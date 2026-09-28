@@ -93,9 +93,23 @@ pub fn display_version(tag: &str) -> &str {
 /// difference counts as an update — the daemon's behaviour before this module.
 pub fn is_newer(latest: &str, current: &str) -> bool {
     match (parse_version(latest), parse_version(current)) {
-        (Some(latest), Some(current)) => latest > current,
+        // Same core: a release outranks a prerelease of it (semver), so a
+        // `0.7.0-rc.1` build is offered `0.7.0`.
+        (Some(latest_core), Some(current_core)) => {
+            latest_core > current_core
+                || (latest_core == current_core && !is_prerelease(latest) && is_prerelease(current))
+        }
         _ => display_version(latest) != display_version(current),
     }
+}
+
+/// Does the version carry a `-pre` part (`1.2.3-rc.1`)? Build metadata
+/// (`+sha`) alone does not make a prerelease.
+fn is_prerelease(value: &str) -> bool {
+    display_version(value)
+        .split('+')
+        .next()
+        .is_some_and(|core| core.contains('-'))
 }
 
 // ---------------------------------------------------------------------------
@@ -222,14 +236,19 @@ pub fn fetch_latest_tag_blocking(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
+    let result = runtime.block_on(async {
         match tokio::time::timeout(timeout, fetch_latest_tag(endpoints, timeout, github_token))
             .await
         {
             Ok(result) => result,
             Err(_) => anyhow::bail!("release check timed out after {}s", timeout.as_secs_f32()),
         }
-    })
+    });
+    // Dropping a runtime waits for its blocking tasks, and reqwest resolves
+    // DNS on one: on a broken network `getaddrinfo` can hang for tens of
+    // seconds after the timeout fired. Abandon it instead of waiting.
+    runtime.shutdown_background();
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -698,6 +717,10 @@ mod tests {
         assert!(is_newer("v0.7.0", "0.6.6"));
         assert!(is_newer("v1.0.0", "0.99.99"));
         assert!(!is_newer("v0.6.6", "0.6.6"));
+        assert!(is_newer("v0.10.0", "0.9.0"));
+        assert!(is_newer("v0.7.0", "0.7.0-rc.1"));
+        assert!(!is_newer("v0.7.0-rc.1", "0.7.0"));
+        assert!(!is_newer("v0.7.0+build", "0.7.0"));
         assert!(!is_newer("0.6.6", "v0.6.6"));
         // A build ahead of the last release is not told to go back.
         assert!(!is_newer("v0.6.5", "0.6.6"));
