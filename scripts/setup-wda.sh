@@ -67,6 +67,7 @@ WDA_ICON_BACKUP_PATH=""
 WDA_ICON_MUTATION_ACTIVE=0
 WDA_RUNNER_ICON_INJECTED=0
 WDA_ICON_BUILD_LOCKED=0
+WDA_BUILT_SDK_VERSION=""
 WDA_RUNNER_REPAIR_ATTEMPTED=0
 WDA_RUNNER_VALIDATION_ERROR=""
 KEEPALIVE_ATTEMPT_ACTIVE=0
@@ -1540,6 +1541,235 @@ if [ "${IPHONE_USE_INTERNAL_TEST_WARP_PREFLIGHT_ONLY:-0}" = "1" ]; then
     exit 1
 fi
 
+# BEGIN Xcode compatibility helpers.
+# Xcode 27 dropped iOS deployment targets below 15.0, while the pinned WDA
+# project still says 12.0, so `xcodebuild` refuses to build it at all. The
+# runner argv is an identity checked by `_runner_signature_valid` and
+# `_command_matches_expected`, so the fix must not add build settings to the
+# command line. Instead setup writes an xcconfig in the state directory and
+# exports XCODE_XCCONFIG_FILE, which every xcodebuild this script starts (and
+# the runner it leaves behind) inherits. The pinned checkout is not edited.
+WDA_XCCONFIG_FILE="$STATE_DIR/wda-xcode-compat.xcconfig"
+WDA_DEPLOYMENT_TARGET_OVERRIDE=""
+WDA_IOS_SDK_VERSION=""
+
+_valid_os_version() {
+    printf '%s\n' "${1:-}" | LC_ALL=C grep -Eq '^[0-9]+(\.[0-9]+){0,2}$'
+}
+
+# Succeeds when dotted version $1 is strictly lower than $2.
+_version_lt() {
+    local a="$1" b="$2" x y i
+    local -a pa pb
+    IFS=. read -r -a pa <<< "$a"
+    IFS=. read -r -a pb <<< "$b"
+    for i in 0 1 2; do
+        x="${pa[$i]:-0}"
+        y="${pb[$i]:-0}"
+        [ "$((10#$x))" -lt "$((10#$y))" ] && return 0
+        [ "$((10#$x))" -gt "$((10#$y))" ] && return 1
+    done
+    return 1
+}
+
+# Major version of the selected Xcode ("Xcode 27.0" -> 27), or nothing.
+_xcode_major() {
+    xcodebuild -version 2>/dev/null \
+        | sed -n '1s/^Xcode \([0-9][0-9]*\).*/\1/p'
+}
+
+_ios_sdk_version() {
+    local version
+    version="$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)"
+    _valid_os_version "$version" && printf '%s\n' "$version"
+}
+
+# Lowest iOS deployment target the selected iPhoneOS SDK accepts, read from
+# the SDK's own SDKSettings. Xcode 27 is known to require 15.0, so fall back to
+# that when the settings cannot be read there; older Xcodes keep the project's
+# own value (no override) when nothing can be read.
+_ios_sdk_min_deployment_target() {
+    local sdk minimum="" major
+    sdk="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || true)"
+    if [ -n "$sdk" ] && [ -f "$sdk/SDKSettings.plist" ]; then
+        minimum="$(plutil -extract SupportedTargets.iphoneos.MinimumDeploymentTarget \
+            raw -o - "$sdk/SDKSettings.plist" 2>/dev/null || true)"
+    fi
+    if ! _valid_os_version "$minimum"; then
+        minimum=""
+        major="$(_xcode_major)"
+        if [ -n "$major" ] && [ "$major" -ge 27 ]; then
+            minimum="15.0"
+        fi
+    fi
+    [ -n "$minimum" ] && printf '%s\n' "$minimum"
+}
+
+# Prints "<lowest> <highest>" IPHONEOS_DEPLOYMENT_TARGET in the WDA project.
+_wda_project_deployment_targets() {
+    local pbxproj="$1/WebDriverAgent.xcodeproj/project.pbxproj" value low="" high=""
+    [ -f "$pbxproj" ] || return 1
+    while IFS= read -r value; do
+        _valid_os_version "$value" || continue
+        if [ -z "$low" ] || _version_lt "$value" "$low"; then low="$value"; fi
+        if [ -z "$high" ] || _version_lt "$high" "$value"; then high="$value"; fi
+    done < <(sed -n 's/.*IPHONEOS_DEPLOYMENT_TARGET = "\{0,1\}\([0-9.]*\)"\{0,1\};.*/\1/p' "$pbxproj")
+    [ -n "$low" ] || return 1
+    printf '%s %s\n' "$low" "$high"
+}
+
+# Decide the deployment target the build needs: nothing when every target in
+# the project is already supported by this Xcode, else max(highest project
+# value, SDK minimum). The highest value is used because the xcconfig applies
+# to every target; raising a target is safe, lowering one below what its
+# author chose is not.
+_wda_required_deployment_target() {
+    local minimum targets low high
+    minimum="$(_ios_sdk_min_deployment_target || true)"
+    [ -n "$minimum" ] || return 0
+    targets="$(_wda_project_deployment_targets "$1" || true)"
+    [ -n "$targets" ] || return 0
+    low="${targets%% *}"
+    high="${targets##* }"
+    _version_lt "$low" "$minimum" || return 0
+    if _version_lt "$high" "$minimum"; then
+        printf '%s\n' "$minimum"
+    else
+        printf '%s\n' "$high"
+    fi
+}
+
+# Setup only: write (or retire) the generated xcconfig and export it.
+_prepare_wda_xcconfig() {
+    local target inherited="" tmp
+    WDA_IOS_SDK_VERSION="$(_ios_sdk_version || true)"
+    target="$(_wda_required_deployment_target "$WDA_DIR")"
+    if [ -L "$WDA_XCCONFIG_FILE" ]; then
+        warn "refusing to use a symlinked xcconfig: $WDA_XCCONFIG_FILE"
+        return 1
+    fi
+    if [ -z "$target" ]; then
+        WDA_DEPLOYMENT_TARGET_OVERRIDE=""
+        if [ "${XCODE_XCCONFIG_FILE:-}" = "$WDA_XCCONFIG_FILE" ]; then
+            unset XCODE_XCCONFIG_FILE
+        fi
+        rm -f -- "$WDA_XCCONFIG_FILE"
+        return 0
+    fi
+    # Keep an xcconfig the caller already exported (for example a manual
+    # workaround in the supervisor plist) in effect; ours is applied after it.
+    if [ -n "${XCODE_XCCONFIG_FILE:-}" ] \
+        && [ "$XCODE_XCCONFIG_FILE" != "$WDA_XCCONFIG_FILE" ]; then
+        case "$XCODE_XCCONFIG_FILE" in
+            *[\"$'\n']*)
+                warn "ignoring inherited XCODE_XCCONFIG_FILE with an unsupported path"
+                ;;
+            /*) [ -f "$XCODE_XCCONFIG_FILE" ] && inherited="$XCODE_XCCONFIG_FILE" ;;
+        esac
+    fi
+    tmp="$(mktemp "$STATE_DIR/wda-xcode-compat.xcconfig.new.XXXXXX")" || return 1
+    {
+        printf '%s\n' "// Generated by setup-wda.sh on every run; edits are overwritten."
+        printf '%s\n' "// The selected Xcode rejects the pinned WDA project's iOS deployment target."
+        [ -z "$inherited" ] || printf '#include? "%s"\n' "$inherited"
+        printf 'IPHONEOS_DEPLOYMENT_TARGET = %s\n' "$target"
+    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$WDA_XCCONFIG_FILE"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    WDA_DEPLOYMENT_TARGET_OVERRIDE="$target"
+    export XCODE_XCCONFIG_FILE="$WDA_XCCONFIG_FILE"
+}
+
+# `xcodebuild test` regenerates the runner's Info.plist from the XCTRunner
+# template on every run that considers the product stale — it wipes the
+# injected icon keys AND does not re-sign, so installd rejects the bundle with
+# 0xe8008001 (hardware-verified: Info.plist was 180s newer than the signature).
+# `test-without-building` installs the already-built product as-is, so the
+# injection survives. Only used when an injection actually happened; without
+# one the original `test` argv is kept untouched.
+#
+# xcodebuild names the file after the SDK it built against
+# (WebDriverAgentRunner_iphoneos27.0-arm64.xctestrun) and never deletes the
+# one an older Xcode left behind, so after an Xcode upgrade the directory holds
+# two. When there is more than one, take the one for the SDK this build used
+# ($2, from the build settings; else the selected SDK). Anything other than
+# exactly one match stays ambiguous and fails: the caller must then not run the
+# normal test action over a hand-signed bundle.
+_resolve_xctestrun() {
+    local products_dir="$1" sdk="${2:-}" parent match count
+    [ -n "$products_dir" ] || return 1
+    parent="$(dirname "$products_dir")"
+    [ -d "$parent" ] || return 1
+    count="$(find "$parent" -maxdepth 1 -name '*.xctestrun' 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$count" = "1" ]; then
+        match="$(find "$parent" -maxdepth 1 -name '*.xctestrun' 2>/dev/null | head -1)"
+    elif [ "$count" -gt 1 ] 2>/dev/null; then
+        [ -n "$sdk" ] || sdk="$(_ios_sdk_version || true)"
+        _valid_os_version "$sdk" || return 1
+        count="$(find "$parent" -maxdepth 1 -name "*_iphoneos${sdk}-*.xctestrun" 2>/dev/null | wc -l | tr -d ' ')"
+        [ "$count" = "1" ] || return 1
+        match="$(find "$parent" -maxdepth 1 -name "*_iphoneos${sdk}-*.xctestrun" 2>/dev/null | head -1)"
+    else
+        return 1
+    fi
+    # The path rides in the PID-identity signature, which is space-delimited.
+    case "$match" in
+        ''|*[[:space:]]*) return 1 ;;
+    esac
+    printf '%s\n' "$match"
+}
+
+# Read-only doctor checks for the two ways an Xcode upgrade wedged setup.
+_doctor_xcode_compat() {
+    local fail=0 major minimum targets required current dir runs sdk matches name
+    local derived="$HOME/Library/Developer/Xcode/DerivedData"
+    major="$(_xcode_major)"
+    minimum="$(_ios_sdk_min_deployment_target || true)"
+    targets="$(_wda_project_deployment_targets "$WDA_DIR" || true)"
+    required="$(_wda_required_deployment_target "$WDA_DIR")"
+    if [ -n "$required" ]; then
+        current=""
+        if [ -f "$WDA_XCCONFIG_FILE" ] && [ ! -L "$WDA_XCCONFIG_FILE" ]; then
+            current="$(sed -n 's/^IPHONEOS_DEPLOYMENT_TARGET = \([0-9.]*\)$/\1/p' "$WDA_XCCONFIG_FILE" | tail -1)"
+        fi
+        if [ -f "$SELF_INSTALL" ] && ! grep -q 'XCODE_XCCONFIG_FILE' "$SELF_INSTALL" 2>/dev/null; then
+            warn "X Xcode ${major:-?} supports iOS deployment targets from $minimum, but WDA sets ${targets%% *}; the installed $SELF_INSTALL predates the override, so KeepAlive builds fail. Rerun setup to install the fixed script"
+            fail=1
+        elif [ "$current" = "$required" ]; then
+            ok "Xcode ${major:-?} deployment target override: IPHONEOS_DEPLOYMENT_TARGET = $required ($WDA_XCCONFIG_FILE)"
+        else
+            warn "~ Xcode ${major:-?} supports iOS deployment targets from $minimum, but WDA sets ${targets%% *}; no override is in place yet. Setup writes $WDA_XCCONFIG_FILE (IPHONEOS_DEPLOYMENT_TARGET = $required) on its next run"
+        fi
+    elif [ -n "$major" ] && [ "$major" -ge 27 ] && [ -z "$targets" ]; then
+        warn "~ Xcode $major requires iOS deployment target ${minimum:-15.0}+; the WDA checkout is not present yet, so setup will decide the override after checking it out"
+    fi
+
+    sdk="$(_ios_sdk_version || true)"
+    for dir in "$derived"/WebDriverAgent-*/Build/Products; do
+        [ -d "$dir" ] || continue
+        runs="$(find "$dir" -maxdepth 1 -name '*.xctestrun' 2>/dev/null | sort)"
+        [ "$(printf '%s' "$runs" | awk 'NF { c++ } END { print c + 0 }')" -gt 1 ] || continue
+        matches=0
+        if [ -n "$sdk" ]; then
+            matches="$(printf '%s\n' "$runs" | awk -v s="_iphoneos${sdk}-" 'index($0, s) { c++ } END { print c + 0 }')"
+        fi
+        warn "~ multiple .xctestrun files in $dir (left by an earlier Xcode):"
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            printf '     %s\n' "$(basename "$name")"
+        done <<< "$runs"
+        if [ "$matches" = "1" ]; then
+            printf '     %s\n' "setup uses the one for the current SDK (iphoneos$sdk); the others are stale and can be deleted"
+        else
+            printf '     %s\n' "none is uniquely for the current SDK (${sdk:+iphoneos$sdk}); setup rebuilds the runner and skips the custom icon until the stale files are deleted"
+        fi
+    done
+    return $fail
+}
+# END Xcode compatibility helpers.
+
 # One-shot preflight: report the FIRST blocker as a checklist instead of a blind
 # wait loop.  `setup-wda.sh doctor`
 cmd_doctor() {
@@ -1554,6 +1784,7 @@ cmd_doctor() {
     xcode_version="$(xcodebuild -version 2>/dev/null | head -1 || true)"
     if [ -n "$xcode_version" ]; then
         ok "Full Xcode: $xcode_version"
+        _doctor_xcode_compat || fail=1
     else
         warn "X full Xcode unavailable (install Xcode, then select it with xcode-select)"
         fail=1
@@ -2469,6 +2700,15 @@ PY
     fi
 fi
 
+# Must run before the first xcodebuild that reads the project (see the Xcode
+# compatibility helpers): the exported XCODE_XCCONFIG_FILE reaches every build,
+# settings query, destination listing and the long-running runner alike.
+_prepare_wda_xcconfig \
+    || die "could not write the Xcode compatibility xcconfig at $WDA_XCCONFIG_FILE"
+if [ -n "$WDA_DEPLOYMENT_TARGET_OVERRIDE" ]; then
+    ok "iOS deployment target raised to $WDA_DEPLOYMENT_TARGET_OVERRIDE for this Xcode (via $WDA_XCCONFIG_FILE; checkout untouched)"
+fi
+
 _runner_icon_fail() {
     local reason="$1"
     local recovery=""
@@ -2486,28 +2726,6 @@ _runner_icon_fail() {
     fi
     warn "Runner icon skipped: ${reason}${recovery}. WDA setup will continue without a custom icon."
     return 1
-}
-
-# `xcodebuild test` regenerates the runner's Info.plist from the XCTRunner
-# template on every run that considers the product stale — it wipes the
-# injected icon keys AND does not re-sign, so installd rejects the bundle with
-# 0xe8008001 (hardware-verified: Info.plist was 180s newer than the signature).
-# `test-without-building` installs the already-built product as-is, so the
-# injection survives. Only used when an injection actually happened; without
-# one the original `test` argv is kept untouched.
-_resolve_xctestrun() {
-    local products_dir="$1" parent match count
-    [ -n "$products_dir" ] || return 1
-    parent="$(dirname "$products_dir")"
-    [ -d "$parent" ] || return 1
-    count="$(find "$parent" -maxdepth 1 -name '*.xctestrun' 2>/dev/null | wc -l | tr -d ' ')"
-    [ "$count" = "1" ] || return 1
-    match="$(find "$parent" -maxdepth 1 -name '*.xctestrun' 2>/dev/null | head -1)"
-    # The path rides in the PID-identity signature, which is space-delimited.
-    case "$match" in
-        *[[:space:]]*) return 1 ;;
-    esac
-    printf '%s\n' "$match"
 }
 
 # BEGIN runner product validation.
@@ -2679,7 +2897,8 @@ print(paths.pop())
 # xcodebuild per reconnect that the phone never needed.
 #
 # The record is keyed on everything that changes the product: WDA commit,
-# bundle id, team, target device, and the icon source + its mtime. Any
+# bundle id, team, target device, the icon source + its mtime, and the Xcode /
+# SDK / deployment target it was built with. Any
 # mismatch, a missing file, or a product that no longer validates falls
 # through to the normal build. A launch that fails on a cached product drops
 # the record so the following round rebuilds from scratch.
@@ -2691,8 +2910,11 @@ _runner_cache_key() {
     if [ -n "${RUNNER_ICON_SOURCE:-}" ] && [ -f "$RUNNER_ICON_SOURCE" ]; then
         icon_mtime="$(stat -f %m "$RUNNER_ICON_SOURCE" 2>/dev/null || echo 0)"
     fi
-    printf 'v1|%s|%s|%s|%s|%s|%s' "${WDA_COMMIT:-}" "${WDA_BUNDLE_ID:-}" "${TEAM_ID:-}" \
-        "${WDA_UDID:-}" "${RUNNER_ICON_SOURCE:-}" "$icon_mtime"
+    # The Xcode, SDK and deployment target override are part of the product:
+    # a product (and its .xctestrun) from before an Xcode upgrade is stale.
+    printf 'v1|%s|%s|%s|%s|%s|%s|%s|%s|%s' "${WDA_COMMIT:-}" "${WDA_BUNDLE_ID:-}" "${TEAM_ID:-}" \
+        "${WDA_UDID:-}" "${RUNNER_ICON_SOURCE:-}" "$icon_mtime" "${XCODE_VERSION:-}" \
+        "${WDA_IOS_SDK_VERSION:-}" "${WDA_DEPLOYMENT_TARGET_OVERRIDE:-}"
 }
 
 _runner_cache_drop() {
@@ -2953,6 +3175,24 @@ PY
             return 1
             ;;
     esac
+    # The SDK this build used picks the matching .xctestrun when an older
+    # Xcode left another one beside it (see _resolve_xctestrun).
+    WDA_BUILT_SDK_VERSION="$(python3 - "$build_settings" <<'PY_SDK'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    records = json.load(handle)
+versions = {
+    record.get("buildSettings", {}).get("SDK_VERSION")
+    for record in records
+    if record.get("target") == "WebDriverAgentRunner"
+}
+versions.discard(None)
+if len(versions) == 1:
+    print(versions.pop())
+PY_SDK
+    )" || WDA_BUILT_SDK_VERSION=""
     runner_product="${WDA_RUNNER_NAME:-WebDriverAgentRunner}-Runner.app"
     WDA_ICON_PRODUCTS_DIR="$products_dir"
     WDA_ICON_APP_PATH="$products_dir/$runner_product"
@@ -3214,7 +3454,7 @@ if [ -n "$RUNNER_ICON_SOURCE" ] && [ "${WDA_RUNNER_REBUILD:-0}" != "1" ] && _run
     _setstatus building "${_BUILD_BLOCKER:-}" "reusing the verified runner product from the last bring-up"
 elif [ -n "$RUNNER_ICON_SOURCE" ]; then
     if _build_and_inject_runner_icon "$RUNNER_ICON_SOURCE"; then
-        WDA_XCTESTRUN="$(_resolve_xctestrun "$WDA_ICON_PRODUCTS_DIR" || true)"
+        WDA_XCTESTRUN="$(_resolve_xctestrun "$WDA_ICON_PRODUCTS_DIR" "${WDA_BUILT_SDK_VERSION:-}" || true)"
         if [ -z "$WDA_XCTESTRUN" ]; then
             if _discard_injected_runner; then
                 warn "Could not resolve a unique .xctestrun; discarded the injected runner so the launch rebuilds a pristine one (the custom icon is skipped this round)"

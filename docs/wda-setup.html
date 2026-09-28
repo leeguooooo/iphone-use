@@ -250,6 +250,19 @@ xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
   <em>Always On</em> 策略会自动把 WARP 连回来，手动断开只顶一时。</p>
 </div>
 
+<div class="pit">
+  <h3>⑪ 升级 Xcode 之后 WDA 编不过 / 起不来</h3>
+  <p><strong>部署版本：</strong>Xcode 27 只接受 iOS 15.0 起的部署版本，而固定版本的 WDA 工程写的是 12.0，
+  <code>xcodebuild</code> 直接报 <code>IPHONEOS_DEPLOYMENT_TARGET … is set to 12.0</code>。
+  runner 的命令行是 PID 身份校验的一部分，不能往里加构建参数；setup 会读所选 SDK 的最低部署版本，
+  需要时写 <code>~/.iphone-use/wda-xcode-compat.xcconfig</code> 并导出 <code>XCODE_XCCONFIG_FILE</code>，
+  取值为 max(工程里的最高值, SDK 最低值)。WDA 源码不改；旧 Xcode 上不生成这个文件。</p>
+  <p><strong>多份 .xctestrun：</strong>每个 SDK 都会在 <code>Build/Products</code> 留一份
+  <code>WebDriverAgentRunner_iphoneosX.Y-arm64.xctestrun</code>，旧 Xcode 那份不会被删。
+  setup 取本次构建所用 SDK 对应的那份；仍然对不上唯一一份时照旧拒绝用普通 test 动作跑手工签名的 runner。
+  <code>setup-wda.sh doctor</code> 会报出这两种情况。</p>
+</div>
+
 <h2>已有真机证据（组件级）</h2>
 <p>在 iPhone 17 / iOS 27 真机（2026-06-11）上，以下 WDA 组件能力曾经通过 daemon API 实测：</p>
 <ul>
