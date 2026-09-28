@@ -25,6 +25,10 @@ pub const API_LATEST_URL: &str =
 /// `/tag/vX.Y.Z`. No anonymous rate limit (the API allows 60 requests an hour
 /// per IP), so it is the fallback when the API refuses.
 pub const WEB_LATEST_URL: &str = "https://github.com/leeguooooo/iphone-use/releases/latest";
+/// The installer `upgrade` downloads and runs (the same script as
+/// [`INSTALL_COMMAND`], fetched first so a failed download is an error).
+pub const INSTALL_SCRIPT_URL: &str =
+    "https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh";
 /// The documented install/upgrade route. It installs the daemon app and the
 /// release-matched skill together.
 pub const INSTALL_COMMAND: &str =
@@ -413,6 +417,42 @@ pub fn git_toplevel(dir: &Path) -> Option<PathBuf> {
     (!top.is_empty()).then(|| PathBuf::from(top))
 }
 
+/// Does `remote` (an `origin` URL) name leeguooooo/iphone-use? Accepts the
+/// HTTPS, `git@host:` and `ssh://` forms, with or without `.git`.
+pub fn remote_is_iphone_use(remote: &str) -> bool {
+    let remote = remote.trim().trim_end_matches('/');
+    let remote = remote
+        .strip_suffix(".git")
+        .unwrap_or(remote)
+        .to_ascii_lowercase();
+    [
+        "github.com/leeguooooo/iphone-use",
+        "github.com:leeguooooo/iphone-use",
+    ]
+    .iter()
+    .any(|suffix| {
+        remote
+            .strip_suffix(suffix)
+            .is_some_and(|head| head.is_empty() || head.ends_with('/') || head.ends_with('@'))
+    })
+}
+
+/// Only a checkout of this repository is pulled; a work tree that merely
+/// vendors a copy of the skill is treated as a copied folder.
+fn is_iphone_use_checkout(root: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["remote", "get-url", "origin"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|remote| remote_is_iphone_use(&remote))
+}
+
 /// Every copy of the skill under `home`, one entry per real folder (the
 /// installer's `~/.claude/skills/iphone-use` is a link to the `~/.agents`
 /// copy, so it is reported once).
@@ -437,7 +477,9 @@ pub fn find_skills(home: &Path) -> Vec<SkillInstall> {
                 path,
                 update: format!("{NAME} upgrade"),
             });
-        } else if let Some(root) = git_toplevel(&real) {
+        } else if let Some(root) = git_toplevel(&real)
+            .filter(|root| real == root.join("skills").join(NAME) && is_iphone_use_checkout(root))
+        {
             found.push(SkillInstall {
                 channel: SkillChannel::Git,
                 path,
@@ -1130,18 +1172,82 @@ mod tests {
         assert_eq!(skills[2].update, SKILLS_UPDATE_COMMAND);
     }
 
+    fn git(args: &[&str], dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn remote_identity_accepts_only_this_repository() {
+        for remote in [
+            "https://github.com/leeguooooo/iphone-use",
+            "https://github.com/leeguooooo/iphone-use.git",
+            "https://github.com/leeguooooo/iphone-use/",
+            "git@github.com:leeguooooo/iphone-use.git",
+            "ssh://git@github.com/leeguooooo/iphone-use.git",
+        ] {
+            assert!(remote_is_iphone_use(remote), "{remote}");
+        }
+        for remote in [
+            "https://github.com/someone/iphone-use.git",
+            "https://github.com/leeguooooo/iphone-use-fork.git",
+            "https://github.com/xleeguooooo/iphone-use",
+            "https://example.com/leeguooooo/iphone-use",
+            "",
+        ] {
+            assert!(!remote_is_iphone_use(remote), "{remote}");
+        }
+    }
+
+    #[test]
+    fn a_repository_that_vendors_the_skill_is_a_copy_not_a_checkout() {
+        let home = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let other = home.join("src/other-project");
+        write(&other.join("skills/iphone-use/SKILL.md"), "skill");
+        git(&["init", "-q"], &other);
+        git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/someone/other-project.git",
+            ],
+            &other,
+        );
+        std::fs::create_dir_all(home.join(".agents/skills")).unwrap();
+        std::os::unix::fs::symlink(
+            other.join("skills/iphone-use"),
+            home.join(".agents/skills/iphone-use"),
+        )
+        .unwrap();
+        let skills = find_skills(&home);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].channel, SkillChannel::Copied);
+    }
+
     #[test]
     fn git_checkout_is_detected_and_pulled() {
         let home = tempfile::tempdir().unwrap();
         let home = std::fs::canonicalize(home.path()).unwrap();
         let checkout = home.join("src/iphone-use");
         write(&checkout.join("skills/iphone-use/SKILL.md"), "skill");
-        let init = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .arg(&checkout)
-            .status()
-            .unwrap();
-        assert!(init.success());
+        git(&["init", "-q"], &checkout);
+        git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:leeguooooo/iphone-use.git",
+            ],
+            &checkout,
+        );
         std::fs::create_dir_all(home.join(".agents/skills")).unwrap();
         std::os::unix::fs::symlink(
             checkout.join("skills/iphone-use"),

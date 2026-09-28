@@ -236,6 +236,41 @@ fn on_path(program: &str) -> bool {
     })
 }
 
+/// Download install.sh into a private temp dir, then run it the way the
+/// documented `curl … | sh` does (script on stdin, so it behaves as a piped
+/// install rather than a local checkout). Downloading first means a failed
+/// fetch is reported, not silently piped into `sh` as an empty script.
+fn run_installer() -> std::result::Result<(), String> {
+    use server::update;
+    let dir = tempfile::tempdir().map_err(|e| format!("could not create a temp dir: {e}"))?;
+    let script = dir.path().join("install.sh");
+    let fetched = std::process::Command::new("curl")
+        .args(["-fsSL", "--proto", "=https", "-o"])
+        .arg(&script)
+        .arg(update::INSTALL_SCRIPT_URL)
+        .status()
+        .map_err(|e| format!("could not run curl: {e}"))?;
+    if !fetched.success() {
+        return Err(format!(
+            "downloading {} failed ({fetched}); nothing was changed",
+            update::INSTALL_SCRIPT_URL
+        ));
+    }
+    let stdin = std::fs::File::open(&script)
+        .map_err(|e| format!("could not open the downloaded installer: {e}"))?;
+    let status = std::process::Command::new("/bin/sh")
+        .stdin(stdin)
+        .status()
+        .map_err(|e| format!("could not run install.sh: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "install.sh failed ({status}); it restores the previous install on failure"
+        ))
+    }
+}
+
 /// `iphone-use upgrade [--check] [--json]`. Returns the process exit code.
 fn upgrade(check_only: bool, json: bool) -> i32 {
     use server::update;
@@ -295,23 +330,11 @@ fn upgrade(check_only: bool, json: bool) -> i32 {
             report.current,
             report.latest.as_deref().unwrap_or("?")
         );
-        let status = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(update::INSTALL_COMMAND)
-            .status();
-        match status {
-            Ok(status) if status.success() => installer_ran = true,
-            Ok(status) => {
-                eprintln!(
-                    "iphone-use: install.sh failed ({status}); the previous install was kept"
-                );
-                return 2;
-            }
-            Err(error) => {
-                eprintln!("iphone-use: could not run install.sh: {error}");
-                return 2;
-            }
+        if let Err(error) = run_installer() {
+            eprintln!("iphone-use: {error}");
+            return 2;
         }
+        installer_ran = true;
         println!(
             "iphone-use upgraded {} -> {}",
             report.current,

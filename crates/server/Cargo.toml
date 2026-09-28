@@ -44,6 +44,10 @@ arc-swap = "1"
 # stream so an open viewer counts as activity for the idle-release watchdog.
 futures-util = "0.3"
 
+# `iphone-use upgrade` downloads install.sh into a private temp dir before
+# running it, so a failed download is reported instead of piped into `sh`.
+tempfile = "3"
+
 # WDA (L2 element-tree control): screenshots arrive base64-encoded.
 base64 = "0.22"
 sha2 = "0.10"
