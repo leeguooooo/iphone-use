@@ -34,7 +34,11 @@ pub const INSTALL_SCRIPT_URL: &str =
 pub const INSTALL_COMMAND: &str =
     "curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh";
 pub const PLUGIN_ID: &str = "iphone-use@leeguooooo-plugins";
-pub const SKILLS_UPDATE_COMMAND: &str = "npx skills update iphone-use";
+/// A copied skill (not the installer's, not a plugin or checkout) is not
+/// release-matched, and a floating public install is not a supported way to
+/// refresh it. The supported copy is the one install.sh puts in
+/// `~/.agents/skills/iphone-use`, so point at the installer.
+pub const COPIED_SKILL_UPDATE: &str = INSTALL_COMMAND;
 /// Marker the installer writes into the skill folder it owns.
 pub const INSTALLER_MARKER: &str = ".iphone-use-release";
 /// How long a cached answer suppresses another network check.
@@ -508,7 +512,7 @@ pub fn find_skills(home: &Path) -> Vec<SkillInstall> {
             found.push(SkillInstall {
                 channel: SkillChannel::Copied,
                 path,
-                update: SKILLS_UPDATE_COMMAND.to_string(),
+                update: COPIED_SKILL_UPDATE.to_string(),
             });
         }
     }
@@ -594,7 +598,7 @@ pub fn refresh_skills(
             SkillChannel::Copied => {
                 writeln!(
                     out,
-                    "skill (copied): {} — run `{}`",
+                    "skill (copied): {} — not release-matched; replace it with the copy `{}` installs in ~/.agents/skills/iphone-use",
                     skill.path, skill.update
                 )?;
             }
@@ -1192,7 +1196,7 @@ mod tests {
             ]
         );
         assert_eq!(skills[0].path, "/placeholder/plugin");
-        assert_eq!(skills[2].update, SKILLS_UPDATE_COMMAND);
+        assert_eq!(skills[2].update, COPIED_SKILL_UPDATE);
     }
 
     fn git(args: &[&str], dir: &Path) {
@@ -1312,7 +1316,7 @@ mod tests {
             SkillInstall {
                 channel: SkillChannel::Copied,
                 path: "/c".into(),
-                update: SKILLS_UPDATE_COMMAND.into(),
+                update: COPIED_SKILL_UPDATE.into(),
             },
             SkillInstall {
                 channel: SkillChannel::Installer,
@@ -1332,7 +1336,8 @@ mod tests {
             ["claude plugin update iphone-use@leeguooooo-plugins"]
         );
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("npx skills update iphone-use"), "{text}");
+        assert!(text.contains("not release-matched"), "{text}");
+        assert!(!text.contains("npx"), "{text}");
         assert!(text.contains("refreshed by install.sh"), "{text}");
 
         let mut calls = Vec::new();

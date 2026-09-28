@@ -151,8 +151,8 @@ The installer links `~/.local/bin/iphone-use` to the app's executable, so the co
 PATH once `~/.local/bin` is. `upgrade` runs the same `install.sh` one-liner as installing
 (which also refreshes the installer-managed skill), then runs
 `claude plugin update iphone-use@leeguooooo-plugins` or `git pull --ff-only` for a plugin
-or git-checkout copy of the skill, and prints `npx skills update iphone-use` for a copied
-one. Exit code `0` = upgraded / already current / check ran; `2` = the check or download
+or git-checkout copy of the skill; any other copy is reported as not release-matched, to be
+replaced by the installer's. Exit code `0` = upgraded / already current / check ran; `2` = the check or download
 failed. A `cargo build` binary is never replaced: `upgrade` prints the install command
 instead.
 

@@ -107,7 +107,7 @@ iphone-use upgrade --check    # 什么都不改：输出 "iphone-use 0.6.6 -> 0.
 iphone-use upgrade --json     # 同上，JSON：name、current、latest、update_available、skills
 ```
 
-安装器会把 `~/.local/bin/iphone-use` 链到 app 里的可执行文件，`~/.local/bin` 在 PATH 上就能直接用。`upgrade` 跑的就是安装那行 `install.sh`（顺带刷新安装器管理的 skill），之后对插件装的 skill 跑 `claude plugin update iphone-use@leeguooooo-plugins`，对 git checkout 跑 `git pull --ff-only`，对复制来的 skill 打印 `npx skills update iphone-use`。退出码 `0` = 升级了 / 已是最新 / 检查成功，`2` = 检查或下载失败。`cargo build` 出来的二进制不会被替换，`upgrade` 只打印安装命令。
+安装器会把 `~/.local/bin/iphone-use` 链到 app 里的可执行文件，`~/.local/bin` 在 PATH 上就能直接用。`upgrade` 跑的就是安装那行 `install.sh`（顺带刷新安装器管理的 skill），之后对插件装的 skill 跑 `claude plugin update iphone-use@leeguooooo-plugins`，对 git checkout 跑 `git pull --ff-only`，其他复制来的 skill 会被标为非 release 匹配，提示换成安装器装的那份。退出码 `0` = 升级了 / 已是最新 / 检查成功，`2` = 检查或下载失败。`cargo build` 出来的二进制不会被替换，`upgrade` 只打印安装命令。
 
 daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `latest` / `update_available`，网页会挂横幅。一次性命令（`iphone-use stop`）每天最多在 stderr 打一行 `iphone-use X is available (you have Y). Upgrade: iphone-use upgrade`（缓存在 `${XDG_CACHE_HOME:-~/.cache}/iphone-use/update-check.json`，超时 2 秒）。设了 `CI`、`IPHONE_USE_NO_UPDATE_CHECK`、`USE_NO_UPDATE_CHECK` 或原来的 `PHONE_REMOTE_NO_UPDATE_CHECK`，每日检查和提示都关掉。安装器具体校验什么见[运维 → 升级](#升级-1)。
 
