@@ -141,10 +141,28 @@ request never waits for a rebuild. Either way the next agent request, or
 
 ### Upgrade
 
+```bash
+iphone-use upgrade            # install the latest release (daemon + skill), then refresh other skill copies
+iphone-use upgrade --check    # change nothing: "iphone-use 0.6.6 -> 0.6.7" or "... is up to date"
+iphone-use upgrade --json     # the same as JSON: name, current, latest, update_available, skills
+```
+
+The installer links `~/.local/bin/iphone-use` to the app's executable, so the command is on
+PATH once `~/.local/bin` is. `upgrade` runs the same `install.sh` one-liner as installing
+(which also refreshes the installer-managed skill), then runs
+`claude plugin update iphone-use@leeguooooo-plugins` or `git pull --ff-only` for a plugin
+or git-checkout copy of the skill, and prints `npx skills update iphone-use` for a copied
+one. Exit code `0` = upgraded / already current / check ran; `2` = the check or download
+failed. A `cargo build` binary is never replaced: `upgrade` prints the install command
+instead.
+
 The daemon checks GitHub daily and reports `version` / `latest` / `update_available` in
-`/agent/status`; the web client shows a banner. Upgrading is the same one-liner as
-installing. Details of what the installer verifies are under
-[Operations → Upgrades](#upgrades).
+`/agent/status`; the web client shows a banner. One-shot commands (`iphone-use stop`) print
+`iphone-use X is available (you have Y). Upgrade: iphone-use upgrade` on stderr at most
+once a day (cached in `${XDG_CACHE_HOME:-~/.cache}/iphone-use/update-check.json`, 2 s
+timeout). `CI`, `IPHONE_USE_NO_UPDATE_CHECK`, `USE_NO_UPDATE_CHECK` or the older
+`PHONE_REMOTE_NO_UPDATE_CHECK` turn off both the daily check and the notice. Details of
+what the installer verifies are under [Operations → Upgrades](#upgrades).
 
 **Unattended upgrades** are opt-in and gated on the phone being idle:
 
@@ -441,7 +459,7 @@ being replaced.
 ### Upgrades
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
+iphone-use upgrade    # or: curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
 The installer resolves the release tag to one commit for helpers and the skill, fetches
@@ -452,7 +470,7 @@ daemon failure restores the previous skill. `IPHONE_USE_SKIP_SKILL=1` leaves the
 untouched (a degraded install with no compatibility claim). Migration is evidence-based:
 an old plist with a valid loopback `PHONE_REMOTE_WDA_URL` moves to Direct, a legacy
 install with no WDA configuration stays on Mirror, an explicit backend stays explicit.
-`PHONE_REMOTE_NO_UPDATE_CHECK=1` disables the daily check.
+`PHONE_REMOTE_NO_UPDATE_CHECK=1` (or `IPHONE_USE_NO_UPDATE_CHECK=1` / `USE_NO_UPDATE_CHECK=1`) disables the daily check.
 
 Signing on install follows the backend: Direct keeps a valid existing signature and
 repairs an invalid one with keychain-free ad-hoc signing (no TCC identity needed);

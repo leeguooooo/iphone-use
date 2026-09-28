@@ -1944,14 +1944,15 @@ async fn agent_status(
     #[cfg(not(target_os = "macos"))]
     let human_active = false;
     // Version + update hint. `latest_release` is fetched by a background
-    // task (24h cadence); compare as plain tags — any mismatch with the
-    // running version means a release the binary doesn't match.
+    // task (24h cadence); `update::is_newer` is the same comparison
+    // `iphone-use upgrade` uses (numeric, so a build ahead of the last release
+    // is not told to go back; any difference when a tag is not a version).
     let version = env!("CARGO_PKG_VERSION");
     let latest = recover(state.latest_release.lock()).clone();
     let (latest_json, update_available) = match &latest {
         Some(tag) => (
             serde_json::to_string(tag).unwrap_or_else(|_| "null".to_string()),
-            tag.trim_start_matches('v') != version,
+            crate::update::is_newer(tag, version),
         ),
         None => ("null".to_string(), false),
     };

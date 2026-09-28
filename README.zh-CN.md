@@ -101,7 +101,15 @@ daemon 也可以自己做这件事：设置 `PHONE_REMOTE_IDLE_RELEASE_SECS`（�
 
 ### 升级
 
-daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `latest` / `update_available`，网页会挂横幅。升级就是再跑一遍安装命令，安装器具体校验什么见[运维 → 升级](#升级-1)。
+```bash
+iphone-use upgrade            # 装最新 release（daemon + skill），再刷新其他地方的 skill
+iphone-use upgrade --check    # 什么都不改：输出 "iphone-use 0.6.6 -> 0.6.7" 或 "... is up to date"
+iphone-use upgrade --json     # 同上，JSON：name、current、latest、update_available、skills
+```
+
+安装器会把 `~/.local/bin/iphone-use` 链到 app 里的可执行文件，`~/.local/bin` 在 PATH 上就能直接用。`upgrade` 跑的就是安装那行 `install.sh`（顺带刷新安装器管理的 skill），之后对插件装的 skill 跑 `claude plugin update iphone-use@leeguooooo-plugins`，对 git checkout 跑 `git pull --ff-only`，对复制来的 skill 打印 `npx skills update iphone-use`。退出码 `0` = 升级了 / 已是最新 / 检查成功，`2` = 检查或下载失败。`cargo build` 出来的二进制不会被替换，`upgrade` 只打印安装命令。
+
+daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `latest` / `update_available`，网页会挂横幅。一次性命令（`iphone-use stop`）每天最多在 stderr 打一行 `iphone-use X is available (you have Y). Upgrade: iphone-use upgrade`（缓存在 `${XDG_CACHE_HOME:-~/.cache}/iphone-use/update-check.json`，超时 2 秒）。设了 `CI`、`IPHONE_USE_NO_UPDATE_CHECK`、`USE_NO_UPDATE_CHECK` 或原来的 `PHONE_REMOTE_NO_UPDATE_CHECK`，每日检查和提示都关掉。安装器具体校验什么见[运维 → 升级](#升级-1)。
 
 ## 在浏览器里操作手机
 
@@ -280,10 +288,10 @@ agent 不靠记性去查源，而是被推着走：`phone_elements` 直接列出
 ### 升级
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
+iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
-安装器把 release tag 解析成一个确定的 commit，helper 和 skill 都钉在上面；daemon app 取对应 Release asset 并校验 SHA-256；先把 skill 安装到 `~/.agents/skills/iphone-use`、逐字节校验落盘内容和 Claude Code 发现链接，再替换 daemon。skill 失败中止升级；之后 daemon 失败则恢复旧 skill。`IPHONE_USE_SKIP_SKILL=1` 保留现有 skill，这是降级安装，安装器不保证新 daemon 和旧 skill 兼容。迁移按证据判断：旧 plist 有有效的 loopback `PHONE_REMOTE_WDA_URL` 就迁到 Direct，完全没有 WDA 配置的旧安装留在 Mirror，显式配置的后端不动。`PHONE_REMOTE_NO_UPDATE_CHECK=1` 关掉每日检查。
+安装器把 release tag 解析成一个确定的 commit，helper 和 skill 都钉在上面；daemon app 取对应 Release asset 并校验 SHA-256；先把 skill 安装到 `~/.agents/skills/iphone-use`、逐字节校验落盘内容和 Claude Code 发现链接，再替换 daemon。skill 失败中止升级；之后 daemon 失败则恢复旧 skill。`IPHONE_USE_SKIP_SKILL=1` 保留现有 skill，这是降级安装，安装器不保证新 daemon 和旧 skill 兼容。迁移按证据判断：旧 plist 有有效的 loopback `PHONE_REMOTE_WDA_URL` 就迁到 Direct，完全没有 WDA 配置的旧安装留在 Mirror，显式配置的后端不动。`PHONE_REMOTE_NO_UPDATE_CHECK=1`（或 `IPHONE_USE_NO_UPDATE_CHECK=1` / `USE_NO_UPDATE_CHECK=1`）关掉每日检查。
 
 安装时的签名跟后端走：Direct 保留有效的现有签名，无效时用不动 keychain 的 ad-hoc 签名（Direct 不需要 TCC 身份）；Mirror 用稳定的本地 `iPhoneUse Local Signing` 身份，让 TCC 授权跨升级保留，退回 ad-hoc 前会警告。
 

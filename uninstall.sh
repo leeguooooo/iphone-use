@@ -827,6 +827,29 @@ remove_owned_plist() {
     remove_file "$path" "$path"
 }
 
+# The installer links ~/.local/bin/iphone-use (or $IPHONE_USE_BIN_DIR) to the
+# app's executable. Remove it only while it is still that exact link.
+remove_cli_link() {
+    local dir="${IPHONE_USE_BIN_DIR:-$HOME/.local/bin}"
+    local link="$dir/iphone-use"
+    local current
+    [ -L "$link" ] || return 0
+    current="$(readlink "$link" 2>/dev/null || true)"
+    if [ "$current" != "$APP_BINARY" ]; then
+        warn "preserving $link: it points at ${current:-an unreadable target}, not $APP_BINARY"
+        return 0
+    fi
+    if [ "$DRY_RUN" = "1" ]; then
+        plan "remove command-line link $link"
+    elif rm -f "$link"; then
+        ok "removed $link"
+    else
+        fail "could not remove $link"
+        return 1
+    fi
+    return 0
+}
+
 remove_owned_app() {
     local path="$1"
     local expected_path="$2"
@@ -1331,6 +1354,7 @@ if [ "$DAEMON_RUNTIME_CLEAN" = "1" ]; then
     DAEMON_ARTIFACTS_CLEAN=1
     remove_owned_app "$APP_PATH" "$APP_PATH" "$APP_BINARY" \
         "com.leeguoo.iphone-use" || DAEMON_ARTIFACTS_CLEAN=0
+    [ "$DAEMON_ARTIFACTS_CLEAN" = "0" ] || remove_cli_link || DAEMON_ARTIFACTS_CLEAN=0
     remove_tree "$LOG_DIR" "$HOME/Library/Logs/iPhoneUse" \
         "$HOME/Library/Logs" || DAEMON_ARTIFACTS_CLEAN=0
     if [ "$DAEMON_ARTIFACTS_CLEAN" = "1" ]; then

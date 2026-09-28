@@ -620,22 +620,30 @@ as XML to the Mac, end-to-end ~2–4 min:
 First run: vision at every step. Second run onward: a one-command script that
 only screenshots at steps 2, 5 and 6 as checkpoints.
 
-## Stay current
+## Upgrade
 
 `GET /agent/status` reports `version`, `latest` and `update_available` (the
-daemon checks GitHub releases daily). When `update_available` is true, tell
-the user once per session — don't upgrade anything yourself (the daemon
-restart would kill your own session):
+daemon checks GitHub releases daily). When `update_available` is true — or any
+`iphone-use` command prints `iphone-use X is available` on stderr — tell the
+user once per session and offer to run `iphone-use upgrade` (it updates the
+daemon and this skill). Check without changing anything:
+`iphone-use upgrade --check` (`--json` for a machine-readable answer). The user
+may also just say "升级 iphone-use" / "upgrade iphone-use".
 
-```
-iphone-use 有新版本(latest,当前 version)。升级:
-  daemon: curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-```
+Only upgrade when the user asks: the upgrade restarts the daemon, which ends
+any phone session in progress, including yours.
+
+If the skill came from somewhere `upgrade` can't refresh:
+- Claude Code plugin: `claude plugin update iphone-use@leeguooooo-plugins`
+- Whole family: `curl -fsSL https://raw.githubusercontent.com/leeguooooo/plugins/main/upgrade-use-family.sh | sh`
+- No `iphone-use` on PATH (older install): rerun the installer,
+  `curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh`
+  — it also links `~/.local/bin/iphone-use`.
 
 If this skill's instructions ever disagree with the live API (an endpoint 404s
-or a field is missing), the skill copy is probably stale. Rerun the installer:
-it installs the daemon and skill from the same immutable release tag. Do not
-run a floating global skill update that can separate their versions.
+or a field is missing), the skill copy is probably stale: `iphone-use upgrade`
+(or the installer) installs the daemon and skill from the same release tag. Do
+not run a floating global skill update that can separate their versions.
 
 ## Found a rough edge? File an issue
 

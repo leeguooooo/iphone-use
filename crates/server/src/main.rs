@@ -3,6 +3,7 @@
 //! ```text
 //! iphone-use serve   # direct device services (default) or legacy mirror → axum
 //! iphone-use stop    # best-effort: kill the recorded pid
+//! iphone-use upgrade # install the latest release + refresh the skill (--check / --json)
 //! ```
 //!
 //! The default direct path uses WebDriverAgent for input and its on-device video
@@ -158,7 +159,13 @@ fn initial_ice_state(backend: DeviceBackend) -> http::IceState {
 }
 
 #[derive(Parser)]
-#[command(name = "iphone-use", about = "Direct iPhone remote-control daemon")]
+// `version` spelled out: clap's bare `version` expands to `core::env!`, and
+// this crate's dependency named `core` shadows the std one.
+#[command(
+    name = "iphone-use",
+    about = "Direct iPhone remote-control daemon",
+    version = env!("CARGO_PKG_VERSION")
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -179,6 +186,155 @@ enum Command {
     /// instances rejects the subcommand outright, so it can never be started
     /// against the wrong phone (#67).
     InstanceContext,
+    /// Upgrade to the latest GitHub release (daemon app and agent skill).
+    ///
+    /// Runs the same install.sh the daemon was installed with, then refreshes
+    /// any other copy of the skill (Claude Code plugin, git checkout). Exit 0
+    /// on success or when already current, 2 when the check or download fails.
+    Upgrade {
+        /// Change nothing; print `iphone-use <current> -> <latest>` or
+        /// `iphone-use <current> is up to date`.
+        #[arg(long)]
+        check: bool,
+        /// Like --check, as JSON: name, current, latest, update_available, skills.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Once-a-day "new version available" line on stderr for one-shot commands.
+/// Cached in `${XDG_CACHE_HOME:-~/.cache}/iphone-use/update-check.json`;
+/// a stale cache costs at most a 2 s lookup. Silent on any failure.
+fn update_notice() {
+    use server::update;
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    let mut fetch = || {
+        update::fetch_latest_tag_blocking(
+            &update::Endpoints::github(),
+            update::NOTICE_TIMEOUT,
+            token.as_deref(),
+        )
+        .ok()
+    };
+    update::maybe_notice(
+        &update::process_env,
+        update::unix_now(),
+        env!("CARGO_PKG_VERSION"),
+        &mut fetch,
+        &mut std::io::stderr(),
+    );
+}
+
+/// Is `program` an executable somewhere on `$PATH`?
+fn on_path(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            std::fs::metadata(dir.join(program))
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+    })
+}
+
+/// `iphone-use upgrade [--check] [--json]`. Returns the process exit code.
+fn upgrade(check_only: bool, json: bool) -> i32 {
+    use server::update;
+    let current = env!("CARGO_PKG_VERSION");
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    let fetched = update::fetch_latest_tag_blocking(
+        &update::Endpoints::github(),
+        update::CHECK_TIMEOUT,
+        token.as_deref(),
+    );
+    // An explicit check refreshes the notice cache too.
+    if let Some(path) = update::cache_path(&update::process_env) {
+        update::record_check(&path, update::unix_now(), fetched.as_deref().ok());
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let skills = home
+        .as_deref()
+        .map(update::find_skills)
+        .unwrap_or_default();
+    let report = update::UpgradeReport::new(current, &fetched, skills);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+        );
+        return report.exit_code();
+    }
+    if let Some(error) = &report.error {
+        eprintln!("iphone-use: could not check for a new release: {error}");
+        return 2;
+    }
+    if check_only {
+        let _ = report.write_text(&mut std::io::stdout());
+        return 0;
+    }
+
+    let mut installer_ran = false;
+    if report.update_available {
+        let exe = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .unwrap_or_default();
+        if !update::installed_by_installer(&exe) {
+            // A cargo build or other copy: never replace ~/Applications behind
+            // its back. Say how instead.
+            println!("{}", report.summary());
+            println!(
+                "this binary ({}) was not installed by install.sh; rebuild it from source, \
+                 or install the release with:\n  {}",
+                exe.display(),
+                update::INSTALL_COMMAND
+            );
+            return 0;
+        }
+        println!(
+            "iphone-use: upgrading {} -> {} with install.sh (the daemon restarts)",
+            report.current,
+            report.latest.as_deref().unwrap_or("?")
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(update::INSTALL_COMMAND)
+            .status();
+        match status {
+            Ok(status) if status.success() => installer_ran = true,
+            Ok(status) => {
+                eprintln!(
+                    "iphone-use: install.sh failed ({status}); the previous install was kept"
+                );
+                return 2;
+            }
+            Err(error) => {
+                eprintln!("iphone-use: could not run install.sh: {error}");
+                return 2;
+            }
+        }
+        println!(
+            "iphone-use upgraded {} -> {}",
+            report.current,
+            report.latest.as_deref().unwrap_or("?")
+        );
+    } else {
+        println!("{}", report.summary());
+    }
+
+    let mut run = |program: &str, args: &[String]| {
+        std::process::Command::new(program)
+            .args(args)
+            .status()
+            .map(|status| status.success())
+    };
+    let _ = update::refresh_skills(
+        &report.skills,
+        installer_ran,
+        on_path("claude"),
+        &mut run,
+        &mut std::io::stdout(),
+    );
+    0
 }
 
 /// `iphone-use instance-context`: the derived instance as one JSON object.
@@ -217,8 +373,16 @@ fn main() -> Result<()> {
     let unattended_service = matches!(cli.command, Command::Serve);
     let result = match cli.command {
         Command::Serve => serve(),
-        Command::Stop => stop(),
+        Command::Stop => {
+            let result = stop();
+            // The daily "new version" line (stderr only). `serve` gets the same
+            // line from its own background check; `instance-context` is an
+            // installer probe and `upgrade` reports versions itself.
+            update_notice();
+            result
+        }
         Command::InstanceContext => instance_context(),
+        Command::Upgrade { check, json } => std::process::exit(upgrade(check || json, json)),
     };
 
     // Issue #28: under launchd `KeepAlive=true`, a startup that fails fast
@@ -520,56 +684,44 @@ fn spawn_pause_watchdog(state: Arc<AppState>) {
 /// Background update check: resolve the repo's latest release tag every 24h
 /// and stash it in `AppState.latest_release` for `/agent/status` to report.
 ///
-/// Uses the `releases/latest` REDIRECT (no api.github.com): the web tier has
-/// no anonymous rate limit (the API caps at 60 req/h per IP — a hardware-
-/// tested failure mode, see install.sh), and the Location header carries the
-/// tag: `https://github.com/<repo>/releases/tag/v0.2.0`. Set
-/// `PHONE_REMOTE_NO_UPDATE_CHECK=1` to disable (air-gapped / privacy).
+/// Same lookup as `iphone-use upgrade` (`server::update`): the GitHub API
+/// (honouring `GITHUB_TOKEN`), falling back to the `releases/latest` redirect,
+/// which has no anonymous rate limit. Each result also refreshes the CLI's
+/// notice cache. Disabled by `PHONE_REMOTE_NO_UPDATE_CHECK`,
+/// `IPHONE_USE_NO_UPDATE_CHECK`, `USE_NO_UPDATE_CHECK` or `CI`.
 fn spawn_update_check(state: Arc<AppState>) {
-    if std::env::var("PHONE_REMOTE_NO_UPDATE_CHECK").is_ok_and(|v| !v.is_empty() && v != "0") {
-        tracing::info!("update check disabled (PHONE_REMOTE_NO_UPDATE_CHECK)");
+    use server::update;
+    if update::update_check_disabled(&update::process_env) {
+        tracing::info!("update check disabled (opt-out environment variable set)");
         return;
     }
+    let token = std::env::var("GITHUB_TOKEN").ok();
     tokio::spawn(async move {
-        let client = match reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("update check disabled (client build failed): {e:#}");
-                return;
-            }
-        };
+        let endpoints = update::Endpoints::github();
         loop {
-            match client
-                .get("https://github.com/leeguooooo/iphone-use/releases/latest")
-                .send()
-                .await
+            match update::fetch_latest_tag(
+                &endpoints,
+                std::time::Duration::from_secs(15),
+                token.as_deref(),
+            )
+            .await
             {
-                Ok(resp) => {
-                    let tag = resp
-                        .headers()
-                        .get(reqwest::header::LOCATION)
-                        .and_then(|l| l.to_str().ok())
-                        .and_then(|l| l.rsplit("/tag/").next().map(str::to_string))
-                        .filter(|t| t.starts_with('v'));
-                    if let Some(tag) = tag {
-                        let current = env!("CARGO_PKG_VERSION");
-                        if tag.trim_start_matches('v') != current {
-                            tracing::info!(
-                                "update available: {tag} (running v{current}) — \
-                                 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh"
-                            );
-                        }
-                        *state
-                            .latest_release
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner()) = Some(tag);
+                Ok(tag) => {
+                    let current = env!("CARGO_PKG_VERSION");
+                    if let Some(path) = update::cache_path(&update::process_env) {
+                        update::record_check(&path, update::unix_now(), Some(&tag));
                     }
+                    if update::is_newer(&tag, current) {
+                        // The family's notice line, verbatim, on stderr (the
+                        // daemon log under launchd).
+                        eprintln!("{}", update::notice_line(&tag, current));
+                    }
+                    *state
+                        .latest_release
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) = Some(tag);
                 }
-                Err(e) => tracing::debug!("update check fetch failed (will retry): {e}"),
+                Err(e) => tracing::debug!("update check failed (will retry): {e:#}"),
             }
             tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
         }

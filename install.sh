@@ -647,6 +647,50 @@ warn() { printf "${YELLOW}⚠${RESET}  %s\n" "$*"; }
 die()  { printf "${RED}✗ ERROR:${RESET} %s\n" "$*" >&2; exit 1; }
 info() { printf "  %s\n" "$*"; }
 
+# ── `iphone-use` on PATH ──────────────────────────────────────────────────────
+# The daemon binary doubles as the CLI (`iphone-use upgrade`, `stop`, ...).
+# Link it into ~/.local/bin (IPHONE_USE_BIN_DIR overrides) so the family's
+# upgrade command works without knowing the app path. Only a missing path or a
+# link that already points at an iPhoneUse.app executable is (re)written; any
+# other file there belongs to someone else and is left alone. The link target
+# is the stable app path, so an upgrade or rollback never leaves it dangling.
+# Runs after the daemon transaction commits; a failure here only warns.
+install_cli_link() {
+    local target="$1"
+    local dir="${IPHONE_USE_BIN_DIR:-$HOME/.local/bin}"
+    local link="$dir/iphone-use"
+    local current
+    if [ -L "$link" ]; then
+        current="$(readlink "$link" 2>/dev/null || true)"
+        case "$current" in
+            "$target") ;;
+            */iPhoneUse.app/Contents/MacOS/iphone-use) ;;
+            *)
+                warn "Left $link alone: it points at ${current:-an unreadable target}, not iphone-use."
+                info "Run the CLI as: $target"
+                return 0
+                ;;
+        esac
+    elif [ -e "$link" ]; then
+        warn "Left $link alone: it is not a link this installer made."
+        info "Run the CLI as: $target"
+        return 0
+    fi
+    if [ "${current:-}" != "$target" ]; then
+        if ! (umask 022 && mkdir -p "$dir") 2>/dev/null \
+            || ! ln -sfn "$target" "$link" 2>/dev/null; then
+            warn "Could not link $link; run the CLI as: $target"
+            return 0
+        fi
+    fi
+    ok "Command line: $link -> $target"
+    case ":${PATH:-}:" in
+        *":$dir:"*) ;;
+        *) warn "$dir is not on PATH; add it to use \`iphone-use upgrade\` (or run $target)." ;;
+    esac
+    return 0
+}
+
 validate_release_ref() {
     printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'
 }
@@ -2787,6 +2831,10 @@ UNINSTALL_BACKUP=""
 [ -z "$OLD_DISABLED_BACKUP" ] || rm -f "$OLD_DISABLED_BACKUP" 2>/dev/null || true
 OLD_DISABLED_BACKUP=""
 
+# ── Step 8b — Command-line entrypoint (`iphone-use upgrade`) ──────────────────
+echo ""
+install_cli_link "$DEST/$BINARY_INSIDE_APP"
+
 # ── Step 9 — Backend-specific first-run work ──────────────────────────────────
 echo ""
 if [ "$BACKEND" = "direct" ]; then
@@ -2871,6 +2919,10 @@ printf '%b━━━ MCP server ━━━%b\n' "$BOLD" "$RESET"
 ok "Installed release-matched MCP executable:"
 printf '  %s\n' "$DEST/$MCP_BINARY_INSIDE_APP"
 info "Use this absolute path as the MCP client command; the bridge connects to the installed daemon."
+
+echo ""
+printf '%b━━━ Upgrade ━━━%b\n' "$BOLD" "$RESET"
+info "Check: iphone-use upgrade --check    Upgrade: iphone-use upgrade"
 
 # ── Step 10 — Print current status ───────────────────────────────────────────
 if [ "$BACKEND" = "direct" ] && command -v curl >/dev/null 2>&1 \

@@ -165,6 +165,7 @@ jobs:
           bash -n uninstall.sh
           bash -n scripts/setup-wda.sh
           bash scripts/test-install-release-transaction.sh
+          bash scripts/test-install-cli-link.sh
           bash scripts/test-setup-wda-warp-preflight.sh
           bash scripts/test-setup-wda-lock-backoff.sh
           bash scripts/test-setup-wda-icon-injection.sh

@@ -7,6 +7,7 @@ pub mod protocol;
 pub mod runtime_dir;
 pub mod signaling;
 pub mod turn;
+pub mod update;
 pub mod wda;
 pub mod webrtc;
 
