@@ -171,10 +171,13 @@ what the installer verifies are under [Operations → Upgrades](#upgrades).
 ```
 
 Each run resolves the latest release and upgrades only when it is newer *and* nobody
-owns the phone (no `X-Phone-Owner` lease), no hold is active, the daemon is not
-releasing/reconnecting, and no WDA session is up. Otherwise it logs one line to
+is using the phone: no `X-Phone-Owner` lease, no hold, the daemon is not
+releasing/reconnecting, no live viewer, and no agent request in the last 15 minutes
+(`idle_secs` on `/agent/status`; override with `AUTO_UPDATE_IDLE_SECS`). A connected
+phone with WDA up but nobody driving it counts as idle. Otherwise it logs one line to
 `~/Library/Logs/iPhoneUse/auto-update.log` and tries again tomorrow. The upgrade itself is
-`install.sh` with its SHA-256 checks and rollback. `run --force` skips the idle gate;
+`install.sh` with its SHA-256 checks and rollback, after which the script refreshes its
+own installed copy from the new release. `run --force` skips the idle gate;
 `run --reinstall` reinstalls the current release. (`scripts/auto-update.sh` self-installs on
 `enable`; the installer will offer `--auto-update` once the multi-instance work lands.)
 
@@ -221,7 +224,7 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/agent/status` | Readiness and lifecycle: `backend`, `device_state`, `drivable`, `wda_actionable`, `recovery_owner`, `setup_blocked_on` / `setup_phase` / `setup_message`, `hint`, viewer counts, `instance`, `udid`, `owner` / `owner_lease_remaining_secs`, `hold_remaining_secs`, `version` / `latest`. |
+| `GET` | `/agent/status` | Readiness and lifecycle: `backend`, `device_state`, `drivable`, `wda_actionable`, `recovery_owner`, `setup_blocked_on` / `setup_phase` / `setup_message`, `hint`, viewer counts, `instance`, `udid`, `owner` / `owner_lease_remaining_secs`, `hold_remaining_secs`, `idle_secs` (since the last agent request; status polls do not count), `version` / `latest`. |
 | `GET` | `/agent/screenshot` | Current screen as PNG, from the phone. |
 | `GET` | `/agent/elements` | Flattened accessibility tree with an ephemeral `snapshot` token, an `ax_stats` usability block, and a sparse `alert` block when a system alert is up. `?since=<snapshot>` returns a `delta` instead of the full tree. WDA missing/busy → `503`; failed source → `502`, never a fake empty `200`. |
 | `GET` | `/agent/mjpeg` | Authenticated live MJPEG stream. |

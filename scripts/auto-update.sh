@@ -10,12 +10,19 @@
 #                                unless --reinstall)
 #   auto-update.sh run --dry-run decide and report, change nothing
 #
-# "Idle" means: nobody owns the phone (X-Phone-Owner lease empty), no hold lease,
-# the daemon is not releasing/reconnecting, and no WDA session is up
-# (device_state released / offline / blocked). Upgrading restarts the daemon, and
-# a daemon restart in the middle of someone's phone task is exactly the kind of
-# interruption #72 was filed about — so the gate is strict and silent: when the
-# phone is busy we log one line and try again tomorrow.
+# "Idle" means nobody is using the phone right now: no X-Phone-Owner lease, no
+# hold lease, the daemon is not releasing/reconnecting, no live viewer is
+# watching, and no agent request reached the daemon in the last
+# AUTO_UPDATE_IDLE_SECS (default 900s, from /agent/status `idle_secs`).
+# Upgrading restarts the daemon, and a daemon restart in the middle of someone's
+# phone task is exactly the kind of interruption #72 was filed about — so when
+# the phone is busy we log one line and try again tomorrow.
+#
+# WDA being up (device_state "ready") is deliberately NOT "in use". Since v0.6.3
+# the daemon no longer idle-releases WDA, so a connected phone is "ready" around
+# the clock and a gate on it never upgraded anything. Daemons older than
+# `idle_secs` expose activity only through the owner lease (it outlives a named
+# client's last request by 300s); unnamed clients are invisible to them.
 #
 # The upgrade itself is the documented one-liner (`install.sh` from the release's
 # pinned commit): SHA-256-checked assets, skill first, daemon second, rollback on
@@ -32,6 +39,7 @@ LOG="$LOG_DIR/auto-update.log"
 INSTALLED_SELF="$STATE_DIR/auto-update.sh"
 INSTALLER_URL="${AUTO_UPDATE_INSTALLER_URL:-https://raw.githubusercontent.com/$REPO/main/install.sh}"
 HOUR="${AUTO_UPDATE_HOUR:-4}"
+IDLE_SECS="${AUTO_UPDATE_IDLE_SECS:-900}"
 MINUTE="${AUTO_UPDATE_MINUTE:-30}"
 
 log() { mkdir -p "$LOG_DIR"; printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "$LOG" >&2; }
@@ -76,7 +84,7 @@ decide() {
     local force="$1" reinstall="$2" status latest
     status="$(status_json)" || { printf 'skip:daemon_unreachable\n'; return 2; }
     latest="$(latest_tag)" || { printf 'skip:latest_unresolved\n'; return 2; }
-    STATUS_JSON="$status" LATEST="$latest" FORCE="$force" REINSTALL="$reinstall" python3 - <<'PY'
+    STATUS_JSON="$status" LATEST="$latest" FORCE="$force" REINSTALL="$reinstall" IDLE_SECS="$IDLE_SECS" python3 - <<'PY'
 import json, os, sys
 s = json.loads(os.environ['STATUS_JSON'])
 latest = os.environ['LATEST'].lstrip('v')
@@ -97,8 +105,13 @@ if not force:
         print(f"skip:held {s['hold_remaining_secs']}s"); sys.exit(0)
     if s.get('releasing') or s.get('reconnecting'):
         print('skip:transitioning'); sys.exit(0)
-    if s.get('device_state') not in ('released', 'offline', 'blocked'):
-        print(f"skip:in_use device_state={s.get('device_state')}"); sys.exit(0)
+    viewers = (s.get('viewer_count') or 0) + (s.get('mjpeg_viewer_count') or 0)
+    if viewers > 0:
+        print(f'skip:watched viewers={viewers}'); sys.exit(0)
+    idle = s.get('idle_secs')
+    need = int(os.environ['IDLE_SECS'])
+    if isinstance(idle, (int, float)) and idle < need:
+        print(f'skip:in_use idle_secs={int(idle)} (<{need})'); sys.exit(0)
 print(f'upgrade current={current} latest={latest}')
 PY
 }
@@ -108,6 +121,28 @@ run_installer() {
         IPHONE_USE_AUTO_UPDATE=1 bash -c "$AUTO_UPDATE_INSTALLER_CMD"
     else
         curl -fsSL -m 120 "$INSTALLER_URL" | IPHONE_USE_AUTO_UPDATE=1 sh
+    fi
+}
+
+# The installer does not ship this script, so without this step the copy under
+# ~/.iphone-use stays at whatever version `enable` copied — a fix to the idle
+# gate would never reach the machine it is meant for. Replace it from the tag
+# just installed; `mv` swaps the inode, so the running bash keeps reading the
+# old file safely. Best effort: a failure logs and keeps the current copy.
+refresh_self() {
+    local tag="$1" url tmp
+    [ -f "$INSTALLED_SELF" ] || return 0
+    [ -n "$tag" ] || { log "self-refresh skipped: no release tag"; return 0; }
+    url="${AUTO_UPDATE_SELF_URL:-https://raw.githubusercontent.com/$REPO/$tag/scripts/auto-update.sh}"
+    tmp="$(mktemp "$STATE_DIR/auto-update.sh.XXXXXX")" || return 0
+    if curl -fsSL -m 30 "$url" -o "$tmp" && bash -n "$tmp" && head -1 "$tmp" | grep -q '^#!/bin/bash'; then
+        if cmp -s "$tmp" "$INSTALLED_SELF"; then
+            rm -f "$tmp"
+        else
+            chmod 0755 "$tmp" && mv -f "$tmp" "$INSTALLED_SELF" && log "self-refresh: $INSTALLED_SELF updated from $tag"
+        fi
+    else
+        rm -f "$tmp"; log "self-refresh: could not fetch $url; keeping the current copy"
     fi
 }
 
@@ -143,6 +178,7 @@ cmd_run() {
         sleep 3
         after="$(status_json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)"
         log "upgrade finished: ${before:-?} -> ${after:-?}"
+        refresh_self "$(latest_tag 2>/dev/null || true)"
     else
         die "installer failed (see $LOG); install.sh rolls back on its own"
     fi

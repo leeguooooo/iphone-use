@@ -3040,6 +3040,50 @@ fn inbox_peek_does_not_drain() {
     });
 }
 
+// auto-update.sh decides "in use" from real activity, not from WDA being up:
+// status reports how long since the last agent request, and a status poll
+// itself must not reset that clock.
+#[test]
+fn status_reports_idle_secs_since_the_last_agent_request() {
+    block(async {
+        let state = build_state_with_agent_token(None, Some("tok"));
+        let app = http::router(state.clone());
+        let status = || {
+            Request::builder()
+                .uri("/agent/status")
+                .header("authorization", "Bearer tok")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let read = |response: axum::response::Response| async move {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+
+        let an_hour_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(3_600))
+            .unwrap();
+        *state.last_activity.lock().unwrap() = an_hour_ago;
+        let json = read(app.clone().oneshot(status()).await.unwrap()).await;
+        assert!(json["idle_secs"].as_u64().unwrap() >= 3_600, "{json}");
+        // Polling status is not activity.
+        let json = read(app.clone().oneshot(status()).await.unwrap()).await;
+        assert!(json["idle_secs"].as_u64().unwrap() >= 3_600, "{json}");
+
+        let hold = Request::builder()
+            .method("POST")
+            .uri("/agent/hold")
+            .header("authorization", "Bearer tok")
+            .header("x-phone-control", "1")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"secs":0}"#))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(hold).await.unwrap().status(), StatusCode::OK);
+        let json = read(app.clone().oneshot(status()).await.unwrap()).await;
+        assert!(json["idle_secs"].as_u64().unwrap() < 60, "{json}");
+    });
+}
+
 // Issue #72: two sessions drove the same phone at once. A client that names
 // itself owns the phone for the lease window; everyone else hears who does.
 #[test]
