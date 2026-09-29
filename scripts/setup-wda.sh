@@ -3581,6 +3581,11 @@ while [ -z "$PHONE_URL" ]; do
     fi
     if grep -q "No profiles for .* were found\|requires a provisioning profile" \
         "$RUN_LOG" 2>/dev/null; then
+        # The product is recorded before launch; one its launch rejected for
+        # signing must not be reused by the next round.
+        if [ -n "${WDA_XCTESTRUN:-}" ]; then
+            _runner_cache_drop || true
+        fi
         _setstatus signing-fail account "Xcode could not create the WDA provisioning profile"
         die "Xcode could not find or create the WDA development provisioning profile.
    In Xcode → Settings → Accounts, refresh the selected team, keep the iPhone

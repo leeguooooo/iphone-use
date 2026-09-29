@@ -137,6 +137,9 @@ launch_line="$(grep -n '^RUNNER_COMMAND=' "$SETUP" | cut -d: -f1)"
 if grep -q 'WDA_RUNNER_FROM_CACHE" = "1" \] && _runner_log_shows_product_failure' "$SETUP"; then
     fail_test "a product failure only evicts cached products; a freshly recorded one would be reused"
 fi
+profile_line="$(grep -n 'requires a provisioning profile' "$SETUP" | tail -1 | cut -d: -f1)"
+sed -n "${profile_line},$((profile_line + 8))p" "$SETUP" | grep -q '_runner_cache_drop' \
+    || fail_test "a provisioning-profile failure leaves the recorded product for the next round"
 pass "a verified product is recorded before launch and evicted on its own failure"
 
 printf '1..%d\n' "$pass_count"
