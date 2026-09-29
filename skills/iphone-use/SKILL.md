@@ -98,6 +98,7 @@ Mirroring-window field and is not a Direct readiness signal.
 | `GET /agent/screenshot` | Current phone screen as a device-side PNG; no Mirroring session required |
 | `POST /agent/input` | One action (JSON body, below); requires `X-Phone-Control: 1` |
 | `POST /agent/actions` | One bounded, fail-closed sequence of `action`, `wait_for`, and short `pause` steps; Direct/WDA only; requires `X-Phone-Control: 1` |
+| `GET /agent/apps` | Installed app versions: `{udid, device:{marketing_name,product_type,ios,build}, fetched_at, source, apps:[{bundle,name,version,bundle_version,system,removable,hidden}]}`. `?bundle=<id>` for one app; cached 10 min (`?refresh=1` bypasses). `503 apps_unavailable` means unknown, not "not installed" |
 | `GET /agent/intents` | Curated **semantic intents** registry (registered Shortcuts verbs). Empty list + hint when none are set up |
 | `POST /agent/intent` | Dispatch one registered verb (`{"name":"battery","args":{}}`); requires `X-Phone-Control: 1`. Results arrive on `/agent/inbox`, matched by the returned `id` |
 

@@ -230,6 +230,7 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
 | `POST` | `/agent/mode` | `{"mode":"agent"}` restarts the configured Direct target. Never changes backend or UDID. |
 | `POST` | `/agent/hold` | `{"secs":N}` (0 clears, max 14400) keeps the phone from idle release around a human pause. `503 device_release_in_progress` if release already started. |
 | `POST` | `/agent/owner` | `{"release":true}` hands the owner lease back early. |
+| `GET` | `/agent/apps` | Installed apps with `version` / `bundle_version` / `system`, plus `device.ios`, from `devicectl` on the daemon's Mac. Cached 10 min; `?bundle=<id>` filters, `?refresh=1` bypasses the cache. `503 apps_unavailable` on failure (never an empty list); `409 target_required` with several phones and no configured UDID. |
 | `GET` | `/agent/intents` | The curated semantic-intent registry (see [Semantic intents](#semantic-intents-shortcuts-on-device)). |
 | `POST` | `/agent/intent` | Dispatch one registered verb; the result arrives on `/agent/inbox`. |
 | `GET` / `POST` | `/agent/inbox`, `/agent/inbox/drain` | Peek / append / atomically drain the Shortcuts result queue. |

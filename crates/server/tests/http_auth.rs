@@ -3158,3 +3158,79 @@ fn element_labels_with_control_characters_serialize_as_valid_json() {
     let parsed: serde_json::Value = serde_json::from_str(&text).expect("strict parse");
     assert_eq!(parsed["elements"][0]["label"], serde_json::json!(label));
 }
+
+// ── Installed-app inventory (/agent/apps, issue #76) ─────────────────────────
+
+#[test]
+fn agent_apps_requires_bearer_and_serves_a_cached_inventory_without_devicectl() {
+    block(async {
+        // A configured target whose inventory is already cached: the handler
+        // must answer from the cache and never shell out to devicectl (which
+        // would reach whatever phone this test machine has paired).
+        let udid = "00008150-0000000000A7E576";
+        let state = build_state(Some("hunter2"));
+        let mut state = match Arc::try_unwrap(state) {
+            Ok(state) => state,
+            Err(_) => panic!("test state unexpectedly shared"),
+        };
+        state.device_udid = Some(udid.to_string());
+        let app = http::router(Arc::new(state));
+        server::apps::cache_put(
+            udid,
+            &serde_json::json!({
+                "ok": true, "udid": udid, "source": "devicectl",
+                "apps": [
+                    {"bundle": "com.apple.Health", "version": "1.0", "system": true},
+                    {"bundle": "com.tencent.xin", "version": "8.0.76", "system": false}
+                ]
+            }),
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/apps")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Read-only: bearer alone, no X-Phone-Control.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/apps")
+                    .header(header::AUTHORIZATION, "Bearer hunter2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["apps"].as_array().unwrap().len(), 2);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/apps?bundle=com.tencent.xin")
+                    .header(header::AUTHORIZATION, "Bearer hunter2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let apps = json["apps"].as_array().unwrap();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0]["version"], "8.0.76");
+    });
+}

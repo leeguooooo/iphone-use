@@ -150,6 +150,7 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 | `POST` | `/agent/mode` | `{"mode":"agent"}` 重启已配置的 Direct 目标。不换后端，不换 UDID。 |
 | `POST` | `/agent/hold` | `{"secs":N}`（0 清除，上限 14400）在人工暂停期间阻止空闲释放。释放已经开始时返回 `503 device_release_in_progress`。 |
 | `POST` | `/agent/owner` | `{"release":true}` 提前归还 owner 租约。 |
+| `GET` | `/agent/apps` | 已安装 App 及其 `version` / `bundle_version` / `system`，外加 `device.ios`，由 daemon 所在 Mac 上的 `devicectl` 读取。缓存 10 分钟；`?bundle=<id>` 过滤，`?refresh=1` 绕过缓存。失败返回 `503 apps_unavailable`（绝不返回空列表）；连着多台手机又没配置 UDID 时返回 `409 target_required`。 |
 | `GET` | `/agent/intents` | 语义意图注册表，见[语义意图](#语义意图手机端快捷指令)。 |
 | `POST` | `/agent/intent` | 派发一个已注册的 verb，结果落到 `/agent/inbox`。 |
 | `GET` / `POST` | `/agent/inbox`、`/agent/inbox/drain` | 查看 / 追加 / 原子清空快捷指令结果队列。 |

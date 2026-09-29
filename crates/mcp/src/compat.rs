@@ -6,9 +6,9 @@
 //! `Compat` verdict that `flow list`, `phone_flow_list`, the `registry` block
 //! in `phone_elements`, and `flow run` all act on.
 //!
-//! Installed versions come from `GET /agent/apps` (daemon, issue #76). Until
-//! that endpoint exists, a daemon on loopback lets the CLI ask `devicectl`
-//! directly; results are cached in the flow store for ten minutes.
+//! Installed versions come from `GET /agent/apps` (daemon, issue #76). For an
+//! older daemon without that endpoint, a daemon on loopback lets the CLI ask
+//! `devicectl` directly; results are cached in the flow store for ten minutes.
 
 use crate::client::DaemonClient;
 use crate::flow::FlowMeta;

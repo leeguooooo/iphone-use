@@ -925,6 +925,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // (`shortcuts://run-shortcut` deep link). Results return through the
         // existing `/agent/inbox`; the registry file — not the phone — is the
         // capability list.
+        .route("/agent/apps", get(agent_apps))
         .route("/agent/intents", get(agent_intents))
         .route("/agent/intent", post(agent_intent))
         .route("/agent/hold", post(agent_hold))
@@ -4208,6 +4209,56 @@ fn devicectl_uninstall(udid: Option<&str>, bundle: &str) -> Result<(), Devicectl
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ))
     }
+}
+
+/// Installed-app inventory for `GET /agent/apps` (issue #76): `device info
+/// apps --include-all-apps` plus `device info details`, mapped onto the
+/// endpoint contract. Returns the resolved target alongside the body so the
+/// caller can cache per target. A failed details call is tolerated (device
+/// fields become null); a failed or empty app list is not.
+#[cfg(target_os = "macos")]
+fn devicectl_installed_apps(
+    udid: Option<&str>,
+) -> Result<(String, serde_json::Value), DevicectlError> {
+    let device = match udid {
+        Some(u) => u.to_string(),
+        None => detect_connected_device()?,
+    };
+    let dir = tempfile::tempdir()
+        .map_err(|e| DevicectlError::Failed(format!("temp dir for devicectl output: {e}")))?;
+    let apps_out = dir.path().join("apps.json");
+    let details_out = dir.path().join("details.json");
+    let run = |args: &[&str], out: &std::path::Path| -> Result<(), DevicectlError> {
+        let mut command = std::process::Command::new("xcrun");
+        command
+            .args(["devicectl", "--quiet", "--timeout", "20"])
+            .args(args)
+            .args(["--device", &device, "--json-output"])
+            .arg(out);
+        let output = run_child_with_deadline(&mut command, std::time::Duration::from_secs(30))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(DevicectlError::Failed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        }
+    };
+    run(&["device", "info", "apps", "--include-all-apps"], &apps_out)?;
+    let details_ok = run(&["device", "info", "details"], &details_out).is_ok();
+    let apps_json = std::fs::read_to_string(&apps_out)
+        .map_err(|e| DevicectlError::Failed(format!("read devicectl apps output: {e}")))?;
+    let details_json = details_ok
+        .then(|| std::fs::read_to_string(&details_out).ok())
+        .flatten();
+    let body = crate::apps::from_devicectl(
+        &device,
+        &apps_json,
+        details_json.as_deref(),
+        &crate::apps::now_rfc3339(),
+    )
+    .map_err(DevicectlError::Failed)?;
+    Ok((device, body))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9726,6 +9777,109 @@ fn intent_error_response(error: &IntentError) -> Response {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
+}
+
+#[derive(Deserialize, Default)]
+struct AgentAppsQuery {
+    bundle: Option<String>,
+    refresh: Option<String>,
+}
+
+fn agent_apps_json(status: StatusCode, body: serde_json::Value) -> Response {
+    with_security_headers(
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
+}
+
+/// `GET /agent/apps` (issue #76) — installed apps and their versions, so
+/// registry flows can be matched to what is on the phone. Read-only: bearer
+/// auth, no `X-Phone-Control`, no lease. Answered by CoreDevice on this Mac for
+/// the configured target (or the single connected device), cached for ten
+/// minutes per target. `?bundle=<id>` filters to one entry; `?refresh=1`
+/// bypasses the cache. A failure is `503 apps_unavailable`, never an empty
+/// list that would read as "nothing installed".
+async fn agent_apps(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<AgentAppsQuery>,
+) -> Response {
+    match agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    let refresh = matches!(query.refresh.as_deref(), Some("1" | "true"));
+    let finish = |body: serde_json::Value| {
+        let body = match query.bundle.as_deref() {
+            Some(bundle) => crate::apps::filter_bundle(body, bundle),
+            None => body,
+        };
+        agent_apps_json(StatusCode::OK, body)
+    };
+    // With a configured target the cache can answer before any CoreDevice
+    // call; without one, the target is only known after detection.
+    if let (Some(udid), false) = (state.device_udid.as_deref(), refresh) {
+        if let Some(body) = crate::apps::cache_get(udid) {
+            return finish(body);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let result = {
+        let udid = state.device_udid.clone();
+        tokio::task::spawn_blocking(move || devicectl_installed_apps(udid.as_deref()))
+            .await
+            .unwrap_or_else(|e| Err(DevicectlError::Failed(format!("join error: {e}"))))
+    };
+    #[cfg(not(target_os = "macos"))]
+    let result: Result<(String, serde_json::Value), &str> =
+        Err("devicectl is only available on macOS");
+
+    let reason = match result {
+        Ok((target, body)) => {
+            crate::apps::cache_put(&target, &body);
+            return finish(body);
+        }
+        #[cfg(target_os = "macos")]
+        Err(DevicectlError::TargetRequired(count)) => {
+            return agent_apps_json(
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "ok": false,
+                    "error": "target_required",
+                    "connected_candidates": count,
+                    "hint": "configure PHONE_REMOTE_UDID (run setup-wda.sh) so the daemon knows which phone to ask",
+                }),
+            );
+        }
+        #[cfg(target_os = "macos")]
+        Err(DevicectlError::Timeout) => "devicectl timed out and was terminated".to_string(),
+        #[cfg(target_os = "macos")]
+        Err(DevicectlError::Failed(reason)) => reason,
+        #[cfg(not(target_os = "macos"))]
+        Err(reason) => reason.to_string(),
+    };
+    tracing::warn!("installed-app inventory unavailable: {reason}");
+    agent_apps_json(
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "ok": false,
+            "error": "apps_unavailable",
+            "reason": reason,
+            "hint": "the inventory comes from `xcrun devicectl` on the daemon's Mac: keep the iPhone paired and reachable (USB is most reliable), then retry with ?refresh=1",
+        }),
     )
 }
 
