@@ -170,10 +170,16 @@ pub fn mock_wda(
             if thread_stop.load(std::sync::atomic::Ordering::Acquire) {
                 return;
             }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+            // A body that is already a full HTTP response (status line
+            // first) is sent verbatim, so a test can script a non-200.
+            let response = if body.starts_with("HTTP/1.1 ") {
+                body
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            };
             let _ = stream.write_all(response.as_bytes());
         }
     });

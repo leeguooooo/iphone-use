@@ -4293,6 +4293,9 @@ enum WdaControlOutcome {
     NoEffect(&'static str),
     /// An `alert` action while no system alert is showing.
     NoAlert,
+    /// `force_press` on a device without pressure touch: WDA refused before
+    /// touching the screen (issue #90). Nothing was sent.
+    ForcePressUnsupported,
     Failed,
 }
 
@@ -4602,6 +4605,9 @@ enum SnapshotElementTapError {
     /// WDA acknowledged the action but the element did not change (a picker
     /// wheel given a value that matches none of its options).
     NoEffect(&'static str),
+    /// WDA refused the gesture because this device cannot perform it (a
+    /// force press on an iPhone without 3D Touch). Nothing was sent.
+    DeviceUnsupported,
     BeforeDispatch(anyhow::Error),
     AfterDispatch(anyhow::Error),
 }
@@ -4638,6 +4644,7 @@ fn snapshot_element_outcome(
         Err(SnapshotElementTapError::InvalidTarget) => Err(WdaControlOutcome::InvalidElementTarget),
         Err(SnapshotElementTapError::InvalidValue(hint)) => Err(WdaControlOutcome::InvalidValue(hint)),
         Err(SnapshotElementTapError::NoEffect(hint)) => Err(WdaControlOutcome::NoEffect(hint)),
+        Err(SnapshotElementTapError::DeviceUnsupported) => Err(WdaControlOutcome::ForcePressUnsupported),
         Err(SnapshotElementTapError::BeforeDispatch(error)) => {
             w.invalidate_session();
             tracing::warn!("wda {context} failed before dispatch: {error:#}");
@@ -5277,7 +5284,16 @@ async fn perform_snapshot_element(
             };
             w.force_touch_element(&element_id, pressure, duration_s)
                 .await
-                .map_err(after_dispatch)
+                .map_err(|error| {
+                    // WDA checks pressure support before it synthesizes any
+                    // touch, so this refusal is a definite "not sent" rather
+                    // than an unknown outcome (issue #90).
+                    if error.is::<crate::wda::ForcePressUnsupported>() {
+                        SnapshotElementTapError::DeviceUnsupported
+                    } else {
+                        after_dispatch(error)
+                    }
+                })
         }
         // The caller allowlists names before dispatch; anything else here is
         // a programming error, and failing closed beats acting.
@@ -6026,6 +6042,18 @@ fn hinted_control_response(status: StatusCode, error: &str, outcome: &str, hint:
     )
 }
 
+/// Hint for `force_press_unsupported` (issue #90).
+const FORCE_PRESS_UNSUPPORTED_HINT: &str = "this iPhone has no pressure-sensitive touch (3D Touch), so WDA refused force_press before touching the screen; nothing was sent. Use perform action \"menu\" (long press) for the context menu instead";
+
+fn force_press_unsupported_response() -> Response {
+    hinted_control_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "force_press_unsupported",
+        "not_sent",
+        FORCE_PRESS_UNSUPPORTED_HINT,
+    )
+}
+
 fn invalid_element_target_response() -> Response {
     element_resolution_response(
         r#"{"ok":false,"error":"invalid_element_target","outcome":"not_sent","retry_safe":true,"hint":"the matched element has no finite positive-size hit target; refresh /agent/elements and choose another locator"}"#,
@@ -6440,6 +6468,9 @@ async fn direct_control(
     }
     if outcome == WdaControlOutcome::NoAlert {
         return no_alert_response();
+    }
+    if outcome == WdaControlOutcome::ForcePressUnsupported {
+        return force_press_unsupported_response();
     }
     if outcome == WdaControlOutcome::UnsupportedPerformAction {
         return unsupported_perform_action_response();
@@ -7492,6 +7523,12 @@ async fn agent_actions(
                             "no_effect",
                             true,
                         ),
+                        WdaControlOutcome::ForcePressUnsupported => (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "force_press_unsupported",
+                            "not_sent",
+                            true,
+                        ),
                         WdaControlOutcome::Failed => {
                             (StatusCode::BAD_GATEWAY, "outcome_unknown", "unknown", false)
                         }
@@ -8483,6 +8520,7 @@ async fn agent_input(
                 StatusCode::CONFLICT, "adjust_no_effect", "no_effect", hint,
             ),
             WdaControlOutcome::NoAlert => no_alert_response(),
+            WdaControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
             WdaControlOutcome::Failed => wda_failed_after_dispatch_response(),
         };
     }

@@ -130,7 +130,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"set_v
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scroll","element":7,"snapshot":"…","dy":120}'          # scroll INSIDE that element's rect — never strays into a neighboring scroll view
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"alert","button":"不是 li guo?"}'  # press a system-alert button by exact name (UIAlertController; use this, NOT an element tap — alert buttons ACK a coordinate/element tap without acting)
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"alert","action":"dismiss"}'      # or the default accept/dismiss button
-curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"perform","element":9,"snapshot":"…","action":"increment"}'  # named affordance on that element: increment|decrement (wheel/stepper/slider), adjust (+"value"), toggle, menu (long-press menu), double_tap, two_finger_tap, scroll_to_visible, pinch, rotate, force_press
+curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"perform","element":9,"snapshot":"…","action":"increment"}'  # named affordance on that element: increment|decrement (wheel/stepper/slider), adjust (+"value"), toggle, menu (long-press menu), double_tap, two_finger_tap, scroll_to_visible, pinch, rotate, force_press (3D Touch only — every iPhone since XR/11 answers 422 force_press_unsupported, retry_safe:true, nothing sent; use menu)
 ```
 
 **Halve the round trips**: `POST /agent/input?return=delta` makes an applied

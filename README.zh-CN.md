@@ -161,7 +161,7 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 - **只看 `drivable:true`**（以及 `backend:"direct"`、`wda_actionable:true`）。`device_state` 取值：`ready`、`locked`、`blocked`、`offline`、`releasing`、`released`、`reconnecting`。`phone_target`、`mirror_state`、`human_active` 是旧镜像字段。
 - **至多送达一次。** 派发前过期返回 `408 not_sent`，`retry_safe:true`。派发后传输失败 `502`，派发后超时 `504`，两者都是 `outcome_unknown`、`retry_safe:false`：先看屏幕，再决定要不要再来一次。
 - **目标绑定快照。** 元素索引只在同一次 `/agent/elements` 返回的 `snapshot` 下有效，树变了就 `409 stale_element_snapshot`。精确标签点按在零匹配或多匹配时都不动作。脚本里存标签、identifier、locator，不存索引和快照令牌。
-- **元素级动作。** `set_value` 直接写字段（先清再填），带 `element` 的 `scroll` 把手势限制在该元素内，`perform` 调用命名能力（`increment`、`decrement`、`adjust`、`toggle`、`menu`、`double_tap`、`two_finger_tap`、`scroll_to_visible`、`pinch`、`rotate`、`force_press`）。`PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` 让树上标出每行支持哪些动作。
+- **元素级动作。** `set_value` 直接写字段（先清再填），带 `element` 的 `scroll` 把手势限制在该元素内，`perform` 调用命名能力（`increment`、`decrement`、`adjust`、`toggle`、`menu`、`double_tap`、`two_finger_tap`、`scroll_to_visible`、`pinch`、`rotate`、`force_press`）。`force_press` 需要 3D Touch：iPhone XR / 11 之后的机型上 WDA 在触屏前就拒绝，daemon 返回 `422 force_press_unsupported`（`not_sent`，`retry_safe:true`），改用 `menu`（长按）。`PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` 让树上标出每行支持哪些动作。
 - **系统弹窗是另一层。** 点它的按钮会被确认但不生效。用 `{"type":"alert","button":"…"}` 或 `{"action":"accept"|"dismiss"}`。
 - **`/agent/actions`** 只要有动作已落地，就不会把整批重放标成安全。`tap_locator` 与 `wait_for` 用同一套精确的 label / identifier / kind / value / 状态字段，要求当前唯一命中。
 

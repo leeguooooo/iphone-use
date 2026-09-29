@@ -251,7 +251,10 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
 - **Element-scoped actions.** `set_value` writes a field (clear-then-type), `scroll` with
   `element` keeps the gesture inside that element, `perform` invokes a named affordance
   (`increment`, `decrement`, `adjust`, `toggle`, `menu`, `double_tap`, `two_finger_tap`,
-  `scroll_to_visible`, `pinch`, `rotate`, `force_press`). With
+  `scroll_to_visible`, `pinch`, `rotate`, `force_press`). `force_press` needs 3D Touch:
+  on every iPhone since the XR / 11 WDA refuses it before touching the screen, and the
+  daemon answers `422 force_press_unsupported` (`not_sent`, `retry_safe:true`); use
+  `menu` (long press) instead. With
   `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` the tree advertises which actions each row
   supports.
 - **System alerts** are a separate surface: taps on their buttons are acknowledged

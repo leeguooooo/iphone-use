@@ -480,6 +480,17 @@ impl WdaClient {
             .send()
             .await
             .with_context(|| operation.clone())?;
+        if response.status().is_client_error() {
+            // Keep WDA's own explanation: `error_for_status` drops the body,
+            // and for a refused gesture the body is the only place that says
+            // why (issue #90).
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            if command == "forceTouch" && force_press_refused(&text) {
+                return Err(anyhow::Error::new(ForcePressUnsupported));
+            }
+            return Err(anyhow!("{operation} HTTP status: {status}: {text}"));
+        }
         ensure_wda_success(response, &operation).await?;
         Ok(())
     }
@@ -1761,6 +1772,27 @@ fn parse_element_id(body: &str) -> Result<String> {
     Err(anyhow!("no element id in WDA response: {body}"))
 }
 
+/// WDA refused a force press because the device has no pressure-sensitive
+/// touch (no 3D Touch: every iPhone since the XR / 11). WDA checks
+/// `XCUIDevice.supportsPressureInteraction` and answers 400 before it
+/// synthesizes any touch, so nothing reached the screen (issue #90).
+#[derive(Debug)]
+pub struct ForcePressUnsupported;
+
+impl std::fmt::Display for ForcePressUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WDA refused force press: this device has no pressure-sensitive touch")
+    }
+}
+
+impl std::error::Error for ForcePressUnsupported {}
+
+/// Is this WDA error body the "no pressure touch" refusal from
+/// `XCUIElement+FBForceTouch.m`? Matched on WDA's fixed English message.
+fn force_press_refused(body: &str) -> bool {
+    body.contains("Force press is not supported on this device")
+}
+
 /// The body a force press puts on the wire. WDA 9.15.3 rejects `{}` outright,
 /// so both fields are always present; an omitted one falls back to WDA's own
 /// documented default rather than to no field at all.
@@ -1819,6 +1851,66 @@ mod tests {
         );
     }
 
+    /// WDA 9.15.3's answer to a force press on an iPhone without 3D Touch,
+    /// captured verbatim from an iPhone 17 Pro Max on iOS 27.0 (issue #90).
+    pub(crate) const FORCE_PRESS_UNSUPPORTED_BODY: &str = r#"{
+  "value" : {
+    "error" : "invalid element state",
+    "message" : "Error Domain=com.facebook.WebDriverAgent Code=1 \"Force press is not supported on this device\" UserInfo={NSLocalizedDescription=Force press is not supported on this device}",
+    "traceback" : ""
+  },
+  "sessionId" : "6F9B166A-6336-42B4-94F6-5E301C9FC79A"
+}"#;
+
+    pub(crate) fn http_400(body: &str) -> String {
+        format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    // Issue #90: the 400 WDA sends when the device has no pressure touch is a
+    // refusal before any touch, and must come back as a typed error the
+    // router can map to "not sent", not as an opaque transport failure.
+    #[test]
+    fn force_press_refusal_is_a_typed_error() {
+        let (base, task) = mock_wda(2, |request| {
+            if request.starts_with("POST /session ") {
+                return r#"{"sessionId":"S-1","value":{}}"#.to_string();
+            }
+            http_400(FORCE_PRESS_UNSUPPORTED_BODY)
+        });
+        let mut client = WdaClient::new(base).unwrap();
+        let error = block(client.force_touch_element("42", None, None)).unwrap_err();
+        task.join().unwrap();
+        assert!(
+            error.is::<ForcePressUnsupported>(),
+            "expected ForcePressUnsupported, got: {error:#}"
+        );
+    }
+
+    // Any other 4xx keeps WDA's body in the message, and a 404 still reads as
+    // a missing element to the router's `404 Not Found` check.
+    #[test]
+    fn other_gesture_client_errors_keep_status_and_body() {
+        let (base, task) = mock_wda(2, |request| {
+            if request.starts_with("POST /session ") {
+                return r#"{"sessionId":"S-1","value":{}}"#.to_string();
+            }
+            let body = r#"{"value":{"error":"no such element","message":"gone"}}"#;
+            format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        });
+        let mut client = WdaClient::new(base).unwrap();
+        let error = block(client.force_touch_element("42", None, None)).unwrap_err();
+        task.join().unwrap();
+        let text = format!("{error:#}");
+        assert!(!error.is::<ForcePressUnsupported>());
+        assert!(text.contains("404 Not Found") && text.contains("no such element"), "{text}");
+    }
+
     #[test]
     fn touch_move_duration_is_bounded() {
         assert_eq!(bounded_move_duration_ms(0), 80);
@@ -1841,10 +1933,16 @@ mod tests {
                 let read = stream.read(&mut request).unwrap();
                 let request = String::from_utf8_lossy(&request[..read]);
                 let body = responder(&request);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
+                // A responder that returns a full HTTP response (status line
+                // first) is sent verbatim, so a test can script a non-200.
+                let response = if body.starts_with("HTTP/1.1 ") {
+                    body
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
                 // A client that timed out on this request has already hung
                 // up; the mock must not panic on that EPIPE.
                 let _ = stream.write_all(response.as_bytes());
