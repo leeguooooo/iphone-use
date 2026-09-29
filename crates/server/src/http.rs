@@ -11027,9 +11027,14 @@ mod tests {
             "menu",
             "double_tap",
             "two_finger_tap",
-            "scroll",
-            "force_touch",
+            "pinch",
+            "rotate",
+            "force_press",
         ] {
+            assert!(
+                PERFORM_ACTION_NAMES.contains(&verb),
+                "{verb} is not a perform verb, so this check would pass vacuously"
+            );
             assert!(
                 !PERFORM_VERBS_WITH_FRAME_FALLBACK.contains(&verb),
                 "{verb} must still require a real locator"
