@@ -1204,6 +1204,9 @@ _warp_ready_summary() {
 # snapshot reported by `scutil --proxy`. Nested scoped/interface dictionaries
 # are separate configurations and must not overwrite the global active values.
 # Output is protocol|host|port, one enabled entry per line.
+# macOS omits the HTTPEnable/HTTPSEnable/SOCKSEnable keys entirely on a network
+# service whose proxies were never configured, so a well-formed dictionary
+# without them means "none enabled", not "unreadable" (issue #91).
 _system_proxy_entries() {
     local scutil_bin="${IPHONE_USE_INTERNAL_TEST_SCUTIL:-/usr/sbin/scutil}"
     local snapshot
@@ -1221,9 +1224,6 @@ _system_proxy_entries() {
             if (before == 1 && $2 == ":" &&
                 $1 ~ /^(HTTP|HTTPS|SOCKS)(Enable|Proxy|Port)$/) {
                 value[$1] = $3
-                if ($1 ~ /Enable$/) {
-                    enable_seen = 1
-                }
             }
             depth += opens - closes
             if (depth < 0) {
@@ -1231,7 +1231,7 @@ _system_proxy_entries() {
             }
         }
         END {
-            if (!root_seen || !enable_seen || depth != 0 || invalid) {
+            if (!root_seen || depth != 0 || invalid) {
                 exit 65
             }
             protocols[1] = "HTTP"

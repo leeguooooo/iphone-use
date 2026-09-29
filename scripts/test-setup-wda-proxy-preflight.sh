@@ -73,6 +73,52 @@ grep -q 'System proxies (HTTP/HTTPS/SOCKS): none enabled' "$TMP_ROOT/out" \
 [ ! -s "$PROBE_LOG" ] || fail_test "disabled proxies triggered a TCP probe"
 pass "disabled HTTP/HTTPS/SOCKS entries pass without probing"
 
+# Issue #91: the exact `scutil --proxy` snapshot from a Wi-Fi service whose
+# proxies were never configured. macOS omits every *Enable key; that is a
+# valid "no proxy" state, not an unreadable one.
+cat > "$SCUTIL_FIXTURE" <<'EOF'
+<dictionary> {
+  ExceptionsList : <array> {
+    0 : *.local
+    1 : 169.254/16
+  }
+  FTPPassive : 1
+}
+EOF
+run_check >"$TMP_ROOT/out" 2>"$TMP_ROOT/err" \
+    || fail_test "snapshot without any *Enable keys was rejected (issue #91)"
+grep -q 'System proxies (HTTP/HTTPS/SOCKS): none enabled' "$TMP_ROOT/out" \
+    || fail_test "snapshot without *Enable keys was not reported as none enabled"
+if grep -q 'Could not inspect macOS HTTP/HTTPS/SOCKS proxy state' "$TMP_ROOT/out"; then
+    fail_test "snapshot without *Enable keys was misreported as unreadable"
+fi
+[ ! -s "$PROBE_LOG" ] || fail_test "snapshot without *Enable keys triggered a TCP probe"
+pass "snapshot with absent *Enable keys (issue #91) means no proxies enabled"
+
+# The same service with a real proxy turned on: only HTTPEnable is present,
+# the HTTPS/SOCKS keys are still absent. The enabled proxy must be reported.
+cat > "$SCUTIL_FIXTURE" <<'EOF'
+<dictionary> {
+  ExceptionsList : <array> {
+    0 : *.local
+    1 : 169.254/16
+  }
+  FTPPassive : 1
+  HTTPEnable : 1
+  HTTPPort : 3128
+  HTTPProxy : proxy.example.com
+}
+EOF
+run_check >"$TMP_ROOT/out" 2>"$TMP_ROOT/err" \
+    || fail_test "remote HTTP proxy with absent HTTPS/SOCKS keys was treated as a blocker"
+grep -q 'HTTP system proxy enabled at proxy.example.com:3128 (endpoint not probed)' \
+    "$TMP_ROOT/out" \
+    || fail_test "enabled HTTP proxy was not reported when other *Enable keys are absent"
+if grep -q 'none enabled' "$TMP_ROOT/out"; then
+    fail_test "enabled HTTP proxy was reported as none enabled"
+fi
+pass "enabled proxy is still reported when the other *Enable keys are absent"
+
 cat > "$SCUTIL_FIXTURE" <<'EOF'
 <dictionary> {
   HTTPEnable : 1
