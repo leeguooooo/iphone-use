@@ -260,6 +260,43 @@ _restore_wda_icon_app() {
     return 1
 }
 
+# Drop an icon-injected runner so the next xcodebuild step rebuilds a pristine,
+# Xcode-signed one. Used after a successful injection (its pristine backup is
+# already gone, so restore is impossible) when the product cannot be launched
+# with `test-without-building`: the plain `test` action would re-emplace the
+# hand-signed bundle's Info.plist and poison the next round (#75). Same
+# containment guard as _restore_wda_icon_app; anything else fails closed.
+_discard_injected_runner() {
+    [ "${WDA_RUNNER_ICON_INJECTED:-0}" = "1" ] || return 0
+    case "${WDA_ICON_PRODUCTS_DIR:-}" in
+        /*/Build/Products/*) ;;
+        *) return 1 ;;
+    esac
+    case "${WDA_ICON_APP_PATH:-}" in
+        "$WDA_ICON_PRODUCTS_DIR"/*-Runner.app) ;;
+        *) return 1 ;;
+    esac
+    [ -L "$WDA_ICON_APP_PATH" ] && return 1
+    /bin/rm -rf -- "$WDA_ICON_APP_PATH" 2>/dev/null || return 1
+    WDA_RUNNER_ICON_INJECTED=0
+    return 0
+}
+
+# An earlier round's injected runner is not a valid incremental-build input:
+# build-for-testing over it re-emplaces Info.plist without re-signing, and the
+# product fails validation ("invalid Info.plist (plist or signature have been
+# modified)"), costing a second, repair build every round (#75). Start the
+# prebuild from a pristine baseline instead: drop the app when it carries the
+# injected icon. A non-injected product is left alone for the incremental build.
+_discard_previous_injection() {
+    local products="$1" app="$2"
+    [ -e "$app/AppIcon60x60@2x.png" ] || return 0
+    WDA_ICON_PRODUCTS_DIR="$products"
+    WDA_ICON_APP_PATH="$app"
+    WDA_RUNNER_ICON_INJECTED=1
+    _discard_injected_runner
+}
+
 if [ "$COMMAND" = "setup" ]; then
     mkdir -p "$STATE_DIR"
     chmod 700 "$STATE_DIR"
@@ -2843,7 +2880,12 @@ PY_PRODUCT_PATH
     rm -rf -- "$app" || return 1
     # Deleting the exact poisoned app also discards its .cstemp leftovers;
     # merely unlinking those files would leave missing framework contents.
-    if ! _run_runner_prebuild "$build_log" || ! _validate_runner_bundle "$app"; then
+    # The rebuild gets its own log: the failed build's log is the only record
+    # of which step produced the invalid product, and truncating it destroyed
+    # that evidence every round (#75).
+    local repair_log="${build_log%.log}.repair.log"
+    warn "Runner repair: keeping the failed build's log at $build_log; rebuild log at $repair_log"
+    if ! _run_runner_prebuild "$repair_log" || ! _validate_runner_bundle "$app"; then
         _setstatus building-fail wda "runner repair failed: $WDA_RUNNER_VALIDATION_ERROR"
         return 1
     fi
@@ -2888,7 +2930,7 @@ print(paths.pop())
 # END runner product validation.
 
 # BEGIN runner product cache.
-# One successful bring-up records the launchable, icon-injected runner product
+# A verified, icon-injected runner product is recorded before its launch
 # (its products dir + .xctestrun) so the next reconnect installs it as-is with
 # `test-without-building` instead of building twice. Before this, every
 # KeepAlive round ran build-for-testing, found the previous round's injected
@@ -2900,8 +2942,8 @@ print(paths.pop())
 # bundle id, team, target device, the icon source + its mtime, and the Xcode /
 # SDK / deployment target it was built with. Any
 # mismatch, a missing file, or a product that no longer validates falls
-# through to the normal build. A launch that fails on a cached product drops
-# the record so the following round rebuilds from scratch.
+# through to the normal build. A launch that names a failure of the product
+# itself drops the record so the following round rebuilds from scratch.
 WDA_RUNNER_CACHE="$STATE_DIR/wda-runner-product.json"
 WDA_RUNNER_FROM_CACHE=0
 
@@ -3109,30 +3151,6 @@ JSON
     # without re-signing, which both drops the icon keys and breaks the seal
     # (hardware-verified: installd rejects it with 0xe8008001).
     build_log="$STATE_DIR/wda-runner-icon-build.log"
-    info "Prebuilding WDA so the runner icon can be injected before installation"
-    _setstatus building "${_BUILD_BLOCKER:-}" "prebuilding WDA for runner icon injection"
-    if ! (
-        cd "$WDA_DIR" || exit 1
-        _wda_xcodebuild -project WebDriverAgent.xcodeproj \
-            -scheme WebDriverAgentRunner \
-            -destination "platform=iOS,id=$WDA_UDID" \
-            -allowProvisioningUpdates \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            PRODUCT_BUNDLE_IDENTIFIER="$WDA_BUNDLE_ID" \
-            build-for-testing
-    ) >"$build_log" 2>&1; then
-        if grep -Eiq 'Unlock iPhone to Continue|device is locked|deviceprep.*Code=-3|Code=-3.*deviceprep' \
-            "$build_log" 2>/dev/null; then
-            # Do not immediately run the guarded `test` action and prompt a
-            # second time in the same cycle. The caller records lock backoff.
-            WDA_ICON_BUILD_LOCKED=1
-            _cleanup_wda_icon_work_dir
-            return 1
-        fi
-        _runner_icon_fail "build-for-testing failed (log: $build_log)" || true
-        return 1
-    fi
-
     build_settings="$WDA_ICON_WORK_DIR/build-settings.json"
     _setstatus building "${_BUILD_BLOCKER:-}" "resolving WDA build settings"
     if ! (
@@ -3144,7 +3162,7 @@ JSON
             DEVELOPMENT_TEAM="$TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$WDA_BUNDLE_ID" \
             -showBuildSettings -json
-    ) >"$build_settings" 2>>"$build_log"; then
+    ) >"$build_settings" 2>"$build_log"; then
         _runner_icon_fail "could not resolve the built-products directory (log: $build_log)" || true
         return 1
     fi
@@ -3193,7 +3211,38 @@ if len(versions) == 1:
     print(versions.pop())
 PY_SDK
     )" || WDA_BUILT_SDK_VERSION=""
+    # Resolved before the prebuild so the previous round's injected runner can
+    # be dropped first: building over it is what poisoned every KeepAlive
+    # round's product (#75). Build settings do not depend on a built product.
     runner_product="${WDA_RUNNER_NAME:-WebDriverAgentRunner}-Runner.app"
+    if ! _discard_previous_injection "$products_dir" "$products_dir/$runner_product"; then
+        _runner_icon_fail "refusing to build over the previous round's injected runner, which could not be discarded" || true
+        return 1
+    fi
+    info "Prebuilding WDA so the runner icon can be injected before installation"
+    _setstatus building "${_BUILD_BLOCKER:-}" "prebuilding WDA for runner icon injection"
+    if ! (
+        cd "$WDA_DIR" || exit 1
+        _wda_xcodebuild -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination "platform=iOS,id=$WDA_UDID" \
+            -allowProvisioningUpdates \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$WDA_BUNDLE_ID" \
+            build-for-testing
+    ) >>"$build_log" 2>&1; then
+        if grep -Eiq 'Unlock iPhone to Continue|device is locked|deviceprep.*Code=-3|Code=-3.*deviceprep' \
+            "$build_log" 2>/dev/null; then
+            # Do not immediately run the guarded `test` action and prompt a
+            # second time in the same cycle. The caller records lock backoff.
+            WDA_ICON_BUILD_LOCKED=1
+            _cleanup_wda_icon_work_dir
+            return 1
+        fi
+        _runner_icon_fail "build-for-testing failed (log: $build_log)" || true
+        return 1
+    fi
+
     WDA_ICON_PRODUCTS_DIR="$products_dir"
     WDA_ICON_APP_PATH="$products_dir/$runner_product"
     if [ ! -f "$WDA_ICON_APP_PATH/Info.plist" ] \
@@ -3478,6 +3527,15 @@ if [ "$WDA_ICON_BUILD_LOCKED" = "1" ]; then
     fi
     die "the phone is locked and WDA prebuild exited. Unlock it, then rerun setup."
 fi
+# Record the product as soon as it is verified launchable, not after WDA
+# serves. A round that builds a good product and then fails for a reason
+# outside it (a locked phone, a dropped device link, a relay error) otherwise
+# leaves no record, so every KeepAlive retry built and injected again (#75).
+# A launch that names a failure of the product itself still drops it below.
+if [ -n "${WDA_XCTESTRUN:-}" ] && [ "$WDA_RUNNER_FROM_CACHE" != "1" ]; then
+    _runner_cache_write && ok "Recorded the verified runner product; the next reconnect installs it without rebuilding" \
+        || warn "could not record the runner product for reuse; the next reconnect rebuilds"
+fi
 # Keep `RUNNER_COMMAND=` at column 0: the icon regression test isolates the
 # selection block by scanning for it, and indenting it swallowed the runner
 # launch block into that excerpt.
@@ -3507,9 +3565,9 @@ BUILD_STARTED_AT="$(date +%s)"
 while [ -z "$PHONE_URL" ]; do
     TRIES=$((TRIES+1))
     if [ $TRIES -gt 120 ]; then
-        if [ "$WDA_RUNNER_FROM_CACHE" = "1" ] && _runner_log_shows_product_failure "$RUN_LOG"; then
+        if [ -n "${WDA_XCTESTRUN:-}" ] && _runner_log_shows_product_failure "$RUN_LOG"; then
             _runner_cache_drop || true
-            warn "the cached runner product failed to install or launch; the next round rebuilds it"
+            warn "the recorded runner product failed to install or launch; the next round rebuilds it"
         fi
         _setstatus building-fail wda "WDA did not report its server URL before the startup timeout"
         die "timed out waiting for WDA to start — check $RUN_LOG"
@@ -3552,9 +3610,9 @@ while [ -z "$PHONE_URL" ]; do
         # communication with the test runner", the CoreDevice tunnel over
         # Wi-Fi), which says nothing about the built product — evicting there
         # made every flaky connection cost a full rebuild.
-        if [ "$WDA_RUNNER_FROM_CACHE" = "1" ] && _runner_log_shows_product_failure "$RUN_LOG"; then
+        if [ -n "${WDA_XCTESTRUN:-}" ] && _runner_log_shows_product_failure "$RUN_LOG"; then
             _runner_cache_drop || true
-            warn "the cached runner product failed to install or launch; the next round rebuilds it"
+            warn "the recorded runner product failed to install or launch; the next round rebuilds it"
         fi
         _setstatus building-fail wda "WDA runner exited before reporting its server URL"
         die "the PID-verified WDA runner exited before reporting its server URL — check $RUN_LOG"
@@ -3580,12 +3638,6 @@ case "$PHONE_URL" in
     *) die "WDA reported an unexpected server URL '$PHONE_URL' (plain http:// expected)" ;;
 esac
 ok "WDA serving at $PHONE_URL"
-if [ -n "${WDA_XCTESTRUN:-}" ]; then
-    if [ "$WDA_RUNNER_FROM_CACHE" != "1" ]; then
-        _runner_cache_write && ok "Recorded the runner product; the next reconnect installs it without rebuilding" \
-            || warn "could not record the runner product for reuse; the next reconnect rebuilds"
-    fi
-fi
 if [ "$WDA_RUNNER_ICON_INJECTED" = "1" ]; then
     if [ ! -f "$WDA_ICON_APP_PATH/Assets.car" ] \
         || [ ! -f "$WDA_ICON_APP_PATH/AppIcon60x60@2x.png" ] \
