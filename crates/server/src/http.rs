@@ -2105,10 +2105,11 @@ async fn agent_status(
     } else if wda {
         // NOT "blocked". A blocker is something a human has to clear, and
         // `blocked` above always comes with a named `setup_blocked_on`
-        // (warp|proxy|usb|trust|ddi|account). This branch has no blocker at
-        // all — WDA answers, the last read just failed. An agent that saw
-        // `blocked` here went looking for `setup_blocked_on`, found it empty,
-        // and had nothing left to do but guess (#74).
+        // (warp|proxy|usb|trust|ddi|account|automation_mode_disabled). This
+        // branch has no blocker at all — WDA answers, the last read just
+        // failed. An agent that saw `blocked` here went looking for
+        // `setup_blocked_on`, found it empty, and had nothing left to do but
+        // guess (#74).
         "degraded"
     } else {
         "offline"
@@ -2297,6 +2298,9 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
         "account" => Some(
             "Xcode has no usable signed-in Apple account or WDA provisioning profile — open Xcode → Settings → Accounts, sign in and select the development team, then poll status; the managed service retries automatically",
         ),
+        "automation_mode_disabled" => Some(
+            "iOS has not enabled UI automation for WDA — on the unlocked iPhone turn on Settings › Developer › Enable UI Automation and accept any passcode or Allow automation prompt; the managed service retries on its own backoff, so do not send another reconnect request",
+        ),
         "locked" => Some(
             "the iPhone is locked — unlock it and keep it awake; the managed service is already retrying on its own backoff, so do not send another reconnect request",
         ),
@@ -2321,7 +2325,15 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
     }
     if !matches!(
         status.blocked_on.as_str(),
-        "" | "warp" | "proxy" | "usb" | "trust" | "ddi" | "account" | "locked" | "wda"
+        "" | "warp"
+            | "proxy"
+            | "usb"
+            | "trust"
+            | "ddi"
+            | "account"
+            | "automation_mode_disabled"
+            | "locked"
+            | "wda"
     ) {
         return None;
     }
@@ -11782,7 +11794,17 @@ mod tests {
 
     #[test]
     fn setup_status_accepts_every_setup_script_blocker() {
-        for blocker in ["warp", "proxy", "usb", "trust", "ddi", "account", "locked", "wda"] {
+        for blocker in [
+            "warp",
+            "proxy",
+            "usb",
+            "trust",
+            "ddi",
+            "account",
+            "automation_mode_disabled",
+            "locked",
+            "wda",
+        ] {
             let payload = format!(r#"{{"blocked_on":"{blocker}","ts":1000}}"#);
             assert_eq!(parse_setup_blocked_on(&payload, 1100), blocker);
             assert!(
@@ -11807,6 +11829,26 @@ mod tests {
         assert!(locked.contains("retrying"), "{locked}");
         assert!(!locked.contains("wda-agent.log"), "{locked}");
         assert!(!locked.contains("doctor"), "{locked}");
+    }
+
+    #[test]
+    fn automation_mode_blocker_names_the_phone_setting_not_a_log() {
+        // setup-wda publishes this when the runner log says "The test runner
+        // failed to initialize for UI testing. (Underlying Error: Timed out
+        // while enabling automation mode.)" on an unlocked phone.
+        let payload = r#"{"phase":"building-fail","blocked_on":"automation_mode_disabled","message":"enable UI automation on the iPhone","ts":1000}"#;
+        let status = parse_setup_status(payload, 1100).expect("fresh status");
+        assert_eq!(status.blocked_on, "automation_mode_disabled");
+        let hint = setup_blocker_hint(&status.blocked_on).unwrap();
+        assert!(
+            hint.contains("Settings › Developer › Enable UI Automation"),
+            "{hint}"
+        );
+        assert!(hint.contains("Allow automation"), "{hint}");
+        assert!(hint.contains("unlocked"), "{hint}");
+        assert!(!hint.contains("wda-agent.log"), "{hint}");
+        // The hint is spliced into the status JSON unescaped.
+        assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
     }
 
     #[test]

@@ -372,6 +372,25 @@ _wda_failure_is_lock_related() {
     [ "$(_wda_endpoint_lock_state)" = "locked" ]
 }
 
+# iOS 17+ refuses to hand an unlocked phone to XCTest until UI automation is
+# switched on (Settings › Developer › Enable UI Automation) and any pending
+# passcode / "Allow automation" prompt is accepted on the phone. xcodebuild
+# then exits with "The test runner failed to initialize for UI testing.
+# (Underlying Error: Timed out while enabling automation mode.)". Reported as
+# the generic `wda` blocker, that left the operator reading logs for something
+# that is fixed with two taps on the phone. Call after the lock checks: a
+# locked phone can fail the same initialization and has its own blocker.
+AUTOMATION_MODE_HINT="enable UI automation on the iPhone: Settings › Developer › Enable UI Automation, then accept any passcode or Allow automation prompt while the phone is unlocked"
+_runner_log_shows_automation_mode_disabled() {
+    grep -Eiq 'Timed out while enabling automation mode|failed to initialize for UI testing' \
+        "${1:-$RUN_LOG}" 2>/dev/null
+}
+
+_report_automation_mode_disabled() {
+    _setstatus building-fail automation_mode_disabled "$AUTOMATION_MODE_HINT"
+    die "iOS did not enable UI automation for the WDA runner — $AUTOMATION_MODE_HINT, then rerun setup (KeepAlive retries on its own). Log: $RUN_LOG"
+}
+
 _exponential_retry_delay() {
     local base="$1"
     local cap="$2"
@@ -582,7 +601,7 @@ def publish(operation):
                 "schema_version": 1, "run_id": run_id,
                 "owner_pid": owner_pid, "owner_start": owner_start,
                 "phase": "starting", "phase_started_at": now,
-                "blocked_on": blocker if blocker in {"warp", "proxy", "usb", "trust", "ddi", "wda"} else "",
+                "blocked_on": blocker if blocker in {"warp", "proxy", "usb", "trust", "ddi", "automation_mode_disabled", "wda"} else "",
                 "message": "starting setup", "active": True, "terminal": False,
             }
         elif data.get("run_id") != run_id:
@@ -2521,7 +2540,7 @@ fi
 # flicker between the real cause and an empty blocker every few seconds.
 _PREVIOUS_BLOCKER="$(sed -n 's/.*"blocked_on":"\([^"]*\)".*/\1/p' "$STATUS_FILE" 2>/dev/null | head -1)"
 case "$_PREVIOUS_BLOCKER" in
-    warp|proxy|usb|trust|ddi|wda) ;;
+    warp|proxy|usb|trust|ddi|automation_mode_disabled|wda) ;;
     *) _PREVIOUS_BLOCKER="" ;;
 esac
 # A USB blocker from an earlier default-mode attempt is incompatible with an
@@ -2534,9 +2553,11 @@ fi
 # blocker visible across KeepAlive's next prerequisite/build pass; clearing it
 # at `building` made status oscillate back to an empty blocker while the phone
 # still required the same manual approval. `serving` below is the first
-# authoritative evidence that trust was restored, and clears it there.
+# authoritative evidence that trust was restored, and clears it there. The
+# UI-automation switch is the same kind of on-phone approval, seen at the same
+# point, and is kept visible the same way.
 case "$_PREVIOUS_BLOCKER" in
-    trust) _BUILD_BLOCKER="$_PREVIOUS_BLOCKER" ;;
+    trust|automation_mode_disabled) _BUILD_BLOCKER="$_PREVIOUS_BLOCKER" ;;
     *) _BUILD_BLOCKER="" ;;
 esac
 _setstatus prereq "$_PREVIOUS_BLOCKER" "checking prerequisites"
@@ -3569,6 +3590,9 @@ while [ -z "$PHONE_URL" ]; do
             _runner_cache_drop || true
             warn "the recorded runner product failed to install or launch; the next round rebuilds it"
         fi
+        if _runner_log_shows_automation_mode_disabled "$RUN_LOG"; then
+            _report_automation_mode_disabled
+        fi
         _setstatus building-fail wda "WDA did not report its server URL before the startup timeout"
         die "timed out waiting for WDA to start — check $RUN_LOG"
     fi
@@ -3618,6 +3642,9 @@ while [ -z "$PHONE_URL" ]; do
         if [ -n "${WDA_XCTESTRUN:-}" ] && _runner_log_shows_product_failure "$RUN_LOG"; then
             _runner_cache_drop || true
             warn "the recorded runner product failed to install or launch; the next round rebuilds it"
+        fi
+        if _runner_log_shows_automation_mode_disabled "$RUN_LOG"; then
+            _report_automation_mode_disabled
         fi
         _setstatus building-fail wda "WDA runner exited before reporting its server URL"
         die "the PID-verified WDA runner exited before reporting its server URL — check $RUN_LOG"

@@ -282,7 +282,7 @@ agent 不靠记性去查源，而是被推着走：`phone_elements` 直接列出
 
 ### 生命周期与恢复
 
-`/agent/status` 是唯一事实来源。`recovery_owner` 在托管 loopback WDA 下是 `daemon`，首次接入尚未持久化目标时是 `unconfigured`，不托管的端点是 `external`。锁屏导致失败后，daemon 重建 WDA 的间隔从 30 秒退避到 15 分钟，不会反复催密码；其他失败从 5 秒退避到 5 分钟；一次成功恢复清零两种退避。交互式 setup 最多等 5 分钟解锁。`POST /agent/mode {"mode":"agent"}`（MCP 里是 `phone_reconnect`）只重启一次已配置的目标，不要循环调；先读 `hint` 和 `setup_blocked_on`（`warp|proxy|usb|trust|ddi|account|locked`）。
+`/agent/status` 是唯一事实来源。`recovery_owner` 在托管 loopback WDA 下是 `daemon`，首次接入尚未持久化目标时是 `unconfigured`，不托管的端点是 `external`。锁屏导致失败后，daemon 重建 WDA 的间隔从 30 秒退避到 15 分钟，不会反复催密码；其他失败从 5 秒退避到 5 分钟；一次成功恢复清零两种退避。交互式 setup 最多等 5 分钟解锁。`POST /agent/mode {"mode":"agent"}`（MCP 里是 `phone_reconnect`）只重启一次已配置的目标，不要循环调；先读 `hint` 和 `setup_blocked_on`（`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|locked`）。`automation_mode_disabled` 表示手机已解锁但 iOS 未开启 UI 自动化：在手机上打开“设置 › 开发者 › 启用 UI 自动化”，并在解锁状态下确认密码或“允许自动化”提示。
 
 **谁有权结束一次重连。** 一次启动归发起它的任务所有，只有这个所有者能结束它。每次开始都会生成一个代次，所以迟到的任务无法结束接替它的那一轮；`GET /agent/status` 也永远不会结束重连——读状态会刷新健康缓存，但不移动生命周期。一次等待只以一个原因结束：手机可驱动了、锁屏了、setup 报出了前置阻塞、预算用尽、或被另一轮接管，每种都有日志。整个等待受预算约束：探针由绝对截止时间掐断而不是它自己的上限，超过截止时间才返回的证据一律丢弃，被取消的等待（进程关闭、future 被 drop）会释放自己那一轮而不是把 `reconnecting` 永久留下。启动之前缓存的证据，永远不算作这次启动已完成的证明。
 

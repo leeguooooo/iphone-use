@@ -1232,6 +1232,8 @@ function setupBlockerCopy(blockedOn) {
       return ['等待设备信任', '请在 iPhone 上信任开发者证书；完成后会自动继续'];
     case 'ddi':
       return ['开发者服务未就绪', '请保持 USB、解锁和亮屏；设备准备完成后会自动继续'];
+    case 'automation_mode_disabled':
+      return ['请开启 UI 自动化', '解锁 iPhone，打开 设置 › 开发者 › 启用 UI 自动化，并确认手机上的密码或“允许自动化”提示；稍候会自动重试'];
     case 'locked':
       return ['请解锁 iPhone', '手机锁屏挡住了设备服务；解锁并保持亮屏，稍候会自动重试'];
     case 'wda':
@@ -1245,7 +1247,7 @@ function setupBlockerCopy(blockedOn) {
    Mac. `wda` and `account` are excluded on purpose: they are not a single
    physical gesture, and their copy sends the operator to a log or to Xcode. */
 const ACTIONABLE_SETUP_BLOCKERS = new Set(
-  ['locked', 'trust', 'usb', 'ddi', 'warp', 'proxy'],
+  ['locked', 'trust', 'automation_mode_disabled', 'usb', 'ddi', 'warp', 'proxy'],
 );
 /* The managed retry loop alternates between building and its backoff, and it
    publishes the blocker only during the backoff. Reading each poll on its own
@@ -1276,7 +1278,7 @@ function effectiveSetupBlocker(status) {
 function managedSetupWillRetry(status) {
   const managed = status?.recovery_owner === 'daemon' ||
     status?.managed_wda === true;
-  return managed && new Set(['warp', 'proxy', 'usb', 'trust', 'ddi', 'locked'])
+  return managed && new Set(['warp', 'proxy', 'usb', 'trust', 'ddi', 'automation_mode_disabled', 'locked'])
     .has(status?.setup_blocked_on);
 }
 

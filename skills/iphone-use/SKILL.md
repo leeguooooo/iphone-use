@@ -76,7 +76,7 @@ Mirroring-window field and is not a Direct readiness signal.
   build after an Xcode update can take several minutes. Never send input until
   `drivable:true`.
 - `device_state:"blocked"` or `"offline"` → read `hint` and
-  `setup_blocked_on` (`warp|proxy|usb|trust|ddi|account`). For a current task
+  `setup_blocked_on` (`warp|proxy|usb|trust|ddi|account|automation_mode_disabled`). For a current task
   that needs phone access, resolve the blocker first; offline recovery follows
   the same task, ownership, and lifecycle conditions as released recovery.
 - `device_state:"degraded"` → **not** a blocker; do not go looking for
@@ -445,7 +445,7 @@ documented or unit-tested action is not automatically a current-device proof:
   setup, and restart the daemon to switch devices. Never pass a one-off UDID
   during recovery.
 - **`mode=agent` stuck / `wda` stays false → read `status.setup_blocked_on`**
-  (`warp|proxy|usb|trust|ddi|account`). The #1 blocker is **`warp`**: Cloudflare WARP (or any
+  (`warp|proxy|usb|trust|ddi|account|automation_mode_disabled`). The #1 blocker is **`warp`**: Cloudflare WARP (or any
   VPN) wedges the CoreDevice tunnel xcodebuild needs when its effective Split
   Tunnel exclusions omit `fe80::/10` or the device RSD ULA range `fd00::/8`.
   If WARP is only needed for selected destinations, prefer **Traffic only** mode
@@ -460,7 +460,11 @@ documented or unit-tested action is not automatically a current-device proof:
   `proxy` means an enabled macOS HTTP/HTTPS/SOCKS entry is malformed or points
   at a loopback port with no listener; start that proxy app or disable only the
   stale entry. `trust` = a one-time "trust the Apple Development cert" tap on
-  the phone.
+  the phone. `automation_mode_disabled` = the phone is unlocked but iOS 17+
+  has not enabled UI automation (runner log: "Timed out while enabling
+  automation mode"): ask the operator to turn on **Settings › Developer ›
+  Enable UI Automation** and accept any passcode / "Allow automation" prompt
+  while the phone is unlocked. KeepAlive keeps retrying; do not loop reconnect.
 - **Reconnect only for a current task that needs phone access.** Status/health
   checks and initialization leave released/offline devices alone. Check
   `recovery_owner:"daemon"`, resolve `hint`/`setup_blocked_on`, and wait out any

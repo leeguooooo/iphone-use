@@ -442,7 +442,10 @@ unmanaged endpoint. After a lock-screen failure the daemon rebuilds WDA with bac
 5 min; a verified recovery resets both. Interactive setup waits at most 5 min for an
 unlock. `POST /agent/mode {"mode":"agent"}` (or MCP `phone_reconnect`) restarts the
 configured target once — do not loop it; read `hint` and `setup_blocked_on`
-(`warp|proxy|usb|trust|ddi|account|locked`) first.
+(`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|locked`) first.
+`automation_mode_disabled` means the phone is unlocked but iOS has not enabled UI
+automation: turn on Settings › Developer › Enable UI Automation and accept any passcode or
+"Allow automation" prompt on the phone.
 
 **Who may end a reconnect.** A bring-up is owned by the task that started it, and only
 that owner ends it. Every begin mints a generation, so a late task cannot end the round

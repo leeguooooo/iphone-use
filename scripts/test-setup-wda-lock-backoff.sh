@@ -122,6 +122,60 @@ done
 assert_delay_near 900
 pass "lock failures retry indefinitely and cap at 15 minutes without repeated prompts"
 
+# An unlocked phone whose iOS has not enabled UI automation makes xcodebuild
+# exit with the line below. It must publish its own blocker with the on-phone
+# fix, not the generic `wda` "runner exited" that sends the operator to a log,
+# and it must not be mistaken for the lock screen (which has its own backoff).
+(
+    for fn in _wda_failure_is_lock_related _runner_log_shows_automation_mode_disabled \
+        _report_automation_mode_disabled; do
+        awk -v fn="$fn" '
+            index($0, fn "()") == 1 { copying=1 }
+            copying { print }
+            copying && /^}/ { exit }
+        ' "$SETUP"
+    done > "$TMP_ROOT/automation-mode.sh"
+    grep '^AUTOMATION_MODE_HINT=' "$SETUP" >> "$TMP_ROOT/automation-mode.sh"
+    RUN_LOG="$TMP_ROOT/automation-runner.log"
+    printf '%s\n' \
+        '2026-09-29 10:00:00.000 xcodebuild[123:456] Testing started' \
+        'iPhoneUse-Runner encountered an error (The test runner failed to initialize for UI testing. (Underlying Error: Timed out while enabling automation mode.))' \
+        > "$RUN_LOG"
+    _setstatus() { printf '%s|%s|%s\n' "$1" "$2" "$3" > "$TMP_ROOT/automation-status.out"; }
+    die() { printf '%s\n' "$*" > "$TMP_ROOT/automation-die.out"; exit 42; }
+    . "$TMP_ROOT/automation-mode.sh"
+    _wda_failure_is_lock_related log-only \
+        && fail_test "automation-mode failure was classified as the lock screen"
+    _runner_log_shows_automation_mode_disabled "$RUN_LOG" \
+        || fail_test "automation-mode runner log line was not recognised"
+    _report_automation_mode_disabled
+) || automation_rc=$?
+[ "${automation_rc:-0}" = "42" ] \
+    || fail_test "automation-mode report did not stop setup through die (rc=${automation_rc:-0})"
+[ "$(cut -d'|' -f1-2 "$TMP_ROOT/automation-status.out")" = "building-fail|automation_mode_disabled" ] \
+    || fail_test "automation-mode failure did not publish the automation_mode_disabled blocker"
+for want in 'Settings › Developer › Enable UI Automation' 'Allow automation' 'unlocked'; do
+    grep -qF "$want" "$TMP_ROOT/automation-status.out" \
+        || fail_test "automation-mode status hint omits: $want"
+    grep -qF "$want" "$TMP_ROOT/automation-die.out" \
+        || fail_test "automation-mode setup output omits: $want"
+done
+if grep -q 'exited before reporting' "$TMP_ROOT/automation-die.out"; then
+    fail_test "automation-mode failure still reported the generic runner exit"
+fi
+# The report goes through die, so KeepAlive records it as an ordinary failure:
+# the 5s-to-5min generic backoff, not the lock schedule.
+if awk '/^_report_automation_mode_disabled\(\)/,/^}/' "$SETUP" \
+    | grep -Eq 'KEEPALIVE_FAILURE_KIND|_prepare_locked_retry'; then
+    fail_test "automation-mode failure changed the KeepAlive backoff kind"
+fi
+(
+    . "$TMP_ROOT/automation-mode.sh"
+    printf 'Unlock iPhone to Continue\n' > "$TMP_ROOT/locked-runner.log"
+    _runner_log_shows_automation_mode_disabled "$TMP_ROOT/locked-runner.log"
+) && fail_test "a lock-screen runner log was classified as automation mode"
+pass "an unlocked phone without UI automation reports automation_mode_disabled with the Settings hint"
+
 locked_helper="$(awk '
     /^_prepare_locked_retry\(\)/ { copying=1 }
     copying { print }
