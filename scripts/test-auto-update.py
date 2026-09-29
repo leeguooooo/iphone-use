@@ -64,6 +64,7 @@ case("newer + live viewer → skip", {**base, "device_state": "ready", "mjpeg_vi
 old_daemon = {k: v for k, v in base.items() if k != "idle_secs"}
 case("older daemon without idle_secs, ready, no owner → upgrade", {**old_daemon, "device_state": "ready"}, "v0.6.0", expect_install=True, expect_decision="upgrade")
 case("older daemon, named agent's lease still live → skip", {**old_daemon, "device_state": "ready", "owner": "mcp-1", "owner_lease_remaining_secs": 200}, "v0.6.0", expect_install=False, expect_decision="skip:phone_owned owner=mcp-1")
+case("a non-integer idle override falls back to 900", {**base, "device_state": "ready", "idle_secs": 120}, "v0.6.0", expect_install=False, expect_decision="skip:in_use idle_secs=120 (<900)", extra_env={"AUTO_UPDATE_IDLE_SECS": "15m"})
 case("--force ignores recent activity", {**base, "device_state": "ready", "idle_secs": 5}, "v0.6.0", "--force", expect_install=True, expect_decision="upgrade")
 case("newer + reconnecting → skip", {**base, "reconnecting": True}, "v0.6.0", expect_install=False, expect_decision="skip:transitioning")
 case("newer + blocked (crash loop) → upgrade", {**base, "device_state": "blocked"}, "v0.6.0", expect_install=True, expect_decision="upgrade")

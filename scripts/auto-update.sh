@@ -40,6 +40,7 @@ INSTALLED_SELF="$STATE_DIR/auto-update.sh"
 INSTALLER_URL="${AUTO_UPDATE_INSTALLER_URL:-https://raw.githubusercontent.com/$REPO/main/install.sh}"
 HOUR="${AUTO_UPDATE_HOUR:-4}"
 IDLE_SECS="${AUTO_UPDATE_IDLE_SECS:-900}"
+case "$IDLE_SECS" in ''|*[!0-9]*) IDLE_SECS=900 ;; esac  # a non-integer override falls back
 MINUTE="${AUTO_UPDATE_MINUTE:-30}"
 
 log() { mkdir -p "$LOG_DIR"; printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "$LOG" >&2; }
@@ -129,11 +130,28 @@ run_installer() {
 # gate would never reach the machine it is meant for. Replace it from the tag
 # just installed; `mv` swaps the inode, so the running bash keeps reading the
 # old file safely. Best effort: a failure logs and keeps the current copy.
+# Resolve a release tag to its exact commit, like install.sh does, so a moved
+# tag cannot swap in different code.
+release_commit() {
+    local tag="$1" refs commit
+    case "$tag" in v[0-9]*) ;; *) return 1 ;; esac
+    refs="$(git ls-remote "https://github.com/$REPO.git" "refs/tags/$tag" "refs/tags/$tag^{}" 2>/dev/null)" || return 1
+    commit="$(printf '%s\n' "$refs" | awk -v want="refs/tags/$tag^{}" '$2 == want { print $1; exit }')"
+    [ -n "$commit" ] || commit="$(printf '%s\n' "$refs" | awk -v want="refs/tags/$tag" '$2 == want { print $1; exit }')"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+    printf '%s\n' "$commit"
+}
+
 refresh_self() {
-    local tag="$1" url tmp
+    local tag="$1" url tmp commit
     [ -f "$INSTALLED_SELF" ] || return 0
     [ -n "$tag" ] || { log "self-refresh skipped: no release tag"; return 0; }
-    url="${AUTO_UPDATE_SELF_URL:-https://raw.githubusercontent.com/$REPO/$tag/scripts/auto-update.sh}"
+    if [ -n "${AUTO_UPDATE_SELF_URL:-}" ]; then
+        url="$AUTO_UPDATE_SELF_URL"
+    else
+        commit="$(release_commit "$tag")" || { log "self-refresh skipped: cannot resolve $tag to a commit"; return 0; }
+        url="https://raw.githubusercontent.com/$REPO/$commit/scripts/auto-update.sh"
+    fi
     tmp="$(mktemp "$STATE_DIR/auto-update.sh.XXXXXX")" || return 0
     if curl -fsSL -m 30 "$url" -o "$tmp" && bash -n "$tmp" && head -1 "$tmp" | grep -q '^#!/bin/bash'; then
         if cmp -s "$tmp" "$INSTALLED_SELF"; then
