@@ -4478,6 +4478,24 @@ fn diff_element_rows(
     delta
 }
 
+/// `ok:true` means the action was dispatched and WDA acknowledged it, not
+/// that the screen responded. A coordinate scroll whose touch lands on an
+/// input or a nested scroller, or a tap on coordinates a keyboard collapse
+/// moved, is acknowledged and changes nothing (#78). When the caller asked
+/// for `?return=delta` against a baseline, say so explicitly instead of
+/// leaving the agent to count rows or screenshot: no row added, changed or
+/// removed, on an observation that settled on a readable, fresh tree. An
+/// unsettled, sparse or stale observation is never evidence of "nothing
+/// happened", so the flag is only ever set, never set to false.
+fn delta_shows_no_visible_change(delta: &ElementRowsDelta, report: &SettleReport) -> bool {
+    report.settled
+        && !report.sparse
+        && !report.stale
+        && delta.added.is_empty()
+        && delta.changed.is_empty()
+        && delta.removed.is_empty()
+}
+
 /// Serialize a computed delta for the wire: `added`/`changed` carry the full
 /// current rows with their indexes (so a follow-up snapshot-bound action needs
 /// no re-read), `removed` is baseline indexes only.
@@ -8343,6 +8361,10 @@ async fn agent_input(
                                             app_changed_json(&baseline_rows, &rows)
                                         {
                                             body["app_changed"] = changed;
+                                        }
+                                        if delta_shows_no_visible_change(&delta, &report) {
+                                            body["no_visible_change"] =
+                                                serde_json::Value::Bool(true);
                                         }
                                         body
                                     }

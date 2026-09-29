@@ -139,6 +139,16 @@ baseline (the `since` query param, or the action's own `snapshot` field) is
 still server-cached, else full `elements`. That replaces the separate
 act-then-`GET /agent/elements` verify pair for routine steps.
 
+**`no_visible_change: true` means the screen did not respond.** It appears
+only beside a delta, and only when the observation settled on a readable,
+fresh tree and no row was added, changed or removed. `ok:true` still stands
+(the gesture was dispatched); the gesture just hit nothing that reacts: a
+coordinate `scroll` whose touch landed on an input or a nested scroller, or a
+tap on coordinates that a keyboard collapse or banner moved. Re-read elements
+and retarget (for a page scroll, prefer an element-scoped `scroll`) instead of
+screenshotting. Its absence is not proof the action worked: check your
+postcondition.
+
 **Read the `settle` block before you trust the delta.** The action result and
 the observation are separate facts: `ok:true` means the action applied, and
 nothing in the observation can take that back — a slow or failed read comes

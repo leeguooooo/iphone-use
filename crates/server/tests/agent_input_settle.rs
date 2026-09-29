@@ -498,6 +498,82 @@ fn a_live_baseline_still_produces_a_delta_not_a_full_tree() {
     });
 }
 
+/// #78: an acknowledged action that changed nothing on a settled, readable
+/// screen says so (`no_visible_change`), so an agent retries instead of
+/// screenshotting. One that did change the screen never carries the flag.
+#[test]
+fn an_action_that_changed_nothing_is_flagged_and_one_that_did_is_not() {
+    for changes in [false, true] {
+        block(async move {
+            let reads = AtomicUsize::new(0);
+            let wda = mock_wda(move |request, _| {
+                if is_session(request) {
+                    return Some((Duration::ZERO, SESSION.to_string()));
+                }
+                if is_mutation(request) {
+                    return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+                }
+                if is_source(request) {
+                    let n = reads.fetch_add(1, Ordering::AcqRel);
+                    let label = if changes && n > 0 { "取消" } else { "搜索" };
+                    return Some((Duration::ZERO, simple_tree(label)));
+                }
+                None
+            });
+            let state = build_state_with_wda(wda.url());
+            let (_, baseline, _) = request_json(&state, "GET", "/agent/elements", None).await;
+            let since = baseline["snapshot"].as_str().unwrap().to_string();
+
+            let (status, json, _) = request_json(
+                &state,
+                "POST",
+                &format!("/agent/input?return=delta&since={since}"),
+                Some(r#"{"type":"home"}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert_eq!(json["ok"], true, "the action itself still applied: {json}");
+            assert_eq!(json["settle"]["settled"], true, "{json}");
+            if changes {
+                assert!(json["no_visible_change"].is_null(), "{json}");
+            } else {
+                assert_eq!(json["no_visible_change"], true, "{json}");
+            }
+        });
+    }
+}
+
+/// An unsettled or sparse observation is not evidence that nothing happened.
+#[test]
+fn a_sparse_observation_never_claims_no_visible_change() {
+    block(async {
+        let wda = mock_wda(move |request, _| {
+            if is_session(request) {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if is_mutation(request) {
+                return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+            }
+            if is_source(request) {
+                return Some((Duration::ZERO, bare_tree()));
+            }
+            None
+        });
+        let state = build_state_with_wda(wda.url());
+        let (_, baseline, _) = request_json(&state, "GET", "/agent/elements", None).await;
+        let since = baseline["snapshot"].as_str().unwrap().to_string();
+        let (status, json, _) = request_json(
+            &state,
+            "POST",
+            &format!("/agent/input?return=delta&settle_ms=700&since={since}"),
+            Some(r#"{"type":"home"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(json["no_visible_change"].is_null(), "{json}");
+    });
+}
+
 /// A baseline the daemon no longer holds degrades to the full tree — the
 /// pre-existing contract, unchanged by `settle`.
 #[test]
