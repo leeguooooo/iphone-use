@@ -1413,7 +1413,36 @@ pub struct ElementRow {
     /// this is not part of the default or affordances payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub traits: Option<Vec<String>>,
+    /// Set on rows that belong to a SpringBoard layer drawn over the app
+    /// rather than to the app itself (issue #78): `"notification"` (a banner
+    /// or a Notification Center / Lock Screen platter), `"dynamic_island"`
+    /// (a Live Activity in the island), `"cover_sheet"` (the Lock Screen /
+    /// Notification Center sheet). A tap on such a row opens or dismisses the
+    /// system surface, not the page control underneath. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<String>,
 }
+
+/// Which system overlay an accessibility identifier roots, if any. These are
+/// SpringBoard's own identifiers, captured on iOS 27.0 (iPhone 17 Pro Max):
+/// a notification platter is `NotificationShortLookView` with
+/// `ShortLook.Platter…` children (its tappable Button is
+/// `ShortLook.Platter.Content.Seamless` and carries the message text as its
+/// label, which is why it read as page content), the Dynamic Island is
+/// `jindo-container-view:N`, and the Lock Screen / Notification Center sheet
+/// is the `SBCoverSheetWindow` window. Identifiers are not localized.
+fn overlay_kind(identifier: &str) -> Option<&'static str> {
+    if identifier == "NotificationShortLookView" || identifier.starts_with("ShortLook.Platter") {
+        Some("notification")
+    } else if identifier.starts_with("jindo-container-view") {
+        Some("dynamic_island")
+    } else if identifier == "SBCoverSheetWindow" {
+        Some("cover_sheet")
+    } else {
+        None
+    }
+}
+
 
 fn wda_bool(node: &serde_json::Value, key: &str) -> Option<bool> {
     match node.get(key)? {
@@ -1570,6 +1599,27 @@ fn flatten_tree_with(
     out: &mut Vec<ElementRow>,
     options: FlattenOptions,
 ) {
+    flatten_node(node, depth, out, options, None);
+}
+
+/// One node of [`flatten_tree_with`]. `overlay` is the system overlay an
+/// ancestor opened (see [`ElementRow::overlay`]); it is inherited through the
+/// real tree, not inferred from the flattened rows, because the unlabeled
+/// containers that would separate an overlay from the app are not emitted.
+fn flatten_node(
+    node: &serde_json::Value,
+    depth: u32,
+    out: &mut Vec<ElementRow>,
+    options: FlattenOptions,
+    overlay: Option<&'static str>,
+) {
+    // The innermost overlay wins: a notification platter inside the Lock
+    // Screen sheet is a `notification`.
+    let overlay = node
+        .get("rawIdentifier")
+        .and_then(serde_json::Value::as_str)
+        .and_then(overlay_kind)
+        .or(overlay);
     let kind = node
         .get("type")
         .and_then(|t| t.as_str())
@@ -1649,11 +1699,12 @@ fn flatten_tree_with(
             min,
             max,
             traits,
+            overlay: overlay.map(str::to_string),
         });
     }
     if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
         for c in children {
-            flatten_tree_with(c, depth + 1, out, options);
+            flatten_node(c, depth + 1, out, options, overlay);
         }
     }
 }
@@ -2613,5 +2664,104 @@ mod tests {
         assert_eq!(wda_number(&node, "bad"), None);
         assert_eq!(wda_number(&node, "inf"), None);
         assert_eq!(wda_number(&node, "missing"), None);
+    }
+}
+
+
+#[cfg(test)]
+mod overlay_tests {
+    //! System-overlay marker (issue #78, item 5).
+    use super::*;
+
+    fn node(kind: &str, label: &str, id: Option<&str>, children: Vec<serde_json::Value>) -> serde_json::Value {
+        let mut n = serde_json::json!({
+            "type": format!("XCUIElementType{kind}"),
+            "label": label,
+            "rect": {"x": 0, "y": 0, "width": 10, "height": 10},
+            "children": children,
+        });
+        if let Some(id) = id {
+            n["rawIdentifier"] = serde_json::Value::String(id.to_string());
+        }
+        n
+    }
+
+    fn flatten(tree: &serde_json::Value) -> Vec<ElementRow> {
+        let mut rows = Vec::new();
+        flatten_tree_with(tree, 0, &mut rows, FlattenOptions::default());
+        rows
+    }
+
+    fn overlay_of<'a>(rows: &'a [ElementRow], label: &str) -> Option<&'a str> {
+        rows.iter()
+            .find(|row| row.label == label)
+            .unwrap_or_else(|| panic!("no row {label}: {rows:?}"))
+            .overlay
+            .as_deref()
+    }
+
+    /// The shape captured on an iPhone 17 Pro Max (iOS 27.0) while a Clock
+    /// timer's Live Activity sat in the Dynamic Island and the Lock Screen
+    /// listed a notification. Identifiers are verbatim; texts are neutral.
+    #[test]
+    fn island_sheet_and_platter_from_the_captured_springboard_tree() {
+        let tree = node("Application", " ", None, vec![
+            node("Other", "", None, vec![
+                node("Other", "jindo-container-view:1", Some("jindo-container-view:1"), vec![
+                    node("StaticText", "0:04", Some("remaining-time"), vec![]),
+                ]),
+            ]),
+            node("Window", "SBCoverSheetWindow", Some("SBCoverSheetWindow"), vec![
+                node("Other", "combined-list-view", Some("combined-list-view"), vec![
+                    node("Button", "App, 27 min ago, 1 notification", Some("ListCell"), vec![
+                        node("Other", "", Some("NotificationShortLookView"), vec![
+                            node("Other", "ShortLook.Platter", Some("ShortLook.Platter"), vec![
+                                node("Button", "27 min ago, App, 1 notification", Some("ShortLook.Platter.Content.Seamless"), vec![
+                                    node("StaticText", "App", Some("NotificationTitle"), vec![]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                node("Button", "Flashlight", Some("flashlight-orb-button"), vec![]),
+            ]),
+        ]);
+        let rows = flatten(&tree);
+        assert_eq!(overlay_of(&rows, " "), None, "the application row itself");
+        assert_eq!(overlay_of(&rows, "jindo-container-view:1"), Some("dynamic_island"));
+        assert_eq!(overlay_of(&rows, "0:04"), Some("dynamic_island"));
+        assert_eq!(overlay_of(&rows, "SBCoverSheetWindow"), Some("cover_sheet"));
+        assert_eq!(overlay_of(&rows, "App, 27 min ago, 1 notification"), Some("cover_sheet"));
+        // The platter's tappable Button (message text as its label) and its
+        // title are notifications, although they also sit in the sheet.
+        assert_eq!(overlay_of(&rows, "27 min ago, App, 1 notification"), Some("notification"));
+        assert_eq!(overlay_of(&rows, "App"), Some("notification"));
+        assert_eq!(overlay_of(&rows, "Flashlight"), Some("cover_sheet"), "back in the sheet");
+    }
+
+    /// A banner dropped over an app: the app's rows before and after it stay
+    /// unmarked even though the containers between them are not emitted.
+    #[test]
+    fn a_banner_over_an_app_is_marked_and_the_app_is_not() {
+        let deep = |leaf: serde_json::Value| {
+            node("Other", "", None, vec![node("Other", "", None, vec![node("Other", "", None, vec![leaf])])])
+        };
+        let tree = node("Application", "Bank", None, vec![
+            node("Window", "", None, vec![deep(node("TextField", "Password", None, vec![]))]),
+            node("Window", "", None, vec![node("Other", "", Some("NotificationShortLookView"), vec![
+                node("Button", "Alice: are you there?", Some("ShortLook.Platter.Content.Seamless"), vec![]),
+            ])]),
+            node("Window", "", None, vec![deep(node("Button", "Next", None, vec![]))]),
+        ]);
+        let rows = flatten(&tree);
+        assert_eq!(overlay_of(&rows, "Password"), None);
+        assert_eq!(overlay_of(&rows, "Alice: are you there?"), Some("notification"));
+        assert_eq!(overlay_of(&rows, "Next"), None);
+    }
+
+    #[test]
+    fn rows_without_overlays_serialize_without_the_field() {
+        let rows = flatten(&node("Button", "OK", Some("ok-button"), vec![]));
+        assert!(!serde_json::to_string(&rows).unwrap().contains("overlay"));
     }
 }

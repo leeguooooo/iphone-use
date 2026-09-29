@@ -4301,6 +4301,9 @@ enum WdaControlOutcome {
     /// `force_press` on a device without pressure touch: WDA refused before
     /// touching the screen (issue #90). Nothing was sent.
     ForcePressUnsupported,
+    /// `scroll` with `page:true` found no page scroller, or no free spot in it
+    /// to start the drag. Nothing was sent.
+    NoPageScroller(&'static str),
     Failed,
 }
 
@@ -5377,6 +5380,183 @@ fn pick_scroll_container(inner: [f64; 4], candidates: &[[f64; 4]]) -> Option<usi
         .map(|(index, _)| index)
 }
 
+/// Row kinds a page-scroll drag must not start on: touching down on a control
+/// either hands the drag to it (a slider, a switch, a nested scroller) or, in a
+/// WKWebView form, is swallowed without moving the page (#78). Bars are here
+/// because a drag that starts on Safari's bottom address bar opens the tab
+/// overview instead of scrolling (hardware-seen while capturing #78).
+const PAGE_SCROLL_OBSTACLE_KINDS: &[&str] = &[
+    "Button",
+    "Link",
+    "TextField",
+    "SecureTextField",
+    "TextView",
+    "SearchField",
+    "Switch",
+    "Slider",
+    "Stepper",
+    "SegmentedControl",
+    "Picker",
+    "PickerWheel",
+    "Toggle",
+    "Keyboard",
+    "Key",
+    "NavigationBar",
+    "Toolbar",
+    "TabBar",
+];
+
+/// A UIScrollView scroll indicator as WDA exposes it: an `Other` row whose value
+/// is a percentage ("0%", "48%") and whose rect is a thin bar. Its label is
+/// localized ("Vertical scroll bar, 4 pages" / "垂直滚动条, 4页"), so it is
+/// recognized by shape, not by text. A vertical indicator spans exactly the
+/// scroller's visible content area — in Safari that is y 62…894 of a
+/// full-screen scroll view, i.e. it excludes the top and bottom bars.
+fn is_vertical_scroll_indicator(row: &crate::wda::ElementRow) -> bool {
+    let [_, _, w, h] = row.rect;
+    row.kind == "Other"
+        && w > 0.0
+        && w <= 40.0
+        && h >= 60.0
+        && row.value.as_deref().is_some_and(|value| {
+            value
+                .strip_suffix('%')
+                .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+        })
+}
+
+/// Plan a page scroll (`{"type":"scroll","page":true,"dy":…}`, issue #78):
+/// find the page's own scroller and a touch-down point inside it that is clear
+/// of every control, nested scroller and bar, so the drag moves the page.
+///
+/// - The page scroller is the live scroll container with the largest on-screen
+///   area (at least 30% of the screen).
+/// - Its usable area is clipped to the screen, to the system edge band, and to
+///   the span of its vertical scroll indicator when one is visible.
+/// - Travel follows `scroll`'s curve but is capped at 60% of that area, so the
+///   whole drag fits inside it; repeat the call to go further.
+/// - Among start points whose drag stays inside the area, the one farthest
+///   from any obstacle wins (ties go to the middle).
+///
+/// Returns `(x1, y1, x2, y2)` in WDA points, or a hint when nothing qualifies.
+fn page_scroll_endpoints(
+    rows: &[crate::wda::ElementRow],
+    containers: &[[f64; 4]],
+    screen: (f64, f64),
+    dx: f64,
+    dy: f64,
+) -> Result<(f64, f64, f64, f64), &'static str> {
+    const NO_SCROLLER: &str = "no page-sized scroll view is on screen; use an element-scoped scroll on the list you want to move";
+    const NO_START: &str = "the page scroller has no spot clear of controls to start a drag; use an element-scoped scroll";
+    let (sw, sh) = screen;
+    if !(sw.is_finite() && sh.is_finite()) || sw <= 0.0 || sh <= 0.0 {
+        return Err(NO_SCROLLER);
+    }
+    let clip = |r: &[f64; 4]| -> Option<[f64; 4]> {
+        if !r.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let (l, t) = (r[0].max(0.0), r[1].max(0.0));
+        let (rt, b) = ((r[0] + r[2]).min(sw), (r[1] + r[3]).min(sh));
+        (rt - l >= 8.0 && b - t >= 8.0).then_some([l, t, rt, b])
+    };
+    let area = |r: &[f64; 4]| (r[2] - r[0]) * (r[3] - r[1]);
+    // Clipped page scroller as [left, top, right, bottom].
+    let Some((page_index, page)) = containers
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| clip(r).map(|c| (i, c)))
+        .filter(|(_, c)| area(c) >= 0.3 * sw * sh)
+        .max_by(|(_, a), (_, b)| area(a).total_cmp(&area(b)))
+    else {
+        return Err(NO_SCROLLER);
+    };
+    let [mut left, mut top, mut right, mut bottom] = page;
+    // The vertical indicator spans the visible content area: bars that float
+    // over a full-screen scroll view are outside it.
+    let indicator = rows
+        .iter()
+        .filter(|row| is_vertical_scroll_indicator(row))
+        .filter_map(|row| clip(&row.rect))
+        .filter(|r| r[0] >= left - 2.0 && r[2] <= right + 2.0 && r[1] >= top - 2.0 && r[3] <= bottom + 2.0)
+        .max_by(|a, b| (a[3] - a[1]).total_cmp(&(b[3] - b[1])));
+    if let Some(bar) = indicator {
+        if dy != 0.0 && bar[3] - bar[1] >= 0.3 * (bottom - top) {
+            top = top.max(bar[1]);
+            bottom = bottom.min(bar[3]);
+        }
+    }
+    let (band_lo_x, band_hi_x) = scroll_edge_band(sw);
+    let (band_lo_y, band_hi_y) = scroll_edge_band(sh);
+    left = left.max(band_lo_x);
+    right = right.min(band_hi_x);
+    top = top.max(band_lo_y);
+    bottom = bottom.min(band_hi_y);
+    const MARGIN: f64 = 12.0;
+    let (lo_x, hi_x, lo_y, hi_y) = (left + MARGIN, right - MARGIN, top + MARGIN, bottom - MARGIN);
+    if hi_x - lo_x < 8.0 || hi_y - lo_y < 8.0 {
+        return Err(NO_START);
+    }
+    let cap = |travel: f64, span: f64| travel.clamp(-0.6 * span, 0.6 * span);
+    let tx = cap(swipe_travel(dx, sw), hi_x - lo_x);
+    let ty = cap(swipe_travel(dy, sh), hi_y - lo_y);
+    // The finger moves opposite to the content: end = start - travel.
+    let (sx_lo, sx_hi) = (lo_x.max(lo_x + tx), hi_x.min(hi_x + tx));
+    let (sy_lo, sy_hi) = (lo_y.max(lo_y + ty), hi_y.min(hi_y + ty));
+    if sx_hi < sx_lo || sy_hi < sy_lo {
+        return Err(NO_START);
+    }
+    let page_area = area(&page);
+    let mut obstacles: Vec<[f64; 4]> = rows
+        .iter()
+        .filter(|row| {
+            PAGE_SCROLL_OBSTACLE_KINDS.contains(&row.kind.as_str()) || is_vertical_scroll_indicator(row)
+        })
+        .filter_map(|row| clip(&row.rect))
+        // A control as large as the page is a container, not a target.
+        .filter(|r| area(r) < 0.5 * page_area)
+        .collect();
+    // Nested scrollers (a carousel, an inner list) would take the drag.
+    obstacles.extend(
+        containers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != page_index)
+            .filter_map(|(_, r)| clip(r))
+            .filter(|r| area(r) < 0.9 * page_area),
+    );
+    const INFLATE: f64 = 4.0;
+    let clearance = |x: f64, y: f64| -> Option<f64> {
+        let mut best = f64::INFINITY;
+        for r in &obstacles {
+            let ddx = (r[0] - INFLATE - x).max(0.0).max(x - (r[2] + INFLATE));
+            let ddy = (r[1] - INFLATE - y).max(0.0).max(y - (r[3] + INFLATE));
+            if ddx == 0.0 && ddy == 0.0 {
+                return None;
+            }
+            best = best.min((ddx * ddx + ddy * ddy).sqrt());
+        }
+        Some(best.min(120.0))
+    };
+    let (cx, cy) = ((sx_lo + sx_hi) / 2.0, (sy_lo + sy_hi) / 2.0);
+    let steps = |lo: f64, hi: f64| {
+        let n = (((hi - lo) / 4.0).floor() as usize).min(1_000);
+        (0..=n).map(move |i| lo + (hi - lo) * i as f64 / n.max(1) as f64)
+    };
+    let mut best: Option<(f64, f64, f64, f64)> = None; // (clearance, -dist, x, y)
+    for y in steps(sy_lo, sy_hi) {
+        for x in steps(sx_lo, sx_hi) {
+            let Some(c) = clearance(x, y) else { continue };
+            let centred = -((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+            if best.is_none_or(|(bc, bd, _, _)| c > bc || (c == bc && centred > bd)) {
+                best = Some((c, centred, x, y));
+            }
+        }
+    }
+    let (_, _, x, y) = best.ok_or(NO_START)?;
+    Ok((x, y, x - tx, y - ty))
+}
+
 /// Swipe endpoints for an element-scoped scroll: START on the target row,
 /// travel inside the (container ∩ screen) region.
 ///
@@ -5750,6 +5930,36 @@ async fn wda_control_with_client(
                 _ => return WdaControlOutcome::Unsupported,
             }
         }
+        "scroll" if v.get("page").and_then(serde_json::Value::as_bool) == Some(true) => {
+            let dx = v.get("dx").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+            let dy = v.get("dy").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+            if !dx.is_finite() || !dy.is_finite() || (dx == 0.0 && dy == 0.0) {
+                return WdaControlOutcome::Unsupported;
+            }
+            // Everything below is a read: a failure before the swipe is a
+            // clean not-sent.
+            let plan = async {
+                let rows = w.elements().await?;
+                let containers = scroll_container_candidates(w).await;
+                let screen = w.window_size().await?;
+                Ok::<_, anyhow::Error>(page_scroll_endpoints(&rows, &containers, screen, dx, dy))
+            }
+            .await;
+            match plan {
+                Err(error) => {
+                    w.invalidate_session();
+                    tracing::warn!("wda control (scroll page) failed before dispatch: {error:#}");
+                    return WdaControlOutcome::NotSent;
+                }
+                Ok(Err(hint)) => return WdaControlOutcome::NoPageScroller(hint),
+                Ok(Ok((x1, y1, x2, y2))) => {
+                    tracing::info!("scroll page: drag ({x1:.0},{y1:.0}) -> ({x2:.0},{y2:.0})");
+                    let dist = ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt();
+                    let duration = (dist * 1.2).clamp(120.0, 600.0) as u64;
+                    w.swipe(x1, y1, x2, y2, duration).await
+                }
+            }
+        }
         "scroll" if v.get("element").is_some() => {
             let result = scroll_snapshot_element(w, v).await;
             match snapshot_element_outcome(result, w, "control element scroll") {
@@ -6057,6 +6267,10 @@ fn force_press_unsupported_response() -> Response {
         "not_sent",
         FORCE_PRESS_UNSUPPORTED_HINT,
     )
+}
+
+fn no_page_scroller_response(hint: &str) -> Response {
+    hinted_control_response(StatusCode::UNPROCESSABLE_ENTITY, "no_page_scroller", "not_sent", hint)
 }
 
 fn invalid_element_target_response() -> Response {
@@ -6477,6 +6691,9 @@ async fn direct_control(
     if outcome == WdaControlOutcome::ForcePressUnsupported {
         return force_press_unsupported_response();
     }
+    if let WdaControlOutcome::NoPageScroller(hint) = outcome {
+        return no_page_scroller_response(hint);
+    }
     if outcome == WdaControlOutcome::UnsupportedPerformAction {
         return unsupported_perform_action_response();
     }
@@ -6689,7 +6906,20 @@ fn validate_agent_action_value(
             let valid_deltas = dx.is_some_and(|value| value.is_finite() && value.abs() <= 1_000.0)
                 && dy.is_some_and(|value| value.is_finite() && value.abs() <= 1_000.0)
                 && !(dx == Some(0.0) && dy == Some(0.0));
-            if action.contains_key("element") {
+            if action.get("page").is_some() {
+                // Page scroll: the daemon picks the start point, so it takes
+                // neither coordinates nor an element.
+                if action.get("page").and_then(serde_json::Value::as_bool) != Some(true)
+                    || action.contains_key("x")
+                    || action.contains_key("y")
+                    || action.contains_key("element")
+                {
+                    return invalid("page scroll takes page:true with dx/dy only");
+                }
+                if !valid_deltas {
+                    return invalid("scroll geometry is invalid");
+                }
+            } else if action.contains_key("element") {
                 // Element-relative scroll: the gesture stays inside that
                 // element's rectangle, so x/y have no meaning here.
                 if action.contains_key("x") || action.contains_key("y") {
@@ -7531,6 +7761,12 @@ async fn agent_actions(
                         WdaControlOutcome::ForcePressUnsupported => (
                             StatusCode::UNPROCESSABLE_ENTITY,
                             "force_press_unsupported",
+                            "not_sent",
+                            true,
+                        ),
+                        WdaControlOutcome::NoPageScroller(_) => (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "no_page_scroller",
                             "not_sent",
                             true,
                         ),
@@ -8526,6 +8762,7 @@ async fn agent_input(
             ),
             WdaControlOutcome::NoAlert => no_alert_response(),
             WdaControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
+            WdaControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
             WdaControlOutcome::Failed => wda_failed_after_dispatch_response(),
         };
     }
@@ -13620,5 +13857,178 @@ mod tests {
         );
         assert!(matches!(result, Err(DevicectlError::Timeout)));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+}
+
+
+#[cfg(test)]
+mod page_scroll_tests {
+    //! `scroll` with `page:true` (issue #78), planned against the element tree
+    //! captured from Safari on an iPhone 17 Pro Max (iOS 27.0, 440x956pt) on the
+    //! Bootstrap checkout demo form.
+    use super::*;
+    use crate::wda::ElementRow;
+
+    const SCREEN: (f64, f64) = (440.0, 956.0);
+    /// Safari's live scroll containers: the full-screen ScrollView and the two
+    /// WebViews inside it (same rect).
+    const SAFARI_CONTAINERS: [[f64; 4]; 3] = [[0.0, 0.0, 440.0, 956.0]; 3];
+
+    fn row(kind: &str, rect: [f64; 4], value: Option<&str>) -> ElementRow {
+        ElementRow {
+            kind: kind.to_string(),
+            rect,
+            value: value.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// Controls, bars and scroll indicators of the captured checkout page at
+    /// the top of the page (scroll indicator 0%), in tree order.
+    fn safari_checkout_rows() -> Vec<ElementRow> {
+        [
+        ("Button", [368.0, 800.0, 56.0, 42.0], None),
+        ("TextField", [21.0, 782.0, 314.0, 39.0], None),
+        ("Button", [333.0, 782.0, 87.0, 39.0], None),
+        ("TextField", [12.0, 951.0, 416.0, 39.0], None),
+        ("TextField", [12.0, 1037.0, 416.0, 39.0], None),
+        ("TextField", [51.0, 1123.0, 378.0, 39.0], None),
+        ("TextField", [12.0, 1209.0, 416.0, 39.0], None),
+        ("TextField", [12.0, 1295.0, 416.0, 39.0], None),
+        ("TextField", [12.0, 1381.0, 416.0, 39.0], None),
+        ("Button", [12.0, 1467.0, 416.0, 39.0], None),
+        ("Button", [12.0, 1553.0, 416.0, 39.0], None),
+        ("TextField", [12.0, 1639.0, 416.0, 39.0], None),
+        ("Switch", [12.0, 1726.0, 392.0, 25.0], None),
+        ("Switch", [12.0, 1752.0, 272.0, 25.0], None),
+        ("TextField", [12.0, 1991.0, 416.0, 39.0], None),
+        ("TextField", [12.0, 2101.0, 416.0, 39.0], None),
+        ("TextField", [12.0, 2187.0, 416.0, 39.0], None),
+        ("TextField", [12.0, 2273.0, 416.0, 39.0], None),
+        ("Button", [12.0, 2360.0, 416.0, 49.0], None),
+        ("Link", [129.0, 2534.0, 54.0, 21.0], None),
+        ("Link", [194.0, 2534.0, 46.0, 21.0], None),
+        ("Link", [251.0, 2534.0, 60.0, 21.0], None),
+        ("Other", [407.0, 62.0, 30.0, 832.0], Some("0%")),
+        ("Other", [62.0, 923.0, 316.0, 30.0], Some("0%")),
+        ("Other", [407.0, 62.0, 30.0, 832.0], Some("0%")),
+        ("Other", [62.0, 923.0, 316.0, 30.0], Some("0%")),
+        ("Other", [62.0, 923.0, 316.0, 30.0], Some("0%")),
+        ("Other", [62.0, 923.0, 316.0, 30.0], Some("0%")),
+        ("Button", [34.0, 874.0, 48.0, 48.0], None),
+        ("Button", [90.0, 874.0, 48.0, 48.0], None),
+        ("TextField", [160.0, 889.0, 120.0, 18.0], None),
+        ("Button", [319.0, 887.0, 19.0, 22.0], None),
+        ("Button", [358.0, 874.0, 48.0, 48.0], None),
+        ]
+        .into_iter()
+        .map(|(kind, rect, value)| row(kind, rect, value))
+        .collect()
+    }
+
+    fn inside(point: (f64, f64), r: [f64; 4]) -> bool {
+        point.0 >= r[0] && point.0 <= r[0] + r[2] && point.1 >= r[1] && point.1 <= r[1] + r[3]
+    }
+
+    fn assert_clear_start(rows: &[ElementRow], endpoints: (f64, f64, f64, f64)) {
+        let (x1, y1, _, _) = endpoints;
+        for r in rows {
+            if PAGE_SCROLL_OBSTACLE_KINDS.contains(&r.kind.as_str()) || is_vertical_scroll_indicator(r) {
+                assert!(!inside((x1, y1), r.rect), "drag starts on a {} at {:?}: {endpoints:?}", r.kind, r.rect);
+            }
+        }
+    }
+
+    #[test]
+    fn scrolling_down_starts_on_open_page_and_stays_inside_the_content_area() {
+        let rows = safari_checkout_rows();
+        let e = page_scroll_endpoints(&rows, &SAFARI_CONTAINERS, SCREEN, 0.0, 300.0).unwrap();
+        let (x1, y1, x2, y2) = e;
+        assert_clear_start(&rows, e);
+        // Positive dy: finger moves up.
+        assert!(y2 < y1, "{e:?}");
+        assert_eq!(x1, x2, "a vertical page scroll does not drift sideways: {e:?}");
+        // The vertical indicator spans y 62..894: both ends stay inside it, so
+        // the drag never starts on the bottom address bar (y 874..922), where
+        // a swipe up opens the tab overview instead (seen while capturing #78).
+        for y in [y1, y2] {
+            assert!((62.0..=894.0 - 12.0).contains(&y), "{e:?}");
+        }
+        assert!(y1 < 874.0, "starts above Safari's bar: {e:?}");
+        // Off the scroll indicator column and out of the back-swipe band.
+        assert!(x1 >= 44.0 && x1 < 407.0, "{e:?}");
+        assert!(y1 - y2 >= 300.0, "travel survives: {e:?}");
+    }
+
+    #[test]
+    fn scrolling_up_moves_the_finger_down() {
+        let rows = safari_checkout_rows();
+        let e = page_scroll_endpoints(&rows, &SAFARI_CONTAINERS, SCREEN, 0.0, -300.0).unwrap();
+        assert_clear_start(&rows, e);
+        assert!(e.3 > e.1, "{e:?}");
+        assert!(e.3 <= 894.0 - 12.0, "{e:?}");
+    }
+
+    #[test]
+    fn a_form_dense_with_fields_still_gets_a_start_off_every_field() {
+        // Full-width inputs every 86pt with 47pt of label/gap between them,
+        // the shape of the page scrolled to the billing address.
+        let mut rows = safari_checkout_rows();
+        rows.retain(|r| r.rect[1] >= 874.0 || r.kind == "Other");
+        let mut y = 70.0;
+        while y < 870.0 {
+            rows.push(row("TextField", [12.0, y, 416.0, 39.0], None));
+            y += 86.0;
+        }
+        let e = page_scroll_endpoints(&rows, &SAFARI_CONTAINERS, SCREEN, 0.0, 400.0).unwrap();
+        assert_clear_start(&rows, e);
+    }
+
+    #[test]
+    fn a_nested_scroller_is_not_a_start_point() {
+        let rows = safari_checkout_rows();
+        // A horizontal carousel across the middle third of the page.
+        let carousel = [0.0, 300.0, 440.0, 350.0];
+        let mut containers = SAFARI_CONTAINERS.to_vec();
+        containers.push(carousel);
+        let e = page_scroll_endpoints(&rows, &containers, SCREEN, 0.0, 200.0).unwrap();
+        assert!(!inside((e.0, e.1), carousel), "{e:?}");
+    }
+
+    #[test]
+    fn no_page_sized_scroller_is_refused_before_anything_is_sent() {
+        let rows = safari_checkout_rows();
+        // Only a small list: nothing that is "the page".
+        let err = page_scroll_endpoints(&rows, &[[20.0, 300.0, 400.0, 200.0]], SCREEN, 0.0, 200.0)
+            .unwrap_err();
+        assert!(err.contains("element-scoped"), "{err}");
+        assert!(page_scroll_endpoints(&rows, &[], SCREEN, 0.0, 200.0).is_err());
+    }
+
+    #[test]
+    fn a_page_covered_by_controls_is_refused() {
+        // Four stacked full-width controls, each a quarter of the screen.
+        let rows: Vec<ElementRow> = (0..4)
+            .map(|i| row("Button", [0.0, 239.0 * f64::from(i), 440.0, 239.0], None))
+            .collect();
+        assert!(page_scroll_endpoints(&rows, &SAFARI_CONTAINERS, SCREEN, 0.0, 200.0).is_err());
+    }
+
+    #[test]
+    fn scroll_indicators_are_recognized_by_shape_not_by_localized_label() {
+        assert!(is_vertical_scroll_indicator(&row("Other", [407.0, 62.0, 30.0, 832.0], Some("23%"))));
+        assert!(!is_vertical_scroll_indicator(&row("Other", [62.0, 923.0, 316.0, 30.0], Some("0%"))), "horizontal");
+        assert!(!is_vertical_scroll_indicator(&row("Other", [407.0, 62.0, 30.0, 832.0], Some("1"))));
+        assert!(!is_vertical_scroll_indicator(&row("Slider", [407.0, 62.0, 30.0, 832.0], Some("50%"))));
+    }
+
+    #[test]
+    fn batch_validation_accepts_page_scroll_only_without_coordinates() {
+        let ok = |v: serde_json::Value| validate_agent_action_value(v.as_object().unwrap(), 0).is_ok();
+        assert!(ok(serde_json::json!({"type":"scroll","page":true,"dy":300})));
+        assert!(!ok(serde_json::json!({"type":"scroll","page":true})), "needs a delta");
+        assert!(!ok(serde_json::json!({"type":"scroll","page":true,"x":0.5,"y":0.5,"dy":300})));
+        assert!(!ok(serde_json::json!({"type":"scroll","page":false,"dy":300})));
+        assert!(!ok(serde_json::json!({"type":"scroll","page":true,"element":3,"snapshot":"a","dy":300})));
     }
 }

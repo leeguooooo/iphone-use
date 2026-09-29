@@ -441,6 +441,7 @@ const DAEMON_ERROR_CODES: &[&str] = &[
     "lifecycle_busy",
     "missing_control_header",
     "no_alert",
+    "no_page_scroller",
     "not_sent",
     "outcome_unknown",
     "phone_handed_to_human",

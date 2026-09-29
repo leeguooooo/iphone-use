@@ -257,7 +257,11 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
   `scroll_to_visible`, `pinch`, `rotate`, `force_press`). `force_press` needs 3D Touch:
   on every iPhone since the XR / 11 WDA refuses it before touching the screen, and the
   daemon answers `422 force_press_unsupported` (`not_sent`, `retry_safe:true`); use
-  `menu` (long press) instead. With
+  `menu` (long press) instead. `{"type":"scroll","page":true,"dy":N}`
+  scrolls the page itself: the daemon finds the page scroller and starts the drag clear
+  of inputs, buttons, nested scrollers and bars (`422 no_page_scroller` when there is
+  none). Rows of a system layer over the app carry `overlay` (`notification`,
+  `dynamic_island`, `cover_sheet`). With
   `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` the tree advertises which actions each row
   supports.
 - **System alerts** are a separate surface: taps on their buttons are acknowledged

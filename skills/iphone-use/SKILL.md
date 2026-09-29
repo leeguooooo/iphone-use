@@ -128,6 +128,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"longp
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"keyboard"}'                     # dismiss the on-screen keyboard
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"set_value","element":5,"snapshot":"…","value":"你好"}'  # write a field directly (clear-then-type; "" clears); no focus tap, no keyboard dance
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scroll","element":7,"snapshot":"…","dy":120}'          # scroll INSIDE that element's rect — never strays into a neighboring scroll view
+curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scroll","page":true,"dy":300}'  # scroll THE PAGE: daemon finds the page scroller and starts the drag clear of fields, buttons, nested scrollers and bars (long web forms); 422 no_page_scroller (not sent) when there is none
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"alert","button":"不是 li guo?"}'  # press a system-alert button by exact name (UIAlertController; use this, NOT an element tap — alert buttons ACK a coordinate/element tap without acting)
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"alert","action":"dismiss"}'      # or the default accept/dismiss button
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"perform","element":9,"snapshot":"…","action":"increment"}'  # named affordance on that element: increment|decrement (wheel/stepper/slider), adjust (+"value"), toggle, menu (long-press menu), double_tap, two_finger_tap, scroll_to_visible, pinch, rotate, force_press (3D Touch only — every iPhone since XR/11 answers 422 force_press_unsupported, retry_safe:true, nothing sent; use menu)
@@ -204,6 +205,13 @@ screen's elements as the ones you were aiming at. Recover by sending
 `{"type":"home"}` and re-entering the intended app.
 Its absence is not a guarantee — a tree with no `Application` row reports
 nothing rather than guessing.
+
+**Rows marked `overlay` are not the page.** `/agent/elements` tags rows that
+belong to a system layer drawn over the app: `overlay:"notification"` (a banner
+or notification platter — its Button carries the message text as its label),
+`"dynamic_island"` (a Live Activity), `"cover_sheet"` (Lock Screen /
+Notification Center). Never tap one while working in an app; wait a few
+seconds and re-read until it is gone, then tap your target.
 
 After typing into a web form the keyboard covers the page's own submit/next
 buttons — send `{"type":"keyboard"}` to dismiss it before tapping them.
@@ -425,6 +433,11 @@ documented or unit-tested action is not automatically a current-device proof:
   hugs the edge the gesture is unchanged, so an edge-hugging element can still
   lose the swipe to the system. A gesture you actually want to start at an edge
   belongs in `swipe`/`drag`, which are never adjusted.
+  On a long form (a WKWebView page full of inputs and cards) prefer
+  `{"type":"scroll","page":true,"dy":N}`: a coordinate scroll that starts on an
+  input can be swallowed, and one that starts on Safari's bottom bar opens the
+  tab overview. Page scroll caps travel at 60% of the visible page area, so
+  repeat it to go further, and verify with `?return=delta`.
 - **Text input** — focus and verify a field first, then `{"type":"text"}`.
   Direct/WDA sends Unicode on-device, so ASCII and CJK land without touching
   the Mac clipboard or keyboard.
