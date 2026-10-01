@@ -699,11 +699,14 @@ validate_release_commit() {
     printf '%s' "$1" | grep -Eq '^[0-9A-Fa-f]{40}$'
 }
 
+# macOS before Sonoma prints `=> true`; current releases print `=> disabled`.
+# Matching only `true` read every disabled label as enabled, so upgrades
+# re-enabled a parked WDA supervisor and rollback restored the wrong state.
 launchd_label_is_disabled() {
     local label="$1"
     printf '%s\n' "$LAUNCHD_DISABLED_SNAPSHOT" \
         | awk -v wanted="\"$label\"" \
-            '$1 == wanted && $2 == "=>" && $3 ~ /^true[,;]?$/ { found = 1 }
+            '$1 == wanted && $2 == "=>" && $3 ~ /^(true|disabled)[,;]?$/ { found = 1 }
              END { exit(found ? 0 : 1) }'
 }
 
