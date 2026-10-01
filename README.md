@@ -127,8 +127,9 @@ the Mac, and reports `human_handoff:true`; while that holds, agent input gets
 button then reads **交给 agent** (give to agent); press it, or send `{"mode":"agent"}`, to
 give the phone back.
 
-**Driving the handed-over phone from a browser.** After a hand-off the page keeps showing
-the phone: the daemon captures the iPhone Mirroring window and streams it over WebRTC, and
+**Driving the handed-over phone from a browser.** When the phone is parked, the page
+offers **我来操作 (let me drive)** next to **交给 agent**; either that or the toolbar's 交还
+hands it over. After a hand-off the page keeps showing the phone: the daemon captures the iPhone Mirroring window and streams it over WebRTC, and
 your taps, drags, scrolls and typing go into that window. This is the path for a person —
 low latency, and the phone stays locked (iPhone Mirroring needs it locked and near the
 Mac), so no passcode prompt. `/agent/status` reports it as `human_view`:

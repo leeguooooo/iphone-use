@@ -666,6 +666,14 @@
     }
     #reconnectBtn:hover { background: rgba(99,102,241,.32); }
     #reconnectBtn:disabled { opacity: .5; cursor: default; }
+    #overlayActions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    #takeOverBtn {
+      margin-top: 14px; padding: .5rem 1.3rem; border-radius: 99px; cursor: pointer;
+      border: 1px solid rgba(34,197,94,.55); background: rgba(34,197,94,.18);
+      color: #bbf7d0; font-size: 13px; pointer-events: auto; transition: background .15s;
+    }
+    #takeOverBtn:hover { background: rgba(34,197,94,.32); }
+    #takeOverBtn:disabled { opacity: .5; cursor: default; }
     #setupHelp {
       margin-top: 8px;
       display: flex; flex-direction: column; align-items: center; gap: 8px;
@@ -784,7 +792,10 @@
           <button id="copySetupBtn" type="button">复制命令</button>
         </div>
         <a id="setupGuideLink" href="/setup" hidden>打开连接向导</a>
-        <button id="reconnectBtn" type="button">重新连接</button>
+        <div id="overlayActions">
+          <button id="takeOverBtn" type="button" hidden title="停止 agent 控制，在这个页面里通过 iPhone 镜像操作手机（手机保持锁屏，不用输密码）">我来操作</button>
+          <button id="reconnectBtn" type="button">重新连接</button>
+        </div>
       </div>
     </div>
 
@@ -1021,6 +1032,7 @@ const flowRun        = document.getElementById('flowRun');
 const flowClear      = document.getElementById('flowClear');
 const recordingPill = document.getElementById('recordingPill');
 const reconnectBtn = document.getElementById('reconnectBtn');
+const takeOverBtn = document.getElementById('takeOverBtn');
 const setupHelp = document.getElementById('setupHelp');
 const setupLabel = document.getElementById('setupLabel');
 const setupCommand = document.getElementById('setupCommand');
@@ -1041,13 +1053,26 @@ function syncReconnectControl(kind = overlayState) {
     kind === 'unconfigured' ||
     kind === 'external' ||
     kind === 'setup-blocked';
+  /* A parked phone has two owners to go to. A person should not take the
+     agent's road back in (WDA wants the phone unlocked and asks for the
+     passcode); offer them the Mirroring view instead. */
+  takeOverBtn.hidden = !(
+    kind === 'released' &&
+    backendType === 'direct' &&
+    backendStatus?.recovery_owner === 'daemon' &&
+    backendStatus?.human_handoff !== true
+  );
+  takeOverBtn.disabled = reconnectActionBusy;
   reconnectBtn.disabled = reconnectActionBusy;
-  if (!reconnectActionBusy) {
+  if (!reconnectActionBusy && !takeOverBtn.hidden) {
+    setTextIfChanged(reconnectBtn, '交给 agent');
+  } else if (!reconnectActionBusy) {
     setTextIfChanged(reconnectBtn, kind === 'status-error'
       ? '重新检查'
       : (humanViewLive ? '重连画面' : (backendType === 'mirror' ? '重连镜像' : '重新连接')));
   }
 }
+if (takeOverBtn) takeOverBtn.onclick = () => { btnHandoff?.click(); };
 if (reconnectBtn) reconnectBtn.onclick = async () => {
   if (reconnectActionBusy) return;
   if (humanViewLive) {
@@ -1428,10 +1453,11 @@ function showOverlay(kind) {
     setTextIfChanged(olSub, '后台标签页不连接设备；切到前台后会自动重新连接');
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'released') {
-    setTextIfChanged(olTitle, '手机已交还给你');
-    setTextIfChanged(olSub, backendStatus?.human_handoff === true
+    const handedOver = backendStatus?.human_handoff === true;
+    setTextIfChanged(olTitle, handedOver ? '手机已交还给你' : '设备空闲中');
+    setTextIfChanged(olSub, handedOver
       ? humanViewText(backendStatus)
-      : '一段时间无远程操作，设备连接已释放。需要远程控制时重新连接');
+      : '一段时间没人操作，设备连接已暂停。自己用点「我来操作」（镜像画面，手机保持锁屏，不用输密码）；让 agent 继续点「交给 agent」');
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'releasing') {
     setTextIfChanged(olTitle, '正在释放设备');
@@ -1605,7 +1631,12 @@ async function pollAgentMode() {
       }
     } else {
       setDirectControlReady(false);
-      if (previousBackend === 'direct') stopStills();
+      if (previousBackend === 'direct') {
+        stopStills();
+        // The Direct overlay ("released", "starting the view…") belongs to the
+        // path this page just left; the WebRTC transport raises its own.
+        hideOverlay();
+      }
       startMirrorTransport();
     }
     updateModeControls();
