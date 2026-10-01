@@ -2461,20 +2461,10 @@ for ENV_KEY in \
 do
     append_plist_env "$ENV_KEY" "$(env_or_existing "$ENV_KEY")"
 done
-# v0.6.3 stopped idling the runner out by default (a reconnect then never
-# rebuilds). Installs from before carry the old default, 300, in their plist;
-# copying it forward would pin the old behaviour on every upgrade. Treat a
-# stored 300 as "the old default" unless the operator sets the variable for
-# this run; any other stored value is a deliberate choice and is kept.
-IDLE_RELEASE_SECS="$(printenv PHONE_REMOTE_IDLE_RELEASE_SECS 2>/dev/null || true)"
-if [ -z "$IDLE_RELEASE_SECS" ]; then
-    IDLE_RELEASE_SECS="$(plist_env_get PHONE_REMOTE_IDLE_RELEASE_SECS)"
-    if [ "$IDLE_RELEASE_SECS" = "300" ]; then
-        info "Dropping the pre-v0.6.3 idle-release default (300s): the runner now stays up between requests."
-        info "  Set PHONE_REMOTE_IDLE_RELEASE_SECS=300 when re-running the installer to keep the old behaviour."
-        IDLE_RELEASE_SECS=""
-    fi
-fi
+# Unset means the daemon's default: release the phone after 600 idle seconds
+# and bring WDA up again on the next request. A stored value (including 0,
+# "keep the runner up") is the operator's choice and is carried forward.
+IDLE_RELEASE_SECS="$(env_or_existing PHONE_REMOTE_IDLE_RELEASE_SECS)"
 append_plist_env PHONE_REMOTE_IDLE_RELEASE_SECS "$IDLE_RELEASE_SECS"
 for ENV_KEY in \
     WDA_REF \
@@ -2588,12 +2578,20 @@ if [ "$BACKEND" = "mirror" ]; then
     fi
 elif [ "$PRODUCT_WDA_SUPERVISOR_OWNED" = "1" ] \
     && [ "$WDA_MANAGED" = "true" ]; then
-    if [ "$PREINSTALL_WDA_DISABLED" = "1" ]; then
-        WDA_RUNTIME_TOUCHED=1
+    if [ "$PREINSTALL_WDA_DISABLED" = "1" ] && [ "${IDLE_RELEASE_SECS:-}" != "0" ]; then
+        # A disabled supervisor in Direct mode is a released phone, parked on
+        # purpose. Enabling it here made the next login start the runner, and
+        # iOS then asked for the passcode on a phone nobody had asked for. The
+        # daemon enables it again on the next agent request.
+        ok "Product WDA supervisor stays parked; the daemon starts it on the next agent request"
+    else
+        if [ "$PREINSTALL_WDA_DISABLED" = "1" ]; then
+            WDA_RUNTIME_TOUCHED=1
+        fi
+        launchctl enable "gui/$UID_NUM/$WDA_PLIST_LABEL" 2>/dev/null \
+            || die "Could not re-enable the product WDA supervisor for Direct mode"
+        ok "Product WDA supervisor enabled for Direct mode"
     fi
-    launchctl enable "gui/$UID_NUM/$WDA_PLIST_LABEL" 2>/dev/null \
-        || die "Could not re-enable the product WDA supervisor for Direct mode"
-    ok "Product WDA supervisor enabled for Direct mode"
 fi
 
 # ── Step 8 — Start or restart the LaunchAgent (no sudo; gui/$UID) ─────────────

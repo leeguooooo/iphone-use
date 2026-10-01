@@ -133,11 +133,14 @@ the phone from a browser without the Mac desktop (WebRTC video of the phone) is 
 the WDA path is for agents — its latency and its unlocked-phone requirement do not suit a
 person.
 
-The daemon can also do this on its own: set `PHONE_REMOTE_IDLE_RELEASE_SECS` (for
-example `300`) and it stops the runner after that long without agent activity or a
-live viewer. Since v0.6.3 this is off by default — the runner stays up, so the next
-request never waits for a rebuild. Either way the next agent request, or
-`POST /agent/mode {"mode":"agent"}`, brings WDA back — unlock the phone if asked.
+The daemon also does this on its own: after 10 minutes without agent activity or a
+live viewer it stops the runner and parks its supervisor, and the phone stays parked
+across logouts and reboots. A runner kept up around the clock is relaunched every time
+iOS kills it, and each launch asks for the passcode to enable UI automation — so the
+phone prompted all day while nobody was using it. The next agent request, or
+`POST /agent/mode {"mode":"agent"}`, brings WDA back from the cached runner (no
+rebuild) — unlock the phone if asked. `PHONE_REMOTE_IDLE_RELEASE_SECS` changes the
+window; `0` keeps the runner up (v0.6.3–v0.7.3 behaviour).
 
 ### Upgrade
 
@@ -502,7 +505,7 @@ upgrades, warning before any ad-hoc fallback.
 | `PHONE_REMOTE_UDID` | detected and persisted by the installer | Canonical iPhone for managed WDA and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `WDA_UDID` to setup. |
 | `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA control and MJPEG loopbacks. Direct fails closed when unreachable. |
 | `PHONE_REMOTE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the WDA supervisor/relay lifecycle. |
-| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `0` | Stop WDA after this many idle seconds (`300` was the pre-v0.6.3 default); `0` keeps the runner up so a reconnect never rebuilds. |
+| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `600` | Stop WDA and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
 | `WDA_RUNNER_ICON` | `auto` | Home-screen icon for the runner: `auto` reuses the app icon, `none` keeps WDA's placeholder, or a `.png`/`.icns` path. Failures only warn. |
 | `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | WDA default 50 | Bound the accessibility snapshot depth (try `20`–`30` for apps with huge trees, issue #44). |

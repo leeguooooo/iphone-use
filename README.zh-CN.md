@@ -97,7 +97,7 @@ WDA 运行期间会占着手机。想自己用手机，先暂停托管的 WDA，
 
 **人在外面想远程操作手机**：iPhone 镜像只能在这台 Mac 上开，所以远程走"远程进 Mac"这条路——把 Mac 和你的设备都放进 Tailscale，用 macOS 自带的屏幕共享连上来，先点"交还"，再在镜像窗口里操作。浏览器里直接看 WebRTC 画面、点画面控制手机（不经过 Mac 桌面）目前没有做；WDA 那条链路是给 agent 用的，延迟和锁屏要求都不适合人。
 
-daemon 也可以自己做这件事：设置 `PHONE_REMOTE_IDLE_RELEASE_SECS`（比如 `300`），这么久没有 agent 活动、也没有人在看画面，它就停掉 runner。v0.6.3 起默认关闭，runner 常驻，下一次请求不用等重建。无论哪种情况，下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 都会把 WDA 拉回来，手机锁了就解一下。
+daemon 也会自己交还：10 分钟没有 agent 活动、也没有人在看画面，它就停掉 runner 并停放 supervisor，注销、重启之后也保持停放。runner 常驻的话，iOS 每杀一次它就被拉起一次，每次拉起 iOS 都要输锁屏密码才能开 UI 自动化，结果没人用的时候手机也整天弹密码。下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 会用缓存的 runner 把 WDA 拉回来（不重新编译），手机锁了就解一下。`PHONE_REMOTE_IDLE_RELEASE_SECS` 改空闲时长，`0` 表示常驻（v0.6.3–v0.7.3 的行为）。
 
 ### 升级
 
@@ -307,7 +307,7 @@ iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/le
 | `PHONE_REMOTE_UDID` | 安装器识别并持久化 | 托管 WDA 和破坏性命令使用的 canonical iPhone。请求不能临时换机，要改就改部署并重启。setup 时传同值 `WDA_UDID`。 |
 | `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA 控制和 MJPEG 的 loopback。不可达时 Direct 直接失败。 |
 | `PHONE_REMOTE_WDA_MANAGED` | loopback 端点默认开 | daemon 是否负责 WDA supervisor / 中继的生命周期。 |
-| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `0` | 空闲多少秒后停 WDA（v0.6.3 之前默认 `300`）；`0` 表示常驻，重连不用重建。 |
+| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `600` | 空闲多少秒后停 WDA 并停放 supervisor，下一次 agent 请求再拉起；`0` 表示常驻，代价是 iOS 每杀一次 runner 就弹一次密码。 |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | `X-Phone-Owner` 租约在没有请求刷新时的存活时间。 |
 | `WDA_RUNNER_ICON` | `auto` | runner 的桌面图标：`auto` 用 app 图标，`none` 用 WDA 占位图，或给 `.png` / `.icns` 路径。失败只警告。 |
 | `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | WDA 默认 50 | 限制辅助功能快照深度（树特别大的 app 试 `20`–`30`，issue #44）。 |

@@ -2999,12 +2999,45 @@ fn write_and_bootstrap_wda_agent(setup_sh: &str, log: &str, udid: &str) -> bool 
     verified
 }
 
-/// Boot out the WDA LaunchAgent (so its KeepAlive stops rebuilding the runner).
-/// Best-effort; ignored if it isn't loaded.
+/// Disable, then boot out, the WDA LaunchAgent (so its KeepAlive stops
+/// rebuilding the runner). Best-effort; ignored if it isn't loaded.
+///
+/// The disable is what makes a release outlive a logout or reboot. A plain
+/// bootout left the plist enabled, so the next login loaded it, RunAtLoad
+/// started the runner, and iOS asked for the passcode to enable UI automation
+/// on a phone nobody had asked for. Every path that brings the phone back
+/// ([`write_and_bootstrap_wda_agent`], `setup-wda.sh resume`, setup itself)
+/// enables the label first.
 fn bootout_wda_agent() {
+    let service = format!("{}/{}", gui_domain(), wda_agent_label());
     let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &format!("{}/{}", gui_domain(), wda_agent_label())])
+        .args(["disable", &service])
         .status();
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", &service])
+        .status();
+}
+
+/// Whether launchd holds the WDA label persistently disabled — the resting
+/// state a release leaves behind. Newer macOS prints `=> disabled`, older
+/// releases `=> true`.
+fn wda_agent_disabled() -> bool {
+    let Ok(output) = std::process::Command::new("launchctl")
+        .args(["print-disabled", &gui_domain()])
+        .output()
+    else {
+        return false;
+    };
+    launchd_label_disabled(&String::from_utf8_lossy(&output.stdout), wda_agent_label())
+}
+
+fn launchd_label_disabled(print_disabled: &str, label: &str) -> bool {
+    let quoted = format!("\"{label}\"");
+    print_disabled.lines().any(|line| {
+        let mut parts = line.trim().splitn(2, "=>");
+        parts.next().map(str::trim) == Some(quoted.as_str())
+            && matches!(parts.next().map(str::trim), Some("disabled" | "true"))
+    })
 }
 
 /// Stop the on-phone WDA runner + relay and boot out its KeepAlive LaunchAgent
@@ -3057,7 +3090,7 @@ fn prepare_idle_wda_probe(state: &AppState) -> bool {
 
 /// Idle auto-release — the phone belongs to its owner first. When WDA is
 /// configured and nobody has driven it for `PHONE_REMOTE_IDLE_RELEASE_SECS`
-/// (default 300; `0` disables) and no viewer is streaming, stop the on-phone
+/// (default 600; `0` disables) and no viewer is streaming, stop the on-phone
 /// WDA runner and boot out its KeepAlive LaunchAgent so the device is free for
 /// hands-on use. The next `/agent/input` re-bootstraps WDA (see [`agent_input`]).
 ///
@@ -3071,6 +3104,10 @@ fn prepare_idle_wda_probe(state: &AppState) -> bool {
 /// cold start (which earns a fresh activity window) rather than a crash-loop
 /// bounce (which must not reset the idle clock). See issue #66.
 const COLD_START_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Idle window before the watchdog releases the phone when
+/// `PHONE_REMOTE_IDLE_RELEASE_SECS` is unset.
+const DEFAULT_IDLE_RELEASE_SECS: u64 = 600;
 
 /// Backoff for a release that did not take. Doubles per consecutive failure,
 /// capped, so a supervisor we cannot stop is retried instead of abandoned —
@@ -3090,21 +3127,30 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
     {
         return; // external/remote WDA and mirror mode are never lifecycle-managed here
     }
-    // Off by default since v0.6.3. Stopping the runner after five idle minutes
-    // meant the next request paid a full bring-up (DDI wait, xcodebuild,
-    // install) — and on a locked phone it turned into the rebuild loop fixed in
-    // cc1d3fb. The runner idling costs a little battery; a human who wants the
-    // phone back uses the explicit release, and installs that prefer the old
-    // behaviour set PHONE_REMOTE_IDLE_RELEASE_SECS=300.
+    // On by default again (v0.6.3 to v0.7.3 kept the runner up). A runner
+    // that is always up is a runner that KeepAlive relaunches whenever iOS
+    // kills it, and every launch makes iOS ask for the passcode to enable UI
+    // automation — the phone prompted all day while nobody was using
+    // iphone-use (one install logged 11,717 launches, 200 of them successful).
+    // The cost that justified keeping it up is gone: a reconnect reuses the
+    // cached runner product instead of rebuilding. `0` still keeps it up.
     let idle_secs = std::env::var("PHONE_REMOTE_IDLE_RELEASE_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(0);
+        .unwrap_or(DEFAULT_IDLE_RELEASE_SECS);
     if idle_secs == 0 {
         tracing::info!(
-            "idle auto-release disabled (default; set PHONE_REMOTE_IDLE_RELEASE_SECS=<secs> to stop WDA after idling)"
+            "idle auto-release disabled (PHONE_REMOTE_IDLE_RELEASE_SECS=0): the runner stays up between requests"
         );
         return;
+    }
+    // A daemon that starts after a release (a restart, an upgrade, a login)
+    // must not report the parked phone as an offline device to be repaired:
+    // the label is still disabled, so this is the released resting state and
+    // the next request brings the phone up on demand.
+    if !launchd_job_loaded(&gui_domain(), wda_agent_label()) && wda_agent_disabled() {
+        state.released.store(true, std::sync::atomic::Ordering::Release);
+        tracing::info!("WDA supervisor is parked (disabled); starting released");
     }
     let window = std::time::Duration::from_secs(idle_secs);
     tracing::info!("idle auto-release enabled: free the phone after {idle_secs}s idle");
@@ -11448,6 +11494,20 @@ mod tests {
         clear_wda_retry_backoff(std::path::Path::new(""));
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_parked_supervisor_is_read_from_print_disabled() {
+        let label = "com.leeguoo.iphone-use.wda";
+        let sonoma = "disabled services = {\n\t\t\"com.leeguoo.iphone-use.wda\" => disabled\n\t\t\"com.leeguoo.iphone-use\" => enabled\n\t}\n";
+        assert!(launchd_label_disabled(sonoma, label));
+        assert!(!launchd_label_disabled(sonoma, "com.leeguoo.iphone-use"));
+        // Older macOS prints booleans.
+        assert!(launchd_label_disabled("\t\"com.leeguoo.iphone-use.wda\" => true\n", label));
+        assert!(!launchd_label_disabled("\t\"com.leeguoo.iphone-use.wda\" => false\n", label));
+        // A label that merely starts with ours is somebody else's job.
+        assert!(!launchd_label_disabled("\t\"com.leeguoo.iphone-use.wda.old\" => disabled\n", label));
+        assert!(!launchd_label_disabled("", label));
     }
 
     #[test]
