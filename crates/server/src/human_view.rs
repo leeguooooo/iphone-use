@@ -103,13 +103,21 @@ pub fn is_live() -> bool {
 /// progress shows in [`snapshot`].
 pub fn start() {
     let Some(view) = view() else { return };
-    let generation = view.generation.fetch_add(1, Ordering::AcqRel) + 1;
-    view.set_status(Phase::Starting, String::new());
-    let view = Arc::clone(view);
-    std::thread::Builder::new()
+    // Bump and publish under the transition lock, or a stop landing between
+    // the two would leave "starting" behind with no start left to finish it.
+    let generation = {
+        let _transition = view.lock_transition();
+        let generation = view.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        view.set_status(Phase::Starting, String::new());
+        generation
+    };
+    let worker = Arc::clone(view);
+    if let Err(error) = std::thread::Builder::new()
         .name("human-view-start".into())
-        .spawn(move || view.run_start(generation))
-        .ok();
+        .spawn(move || worker.run_start(generation))
+    {
+        view.fail(generation, format!("start: could not spawn the capture thread ({error})"));
+    }
 }
 
 /// Stop the capture and the input sink. Blocks while ScreenCaptureKit stops,
