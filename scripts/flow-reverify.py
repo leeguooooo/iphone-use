@@ -14,7 +14,10 @@ All registry changes go into ONE pull request (branch `reverify/<date>`) opened 
 so a human reviews what the night changed. Nothing is merged automatically.
 
 Preconditions (checked, never forced): daemon reachable, `drivable:true`, nobody else owns
-the phone, no hold active. Otherwise it logs one line and exits 0 — tomorrow is fine.
+the phone, no hold active, not handed to a person. Otherwise it logs one line and exits 0 —
+tomorrow is fine. A parked (released/offline) phone is left alone: bringing WDA up makes
+iOS ask for the passcode, and at 03:30 nobody is there to answer. Set
+FLOW_REVERIFY_BRING_UP=1 to request one bring-up anyway.
 
 Usage:
   flow-reverify.py run [--dry-run] [--only id,id] [--device NAME]
@@ -22,7 +25,8 @@ Usage:
 
 Env: PHONE_REMOTE_URL, PHONE_REMOTE_TOKEN (required for run), IPHONE_USE_MCP (binary),
      IPHONE_USE_FLOWS_REPO (owner/name, default leeguooooo/iphone-use-flows),
-     FLOW_REVERIFY_OWNER (owner lease name, default flow-reverify).
+     FLOW_REVERIFY_OWNER (owner lease name, default flow-reverify),
+     FLOW_REVERIFY_BRING_UP=1 (bring a parked phone up instead of skipping).
 """
 import argparse, datetime, json, os, plistlib, shutil, subprocess, sys, tempfile, time, urllib.request
 
@@ -34,6 +38,7 @@ OWNER = os.environ.get("FLOW_REVERIFY_OWNER", "flow-reverify")
 MCP = os.environ.get("IPHONE_USE_MCP") or os.path.expanduser("~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp")
 HOST = os.environ.get("PHONE_REMOTE_URL", "http://127.0.0.1:44321").rstrip("/")
 TOKEN = os.environ.get("PHONE_REMOTE_TOKEN", "")
+BRING_UP = os.environ.get("FLOW_REVERIFY_BRING_UP", "") == "1"
 
 
 def log(msg):
@@ -85,6 +90,9 @@ def preflight():
         return None, f"phone owned by {st['owner']} ({st.get('owner_lease_remaining_secs')}s left)"
     if (st.get("hold_remaining_secs") or 0) > 0:
         return None, f"hold active ({st['hold_remaining_secs']}s)"
+    if st.get("human_handoff"):
+        # Taking the phone back is a person's decision, never a canary's.
+        return None, "phone handed to a person"
     if st.get("device_state") in ("releasing", "reconnecting"):
         return None, f"device_state={st['device_state']}"
     return st, None
@@ -93,6 +101,9 @@ def preflight():
 def bring_up(st):
     if st.get("drivable"):
         return True
+    if st.get("device_state") in ("released", "offline") and not BRING_UP:
+        log(f"device {st['device_state']}; not waking a parked phone (FLOW_REVERIFY_BRING_UP=1 to allow)")
+        return False
     if st.get("device_state") in ("released", "offline"):
         log(f"device {st['device_state']}; requesting one bring-up")
         http("POST", "/agent/mode", {"mode": "agent"}, control=True, timeout=15)

@@ -55,6 +55,7 @@ case("up to date → skip", base, "v0.5.4", expect_install=False, expect_decisio
 case("newer + idle → upgrade", base, "v0.6.0", expect_install=True, expect_decision="upgrade current=0.5.4 latest=0.6.0")
 case("newer + owner → skip", {**base, "owner": "bank-flow", "owner_lease_remaining_secs": 120}, "v0.6.0", expect_install=False, expect_decision="skip:phone_owned owner=bank-flow")
 case("newer + hold → skip", {**base, "hold_remaining_secs": 300}, "v0.6.0", expect_install=False, expect_decision="skip:held")
+case("newer + handed to a person → skip", {**base, "human_handoff": True}, "v0.6.0", expect_install=False, expect_decision="skip:handed_to_person")
 # A connected, drivable phone is not "in use": since v0.6.3 WDA stays up, and
 # this rule kept a connected phone from ever auto-upgrading.
 case("newer + ready (WDA up), idle → upgrade", {**base, "device_state": "ready"}, "v0.6.0", expect_install=True, expect_decision="upgrade current=0.5.4 latest=0.6.0")

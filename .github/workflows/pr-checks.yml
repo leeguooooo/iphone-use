@@ -184,3 +184,4 @@ jobs:
           # let a rename turn "the canary is covered" into a silent skip.
           python3 scripts/test-flow-reverify-verdicts.py
           python3 scripts/test-flow-reverify-record.py
+          python3 scripts/test-flow-reverify-gates.py
