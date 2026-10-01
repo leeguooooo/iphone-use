@@ -93,9 +93,9 @@ WDA 运行期间会占着手机。想自己用手机，先暂停托管的 WDA，
 ~/.iphone-use/setup-wda.sh resume
 ```
 
-更省事的是网页控制栏里的 **交还** 按钮（或 `POST /agent/mode {"mode":"human"}`）：daemon 停掉 runner、在 Mac 上打开 iPhone 镜像，状态里 `human_handoff:true`，此时 agent 的输入请求一律 409 `phone_handed_to_human`，不会在你用着的时候把手机抢回去。用完点 **重新连接**（或 `{"mode":"agent"}`）还给 agent。
+更省事的是网页控制栏里的 **交还** 按钮（或 `POST /agent/mode {"mode":"human"}`）：daemon 停掉 runner、在 Mac 上打开 iPhone 镜像，状态里 `human_handoff:true`，此时 agent 的输入请求一律 409 `phone_handed_to_human`，不会在你用着的时候把手机抢回去。交还之后同一个按钮变成 **交给 agent**，点它（或 `{"mode":"agent"}`）把手机还给 agent。
 
-**人在外面想远程操作手机**：iPhone 镜像只能在这台 Mac 上开，所以远程走"远程进 Mac"这条路——把 Mac 和你的设备都放进 Tailscale，用 macOS 自带的屏幕共享连上来，先点"交还"，再在镜像窗口里操作。浏览器里直接看 WebRTC 画面、点画面控制手机（不经过 Mac 桌面）目前没有做；WDA 那条链路是给 agent 用的，延迟和锁屏要求都不适合人。
+**在浏览器里操作交还后的手机**：交还之后页面会继续显示手机——daemon 截取 Mac 上的 iPhone 镜像窗口，用 WebRTC 推到浏览器，你的点击、拖动、滚动和输入都会落到镜像窗口里。这是给人用的路径：延迟低，手机保持锁屏（iPhone 镜像本来就要求手机锁屏、放在 Mac 附近），不会弹密码。`/agent/status` 里的 `human_view` 依次是 `starting` → `live`；失败时是 `failed`，`human_view_error` 写明缺什么。需要在 Mac 上给 iPhoneUse 授权一次 **屏幕录制**（画面）和 **辅助功能**（输入）；Direct 后端在交还之前不会申请这两项。输入会移动 Mac 的鼠标到镜像窗口里，所以适合没人坐在前面的 Mac。局域网里其他设备要打开这个页面，设 `PHONE_REMOTE_HOST=0.0.0.0` 并设密码；局域网以外暂时还是 Tailscale 加 macOS 屏幕共享。
 
 daemon 也会自己交还：10 分钟没有 agent 活动、也没有人在看画面，它就停掉 runner 并停放 supervisor，注销、重启之后也保持停放。runner 常驻的话，iOS 每杀一次它就被拉起一次，每次拉起 iOS 都要输锁屏密码才能开 UI 自动化，结果没人用的时候手机也整天弹密码。下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 会用缓存的 runner 把 WDA 拉回来（不重新编译），手机锁了就解一下。`PHONE_REMOTE_IDLE_RELEASE_SECS` 改空闲时长，`0` 表示常驻（v0.6.3–v0.7.3 的行为）。
 

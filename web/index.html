@@ -1045,11 +1045,17 @@ function syncReconnectControl(kind = overlayState) {
   if (!reconnectActionBusy) {
     setTextIfChanged(reconnectBtn, kind === 'status-error'
       ? '重新检查'
-      : (backendType === 'mirror' ? '重连镜像' : '重新连接'));
+      : (humanViewLive ? '重连画面' : (backendType === 'mirror' ? '重连镜像' : '重新连接')));
   }
 }
 if (reconnectBtn) reconnectBtn.onclick = async () => {
   if (reconnectActionBusy) return;
+  if (humanViewLive) {
+    // The phone is the person's: reconnect the picture, not the agent.
+    stopMirrorTransport();
+    startMirrorTransport();
+    return;
+  }
   if (backendType === 'direct' && overlayState === 'status-error') {
     reconnectActionBusy = true;
     reconnectBtn.disabled = true;
@@ -1133,6 +1139,11 @@ let iceRestartTimer = null, reconnectTimer = null;
 let reconnectDelay = RECONNECT_BASE_MS, statsInterval = null;
 let lastRtt = '--', connState = 'new';
 let backendType = 'direct'; // Fail closed to the on-device path until status loads.
+/* A Direct daemon whose phone is handed to a person streams the iPhone
+   Mirroring window over WebRTC, exactly as the legacy Mirror backend does.
+   While that view is live the page runs the Mirror transport and input path
+   (backendType 'mirror'); this flag remembers the daemon is still Direct. */
+let humanViewLive = false;
 let backendStatus = null;
 let mirrorTransportEnabled = false;
 let textSendBusy = false;
@@ -1419,7 +1430,7 @@ function showOverlay(kind) {
   } else if (kind === 'released') {
     setTextIfChanged(olTitle, '手机已交还给你');
     setTextIfChanged(olSub, backendStatus?.human_handoff === true
-      ? '请在 Mac 上用 iPhone 镜像操作（本机或屏幕共享均可）。需要 agent 控制时点"重新连接"'
+      ? humanViewText(backendStatus)
       : '一段时间无远程操作，设备连接已释放。需要远程控制时重新连接');
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'releasing') {
@@ -1541,7 +1552,9 @@ async function pollAgentMode() {
     if (generation !== statusPollGeneration) return backendStatus;
     const previousBackend = backendType;
     backendStatus = s;
-    backendType = s.backend === 'mirror' ? 'mirror' : 'direct';
+    humanViewLive = s.backend === 'direct' && s.human_handoff === true && s.human_view === 'live';
+    backendType = (s.backend === 'mirror' || humanViewLive) ? 'mirror' : 'direct';
+    syncHandoffButton();
 
     if (backendType === 'direct') {
       updateMjpegActivityFromStatus(s, polledStreamId);
@@ -3964,6 +3977,34 @@ textInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); void sendText(); }
 });
 
+/* What a person sees while the browser view of a handed-over phone starts or
+   cannot start. The daemon names the missing piece first ("screen_recording:
+   …"); everything after the colon is for the log. */
+function humanViewText(s) {
+  if (s?.human_view === 'starting') return '正在打开 iPhone 镜像画面，请把手机锁屏放在 Mac 旁边…';
+  if (s?.human_view === 'failed') {
+    const why = String(s.human_view_error || '');
+    const stale = '（如果开关已经是打开的，先用 − 把 iPhoneUse 删掉再重新添加：旧版本的授权不适用于当前版本）';
+    if (why.startsWith('screen_recording')) return '画面需要「屏幕录制」权限：在 Mac 的 系统设置 › 隐私与安全性 › 屏幕录制 里允许 iPhoneUse，重启服务后再点一次「交还」' + stale;
+    if (why.startsWith('accessibility')) return '操作需要「辅助功能」权限：在 Mac 的 系统设置 › 隐私与安全性 › 辅助功能 里允许 iPhoneUse，然后再点一次「交还」' + stale;
+    if (why.startsWith('mirroring_window')) return 'Mac 上的 iPhone 镜像没有打开：把手机锁屏放在 Mac 附近，再点一次「交还」';
+    return '浏览器画面打不开，可以在 Mac 上直接用 iPhone 镜像。原因：' + why;
+  }
+  return '请在 Mac 上用 iPhone 镜像操作（本机或屏幕共享均可）。需要 agent 控制时点"重新连接"';
+}
+
+/* One button both ways: 交还 hands the phone to a person; once it is theirs
+   the same button gives it back to the agent. */
+function syncHandoffButton() {
+  if (!btnHandoff) return;
+  const handedOver = backendStatus?.backend === 'direct' && backendStatus?.human_handoff === true;
+  const label = btnHandoff.querySelector('.lbl');
+  if (label) setTextIfChanged(label, handedOver ? '交给 agent' : '交还');
+  btnHandoff.title = handedOver
+    ? '把手机交回给 agent：停止浏览器画面并重新连接设备'
+    : '交还手机给人：停止 agent 控制，在这个页面或 Mac 上的 iPhone 镜像里操作';
+}
+
 function updateModeControls() {
   const direct = backendType === 'direct';
   if (!direct && flowRecording) {
@@ -3991,10 +4032,36 @@ document.getElementById('btnLogout').addEventListener('click', () => { location.
    Mac. The human then drives the phone there — at the Mac, or through Screen
    Sharing / Tailscale. "重新连接" takes it back for the agent. */
 const btnHandoff = document.getElementById('btnHandoff');
+async function takePhoneBackForAgent() {
+  if (!confirm('把手机交回给 agent？浏览器画面会停止，设备连接会重新建立（手机锁着的话需要解锁一次）。')) return;
+  btnHandoff.disabled = true;
+  try {
+    invalidateDirectControlQueue();
+    const r = await fetch('/agent/mode', {
+      method: 'POST', cache: 'no-store', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Phone-Control': '1' },
+      body: JSON.stringify({ mode: 'agent' }),
+    });
+    if (r.status === 401) { location.replace('/login'); return; }
+    const result = await r.json().catch(() => ({}));
+    toast(r.ok && result.ok === true ? '已交回 agent，正在连接设备' : '交回失败，请查看服务日志');
+    stopMirrorTransport();
+    cancelStatusPoll();
+    await pollAgentMode();
+  } catch (_) {
+    toast('交回失败，请稍后再试');
+  } finally {
+    btnHandoff.disabled = false;
+  }
+}
 if (btnHandoff) btnHandoff.addEventListener('click', async () => {
+  if (backendStatus?.backend === 'direct' && backendStatus?.human_handoff === true) {
+    await takePhoneBackForAgent();
+    return;
+  }
   if (backendType !== 'direct') { toast('镜像模式下手机本来就在你手里'); return; }
   if (backendStatus?.recovery_owner === 'external') { toast('WDA 在别的主机上，本机无法交还'); return; }
-  if (!confirm('把手机交还给人？agent 控制会停止，Mac 上会打开 iPhone 镜像。')) return;
+  if (!confirm('把手机交还给人？agent 控制会停止，Mac 上会打开 iPhone 镜像，这个页面也会显示镜像画面。')) return;
   btnHandoff.disabled = true;
   try {
     const r = await fetch('/agent/mode', {
@@ -4007,7 +4074,7 @@ if (btnHandoff) btnHandoff.addEventListener('click', async () => {
     if (!r.ok || result.ok !== true) {
       toast(result?.error === 'lifecycle_busy' ? '设备正在切换，稍后再试' : '交还失败，请查看服务日志');
     } else {
-      toast(result.mirroring_opened ? '已交还，iPhone 镜像已打开' : '已交还；请在 Mac 上打开 iPhone 镜像');
+      toast(result.mirroring_opened ? '已交还，正在打开镜像画面' : '已交还；请在 Mac 上打开 iPhone 镜像');
     }
     cancelStatusPoll();
     await pollAgentMode();
@@ -4172,6 +4239,7 @@ function stopMirrorTransport() {
 
 async function connectWs() {
   if (!mirrorTransportEnabled || backendType !== 'mirror') return;
+  pendingRemoteIce = []; // candidates from an earlier socket belong to a dead session
   if (ws) {
     const oldWs = ws;
     ws = null;
@@ -4207,7 +4275,7 @@ async function connectWs() {
     if (!mirrorTransportEnabled || backendType !== 'mirror' || ws !== socket) return;
     let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
     if (msg.type === 'offer') await handleOffer(msg.sdp);
-    else if (msg.type === 'ice' && pc && msg.candidate) { try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (_) {} }
+    else if (msg.type === 'ice' && msg.candidate) await addRemoteIce(msg.candidate);
     else if (msg.type === 'phone_status') {
       // Daemon-side truth about the Mirroring window. Keepalive frames keep
       // flowing when the window vanishes, so this signal (not frame flow)
@@ -4224,8 +4292,40 @@ async function connectWs() {
     }
   };
 }
+/* The daemon trickles its host candidates the moment it sets its offer, so
+   they can reach us before the offer itself, or while handleOffer is still
+   awaiting the ICE servers or setRemoteDescription. addIceCandidate throws
+   without a remote description, and a dropped host candidate on a LAN with
+   obfuscated (mDNS) browser candidates leaves ICE with nothing to pair.
+   Hold candidates until the offer that owns them is applied. */
+let pendingRemoteIce = [];
+let offerInFlight = false;
+async function addRemoteIce(candidate) {
+  if (!pc || offerInFlight || !pc.remoteDescription) {
+    pendingRemoteIce.push(candidate);
+    return;
+  }
+  try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
+}
+async function flushRemoteIce() {
+  const queued = pendingRemoteIce;
+  pendingRemoteIce = [];
+  for (const candidate of queued) {
+    try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
+  }
+}
+
 async function handleOffer(sdp) {
   if (!mirrorTransportEnabled || backendType !== 'mirror') return;
+  offerInFlight = true;
+  try {
+    await applyOffer(sdp);
+  } finally {
+    offerInFlight = false;
+  }
+}
+
+async function applyOffer(sdp) {
   const iceServers = await fetchIceServers();
   if (!mirrorTransportEnabled || backendType !== 'mirror') return;
   /* FORCE_RELAY (?relay=1) always uses relay-only transport; otherwise fall back
@@ -4240,6 +4340,7 @@ async function handleOffer(sdp) {
   wirePc(newPc);
   try {
     await pc.setRemoteDescription({ type:'offer', sdp });
+    await flushRemoteIce();
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     wsSend({ type:'answer', sdp: pc.localDescription.sdp });

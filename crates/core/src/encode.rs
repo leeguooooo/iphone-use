@@ -151,6 +151,58 @@ impl VideoPipeline for NullPipeline {
     }
 }
 
+/// A pipeline whose implementation can be replaced while the daemon runs.
+///
+/// The Direct backend starts with a [`NullPipeline`] and swaps in a real
+/// Mirroring capture only while the phone is handed to a person who watches it
+/// from a browser. Viewers subscribe through this wrapper, so a viewer that
+/// connects after the swap gets the live encoder; when the capture is swapped
+/// back out its encoder is dropped, which stops ScreenCaptureKit and closes
+/// every receiver it handed out.
+pub struct SwitchablePipeline {
+    inner: std::sync::RwLock<Arc<dyn VideoPipeline>>,
+}
+
+impl SwitchablePipeline {
+    pub fn new(initial: Arc<dyn VideoPipeline>) -> Self {
+        Self {
+            inner: std::sync::RwLock::new(initial),
+        }
+    }
+
+    /// Install `next` and return the pipeline it replaced. The caller decides
+    /// when the old one is dropped (dropping a capture pipeline blocks while
+    /// ScreenCaptureKit stops).
+    pub fn replace(&self, next: Arc<dyn VideoPipeline>) -> Arc<dyn VideoPipeline> {
+        let mut slot = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::replace(&mut *slot, next)
+    }
+
+    fn current(&self) -> Arc<dyn VideoPipeline> {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl VideoPipeline for SwitchablePipeline {
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EncodedFrame> {
+        self.current().subscribe()
+    }
+
+    fn request_keyframe(&self) {
+        self.current().request_keyframe();
+    }
+
+    fn phone_present(&self) -> bool {
+        self.current().phone_present()
+    }
+}
+
 const START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 
 /// Convert an AVCC elementary stream (`[4-byte BE length][NALU]` repeated) into
@@ -844,6 +896,56 @@ mod imp {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// A pipeline that is present and counts keyframe requests.
+    struct FakePipeline {
+        tx: tokio::sync::broadcast::Sender<EncodedFrame>,
+        keyframes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl VideoPipeline for FakePipeline {
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EncodedFrame> {
+            self.tx.subscribe()
+        }
+        fn request_keyframe(&self) {
+            self.keyframes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_switchable_pipeline_routes_to_whatever_is_installed() {
+        let switchable = SwitchablePipeline::new(Arc::new(NullPipeline::new()));
+        assert!(!switchable.phone_present());
+
+        let (tx, _keep) = tokio::sync::broadcast::channel(4);
+        let fake = Arc::new(FakePipeline {
+            tx: tx.clone(),
+            keyframes: Default::default(),
+        });
+        switchable.replace(fake.clone());
+        assert!(switchable.phone_present());
+        switchable.request_keyframe();
+        assert_eq!(fake.keyframes.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        let mut rx = switchable.subscribe();
+        tx.send(EncodedFrame {
+            data: bytes::Bytes::from_static(b"frame"),
+            is_keyframe: true,
+            pts_micros: 1,
+        })
+        .unwrap();
+        assert_eq!(&rx.try_recv().unwrap().data[..], b"frame");
+
+        // Swapping the capture out hands back the old pipeline; once nothing
+        // holds it, a subscriber it served sees the stream close.
+        let previous = switchable.replace(Arc::new(NullPipeline::new()));
+        assert!(!switchable.phone_present());
+        drop((previous, fake, tx, _keep));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+        ));
+    }
 
     fn avcc_nalu(payload: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();

@@ -1880,6 +1880,13 @@ async fn agent_status(
     let hold_remaining = state.hold_remaining_secs();
     let released = state.released.load(std::sync::atomic::Ordering::Relaxed);
     let human_handoff = released && human_handoff_active();
+    let (human_view_phase, human_view_message) = crate::human_view::snapshot();
+    let human_view = human_view_phase.as_str();
+    let human_view_error = if human_view_message.is_empty() {
+        "null".to_string()
+    } else {
+        serde_json::to_string(&human_view_message).unwrap_or_else(|_| "null".into())
+    };
     // Direct mode must not touch any iPhone Mirroring API. The legacy backend
     // keeps the cheap geometry probe for compatibility status.
     #[cfg(target_os = "macos")]
@@ -2131,7 +2138,7 @@ async fn agent_status(
     // up indefinitely, so `device_state:"ready"` alone says nothing about use.
     let idle_secs = state.idle_for().as_secs();
     let body = format!(
-        r#"{{"ok":true,"backend":"{}","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","phone_target":{phone_target},"wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"human_active":{human_active},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","mirror_state":"{mirror_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"version":"{version}","latest":{latest_json},"update_available":{update_available}}}"#,
+        r#"{{"ok":true,"backend":"{}","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","phone_target":{phone_target},"wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"human_active":{human_active},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","mirror_state":"{mirror_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"human_view":"{human_view}","human_view_error":{human_view_error},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"version":"{version}","latest":{latest_json},"update_available":{update_available}}}"#,
         state.backend.as_str(),
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
@@ -3893,6 +3900,9 @@ async fn agent_mode(
             // can outlast a client's timeout, and status must not keep saying
             // "handed to a human" while the runner is already coming up.
             HUMAN_HANDOFF.store(false, std::sync::atomic::Ordering::Release);
+            // The runner and a Mirroring capture cannot share the phone: end
+            // the browser view (capture and Mac input) before WDA comes up.
+            let _ = tokio::task::spawn_blocking(crate::human_view::stop).await;
             // An explicit reconnect is intent, not idleness: restart the clock
             // before the bring-up begins, or a build longer than the idle
             // window ends with the watchdog stopping the very supervisor this
@@ -3983,14 +3993,23 @@ async fn agent_mode(
             #[cfg(target_os = "macos")]
             let mirroring_opened = stopped
                 && std::process::Command::new("open")
-                    .args(["-a", "iPhone Mirroring"])
+                    // By bundle id: the app's name is localized ("iPhone镜像").
+                    .args(["-b", "com.apple.ScreenContinuity"])
                     .status()
                     .map(|status| status.success())
                     .unwrap_or(false);
             #[cfg(not(target_os = "macos"))]
             let mirroring_opened = false;
+            // The browser can watch and drive the handed-over phone too: start
+            // capturing the Mirroring window for WebRTC. It reports through
+            // `/agent/status` `human_view`; a failure (no Screen Recording
+            // grant, say) leaves the hand-off itself intact.
+            if stopped {
+                crate::human_view::start();
+            }
             let body = format!(
-                r#"{{"ok":{stopped},"mode":"human","released":{stopped},"mirroring_opened":{mirroring_opened},"hint":"the phone is yours: use iPhone Mirroring on this Mac (locally or over Screen Sharing); POST {{\"mode\":\"agent\"}} hands it back to the agent"}}"#
+                r#"{{"ok":{stopped},"mode":"human","released":{stopped},"mirroring_opened":{mirroring_opened},"human_view":"{}","hint":"the phone is yours: drive it from this page once human_view is live, or use iPhone Mirroring on this Mac; POST {{\"mode\":\"agent\"}} hands it back to the agent"}}"#,
+                crate::human_view::snapshot().0.as_str()
             );
             with_security_headers(
                 Response::builder()
@@ -10502,11 +10521,11 @@ async fn ws_upgrade(
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
-    if state.backend != crate::config::DeviceBackend::Mirror {
+    if state.backend != crate::config::DeviceBackend::Mirror && !crate::human_view::is_live() {
         return with_security_headers(
             (
                 StatusCode::CONFLICT,
-                "WebRTC signaling is disabled for the direct device backend",
+                "WebRTC signaling is disabled for the direct device backend until the phone is handed to a person",
             )
                 .into_response(),
         );

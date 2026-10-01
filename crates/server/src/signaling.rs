@@ -311,9 +311,15 @@ async fn build_pc(
     out_tx: &mpsc::UnboundedSender<SignalMsg>,
 ) -> anyhow::Result<Arc<RTCPeerConnection>> {
     anyhow::ensure!(
-        state.backend == crate::config::DeviceBackend::Mirror,
-        "WebRTC is available only for the legacy Mirror backend"
+        state.backend == crate::config::DeviceBackend::Mirror || crate::human_view::is_live(),
+        "WebRTC is available only for the legacy Mirror backend or a phone handed to a person"
     );
+    // ScreenCaptureKit delivers no frames for a window on another Space, and
+    // a person watching remotely cannot switch Spaces on the Mac. A viewer of
+    // a handed-over phone therefore brings Mirroring to the front on joining.
+    if state.backend != crate::config::DeviceBackend::Mirror {
+        tokio::task::spawn_blocking(crate::macos::bring_mirroring_frontmost);
+    }
     let ice_servers = state.ice.load().servers.clone();
     let pc = crate::webrtc::build_mirror_viewer_pc(
         ice_servers,
@@ -327,6 +333,10 @@ async fn build_pc(
     pc.on_ice_candidate(Box::new(move |cand| {
         let tx = tx.clone();
         Box::pin(async move {
+            match &cand {
+                Some(c) => tracing::info!("local ice candidate: {} {}:{}", c.typ, c.address, c.port),
+                None => tracing::info!("local ice gathering complete"),
+            }
             if let Some(c) = cand {
                 if let Ok(init) = c.to_json() {
                     if let Ok(value) = serde_json::to_value(&init) {

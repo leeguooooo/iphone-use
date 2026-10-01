@@ -55,6 +55,53 @@ mod imp {
         let _ = unsafe { CGRequestScreenCaptureAccess() };
     }
 
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFBooleanTrue: *const std::ffi::c_void;
+        static kCFTypeDictionaryKeyCallBacks: u8;
+        static kCFTypeDictionaryValueCallBacks: u8;
+        fn CFDictionaryCreate(
+            allocator: *const std::ffi::c_void,
+            keys: *const *const std::ffi::c_void,
+            values: *const *const std::ffi::c_void,
+            count: isize,
+            key_callbacks: *const u8,
+            value_callbacks: *const u8,
+        ) -> *const std::ffi::c_void;
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        static kAXTrustedCheckOptionPrompt: *const std::ffi::c_void;
+        fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+    }
+
+    /// Show the system's "allow Accessibility" prompt (no-op if already
+    /// trusted). Without it a missing grant can only be fixed by finding the
+    /// app in System Settings by hand.
+    pub fn request_accessibility() {
+        // SAFETY: a one-entry CFDictionary of two immortal CF constants, built
+        // with the standard CFType callbacks and released after the call.
+        unsafe {
+            let keys = [kAXTrustedCheckOptionPrompt];
+            let values = [kCFBooleanTrue];
+            let options = CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            );
+            if options.is_null() {
+                return;
+            }
+            let _ = AXIsProcessTrustedWithOptions(options);
+            CFRelease(options);
+        }
+    }
+
     /// Bootstrap AppKit/CoreGraphics so ScreenCaptureKit's `startCapture` works
     /// (fixes `CGS_REQUIRE_INIT`). Must run on the main thread before any SCK call.
     pub fn ns_application_load() {
@@ -87,9 +134,12 @@ mod imp {
         // silent debug line as "app isn't running" and "name is localized
         // differently", so the one failure the user CAN fix looked identical
         // to the ones they can't.
-        for name in MIRRORING_NAMES {
+        let by_id = format!(r#"id "{MIRRORING_BUNDLE_ID}""#);
+        let quoted: Vec<String> = MIRRORING_NAMES.iter().map(|name| format!(r#""{name}""#)).collect();
+        for target in std::iter::once(&by_id).chain(quoted.iter()) {
+            let name = target.as_str();
             let out = std::process::Command::new("/usr/bin/osascript")
-                .args(["-e", &format!(r#"tell application "{name}" to activate"#)])
+                .args(["-e", &format!("tell application {name} to activate")])
                 .output();
             match out {
                 Ok(o) if o.status.success() => return,
@@ -97,8 +147,16 @@ mod imp {
                 Err(e) => tracing::warn!("activate {name} via osascript: could not spawn: {e}"),
             }
         }
-        // Fallback (helps when Automation consent was denied): open -a still
-        // works when the user isn't actively focused elsewhere.
+        // Fallback (helps when Automation consent was denied): open -b/-a
+        // still works when the user isn't actively focused elsewhere.
+        match std::process::Command::new("/usr/bin/open")
+            .args(["-b", MIRRORING_BUNDLE_ID])
+            .output()
+        {
+            Ok(o) if o.status.success() => return,
+            Ok(o) => log_activation_failure("open -b", MIRRORING_BUNDLE_ID, o.status.code(), &o.stderr),
+            Err(e) => tracing::warn!("activate {MIRRORING_BUNDLE_ID} via `open -b`: could not spawn: {e}"),
+        }
         for name in MIRRORING_NAMES {
             let out = std::process::Command::new("/usr/bin/open")
                 .args(["-a", name])
@@ -138,7 +196,12 @@ mod imp {
     }
 
     /// The known localized names of the iPhone Mirroring app (en + zh-CN).
-    const MIRRORING_NAMES: [&str; 2] = ["iPhone Mirroring", "iPhone 镜像"];
+    /// iPhone Mirroring's bundle id. Matching on it is language-independent:
+    /// the localized name on a Chinese Mac is "iPhone镜像" (no space), which
+    /// the name list below missed, so every tap there was dropped as "could
+    /// not be brought frontmost" while Mirroring was in front.
+    const MIRRORING_BUNDLE_ID: &str = "com.apple.ScreenContinuity";
+    const MIRRORING_NAMES: [&str; 3] = ["iPhone Mirroring", "iPhone镜像", "iPhone 镜像"];
 
     /// Ensure the Mirroring app is frontmost, **synchronously**.
     ///
@@ -176,24 +239,24 @@ mod imp {
     pub fn mirroring_is_frontmost() -> bool {
         use objc2_app_kit::NSWorkspace;
         // Argument-free property reads; safe to query off the main thread.
-        let front = NSWorkspace::sharedWorkspace().frontmostApplication();
-        match front {
-            Some(app) => match app.localizedName() {
-                Some(name) => {
-                    let name = name.to_string();
-                    MIRRORING_NAMES.contains(&name.as_str())
-                }
-                None => false,
-            },
-            None => false,
+        let Some(app) = NSWorkspace::sharedWorkspace().frontmostApplication() else {
+            return false;
+        };
+        if app
+            .bundleIdentifier()
+            .is_some_and(|id| id.to_string() == MIRRORING_BUNDLE_ID)
+        {
+            return true;
         }
+        app.localizedName()
+            .is_some_and(|name| MIRRORING_NAMES.contains(&name.to_string().as_str()))
     }
 }
 
 #[cfg(target_os = "macos")]
 pub use imp::{
     bring_mirroring_frontmost, ensure_mirroring_frontmost, mirroring_is_frontmost,
-    ns_application_load, request_screen_capture, tcc_status, TccStatus,
+    ns_application_load, request_accessibility, request_screen_capture, tcc_status, TccStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -222,6 +285,9 @@ pub fn tcc_status() -> TccStatus {
 
 #[cfg(not(target_os = "macos"))]
 pub fn request_screen_capture() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_accessibility() {}
 
 #[cfg(not(target_os = "macos"))]
 pub fn ns_application_load() {}

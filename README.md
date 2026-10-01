@@ -123,15 +123,22 @@ resume it before the next agent session:
 Simpler still is the **交还 (hand off)** button in the web toolbar, or
 `POST /agent/mode {"mode":"human"}`: the daemon stops the runner, opens iPhone Mirroring on
 the Mac, and reports `human_handoff:true`; while that holds, agent input gets
-409 `phone_handed_to_human` instead of restarting the runner under your fingers. Press
-**重新连接** (reconnect), or send `{"mode":"agent"}`, to give the phone back to the agent.
+409 `phone_handed_to_human` instead of restarting the runner under your fingers. The same
+button then reads **交给 agent** (give to agent); press it, or send `{"mode":"agent"}`, to
+give the phone back.
 
-**Operating the phone from somewhere else, as a person:** iPhone Mirroring only runs on
-this Mac, so remote use means reaching the Mac — put the Mac and your device on Tailscale,
-connect with macOS Screen Sharing, press hand off, and drive the Mirroring window. Driving
-the phone from a browser without the Mac desktop (WebRTC video of the phone) is not built;
-the WDA path is for agents — its latency and its unlocked-phone requirement do not suit a
-person.
+**Driving the handed-over phone from a browser.** After a hand-off the page keeps showing
+the phone: the daemon captures the iPhone Mirroring window and streams it over WebRTC, and
+your taps, drags, scrolls and typing go into that window. This is the path for a person —
+low latency, and the phone stays locked (iPhone Mirroring needs it locked and near the
+Mac), so no passcode prompt. `/agent/status` reports it as `human_view`:
+`starting` → `live`, or `failed` with `human_view_error` naming what is missing.
+It needs two one-time grants on the Mac for iPhoneUse — **Screen Recording** (the picture)
+and **Accessibility** (the input); the Direct backend asks for neither until you hand the
+phone over. Input moves the Mac's pointer into the Mirroring window, so use it on a Mac
+nobody is sitting at. To reach the page from another device on the LAN, bind
+`PHONE_REMOTE_HOST=0.0.0.0` with a password set; from outside the LAN, Tailscale plus macOS
+Screen Sharing still works.
 
 The daemon also does this on its own: after 10 minutes without agent activity or a
 live viewer it stops the runner and parks its supervisor, and the phone stays parked

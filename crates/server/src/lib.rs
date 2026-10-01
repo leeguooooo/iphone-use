@@ -1,6 +1,7 @@
 pub mod apps;
 pub mod config;
 pub mod http;
+pub mod human_view;
 pub mod input_bridge;
 pub mod instance;
 pub mod macos;

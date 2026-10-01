@@ -460,8 +460,12 @@ fn serve() -> Result<()> {
     } else {
         tracing::info!(
             "direct backend selected — iPhone Mirroring, Screen Recording, and \
-             Mac Accessibility are not used"
+             Mac Accessibility are used only while the phone is handed to a person"
         );
+        // ScreenCaptureKit needs AppKit bootstrapped on the main thread before
+        // any capture, and the browser view of a handed-over phone starts one
+        // later from a worker thread. Loading AppKit asks for no permission.
+        server::macos::ns_application_load();
     }
 
     // 3. Runtime dir + signing secret. The pid record is written only after the
@@ -501,8 +505,13 @@ fn serve() -> Result<()> {
     )?;
 
     // 4. Only the explicit compatibility backend starts ScreenCaptureKit.
+    // Direct starts without capture; the switchable wrapper lets a human
+    // hand-off swap a Mirroring capture in for the browser (see human_view).
+    let human_view_pipeline = Arc::new(core::encode::SwitchablePipeline::new(Arc::new(
+        core::encode::NullPipeline::new(),
+    )));
     let pipeline: Arc<dyn core::encode::VideoPipeline> = match cfg.backend {
-        DeviceBackend::Direct => Arc::new(core::encode::NullPipeline::new()),
+        DeviceBackend::Direct => human_view_pipeline.clone(),
         DeviceBackend::Mirror => {
             core::encode::start_pipeline(core::encode::PipelineConfig::default())
                 .context("start legacy mirror capture + H.264 pipeline")?
@@ -564,6 +573,9 @@ fn serve() -> Result<()> {
     // Secure here would make browsers reject the cookie over LAN and break /ws
     // auth → WebRTC. Keep this `false`; per-request HTTPS is detected in http.rs.
     let cookie_secure = false;
+    if cfg.backend == DeviceBackend::Direct {
+        server::human_view::install(human_view_pipeline, injector.clone(), lease_state.clone());
+    }
     let state = Arc::new(AppState {
         backend: cfg.backend,
         pipeline,

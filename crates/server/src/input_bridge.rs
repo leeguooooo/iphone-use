@@ -148,7 +148,9 @@ pub fn move_button_down(bytes: &[u8]) -> bool {
 /// Cloneable; dropping all clones lets the injector thread exit.
 #[derive(Clone)]
 pub struct InputInjector {
-    tx: std::sync::mpsc::Sender<InputEvent>,
+    /// Shared by every clone, so [`InputInjector::replace_with`] redirects
+    /// injectors that WebRTC sessions already hold.
+    tx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Sender<InputEvent>>>,
 }
 
 impl InputInjector {
@@ -161,13 +163,38 @@ impl InputInjector {
     pub fn null() -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<InputEvent>();
         drop(rx);
-        Self { tx }
+        Self::from_sender(tx)
+    }
+
+    fn from_sender(tx: std::sync::mpsc::Sender<InputEvent>) -> Self {
+        Self {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(tx)),
+        }
     }
 
     /// Enqueue an event for injection. Non-blocking; drops the event if the
     /// injector thread has gone away.
     pub fn send(&self, ev: InputEvent) {
-        let _ = self.tx.send(ev);
+        let _ = self
+            .tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .send(ev);
+    }
+
+    /// Point this injector, and every clone of it, at `other`'s sink. The
+    /// replaced sink's thread exits once its last sender is gone, so swapping
+    /// back to [`InputInjector::null`] ends a human session's CGEvent thread.
+    pub fn replace_with(&self, other: &InputInjector) {
+        let next = other
+            .tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        *self
+            .tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
     }
 }
 
@@ -191,7 +218,7 @@ where
         .name("input-injector".into())
         .spawn(move || injector_loop(geo, rx, is_allowed))
         .expect("spawn input-injector thread");
-    InputInjector { tx }
+    InputInjector::from_sender(tx)
 }
 
 #[cfg(target_os = "macos")]
@@ -250,6 +277,27 @@ fn injector_loop<F>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_an_injector_redirects_every_clone() {
+        let injector = InputInjector::null();
+        // A WebRTC session cloned the injector before the swap.
+        let held_by_session = injector.clone();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        injector.replace_with(&InputInjector::from_sender(tx));
+        held_by_session.send(InputEvent::Tap { x: 0.5, y: 0.5 });
+        assert_eq!(rx.try_recv().unwrap(), InputEvent::Tap { x: 0.5, y: 0.5 });
+
+        // Swapping back to the null sink drops the last sender, so the
+        // injector thread reading `rx` would exit.
+        injector.replace_with(&InputInjector::null());
+        held_by_session.send(InputEvent::Tap { x: 0.1, y: 0.1 });
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+    }
 
     #[test]
     fn decode_control_down() {
