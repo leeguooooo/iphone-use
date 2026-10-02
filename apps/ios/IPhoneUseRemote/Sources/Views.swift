@@ -150,6 +150,9 @@ struct RemoteView: View {
         if status.releasing {
             return .init(title: "正在释放设备", detail: "请稍候", action: nil)
         }
+        if status.setupBlockedOn == "locked" {
+            return .init(title: "请解锁手机", detail: "手机锁着屏，设备服务启动不了。解锁并保持亮屏后会自动接着连接。", action: nil)
+        }
         if status.reconnecting {
             let blocked = !status.setupBlockedOn.isEmpty
             return .init(title: blocked ? "需要处理一下" : "正在连接手机",

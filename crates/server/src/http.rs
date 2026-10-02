@@ -2414,7 +2414,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "iOS has not enabled UI automation for WDA — on the unlocked iPhone turn on Settings › Developer › Enable UI Automation and accept any passcode or Allow automation prompt; the managed service retries on its own backoff, so do not send another reconnect request",
         ),
         "locked" => Some(
-            "the iPhone is locked — unlock it and keep it awake; the managed service is already retrying on its own backoff, so do not send another reconnect request",
+            "the iPhone is locked — unlock it and keep it awake; connecting continues on its own as soon as it is unlocked, so do not send another reconnect request",
         ),
         "wda" => Some(
             "WebDriverAgent failed to start — inspect ~/.iphone-use/wda-agent.log and run setup-wda.sh doctor before retrying",
@@ -12038,7 +12038,7 @@ mod tests {
         // retrying — it must not read as a failed build to inspect.
         let locked = setup_blocker_hint("locked").unwrap();
         assert!(locked.contains("unlock"), "{locked}");
-        assert!(locked.contains("retrying"), "{locked}");
+        assert!(locked.contains("on its own"), "{locked}");
         assert!(!locked.contains("wda-agent.log"), "{locked}");
         assert!(!locked.contains("doctor"), "{locked}");
     }

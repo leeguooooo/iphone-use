@@ -3490,6 +3490,49 @@ until _ddi_ready; do
     sleep 4
 done
 ok "Developer Disk Image mounted"
+
+# ── 3b. Wait for the phone to be unlocked ─────────────────────────────────────
+# Launching the runner on a locked phone fails only after xcodebuild's ~70 s
+# automation-mode timeout, then KeepAlive retries — minutes of "connecting"
+# while the phone simply needed unlocking. Ask CoreDevice first (~0.5-2 s,
+# works before WDA exists; hardware-verified: passcodeRequired flips true on
+# lock and back to false the moment the phone unlocks, faster than WDA's own
+# /wda/locked), publish `locked` at once, and launch the moment it unlocks.
+_device_passcode_required() {
+    local j out
+    j="$(mktemp)"
+    _devicectl_t 5 device info lockState --device "$WDA_UDID" -j "$j" >/dev/null
+    out="$(python3 - "$j" <<'PY_LOCK' 2>/dev/null || echo unknown
+import json, sys
+try:
+    result = json.load(open(sys.argv[1]))["result"]
+    print("true" if result.get("passcodeRequired") is True else "false")
+except Exception:
+    print("unknown")
+PY_LOCK
+)"
+    rm -f "$j"
+    printf '%s\n' "$out"
+}
+WDA_LOCK_WAIT_SECS="${WDA_LOCK_WAIT_SECS:-300}"
+if [ "$(_device_passcode_required)" = "true" ]; then
+    info "Waiting for the iPhone to be unlocked"
+    _setstatus lock-wait locked "the iPhone is locked — unlock it and connecting continues on its own"
+    _lock_wait_started=$SECONDS
+    while [ "$(_device_passcode_required)" = "true" ]; do
+        if [ $((SECONDS - _lock_wait_started)) -ge "$WDA_LOCK_WAIT_SECS" ]; then
+            if [ "${WDA_KEEPALIVE:-0}" = "1" ]; then
+                # The existing quiet locked backoff (30 s → 15 min) takes over.
+                _prepare_locked_retry
+                exit 1
+            fi
+            _setstatus building-fail locked "the iPhone stayed locked for ${WDA_LOCK_WAIT_SECS}s"
+            die "the iPhone stayed locked for ${WDA_LOCK_WAIT_SECS}s. Unlock it, then rerun setup."
+        fi
+        sleep 1
+    done
+    ok "iPhone unlocked after $((SECONDS - _lock_wait_started))s"
+fi
 _setstatus building "$_BUILD_BLOCKER" "building + launching WDA"
 
 # ── 4. Build + run WDA (stays running; this is the server) ───────────────────

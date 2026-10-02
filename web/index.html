@@ -1192,7 +1192,7 @@ function setupBlockerCopy(blockedOn) {
     case 'automation_mode_disabled':
       return ['请开启 UI 自动化', '解锁 iPhone，打开 设置 › 开发者 › 启用 UI 自动化，并确认手机上的密码或“允许自动化”提示；稍候会自动重试'];
     case 'locked':
-      return ['请解锁 iPhone', '手机锁屏挡住了设备服务；解锁并保持亮屏，稍候会自动重试'];
+      return ['请解锁 iPhone', '手机锁着屏，设备服务启动不了；解锁并保持亮屏后会自动接着连接'];
     case 'wda':
       return ['设备服务启动失败', '请保持 USB、解锁和亮屏，然后重新运行下方设置命令'];
     default:
