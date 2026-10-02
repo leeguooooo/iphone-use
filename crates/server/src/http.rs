@@ -8375,7 +8375,7 @@ async fn agent_input(
         alert = probe_alert(&mut client).await;
     }
     drop(client);
-    return match outcome {
+    match outcome {
         WdaControlOutcome::Applied => {
             let body = match settled {
                 None => r#"{"ok":true,"transport":"wda"}"#.to_string(),
@@ -8481,7 +8481,7 @@ async fn agent_input(
         WdaControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
         WdaControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
         WdaControlOutcome::Failed => wda_failed_after_dispatch_response(),
-    };
+    }
 }
 
 /// `GET /agent/elements` — the phone's element tree, flattened to

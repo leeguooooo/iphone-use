@@ -74,11 +74,8 @@ impl MjpegSplitter {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<Bytes> {
         self.buf.extend_from_slice(chunk);
         let mut frames = Vec::new();
-        loop {
-            match self.next_frame() {
-                Some(frame) => frames.push(frame),
-                None => break,
-            }
+        while let Some(frame) = self.next_frame() {
+            frames.push(frame);
         }
         if self.buf.len() > MAX_BUFFERED {
             self.buf.clear();
