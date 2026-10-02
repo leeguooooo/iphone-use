@@ -182,7 +182,9 @@ own installed copy from the new release. `run --force` skips the idle gate;
 
 ## Drive the phone from the browser
 
-`/phone` renders the on-device MJPEG stream and turns your clicks, drags, long-presses,
+`/phone` shows the live screen: as H.264 from `/agent/h264` where the browser has
+WebCodecs (the daemon re-encodes WDA's JPEG frames on the Mac's hardware encoder,
+~0.7–2.5 Mbit/s), otherwise as `/agent/mjpeg` (25–40 Mbit/s, LAN only). It turns your clicks, drags, long-presses,
 scrolls, and typing (Unicode included) into acknowledged `POST /control` commands with a
 bounded `ttl_ms`. Nothing steals Mac focus. The **Controls** panel shows the accessibility
 tree so you can tap by exact label instead of by pixel.
@@ -205,6 +207,14 @@ The **流程** (flow) panel records what you do into a replayable flow file:
 
 What you record here is what the [registry](#flows-and-the-official-flow-registry)
 distributes.
+
+## Drive the phone from the native iOS app
+
+`apps/ios` is a native SwiftUI app (iOS 17+). Log in with the daemon's address and control
+password; it plays the H.264 feed with the system's hardware decoder and sends taps, long
+presses, swipes, drags, text and Home to `POST /control`, the same contract as the web
+page. The phone being controlled must stay unlocked: iOS does not let automation type the
+lock-screen passcode. Build with `cd apps/ios && xcodegen generate`, then open in Xcode.
 
 ## Agent API
 

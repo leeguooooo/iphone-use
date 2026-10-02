@@ -113,7 +113,7 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 ## 在浏览器里操作手机
 
-`/phone` 显示手机端 MJPEG 画面，把你的点击、拖动、长按、滚动和输入（含中文）变成带 `ttl_ms` 上限、逐条确认的 `POST /control` 命令，不抢 Mac 焦点。**控件**面板列出辅助功能树，可以按精确标签点，不用对像素。
+`/phone` 显示手机实时画面：浏览器支持 WebCodecs 时走 `/agent/h264`（daemon 把 WDA 的 JPEG 帧用 Mac 的硬件编码器转成 H.264，码率约 0.7–2.5 Mbit/s），否则退回 `/agent/mjpeg`（25–40 Mbit/s，只适合局域网）。页面把你的点击、拖动、长按、滚动和输入（含中文）变成带 `ttl_ms` 上限、逐条确认的 `POST /control` 命令，不抢 Mac 焦点。**控件**面板列出辅助功能树，可以按精确标签点，不用对像素。
 
 **流程**面板把你的操作录成可重放的 flow 文件：
 
@@ -124,6 +124,10 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 - **打开脚本**按和 CLI 相同的限制严格校验后，重新载入保存过的 flow；字面文字会被拒绝，必须是命名参数。
 
 在这里录下来的东西，就是[官方源](#flow-与官方-flow-源)分发的东西。
+
+## 用原生 iOS App 操作手机
+
+`apps/ios` 是原生 SwiftUI App（iOS 17+）：填 Mac 上服务的地址和控制密码登录，用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码。构建：`cd apps/ios && xcodegen generate`，再用 Xcode 打开。
 
 ## Agent API
 
