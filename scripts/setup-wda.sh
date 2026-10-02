@@ -3527,17 +3527,20 @@ if [ "$(_device_passcode_required)" = "true" ]; then
     info "Waiting for the iPhone to be unlocked"
     _setstatus lock-wait locked "the iPhone is locked — unlock it and connecting continues on its own"
     _lock_wait_started=$SECONDS
-    # Unlocked only after three readings in a row: hardware showed a single
-    # "not required" reading followed by xcodebuild's "Unlock iPhone to
-    # Continue" a second later.
+    # Unlocked only after two explicit "not required" readings in a row. A
+    # reading devicectl failed to produce is not "unlocked": on hardware,
+    # failed reads while the phone stayed locked launched the runner into
+    # xcodebuild's "Unlock iPhone to Continue".
     _unlocked_reads=0
-    while [ "$_unlocked_reads" -lt 3 ]; do
-        if [ "$(_device_passcode_required)" = "true" ]; then
-            _unlocked_reads=0
-        else
-            _unlocked_reads=$((_unlocked_reads + 1))
-            continue
-        fi
+    while [ "$_unlocked_reads" -lt 2 ]; do
+        case "$(_device_passcode_required)" in
+            false)
+                _unlocked_reads=$((_unlocked_reads + 1))
+                continue
+                ;;
+            true) _unlocked_reads=0 ;;
+            *) ;;  # unreadable: neither proof of unlock nor of lock
+        esac
         if [ $((SECONDS - _lock_wait_started)) -ge "$WDA_LOCK_WAIT_SECS" ]; then
             if [ "${WDA_KEEPALIVE:-0}" = "1" ]; then
                 # The quiet locked backoff (5 s → 1 min) takes over.
