@@ -3,7 +3,8 @@
   iphone-use — remote-control web client  (web/index.html)
   ==========================================================
   Served at /phone (auth-gated).
-  WebDriverAgent only: MJPEG (/agent/mjpeg, /agent/screenshot stills fallback)
+  WebDriverAgent only: H.264 via WebCodecs (/agent/h264) when the browser can
+  decode it, else MJPEG (/agent/mjpeg); /agent/screenshot stills as fallback
   + cookie-authenticated POST /control (one JSON action per gesture, ACKed)
   Touch: Pointer Events → normalized [0,1] content-rect coords
 
@@ -553,7 +554,7 @@
     }
 
     /* ── Direct device image (MJPEG with periodic still fallback) ── */
-    #mjpegFrame, #stillFrame {
+    #h264Frame, #mjpegFrame, #stillFrame {
       position: absolute; top: 0; left: 0;
       width: 100%; height: calc(100% - var(--tb-reserve));
       object-fit: contain;
@@ -561,9 +562,9 @@
       pointer-events: none;   /* taps still land on #videoArea */
       transition: height .28s cubic-bezier(.2,.7,.2,1);
     }
-    #mjpegFrame { z-index: 2; }
+    #h264Frame, #mjpegFrame { z-index: 2; }
     #stillFrame { z-index: 1; }
-    #mjpegFrame.active, #stillFrame.active { display: block; }
+    #h264Frame.active, #mjpegFrame.active, #stillFrame.active { display: block; }
 
     /* ── Update banner (new release available) ───────────────────── */
     #updateBanner {
@@ -712,6 +713,7 @@
     <!-- Direct image: keep the last screenshot visible while MJPEG reconnects. -->
     <img id="stillFrame" alt="iPhone 设备静态画面">
     <img id="mjpegFrame" alt="iPhone 设备实时画面">
+    <canvas id="h264Frame" aria-label="iPhone 设备实时画面"></canvas>
     <canvas id="gridCanvas" aria-hidden="true"></canvas>
     <div id="tapDot"></div>
 
@@ -1378,8 +1380,8 @@ function showOverlay(kind) {
 })();
 
 /* ── Device status ───────────────────────────────────────────────
-   The phone is served only over WebDriverAgent: MJPEG (with screenshot
-   stills as fallback) for video and cookie-authenticated POST /control for
+   The phone is served only over WebDriverAgent: H.264 or MJPEG (with
+   screenshot stills as fallback) for video and cookie-authenticated POST /control for
    input, each gesture explicitly acknowledged. */
 const STATUS_REQUEST_TIMEOUT_MS = 8000;
 let statusPollBusy = false;
@@ -1492,6 +1494,7 @@ async function pollAgentMode() {
 /* ── Direct device video + still-image fallback ───────────────── */
 const stillFrame = document.getElementById('stillFrame');
 const mjpegFrame = document.getElementById('mjpegFrame');
+const h264Frame = document.getElementById('h264Frame');
 const MJPEG_RETRY_BASE_MS = 5000;
 const MJPEG_RETRY_MAX_MS = 30000;
 const MJPEG_FRAME_FRESH_MS = 8000;
@@ -1511,6 +1514,15 @@ let stillsGeneration = 0;
 let stillRequestEpoch = 0;
 let mjpegConnectTimer = null, mjpegProbeTimer = null, mjpegRetryTimer = null;
 let mjpegRetryDelay = MJPEG_RETRY_BASE_MS;
+// The live stream is H.264 (WebCodecs) when the browser can decode it, else
+// MJPEG. mjpegLive / lastMjpegActivityAt / mjpegStreamId describe whichever
+// live stream is up: both transports share the daemon's stream_id freshness.
+const H264_KEYFRAME_TIMEOUT_MS = 3000;
+const H264_MAX_DECODE_QUEUE = 3;
+const H264_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+let h264Disabled = false;
+let h264Session = null;
+let h264Ctx = null;
 function hasFreshDirectFrame(now = performance.now()) {
   const mjpegFresh = mjpegLive &&
     lastMjpegActivityAt !== null &&
@@ -1671,6 +1683,238 @@ function stopSnapshotPolling() {
   if (stillsStartTimer) { clearTimeout(stillsStartTimer); stillsStartTimer = null; }
   if (stillsTimer) { clearInterval(stillsTimer); stillsTimer = null; }
 }
+/* ── H.264 live stream (WebCodecs) ─────────────────────────────
+   /agent/h264 body: [u32 BE length L][u8 flags][u64 BE pts µs][Annex-B
+   access unit of L-9 bytes]; flags bit0 = keyframe (carries SPS/PPS). */
+function h264ParseMessages(state, chunk) {
+  let buf = chunk;
+  if (state.buf && state.buf.length) {
+    buf = new Uint8Array(state.buf.length + chunk.length);
+    buf.set(state.buf);
+    buf.set(chunk, state.buf.length);
+  }
+  const out = [];
+  let off = 0;
+  while (buf.length - off >= 4) {
+    const view = new DataView(buf.buffer, buf.byteOffset + off, buf.length - off);
+    const len = view.getUint32(0);
+    if (len < 9 || len > H264_MAX_MESSAGE_BYTES) {
+      throw new Error('bad h264 message length ' + len);
+    }
+    if (buf.length - off - 4 < len) break;
+    out.push({
+      keyframe: (buf[off + 4] & 1) === 1,
+      pts: Number(view.getBigUint64(5)),
+      data: buf.subarray(off + 13, off + 4 + len),
+    });
+    off += 4 + len;
+  }
+  state.buf = off < buf.length ? buf.slice(off) : new Uint8Array(0);
+  return out;
+}
+function h264FindSps(data) {
+  for (let i = 0; i + 3 < data.length; i++) {
+    if (data[i] !== 0 || data[i + 1] !== 0 || data[i + 2] !== 1) continue;
+    const nal = i + 3;
+    if ((data[nal] & 0x1f) !== 7) { i = nal - 1; continue; }
+    let end = data.length;
+    for (let j = nal + 1; j + 2 < data.length; j++) {
+      if (data[j] === 0 && data[j + 1] === 0 && data[j + 2] === 1) { end = j; break; }
+    }
+    // A 4-byte start code leaves its leading zero on the previous NAL.
+    while (end > nal + 1 && data[end - 1] === 0) end--;
+    return data.subarray(nal, end);
+  }
+  return null;
+}
+function h264CodecFromSps(sps) {
+  if (!sps || sps.length < 4) return null;
+  return 'avc1.' + [sps[1], sps[2], sps[3]]
+    .map(b => b.toString(16).padStart(2, '0').toUpperCase()).join('');
+}
+function h264BytesEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+function disableH264(reason) {
+  if (h264Disabled) return;
+  h264Disabled = true;
+  console.info('iphone-use: h264 unavailable (' + reason + '), using mjpeg for this page');
+}
+function h264SessionCurrent(session) {
+  return session === h264Session &&
+    session.generation === stillsGeneration &&
+    directFeedActive &&
+    backendStatus?.mode === 'agent';
+}
+function stopH264Stream() {
+  const session = h264Session;
+  if (!session) return;
+  h264Session = null;
+  if (session.keyTimer) { clearTimeout(session.keyTimer); session.keyTimer = null; }
+  session.controller.abort();
+  if (session.decoder && session.decoder.state !== 'closed') {
+    try { session.decoder.close(); } catch (_) {}
+  }
+}
+// fatal: true = never retry H.264 this page session; 'transient' = lifecycle
+// refusal (503), retry like MJPEG; otherwise fatal only if it never went live.
+function h264Failed(session, reason, fatal) {
+  if (session !== h264Session) return;
+  const generation = session.generation;
+  const wasLive = session.live;
+  const permanent = fatal === true || (fatal !== 'transient' && !wasLive);
+  stopH264Stream();
+  if (permanent) disableH264(reason);
+  if (generation !== stillsGeneration || !directFeedActive) return;
+  if (!permanent || wasLive) mjpegFailed(generation);
+  if (permanent) {
+    // Switch transports now rather than after the retry backoff.
+    if (mjpegRetryTimer) { clearTimeout(mjpegRetryTimer); mjpegRetryTimer = null; }
+    startMjpegAttempt(generation);
+  }
+}
+function h264Ready(session) {
+  const generation = session.generation;
+  clearMjpegAttempt();
+  if (mjpegRetryTimer) { clearTimeout(mjpegRetryTimer); mjpegRetryTimer = null; }
+  mjpegRetryDelay = MJPEG_RETRY_BASE_MS;
+  if (!mjpegLive && stillFrame.classList.contains('active')) {
+    invalidateDirectVisualContext();
+  }
+  session.live = true;
+  mjpegLive = true;
+  lastMjpegActivityAt = performance.now();
+  armMjpegFreshnessTimer(generation);
+  directFrameSeen = true;
+  h264Frame.classList.add('active');
+  mjpegFrame.classList.remove('active');
+  stillFrame.classList.remove('active');
+  stopSnapshotPolling();
+  syncDirectFrameFreshness();
+}
+function h264RenderFrame(session, frame) {
+  try {
+    if (!h264SessionCurrent(session)) return;
+    const w = frame.displayWidth, h = frame.displayHeight;
+    if (h264Frame.width !== w || h264Frame.height !== h) {
+      h264Frame.width = w;
+      h264Frame.height = h;
+    }
+    if (!h264Ctx) h264Ctx = h264Frame.getContext('2d');
+    h264Ctx.drawImage(frame, 0, 0, w, h);
+  } finally {
+    frame.close();
+  }
+  if (!session.live) {
+    h264Ready(session);
+    return;
+  }
+  lastMjpegActivityAt = performance.now();
+  if (!mjpegFreshnessTimer) armMjpegFreshnessTimer(session.generation);
+}
+async function h264HandleMessage(session, msg) {
+  if (msg.keyframe) {
+    if (session.keyTimer) { clearTimeout(session.keyTimer); session.keyTimer = null; }
+    const sps = h264FindSps(msg.data);
+    if (sps && !h264BytesEqual(sps, session.sps)) {
+      const codec = h264CodecFromSps(sps);
+      if (!codec) throw new Error('short sps');
+      const config = { codec, optimizeForLatency: true };
+      const support = await VideoDecoder.isConfigSupported(config);
+      if (session !== h264Session) return;
+      if (!support.supported) {
+        h264Failed(session, 'unsupported ' + codec, true);
+        return;
+      }
+      if (!session.decoder) {
+        session.decoder = new VideoDecoder({
+          output: frame => h264RenderFrame(session, frame),
+          error: e => h264Failed(session, 'decoder error: ' + (e?.message || e), true),
+        });
+      }
+      // No description: input stays Annex-B with SPS/PPS in band.
+      session.decoder.configure({ ...config, hardwareAcceleration: 'prefer-hardware' });
+      session.sps = sps.slice();
+    }
+    if (!session.decoder) return;
+    session.needKey = false;
+  } else {
+    if (!session.decoder || session.needKey) return;
+    // Latency over completeness: a backed-up decoder skips to the next keyframe.
+    if (session.decoder.decodeQueueSize > H264_MAX_DECODE_QUEUE) {
+      session.needKey = true;
+      return;
+    }
+  }
+  session.decoder.decode(new EncodedVideoChunk({
+    type: msg.keyframe ? 'key' : 'delta',
+    timestamp: msg.pts,
+    data: msg.data,
+  }));
+}
+async function pumpH264(session) {
+  let response;
+  try {
+    response = await fetch(
+      `/agent/h264?stream_id=${encodeURIComponent(session.streamId)}&t=${Date.now()}`,
+      { credentials: 'same-origin', cache: 'no-store', signal: session.controller.signal },
+    );
+  } catch (e) {
+    h264Failed(session, 'fetch: ' + (e?.message || e));
+    return;
+  }
+  if (session !== h264Session) return;
+  if (response.status === 401) {
+    location.replace('/login');
+    return;
+  }
+  if (!response.ok || !response.body) {
+    h264Failed(
+      session,
+      'http ' + response.status,
+      response.status === 501 ? true : (response.status === 503 ? 'transient' : undefined),
+    );
+    return;
+  }
+  session.keyTimer = setTimeout(() => {
+    session.keyTimer = null;
+    h264Failed(session, 'no keyframe within ' + H264_KEYFRAME_TIMEOUT_MS + 'ms', !session.live);
+  }, H264_KEYFRAME_TIMEOUT_MS);
+  const reader = response.body.getReader();
+  const parser = { buf: null };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (session !== h264Session) return;
+      if (done) throw new Error('stream ended');
+      for (const msg of h264ParseMessages(parser, value)) {
+        await h264HandleMessage(session, msg);
+        if (session !== h264Session) return;
+      }
+    }
+  } catch (e) {
+    h264Failed(session, e?.message || String(e));
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+function startH264Attempt(generation, streamId) {
+  const session = {
+    generation,
+    streamId,
+    controller: new AbortController(),
+    decoder: null,
+    sps: null,
+    needKey: true,
+    live: false,
+    keyTimer: null,
+  };
+  h264Session = session;
+  mjpegConnectTimer = setTimeout(() => h264Failed(session, 'connect timeout'), 8000);
+  void pumpH264(session);
+}
 function clearMjpegAttempt() {
   if (mjpegConnectTimer) { clearTimeout(mjpegConnectTimer); mjpegConnectTimer = null; }
   if (mjpegProbeTimer) { clearInterval(mjpegProbeTimer); mjpegProbeTimer = null; }
@@ -1710,6 +1954,7 @@ function scheduleMjpegRetry(generation) {
 function mjpegFailed(generation) {
   if (generation !== stillsGeneration || !directFeedActive) return;
   clearMjpegAttempt();
+  stopH264Stream();
   if (mjpegLive) invalidateDirectVisualContext();
   mjpegLive = false;
   lastMjpegActivityAt = null;
@@ -1719,6 +1964,7 @@ function mjpegFailed(generation) {
   mjpegFrame.onerror = null;
   mjpegFrame.classList.remove('active');
   mjpegFrame.src = '';
+  h264Frame.classList.remove('active');
   if (stillsUrl) stillFrame.classList.add('active');
   startSnapshotFallback(generation);
   scheduleMjpegRetry(generation);
@@ -1731,10 +1977,20 @@ function startMjpegAttempt(generation) {
     backendStatus?.mode !== 'agent'
   ) return;
   clearMjpegAttempt();
+  stopH264Stream();
+  mjpegFrame.classList.remove('active');
+  h264Frame.classList.remove('active');
+  mjpegStreamId = newMjpegStreamId();
+  if (!h264Disabled && !('VideoDecoder' in window && 'EncodedVideoChunk' in window)) {
+    disableH264('no WebCodecs VideoDecoder');
+  }
+  if (!h264Disabled) {
+    startH264Attempt(generation, mjpegStreamId);
+    if (!stillsUrl) olSub.textContent = '设备实时画面正在连接…';
+    return;
+  }
   mjpegFrame.onload = () => mjpegReady(generation);
   mjpegFrame.onerror = () => mjpegFailed(generation);
-  mjpegFrame.classList.remove('active');
-  mjpegStreamId = newMjpegStreamId();
   mjpegFrame.src = `/agent/mjpeg?stream_id=${encodeURIComponent(mjpegStreamId)}&t=${Date.now()}`;
   // Streaming images need not dispatch load until the multipart response ends.
   // naturalWidth becomes non-zero after the first decoded frame, so poll that
@@ -1774,6 +2030,8 @@ function stopStills() {
   clearMjpegFreshnessTimer();
   setDirectControlReady(false);
   clearMjpegAttempt();
+  stopH264Stream();
+  h264Frame.classList.remove('active');
   if (mjpegRetryTimer) { clearTimeout(mjpegRetryTimer); mjpegRetryTimer = null; }
   stopSnapshotPolling();
   mjpegFrame.onload = null;
@@ -1894,13 +2152,15 @@ function pointerToNormalized(clientX, clientY) {
   // The visible source owns the coordinate system. This includes the periodic
   // PNG fallback after MJPEG has failed; with neither frame visible there is
   // nothing to map a tap against.
-  const el = mjpegFrame.classList.contains('active')
-    ? mjpegFrame
-    : (stillFrame.classList.contains('active') ? stillFrame : null);
+  const el = h264Frame.classList.contains('active')
+    ? h264Frame
+    : (mjpegFrame.classList.contains('active')
+      ? mjpegFrame
+      : (stillFrame.classList.contains('active') ? stillFrame : null));
   if (!el) return null;
   const rect = el.getBoundingClientRect();
-  const vw = el.naturalWidth;
-  const vh = el.naturalHeight;
+  const vw = el === h264Frame ? el.width : el.naturalWidth;
+  const vh = el === h264Frame ? el.height : el.naturalHeight;
   if (!vw || !vh) return null;
   const elAR = rect.width / rect.height, vidAR = vw / vh;
   let contentW, contentH, offX, offY;
