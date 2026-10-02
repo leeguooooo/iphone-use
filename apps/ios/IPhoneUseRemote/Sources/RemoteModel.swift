@@ -29,6 +29,10 @@ final class RemoteModel {
     private var statusTask: Task<Void, Never>?
     private var pendingActions = 0
     private var reloginTask: Task<Bool, Never>?
+    /// Opening the app is the request to drive the phone: an idle-released
+    /// device is started at once, once per foreground, instead of waiting for
+    /// a tap on 连接手机. Never for a phone handed back to its holder.
+    private var autoWakeTried = false
 
     init() {
         #if DEBUG
@@ -199,14 +203,30 @@ final class RemoteModel {
         }
     }
 
+    /// The app came back to the foreground: allow one more automatic start.
+    func becameActive() {
+        autoWakeTried = false
+        if let status { maybeAutoWake(status) }
+    }
+
+    private func maybeAutoWake(_ status: PhoneStatus) {
+        guard !autoWakeTried, !busy, status.released, !status.releasing,
+              !status.humanHandoff, status.recoveryOwner.isEmpty || status.recoveryOwner == "daemon"
+        else { return }
+        autoWakeTried = true
+        connectPhone()
+    }
+
     private func startPolling() {
         statusTask?.cancel()
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let client = self.client else { return }
                 do {
-                    self.status = try await client.status()
+                    let status = try await client.status()
+                    self.status = status
                     self.updateStream()
+                    self.maybeAutoWake(status)
                 } catch DaemonError.sessionExpired {
                     _ = await self.relogin()
                 } catch {}

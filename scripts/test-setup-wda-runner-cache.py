@@ -65,9 +65,14 @@ class RunnerCacheTests(unittest.TestCase):
     def test_key_change_misses(self):
         code, out = self.run_bash(self.write_body() + 'WDA_COMMIT=def456\n' + self.read_body())
         self.assertEqual(out[-1], 'miss', out)
-        # touching the icon source changes its mtime → miss as well
-        code, out = self.run_bash(self.write_body() + f'touch -t 203001010000 "{self.icon}"\n' + self.read_body())
+        # a new icon (different content) → miss as well
+        code, out = self.run_bash(self.write_body() + f'printf other > "{self.icon}"\n' + self.read_body())
         self.assertEqual(out[-1], 'miss', out)
+
+    def test_reinstalling_the_same_icon_still_hits(self):
+        # an app upgrade rewrites the icon file: new mtime, same bytes
+        code, out = self.run_bash(self.write_body() + f'touch -t 203001010000 "{self.icon}"\n' + self.read_body())
+        self.assertTrue(out[-1].startswith('hit 1 '), out)
 
     def test_missing_files_or_invalid_bundle_miss(self):
         code, out = self.run_bash(self.write_body() + f'rm "{self.xctestrun}"\n' + self.read_body())

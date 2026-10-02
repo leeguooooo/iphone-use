@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct IPhoneUseRemoteApp: App {
     @State private var model = RemoteModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -10,6 +11,9 @@ struct IPhoneUseRemoteApp: App {
                 .preferredColorScheme(.dark)
                 // The landing page a scanned QR opens hands off here.
                 .onOpenURL { model.handle(url: $0) }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active { model.becameActive() }
+                }
                 .alert(
                     "连接到这台 Mac？",
                     isPresented: Binding(

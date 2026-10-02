@@ -991,6 +991,18 @@ const setupCommand = document.getElementById('setupCommand');
 const copySetupBtn = document.getElementById('copySetupBtn');
 const setupGuideLink = document.getElementById('setupGuideLink');
 let reconnectActionBusy = false;
+/* Opening the page to drive the phone is the request: start the idle-released
+   device right away instead of waiting for a tap on 连接手机. Once per page
+   load, never for a phone handed back to its holder. */
+let autoWakeTried = false;
+function maybeAutoWake(s) {
+  if (autoWakeTried || reconnectActionBusy) return;
+  if (document.visibilityState !== 'visible') return;
+  if (s?.released !== true || s?.human_handoff === true) return;
+  if (s?.recovery_owner && s.recovery_owner !== 'daemon') return;
+  autoWakeTried = true;
+  setTimeout(() => reconnectBtn?.onclick?.(), 0);
+}
 function syncReconnectControl(kind = overlayState) {
   const recoveryIsExternal =
     backendStatus?.recovery_owner === 'unconfigured' ||
@@ -1493,6 +1505,7 @@ async function pollAgentMode() {
     } else if (s.released === true) {
       stopStills();
       showOverlay('released');
+      maybeAutoWake(s);
     } else if (s.drivable !== true) {
       const unavailableKind = directUnavailableKind(s);
       if (unavailableKind === 'locked' || unavailableKind === 'blocked') {

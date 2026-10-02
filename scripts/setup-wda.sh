@@ -151,7 +151,10 @@ case "$WDA_ALLOW_LAN" in
 esac
 
 BOLD=$'\033[1m'; RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[1;33m'; RST=$'\033[0m'
-info() { printf '%s\n' "${BOLD}== $*${RST}"; }
+# Each stage header carries the seconds since this run started, so a slow
+# connect can be read straight off wda-agent.log.
+# (Suffix, not prefix: the daemon finds rounds by the "== Checking prerequisites" text.)
+info() { printf '%s\n' "${BOLD}== $* (+${SECONDS}s)${RST}"; }
 ok()   { printf '%s\n' "${GRN}✓${RST} $*"; }
 warn() { printf '%s\n' "${YLW}⚠${RST}  $*"; }
 die()  { printf '%s\n' "${RED}✗ $*${RST}" >&2; exit 1; }
@@ -2711,8 +2714,12 @@ if [ -n "$WDA_TRACKED_CHANGES" ]; then
     die "tracked changes exist in $WDA_DIR; refusing to overwrite them.
    Commit, stash, or choose a separate WDA_DIR, then rerun."
 fi
-git -C "$WDA_DIR" fetch --depth 1 origin "$WDA_REF" \
-    || die "could not fetch pinned WDA commit $WDA_REF ($WDA_REF_LABEL)"
+# Already holding the pinned commit (every reconnect after the first): no
+# network round trip, and a reconnect keeps working offline.
+if [ "$(git -C "$WDA_DIR" rev-parse --verify --quiet "$WDA_REF^{commit}" 2>/dev/null)" != "$WDA_REF" ]; then
+    git -C "$WDA_DIR" fetch --depth 1 origin "$WDA_REF" \
+        || die "could not fetch pinned WDA commit $WDA_REF ($WDA_REF_LABEL)"
+fi
 FETCHED_WDA_COMMIT="$(git -C "$WDA_DIR" rev-parse --verify "$WDA_REF^{commit}" 2>/dev/null || true)"
 [ "$FETCHED_WDA_COMMIT" = "$WDA_REF" ] \
     || die "fetched WDA object did not resolve to the required commit $WDA_REF"
@@ -2960,7 +2967,7 @@ print(paths.pop())
 # xcodebuild per reconnect that the phone never needed.
 #
 # The record is keyed on everything that changes the product: WDA commit,
-# bundle id, team, target device, the icon source + its mtime, and the Xcode /
+# bundle id, team, target device, the icon source + its content hash, and the Xcode /
 # SDK / deployment target it was built with. Any
 # mismatch, a missing file, or a product that no longer validates falls
 # through to the normal build. A launch that names a failure of the product
@@ -2969,14 +2976,18 @@ WDA_RUNNER_CACHE="$STATE_DIR/wda-runner-product.json"
 WDA_RUNNER_FROM_CACHE=0
 
 _runner_cache_key() {
-    local icon_mtime=0
+    # The icon's content, not its mtime: every app install rewrites the same
+    # icon file, and keying on mtime made the first connect after each upgrade
+    # (nightly auto-update included) rebuild WDA from scratch.
+    local icon_hash=0
     if [ -n "${RUNNER_ICON_SOURCE:-}" ] && [ -f "$RUNNER_ICON_SOURCE" ]; then
-        icon_mtime="$(stat -f %m "$RUNNER_ICON_SOURCE" 2>/dev/null || echo 0)"
+        icon_hash="$(shasum -a 256 "$RUNNER_ICON_SOURCE" 2>/dev/null | cut -d' ' -f1)"
+        [ -n "$icon_hash" ] || icon_hash="mtime:$(stat -f %m "$RUNNER_ICON_SOURCE" 2>/dev/null || echo 0)"
     fi
     # The Xcode, SDK and deployment target override are part of the product:
     # a product (and its .xctestrun) from before an Xcode upgrade is stale.
-    printf 'v1|%s|%s|%s|%s|%s|%s|%s|%s|%s' "${WDA_COMMIT:-}" "${WDA_BUNDLE_ID:-}" "${TEAM_ID:-}" \
-        "${WDA_UDID:-}" "${RUNNER_ICON_SOURCE:-}" "$icon_mtime" "${XCODE_VERSION:-}" \
+    printf 'v2|%s|%s|%s|%s|%s|%s|%s|%s|%s' "${WDA_COMMIT:-}" "${WDA_BUNDLE_ID:-}" "${TEAM_ID:-}" \
+        "${WDA_UDID:-}" "${RUNNER_ICON_SOURCE:-}" "$icon_hash" "${XCODE_VERSION:-}" \
         "${WDA_IOS_SDK_VERSION:-}" "${WDA_DEPLOYMENT_TARGET_OVERRIDE:-}"
 }
 
