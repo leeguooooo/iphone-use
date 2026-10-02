@@ -93,28 +93,50 @@ final class RemoteModel {
     }
 
     /// Connect from a scanned QR code: no address or password to type.
+    /// The current connection, address and saved credentials stay untouched
+    /// until the new daemon has accepted the code and answered a status read.
     func pair(_ link: PairLink) async {
-        disconnect()
-        address = link.base.absoluteString
-        phase = .connecting
+        let wasConnected = phase == .connected
+        if !wasConnected { phase = .connecting }
         let client = DaemonClient(base: link.base)
         do {
             let token = try await client.pair(code: link.code)
-            Keychain.save(password: token, for: Self.deviceAccount(address))
-            try await finishConnecting(client)
+            let newAddress = link.base.absoluteString
+            try await finishConnecting(client, replacingWith: newAddress)
+            Keychain.save(password: token, for: Self.deviceAccount(newAddress))
         } catch {
-            phase = .failed(error.localizedDescription)
+            if wasConnected {
+                show("扫码连接失败：\(error.localizedDescription)")
+            } else {
+                phase = .failed(error.localizedDescription)
+            }
         }
     }
 
-    /// `iphoneuse://pair?…` from the landing page the system camera opened.
+    /// A pairing link opened from outside the app (the camera's landing page,
+    /// or any other app). It waits for the person to confirm, so a stray link
+    /// cannot silently move the app to another server.
+    var pendingLink: PairLink?
+
     func handle(url: URL) {
         guard let link = PairLink.parse(url.absoluteString) else { return }
+        pendingLink = link
+    }
+
+    func confirmPendingLink() {
+        guard let link = pendingLink else { return }
+        pendingLink = nil
         Task { await pair(link) }
     }
 
-    private func finishConnecting(_ client: DaemonClient) async throws {
+    /// Commit a verified client. With `replacingWith`, the old session is
+    /// dropped and the address switched only now that the new one works.
+    private func finishConnecting(_ client: DaemonClient, replacingWith newAddress: String? = nil) async throws {
         let status = try await client.status()
+        if let newAddress {
+            disconnect()
+            address = newAddress
+        }
         UserDefaults.standard.set(address, forKey: "address")
         self.client = client
         self.status = status
@@ -205,7 +227,13 @@ final class RemoteModel {
             guard token != nil || password != nil else { return false }
             do {
                 if let token {
-                    try await client.renew(deviceToken: token)
+                    do {
+                        try await client.renew(deviceToken: token)
+                    } catch DaemonError.pairingRevoked where password != nil {
+                        // The pairing died (password changed?); the saved password may still work.
+                        Keychain.delete(for: Self.deviceAccount(self.address))
+                        try await client.login(password: password!)
+                    }
                 } else if let password {
                     try await client.login(password: password)
                 }

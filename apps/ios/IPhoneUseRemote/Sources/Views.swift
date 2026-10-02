@@ -10,6 +10,18 @@ struct IPhoneUseRemoteApp: App {
                 .preferredColorScheme(.dark)
                 // The landing page a scanned QR opens hands off here.
                 .onOpenURL { model.handle(url: $0) }
+                .alert(
+                    "连接到这台 Mac？",
+                    isPresented: Binding(
+                        get: { model.pendingLink != nil },
+                        set: { if !$0 { model.pendingLink = nil } }),
+                    presenting: model.pendingLink
+                ) { _ in
+                    Button("连接") { model.confirmPendingLink() }
+                    Button("取消", role: .cancel) { model.pendingLink = nil }
+                } message: { link in
+                    Text("\(link.base.host() ?? link.base.absoluteString)\n只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
+                }
         }
     }
 }
