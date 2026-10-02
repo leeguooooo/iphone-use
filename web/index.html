@@ -669,10 +669,10 @@
     #overlayActions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
     #takeOverBtn {
       margin-top: 14px; padding: .5rem 1.3rem; border-radius: 99px; cursor: pointer;
-      border: 1px solid rgba(34,197,94,.55); background: rgba(34,197,94,.18);
-      color: #bbf7d0; font-size: 13px; pointer-events: auto; transition: background .15s;
+      border: 1px solid rgba(148,163,184,.45); background: rgba(148,163,184,.12);
+      color: #cbd5e1; font-size: 13px; pointer-events: auto; transition: background .15s;
     }
-    #takeOverBtn:hover { background: rgba(34,197,94,.32); }
+    #takeOverBtn:hover { background: rgba(148,163,184,.24); }
     #takeOverBtn:disabled { opacity: .5; cursor: default; }
     #setupHelp {
       margin-top: 8px;
@@ -793,8 +793,8 @@
         </div>
         <a id="setupGuideLink" href="/setup" hidden>打开连接向导</a>
         <div id="overlayActions">
-          <button id="takeOverBtn" type="button" hidden title="停止 agent 控制，在这个页面里通过 iPhone 镜像操作手机（手机保持锁屏，不用输密码）">我来操作</button>
           <button id="reconnectBtn" type="button">重新连接</button>
+          <button id="takeOverBtn" type="button" hidden title="通过 Mac 上的 iPhone 镜像操作（手机保持锁屏）。只适合当前没人在用的 Mac：有人在用时 macOS 不让镜像切到前台，点击送不到手机">镜像画面</button>
         </div>
       </div>
     </div>
@@ -1053,9 +1053,11 @@ function syncReconnectControl(kind = overlayState) {
     kind === 'unconfigured' ||
     kind === 'external' ||
     kind === 'setup-blocked';
-  /* A parked phone has two owners to go to. A person should not take the
-     agent's road back in (WDA wants the phone unlocked and asks for the
-     passcode); offer them the Mirroring view instead. */
+  /* A parked phone offers two roads. 连接手机 (WDA) works for a person and an
+     agent alike and never touches the Mac's front or pointer — the default,
+     because the Mac is usually someone's working machine. 镜像画面 (the
+     Mirroring view) keeps the phone locked but needs a Mac nobody is using:
+     macOS will not hand Mirroring the front while someone is. */
   takeOverBtn.hidden = !(
     kind === 'released' &&
     backendType === 'direct' &&
@@ -1065,7 +1067,7 @@ function syncReconnectControl(kind = overlayState) {
   takeOverBtn.disabled = reconnectActionBusy;
   reconnectBtn.disabled = reconnectActionBusy;
   if (!reconnectActionBusy && !takeOverBtn.hidden) {
-    setTextIfChanged(reconnectBtn, '交给 agent');
+    setTextIfChanged(reconnectBtn, '连接手机');
   } else if (!reconnectActionBusy) {
     setTextIfChanged(reconnectBtn, kind === 'status-error'
       ? '重新检查'
@@ -1457,7 +1459,7 @@ function showOverlay(kind) {
     setTextIfChanged(olTitle, handedOver ? '手机已交还给你' : '设备空闲中');
     setTextIfChanged(olSub, handedOver
       ? humanViewText(backendStatus)
-      : '一段时间没人操作，设备连接已暂停。自己用点「我来操作」（镜像画面，手机保持锁屏，不用输密码）；让 agent 继续点「交给 agent」');
+      : '一段时间没人操作，设备连接已暂停。点「连接手机」继续（手机需解锁亮屏，人和 agent 都能用，不占用 Mac）；「镜像画面」只适合当前没人在用的 Mac');
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'releasing') {
     setTextIfChanged(olTitle, '正在释放设备');
@@ -4037,11 +4039,11 @@ function explainHumanViewInput(s) {
   const local = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(location.hostname);
   if (local && !humanViewLocalHintShown) {
     humanViewLocalHintShown = true;
-    toast('你就在这台 Mac 上：直接用 Mac 上的 iPhone 镜像窗口操作。浏览器操作要在另一台设备上打开这个页面');
+    toast('你就在这台 Mac 上：直接用 Mac 上的 iPhone 镜像窗口操作；想在浏览器里操作，点底部「交给 agent」切到直连');
   }
   if (s.human_view_input_blocked === true && Date.now() - humanViewBlockedToastAt > 15000) {
     humanViewBlockedToastAt = Date.now();
-    toast('操作没送到手机：Mac 上有人正在用别的应用，iPhone 镜像切不到前台。请在 Mac 前直接用镜像窗口，或换一台设备打开这个页面');
+    toast('操作没送到手机：Mac 正在被使用，iPhone 镜像切不到前台。点底部「交给 agent」切到直连（手机需解锁），就能在这里继续操作');
   }
 }
 
