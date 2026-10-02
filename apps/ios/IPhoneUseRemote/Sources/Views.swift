@@ -40,7 +40,7 @@ struct ConnectView: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("http://192.168.1.11:45432", text: $model.address)
+                    TextField("http://192.168.1.11:44321", text: $model.address)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()

@@ -180,10 +180,12 @@ impl VideoHub {
             *running = true;
             let hub = Arc::clone(self);
             tokio::spawn(async move {
-                if let Err(error) = Arc::clone(&hub).run().await {
+                // `run` clears `running` itself, under the lock, at the moment
+                // it decides to stop; clearing it here could clobber a pipeline
+                // a newer subscriber already started.
+                if let Err(error) = hub.run().await {
                     tracing::warn!("h264 pipeline stopped: {error:#}");
                 }
-                *hub.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
             });
         }
         Subscription {
@@ -202,6 +204,19 @@ impl VideoHub {
     }
 
     async fn run(self: Arc<Self>) -> anyhow::Result<()> {
+        let result = self.pipeline().await;
+        if result.is_err() {
+            // Failed before it could decide to stop on its own.
+            self.mark_stopped();
+        }
+        result
+    }
+
+    fn mark_stopped(&self) {
+        *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+
+    async fn pipeline(&self) -> anyhow::Result<()> {
         use futures_util::StreamExt;
 
         // Latest-wins handoff to the encoder thread: a slow encode drops stale
@@ -225,18 +240,30 @@ impl VideoHub {
             .build()?;
         let mut idle_since: Option<std::time::Instant> = None;
         'outer: loop {
-            let response = match client.get(&self.mjpeg_url).send().await {
-                Ok(response) if response.status().is_success() => response,
-                Ok(response) => {
-                    tracing::debug!("h264: MJPEG upstream answered {}", response.status());
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    if self.should_stop(&mut idle_since) {
-                        break;
+            if encoder_thread.is_finished() {
+                // The encoder could not start (or died): stop, so the next
+                // subscriber starts a fresh pipeline instead of feeding a
+                // thread that is gone.
+                self.mark_stopped();
+                anyhow::bail!("the H.264 encoder stopped");
+            }
+            // A relay that accepts the connection but never answers must not
+            // hold the pipeline past its last viewer.
+            let sent =
+                tokio::time::timeout(Duration::from_secs(5), client.get(&self.mjpeg_url).send())
+                    .await;
+            let response = match sent {
+                Ok(Ok(response)) if response.status().is_success() => response,
+                outcome => {
+                    match outcome {
+                        Ok(Ok(response)) => {
+                            tracing::debug!("h264: MJPEG upstream answered {}", response.status())
+                        }
+                        Ok(Err(error)) => {
+                            tracing::debug!("h264: MJPEG upstream unreachable: {error:#}")
+                        }
+                        Err(_) => tracing::debug!("h264: MJPEG upstream sent no headers in 5 s"),
                     }
-                    continue;
-                }
-                Err(error) => {
-                    tracing::debug!("h264: MJPEG upstream unreachable: {error:#}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     if self.should_stop(&mut idle_since) {
                         break;
@@ -250,6 +277,9 @@ impl VideoHub {
                 let next = tokio::time::timeout(Duration::from_secs(1), body.next()).await;
                 if self.should_stop(&mut idle_since) {
                     break 'outer;
+                }
+                if encoder_thread.is_finished() {
+                    break; // the check at the top of the outer loop stops us
                 }
                 let chunk = match next {
                     Ok(Some(Ok(chunk))) => chunk,
@@ -269,14 +299,27 @@ impl VideoHub {
         Ok(())
     }
 
-    /// True once nobody has watched for [`IDLE_LINGER`].
+    /// True once nobody has watched for [`IDLE_LINGER`] — and then the
+    /// pipeline is already marked stopped. The decision and the mark happen
+    /// under the `running` lock, which `subscribe` takes after counting
+    /// itself: a newcomer either keeps this pipeline alive or finds it
+    /// stopped and starts its own, never attaches to one that is leaving.
     fn should_stop(&self, idle_since: &mut Option<std::time::Instant>) -> bool {
         if self.subscribers.load(Ordering::Acquire) > 0 {
             *idle_since = None;
             return false;
         }
         let since = idle_since.get_or_insert_with(std::time::Instant::now);
-        since.elapsed() >= IDLE_LINGER
+        if since.elapsed() < IDLE_LINGER {
+            return false;
+        }
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        if self.subscribers.load(Ordering::Acquire) > 0 {
+            *idle_since = None;
+            return false;
+        }
+        *running = false;
+        true
     }
 }
 
@@ -798,6 +841,34 @@ mod tests {
 
     const JPEG_A: &[u8] = &[0xFF, 0xD8, 1, 2, 3, 0xFF, 0x00, 4, 0xFF, 0xD9];
     const JPEG_B: &[u8] = &[0xFF, 0xD8, 9, 8, 0xFF, 0xD9];
+
+    #[test]
+    fn stopping_is_decided_and_marked_under_the_running_lock() {
+        let hub = VideoHub::new("http://127.0.0.1:1".into());
+        *hub.running.lock().unwrap() = true;
+        let long_ago = std::time::Instant::now() - IDLE_LINGER - Duration::from_secs(1);
+
+        // A viewer counted before the decision keeps the pipeline running
+        // and resets the idle clock.
+        hub.subscribers.store(1, Ordering::Release);
+        let mut idle = Some(long_ago);
+        assert!(!hub.should_stop(&mut idle));
+        assert!(idle.is_none());
+        assert!(*hub.running.lock().unwrap());
+
+        // Nobody watching past the linger: stop, and the mark is already
+        // down when should_stop returns, so the next subscribe starts afresh.
+        hub.subscribers.store(0, Ordering::Release);
+        let mut idle = Some(long_ago);
+        assert!(hub.should_stop(&mut idle));
+        assert!(!*hub.running.lock().unwrap());
+
+        // Inside the linger nothing changes.
+        *hub.running.lock().unwrap() = true;
+        let mut idle = None;
+        assert!(!hub.should_stop(&mut idle));
+        assert!(*hub.running.lock().unwrap());
+    }
 
     #[test]
     fn content_length_parts_split_exactly_even_across_chunks() {

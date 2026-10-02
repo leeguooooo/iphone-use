@@ -28,6 +28,7 @@ final class RemoteModel {
     private weak var video: VideoDisplayView?
     private var statusTask: Task<Void, Never>?
     private var pendingActions = 0
+    private var reloginTask: Task<Bool, Never>?
 
     init() {
         #if DEBUG
@@ -114,6 +115,9 @@ final class RemoteModel {
                 onState: { [weak self] ok, why in
                     self?.videoMessage = why
                     if !ok { self?.videoLive = false }
+                    if why?.contains("401") == true {
+                        Task { _ = await self?.relogin() }
+                    }
                 })
             self.reader = reader
             video?.reset()
@@ -130,13 +134,43 @@ final class RemoteModel {
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let client = self.client else { return }
-                if let status = try? await client.status() {
-                    self.status = status
+                do {
+                    self.status = try await client.status()
                     self.updateStream()
-                }
+                } catch DaemonError.sessionExpired {
+                    _ = await self.relogin()
+                } catch {}
                 try? await Task.sleep(for: .seconds(self.status?.reconnecting == true ? 1 : 2))
             }
         }
+    }
+
+    /// The daemon's session cookie expires (8 h by default). Log in again
+    /// with the saved password; every caller shares one attempt.
+    private func relogin() async -> Bool {
+        if let running = reloginTask { return await running.value }
+        let task = Task { @MainActor [weak self] () -> Bool in
+            guard let self, let client = self.client,
+                  let password = Keychain.password(for: self.address) else { return false }
+            do {
+                try await client.login(password: password)
+                // The stream still carries the old cookie: restart it.
+                self.reader?.stop()
+                self.reader = nil
+                self.updateStream()
+                return true
+            } catch {
+                self.phase = .failed("登录已过期，请重新输入密码（\(error.localizedDescription)）")
+                self.statusTask?.cancel()
+                self.reader?.stop()
+                self.reader = nil
+                return false
+            }
+        }
+        reloginTask = task
+        let ok = await task.value
+        reloginTask = nil
+        return ok
     }
 
     // MARK: control
@@ -152,6 +186,9 @@ final class RemoteModel {
             defer { pendingActions -= 1 }
             do {
                 try await client.control(action)
+            } catch DaemonError.sessionExpired {
+                // Do not replay the gesture: the screen may have moved on.
+                if await relogin() { show("登录已刷新，请再操作一次") }
             } catch {
                 show("没有送达：\(error.localizedDescription)")
                 if let status = try? await client.status() {

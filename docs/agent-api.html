@@ -326,8 +326,8 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 </p>
 <p class="muted">
   The MCP <code>phone_reconnect</code> tool is a constrained wrapper around
-  <code>{"mode":"agent"}</code>. It takes no arguments, never accepts a UDID, changes
-  device. For managed WDA it waits up to roughly 120
+  <code>{"mode":"agent"}</code>. It takes no arguments, never accepts a UDID, and never
+  changes the configured device. For managed WDA it waits up to roughly 120
   seconds for the persisted canonical target; an externally managed WDA endpoint returns
   an operator-owned recovery error instead.
 </p>

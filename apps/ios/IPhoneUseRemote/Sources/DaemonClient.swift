@@ -73,14 +73,16 @@ enum PhoneAction: Sendable {
 enum DaemonError: LocalizedError {
     case badAddress
     case wrongPassword
+    case sessionExpired
     case lockedOut
     case http(Int, String)
     case unreachable(String)
 
     var errorDescription: String? {
         switch self {
-        case .badAddress: return "地址格式不对，应该像 http://192.168.1.11:45432"
+        case .badAddress: return "地址格式不对，应该像 http://192.168.1.11:44321"
         case .wrongPassword: return "密码不对"
+        case .sessionExpired: return "登录已过期"
         case .lockedOut: return "密码错误次数太多，30 秒后再试"
         case let .http(code, body): return "服务返回 \(code)：\(body.prefix(160))"
         case let .unreachable(why): return "连不上服务：\(why)"
@@ -149,7 +151,7 @@ final class DaemonClient: @unchecked Sendable {
     func status() async throws -> PhoneStatus {
         let (data, response) = try await send(URLRequest(url: base.appending(path: "agent/status")))
         guard response.statusCode == 200 else {
-            if response.statusCode == 401 { throw DaemonError.wrongPassword }
+            if response.statusCode == 401 { throw DaemonError.sessionExpired }
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
         }
         return try JSONDecoder().decode(PhoneStatus.self, from: data)
@@ -171,6 +173,7 @@ final class DaemonClient: @unchecked Sendable {
         request.timeoutInterval = 15
         let (data, response) = try await send(request)
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        if response.statusCode == 401 { throw DaemonError.sessionExpired }
         guard (200..<300).contains(response.statusCode) else {
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
         }
@@ -188,6 +191,7 @@ final class DaemonClient: @unchecked Sendable {
         request.httpBody = try JSONSerialization.data(withJSONObject: ["mode": mode])
         request.timeoutInterval = 60
         let (data, response) = try await send(request)
+        if response.statusCode == 401 { throw DaemonError.sessionExpired }
         guard (200..<300).contains(response.statusCode) else {
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
         }
