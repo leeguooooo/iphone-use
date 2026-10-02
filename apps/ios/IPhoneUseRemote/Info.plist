@@ -16,6 +16,17 @@
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.leeguoo.iphone-use.remote.pair</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>iphoneuse</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
@@ -31,6 +42,8 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>扫描 Mac 上 iphone-use 页面里的二维码，免输地址和密码直接连接。</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>连接你 Mac 上的 iphone-use 服务，远程查看和操作手机。</string>
 	<key>UIApplicationSceneManifest</key>

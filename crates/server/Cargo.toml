@@ -52,6 +52,9 @@ sha2 = "0.10"
 # viewer's bandwidth ~10x versus forwarding the JPEGs.
 zune-jpeg = "0.4"
 
+# Scan-to-connect: the pairing page shows the one-time link as a QR code.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = "0.3.2"
 objc2-core-media = "0.3.2"

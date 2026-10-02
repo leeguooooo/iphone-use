@@ -32,8 +32,14 @@ final class RemoteModel {
 
     init() {
         #if DEBUG
-        // UI checks on the simulator: `-address <url> -password <pw>`.
+        // UI checks on the simulator: `-address <url> -password <pw>`, or
+        // `-pair <QR text>` standing in for a scan (the simulator has no camera).
         let defaults = UserDefaults.standard
+        if let scanned = defaults.string(forKey: "pair"), let link = PairLink.parse(scanned) {
+            phase = .connecting
+            Task { await pair(link) }
+            return
+        }
         if let address = defaults.string(forKey: "address"),
            let password = defaults.string(forKey: "password"), !password.isEmpty {
             self.address = address
@@ -42,38 +48,79 @@ final class RemoteModel {
             return
         }
         #endif
-        if !address.isEmpty, Keychain.password(for: address) != nil {
+        if !address.isEmpty, deviceToken != nil || Keychain.password(for: address) != nil {
             phase = .connecting
             Task { await connect(password: nil) }
         }
     }
 
-    var savedPassword: String? { Keychain.password(for: address) }
+    /// A scanned pairing's token for the saved address, if any.
+    private var deviceToken: String? { Keychain.password(for: Self.deviceAccount(address)) }
 
+    private static func deviceAccount(_ address: String) -> String { "device:" + address }
+
+    /// Connect with a typed password, or (nil) with what was saved: the
+    /// paired device token first, then the password.
     func connect(password: String?) async {
         guard let base = DaemonClient.parse(address: address) else {
             phase = .failed(DaemonError.badAddress.localizedDescription)
             return
         }
-        guard let password = password ?? Keychain.password(for: address), !password.isEmpty else {
+        let token = password == nil ? deviceToken : nil
+        let password = password ?? Keychain.password(for: address)
+        guard token != nil || password?.isEmpty == false else {
             phase = .setup
             return
         }
         phase = .connecting
         let client = DaemonClient(base: base)
         do {
-            try await client.login(password: password)
-            let status = try await client.status()
-            UserDefaults.standard.set(address, forKey: "address")
-            Keychain.save(password: password, for: address)
-            self.client = client
-            self.status = status
-            phase = .connected
-            startPolling()
-            updateStream()
+            if let token {
+                try await client.renew(deviceToken: token)
+            } else if let password {
+                try await client.login(password: password)
+                Keychain.save(password: password, for: address)
+            }
+            try await finishConnecting(client)
+        } catch DaemonError.pairingRevoked where Keychain.password(for: address) != nil {
+            // The pairing died (password changed?); fall back to the password.
+            Keychain.delete(for: Self.deviceAccount(address))
+            await connect(password: nil)
+        } catch {
+            if case DaemonError.pairingRevoked = error { Keychain.delete(for: Self.deviceAccount(address)) }
+            phase = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Connect from a scanned QR code: no address or password to type.
+    func pair(_ link: PairLink) async {
+        disconnect()
+        address = link.base.absoluteString
+        phase = .connecting
+        let client = DaemonClient(base: link.base)
+        do {
+            let token = try await client.pair(code: link.code)
+            Keychain.save(password: token, for: Self.deviceAccount(address))
+            try await finishConnecting(client)
         } catch {
             phase = .failed(error.localizedDescription)
         }
+    }
+
+    /// `iphoneuse://pair?…` from the landing page the system camera opened.
+    func handle(url: URL) {
+        guard let link = PairLink.parse(url.absoluteString) else { return }
+        Task { await pair(link) }
+    }
+
+    private func finishConnecting(_ client: DaemonClient) async throws {
+        let status = try await client.status()
+        UserDefaults.standard.set(address, forKey: "address")
+        self.client = client
+        self.status = status
+        phase = .connected
+        startPolling()
+        updateStream()
     }
 
     func disconnect() {
@@ -88,6 +135,7 @@ final class RemoteModel {
 
     func forget() {
         Keychain.delete(for: address)
+        Keychain.delete(for: Self.deviceAccount(address))
         disconnect()
     }
 
@@ -145,22 +193,32 @@ final class RemoteModel {
         }
     }
 
-    /// The daemon's session cookie expires (8 h by default). Log in again
-    /// with the saved password; every caller shares one attempt.
+    /// The daemon's session cookie expires (8 h by default). Renew it with
+    /// the paired device token, or log in again with the saved password;
+    /// every caller shares one attempt.
     private func relogin() async -> Bool {
         if let running = reloginTask { return await running.value }
         let task = Task { @MainActor [weak self] () -> Bool in
-            guard let self, let client = self.client,
-                  let password = Keychain.password(for: self.address) else { return false }
+            guard let self, let client = self.client else { return false }
+            let token = self.deviceToken
+            let password = Keychain.password(for: self.address)
+            guard token != nil || password != nil else { return false }
             do {
-                try await client.login(password: password)
+                if let token {
+                    try await client.renew(deviceToken: token)
+                } else if let password {
+                    try await client.login(password: password)
+                }
                 // The stream still carries the old cookie: restart it.
                 self.reader?.stop()
                 self.reader = nil
                 self.updateStream()
                 return true
             } catch {
-                self.phase = .failed("登录已过期，请重新输入密码（\(error.localizedDescription)）")
+                if case DaemonError.pairingRevoked = error {
+                    Keychain.delete(for: Self.deviceAccount(self.address))
+                }
+                self.phase = .failed("登录已过期，请重新扫码或输入密码（\(error.localizedDescription)）")
                 self.statusTask?.cancel()
                 self.reader?.stop()
                 self.reader = nil
@@ -245,7 +303,8 @@ final class RemoteModel {
     }
 }
 
-/// The control password lives in the Keychain, keyed by server address.
+/// The control password lives in the Keychain, keyed by server address; a
+/// paired device token under `device:<address>`.
 enum Keychain {
     private static let service = "com.leeguoo.iphone-use.remote"
 

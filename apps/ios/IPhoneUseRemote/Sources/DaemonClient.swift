@@ -74,6 +74,8 @@ enum DaemonError: LocalizedError {
     case badAddress
     case wrongPassword
     case sessionExpired
+    case pairingCodeInvalid
+    case pairingRevoked
     case lockedOut
     case http(Int, String)
     case unreachable(String)
@@ -83,6 +85,8 @@ enum DaemonError: LocalizedError {
         case .badAddress: return "地址格式不对，应该像 http://192.168.1.11:44321"
         case .wrongPassword: return "密码不对"
         case .sessionExpired: return "登录已过期"
+        case .pairingCodeInvalid: return "二维码已用过或已过期，请在 Mac 上点「换一个」再扫"
+        case .pairingRevoked: return "配对已失效（可能改过控制密码），请重新扫码"
         case .lockedOut: return "密码错误次数太多，30 秒后再试"
         case let .http(code, body): return "服务返回 \(code)：\(body.prefix(160))"
         case let .unreachable(why): return "连不上服务：\(why)"
@@ -133,12 +137,7 @@ final class DaemonClient: @unchecked Sendable {
         let (data, response) = try await send(request, followRedirects: false)
         switch response.statusCode {
         case 303, 302, 200:
-            let header = response.value(forHTTPHeaderField: "Set-Cookie") ?? ""
-            guard let pair = header.split(separator: ";").first.map(String.init),
-                  pair.hasPrefix("phone_session=") else {
-                throw DaemonError.http(response.statusCode, "登录没有返回会话")
-            }
-            cookie = pair
+            try takeSessionCookie(from: response)
         case 401:
             throw DaemonError.wrongPassword
         case 429:
@@ -146,6 +145,53 @@ final class DaemonClient: @unchecked Sendable {
         default:
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
         }
+    }
+
+    /// Trade a scanned one-time code for a session. Returns the long-lived
+    /// device token that renews the session later without the password.
+    func pair(code: String) async throws -> String {
+        let (data, response) = try await postPair(["code": code])
+        try takeSessionCookie(from: response)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["device_token"] as? String else {
+            throw DaemonError.http(response.statusCode, "配对没有返回设备令牌")
+        }
+        return token
+    }
+
+    /// Fresh session from a paired device's token.
+    func renew(deviceToken: String) async throws {
+        let (_, response) = try await postPair(["device_token": deviceToken])
+        try takeSessionCookie(from: response)
+    }
+
+    private func postPair(_ body: [String: String]) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: base.appending(path: "pair"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await send(request)
+        switch response.statusCode {
+        case 200:
+            return (data, response)
+        case 401:
+            throw body["code"] != nil ? DaemonError.pairingCodeInvalid : DaemonError.pairingRevoked
+        case 429:
+            throw DaemonError.lockedOut
+        case 404:
+            throw DaemonError.http(404, "Mac 上的 iphone-use 版本太旧，不支持扫码连接，请先升级")
+        default:
+            throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
+        }
+    }
+
+    private func takeSessionCookie(from response: HTTPURLResponse) throws {
+        let header = response.value(forHTTPHeaderField: "Set-Cookie") ?? ""
+        guard let pair = header.split(separator: ";").first.map(String.init),
+              pair.hasPrefix("phone_session=") else {
+            throw DaemonError.http(response.statusCode, "登录没有返回会话")
+        }
+        cookie = pair
     }
 
     func status() async throws -> PhoneStatus {

@@ -2,6 +2,7 @@ pub mod apps;
 pub mod config;
 pub mod http;
 pub mod instance;
+pub mod pairing;
 pub mod protocol;
 pub mod runtime_dir;
 pub mod update;

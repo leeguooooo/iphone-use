@@ -11,9 +11,13 @@ xcodegen generate          # writes IPhoneUseRemote.xcodeproj from project.yml
 open IPhoneUseRemote.xcodeproj
 ```
 
-Debug builds accept `-address <url> -password <pw>` launch arguments, so a simulator can
-connect without typing: `xcrun simctl launch booted com.leeguoo.iphone-use.remote -address
-http://127.0.0.1:44321 -password …`.
+Connecting: scan the QR code from the web page's **Scan** button (in-app camera, or the system
+camera → landing page → `iphoneuse://pair?u=…&c=…`). The app keeps the returned device token in
+the Keychain and renews its session with it; typing the address and password still works.
+
+Debug builds accept `-address <url> -password <pw>` launch arguments, or `-pair <QR text>` in
+place of a scan (the simulator has no camera): `xcrun simctl launch booted
+com.leeguoo.iphone-use.remote -pair 'http://127.0.0.1:44321/pair?c=…'`.
 
 The phone being controlled must stay unlocked: iOS does not let automation type the
 lock-screen passcode.

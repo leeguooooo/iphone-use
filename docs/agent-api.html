@@ -134,6 +134,8 @@
   <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/inbox</td><td>Legacy Shortcuts-bridge result queue. GET is always a read-only peek; POST appends and requires the mutation header.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/inbox/drain</td><td>Atomically return and clear the inbox; requires bearer auth and the mutation header.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/control</td><td>Browser-only direct control: session cookie + mutation header, with an explicit HTTP acknowledgement.</td></tr>
+  <tr><td><span class="method post">POST</span></td><td class="ep">/pair/new</td><td>Signed-in browser: one-time scan-to-connect code + QR (SVG).</td></tr>
+  <tr><td><span class="method post">POST</span></td><td class="ep">/pair</td><td>Trade a scanned code (or a paired device token) for a session; no password.</td></tr>
 </table>
 
 <h3><span class="method get">GET</span> <span class="ep">/agent/status</span></h3>
@@ -647,6 +649,27 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   <code>[u32 BE length of the rest][u8 flags][u64 BE pts µs][Annex-B access unit]</code>,
   flags bit 0 = keyframe. Keyframes carry SPS and PPS in-band, so a client can derive the
   codec string (<code>avc1.</code> + SPS bytes 1–3 in hex) and start at any keyframe.
+</p>
+
+<h3><span class="method post">POST</span> <span class="ep">/pair/new</span> · <span class="method get">GET</span>/<span class="method post">POST</span> <span class="ep">/pair</span></h3>
+<p>
+  Scan-to-connect. A signed-in browser (session cookie + <code>X-Phone-Control: 1</code>)
+  calls <code>POST /pair/new</code> and gets <code>{ok, url, host, hosts, expires_in_secs,
+  svg}</code>: <code>url</code> is <code>http://&lt;host&gt;:&lt;port&gt;/pair?c=&lt;code&gt;</code>
+  and <code>svg</code> its QR code. The host is the address the browser used, or this Mac's
+  best LAN address when it was opened on <code>127.0.0.1</code>; <code>?host=</code> picks
+  another of <code>hosts</code>. A loopback-only daemon answers <code>409 loopback_only</code>.
+  Codes work once, within 5 minutes.
+</p>
+<p>
+  <code>GET /pair?c=</code> is the landing page the system camera opens; it does not consume
+  the code and offers <code>iphoneuse://pair?u=&lt;base&gt;&amp;c=&lt;code&gt;</code> for the
+  app or a form post for browser control. <code>POST /pair</code> trades the code: as a form
+  (<code>c=</code>) it sets the session cookie and redirects to <code>/phone</code>; as JSON
+  <code>{"code"}</code> it sets the cookie and returns a <code>device_token</code> (180 days);
+  JSON <code>{"device_token"}</code> returns a fresh cookie. Device tokens are signed with a key
+  derived from the daemon secret and the control password, so changing the password revokes
+  them. Failures count toward the login lockout.
 </p>
 
 <h3><span class="method get">GET</span> <span class="ep">/agent/screenshot</span></h3>

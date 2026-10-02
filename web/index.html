@@ -234,6 +234,26 @@
       width: 22px; height: 22px; border: 1px solid currentColor;
       border-radius: 6px; font: 700 9px/1 var(--mono); letter-spacing: -.03em;
     }
+    #pairDialog {
+      width: min(92vw, 340px); box-sizing: border-box; padding: 20px;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--line); border-radius: 16px;
+    }
+    #pairDialog::backdrop { background: rgba(0,0,0,.6); }
+    #pairDialog h2 { margin: 0 0 6px; font-size: 17px; }
+    #pairDialog .pair-hint { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    #pairQr { background: #fff; border-radius: 12px; padding: 8px; aspect-ratio: 1; display: grid; place-items: center; }
+    #pairQr svg { width: 100%; height: auto; display: block; }
+    #pairQr.expired { opacity: .25; }
+    #pairStatus { min-height: 18px; margin: 8px 0 4px; font-size: 12px; color: var(--muted); text-align: center; }
+    #pairStatus.err { color: var(--danger); }
+    .pair-host { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+    .pair-host select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 13px; }
+    #pairUrl { display: block; font-size: 11px; color: var(--muted); word-break: break-all; margin-bottom: 14px; }
+    .pair-actions { display: flex; gap: 8px; }
+    .pair-actions button { flex: 1; padding: 10px; border-radius: 10px; font-size: 14px; font-weight: 600;
+      background: transparent; color: var(--text); border: 1px solid var(--line); cursor: pointer; font-family: inherit; }
+    .pair-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     #elementPanel {
       position: fixed; left: 0; right: 0; z-index: 42;
       bottom: calc(var(--tb-h) + env(safe-area-inset-bottom) + 8px);
@@ -789,6 +809,11 @@
     </svg>
     <span class="lbl">流程</span>
   </button>
+  <button id="btnPair" class="tbtn" title="手机扫码连接：用 iPhone 扫码，免输地址和密码" type="button"
+          aria-controls="pairDialog">
+    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 14v0M14 21h3M20 17v4"/></svg>
+    <span class="lbl">扫码</span>
+  </button>
   <button id="btnHandoff" class="tbtn" title="交还手机给持有人：停止远程控制，手机留给拿着它的人用" type="button">
     <svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/><path d="M2 12h3M19 12h3"/></svg>
     <span class="lbl">交还</span>
@@ -803,6 +828,21 @@
     <span class="lbl">全屏</span>
   </button>
 </nav>
+
+<dialog id="pairDialog" aria-labelledby="pairTitle">
+  <h2 id="pairTitle">手机扫码连接</h2>
+  <p class="pair-hint">用 iPhone 相机或 iPhone Use App 扫码，不用输地址和密码。二维码只能用一次，5 分钟内有效。</p>
+  <div id="pairQr" role="img" aria-label="配对二维码"></div>
+  <div id="pairStatus" role="status" aria-live="polite"></div>
+  <label id="pairHostRow" class="pair-host" hidden>手机连这个地址
+    <select id="pairHost"></select>
+  </label>
+  <code id="pairUrl"></code>
+  <div class="pair-actions">
+    <button id="pairRefresh" type="button">换一个</button>
+    <button id="pairClose" class="primary" type="button">关闭</button>
+  </div>
+</dialog>
 
 <!-- restore handle when immersive -->
 <button id="grabber" type="button" aria-label="显示控制栏"></button>
@@ -3995,6 +4035,71 @@ if (btnHandoff) btnHandoff.addEventListener('click', async () => {
     btnHandoff.disabled = false;
   }
 });
+
+/* Scan-to-connect: a one-time code from /pair/new, shown as a QR code. The
+   phone that scans it (camera → Safari, or the iPhone Use app) gets its own
+   session without typing the address or the password. */
+const pairDialog = document.getElementById('pairDialog');
+const pairQr = document.getElementById('pairQr');
+const pairStatus = document.getElementById('pairStatus');
+const pairUrl = document.getElementById('pairUrl');
+const pairHost = document.getElementById('pairHost');
+const pairHostRow = document.getElementById('pairHostRow');
+let pairTimer = null;
+function setPairStatus(text, isError) {
+  pairStatus.textContent = text;
+  pairStatus.classList.toggle('err', !!isError);
+}
+async function loadPairCode(host) {
+  clearInterval(pairTimer);
+  setPairStatus('正在生成…');
+  pairQr.classList.remove('expired');
+  try {
+    const q = host ? '?host=' + encodeURIComponent(host) : '';
+    const r = await fetch('/pair/new' + q, {
+      method: 'POST', cache: 'no-store', credentials: 'same-origin',
+      headers: { 'X-Phone-Control': '1' },
+    });
+    if (r.status === 401) { location.replace('/login'); return; }
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok || !res.ok) {
+      pairQr.replaceChildren();
+      pairUrl.textContent = '';
+      setPairStatus(res.error === 'loopback_only'
+        ? '这台 Mac 只允许本机访问，手机连不上。重新运行安装程序并允许局域网访问后再试。'
+        : res.error === 'no_lan_address' ? '这台 Mac 现在没有手机能访问的网络地址，先连上 Wi-Fi。'
+        : '生成失败，请稍后再试', true);
+      return;
+    }
+    pairQr.innerHTML = res.svg || '';
+    pairUrl.textContent = res.url;
+    pairHost.replaceChildren(...res.hosts.map(h => new Option(h, h, false, h === res.host)));
+    pairHostRow.hidden = res.hosts.length < 2;
+    let left = res.expires_in_secs;
+    const tick = () => {
+      if (left <= 0) {
+        clearInterval(pairTimer);
+        pairQr.classList.add('expired');
+        setPairStatus('已过期，点「换一个」');
+        return;
+      }
+      setPairStatus(`${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} 后失效`);
+      left -= 1;
+    };
+    tick();
+    pairTimer = setInterval(tick, 1000);
+  } catch (_) {
+    setPairStatus('生成失败，请检查网络', true);
+  }
+}
+document.getElementById('btnPair').addEventListener('click', () => {
+  pairDialog.showModal();
+  loadPairCode();
+});
+document.getElementById('pairRefresh').addEventListener('click', () => loadPairCode(pairHost.value));
+pairHost.addEventListener('change', () => loadPairCode(pairHost.value));
+document.getElementById('pairClose').addEventListener('click', () => pairDialog.close());
+pairDialog.addEventListener('close', () => clearInterval(pairTimer));
 
 /* ── Chrome: text panel + immersive (mobile UI) ───────────────── */
 const textPanel = document.getElementById('textPanel');

@@ -127,7 +127,7 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 ## 用原生 iOS App 操作手机
 
-`apps/ios` 是原生 SwiftUI App（iOS 17+）：填 Mac 上服务的地址和控制密码登录，用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码。构建：`cd apps/ios && xcodegen generate`，再用 Xcode 打开。
+`apps/ios` 是原生 SwiftUI App（iOS 17+）。**扫码连接**：在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，用 App 扫一下就连上（用 iPhone 自带相机扫也行，还能直接在浏览器里控制）。二维码只能用一次、5 分钟内有效；App 会保存一个设备令牌自动续登录，改控制密码会让所有已配对的手机失效。也可以手动填地址和控制密码。App 用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码。构建：`cd apps/ios && xcodegen generate`，再用 Xcode 打开。
 
 ## Agent API
 

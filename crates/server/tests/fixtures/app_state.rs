@@ -35,6 +35,7 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
         mjpeg_url: None,
         video: None,
         wda_actionable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        pairing: std::sync::Arc::new(srv::pairing::Pairing::new(true)),
         wda_health: std::sync::Arc::new(std::sync::Mutex::new(srv::wda::WdaHealth::down())),
         wda_death: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         wda_health_probe: std::sync::Arc::new(std::sync::Mutex::new(None)),

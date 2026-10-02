@@ -6,6 +6,9 @@
 //!   * `GET  /login`       — password form.
 //!   * `POST /login`       — password check → set signed `phone_session` cookie.
 //!   * `GET  /logout`      — clear the cookie.
+//!   * `POST /pair/new`    — auth-gated; one-time scan-to-connect code + QR.
+//!   * `GET  /pair`        — landing page a scanned QR opens.
+//!   * `POST /pair`        — trade a code (or a device token) for a session.
 //!   * `GET  /turn-creds`  — auth-gated; `{iceServers:[...]}` (STUN + env TURN).
 //!   * `GET  /ws`          — auth-gated WebSocket; daemon-offerer signaling.
 //!   * `GET  /`            — redirect to `/phone`.
@@ -374,6 +377,8 @@ pub struct AppState {
     /// and control events. Direct handlers use it as readiness evidence but
     /// always fail closed when WDA cannot act.
     pub wda_actionable: Arc<std::sync::atomic::AtomicBool>,
+    /// Scan-to-connect codes (see [`crate::pairing`]).
+    pub pairing: Arc<crate::pairing::Pairing>,
     /// Last completed WDA health probe. Status polling uses this cache whenever
     /// the control client is busy, so a slow health check never queues behind or
     /// blocks a time-sensitive browser gesture indefinitely.
@@ -808,6 +813,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/setup", get(setup))
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", get(logout))
+        // Scan-to-connect: a signed-in page mints a one-time code shown as a
+        // QR; the phone that scans it gets a session without the password.
+        .route("/pair/new", post(pair_new))
+        .route("/pair", get(pair_page).post(pair_submit))
         // Browser control: one HTTP request per gesture, each with an explicit
         // ACK, alongside the MJPEG view.
         .route("/control", post(direct_control))
@@ -1092,6 +1101,298 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     with_security_headers(resp)
+}
+
+// ---------------------------------------------------------------------------
+// Scan-to-connect pairing
+// ---------------------------------------------------------------------------
+
+fn pair_json(status: StatusCode, value: serde_json::Value) -> Response {
+    with_security_headers(
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(value.to_string()))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
+}
+
+/// Codes are base64url; anything else is rejected before it reaches HTML.
+fn pair_code_shape_ok(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn device_key(state: &AppState) -> Vec<u8> {
+    crate::pairing::device_key(&state.secret, state.password.as_deref())
+}
+
+#[derive(Default, Deserialize)]
+struct PairNewQuery {
+    host: Option<String>,
+}
+
+/// `POST /pair/new` — mint a one-time code for the signed-in viewer to show
+/// as a QR code. `?host=` picks one of the returned `hosts` instead of the
+/// first (e.g. the Tailscale address rather than Wi-Fi).
+async fn pair_new(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<PairNewQuery>,
+) -> Response {
+    if !is_authed(&state, &headers) {
+        return pair_json(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({"ok": false, "error": "unauthorized"}),
+        );
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    if !state.pairing.lan_reachable {
+        return pair_json(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "ok": false,
+                "error": "loopback_only",
+                "hint": "this Mac only listens on 127.0.0.1, so a phone cannot reach it; set PHONE_REMOTE_HOST=0.0.0.0 (re-run install.sh and allow LAN access)"
+            }),
+        );
+    }
+    let host_header = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (request_host, request_port) = crate::pairing::split_host(host_header);
+    let https = request_is_https(&state, &headers);
+    let mut hosts: Vec<String> = Vec::new();
+    if !request_host.is_empty() && !crate::pairing::is_loopback_host(&request_host) {
+        hosts.push(request_host.clone());
+    }
+    for (_, ip) in crate::pairing::lan_addresses() {
+        let ip = ip.to_string();
+        if !hosts.contains(&ip) {
+            hosts.push(ip);
+        }
+    }
+    let Some(default_host) = hosts.first().cloned() else {
+        return pair_json(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "ok": false,
+                "error": "no_lan_address",
+                "hint": "this Mac has no network address a phone could reach; join Wi-Fi or a VPN first"
+            }),
+        );
+    };
+    let host = query
+        .host
+        .filter(|h| hosts.contains(h))
+        .unwrap_or(default_host);
+    let scheme = if https { "https" } else { "http" };
+    // Keep the port the browser used; a tunnel's https URL has none.
+    let port = match request_port {
+        Some(p) => format!(":{p}"),
+        None => String::new(),
+    };
+    let code = state.pairing.issue();
+    let url = format!("{scheme}://{host}{port}/pair?c={code}");
+    pair_json(
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": true,
+            "url": url,
+            "host": host,
+            "hosts": hosts,
+            "expires_in_secs": crate::pairing::CODE_TTL.as_secs(),
+            "svg": crate::pairing::qr_svg(&url),
+        }),
+    )
+}
+
+const PAIR_HTML: &str = r#"<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>扫码连接 · iphone-use</title>
+<style>
+:root{color-scheme:dark}
+html,body{margin:0;min-height:100%;background:#08090c;color:#eef2ff;
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif}
+main{max-width:340px;margin:0 auto;padding:56px 20px;display:flex;flex-direction:column;gap:14px}
+h1{font-size:20px;margin:0}
+p{margin:0;color:#8b93a7;font-size:14px;line-height:1.55}
+a,button{display:block;box-sizing:border-box;width:100%;text-align:center;text-decoration:none;
+  border-radius:12px;padding:14px;font-size:16px;font-weight:600;cursor:pointer;font-family:inherit}
+a{background:#4f8cff;color:#fff;border:1px solid #4f8cff}
+button{background:transparent;color:#eef2ff;border:1px solid #272b38}
+form{margin:0}
+</style></head><body><main>__BODY__</main></body></html>"#;
+
+fn render_pair_page(body: &str) -> String {
+    PAIR_HTML.replace("__BODY__", body)
+}
+
+fn pair_expired_html() -> String {
+    render_pair_page(
+        "<h1>二维码已失效</h1><p>每个二维码只能用一次，5 分钟内有效。请在 Mac 的 iphone-use 页面上点「手机扫码连接」重新生成。</p>",
+    )
+}
+
+#[derive(Default, Deserialize)]
+struct PairQuery {
+    c: Option<String>,
+}
+
+/// `GET /pair?c=` — where the system camera lands. Does not consume the
+/// code: the person picks the app or the browser here.
+async fn pair_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<PairQuery>,
+) -> Response {
+    let code = query.c.unwrap_or_default();
+    if !pair_code_shape_ok(&code) || !state.pairing.is_live(&code) {
+        let mut resp = Html(pair_expired_html()).into_response();
+        *resp.status_mut() = StatusCode::GONE;
+        return with_security_headers(resp);
+    }
+    let scheme = if request_is_https(&state, &headers) {
+        "https"
+    } else {
+        "http"
+    };
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let base = format!("{scheme}://{host}");
+    let app_link = format!("iphoneuse://pair?u={}&amp;c={code}", percent_encode(&base));
+    let body = format!(
+        r#"<h1>连接这台 Mac 上的 iPhone</h1>
+<p>装了 iPhone Use App 就用 App 打开，画面更流畅；没装也可以直接在浏览器里控制。</p>
+<a href="{app_link}">在 iPhone Use App 中打开</a>
+<form method="POST" action="/pair"><input type="hidden" name="c" value="{code}"><button type="submit">在浏览器里控制</button></form>"#
+    );
+    with_security_headers(Html(render_pair_page(&body)).into_response())
+}
+
+#[derive(Default, Deserialize)]
+struct PairJson {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    device_token: Option<String>,
+}
+
+/// `POST /pair` — a form post from the landing page (code → cookie → /phone),
+/// or JSON from the app: `{"code"}` → cookie + a long-lived `device_token`;
+/// `{"device_token"}` → a fresh cookie.
+async fn pair_submit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    if state.auth_limiter.lock().unwrap().is_locked() {
+        let mut resp = if is_json {
+            pair_json(
+                StatusCode::TOO_MANY_REQUESTS,
+                serde_json::json!({"ok": false, "error": "locked_out", "retry_after_secs": 30}),
+            )
+        } else {
+            let mut r = Html(render_pair_page(
+                "<h1>尝试次数过多</h1><p>为保护手机，请 30 秒后再试。</p>",
+            ))
+            .into_response();
+            *r.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+            with_security_headers(r)
+        };
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("30"));
+        return resp;
+    }
+    let secure = request_is_https(&state, &headers);
+
+    if !is_json {
+        let code = pair_form_code(&body);
+        if pair_code_shape_ok(&code) && state.pairing.redeem(&code) {
+            state.auth_limiter.lock().unwrap().record_success();
+            return redirect_with_cookie(&state, "/phone", &headers);
+        }
+        state.auth_limiter.lock().unwrap().record_failure();
+        let mut resp = Html(pair_expired_html()).into_response();
+        *resp.status_mut() = StatusCode::UNAUTHORIZED;
+        return with_security_headers(resp);
+    }
+
+    let req: PairJson = serde_json::from_slice(&body).unwrap_or_default();
+    let device_token = if let Some(code) = req.code.as_deref() {
+        if !(pair_code_shape_ok(code) && state.pairing.redeem(code)) {
+            state.auth_limiter.lock().unwrap().record_failure();
+            return pair_json(
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({"ok": false, "error": "pairing_code_invalid", "hint": "the code was already used or is older than 5 minutes; scan a fresh QR code"}),
+            );
+        }
+        Some(core::auth::make_token(
+            &device_key(&state),
+            crate::pairing::DEVICE_TOKEN_TTL_SECS,
+            now_secs(),
+        ))
+    } else if let Some(token) = req.device_token.as_deref() {
+        if !core::auth::check_token(&device_key(&state), token, now_secs()) {
+            state.auth_limiter.lock().unwrap().record_failure();
+            return pair_json(
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({"ok": false, "error": "device_token_invalid", "hint": "the pairing expired or the control password changed; scan a new QR code"}),
+            );
+        }
+        None
+    } else {
+        return pair_json(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "invalid_request", "hint": "send {\"code\"} or {\"device_token\"}"}),
+        );
+    };
+    state.auth_limiter.lock().unwrap().record_success();
+    let mut body = serde_json::json!({"ok": true, "session_ttl_secs": state.session_ttl_secs});
+    if let Some(token) = device_token {
+        body["device_token"] = serde_json::Value::String(token);
+        body["device_token_ttl_secs"] = crate::pairing::DEVICE_TOKEN_TTL_SECS.into();
+    }
+    let mut resp = pair_json(StatusCode::OK, body);
+    if let Ok(v) = HeaderValue::from_str(&make_session_cookie(&state, secure)) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
+}
+
+/// The landing page posts one field, `c`, whose value is base64url and so
+/// never percent-encoded.
+fn pair_form_code(body: &[u8]) -> String {
+    std::str::from_utf8(body)
+        .unwrap_or("")
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("c="))
+        .unwrap_or("")
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

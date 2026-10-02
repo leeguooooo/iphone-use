@@ -3070,3 +3070,308 @@ fn agent_apps_requires_bearer_and_serves_a_cached_inventory_without_devicectl() 
         assert_eq!(apps[0]["version"], "8.0.76");
     });
 }
+
+// ---------------------------------------------------------------------------
+// Scan-to-connect pairing
+// ---------------------------------------------------------------------------
+
+async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).unwrap()
+}
+
+fn cookie_pair(resp: &axum::response::Response) -> String {
+    resp.headers()
+        .get(header::SET_COOKIE)
+        .expect("a session cookie")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+async fn login_cookie(app: &axum::Router, password: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("password={password}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    cookie_pair(&resp)
+}
+
+async fn new_pair_code(app: &axum::Router, cookie: &str) -> serde_json::Value {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/pair/new")
+                .header(header::HOST, "192.168.1.11:45432")
+                .header(header::COOKIE, cookie)
+                .header("x-phone-control", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    body_json(resp).await
+}
+
+fn code_of(pair: &serde_json::Value) -> String {
+    pair["url"]
+        .as_str()
+        .unwrap()
+        .split("c=")
+        .nth(1)
+        .unwrap()
+        .to_string()
+}
+
+fn pair_json_request(body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/pair")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[test]
+fn pair_new_requires_a_session_and_the_control_header() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pair/new")
+                    .header("x-phone-control", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let cookie = login_cookie(&app, "hunter2").await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pair/new")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    });
+}
+
+#[test]
+fn pair_url_uses_the_address_the_browser_reached() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        let cookie = login_cookie(&app, "hunter2").await;
+        let pair = new_pair_code(&app, &cookie).await;
+        let url = pair["url"].as_str().unwrap();
+        assert!(
+            url.starts_with("http://192.168.1.11:45432/pair?c="),
+            "{url}"
+        );
+        assert_eq!(pair["hosts"][0], "192.168.1.11");
+        assert_eq!(pair["expires_in_secs"], 300);
+        assert!(pair["svg"].as_str().unwrap().contains("<svg"));
+    });
+}
+
+#[test]
+fn app_trades_a_code_once_for_a_session_and_a_device_token() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        let cookie = login_cookie(&app, "hunter2").await;
+        let code = code_of(&new_pair_code(&app, &cookie).await);
+
+        // The landing page offers the app link without consuming the code.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pair?c={code}"))
+                    .header(header::HOST, "192.168.1.11:45432")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes())
+            .to_string();
+        assert!(
+            html.contains(&format!(
+                "iphoneuse://pair?u=http%3A%2F%2F192.168.1.11%3A45432&amp;c={code}"
+            )),
+            "{html}"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(pair_json_request(serde_json::json!({"code": code})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let session = cookie_pair(&resp);
+        let token = body_json(resp).await["device_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // The new session opens the control page.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/phone")
+                    .header(header::COOKIE, session)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Single use.
+        let resp = app
+            .clone()
+            .oneshot(pair_json_request(serde_json::json!({"code": code})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // The device token renews the session, and is not itself a cookie.
+        let resp = app
+            .clone()
+            .oneshot(pair_json_request(
+                serde_json::json!({"device_token": token}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(cookie_pair(&resp).starts_with("phone_session="));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/phone")
+                    .header(header::COOKIE, format!("phone_session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    });
+}
+
+#[test]
+fn browser_form_trades_a_code_for_a_session() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        let cookie = login_cookie(&app, "hunter2").await;
+        let code = code_of(&new_pair_code(&app, &cookie).await);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pair")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("c={code}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/phone");
+        assert!(cookie_pair(&resp).starts_with("phone_session="));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pair?c={code}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::GONE,
+            "a used code's page says so"
+        );
+    });
+}
+
+#[test]
+fn changing_the_password_revokes_device_tokens() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        let cookie = login_cookie(&app, "hunter2").await;
+        let code = code_of(&new_pair_code(&app, &cookie).await);
+        let resp = app
+            .oneshot(pair_json_request(serde_json::json!({"code": code})))
+            .await
+            .unwrap();
+        let token = body_json(resp).await["device_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let other = http::router(build_state(Some("changed")));
+        let resp = other
+            .oneshot(pair_json_request(
+                serde_json::json!({"device_token": token}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_json(resp).await["error"], "device_token_invalid");
+    });
+}
+
+#[test]
+fn loopback_only_daemon_refuses_to_pair() {
+    block(async {
+        let state = build_state(None);
+        let mut state = match Arc::try_unwrap(state) {
+            Ok(state) => state,
+            Err(_) => panic!("test state unexpectedly shared"),
+        };
+        state.pairing = Arc::new(server::pairing::Pairing::new(false));
+        let app = http::router(Arc::new(state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pair/new")
+                    .header("x-phone-control", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(resp).await["error"], "loopback_only");
+    });
+}

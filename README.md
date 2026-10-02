@@ -210,8 +210,11 @@ distributes.
 
 ## Drive the phone from the native iOS app
 
-`apps/ios` is a native SwiftUI app (iOS 17+). Log in with the daemon's address and control
-password; it plays the H.264 feed with the system's hardware decoder and sends taps, long
+`apps/ios` is a native SwiftUI app (iOS 17+). Connect by scanning: on the Mac, open the
+iphone-use page and press **Scan** in the toolbar, then scan the QR code with the app (or the
+iPhone's own camera, which can also open plain browser control). The code works once, within
+5 minutes, and the app keeps a device token that renews its session; changing the control
+password revokes every paired phone. Typing the address and password still works. It plays the H.264 feed with the system's hardware decoder and sends taps, long
 presses, swipes, drags, text and Home to `POST /control`, the same contract as the web
 page. The phone being controlled must stay unlocked: iOS does not let automation type the
 lock-screen passcode. Build with `cd apps/ios && xcodegen generate`, then open in Xcode.
