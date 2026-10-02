@@ -128,6 +128,7 @@
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/actions</td><td>Bounded multi-step WDA execution with full-batch validation, semantic waits, one control lock, and first-failure stop.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/screenshot</td><td>Current target screen as PNG, read from WDA.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/mjpeg</td><td>Live WDA MJPEG stream; accepts bearer auth or a logged-in browser cookie.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/h264</td><td>The same live screen as H.264 (~10× less bandwidth); same auth and viewer accounting as <code>/agent/mjpeg</code>.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/elements</td><td>Snapshot-bound, flattened WDA element list with sparse locator/state fields and screen dimensions.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/mode</td><td><code>mode=agent</code> brings WDA up; <code>mode=human</code> stops WDA and hands the phone back to the person holding it. It never changes the persisted target.</td></tr>
   <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/inbox</td><td>Legacy Shortcuts-bridge result queue. GET is always a read-only peek; POST appends and requires the mutation header.</td></tr>
@@ -630,6 +631,22 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   returns <code>503</code>; upstream connection/stream failure is an explicit error. Each
   open stream increments both <code>viewer_count</code> and
   <code>mjpeg_viewer_count</code>.
+</p>
+
+<h3><span class="method get">GET</span> <span class="ep">/agent/h264</span></h3>
+<p>
+  The live screen as H.264. One upstream MJPEG connection per daemon is decoded and
+  re-encoded on the Mac's hardware encoder (VideoToolbox, Main profile, no B-frames,
+  <code>PHONE_REMOTE_H264_KBPS</code> average bitrate, default 2500); every subscriber gets
+  the same encoded stream, and a new subscriber triggers an IDR. Auth, lifecycle refusals,
+  the four-viewer limit and <code>?stream_id=</code> freshness tracking are the same as
+  <code>/agent/mjpeg</code>; a daemon that cannot encode answers <code>501</code>.
+</p>
+<p>
+  The body (<code>application/octet-stream</code>) is a sequence of messages:
+  <code>[u32 BE length of the rest][u8 flags][u64 BE pts µs][Annex-B access unit]</code>,
+  flags bit 0 = keyframe. Keyframes carry SPS and PPS in-band, so a client can derive the
+  codec string (<code>avc1.</code> + SPS bytes 1–3 in hex) and start at any keyframe.
 </p>
 
 <h3><span class="method get">GET</span> <span class="ep">/agent/screenshot</span></h3>
