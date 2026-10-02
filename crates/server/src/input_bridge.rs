@@ -198,6 +198,22 @@ impl InputInjector {
     }
 }
 
+/// Unix seconds of the last event dropped because iPhone Mirroring could not
+/// be brought frontmost (0 = never). macOS will not let a background process
+/// take the front from an app the person is actively using, so a browser on
+/// the same Mac drives nothing; status surfaces this instead of going silent.
+static LAST_FRONT_DROP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether an event was dropped for want of the front within `window_secs`.
+pub fn input_blocked_recently(window_secs: u64) -> bool {
+    let last = LAST_FRONT_DROP.load(std::sync::atomic::Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    last != 0 && now.saturating_sub(last) <= window_secs
+}
+
 /// Spawn the injector thread.
 ///
 /// On macOS it owns a [`core::input::CgEventSink`] and the [`SessionGeometry`],
@@ -244,14 +260,35 @@ fn injector_loop<F>(
     // rebuild (rebuilds invalidate ad-hoc TCC grants — expensive during dev).
     // Resolved centrally so the HTTP preflight cannot drift below it (#29).
     let front_deadline = crate::macos::front_deadline();
+    // After a failed activation, events in the next moment drop at once
+    // instead of each waiting the full deadline: a drag is dozens of events,
+    // and waiting 4s apiece queued minutes of stale input behind it.
+    const FAIL_FAST: std::time::Duration = std::time::Duration::from_secs(2);
+    let mut failed_at: Option<std::time::Instant> = None;
     while let Ok(ev) = rx.recv() {
         if !is_allowed() {
             continue;
         }
-        if !crate::macos::ensure_mirroring_frontmost(front_deadline) {
-            tracing::warn!("input dropped {ev:?}: iPhone Mirroring could not be brought frontmost");
+        let in_front = if failed_at.is_some_and(|at| at.elapsed() < FAIL_FAST) {
+            crate::macos::mirroring_is_frontmost()
+        } else {
+            crate::macos::ensure_mirroring_frontmost(front_deadline)
+        };
+        if !in_front {
+            if failed_at.is_none_or(|at| at.elapsed() >= FAIL_FAST) {
+                tracing::warn!("input dropped {ev:?}: iPhone Mirroring could not be brought frontmost");
+                failed_at = Some(std::time::Instant::now());
+            }
+            LAST_FRONT_DROP.store(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             continue;
         }
+        failed_at = None;
         if let Err(e) = inject(&ev, &geo, &mut sink) {
             tracing::debug!("inject dropped {ev:?}: {e}");
         }

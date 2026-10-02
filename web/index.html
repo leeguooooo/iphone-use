@@ -1581,6 +1581,7 @@ async function pollAgentMode() {
     humanViewLive = s.backend === 'direct' && s.human_handoff === true && s.human_view === 'live';
     backendType = (s.backend === 'mirror' || humanViewLive) ? 'mirror' : 'direct';
     syncHandoffButton();
+    explainHumanViewInput(s);
 
     if (backendType === 'direct') {
       updateMjpegActivityFromStatus(s, polledStreamId);
@@ -4022,6 +4023,26 @@ function humanViewText(s) {
     return '浏览器画面打不开，可以在 Mac 上直接用 iPhone 镜像。原因：' + why;
   }
   return '请在 Mac 上用 iPhone 镜像操作（本机或屏幕共享均可）。需要 agent 控制时点"重新连接"';
+}
+
+/* iPhone Mirroring takes input only while it is the Mac's frontmost app, and
+   macOS will not let the daemon take the front from an app a person is
+   actively using. A browser on that same Mac is exactly such an app, so its
+   taps never arrive. Say so — once on arrival from this Mac, and whenever the
+   daemon reports input dropped for want of the front. */
+let humanViewLocalHintShown = false;
+let humanViewBlockedToastAt = 0;
+function explainHumanViewInput(s) {
+  if (!humanViewLive) return;
+  const local = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(location.hostname);
+  if (local && !humanViewLocalHintShown) {
+    humanViewLocalHintShown = true;
+    toast('你就在这台 Mac 上：直接用 Mac 上的 iPhone 镜像窗口操作。浏览器操作要在另一台设备上打开这个页面');
+  }
+  if (s.human_view_input_blocked === true && Date.now() - humanViewBlockedToastAt > 15000) {
+    humanViewBlockedToastAt = Date.now();
+    toast('操作没送到手机：Mac 上有人正在用别的应用，iPhone 镜像切不到前台。请在 Mac 前直接用镜像窗口，或换一台设备打开这个页面');
+  }
 }
 
 /* One button both ways: 交还 hands the phone to a person; once it is theirs

@@ -136,8 +136,11 @@ Mac), so no passcode prompt. `/agent/status` reports it as `human_view`:
 `starting` → `live`, or `failed` with `human_view_error` naming what is missing.
 It needs two one-time grants on the Mac for iPhoneUse — **Screen Recording** (the picture)
 and **Accessibility** (the input); the Direct backend asks for neither until you hand the
-phone over. Input moves the Mac's pointer into the Mirroring window, so use it on a Mac
-nobody is sitting at. To reach the page from another device on the LAN, bind
+phone over. Input moves the Mac's pointer into the Mirroring window, and iPhone Mirroring takes
+input only while it is the frontmost app — which macOS will not hand over while someone
+is actively using another app. So open the page from **another device**; a browser on
+the same Mac holds the front and its taps never arrive (the page says so, and status
+reports `human_view_input_blocked:true`). At the Mac itself, use the Mirroring window. To reach the page from another device on the LAN, bind
 `PHONE_REMOTE_HOST=0.0.0.0` with a password set; from outside the LAN, Tailscale plus macOS
 Screen Sharing still works.
 
