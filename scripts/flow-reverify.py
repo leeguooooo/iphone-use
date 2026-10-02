@@ -179,7 +179,7 @@ ENVIRONMENT_ERRORS = {
     "wda_pre_dispatch_failed",
     "wda_source_failed",
     "wda_source_timeout",
-    "backend_is_mirror",
+    "mirror_removed",
     "target_not_configured",
 }
 

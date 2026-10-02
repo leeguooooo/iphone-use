@@ -90,7 +90,7 @@ Do this:
 
 1. Read each open issue with \`gh issue view <n> --comments\`. Decide whether it
    is fixable from source alone. SKIP anything that needs physical hardware to
-   reproduce or verify (a real iPhone, iPhone Mirroring, a live WDA session, a
+   reproduce or verify (a real iPhone, a live WDA session, a
    signing keychain) — you have none of that. Skip anything that needs a
    product decision. Skipping is a fine outcome; a wrong guess shipped to
    users is not.

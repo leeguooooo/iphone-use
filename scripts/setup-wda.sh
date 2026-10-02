@@ -3749,9 +3749,8 @@ warn "The Mac relay is loopback-only, but WDA on the iPhone has no HTTP authenti
 
 # ── 5b. MJPEG relay (live video for agent mode — /agent/mjpeg) ─────────────────
 # WDA serves an MJPEG screen stream on the device's :9100, INSIDE the same
-# XCUITest session as control — so live video and driving coexist (iPhone
-# Mirroring can't run alongside WDA, this can). The product's Direct mode needs
-# this stream, so setup does not publish a video URL unless relay ownership and
+# XCUITest session as control — so live video and driving coexist. The daemon
+# needs this stream, so setup does not publish a video URL unless relay ownership and
 # an initial stream byte are both verified.
 PHONE_MJPEG_PORT=9100
 _stop_managed_process "$MJPEG_RELAY_PID_FILE" "$LEGACY_MJPEG_EXPECTED" mjpeg \
