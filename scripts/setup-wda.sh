@@ -3515,6 +3515,10 @@ PY_LOCK
     printf '%s\n' "$out"
 }
 WDA_LOCK_WAIT_SECS="${WDA_LOCK_WAIT_SECS:-300}"
+case "$WDA_LOCK_WAIT_SECS" in
+    ''|*[!0-9]*) warn "WDA_LOCK_WAIT_SECS='$WDA_LOCK_WAIT_SECS' is not a whole number of seconds; using 300"
+        WDA_LOCK_WAIT_SECS=300 ;;
+esac
 if [ "$(_device_passcode_required)" = "true" ]; then
     info "Waiting for the iPhone to be unlocked"
     _setstatus lock-wait locked "the iPhone is locked — unlock it and connecting continues on its own"

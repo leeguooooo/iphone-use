@@ -27,6 +27,7 @@ run() {  # $1 = seconds until unlock (or "never"), extra env after
     env PATH="$tmp/bin:$PATH" UNLOCK_AT="$tmp/unlock_at" "$@" /bin/bash -c "
         WDA_UDID=X; _BUILD_BLOCKER=''
         info() { echo \"== \$*\"; }; ok() { echo \"ok: \$*\"; }; die() { echo \"die: \$*\"; exit 9; }
+        warn() { echo \"warn: \$*\"; }
         _setstatus() { echo \"status \$1 \$2\"; }
         _prepare_locked_retry() { echo locked-retry; }
         $devicectl_t
@@ -49,5 +50,7 @@ check "under KeepAlive a phone locked past the wait hands over to the locked bac
 
 out="$(run never WDA_LOCK_WAIT_SECS=2 WDA_KEEPALIVE=0)"; code=$?
 check "interactive setup fails with a locked status" '[ $code -eq 9 ] && echo "$out" | grep -q "^status building-fail locked"'
+out="$(run 1 WDA_LOCK_WAIT_SECS=abc)"; code=$?
+check "a non-numeric wait falls back to 300 s instead of breaking the comparison" '[ $code -eq 0 ] && echo "$out" | grep -q "using 300" && echo "$out" | tail -1 | grep -q launched'
 echo "1..$n"
 exit "$fail"
