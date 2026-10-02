@@ -203,10 +203,11 @@ final class RemoteModel {
         }
     }
 
-    /// The app came back to the foreground: allow one more automatic start.
+    /// The app came back to the foreground: allow one more automatic start,
+    /// decided by the next fresh status read (the cached one may predate a
+    /// hand-back made while the app was in the background).
     func becameActive() {
         autoWakeTried = false
-        if let status { maybeAutoWake(status) }
     }
 
     private func maybeAutoWake(_ status: PhoneStatus) {
