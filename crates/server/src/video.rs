@@ -392,9 +392,9 @@ mod imp {
         CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     };
     use objc2_core_video::{
-        kCVPixelFormatType_32BGRA, CVPixelBuffer, CVPixelBufferCreate,
-        CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
-        CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        kCVPixelFormatType_32BGRA, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddress,
+        CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+        CVPixelBufferUnlockBaseAddress,
     };
     use objc2_video_toolbox::{
         kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
@@ -450,13 +450,21 @@ mod imp {
             unsafe {
                 set_bool(&session, kVTCompressionPropertyKey_RealTime, true)?;
                 // B-frames would add a frame of latency for no visible gain.
-                set_bool(&session, kVTCompressionPropertyKey_AllowFrameReordering, false)?;
+                set_bool(
+                    &session,
+                    kVTCompressionPropertyKey_AllowFrameReordering,
+                    false,
+                )?;
                 set_string(
                     &session,
                     kVTCompressionPropertyKey_ProfileLevel,
                     kVTProfileLevel_H264_Main_AutoLevel,
                 )?;
-                set_int(&session, kVTCompressionPropertyKey_AverageBitRate, bitrate as i32)?;
+                set_int(
+                    &session,
+                    kVTCompressionPropertyKey_AverageBitRate,
+                    bitrate as i32,
+                )?;
                 set_int(&session, kVTCompressionPropertyKey_ExpectedFrameRate, 30)?;
                 // A keyframe every 2 s bounds how long a lost frame smears.
                 set_int(&session, kVTCompressionPropertyKey_MaxKeyFrameInterval, 60)?;
@@ -526,7 +534,11 @@ mod imp {
     }
 
     /// Copy packed BGRA rows into a new pixel buffer (its rows may be padded).
-    fn pixel_buffer(width: usize, height: usize, pixels: &[u8]) -> Option<CFRetained<CVPixelBuffer>> {
+    fn pixel_buffer(
+        width: usize,
+        height: usize,
+        pixels: &[u8],
+    ) -> Option<CFRetained<CVPixelBuffer>> {
         let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
         let status = unsafe {
             CVPixelBufferCreate(
@@ -687,25 +699,58 @@ mod imp {
         }
     }
 
-    unsafe fn set_int(session: &VTCompressionSession, key: &CFString, value: i32) -> anyhow::Result<()> {
-        let number = CFNumber::new(None, CFNumberType::SInt32Type, &value as *const i32 as *const c_void)
-            .ok_or_else(|| anyhow::anyhow!("CFNumberCreate failed"))?;
+    unsafe fn set_int(
+        session: &VTCompressionSession,
+        key: &CFString,
+        value: i32,
+    ) -> anyhow::Result<()> {
+        let number = CFNumber::new(
+            None,
+            CFNumberType::SInt32Type,
+            &value as *const i32 as *const c_void,
+        )
+        .ok_or_else(|| anyhow::anyhow!("CFNumberCreate failed"))?;
         let status = VTSessionSetProperty(session.as_ref(), key, Some(number.as_ref() as &CFType));
-        anyhow::ensure!(status == 0, "VTSessionSetProperty(int) failed: status={status}");
+        anyhow::ensure!(
+            status == 0,
+            "VTSessionSetProperty(int) failed: status={status}"
+        );
         Ok(())
     }
 
-    unsafe fn set_bool(session: &VTCompressionSession, key: &CFString, value: bool) -> anyhow::Result<()> {
-        let flag = if value { kCFBooleanTrue } else { kCFBooleanFalse }
-            .ok_or_else(|| anyhow::anyhow!("kCFBoolean missing"))?;
-        let status = VTSessionSetProperty(session.as_ref(), key, Some(&*(flag as *const _ as *const CFType)));
-        anyhow::ensure!(status == 0, "VTSessionSetProperty(bool) failed: status={status}");
+    unsafe fn set_bool(
+        session: &VTCompressionSession,
+        key: &CFString,
+        value: bool,
+    ) -> anyhow::Result<()> {
+        let flag = if value {
+            kCFBooleanTrue
+        } else {
+            kCFBooleanFalse
+        }
+        .ok_or_else(|| anyhow::anyhow!("kCFBoolean missing"))?;
+        let status = VTSessionSetProperty(
+            session.as_ref(),
+            key,
+            Some(&*(flag as *const _ as *const CFType)),
+        );
+        anyhow::ensure!(
+            status == 0,
+            "VTSessionSetProperty(bool) failed: status={status}"
+        );
         Ok(())
     }
 
-    unsafe fn set_string(session: &VTCompressionSession, key: &CFString, value: &CFString) -> anyhow::Result<()> {
+    unsafe fn set_string(
+        session: &VTCompressionSession,
+        key: &CFString,
+        value: &CFString,
+    ) -> anyhow::Result<()> {
         let status = VTSessionSetProperty(session.as_ref(), key, Some(value as &CFType));
-        anyhow::ensure!(status == 0, "VTSessionSetProperty(string) failed: status={status}");
+        anyhow::ensure!(
+            status == 0,
+            "VTSessionSetProperty(string) failed: status={status}"
+        );
         Ok(())
     }
 }
@@ -807,7 +852,10 @@ mod tests {
     fn avcc_converts_to_annex_b_with_parameter_sets_on_keyframes() {
         let avcc = [0, 0, 0, 2, 0x65, 0xAA];
         let out = avcc_to_annex_b(&avcc, Some((&[0x67, 1], &[0x68, 2]))).unwrap();
-        assert_eq!(out, [0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 2, 0, 0, 0, 1, 0x65, 0xAA]);
+        assert_eq!(
+            out,
+            [0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 2, 0, 0, 0, 1, 0x65, 0xAA]
+        );
         assert!(avcc_to_annex_b(&[0, 0, 0, 9, 1], None).is_err());
     }
 
@@ -820,6 +868,5 @@ mod tests {
         assert_eq!(size, (8, 16));
         assert_eq!(pixels.len(), 8 * 16 * 4);
         assert!(decode_bgra(&jpeg[..20], &mut pixels).is_err());
-
     }
 }
