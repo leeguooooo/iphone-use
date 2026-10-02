@@ -3,15 +3,14 @@
   iphone-use — remote-control web client  (web/index.html)
   ==========================================================
   Served at /phone (auth-gated).
-  Direct (default): MJPEG/stills + cookie-authenticated POST /control
-  Mirror (compat): WebSocket /ws + WebRTC video/data channels
+  WebDriverAgent only: MJPEG (/agent/mjpeg, /agent/screenshot stills fallback)
+  + cookie-authenticated POST /control (one JSON action per gesture, ACKed)
   Touch: Pointer Events → normalized [0,1] content-rect coords
 
-  Mobile UI: video is the hero (full-bleed). Chrome is a thumb-zone bottom toolbar +
+  Mobile UI: the device image is the hero (full-bleed). Chrome is a thumb-zone bottom toolbar +
   floating status pill + slide-up text panel + immersive collapse. Instrument-panel
   aesthetic: dark, monospace readouts, accent-glow active states. Safe-area aware.
   Ref:
-    docs/superpowers/notes/2026-06-09-ios-safari-webrtc-client.md
     docs/superpowers/notes/2026-06-09-v1-feature-parity.md
 -->
 <html lang="zh-CN">
@@ -96,24 +95,7 @@
       -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
     }
 
-    /* [iOS-notes §Video] The video sits ABOVE the floating toolbar so the toolbar
-       never covers the phone's bottom (and taps there don't hit the toolbar).
-       Use an explicit HEIGHT, not `bottom`: <video> is a replaced element, and
-       width:100% + its intrinsic aspect ratio would otherwise drive the height
-       past `bottom` and back behind the toolbar. getBoundingClientRect() then
-       yields the visible rect, so the content-rect / coordinate math stays correct. */
-    #screen {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%;
-      height: calc(100% - var(--tb-reserve));
-      object-fit: contain;          /* letterbox; required for content-rect math */
-      background: #000;
-      pointer-events: none;         /* pointer events handled on #videoArea */
-      touch-action: none;
-      transition: height .28s cubic-bezier(.2,.7,.2,1);
-    }
-    /* subtle device-screen vignette + inset ring so the mirror reads as "a screen" */
+    /* subtle device-screen vignette + inset ring so the image reads as "a screen" */
     #videoArea::after {
       content: ""; position: absolute;
       top: 0; left: 0; width: 100%;
@@ -165,30 +147,6 @@
       color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
 
-    /* ── "Tap to start" play overlay ─────────────────────────────── */
-    #playOverlay {
-      position: absolute; inset: 0; z-index: 20;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 14px; background: rgba(6,7,11,.86);
-      backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
-      cursor: pointer; width: 100%; border: 0; padding: 0;
-      color: inherit; font: inherit;
-    }
-    #playOverlay .pulse {
-      width: 92px; height: 92px; border-radius: 50%;
-      display: grid; place-items: center;
-      background: rgba(79,140,255,.12);
-      border: 1px solid rgba(79,140,255,.4);
-      box-shadow: 0 0 0 0 rgba(79,140,255,.4);
-      animation: pulse 2.2s infinite;
-    }
-    @keyframes pulse {
-      0%   { box-shadow: 0 0 0 0 rgba(79,140,255,.35); }
-      70%  { box-shadow: 0 0 0 22px rgba(79,140,255,0); }
-      100% { box-shadow: 0 0 0 0 rgba(79,140,255,0); }
-    }
-    #playOverlay svg { width: 40px; height: 40px; fill: var(--accent); margin-left: 4px; }
-    #playOverlay p { color: var(--text); font-size: 15px; margin: 0; letter-spacing: .04em; }
     /* ── Bottom toolbar (thumb zone) ─────────────────────────────── */
     #toolbar {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
@@ -227,11 +185,6 @@
     .tbtn.danger { color: #ff8a93; }
     .tbtn.danger:active { background: var(--danger-bg); }
     .tbtn.spacer { flex: 1 1 auto; min-width: 4px; pointer-events: none; }
-
-    /* freeze: swap icon by .active (the JS only toggles .active + .lbl text) */
-    .tbtn .ico-play { display: none; }
-    .tbtn.active .ico-pause { display: none; }
-    .tbtn.active .ico-play { display: inline; }
 
     /* ── Grabber to restore chrome when immersive ────────────────── */
     #grabber {
@@ -640,12 +593,12 @@
       top: 0; left: 0;
       width: 100%;
       height: calc(100% - var(--tb-reserve));
-      z-index: 15;                /* above video (z=0) and tapDot (z=5), below playOverlay (z=20) */
+      z-index: 15;                /* above the device image and tapDot (z=5) */
       display: flex; flex-direction: column; align-items: center; justify-content: center;
       gap: 10px;
       background: rgba(8,9,12,.72);
       backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
-      pointer-events: none;       /* taps pass through to #videoArea so a tap can wake Mirroring */
+      pointer-events: none;       /* only the card's buttons take taps */
       transition: opacity .3s, height .28s cubic-bezier(.2,.7,.2,1);
       opacity: 0;
     }
@@ -667,13 +620,6 @@
     #reconnectBtn:hover { background: rgba(99,102,241,.32); }
     #reconnectBtn:disabled { opacity: .5; cursor: default; }
     #overlayActions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-    #takeOverBtn {
-      margin-top: 14px; padding: .5rem 1.3rem; border-radius: 99px; cursor: pointer;
-      border: 1px solid rgba(34,197,94,.55); background: rgba(34,197,94,.18);
-      color: #bbf7d0; font-size: 13px; pointer-events: auto; transition: background .15s;
-    }
-    #takeOverBtn:hover { background: rgba(34,197,94,.32); }
-    #takeOverBtn:disabled { opacity: .5; cursor: default; }
     #setupHelp {
       margin-top: 8px;
       display: flex; flex-direction: column; align-items: center; gap: 8px;
@@ -765,8 +711,6 @@
 <div id="app">
   <!-- ── Video + interaction surface (hero) ────────────────────── -->
   <div id="videoArea">
-    <video id="screen" autoplay playsinline webkit-playsinline muted
-           disablePictureInPicture disableRemotePlayback></video>
     <!-- Direct image: keep the last screenshot visible while MJPEG reconnects. -->
     <img id="stillFrame" alt="iPhone 设备静态画面">
     <img id="mjpegFrame" alt="iPhone 设备实时画面">
@@ -793,7 +737,6 @@
         </div>
         <a id="setupGuideLink" href="/setup" hidden>打开连接向导</a>
         <div id="overlayActions">
-          <button id="takeOverBtn" type="button" hidden title="停止 agent 控制，在这个页面里通过 iPhone 镜像操作手机（手机保持锁屏，不用输密码）">我来操作</button>
           <button id="reconnectBtn" type="button">重新连接</button>
         </div>
       </div>
@@ -807,17 +750,10 @@
     <button id="recordingPill" type="button" hidden
             aria-label="打开自动化流程并审核正在录制的步骤">录制中 · 0 步</button>
 
-    <!-- [iOS-notes §Video] "Tap to start" play() gesture fallback -->
-    <button id="playOverlay" type="button" aria-label="开始播放 iPhone 画面" hidden>
-      <span class="pulse">
-        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M8 5v14l11-7L8 5z"/></svg>
-      </span>
-      <p>轻触以开始</p>
-    </button>
   </div>
 </div><!-- #app -->
 
-<!-- ── Bottom toolbar (thumb zone; backend-specific controls hide in Direct) ── -->
+<!-- ── Bottom toolbar (thumb zone) ── -->
 <nav id="toolbar" aria-label="控制栏">
   <button id="btnHome" class="tbtn" title="Home" type="button">
     <svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
@@ -827,10 +763,6 @@
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
     <span class="lbl">搜索</span>
   </button>
-  <button id="btnSwitcher" class="tbtn" title="App 切换" type="button" hidden>
-    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/></svg>
-    <span class="lbl">切换器</span>
-  </button>
   <button id="btnGrid" class="tbtn" title="数字网格覆盖" type="button" aria-pressed="false">
     <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/></svg>
     <span class="lbl">网格</span>
@@ -839,12 +771,6 @@
           aria-controls="elementPanel" aria-expanded="false">
     <span class="element-glyph" aria-hidden="true">UI</span>
     <span class="lbl">控件</span>
-  </button>
-  <button id="btnFreeze" class="tbtn" title="暂停/继续渲染" type="button"
-          aria-pressed="false" hidden>
-    <svg class="ico-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg>
-    <svg class="ico-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7L8 5z" fill="currentColor" stroke="none"/></svg>
-    <span class="lbl">冻结</span>
   </button>
   <button id="btnKeyboard" class="tbtn" title="文字输入" type="button"
           aria-controls="textPanel" aria-expanded="false">
@@ -863,7 +789,7 @@
     </svg>
     <span class="lbl">流程</span>
   </button>
-  <button id="btnHandoff" class="tbtn" title="交还手机给人：停止 agent 控制并打开 iPhone 镜像" type="button">
+  <button id="btnHandoff" class="tbtn" title="交还手机给持有人：停止远程控制，手机留给拿着它的人用" type="button">
     <svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/><path d="M2 12h3M19 12h3"/></svg>
     <span class="lbl">交还</span>
   </button>
@@ -970,26 +896,15 @@
 
 <script>
 /* ================================================================
-   iphone-use — Direct/WDA client with legacy Mirror compatibility
+   iphone-use — WebDriverAgent client
    Contract legend:
-     [SIG] signaling (/ws)  [ICE] /turn-creds + ICE  [CH] data channels
      [TOUCH] Pointer Events  [iOS] Safari notes  [v1] parity affordance
    ================================================================ */
 'use strict';
 
-/* ── URL flags ────────────────────────────────────────────────── */
-/* ?relay=1  →  force iceTransportPolicy:'relay' (TURN-only, no direct/srflx).
-   Use this from a LAN browser to exercise the Cloudflare TURN path without
-   leaving the network.  See GitHub issue #9. */
-const FORCE_RELAY = new URLSearchParams(location.search).has('relay');
-
 /* ── Constants ────────────────────────────────────────────────── */
 const TAP_SLOP     = 10;
 const LONGPRESS_MS = 500;
-const MOVE_BACKPRESSURE_BYTES = 256 * 1024;
-const STATS_INTERVAL_MS = 2000;
-const ICE_RESTART_DEBOUNCE_MS = 2000;
-const RECONNECT_BASE_MS = 1500;
 // /control owns a 2.5s maximum at-most-once deadline. Leave enough transport
 // headroom for its authoritative outcome while still bounding a hung browser
 // request.
@@ -1000,11 +915,9 @@ const RECONNECT_REQUEST_TIMEOUT_MS = 15000;
 const RECONNECT_COOLDOWN_MS = 3000;
 
 /* ── DOM refs ─────────────────────────────────────────────────── */
-const video          = document.getElementById('screen');
 const videoArea      = document.getElementById('videoArea');
 const gridCanvas     = document.getElementById('gridCanvas');
 const tapDot         = document.getElementById('tapDot');
-const playOverlay    = document.getElementById('playOverlay');
 const statusLine     = document.getElementById('statusLine');
 const toastEl        = document.getElementById('toast');
 const textInput      = document.getElementById('textInput');
@@ -1032,7 +945,6 @@ const flowRun        = document.getElementById('flowRun');
 const flowClear      = document.getElementById('flowClear');
 const recordingPill = document.getElementById('recordingPill');
 const reconnectBtn = document.getElementById('reconnectBtn');
-const takeOverBtn = document.getElementById('takeOverBtn');
 const setupHelp = document.getElementById('setupHelp');
 const setupLabel = document.getElementById('setupLabel');
 const setupCommand = document.getElementById('setupCommand');
@@ -1040,9 +952,9 @@ const copySetupBtn = document.getElementById('copySetupBtn');
 const setupGuideLink = document.getElementById('setupGuideLink');
 let reconnectActionBusy = false;
 function syncReconnectControl(kind = overlayState) {
-  const recoveryIsExternal = backendType === 'direct' &&
-    (backendStatus?.recovery_owner === 'unconfigured' ||
-     backendStatus?.recovery_owner === 'external');
+  const recoveryIsExternal =
+    backendStatus?.recovery_owner === 'unconfigured' ||
+    backendStatus?.recovery_owner === 'external';
   reconnectBtn.hidden =
     recoveryIsExternal ||
     kind === 'releasing' ||
@@ -1053,35 +965,16 @@ function syncReconnectControl(kind = overlayState) {
     kind === 'unconfigured' ||
     kind === 'external' ||
     kind === 'setup-blocked';
-  /* A parked phone has two owners to go to. A person should not take the
-     agent's road back in (WDA wants the phone unlocked and asks for the
-     passcode); offer them the Mirroring view instead. */
-  takeOverBtn.hidden = !(
-    kind === 'released' &&
-    backendType === 'direct' &&
-    backendStatus?.recovery_owner === 'daemon' &&
-    backendStatus?.human_handoff !== true
-  );
-  takeOverBtn.disabled = reconnectActionBusy;
   reconnectBtn.disabled = reconnectActionBusy;
-  if (!reconnectActionBusy && !takeOverBtn.hidden) {
-    setTextIfChanged(reconnectBtn, '交给 agent');
-  } else if (!reconnectActionBusy) {
+  if (!reconnectActionBusy) {
     setTextIfChanged(reconnectBtn, kind === 'status-error'
       ? '重新检查'
-      : (humanViewLive ? '重连画面' : (backendType === 'mirror' ? '重连镜像' : '重新连接')));
+      : (kind === 'released' ? '连接手机' : '重新连接'));
   }
 }
-if (takeOverBtn) takeOverBtn.onclick = () => { btnHandoff?.click(); };
 if (reconnectBtn) reconnectBtn.onclick = async () => {
   if (reconnectActionBusy) return;
-  if (humanViewLive) {
-    // The phone is the person's: reconnect the picture, not the agent.
-    stopMirrorTransport();
-    startMirrorTransport();
-    return;
-  }
-  if (backendType === 'direct' && overlayState === 'status-error') {
+  if (overlayState === 'status-error') {
     reconnectActionBusy = true;
     reconnectBtn.disabled = true;
     reconnectBtn.textContent = '正在检查…';
@@ -1095,9 +988,8 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
     return;
   }
   if (
-    backendType === 'direct' &&
-    (backendStatus?.recovery_owner === 'unconfigured' ||
-     backendStatus?.recovery_owner === 'external')
+    backendStatus?.recovery_owner === 'unconfigured' ||
+    backendStatus?.recovery_owner === 'external'
   ) {
     toast(backendStatus.recovery_owner === 'unconfigured'
       ? '请先完成 iPhone 设备设置'
@@ -1113,16 +1005,14 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
     RECONNECT_REQUEST_TIMEOUT_MS,
   );
   try {
-    // Direct is fail-closed: every recovery starts the on-device WDA path.
-    // Only the explicitly selected legacy backend may recover Mirroring.
-    const mode = backendType === 'mirror' ? 'mirror' : 'agent';
-    if (mode === 'agent') invalidateDirectControlQueue();
+    // Every recovery starts the on-device WDA path.
+    invalidateDirectControlQueue();
     const r = await fetch('/agent/mode', {
       method: 'POST', cache: 'no-store',
       credentials: 'same-origin',
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json', 'X-Phone-Control': '1' },
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({ mode: 'agent' }),
     });
     if (r.status === 401) {
       location.replace('/login');
@@ -1134,14 +1024,12 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
       error.result = result;
       throw error;
     }
-    toast(mode === 'agent' ? '设备正在启动' : '正在恢复镜像');
+    toast('设备正在启动');
     await pollAgentMode();
   } catch (error) {
     toast(recoveryFailureText(error?.result));
     const refreshed = await pollAgentMode();
-    if (!refreshed) {
-      showOverlay(backendType === 'mirror' ? 'disconnected' : 'offline');
-    }
+    if (!refreshed) showOverlay('offline');
   } finally {
     clearTimeout(timeout);
     setTimeout(() => {
@@ -1153,24 +1041,9 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
 const olTitle        = document.getElementById('olTitle');
 const olSub          = document.getElementById('olSub');
 
-/* ── Stall detection constants ────────────────────────────────── */
-const STALL_THRESHOLD_MS  = 4000;   /* no new frame for >4 s → stalled */
-const STALL_POLL_INTERVAL = 1000;   /* fallback poll (when rVFC unavailable) */
-
 /* ── State ────────────────────────────────────────────────────── */
-let pc = null, ws = null, controlCh = null, moveCh = null;
-let frozen = false, gridOn = false, wakeLock = null;
-let iceRestartTimer = null, reconnectTimer = null;
-let reconnectDelay = RECONNECT_BASE_MS, statsInterval = null;
-let lastRtt = '--', connState = 'new';
-let backendType = 'direct'; // Fail closed to the on-device path until status loads.
-/* A Direct daemon whose phone is handed to a person streams the iPhone
-   Mirroring window over WebRTC, exactly as the legacy Mirror backend does.
-   While that view is live the page runs the Mirror transport and input path
-   (backendType 'mirror'); this flag remembers the daemon is still Direct. */
-let humanViewLive = false;
+let gridOn = false, wakeLock = null;
 let backendStatus = null;
-let mirrorTransportEnabled = false;
 let textSendBusy = false;
 let flowRecording = false;
 let flowRunning = false;
@@ -1189,9 +1062,8 @@ let flowActionSerial = 0;
 let flowLastObservation = null;
 let flowEntrySequence = 0;
 
-/* ── Overlay state: 'hidden' | 'stalled' | 'disconnected' ────── */
+/* ── Overlay state: 'hidden' or a showOverlay() kind ──────────── */
 let overlayState = 'hidden';
-let queuedAhead = 0; /* issue #8: viewers ahead of us in the single-viewer queue */
 
 function setTextIfChanged(node, text) {
   if (node && node.textContent !== text) node.textContent = text;
@@ -1245,9 +1117,6 @@ function recoveryFailureText(result = {}) {
       return '设备正在释放，请稍后再试';
     case 'reconnect_in_progress':
       return '设备已经在重新连接';
-    case 'backend_is_direct':
-    case 'backend_is_mirror':
-      return '后端配置已变更，请重启服务';
     default:
       return result.hint || '启动失败，请检查设备连接';
   }
@@ -1341,23 +1210,21 @@ function directHintText(status, fallback) {
 function updateSetupHelp(kind) {
   let command = '';
   let label = '在这台 Mac 的终端运行';
-  if (backendType === 'direct') {
-    if (kind === 'unconfigured') {
-      command = '~/.iphone-use/setup-wda.sh setup';
-      label = '连接并解锁 iPhone 后，在这台 Mac 的终端运行';
-    } else if (
-      kind === 'setup-blocked' &&
-      !managedSetupWillRetry(backendStatus)
-    ) {
-      command = '~/.iphone-use/setup-wda.sh setup';
-      label = '处理上面的阻塞项后，在这台 Mac 的终端运行';
-    } else if (
-      kind === 'offline' &&
-      backendStatus?.recovery_owner !== 'external'
-    ) {
-      command = '~/.iphone-use/setup-wda.sh status';
-      label = '在这台 Mac 的终端检查设备服务';
-    }
+  if (kind === 'unconfigured') {
+    command = '~/.iphone-use/setup-wda.sh setup';
+    label = '连接并解锁 iPhone 后，在这台 Mac 的终端运行';
+  } else if (
+    kind === 'setup-blocked' &&
+    !managedSetupWillRetry(backendStatus)
+  ) {
+    command = '~/.iphone-use/setup-wda.sh setup';
+    label = '处理上面的阻塞项后，在这台 Mac 的终端运行';
+  } else if (
+    kind === 'offline' &&
+    backendStatus?.recovery_owner !== 'external'
+  ) {
+    command = '~/.iphone-use/setup-wda.sh status';
+    label = '在这台 Mac 的终端检查设备服务';
   }
   setupHelp.hidden = command.length === 0;
   setupHelp.inert = command.length === 0;
@@ -1371,7 +1238,7 @@ function updateSetupHelp(kind) {
     'locked',
     'blocked',
   ]);
-  setupGuideLink.hidden = backendType !== 'direct' || !guideKinds.has(kind);
+  setupGuideLink.hidden = !guideKinds.has(kind);
 }
 
 function directUnavailableKind(status) {
@@ -1393,20 +1260,15 @@ function directUnavailableKind(status) {
 
 /* ── Offline overlay management ──────────────────────────────── */
 function showOverlay(kind) {
-  /* kind: 'offline' | 'locked' | 'frame-stale' | 'stalled' |
-     'disconnected' | 'gone'
-     'gone' = daemon-reported: the Mirroring window vanished (phone fully
-     disconnected / Mirroring quit). The daemon's keepalive keeps frames
-     flowing, so only the phone_status signal can tell us this. */
+  /* kind: 'offline' | 'unconfigured' | 'external' | 'setup-blocked' |
+     'status-error' | 'background' | 'released' | 'releasing' | 'locked' |
+     'blocked' | 'frame-stale' | 'outcome-unknown' | 'connecting' |
+     'reconnecting' */
   overlayState = kind;
   updateSetupHelp(kind);
   offlineOverlay.classList.remove('disconnected');
   syncReconnectControl(kind);
-  if (kind === 'disconnected') {
-    setTextIfChanged(olTitle, '连接已断开');
-    setTextIfChanged(olSub, '正在尝试重连…');
-    offlineOverlay.classList.add('disconnected');
-  } else if (kind === 'offline') {
+  if (kind === 'offline') {
     setTextIfChanged(olTitle, '设备未连接');
     setTextIfChanged(olSub, directHintText(
       backendStatus,
@@ -1436,28 +1298,16 @@ function showOverlay(kind) {
     setTextIfChanged(olTitle, '无法获取设备状态');
     setTextIfChanged(olSub, '请检查服务是否正在运行，然后重试');
     offlineOverlay.classList.add('disconnected');
-  } else if (kind === 'gone') {
-    setTextIfChanged(olTitle, '手机已断开');
-    setTextIfChanged(olSub, 'iPhone 镜像窗口已消失 — 检查手机与 Mac 的连接');
-    offlineOverlay.classList.add('disconnected');
-  } else if (kind === 'queued') {
-    /* issue #8: another viewer holds the live session — we wait in line and the
-       daemon promotes us (sends an offer) when they disconnect. */
-    setTextIfChanged(olTitle, '会话占用中');
-    setTextIfChanged(olSub, (queuedAhead > 1)
-      ? `另一个观看者正在使用 — 已排队(前面还有 ${queuedAhead} 位)，对方断开后自动接入`
-      : '另一个观看者正在使用 — 已排队，对方断开后将自动接入');
-    offlineOverlay.classList.add('disconnected');
   } else if (kind === 'background') {
     setTextIfChanged(olTitle, '页面在后台');
     setTextIfChanged(olSub, '后台标签页不连接设备；切到前台后会自动重新连接');
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'released') {
     const handedOver = backendStatus?.human_handoff === true;
-    setTextIfChanged(olTitle, handedOver ? '手机已交还给你' : '设备空闲中');
+    setTextIfChanged(olTitle, handedOver ? '手机已交还' : '设备空闲中');
     setTextIfChanged(olSub, handedOver
-      ? humanViewText(backendStatus)
-      : '一段时间没人操作，设备连接已暂停。自己用点「我来操作」（镜像画面，手机保持锁屏，不用输密码）；让 agent 继续点「交给 agent」');
+      ? '手机在持有人手里，远程控制已停止。需要远程操作时点「连接手机」'
+      : '一段时间没人操作，设备连接已暂停。点「连接手机」继续（手机需解锁亮屏）');
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'releasing') {
     setTextIfChanged(olTitle, '正在释放设备');
@@ -1492,9 +1342,7 @@ function showOverlay(kind) {
     offlineOverlay.classList.add('disconnected');
   } else {
     setTextIfChanged(olTitle, '画面已停止');
-    setTextIfChanged(olSub, backendType === 'direct'
-      ? '设备画面暂时没有更新'
-      : '手机可能已锁屏、断开或镜像已暂停');
+    setTextIfChanged(olSub, '设备画面暂时没有更新');
   }
   offlineOverlay.hidden = false;
   offlineOverlay.inert = false;
@@ -1531,11 +1379,10 @@ function showOverlay(kind) {
   } catch (_) { /* best-effort */ }
 })();
 
-/* ── Backend + device status ─────────────────────────────────────
-   Direct is the primary path: MJPEG for video and cookie-authenticated HTTP for
-   control. It must never create /ws or a PeerConnection. Mirror keeps the
-   original WebRTC/data-channel implementation as an explicit compatibility
-   backend. */
+/* ── Device status ───────────────────────────────────────────────
+   The phone is served only over WebDriverAgent: MJPEG (with screenshot
+   stills as fallback) for video and cookie-authenticated POST /control for
+   input, each gesture explicitly acknowledged. */
 const STATUS_REQUEST_TIMEOUT_MS = 8000;
 let statusPollBusy = false;
 let statusPollGeneration = 0;
@@ -1576,85 +1423,64 @@ async function pollAgentMode() {
     if (!r.ok) throw new Error('status rejected');
     const s = await r.json();
     if (generation !== statusPollGeneration) return backendStatus;
-    const previousBackend = backendType;
     backendStatus = s;
-    humanViewLive = s.backend === 'direct' && s.human_handoff === true && s.human_view === 'live';
-    backendType = (s.backend === 'mirror' || humanViewLive) ? 'mirror' : 'direct';
     syncHandoffButton();
-    explainHumanViewInput(s);
 
-    if (backendType === 'direct') {
-      updateMjpegActivityFromStatus(s, polledStreamId);
-      const directPageVisible = document.visibilityState === 'visible';
-      setDirectControlReady(
-        directPageVisible &&
-          s.releasing !== true && s.reconnecting !== true && s.released !== true &&
-          s.mode === 'agent' && s.drivable === true && hasFreshDirectFrame(),
-      );
-      if (previousBackend === 'mirror') stopMirrorTransport();
-      hidePlayOverlay();
-      if (!directPageVisible) {
-        // A background/locked browser must not keep an MJPEG viewer alive and
-        // defeat the daemon's idle release. Visible recovery starts with a
-        // fresh status probe instead of silently retaining control readiness.
-        // Say so on the page: a capture of a background tab (agents do this)
-        // otherwise shows a black frame and a stale pill with no explanation.
-        stopStills();
-        showOverlay('background');
-      } else if (s.releasing === true) {
-        stopStills();
-        showOverlay('releasing');
-      } else if (s.reconnecting === true) {
-        stopStills();
-        /* A blocker that needs the operator's hands (unlock, trust, cable,
-           WARP) must not hide behind "正在重新连接": the retry loop cannot
-           clear it on its own, so waiting quietly is exactly wrong. */
-        showOverlay(actionableSetupBlocker(s) ? 'setup-blocked' : 'reconnecting');
-      } else if (s.released === true) {
-        stopStills();
-        showOverlay('released');
-      } else if (s.drivable !== true) {
-        const unavailableKind = directUnavailableKind(s);
-        if (unavailableKind === 'locked' || unavailableKind === 'blocked') {
-          startStills();
-          acquireWakeLock();
-        } else {
-          stopStills();
-        }
-        showOverlay(unavailableKind);
-      } else {
+    updateMjpegActivityFromStatus(s, polledStreamId);
+    const directPageVisible = document.visibilityState === 'visible';
+    setDirectControlReady(
+      directPageVisible &&
+        s.releasing !== true && s.reconnecting !== true && s.released !== true &&
+        s.mode === 'agent' && s.drivable === true && hasFreshDirectFrame(),
+    );
+    if (!directPageVisible) {
+      // A background/locked browser must not keep an MJPEG viewer alive and
+      // defeat the daemon's idle release. Visible recovery starts with a
+      // fresh status probe instead of silently retaining control readiness.
+      // Say so on the page: a capture of a background tab (agents do this)
+      // otherwise shows a black frame and a stale pill with no explanation.
+      stopStills();
+      showOverlay('background');
+    } else if (s.releasing === true) {
+      stopStills();
+      showOverlay('releasing');
+    } else if (s.reconnecting === true) {
+      stopStills();
+      /* A blocker that needs the operator's hands (unlock, trust, cable,
+         WARP) must not hide behind "正在重新连接": the retry loop cannot
+         clear it on its own, so waiting quietly is exactly wrong. */
+      showOverlay(actionableSetupBlocker(s) ? 'setup-blocked' : 'reconnecting');
+    } else if (s.released === true) {
+      stopStills();
+      showOverlay('released');
+    } else if (s.drivable !== true) {
+      const unavailableKind = directUnavailableKind(s);
+      if (unavailableKind === 'locked' || unavailableKind === 'blocked') {
         startStills();
         acquireWakeLock();
-        if (hasFreshDirectFrame()) hideOverlay();
-        else showOverlay(directVisualEvidenceRequiredAfter !== null
-          ? 'outcome-unknown'
-          : (directFrameSeen ? 'frame-stale' : 'connecting'));
-      }
-    } else {
-      setDirectControlReady(false);
-      if (previousBackend === 'direct') {
+      } else {
         stopStills();
-        // The Direct overlay ("released", "starting the view…") belongs to the
-        // path this page just left; the WebRTC transport raises its own.
-        hideOverlay();
       }
-      startMirrorTransport();
+      showOverlay(unavailableKind);
+    } else {
+      startStills();
+      acquireWakeLock();
+      if (hasFreshDirectFrame()) hideOverlay();
+      else showOverlay(directVisualEvidenceRequiredAfter !== null
+        ? 'outcome-unknown'
+        : (directFrameSeen ? 'frame-stale' : 'connecting'));
     }
     updateModeControls();
     updateStatusLine();
     return s;
   } catch (_) {
     if (generation !== statusPollGeneration) return backendStatus;
-    if (backendType !== 'mirror') {
-      backendType = 'direct'; // safe default: never start Mac capture/input.
-      backendStatus = null;
-      setDirectControlReady(false);
-      stopMirrorTransport();
-      stopStills();
-      showOverlay('status-error');
-      updateModeControls();
-      updateStatusLine();
-    }
+    backendStatus = null;
+    setDirectControlReady(false);
+    stopStills();
+    showOverlay('status-error');
+    updateModeControls();
+    updateStatusLine();
     return null;
   } finally {
     clearTimeout(timeoutId);
@@ -1702,8 +1528,7 @@ function hasFreshDirectFrame(now = performance.now()) {
      freshestEvidenceAt > directVisualEvidenceRequiredAfter);
 }
 function directStatusAllowsControl(s = backendStatus) {
-  return backendType === 'direct' &&
-    document.visibilityState === 'visible' &&
+  return document.visibilityState === 'visible' &&
     s != null &&
     s.releasing !== true &&
     s.reconnecting !== true &&
@@ -1808,7 +1633,6 @@ async function fetchStill(generation = stillsGeneration) {
       const next = URL.createObjectURL(blob);
       if (generation !== stillsGeneration ||
           requestEpoch !== stillRequestEpoch ||
-          backendType !== 'direct' ||
           backendStatus?.mode !== 'agent') {
         URL.revokeObjectURL(next);
         return;
@@ -1838,7 +1662,6 @@ function startSnapshotFallback(generation) {
   if (
     generation !== stillsGeneration ||
     !directFeedActive ||
-    backendType !== 'direct' ||
     backendStatus?.mode !== 'agent'
   ) return;
   if (!stillsTimer) {
@@ -1858,7 +1681,6 @@ function mjpegReady(generation) {
   if (
     generation !== stillsGeneration ||
     !directFeedActive ||
-    backendType !== 'direct' ||
     backendStatus?.mode !== 'agent' ||
     !mjpegFrame.naturalWidth ||
     !mjpegFrame.naturalHeight
@@ -1908,7 +1730,6 @@ function startMjpegAttempt(generation) {
   if (
     generation !== stillsGeneration ||
     !directFeedActive ||
-    backendType !== 'direct' ||
     backendStatus?.mode !== 'agent'
   ) return;
   clearMjpegAttempt();
@@ -1976,42 +1797,36 @@ function hideOverlay() {
 
 /* ── Status pill dot colour ───────────────────────────────────── */
 /* Forward-declared here; defined fully below after paintDot() exists.
-   paintDot() reads overlayState + connState directly rather than scraping text. */
+   paintDot() reads overlayState + backendStatus directly rather than scraping text. */
 
 /* ── Status line ──────────────────────────────────────────────── */
 function setStatus(msg) { setTextIfChanged(statusLine, msg); }
 function updateStatusLine() {
-  if (backendType === 'direct') {
-    if (overlayState === 'status-error') { setStatus('无法获取设备状态'); return; }
-    if (!backendStatus) { setStatus('正在获取设备状态…'); return; }
-    if (backendStatus.reconnecting === true) { setStatus('正在重新连接设备…'); return; }
-    if (backendStatus.releasing === true) { setStatus('正在释放设备…'); return; }
-    if (backendStatus.released === true) { setStatus('设备已释放'); return; }
-    if (backendStatus.drivable !== true) {
-      switch (directUnavailableKind(backendStatus)) {
-        case 'locked': setStatus('设备不可用 · 请解锁'); break;
-        case 'setup-blocked': setStatus('设备设置被阻塞'); break;
-        case 'unconfigured': setStatus('尚未选择 iPhone'); break;
-        case 'external': setStatus('外部 WDA 未连接'); break;
-        case 'blocked': setStatus('设备控制暂不可用'); break;
-        default: setStatus('设备未连接');
-      }
-      return;
+  if (overlayState === 'status-error') { setStatus('无法获取设备状态'); return; }
+  if (!backendStatus) { setStatus('正在获取设备状态…'); return; }
+  if (backendStatus.reconnecting === true) { setStatus('正在重新连接设备…'); return; }
+  if (backendStatus.releasing === true) { setStatus('正在释放设备…'); return; }
+  if (backendStatus.released === true) { setStatus('设备已释放'); return; }
+  if (backendStatus.drivable !== true) {
+    switch (directUnavailableKind(backendStatus)) {
+      case 'locked': setStatus('设备不可用 · 请解锁'); break;
+      case 'setup-blocked': setStatus('设备设置被阻塞'); break;
+      case 'unconfigured': setStatus('尚未选择 iPhone'); break;
+      case 'external': setStatus('外部 WDA 未连接'); break;
+      case 'blocked': setStatus('设备控制暂不可用'); break;
+      default: setStatus('设备未连接');
     }
-    if (directVisualEvidenceRequiredAfter !== null) {
-      setStatus('操作结果待确认 · 等待新画面');
-      return;
-    }
-    if (!hasFreshDirectFrame()) {
-      setStatus(directFrameSeen ? '设备在线 · 画面停滞' : '设备在线 · 等待画面');
-      return;
-    }
-    setStatus('设备在线 · Direct');
     return;
   }
-  const rtt   = lastRtt !== '--' ? ` · ${lastRtt}ms` : '';
-  const relay = FORCE_RELAY ? ' · relay' : '';
-  setStatus(`${connState}${rtt}${relay}`);
+  if (directVisualEvidenceRequiredAfter !== null) {
+    setStatus('操作结果待确认 · 等待新画面');
+    return;
+  }
+  if (!hasFreshDirectFrame()) {
+    setStatus(directFrameSeen ? '设备在线 · 画面停滞' : '设备在线 · 等待画面');
+    return;
+  }
+  setStatus('设备在线 · Direct');
 }
 
 /* ── Wake Lock [iOS §Wake Lock] ───────────────────────────────── */
@@ -2024,43 +1839,14 @@ async function acquireWakeLock() {
   } catch (_) {}
 }
 
-/* ── Play() with fallback overlay [iOS §Video] ────────────────── */
-function hidePlayOverlay() {
-  playOverlay.hidden = true;
-  playOverlay.inert = true;
-}
-function showPlayOverlay() {
-  if (backendType === 'direct') return;
-  playOverlay.inert = false;
-  playOverlay.hidden = false;
-}
-async function tryPlay() {
-  if (backendType === 'direct' || video.srcObject == null) return;
-  try { await video.play(); hidePlayOverlay(); acquireWakeLock(); }
-  catch (_) { showPlayOverlay(); }
-}
-playOverlay.addEventListener('click', async (e) => {
-  e.stopPropagation();
-  try { await video.play(); hidePlayOverlay(); acquireWakeLock(); } catch (_) {}
-});
-
-/* ── Visibility change: re-play + WakeLock + ICE restart [iOS] ── */
+/* ── Visibility change: drop the feed in the background ───────── */
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
-    if (backendType === 'direct') {
-      // Re-establish both readiness and the image feed only from current daemon
-      // truth; never reuse the pre-background control state.
-      cancelStatusPoll();
-      void pollAgentMode();
-    } else {
-      if (video.srcObject && video.paused && !frozen) tryPlay();
-      acquireWakeLock();
-      if (pc &&
-          (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed')) {
-        scheduleIceRestart();
-      }
-    }
-  } else if (backendType === 'direct') {
+    // Re-establish both readiness and the image feed only from current daemon
+    // truth; never reuse the pre-background control state.
+    cancelStatusPoll();
+    void pollAgentMode();
+  } else {
     cancelStatusPoll();
     setDirectControlReady(false);
     stopStills();
@@ -2068,13 +1854,12 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 window.addEventListener('pagehide', () => {
-  if (backendType !== 'direct') return;
   cancelStatusPoll();
   setDirectControlReady(false);
   stopStills();
 });
 window.addEventListener('pageshow', () => {
-  if (backendType === 'direct' && document.visibilityState === 'visible') {
+  if (document.visibilityState === 'visible') {
     cancelStatusPoll();
     void pollAgentMode();
   }
@@ -2109,16 +1894,15 @@ window.addEventListener('resize', () => { if (gridOn) drawGrid(); });
 /* ── Content-rect coord mapping [iOS §Touch] ──────────────────── */
 function pointerToNormalized(clientX, clientY) {
   // The visible source owns the coordinate system. This includes the periodic
-  // PNG fallback after MJPEG has failed; tying it to `mjpegLive` mapped those
-  // taps against a hidden/empty video element.
-  const directFrame = mjpegFrame.classList.contains('active')
+  // PNG fallback after MJPEG has failed; with neither frame visible there is
+  // nothing to map a tap against.
+  const el = mjpegFrame.classList.contains('active')
     ? mjpegFrame
     : (stillFrame.classList.contains('active') ? stillFrame : null);
-  const usingDirectFrame = directFrame !== null;
-  const el = directFrame || video;
+  if (!el) return null;
   const rect = el.getBoundingClientRect();
-  const vw = usingDirectFrame ? el.naturalWidth  : el.videoWidth;
-  const vh = usingDirectFrame ? el.naturalHeight : el.videoHeight;
+  const vw = el.naturalWidth;
+  const vh = el.naturalHeight;
   if (!vw || !vh) return null;
   const elAR = rect.width / rect.height, vidAR = vw / vh;
   let contentW, contentH, offX, offY;
@@ -2129,7 +1913,7 @@ function pointerToNormalized(clientX, clientY) {
   return { nx, ny };
 }
 
-/* ── Direct HTTP control / legacy data channels ───────────────── */
+/* ── Direct HTTP control (POST /control) ──────────────────────── */
 let directControlTail = Promise.resolve();
 let directControlEpoch = 0;
 let directControlQueued = 0;
@@ -2204,7 +1988,7 @@ function setDirectControlReady(ready) {
   }
 }
 function syncDirectControlAvailability() {
-  const unavailable = backendType === 'direct' && !directControlReady;
+  const unavailable = !directControlReady;
   if (unavailable && textPanel.classList.contains('open')) {
     closeTextPanel({ restoreFocus: false });
   }
@@ -2231,11 +2015,7 @@ function sendDirectControl(obj) {
     // timeout, backend transition, release, or reconnect invalidates the epoch;
     // a bounded queue age also drops commands that waited too long behind one
     // slow request.
-    if (
-      epoch !== directControlEpoch ||
-      backendType !== 'direct' ||
-      !directControlReady
-    ) {
+    if (epoch !== directControlEpoch || !directControlReady) {
       return controlResult(false, 'not_sent');
     }
     // The server deadline consumes only the gesture's remaining freshness
@@ -2311,49 +2091,10 @@ function sendDirectControl(obj) {
   return directControlTail;
 }
 async function sendControl(obj) {
-  let result;
-  if (backendType === 'direct') {
-    result = await sendDirectControl(obj);
-    if (!result.ok) void pollAgentMode();
-  } else if (!controlCh || controlCh.readyState !== 'open') {
-    result = controlResult(false, 'not_sent');
-  } else {
-    try {
-      controlCh.send(JSON.stringify(obj));
-      result = controlResult(true);
-    } catch (_) {
-      result = controlResult(false, 'not_sent');
-    }
-  }
+  const result = await sendDirectControl(obj);
+  if (!result.ok) void pollAgentMode();
   if (result.ok) recordSuccessfulControl(obj);
   return result;
-}
-function sendMove(nx, ny, flags) {
-  if (backendType !== 'mirror') return false;
-  if (!moveCh || moveCh.readyState !== 'open') return;
-  if (moveCh.bufferedAmount > MOVE_BACKPRESSURE_BYTES) return;
-  const buf = new ArrayBuffer(5), view = new DataView(buf);
-  view.setUint16(0, Math.round(nx * 65535), false);
-  view.setUint16(2, Math.round(ny * 65535), false);
-  view.setUint8(4, flags & 0xff);
-  try { moveCh.send(buf); } catch (_) {}
-}
-/* Swipe → scroll-wheel. 7-byte packet: [u16 nx][u16 ny][i8 dx][i8 dy][u8 flags=0x02].
-   nx/ny anchor the cursor; dx/dy are per-move CSS-pixel deltas. iPhone Mirroring
-   only scrolls on scroll-wheel events, so swipes go here (NOT sendMove, which is a
-   mouse-drag → long-press/reorder and never scrolls). */
-const clampI8 = v => Math.max(-127, Math.min(127, Math.round(v)));
-function sendScroll(nx, ny, dx, dy) {
-  if (backendType !== 'mirror') return false;
-  if (!moveCh || moveCh.readyState !== 'open') return;
-  if (moveCh.bufferedAmount > MOVE_BACKPRESSURE_BYTES) return;
-  const buf = new ArrayBuffer(7), view = new DataView(buf);
-  view.setUint16(0, Math.round(nx * 65535), false);
-  view.setUint16(2, Math.round(ny * 65535), false);
-  view.setInt8(4, clampI8(dx));
-  view.setInt8(5, clampI8(dy));
-  view.setUint8(6, 0x02);
-  try { moveCh.send(buf); } catch (_) {}
 }
 
 /* ── Tap dot ──────────────────────────────────────────────────── */
@@ -2378,82 +2119,53 @@ videoArea.addEventListener('gesturestart',  e => e.preventDefault(), { passive: 
 videoArea.addEventListener('gesturechange', e => e.preventDefault(), { passive: false });
 videoArea.addEventListener('gestureend',    e => e.preventDefault(), { passive: false });
 
-/* Gesture model (matches iPhone Mirroring's input semantics):
-   - quick tap (no move)        → control `tap`         → mouse down+up
-   - swipe (move before hold)   → `scroll` packets      → scroll-wheel (the ONLY
-                                                           thing Mirroring scrolls on)
-   - long-press (held, still)   → control `longpress`   → mouse down (held)
-   - long-press then drag       → `move` packets        → mouse-drag (slider/reorder)
-   No eager `down` on every gesture: an early mouse press + drag is what Mirroring
-   read as long-press/icon-reorder, so swipes never scrolled. */
+/* Gesture model (sent to WDA as one /control action on pointerup):
+   - quick tap (no move)              → `tap`
+   - swipe (move before hold)         → `swipe`
+   - long-press (held, still)         → `longpress`
+   - long-press then drag             → `drag` */
 function onPointerDown(e) {
   if (e.target.closest('a, button, input, textarea, select, summary, [contenteditable="true"]')) {
     return;
   }
   e.preventDefault();
   videoArea.setPointerCapture(e.pointerId);
-  const directAtDown = backendType === 'direct';
   const pd = {
     startX:e.clientX, startY:e.clientY, startT:performance.now(),
     lastX:e.clientX, lastY:e.clientY,
-    longTimer:null, pressed:false, scrolling:false,
+    longTimer:null, scrolling:false,
     longpressArmed:false, movedAt:null,
-    backendAtDown:backendType,
-    directEpoch:directAtDown ? directControlEpoch : null,
-    directReadyAtDown:directAtDown &&
-      directControlReady &&
+    directEpoch:directControlEpoch,
+    directReadyAtDown:directControlReady &&
       directStatusAllowsControl() &&
       hasFreshDirectFrame(),
   };
   pointers.set(e.pointerId, pd);
-  if (backendType === 'direct') {
-    pd.longTimer = setTimeout(() => {
-      const live = pointers.get(e.pointerId); if (!live) return;
-      const distance = Math.hypot(
-        live.lastX - live.startX,
-        live.lastY - live.startY,
-      );
-      if (directGestureIsCurrent(live) && distance <= TAP_SLOP) {
-        live.longpressArmed = true;
-      }
-    }, LONGPRESS_MS);
-  } else {
-    pd.longTimer = setTimeout(async () => {
-      const live = pointers.get(e.pointerId); if (!live) return;
-      const coords = pointerToNormalized(live.lastX, live.lastY);
-      if (!coords) return;
-      const result = await sendControl({ type:'longpress', x:coords.nx, y:coords.ny });
-      if (!result.ok || pointers.get(e.pointerId) !== live) return;
-      showTapDot(live.lastX, live.lastY); toast('长按');
-      live.pressed = true; // mirror-only mouse-drag mode
-    }, LONGPRESS_MS);
-  }
+  pd.longTimer = setTimeout(() => {
+    const live = pointers.get(e.pointerId); if (!live) return;
+    const distance = Math.hypot(
+      live.lastX - live.startX,
+      live.lastY - live.startY,
+    );
+    if (directGestureIsCurrent(live) && distance <= TAP_SLOP) {
+      live.longpressArmed = true;
+    }
+  }, LONGPRESS_MS);
 }
 function onPointerMove(e) {
   const pd = pointers.get(e.pointerId); if (!pd) return;
   e.preventDefault();
   const events = hasCoalesced ? e.getCoalescedEvents() : [e];
   for (const ev of events) {
-    const ddx = ev.clientX - pd.lastX, ddy = ev.clientY - pd.lastY; // per-move delta
     pd.lastX = ev.clientX; pd.lastY = ev.clientY;
     const moved = Math.hypot(ev.clientX - pd.startX, ev.clientY - pd.startY) > TAP_SLOP;
-    const coords = pointerToNormalized(ev.clientX, ev.clientY);
-    if (backendType === 'direct') {
-      if (moved && !pd.scrolling) {
-        pd.scrolling = true;
-        pd.movedAt = performance.now();
-        // Movement before the hold threshold is always a swipe, even if the
-        // finger stays down for a long time afterwards. Only movement after a
-        // stationary hold is a drag.
-        if (!pd.longpressArmed) clearTimeout(pd.longTimer);
-      }
-    } else if (pd.pressed) {
-      // long-press already fired → real mouse-drag (slider/reorder).
-      if (coords) sendMove(coords.nx, coords.ny, 1);
-    } else if (moved) {
-      // swipe before any hold. Cancel the long-press timer once.
-      if (!pd.scrolling) { clearTimeout(pd.longTimer); pd.scrolling = true; }
-      if (coords) sendScroll(coords.nx, coords.ny, ddx, ddy);
+    if (moved && !pd.scrolling) {
+      pd.scrolling = true;
+      pd.movedAt = performance.now();
+      // Movement before the hold threshold is always a swipe, even if the
+      // finger stays down for a long time afterwards. Only movement after a
+      // stationary hold is a drag.
+      if (!pd.longpressArmed) clearTimeout(pd.longTimer);
     }
   }
 }
@@ -2470,7 +2182,6 @@ function classifyDirectGesture(pd, elapsedMs, distancePx) {
 function directGestureIsCurrent(pd) {
   return pd.directReadyAtDown &&
     pd.directEpoch === directControlEpoch &&
-    backendType === 'direct' &&
     directControlReady &&
     directStatusAllowsControl() &&
     hasFreshDirectFrame();
@@ -2483,79 +2194,55 @@ function onPointerUp(e) {
   const dt = performance.now() - pd.startT;
   const dist = Math.hypot(e.clientX - pd.startX, e.clientY - pd.startY);
 
-  if (pd.backendAtDown !== backendType) return;
-  if (backendType === 'direct') {
-    // A gesture belongs to the exact visible Direct control epoch in which it
-    // began. Backgrounding, feed loss, reconnect, or a readiness transition
-    // cancels it; a later pointerup must not act on a newly connected screen.
-    if (!directGestureIsCurrent(pd)) return;
-    const a = pointerToNormalized(pd.startX, pd.startY);
-    const b = coords;
-    let action = null, feedback = '';
-    const gesture = classifyDirectGesture(pd, dt, dist);
-    if ((gesture === 'drag' || gesture === 'swipe') && a && b) {
-      action = gesture === 'drag'
-        ? {
-            type:'drag', x1:a.nx, y1:a.ny, x2:b.nx, y2:b.ny,
-            hold_ms:LONGPRESS_MS,
-            duration_ms:Math.max(120, Math.min(900, Math.round(
-              dt - Math.max(LONGPRESS_MS, (pd.movedAt || pd.startT) - pd.startT),
-            ))),
-          }
-        : {
-            type:'swipe', x1:a.nx, y1:a.ny, x2:b.nx, y2:b.ny,
-            duration_ms:Math.max(120, Math.min(900, Math.round(dt))),
-          };
-    } else if (b && gesture === 'longpress') {
-      action = {
-        type:'longpress', x:b.nx, y:b.ny,
-        duration_ms:Math.max(600, Math.min(10_000, Math.round(dt))),
-      };
-      feedback = '长按';
-    } else if (b && gesture === 'tap') {
-      action = { type:'tap', x:b.nx, y:b.ny };
-    }
-    if (action) {
-      void sendControl(action).then(result => {
-        if (!result.ok) {
-          toast(controlFailureText(result, '操作失败，设备未连接'));
-          return;
+  // A gesture belongs to the exact visible Direct control epoch in which it
+  // began. Backgrounding, feed loss, reconnect, or a readiness transition
+  // cancels it; a later pointerup must not act on a newly connected screen.
+  if (!directGestureIsCurrent(pd)) return;
+  const a = pointerToNormalized(pd.startX, pd.startY);
+  const b = coords;
+  let action = null, feedback = '';
+  const gesture = classifyDirectGesture(pd, dt, dist);
+  if ((gesture === 'drag' || gesture === 'swipe') && a && b) {
+    action = gesture === 'drag'
+      ? {
+          type:'drag', x1:a.nx, y1:a.ny, x2:b.nx, y2:b.ny,
+          hold_ms:LONGPRESS_MS,
+          duration_ms:Math.max(120, Math.min(900, Math.round(
+            dt - Math.max(LONGPRESS_MS, (pd.movedAt || pd.startT) - pd.startT),
+          ))),
         }
-        if (action.type !== 'swipe') showTapDot(e.clientX, e.clientY);
-        if (feedback) toast(feedback);
-      });
-    }
-  } else if (pd.pressed) {
-    // release the held long-press / drag.
-    if (coords) void sendControl({ type:'up', x:coords.nx, y:coords.ny });
-  } else if (pd.scrolling) {
-    // Mirror mode already emitted scroll-wheel deltas per move.
-  } else {
-    // No long-press fired and no scroll occurred: this is a tap. Avoid the old
-    // 250–500ms dead zone where a deliberate tap produced no action.
-    if (coords && dist < TAP_SLOP) {
-      void sendControl({ type:'tap', x:coords.nx, y:coords.ny }).then(result => {
-        if (result.ok) showTapDot(e.clientX, e.clientY);
-        else toast(controlFailureText(result, '操作失败，连接未就绪'));
-      });
-    }
+      : {
+          type:'swipe', x1:a.nx, y1:a.ny, x2:b.nx, y2:b.ny,
+          duration_ms:Math.max(120, Math.min(900, Math.round(dt))),
+        };
+  } else if (b && gesture === 'longpress') {
+    action = {
+      type:'longpress', x:b.nx, y:b.ny,
+      duration_ms:Math.max(600, Math.min(10_000, Math.round(dt))),
+    };
+    feedback = '长按';
+  } else if (b && gesture === 'tap') {
+    action = { type:'tap', x:b.nx, y:b.ny };
+  }
+  if (action) {
+    void sendControl(action).then(result => {
+      if (!result.ok) {
+        toast(controlFailureText(result, '操作失败，设备未连接'));
+        return;
+      }
+      if (action.type !== 'swipe') showTapDot(e.clientX, e.clientY);
+      if (feedback) toast(feedback);
+    });
   }
 }
 function onPointerCancel(e) {
   const pd = pointers.get(e.pointerId);
-  if (pd) {
-    clearTimeout(pd.longTimer);
-    if (backendType === 'mirror' && pd.pressed) {
-      const coords = pointerToNormalized(pd.lastX, pd.lastY);
-      if (coords) void sendControl({ type:'up', x:coords.nx, y:coords.ny });
-    }
-  }
+  if (pd) clearTimeout(pd.longTimer);
   pointers.delete(e.pointerId);
 }
 
 function cancelDirectPointers() {
   for (const [pointerId, pd] of pointers) {
-    if (pd.backendAtDown !== 'direct') continue;
     clearTimeout(pd.longTimer);
     pointers.delete(pointerId);
   }
@@ -2843,9 +2530,6 @@ function renderRecordedFlow() {
 }
 
 function flowUnavailableCopy() {
-  if (backendType !== 'direct') {
-    return '自动化流程目前只支持已连接的真实 iPhone。';
-  }
   if (backendStatus?.setup_blocked_on === 'usb') {
     return '目标 iPhone 尚未通过 USB 连接。连接、解锁并保持亮屏后，这里会自动恢复。';
   }
@@ -2863,7 +2547,7 @@ function syncFlowControls() {
   const incomplete = excludedUnrecordedActions;
   const missingInputs = missingFlowInputs().length;
   const checkpointBusy = flowCheckpointPending > 0 || flowStarting || flowFinalizing;
-  const drivable = backendType === 'direct' && directControlReady;
+  const drivable = directControlReady;
   const showOpen =
     !hasSteps &&
     !flowRecording &&
@@ -3107,7 +2791,7 @@ function nextFlowInputKey() {
 }
 
 function recordSuccessfulControl(action) {
-  if (!flowRecording || backendType !== 'direct') return;
+  if (!flowRecording) return;
   flowActionSerial++;
   if (action.type === 'text') {
     const key = nextFlowInputKey();
@@ -3784,7 +3468,7 @@ async function toggleFlowRecording() {
     toast('录制已停止，请逐项审核后下载或执行');
     return;
   }
-  if (backendType !== 'direct' || !directControlReady) {
+  if (!directControlReady) {
     toast('设备连接未就绪，暂时不能开始录制');
     return;
   }
@@ -3795,7 +3479,6 @@ async function toggleFlowRecording() {
   const baseline = await readFlowObservation();
   if (
     session !== flowCheckpointSession ||
-    backendType !== 'direct' ||
     !directControlReady
   ) {
     flowStarting = false;
@@ -3846,7 +3529,6 @@ flowRun.addEventListener('click', async () => {
     excludedUnrecordedActions > 0 ||
     missingFlowInputs().length > 0 ||
     !flowSafety.checked ||
-    backendType !== 'direct' ||
     !directControlReady
   ) return;
   let batchSteps;
@@ -3945,32 +3627,6 @@ document.getElementById('btnSearch').addEventListener('click', () => {
   void runShortcut('spotlight', '已打开搜索');
 });
 
-const btnSwitcher = document.getElementById('btnSwitcher');
-btnSwitcher.addEventListener('click', () => {
-  // The App Switcher is a home-indicator system gesture WDA can't synthesize, so
-  // it is only offered by the explicit mirror backend. Guide the user
-  // to Spotlight, which IS wired up on-device, instead of sending a no-op.
-  if (backendType === 'direct') { toast('请使用「搜索」打开其他 App'); return; }
-  void runShortcut('switcher', '已打开切换器');
-});
-
-const btnFreeze = document.getElementById('btnFreeze');
-const freezeLbl = btnFreeze.querySelector('.lbl');
-btnFreeze.addEventListener('click', () => {
-  if (backendType !== 'mirror') return;
-  frozen = !frozen;
-  btnFreeze.setAttribute('aria-pressed', String(frozen));
-  if (frozen) {
-    video.pause(); btnFreeze.classList.add('active');
-    if (freezeLbl) freezeLbl.textContent = '继续';
-    toast('画面已冻结');
-  } else {
-    video.play().catch(()=>{}); btnFreeze.classList.remove('active');
-    if (freezeLbl) freezeLbl.textContent = '冻结';
-    toast('画面继续');
-  }
-});
-
 const btnGrid = document.getElementById('btnGrid');
 btnGrid.addEventListener('click', () => {
   gridOn = !gridOn;
@@ -3983,8 +3639,7 @@ btnGrid.addEventListener('click', () => {
 const btnSend = document.getElementById('btnSend');
 async function sendText() {
   const text = textInput.value.slice(0, 500);
-  if (text.length === 0 || textSendBusy ||
-      (backendType === 'direct' && !directControlReady)) return false;
+  if (text.length === 0 || textSendBusy || !directControlReady) return false;
   textSendBusy = true;
   syncDirectControlAvailability();
   btnSend.textContent = '发送中…';
@@ -4009,83 +3664,30 @@ textInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); void sendText(); }
 });
 
-/* What a person sees while the browser view of a handed-over phone starts or
-   cannot start. The daemon names the missing piece first ("screen_recording:
-   …"); everything after the colon is for the log. */
-function humanViewText(s) {
-  if (s?.human_view === 'starting') return '正在打开 iPhone 镜像画面，请把手机锁屏放在 Mac 旁边…';
-  if (s?.human_view === 'failed') {
-    const why = String(s.human_view_error || '');
-    const stale = '（如果开关已经是打开的，先用 − 把 iPhoneUse 删掉再重新添加：旧版本的授权不适用于当前版本）';
-    if (why.startsWith('screen_recording')) return '画面需要「屏幕录制」权限：在 Mac 的 系统设置 › 隐私与安全性 › 屏幕录制 里允许 iPhoneUse，重启服务后再点一次「交还」' + stale;
-    if (why.startsWith('accessibility')) return '操作需要「辅助功能」权限：在 Mac 的 系统设置 › 隐私与安全性 › 辅助功能 里允许 iPhoneUse，然后再点一次「交还」' + stale;
-    if (why.startsWith('mirroring_window')) return 'Mac 上的 iPhone 镜像没有打开：把手机锁屏放在 Mac 附近，再点一次「交还」';
-    return '浏览器画面打不开，可以在 Mac 上直接用 iPhone 镜像。原因：' + why;
-  }
-  return '请在 Mac 上用 iPhone 镜像操作（本机或屏幕共享均可）。需要 agent 控制时点"重新连接"';
-}
-
-/* iPhone Mirroring takes input only while it is the Mac's frontmost app, and
-   macOS will not let the daemon take the front from an app a person is
-   actively using. A browser on that same Mac is exactly such an app, so its
-   taps never arrive. Say so — once on arrival from this Mac, and whenever the
-   daemon reports input dropped for want of the front. */
-let humanViewLocalHintShown = false;
-let humanViewBlockedToastAt = 0;
-function explainHumanViewInput(s) {
-  if (!humanViewLive) return;
-  const local = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(location.hostname);
-  if (local && !humanViewLocalHintShown) {
-    humanViewLocalHintShown = true;
-    toast('你就在这台 Mac 上：直接用 Mac 上的 iPhone 镜像窗口操作。浏览器操作要在另一台设备上打开这个页面');
-  }
-  if (s.human_view_input_blocked === true && Date.now() - humanViewBlockedToastAt > 15000) {
-    humanViewBlockedToastAt = Date.now();
-    toast('操作没送到手机：Mac 上有人正在用别的应用，iPhone 镜像切不到前台。请在 Mac 前直接用镜像窗口，或换一台设备打开这个页面');
-  }
-}
-
-/* One button both ways: 交还 hands the phone to a person; once it is theirs
-   the same button gives it back to the agent. */
+/* One button both ways: 交还 stops WDA and gives the phone back to the person
+   holding it; once it is theirs the same button gives it back to the agent. */
 function syncHandoffButton() {
   if (!btnHandoff) return;
-  const handedOver = backendStatus?.backend === 'direct' && backendStatus?.human_handoff === true;
+  const handedOver = backendStatus?.human_handoff === true;
   const label = btnHandoff.querySelector('.lbl');
   if (label) setTextIfChanged(label, handedOver ? '交给 agent' : '交还');
   btnHandoff.title = handedOver
-    ? '把手机交回给 agent：停止浏览器画面并重新连接设备'
-    : '交还手机给人：停止 agent 控制，在这个页面或 Mac 上的 iPhone 镜像里操作';
+    ? '把手机交回给 agent：重新连接设备（手机需解锁亮屏）'
+    : '交还手机给持有人：停止远程控制，手机留给拿着它的人用';
 }
 
 function updateModeControls() {
-  const direct = backendType === 'direct';
-  if (!direct && flowRecording) {
-    flowRecording = false;
-    flowCheckpointSession++;
-    flowLastObservation = null;
-    renderRecordedFlow();
-    toast('流程录制只支持真实设备模式，录制已停止');
-  }
-  // These two controls describe behavior the WDA path cannot honestly provide.
-  // Removing them in Direct also keeps the primary mobile toolbar within reach.
-  btnSwitcher.hidden = direct;
-  btnFreeze.hidden = direct;
-  btnElements.hidden = !direct;
-  if (!direct && elementPanel.classList.contains('open')) {
-    closeElementPanel({ restoreFocus: false });
-  }
   syncDirectControlAvailability();
   if (typeof syncToolbarReserve === 'function') syncToolbarReserve();
 }
 
 document.getElementById('btnLogout').addEventListener('click', () => { location.href = '/logout'; });
-/* Hand the phone to a person: the daemon stops the on-phone runner (which
-   blocks iPhone Mirroring while it runs) and opens iPhone Mirroring on the
-   Mac. The human then drives the phone there — at the Mac, or through Screen
-   Sharing / Tailscale. "重新连接" takes it back for the agent. */
+/* Hand the phone back to the person holding it: the daemon stops the on-phone
+   WDA runner and agent input is refused until someone asks for the agent
+   again ("交给 agent" or 「连接手机」). */
 const btnHandoff = document.getElementById('btnHandoff');
 async function takePhoneBackForAgent() {
-  if (!confirm('把手机交回给 agent？浏览器画面会停止，设备连接会重新建立（手机锁着的话需要解锁一次）。')) return;
+  if (!confirm('把手机交回给 agent？设备连接会重新建立（手机锁着的话需要解锁一次）。')) return;
   btnHandoff.disabled = true;
   try {
     invalidateDirectControlQueue();
@@ -4097,7 +3699,6 @@ async function takePhoneBackForAgent() {
     if (r.status === 401) { location.replace('/login'); return; }
     const result = await r.json().catch(() => ({}));
     toast(r.ok && result.ok === true ? '已交回 agent，正在连接设备' : '交回失败，请查看服务日志');
-    stopMirrorTransport();
     cancelStatusPoll();
     await pollAgentMode();
   } catch (_) {
@@ -4107,15 +3708,15 @@ async function takePhoneBackForAgent() {
   }
 }
 if (btnHandoff) btnHandoff.addEventListener('click', async () => {
-  if (backendStatus?.backend === 'direct' && backendStatus?.human_handoff === true) {
+  if (backendStatus?.human_handoff === true) {
     await takePhoneBackForAgent();
     return;
   }
-  if (backendType !== 'direct') { toast('镜像模式下手机本来就在你手里'); return; }
   if (backendStatus?.recovery_owner === 'external') { toast('WDA 在别的主机上，本机无法交还'); return; }
-  if (!confirm('把手机交还给人？agent 控制会停止，Mac 上会打开 iPhone 镜像，这个页面也会显示镜像画面。')) return;
+  if (!confirm('把手机交还给持有人？远程控制会停止，手机留给拿着它的人用；需要时再点「交给 agent」。')) return;
   btnHandoff.disabled = true;
   try {
+    invalidateDirectControlQueue();
     const r = await fetch('/agent/mode', {
       method: 'POST', cache: 'no-store', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Phone-Control': '1' },
@@ -4126,7 +3727,7 @@ if (btnHandoff) btnHandoff.addEventListener('click', async () => {
     if (!r.ok || result.ok !== true) {
       toast(result?.error === 'lifecycle_busy' ? '设备正在切换，稍后再试' : '交还失败，请查看服务日志');
     } else {
-      toast(result.mirroring_opened ? '已交还，正在打开镜像画面' : '已交还；请在 Mac 上打开 iPhone 镜像');
+      toast('已交还，远程控制已停止');
     }
     cancelStatusPoll();
     await pollAgentMode();
@@ -4136,271 +3737,6 @@ if (btnHandoff) btnHandoff.addEventListener('click', async () => {
     btnHandoff.disabled = false;
   }
 });
-
-/* ── Stats: RTT from candidate-pair ───────────────────────────── */
-let _candidateTypeLogged = false; /* one-shot: log the active candidate type once per connection */
-async function pollStats() {
-  if (!pc || pc.connectionState === 'closed') return;
-  try {
-    const stats = await pc.getStats();
-    stats.forEach(report => {
-      if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.currentRoundTripTime != null) {
-        lastRtt = Math.round(report.currentRoundTripTime * 1000);
-      }
-    });
-    /* One-shot: on first successful stats read after connection, log the active
-       candidate pair's local/remote candidateType.  A value of 'relay' on both
-       sides proves the Cloudflare TURN path is in use (?relay=1 test).
-       Runs unconditionally (not only in FORCE_RELAY mode) so normal LAN connections
-       show 'host'/'srflx' and relay mode clearly shows 'relay'/'relay'. */
-    if (!_candidateTypeLogged) {
-      const candidatesById = new Map();
-      stats.forEach(r => {
-        if (r.type === 'local-candidate' || r.type === 'remote-candidate') {
-          candidatesById.set(r.id, r);
-        }
-      });
-      stats.forEach(r => {
-        if (r.type === 'candidate-pair' && r.state === 'succeeded' && !_candidateTypeLogged) {
-          const local  = candidatesById.get(r.localCandidateId);
-          const remote = candidatesById.get(r.remoteCandidateId);
-          const localType  = local  ? local.candidateType  : '?';
-          const remoteType = remote ? remote.candidateType : '?';
-          console.log(
-            `[iphone-use] active candidate-pair: local=${localType} remote=${remoteType}` +
-            (FORCE_RELAY ? '  ← ?relay=1 mode (expect relay/relay)' : '')
-          );
-          _candidateTypeLogged = true;
-        }
-      });
-    }
-  } catch (_) {}
-  updateStatusLine();
-}
-
-/* ── ICE restart [SIG §restart] ───────────────────────────────── */
-function scheduleIceRestart() {
-  if (!mirrorTransportEnabled || backendType !== 'mirror' || iceRestartTimer) return;
-  iceRestartTimer = setTimeout(() => {
-    iceRestartTimer = null;
-    if (!mirrorTransportEnabled || backendType !== 'mirror' ||
-        !ws || ws.readyState !== WebSocket.OPEN) return;
-    wsSend({ type:'restart' }); toast('ICE 重连中…');
-  }, ICE_RESTART_DEBOUNCE_MS);
-}
-
-/* ── WebSocket helpers [SIG] ──────────────────────────────────── */
-function wsSend(obj) { if (!ws || ws.readyState !== WebSocket.OPEN) return; try { ws.send(JSON.stringify(obj)); } catch (_) {} }
-
-/* ── PeerConnection ───────────────────────────────────────────── */
-async function fetchIceServers() {
-  try {
-    const resp = await fetch('/turn-creds', { credentials: 'include' });
-    if (!resp.ok) return [];
-    const data = await resp.json();
-    return Array.isArray(data.iceServers) ? data.iceServers : [];
-  } catch (_) { return []; }
-}
-async function buildPeerConnection(iceServers) {
-  return new RTCPeerConnection({ iceServers, bundlePolicy:'max-bundle', rtcpMuxPolicy:'require' });
-}
-async function buildPeerConnectionRelayOnly(iceServers) {
-  return new RTCPeerConnection({ iceServers, iceTransportPolicy:'relay', bundlePolicy:'max-bundle', rtcpMuxPolicy:'require' });
-}
-
-function wirePc(newPc) {
-  if (pc) { try { pc.close(); } catch (_) {} }
-  pc = newPc; controlCh = null; moveCh = null;
-  _candidateTypeLogged = false; /* reset so each new offer logs its candidate type */
-  pc.ontrack = (e) => { video.srcObject = e.streams[0] ?? new MediaStream([e.track]); if (!frozen) tryPlay(); };
-  pc.ondatachannel = (e) => {
-    const ch = e.channel; ch.binaryType = 'arraybuffer';
-    if (ch.label === 'control') { controlCh = ch; ch.onopen = () => { connState = 'connected'; updateStatusLine(); }; ch.onclose = () => { controlCh = null; }; ch.onmessage = onControlMessage; }
-    else if (ch.label === 'move') { moveCh = ch; ch.onclose = () => { moveCh = null; }; }
-  };
-  pc.onicecandidate = (e) => { if (e.candidate) wsSend({ type:'ice', candidate: e.candidate.toJSON() }); };
-  pc.oniceconnectionstatechange = () => {
-    const s = pc.iceConnectionState; connState = s; updateStatusLine();
-    if (s === 'disconnected' || s === 'failed') scheduleIceRestart();
-    else if (s === 'connected' || s === 'completed') {
-      clearTimeout(iceRestartTimer); iceRestartTimer = null;
-      if (statsInterval) clearInterval(statsInterval);
-      statsInterval = setInterval(pollStats, STATS_INTERVAL_MS);
-    }
-  };
-  pc.onconnectionstatechange = () => {
-    connState = pc.connectionState; updateStatusLine();
-    if (pc.connectionState === 'failed') scheduleIceRestart();
-    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-      showOverlay('disconnected');
-    } else if (pc.connectionState === 'connected') {
-      /* Only clear a 'disconnected' overlay here; stall detection clears 'stalled'. */
-      if (overlayState === 'disconnected') hideOverlay();
-    }
-  };
-}
-
-function onControlMessage(e) {
-  if (typeof e.data === 'string') { try { const msg = JSON.parse(e.data); if (msg.type === 'toast') toast(msg.text || ''); } catch (_) {} }
-}
-
-/* ── Signaling loop [SIG] ─────────────────────────────────────── */
-let relayAttempt = false;
-function startMirrorTransport() {
-  if (mirrorTransportEnabled) return;
-  mirrorTransportEnabled = true;
-  reconnectDelay = RECONNECT_BASE_MS;
-  connectWs();
-}
-
-function stopMirrorTransport() {
-  mirrorTransportEnabled = false;
-  clearTimeout(reconnectTimer); reconnectTimer = null;
-  clearTimeout(iceRestartTimer); iceRestartTimer = null;
-  if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
-  _stopStallWatch();
-  _stopStallChecker();
-
-  if (ws) {
-    const oldWs = ws;
-    ws = null;
-    oldWs.onopen = null;
-    oldWs.onmessage = null;
-    oldWs.onerror = null;
-    oldWs.onclose = null;
-    try { oldWs.close(); } catch (_) {}
-  }
-  if (pc) {
-    const oldPc = pc;
-    pc = null;
-    oldPc.ontrack = null;
-    oldPc.ondatachannel = null;
-    oldPc.onicecandidate = null;
-    oldPc.oniceconnectionstatechange = null;
-    oldPc.onconnectionstatechange = null;
-    try { oldPc.close(); } catch (_) {}
-  }
-  controlCh = null;
-  moveCh = null;
-  video.srcObject = null;
-  connState = 'direct';
-  lastRtt = '--';
-  relayAttempt = false;
-  hidePlayOverlay();
-}
-
-async function connectWs() {
-  if (!mirrorTransportEnabled || backendType !== 'mirror') return;
-  pendingRemoteIce = []; // candidates from an earlier socket belong to a dead session
-  if (ws) {
-    const oldWs = ws;
-    ws = null;
-    oldWs.onclose = null;
-    try { oldWs.close(); } catch (_) {}
-  }
-  clearTimeout(iceRestartTimer); iceRestartTimer = null;
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  connState = 'connecting'; updateStatusLine();
-  const socket = new WebSocket(`${proto}//${location.host}/ws`);
-  ws = socket;
-  socket.onopen = () => {
-    if (!mirrorTransportEnabled || backendType !== 'mirror' || ws !== socket) {
-      socket.onclose = null;
-      try { socket.close(); } catch (_) {}
-      return;
-    }
-    connState = 'ws-open';
-    updateStatusLine();
-    reconnectDelay = RECONNECT_BASE_MS;
-    relayAttempt = false;
-  };
-  socket.onerror = () => {};
-  socket.onclose = () => {
-    if (ws === socket) ws = null;
-    if (!mirrorTransportEnabled || backendType !== 'mirror') return;
-    connState = 'ws-closed'; updateStatusLine();
-    if (pc) { try { pc.close(); } catch (_) {} pc = null; }
-    reconnectDelay = Math.min(reconnectDelay * 1.5, 30000);
-    clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connectWs, reconnectDelay);
-  };
-  socket.onmessage = async (ev) => {
-    if (!mirrorTransportEnabled || backendType !== 'mirror' || ws !== socket) return;
-    let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
-    if (msg.type === 'offer') await handleOffer(msg.sdp);
-    else if (msg.type === 'ice' && msg.candidate) await addRemoteIce(msg.candidate);
-    else if (msg.type === 'phone_status') {
-      // Daemon-side truth about the Mirroring window. Keepalive frames keep
-      // flowing when the window vanishes, so this signal (not frame flow)
-      // drives the "phone gone" overlay.
-      if (msg.present === false) {
-        showOverlay('gone');
-      }
-      else if (overlayState === 'gone') hideOverlay();
-    }
-    else if (msg.type === 'session_status') {
-      // issue #8 (queue + notify): another viewer holds the live session.
-      if (msg.state === 'queued') { queuedAhead = msg.ahead || 0; showOverlay('queued'); }
-      else if (msg.state === 'active') { if (overlayState === 'queued') hideOverlay(); }
-    }
-  };
-}
-/* The daemon trickles its host candidates the moment it sets its offer, so
-   they can reach us before the offer itself, or while handleOffer is still
-   awaiting the ICE servers or setRemoteDescription. addIceCandidate throws
-   without a remote description, and a dropped host candidate on a LAN with
-   obfuscated (mDNS) browser candidates leaves ICE with nothing to pair.
-   Hold candidates until the offer that owns them is applied. */
-let pendingRemoteIce = [];
-let offerInFlight = false;
-async function addRemoteIce(candidate) {
-  if (!pc || offerInFlight || !pc.remoteDescription) {
-    pendingRemoteIce.push(candidate);
-    return;
-  }
-  try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
-}
-async function flushRemoteIce() {
-  const queued = pendingRemoteIce;
-  pendingRemoteIce = [];
-  for (const candidate of queued) {
-    try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
-  }
-}
-
-async function handleOffer(sdp) {
-  if (!mirrorTransportEnabled || backendType !== 'mirror') return;
-  offerInFlight = true;
-  try {
-    await applyOffer(sdp);
-  } finally {
-    offerInFlight = false;
-  }
-}
-
-async function applyOffer(sdp) {
-  const iceServers = await fetchIceServers();
-  if (!mirrorTransportEnabled || backendType !== 'mirror') return;
-  /* FORCE_RELAY (?relay=1) always uses relay-only transport; otherwise fall back
-     to the relay path only after an SDP error (relayAttempt flag). */
-  const newPc = (FORCE_RELAY || relayAttempt)
-    ? await buildPeerConnectionRelayOnly(iceServers)
-    : await buildPeerConnection(iceServers);
-  if (!mirrorTransportEnabled || backendType !== 'mirror') {
-    try { newPc.close(); } catch (_) {}
-    return;
-  }
-  wirePc(newPc);
-  try {
-    await pc.setRemoteDescription({ type:'offer', sdp });
-    await flushRemoteIce();
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    wsSend({ type:'answer', sdp: pc.localDescription.sdp });
-  } catch (err) {
-    connState = 'sdp-error'; updateStatusLine(); toast('SDP 协商失败');
-    if (!relayAttempt) { relayAttempt = true; clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connectWs, 500); }
-  }
-}
 
 /* ── Chrome: text panel + immersive (mobile UI) ───────────────── */
 const textPanel = document.getElementById('textPanel');
@@ -4626,7 +3962,7 @@ async function loadAccessibleElements() {
 }
 
 function openElementPanel() {
-  if (backendType !== 'direct' || !directControlReady) {
+  if (!directControlReady) {
     toast('设备连接未就绪，暂时无法读取控件');
     return;
   }
@@ -4689,30 +4025,20 @@ syncToolbarReserve();
 const connDot = document.querySelector('#statusPill .conn-dot');
 function paintDot() {
   let cls;
-  if (backendType === 'direct') {
-    if (overlayState === 'status-error' || overlayState === 'offline') {
-      cls = 'bad';
-    } else if (
-      overlayState === 'released' ||
-      overlayState === 'releasing' ||
-      overlayState === 'reconnecting' ||
-      overlayState === 'background' ||
-      overlayState === 'locked' ||
-      overlayState === 'connecting' ||
-      overlayState === 'frame-stale' ||
-      !backendStatus
-    ) {
-      cls = 'warn';
-    } else if (backendStatus.mode === 'agent' && backendStatus.drivable === true) {
-      cls = 'ok';
-    } else {
-      cls = 'warn';
-    }
-  } else if (overlayState === 'disconnected' || /(failed|closed|error)/.test(connState)) {
+  if (overlayState === 'status-error' || overlayState === 'offline') {
     cls = 'bad';
-  } else if (overlayState === 'stalled' || overlayState === 'queued' || overlayState === 'gone') {
+  } else if (
+    overlayState === 'released' ||
+    overlayState === 'releasing' ||
+    overlayState === 'reconnecting' ||
+    overlayState === 'background' ||
+    overlayState === 'locked' ||
+    overlayState === 'connecting' ||
+    overlayState === 'frame-stale' ||
+    !backendStatus
+  ) {
     cls = 'warn';
-  } else if (/(connected|completed)/.test(connState)) {
+  } else if (backendStatus.mode === 'agent' && backendStatus.drivable === true) {
     cls = 'ok';
   } else {
     cls = 'warn';
@@ -4722,108 +4048,13 @@ function paintDot() {
 /* Also keep the MutationObserver so any direct setStatus() call refreshes the dot. */
 new MutationObserver(paintDot).observe(statusLine, { childList:true, characterData:true, subtree:true });
 
-/* ── Stall detection ─────────────────────────────────────────── */
-/* Timestamps the last rendered frame via requestVideoFrameCallback when
-   available (Chrome/Safari), falling back to a 1-second currentTime-delta
-   poll (Firefox and older Safari). If no new frame arrives for >STALL_THRESHOLD_MS
-   while pc.connectionState === 'connected' → show stalled overlay.
-   Any new frame → recovery (hide overlay immediately). */
-
-let _lastFrameTs = 0;         /* performance.now() of last known rendered frame */
-let _stallPollId = null;      /* setInterval id for fallback poll */
-let _rvfcActive  = false;     /* true when rVFC loop is running */
-let _lastKnownTime = -1;      /* video.currentTime at last poll (fallback) */
-
-function _onNewFrame() {
-  /* Called every time a frame is painted; resets the stall clock. */
-  _lastFrameTs = performance.now();
-  if (overlayState === 'stalled') hideOverlay();
-}
-
-/* requestVideoFrameCallback loop (Chrome 83+, Safari 15.4+) */
-function _rVFCLoop(now, meta) {
-  void meta;
-  _onNewFrame();
-  if (_rvfcActive) video.requestVideoFrameCallback(_rVFCLoop);
-}
-
-function _startStallWatch() {
-  _lastFrameTs = performance.now();
-  _lastKnownTime = video.currentTime;
-  if (typeof video.requestVideoFrameCallback === 'function') {
-    _rvfcActive = true;
-    video.requestVideoFrameCallback(_rVFCLoop);
-  } else {
-    /* Fallback: poll currentTime + getVideoPlaybackQuality */
-    if (_stallPollId) return;
-    _stallPollId = setInterval(() => {
-      if (video.paused) return;                 /* user-frozen or not started */
-      const ct = video.currentTime;
-      let newFrame = ct !== _lastKnownTime;
-      /* also check decoded frame count if available */
-      if (!newFrame && typeof video.getVideoPlaybackQuality === 'function') {
-        const q = video.getVideoPlaybackQuality();
-        if (q && q.totalVideoFrames > 0) newFrame = q.totalVideoFrames !== (_startStallWatch._lastFrameCount || 0);
-        _startStallWatch._lastFrameCount = q ? q.totalVideoFrames : 0;
-      }
-      if (newFrame) { _lastKnownTime = ct; _onNewFrame(); }
-    }, STALL_POLL_INTERVAL);
-  }
-}
-
-function _stopStallWatch() {
-  _rvfcActive = false;
-  if (_stallPollId) { clearInterval(_stallPollId); _stallPollId = null; }
-}
-
-/* Master stall-checker: runs every second regardless of method */
-let _stallCheckId = null;
-function _startStallChecker() {
-  if (_stallCheckId) return;
-  _stallCheckId = setInterval(() => {
-    if (frozen || video.paused) return;           /* intentional freeze → ignore */
-    if (!pc || pc.connectionState !== 'connected') return; /* let conn-state handler own it */
-    if (!video.srcObject) return;                 /* no track yet */
-    const age = performance.now() - _lastFrameTs;
-    /* 'gone' (daemon-reported window vanished) outranks 'stalled' — don't
-       downgrade the message; the phone_status signal owns clearing it. */
-    if (age > STALL_THRESHOLD_MS && overlayState !== 'stalled' && overlayState !== 'gone') {
-      showOverlay('stalled');
-    }
-  }, STALL_POLL_INTERVAL);
-}
-function _stopStallChecker() {
-  if (_stallCheckId) { clearInterval(_stallCheckId); _stallCheckId = null; }
-}
-
-/* Wire into video lifecycle */
-video.addEventListener('playing', () => {
-  _lastFrameTs = performance.now();
-  _startStallWatch();
-  _startStallChecker();
-  /* A frame is flowing — clear any stall overlay (but not 'disconnected') */
-  if (overlayState === 'stalled') hideOverlay();
-});
-video.addEventListener('pause', () => {
-  /* rVFC stops firing on its own when paused; stop the loop.
-     The stall-checker guards with (frozen || video.paused) so won't false-alarm. */
-  _stopStallWatch();
-});
-video.addEventListener('emptied', () => { _stopStallWatch(); _stopStallChecker(); });
-
 /* ── Boot ─────────────────────────────────────────────────────── */
 videoArea.addEventListener('contextmenu', e => e.preventDefault());
-video.addEventListener('pause', () => {
-  if (backendType === 'mirror' && !frozen) showPlayOverlay();
-});
-video.addEventListener('playing', hidePlayOverlay);
-video.addEventListener('stalled', tryPlay);
-video.addEventListener('waiting', tryPlay);
 function pollAgentModeOnInterval() {
-  // A hidden Direct tab must not continually trigger action-level WDA probes;
+  // A hidden tab must not continually trigger action-level WDA probes;
   // visibilitychange/pageshow performs an authoritative poll before restoring
-  // its feed and input. Mirror keeps its legacy background status behavior.
-  if (backendType === 'direct' && document.visibilityState !== 'visible') return;
+  // its feed and input.
+  if (document.visibilityState !== 'visible') return;
   void pollAgentMode();
 }
 async function boot() {

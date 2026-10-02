@@ -12008,8 +12008,10 @@ mod tests {
     fn embedded_index_html_is_the_client() {
         // include_str! must pick up web/index.html (the browser client).
         assert!(INDEX_HTML.contains("iphone-use"));
-        assert!(INDEX_HTML.contains("/ws"));
-        assert!(INDEX_HTML.contains("turn-creds"));
+        // WDA-only since v0.9: no WebRTC signaling or TURN in the client.
+        assert!(!INDEX_HTML.contains("/ws"));
+        assert!(!INDEX_HTML.contains("turn-creds"));
+        assert!(!INDEX_HTML.contains("RTCPeerConnection"));
         assert!(INDEX_HTML.contains("id=\"flowPanel\""));
         assert!(INDEX_HTML.contains("aria-label=\"录制并运行自动化流程\""));
         assert!(INDEX_HTML.contains("id=\"flowAvailability\""));

@@ -363,7 +363,7 @@ fn login_sets_session_cookie_and_phone_then_serves_client() {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let html = String::from_utf8_lossy(&body);
         assert!(html.contains("iphone-use"));
-        assert!(html.contains("/ws"));
+        assert!(html.contains("/agent/mjpeg"));
     });
 }
 

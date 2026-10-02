@@ -25,7 +25,6 @@ umask 077
 # ── Inline ad-hoc signer ──────────────────────────────────────────────────────
 # Direct mode uses this only when the supplied app has no valid signature. It
 # creates no certificate and never changes the user's keychain search list.
-# Mirror may use it as a degraded fallback when the stable signer is unavailable.
 #
 # Order matters and is not obvious: `iphone-use` is the bundle's MAIN
 # executable, so codesign treats signing it as signing the bundle and validates
@@ -102,7 +101,6 @@ WDA_RUNTIME_TOUCHED=0
 WDA_TRANSITION_COMMITTED=0
 PREINSTALL_WDA_LOADED=0
 PREINSTALL_WDA_DISABLED=0
-DEFERRED_MANUAL_WDA_STOP=0
 DAEMON_RUNTIME_TOUCHED=0
 DAEMON_RUNTIME_COMMITTED=0
 PREINSTALL_DAEMON_LOADED=0
@@ -1967,60 +1965,12 @@ env_or_existing() {
     printf '%s' "$value"
 }
 
-resolve_backend() {
-    local existing_backend
-    local existing_wda_url
-    existing_backend="$(plist_env_get PHONE_REMOTE_BACKEND)"
-    existing_wda_url="$(plist_env_get PHONE_REMOTE_WDA_URL)"
-    if [ -n "${PHONE_REMOTE_BACKEND:-}" ]; then
-        BACKEND="$PHONE_REMOTE_BACKEND"
-    elif [ -n "$existing_backend" ]; then
-        BACKEND="$existing_backend"
-    elif [ -f "$PLIST_DST" ] || [ -f "$OLD_PLIST" ]; then
-        if is_loopback_wda_url "$existing_wda_url"; then
-            BACKEND="direct"
-            info "Legacy loopback WDA configuration detected; migrating the existing Direct workflow."
-        else
-            BACKEND="mirror"
-            warn "Legacy install without WDA detected; preserving the mirror compatibility backend."
-        fi
-    else
-        BACKEND="direct"
-    fi
-    case "$BACKEND" in
-        direct|mirror) ;;
-        legacy-mirror)
-            BACKEND="mirror"
-            info "Normalizing legacy PHONE_REMOTE_BACKEND=legacy-mirror to mirror."
-            ;;
-        *) die "Unsupported PHONE_REMOTE_BACKEND='$BACKEND' (expected 'direct' or 'mirror')." ;;
-    esac
-}
-
-resolve_backend
-ok "Device backend: $BACKEND"
-
-# Snapshot pre-install product state before the fixed helper is replaced. This
-# catches v0.4.12 manual WDA setups that had no supervisor plist, only the fixed
-# product script plus loopback daemon config and/or product PID files.
-PREEXISTING_PRODUCT_SETUP=0
-PREEXISTING_PRODUCT_PID_STATE=0
-LEGACY_MANUAL_PRODUCT_WDA=0
-[ ! -f "$HOME/.iphone-use/setup-wda.sh" ] || PREEXISTING_PRODUCT_SETUP=1
-for LEGACY_PID_FILE in \
-    "$HOME/.iphone-use/wda-runner.pid" \
-    "$HOME/.iphone-use/wda-relay.pid" \
-    "$HOME/.iphone-use/wda-mjpeg-relay.pid"
-do
-    if [ -f "$LEGACY_PID_FILE" ]; then
-        PREEXISTING_PRODUCT_PID_STATE=1
-        break
-    fi
-done
-if [ "$PREEXISTING_PRODUCT_SETUP" = "1" ] \
-    && { [ "$PREEXISTING_PRODUCT_PID_STATE" = "1" ] \
-        || is_loopback_wda_url "$(plist_env_get PHONE_REMOTE_WDA_URL)"; }; then
-    LEGACY_MANUAL_PRODUCT_WDA=1
+# The iPhone Mirroring backend was removed in v0.9; every install serves the
+# phone over WDA. An older plist may still say mirror: say so and move on.
+if [ "${PHONE_REMOTE_BACKEND:-$(plist_env_get PHONE_REMOTE_BACKEND)}" = "mirror" ] \
+    || [ "${PHONE_REMOTE_BACKEND:-$(plist_env_get PHONE_REMOTE_BACKEND)}" = "legacy-mirror" ]; then
+    warn "The iPhone Mirroring backend was removed in v0.9; this install serves the phone over WDA."
+    warn "  Run setup-wda.sh once if this Mac has never set WDA up."
 fi
 
 # ── Step 1 — Obtain the .app ──────────────────────────────────────────────────
@@ -2061,48 +2011,15 @@ info "Removing quarantine attribute ..."
 xattr -dr com.apple.quarantine "$APP_STAGE" 2>/dev/null || true
 ok "Quarantine cleared"
 
-# ── Step 3 — Validate or repair the signature for the selected backend ────────
-if [ "$BACKEND" = "direct" ]; then
-    # Direct uses neither Screen Recording nor Accessibility TCC. Preserve any
-    # valid release/local signature verbatim (Developer ID or ad-hoc), avoiding
-    # needless certificate creation and keychain mutation.
-    if codesign --verify --deep --strict "$APP_STAGE" 2>/dev/null; then
-        ok "Valid existing app signature preserved (Direct needs no TCC identity)."
-    else
-        warn "App is unsigned or has an invalid signature; applying keychain-free ad-hoc signing for Direct."
-        _inline_sign "$APP_STAGE"
-    fi
+# ── Step 3 — Validate or repair the signature ─────────────────────────────────
+# The daemon needs no TCC identity. Preserve any valid release/local signature
+# verbatim (Developer ID or ad-hoc), avoiding needless certificate creation and
+# keychain mutation.
+if codesign --verify --deep --strict "$APP_STAGE" 2>/dev/null; then
+    ok "Valid existing app signature preserved."
 else
-    # Mirror TCC grants are keyed to the Designated Requirement. Its explicit
-    # compatibility path keeps the stable local identity across upgrades.
-    STABLE_AUTHORITY="iPhoneUse Local Signing"
-    CUR_AUTHORITY="$(codesign -dvv "$APP_STAGE" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)"
-    if [ "$CUR_AUTHORITY" = "$STABLE_AUTHORITY" ] \
-        && codesign --verify --deep --strict "$APP_STAGE" 2>/dev/null; then
-        ok "Already signed with the mirror-compatible stable identity ('$STABLE_AUTHORITY')."
-    else
-        info "Signing with the stable identity required by mirror-only TCC ..."
-        SIGN_SH=""
-        if [ "$SCRIPT_IS_LOCAL" = "1" ] && [ -f "$SCRIPT_DIR/scripts/sign.sh" ]; then
-            SIGN_SH="$SCRIPT_DIR/scripts/sign.sh"
-        fi
-        if [ ! -f "$SIGN_SH" ] && command -v curl >/dev/null 2>&1; then
-            # A local checkout may omit release helpers. Fetch only from the
-            # exact release commit selected for this install, never moving main.
-            ensure_release_commit
-            SIGN_SH_DL="$(mktemp)"
-            if curl -fsSL "https://raw.githubusercontent.com/$REPO/$RELEASE_COMMIT/scripts/sign.sh" -o "$SIGN_SH_DL" 2>/dev/null \
-               && [ -s "$SIGN_SH_DL" ]; then
-                SIGN_SH="$SIGN_SH_DL"
-            fi
-        fi
-        if [ -f "$SIGN_SH" ]; then
-            /bin/bash "$SIGN_SH" "$APP_STAGE"
-        else
-            warn "Stable mirror signer unavailable; TCC may reset after updates."
-            _inline_sign "$APP_STAGE"
-        fi
-    fi
+    warn "App is unsigned or has an invalid signature; applying keychain-free ad-hoc signing."
+    _inline_sign "$APP_STAGE"
 fi
 
 # ── Step 4 — Verify bundle-id in signature ────────────────────────────────────
@@ -2232,49 +2149,42 @@ LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/nu
 # the USB iproxy relays behind these URLs; a LAN/socat relay is available only
 # through the explicit WDA_ALLOW_LAN=1 escape hatch. WDA itself has no auth, so
 # the Mac and phone still belong on a trusted or isolated network.
-if [ "$BACKEND" = "direct" ]; then
-    WDA_URL="$(env_or_existing PHONE_REMOTE_WDA_URL)"
-    WDA_MJPEG_URL="$(env_or_existing PHONE_REMOTE_WDA_MJPEG_URL)"
-    if [ -z "$WDA_URL" ] && [ -z "$WDA_MJPEG_URL" ]; then
-        WDA_URL="http://127.0.0.1:8100"
-        WDA_MJPEG_URL="http://127.0.0.1:9100"
-    elif [ -z "$WDA_URL" ]; then
-        if is_loopback_wda_url "$WDA_MJPEG_URL"; then
-            WDA_URL="http://127.0.0.1:8100"
-        else
-            die "External Direct WDA requires both PHONE_REMOTE_WDA_URL and PHONE_REMOTE_WDA_MJPEG_URL; refusing a remote/local split."
-        fi
-    elif [ -z "$WDA_MJPEG_URL" ]; then
-        if is_loopback_wda_url "$WDA_URL"; then
-            WDA_MJPEG_URL="http://127.0.0.1:9100"
-        else
-            die "External Direct WDA requires both PHONE_REMOTE_WDA_URL and PHONE_REMOTE_WDA_MJPEG_URL; refusing a remote/local split."
-        fi
-    fi
-    is_network_wda_url "$WDA_URL" \
-        || die "PHONE_REMOTE_WDA_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
-    is_network_wda_url "$WDA_MJPEG_URL" \
-        || die "PHONE_REMOTE_WDA_MJPEG_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
-    if is_loopback_wda_url "$WDA_URL"; then
-        WDA_CONTROL_LOOPBACK=1
-    else
-        WDA_CONTROL_LOOPBACK=0
-    fi
+WDA_URL="$(env_or_existing PHONE_REMOTE_WDA_URL)"
+WDA_MJPEG_URL="$(env_or_existing PHONE_REMOTE_WDA_MJPEG_URL)"
+if [ -z "$WDA_URL" ] && [ -z "$WDA_MJPEG_URL" ]; then
+    WDA_URL="http://127.0.0.1:8100"
+    WDA_MJPEG_URL="http://127.0.0.1:9100"
+elif [ -z "$WDA_URL" ]; then
     if is_loopback_wda_url "$WDA_MJPEG_URL"; then
-        WDA_MJPEG_LOOPBACK=1
+        WDA_URL="http://127.0.0.1:8100"
     else
-        WDA_MJPEG_LOOPBACK=0
+        die "External Direct WDA requires both PHONE_REMOTE_WDA_URL and PHONE_REMOTE_WDA_MJPEG_URL; refusing a remote/local split."
     fi
-    [ "$WDA_CONTROL_LOOPBACK" = "$WDA_MJPEG_LOOPBACK" ] \
-        || die "Direct control and MJPEG endpoints must both be loopback or both be external; mixed routing is unsafe."
-    ok "WDA control endpoint: $WDA_URL"
-    ok "WDA video endpoint: $WDA_MJPEG_URL"
-else
-    # Preserve explicit WDA endpoints on a mirror-mode upgrade so switching back
-    # to direct does not discard a previously working device setup.
-    WDA_URL="$(env_or_existing PHONE_REMOTE_WDA_URL)"
-    WDA_MJPEG_URL="$(env_or_existing PHONE_REMOTE_WDA_MJPEG_URL)"
+elif [ -z "$WDA_MJPEG_URL" ]; then
+    if is_loopback_wda_url "$WDA_URL"; then
+        WDA_MJPEG_URL="http://127.0.0.1:9100"
+    else
+        die "External Direct WDA requires both PHONE_REMOTE_WDA_URL and PHONE_REMOTE_WDA_MJPEG_URL; refusing a remote/local split."
+    fi
 fi
+is_network_wda_url "$WDA_URL" \
+    || die "PHONE_REMOTE_WDA_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
+is_network_wda_url "$WDA_MJPEG_URL" \
+    || die "PHONE_REMOTE_WDA_MJPEG_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
+if is_loopback_wda_url "$WDA_URL"; then
+    WDA_CONTROL_LOOPBACK=1
+else
+    WDA_CONTROL_LOOPBACK=0
+fi
+if is_loopback_wda_url "$WDA_MJPEG_URL"; then
+    WDA_MJPEG_LOOPBACK=1
+else
+    WDA_MJPEG_LOOPBACK=0
+fi
+[ "$WDA_CONTROL_LOOPBACK" = "$WDA_MJPEG_LOOPBACK" ] \
+    || die "Direct control and MJPEG endpoints must both be loopback or both be external; mixed routing is unsafe."
+ok "WDA control endpoint: $WDA_URL"
+ok "WDA video endpoint: $WDA_MJPEG_URL"
 
 # Recognize the product-owned supervisor shipped before
 # PHONE_REMOTE_WDA_MANAGED existed. Exact label + exact fixed setup-script path
@@ -2321,18 +2231,6 @@ if [ "$WDA_MANAGED" = "true" ] \
     die "PHONE_REMOTE_WDA_MANAGED=true requires loopback HTTP control and MJPEG URLs (127.0.0.1 or localhost). Set it to false for external WDA."
 fi
 ok "WDA lifecycle managed by iphone-use: $WDA_MANAGED"
-
-# An externally owned WDA session cannot be stopped safely by this installer,
-# but leaving a reachable one attached makes iPhone Mirroring unusable. Refuse
-# that transition and let its owner stop it explicitly first.
-if [ "$BACKEND" = "mirror" ] \
-    && [ "$WDA_MANAGED" = "false" ] \
-    && [ -n "$WDA_URL" ] \
-    && is_network_wda_url "$WDA_URL" \
-    && command -v curl >/dev/null 2>&1 \
-    && curl -fsS --noproxy '*' -m 2 -- "${WDA_URL%/}/status" >/dev/null 2>&1; then
-    die "External WDA is still reachable at $WDA_URL. Stop it with its owning tool before selecting mirror; the installer will not terminate an unmanaged session."
-fi
 
 # Persist one explicit device target across browser reconnects, idle release,
 # daemon upgrades, and multi-device Macs. Accept WDA_UDID as a first-install
@@ -2413,30 +2311,12 @@ UNINSTALL_STAGE=""
 UNINSTALL_REPLACED=1
 ok "Uninstaller atomically updated: $UNINSTALL_DST"
 
-# Preserve optional Cloudflare TURN values from prior installs. They apply only
-# to the legacy mirror/WebRTC backend; Direct uses HTTP MJPEG + authenticated
-# control requests and does not create a TURN/STUN media session.
-CF_TURN_KEY_ID="$(env_or_existing PHONE_REMOTE_CF_TURN_KEY_ID)"
-CF_TURN_API_TOKEN="$(env_or_existing PHONE_REMOTE_CF_TURN_API_TOKEN)"
-if [ "$BACKEND" = "direct" ]; then
-    if [ -n "$CF_TURN_KEY_ID" ] || [ -n "$CF_TURN_API_TOKEN" ]; then
-        info "Legacy TURN configuration preserved but unused by the Direct backend."
-    else
-        info "Direct backend does not use TURN/STUN."
-    fi
-    info "For cross-network access, configure an authenticated HTTPS reverse proxy or trusted VPN/tunnel separately; never expose WDA ports."
-elif [ -n "$CF_TURN_KEY_ID" ] && [ -n "$CF_TURN_API_TOKEN" ]; then
-    ok "Cloudflare TURN configured for mirror/WebRTC cross-network relay"
-else
-    info "Cloudflare TURN not set for mirror (STUN-only; fine on same Wi-Fi). To enable cross-network,"
-    info "  export PHONE_REMOTE_CF_TURN_KEY_ID + PHONE_REMOTE_CF_TURN_API_TOKEN and re-run."
-fi
+info "For cross-network access, put an authenticated HTTPS reverse proxy or a trusted VPN/tunnel in front of the daemon; never expose WDA ports."
 
 # Persist every daemon setting the installer knows about, not just the four
 # headline values. This is intentionally an allow-list: it preserves supported
 # configuration without copying arbitrary/untrusted LaunchAgent environment.
 append_plist_env RUST_LOG "$(env_or_existing RUST_LOG info)"
-append_plist_env PHONE_REMOTE_BACKEND "$BACKEND"
 append_plist_env PHONE_REMOTE_HOST "$HOST"
 append_plist_env PHONE_REMOTE_PORT "$PORT"
 append_plist_env PHONE_REMOTE_PASSWORD "$PASSWORD"
@@ -2446,20 +2326,11 @@ append_plist_env PHONE_REMOTE_WDA_MJPEG_URL "$WDA_MJPEG_URL"
 append_plist_env PHONE_REMOTE_WDA_MANAGED "$WDA_MANAGED"
 for ENV_KEY in \
     PHONE_REMOTE_AGENT_TOKEN \
-    PHONE_REMOTE_AUTO_RESUME \
-    PHONE_REMOTE_CF_TURN_KEY_ID \
-    PHONE_REMOTE_CF_TURN_API_TOKEN \
-    PHONE_REMOTE_CF_TURN_TTL_SECS \
-    PHONE_REMOTE_FRONT_DEADLINE_MS \
     PHONE_REMOTE_NO_UPDATE_CHECK \
     PHONE_REMOTE_SECRET \
     PHONE_REMOTE_SESSION_TTL \
     PHONE_REMOTE_STATE_DIR \
-    PHONE_REMOTE_TEXT_KEYCODE \
     PHONE_REMOTE_TOKEN \
-    PHONE_REMOTE_TURN_URLS \
-    PHONE_REMOTE_TURN_USERNAME \
-    PHONE_REMOTE_TURN_CREDENTIAL \
     PHONE_REMOTE_URL
 do
     append_plist_env "$ENV_KEY" "$(env_or_existing "$ENV_KEY")"
@@ -2505,7 +2376,7 @@ cat > "$PLIST_STAGE" <<PLIST
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <!-- Cap the relaunch rate: if startup fails (device not ready, mirror TCC, port in use)
+    <!-- Cap the relaunch rate: if startup fails (device not ready, port in use)
          launchd would otherwise relaunch instantly, pegging launchservicesd at
          100% CPU and ballooning the err log (issue #28). The daemon also backs
          off ~30s before exiting unattended; this bounds it at the launchd layer. -->
@@ -2546,40 +2417,9 @@ PLIST_STAGE=""
 
 ok "LaunchAgent plist written: $PLIST_DST"
 
-# Complete the backend transition before committing the artifact backups. A
-# failed Mirror stop therefore restores the previous app/plist/helpers instead
-# of leaving mirror-on-disk while Direct/WDA is still active.
-if [ "$BACKEND" = "mirror" ]; then
-    if [ "$PRODUCT_WDA_SUPERVISOR_OWNED" = "1" ]; then
-        WDA_RUNTIME_TOUCHED=1
-        if [ "$PREINSTALL_WDA_DISABLED" != "1" ]; then
-            launchctl disable "gui/$UID_NUM/$WDA_PLIST_LABEL" 2>/dev/null \
-                || die "Could not persistently disable $WDA_PLIST_LABEL; refusing a mirror setup that could revive WDA"
-        fi
-        info "Stopping the product-owned Direct/WDA layer before enabling mirror compatibility mode"
-        /bin/bash "$SETUP_WDA_DST" stop \
-            || die "Could not safely stop legacy WDA. The previous install was restored; inspect $HOME/.iphone-use and rerun '$SETUP_WDA_DST stop' before selecting mirror."
-        ok "Product WDA supervisor stopped and disabled for future GUI logins"
-    elif [ "$LEGACY_MANUAL_PRODUCT_WDA" = "1" ]; then
-        DEFERRED_MANUAL_WDA_STOP=1
-        info "Legacy manual WDA stop queued after the new daemon definition is validated."
-    elif [ "$WDA_MANAGED" = "true" ] \
-        && { [ "$PREINSTALL_WDA_LOADED" = "1" ] \
-        || { command -v curl >/dev/null 2>&1 \
-            && curl -fsS --noproxy '*' -m 2 "http://127.0.0.1:8100/status" >/dev/null 2>&1; }; }; then
-        if [ "$PREINSTALL_WDA_LOADED" = "1" ] && [ -f "$WDA_PLIST_DST" ]; then
-            WDA_RUNTIME_TOUCHED=1
-            info "Stopping the recoverable managed WDA supervisor before enabling mirror compatibility mode"
-            /bin/bash "$SETUP_WDA_DST" stop \
-                || die "WDA is still holding the iPhone; installation artifacts and the prior supervisor state are being restored."
-        else
-            DEFERRED_MANUAL_WDA_STOP=1
-            info "Managed manual WDA stop queued after the new daemon definition is validated."
-        fi
-    elif [ "$WDA_MANAGED" = "false" ]; then
-        info "External WDA endpoint is unmanaged; installer will not stop or rewrite it."
-    fi
-elif [ "$PRODUCT_WDA_SUPERVISOR_OWNED" = "1" ] \
+# Settle the WDA supervisor's enabled state before committing the artifact
+# backups, so a failure here restores the previous install.
+if [ "$PRODUCT_WDA_SUPERVISOR_OWNED" = "1" ] \
     && [ "$WDA_MANAGED" = "true" ]; then
     if [ "$PREINSTALL_WDA_DISABLED" = "1" ] && [ "${IDLE_RELEASE_SECS:-}" != "0" ]; then
         # A disabled supervisor in Direct mode is a released phone, parked on
@@ -2598,15 +2438,12 @@ elif [ "$PRODUCT_WDA_SUPERVISOR_OWNED" = "1" ] \
 fi
 
 # ── Step 8 — Start or restart the LaunchAgent (no sudo; gui/$UID) ─────────────
-# The Direct daemon intentionally starts while WDA is down: its HTTP/UI control
-# plane explains the missing prerequisite and offers recovery without touching
-# Mirroring or TCC. Keep the product reachable instead of turning setup state
-# into a connection-refused page.
+# The daemon intentionally starts while WDA is down: its HTTP/UI control plane
+# explains the missing prerequisite and offers recovery. Keep the product
+# reachable instead of turning setup state into a connection-refused page.
 DAEMON_SHOULD_START=1
 WDA_READY=0
-if [ "$BACKEND" = "mirror" ]; then
-    info "Mirror compatibility backend selected."
-elif command -v curl >/dev/null 2>&1 \
+if command -v curl >/dev/null 2>&1 \
     && curl -fsS --noproxy '*' -m 4 "${WDA_URL%/}/status" >/dev/null 2>&1; then
     WDA_READY=1
     ok "Existing WDA endpoint verified; the direct daemon can start now"
@@ -2728,9 +2565,8 @@ fi
     || die "The new LaunchAgent was not loaded; the previous install and daemon state were restored."
 
 # A loaded KeepAlive job can still be crash-looping or unable to bind its port.
-# Direct's browser control plane is designed to work while WDA is offline, so
+# The browser control plane is designed to work while WDA is offline, so
 # require that local HTTP endpoint before discarding the previous install.
-# Mirror may legitimately remain offline until its first TCC grant.
 case "$HOST" in
     0.0.0.0) DAEMON_PROBE_HOST="127.0.0.1" ;;
     "::"|"0:0:0:0:0:0:0:0") DAEMON_PROBE_HOST="[::1]" ;;
@@ -2749,26 +2585,17 @@ if command -v curl >/dev/null 2>&1; then
         sleep 0.5
     done
 fi
-if [ "$BACKEND" = "direct" ] && [ "$DAEMON_HTTP_READY" != "1" ]; then
-    die "The new Direct daemon did not prove a stable owned PID, listener, and HTTP response at $DAEMON_PROBE_URL; the previous install and daemon state were restored. Inspect $LOG_DIR."
-elif [ "$BACKEND" = "mirror" ] \
-    && { [ "$PREINSTALL_DAEMON_LOADED" = "1" ] \
-        || [ "$PREINSTALL_OLD_DAEMON_LOADED" = "1" ]; } \
-    && [ "$DAEMON_HTTP_READY" != "1" ]; then
-    die "The mirror upgrade replaced a previously loaded daemon but the new owned PID/listener/HTTP chain was not healthy at $DAEMON_PROBE_URL; the previous install and daemon state were restored."
-elif [ "$DAEMON_HTTP_READY" = "1" ]; then
-    ok "Daemon identity, listener, and HTTP control plane verified (pid $DAEMON_PID): $DAEMON_PROBE_URL"
-else
-    info "Fresh mirror HTTP readiness is deferred until its first TCC permission grant."
+if [ "$DAEMON_HTTP_READY" != "1" ]; then
+    die "The new daemon did not prove a stable owned PID, listener, and HTTP response at $DAEMON_PROBE_URL; the previous install and daemon state were restored. Inspect $LOG_DIR."
 fi
+ok "Daemon identity, listener, and HTTP control plane verified (pid $DAEMON_PID): $DAEMON_PROBE_URL"
 
-# A newly-started Direct daemon begins with a conservative cached WDA health
+# A newly-started daemon begins with a conservative cached WDA health
 # value and refreshes it in the background. If the installer already proved the
 # WDA endpoint itself, do not report a ready device layer while the product API
 # still says `drivable:false` (the same cold-cache boundary setup-wda.sh gates).
 DAEMON_PRODUCT_READY=0
-if [ "$BACKEND" = "direct" ] \
-    && [ "$WDA_READY" = "1" ] \
+if [ "$WDA_READY" = "1" ] \
     && [ "$DAEMON_HTTP_READY" = "1" ]; then
     DAEMON_AGENT_SECRET="$(plist_env_get PHONE_REMOTE_AGENT_TOKEN)"
     [ -n "$DAEMON_AGENT_SECRET" ] || DAEMON_AGENT_SECRET="$PASSWORD"
@@ -2793,25 +2620,14 @@ if [ "$BACKEND" = "direct" ] \
     DAEMON_STATUS=""
     DAEMON_AGENT_SECRET=""
     [ "$DAEMON_PRODUCT_READY" = "1" ] \
-        || die "WDA answered before install, but the restarted Direct daemon did not report drivable=true within 15s; the previous install and daemon state were restored. Inspect $LOG_DIR."
+        || die "WDA answered before install, but the restarted daemon did not report drivable=true within 15s; the previous install and daemon state were restored. Inspect $LOG_DIR."
     ok "Daemon product status verified: drivable=true"
 fi
 
-# A manual WDA process set has no restart contract strong enough for rollback.
-# Stop it only after every later fallible daemon validation is complete, then
-# commit immediately. If the ownership-gated stop itself fails, preserve its
-# PID/log/setup evidence and describe the partial state honestly.
-if [ "$BACKEND" = "mirror" ] && [ "$DEFERRED_MANUAL_WDA_STOP" = "1" ]; then
-    info "Stopping the manual Direct/WDA process set before committing mirror mode."
-    /bin/bash "$SETUP_WDA_DST" stop \
-        || die "Manual WDA stop did not prove a clean state. Installation artifacts and prior daemon jobs were rolled back, but WDA may be partially stopped; recovery evidence remains under $HOME/.iphone-use."
-    ok "Manual Direct/WDA process set stopped"
-fi
-
-# Commit only after launchd accepts the new definition and, for Direct, the
-# local HTTP control plane answers. WDA and mirror TCC may still be first-run
-# prerequisites, but a broken daemon bootstrap/control plane is an install
-# failure and must never be reported as success.
+# Commit only after launchd accepts the new definition and the local HTTP
+# control plane answers. WDA may still be a first-run prerequisite, but a
+# broken daemon bootstrap/control plane is an install failure and must never
+# be reported as success.
 INSTALL_COMMIT_SIGNAL_PENDING=0
 trap 'INSTALL_COMMIT_SIGNAL_PENDING=1' HUP INT TERM
 _verify_skill_before_daemon_commit
@@ -2836,66 +2652,41 @@ OLD_DISABLED_BACKUP=""
 echo ""
 install_cli_link "$DEST/$BINARY_INSIDE_APP"
 
-# ── Step 9 — Backend-specific first-run work ──────────────────────────────────
+# ── Step 9 — First-run work ────────────────────────────────────────────────────
 echo ""
-if [ "$BACKEND" = "direct" ]; then
-    printf '%b━━━ Direct-device backend ━━━%b\n' "$BOLD" "$RESET"
+printf '%b━━━ Device layer (WebDriverAgent) ━━━%b\n' "$BOLD" "$RESET"
+echo ""
+if [ "$WDA_MANAGED" = "true" ]; then
+    printf "  Before managed setup:\n"
+    printf "    • Install full Xcode and sign in: Xcode → Settings → Accounts.\n"
+    printf "    • Enable Developer Mode on the iPhone; connect it over USB.\n"
+    printf "    • Keep the iPhone unlocked and awake during the first build.\n"
+    printf '    • Install the default USB loopback relay: %bbrew install libimobiledevice%b (iproxy).\n' "$BOLD" "$RESET"
+    printf "    • Keep the Mac and iPhone on a trusted/isolated network: WDA itself has no authentication.\n"
+    printf "    • Keep Cloudflare WARP / tunnel VPN manually disconnected while Xcode mounts developer services.\n"
+    printf "    • WDA_ALLOW_LAN=1 + socat is an explicit unsafe fallback, not automatic recovery.\n"
     echo ""
-    ok "Screen Recording and Accessibility permissions are not used in direct mode."
-    if [ "$WDA_MANAGED" = "true" ]; then
-        printf "  Before managed setup:\n"
-        printf "    • Install full Xcode and sign in: Xcode → Settings → Accounts.\n"
-        printf "    • Enable Developer Mode on the iPhone; connect it over USB.\n"
-        printf "    • Keep the iPhone unlocked and awake during the first build.\n"
-        printf '    • Install the default USB loopback relay: %bbrew install libimobiledevice%b (iproxy).\n' "$BOLD" "$RESET"
-        printf "    • Keep the Mac and iPhone on a trusted/isolated network: WDA itself has no authentication.\n"
-        printf "    • Keep Cloudflare WARP / tunnel VPN manually disconnected while Xcode mounts developer services.\n"
-        printf "    • WDA_ALLOW_LAN=1 + socat is an explicit unsafe fallback, not automatic recovery.\n"
-        echo ""
-        if [ -x "$SETUP_WDA_DST" ]; then
-            printf "  1. Check prerequisites (read-only):\n"
-            printf "       ${BOLD}%s doctor${RESET}\n" "$SETUP_WDA_DST"
-            printf "  2. Build, sign, install, relay, and verify WDA:\n"
-            printf "       ${BOLD}%s${RESET}\n" "$SETUP_WDA_DST"
-        else
-            warn "WDA setup script disappeared after commit; rerun install.sh to restore $SETUP_WDA_DST."
-        fi
+    if [ -x "$SETUP_WDA_DST" ]; then
+        printf "  1. Check prerequisites (read-only):\n"
+        printf "       ${BOLD}%s doctor${RESET}\n" "$SETUP_WDA_DST"
+        printf "  2. Build, sign, install, relay, and verify WDA:\n"
+        printf "       ${BOLD}%s${RESET}\n" "$SETUP_WDA_DST"
     else
-        info "Using an externally managed WDA endpoint:"
-        printf "    control: %s\n" "$WDA_URL"
-        printf "    video  : %s\n" "$WDA_MJPEG_URL"
-        printf "  The installer will not start, stop, or rewrite that service.\n"
-    fi
-    echo ""
-    if [ "$WDA_READY" = "1" ]; then
-        ok "WDA was already reachable during this install."
-    elif [ "$WDA_MANAGED" = "false" ]; then
-        warn "The external WDA endpoint was not reachable; verify it independently."
-    else
-        warn "The phone is not reported ready yet; completion is intentionally deferred to setup-wda.sh."
+        warn "WDA setup script disappeared after commit; rerun install.sh to restore $SETUP_WDA_DST."
     fi
 else
-    printf '%b━━━ Grant permissions (mirror backend only) ━━━%b\n' "$BOLD" "$RESET"
-    echo ""
-    info "Opening System Settings > Privacy & Security > Screen Recording ..."
-    if ! open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"; then
-        warn "Could not open Screen Recording settings automatically; open System Settings > Privacy & Security > Screen Recording manually."
-    fi
-    sleep 1 || true
-    info "Opening System Settings > Privacy & Security > Accessibility ..."
-    if ! open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"; then
-        warn "Could not open Accessibility settings automatically; open System Settings > Privacy & Security > Accessibility manually."
-    fi
-    sleep 1 || true
-    # Reveal the app in Finder so it can be dragged into the TCC lists.
-    open -R "$DEST" 2>/dev/null || true
-
-    echo ""
-    printf '%bACTION REQUIRED — grant in BOTH panes (Screen Recording + Accessibility):%b\n' "$YELLOW" "$RESET"
-    printf '  • If %biPhoneUse%b is already listed: enable its toggle.\n' "$BOLD" "$RESET"
-    printf '  • If it is absent, add %b~/Applications/iPhoneUse.app%b.\n' "$BOLD" "$RESET"
-    printf "  • Then restart: ${BOLD}launchctl kickstart -k gui/%s/%s${RESET}\n" "$UID_NUM" "$PLIST_LABEL"
-    printf "  • These grants are required only for PHONE_REMOTE_BACKEND=mirror.\n"
+    info "Using an externally managed WDA endpoint:"
+    printf "    control: %s\n" "$WDA_URL"
+    printf "    video  : %s\n" "$WDA_MJPEG_URL"
+    printf "  The installer will not start, stop, or rewrite that service.\n"
+fi
+echo ""
+if [ "$WDA_READY" = "1" ]; then
+    ok "WDA was already reachable during this install."
+elif [ "$WDA_MANAGED" = "false" ]; then
+    warn "The external WDA endpoint was not reachable; verify it independently."
+else
+    warn "The phone is not reported ready yet; completion is intentionally deferred to setup-wda.sh."
 fi
 printf "\n"
 printf '%bNOTE (headless):%b LaunchAgents run only after a desktop login (Aqua session).\n' "$YELLOW" "$RESET"
@@ -2926,7 +2717,7 @@ printf '%b━━━ Upgrade ━━━%b\n' "$BOLD" "$RESET"
 info "Check: iphone-use upgrade --check    Upgrade: iphone-use upgrade"
 
 # ── Step 10 — Print current status ───────────────────────────────────────────
-if [ "$BACKEND" = "direct" ] && command -v curl >/dev/null 2>&1 \
+if command -v curl >/dev/null 2>&1 \
     && curl -fsS --noproxy '*' -m 4 "${WDA_URL%/}/status" >/dev/null 2>&1; then
     WDA_READY=1
 fi
@@ -2938,14 +2729,12 @@ if launchctl print "gui/$UID_NUM/$PLIST_LABEL" >/dev/null 2>&1; then
 else
     info "Daemon job is staged but not loaded."
 fi
-if [ "$BACKEND" = "direct" ]; then
-    if [ "$WDA_MANAGED" = "false" ]; then
-        info "WDA endpoint is externally managed; no local supervisor status is asserted."
-    elif launchctl print "gui/$UID_NUM/$WDA_PLIST_LABEL" >/dev/null 2>&1; then
-        ok "WDA supervisor loaded: gui/$UID_NUM/$WDA_PLIST_LABEL"
-    else
-        info "WDA supervisor is not loaded yet (setup-wda.sh installs it after verification)."
-    fi
+if [ "$WDA_MANAGED" = "false" ]; then
+    info "WDA endpoint is externally managed; no local supervisor status is asserted."
+elif launchctl print "gui/$UID_NUM/$WDA_PLIST_LABEL" >/dev/null 2>&1; then
+    ok "WDA supervisor loaded: gui/$UID_NUM/$WDA_PLIST_LABEL"
+else
+    info "WDA supervisor is parked or not set up yet (it starts on the next agent request)."
 fi
 
 echo ""
@@ -2954,12 +2743,10 @@ if [ "$DAEMON_HTTP_READY" = "1" ]; then
     ok "Daemon HTTP endpoint verified at $DAEMON_PROBE_URL"
 else
     printf '%b━━━ Connect after first-run setup ━━━%b\n' "$BOLD" "$RESET"
-    if [ "$BACKEND" = "direct" ] && [ "$WDA_MANAGED" = "true" ]; then
+    if [ "$WDA_MANAGED" = "true" ]; then
         warn "Run setup-wda.sh first; the installer has not verified a usable daemon yet."
-    elif [ "$BACKEND" = "direct" ]; then
-        warn "Verify the external WDA endpoints and restart the daemon before connecting."
     else
-        warn "Grant the mirror-only TCC permissions, restart, and verify the daemon before connecting."
+        warn "Verify the external WDA endpoints and restart the daemon before connecting."
     fi
 fi
 printf "  1. Keep the iPhone and Mac on the same trusted Wi-Fi.\n"
@@ -2978,22 +2765,14 @@ printf "  Stop    : launchctl bootout gui/%s/%s\n"      "$UID_NUM" "$PLIST_LABEL
 printf "  Uninstall: %s\n" "$UNINSTALL_DST"
 printf "  Logs    : tail -f %s/iphone-use.log\n"    "$LOG_DIR"
 printf "  Errors  : tail -f %s/iphone-use.err\n"    "$LOG_DIR"
-if [ "$BACKEND" = "direct" ]; then
-    printf "  WDA     : %s status\n" "$SETUP_WDA_DST"
-    printf "  WDA log : tail -f %s/.iphone-use/wda-agent.log\n" "$HOME"
-fi
+printf "  WDA     : %s status\n" "$SETUP_WDA_DST"
+printf "  WDA log : tail -f %s/.iphone-use/wda-agent.log\n" "$HOME"
 echo ""
-if [ "$BACKEND" = "direct" ] \
-    && [ "$DAEMON_HTTP_READY" = "1" ] \
+if [ "$DAEMON_HTTP_READY" = "1" ] \
     && [ "$WDA_READY" = "1" ] \
     && [ "$DAEMON_PRODUCT_READY" = "1" ]; then
     ok "Installed; daemon HTTP, WDA endpoints, and product drivable status verified."
-elif [ "$BACKEND" = "mirror" ] && [ "$DAEMON_HTTP_READY" = "1" ]; then
-    ok "Installed; mirror daemon HTTP endpoint verified."
-elif [ "$BACKEND" = "direct" ]; then
-    ok "Installed; Direct daemon HTTP control plane verified."
-    warn "The device layer is still pending WDA setup/verification."
 else
-    ok "Application and LaunchAgent configuration installed."
-    warn "Mirror runtime is still pending permission/daemon verification."
+    ok "Installed; daemon HTTP control plane verified."
+    warn "The device layer is pending: WDA is parked, or still needs setup-wda.sh."
 fi
