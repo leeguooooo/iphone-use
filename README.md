@@ -139,8 +139,9 @@ and **Accessibility** (the input); the Direct backend asks for neither until you
 phone over. Input moves the Mac's pointer into the Mirroring window, and iPhone Mirroring takes
 input only while it is the frontmost app — which macOS will not hand over while someone
 is actively using another app. So open the page from **another device**; a browser on
-the same Mac holds the front and its taps never arrive (the page says so, and status
-reports `human_view_input_blocked:true`). At the Mac itself, use the Mirroring window. To reach the page from another device on the LAN, bind
+the same Mac holds the front and its taps never arrive; the page says so, and while the
+view is live and an event was dropped in the last 15 seconds, status reports
+`human_view_input_blocked:true`. At the Mac itself, use the Mirroring window. To reach the page from another device on the LAN, bind
 `PHONE_REMOTE_HOST=0.0.0.0` with a password set; from outside the LAN, Tailscale plus macOS
 Screen Sharing still works.
 
