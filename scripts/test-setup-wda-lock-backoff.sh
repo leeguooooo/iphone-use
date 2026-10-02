@@ -72,7 +72,7 @@ run_retry locked >"$TMP_ROOT/locked-first.out"
     || fail_test "lock failure did not replace the generic retry kind"
 [ "$(retry_field '3s/^attempt=//p')" = "1" ] \
     || fail_test "switching to lock backoff did not reset the attempt"
-assert_delay_near 30
+assert_delay_near 5
 grep -q 'lock screen blocked WDA' "$TMP_ROOT/locked-first.out" \
     || fail_test "first lock transition was not reported"
 # A locked phone is its own blocker. Publishing `wda` here made the daemon
@@ -106,21 +106,21 @@ grep -q 'lock screen blocked WDA' "$TMP_ROOT/locked-first.out" \
 run_retry locked >"$TMP_ROOT/locked-second.out"
 [ "$(retry_field '3s/^attempt=//p')" = "2" ] \
     || fail_test "lock retry attempt did not increment"
-assert_delay_near 60
+assert_delay_near 10
 if grep -q 'lock screen blocked WDA' "$TMP_ROOT/locked-second.out"; then
     fail_test "unchanged lock state repeated the user prompt"
 fi
 for _ in 3 4 5 6 7; do
     run_retry locked >"$TMP_ROOT/locked-repeat.out"
 done
-assert_delay_near 900
+assert_delay_near 60
 for _ in 8 9 10; do
     run_retry locked >"$TMP_ROOT/locked-repeat.out"
 done
 [ "$(retry_field '3s/^attempt=//p')" = "10" ] \
     || fail_test "lock retry stopped advancing after reaching its delay cap"
-assert_delay_near 900
-pass "lock failures retry indefinitely and cap at 15 minutes without repeated prompts"
+assert_delay_near 60
+pass "lock failures retry indefinitely from 5 seconds and cap at 1 minute without repeated prompts"
 
 # An unlocked phone whose iOS has not enabled UI automation makes xcodebuild
 # exit with the line below. It must publish its own blocker with the on-phone

@@ -471,7 +471,11 @@ _record_keepalive_failure() {
         attempt=1
     fi
     case "$KEEPALIVE_FAILURE_KIND" in
-        locked) delay=30; cap=900 ;;
+        # Short: the pre-launch lock wait now holds a locked phone without
+        # launching anything, so this only covers a lock that landed between
+        # that check and the runner start. The old 30 s → 15 min backoff
+        # kept a just-unlocked phone waiting minutes for its next attempt.
+        locked) delay=5; cap=60 ;;
         *) delay=5; cap=300; KEEPALIVE_FAILURE_KIND="generic" ;;
     esac
     delay="$(_exponential_retry_delay "$delay" "$cap" "$attempt")"
@@ -489,7 +493,7 @@ _record_keepalive_failure() {
             # unlocking the phone.
             _setstatus lock-backoff locked "lock screen blocked WDA; next quiet retry in ${delay}s"
             if [ "$previous_kind" != "locked" ]; then
-                warn "iPhone lock screen blocked WDA; retries are now quiet and back off from 30s to 15min"
+                warn "iPhone lock screen blocked WDA; retrying quietly every 5s to 1min until it is unlocked"
             fi
         else
             warn "KeepAlive rebuild failed; next retry in ${delay}s (failure $attempt)"
@@ -3523,10 +3527,20 @@ if [ "$(_device_passcode_required)" = "true" ]; then
     info "Waiting for the iPhone to be unlocked"
     _setstatus lock-wait locked "the iPhone is locked — unlock it and connecting continues on its own"
     _lock_wait_started=$SECONDS
-    while [ "$(_device_passcode_required)" = "true" ]; do
+    # Unlocked only after three readings in a row: hardware showed a single
+    # "not required" reading followed by xcodebuild's "Unlock iPhone to
+    # Continue" a second later.
+    _unlocked_reads=0
+    while [ "$_unlocked_reads" -lt 3 ]; do
+        if [ "$(_device_passcode_required)" = "true" ]; then
+            _unlocked_reads=0
+        else
+            _unlocked_reads=$((_unlocked_reads + 1))
+            continue
+        fi
         if [ $((SECONDS - _lock_wait_started)) -ge "$WDA_LOCK_WAIT_SECS" ]; then
             if [ "${WDA_KEEPALIVE:-0}" = "1" ]; then
-                # The existing quiet locked backoff (30 s → 15 min) takes over.
+                # The quiet locked backoff (5 s → 1 min) takes over.
                 _prepare_locked_retry
                 exit 1
             fi

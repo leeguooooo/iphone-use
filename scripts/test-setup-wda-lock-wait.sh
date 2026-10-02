@@ -9,6 +9,12 @@ mkdir -p "$tmp/bin"
 cat > "$tmp/bin/xcrun" <<'FAKE'
 #!/bin/bash
 while [ $# -gt 0 ]; do [ "$1" = -j ] && { out="$2"; shift; }; shift; done
+# A scripted sequence of answers (one per line, consumed in order) wins.
+if [ -n "${LOCK_SEQ:-}" ] && [ -s "$LOCK_SEQ" ]; then
+    answer="$(head -1 "$LOCK_SEQ")"; sed -i '' 1d "$LOCK_SEQ"
+    printf '{"result":{"passcodeRequired":%s}}' "$answer" > "$out"
+    exit 0
+fi
 if [ -f "$UNLOCK_AT" ] && [ "$(date +%s)" -ge "$(cat "$UNLOCK_AT")" ]; then
     printf '{"result":{"passcodeRequired":false}}' > "$out"
 else
@@ -24,7 +30,7 @@ run() {  # $1 = seconds until unlock (or "never"), extra env after
     local unlock_in="$1"; shift
     rm -f "$tmp/unlock_at"
     [ "$unlock_in" = never ] || echo $(( $(date +%s) + unlock_in )) > "$tmp/unlock_at"
-    env PATH="$tmp/bin:$PATH" UNLOCK_AT="$tmp/unlock_at" "$@" /bin/bash -c "
+    env PATH="$tmp/bin:$PATH" UNLOCK_AT="$tmp/unlock_at" LOCK_SEQ="$tmp/seq" "$@" /bin/bash -c "
         WDA_UDID=X; _BUILD_BLOCKER=''
         info() { echo \"== \$*\"; }; ok() { echo \"ok: \$*\"; }; die() { echo \"die: \$*\"; exit 9; }
         warn() { echo \"warn: \$*\"; }
@@ -50,6 +56,12 @@ check "under KeepAlive a phone locked past the wait hands over to the locked bac
 
 out="$(run never WDA_LOCK_WAIT_SECS=2 WDA_KEEPALIVE=0)"; code=$?
 check "interactive setup fails with a locked status" '[ $code -eq 9 ] && echo "$out" | grep -q "^status building-fail locked"'
+# locked, one stray "not required", locked again, then unlocked for good
+printf 'true\ntrue\nfalse\ntrue\nfalse\nfalse\nfalse\n' > "$tmp/seq"
+out="$(run never)"; code=$?
+check "a single unlocked reading between locked ones does not launch" '[ $code -eq 0 ] && [ "$(echo "$out" | grep -c "^launched")" -eq 1 ] && [ ! -s "$tmp/seq" ]'
+rm -f "$tmp/seq"
+
 out="$(run 1 WDA_LOCK_WAIT_SECS=abc)"; code=$?
 check "a non-numeric wait falls back to 300 s instead of breaking the comparison" '[ $code -eq 0 ] && echo "$out" | grep -q "using 300" && echo "$out" | tail -1 | grep -q launched'
 echo "1..$n"
