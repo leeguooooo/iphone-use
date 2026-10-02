@@ -34,21 +34,10 @@ fn block<F: std::future::Future>(f: F) -> F::Output {
 }
 
 use server as srv;
-use server::core_crate as srv_core;
 include!("fixtures/app_state.rs");
 
 fn build_state(password: Option<&str>) -> Arc<AppState> {
     fixture_app_state(password)
-}
-
-fn build_mirror_state(password: Option<&str>) -> Arc<AppState> {
-    let state = build_state(password);
-    let mut state = match Arc::try_unwrap(state) {
-        Ok(state) => state,
-        Err(_) => panic!("test state unexpectedly shared"),
-    };
-    state.backend = server::config::DeviceBackend::Mirror;
-    Arc::new(state)
 }
 
 fn build_state_with_wda(base_url: &str) -> Arc<AppState> {
@@ -60,27 +49,6 @@ fn build_state_with_wda(base_url: &str) -> Arc<AppState> {
     state.wda = Some(Arc::new(tokio::sync::Mutex::new(
         server::wda::WdaClient::new(base_url).unwrap(),
     )));
-    Arc::new(state)
-}
-
-/// Deliberately violate the production constructor's backend invariant.
-///
-/// Boundary tests use this state to prove that Mirror handlers ignore WDA even
-/// if a future refactor accidentally leaves a client and MJPEG URL attached.
-fn build_invalid_mirror_state_with_wda(base_url: &str) -> Arc<AppState> {
-    let state = build_state_with_wda(base_url);
-    let mut state = match Arc::try_unwrap(state) {
-        Ok(state) => state,
-        Err(_) => panic!("test state unexpectedly shared"),
-    };
-    state.backend = server::config::DeviceBackend::Mirror;
-    state.mjpeg_url = Some(base_url.to_string());
-    state.wda_actionable.store(true, Ordering::Release);
-    *state.wda_health.lock().unwrap() = server::wda::WdaHealth {
-        up: true,
-        actionable: true,
-        locked: Some(false),
-    };
     Arc::new(state)
 }
 
@@ -471,70 +439,6 @@ fn login_wrong_password_is_unauthorized() {
 }
 
 #[test]
-fn turn_creds_gated_then_served() {
-    block(async {
-        let state = build_state(Some("hunter2"));
-        let app = http::router(state);
-
-        // Unauthed → 401.
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/turn-creds")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-        // Mint a valid cookie via login, then fetch turn-creds.
-        let login = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from("password=hunter2"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let cookie_pair = login
-            .headers()
-            .get(header::SET_COOKIE)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/turn-creds")
-                    .header(header::COOKIE, cookie_pair)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["iceServers"].is_array());
-        assert_eq!(
-            v["iceServers"][0]["urls"][0],
-            "stun:stun.l.google.com:19302"
-        );
-    });
-}
-
-#[test]
 fn open_mode_serves_phone_without_cookie() {
     block(async {
         // No password configured → open LAN mode; /phone serves directly.
@@ -635,8 +539,10 @@ fn agent_status_requires_bearer_when_password_set() {
         assert!(json.contains(r#""managed_wda":false"#), "{json}");
         assert!(json.contains(r#""recovery_owner":"external""#), "{json}");
         assert!(json.contains(r#""reconnecting":false"#), "{json}");
-        assert!(json.contains(r#""phone_target":false"#), "{json}");
-        assert!(json.contains(r#""mirror_state":"disabled""#), "{json}");
+        // The iPhone Mirroring fields went with the backend (v0.9).
+        for gone in ["phone_target", "mirror_state", "human_active", "human_view"] {
+            assert!(!json.contains(&format!("\"{gone}\"")), "{json}");
+        }
     });
 }
 
@@ -872,7 +778,7 @@ fn direct_browser_control_fails_closed_when_wda_is_unavailable() {
 }
 
 #[test]
-fn direct_backend_rejects_runtime_switch_to_mirroring() {
+fn mirror_mode_is_gone() {
     block(async {
         let app = http::router(build_state(None));
         let resp = app
@@ -886,108 +792,9 @@ fn direct_backend_rejects_runtime_switch_to_mirroring() {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
-    });
-}
-
-#[test]
-fn mirror_backend_rejects_runtime_switch_to_agent() {
-    block(async {
-        let app = http::router(build_mirror_state(None));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/agent/mode")
-                    .header("x-phone-control", "1")
-                    .body(Body::from(r#"{"mode":"agent"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(resp.status(), StatusCode::GONE);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8_lossy(&body).contains("backend_is_mirror"));
-    });
-}
-
-#[test]
-fn mirror_backend_ignores_wda_even_when_state_is_misconfigured() {
-    block(async {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let app = http::router(build_invalid_mirror_state_with_wda(&base_url));
-
-        let status = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            app.clone().oneshot(
-                Request::builder()
-                    .uri("/agent/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            ),
-        )
-        .await
-        .expect("Mirror status must not wait on WDA")
-        .unwrap();
-        assert_eq!(status.status(), StatusCode::OK);
-        let body = status.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["backend"], "mirror");
-        assert_eq!(json["wda"], false);
-        assert_eq!(json["wda_actionable"], false);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_no_wda_connection(&listener);
-
-        let elements = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/agent/elements")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(elements.status(), StatusCode::CONFLICT);
-        let body = elements.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "backend_is_mirror");
-        assert_no_wda_connection(&listener);
-
-        let mjpeg = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/agent/mjpeg")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(mjpeg.status(), StatusCode::CONFLICT);
-        assert_no_wda_connection(&listener);
-
-        let screenshot = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            app.oneshot(
-                Request::builder()
-                    .uri("/agent/screenshot")
-                    .body(Body::empty())
-                    .unwrap(),
-            ),
-        )
-        .await
-        .expect("Mirror screenshot must not wait on WDA")
-        .unwrap();
-        assert!(
-            screenshot.status() == StatusCode::OK
-                || screenshot.status() == StatusCode::SERVICE_UNAVAILABLE,
-            "unexpected Mirror screenshot status: {}",
-            screenshot.status()
-        );
-        assert_no_wda_connection(&listener);
+        assert!(String::from_utf8_lossy(&body).contains("mirror_removed"));
     });
 }
 
@@ -1665,47 +1472,16 @@ fn indexed_browser_tap_rejects_a_stale_snapshot_without_tapping() {
 }
 
 #[test]
-fn direct_backend_rejects_websocket_signaling() {
+fn webrtc_routes_are_gone() {
+    // iPhone Mirroring and its WebRTC transport were removed in v0.9.
     block(async {
-        let app = http::router(build_state(None));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ws")
-                    .header(header::HOST, "phone.test")
-                    .header(header::CONNECTION, "Upgrade")
-                    .header(header::UPGRADE, "websocket")
-                    .header("sec-websocket-version", "13")
-                    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
-    });
-}
-
-#[test]
-fn mirror_backend_rejects_cross_origin_websocket() {
-    block(async {
-        let app = http::router(build_mirror_state(None));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ws")
-                    .header(header::HOST, "phone.test")
-                    .header(header::ORIGIN, "https://evil.test")
-                    .header(header::CONNECTION, "Upgrade")
-                    .header(header::UPGRADE, "websocket")
-                    .header("sec-websocket-version", "13")
-                    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        for uri in ["/ws", "/turn-creds"] {
+            let resp = http::router(build_state(None))
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
     });
 }
 

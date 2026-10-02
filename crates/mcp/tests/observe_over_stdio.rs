@@ -307,53 +307,21 @@ fn a_non_json_server_error_is_unknown_not_not_sent() {
     assert_eq!(structured["retry_safe"], false, "{reply}");
 }
 
-/// The Mirror backend answers a dispatched CGEvent with `200 ok` in plain
-/// text. That must stay a success — the strict-JSON rule would otherwise
-/// report every legitimate Mirror action as an uncertain outcome — but it must
-/// be labelled as an acknowledgement, not as a verified result.
+/// A plain-text `200 ok` proves nothing about the phone (the iPhone Mirroring
+/// backend that sent it is gone). It reads as an unknown outcome — never a
+/// success, and never safe to resend.
 #[test]
-fn the_legacy_plain_text_ack_is_success_but_not_verified() {
+fn a_plain_text_ok_is_an_unknown_outcome() {
     let daemon = ScriptedDaemon::start("200 OK", b"ok".to_vec());
     let mut mcp = McpChild::start(&daemon.url);
 
     let reply = mcp.call_tool(2, "phone_tap", serde_json::json!({ "x": 0.5, "y": 0.5 }));
 
     let result = &reply["result"];
-    assert_ne!(result["isError"], true, "a legacy ack was reported as failure: {reply}");
-    assert_eq!(result["content"][0]["text"], "ok");
+    assert_eq!(result["isError"], true, "{reply}");
     let structured = &result["structuredContent"];
-    assert_eq!(structured["outcome"], "acknowledged", "{reply}");
-    assert_eq!(
-        structured["verified"], false,
-        "an unverified ack claimed verification: {reply}"
-    );
-    assert_eq!(structured["protocol"], "legacy_text_ack");
-}
-
-/// Asking that backend to observe must not fabricate an observation, and must
-/// not turn the missing observation into a reason to send the action twice.
-#[test]
-fn a_legacy_ack_under_observe_reports_no_observation_rather_than_inventing_one() {
-    let daemon = ScriptedDaemon::start("200 OK", b"ok".to_vec());
-    let mut mcp = McpChild::start(&daemon.url);
-
-    let reply = mcp.call_tool(
-        2,
-        "phone_tap",
-        serde_json::json!({ "x": 0.5, "y": 0.5, "observe": true }),
-    );
-
-    let result = &reply["result"];
-    assert_ne!(result["isError"], true, "{reply}");
-    let structured = &result["structuredContent"];
-    assert_eq!(structured["observation"], "unavailable", "{reply}");
-    assert_eq!(structured["verified"], false);
-    assert!(
-        structured.get("settle").is_none() && structured.get("delta").is_none(),
-        "an observation was invented for a backend that cannot produce one: {reply}"
-    );
-    let text = result["content"][0]["text"].as_str().unwrap_or_default();
-    assert!(text.contains("do NOT resend"), "{text}");
+    assert_eq!(structured["outcome"], "unknown", "{reply}");
+    assert_eq!(structured["retry_safe"], false, "{reply}");
 }
 
 /// The recognition is exact. A 2xx whose body merely CONTAINS "ok", or is any

@@ -418,8 +418,8 @@ fn a_dropped_batch_answer_is_unknown_and_never_resent() {
     );
 }
 
-/// A Mirror-era plain-text `ok` acknowledges ONE action. It carries no
-/// per-step outcome, so it can never stand in for a batch result.
+/// A plain-text `ok` carries no per-step outcome, so it can never stand in
+/// for a batch result.
 #[test]
 fn a_legacy_text_ack_is_not_a_batch_success() {
     let home = tempfile::tempdir().unwrap();

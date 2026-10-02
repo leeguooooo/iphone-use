@@ -10,36 +10,3 @@ subtle = "2"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# input.rs — CgEventSink uses CGEvent::post(HID) for mouse injection.
-# The elcapitan feature gates CGEventPostToPid (not needed here, but kept for
-# parity with the spikes crate that confirmed the API surface).
-# The highsierra feature gates CGEvent::new_scroll_event — used by the scroll
-# path (iPhone Mirroring scrolls only on scroll-wheel events, not mouse-drag).
-# Only used on macOS; the CgEventSink impl is #[cfg(target_os = "macos")].
-core-graphics = { version = "0.25", features = ["elcapitan", "highsierra"] }
-
-# capture.rs paused-screen detection: decode the screencapture PNG to sample the
-# "Connection Paused" interstitial's uniform-gray signature (issue #14/#3).
-png = "0.17"
-
-# capture.rs / encode.rs video pipeline — cross-platform deps.
-# anyhow: error type for the public pipeline API.
-# bytes: zero-copy Annex-B buffers handed to the WebRTC payloader.
-# tokio (sync only): the broadcast channel that fans encoded frames out to viewers.
-anyhow = "1"
-bytes = "1"
-tokio = { version = "1", features = ["sync"] }
-
-# macOS-only: ScreenCaptureKit capture + VideoToolbox H.264 encode.
-# Versions pinned to what the hardware-validated spikes crate resolved so there's
-# a single copy of each across the workspace.
-[target.'cfg(target_os = "macos")'.dependencies]
-screencapturekit = "0.3"
-objc2-app-kit = "0.3"
-core-media-rs = "0.3.5"
-core-video-rs = "0.3.5"
-objc2-video-toolbox = "0.3.2"
-objc2-core-foundation = "0.3.2"
-objc2-core-media = "0.3.2"
-objc2-core-video = "0.3.2"
-core-foundation = "0.10"

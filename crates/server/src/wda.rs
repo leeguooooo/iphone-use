@@ -1,15 +1,13 @@
-//! L2 element-tree control via WebDriverAgent (WDA).
+//! Device control via WebDriverAgent (WDA).
 //!
-//! This is the "L2" layer (see the roadmap / `docs/wda-setup.html`): instead of
-//! the L3 pixel path (vision → coords → a synthetic click on the host Mac's one
-//! shared cursor), we drive iOS's own accessibility tree. WDA runs *on the
-//! phone* (Appium's runner, default `http://<phone>:8100`) and synthesizes the
-//! events itself — so there is no cursor contention, no coordinate drift, and
-//! text goes in as a real string (bypassing the keycode / Pinyin-IME caveat).
+//! WDA runs *on the phone* (Appium's runner, default `http://<phone>:8100`),
+//! drives iOS's own accessibility tree, and synthesizes the events itself — so
+//! nothing touches the Mac's cursor, coordinates do not drift, and text goes in
+//! as a real string (no keycode / Pinyin-IME caveat).
 //!
-//! This module is the daemon-side HTTP client for WDA's (W3C-ish) API. Direct
-//! mode routes browser and agent input here and fails closed when the device
-//! service is unavailable; the legacy Mac-side L3 path is a separate backend.
+//! This module is the daemon-side HTTP client for WDA's (W3C-ish) API. Browser
+//! and agent input route here and fail closed when the device service is
+//! unavailable.
 //! Request shapes follow Appium WebDriverAgent, and response parsers reject
 //! both HTTP failures and W3C error envelopes.
 
@@ -382,7 +380,7 @@ impl WdaClient {
 
     /// Type a literal string into an element (`POST .../element/:id/value`).
     /// WDA sends it through the on-device text input, so **CJK goes in directly**
-    /// — this is the whole reason L2 beats the L3 keycode path for text.
+    /// — no keycode mapping, no input-method interference.
     pub async fn type_into(&mut self, element_id: &str, text: &str) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
@@ -634,9 +632,7 @@ impl WdaClient {
     /// The older `/wda/tap/0` helper 404s on current WDA builds (verified on
     /// 14.1.1 / iOS 27): the route was element-scoped (`/wda/tap/<element>`) and
     /// element `0` no longer resolves. `/actions` is the W3C-standard path and is
-    /// present across builds, so a coordinate tap never silently falls through to
-    /// the Mirroring (L3) injector — which drops the event when the phone is in
-    /// hand and the Mirroring window isn't frontmost.
+    /// present across builds.
     pub async fn tap_point(&mut self, x: f64, y: f64) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
@@ -733,10 +729,7 @@ impl WdaClient {
 
     /// Swipe/scroll gesture via the W3C Actions API — a single touch that
     /// presses at `(x1,y1)`, drags to `(x2,y2)` over `duration_ms`, and lifts.
-    /// Synthesized on the phone like [`Self::tap_point`], so it works in agent
-    /// mode regardless of whether the Mirroring window is frontmost (issue #27:
-    /// `scroll` used to fall back to the L3/CGEvent path, which the OS drops
-    /// when a human holds the Mac's foreground). Coords are WDA points
+    /// Synthesized on the phone like [`Self::tap_point`]. Coords are WDA points
     /// (top-left origin), NOT normalized — convert via [`Self::window_size`].
     ///
     /// A short press-pause before the move makes XCUITest register a drag
@@ -780,9 +773,7 @@ impl WdaClient {
     }
 
     /// Press the Home button on-device (`POST /wda/pressButton` `{name:home}`).
-    /// Works in agent mode regardless of the Mirroring window — the `shortcut`
-    /// path routes through L3 and needs the mirror frontmost, so this is the
-    /// reliable "go home".
+    /// The reliable "go home".
     pub async fn press_home(&mut self) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
@@ -1106,8 +1097,7 @@ impl WdaClient {
     }
 
     /// Current phone screen as PNG bytes (`GET /screenshot`, base64 in the
-    /// envelope). Works with no Mirroring window at all — the capture happens
-    /// on the phone — so it's the L2 fallback when the L3 capture is gone.
+    /// envelope). The capture happens on the phone.
     pub async fn screenshot_png(&mut self) -> Result<Vec<u8>> {
         // Session-less endpoint; no ensure_session needed.
         let response = self

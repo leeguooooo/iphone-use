@@ -1,4 +1,4 @@
-//! axum HTTP app: auth-gated routes for the WebRTC web client.
+//! axum HTTP app: the web client, the agent API, and the WDA proxy.
 //!
 //! Routes (contract from `web/index.html`):
 //!   * `GET  /phone`       — auth-gated; serves the embedded web client.
@@ -32,19 +32,13 @@ fn recover<T>(r: std::sync::LockResult<T>) -> T {
 
 use axum::{
     body::Body,
-    extract::{ws::WebSocketUpgrade, Query, State},
+    extract::{Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Form, Router,
 };
 use serde::Deserialize;
-use webrtc::ice_transport::ice_server::RTCIceServer;
-
-use core::control::{Control, Lease};
-use core::encode::VideoPipeline;
-
-use crate::input_bridge::InputInjector;
 
 /// The embedded web client served at `/phone`.
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
@@ -75,52 +69,6 @@ const SESSION_COOKIE: &str = "phone_session";
 pub struct AuthLimiter {
     pub(crate) failures: u32,
     pub(crate) locked_until: Option<Instant>,
-}
-
-/// Control arbitration and its currently-authorized injector lease.
-///
-/// These values used to live behind two independent mutexes.  Some call sites
-/// locked `control → current_lease` while the injector gate locked them in the
-/// opposite order, which could deadlock the daemon permanently.  One mutex also
-/// prevents observers from seeing a newly-acquired control holder paired with a
-/// stale lease.
-pub struct LeaseState {
-    control: Control,
-    current: Option<Lease>,
-}
-
-impl LeaseState {
-    pub fn new() -> Self {
-        Self {
-            control: Control::new(),
-            current: None,
-        }
-    }
-
-    pub fn acquire(&mut self, holder: core::control::Holder, now: u64) -> Lease {
-        let lease = self.control.acquire(holder, now);
-        self.current = Some(lease.clone());
-        lease
-    }
-
-    pub fn allows_injection(&self) -> bool {
-        self.current
-            .as_ref()
-            .is_some_and(|lease| self.control.is_current(lease))
-    }
-
-    pub fn release_if_current(&mut self, lease: &Lease) {
-        if self.control.is_current(lease) {
-            self.control.release(lease);
-            self.current = None;
-        }
-    }
-}
-
-impl Default for LeaseState {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// Number of consecutive failures that trigger a lockout.
@@ -166,23 +114,6 @@ impl AuthLimiter {
 impl Default for AuthLimiter {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// ICE servers + their precomputed `/turn-creds` JSON, kept together so a TURN
-/// refresh swaps both atomically (see [`AppState::ice`]).
-pub struct IceState {
-    /// ICE servers handed to each PeerConnection.
-    pub servers: Vec<RTCIceServer>,
-    /// JSON `iceServers` array body returned by `/turn-creds`.
-    pub json: String,
-}
-
-impl IceState {
-    /// Build from a server list, precomputing the `/turn-creds` JSON.
-    pub fn new(servers: Vec<RTCIceServer>) -> Self {
-        let json = ice_servers_json(&servers);
-        Self { servers, json }
     }
 }
 
@@ -378,15 +309,6 @@ impl Default for WdaLifecycle {
 
 /// Shared application state for all handlers.
 pub struct AppState {
-    /// Selected device transport. Direct mode never probes, captures, or injects
-    /// through iPhone Mirroring; mirror mode keeps the original Mac-side path.
-    pub backend: crate::config::DeviceBackend,
-    /// Running video pipeline the WebRTC feed subscribes to.
-    pub pipeline: Arc<dyn VideoPipeline>,
-    /// ICE servers + `/turn-creds` JSON. Behind an `ArcSwap` so the Cloudflare
-    /// TURN refresh task can hot-swap fresh ephemeral credentials without a
-    /// restart; readers `load()` the current snapshot.
-    pub ice: Arc<arc_swap::ArcSwap<IceState>>,
     /// Optional shared password; `None` = open (LAN dev) mode.
     pub password: Option<String>,
     /// Secret for signing session cookies (always present; generated if unset).
@@ -395,10 +317,6 @@ pub struct AppState {
     pub session_ttl_secs: u64,
     /// Whether to mark the cookie `Secure` (true behind TLS).
     pub cookie_secure: bool,
-    /// Control arbitration and current injector authorization under one lock.
-    pub lease_state: Arc<Mutex<LeaseState>>,
-    /// Input injector (decoded events → CgEventSink on its own thread).
-    pub injector: InputInjector,
     /// Rate limiter for login and agent bearer auth failures.
     /// After 5 consecutive failures requests are rejected with 429 for 30 s.
     pub auth_limiter: Arc<Mutex<AuthLimiter>>,
@@ -423,8 +341,7 @@ pub struct AppState {
     /// (`PHONE_REMOTE_WDA_URL`, e.g. `http://<phone-ip>:8100`). When present,
     /// agent input auto-routes through it (see [`agent_input`]): text goes in
     /// as Unicode (CJK lands cleanly), taps are synthesized on-device (no host
-    /// cursor). Direct mode fails closed on WDA errors; only the explicit mirror
-    /// backend may use the L3 compatibility path.
+    /// cursor). Control fails closed on WDA errors.
     /// `tokio::sync::Mutex` because the client mutates its cached session and
     /// handlers hold the lock across awaits.
     pub wda: Option<Arc<tokio::sync::Mutex<crate::wda::WdaClient>>>,
@@ -444,26 +361,15 @@ pub struct AppState {
     /// the first successful fetch (or when offline). Read by `agent_status`
     /// to surface `update_available` to agents and the web client.
     pub latest_release: Arc<Mutex<Option<String>>>,
-    /// Single-active-viewer arbitration for `/ws` (issue #8: queue + notify).
-    /// One viewer streams at a time; others wait in line and are promoted when
-    /// the active one disconnects. Read by `/agent/status` as `viewer_count`.
-    pub viewers: Arc<Mutex<crate::signaling::ViewerRegistry>>,
-    /// Memoized Mirroring window classification (issue #14/#3): `(checked_at,
-    /// state)`. Detection runs `screencapture`, so `/agent/status` reuses a
-    /// recent result instead of re-capturing on every poll.
-    pub mirror_paused_cache: Arc<Mutex<Option<(Instant, core::capture::MirrorState)>>>,
     /// WDA's on-device MJPEG stream URL (e.g. `http://127.0.0.1:9100`), if WDA
-    /// is configured. The `/agent/mjpeg` endpoint proxies it so agent mode gets
-    /// LIVE video without iPhone Mirroring — the MJPEG server runs inside the
-    /// same XCUITest session as control, so the two coexist (Mirroring can't).
+    /// is configured. The `/agent/mjpeg` endpoint proxies it for live video —
+    /// the MJPEG server runs inside the same XCUITest session as control.
     /// Defaults to `127.0.0.1:9100` (the relay target), override via
     /// `PHONE_REMOTE_WDA_MJPEG_URL`.
     pub mjpeg_url: Option<String>,
     /// Last-known "WDA can act on-device" flag, updated by Direct health probes
     /// and control events. Direct handlers use it as readiness evidence but
-    /// always fail closed when WDA cannot act; they never fall through to the
-    /// Mac injector. The explicit Mirror backend ignores WDA and retains its
-    /// legacy host-capture/input path.
+    /// always fail closed when WDA cannot act.
     pub wda_actionable: Arc<std::sync::atomic::AtomicBool>,
     /// Last completed WDA health probe. Status polling uses this cache whenever
     /// the control client is busy, so a slow health check never queues behind or
@@ -767,11 +673,10 @@ impl AppState {
         self.hold_remaining_secs() > 0
     }
 
-    /// A viewer is actively watching — an MJPEG stream is open or a `/ws`
-    /// WebRTC viewer is connected. The watchdog never releases out from under one.
+    /// A viewer is actively watching an MJPEG stream. The watchdog never
+    /// releases out from under one.
     fn viewer_busy(&self) -> bool {
         self.live_streams.load(std::sync::atomic::Ordering::Relaxed) > 0
-            || recover(self.viewers.lock()).count() > 0
     }
 
     /// How long since the last remote-driving activity.
@@ -900,14 +805,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/setup", get(setup))
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", get(logout))
-        .route("/turn-creds", get(turn_creds))
-        .route("/ws", get(ws_upgrade))
-        // Browser control in the direct backend is deliberately independent of
-        // WebRTC.  MJPEG viewers can still control the device when ICE/H.264 is
-        // unavailable, and every request receives an explicit HTTP ACK.
+        // Browser control: one HTTP request per gesture, each with an explicit
+        // ACK, alongside the MJPEG view.
         .route("/control", post(direct_control))
-        // Agent operation entry (connect-in; reuses the validated injector +
-        // control lease). Bearer-token auth; see `agent_input` / `agent_status`.
+        // Agent operation entry (connect-in). Bearer-token auth; see
+        // `agent_input` / `agent_status`.
         .route("/agent/status", get(agent_status))
         .route("/agent/mode", post(agent_mode))
         .route("/agent/input", post(agent_input))
@@ -985,8 +887,8 @@ pub fn is_authed(state: &AppState, headers: &HeaderMap) -> bool {
 /// plain HTTP; HTTPS is terminated by the Cloudflare tunnel, which forwards
 /// `X-Forwarded-Proto: https`. We must decide `Secure` **per request** and NOT
 /// from the bind host: a LAN bind (`0.0.0.0`) is still plain HTTP, and a `Secure`
-/// cookie is rejected by browsers over plain HTTP — which silently breaks the
-/// `/ws` auth (the cookie isn't sent on the `ws://` upgrade) and thus WebRTC.
+/// cookie is rejected by browsers over plain HTTP, which silently logs every
+/// LAN viewer out.
 fn request_is_https(state: &AppState, headers: &HeaderMap) -> bool {
     if state.cookie_secure {
         return true; // explicit force (e.g. an external HTTPS terminator)
@@ -1188,24 +1090,12 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
     with_security_headers(resp)
 }
 
-async fn turn_creds(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !is_authed(&state, &headers) {
-        return with_security_headers((StatusCode::UNAUTHORIZED, "unauthorized").into_response());
-    }
-    let resp = Response::builder()
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(state.ice.load().json.clone()))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-    with_security_headers(resp)
-}
-
 // ---------------------------------------------------------------------------
 // Agent operation entry (connect-in HTTP API)
 // ---------------------------------------------------------------------------
 //
-// An agent (Hermes, an MCP client, or a script) drives the selected backend by
-// POSTing to this already-running daemon. Direct dispatches only to on-device
-// WDA. The explicit Mirror compatibility backend uses the legacy Mac injector.
+// An agent (Hermes, an MCP client, or a script) drives the phone by POSTing to
+// this already-running daemon, which dispatches to on-device WDA.
 
 /// Extract the bytes after `Authorization: Bearer `.
 ///
@@ -1340,26 +1230,6 @@ fn target_not_configured_response() -> Response {
             ))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
     )
-}
-
-/// What the Mirroring window is showing (active / paused / in_use). Memoized for
-/// [`MIRROR_STATE_CACHE_TTL`] so `/agent/status` polling doesn't run a
-/// `screencapture` on every request. Detection is blocking (spawns
-/// `screencapture` + decodes), so it runs on a blocking thread.
-async fn mirror_state_cached(state: &Arc<AppState>) -> core::capture::MirrorState {
-    const MIRROR_STATE_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(1000);
-    if let Some((at, s)) = *recover(state.mirror_paused_cache.lock()) {
-        if at.elapsed() < MIRROR_STATE_CACHE_TTL {
-            return s;
-        }
-    }
-    let s = tokio::task::spawn_blocking(|| {
-        core::capture::mirroring_state().unwrap_or(core::capture::MirrorState::Active)
-    })
-    .await
-    .unwrap_or(core::capture::MirrorState::Active);
-    *recover(state.mirror_paused_cache.lock()) = Some((Instant::now(), s));
-    s
 }
 
 /// Return cached WDA health and, when idle, start one background refresh.
@@ -1833,12 +1703,8 @@ fn spawn_wda_readiness_wait(state: Arc<AppState>, token: WdaTransitionToken) {
     });
 }
 
-/// `GET /agent/status` — authenticated backend/readiness/lifecycle probe.
-///
-/// Direct callers gate on `drivable`; its legacy `phone_target` field is always
-/// false and no Mirroring API is touched. In explicit Mirror compatibility
-/// mode, `phone_target` reports whether a Mirroring window is currently
-/// findable on macOS.
+/// `GET /agent/status` — authenticated readiness/lifecycle probe. Callers gate
+/// on `drivable`.
 async fn agent_status(
     State(state): State<Arc<AppState>>,
     Query(query): Query<MjpegStreamQuery>,
@@ -1873,35 +1739,17 @@ async fn agent_status(
             (StatusCode::BAD_REQUEST, "invalid MJPEG stream id").into_response(),
         );
     }
-    let direct = state.backend == crate::config::DeviceBackend::Direct;
     let lifecycle = state.wda_lifecycle.current();
     let releasing = lifecycle == WdaLifecycleTransition::Releasing;
     let reconnecting = lifecycle == WdaLifecycleTransition::Reconnecting;
     let hold_remaining = state.hold_remaining_secs();
     let released = state.released.load(std::sync::atomic::Ordering::Relaxed);
     let human_handoff = released && human_handoff_active();
-    let (human_view_phase, human_view_message) = crate::human_view::snapshot();
-    let human_view = human_view_phase.as_str();
-    // A person driving the view from a browser on this same Mac: macOS keeps
-    // the front with their browser, so Mirroring never gets the input.
-    let human_view_input_blocked = human_view_phase == crate::human_view::Phase::Live
-        && crate::input_bridge::input_blocked_recently(15);
-    let human_view_error = if human_view_message.is_empty() {
-        "null".to_string()
-    } else {
-        serde_json::to_string(&human_view_message).unwrap_or_else(|_| "null".into())
-    };
-    // Direct mode must not touch any iPhone Mirroring API. The legacy backend
-    // keeps the cheap geometry probe for compatibility status.
-    #[cfg(target_os = "macos")]
-    let phone_target = !direct && core::capture::find_mirroring_geometry().is_ok();
-    #[cfg(not(target_os = "macos"))]
-    let phone_target = false;
     // L2 health — action-level, not just /status (which lies: it reports
     // `ready` even when every UI action fails Code=41 because the phone is
     // locked or the test session was severed). `wda` stays "runner reachable"
     // for back-compat; `wda_actionable` is the honest "can it act right now".
-    let health = if !direct || state.managed_wda_pending {
+    let health = if state.managed_wda_pending {
         crate::wda::WdaHealth::down()
     } else if reconnecting {
         *recover(state.wda_health.lock())
@@ -1915,46 +1763,9 @@ async fn agent_status(
         Some(false) => "false",
         None => "null",
     };
-    // `backend` is configuration and never changes because a health probe
-    // flickered. `mode` remains for old clients, but in direct mode it can only
-    // be agent/offline — never an implicit switch back to Mirroring.
-    let mode = if direct {
-        if wda {
-            "agent"
-        } else {
-            "offline"
-        }
-    } else if phone_target {
-        "mirror"
-    } else {
-        "offline"
-    };
-    // mirror_state + drivable (issue #14 §1): `phone_target` only says the
-    // Mirroring *window* exists — it stays true on the "Connection Paused" /
-    // "in use" interstitial, where L3 taps land in the void. `drivable` is the
-    // honest "can an agent act right now" signal: WDA always can (on-device);
-    // the mirror path can only when the window isn't paused.
-    let (mirror_state, drivable) = if direct {
-        (
-            "disabled",
-            wda_actionable && !releasing && !reconnecting && !released,
-        )
-    } else if phone_target {
-        let s = mirror_state_cached(&state).await;
-        (s.as_str(), s.drivable())
-    } else {
-        ("offline", false)
-    };
-    // Human-presence signal (issue #16): in mirror mode the agent and the human
-    // share ONE Mac cursor — an L3 tap first yanks iPhone Mirroring frontmost,
-    // stealing focus from whatever the human is doing. If Mirroring isn't
-    // frontmost right now, a human/another app holds the Mac, so the next tap
-    // WILL interrupt them. (Agent/WDA mode injects on-device → no contention,
-    // so this is always false there.) Passive NSWorkspace read — no focus steal.
-    #[cfg(target_os = "macos")]
-    let human_active = !direct && drivable && !crate::macos::mirroring_is_frontmost();
-    #[cfg(not(target_os = "macos"))]
-    let human_active = false;
+    // `mode` remains for old clients: agent while WDA answers, else offline.
+    let mode = if wda { "agent" } else { "offline" };
+    let drivable = wda_actionable && !releasing && !reconnecting && !released;
     // Version + update hint. `latest_release` is fetched by a background
     // task (24h cadence); `update::is_newer` is the same comparison
     // `iphone-use upgrade` uses (numeric, so a build ahead of the last release
@@ -1968,12 +1779,11 @@ async fn agent_status(
         ),
         None => ("null".to_string(), false),
     };
-    // Connected `/ws` viewers (active + queued) — issue #8.
-    let ws_viewer_count = recover(state.viewers.lock()).count();
     let mjpeg_viewer_count = state
         .live_streams
         .load(std::sync::atomic::Ordering::Relaxed);
-    let viewer_count = ws_viewer_count.saturating_add(mjpeg_viewer_count);
+    // `viewer_count` predates the MJPEG-only page; it is the same number now.
+    let viewer_count = mjpeg_viewer_count;
     let mjpeg_stream_age_ms = query.stream_id.as_deref().and_then(|stream_id| {
         recover(state.mjpeg_stream_activity.lock())
             .get(stream_id)
@@ -1987,27 +1797,23 @@ async fn agent_status(
     let mjpeg_stream_age_json = mjpeg_stream_age_ms
         .map(|age_ms| age_ms.to_string())
         .unwrap_or_else(|| "null".to_string());
-    let recovery_owner = if direct {
-        if state.managed_wda {
-            "daemon"
-        } else if state.managed_wda_pending {
-            "unconfigured"
-        } else {
-            "external"
-        }
+    let recovery_owner = if state.managed_wda {
+        "daemon"
+    } else if state.managed_wda_pending {
+        "unconfigured"
     } else {
-        "mirror"
+        "external"
     };
     // Setup progress: `setup-wda.sh` writes ~/.iphone-use/wda-setup-status.json
     // ({phase, blocked_on, message, ts}) as it runs. Read it before selecting
     // the recovery hint: a concrete prerequisite failure must take precedence
     // over the generic "keep waiting" text while reconnecting.
-    let setup_status = if direct && state.managed_wda {
+    let setup_status = if state.managed_wda {
         read_structured_setup_status()
     } else {
         None
     };
-    let setup_blocked_on = if direct && state.managed_wda {
+    let setup_blocked_on = if state.managed_wda {
         read_setup_blocked_on()
     } else {
         String::new()
@@ -2037,7 +1843,7 @@ async fn agent_status(
     // Build progress (#26 §1). Read raw — unlike `setup_status`, a *stale*
     // status is meaningful here: it means the helper died mid-build rather
     // than that the blocker went away.
-    let wda_build = if direct && state.managed_wda {
+    let wda_build = if state.managed_wda {
         derive_wda_build(
             read_raw_setup_status().as_ref(),
             now_secs(),
@@ -2050,9 +1856,9 @@ async fn agent_status(
     // When not drivable, tell the caller HOW to recover (the recovery differs by
     // state, and auto-recovery is blocked by macOS while the phone is in use).
     // Plain text only — kept free of quotes/braces so it drops into the JSON.
-    let hint = if direct && releasing {
+    let hint = if releasing {
         "direct device service is being released after inactivity — wait for confirmation before reconnecting"
-    } else if direct && !wda {
+    } else if !wda {
         if state.managed_wda_pending {
             "no canonical iPhone target is configured — run setup-wda.sh to persist PHONE_REMOTE_UDID; until then the daemon will not stop or bootstrap local WDA"
         } else if let Some(blocker_hint) = setup_blocker_hint(&setup_blocked_on) {
@@ -2062,19 +1868,19 @@ async fn agent_status(
         } else if released && !state.managed_wda {
             "the remote WDA endpoint is externally managed — restart it on the owning host; this daemon will not stop or bootstrap local services"
         } else if released && human_handoff {
-            "the phone was handed to a human (mode=human) — a person is using it through iPhone Mirroring; POST /agent/mode {mode:agent} takes it back"
+            "the phone was handed to a person (mode=human) and WDA is stopped so they can use it in hand — POST /agent/mode {mode:agent} takes it back"
         } else if released {
             "direct device service was released after inactivity — reconnect to restart WDA, then keep the phone unlocked and awake"
         } else if !state.managed_wda {
             "the configured remote WDA endpoint is unreachable and externally managed — recover it on the owning host; this daemon will not run local setup or launchctl commands"
         } else {
-            "direct device service is unreachable — start or repair WDA and the 8100/9100 relays; iPhone Mirroring is not used"
+            "direct device service is unreachable — start or repair WDA and the 8100/9100 relays"
         }
-    } else if direct && reconnecting {
+    } else if reconnecting {
         "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying"
-    } else if direct && wda && !wda_actionable {
+    } else if wda && !wda_actionable {
         if wda_locked == "true" {
-            "WDA is reachable but the iPhone is locked — unlock it and keep it awake; direct control never falls back to iPhone Mirroring"
+            "WDA is reachable but the iPhone is locked — unlock it and keep it awake"
         } else if !wda_died_reason.is_empty() {
             // We watched it die; say what took it down instead of the generic
             // "cannot act" that made a severed session look like interference.
@@ -2088,22 +1894,12 @@ async fn agent_status(
             // recovery path for a condition that clears itself (#74).
             "WDA is reachable but the last read or action did not complete (usually a /source read that timed out on a heavy page, or a stalled app) — retry the read; the next health probe decides whether this clears or becomes offline"
         }
-    } else if !drivable {
-        match mirror_state {
-            "paused" => "Mirroring needs reconnecting (paused / interrupted / timed out) — tap the Resume/Connect/Try Again button (x=0.5, y=0.64), once, then wait 45s+; do NOT loop",
-            "in_use" => "iPhone in use — LOCK the phone to reconnect; the on-screen Connect button will not reconnect while it is in use",
-            "offline" => "no iPhone Mirroring window — open it on the Mac; to use on-device control, persist PHONE_REMOTE_BACKEND=direct and restart the daemon",
-            _ => "",
-        }
-    } else if human_active {
-        // Issue #16: a human is on the Mac — yield instead of stealing focus.
-        "a human is using the Mac (iPhone Mirroring is not frontmost) — an L3 tap will steal their focus; pause until they are idle, or persist PHONE_REMOTE_BACKEND=direct and restart for on-device control"
     } else {
         ""
     };
     let device_state = if releasing {
         "releasing"
-    } else if direct && !wda && !setup_blocked_on.is_empty() {
+    } else if !wda && !setup_blocked_on.is_empty() {
         "blocked"
     } else if reconnecting {
         "reconnecting"
@@ -2125,14 +1921,10 @@ async fn agent_status(
     } else {
         "offline"
     };
-    let screen_state = if direct && wda && mjpeg_stream_fresh {
+    let screen_state = if wda && mjpeg_stream_fresh {
         "live"
-    } else if direct && wda {
+    } else if wda {
         "waiting"
-    } else if direct {
-        "offline"
-    } else if phone_target {
-        "ready"
     } else {
         "offline"
     };
@@ -2142,8 +1934,7 @@ async fn agent_status(
     // up indefinitely, so `device_state:"ready"` alone says nothing about use.
     let idle_secs = state.idle_for().as_secs();
     let body = format!(
-        r#"{{"ok":true,"backend":"{}","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","phone_target":{phone_target},"wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"human_active":{human_active},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","mirror_state":"{mirror_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"human_view":"{human_view}","human_view_error":{human_view_error},"human_view_input_blocked":{human_view_input_blocked},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"version":"{version}","latest":{latest_json},"update_available":{update_available}}}"#,
-        state.backend.as_str(),
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"version":"{version}","latest":{latest_json},"update_available":{update_available}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -3105,12 +2896,8 @@ fn prepare_idle_wda_probe(state: &AppState) -> bool {
 /// WDA runner and boot out its KeepAlive LaunchAgent so the device is free for
 /// hands-on use. The next `/agent/input` re-bootstraps WDA (see [`agent_input`]).
 ///
-/// This transition only lets go of the configured Direct target; it never
-/// opens, focuses, or otherwise touches the separate Mirror compatibility
-/// backend.
+/// No-op (and silent) when WDA isn't configured or is externally managed.
 ///
-/// No-op (and silent) when WDA isn't configured: a pure L3/mirror deployment has
-/// no persistent on-device session to release.
 /// How long WDA must have been down for the next up edge to count as a human
 /// cold start (which earns a fresh activity window) rather than a crash-loop
 /// bounce (which must not reset the idle clock). See issue #66.
@@ -3132,11 +2919,8 @@ fn release_retry_backoff(failures: &mut u32) -> std::time::Duration {
 }
 
 pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
-    if state.backend != crate::config::DeviceBackend::Direct
-        || !state.managed_wda
-        || state.wda.is_none()
-    {
-        return; // external/remote WDA and mirror mode are never lifecycle-managed here
+    if !state.managed_wda || state.wda.is_none() {
+        return; // an external/remote WDA is never lifecycle-managed here
     }
     // On by default again (v0.6.3 to v0.7.3 kept the runner up). A runner
     // that is always up is a runner that KeepAlive relaunches whenever iOS
@@ -3452,16 +3236,6 @@ const CAPABILITY_BATCH_ACTIONS: &[&str] = &[
     "text",
 ];
 
-/// What the legacy Mirror backend can carry: the `ControlMsg` variants
-/// `decode_control` accepts, injected as Mac-side CGEvents. Everything
-/// element-shaped needs WDA and is refused on this backend
-/// (`/agent/elements` → `backend_is_mirror`, `/agent/actions` →
-/// `batch_requires_direct_wda`, element-bound `/agent/input` → invalid
-/// control message).
-const CAPABILITY_MIRROR_ACTIONS: &[&str] = &[
-    "down", "up", "tap", "longpress", "scroll", "shortcut", "text", "key",
-];
-
 /// How the caller's `X-Phone-Owner` relates to the current lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapabilityOwnership {
@@ -3521,7 +3295,6 @@ fn capability_ownership(state: &AppState, headers: &HeaderMap) -> CapabilityOwne
 fn capability_availability(state: &AppState, headers: &HeaderMap) -> serde_json::Value {
     use std::sync::atomic::Ordering;
 
-    let direct = state.backend == crate::config::DeviceBackend::Direct;
     let released = state.released.load(Ordering::Acquire);
     let releasing = state.wda_lifecycle.is_releasing();
     let reconnecting = state.wda_lifecycle.is_reconnecting();
@@ -3535,9 +3308,7 @@ fn capability_availability(state: &AppState, headers: &HeaderMap) -> serde_json:
     // Ordered by what the caller must do about it. `ok: null` means the daemon
     // has no evidence either way — never `false`, which would claim knowledge
     // it does not have.
-    let (ok, blocked_by): (Option<bool>, Option<&str>) = if !direct {
-        (None, Some("backend_is_mirror"))
-    } else if handoff {
+    let (ok, blocked_by): (Option<bool>, Option<&str>) = if handoff {
         (Some(false), Some("human_handoff"))
     } else if releasing {
         (Some(false), Some("releasing"))
@@ -3613,41 +3384,24 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
         AgentAuth::Ok => {}
     }
 
-    let direct = state.backend == crate::config::DeviceBackend::Direct;
-    let managed = direct && state.managed_wda;
-
-    // `mode` values this daemon would actually accept. Advertising one it
-    // answers 409 to is a false promise: Mirror refuses `agent`, Direct
-    // refuses `mirror`, and an externally managed endpoint refuses both
-    // lifecycle transitions because it does not own the supervisor.
-    let modes: Vec<&str> = if !direct {
-        vec!["mirror"]
-    } else if managed {
+    // `mode` values this daemon would actually accept. An externally managed
+    // endpoint refuses both lifecycle transitions: it does not own the
+    // supervisor.
+    let modes: Vec<&str> = if state.managed_wda {
         vec!["agent", "human"]
     } else {
         Vec::new()
     };
-
-    // Element-shaped work is WDA-only. On Mirror the daemon carries just the
-    // CGEvent vocabulary, refuses the batch route outright
-    // (`batch_requires_direct_wda`) and refuses the element tree
-    // (`backend_is_mirror`), so it must not advertise either.
-    let (single_step, batch, perform): (&[&str], &[&str], &[&str]) = if direct {
-        (
-            CAPABILITY_SINGLE_STEP_ACTIONS,
-            CAPABILITY_BATCH_ACTIONS,
-            &PERFORM_ACTION_NAMES,
-        )
-    } else {
-        (CAPABILITY_MIRROR_ACTIONS, &[], &[])
-    };
+    let (single_step, batch, perform): (&[&str], &[&str], &[&str]) = (
+        CAPABILITY_SINGLE_STEP_ACTIONS,
+        CAPABILITY_BATCH_ACTIONS,
+        &PERFORM_ACTION_NAMES,
+    );
 
     let body = serde_json::json!({
         "ok": true,
-        "backend": state.backend.as_str(),
-        "recovery_owner": if !direct {
-            "mirror"
-        } else if state.managed_wda {
+        "backend": "direct",
+        "recovery_owner": if state.managed_wda {
             "daemon"
         } else if state.managed_wda_pending {
             "unconfigured"
@@ -3665,13 +3419,13 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
             // The closed set `direct_agent_action` checks before touching the
             // device: an unlisted name is refused without reaching the phone.
             "perform_actions": perform,
-            "element_tree": direct,
+            "element_tree": true,
             "observation": {
-                "return_delta": direct,
-                "settle_ms_max": if direct { AGENT_INPUT_SETTLE_MAX_MS } else { 0 },
+                "return_delta": true,
+                "settle_ms_max": AGENT_INPUT_SETTLE_MAX_MS,
             },
             "modes": modes,
-            "lifecycle_managed_here": managed,
+            "lifecycle_managed_here": state.managed_wda,
         },
         "available": capability_availability(&state, &headers),
     });
@@ -3684,26 +3438,14 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
     )
 }
 
-/// `POST /agent/mode` — recover the currently configured backend, or hand the
-/// phone to a person.
-/// Body: `{"mode":"mirror"}` for Mirror, `{"mode":"agent"}` for Direct, or
-/// `{"mode":"human"}` to stop the managed runner so iPhone Mirroring can take
-/// the phone (see the `human` arm).
+/// `POST /agent/mode` — bring the phone up for remote control, or give it back
+/// to the person holding it.
 ///
-/// The on-phone XCUITest runner (WDA, the L2 layer) monopolizes the device's
-/// remote session: while it runs, iPhone Mirroring shows "Connection
-/// Interrupted" and can never reconnect — even with the phone locked
-/// (hardware A/B-verified, see docs/wda-setup.html pitfall ⑨). The configured
-/// backend is therefore persistent and never changes here:
-///
-/// * Mirror + `mirror` — bring Mirroring frontmost and tap its "Try Again"
-///   button through the L3 injector. Returns once dispatched;
-///   callers poll `/agent/status` for `"mode":"mirror"` and verify pixels.
-/// * Direct + `agent` — recover daemon-managed WDA using its persisted
+/// * `{"mode":"agent"}` — recover daemon-managed WDA using its persisted
 ///   canonical target. Poll until `reconnecting:false` and `drivable:true`.
-///
-/// A cross-backend value returns 409 and instructs the operator to persist
-/// `PHONE_REMOTE_BACKEND` and restart.
+/// * `{"mode":"human"}` — stop the managed runner so the person holding the
+///   phone has it to themselves; agent input then answers 409
+///   `phone_handed_to_human` until `agent` takes it back.
 async fn agent_mode(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3735,24 +3477,13 @@ async fn agent_mode(
         .as_ref()
         .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(String::from))
         .unwrap_or_default();
-    if state.backend == crate::config::DeviceBackend::Direct && mode == "mirror" {
+    if mode == "mirror" {
         return with_security_headers(
             Response::builder()
-                .status(StatusCode::CONFLICT)
+                .status(StatusCode::GONE)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    r#"{"ok":false,"error":"backend_is_direct","hint":"set PHONE_REMOTE_BACKEND=mirror and restart the daemon to use the legacy compatibility backend"}"#,
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
-    }
-    if state.backend == crate::config::DeviceBackend::Mirror && mode == "agent" {
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::CONFLICT)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"ok":false,"error":"backend_is_mirror","hint":"set PHONE_REMOTE_BACKEND=direct and restart the daemon to use device-side WDA control"}"#,
+                    r#"{"ok":false,"error":"mirror_removed","hint":"the iPhone Mirroring backend was removed in v0.9; use {\"mode\":\"agent\"}"}"#,
                 ))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         );
@@ -3782,7 +3513,7 @@ async fn agent_mode(
             (StatusCode::BAD_REQUEST, "invalid target UDID").into_response(),
         );
     }
-    if state.backend == crate::config::DeviceBackend::Direct {
+    {
         if mode == "agent" && state.managed_wda_pending {
             return with_security_headers(
                 Response::builder()
@@ -3815,40 +3546,6 @@ async fn agent_mode(
         .or_else(|| requested_udid.map(String::from));
     let setup_sh = crate::instance::Instance::path_str(&crate::instance::current().setup_sh());
     match mode.as_str() {
-        "mirror" => {
-            // Mirror recovery never starts, stops, or reuses WDA. Installation
-            // owns the explicit backend transition; runtime recovery only
-            // reopens the selected compatibility backend.
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("open")
-                    .args(["-a", "iPhone Mirroring"])
-                    .status();
-                tokio::task::spawn_blocking(|| {
-                    crate::macos::ensure_mirroring_frontmost(crate::macos::front_deadline())
-                })
-                .await
-                .ok();
-            }
-            if let Some(ev) =
-                crate::input_bridge::decode_control(r#"{"type":"tap","x":0.5,"y":0.65}"#)
-            {
-                recover(state.lease_state.lock()).acquire(
-                    core::control::Holder::Agent("mirror-recovery".into()),
-                    now_secs(),
-                );
-                state.injector.send(ev);
-            }
-            // Keep `switching` temporarily for older clients, while
-            // `recovering` names the actual current-backend operation.
-            let body = r#"{"ok":true,"mode":"mirror","recovering":true,"switching":true,"stopped_via_script":false}"#;
-            with_security_headers(
-                Response::builder()
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-            )
-        }
         "agent" => {
             if !state.managed_wda {
                 return with_security_headers(
@@ -3904,9 +3601,6 @@ async fn agent_mode(
             // can outlast a client's timeout, and status must not keep saying
             // "handed to a human" while the runner is already coming up.
             HUMAN_HANDOFF.store(false, std::sync::atomic::Ordering::Release);
-            // The runner and a Mirroring capture cannot share the phone: end
-            // the browser view (capture and Mac input) before WDA comes up.
-            let _ = tokio::task::spawn_blocking(crate::human_view::stop).await;
             // An explicit reconnect is intent, not idleness: restart the clock
             // before the bring-up begins, or a build longer than the idle
             // window ends with the watchdog stopping the very supervisor this
@@ -3947,20 +3641,17 @@ async fn agent_mode(
             )
         }
         "human" => {
-            // Hand the phone to a person. The on-phone runner monopolizes the
-            // device session (iPhone Mirroring shows "Connection Interrupted"
-            // while it runs), so a human at the Mac — locally or over Screen
-            // Sharing / Tailscale — first needs the runner gone. This is the
-            // same stop the idle watchdog performs, done on request, plus a
-            // best-effort `open -a "iPhone Mirroring"` so the window is there
-            // when they look. `{"mode":"agent"}` takes the phone back.
-            if state.backend != crate::config::DeviceBackend::Direct || !state.managed_wda {
+            // Give the phone back to the person holding it: the same stop the
+            // idle watchdog performs, done on request, plus a flag that makes
+            // agent input answer 409 instead of starting the runner under
+            // their fingers. `{"mode":"agent"}` takes the phone back.
+            if !state.managed_wda {
                 return with_security_headers(
                     Response::builder()
                         .status(StatusCode::CONFLICT)
                         .header(header::CONTENT_TYPE, "application/json")
                         .body(Body::from(
-                            r#"{"ok":false,"error":"wda_is_externally_managed","hint":"human hand-off stops the daemon-managed local runner; an external or mirror backend has nothing to hand off"}"#,
+                            r#"{"ok":false,"error":"wda_is_externally_managed","hint":"human hand-off stops the daemon-managed local runner; an external endpoint has nothing to hand off"}"#,
                         ))
                         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
                 );
@@ -3994,26 +3685,8 @@ async fn agent_mode(
                 tracing::info!("phone handed to a human: managed WDA stopped on request");
             }
             state.wda_lifecycle.finish_releasing(release_token);
-            #[cfg(target_os = "macos")]
-            let mirroring_opened = stopped
-                && std::process::Command::new("open")
-                    // By bundle id: the app's name is localized ("iPhone镜像").
-                    .args(["-b", "com.apple.ScreenContinuity"])
-                    .status()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
-            #[cfg(not(target_os = "macos"))]
-            let mirroring_opened = false;
-            // The browser can watch and drive the handed-over phone too: start
-            // capturing the Mirroring window for WebRTC. It reports through
-            // `/agent/status` `human_view`; a failure (no Screen Recording
-            // grant, say) leaves the hand-off itself intact.
-            if stopped {
-                crate::human_view::start();
-            }
             let body = format!(
-                r#"{{"ok":{stopped},"mode":"human","released":{stopped},"mirroring_opened":{mirroring_opened},"human_view":"{}","hint":"the phone is yours: drive it from this page once human_view is live, or use iPhone Mirroring on this Mac; POST {{\"mode\":\"agent\"}} hands it back to the agent"}}"#,
-                crate::human_view::snapshot().0.as_str()
+                r#"{{"ok":{stopped},"mode":"human","released":{stopped},"hint":"WDA is stopped and the phone is the holder's; POST {{\"mode\":\"agent\"}} hands it back to remote control"}}"#
             );
             with_security_headers(
                 Response::builder()
@@ -4030,7 +3703,7 @@ async fn agent_mode(
         _ => with_security_headers(
             (
                 StatusCode::BAD_REQUEST,
-                r#"body must be {"mode":"mirror"}, {"mode":"agent"}, or {"mode":"human"}"#,
+                r#"body must be {"mode":"agent"} or {"mode":"human"}"#,
             )
                 .into_response(),
         ),
@@ -4039,7 +3712,7 @@ async fn agent_mode(
 
 /// Perform a WDA on-device scroll/swipe (issue #27). `nx`/`ny` are the
 /// normalized `[0,1]` gesture anchor; `dx`/`dy` are scroll deltas whose sign
-/// matches the L3 convention (positive `dy` reveals content below, positive
+/// matches the web client's convention (positive `dy` reveals content below, positive
 /// `dx` reveals content to the right). The delta is scaled into a finger travel
 /// that is always a visible swipe (≥15% of the axis) yet stays on-screen (≤75%);
 /// the finger moves opposite to the content reveal.
@@ -6105,7 +5778,7 @@ async fn wda_control_with_client(
             // Home, from an app the swipe is absorbed — the switcher never opens).
             // There is no WDA element to tap either, so it's unreachable in agent
             // mode. Report unhandled; the web client shows a hint instead of
-            // sending a no-op. (Works in mirror mode via the L3 path.)
+            // sending a no-op.
             Some("switcher") => return WdaControlOutcome::Unsupported,
             _ => return WdaControlOutcome::Unsupported,
         },
@@ -6147,8 +5820,8 @@ async fn wda_control_with_client(
                 _ => return WdaControlOutcome::Unsupported,
             }
         }
-        // Streaming down/up/move is a Mirroring-era protocol. Direct gestures
-        // arrive atomically as tap/longpress/swipe/drag.
+        // Gestures arrive atomically as tap/longpress/swipe/drag; there is no
+        // streaming down/move/up.
         _ => return WdaControlOutcome::Unsupported,
     };
     match r {
@@ -6167,9 +5840,7 @@ async fn wda_control_with_client(
             WdaControlOutcome::NotSent
         }
         Err(e) => {
-            // A WDA call that should have worked failed. Direct callers fail
-            // closed; the explicit mirror backend may choose its compatibility
-            // path.
+            // A WDA call that should have worked failed. Callers fail closed.
             actionable.store(false, Ordering::Relaxed);
             w.invalidate_session();
             tracing::warn!("wda control ({typ}): {e:#}");
@@ -6611,15 +6282,6 @@ async fn direct_control(
     }
     if let Err(refused) = claim_phone_owner(&state, &headers) {
         return refused;
-    }
-    if state.backend != crate::config::DeviceBackend::Direct {
-        return with_security_headers(
-            (
-                StatusCode::CONFLICT,
-                r#"{"ok":false,"error":"legacy_mirror_uses_webrtc"}"#,
-            )
-                .into_response(),
-        );
     }
     if state.managed_wda_pending {
         return target_not_configured_response();
@@ -7630,20 +7292,6 @@ async fn agent_actions(
     if let Err(error) = validate_agent_actions(&request) {
         return agent_actions_invalid(error);
     }
-    if state.backend != crate::config::DeviceBackend::Direct {
-        return agent_actions_json(
-            StatusCode::CONFLICT,
-            serde_json::json!({
-                "ok": false,
-                "error": "batch_requires_direct_wda",
-                // Refused before the first step: zero actions, certainly.
-                "outcome": "not_sent",
-                "failed_step_outcome": "not_sent",
-                "batch_outcome": "nothing_applied",
-                "retry_safe": true
-            }),
-        );
-    }
     if state.managed_wda_pending {
         return target_not_configured_response();
     }
@@ -8335,8 +7983,8 @@ async fn settle_and_read_elements(
     (Some((id, rows)), report)
 }
 
-/// `POST /agent/input` — inject one control message (same JSON shape as the
-/// WebRTC control channel): `{"type":"tap","x":0.5,"y":0.5}`,
+/// `POST /agent/input` — perform one control message on the phone:
+/// `{"type":"tap","x":0.5,"y":0.5}`,
 /// `{"type":"text","text":"hi"}`, `{"type":"scroll","x":..,"y":..,"dx":..,"dy":..}`,
 /// `{"type":"shortcut","name":"home"}`, `{"type":"key","name":"return"}`,
 /// `{"type":"uninstall","bundle":"com.example.app"}` (via devicectl), etc.
@@ -8355,10 +8003,8 @@ async fn settle_and_read_elements(
 /// to be re-sent. Such a read is reported as `settle.reason:"observation_failed"`
 /// (and, for existing callers, still as `delta_error`) beside `ok:true`.
 ///
-/// Coordinates are normalized `[0,1]` over the phone content rect (geometry-agnostic,
-/// like the web client). Acquiring an `Agent` control lease makes the injector gate
-/// allow the event; this preempts a human viewer (single shared cursor, last actor
-/// wins). Returns 200 on accept, 400 on an unparseable message.
+/// Coordinates are normalized `[0,1]` over the phone screen (geometry-agnostic,
+/// like the web client). Returns 200 on accept, 400 on an unparseable message.
 async fn agent_input(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AgentInputQuery>,
@@ -8523,16 +8169,15 @@ async fn agent_input(
             );
         }
         // A phone handed to a person stays with the person. An agent action
-        // must not silently restart the runner under their fingers (which
-        // would also kill their iPhone Mirroring session); taking it back is
-        // an explicit `POST /agent/mode {"mode":"agent"}`.
+        // must not silently restart the runner under their fingers; taking it
+        // back is an explicit `POST /agent/mode {"mode":"agent"}`.
         if human_handoff_active() {
             return with_security_headers(
                 Response::builder()
                     .status(StatusCode::CONFLICT)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"ok":false,"error":"phone_handed_to_human","released":true,"hint":"a person is using the phone through iPhone Mirroring; POST /agent/mode {\"mode\":\"agent\"} to take it back before sending input"}"#,
+                        r#"{"ok":false,"error":"phone_handed_to_human","released":true,"hint":"the phone was handed to the person holding it; POST /agent/mode {\"mode\":\"agent\"} to take it back before sending input"}"#,
                     ))
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
             );
@@ -8590,7 +8235,7 @@ async fn agent_input(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         );
     }
-    if state.backend == crate::config::DeviceBackend::Direct && state.managed_wda_pending {
+    if state.managed_wda_pending {
         return target_not_configured_response();
     }
     if state.wda_lifecycle.is_reconnecting() {
@@ -8619,295 +8264,220 @@ async fn agent_input(
     }
     // Direct is a single at-most-once WDA path. One server deadline covers lock
     // acquisition plus the whole compound action, and no failure is replayed.
-    if state.backend == crate::config::DeviceBackend::Direct {
-        let value = match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(value) if value.is_object() => value,
-            _ => {
-                return with_security_headers(
-                    (
-                        StatusCode::BAD_REQUEST,
-                        r#"{"ok":false,"error":"invalid_control_message"}"#,
-                    )
-                        .into_response(),
-                );
-            }
-        };
-        // A malformed request is the caller's problem, not the device's. Name
-        // the action BEFORE the WDA guard is taken: an unknown or missing
-        // `type` used to fall through to the dispatcher, whose catch-all
-        // `Unsupported` is rendered as `wda_unavailable_or_unsupported` — a
-        // 503 blaming a perfectly healthy phone for a typo. Answer 400 here
-        // and never touch WDA.
-        if let Err(response) = reject_unknown_single_step_action(&value) {
-            return response;
-        }
-        let Some(wda) = &state.wda else {
+    let value = match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        _ => {
             return with_security_headers(
-                Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"ok":false,"error":"wda_not_configured","fallback":"disabled"}"#,
-                    ))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+                (
+                    StatusCode::BAD_REQUEST,
+                    r#"{"ok":false,"error":"invalid_control_message"}"#,
+                )
+                    .into_response(),
             );
-        };
-        if tokio::time::Instant::now() >= agent_wda_deadline {
-            return wda_deadline_response(false);
         }
-        let _priority = state.begin_wda_control();
-        let dispatched = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let dispatch_marker = dispatched.clone();
-        let want_delta = query.return_mode.as_deref() == Some("delta");
-        let settle_budget_ms = query
-            .settle_ms
-            .unwrap_or(AGENT_INPUT_SETTLE_DEFAULT_MS)
-            .min(AGENT_INPUT_SETTLE_MAX_MS);
-        // The action deadline and the observation deadline are DELIBERATELY
-        // separate scopes over one WDA guard. Only acquiring the guard and
-        // dispatching the mutation run under `agent_wda_deadline` — once
-        // `direct_agent_action` returns, its outcome is a plain local and no
-        // later timeout can rewrite it. The best-effort observation that
-        // follows gets its own, strictly shorter deadline, so a slow `/source`
-        // or `/alert/text` can never turn an applied action into
-        // `outcome_unknown` and can never cause the mutation to be re-sent.
-        let dispatch = tokio::time::timeout_at(agent_wda_deadline, async {
-            let mut client = wda.lock().await;
-            if tokio::time::Instant::now() >= agent_wda_deadline
-                || state.wda_lifecycle.is_transitioning()
-                || state.released.load(std::sync::atomic::Ordering::Acquire)
-            {
-                return None;
-            }
-            dispatch_marker.store(true, std::sync::atomic::Ordering::Release);
-            let mut detail = None;
-            let outcome =
-                direct_agent_action(&mut client, &state.wda_actionable, &value, &mut detail).await;
-            Some((client, outcome, detail))
-        })
-        .await;
-        let (mut client, outcome, detail) = match dispatch {
-            Ok(Some(dispatched)) => dispatched,
-            Ok(None) => return wda_deadline_response(false),
-            Err(_) => {
-                return wda_deadline_response(
-                    dispatched.load(std::sync::atomic::Ordering::Acquire),
-                );
-            }
-        };
-        // Post-action observation (`?return=delta`), still holding the SAME
-        // guard so no other control interleaves between the action and its
-        // read — but on its own budget, bounded by both the caller's
-        // `settle_ms` and what is left of the endpoint deadline.
-        let mut settled = None;
-        let mut alert = None;
-        if want_delta && outcome == WdaControlOutcome::Applied {
-            // The observation's clock starts HERE, after the action is
-            // confirmed — it is not carved out of what the action left of its
-            // own deadline. Otherwise a slow action silently eats the
-            // observation: 15s of dispatch would leave nothing to look with,
-            // and the caller would be told `captures: 0` as though the screen
-            // were unreadable rather than never looked at.
-            //
-            // The two deadlines therefore compose rather than compete:
-            // dispatch is bounded by `agent_wda_deadline`, observation by this
-            // budget, and the client's timeout has to cover their sum (see
-            // `OBSERVE_TIMEOUT` in the MCP client).
-            let budget = std::time::Duration::from_millis(settle_budget_ms);
-            let (observed, report) = settle_and_read_elements(&mut client, budget).await;
-            settled = Some((
-                observed.map(|(snapshot, rows)| (snapshot, Arc::new(rows))),
-                report,
-            ));
-            // A system alert is the one thing the settled tree may not show;
-            // report it alongside so the agent never has to screenshot for it.
-            // Bounded by its own hard 1.5s cap (see `probe_alert`), which is
-            // what the client's timeout budgets for on top of the action
-            // deadline and the observation budget.
-            alert = probe_alert(&mut client).await;
+    };
+    // A malformed request is the caller's problem, not the device's. Name
+    // the action BEFORE the WDA guard is taken: an unknown or missing
+    // `type` used to fall through to the dispatcher, whose catch-all
+    // `Unsupported` is rendered as `wda_unavailable_or_unsupported` — a
+    // 503 blaming a perfectly healthy phone for a typo. Answer 400 here
+    // and never touch WDA.
+    if let Err(response) = reject_unknown_single_step_action(&value) {
+        return response;
+    }
+    let Some(wda) = &state.wda else {
+        return with_security_headers(
+            Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"ok":false,"error":"wda_not_configured","fallback":"disabled"}"#,
+                ))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        );
+    };
+    if tokio::time::Instant::now() >= agent_wda_deadline {
+        return wda_deadline_response(false);
+    }
+    let _priority = state.begin_wda_control();
+    let dispatched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_marker = dispatched.clone();
+    let want_delta = query.return_mode.as_deref() == Some("delta");
+    let settle_budget_ms = query
+        .settle_ms
+        .unwrap_or(AGENT_INPUT_SETTLE_DEFAULT_MS)
+        .min(AGENT_INPUT_SETTLE_MAX_MS);
+    // The action deadline and the observation deadline are DELIBERATELY
+    // separate scopes over one WDA guard. Only acquiring the guard and
+    // dispatching the mutation run under `agent_wda_deadline` — once
+    // `direct_agent_action` returns, its outcome is a plain local and no
+    // later timeout can rewrite it. The best-effort observation that
+    // follows gets its own, strictly shorter deadline, so a slow `/source`
+    // or `/alert/text` can never turn an applied action into
+    // `outcome_unknown` and can never cause the mutation to be re-sent.
+    let dispatch = tokio::time::timeout_at(agent_wda_deadline, async {
+        let mut client = wda.lock().await;
+        if tokio::time::Instant::now() >= agent_wda_deadline
+            || state.wda_lifecycle.is_transitioning()
+            || state.released.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
         }
-        drop(client);
-        return match outcome {
-            WdaControlOutcome::Applied => {
-                let body = match settled {
-                    None => r#"{"ok":true,"transport":"wda"}"#.to_string(),
-                    Some((observed, report)) => {
-                        // The action DID apply. Everything below is observation
-                        // quality reported ALONGSIDE that success — never a
-                        // reason to fail it.
-                        let mut body = match observed {
-                            None => serde_json::json!({
-                                "ok": true,
-                                "transport": "wda",
-                            }),
-                            Some((snapshot, rows)) => {
-                                remember_element_snapshot(&state, &snapshot, &rows);
-                                let baseline = query
-                                    .since
-                                    .as_deref()
-                                    .filter(|since| !since.is_empty())
-                                    .or_else(|| {
-                                        value.get("snapshot").and_then(serde_json::Value::as_str)
-                                    })
-                                    .and_then(|since| {
-                                        lookup_element_snapshot(&state, since)
-                                            .map(|baseline| (since, baseline))
-                                    });
-                                match baseline {
-                                    Some((baseline_id, baseline_rows)) => {
-                                        let delta = diff_element_rows(&baseline_rows, &rows);
-                                        let mut body = serde_json::json!({
-                                            "ok": true,
-                                            "transport": "wda",
-                                            "snapshot": snapshot,
-                                            "baseline": baseline_id,
-                                            "delta": elements_delta_json(&delta, &rows),
-                                        });
-                                        // A banner that drops in front of the tap eats it and opens
-                                        // its own app; the delta then describes a screen the caller
-                                        // never asked for, and nothing says the tap missed. The
-                                        // frontmost app is already in the tree, so say it plainly.
-                                        if let Some(changed) =
-                                            app_changed_json(&baseline_rows, &rows)
-                                        {
-                                            body["app_changed"] = changed;
-                                        }
-                                        if delta_shows_no_visible_change(&delta, &report) {
-                                            body["no_visible_change"] =
-                                                serde_json::Value::Bool(true);
-                                        }
-                                        body
-                                    }
-                                    None => serde_json::json!({
+        dispatch_marker.store(true, std::sync::atomic::Ordering::Release);
+        let mut detail = None;
+        let outcome =
+            direct_agent_action(&mut client, &state.wda_actionable, &value, &mut detail).await;
+        Some((client, outcome, detail))
+    })
+    .await;
+    let (mut client, outcome, detail) = match dispatch {
+        Ok(Some(dispatched)) => dispatched,
+        Ok(None) => return wda_deadline_response(false),
+        Err(_) => {
+            return wda_deadline_response(
+                dispatched.load(std::sync::atomic::Ordering::Acquire),
+            );
+        }
+    };
+    // Post-action observation (`?return=delta`), still holding the SAME
+    // guard so no other control interleaves between the action and its
+    // read — but on its own budget, bounded by both the caller's
+    // `settle_ms` and what is left of the endpoint deadline.
+    let mut settled = None;
+    let mut alert = None;
+    if want_delta && outcome == WdaControlOutcome::Applied {
+        // The observation's clock starts HERE, after the action is
+        // confirmed — it is not carved out of what the action left of its
+        // own deadline. Otherwise a slow action silently eats the
+        // observation: 15s of dispatch would leave nothing to look with,
+        // and the caller would be told `captures: 0` as though the screen
+        // were unreadable rather than never looked at.
+        //
+        // The two deadlines therefore compose rather than compete:
+        // dispatch is bounded by `agent_wda_deadline`, observation by this
+        // budget, and the client's timeout has to cover their sum (see
+        // `OBSERVE_TIMEOUT` in the MCP client).
+        let budget = std::time::Duration::from_millis(settle_budget_ms);
+        let (observed, report) = settle_and_read_elements(&mut client, budget).await;
+        settled = Some((
+            observed.map(|(snapshot, rows)| (snapshot, Arc::new(rows))),
+            report,
+        ));
+        // A system alert is the one thing the settled tree may not show;
+        // report it alongside so the agent never has to screenshot for it.
+        // Bounded by its own hard 1.5s cap (see `probe_alert`), which is
+        // what the client's timeout budgets for on top of the action
+        // deadline and the observation budget.
+        alert = probe_alert(&mut client).await;
+    }
+    drop(client);
+    return match outcome {
+        WdaControlOutcome::Applied => {
+            let body = match settled {
+                None => r#"{"ok":true,"transport":"wda"}"#.to_string(),
+                Some((observed, report)) => {
+                    // The action DID apply. Everything below is observation
+                    // quality reported ALONGSIDE that success — never a
+                    // reason to fail it.
+                    let mut body = match observed {
+                        None => serde_json::json!({
+                            "ok": true,
+                            "transport": "wda",
+                        }),
+                        Some((snapshot, rows)) => {
+                            remember_element_snapshot(&state, &snapshot, &rows);
+                            let baseline = query
+                                .since
+                                .as_deref()
+                                .filter(|since| !since.is_empty())
+                                .or_else(|| {
+                                    value.get("snapshot").and_then(serde_json::Value::as_str)
+                                })
+                                .and_then(|since| {
+                                    lookup_element_snapshot(&state, since)
+                                        .map(|baseline| (since, baseline))
+                                });
+                            match baseline {
+                                Some((baseline_id, baseline_rows)) => {
+                                    let delta = diff_element_rows(&baseline_rows, &rows);
+                                    let mut body = serde_json::json!({
                                         "ok": true,
                                         "transport": "wda",
                                         "snapshot": snapshot,
-                                        "elements": &*rows,
-                                    }),
+                                        "baseline": baseline_id,
+                                        "delta": elements_delta_json(&delta, &rows),
+                                    });
+                                    // A banner that drops in front of the tap eats it and opens
+                                    // its own app; the delta then describes a screen the caller
+                                    // never asked for, and nothing says the tap missed. The
+                                    // frontmost app is already in the tree, so say it plainly.
+                                    if let Some(changed) =
+                                        app_changed_json(&baseline_rows, &rows)
+                                    {
+                                        body["app_changed"] = changed;
+                                    }
+                                    if delta_shows_no_visible_change(&delta, &report) {
+                                        body["no_visible_change"] =
+                                            serde_json::Value::Bool(true);
+                                    }
+                                    body
                                 }
+                                None => serde_json::json!({
+                                    "ok": true,
+                                    "transport": "wda",
+                                    "snapshot": snapshot,
+                                    "elements": &*rows,
+                                }),
                             }
-                        };
-                        // `delta_error` stays exactly where it was for existing
-                        // callers; `settle` is the additive, structured view.
-                        if let Some(error) = &report.error {
-                            body["delta_error"] = serde_json::Value::String(error.clone());
                         }
-                        body["settle"] = report.to_json();
-                        body.to_string()
+                    };
+                    // `delta_error` stays exactly where it was for existing
+                    // callers; `settle` is the additive, structured view.
+                    if let Some(error) = &report.error {
+                        body["delta_error"] = serde_json::Value::String(error.clone());
                     }
-                };
-                let body = attach_alert(body, alert);
-                with_security_headers(
-                    Response::builder()
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(body))
-                        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-                )
-            }
-            WdaControlOutcome::NotSent => {
-                mark_wda_read_path_unactionable(&state);
-                wda_failed_before_dispatch_response()
-            }
-            WdaControlOutcome::Unsupported => with_security_headers(
+                    body["settle"] = report.to_json();
+                    body.to_string()
+                }
+            };
+            let body = attach_alert(body, alert);
+            with_security_headers(
                 Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"ok":false,"error":"wda_unavailable_or_unsupported","fallback":"disabled"}"#,
-                    ))
+                    .body(Body::from(body))
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-            ),
-            WdaControlOutcome::UnsupportedPerformAction => unsupported_perform_action_response(),
-            WdaControlOutcome::InvalidElementSnapshot => invalid_element_snapshot_response(),
-            WdaControlOutcome::StaleElementSnapshot => stale_element_snapshot_response(),
-            WdaControlOutcome::ElementNotFound => element_not_found_response(),
-            WdaControlOutcome::AmbiguousElement => ambiguous_element_response(detail.as_ref()),
-            WdaControlOutcome::InvalidElementTarget => invalid_element_target_response(),
-            WdaControlOutcome::InvalidValue(hint) => hinted_control_response(
-                StatusCode::UNPROCESSABLE_ENTITY, "invalid_value", "not_sent", hint,
-            ),
-            WdaControlOutcome::NoEffect(hint) => hinted_control_response(
-                StatusCode::CONFLICT, "adjust_no_effect", "no_effect", hint,
-            ),
-            WdaControlOutcome::NoAlert => no_alert_response(),
-            WdaControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
-            WdaControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
-            WdaControlOutcome::Failed => wda_failed_after_dispatch_response(),
-        };
-    }
-
-    let event = match crate::input_bridge::decode_control(&body) {
-        Some(ev) => ev,
-        None => {
-            return with_security_headers(
-                (StatusCode::BAD_REQUEST, "invalid control message").into_response(),
-            );
-        }
-    };
-    // Cooperative yield (issue #16): an agent that doesn't want to interrupt a
-    // human sets `X-Yield-To-Human: 1`. This L3 path would yank iPhone Mirroring
-    // frontmost and steal the Mac's focus — so if a human/another app currently
-    // holds the foreground, refuse with 409 instead of barging in. Opt-in, so
-    // default behavior is unchanged. (WDA-handled events returned earlier; their
-    // on-device injection never contends, so only the L3 path is gated.)
-    let yield_to_human = headers
-        .get("x-yield-to-human")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| !v.is_empty() && v != "0" && v != "false");
-    #[cfg(target_os = "macos")]
-    let mac_held_by_human = yield_to_human && !crate::macos::mirroring_is_frontmost();
-    #[cfg(not(target_os = "macos"))]
-    let mac_held_by_human = {
-        let _ = yield_to_human;
-        false
-    };
-    if mac_held_by_human {
-        return with_security_headers(
-            (
-                StatusCode::CONFLICT,
-                "yielded to human: iPhone Mirroring is not frontmost — retry when status human_active is false; on-device control requires PHONE_REMOTE_BACKEND=direct plus a daemon restart",
             )
-                .into_response(),
-        );
-    }
-    // Take an Agent lease so the injector gate permits this event.
-    let agent_id = headers
-        .get("x-agent-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("agent")
-        .to_string();
-    recover(state.lease_state.lock()).acquire(core::control::Holder::Agent(agent_id), now_secs());
-    // Deliverability check (issue #25): an L3 event only lands if iPhone
-    // Mirroring can be brought frontmost. When a human is on the Mac, macOS
-    // refuses to let a background LaunchAgent steal focus, so the event is
-    // silently dropped — and returning "ok" makes an agent loop blindly. Bring
-    // it frontmost up front; if that fails, report the drop instead of lying.
-    #[cfg(target_os = "macos")]
-    {
-        // Same deadline the injector loop uses (#29). This used to be a
-        // hardcoded 1200ms — under the >2s an osascript activation needs on
-        // first use — so a fresh activation on a completely idle Mac was
-        // reported back to the agent as `dropped: human is using the Mac`.
-        let delivered = tokio::task::spawn_blocking(|| {
-            crate::macos::ensure_mirroring_frontmost(crate::macos::front_deadline())
-        })
-        .await
-        .unwrap_or(false);
-        if !delivered {
-            return with_security_headers(
-                Response::builder()
-                    .status(StatusCode::CONFLICT)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"ok":false,"dropped":true,"reason":"iPhone Mirroring could not be brought frontmost (a human is using the Mac, or it is paused/in-use) — poll /agent/status until human_active is false and drivable is true; on-device control requires PHONE_REMOTE_BACKEND=direct plus a daemon restart"}"#,
-                    ))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-            );
         }
-    }
-    state.injector.send(event);
-    with_security_headers((StatusCode::OK, "ok").into_response())
+        WdaControlOutcome::NotSent => {
+            mark_wda_read_path_unactionable(&state);
+            wda_failed_before_dispatch_response()
+        }
+        WdaControlOutcome::Unsupported => with_security_headers(
+            Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"ok":false,"error":"wda_unavailable_or_unsupported","fallback":"disabled"}"#,
+                ))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        ),
+        WdaControlOutcome::UnsupportedPerformAction => unsupported_perform_action_response(),
+        WdaControlOutcome::InvalidElementSnapshot => invalid_element_snapshot_response(),
+        WdaControlOutcome::StaleElementSnapshot => stale_element_snapshot_response(),
+        WdaControlOutcome::ElementNotFound => element_not_found_response(),
+        WdaControlOutcome::AmbiguousElement => ambiguous_element_response(detail.as_ref()),
+        WdaControlOutcome::InvalidElementTarget => invalid_element_target_response(),
+        WdaControlOutcome::InvalidValue(hint) => hinted_control_response(
+            StatusCode::UNPROCESSABLE_ENTITY, "invalid_value", "not_sent", hint,
+        ),
+        WdaControlOutcome::NoEffect(hint) => hinted_control_response(
+            StatusCode::CONFLICT, "adjust_no_effect", "no_effect", hint,
+        ),
+        WdaControlOutcome::NoAlert => no_alert_response(),
+        WdaControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
+        WdaControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
+        WdaControlOutcome::Failed => wda_failed_after_dispatch_response(),
+    };
 }
 
 /// `GET /agent/elements` — the phone's element tree, flattened to
@@ -8959,12 +8529,6 @@ async fn agent_elements(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         )
     };
-    if state.backend != crate::config::DeviceBackend::Direct {
-        return json_body(
-            StatusCode::CONFLICT,
-            r#"{"elements":[],"error":"backend_is_mirror"}"#.to_string(),
-        );
-    }
     if state.managed_wda_pending {
         return json_body(
             StatusCode::CONFLICT,
@@ -9267,14 +8831,11 @@ fn mark_wda_read_path_unactionable(state: &AppState) {
 
 /// `GET /agent/screenshot` — current phone screen as a PNG.
 ///
-/// Direct captures on-device through WDA and fails closed if WDA is unavailable.
-/// Mirror compatibility captures its configured Mirroring window through
-/// [`core::capture::screenshot_mirroring_png`]. The two paths never fall
-/// through to one another.
+/// Captured on-device through WDA; fails closed if WDA is unavailable.
 ///
 /// Auth: agent bearer **or** a valid session cookie. The cookie path exists for
-/// the web client's stills-fallback (when Mirroring dies the page polls this
-/// endpoint) — a logged-in viewer already sees these pixels as video, so the
+/// the web client's stills fallback (when the MJPEG feed stalls the page polls
+/// this endpoint) — a logged-in viewer already sees these pixels as video, so the
 /// privilege is identical. The cookie is checked FIRST so browser polling never
 /// touches the bearer auth-limiter (5 misses there lock the agent API for 30s).
 async fn agent_screenshot(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -9293,12 +8854,11 @@ async fn agent_screenshot(State(state): State<Arc<AppState>>, headers: HeaderMap
         }
         AgentAuth::Ok => {}
     }
-    if state.backend == crate::config::DeviceBackend::Direct && state.managed_wda_pending {
+    if state.managed_wda_pending {
         return target_not_configured_response();
     }
-    if state.backend == crate::config::DeviceBackend::Direct
-        && (state.wda_lifecycle.is_transitioning()
-            || state.released.load(std::sync::atomic::Ordering::Relaxed))
+    if state.wda_lifecycle.is_transitioning()
+        || state.released.load(std::sync::atomic::Ordering::Relaxed)
     {
         return with_security_headers(
             (
@@ -9310,101 +8870,61 @@ async fn agent_screenshot(State(state): State<Arc<AppState>>, headers: HeaderMap
     }
     // A screenshot means someone is looking at the phone — keep it held.
     state.touch_activity();
-    // The configured backend owns capture end-to-end. Direct uses WDA bytes
-    // from its canonical phone and returns an error when that path is down;
-    // Mirror alone reaches the legacy host-window capture below. This prevents
-    // a failed Direct request from silently returning pixels from another
-    // mirrored phone.
-    if state.backend == crate::config::DeviceBackend::Direct {
-        let _priority = state.wda.as_ref().map(|_| state.begin_wda_control());
-        let Some(wda) = &state.wda else {
-            return with_security_headers(
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "direct device screenshot unavailable (WDA is not configured)",
-                )
-                    .into_response(),
-            );
-        };
-        return match tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            wda.lock().await.screenshot_png().await
-        })
-        .await
-        {
-            Ok(Ok(bytes)) if is_valid_png(&bytes) => {
-                let response = Response::builder()
-                    .header(header::CONTENT_TYPE, "image/png")
-                    .body(Body::from(bytes))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-                with_security_headers(response)
-            }
-            Ok(Ok(bytes)) => {
-                tracing::warn!(
-                    "agent screenshot: Direct WDA returned {} bytes, not a valid PNG",
-                    bytes.len()
-                );
-                mark_wda_read_path_unactionable(&state);
-                with_security_headers(
-                    (StatusCode::BAD_GATEWAY, "WDA returned an invalid PNG").into_response(),
-                )
-            }
-            Ok(Err(error)) => {
-                tracing::warn!("agent screenshot: Direct WDA failed: {error:#}");
-                mark_wda_read_path_unactionable(&state);
-                with_security_headers(
-                    (StatusCode::BAD_GATEWAY, "WDA screenshot failed").into_response(),
-                )
-            }
-            Err(_) => {
-                mark_wda_read_path_unactionable(&state);
-                with_security_headers(
-                    (
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "WDA screenshot exceeded the server deadline",
-                    )
-                        .into_response(),
-                )
-            }
-        };
-    }
-    let png = tokio::task::spawn_blocking(core::capture::screenshot_mirroring_png).await;
-    // Mirror is an isolated compatibility backend: a failed/runt host-window
-    // capture returns 503 and never reaches WDA, even if an invalid AppState
-    // accidentally contains a WDA client.
-    match png {
+    let _priority = state.wda.as_ref().map(|_| state.begin_wda_control());
+    let Some(wda) = &state.wda else {
+        return with_security_headers(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "direct device screenshot unavailable (WDA is not configured)",
+            )
+                .into_response(),
+        );
+    };
+    return match tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        wda.lock().await.screenshot_png().await
+    })
+    .await
+    {
         Ok(Ok(bytes)) if is_valid_png(&bytes) => {
-            let resp = Response::builder()
+            let response = Response::builder()
                 .header(header::CONTENT_TYPE, "image/png")
                 .body(Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-            return with_security_headers(resp);
+            with_security_headers(response)
         }
         Ok(Ok(bytes)) => {
             tracing::warn!(
-                "agent screenshot: Mirror capture returned {} bytes, not a valid PNG",
+                "agent screenshot: Direct WDA returned {} bytes, not a valid PNG",
                 bytes.len()
             );
+            mark_wda_read_path_unactionable(&state);
+            with_security_headers(
+                (StatusCode::BAD_GATEWAY, "WDA returned an invalid PNG").into_response(),
+            )
         }
-        Ok(Err(e)) => {
-            tracing::warn!("agent screenshot: no Mirroring window: {e:#}");
+        Ok(Err(error)) => {
+            tracing::warn!("agent screenshot: Direct WDA failed: {error:#}");
+            mark_wda_read_path_unactionable(&state);
+            with_security_headers(
+                (StatusCode::BAD_GATEWAY, "WDA screenshot failed").into_response(),
+            )
         }
-        Err(e) => {
-            tracing::warn!("agent screenshot: Mirror capture task panicked: {e:?}");
+        Err(_) => {
+            mark_wda_read_path_unactionable(&state);
+            with_security_headers(
+                (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "WDA screenshot exceeded the server deadline",
+                )
+                    .into_response(),
+            )
         }
-    }
-    with_security_headers(
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no valid screenshot frame available",
-        )
-            .into_response(),
-    )
+    };
 }
 
 /// `GET /agent/mjpeg` — LIVE video in agent mode by proxying WDA's on-device
 /// MJPEG stream (`multipart/x-mixed-replace`). The MJPEG server runs inside the
-/// same XCUITest session as control, so video and driving coexist — unlike
-/// iPhone Mirroring, which is mutually exclusive with WDA. A browser renders
+/// same XCUITest session as control, so video and driving coexist. A browser renders
 /// this directly in an `<img src="/agent/mjpeg">`. ~28 fps at the tuned
 /// settings applied here (framerate/scaling/quality), regardless of USB vs Wi-Fi
 /// (the cap is WDA's screenshot rate, not the transport).
@@ -9444,15 +8964,6 @@ async fn agent_mjpeg(
         }
         None => None,
     };
-    if state.backend != crate::config::DeviceBackend::Direct {
-        return with_security_headers(
-            (
-                StatusCode::CONFLICT,
-                "WDA MJPEG is disabled for the Mirror backend",
-            )
-                .into_response(),
-        );
-    }
     if state.managed_wda_pending {
         return target_not_configured_response();
     }
@@ -9632,7 +9143,7 @@ async fn agent_mjpeg(
 
 /// True when `bytes` is a plausibly-decodable PNG: the 8-byte signature plus
 /// enough length to carry an IHDR. Guards the agent's decoder against the
-/// runt/garbage frames the Mirroring capture can emit mid-transition (issue #14).
+/// runt/garbage frames a capture can emit mid-transition (issue #14).
 fn is_valid_png(bytes: &[u8]) -> bool {
     const PNG_SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
     // 8 sig + 4 len + 4 "IHDR" + 13 IHDR data + 4 CRC = 33 minimum.
@@ -10447,7 +9958,7 @@ async fn agent_intent(
             reason: "phone was idle-released; POST /agent/mode {\"mode\":\"agent\"} to restart managed WDA, then retry".to_string(),
         });
     }
-    if state.backend == crate::config::DeviceBackend::Direct && state.managed_wda_pending {
+    if state.managed_wda_pending {
         return target_not_configured_response();
     }
     if state.wda_lifecycle.is_reconnecting() {
@@ -10520,112 +10031,6 @@ async fn agent_intent(
     }
 }
 
-async fn ws_upgrade(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
-) -> Response {
-    if state.backend != crate::config::DeviceBackend::Mirror && !crate::human_view::is_live() {
-        return with_security_headers(
-            (
-                StatusCode::CONFLICT,
-                "WebRTC signaling is disabled for the direct device backend until the phone is handed to a person",
-            )
-                .into_response(),
-        );
-    }
-    // Browser WebSockets are not protected by CORS preflight. In open mirror
-    // mode, reject a cross-site page before it can acquire a viewer lease or
-    // reach the legacy data-channel control path. Non-browser clients may omit
-    // Origin; when it is present, it must match this request's Host exactly.
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        let same_origin = origin
-            .parse::<axum::http::Uri>()
-            .ok()
-            .and_then(|uri| {
-                let scheme_ok = matches!(uri.scheme_str(), Some("http") | Some("https"));
-                let authority = uri.authority()?.as_str();
-                let host = headers.get(header::HOST)?.to_str().ok()?;
-                Some(scheme_ok && authority.eq_ignore_ascii_case(host))
-            })
-            .unwrap_or(false);
-        if !same_origin {
-            return with_security_headers(
-                (StatusCode::FORBIDDEN, "cross-origin WebSocket denied").into_response(),
-            );
-        }
-    }
-    if !is_authed(&state, &headers) {
-        return with_security_headers((StatusCode::UNAUTHORIZED, "unauthorized").into_response());
-    }
-    let ws = match ws {
-        Ok(ws) => ws,
-        Err(rejection) => return with_security_headers(rejection.into_response()),
-    };
-    let session_id = new_session_id();
-    let state = state.clone();
-    ws.on_upgrade(move |socket| async move {
-        crate::signaling::run_session(socket, state, session_id).await;
-    })
-}
-
-// ---------------------------------------------------------------------------
-// ICE servers / TURN creds
-// ---------------------------------------------------------------------------
-
-/// Build the ICE server list: Google STUN + any env-provided TURN.
-///
-/// `PHONE_REMOTE_TURN_URLS` (comma-separated), `PHONE_REMOTE_TURN_USERNAME`,
-/// `PHONE_REMOTE_TURN_CREDENTIAL` configure an optional TURN server. STUN is
-/// always included.
-pub fn build_ice_servers(
-    turn_urls: Option<String>,
-    turn_user: Option<String>,
-    turn_cred: Option<String>,
-) -> Vec<RTCIceServer> {
-    let mut servers = vec![RTCIceServer {
-        urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-        ..Default::default()
-    }];
-    if let Some(urls) = turn_urls.filter(|s| !s.trim().is_empty()) {
-        let urls: Vec<String> = urls
-            .split(',')
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !urls.is_empty() {
-            servers.push(RTCIceServer {
-                urls,
-                username: turn_user.unwrap_or_default(),
-                credential: turn_cred.unwrap_or_default(),
-            });
-        }
-    }
-    servers
-}
-
-/// Serialize ICE servers into the `{iceServers:[...]}` JSON the client expects.
-///
-/// Each entry is normalized to `{urls, username?, credential?}` (username/
-/// credential omitted when empty).
-pub fn ice_servers_json(servers: &[RTCIceServer]) -> String {
-    let arr: Vec<serde_json::Value> = servers
-        .iter()
-        .map(|s| {
-            let mut obj = serde_json::Map::new();
-            obj.insert("urls".to_string(), serde_json::json!(s.urls));
-            if !s.username.is_empty() {
-                obj.insert("username".to_string(), serde_json::json!(s.username));
-            }
-            if !s.credential.is_empty() {
-                obj.insert("credential".to_string(), serde_json::json!(s.credential));
-            }
-            serde_json::Value::Object(obj)
-        })
-        .collect();
-    serde_json::json!({ "iceServers": arr }).to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -10635,15 +10040,6 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// A best-effort unique session id (time + a counter). Not security-sensitive —
-/// it only labels the control lease holder.
-fn new_session_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("viewer-{}-{}", now_secs(), n)
 }
 
 // ---------------------------------------------------------------------------
@@ -12591,59 +11987,6 @@ mod tests {
     }
 
     #[test]
-    fn ice_servers_stun_only_by_default() {
-        let servers = build_ice_servers(None, None, None);
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].urls[0], "stun:stun.l.google.com:19302");
-    }
-
-    #[test]
-    fn ice_servers_with_env_turn() {
-        let servers = build_ice_servers(
-            Some("turn:turn.example.com:3478,turns:turn.example.com:5349".to_string()),
-            Some("user".to_string()),
-            Some("pass".to_string()),
-        );
-        assert_eq!(servers.len(), 2);
-        assert_eq!(servers[1].urls.len(), 2);
-        assert_eq!(servers[1].username, "user");
-        assert_eq!(servers[1].credential, "pass");
-    }
-
-    #[test]
-    fn ice_servers_empty_turn_urls_ignored() {
-        let servers = build_ice_servers(Some("   ".to_string()), None, None);
-        assert_eq!(servers.len(), 1);
-    }
-
-    #[test]
-    fn ice_json_normalizes_to_array_stun() {
-        let servers = build_ice_servers(None, None, None);
-        let json = ice_servers_json(&servers);
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(v["iceServers"].is_array());
-        assert_eq!(
-            v["iceServers"][0]["urls"][0],
-            "stun:stun.l.google.com:19302"
-        );
-        // No username/credential on a bare STUN entry.
-        assert!(v["iceServers"][0].get("username").is_none());
-    }
-
-    #[test]
-    fn ice_json_includes_turn_creds() {
-        let servers = build_ice_servers(
-            Some("turn:t.example:3478".to_string()),
-            Some("u".to_string()),
-            Some("c".to_string()),
-        );
-        let json = ice_servers_json(&servers);
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["iceServers"][1]["username"], "u");
-        assert_eq!(v["iceServers"][1]["credential"], "c");
-    }
-
-    #[test]
     fn session_cookie_parsing() {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -12663,7 +12006,7 @@ mod tests {
 
     #[test]
     fn embedded_index_html_is_the_client() {
-        // include_str! must pick up web/index.html (the WebRTC client).
+        // include_str! must pick up web/index.html (the browser client).
         assert!(INDEX_HTML.contains("iphone-use"));
         assert!(INDEX_HTML.contains("/ws"));
         assert!(INDEX_HTML.contains("turn-creds"));
@@ -12912,7 +12255,6 @@ mod tests {
     }
 
     use crate as srv;
-    use ::core as srv_core;
     include!("../tests/fixtures/app_state.rs");
 
     fn readiness_test_state() -> Arc<AppState> {
@@ -13430,13 +12772,6 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    fn mirror_capability_state() -> Arc<AppState> {
-        let state = readiness_test_state();
-        let mut owned = Arc::try_unwrap(state).ok().expect("fresh state");
-        owned.backend = crate::config::DeviceBackend::Mirror;
-        Arc::new(owned)
-    }
-
     fn strings(value: &serde_json::Value) -> Vec<String> {
         value
             .as_array()
@@ -13463,95 +12798,6 @@ mod tests {
                 !advertised.iter().any(|a| a == "tap"),
                 "a top-level action leaked into the perform set: {json}"
             );
-        });
-    }
-
-    /// Mirror cannot do element-shaped work, and the route responses prove it:
-    /// the batch route answers `batch_requires_direct_wda` and the element
-    /// tree answers `backend_is_mirror`. Neither touches the OS, so this is
-    /// safe to assert here — unlike a Mirror `tap`, which would pull real
-    /// windows around on the operator's Mac.
-    #[test]
-    fn mirror_advertises_only_what_it_can_actually_carry() {
-        block(async {
-            use axum::body::Body;
-            use http_body_util::BodyExt;
-            use tower::ServiceExt;
-
-            let state = mirror_capability_state();
-            let json = capabilities_json(&state, None).await;
-
-            assert_eq!(json["backend"], "mirror");
-            assert_eq!(json["supported"]["element_tree"], false);
-            assert!(strings(&json["supported"]["batch_actions"]).is_empty());
-            assert!(strings(&json["supported"]["perform_actions"]).is_empty());
-            assert_eq!(json["supported"]["observation"]["return_delta"], false);
-            assert_eq!(json["supported"]["modes"], serde_json::json!(["mirror"]));
-            let single = strings(&json["supported"]["single_step_actions"]);
-            assert!(single.iter().any(|a| a == "tap"), "{json}");
-            for element_shaped in ["perform", "set_value", "tap_locator", "launch_app"] {
-                assert!(
-                    !single.iter().any(|a| a == element_shaped),
-                    "mirror advertised {element_shaped}: {json}"
-                );
-            }
-
-            // The refusals the advertisement is based on.
-            let batch = router(state.clone())
-                .oneshot(
-                    axum::http::Request::builder()
-                        .method("POST")
-                        .uri("/agent/actions")
-                        .header("x-phone-control", "1")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            r#"{"steps":[{"kind":"action","action":{"type":"tap","x":0.5,"y":0.5}}]}"#,
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(batch.status(), axum::http::StatusCode::CONFLICT);
-            let bytes = batch.into_body().collect().await.unwrap().to_bytes();
-            assert!(
-                String::from_utf8_lossy(&bytes).contains("batch_requires_direct_wda"),
-                "{}",
-                String::from_utf8_lossy(&bytes)
-            );
-
-            let elements = router(state.clone())
-                .oneshot(
-                    axum::http::Request::builder()
-                        .uri("/agent/elements")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(elements.status(), axum::http::StatusCode::CONFLICT);
-            let bytes = elements.into_body().collect().await.unwrap().to_bytes();
-            assert!(String::from_utf8_lossy(&bytes).contains("backend_is_mirror"));
-        });
-    }
-
-    /// Direct advertises the element-shaped surface Mirror does not, and the
-    /// two responses must differ — one catalogue for both backends was the
-    /// defect this replaces.
-    #[test]
-    fn direct_and_mirror_advertise_different_surfaces() {
-        block(async {
-            let direct = capabilities_json(&readiness_test_state(), None).await;
-            let mirror = capabilities_json(&mirror_capability_state(), None).await;
-
-            assert_ne!(
-                direct["supported"], mirror["supported"],
-                "both backends advertised the same capabilities"
-            );
-            assert_eq!(direct["supported"]["element_tree"], true);
-            assert!(!strings(&direct["supported"]["batch_actions"]).is_empty());
-            assert!(strings(&direct["supported"]["single_step_actions"])
-                .iter()
-                .any(|a| a == "perform"));
         });
     }
 

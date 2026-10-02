@@ -984,7 +984,7 @@ mod tests {
         let body = serde_json::json!({
             "ok": true,
             "backend": "direct",
-            "phone_target": false,
+            
             "wda": true,
             "wda_actionable": false,
             "wda_locked": true,

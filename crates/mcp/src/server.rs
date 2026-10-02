@@ -470,9 +470,8 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Capture the current iPhone screen through the configured device \
-        backend and return it as an image/png content block. Direct/WDA capture is the \
-        default and does not require iPhone Mirroring. Capture only when a current \
+        description = "Capture the current iPhone screen through WDA and return it as \
+        an image/png content block. Capture only when a current \
         user-requested task needs phone pixels; do not capture or reconnect for \
         initialization, health checks, or to keep the phone ready. Idle release is \
         intentional. If that task cannot proceed because Direct is released/offline, \
@@ -640,9 +639,8 @@ impl PhoneHandler {
             }
         };
 
-        // A legacy plain-text `ok` is a Mirror single-action acknowledgement.
-        // It is not a batch result: it carries no per-step outcome, so it can
-        // never stand in for one.
+        // A plain-text `ok` is not a batch result: it carries no per-step
+        // outcome, so it can never stand in for one.
         if response.confirms_action() {
             let body = response.body().to_string();
             let hint = (step_count >= 3).then(|| {
@@ -697,15 +695,14 @@ impl PhoneHandler {
         will be refused with phone_owned. The JSON preserves \
         backend, target_configured, managed_wda, managed_wda_pending, recovery_owner, \
         device_state, screen_state, wda, wda_actionable, locked, drivable, released, \
-        hint, setup_blocked_on, setup_phase, and setup_message. Gate actions on drivable=true, not on \
-        phone_target. For initialization, status/health checks, or no unfinished \
+        hint, setup_blocked_on, setup_phase, and setup_message. Gate actions on drivable=true. \
+        For initialization, status/health checks, or no unfinished \
         user-requested task needing phone access, report the state and stop; do not \
         reconnect or hold the phone. Idle release is intentional. Only if a current \
         user-requested phone operation or screen/UI read cannot proceed because \
         Direct is released/offline, check recovery_owner=daemon and hint/setup_blocked_on. \
         Do not reconnect while releasing/reconnecting or a blocker remains. When \
-        appropriate, call phone_reconnect once, then poll until drivable=true; never \
-        switch to Mirroring implicitly."
+        appropriate, call phone_reconnect once, then poll until drivable=true."
     )]
     async fn phone_status(&self) -> CallToolResult {
         match self.daemon.status().await {
@@ -729,8 +726,7 @@ impl PhoneHandler {
         kind, label, rect, depth and, when useful, identifier, disabled/hidden \
         state, accessibility/focus state, value, and placeholder. PREFER this over \
         phone_screenshot for reasoning: it is text (an order of magnitude cheaper), \
-        carries semantic locator candidates, and does not depend on a Mirroring \
-        window. Snapshot indexes are current-read refs only; never persist them \
+        and carries semantic locator candidates. Snapshot indexes are current-read refs only; never persist them \
         in a reusable flow."
     )]
     async fn phone_elements(&self) -> CallToolResult {
@@ -860,7 +856,7 @@ impl PhoneHandler {
         or a blocker remains. Once these conditions are met, call once, \
         then poll phone_status until reconnecting=false and drivable=true; while it is \
         reconnecting, report setup_phase/setup_message and obey setup_blocked_on. This tool \
-        never accepts a UDID and cannot switch devices or fall back to Mirroring. \
+        never accepts a UDID and cannot switch devices. \
         External WDA returns an explicit operator-owned recovery error."
     )]
     async fn phone_reconnect(&self) -> CallToolResult {
@@ -1219,8 +1215,7 @@ impl ServerHandler for PhoneHandler {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "Control an iPhone through the daemon's Direct/WDA backend; iPhone \
-                 Mirroring is only an explicit legacy compatibility mode. phone_status() \
+                "Control an iPhone through the daemon's WDA connection. phone_status() \
                  is read-only. For initialization, status/health checks, or no unfinished \
                  user-requested task needing phone access, report the state and stop; \
                  do not reconnect, hold, or poll screenshots/elements to keep the phone \
@@ -1233,7 +1228,7 @@ impl ServerHandler for PhoneHandler {
                  check recovery_owner=daemon and hint/setup_blocked_on. Do not reconnect \
                  while releasing/reconnecting or a blocker remains. When appropriate, \
                  call phone_reconnect() once, then poll status until drivable=true. \
-                 Never fall back to Mirroring implicitly. App Switcher is unsupported.",
+                 App Switcher is unsupported.",
             )
     }
 }
@@ -1683,27 +1678,6 @@ fn not_sent_result(reason: &str, detail: String) -> CallToolResult {
     result
 }
 
-/// The pre-JSON acknowledgement: `200` with the literal body `ok`.
-///
-/// The Mirror backend still answers this way after injecting a CGEvent, so
-/// treating every non-JSON 2xx as unknown would report every legitimate
-/// Mirror action as an uncertain outcome. Recognised EXACTLY — a 200 whose
-/// body is nothing but `ok` — so an HTML error page or a truncated body stays
-/// unknown.
-///
-/// It acknowledges that the daemon accepted and dispatched the event; it is
-/// NOT evidence that anything happened on screen, because that backend
-/// injects into a Mirroring window and nothing reports back.
-/// [`crate::client::DaemonResponse::confirms_action`] stays strict about
-/// JSON, and this compatibility branch lives only in these seven tools — the
-/// shared adapter and the flow verdicts must not learn it.
-fn is_legacy_ok_ack(response: &crate::client::DaemonResponse) -> bool {
-    response.status == reqwest::StatusCode::OK
-        && response.json.is_none()
-        && !response.too_large
-        && response.body().trim() == "ok"
-}
-
 /// Render one MUTATION's daemon response.
 ///
 /// Success requires `confirms_action()`, not `ok()`: a 2xx whose body could
@@ -1727,31 +1701,6 @@ fn daemon_action_result(
             plain_success.to_string()
         };
         return with_structure(CallToolResult::success(vec![Content::text(text)]), response);
-    }
-    // Legacy plain-text acknowledgement (Mirror). Reported as success because
-    // the event was dispatched, but labelled so nobody mistakes it for a
-    // verified outcome.
-    if is_legacy_ok_ack(response) {
-        let mut result = if observed {
-            // Do not invent an observation this backend cannot produce, and do
-            // not turn "no observation" into a reason to send the action again.
-            CallToolResult::success(vec![Content::text(format!(
-                "{plain_success} (acknowledged, but this backend cannot observe the \
-                 result — check phone_screenshot; do NOT resend)"
-            ))])
-        } else {
-            CallToolResult::success(vec![Content::text(plain_success.to_string())])
-        };
-        result.structured_content = Some(serde_json::json!({
-            "ok": true,
-            "outcome": "acknowledged",
-            "verified": false,
-            "protocol": "legacy_text_ack",
-            "observation": if observed { "unavailable" } else { "not_requested" },
-            "note": "the daemon accepted and dispatched the event; this backend does not \
-                     report what happened on screen",
-        }));
-        return result;
     }
     // A refusal the daemon spelled out keeps its own fields — it knows what
     // happened and said so. "Spelled out" means a body that explicitly says

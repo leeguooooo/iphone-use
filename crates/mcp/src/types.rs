@@ -14,12 +14,10 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StatusResponse {
     pub ok: bool,
-    /// Configured device backend. Current daemons report `direct` or `mirror`.
-    /// Optional for compatibility with older daemon releases.
+    /// Device backend; always `direct` since v0.9 (older daemons may also say
+    /// `mirror`). Optional for compatibility with older daemon releases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
-    #[serde(default)]
-    pub phone_target: bool,
     /// WebDriverAgent's HTTP service is reachable. This alone does not mean it
     /// can perform actions; use `wda_actionable` / `drivable` for that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,7 +39,7 @@ pub struct StatusResponse {
     /// Device-screen transport state, independent from control readiness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_state: Option<String>,
-    /// Compatibility mode reported by the daemon (`agent`, `mirror`, `offline`).
+    /// Compatibility mode reported by the daemon (`agent` or `offline`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Whether setup persisted one canonical iPhone UDID.
@@ -53,8 +51,8 @@ pub struct StatusResponse {
     /// First-run local management intent is waiting for a canonical target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_wda_pending: Option<bool>,
-    /// Component responsible for recovery (`daemon`, `unconfigured`,
-    /// `external`, or `mirror`).
+    /// Component responsible for recovery (`daemon`, `unconfigured`, or
+    /// `external`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_owner: Option<String>,
     /// Which session currently holds the phone lease (#72), if any.
@@ -85,8 +83,8 @@ pub struct StatusResponse {
     /// Bounded human-readable detail for the current setup phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup_message: Option<String>,
-    /// Preserve additional daemon fields (version/update metadata, legacy
-    /// mirror diagnostics, viewer count, and fields added by future releases)
+    /// Preserve additional daemon fields (version/update metadata, viewer
+    /// count, and fields added by future releases)
     /// when MCP parses and re-serializes the status response.
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -146,7 +144,7 @@ mod tests {
         let status: StatusResponse = serde_json::from_value(json!({
             "ok": true,
             "backend": "direct",
-            "phone_target": false,
+            
             "wda": true,
             "wda_actionable": false,
             "wda_locked": true,
@@ -202,7 +200,7 @@ mod tests {
     fn legacy_status_without_direct_fields_still_parses() {
         let status: StatusResponse = serde_json::from_value(json!({
             "ok": true,
-            "phone_target": true,
+            
             "wda": false
         }))
         .unwrap();
