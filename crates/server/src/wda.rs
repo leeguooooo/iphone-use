@@ -34,6 +34,11 @@ pub struct WdaClient {
     base: String, // e.g. "http://192.168.0.190:8100"
     http: reqwest::Client,
     session: Option<String>,
+    /// Last `GET /window/size` answer and when it was read. Every coordinate
+    /// gesture needs the size to map normalized points, and the read costs
+    /// ~180 ms on a real phone — more than a third of a tap. A short TTL keeps
+    /// a burst of gestures on one read and still notices a rotation.
+    window: Option<((f64, f64), std::time::Instant)>,
     /// How long `probe_health` waits for session/lock/apps-list before
     /// settling on "up, not actionable". Tests shrink it.
     actionability_budget: Duration,
@@ -52,6 +57,7 @@ impl WdaClient {
             base: base_url.into().trim_end_matches('/').to_string(),
             http,
             session: None,
+            window: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
         })
     }
@@ -205,8 +211,16 @@ impl WdaClient {
     /// under `value.sessionId` across versions — we accept either).
     pub async fn ensure_session(&mut self) -> Result<&str> {
         if self.session.is_none() {
+            // XCUITest waits for the app to go idle and for animations to
+            // cool off around every action — up to 10 s in an app that never
+            // stops animating (a carousel, a video). The daemon observes the
+            // screen itself (MJPEG, its own settle reads), so the wait buys
+            // nothing and turns a 0.3 s tap into seconds.
             let body = serde_json::json!({
-                "capabilities": { "alwaysMatch": {}, "firstMatch": [{}] }
+                "capabilities": {
+                    "alwaysMatch": { "shouldWaitForQuiescence": false },
+                    "firstMatch": [{}]
+                }
             });
             let text = self
                 .http
@@ -221,6 +235,33 @@ impl WdaClient {
                 .await
                 .context("POST /session body")?;
             self.session = Some(parse_session_id(&text)?);
+            self.window = None;
+            {
+                let sid = self.session.as_deref().unwrap().to_string();
+                let result = self
+                    .http
+                    .post(format!("{}/session/{}/appium/settings", self.base, sid))
+                    .json(&serde_json::json!({ "settings": {
+                        "waitForIdleTimeout": 0,
+                        "animationCoolOffTimeout": 0,
+                    }}))
+                    // A runner slow to answer must not hold session setup.
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await;
+                // Best effort: an older runner without these settings still
+                // works, just slower.
+                match result {
+                    Ok(response) => {
+                        if let Err(error) =
+                            ensure_wda_success(response, "POST /appium/settings (idle)").await
+                        {
+                            tracing::debug!("could not disable WDA idle waits: {error:#}");
+                        }
+                    }
+                    Err(error) => tracing::debug!("could not disable WDA idle waits: {error:#}"),
+                }
+            }
             // Opt-in bounded-snapshot settings (issue #44): apps with an
             // enormous accessibility tree (hardware-reported with KakaoTalk)
             // can make WDA's hierarchy snapshot run so long that testmanagerd
@@ -903,6 +944,18 @@ impl WdaClient {
     /// Window (screen) size in WDA points — needed to map our normalized
     /// `[0,1]` agent coordinates onto [`Self::tap_point`]'s absolute points.
     pub async fn window_size(&mut self) -> Result<(f64, f64)> {
+        const WINDOW_SIZE_TTL: Duration = Duration::from_secs(3);
+        if let Some((size, at)) = self.window {
+            if at.elapsed() < WINDOW_SIZE_TTL {
+                return Ok(size);
+            }
+        }
+        let size = self.read_window_size().await?;
+        self.window = Some((size, std::time::Instant::now()));
+        Ok(size)
+    }
+
+    async fn read_window_size(&mut self) -> Result<(f64, f64)> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
             .http
@@ -1275,6 +1328,7 @@ impl WdaClient {
     /// stale); the next call re-creates one via [`Self::ensure_session`].
     pub fn invalidate_session(&mut self) {
         self.session = None;
+        self.window = None;
     }
 
     /// `POST /session/:id/wda/lock` — lock the phone's screen.
@@ -1872,9 +1926,12 @@ mod tests {
     fn force_touch_request_body_is_never_empty() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let recorder = std::sync::Arc::clone(&seen);
-        let (base, task) = mock_wda(2, move |request| {
+        let (base, task) = mock_wda(3, move |request| {
             if request.starts_with("POST /session ") {
                 return r#"{"sessionId":"S-1","value":{}}"#.to_string();
+            }
+            if request.contains("/appium/settings") {
+                return r#"{"value":null}"#.to_string();
             }
             if request.contains("forceTouch") {
                 let body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
@@ -1915,9 +1972,12 @@ mod tests {
     // router can map to "not sent", not as an opaque transport failure.
     #[test]
     fn force_press_refusal_is_a_typed_error() {
-        let (base, task) = mock_wda(2, |request| {
+        let (base, task) = mock_wda(3, |request| {
             if request.starts_with("POST /session ") {
                 return r#"{"sessionId":"S-1","value":{}}"#.to_string();
+            }
+            if request.contains("/appium/settings") {
+                return r#"{"value":null}"#.to_string();
             }
             http_400(FORCE_PRESS_UNSUPPORTED_BODY)
         });
@@ -1934,9 +1994,12 @@ mod tests {
     // a missing element to the router's `404 Not Found` check.
     #[test]
     fn other_gesture_client_errors_keep_status_and_body() {
-        let (base, task) = mock_wda(2, |request| {
+        let (base, task) = mock_wda(3, |request| {
             if request.starts_with("POST /session ") {
                 return r#"{"sessionId":"S-1","value":{}}"#.to_string();
+            }
+            if request.contains("/appium/settings") {
+                return r#"{"value":null}"#.to_string();
             }
             let body = r#"{"value":{"error":"no such element","message":"gone"}}"#;
             format!(

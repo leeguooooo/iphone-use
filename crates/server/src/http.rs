@@ -367,6 +367,9 @@ pub struct AppState {
     /// Defaults to `127.0.0.1:9100` (the relay target), override via
     /// `PHONE_REMOTE_WDA_MJPEG_URL`.
     pub mjpeg_url: Option<String>,
+    /// The H.264 re-encoder fed from `mjpeg_url` (see [`crate::video`]);
+    /// `None` where it cannot run (no WDA video, or not macOS).
+    pub video: Option<Arc<crate::video::VideoHub>>,
     /// Last-known "WDA can act on-device" flag, updated by Direct health probes
     /// and control events. Direct handlers use it as readiness evidence but
     /// always fail closed when WDA cannot act.
@@ -816,6 +819,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/actions", post(agent_actions))
         .route("/agent/screenshot", get(agent_screenshot))
         .route("/agent/mjpeg", get(agent_mjpeg))
+        .route("/agent/h264", get(agent_h264))
         .route("/agent/elements", get(agent_elements))
         // Shortcuts RPC return path: the phone POSTs structured results here.
         // Safe GET only peeks; destructive consumption has an explicit,
@@ -9139,6 +9143,115 @@ async fn agent_mjpeg(
             )
         }
     }
+}
+
+/// `GET /agent/h264` — the live screen as H.264, ~10× less bandwidth than
+/// `/agent/mjpeg` (see [`crate::video`] for the wire format). Same auth,
+/// lifecycle gates, viewer accounting and freshness tracking as the MJPEG
+/// feed; a client that cannot decode H.264 uses `/agent/mjpeg` instead.
+async fn agent_h264(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<MjpegStreamQuery>,
+    headers: HeaderMap,
+) -> Response {
+    match browser_or_agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    let stream_id = match query.stream_id {
+        Some(stream_id) if valid_mjpeg_stream_id(&stream_id) => Some(stream_id),
+        Some(_) => {
+            return with_security_headers(
+                (StatusCode::BAD_REQUEST, "invalid stream id").into_response(),
+            )
+        }
+        None => None,
+    };
+    let Some(hub) = state.video.clone() else {
+        return with_security_headers(
+            (StatusCode::NOT_IMPLEMENTED, "H.264 video is unavailable on this daemon").into_response(),
+        );
+    };
+    if state.managed_wda_pending {
+        return target_not_configured_response();
+    }
+    if state.wda_lifecycle.is_transitioning()
+        || state.released.load(std::sync::atomic::Ordering::Acquire)
+    {
+        return with_security_headers(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "direct device is released, releasing, or reconnecting",
+            )
+                .into_response(),
+        );
+    }
+    state.touch_activity();
+    const MAX_VIEWERS: usize = 4;
+    let Some(stream_guard) = StreamGuard::try_reserve(state.live_streams.clone(), MAX_VIEWERS)
+    else {
+        return with_security_headers(
+            (StatusCode::TOO_MANY_REQUESTS, "too many live viewers (maximum 4)").into_response(),
+        );
+    };
+    if let Some(wda) = &state.wda {
+        let _priority = state.begin_wda_control();
+        if let Ok(mut client) = wda.try_lock() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(750),
+                client.set_mjpeg_settings(30, 50, 60),
+            )
+            .await;
+        }
+    }
+    let subscription = hub.subscribe();
+    let activity_guard = stream_id.map(|stream_id| {
+        MjpegActivityGuard::register(state.mjpeg_stream_activity.clone(), stream_id)
+    });
+    let frames = futures_util::stream::unfold(
+        (subscription, stream_guard, activity_guard, hub),
+        |(mut subscription, guard, activity_guard, hub)| async move {
+            loop {
+                match tokio::time::timeout(MJPEG_INACTIVITY_TIMEOUT, subscription.frames.recv())
+                    .await
+                {
+                    Ok(Ok(frame)) => {
+                        if let Some(activity) = &activity_guard {
+                            activity.touch();
+                        }
+                        return Some((
+                            Ok::<_, std::io::Error>(crate::video::frame_message(&frame)),
+                            (subscription, guard, activity_guard, hub),
+                        ));
+                    }
+                    // Fell behind: what it missed is gone, so give it a fresh
+                    // entry point instead of a smeared picture.
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                        hub.request_keyframe();
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
+                        return None
+                    }
+                }
+            }
+        },
+    );
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-video-format", "iphone-use-h264-annexb-v1")
+        .body(Body::from_stream(frames))
+        .map(with_security_headers)
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// True when `bytes` is a plausibly-decodable PNG: the 8-byte signature plus

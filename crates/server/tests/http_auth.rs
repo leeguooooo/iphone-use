@@ -67,12 +67,28 @@ fn mock_wda(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let task = std::thread::spawn(move || {
-        for index in 0..requests {
+        let mut index = 0;
+        while index < requests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 8_192];
             let read = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..read]);
-            let Some((delay, body)) = responder(&request, index) else {
+            // Session setup writes WDA's idle-wait settings; answer them here,
+            // outside the scripted count and index.
+            if request.starts_with("POST ") && request.contains("/appium/settings") {
+                let body = r#"{"value":null}"#;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                continue;
+            }
+            let this = index;
+            index += 1;
+            let Some((delay, body)) = responder(&request, this) else {
                 continue; // close without a response: ambiguous transport loss
             };
             std::thread::sleep(delay);

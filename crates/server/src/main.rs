@@ -495,6 +495,8 @@ fn serve() -> Result<()> {
         latest_release: Arc::new(Mutex::new(None)),
         // WDA's MJPEG stream (see /agent/mjpeg); the relay forwards it to
         // 127.0.0.1:9100 (override with PHONE_REMOTE_WDA_MJPEG_URL).
+        video: server::video::VideoHub::supported()
+            .then(|| server::video::VideoHub::new(mjpeg_url.clone())),
         mjpeg_url: Some(mjpeg_url),
         wda_actionable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         wda_health: Arc::new(Mutex::new(server::wda::WdaHealth::down())),

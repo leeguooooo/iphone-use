@@ -47,6 +47,17 @@ tempfile = "3"
 base64 = "0.22"
 sha2 = "0.10"
 
+# Live video as H.264: WDA's MJPEG frames are decoded (zune-jpeg) and
+# re-encoded on the Mac's hardware encoder (VideoToolbox), cutting a remote
+# viewer's bandwidth ~10x versus forwarding the JPEGs.
+zune-jpeg = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-video-toolbox = "0.3.2"
+
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

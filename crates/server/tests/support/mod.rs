@@ -133,6 +133,18 @@ pub fn mock_wda(
                 continue;
             };
             let request = String::from_utf8_lossy(&request[..read]).to_string();
+            // Session setup writes WDA's idle-wait settings. Answer them here,
+            // outside the script and its request index, so each test scripts
+            // only the traffic it is about.
+            if request.starts_with("POST ") && request.contains("/appium/settings") {
+                let body = r#"{"value":null}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                continue;
+            }
             let scripted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 responder(&request, index)
             }));

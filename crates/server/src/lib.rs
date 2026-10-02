@@ -5,6 +5,7 @@ pub mod instance;
 pub mod protocol;
 pub mod runtime_dir;
 pub mod update;
+pub mod video;
 pub mod wda;
 
 /// Re-export of the `core` crate under a non-`core` name.
