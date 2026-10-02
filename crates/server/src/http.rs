@@ -2648,9 +2648,31 @@ fn xml_escape(value: &str) -> String {
 fn launchd_job_loaded(domain: &str, label: &str) -> bool {
     std::process::Command::new("launchctl")
         .args(["print", &format!("{domain}/{label}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// Whether the job has a live process (`pid = N` in `launchctl print`).
+fn launchd_job_running(domain: &str, label: &str) -> bool {
+    std::process::Command::new("launchctl")
+        .args(["print", &format!("{domain}/{label}")])
+        .output()
+        .map(|out| {
+            out.status.success() && launchctl_print_has_pid(&String::from_utf8_lossy(&out.stdout))
+        })
+        .unwrap_or(false)
+}
+
+/// The job's own `pid = N` line: one tab deep, unlike the nested blocks.
+fn launchctl_print_has_pid(print: &str) -> bool {
+    print.lines().any(|line| {
+        line.strip_prefix('\t')
+            .and_then(|rest| rest.strip_prefix("pid = "))
+            .is_some_and(|pid| pid.trim().parse::<u32>().is_ok_and(|pid| pid > 0))
+    })
 }
 
 fn wait_launchd_job_gone(domain: &str, label: &str) -> bool {
@@ -3043,12 +3065,17 @@ fn write_and_bootstrap_wda_agent(setup_sh: &str, log: &str, udid: &str) -> bool 
             }
             return false;
         }
-        // Loaded now. Force one fresh run: RunAtLoad may have fired and the
-        // runner already exited (ThrottleInterval/KeepAlive can leave it briefly
-        // down right after bootstrap), and kickstart is safe on a loaded job.
-        let _ = std::process::Command::new("launchctl")
-            .args(["kickstart", "-k", &service])
-            .status();
+        // Loaded now, and RunAtLoad normally has it running already. Only
+        // start it when it is not: `kickstart -k` on the run RunAtLoad just
+        // began killed it, and launchd's 30 s ThrottleInterval then held the
+        // restart — every cold connect waited 30 s before setup even began.
+        if !launchd_job_running(&domain, wda_agent_label()) {
+            let _ = std::process::Command::new("launchctl")
+                .args(["kickstart", &service])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
         return launchd_job_loaded(&domain, wda_agent_label());
     }
     // A persistently disabled service rejects bootstrap. Enable first and treat
@@ -10462,6 +10489,18 @@ fn now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launchctl_print_pid_is_the_jobs_own_line() {
+        let running = "gui/501/com.leeguoo.iphone-use.wda = {\n\tactive count = 1\n\tstate = running\n\tpid = 72917\n\tresource coalition = {\n\t\tID = 42823\n\t}\n}\n";
+        assert!(launchctl_print_has_pid(running));
+        let waiting = "gui/501/com.leeguoo.iphone-use.wda = {\n\tstate = waiting\n\tlast exit code = 0\n\tjetsam coalition = {\n\t\tpid = 12\n\t}\n}\n";
+        assert!(
+            !launchctl_print_has_pid(waiting),
+            "a nested pid is not the job's"
+        );
+        assert!(!launchctl_print_has_pid("\tpid = 0\n"));
+    }
+
     use super::*;
 
     // --- Batch outcome: the failed step is not the batch ---

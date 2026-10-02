@@ -339,16 +339,21 @@ fi
 _devicectl_t() {
     local secs="$1"; shift
     local out; out="$(mktemp)"
-    ( xcrun devicectl "$@" > "$out" 2>/dev/null ) &
-    local pid=$!
-    ( sleep "$secs"; kill "$pid" 2>/dev/null ) &
-    local killer=$!
-    wait "$pid" 2>/dev/null
-    kill "$killer" 2>/dev/null
-    # Reap the watchdog explicitly. Without this wait, bash may print a
-    # delayed `Terminated: 15` job notification into the supervisor log even
-    # though devicectl completed successfully.
-    wait "$killer" 2>/dev/null || true
+    # Poll instead of a `( sleep N; kill ) &` watchdog: killing that subshell
+    # left its `sleep` running, and reaping it made every call last the full
+    # timeout — 8-10 s per call, three calls per connect, even when devicectl
+    # answered at once.
+    xcrun devicectl "$@" > "$out" 2>/dev/null &
+    local pid=$! ticks=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$ticks" -ge $((secs * 10)) ]; then
+            kill "$pid" 2>/dev/null
+            break
+        fi
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+    wait "$pid" 2>/dev/null || true
     cat "$out"; rm -f "$out"
 }
 
@@ -3411,7 +3416,7 @@ _refresh_legacy_contracts
 # Show WHICH phone was picked (auto-detect grabs the first destination; with
 # several paired iPhones it can choose an unavailable one — let the user catch it).
 PICKED_NAME="$(_devicectl_t 8 device info details --device "$WDA_UDID" \
-              | sed -n 's/.*marketingName: *//p' | head -1 || true)"
+              | sed -nE 's/.*[Mm]arketing ?[Nn]ame: *//p' | head -1 || true)"
 ok "Device UDID: $WDA_UDID${PICKED_NAME:+  ($PICKED_NAME)}"
 IOS_COUNT="$(_devicectl_t 8 list devices | grep -ciE 'iPhone|iPad' || true)"
 if [ "${IOS_COUNT:-0}" -gt 1 ]; then
