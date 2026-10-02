@@ -139,8 +139,10 @@ fn wda_management_pending(
     version = env!("CARGO_PKG_VERSION")
 )]
 struct Cli {
+    /// With no command (a double-click on the app in Finder or Launchpad),
+    /// open the control page in the browser.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -354,6 +356,77 @@ fn instance_context() -> Result<()> {
     Ok(())
 }
 
+/// The app has no window: a double-click opens the browser control page,
+/// first asking launchd to start the service if it is not answering.
+fn open_console() -> Result<()> {
+    const LABEL: &str = "com.leeguoo.iphone-use";
+    let port = std::env::var("PHONE_REMOTE_PORT")
+        .ok()
+        .or_else(|| launch_agent_env(LABEL, "PHONE_REMOTE_PORT"))
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .unwrap_or(44321);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let answering = || {
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok()
+    };
+    if !answering() {
+        let uid = unsafe { libc::getuid() };
+        let _ = std::process::Command::new("/bin/launchctl")
+            .args(["kickstart", &format!("gui/{uid}/{LABEL}")])
+            .status();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !answering() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    let url = format!("http://127.0.0.1:{port}/phone");
+    if !answering() {
+        let message = format!(
+            "iphone-use 服务没有运行（127.0.0.1:{port} 无响应）。请重新运行安装命令：\ncurl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh"
+        );
+        eprintln!("{message}");
+        let script = format!(
+            "display alert \"iPhone Use\" message \"{}\" as critical",
+            message.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let _ = std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &script])
+            .status();
+        anyhow::bail!("service not answering on {addr}");
+    }
+    eprintln!("opening {url}");
+    std::process::Command::new("/usr/bin/open")
+        .arg(&url)
+        .status()
+        .context("open the control page")?;
+    Ok(())
+}
+
+/// One value from the installed LaunchAgent's EnvironmentVariables, which a
+/// Finder launch does not inherit.
+fn launch_agent_env(label: &str, key: &str) -> Option<String> {
+    let plist = dirs_home()?.join(format!("Library/LaunchAgents/{label}.plist"));
+    let out = std::process::Command::new("/usr/bin/plutil")
+        .args([
+            "-extract",
+            &format!("EnvironmentVariables.{key}"),
+            "raw",
+            "-o",
+            "-",
+        ])
+        .arg(&plist)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -362,11 +435,15 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let cli = Cli::parse();
+    // Older Launch Services hands a Finder launch a `-psn_…` argument.
+    let cli = Cli::parse_from(std::env::args().filter(|a| !a.starts_with("-psn_")));
+    let Some(command) = cli.command else {
+        return open_console();
+    };
     // Only the long-running service earns the unattended-relaunch backoff
     // below; a one-shot query must report and exit at once.
-    let unattended_service = matches!(cli.command, Command::Serve);
-    let result = match cli.command {
+    let unattended_service = matches!(command, Command::Serve);
+    let result = match command {
         Command::Serve => serve(),
         Command::Stop => {
             let result = stop();
