@@ -52,20 +52,17 @@
 
 <p>
   An agent drives the iPhone by talking to the <strong>already-running daemon</strong> over
-  HTTP. <code>PHONE_REMOTE_BACKEND</code> is fixed when the daemon starts:
-  <code>direct</code> (the default) uses WebDriverAgent for on-phone input and WDA MJPEG
-  for video; <code>mirror</code> is the explicit legacy iPhone Mirroring +
-  ScreenCaptureKit + CGEvent backend. Direct mode needs no iPhone Mirroring, Screen
-  Recording, Accessibility grant, Mac cursor, or frontmost window.
+  HTTP. The daemon serves the phone only over WebDriverAgent (WDA): input is performed by
+  on-device WDA actions and video is WDA's MJPEG stream. It never touches the Mac's screen,
+  cursor, or focus, and needs no macOS permission grants.
 </p>
 <aside class="note">
-  <strong>The backend is a deployment boundary, not a health-based fallback.</strong>
-  A direct request that WDA cannot perform fails closed. It never wakes iPhone Mirroring
-  or injects into the Mac. To use the legacy path, set
-  <code>PHONE_REMOTE_BACKEND=mirror</code> and restart the daemon.
+  <strong>Failures are closed, not substituted.</strong> A request that WDA cannot
+  perform returns an explicit error; there is no other input or capture path to fall
+  back to.
 </aside>
 <aside class="note">
-  <strong>Direct requires completed WDA setup.</strong> Installing or starting the daemon
+  <strong>Control requires completed WDA setup.</strong> Installing or starting the daemon
   does not make the phone ready. Run <code>~/.iphone-use/setup-wda.sh doctor</code>,
   <code>~/.iphone-use/setup-wda.sh</code>, and
   <code>~/.iphone-use/setup-wda.sh status</code> with the pinned iPhone connected,
@@ -126,20 +123,20 @@
 
 <table>
   <tr><th>Method</th><th>Path</th><th>Purpose</th></tr>
-  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/status</td><td>Configured backend, WDA reachability/actionability, device lifecycle, and recovery hints.</td></tr>
-  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/input</td><td>Bearer-authenticated control with the mutation header. Direct mode routes to WDA and fails closed.</td></tr>
-  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/actions</td><td>Direct/WDA-only bounded multi-step execution with full-batch validation, semantic waits, one control lock, and first-failure stop.</td></tr>
-  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/screenshot</td><td>Current target screen as PNG. Direct mode uses WDA only.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/status</td><td>WDA reachability/actionability, device lifecycle, and recovery hints.</td></tr>
+  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/input</td><td>Bearer-authenticated control with the mutation header. Routes to WDA and fails closed.</td></tr>
+  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/actions</td><td>Bounded multi-step WDA execution with full-batch validation, semantic waits, one control lock, and first-failure stop.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/screenshot</td><td>Current target screen as PNG, read from WDA.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/mjpeg</td><td>Live WDA MJPEG stream; accepts bearer auth or a logged-in browser cookie.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/elements</td><td>Snapshot-bound, flattened WDA element list with sparse locator/state fields and screen dimensions.</td></tr>
-  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/mode</td><td>Recover the currently configured backend. Direct accepts only <code>mode=agent</code>; Mirror accepts only <code>mode=mirror</code>. It never switches the persisted backend or target.</td></tr>
+  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/mode</td><td><code>mode=agent</code> brings WDA up; <code>mode=human</code> stops WDA and hands the phone back to the person holding it. It never changes the persisted target.</td></tr>
   <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/inbox</td><td>Legacy Shortcuts-bridge result queue. GET is always a read-only peek; POST appends and requires the mutation header.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/inbox/drain</td><td>Atomically return and clear the inbox; requires bearer auth and the mutation header.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/control</td><td>Browser-only direct control: session cookie + mutation header, with an explicit HTTP acknowledgement.</td></tr>
 </table>
 
 <h3><span class="method get">GET</span> <span class="ep">/agent/status</span></h3>
-<p>Accepts the agent bearer or a logged-in browser cookie. A healthy direct response looks like:</p>
+<p>Accepts the agent bearer or a logged-in browser cookie. A healthy response looks like:</p>
 <pre><code>{
   "ok": true,
   "backend": "direct",
@@ -147,19 +144,17 @@
   "managed_wda": true,
   "managed_wda_pending": false,
   "recovery_owner": "daemon",
-  "phone_target": false,
   "wda": true,
   "wda_actionable": true,
   "wda_locked": false,
   "drivable": true,
-  "human_active": false,
   "mode": "agent",
   "device_state": "ready",
   "screen_state": "waiting",
-  "mirror_state": "disabled",
   "releasing": false,
   "reconnecting": false,
   "released": false,
+  "human_handoff": false,
   "hint": "",
   "setup_blocked_on": "",
   "setup_phase": "ready",
@@ -175,23 +170,24 @@
 }</code></pre>
 
 <table>
-  <tr><th>Field</th><th>Meaning in direct backend</th></tr>
-  <tr><td><code>backend</code></td><td>Configured transport; remains <code>direct</code> until the daemon is restarted with a different deployment setting.</td></tr>
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td><code>backend</code></td><td>Always <code>direct</code> (the phone is driven over WDA). Kept for client compatibility.</td></tr>
   <tr><td><code>target_configured</code></td><td>Whether a persistent <code>PHONE_REMOTE_UDID</code> is configured.</td></tr>
   <tr><td><code>managed_wda</code></td><td><code>true</code> when this daemon owns the local loopback WDA supervisor and relay lifecycle; remote endpoints are externally managed.</td></tr>
   <tr><td><code>managed_wda_pending</code></td><td><code>true</code> during first-run local setup when managed Direct was requested but no canonical device target has been persisted yet. In this state the daemon will not stop or bootstrap WDA.</td></tr>
-  <tr><td><code>recovery_owner</code></td><td><code>daemon</code> for managed Direct, <code>unconfigured</code> while first-run local management is waiting for a persistent target, <code>external</code> for a remote or explicitly unmanaged WDA endpoint, and <code>mirror</code> for the compatibility backend.</td></tr>
+  <tr><td><code>recovery_owner</code></td><td><code>daemon</code> for managed Direct, <code>unconfigured</code> while first-run local management is waiting for a persistent target, and <code>external</code> for a remote or explicitly unmanaged WDA endpoint.</td></tr>
   <tr><td><code>wda</code></td><td>WDA HTTP is reachable. This alone is not proof that it can act.</td></tr>
   <tr><td><code>wda_actionable</code></td><td>A real device-side action probe succeeded.</td></tr>
   <tr><td><code>wda_locked</code></td><td><code>true</code>, <code>false</code>, or <code>null</code> when lock state cannot be determined.</td></tr>
   <tr><td><code>drivable</code></td><td>The control-readiness gate: actionable WDA with no release or reconnect transition in progress.</td></tr>
   <tr><td><code>device_state</code></td><td><code>ready</code>, <code>locked</code>, <code>blocked</code>, <code>offline</code>, <code>releasing</code>, <code>released</code>, or <code>reconnecting</code>.</td></tr>
-  <tr><td><code>screen_state</code></td><td>Coarse transport lifecycle (<code>waiting</code>/<code>offline</code> in direct mode); it is not a frame-level MJPEG health check.</td></tr>
+  <tr><td><code>screen_state</code></td><td>Coarse transport lifecycle (<code>waiting</code>/<code>offline</code>); it is not a frame-level MJPEG health check.</td></tr>
   <tr><td><code>releasing</code></td><td>The managed local WDA service is being stopped after idle timeout.</td></tr>
   <tr><td><code>reconnecting</code></td><td>The daemon is bootstrapping its managed WDA supervisor. If <code>setup_blocked_on</code> is non-empty, follow <code>hint</code> first; otherwise wait for this to clear. In every case, require <code>wda_actionable</code> and <code>drivable</code> before acting.</td></tr>
-  <tr><td><code>released</code></td><td>WDA was intentionally stopped after the configured idle period. A completed health probe that finds a replacement/self-healed runner clears this guard; clients do not need a redundant reconnect.</td></tr>
-  <tr><td><code>viewer_count</code></td><td>Total open viewers: legacy <code>/ws</code> WebSocket/WebRTC connections plus live <code>/agent/mjpeg</code> streams.</td></tr>
-  <tr><td><code>mjpeg_viewer_count</code></td><td>The MJPEG subset of <code>viewer_count</code>. It does not include <code>/ws</code>.</td></tr>
+  <tr><td><code>released</code></td><td>WDA was intentionally stopped — after the idle period (<code>PHONE_REMOTE_IDLE_RELEASE_SECS</code>, default 600, <code>0</code> keeps it up) or by a human hand-off. The parked state survives daemon restarts and logins; the next agent request brings WDA back up. A completed health probe that finds a replacement/self-healed runner clears this guard; clients do not need a redundant reconnect.</td></tr>
+  <tr><td><code>human_handoff</code></td><td><code>true</code> while the phone has been handed back to its holder with <code>{"mode":"human"}</code>. Agent input answers <code>409 phone_handed_to_human</code> until <code>{"mode":"agent"}</code> takes it back.</td></tr>
+  <tr><td><code>viewer_count</code></td><td>Open live <code>/agent/mjpeg</code> streams (same number as <code>mjpeg_viewer_count</code>; kept for older clients).</td></tr>
+  <tr><td><code>mjpeg_viewer_count</code></td><td>Open live <code>/agent/mjpeg</code> streams.</td></tr>
   <tr><td><code>setup_blocked_on</code></td><td>Fresh daemon-owned managed-Direct setup blocker: <code>warp</code>, <code>proxy</code>, <code>usb</code>, <code>trust</code>, <code>ddi</code>, <code>wda</code>, or empty. KeepAlive preserves the last blocker while the next preflight pass checks it, then clears or replaces it only after evidence; it is deliberately empty for unconfigured and externally managed targets.</td></tr>
   <tr><td><code>setup_phase</code></td><td>Fresh managed-Direct helper phase such as <code>prereq</code>, <code>ddi-wait</code>, <code>building</code>, <code>serving</code>, or <code>ready</code>. During a long first build, this distinguishes progress from a silent hang.</td></tr>
   <tr><td><code>setup_message</code></td><td>Bounded, JSON-escaped detail for <code>setup_phase</code>, including periodically refreshed WDA build elapsed time. It is progress context, not actionability proof.</td></tr>
@@ -201,15 +197,11 @@
   <tr><td><code>hint</code></td><td>Concrete recovery guidance for locked, severed, released, or unreachable WDA. When a death was observed, this is the reason-specific guidance for <code>wda_died_reason</code>.</td></tr>
 </table>
 <aside class="note">
-  <strong>Direct readiness rule:</strong> require <code>backend:"direct"</code>,
-  <code>wda_actionable:true</code>, and <code>drivable:true</code>. Do not gate direct
-  automation on <code>phone_target</code>; it is always <code>false</code> there.
-  <code>mirror_state:"disabled"</code> and <code>human_active:false</code> confirm that
-  Mirroring/cursor semantics are outside the selected backend.
+  <strong>Readiness rule:</strong> require <code>wda_actionable:true</code> and
+  <code>drivable:true</code> before acting.
 </aside>
 <p class="muted">
-  <code>mode</code> is a compatibility/lifecycle field, not the configured backend. In
-  direct mode it is only <code>agent</code> while WDA is reachable or
+  <code>mode</code> is a lifecycle field: <code>agent</code> while WDA is reachable,
   <code>offline</code> otherwise.
   <code>version</code> is the running daemon; <code>latest</code> is the newest GitHub
   release tag (refreshed daily; <code>null</code> until first fetch / offline;
@@ -254,11 +246,7 @@
   }
 }</code></pre>
 <p>
-  <code>supported</code> is static for the configured backend. Mirror carries only
-  the CGEvent vocabulary (<code>down up tap longpress scroll shortcut text key</code>):
-  it refuses <code>/agent/actions</code> with <code>batch_requires_direct_wda</code> and
-  <code>/agent/elements</code> with <code>backend_is_mirror</code>, so it advertises no
-  batch actions, no <code>perform</code> set, and no delta observation.
+  <code>supported</code> is static for this build.
   <code>modes</code> lists only values this daemon would accept — an externally
   managed endpoint lists none, because it answers
   <code>wda_is_externally_managed</code> to both.
@@ -273,7 +261,7 @@
   <code>false</code> blocked, and <code>null</code> meaning the daemon has no
   evidence either way — <em>not</em> that things are fine.
   <code>blocked_by</code> names the obstacle:
-  <code>backend_is_mirror</code>, <code>human_handoff</code>,
+  <code>human_handoff</code>,
   <code>releasing</code>, <code>reconnecting</code>, <code>released</code>,
   <code>locked</code>, <code>owned_by_other</code>, <code>not_actionable</code>,
   <code>offline</code>.
@@ -302,11 +290,13 @@
 
 <h3><span class="method post">POST</span> <span class="ep">/agent/mode</span></h3>
 <p>
-  This is current-backend recovery, not a mode switch. It never changes
-  <code>PHONE_REMOTE_BACKEND</code>. Direct accepts only <code>mode=agent</code> to
-  restart daemon-managed WDA; Mirror accepts only <code>mode=mirror</code> to recover
-  the legacy Mirroring session. A cross-backend value returns <code>409</code>.
-  In Direct, the canonical classic UDID must already be persisted as
+  Moves the phone between remote control and the person holding it.
+  <code>{"mode":"agent"}</code> brings daemon-managed WDA up;
+  <code>{"mode":"human"}</code> stops WDA so the holder has the phone to themselves, and
+  agent input then answers <code>409 phone_handed_to_human</code> until
+  <code>{"mode":"agent"}</code> takes it back. Any other value returns <code>400</code>;
+  <code>{"mode":"mirror"}</code> returns <code>410 {"error":"mirror_removed"}</code>.
+  The canonical classic UDID must already be persisted as
   <code>PHONE_REMOTE_UDID</code>; a request cannot establish or temporarily change it:
 </p>
 <pre><code>MUTATION="X-Phone-Control: 1"
@@ -315,10 +305,10 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"agent"
 # poll /agent/status until wda_actionable:true and drivable:true
 
 # a different request-scoped udid returns HTTP 409 target_change_requires_restart
-curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"mirror"}'
-# HTTP 409 in direct backend:
-# {"ok":false,"error":"backend_is_direct",
-#  "hint":"set PHONE_REMOTE_BACKEND=mirror and restart the daemon to use the legacy compatibility backend"}</code></pre>
+
+# give the phone back to the person holding it (stops WDA)
+curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"}'
+# {"ok":true,"mode":"human","released":true,"hint":"…"}</code></pre>
 <p class="muted">
   <code>mode=agent</code> works only when <code>managed_wda:true</code>, requires
   <code>~/.iphone-use/setup-wda.sh</code> and an unlocked, awake phone, and is
@@ -330,20 +320,13 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"mirror
   live build stage; clients must keep treating <code>drivable:true</code> as the only
   permission to act.
   When <code>recovery_owner:"external"</code>,
-  the endpoint returns <code>409 wda_is_externally_managed</code>; recover the service on
-  its owning host.
-</p>
-<p class="muted">
-  A daemon deployed with <code>PHONE_REMOTE_BACKEND=mirror</code> does not construct a
-  WDA client even if WDA environment URLs are present. Its browser reconnect action sends
-  <code>{"mode":"mirror"}</code> to recover that same compatibility backend. It rejects
-  <code>mode=agent</code>; changing to Direct requires a persisted configuration change
-  and daemon restart.
+  the endpoint returns <code>409 wda_is_externally_managed</code> for both modes; recover
+  the service on its owning host.
 </p>
 <p class="muted">
   The MCP <code>phone_reconnect</code> tool is a constrained wrapper around
   <code>{"mode":"agent"}</code>. It takes no arguments, never accepts a UDID, changes
-  device, or falls back to Mirroring. For managed Direct it waits up to roughly 120
+  device. For managed WDA it waits up to roughly 120
   seconds for the persisted canonical target; an externally managed WDA endpoint returns
   an operator-owned recovery error instead.
 </p>
@@ -352,8 +335,8 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"mirror
 <p>
   Body is one JSON control message. Coordinates are normalized
   <span class="pill">[0,1]</span> over the WDA window
-  (<code>0,0</code> = top-left, <code>1,1</code> = bottom-right). Direct gestures are
-  atomic: use tap, long-press, swipe, or drag rather than Mirroring-era
+  (<code>0,0</code> = top-left, <code>1,1</code> = bottom-right). Gestures are
+  atomic: use tap, long-press, swipe, or drag rather than
   <code>down</code>/<code>move</code>/<code>up</code> streams.
 </p>
 
@@ -370,9 +353,9 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"mirror
   <tr><td><code>{"type":"text","text":"你好","clear":true}</code></td><td>Send Unicode to the focused field. <code>clear:true</code> best-effort clears it first.</td></tr>
   <tr><td><code>{"type":"key","name":"return"}</code></td><td>Named WDA key: <code>return</code>/<code>enter</code>, <code>escape</code>, <code>space</code>, <code>tab</code>, <code>delete</code>/<code>backspace</code>, or an arrow <code>left</code>/<code>up</code>/<code>right</code>/<code>down</code>.</td></tr>
   <tr><td><code>{"type":"keyboard"}</code></td><td>Dismiss the on-screen keyboard. <code>{"type":"key","name":"dismiss"}</code> and <code>hide</code> are aliases.</td></tr>
-  <tr><td><code>{"type":"shortcut","name":"home"}</code></td><td>Supported in direct mode through WDA. <code>{"type":"home"}</code> is also accepted.</td></tr>
+  <tr><td><code>{"type":"shortcut","name":"home"}</code></td><td>Supported through WDA. <code>{"type":"home"}</code> is also accepted.</td></tr>
   <tr><td><code>{"type":"shortcut","name":"spotlight"}</code></td><td>Supported: go Home, then tap the SpringBoard Search pill.</td></tr>
-  <tr><td><code>{"type":"shortcut","name":"switcher"}</code></td><td><strong>Unsupported in direct mode.</strong> WDA cannot synthesize the App Switcher system gesture; the request fails instead of pretending success.</td></tr>
+  <tr><td><code>{"type":"shortcut","name":"switcher"}</code></td><td><strong>Unsupported.</strong> WDA cannot synthesize the App Switcher system gesture; the request fails instead of pretending success.</td></tr>
   <tr><td><code>{"type":"back"}</code></td><td>Navigate back with an on-device left-edge swipe.</td></tr>
   <tr><td><code>{"type":"launch_app","bundle":"com.apple.Preferences"}</code></td><td>Launch/foreground an app by bundle id. A limited known-name mapping is also accepted.</td></tr>
   <tr><td><code>{"type":"picker","column":0,"value":"March"}</code></td><td>Set a WDA PickerWheel value.</td></tr>
@@ -416,7 +399,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"mirror
 </p>
 
 <p>
-  Direct mode returns <code>200</code> only after the WDA action succeeds.
+  <code>/agent/input</code> returns <code>200</code> only after the WDA action succeeds.
   <code>/agent/input</code> adds no deadline field to the action payload; the server
   applies a fixed 15-second total deadline from request receipt, including WDA mutex
   waiting and execution.
@@ -592,7 +575,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"mirror
 
 <h3><span class="method post">POST</span> <span class="ep">/control</span> <span class="muted">(browser)</span></h3>
 <p>
-  The direct browser uses the same WDA dispatcher through a separate cookie-authenticated
+  The browser uses the same WDA dispatcher through a separate cookie-authenticated
   endpoint. Requests must include <code>X-Phone-Control: 1</code>; successful commands
   return only <code>{"ok":true}</code>. Every message must also include a positive
   <code>ttl_ms</code> from 1 through 2500; optional <code>issued_at_ms</code> is audit
@@ -601,15 +584,10 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"mirror
   transitions are explicit HTTP errors, so the UI must not clear input or show success
   until the response is successful.
 </p>
-<p class="muted">
-  This route exists only for <code>backend:"direct"</code>. A daemon configured with
-  <code>PHONE_REMOTE_BACKEND=mirror</code> returns <code>409</code> because the legacy
-  browser uses its WebRTC data channel.
-</p>
 
-<h3>Direct delivery outcomes and retry safety</h3>
+<h3>Delivery outcomes and retry safety</h3>
 <p>
-  <code>/control</code>, Direct <code>/agent/input</code>, and every mutation step
+  <code>/control</code>, <code>/agent/input</code>, and every mutation step
   inside <code>/agent/actions</code> use at-most-once delivery semantics. A deadline
   does not automatically mean the action failed:
 </p>
@@ -649,23 +627,17 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"mirror
 </p>
 <p class="muted">
   The daemon allows at most four simultaneous live streams. A missing MJPEG endpoint
-  returns <code>503</code>; upstream connection/stream failure is an error, not a switch
-  to legacy WebRTC. Each open stream increments both <code>viewer_count</code> and
-  <code>mjpeg_viewer_count</code>; only the latter excludes legacy <code>/ws</code>
-  viewers.
+  returns <code>503</code>; upstream connection/stream failure is an explicit error. Each
+  open stream increments both <code>viewer_count</code> and
+  <code>mjpeg_viewer_count</code>.
 </p>
 
 <h3><span class="method get">GET</span> <span class="ep">/agent/screenshot</span></h3>
 <p>
-  Returns a validated <code>image/png</code> of the selected phone. In direct backend this
-  is <strong>WDA-only</strong>: if WDA is down or returns an invalid frame, the endpoint
-  returns an error and does not capture iPhone Mirroring or the Mac screen. An invalid
+  Returns a validated <code>image/png</code> of the selected phone, read from WDA: if WDA
+  is down or returns an invalid frame, the endpoint returns an error. An invalid
   PNG, WDA error, or timeout immediately revokes cached actionability before the response
   returns.
-</p>
-<p class="muted">
-  The explicit mirror backend does not construct WDA. Its screenshot path captures the
-  Mirroring window only; <code>PHONE_REMOTE_WDA_URL</code> is ignored there.
 </p>
 
 <h3><span class="method get">GET</span> <span class="ep">/agent/elements</span></h3>
@@ -720,10 +692,8 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"mirror
   and atomically clears the queue. Bounded ring buffer (64), oldest dropped.
 </p>
 <aside class="note">
-  The current Shortcuts launcher depends on Spotlight, clipboard/key events, and the
-  Mac-side Mirroring path. The inbox endpoint remains available, but the bridge itself is
-  <strong>legacy <code>PHONE_REMOTE_BACKEND=mirror</code> functionality</strong>, not a
-  promised direct/WDA capability.
+  The inbox endpoint remains available, but launching the Shortcuts bridge from the agent
+  side is not a promised WDA capability; treat the bridge as legacy.
 </aside>
 
 <h2>Example — a see-decide-act loop</h2>
@@ -732,15 +702,15 @@ PW=&lt;password&gt;
 AUTH="Authorization: Bearer $PW"
 MUTATION="X-Phone-Control: 1"
 
-# 1. require the configured direct target to be actionable
+# 1. require the configured target to be actionable
 curl -s -H "$AUTH" "$HOST/agent/status"
-# continue only with backend=direct, wda_actionable=true, drivable=true
+# continue only with wda_actionable=true, drivable=true
 curl -s -H "$AUTH" "$HOST/agent/elements"
 
 # 2. see
 curl -s -H "$AUTH" "$HOST/agent/screenshot" -o screen.png
 
-# 3. act — Home and Spotlight are supported by direct WDA
+# 3. act — Home and Spotlight are supported by WDA
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"shortcut","name":"home"}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"shortcut","name":"spotlight"}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"text","text":"Notes"}'
@@ -749,14 +719,12 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scrol
 
 <h2>Behaviour notes</h2>
 <aside class="note">
-  <strong>No Mac cursor in direct mode.</strong> WDA synthesizes input on the phone. The
-  shared-cursor lease and <code>X-Yield-To-Human</code> behavior apply only to the explicit
-  legacy mirror backend.
+  <strong>No Mac cursor.</strong> WDA synthesizes input on the phone; the Mac's screen,
+  cursor, and focus are never touched.
 </aside>
 <aside class="note">
-  <strong>Unicode text in direct mode.</strong> WDA sends text through
-  <code>/wda/keys</code>, so CJK does not take the legacy Mac-keycode/Pinyin path. The
-  US-keycode/IME caveat remains relevant only to mirror compatibility input.
+  <strong>Unicode text.</strong> WDA sends text through <code>/wda/keys</code>, so CJK
+  text is typed as-is rather than through keycodes and the phone's input method.
 </aside>
 <aside class="note">
   <strong>Video and screenshots are distinct health layers.</strong>
@@ -765,24 +733,24 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scrol
   actionable — keep gating actions on status.
 </aside>
 <aside class="note">
-  <strong>System-command boundary.</strong> Direct supports Home, Spotlight, Back, keyboard
-  dismissal, and the documented named keys. App Switcher is unsupported. Shortcuts bridge,
-  Control Center, and other Mac/Mirroring-specific automation remain legacy until they gain
-  a device-side implementation and hardware acceptance.
+  <strong>System-command boundary.</strong> WDA supports Home, Spotlight, Back, keyboard
+  dismissal, and the documented named keys. App Switcher is unsupported. Launching the
+  Shortcuts bridge, Control Center, and other system gestures are out of scope until they
+  gain a device-side implementation and hardware acceptance.
 </aside>
 
 <h2>Live acceptance boundary</h2>
 <p>
   Source/tests and a <code>200</code> status response are not physical-device proof. Before
-  shipping a direct integration, verify on the intended iPhone that:
+  shipping an integration, verify on the intended iPhone that:
 </p>
 <ol>
-  <li>the daemon runs without iPhone Mirroring, Screen Recording, or Accessibility;</li>
+  <li>the daemon runs without any macOS permission grant and never touches the Mac's screen or cursor;</li>
   <li>status identifies the pinned device and reports actionable/drivable WDA;</li>
   <li>managed recovery reports <code>releasing → released → reconnecting → ready</code>, while an external endpoint remains owned by <code>recovery_owner:"external"</code>;</li>
   <li>MJPEG updates continuously and a stopped 9100 relay is reported as failure;</li>
   <li>tap, long-press, swipe, drag, both scroll directions, CJK text, named keys, Home, and Spotlight each land once;</li>
-  <li>Switcher fails honestly, WDA loss never moves the Mac cursor, and direct screenshot never returns mirror pixels;</li>
+  <li>Switcher fails honestly and WDA loss is reported as an error, never as a stale or substitute frame;</li>
   <li>lock/unlock, USB reconnect, daemon/Mac restart, and a multi-device host recover the same canonical target;</li>
   <li>8100/9100 exposure is measured on an isolated network rather than assumed safe because the Mac relay is loopback-only.</li>
 </ol>

@@ -2,8 +2,8 @@
 
 MCP stdio server that wraps the `iphone-use` daemon's agent HTTP API,
 giving MCP clients (Claude Desktop, Claude Code, etc.) native tool access
-to a real iPhone. The default Direct backend uses WebDriverAgent on the phone;
-the old iPhone Mirroring path is an explicit compatibility backend.
+to a real iPhone. The daemon drives the phone through WebDriverAgent running
+on it.
 
 ## Prerequisites
 
@@ -340,7 +340,6 @@ branch on rather than in prose:
 | `outcome` | `retry_safe` | When |
 |---|---|---|
 | *(absent — success)* | — | The daemon confirmed the action with `ok:true` |
-| `acknowledged` | — | Legacy plain-text `ok` from the Mirror backend: the event was dispatched, `verified:false`, that backend cannot report what happened on screen |
 | `not_sent` | `true` | Nothing was sent — either refused locally (e.g. an empty `snapshot`) or reported as such by the daemon. Either source is valid evidence; the `retry_safe` boolean is what makes it actionable |
 | *(from the daemon)* | *(from the daemon)* | An explicit refusal — an object saying `ok:false` — keeps its own fields, including its own `retry_safe` |
 | `unknown` | `false` | Everything else: an unparseable or oversized body, a non-JSON error page, a dropped connection |
@@ -363,7 +362,7 @@ took effect.
 ## Typical session flow
 
 0. `phone_flow_list()` — if a registry flow already does the task, `phone_flow_run(id)` and skip the rest
-1. `phone_status()` — confirm `ok=true` and `drivable=true` (Direct does not use the legacy `phone_target` field)
+1. `phone_status()` — confirm `ok=true` and `drivable=true`
 2. `phone_elements()` — inspect semantic controls and keep its snapshot token
 3. `phone_tap_element(element, snapshot)` — tap the chosen row; refresh if the snapshot is stale
 4. Use `phone_screenshot()` + `phone_tap(x, y)` only for pixel-only controls

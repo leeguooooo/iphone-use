@@ -3,7 +3,7 @@
 locale: en
 slug: iphone-use
 title: iphone-use — Computer-use, but for the iPhone
-summary: Open-source Direct/WDA control for a real iPhone: live WDA MJPEG, acknowledged HTTP control, and an Agent API. Mirror/WebRTC is explicit legacy compatibility.
+summary: Open-source Direct/WDA control for a real iPhone: live WDA MJPEG, acknowledged HTTP control, and an Agent API that never touches the Mac's screen or cursor.
 renderMode: raw
 section: editorial
 tags: [iphone-use, agent, computer-use, ios, open-source]
@@ -18,7 +18,7 @@ repoUrl: https://github.com/leeguooooo/iphone-use
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>iphone-use — Computer-use, but for the iPhone</title>
-<meta name="description" content="Open-source Direct/WDA control for a real iPhone: live WDA MJPEG, acknowledged HTTP control, and an Agent API. Mirror/WebRTC is explicit legacy compatibility.">
+<meta name="description" content="Open-source Direct/WDA control for a real iPhone: live WDA MJPEG, acknowledged HTTP control, and an Agent API that never touches the Mac's screen or cursor.">
 <link rel="icon" href="https://raw.githubusercontent.com/leeguooooo/iphone-use/main/assets/icon-1024.png">
 <style>
   :root {
@@ -186,17 +186,17 @@ repoUrl: https://github.com/leeguooooo/iphone-use
 
   <section class="hero">
     <div>
-      <div class="kicker">Open source · Direct/WDA default · Rust</div>
+      <div class="kicker">Open source · Direct/WDA · Rust</div>
       <h1>
         Let agents drive<br>a real iPhone directly
         <span class="en">Direct device control, with honest failure.</span>
       </h1>
       <p class="lede">
-        The default backend runs <strong>WebDriverAgent</strong> on the phone. Browsers
+        <strong>WebDriverAgent</strong> runs on the phone. Browsers
         watch its live MJPEG stream and control it through acknowledged HTTP requests;
-        agents use the same pinned device's element, screenshot, and input APIs. iPhone
-        Mirroring, WebRTC, TURN, and the Mac cursor belong only to the explicit
-        <code>PHONE_REMOTE_BACKEND=mirror</code> compatibility backend.
+        agents use the same pinned device's element, screenshot, and input APIs. All of
+        it happens on the phone: the Mac's screen, cursor, and focus stay untouched, and
+        no macOS privacy permission is needed.
       </p>
       <div class="cta-row">
         <a class="btn primary" href="https://github.com/leeguooooo/iphone-use">GitHub ↗</a>
@@ -228,19 +228,19 @@ repoUrl: https://github.com/leeguooooo/iphone-use
     </div>
     <p class="sec-lede">You need full Xcode, an Apple development team, iPhone Developer Mode, pairing/trust, an unlocked and awake phone, and <code>iproxy</code>. The normal path requires USB and does not auto-switch to Wi-Fi or <code>socat</code>.</p>
     <p class="sec-lede">The app is checked against the corresponding Release asset SHA-256; helpers and skill use the tag's exact commit. Skill fetch, validation, discovery-link, or installation failure aborts before daemon replacement; a later daemon failure restores the previous skill. Piping into <code>IPHONE_USE_SKIP_SKILL=1 sh</code> is an explicit degraded opt-out, and makes no daemon/skill compatibility claim.</p>
-    <p class="sec-lede">On upgrade, an older plist with no backend key but a valid loopback WDA URL migrates to Direct. Only a legacy install with no WDA configuration stays on Mirror; an explicit backend remains unchanged.</p>
+    <p class="sec-lede">Since v0.9 WDA is the only path; installs that had <code>PHONE_REMOTE_BACKEND=mirror</code> are served over WDA after upgrading.</p>
   </section>
 
   <section id="layers">
     <h2>The Direct path</h2>
     <p class="sec-lede">
-      Video, control, and recovery stay attached to one persisted target. If WDA is unavailable, the request fails; the daemon does not silently switch to Mirroring or move the Mac cursor.
+      Video, control, and recovery stay attached to one persisted target. If WDA is unavailable, the request fails with a reason; the daemon never quietly takes another route.
     </p>
     <div class="layers">
       <div class="layer">
         <div class="tag">VIDEO · 9100</div>
         <h3>Live WDA MJPEG</h3>
-        <p>The daemon proxies the phone's port 9100 stream at <code>/agent/mjpeg</code>. A broken stream reports failure or a visible degradation; it never switches to legacy WebRTC.</p>
+        <p>The daemon proxies the phone's port 9100 stream at <code>/agent/mjpeg</code>. A broken stream reports failure; <code>/agent/screenshot</code> stills remain as a fallback.</p>
       </div>
       <div class="layer hot">
         <div class="tag">CONTROL · 8100</div>
@@ -256,13 +256,9 @@ repoUrl: https://github.com/leeguooooo/iphone-use
   </section>
 
   <section>
-    <h2>CJK input: clean vs mangled</h2>
+    <h2>CJK input: Unicode, straight to the field</h2>
     <p class="sec-lede">These are component-level records from the same phone. They prove WDA Unicode input works, not that the whole Direct browser path has passed acceptance.</p>
-    <div class="versus">
-      <div class="vs-card vs-bad">
-        <span class="lbl">Legacy mirror keycodes: consumed by the Pinyin IME</span>
-        我爱上 typed 不要按 AI阿根廷鸥鸟啊 real iPh…
-      </div>
+    <div class="versus" style="grid-template-columns: 1fr;">
       <div class="vs-card vs-good">
         <span class="lbl">Direct/WDA: Unicode sent to the field</span>
         你好世界！This note was entered directly through WDA.
@@ -297,9 +293,9 @@ repoUrl: https://github.com/leeguooooo/iphone-use
     <div class="grid">
       <div class="cell"><h3>WDA is a default dependency</h3><p>Direct requires complete WDA setup. A running daemon alone is not proof that video or control works.</p></div>
       <div class="cell"><h3>Acknowledged HTTP control</h3><p><code>/control</code> and <code>/agent/input</code> do not confuse “accepted” with “executed.” On <code>504 outcome_unknown</code>, inspect the screen/status and never replay blindly.</p></div>
-      <div class="cell"><h3>Elements and Unicode</h3><p><code>/agent/elements</code> exposes the phone accessibility tree; WDA sends text without the Mac keycode path.</p></div>
-      <div class="cell"><h3>No Direct TCC identity</h3><p>The installer preserves a valid signature and applies ad-hoc signing only when needed. Stable TCC identity exists only for legacy mirror.</p></div>
-      <div class="cell"><h3>Mirror is compatibility</h3><p>Only explicit <code>PHONE_REMOTE_BACKEND=mirror</code> enables ScreenCaptureKit, WebRTC, TURN, CGEvent, and their TCC permissions.</p></div>
+      <div class="cell"><h3>Elements and Unicode</h3><p><code>/agent/elements</code> exposes the phone's element tree; WDA sends text straight into the field, so the Pinyin IME cannot swallow it.</p></div>
+      <div class="cell"><h3>Hands off the Mac</h3><p>Video and input both go through WDA on the phone. The daemon never reads the Mac's screen, moves its cursor, or steals focus, and needs no macOS privacy permission.</p></div>
+      <div class="cell"><h3>Hand-back and idle release</h3><p><code>POST /agent/mode {"mode":"human"}</code> stops WDA and gives the phone back to whoever holds it. After 600 idle seconds WDA stops on its own; the next agent request brings it back up.</p></div>
       <div class="cell"><h3>Layered hardware evidence</h3><p>WDA components have records. Installer, MJPEG, browser gestures, recovery, and multi-device behavior still need the <a href="https://github.com/leeguooooo/iphone-use/tree/main/docs">full acceptance run</a>.</p></div>
     </div>
   </section>

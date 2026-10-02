@@ -3,7 +3,7 @@
 locale: zh
 slug: iphone-use
 title: iphone-use — 把 computer-use 搬到 iPhone 上
-summary: 开源的真实 iPhone Direct/WDA 控制层：WDA MJPEG 实时画面、HTTP 确认式控制和 Agent API。Mirror/WebRTC 仅为显式兼容后端。
+summary: 开源的真实 iPhone Direct/WDA 控制层：WDA MJPEG 实时画面、HTTP 确认式控制和 Agent API，不碰 Mac 的屏幕和光标。
 renderMode: raw
 section: editorial
 tags: [iphone-use, agent, computer-use, ios, open-source]
@@ -18,7 +18,7 @@ repoUrl: https://github.com/leeguooooo/iphone-use
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>iphone-use — 把 computer-use 搬到 iPhone 上</title>
-<meta name="description" content="开源的真实 iPhone Direct/WDA 控制层：WDA MJPEG 实时画面、HTTP 确认式控制和 Agent API。Mirror/WebRTC 仅为显式兼容后端。">
+<meta name="description" content="开源的真实 iPhone Direct/WDA 控制层：WDA MJPEG 实时画面、HTTP 确认式控制和 Agent API，不碰 Mac 的屏幕和光标。">
 <link rel="icon" href="https://raw.githubusercontent.com/leeguooooo/iphone-use/main/assets/icon-1024.png">
 <style>
   :root {
@@ -186,16 +186,16 @@ repoUrl: https://github.com/leeguooooo/iphone-use
 
   <section class="hero">
     <div>
-      <div class="kicker">Open source · Direct/WDA default · Rust</div>
+      <div class="kicker">Open source · Direct/WDA · Rust</div>
       <h1>
         让 agent 直接操作<br>真实 iPhone
         <span class="en">Direct device control, with honest failure.</span>
       </h1>
       <p class="lede">
-        默认后端在手机上运行 <strong>WebDriverAgent</strong>：浏览器通过 WDA MJPEG
+        手机上运行 <strong>WebDriverAgent</strong>：浏览器通过 WDA MJPEG
         看实时画面，通过有确认响应的 HTTP 请求操作手机；agent 使用同一台目标设备的
-        元素树、截图和输入 API。iPhone 镜像、WebRTC、TURN 和 Mac 光标只属于显式
-        <code>PHONE_REMOTE_BACKEND=mirror</code> 兼容模式。
+        元素树、截图和输入 API。整个过程都在手机上完成，不占用 Mac 的屏幕、光标和焦点，
+        也不需要任何 macOS 隐私权限。
       </p>
       <div class="cta-row">
         <a class="btn primary" href="https://github.com/leeguooooo/iphone-use">GitHub ↗</a>
@@ -227,19 +227,19 @@ repoUrl: https://github.com/leeguooooo/iphone-use
     </div>
     <p class="sec-lede">需要完整 Xcode、Apple 开发团队、iPhone 开发者模式、配对/信任、解锁亮屏和 <code>iproxy</code>。普通路径使用 USB，不会自动切换 Wi-Fi 或 <code>socat</code>。</p>
     <p class="sec-lede">app 会校验对应 Release asset 的 SHA-256；helper 与 skill 使用 tag 的确定 commit。skill 下载、校验、发现链接或安装失败会在替换 daemon 前中止；后续 daemon 失败则恢复旧 skill。管道末端明确使用 <code>IPHONE_USE_SKIP_SKILL=1 sh</code> 才会跳过；这是降级选项，不代表 daemon 与现有 skill 兼容。</p>
-    <p class="sec-lede">升级时，旧 plist 虽没有 backend 字段，但已有有效 loopback WDA URL，会迁移到 Direct；只有完全没有 WDA 配置的旧安装才保留 Mirror。显式 backend 不变。</p>
+    <p class="sec-lede">从 v0.9 起只剩 WDA 这一条路径；以前设置过 <code>PHONE_REMOTE_BACKEND=mirror</code> 的安装，升级后同样改由 WDA 提供服务。</p>
   </section>
 
   <section id="layers">
     <h2>Direct 主路径</h2>
     <p class="sec-lede">
-      画面、控制和恢复都围绕同一个持久化目标。WDA 不可用时请求失败，不会暗中改走镜像或移动 Mac 光标。
+      画面、控制和恢复都围绕同一个持久化目标。WDA 不可用时请求直接失败并说明原因，不会悄悄换一条路。
     </p>
     <div class="layers">
       <div class="layer">
         <div class="tag">VIDEO · 9100</div>
         <h3>WDA MJPEG 实时画面</h3>
-        <p>daemon 把手机端 9100 流代理到 <code>/agent/mjpeg</code>。断流会显式报错或降级，不会切到 legacy WebRTC。</p>
+        <p>daemon 把手机端 9100 流代理到 <code>/agent/mjpeg</code>。断流会显式报错，也可以退回 <code>/agent/screenshot</code> 静态截图。</p>
       </div>
       <div class="layer hot">
         <div class="tag">CONTROL · 8100</div>
@@ -255,13 +255,9 @@ repoUrl: https://github.com/leeguooooo/iphone-use
   </section>
 
   <section>
-    <h2>中文输入：直通与乱码</h2>
+    <h2>中文输入：Unicode 直送</h2>
     <p class="sec-lede">下面是同一台手机上的组件级真机记录。它证明 WDA Unicode 输入可行，不代表 Direct 浏览器整条链路已经验收。</p>
-    <div class="versus">
-      <div class="vs-card vs-bad">
-        <span class="lbl">Legacy mirror 键码路径：被拼音输入法吞掉</span>
-        我爱上 typed 不要按 AI阿根廷鸥鸟啊 real iPh…
-      </div>
+    <div class="versus" style="grid-template-columns: 1fr;">
       <div class="vs-card vs-good">
         <span class="lbl">Direct/WDA：Unicode 直送输入框</span>
         你好世界！这条备忘录由 iphone-use 通过 WDA 直接输入。
@@ -296,9 +292,9 @@ repoUrl: https://github.com/leeguooooo/iphone-use
     <div class="grid">
       <div class="cell"><h3>WDA 是默认依赖</h3><p>Direct 需要完整的 WDA setup。只有 daemon 启动，不等于画面和控制已经可用。</p></div>
       <div class="cell"><h3>HTTP 确认式控制</h3><p><code>/control</code> 和 <code>/agent/input</code> 不把“已接收”冒充“已执行”。遇到 <code>504 outcome_unknown</code>，先看画面/状态，不能盲目重发。</p></div>
-      <div class="cell"><h3>元素与 Unicode</h3><p><code>/agent/elements</code> 返回手机辅助功能树；文字由 WDA 送入输入框，不经过 Mac 键码。</p></div>
-      <div class="cell"><h3>Direct 不申请 TCC</h3><p>安装器保留已有有效签名；无有效签名时才 ad-hoc 签名。稳定 TCC 身份只服务于 legacy mirror。</p></div>
-      <div class="cell"><h3>Mirror 是兼容后端</h3><p>只有显式设置 <code>PHONE_REMOTE_BACKEND=mirror</code> 才启用 ScreenCaptureKit、WebRTC、TURN、CGEvent 与对应 TCC 权限。</p></div>
+      <div class="cell"><h3>元素与 Unicode</h3><p><code>/agent/elements</code> 返回手机上的元素树；文字由 WDA 直接送进输入框，拼音输入法不会吞字。</p></div>
+      <div class="cell"><h3>不碰 Mac</h3><p>画面和输入都走手机上的 WDA，不读 Mac 屏幕、不动光标、不抢焦点，也不用在 macOS 里授予屏幕录制或辅助功能权限。</p></div>
+      <div class="cell"><h3>交还与空闲释放</h3><p><code>POST /agent/mode {"mode":"human"}</code> 停掉 WDA，把手机还给拿着它的人；空闲 600 秒后 WDA 也会自动停下，下一个 agent 请求再把它拉起来。</p></div>
       <div class="cell"><h3>真机证据分层</h3><p>已有 WDA 组件记录；安装器、MJPEG、浏览器手势、恢复和多设备整链路仍须按<a href="https://github.com/leeguooooo/iphone-use/tree/main/docs">验收文档</a>实测。</p></div>
     </div>
   </section>

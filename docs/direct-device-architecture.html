@@ -508,14 +508,14 @@
       <p class="eyebrow">iphone-use / Architecture &amp; Acceptance</p>
       <h1>Direct Device 架构与真机验收</h1>
       <p class="lede">
-        当前默认链路是 WebDriverAgent 输入与 WDA MJPEG 画面。浏览器通过守护进程控制手机，
-        不读取 Mac 屏幕，也不向 Mac 注入事件。本文记录现有实现、迁移步骤和可执行验收条件。
+        链路只有一条：WebDriverAgent 输入加 WDA MJPEG 画面。浏览器通过守护进程控制手机，
+        不读取 Mac 屏幕，也不向 Mac 注入事件。本文记录现有实现、接入顺序和可执行的验收条件。
       </p>
       <div class="meta" aria-label="文档状态">
         <span class="badge primary">Phase 1 · 已实现，待逐机验收</span>
         <span class="badge">Phase 2 · 研究闸门，未实现</span>
         <span class="badge">工作树基线 · 2026-07-28</span>
-        <span class="badge">默认 backend · direct</span>
+        <span class="badge">backend · direct</span>
       </div>
     </div>
   </header>
@@ -528,7 +528,7 @@
       <a href="#contract">控制契约</a>
       <a href="#state">状态模型</a>
       <a href="#security">安全边界</a>
-      <a href="#migration">迁移顺序</a>
+      <a href="#setup">接入顺序</a>
       <a href="#lifecycle">安装与生命周期</a>
       <a href="#acceptance">真机验收矩阵</a>
       <a href="#commands">现场检查命令</a>
@@ -541,9 +541,9 @@
       <section id="decision">
         <h2>决策边界</h2>
         <div class="decision">
-          <strong>Direct 失败时不得退回 Mirroring。</strong>
-          WDA 不可用、请求无效或设备已释放时，服务返回失败；Mac 侧的 ScreenCaptureKit、
-          CGEvent 和 iPhone Mirroring 路径保持关闭。
+          <strong>WDA 不可用就如实失败。</strong>
+          WDA 不可用、请求无效或设备已释放时，服务直接返回失败并说明原因；
+          任何情况下都不去碰 Mac 的屏幕、光标和焦点。
         </div>
 
         <div class="table-wrap">
@@ -557,8 +557,8 @@
             </thead>
             <tbody>
               <tr>
-                <td>默认后端</td>
-                <td><code>direct</code>。服务端遇到未设置或未知值也选 direct；安装器遇到未知值会直接报错。</td>
+                <td>后端</td>
+                <td><code>direct</code>，也是唯一的后端。</td>
                 <td><code>/agent/status.backend == "direct"</code>，启动日志写出 <code>backend: direct</code>。</td>
               </tr>
               <tr>
@@ -567,9 +567,9 @@
                 <td><code>127.0.0.1:8100/status</code> 可用；<code>/agent/mjpeg</code> 持续返回 multipart 帧；控制请求收到 ACK。</td>
               </tr>
               <tr>
-                <td>旧路径</td>
-                <td>只有显式设置 <code>PHONE_REMOTE_BACKEND=mirror</code> 才启用 legacy Mirroring。</td>
-                <td>Direct 模式不启动 TCC preflight、AppKit、ScreenCaptureKit pipeline 或 CGEvent injector。</td>
+                <td>Mac 侧</td>
+                <td>daemon 不读 Mac 屏幕、不向 Mac 注入事件，也不需要任何 macOS 隐私权限。</td>
+                <td>安装、启动和使用全程不出现系统权限弹窗；Mac 光标与焦点不受影响。</td>
               </tr>
               <tr>
                 <td>Phase 2</td>
@@ -625,7 +625,7 @@
             </div>
           </div>
           <div class="boundary">
-            Direct 的 Mac 侧边界：NullPipeline + null injector；不枚举 Mirroring 窗口，不抓 Mac 屏幕，不移动 Mac 光标，不请求 Screen Recording 或 Accessibility。
+            Mac 侧边界：不抓 Mac 屏幕，不移动 Mac 光标，不抢焦点，不请求任何 macOS 隐私权限。
           </div>
         </figure>
 
@@ -644,59 +644,15 @@
           <article class="card">
             <h3>控制</h3>
             <p>
-              Direct 浏览器不建立 <code>/ws</code>、RTCPeerConnection 或 WebRTC data channel。
-              每个完整手势在 pointer-up 后变成一次 HTTP 请求。
+              浏览器不保持长连接控制通道。每个完整手势在 pointer-up 后变成一次 HTTP 请求。
             </p>
             <p>
               tap、longpress、swipe、drag、text、key、keyboard、Home、Back 和 Spotlight
-              走 WDA。Mirroring 时代的连续 down/move/up 协议在 direct 中不接受。
+              走 WDA。服务端不接受逐点发送的 down/move/up 流。
             </p>
           </article>
         </div>
 
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>维度</th>
-                <th>Direct（默认）</th>
-                <th>Mirror（兼容模式）</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>选择方式</td>
-                <td>未设置、<code>direct</code> 或服务端未知值</td>
-                <td>仅支持显式 <code>PHONE_REMOTE_BACKEND=mirror</code></td>
-              </tr>
-              <tr>
-                <td>画面</td>
-                <td>WDA MJPEG；失败后 WDA PNG 降级</td>
-                <td>ScreenCaptureKit → VideoToolbox H.264 → WebRTC</td>
-              </tr>
-              <tr>
-                <td>输入</td>
-                <td><code>POST /control</code> → WDA action</td>
-                <td>WebRTC data channel → CGEvent</td>
-              </tr>
-              <tr>
-                <td>Mac 权限</td>
-                <td>不需要 Screen Recording / Accessibility</td>
-                <td>两项 TCC 都需要</td>
-              </tr>
-              <tr>
-                <td>失败行为</td>
-                <td>返回 4xx/503；不碰 Mac</td>
-                <td>只在用户明确选择后维持旧逻辑</td>
-              </tr>
-              <tr>
-                <td>App Switcher</td>
-                <td>不支持</td>
-                <td>保留旧 L3 shortcut</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
       </section>
 
       <section id="contract">
@@ -725,7 +681,7 @@
               <tr>
                 <td><code>400</code></td>
                 <td><code>invalid_control_message</code></td>
-                <td>body 不是对象或消息结构无效。不得重试成其他 backend。</td>
+                <td>body 不是对象或消息结构无效。修正请求，不要原样重试。</td>
               </tr>
               <tr>
                 <td><code>401</code></td>
@@ -739,8 +695,8 @@
               </tr>
               <tr>
                 <td><code>409</code></td>
-                <td><code>legacy_mirror_uses_webrtc</code></td>
-                <td>当前是 mirror。HTTP direct endpoint 不接管旧 data channel。</td>
+                <td><code>phone_owned</code></td>
+                <td>另一个会话持有这台手机的租约。等租约到期，不要静默抢占。</td>
               </tr>
               <tr>
                 <td><code>422</code></td>
@@ -750,7 +706,7 @@
               <tr>
                 <td><code>503</code></td>
                 <td><code>released</code>、<code>wda_not_configured</code> 或 <code>wda_unavailable</code></td>
-                <td>停止成功提示。released 由用户点“重新连接”；其余检查 WDA runner、relay、锁屏与签名。</td>
+                <td>停止成功提示。released 由用户点「连接手机」；其余检查 WDA runner、relay、锁屏与签名。</td>
               </tr>
             </tbody>
           </table>
@@ -784,8 +740,8 @@
             <tbody>
               <tr>
                 <td>backend</td>
-                <td><code>backend: direct | mirror</code></td>
-                <td>进程启动时确定，健康探测抖动不会改变。浏览器取不到 status 时默认 direct，并停止 mirror transport。</td>
+                <td><code>backend: direct</code></td>
+                <td>固定值，不随健康探测变化。</td>
                 <td><code>direct</code> 不代表 WDA 或画面在线。</td>
               </tr>
               <tr>
@@ -837,7 +793,7 @@
                 <td>released</td>
                 <td>不作为画面证据</td>
                 <td>503 released</td>
-                <td>显示“手机已交还给你”，由用户重新连接。</td>
+                <td>显示「连接手机」，由用户重新连接。</td>
               </tr>
               <tr>
                 <td><code>wda_actionable=true</code></td>
@@ -851,7 +807,7 @@
                 <td>locked</td>
                 <td>waiting</td>
                 <td>503 或动作失败</td>
-                <td>要求解锁并保持唤醒，不退回 Mirroring。</td>
+                <td>要求解锁并保持唤醒。</td>
               </tr>
               <tr>
                 <td><code>wda=true</code>，但不可操作</td>
@@ -865,7 +821,7 @@
                 <td>offline</td>
                 <td>offline</td>
                 <td>503</td>
-                <td>检查 WDA、8100/9100 relay 与签名，不启动 mirror。</td>
+                <td>检查 WDA、8100/9100 relay 与签名。</td>
               </tr>
             </tbody>
           </table>
@@ -886,13 +842,8 @@
             <tbody>
               <tr>
                 <td>Mac 权限</td>
-                <td>Direct 不调用 TCC preflight，不加载 AppKit，不构造 ScreenCaptureKit pipeline 或 CGEvent sink。</td>
-                <td>任何 direct 启动中的 Screen Recording / Accessibility 提示都算回归。</td>
-              </tr>
-              <tr>
-                <td>后端选择</td>
-                <td>只有 <code>PHONE_REMOTE_BACKEND=mirror</code> 可进入 legacy。状态读取失败时，web client 留在 direct。</td>
-                <td>不得因 WDA、MJPEG、status 或控制失败而自动切换。</td>
+                <td>daemon 不读 Mac 屏幕，不向 Mac 注入键鼠事件。</td>
+                <td>启动或使用中出现任何 macOS 隐私权限提示都算回归。</td>
               </tr>
               <tr>
                 <td>WDA 暴露面</td>
@@ -918,7 +869,7 @@
               </tr>
               <tr>
                 <td>空闲释放</td>
-                <td>默认空闲窗口后停止 WDA，把手机交还用户；有 live stream 时不释放。</td>
+                <td>默认空闲 600 秒后停止 WDA，把手机交还用户（<code>PHONE_REMOTE_IDLE_RELEASE_SECS</code>，0 表示一直保持）；有 live stream 时不释放。下一个 agent 请求会重新拉起 WDA。</td>
                 <td>released 状态下控制必须 503，不能在后台悄悄重启或注入。</td>
               </tr>
               <tr>
@@ -934,29 +885,20 @@
         </div>
       </section>
 
-      <section id="migration">
-        <h2>从 Mirroring 迁移到 Direct</h2>
-        <p>
-          安装器会保留现有 plist 中的 backend。旧安装已经写入 mirror 时，仅重跑安装命令不会迁移；
-          必须显式传入 direct。
-        </p>
+      <section id="setup">
+        <h2>接入顺序</h2>
 
         <ol class="sequence">
-          <li>
-            <b>记录回滚点</b>
-            记录当前 release、backend、端口、设备 UDID 和两条 launchd label。密码与 token 只确认“存在”，不要复制进文档。
-          </li>
           <li>
             <b>准备目标设备</b>
             在 Xcode 登录 Apple ID；完成配对、Developer Mode 和开发者信任。第一次设置保持 USB、解锁和亮屏，并明确
             <code>WDA_UDID</code>，避免多设备自动选择。
           </li>
           <li>
-            <b>显式安装 direct</b>
-            <pre><code>PHONE_REMOTE_BACKEND=direct \
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh</code></pre>
+            <b>安装 daemon</b>
+            <pre><code>curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh</code></pre>
             安装器会停止旧 daemon、保留密码和受支持的配置，并写入 loopback WDA endpoints。WDA 尚未验证时，
-            direct daemon 仍启动其 HTTP/登录/状态控制面，但明确报告设备层 offline；不会假装 WDA 已就绪。
+            daemon 仍启动其 HTTP/登录/状态控制面，但明确报告设备层 offline；不会假装 WDA 已就绪。
           </li>
           <li>
             <b>建立 WDA 与两条 relay</b>
@@ -969,26 +911,10 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.
           </li>
           <li>
             <b>跑完真机矩阵</b>
-            至少验证无 TCC、无 Mirroring、实时画面、文字、tap、longpress、swipe、Home、Spotlight、锁屏、
-            idle release、重连和卸载。Switcher 按“已知不支持”验收。
-          </li>
-          <li>
-            <b>关闭旧权限</b>
-            Direct 证据完整后，再在系统设置撤销 iPhoneUse 的 Screen Recording 与 Accessibility。
-            撤权后重跑一遍 direct 启动、画面和控制，证明旧权限不是隐性依赖。
+            至少验证 Mac 不受影响、实时画面、文字、tap、longpress、swipe、Home、Spotlight、锁屏、
+            idle release、交还与重连、卸载。Switcher 按“已知不支持”验收。
           </li>
         </ol>
-
-        <h3>回滚到 mirror</h3>
-        <p>
-          回滚是人工选择，不是运行时 fallback。先停 WDA supervisor、runner 和 relay，再显式安装 mirror：
-        </p>
-        <pre><code>~/.iphone-use/setup-wda.sh stop
-PHONE_REMOTE_BACKEND=mirror \
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh</code></pre>
-        <p class="small">
-          回滚后重新授予并验证 Screen Recording 与 Accessibility。仅看到 daemon loaded 不算回滚完成。
-        </p>
       </section>
 
       <section id="lifecycle">
@@ -1009,22 +935,22 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.
                 <td>
                   由已登录的 GUI 用户执行，不用 root。准备 Xcode/Apple ID、配对、Developer Mode、
                   <code>iproxy</code>。支持路径只用 USB loopback，不自动回退 Wi‑Fi 或
-                  <code>socat</code>。默认写入 direct 与受管 loopback endpoints。
+                  <code>socat</code>。写入受管 loopback endpoints。
                 </td>
-                <td>两个 LaunchAgent 状态明确；8100 可用；daemon HTTP 可用；没有 TCC 提示。</td>
+                <td>两个 LaunchAgent 状态明确；8100 可用；daemon HTTP 可用；没有 macOS 权限弹窗。</td>
               </tr>
               <tr>
                 <td>升级</td>
                 <td>
                   配置优先级保持“显式环境变量 &gt; 现有 plist &gt; 默认值”；不能轮换既有密码，不能丢失
-                  backend、UDID、WDA endpoints 或 agent token。每次升级刷新
+                  UDID、WDA endpoints 或 agent token。每次升级刷新
                   <code>~/.iphone-use/setup-wda.sh</code>。
                 </td>
-                <td>升级前后 status 中 backend/设备一致；新二进制版本正确；WDA supervisor 接管后的替代 runner 可用。</td>
+                <td>升级前后 status 中设备一致；新二进制版本正确；WDA supervisor 接管后的替代 runner 可用。</td>
               </tr>
               <tr>
                 <td>签名续期</td>
-                <td>免费 Apple ID profile 可能约 7 天到期。WDA 失效时重新运行 setup，不得切换到 mirror 掩盖问题。</td>
+                <td>免费 Apple ID profile 可能约 7 天到期。WDA 失效时重新运行 setup。</td>
                 <td>WDA app 能启动，8100 status 和 action-level probe 都成功。</td>
               </tr>
               <tr>
@@ -1090,111 +1016,104 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.
             <tbody>
               <tr>
                 <td>D01</td>
-                <td>无 Mirroring</td>
-                <td>退出 iPhone Mirroring，启动 direct。</td>
-                <td>daemon、画面、WDA 控制可用；不自动打开 Mirroring。</td>
-                <td>status JSON、进程列表、浏览器录屏。</td>
+                <td>不碰 Mac</td>
+                <td>在未授予任何 macOS 隐私权限的测试机上启动 daemon，用浏览器看和控制手机。</td>
+                <td>无权限提示；画面和 WDA 控制可用；Mac 光标、焦点和屏幕内容不受影响。</td>
+                <td>status JSON、启动日志、Mac 屏幕录像。</td>
               </tr>
               <tr>
                 <td>D02</td>
-                <td>无 TCC</td>
-                <td>在测试机撤销 Screen Recording 与 Accessibility，重启 daemon。</td>
-                <td>无权限提示；direct 仍能看和控制。</td>
-                <td>系统设置截图、启动日志、操作录像。</td>
-              </tr>
-              <tr>
-                <td>D03</td>
-                <td>默认选择</td>
-                <td>全新安装，不传 backend。</td>
-                <td><code>backend=direct</code>；安装器不打开 TCC 设置。</td>
+                <td>全新安装</td>
+                <td>在干净账户上安装并完成 setup。</td>
+                <td><code>backend=direct</code>；安装器不打开系统设置。</td>
                 <td>live plist、安装日志、status。</td>
               </tr>
               <tr>
-                <td>D04</td>
-                <td>旧安装迁移</td>
-                <td>从 persisted mirror 运行显式 direct 安装和 setup。</td>
-                <td>旧 daemon 停止；WDA 验证后新 daemon 加载；密码不变。</td>
+                <td>D03</td>
+                <td>升级</td>
+                <td>从上一个版本运行安装命令和 setup。</td>
+                <td>旧 daemon 停止；WDA 验证后新 daemon 加载；密码、UDID 与 WDA endpoints 不变。</td>
                 <td>升级前后 plist 摘要、launchctl、登录验证。</td>
               </tr>
               <tr>
-                <td>D05</td>
+                <td>D04</td>
                 <td>实时画面</td>
                 <td>在手机上持续滚动 10 秒。</td>
                 <td>MJPEG 连续更新，无周期性整屏停顿；screen 记为 live。</td>
                 <td>Safari 录屏、响应 Content-Type、接收字节增长。</td>
               </tr>
               <tr>
-                <td>D06</td>
+                <td>D05</td>
                 <td>画面降级</td>
                 <td>只中断 9100 relay，保留 8100。</td>
                 <td>约 2.5 秒 PNG 刷新；页面明确不是实时；控制仍成功。</td>
                 <td>页面录屏、9100 失败、两次不同 PNG、控制 ACK。</td>
               </tr>
               <tr>
-                <td>D07</td>
+                <td>D06</td>
                 <td>基础控制</td>
                 <td>执行 tap、longpress、swipe、drag、Home、Back、Spotlight。</td>
                 <td>每次先收到 <code>{"ok":true}</code>，手机随后出现对应变化。</td>
                 <td>请求/响应与前后画面对照。</td>
               </tr>
               <tr>
-                <td>D08</td>
+                <td>D07</td>
                 <td>文字输入</td>
                 <td>在文本框输入 ASCII、中文、emoji，再收起键盘。</td>
                 <td>字符不丢失、不重复；输入成功后才清空网页文本框。</td>
                 <td>手机结果截图、浏览器网络记录。</td>
               </tr>
               <tr>
-                <td>D09</td>
+                <td>D08</td>
                 <td>错误 ACK</td>
                 <td>未登录、删掉控制头、发送无效 JSON。</td>
                 <td>依次得到 401、403、400；页面不画成功反馈。</td>
                 <td>HTTP 状态与页面录像。</td>
               </tr>
               <tr>
-                <td>D10</td>
+                <td>D09</td>
                 <td>WDA 不可用</td>
                 <td>停 WDA supervisor 后发送控制。</td>
                 <td>503；Mac 光标、焦点、屏幕采集均无变化；backend 仍是 direct。</td>
-                <td>HTTP、status、Mac 录屏、无 CGEvent 进程证据。</td>
+                <td>HTTP、status、Mac 屏幕录像。</td>
               </tr>
               <tr>
-                <td>D11</td>
+                <td>D10</td>
                 <td>锁屏与 zombie</td>
                 <td>锁屏；再制造 runner 可达但 action probe 失败的状态。</td>
                 <td>device 分别显示 locked/blocked；<code>drivable=false</code>；提示要求解锁或重启。</td>
                 <td>两份 status JSON、恢复时间。</td>
               </tr>
               <tr>
-                <td>D12</td>
+                <td>D11</td>
                 <td>空闲释放</td>
                 <td>按配置时长停止操作且关闭 live stream。</td>
-                <td><code>released=true</code>；控制 503；点“重新连接”后 WDA 恢复。</td>
+                <td><code>released=true</code>；控制 503；点「连接手机」后 WDA 恢复。</td>
                 <td>释放前后 status、launchctl、恢复录像。</td>
               </tr>
               <tr>
-                <td>D13</td>
+                <td>D12</td>
                 <td>状态接口失联</td>
                 <td>让 <code>/agent/status</code> 临时失败。</td>
-                <td>web client 保持 direct、停止 mirror transport、显示状态错误。</td>
-                <td>浏览器网络记录；无 <code>/ws</code> 或 PeerConnection。</td>
+                <td>页面显示状态错误，控制不显示成功反馈。</td>
+                <td>浏览器网络记录与页面录像。</td>
               </tr>
               <tr>
-                <td>D14</td>
+                <td>D13</td>
                 <td>Switcher</td>
-                <td>检查 direct 工具栏并发送 switcher 负向请求。</td>
-                <td>按钮隐藏或提示改用“搜索”；服务返回 unsupported，不假成功。</td>
+                <td>检查工具栏并发送 switcher 负向请求。</td>
+                <td>工具栏没有 Switcher 按钮；服务返回 unsupported，不假成功。</td>
                 <td>页面截图、422 响应。</td>
               </tr>
               <tr>
-                <td>D15</td>
+                <td>D14</td>
                 <td>多设备稳定性</td>
                 <td>连接两台已配对设备，重启 WDA 和 daemon。</td>
                 <td>始终使用已固定 UDID；不因重连静默换手机。</td>
                 <td>配置 UDID、两次 status 与设备画面。</td>
               </tr>
               <tr>
-                <td>D16</td>
+                <td>D15</td>
                 <td>完整卸载</td>
                 <td>按 lifecycle 清单卸载并重新登录。</td>
                 <td>两个 job 不复活；44321/8100/9100 不监听；App、plist、日志和状态目录已清理。</td>
@@ -1278,13 +1197,8 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
             <tbody>
               <tr>
                 <td>App Switcher</td>
-                <td>WDA 无法合成 home-indicator 系统手势，也没有可点的 WDA element。Direct 不支持。</td>
-                <td>工具栏隐藏 Switcher，提示用 Spotlight 打开其他 App；不得返回假成功。</td>
-              </tr>
-              <tr>
-                <td>WDA 与 Mirroring 互斥</td>
-                <td>WDA runner 启动会断开 Mirroring，反向也成立。</td>
-                <td>Direct 验收不依赖 Mirroring；回滚前先停 WDA。</td>
+                <td>WDA 无法合成 home-indicator 系统手势，也没有可点的 WDA element。不支持。</td>
+                <td>工具栏不提供 Switcher，用 Spotlight 打开其他 App；不得返回假成功。</td>
               </tr>
               <tr>
                 <td>锁屏与休眠</td>
@@ -1384,7 +1298,7 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
                 <td>P2-7 集成</td>
                 <td>新画面源如何映射 backend/device/screen/control，如何与 WDA input 共存？</td>
                 <td>独立 feature flag、状态契约、回滚方案和端到端测试。</td>
-                <td>失败时回到 Phase 1 direct，不回到 mirror。</td>
+                <td>失败时回到 Phase 1 direct。</td>
               </tr>
             </tbody>
           </table>
@@ -1410,11 +1324,11 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
             <tbody>
               <tr>
                 <td><code>crates/server/src/config.rs</code></td>
-                <td>Direct 默认、显式 mirror、未知服务端值 fail-closed 到 direct、持久设备 UDID。</td>
+                <td>持久设备 UDID 与 WDA endpoint 配置。</td>
               </tr>
               <tr>
                 <td><code>crates/server/src/main.rs</code></td>
-                <td>Direct 跳过 TCC/AppKit，使用 NullPipeline、placeholder geometry 和 null injector；WDA 默认 loopback endpoints。</td>
+                <td>daemon 启动与 WDA 默认 loopback endpoints；不加载任何 Mac 屏幕采集或输入注入。</td>
               </tr>
               <tr>
                 <td><code>crates/server/src/http.rs</code></td>
@@ -1422,7 +1336,7 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
               </tr>
               <tr>
                 <td><code>web/index.html</code></td>
-                <td>Direct 的 MJPEG/PNG、HTTP control、gesture 聚合、fail-closed status handling、Switcher UI。</td>
+                <td>MJPEG/PNG、HTTP control、gesture 聚合、fail-closed status handling、「连接手机」与「交还」控件。</td>
               </tr>
               <tr>
                 <td><code>crates/server/src/wda.rs</code></td>
@@ -1430,7 +1344,7 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
               </tr>
               <tr>
                 <td><code>install.sh</code></td>
-                <td>默认 direct、旧 mirror 配置迁移、固定 release 事务、配置保留、原子替换、离线控制面与 backend-specific 首次设置。</td>
+                <td>固定 release 事务、配置保留、原子替换、离线控制面与首次 WDA 设置。</td>
               </tr>
               <tr>
                 <td><code>scripts/setup-wda.sh</code></td>
@@ -1466,11 +1380,11 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
 
         <h3>Phase 1 可以宣布完成的条件</h3>
         <ul>
-          <li>全新安装默认 direct，旧 mirror 安装按迁移顺序升级成功。</li>
-          <li>D01–D16 在目标设备组合上全部有证据；不适用项写明原因和替代验证，不能留空。</li>
-          <li>Direct 在无 Mirroring、无 Screen Recording、无 Accessibility 下通过画面和控制验收。</li>
-          <li>WDA、MJPEG、status、网络或控制失败时均 fail-closed，没有 Mac 输入或自动 mirror fallback。</li>
-          <li>安装、升级、回滚、停止和完整卸载都在真实 GUI 用户环境跑过。</li>
+          <li>全新安装与从上一版本升级都成功。</li>
+          <li>D01–D15 在目标设备组合上全部有证据；不适用项写明原因和替代验证，不能留空。</li>
+          <li>不授予任何 macOS 隐私权限即通过画面和控制验收。</li>
+          <li>WDA、MJPEG、status、网络或控制失败时均 fail-closed，不向 Mac 注入任何输入。</li>
+          <li>安装、升级、停止和完整卸载都在真实 GUI 用户环境跑过。</li>
           <li>Switcher 以 unsupported 交付，不隐藏成“偶发失效”。</li>
         </ul>
       </section>

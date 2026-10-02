@@ -10,28 +10,26 @@
 
 ## 1. The existing Shortcuts RPC bridge — how it actually works today
 
-The repo already contains a working (experimental, mirror-era) RPC bridge. Reconstructed
-from `shortcuts/README.md`, `shortcuts/registry.json`, and `crates/server/src/http.rs`:
+The repo already contains an experimental RPC bridge. Reconstructed from
+`shortcuts/README.md`, `shortcuts/registry.json`, and `crates/server/src/http.rs`:
 
-### 1.1 Trigger path (legacy, Mirroring-only)
+### 1.1 Trigger path (original, no longer reachable)
 
 ```
-daemon writes {"verb":"battery","id":"abc","args":{}} to the *Mac* clipboard
-  → (iPhone Mirroring shares the clipboard with the phone)
-  → open Spotlight on the mirrored phone, type "iU Bridge", press return
+daemon writes {"verb":"battery","id":"abc","args":{}} to a clipboard shared with the phone
+  → open Spotlight on the phone, type "iU Bridge", press return
   → the "iU Bridge" shortcut runs: reads the clipboard, dispatches on `verb`,
     executes the native action (Get Battery Level, …)
 ```
 
 The trigger is **not** a URL scheme, not devicectl — it is ordinary UI automation
-(Spotlight + typed text) plus the Mirroring shared clipboard as the parameter carrier.
-That is why README.md §"Shortcuts bridge (legacy mirror experiment)" pins it to
-`PHONE_REMOTE_BACKEND=mirror`: the Direct/WDA backend types text on-device, so the Mac
-clipboard never reaches the phone, and the whole carrier disappears.
+(Spotlight + typed text) plus a Mac→phone shared clipboard as the parameter carrier.
+The daemon now drives the phone only through WDA, which types text on-device; the Mac
+clipboard never reaches the phone, so the whole carrier is gone.
 
-### 1.2 Return path (still shipped, backend-agnostic)
+### 1.2 Return path (still shipped)
 
-The return half lives in `crates/server/src/http.rs` and works today under any backend:
+The return half lives in `crates/server/src/http.rs` and works today:
 
 - `POST /agent/inbox` — the shortcut's *Get Contents of URL* action POSTs
   `{"id":"abc","verb":"battery","ok":true,"data":{...}}` to the daemon with
@@ -51,8 +49,8 @@ fly; adding a verb is a reviewed change. One verb (`battery`) validated the roun
 
 ### 1.4 Limitations of the current design
 
-1. **Dead under Direct.** The trigger needs Mirroring's shared clipboard and Mac-side
-   key events. Direct/WDA is now the product path, so the bridge is effectively offline.
+1. **Trigger is offline.** It needs a Mac→phone shared clipboard and Mac-side key
+   events; the WDA-only daemon has neither, so the bridge cannot be triggered today.
 2. **Fragile trigger.** Spotlight typing is the least reliable primitive in the repo's
    own hardware history (Search-pill tap flakiness, CN IME hijacking typed characters).
 3. **Clipboard as carrier** clobbers whatever the user had on the clipboard.

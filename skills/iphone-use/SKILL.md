@@ -7,10 +7,9 @@ description: Use when a task needs a real iPhone — operating iOS apps that hav
 
 Control a physical iPhone through the [iphone-use](https://github.com/leeguooooo/iphone-use)
 daemon: see the screen (`/agent/screenshot`), act on it (`/agent/input`), repeat.
-The default backend is Direct: WebDriverAgent performs input on the phone and
-the device-side screen service provides pixels. It does not need iPhone
-Mirroring, Screen Recording, Accessibility, or the Mac cursor. The old
-Mirroring path is an explicit compatibility backend only.
+The daemon drives the phone over WebDriverAgent (WDA): input is performed on
+the phone and the device-side screen service provides pixels. It never touches
+the Mac's screen, cursor, or focus, and needs no macOS privacy permission.
 
 ## Prerequisites
 
@@ -46,8 +45,7 @@ and stop. Do not reconnect, take a hold, or poll screenshots/elements to keep
 the phone ready. Idle release is intentional.
 
 **Gate phone operations and screen/UI reads on `drivable:true`.** The current
-user-requested task must need that access. `phone_target` is a legacy
-Mirroring-window field and is not a Direct readiness signal.
+user-requested task must need that access.
 
 - `device_state:"ready"` + `drivable:true` → proceed with the requested task.
 - `device_state:"locked"` → ask the operator to unlock the iPhone and keep it
@@ -86,8 +84,10 @@ Mirroring-window field and is not a Direct readiness signal.
   response (3s) and read again. The next health probe decides whether this
   clears back to `ready` or drops to `offline`; do not restart the service for
   it.
-- Never switch to `mode=mirror` as automatic recovery. Mirror is an explicit
-  operator-selected compatibility mode.
+- `released:true` with `human_handoff:true` → the operator handed the phone
+  to the person holding it (`{"mode":"human"}`, the web page's 交还 button).
+  Agent input answers `409 phone_handed_to_human`. Do not take it back on your
+  own; ask the operator before sending `{"mode":"agent"}`.
 
 ## The API
 
@@ -95,7 +95,7 @@ Mirroring-window field and is not a Direct readiness signal.
 |---|---|
 | `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, hint, setup_blocked_on, setup_phase, setup_message, …}` — gate on **`drivable`** |
 | `GET /agent/elements` | **Direct/WDA UI as text**: `{"snapshot":"…","elements":[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?},…]}` — prefer this over screenshots. Indexes and snapshot tokens are valid only for this read. Add `?since=<prior snapshot>` to get `{"snapshot":…,"baseline":…,"delta":{added,changed,removed,unchanged}}` instead of the full tree (much cheaper on multi-step flows; unknown baseline falls back to the full tree), plus `app_changed:{from,to}` if the foreground app moved since that baseline. Both shapes carry a read-only `ax_stats` usability block — see **Vision fallback** below — and a sparse `alert:{text,buttons}` block whenever a system alert (UIAlertController) is on screen. With `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` on the daemon, rows also carry sparse `actions` (named `perform` affordances), `selected`, and `min`/`max` |
-| `GET /agent/screenshot` | Current phone screen as a device-side PNG; no Mirroring session required |
+| `GET /agent/screenshot` | Current phone screen as a device-side PNG |
 | `POST /agent/input` | One action (JSON body, below); requires `X-Phone-Control: 1` |
 | `POST /agent/actions` | One bounded, fail-closed sequence of `action`, `wait_for`, and short `pause` steps; Direct/WDA only; requires `X-Phone-Control: 1` |
 | `GET /agent/apps` | Installed app versions: `{udid, device:{marketing_name,product_type,ios,build}, fetched_at, source, apps:[{bundle,name,version,bundle_version,system,removable,hidden}]}`. `?bundle=<id>` for one app; cached 10 min (`?refresh=1` bypasses). `503 apps_unavailable` means unknown, not "not installed" |
@@ -448,15 +448,11 @@ documented or unit-tested action is not automatically a current-device proof:
   combination before relying on them in a destructive workflow.
 - **Shortcuts** — Direct supports `home` and `spotlight`. `switcher` is
   unsupported. Use a supported app-launch action instead of inventing a gesture.
-- **WDA and iPhone Mirroring are mutually exclusive** (A/B-tested on hardware):
-  the on-phone XCUITest runner monopolizes the device's remote session, so
-  while Direct is active any Mirroring window may show an interrupted state.
-  That is expected. Do not try to repair or open Mirroring. Reconnect Direct
-  only when the current task needs it and the recovery conditions above are
-  met, using `phone_reconnect` or `POST /agent/mode {"mode":"agent"}`; it needs the
-  phone unlocked. The target is canonical: change `PHONE_REMOTE_UDID`, rerun
-  setup, and restart the daemon to switch devices. Never pass a one-off UDID
-  during recovery.
+- **Reconnect** only when the current task needs it and the recovery
+  conditions above are met, using `phone_reconnect` or
+  `POST /agent/mode {"mode":"agent"}`; it needs the phone unlocked. The target
+  is canonical: change `PHONE_REMOTE_UDID`, rerun setup, and restart the daemon
+  to switch devices. Never pass a one-off UDID during recovery.
 - **`mode=agent` stuck / `wda` stays false → read `status.setup_blocked_on`**
   (`warp|proxy|usb|trust|ddi|account|automation_mode_disabled`). The #1 blocker is **`warp`**: Cloudflare WARP (or any
   VPN) wedges the CoreDevice tunnel xcodebuild needs when its effective Split
@@ -694,7 +690,7 @@ gh issue create -R leeguooooo/iphone-use \
 **What I was doing**: <task context, 1-2 lines>
 **What happened**: <actual behavior, exact error/output>
 **Expected**: <what would have been better>
-**Env**: daemon <version from /agent/status>, backend <direct|mirror>,
+**Env**: daemon <version from /agent/status>, backend <direct>,
 device_state <state>, <macOS/iOS if known>
 **Repro**: <the exact curl/API calls, if reproducible>
 

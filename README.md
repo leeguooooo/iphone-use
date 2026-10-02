@@ -10,7 +10,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="Platform: macOS 15+">
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="Built with Rust">
-  <img src="https://img.shields.io/badge/default-WDA%20direct-success" alt="Default backend: direct WDA">
+  <img src="https://img.shields.io/badge/runs%20on-WebDriverAgent-success" alt="Runs on WebDriverAgent">
 </p>
 
 <p align="center">
@@ -32,11 +32,9 @@ phone three ways:
 | Claude Code / Claude Desktop / any MCP client | the bundled `iphone-use-mcp` server, 21 tools | [MCP server](#mcp-server) |
 | anyone repeating a task | a reviewed **flow** from the official registry — one command, no model | [Flows and the registry](#flows-and-the-official-flow-registry) |
 
-Everything happens on the phone. The default `direct` backend does **not** use macOS
-iPhone Mirroring, Screen Recording, Accessibility, the Mac cursor, or a frontmost window,
-and it fails closed: when WDA is unavailable, control returns an error instead of moving
-anything on the Mac. The older Mirroring path survives only as the explicit
-`PHONE_REMOTE_BACKEND=mirror` [compatibility backend](#legacy-mirror-backend).
+Everything happens on the phone. The daemon never touches the Mac's screen, cursor, or
+window focus, needs no macOS privacy permission, and fails closed: when WDA is
+unavailable, control returns an error instead of pretending it acted.
 
 > Status: individual WDA element, text, tap, and screenshot capabilities have been
 > exercised on real hardware. The end-to-end browser vertical still has an open
@@ -85,8 +83,8 @@ Design, lifecycle, failure states, and security boundaries:
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
-The installer fetches the latest GitHub Release, registers a per-user LaunchAgent with
-`PHONE_REMOTE_BACKEND=direct`, writes the loopback WDA endpoints, installs the matching
+The installer fetches the latest GitHub Release, registers a per-user LaunchAgent,
+writes the loopback WDA endpoints, installs the matching
 agent skill, and drops the setup helper at `~/.iphone-use/setup-wda.sh`. It does not
 prove your team, phone, runner, and relays work together — that is the next step, with
 the phone connected, trusted, unlocked, and awake:
@@ -120,30 +118,12 @@ resume it before the next agent session:
 ~/.iphone-use/setup-wda.sh resume
 ```
 
-Simpler still is the **交还 (hand off)** button in the web toolbar, or
-`POST /agent/mode {"mode":"human"}`: the daemon stops the runner, opens iPhone Mirroring on
-the Mac, and reports `human_handoff:true`; while that holds, agent input gets
+Simpler still is the **交还 (hand back)** button in the web toolbar, or
+`POST /agent/mode {"mode":"human"}`: the daemon stops WDA so the phone belongs to whoever
+is holding it, and reports `human_handoff:true`; while that holds, agent input gets
 409 `phone_handed_to_human` instead of restarting the runner under your fingers. The same
 button then reads **交给 agent** (give to agent); press it, or send `{"mode":"agent"}`, to
-give the phone back.
-
-**Driving the handed-over phone from a browser.** When the phone is parked, the page
-offers **我来操作 (let me drive)** next to **交给 agent**; either that or the toolbar's 交还
-hands it over. After a hand-off the page keeps showing the phone: the daemon captures the iPhone Mirroring window and streams it over WebRTC, and
-your taps, drags, scrolls and typing go into that window. This is the path for a person —
-low latency, and the phone stays locked (iPhone Mirroring needs it locked and near the
-Mac), so no passcode prompt. `/agent/status` reports it as `human_view`:
-`starting` → `live`, or `failed` with `human_view_error` naming what is missing.
-It needs two one-time grants on the Mac for iPhoneUse — **Screen Recording** (the picture)
-and **Accessibility** (the input); the Direct backend asks for neither until you hand the
-phone over. Input moves the Mac's pointer into the Mirroring window, and iPhone Mirroring takes
-input only while it is the frontmost app — which macOS will not hand over while someone
-is actively using another app. So open the page from **another device**; a browser on
-the same Mac holds the front and its taps never arrive; the page says so, and while the
-view is live and an event was dropped in the last 15 seconds, status reports
-`human_view_input_blocked:true`. At the Mac itself, use the Mirroring window. To reach the page from another device on the LAN, bind
-`PHONE_REMOTE_HOST=0.0.0.0` with a password set; from outside the LAN, Tailscale plus macOS
-Screen Sharing still works.
+put the phone back under remote control.
 
 The daemon also does this on its own: after 10 minutes without agent activity or a
 live viewer it stops the runner and parks its supervisor, and the phone stays parked
@@ -151,10 +131,14 @@ across logouts and reboots. A runner kept up around the clock is relaunched ever
 iOS kills it, and each launch asks for the passcode to enable UI automation — so the
 phone prompted all day while nobody was using it. The next agent request, or
 `POST /agent/mode {"mode":"agent"}`, brings WDA back from the cached runner (no
-rebuild) — unlock the phone if asked. `PHONE_REMOTE_IDLE_RELEASE_SECS` changes the
+rebuild) — unlock the phone if asked. On `/phone` a parked phone shows **连接手机**
+(connect phone); press it with the phone unlocked and awake. `PHONE_REMOTE_IDLE_RELEASE_SECS` changes the
 window; `0` keeps the runner up (v0.6.3–v0.7.3 behaviour).
 
 ### Upgrade
+
+> v0.9 removed the iPhone Mirroring backend; installs that had
+> `PHONE_REMOTE_BACKEND=mirror` are served over WDA after upgrading.
 
 ```bash
 iphone-use upgrade            # install the latest release (daemon + skill), then refresh other skill copies
@@ -245,7 +229,7 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
 | `GET` | `/agent/mjpeg` | Authenticated live MJPEG stream. |
 | `POST` | `/agent/input` | One action: tap, drag, long-press, scroll, text, key, `home`/`spotlight`, `launch_app`, `set_value`, `perform`, `alert`. `?return=delta` also attempts a post-action tree read and returns the change plus a `settle` block (`settled`, `reason`: `stable` / `budget_exhausted` / `observation_failed`, `waited_ms`, `captures`, `budget_ms`, and `sparse` / `stale` when they apply). Observation is best-effort: a slow or failed read never downgrades an applied action to an unknown outcome. A settled delta with no row added, changed or removed also carries `no_visible_change: true` (a scroll or tap that hit nothing responsive). |
 | `POST` | `/agent/actions` | Up to 24 `action` / `wait_for` / `pause` steps validated as a whole, run under one WDA lock, stopped at the first failure. Response: `completed`, `applied_actions`, `failed_step`, `outcome` (the failed step), `failed_step_outcome`, `batch_outcome` (`nothing_applied` / `partially_applied` / `unknown`), `retry_safe` (the whole batch, and the only field that authorises a replay). |
-| `POST` | `/agent/mode` | `{"mode":"agent"}` restarts the configured Direct target. Never changes backend or UDID. |
+| `POST` | `/agent/mode` | `{"mode":"agent"}` brings WDA up on the configured target (never changes the UDID). `{"mode":"human"}` stops WDA and hands the phone to its holder; agent input then answers `409 phone_handed_to_human` until `agent` takes it back. |
 | `POST` | `/agent/hold` | `{"secs":N}` (0 clears, max 14400) keeps the phone from idle release around a human pause. `503 device_release_in_progress` if release already started. |
 | `POST` | `/agent/owner` | `{"release":true}` hands the owner lease back early. |
 | `GET` | `/agent/apps` | Installed apps with `version` / `bundle_version` / `system`, plus `device.ios`, from `devicectl` on the daemon's Mac. Cached 10 min; `?bundle=<id>` filters, `?refresh=1` bypasses the cache. `503 apps_unavailable` on failure (never an empty list); `409 target_required` with several phones and no configured UDID. |
@@ -256,9 +240,9 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
 
 ### Semantics an agent must respect
 
-- **Gate on `drivable:true`** (and `backend:"direct"`, `wda_actionable:true`). `device_state`
-  is one of `ready`, `locked`, `blocked`, `offline`, `releasing`, `released`,
-  `reconnecting`. `phone_target`, `mirror_state`, `human_active` are legacy mirror fields.
+- **Gate on `drivable:true`** (and `wda_actionable:true`). `device_state` is one of
+  `ready`, `locked`, `blocked`, `offline`, `releasing`, `released`, `reconnecting`;
+  `mode` is `agent` or `offline`.
 - **At-most-once delivery.** Expiry before dispatch → `408 not_sent`, `retry_safe:true`.
   Transport failure after dispatch → `502`, post-dispatch deadline → `504`, both
   `outcome_unknown`, `retry_safe:false`: read the screen before doing anything again.
@@ -281,6 +265,7 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
   supports.
 - **System alerts** are a separate surface: taps on their buttons are acknowledged
   without effect. Use `{"type":"alert","button":"…"}` or `{"action":"accept"|"dismiss"}`.
+  App Switcher and Control Center are system gestures WDA cannot reach.
 - **`/agent/actions`** never reports a replay as safe once any action applied.
   `tap_locator` uses the same exact label/identifier/kind/value/state fields as
   `wait_for` and requires one unique match.
@@ -354,7 +339,7 @@ its daemon requests automatically.
 | See | `phone_status`, `phone_capabilities` (what this build supports vs what is possible right now; wakes nothing), `phone_screenshot`, `phone_elements` (carries a `registry` block naming installed flows for the app on screen) |
 | Act | `phone_tap`, `phone_tap_element` (snapshot-bound), `phone_tap_label` (unique exact label), `phone_scroll`, `phone_type` (CJK-clean), `phone_key`, `phone_shortcut` (`home`/`spotlight`) — each takes an optional `observe` |
 | Batch | `phone_run_steps` — up to 24 steps incl. `tap_locator`, `launch_app`, `picker`, `alert`, long-press/swipe/drag, `wait_for` |
-| Lifecycle | `phone_reconnect` (restart the canonical Direct target, never a UDID switch), `phone_hold`, `phone_release_owner` |
+| Lifecycle | `phone_reconnect` (restart WDA on the configured phone, never a UDID switch), `phone_hold`, `phone_release_owner` |
 | Flows | `phone_flow_list`, `phone_flow_info`, `phone_flow_run`, `phone_flow_update`, `phone_flow_publish`, `phone_flow_report` |
 
 For those seven act tools and `phone_capabilities`, the parsed JSON arrives as MCP
@@ -496,26 +481,23 @@ the daemon app from the matching Release asset, checks its SHA-256, installs and
 byte-verifies the skill at `~/.agents/skills/iphone-use` plus its Claude Code discovery
 link, and only then replaces the daemon. A skill failure aborts the upgrade; a later
 daemon failure restores the previous skill. `IPHONE_USE_SKIP_SKILL=1` leaves the skill
-untouched (a degraded install with no compatibility claim). Migration is evidence-based:
-an old plist with a valid loopback `PHONE_REMOTE_WDA_URL` moves to Direct, a legacy
-install with no WDA configuration stays on Mirror, an explicit backend stays explicit.
+untouched (a degraded install with no compatibility claim). Existing settings
+(`PHONE_REMOTE_WDA_URL`, password, token, UDID) carry over.
 `PHONE_REMOTE_NO_UPDATE_CHECK=1` (or `IPHONE_USE_NO_UPDATE_CHECK=1` / `USE_NO_UPDATE_CHECK=1`) disables the daily check.
 
-Signing on install follows the backend: Direct keeps a valid existing signature and
-repairs an invalid one with keychain-free ad-hoc signing (no TCC identity needed);
-Mirror uses the stable local `iPhoneUse Local Signing` identity so TCC grants survive
-upgrades, warning before any ad-hoc fallback.
+On install the app keeps a valid existing signature and repairs an invalid one with
+keychain-free ad-hoc signing; the daemon holds no macOS permission grant that a new
+signature could invalidate.
 
 ### Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PHONE_REMOTE_BACKEND` | `direct` | `direct` = WDA input + on-device MJPEG. `mirror` = legacy ScreenCaptureKit + CGEvent path. |
 | `PHONE_REMOTE_HOST` / `PHONE_REMOTE_PORT` | `127.0.0.1` / `44321` | Listen address and port (`0.0.0.0` for LAN; a password is then mandatory). |
 | `PHONE_REMOTE_PASSWORD` | *(none)* | Browser login; doubles as the agent bearer only when no agent token is set. |
 | `PHONE_REMOTE_AGENT_TOKEN` | *(none)* | Dedicated agent bearer. When set, it is the **only** accepted bearer. |
 | `PHONE_REMOTE_UDID` | detected and persisted by the installer | Canonical iPhone for managed WDA and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `WDA_UDID` to setup. |
-| `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA control and MJPEG loopbacks. Direct fails closed when unreachable. |
+| `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA control and MJPEG loopbacks. Control fails closed when unreachable. |
 | `PHONE_REMOTE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the WDA supervisor/relay lifecycle. |
 | `PHONE_REMOTE_IDLE_RELEASE_SECS` | `600` | Stop WDA and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
@@ -525,7 +507,6 @@ upgrades, warning before any ad-hoc fallback.
 | `PHONE_REMOTE_ELEMENTS_AFFORDANCES` | off | `1` adds sparse `actions`, `selected`, `min`/`max` to `/agent/elements` rows. |
 | `PHONE_REMOTE_ELEMENTS_TRAITS` | off | `1` also emits raw accessibility trait names. |
 | `PHONE_REMOTE_NO_UPDATE_CHECK` | off | Skip the daily release check. |
-| `PHONE_REMOTE_CF_TURN_*`, `PHONE_REMOTE_TURN_*`, `PHONE_REMOTE_AUTO_RESUME` | — | Legacy mirror/WebRTC only. |
 
 ## Security
 
@@ -534,13 +515,14 @@ credentials.
 
 - The password / cookie / bearer protects port `44321` only. **WDA's own `8100` and
   `9100` on the phone have no authentication**, and the USB `iproxy` relay does not add
-  any — another host on the phone's Wi-Fi can reach them directly. Use Direct only on a
+  any — another host on the phone's Wi-Fi can reach them directly. Use it only on a
   trusted, isolated network; turning off iPhone Wi-Fi while on USB removes that exposure.
 - A real authenticated device transport is Phase 2 (a companion app or a controlled
   tunnel). Until then, daemon login is not WDA protection.
-- For remote access put `44321` behind an HTTPS tunnel you operate; the daemon serves
-  plain HTTP, honours `X-Forwarded-Proto`, and sets an `HttpOnly` + `SameSite=Lax`
-  session cookie.
+- From outside the LAN, reach `44321` through an authenticated HTTPS reverse proxy or a
+  trusted VPN/tunnel (Tailscale, for example) — never by exposing WDA's ports. The daemon
+  serves plain HTTP, honours `X-Forwarded-Proto`, and sets an `HttpOnly` +
+  `SameSite=Lax` session cookie.
 - The owner lease (`X-Phone-Owner`) is coordination between cooperating sessions, not a
   security boundary.
 - Do not leave payment apps, private chats, or 2FA screens open while exposing access.
@@ -553,28 +535,6 @@ detects it and `/agent/status` reports `device_state:"blocked"`,
 `setup_blocked_on:"warp"`; neither changes your VPN — that is an operator decision, and
 managed Macs need an administrator split-tunnel rule.
 
-WARP also breaks **iPhone Mirroring itself** with none of this running (issue #17,
-reproduced on macOS 26 and 27.0 beta): Mirroring rides on Continuity, which the VPN
-degrades. Before filing a bug here: stop our LaunchAgents
-(`launchctl bootout gui/$(id -u)/com.leeguoo.iphone-use` and the `.wda` job), quit
-Mirroring, `warp-cli disconnect`, reopen Mirroring. If it connects, the daemon was never
-involved; an *Always On* Zero Trust policy will reconnect WARP by itself, so only an
-administrator exclusion lasts.
-
-## Legacy mirror backend
-
-`PHONE_REMOTE_BACKEND=mirror` captures the iPhone Mirroring window with ScreenCaptureKit,
-encodes H.264 with VideoToolbox, streams it over WebRTC, and injects input with CGEvent.
-It needs Mirroring connected, Screen Recording and Accessibility grants, an Aqua login
-session, and a frontmost-capable Mirroring window. The diagrams in `assets/` describe
-this backend, not the default.
-
-The **"iU Bridge" Shortcuts experiment** (`shortcuts/`) belongs to this backend: it
-opens Spotlight and feeds clipboard/key events from the Mac. Its Direct-native successor
-is the [semantic intents channel](#semantic-intents-shortcuts-on-device). App Switcher,
-Control Center, and arbitrary Mac keycodes remain unsupported in Direct until they have
-a device-native implementation.
-
 ## Development
 
 ```bash
@@ -583,7 +543,7 @@ cargo build --release --bin iphone-use --bin iphone-use-mcp
 ./install.sh ./iPhoneUse.app           # sign, install, write the LaunchAgent (uses the worktree skill)
 
 # or run the daemon without installing
-PHONE_REMOTE_BACKEND=direct PHONE_REMOTE_WDA_URL=http://127.0.0.1:8100 \
+PHONE_REMOTE_WDA_URL=http://127.0.0.1:8100 \
 PHONE_REMOTE_WDA_MJPEG_URL=http://127.0.0.1:9100 \
 PHONE_REMOTE_HOST=0.0.0.0 PHONE_REMOTE_PASSWORD=secret ./target/release/iphone-use serve
 ```
@@ -592,10 +552,10 @@ Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's te
 
 | Path | What lives there |
 |---|---|
-| `crates/server` | daemon: WDA control, MJPEG proxy, browser `/control`, agent API, legacy mirror signaling |
+| `crates/server` | daemon: WDA control, MJPEG proxy, browser `/control`, agent API |
 | `crates/mcp` | `iphone-use-mcp`: MCP server, flow runner, registry client, `flow publish` / `report` |
-| `crates/core` | ScreenCaptureKit, encoding, geometry, CGEvent — legacy mirror only |
-| `web/index.html` | browser client (MJPEG + `/control` by default, WebRTC for mirror) |
+| `crates/core` | shared auth helpers |
+| `web/index.html` | browser client (MJPEG + `/control`) |
 | `skills/iphone-use` | the agent skill the installer ships |
 | `scripts/`, `deploy/`, `install.sh` | WDA setup, packaging, LaunchAgent, bridge-shortcut generator |
 | `docs/` | architecture, agent API reference, WDA setup, flows research |
@@ -607,8 +567,8 @@ Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's te
 - [x] Deterministic flows, the official flow registry, publish/report loop.
 - [ ] Record the direct-browser hardware acceptance matrix below.
 - [ ] Make first-device setup, signing renewal, sleep/reconnect recovery, and multi-device selection understandable from the product UI.
-- [ ] Revalidate every advertised command against Direct; inherit no Mirroring capability claims by name.
-- [ ] Phase 2 authenticated device transport (companion app or controlled tunnel).
+- [ ] Revalidate every advertised command on real hardware.
+- [ ] Phase 2 authenticated device transport (a native iOS companion app, planned, or a controlled tunnel).
 - [ ] A short demo of an agent driving the phone.
 
 ### Hardware acceptance boundary
@@ -616,7 +576,7 @@ Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's te
 The direct browser default is accepted only after all of these are observed on a real
 iPhone:
 
-1. From a Mac without Screen Recording/Accessibility grants and without Mirroring, install, run WDA setup, and keep Direct up.
+1. On a Mac with no macOS privacy grants for the app, install, run WDA setup, and keep WDA up.
 2. `/agent/status` reports `backend:"direct"`, `wda:true`, `wda_actionable:true`, `drivable:true` for the intended UDID.
 3. `/phone` from another device shows a continuously updating picture; stopping the 9100 relay makes the UI report degraded/offline, not success.
 4. Tap, drag, long-press, scroll, ASCII and CJK text through `/control` are each acknowledged and land exactly once.
