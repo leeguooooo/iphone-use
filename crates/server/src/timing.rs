@@ -227,9 +227,22 @@ async fn attach(response: Response, summary: &Summary) -> Response {
     if !is_json || summary.calls == 0 {
         return Response::from_parts(parts, body);
     }
+    // Buffer only a body of known size under the cap: reading anything else
+    // and failing part-way would leave nothing to send but an empty 200.
+    let exact = axum::body::HttpBody::size_hint(&body).exact();
+    if !exact.is_some_and(|len| len <= MAX_REWRITE_BYTES as u64) {
+        return Response::from_parts(parts, body);
+    }
     let bytes = match axum::body::to_bytes(body, MAX_REWRITE_BYTES).await {
         Ok(bytes) => bytes,
-        Err(_) => return Response::from_parts(parts, Body::empty()),
+        Err(_) => {
+            parts.status = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+            parts.headers.remove(header::CONTENT_LENGTH);
+            return Response::from_parts(
+                parts,
+                Body::from(r#"{"ok":false,"error":"response_body_unreadable"}"#),
+            );
+        }
     };
     match with_timing_field(&bytes, &summary.json()) {
         Some(body) => {
@@ -333,6 +346,58 @@ mod tests {
         assert!(with_timing_field(b"[1,2]", &t).is_none());
         assert!(with_timing_field(br#"{"timing":1}"#, &t).is_none());
         assert!(with_timing_field(b"not json", &t).is_none());
+    }
+
+    // A hand-built runtime: `#[tokio::test]` resolves `core::` to this
+    // workspace's own `core` crate.
+    #[test]
+    fn an_oversized_or_unsized_json_body_passes_through_untouched() {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(oversized_or_unsized_body_case());
+    }
+
+    async fn oversized_or_unsized_body_case() {
+        let summary = Summary::new(
+            &Recorder {
+                calls: vec![Call {
+                    route: "GET /source".into(),
+                    elapsed: Duration::from_millis(5),
+                    bytes: None,
+                }],
+            },
+            Duration::from_millis(9),
+        );
+        let big = vec![b' '; MAX_REWRITE_BYTES + 1];
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(big.clone()))
+            .unwrap();
+        let out = attach(response, &summary).await;
+        assert_eq!(out.status(), axum::http::StatusCode::OK);
+        assert!(out.headers().contains_key("server-timing"));
+        let body = axum::body::to_bytes(out.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.len(),
+            big.len(),
+            "the body must reach the client intact"
+        );
+
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            bytes::Bytes::from_static(br#"{"ok":true}"#),
+        )]);
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(stream))
+            .unwrap();
+        let out = attach(response, &summary).await;
+        let body = axum::body::to_bytes(out.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], br#"{"ok":true}"#);
     }
 
     #[test]
