@@ -846,6 +846,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/hold", post(agent_hold))
         .route("/agent/owner", post(agent_owner))
         .route("/agent/capabilities", get(agent_capabilities))
+        // Per-request WDA timing on every /agent/* answer (see `timing`).
+        .layer(axum::middleware::from_fn(crate::timing::layer))
         .with_state(state)
 }
 

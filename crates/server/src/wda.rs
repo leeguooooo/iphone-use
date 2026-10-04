@@ -11,6 +11,7 @@
 //! Request shapes follow Appium WebDriverAgent, and response parsers reject
 //! both HTTP failures and W3C error envelopes.
 
+use crate::timing::SendTimed as _;
 use anyhow::{anyhow, Context, Result};
 use std::time::Duration;
 
@@ -65,7 +66,12 @@ impl WdaClient {
     /// `GET /status` — health/liveness probe (no session required).
     /// Returns true when WDA answers with a ready state.
     pub async fn is_up(&self) -> bool {
-        match self.http.get(format!("{}/status", self.base)).send().await {
+        match self
+            .http
+            .get(format!("{}/status", self.base))
+            .send_timed()
+            .await
+        {
             Ok(r) => r.status().is_success(),
             Err(_) => false,
         }
@@ -79,7 +85,7 @@ impl WdaClient {
         let body = self
             .http
             .get(format!("{}/session/{}/wda/locked", self.base, sid))
-            .send()
+            .send_timed()
             .await
             .context("GET /wda/locked")?
             .error_for_status()
@@ -99,7 +105,7 @@ impl WdaClient {
         let body = self
             .http
             .get(format!("{}/wda/locked", self.base))
-            .send()
+            .send_timed()
             .await
             .context("GET /wda/locked (unattached)")?
             .error_for_status()
@@ -182,7 +188,7 @@ impl WdaClient {
         let active_apps_actionable = match self
             .http
             .get(format!("{}/session/{}/wda/apps/list", self.base, sid))
-            .send()
+            .send_timed()
             .await
         {
             Ok(response) => ensure_wda_success(response, "GET /wda/apps/list")
@@ -226,7 +232,7 @@ impl WdaClient {
                 .http
                 .post(format!("{}/session", self.base))
                 .json(&body)
-                .send()
+                .send_timed()
                 .await
                 .context("POST /session")?
                 .error_for_status()
@@ -247,7 +253,7 @@ impl WdaClient {
                     }}))
                     // A runner slow to answer must not hold session setup.
                     .timeout(Duration::from_secs(2))
-                    .send()
+                    .send_timed()
                     .await;
                 // Best effort: an older runner without these settings still
                 // works, just slower.
@@ -279,7 +285,7 @@ impl WdaClient {
                     .http
                     .post(format!("{}/session/{}/appium/settings", self.base, sid))
                     .json(&serde_json::json!({ "settings": settings }))
-                    .send()
+                    .send_timed()
                     .await;
                 match result {
                     Ok(response) => {
@@ -308,7 +314,7 @@ impl WdaClient {
         let body = self
             .http
             .get(format!("{}/source?format=json", self.base))
-            .send()
+            .send_timed()
             .await
             .context("GET /source")?
             .error_for_status()
@@ -328,7 +334,7 @@ impl WdaClient {
             .http
             .post(format!("{}/session/{}/element", self.base, sid))
             .json(&serde_json::json!({ "using": using, "value": value }))
-            .send()
+            .send_timed()
             .await
             .context("POST /element")?
             .error_for_status()
@@ -349,7 +355,7 @@ impl WdaClient {
             .http
             .post(format!("{}/session/{}/elements", self.base, sid))
             .json(&serde_json::json!({ "using": using, "value": value }))
-            .send()
+            .send_timed()
             .await
             .context("POST /elements")?;
         let value = ensure_wda_success(response, "POST /elements").await?;
@@ -394,7 +400,7 @@ impl WdaClient {
                 self.base, sid, id
             ))
             .json(&serde_json::json!({ "value": [value] }))
-            .send()
+            .send_timed()
             .await
             .context("POST pickerwheel value")?;
         ensure_wda_success(response, "POST pickerwheel value").await?;
@@ -412,7 +418,7 @@ impl WdaClient {
                 self.base, sid, element_id
             ))
             .json(&serde_json::json!({}))
-            .send()
+            .send_timed()
             .await
             .context("POST element/click")?;
         ensure_wda_success(response, "POST element/click").await?;
@@ -432,7 +438,7 @@ impl WdaClient {
             ))
             // WDA accepts both `value: [chars]` (W3C) and `text: "..."`; send text.
             .json(&serde_json::json!({ "value": [text], "text": text }))
-            .send()
+            .send_timed()
             .await
             .context("POST element/value")?;
         ensure_wda_success(response, "POST element/value").await?;
@@ -455,7 +461,7 @@ impl WdaClient {
             // (hardware-hit on 9.15.3 during the set_value("") validation);
             // send the same empty JSON object every other element POST sends.
             .json(&serde_json::json!({}))
-            .send()
+            .send_timed()
             .await
             .context("POST element/clear")?;
         ensure_wda_success(response, "POST element/clear").await?;
@@ -480,7 +486,7 @@ impl WdaClient {
                 self.base, sid, element_id
             ))
             .json(&serde_json::json!({ "using": using, "value": value }))
-            .send()
+            .send_timed()
             .await
             .context("POST element/elements")?;
         let value = ensure_wda_success(response, "POST element/elements").await?;
@@ -516,7 +522,7 @@ impl WdaClient {
                 self.base, sid, element_id, command
             ))
             .json(&body)
-            .send()
+            .send_timed()
             .await
             .with_context(|| operation.clone())?;
         if response.status().is_client_error() {
@@ -637,7 +643,7 @@ impl WdaClient {
                 self.base, sid, element_id
             ))
             .json(&serde_json::json!({ "order": order, "offset": offset }))
-            .send()
+            .send_timed()
             .await
             .context("POST wda/pickerwheel/select")?;
         ensure_wda_success(response, "POST wda/pickerwheel/select").await?;
@@ -657,7 +663,7 @@ impl WdaClient {
                 self.base, sid, element_id
             ))
             .json(&serde_json::json!({ "value": [value] }))
-            .send()
+            .send_timed()
             .await
             .context("POST element/value (adjust)")?;
         ensure_wda_success(response, "POST element/value (adjust)").await?;
@@ -691,7 +697,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send()
+            .send_timed()
             .await
             .context("POST /actions")?;
         ensure_wda_success(response, "POST /actions").await?;
@@ -721,7 +727,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send()
+            .send_timed()
             .await
             .context("POST /actions (long press)")?;
         ensure_wda_success(response, "POST /actions (long press)").await?;
@@ -761,7 +767,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send()
+            .send_timed()
             .await
             .context("POST /actions (drag)")?;
         ensure_wda_success(response, "POST /actions (drag)").await?;
@@ -806,7 +812,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send()
+            .send_timed()
             .await
             .context("POST /actions (swipe)")?;
         ensure_wda_success(response, "POST /actions (swipe)").await?;
@@ -821,7 +827,7 @@ impl WdaClient {
             .http
             .post(format!("{}/session/{}/wda/pressButton", self.base, sid))
             .json(&serde_json::json!({ "name": "home" }))
-            .send()
+            .send_timed()
             .await
             .context("POST /wda/pressButton home")?;
         ensure_wda_success(response, "POST /wda/pressButton home").await?;
@@ -890,7 +896,7 @@ impl WdaClient {
         let body = self
             .http
             .get(format!("{}/session/{}/element/active", self.base, sid))
-            .send()
+            .send_timed()
             .await
             .context("GET /element/active")?
             .error_for_status()
@@ -907,7 +913,7 @@ impl WdaClient {
             ))
             // Same bodyless-POST 400 as clear_element on current WDA builds.
             .json(&serde_json::json!({}))
-            .send()
+            .send_timed()
             .await
             .context("POST /element/clear")?;
         ensure_wda_success(response, "POST /element/clear").await?;
@@ -934,7 +940,7 @@ impl WdaClient {
                 "mjpegScalingFactor": scaling,
                 "mjpegServerScreenshotQuality": quality,
             }}))
-            .send()
+            .send_timed()
             .await
             .context("POST /appium/settings (mjpeg)")?;
         ensure_wda_success(response, "POST /appium/settings (mjpeg)").await?;
@@ -960,7 +966,7 @@ impl WdaClient {
         let response = self
             .http
             .get(format!("{}/session/{}/window/size", self.base, sid))
-            .send()
+            .send_timed()
             .await
             .context("GET /window/size")?;
         let value = ensure_wda_success(response, "GET /window/size").await?;
@@ -984,7 +990,7 @@ impl WdaClient {
             .http
             .post(format!("{}/session/{}/wda/apps/launch", self.base, sid))
             .json(&serde_json::json!({ "bundleId": bundle_id }))
-            .send()
+            .send_timed()
             .await
             .context("POST /wda/apps/launch")?;
         ensure_wda_success(response, "POST /wda/apps/launch").await?;
@@ -1011,7 +1017,7 @@ impl WdaClient {
             .http
             .post(format!("{}/session/{}/url", self.base, sid))
             .json(&serde_json::json!({ "url": url }))
-            .send()
+            .send_timed()
             .await
             .context("POST /session/:sid/url")?;
         ensure_wda_success(response, "POST /session/:sid/url").await?;
@@ -1027,7 +1033,7 @@ impl WdaClient {
             .http
             .post(format!("{}/session/{}/wda/keys", self.base, sid))
             .json(&serde_json::json!({ "value": [text] }))
-            .send()
+            .send_timed()
             .await
             .context("POST /wda/keys")?;
         ensure_wda_success(response, "POST /wda/keys").await?;
@@ -1081,7 +1087,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send()
+            .send_timed()
             .await
             .context("POST /actions (key)")?;
         ensure_wda_success(response, "POST /actions").await?;
@@ -1142,7 +1148,7 @@ impl WdaClient {
                 self.base, sid
             ))
             .json(&serde_json::json!({ "keyNames": ["Done", "完了", "return", "前往", "search"] }))
-            .send()
+            .send_timed()
             .await
             .context("POST /wda/keyboard/dismiss")?;
         ensure_wda_success(response, "POST /wda/keyboard/dismiss").await?;
@@ -1156,7 +1162,7 @@ impl WdaClient {
         let response = self
             .http
             .get(format!("{}/screenshot", self.base))
-            .send()
+            .send_timed()
             .await
             .context("GET /screenshot")?;
         let value = ensure_wda_success(response, "GET /screenshot").await?;
@@ -1215,7 +1221,7 @@ impl WdaClient {
                 "{}/session/{}/element/{}/rect",
                 self.base, sid, element_id
             ))
-            .send()
+            .send_timed()
             .await
             .context("GET element/rect")?;
         let value = ensure_wda_success(response, "GET element/rect").await?;
@@ -1237,7 +1243,7 @@ impl WdaClient {
                 "{}/session/{}/element/{}/attribute/value",
                 self.base, sid, element_id
             ))
-            .send()
+            .send_timed()
             .await
             .context("GET element/attribute/value")?;
         let value = ensure_wda_success(response, "GET element/attribute/value").await?;
@@ -1260,7 +1266,7 @@ impl WdaClient {
         let response = self
             .http
             .get(format!("{}/session/{}/alert/text", self.base, sid))
-            .send()
+            .send_timed()
             .await
             .context("GET /alert/text")?;
         let text = match ensure_wda_success(response, "GET /alert/text").await {
@@ -1272,7 +1278,7 @@ impl WdaClient {
         let response = self
             .http
             .get(format!("{}/session/{}/wda/alert/buttons", self.base, sid))
-            .send()
+            .send_timed()
             .await
             .context("GET /wda/alert/buttons")?;
         let buttons = match ensure_wda_success(response, "GET /wda/alert/buttons").await {
@@ -1302,7 +1308,7 @@ impl WdaClient {
             .http
             .post(format!("{}/session/{}/alert/accept", self.base, sid))
             .json(&body)
-            .send()
+            .send_timed()
             .await
             .context("POST /alert/accept")?;
         ensure_wda_success(response, "POST /alert/accept").await?;
@@ -1317,7 +1323,7 @@ impl WdaClient {
             .http
             .post(format!("{}/session/{}/alert/dismiss", self.base, sid))
             .json(&serde_json::json!({}))
-            .send()
+            .send_timed()
             .await
             .context("POST /alert/dismiss")?;
         ensure_wda_success(response, "POST /alert/dismiss").await?;
@@ -1341,7 +1347,7 @@ impl WdaClient {
             .http
             .post(format!("{}/session/{}/wda/lock", self.base, sid))
             .json(&serde_json::json!({}))
-            .send()
+            .send_timed()
             .await
             .context("POST wda/lock")?;
         ensure_wda_success(response, "POST wda/lock").await?;

@@ -3375,3 +3375,67 @@ fn loopback_only_daemon_refuses_to_pair() {
         assert_eq!(body_json(resp).await["error"], "loopback_only");
     });
 }
+
+#[test]
+fn agent_answers_carry_wda_timing_in_body_and_server_timing() {
+    block(async {
+        // Answer whatever /agent/elements asks WDA; the source read is slow on
+        // purpose so it stands out in the breakdown. The server thread is left
+        // waiting for requests that never come and ends with the process.
+        let (base, _server) = mock_wda(16, move |request, _| {
+            if request.contains("/source") {
+                Some((
+                    std::time::Duration::from_millis(50),
+                    r#"{"value":{"type":"XCUIElementTypeApplication","children":[{"type":"XCUIElementTypeButton","label":"OK","rect":{"x":10,"y":10,"width":60,"height":44}}]}}"#.to_string(),
+                ))
+            } else if request.contains("/window/size") {
+                Some((
+                    std::time::Duration::ZERO,
+                    r#"{"value":{"width":390,"height":844}}"#.to_string(),
+                ))
+            } else if request.starts_with("POST ") && request.contains("/session ") {
+                Some((
+                    std::time::Duration::ZERO,
+                    r#"{"value":{"sessionId":"s1","capabilities":{}},"sessionId":"s1"}"#
+                        .to_string(),
+                ))
+            } else {
+                Some((std::time::Duration::ZERO, r#"{"value":null}"#.to_string()))
+            }
+        });
+        let app = http::router(build_state_with_wda(&base));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/elements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let server_timing = response
+            .headers()
+            .get("server-timing")
+            .expect("Server-Timing header")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(server_timing.starts_with("total;dur="), "{server_timing}");
+        assert!(
+            server_timing.contains("wda-get-source;dur="),
+            "{server_timing}"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let timing = &json["timing"];
+        let source = timing["wda"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|call| call["call"] == "GET /source")
+            .unwrap_or_else(|| panic!("no source call in {timing}"));
+        assert!(source["ms"].as_u64().unwrap() >= 50, "{timing}");
+        assert!(source["bytes"].as_u64().unwrap() > 0, "{timing}");
+        assert!(timing["total_ms"].as_u64().unwrap() >= timing["wda_ms"].as_u64().unwrap());
+    });
+}
