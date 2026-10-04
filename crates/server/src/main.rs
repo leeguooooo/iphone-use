@@ -548,6 +548,12 @@ fn serve() -> Result<()> {
     // Secure here would make browsers reject the cookie over LAN. Keep this
     // `false`; per-request HTTPS is detected in http.rs.
     let cookie_secure = false;
+    // Per-request /agent/* timings, independent of RUST_LOG (see `timing`).
+    server::timing::set_log_path(
+        server::instance::current()
+            .state_dir
+            .join("agent-timing.jsonl"),
+    );
     let state = Arc::new(AppState {
         password: cfg.password.clone(),
         secret,

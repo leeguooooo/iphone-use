@@ -651,6 +651,21 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   codec string (<code>avc1.</code> + SPS bytes 1–3 in hex) and start at any keyframe.
 </p>
 
+<h3>Timing on every answer</h3>
+<p>
+  Every <code>/agent/*</code> answer carries a <code>Server-Timing</code> header (<code>total</code>,
+  <code>wda</code>, and one metric per WDA route such as <code>wda-get-source</code>). A JSON answer that
+  reached WDA also gets a <code>timing</code> object: <code>{total_ms, wda_ms, daemon_ms, wda:[{call, count,
+  ms, bytes}]}</code>, where <code>ms</code> is the time until WDA's response headers (WDA builds the whole
+  answer before sending) and <code>bytes</code> its declared size. Live streams are not timed.
+</p>
+<p>
+  The daemon appends one line per request (status polls excepted) to
+  <code>~/.iphone-use/agent-timing.jsonl</code>: timestamp, <code>X-Phone-Owner</code>, method, path, query
+  parameter <em>names</em>, status and the same <code>timing</code> object — never request or screen content.
+  It rotates to <code>agent-timing.jsonl.1</code> at 20 MB.
+</p>
+
 <h3><span class="method post">POST</span> <span class="ep">/pair/new</span> · <span class="method get">GET</span>/<span class="method post">POST</span> <span class="ep">/pair</span></h3>
 <p>
   Scan-to-connect. A signed-in browser (session cookie + <code>X-Phone-Control: 1</code>)

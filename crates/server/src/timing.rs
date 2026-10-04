@@ -7,8 +7,16 @@
 //! With it, a slow step can be split into WDA building the answer (time to
 //! the response headers: WDA serialises the whole tree before sending),
 //! transfer (bytes), and the daemon's own work (total minus WDA).
+//!
+//! The daemon also appends one JSON line per request to
+//! `<state dir>/agent-timing.jsonl` (see [`set_log_path`]) — timings, route
+//! and the caller's `X-Phone-Owner`, never request or screen content — so
+//! real sessions can be analysed without raising the log level, which would
+//! need a restart.
 
-use std::sync::Mutex;
+use std::io::Write as _;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -107,6 +115,72 @@ fn is_stream(path: &str) -> bool {
 /// Bodies larger than this are passed through with the header only.
 const MAX_REWRITE_BYTES: usize = 32 << 20;
 
+/// Where the per-request timing log goes. Unset (tests, one-shot commands):
+/// nothing is written.
+static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// Serialises appends and rotation across requests.
+static LOG_LOCK: Mutex<()> = Mutex::new(());
+/// Past this size the log is moved to `agent-timing.jsonl.1` (one generation).
+const LOG_ROTATE_BYTES: u64 = 20 << 20;
+
+/// Called once by the daemon at startup.
+pub fn set_log_path(path: PathBuf) {
+    let _ = LOG_PATH.set(path);
+}
+
+fn append_log_line(line: String) {
+    if let Some(path) = LOG_PATH.get() {
+        append_to(path, &line);
+    }
+}
+
+fn append_to(path: &std::path::Path, line: &str) {
+    let Ok(_guard) = LOG_LOCK.lock() else {
+        return;
+    };
+    if std::fs::metadata(path).is_ok_and(|m| m.len() >= LOG_ROTATE_BYTES) {
+        let mut rotated = path.as_os_str().to_owned();
+        rotated.push(".1");
+        let _ = std::fs::rename(path, rotated);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path);
+    if let Ok(mut file) = file {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// The caller's lease name, if it sent one: short, printable, nothing else.
+fn owner_of(request: &Request) -> String {
+    request
+        .headers()
+        .get("x-phone-owner")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.chars()
+                .filter(|c| c.is_ascii_graphic())
+                .take(64)
+                .collect::<String>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// Query parameter names only: their values can be tokens or text.
+fn query_keys(request: &Request) -> Vec<String> {
+    request
+        .uri()
+        .query()
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| pair.split('=').next())
+        .filter(|key| !key.is_empty())
+        .map(|key| key.chars().take(32).collect())
+        .collect()
+}
+
 /// axum middleware: time `/agent/*` requests and attach the breakdown.
 pub async fn layer(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
@@ -114,6 +188,9 @@ pub async fn layer(request: Request, next: Next) -> Response {
         return next.run(request).await;
     }
     let started = Instant::now();
+    let method = request.method().to_string();
+    let owner = owner_of(&request);
+    let query = query_keys(&request);
     let (response, recorder) = RECORDER
         .scope(Mutex::new(Recorder::default()), async move {
             let response = next.run(request).await;
@@ -134,6 +211,23 @@ pub async fn layer(request: Request, next: Next) -> Response {
             slowest = %summary.slowest(),
             "agent request timing"
         );
+    }
+    // Status polls (every client, every few seconds) would drown the log.
+    if path != "/agent/status" && LOG_PATH.get().is_some() {
+        let line = serde_json::json!({
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            "owner": owner,
+            "method": method,
+            "path": path,
+            "query": query,
+            "status": response.status().as_u16(),
+            "timing": summary.json(),
+        })
+        .to_string();
+        tokio::task::spawn_blocking(move || append_log_line(line));
     }
     attach(response, &summary).await
 }
@@ -398,6 +492,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn log_lines_name_the_owner_and_query_keys_but_never_values() {
+        let request = Request::builder()
+            .uri("/agent/elements?since=SECRETTOKEN&filter=hello")
+            .header("x-phone-owner", "paypay-check")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(owner_of(&request), "paypay-check");
+        assert_eq!(query_keys(&request), vec!["since", "filter"]);
+        let anonymous = Request::builder()
+            .uri("/agent/elements")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(owner_of(&anonymous), "-");
+        assert!(query_keys(&anonymous).is_empty());
+    }
+
+    #[test]
+    fn the_log_appends_and_rotates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-timing.jsonl");
+        append_to(&path, r#"{"n":1}"#);
+        append_to(&path, r#"{"n":2}"#);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"n\":1}\n{\"n\":2}\n"
+        );
+        // Past the cap the current file becomes .1 and a fresh one starts.
+        std::fs::write(&path, vec![b'x'; LOG_ROTATE_BYTES as usize]).unwrap();
+        append_to(&path, r#"{"n":3}"#);
+        assert_eq!(
+            std::fs::metadata(dir.path().join("agent-timing.jsonl.1"))
+                .unwrap()
+                .len(),
+            LOG_ROTATE_BYTES
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"n\":3}\n");
     }
 
     #[test]
