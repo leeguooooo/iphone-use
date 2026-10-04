@@ -3591,3 +3591,90 @@ fn snapshot_tap_still_refuses_when_nothing_decides() {
     assert_eq!(json["outcome"], "not_sent");
     assert!(clicked.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Screens the app hides from capture
+// ---------------------------------------------------------------------------
+
+/// GET /agent/screenshot against a WDA whose capture is a flat white screen
+/// and whose tree is `source`. Returns (status, redacted header, png bytes).
+fn screenshot_of_blank_capture(
+    source: &'static str,
+    uri: &'static str,
+) -> (StatusCode, Option<String>, Vec<u8>) {
+    use base64::Engine as _;
+    let blank = server::redaction::encode_png(&server::redaction::Image {
+        width: 390,
+        height: 844,
+        rgba: vec![255; 390 * 844 * 4],
+    })
+    .unwrap();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&blank);
+    block(async move {
+        let (base, _server) = mock_wda(16, move |request, _| {
+            let ok = |body: String| Some((std::time::Duration::ZERO, body));
+            if request.starts_with("POST /session ") {
+                ok(r#"{"value":{"sessionId":"SESSION"}}"#.to_string())
+            } else if request.contains("/screenshot") {
+                ok(format!(r#"{{"value":"{encoded}"}}"#))
+            } else if request.contains("/source?format=json") {
+                ok(source.to_string())
+            } else if request.contains("/window/size") {
+                ok(r#"{"value":{"width":390,"height":844}}"#.to_string())
+            } else {
+                ok(r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string())
+            }
+        });
+        let app = http::router(build_state_with_wda(&base));
+        let response = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let redacted = response
+            .headers()
+            .get("x-capture-redacted")
+            .map(|v| v.to_str().unwrap().to_string());
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        (status, redacted, body)
+    })
+}
+
+const PROTECTED_SOURCE: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"PayPay","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeStaticText","label":"残高","rect":{"x":20,"y":120,"width":100,"height":24}},{"type":"XCUIElementTypeButton","label":"支払う","rect":{"x":20,"y":200,"width":160,"height":44}},{"type":"XCUIElementTypeButton","label":"チャージ","rect":{"x":200,"y":200,"width":160,"height":44}}]}}"#;
+
+#[test]
+fn a_capture_the_app_blanked_comes_back_as_a_labelled_wireframe() {
+    let (status, redacted, png) =
+        screenshot_of_blank_capture(PROTECTED_SOURCE, "/agent/screenshot");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(redacted.as_deref(), Some("1"));
+    let image = server::redaction::decode_png(&png).unwrap();
+    assert!(
+        !server::redaction::content_band_is_blank(&image),
+        "the wireframe must draw over the blank band"
+    );
+}
+
+#[test]
+fn raw_returns_the_blank_capture_untouched() {
+    let (status, redacted, png) =
+        screenshot_of_blank_capture(PROTECTED_SOURCE, "/agent/screenshot?raw=1");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(redacted, None);
+    let image = server::redaction::decode_png(&png).unwrap();
+    assert!(server::redaction::content_band_is_blank(&image));
+}
+
+#[test]
+fn a_genuinely_empty_screen_is_not_called_redacted() {
+    let empty = r#"{"value":{"type":"XCUIElementTypeApplication","label":"Notes","rect":{"x":0,"y":0,"width":390,"height":844},"children":[]}}"#;
+    let (status, redacted, _) = screenshot_of_blank_capture(empty, "/agent/screenshot");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(redacted, None);
+}

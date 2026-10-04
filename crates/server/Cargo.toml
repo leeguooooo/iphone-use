@@ -55,6 +55,11 @@ zune-jpeg = "0.4"
 # Scan-to-connect: the pairing page shows the one-time link as a QR code.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
+# Screens an app hides from capture (PayPay): a blank screenshot is detected
+# (png decode) and the accessibility tree is drawn over it (ab_glyph text).
+png = "0.17"
+ab_glyph = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = "0.3.2"
 objc2-core-media = "0.3.2"

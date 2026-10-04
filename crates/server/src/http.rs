@@ -9237,7 +9237,55 @@ fn mark_wda_read_path_unactionable(state: &AppState) {
 /// this endpoint) — a logged-in viewer already sees these pixels as video, so the
 /// privilege is identical. The cookie is checked FIRST so browser polling never
 /// touches the bearer auth-limiter (5 misses there lock the agent API for 30s).
-async fn agent_screenshot(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+#[derive(Default, Deserialize)]
+struct ScreenshotQuery {
+    /// `raw=1`: the capture as WDA returned it, even when the app blanked it.
+    raw: Option<String>,
+}
+
+/// Captures above this size have real content; a protected (flat) screen
+/// compresses to far less, so only small captures are decoded and checked.
+const REDACTION_CHECK_MAX_PNG_BYTES: usize = 600 * 1024;
+
+/// When the app hid this screen from capture (blank content band, labelled
+/// elements in the tree), the same capture with the tree drawn over it.
+async fn redacted_capture_wireframe(
+    wda: &Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
+    png: &[u8],
+) -> Option<Vec<u8>> {
+    if png.len() > REDACTION_CHECK_MAX_PNG_BYTES {
+        return None;
+    }
+    let png = png.to_vec();
+    let blank = tokio::task::spawn_blocking(move || {
+        let image = crate::redaction::decode_png(&png)?;
+        crate::redaction::content_band_is_blank(&image).then_some(image)
+    })
+    .await
+    .ok()??;
+    let (rows, window) = {
+        let mut w = wda.lock().await;
+        let rows = w.elements().await.ok()?;
+        let window = w.window_size().await.ok()?;
+        (rows, window)
+    };
+    if !crate::redaction::tree_has_hidden_content(&rows, window) {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || {
+        let mut image = blank;
+        crate::redaction::draw_wireframe(&mut image, &rows, window);
+        crate::redaction::encode_png(&image)
+    })
+    .await
+    .ok()?
+}
+
+async fn agent_screenshot(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ScreenshotQuery>,
+) -> Response {
     // Match `/phone`: password=None intentionally makes the browser UI open.
     // A separate agent token still protects machine-only mutation endpoints.
     match browser_or_agent_auth(&state, &headers) {
@@ -9285,6 +9333,28 @@ async fn agent_screenshot(State(state): State<Arc<AppState>>, headers: HeaderMap
     .await
     {
         Ok(Ok(bytes)) if is_valid_png(&bytes) => {
+            if !query
+                .raw
+                .as_deref()
+                .is_some_and(|v| v == "1" || v == "true")
+            {
+                let wireframe = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    redacted_capture_wireframe(wda, &bytes),
+                )
+                .await
+                .ok()
+                .flatten();
+                if let Some(wireframe) = wireframe {
+                    let response = Response::builder()
+                        .header(header::CONTENT_TYPE, "image/png")
+                        .header("x-capture-redacted", "1")
+                        .header("x-screenshot-source", "accessibility-wireframe")
+                        .body(Body::from(wireframe))
+                        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                    return with_security_headers(response);
+                }
+            }
             let response = Response::builder()
                 .header(header::CONTENT_TYPE, "image/png")
                 .body(Body::from(bytes))

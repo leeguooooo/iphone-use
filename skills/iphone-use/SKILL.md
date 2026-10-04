@@ -95,7 +95,7 @@ user-requested task must need that access.
 |---|---|
 | `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, hint, setup_blocked_on, setup_phase, setup_message, …}` — gate on **`drivable`** |
 | `GET /agent/elements` | **Direct/WDA UI as text**: `{"snapshot":"…","elements":[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?},…]}` — prefer this over screenshots. Indexes and snapshot tokens are valid only for this read. Add `?since=<prior snapshot>` to get `{"snapshot":…,"baseline":…,"delta":{added,changed,removed,unchanged}}` instead of the full tree (much cheaper on multi-step flows; unknown baseline falls back to the full tree), plus `app_changed:{from,to}` if the foreground app moved since that baseline. Both shapes carry a read-only `ax_stats` usability block — see **Vision fallback** below — and a sparse `alert:{text,buttons}` block whenever a system alert (UIAlertController) is on screen. With `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` on the daemon, rows also carry sparse `actions` (named `perform` affordances), `selected`, and `min`/`max` |
-| `GET /agent/screenshot` | Current phone screen as a device-side PNG |
+| `GET /agent/screenshot` | Current phone screen as a device-side PNG. On a screen the app hides from capture (PayPay and other payment/bank apps) the response carries `X-Capture-Redacted: 1` and the PNG is the accessibility tree drawn as a labelled wireframe over the blank area — see **Screens hidden from capture** below. `?raw=1` returns the capture untouched |
 | `POST /agent/input` | One action (JSON body, below); requires `X-Phone-Control: 1` |
 | `POST /agent/actions` | One bounded, fail-closed sequence of `action`, `wait_for`, and short `pause` steps; Direct/WDA only; requires `X-Phone-Control: 1` |
 | `GET /agent/apps` | Installed app versions: `{udid, device:{marketing_name,product_type,ios,build}, fetched_at, source, apps:[{bundle,name,version,bundle_version,system,removable,hidden}]}`. `?bundle=<id>` for one app; cached 10 min (`?refresh=1` bypasses). `503 apps_unavailable` means unknown, not "not installed" |
@@ -496,6 +496,26 @@ documented or unit-tested action is not automatically a current-device proof:
   replay text, scroll, back, payment, send, or delete actions.
 - A reliable "reset to known state": `shortcut home`, then `shortcut spotlight`
   + `text <app name>` + `key return` to launch any app.
+
+## Screens hidden from capture
+
+Some apps (PayPay, banks, wallets) mark their content as protected. iOS then
+hands every capture path — screenshot, live view, mirroring — a blank area
+there: white or one flat colour, with only the status bar and tab bar left.
+That is **not** a loading screen and **not** an empty page, and the real pixels
+cannot be recovered.
+
+- `GET /agent/screenshot` detects it (blank content band + labelled elements in
+  the tree) and returns `X-Capture-Redacted: 1` with a **wireframe** drawn from
+  the accessibility tree: one outline per element (blue = buttons/cells, green
+  = input fields, purple = images, gray = text) with its label, under a yellow
+  banner that says so. Read it like a screenshot, but it shows only what the
+  tree has: images, QR codes and charts are empty boxes.
+- Drive these screens by **elements**, not pixels: `GET /agent/elements`, then
+  `{"type":"tap","element":N,"snapshot":"…"}`. Never take the vision fallback
+  below on a blank capture, and never tap coordinates guessed from a white image.
+- A screen that is blank in `?raw=1` and has no labelled elements is genuinely
+  empty (or still loading): wait and read again.
 
 ## Vision fallback: when the AX tree is unusable
 

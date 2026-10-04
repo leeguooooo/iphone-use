@@ -689,6 +689,14 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 
 <h3><span class="method get">GET</span> <span class="ep">/agent/screenshot</span></h3>
 <p>
+  <strong>Screens hidden from capture.</strong> When the app protects its content (PayPay and other
+  payment apps), iOS blanks it in every capture. If the capture's content band is one flat colour while
+  the accessibility tree has labelled elements there, the daemon returns the capture with the tree drawn
+  over it — outlines, kinds and labels under a banner — and sets <code>X-Capture-Redacted: 1</code> and
+  <code>X-Screenshot-Source: accessibility-wireframe</code>. <code>?raw=1</code> skips this. Captures over
+  600 KB are never checked (protected screens compress far below that).
+</p>
+<p>
   Returns a validated <code>image/png</code> of the selected phone, read from WDA: if WDA
   is down or returns an invalid frame, the endpoint returns an error. An invalid
   PNG, WDA error, or timeout immediately revokes cached actionability before the response
