@@ -4810,19 +4810,81 @@ async fn fetch_snapshot_row(
 /// semantic locator. Rows without semantics cannot be addressed this way.
 async fn resolve_snapshot_row_element(
     w: &mut crate::wda::WdaClient,
-    row: &crate::wda::ElementRow,
+    rows: &[crate::wda::ElementRow],
+    index: usize,
 ) -> Result<String, SnapshotElementTapError> {
-    let locator = snapshot_row_locator(row).ok_or(SnapshotElementTapError::InvalidTarget)?;
+    let locator =
+        snapshot_row_locator(&rows[index]).ok_or(SnapshotElementTapError::InvalidTarget)?;
     let (using, value) = locator_wda_query(&locator).ok_or(SnapshotElementTapError::Invalid)?;
     let element_ids = w
         .find_elements(using, &value)
         .await
         .map_err(SnapshotElementTapError::BeforeDispatch)?;
-    match element_ids.as_slice() {
-        [] => Err(SnapshotElementTapError::NotFound),
-        [element_id] => Ok(element_id.clone()),
-        _ => Err(SnapshotElementTapError::Ambiguous),
+    pick_snapshot_element(w, rows, index, (using, &value), element_ids).await
+}
+
+/// More live elements than candidates the cheap rect check may read.
+const SNAPSHOT_PICK_MAX_RECT_READS: usize = 8;
+
+/// Choose the live element a snapshot row names when its semantic locator
+/// matches several (two `关闭` buttons, an Icon and a Cell sharing a label).
+/// The caller already named the row by index; refusing those as
+/// "ambiguous" pushed agents back to raw coordinates. In order:
+/// 1. exactly one candidate's frame equals the row's (both frames come from
+///    the same accessibility snapshot, so even a system sheet's offset frame
+///    agrees);
+/// 2. the row's position among the snapshot rows with the same locator, when
+///    the snapshot and WDA count the same number of them (both walk the tree
+///    in document order).
+///
+/// Anything else stays `Ambiguous`: no guess is dispatched.
+async fn pick_snapshot_element(
+    w: &mut crate::wda::WdaClient,
+    rows: &[crate::wda::ElementRow],
+    index: usize,
+    query: (&str, &str),
+    element_ids: Vec<String>,
+) -> Result<String, SnapshotElementTapError> {
+    match element_ids.len() {
+        0 => return Err(SnapshotElementTapError::NotFound),
+        1 => return Ok(element_ids.into_iter().next().unwrap_or_default()),
+        _ => {}
     }
+    let target = rows[index].rect;
+    if element_ids.len() <= SNAPSHOT_PICK_MAX_RECT_READS && target.iter().all(|v| v.is_finite()) {
+        let mut matching = Vec::new();
+        for element_id in &element_ids {
+            if let Ok(rect) = w.element_rect(element_id).await {
+                if rects_match(rect, target) {
+                    matching.push(element_id.clone());
+                }
+            }
+        }
+        if let [only] = matching.as_slice() {
+            return Ok(only.clone());
+        }
+    }
+    let same_locator: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            snapshot_row_locator(row)
+                .and_then(|locator| locator_wda_query(&locator))
+                .is_some_and(|(using, value)| using == query.0 && value == query.1)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if same_locator.len() == element_ids.len() {
+        if let Some(position) = same_locator.iter().position(|&i| i == index) {
+            return Ok(element_ids[position].clone());
+        }
+    }
+    Err(SnapshotElementTapError::Ambiguous)
+}
+
+/// Frames from one accessibility snapshot: equal up to rounding.
+fn rects_match(a: [f64; 4], b: [f64; 4]) -> bool {
+    a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() <= 1.0)
 }
 
 /// WDA answers 404 on `element/:id/*` routes when the resolved element
@@ -4852,12 +4914,9 @@ async fn tap_snapshot_element(
             .find_elements(using, &value)
             .await
             .map_err(SnapshotElementTapError::BeforeDispatch)?;
-        let element_id = match element_ids.as_slice() {
-            [] => return Err(SnapshotElementTapError::NotFound),
-            [element_id] => element_id,
-            _ => return Err(SnapshotElementTapError::Ambiguous),
-        };
-        return w.click_element(element_id).await.map_err(|error| {
+        let element_id =
+            pick_snapshot_element(w, &rows, index, (using, &value), element_ids).await?;
+        return w.click_element(&element_id).await.map_err(|error| {
             if wda_error_is_missing_element(&error) {
                 SnapshotElementTapError::NotFound
             } else {
@@ -4891,7 +4950,7 @@ async fn set_value_snapshot_element(
     let (rows, index) = fetch_snapshot_row(w, value).await?;
     let row = &rows[index];
     let element_id = if snapshot_row_locator(row).is_some() {
-        resolve_snapshot_row_element(w, row).await?
+        resolve_snapshot_row_element(w, &rows, index).await?
     } else if TEXT_INPUT_KINDS.contains(&row.kind.as_str()) {
         // A web form's <input> routinely has neither label nor identifier
         // (hardware-hit inside a bank's WKWebView, issue #70). It still has a
@@ -5132,7 +5191,7 @@ async fn perform_snapshot_element(
     // locator: fall back to the same snapshot-bound coordinate tap that
     // `tap` uses for semantic-less rows. Every other perform verb still
     // requires the semantic resolution.
-    let element_id = match resolve_snapshot_row_element(w, row).await {
+    let element_id = match resolve_snapshot_row_element(w, &rows, index).await {
         Ok(element_id) => Some(element_id),
         Err(SnapshotElementTapError::InvalidTarget)
             if PERFORM_VERBS_WITH_FRAME_FALLBACK.contains(&action.as_str()) =>

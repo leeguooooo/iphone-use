@@ -3439,3 +3439,139 @@ fn agent_answers_carry_wda_timing_in_body_and_server_timing() {
         assert!(timing["total_ms"].as_u64().unwrap() >= timing["wda_ms"].as_u64().unwrap());
     });
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot-bound taps when several live elements share the row's locator
+// ---------------------------------------------------------------------------
+
+/// Two `关闭` buttons; WDA's label lookup returns `ids`. `rects` answers
+/// `element/:id/rect` (None = WDA fails that read). Taps snapshot row
+/// `element` and returns (status, json, clicked element ids).
+fn tap_with_duplicate_labels(
+    ids: &'static [&'static str],
+    rects: fn(&str) -> Option<&'static str>,
+    element: usize,
+) -> (StatusCode, serde_json::Value, Vec<String>) {
+    block(async move {
+        let clicked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = clicked.clone();
+        let source = r#"{"value":{"type":"XCUIElementTypeApplication","children":[{"type":"XCUIElementTypeButton","label":"关闭","rect":{"x":24,"y":66,"width":36,"height":36},"children":[]},{"type":"XCUIElementTypeButton","label":"关闭","rect":{"x":300,"y":700,"width":60,"height":44},"children":[]}]}}"#;
+        let (base, _server) = mock_wda(32, move |request, _| {
+            let ok = |body: String| Some((std::time::Duration::ZERO, body));
+            if request.starts_with("POST /session ") {
+                ok(r#"{"value":{"sessionId":"SESSION"}}"#.to_string())
+            } else if request.contains("/source?format=json") {
+                ok(source.to_string())
+            } else if request.contains("/window/size") {
+                ok(r#"{"value":{"width":390,"height":844}}"#.to_string())
+            } else if request.contains("/alert/") {
+                ok(r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string())
+            } else if request.contains("/elements") {
+                let list: Vec<String> = ids
+                    .iter()
+                    .map(|id| format!(r#"{{"ELEMENT":"{id}"}}"#))
+                    .collect();
+                ok(format!(r#"{{"value":[{}]}}"#, list.join(",")))
+            } else if let Some(id) = request
+                .split("/element/")
+                .nth(1)
+                .and_then(|rest| rest.strip_suffix_owned("/rect"))
+            {
+                match rects(&id) {
+                    Some(rect) => ok(format!(r#"{{"value":{rect}}}"#)),
+                    None => ok(
+                        r#"{"value":{"error":"unknown error","message":"no frame"}}"#.to_string(),
+                    ),
+                }
+            } else if let Some(id) = request
+                .split("/element/")
+                .nth(1)
+                .and_then(|rest| rest.split("/click").next())
+            {
+                seen.lock().unwrap().push(id.to_string());
+                ok(r#"{"value":null}"#.to_string())
+            } else {
+                ok(r#"{"value":null}"#.to_string())
+            }
+        });
+        let app = http::router(build_state_with_wda(&base));
+        let elements = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/elements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = elements.into_body().collect().await.unwrap().to_bytes();
+        let snapshot = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["snapshot"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control")
+                    .header("x-phone-control", "1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"type":"tap","element":element,"snapshot":snapshot,"ttl_ms":2000})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        let clicked = clicked.lock().unwrap().clone();
+        (status, json, clicked)
+    })
+}
+
+trait StripSuffixOwned {
+    fn strip_suffix_owned(&self, suffix: &str) -> Option<String>;
+}
+impl StripSuffixOwned for str {
+    /// `"ID/rect HTTP/1.1..."` → `"ID"` when the path ends in `/rect`.
+    fn strip_suffix_owned(&self, suffix: &str) -> Option<String> {
+        let path = self.split_whitespace().next()?;
+        path.strip_suffix(suffix).map(str::to_string)
+    }
+}
+
+#[test]
+fn snapshot_tap_picks_the_duplicate_whose_frame_matches_the_row() {
+    let (status, json, clicked) = tap_with_duplicate_labels(
+        &["TOP", "BOTTOM"],
+        |id| match id {
+            "TOP" => Some(r#"{"x":24,"y":66,"width":36,"height":36}"#),
+            "BOTTOM" => Some(r#"{"x":300,"y":700,"width":60,"height":44}"#),
+            _ => None,
+        },
+        1,
+    );
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(clicked, vec!["BOTTOM".to_string()]);
+}
+
+#[test]
+fn snapshot_tap_falls_back_to_document_order_when_frames_are_unreadable() {
+    let (status, json, clicked) = tap_with_duplicate_labels(&["FIRST", "SECOND"], |_| None, 0);
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(clicked, vec!["FIRST".to_string()]);
+}
+
+#[test]
+fn snapshot_tap_still_refuses_when_nothing_decides() {
+    // WDA sees three matches, the snapshot two, and no frame can be read.
+    let (status, json, clicked) = tap_with_duplicate_labels(&["A", "B", "C"], |_| None, 1);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+    assert_eq!(json["error"], "ambiguous_element_label");
+    assert_eq!(json["outcome"], "not_sent");
+    assert!(clicked.is_empty());
+}
