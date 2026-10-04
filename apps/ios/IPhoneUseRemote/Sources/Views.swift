@@ -119,6 +119,14 @@ struct RemoteView: View {
             StatusPill(model: model)
             ZStack {
                 RemoteScreen(model: model)
+                if let wireframe = model.redactedImage {
+                    // The app hides this screen from capture; this is its
+                    // accessibility tree drawn by the daemon. Taps pass through.
+                    Image(uiImage: wireframe)
+                        .resizable()
+                        .scaledToFit()
+                        .allowsHitTesting(false)
+                }
                 if let overlay = overlay {
                     StatusOverlay(content: overlay, model: model)
                 }

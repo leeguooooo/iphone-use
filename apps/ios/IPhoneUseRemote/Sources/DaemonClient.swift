@@ -13,6 +13,9 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
     var setupBlockedOn: String
     var recoveryOwner: String
     var version: String
+    /// The app on screen hides it from capture; the picture is blank and
+    /// `/agent/screenshot` answers with a wireframe of its accessibility tree.
+    var captureRedacted: Bool
 
     enum CodingKeys: String, CodingKey {
         case deviceState = "device_state"
@@ -23,6 +26,7 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         case setupBlockedOn = "setup_blocked_on"
         case recoveryOwner = "recovery_owner"
         case version
+        case captureRedacted = "capture_redacted"
     }
 
     init(from decoder: Decoder) throws {
@@ -38,6 +42,7 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         setupBlockedOn = try c.decodeIfPresent(String.self, forKey: .setupBlockedOn) ?? ""
         recoveryOwner = try c.decodeIfPresent(String.self, forKey: .recoveryOwner) ?? ""
         version = try c.decodeIfPresent(String.self, forKey: .version) ?? ""
+        captureRedacted = try c.decodeIfPresent(Bool.self, forKey: .captureRedacted) ?? false
     }
 }
 
@@ -241,6 +246,17 @@ final class DaemonClient: @unchecked Sendable {
         guard (200..<300).contains(response.statusCode) else {
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
         }
+    }
+
+    /// The current screen as `/agent/screenshot` answers it, and whether that
+    /// answer is the wireframe of a screen hidden from capture.
+    func screenshot() async throws -> (Data, redacted: Bool) {
+        let (data, response) = try await send(request("agent/screenshot"))
+        if response.statusCode == 401 { throw DaemonError.sessionExpired }
+        guard response.statusCode == 200 else {
+            throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
+        }
+        return (data, response.value(forHTTPHeaderField: "X-Capture-Redacted") == "1")
     }
 
     /// A request for `path` with the session cookie attached.

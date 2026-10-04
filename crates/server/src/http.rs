@@ -2091,6 +2091,15 @@ async fn agent_status(
         .load(std::sync::atomic::Ordering::Relaxed);
     // `viewer_count` predates the MJPEG-only page; it is the same number now.
     let viewer_count = mjpeg_viewer_count;
+    // A watched picture that is blank because the app hides this screen from
+    // capture: clients overlay /agent/screenshot's wireframe (see `redaction`).
+    let capture_redacted = match &state.video {
+        Some(hub) => {
+            refresh_capture_verdict(&state, hub);
+            hub.capture_redacted()
+        }
+        None => false,
+    };
     let mjpeg_stream_age_ms = query.stream_id.as_deref().and_then(|stream_id| {
         recover(state.mjpeg_stream_activity.lock())
             .get(stream_id)
@@ -2241,7 +2250,7 @@ async fn agent_status(
     // up indefinitely, so `device_state:"ready"` alone says nothing about use.
     let idle_secs = state.idle_for().as_secs();
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"version":"{version}","latest":{latest_json},"update_available":{update_available}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -9241,6 +9250,32 @@ fn mark_wda_read_path_unactionable(state: &AppState) {
 struct ScreenshotQuery {
     /// `raw=1`: the capture as WDA returned it, even when the app blanked it.
     raw: Option<String>,
+}
+
+/// Decide again, in the background, whether a blank live picture is a screen
+/// the app hides from capture. Status polls drive it; at most one tree read
+/// per 8 s, and only while someone watches a blank picture.
+fn refresh_capture_verdict(state: &Arc<AppState>, hub: &Arc<crate::video::VideoHub>) {
+    if !hub.begin_verdict(std::time::Duration::from_secs(8)) {
+        return;
+    }
+    let Some(wda) = state.wda.clone() else {
+        hub.finish_verdict(None);
+        return;
+    };
+    let hub = Arc::clone(hub);
+    tokio::spawn(async move {
+        let verdict = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut w = wda.lock().await;
+            let rows = w.elements().await.ok()?;
+            let window = w.window_size().await.ok()?;
+            Some(crate::redaction::tree_has_hidden_content(&rows, window))
+        })
+        .await
+        .ok()
+        .flatten();
+        hub.finish_verdict(verdict);
+    });
 }
 
 /// Captures above this size have real content; a protected (flat) screen

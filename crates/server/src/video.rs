@@ -131,6 +131,15 @@ pub struct VideoHub {
     force_idr: Arc<AtomicBool>,
     running: Mutex<bool>,
     bitrate: u32,
+    /// The live frame's content band is one flat colour (checked every few
+    /// frames while someone watches). See [`crate::redaction`].
+    frame_blank: Arc<AtomicBool>,
+    /// Daemon verdict: the blank frame is a screen the app hides from
+    /// capture (its tree has labelled content), not an empty one.
+    capture_redacted: AtomicBool,
+    /// When the verdict was last decided, and whether a check is running.
+    verdict_at: Mutex<Option<std::time::Instant>>,
+    verdict_running: AtomicBool,
 }
 
 /// Keeps a subscription counted; dropping it lets the pipeline wind down.
@@ -161,7 +170,48 @@ impl VideoHub {
             force_idr: Arc::new(AtomicBool::new(true)),
             running: Mutex::new(false),
             bitrate,
+            frame_blank: Arc::new(AtomicBool::new(false)),
+            capture_redacted: AtomicBool::new(false),
+            verdict_at: Mutex::new(None),
+            verdict_running: AtomicBool::new(false),
         })
+    }
+
+    /// Someone is watching and the picture they get is blank.
+    pub fn watching_a_blank_frame(&self) -> bool {
+        self.subscribers.load(Ordering::Acquire) > 0 && self.frame_blank.load(Ordering::Acquire)
+    }
+
+    /// The current verdict, reset as soon as the picture is no longer blank.
+    pub fn capture_redacted(&self) -> bool {
+        self.watching_a_blank_frame() && self.capture_redacted.load(Ordering::Acquire)
+    }
+
+    /// Claim the right to decide the verdict again: the frame is blank and the
+    /// last decision is older than `max_age`. Returns false when a check is
+    /// already running or none is due.
+    pub fn begin_verdict(&self, max_age: Duration) -> bool {
+        if !self.watching_a_blank_frame() {
+            return false;
+        }
+        let due = self
+            .verdict_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none_or(|at| at.elapsed() >= max_age);
+        due && self
+            .verdict_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn finish_verdict(&self, redacted: Option<bool>) {
+        if let Some(redacted) = redacted {
+            self.capture_redacted.store(redacted, Ordering::Release);
+            *self.verdict_at.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(std::time::Instant::now());
+        }
+        self.verdict_running.store(false, Ordering::Release);
     }
 
     /// Whether this build can encode at all (VideoToolbox is macOS-only).
@@ -214,6 +264,8 @@ impl VideoHub {
 
     fn mark_stopped(&self) {
         *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        // No picture any more: nothing is blank, nothing is redacted.
+        self.frame_blank.store(false, Ordering::Release);
     }
 
     async fn pipeline(&self) -> anyhow::Result<()> {
@@ -229,10 +281,11 @@ impl VideoHub {
             let stop = Arc::clone(&stop);
             let tx = self.tx.clone();
             let force_idr = Arc::clone(&self.force_idr);
+            let frame_blank = Arc::clone(&self.frame_blank);
             let bitrate = self.bitrate;
             std::thread::Builder::new()
                 .name("h264-encoder".into())
-                .spawn(move || encoder_loop(slot, stop, tx, force_idr, bitrate))?
+                .spawn(move || encoder_loop(slot, stop, tx, force_idr, frame_blank, bitrate))?
         };
 
         let client = reqwest::Client::builder()
@@ -329,9 +382,11 @@ fn encoder_loop(
     stop: Arc<AtomicBool>,
     tx: tokio::sync::broadcast::Sender<H264Frame>,
     force_idr: Arc<AtomicBool>,
+    frame_blank: Arc<AtomicBool>,
     bitrate: u32,
 ) {
     let started = std::time::Instant::now();
+    let mut decoded_frames: u64 = 0;
     let mut encoder: Option<imp::Encoder> = None;
     let mut pixels: Vec<u8> = Vec::new();
     loop {
@@ -358,6 +413,14 @@ fn encoder_loop(
                 continue;
             }
         };
+        // A few times a second is plenty to notice a protected screen.
+        if decoded_frames % 10 == 0 {
+            frame_blank.store(
+                crate::redaction::band_is_flat(width, height, &pixels),
+                Ordering::Release,
+            );
+        }
+        decoded_frames += 1;
         if encoder.as_ref().is_none_or(|e| e.size() != (width, height)) {
             // First frame, or the phone rotated: a new size needs a new session.
             encoder = match imp::Encoder::new(width, height, bitrate, tx.clone()) {
@@ -826,6 +889,40 @@ pub fn avcc_to_annex_b(avcc: &[u8], param_sets: Option<(&[u8], &[u8])>) -> Resul
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_capture_verdict_follows_the_live_picture() {
+        let hub = VideoHub::new("http://127.0.0.1:1".into());
+        // Nobody watching, nothing blank: no check is due.
+        assert!(!hub.begin_verdict(Duration::ZERO));
+        hub.subscribers.store(1, Ordering::Release);
+        assert!(
+            !hub.begin_verdict(Duration::ZERO),
+            "a live picture needs no verdict"
+        );
+        hub.frame_blank.store(true, Ordering::Release);
+        assert!(hub.begin_verdict(Duration::ZERO));
+        assert!(!hub.begin_verdict(Duration::ZERO), "one check at a time");
+        hub.finish_verdict(Some(true));
+        assert!(hub.capture_redacted());
+        assert!(
+            !hub.begin_verdict(Duration::from_secs(60)),
+            "fresh verdicts are reused"
+        );
+        // The picture comes back: the verdict no longer applies.
+        hub.frame_blank.store(false, Ordering::Release);
+        assert!(!hub.capture_redacted());
+        // A failed check leaves the old verdict and frees the slot.
+        hub.frame_blank.store(true, Ordering::Release);
+        assert!(hub.begin_verdict(Duration::ZERO));
+        hub.finish_verdict(None);
+        assert!(hub.capture_redacted());
+        assert!(hub.begin_verdict(Duration::ZERO));
+        hub.finish_verdict(Some(false));
+        assert!(!hub.capture_redacted());
+    }
+
     use super::*;
 
     fn part(jpeg: &[u8], with_length: bool) -> Vec<u8> {

@@ -73,8 +73,13 @@ pub fn encode_png(image: &Image) -> Option<Vec<u8>> {
 
 /// Whether the content band is one flat colour (a protected or empty screen).
 pub fn content_band_is_blank(image: &Image) -> bool {
-    let (w, h) = (image.width as usize, image.height as usize);
-    if w == 0 || h == 0 || image.rgba.len() < w * h * 4 {
+    band_is_flat(image.width as usize, image.height as usize, &image.rgba)
+}
+
+/// The same test on any 4-bytes-per-pixel buffer (RGBA screenshots, BGRA video
+/// frames: channel order does not matter for "one flat colour").
+pub fn band_is_flat(w: usize, h: usize, px: &[u8]) -> bool {
+    if w == 0 || h == 0 || px.len() < w * h * 4 {
         return false;
     }
     let top = (h as f64 * BAND_TOP) as usize;
@@ -82,11 +87,7 @@ pub fn content_band_is_blank(image: &Image) -> bool {
     let step = (w.min(h) / 120).max(2);
     let pixel = |x: usize, y: usize| {
         let i = (y * w + x) * 4;
-        [
-            image.rgba[i] as i32,
-            image.rgba[i + 1] as i32,
-            image.rgba[i + 2] as i32,
-        ]
+        [px[i] as i32, px[i + 1] as i32, px[i + 2] as i32]
     };
     // Dominant colour: the most common of the sampled colours, bucketed.
     let mut buckets: std::collections::HashMap<[i32; 3], usize> = Default::default();

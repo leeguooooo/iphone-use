@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import Security
+import UIKit
 
 /// App state: the saved connection, the session with the daemon, the phone's
 /// status, and the live video stream.
@@ -22,6 +23,9 @@ final class RemoteModel {
     var toast: String?
     var busy = false
     var lastFrameAt: Date?
+    /// Wireframe shown over a picture the app blanked (see `captureRedacted`).
+    var redactedImage: UIImage?
+    private var redactedTask: Task<Void, Never>?
 
     private var client: DaemonClient?
     private var reader: H264StreamReader?
@@ -151,6 +155,9 @@ final class RemoteModel {
 
     func disconnect() {
         statusTask?.cancel()
+        redactedTask?.cancel()
+        redactedTask = nil
+        redactedImage = nil
         reader?.stop()
         reader = nil
         client = nil
@@ -218,6 +225,27 @@ final class RemoteModel {
         connectPhone()
     }
 
+    /// While the app on screen hides it from capture, refresh the wireframe
+    /// every 1.5 s; drop it as soon as the picture is real again.
+    private func updateRedactedOverlay() {
+        let wanted = status?.captureRedacted == true && client != nil
+        if wanted, redactedTask == nil {
+            redactedTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let self, let client = self.client else { return }
+                    if let (data, redacted) = try? await client.screenshot() {
+                        self.redactedImage = redacted ? UIImage(data: data) : nil
+                    }
+                    try? await Task.sleep(for: .milliseconds(1500))
+                }
+            }
+        } else if !wanted, let task = redactedTask {
+            task.cancel()
+            redactedTask = nil
+            redactedImage = nil
+        }
+    }
+
     private func startPolling() {
         statusTask?.cancel()
         statusTask = Task { [weak self] in
@@ -228,6 +256,7 @@ final class RemoteModel {
                     self.status = status
                     self.updateStream()
                     self.maybeAutoWake(status)
+                    self.updateRedactedOverlay()
                 } catch DaemonError.sessionExpired {
                     _ = await self.relogin()
                 } catch {}

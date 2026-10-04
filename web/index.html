@@ -574,7 +574,7 @@
     }
 
     /* ── Direct device image (MJPEG with periodic still fallback) ── */
-    #h264Frame, #mjpegFrame, #stillFrame {
+    #h264Frame, #mjpegFrame, #stillFrame, #redactedFrame {
       position: absolute; top: 0; left: 0;
       width: 100%; height: calc(100% - var(--tb-reserve));
       object-fit: contain;
@@ -584,7 +584,10 @@
     }
     #h264Frame, #mjpegFrame { z-index: 2; }
     #stillFrame { z-index: 1; }
-    #h264Frame.active, #mjpegFrame.active, #stillFrame.active { display: block; }
+    /* The app hides this screen from capture: the daemon's wireframe of its
+       accessibility tree replaces the blank picture (taps still go through). */
+    #redactedFrame { z-index: 3; background: #fff; }
+    #h264Frame.active, #mjpegFrame.active, #stillFrame.active, #redactedFrame.active { display: block; }
 
     /* ── Update banner (new release available) ───────────────────── */
     #updateBanner {
@@ -734,6 +737,7 @@
     <img id="stillFrame" alt="iPhone 设备静态画面">
     <img id="mjpegFrame" alt="iPhone 设备实时画面">
     <canvas id="h264Frame" aria-label="iPhone 设备实时画面"></canvas>
+    <img id="redactedFrame" alt="这个界面被 App 屏蔽了截屏，显示的是按控件树画的线框图">
     <canvas id="gridCanvas" aria-hidden="true"></canvas>
     <div id="tapDot"></div>
 
@@ -1448,6 +1452,48 @@ function cancelStatusPoll() {
   statusAbortController = null;
   statusPollBusy = false;
 }
+/* Screens the app hides from capture (PayPay…): the live picture is blank,
+   so while status says capture_redacted, show /agent/screenshot — which the
+   daemon answers with a wireframe of the accessibility tree — over it. */
+const redactedFrame = document.getElementById('redactedFrame');
+let redactedTimer = null;
+let redactedBusy = false;
+let redactedUrl = null;
+function hideRedactedFrame() {
+  redactedFrame.classList.remove('active');
+  if (redactedUrl) { URL.revokeObjectURL(redactedUrl); redactedUrl = null; }
+}
+async function refreshRedactedFrame() {
+  if (redactedBusy || document.visibilityState !== 'visible') return;
+  redactedBusy = true;
+  try {
+    const r = await fetch('/agent/screenshot', { cache: 'no-store', credentials: 'same-origin' });
+    if (!r.ok) return;
+    if (r.headers.get('x-capture-redacted') !== '1') { hideRedactedFrame(); return; }
+    const url = URL.createObjectURL(await r.blob());
+    const previous = redactedUrl;
+    redactedUrl = url;
+    redactedFrame.src = url;
+    redactedFrame.classList.add('active');
+    if (previous) URL.revokeObjectURL(previous);
+  } catch (_) {
+    /* the next tick retries */
+  } finally {
+    redactedBusy = false;
+  }
+}
+function syncRedactedOverlay(s) {
+  if (s?.capture_redacted === true) {
+    if (!redactedTimer) {
+      refreshRedactedFrame();
+      redactedTimer = setInterval(refreshRedactedFrame, 1500);
+    }
+  } else if (redactedTimer) {
+    clearInterval(redactedTimer);
+    redactedTimer = null;
+    hideRedactedFrame();
+  }
+}
 async function pollAgentMode() {
   // A degraded WDA can take several seconds to answer its action-level probe.
   // Never let the 3s timer stack duplicate probes behind the daemon's single
@@ -1477,6 +1523,7 @@ async function pollAgentMode() {
     if (generation !== statusPollGeneration) return backendStatus;
     backendStatus = s;
     syncHandoffButton();
+    syncRedactedOverlay(s);
 
     updateMjpegActivityFromStatus(s, polledStreamId);
     const directPageVisible = document.visibilityState === 'visible';
