@@ -4852,15 +4852,21 @@ async fn pick_snapshot_element(
     }
     let target = rows[index].rect;
     if element_ids.len() <= SNAPSHOT_PICK_MAX_RECT_READS && target.iter().all(|v| v.is_finite()) {
+        // Uniqueness needs every frame: one unreadable candidate could be the
+        // match too, so a partial scan decides nothing.
         let mut matching = Vec::new();
+        let mut complete = true;
         for element_id in &element_ids {
-            if let Ok(rect) = w.element_rect(element_id).await {
-                if rects_match(rect, target) {
-                    matching.push(element_id.clone());
+            match w.element_rect(element_id).await {
+                Ok(rect) if rects_match(rect, target) => matching.push(element_id.clone()),
+                Ok(_) => {}
+                Err(_) => {
+                    complete = false;
+                    break;
                 }
             }
         }
-        if let [only] = matching.as_slice() {
+        if let (true, [only]) = (complete, matching.as_slice()) {
             return Ok(only.clone());
         }
     }

@@ -3567,6 +3567,22 @@ fn snapshot_tap_falls_back_to_document_order_when_frames_are_unreadable() {
 }
 
 #[test]
+fn snapshot_tap_ignores_a_frame_match_when_another_frame_is_unreadable() {
+    // TOP's frame matches row 0, BOTTOM's cannot be read; three live matches
+    // against two snapshot rows also rule out document order. Nothing is sure.
+    let (status, json, clicked) = tap_with_duplicate_labels(
+        &["TOP", "BOTTOM", "EXTRA"],
+        |id| match id {
+            "TOP" => Some(r#"{"x":24,"y":66,"width":36,"height":36}"#),
+            _ => None,
+        },
+        0,
+    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+    assert!(clicked.is_empty());
+}
+
+#[test]
 fn snapshot_tap_still_refuses_when_nothing_decides() {
     // WDA sees three matches, the snapshot two, and no frame can be read.
     let (status, json, clicked) = tap_with_duplicate_labels(&["A", "B", "C"], |_| None, 1);
