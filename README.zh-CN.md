@@ -127,7 +127,7 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 ## 用原生 iOS App 操作手机
 
-`apps/ios` 是原生 SwiftUI App（iOS 17+）。**扫码连接**：在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，用 App 扫一下就连上（用 iPhone 自带相机扫也行，还能直接在浏览器里控制）。二维码只能用一次、5 分钟内有效；App 会保存一个设备令牌自动续登录，改控制密码会让所有已配对的手机失效。也可以手动填地址和控制密码。App 用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码。构建：`cd apps/ios && xcodegen generate`，再用 Xcode 打开。
+`apps/ios` 是原生 SwiftUI App（iOS 17+）。**扫码连接**：在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，用 App 扫一下就连上（用 iPhone 自带相机扫也行，还能直接在浏览器里控制）。二维码只能用一次、5 分钟内有效；App 会保存一个设备令牌自动续登录，改控制密码会让所有已配对的手机失效。也可以手动填地址和控制密码。App 用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码，所以手机锁着时 App 几秒内就会提示「请解锁」，解锁后马上连上。遇到 App 禁止截屏的界面（支付、银行类 App），画面不再是一片白，而是显示守护进程按控件树画的线框图。构建：`cd apps/ios && xcodegen generate`，再用 Xcode 打开。
 
 ## Agent API
 
@@ -145,8 +145,8 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| `GET` | `/agent/status` | 就绪与生命周期：`backend`、`device_state`、`drivable`、`wda_actionable`、`recovery_owner`、`setup_blocked_on` / `setup_phase` / `setup_message`、`hint`、viewer 计数、`instance`、`udid`、`owner` / `owner_lease_remaining_secs`、`hold_remaining_secs`、`idle_secs`（距上一次 agent 请求的秒数，轮询状态不算）、`version` / `latest`。 |
-| `GET` | `/agent/screenshot` | 当前屏幕 PNG，来自手机。 |
+| `GET` | `/agent/status` | 就绪与生命周期：`backend`、`device_state`、`drivable`、`wda_actionable`、`recovery_owner`、`setup_blocked_on` / `setup_phase` / `setup_message`、`hint`、viewer 计数、`instance`、`udid`、`owner` / `owner_lease_remaining_secs`、`hold_remaining_secs`、`idle_secs`（距上一次 agent 请求的秒数，轮询状态不算）、`capture_redacted`（正在看的画面因为 App 禁止截屏而是空白的）、`version` / `latest`。 |
+| `GET` | `/agent/screenshot` | 当前屏幕 PNG，来自手机。遇到 App 禁止截屏的界面，返回的是把控件树画在空白处的线框图，响应头带 `X-Capture-Redacted: 1`；`?raw=1` 返回原始截图。 |
 | `GET` | `/agent/elements` | 扁平化的辅助功能树，带一次性 `snapshot` 令牌、`ax_stats` 可用性块，以及系统弹窗在场时的 `alert` 块。`?since=<snapshot>` 只返回 `delta`。WDA 缺失或繁忙 `503`，source 失败 `502`，不会用空数组伪装 `200`。 |
 | `GET` | `/agent/mjpeg` | 鉴权后的实时 MJPEG。 |
 | `POST` | `/agent/input` | 一个动作：点按、拖动、长按、滚动、文字、按键、`home` / `spotlight`、`launch_app`、`set_value`、`perform`、`alert`。`?return=delta` 会在动作后于预算内反复采样元素树并返回其变化，以及一个 `settle` 块（`settled`、`reason`：`stable` / `budget_exhausted` / `observation_failed`、`waited_ms`、`captures`、`budget_ms`，必要时还有 `sparse` / `stale`）。观察是尽力而为的：读取慢或失败绝不会把已经生效的动作降级成未知结果。树已稳定、且没有任何行新增、变化或消失时，还会带上 `no_visible_change: true`（滚动或点按没碰到会响应的东西）。 |
@@ -166,6 +166,11 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 - **至多送达一次。** 派发前过期返回 `408 not_sent`，`retry_safe:true`。派发后传输失败 `502`，派发后超时 `504`，两者都是 `outcome_unknown`、`retry_safe:false`：先看屏幕，再决定要不要再来一次。
 - **目标绑定快照。** 元素索引只在同一次 `/agent/elements` 返回的 `snapshot` 下有效，树变了就 `409 stale_element_snapshot`。精确标签点按在零匹配或多匹配时都不动作。脚本里存标签、identifier、locator，不存索引和快照令牌。
 - **元素级动作。** `set_value` 直接写字段（先清再填），带 `element` 的 `scroll` 把手势限制在该元素内，`perform` 调用命名能力（`increment`、`decrement`、`adjust`、`toggle`、`menu`、`double_tap`、`two_finger_tap`、`scroll_to_visible`、`pinch`、`rotate`、`force_press`）。`force_press` 需要 3D Touch：iPhone XR / 11 之后的机型上 WDA 在触屏前就拒绝，daemon 返回 `422 force_press_unsupported`（`not_sent`，`retry_safe:true`），改用 `menu`（长按）。`{"type":"scroll","page":true,"dy":N}` 滚动页面本身：daemon 找到页面的滚动视图，从避开输入框、按钮、内层滚动区和工具栏的位置起手（找不到时返回 `422 no_page_scroller`）。盖在 app 上的系统层（通知横幅、灵动岛、锁屏）里的行带 `overlay` 字段（`notification`、`dynamic_island`、`cover_sheet`）。`PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` 让树上标出每行支持哪些动作。
+- **会点歪的点击直接拒绝。** 要点的元素中心被别的控件盖住（固定标题栏、键盘、悬浮按钮）时，返回 `409 element_occluded`、`not_sent`：先用 `perform` 的 `scroll_to_visible` 把它滚出来，重新读一次再点；确实要点最上面那个就加 `"allow_occluded":true`。按文字点击可以加 `"kind":"Button"` 限定类型，屏幕外的行不会和屏幕上的同名行抢匹配。
+- **`set_value` 写完会读回核对。** 字段没变（网页输入框常常不认直接写入）就返回 `409 value_not_applied`、`outcome:"no_effect"`，改成先点输入框再用 `text` 输入。输入框自己加的格式（分隔符、空格）算写入成功。
+- **禁止截屏的界面**（PayPay、银行、钱包）从 `/agent/screenshot` 拿到的是线框图，响应头带 `X-Capture-Redacted: 1`。在这类界面上按元素操作，不要对着空白截图做视觉识别。
+- **每个 `/agent/*` 响应都带耗时**：JSON 里有 `timing`（`total_ms`、`wda_ms`、`daemon_ms`，以及每个 WDA 调用的次数、毫秒和字节数），另有 `Server-Timing` 响应头；每个请求还会在 `~/.iphone-use/agent-timing.jsonl` 里记一行（只有路径、owner 和耗时，从不记请求内容或屏幕内容）。
+- 不认识的动作 `type` 返回 `400 invalid_action` 和支持的类型列表；常见的猜测（`scroll_into_view`、`click`、`fill` 等）还会直接给出该发的请求。
 - **系统弹窗是另一层。** 点它的按钮会被确认但不生效。用 `{"type":"alert","button":"…"}` 或 `{"action":"accept"|"dismiss"}`。App Switcher 和控制中心是系统手势，WDA 够不着。
 - **`/agent/actions`** 只要有动作已落地，就不会把整批重放标成安全。`tap_locator` 与 `wait_for` 用同一套精确的 label / identifier / kind / value / 状态字段，要求当前唯一命中。
 
@@ -286,7 +291,9 @@ agent 不靠记性去查源，而是被推着走：`phone_elements` 直接列出
 
 ### 生命周期与恢复
 
-`/agent/status` 是唯一事实来源。`recovery_owner` 在托管 loopback WDA 下是 `daemon`，首次接入尚未持久化目标时是 `unconfigured`，不托管的端点是 `external`。锁屏导致失败后，daemon 重建 WDA 的间隔从 30 秒退避到 15 分钟，不会反复催密码；其他失败从 5 秒退避到 5 分钟；一次成功恢复清零两种退避。交互式 setup 最多等 5 分钟解锁。`POST /agent/mode {"mode":"agent"}`（MCP 里是 `phone_reconnect`）只重启一次已配置的目标，不要循环调；先读 `hint` 和 `setup_blocked_on`（`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|locked`）。`automation_mode_disabled` 表示手机已解锁但 iOS 未开启 UI 自动化：在手机上打开“设置 › 开发者 › 启用 UI 自动化”，并在解锁状态下确认密码或“允许自动化”提示。
+`/agent/status` 是唯一事实来源。`recovery_owner` 在托管 loopback WDA 下是 `daemon`，首次接入尚未持久化目标时是 `unconfigured`，不托管的端点是 `external`。启动 WDA 之前，daemon 会先问手机是否锁屏：锁着的手机在连接后几秒内就显示 `setup_blocked_on:"locked"`（以前要等 Xcode 约 70 秒超时），连续两次读到解锁才启动。仍然因锁屏失败的，从 5 秒到 1 分钟安静重试；其他失败从 5 秒退避到 5 分钟；一次成功恢复清零两种退避。交互式 setup 最多等 5 分钟解锁。
+
+在 iPhone 17 Pro Max（iOS 27）上实测：手机解锁时冷连接 13–22 秒可操作；锁着时约 4 秒提示解锁，解锁后约 14 秒可操作；按编号点击并等画面稳定（`?return=delta`）约 4 秒。`POST /agent/mode {"mode":"agent"}`（MCP 里是 `phone_reconnect`）只重启一次已配置的目标，不要循环调；先读 `hint` 和 `setup_blocked_on`（`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|locked`）。`automation_mode_disabled` 表示手机已解锁但 iOS 未开启 UI 自动化：在手机上打开“设置 › 开发者 › 启用 UI 自动化”，并在解锁状态下确认密码或“允许自动化”提示。
 
 **谁有权结束一次重连。** 一次启动归发起它的任务所有，只有这个所有者能结束它。每次开始都会生成一个代次，所以迟到的任务无法结束接替它的那一轮；`GET /agent/status` 也永远不会结束重连——读状态会刷新健康缓存，但不移动生命周期。一次等待只以一个原因结束：手机可驱动了、锁屏了、setup 报出了前置阻塞、预算用尽、或被另一轮接管，每种都有日志。整个等待受预算约束：探针由绝对截止时间掐断而不是它自己的上限，超过截止时间才返回的证据一律丢弃，被取消的等待（进程关闭、future 被 drop）会释放自己那一轮而不是把 `reconnecting` 永久留下。启动之前缓存的证据，永远不算作这次启动已完成的证明。
 
@@ -366,7 +373,9 @@ PHONE_REMOTE_HOST=0.0.0.0 PHONE_REMOTE_PASSWORD=secret ./target/release/iphone-u
 - [ ] 记完下面的浏览器整链路真机验收矩阵。
 - [ ] 让首次接机、签名续期、休眠 / 重连恢复、多设备选择在产品界面里看得懂。
 - [ ] 在真机上逐条重验每个对外宣称的命令。
-- [ ] Phase 2 带鉴权的设备传输（计划中的 iOS 原生 companion app，或受控隧道）。
+- [x] iOS 原生 companion App，支持扫码配对（`apps/ios`）。
+- [x] 逐请求耗时统计，以及据此做的第一轮提速（按编号点击和等画面稳定都只读一次控件树）。
+- [ ] Phase 2 局域网以外的带鉴权设备传输（受控隧道）。
 - [ ] 一段 agent 操作手机的演示。
 
 ### 真机验收边界

@@ -217,7 +217,10 @@ iPhone's own camera, which can also open plain browser control). The code works 
 password revokes every paired phone. Typing the address and password still works. It plays the H.264 feed with the system's hardware decoder and sends taps, long
 presses, swipes, drags, text and Home to `POST /control`, the same contract as the web
 page. The phone being controlled must stay unlocked: iOS does not let automation type the
-lock-screen passcode. Build with `cd apps/ios && xcodegen generate`, then open in Xcode.
+lock-screen passcode, so when it is locked the app says so within seconds and connects as
+soon as it is unlocked. On screens an app hides from capture (payment and banking apps),
+the app shows the daemon's wireframe of the accessibility tree instead of a white picture.
+Build with `cd apps/ios && xcodegen generate`, then open in Xcode.
 
 ## Agent API
 
@@ -236,8 +239,8 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/agent/status` | Readiness and lifecycle: `backend`, `device_state`, `drivable`, `wda_actionable`, `recovery_owner`, `setup_blocked_on` / `setup_phase` / `setup_message`, `hint`, viewer counts, `instance`, `udid`, `owner` / `owner_lease_remaining_secs`, `hold_remaining_secs`, `idle_secs` (since the last agent request; status polls do not count), `version` / `latest`. |
-| `GET` | `/agent/screenshot` | Current screen as PNG, from the phone. |
+| `GET` | `/agent/status` | Readiness and lifecycle: `backend`, `device_state`, `drivable`, `wda_actionable`, `recovery_owner`, `setup_blocked_on` / `setup_phase` / `setup_message`, `hint`, viewer counts, `instance`, `udid`, `owner` / `owner_lease_remaining_secs`, `hold_remaining_secs`, `idle_secs` (since the last agent request; status polls do not count), `capture_redacted` (the watched picture is blank because the app hides it from capture), `version` / `latest`. |
+| `GET` | `/agent/screenshot` | Current screen as PNG, from the phone. On a screen the app hides from capture, the accessibility tree drawn as a labelled wireframe over the blank area, with `X-Capture-Redacted: 1`; `?raw=1` returns the capture untouched. |
 | `GET` | `/agent/elements` | Flattened accessibility tree with an ephemeral `snapshot` token, an `ax_stats` usability block, and a sparse `alert` block when a system alert is up. `?since=<snapshot>` returns a `delta` instead of the full tree. WDA missing/busy → `503`; failed source → `502`, never a fake empty `200`. |
 | `GET` | `/agent/mjpeg` | Authenticated live MJPEG stream. |
 | `POST` | `/agent/input` | One action: tap, drag, long-press, scroll, text, key, `home`/`spotlight`, `launch_app`, `set_value`, `perform`, `alert`. `?return=delta` also attempts a post-action tree read and returns the change plus a `settle` block (`settled`, `reason`: `stable` / `budget_exhausted` / `observation_failed`, `waited_ms`, `captures`, `budget_ms`, and `sparse` / `stale` when they apply). Observation is best-effort: a slow or failed read never downgrades an applied action to an unknown outcome. A settled delta with no row added, changed or removed also carries `no_visible_change: true` (a scroll or tap that hit nothing responsive). |
@@ -276,6 +279,23 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
   `dynamic_island`, `cover_sheet`). With
   `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` the tree advertises which actions each row
   supports.
+- **Taps that would land elsewhere are refused.** An element tap whose centre is covered
+  by another control (a fixed header, the keyboard, a floating button) answers
+  `409 element_occluded`, `not_sent`: scroll it clear (`perform` `scroll_to_visible`)
+  and read again; `"allow_occluded":true` overrides. Label taps take an optional
+  `"kind":"Button"`, and rows outside the screen never compete with a visible match.
+- **`set_value` is read back.** A field that kept its old contents (web views often
+  ignore direct writes) answers `409 value_not_applied`, `outcome:"no_effect"`; tap the
+  field and send `text` instead. Formatting the field adds itself still counts as applied.
+- **Screens hidden from capture** (PayPay, banks, wallets) come back from
+  `/agent/screenshot` as a wireframe with `X-Capture-Redacted: 1`. Drive them by
+  elements; never run vision on a blank capture.
+- **Every `/agent/*` answer is timed**: a `timing` object (`total_ms`, `wda_ms`,
+  `daemon_ms`, and each WDA call with count, ms and bytes) in JSON bodies, a
+  `Server-Timing` header, and one line per request in `~/.iphone-use/agent-timing.jsonl`
+  (route, owner and timings only — never request or screen content).
+- An unknown action `type` answers `400 invalid_action` with the supported list, and a
+  common guess (`scroll_into_view`, `click`, `fill`, …) also gets the exact request to send.
 - **System alerts** are a separate surface: taps on their buttons are acknowledged
   without effect. Use `{"type":"alert","button":"…"}` or `{"action":"accept"|"dismiss"}`.
   App Switcher and Control Center are system gestures WDA cannot reach.
@@ -460,10 +480,16 @@ suggests saving the sequence, and a failed `phone_flow_run` keeps the failure so
 
 `/agent/status` is the source of truth. `recovery_owner` is `daemon` for managed
 loopback WDA, `unconfigured` until a first-run target is persisted, `external` for an
-unmanaged endpoint. After a lock-screen failure the daemon rebuilds WDA with backoff from
-30 s to 15 min rather than nagging for the passcode; other failures back off from 5 s to
-5 min; a verified recovery resets both. Interactive setup waits at most 5 min for an
-unlock. `POST /agent/mode {"mode":"agent"}` (or MCP `phone_reconnect`) restarts the
+unmanaged endpoint. Before launching WDA the daemon asks the phone whether it is locked: a
+locked phone shows `setup_blocked_on:"locked"` within seconds of connecting (instead of
+after a ~70 s Xcode timeout), and the runner starts once two consecutive readings say it
+is unlocked. A lock-screen failure that still slips through retries quietly from 5 s to
+1 min; other failures back off from 5 s to 5 min; a verified recovery resets both.
+Interactive setup waits at most 5 min for an unlock.
+
+Measured on an iPhone 17 Pro Max (iOS 27): an unlocked cold connect is drivable in
+13–22 s; a locked one shows "unlock" in ~4 s and is drivable ~14 s after the unlock; a
+snapshot-bound tap with `?return=delta` (tap, then the settled tree) takes ~4 s. `POST /agent/mode {"mode":"agent"}` (or MCP `phone_reconnect`) restarts the
 configured target once — do not loop it; read `hint` and `setup_blocked_on`
 (`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|locked`) first.
 `automation_mode_disabled` means the phone is unlocked but iOS has not enabled UI
@@ -581,7 +607,9 @@ Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's te
 - [ ] Record the direct-browser hardware acceptance matrix below.
 - [ ] Make first-device setup, signing renewal, sleep/reconnect recovery, and multi-device selection understandable from the product UI.
 - [ ] Revalidate every advertised command on real hardware.
-- [ ] Phase 2 authenticated device transport (a native iOS companion app, planned, or a controlled tunnel).
+- [x] Native iOS companion app with scan-to-connect pairing (`apps/ios`).
+- [x] Per-request timing, and the first round of latency work driven by it (snapshot taps and settle read the tree once).
+- [ ] Phase 2 authenticated device transport beyond the LAN (a controlled tunnel).
 - [ ] A short demo of an agent driving the phone.
 
 ### Hardware acceptance boundary
