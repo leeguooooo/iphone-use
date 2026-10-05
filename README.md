@@ -18,9 +18,9 @@
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-https://github.com/user-attachments/assets/a542817d-75b2-4b39-9d2d-c2025493c218
+https://github.com/user-attachments/assets/f1e6574d-3134-4c23-9092-4b51bc79af2c
 
-<sub>35-second demo · [中文版](https://github.com/user-attachments/assets/9019ce51-52df-445b-9cfb-22d67056d0ba)</sub>
+<sub>2-minute demo · [中文版](https://github.com/user-attachments/assets/a9947152-6655-4509-ac1e-49953a3cea70)</sub>
 
 iphone-use lets an AI agent see and operate a real iPhone: read the screen as text, tap,
 swipe and type, and get told plainly when an action did not land. It works on apps that

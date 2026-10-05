@@ -18,9 +18,9 @@
   <strong>简体中文</strong>
 </p>
 
-https://github.com/user-attachments/assets/9019ce51-52df-445b-9cfb-22d67056d0ba
+https://github.com/user-attachments/assets/a9947152-6655-4509-ac1e-49953a3cea70
 
-<sub>35 秒演示 · [English](https://github.com/user-attachments/assets/a542817d-75b2-4b39-9d2d-c2025493c218)</sub>
+<sub>2 分钟演示 · [English](https://github.com/user-attachments/assets/f1e6574d-3134-4c23-9092-4b51bc79af2c)</sub>
 
 iphone-use 让 AI agent 操作一台真 iPhone：把屏幕读成文字，点、滑、输入，操作没生效时直接告诉它。没有 API 的 App 也能用，包括禁止截屏的银行、支付类 App。
 
