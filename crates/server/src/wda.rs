@@ -1190,6 +1190,11 @@ impl WdaClient {
         Ok(rows)
     }
 
+    /// Drop a reused "no alert" answer so the next probe asks WDA.
+    pub fn forget_alert_probe(&mut self) {
+        self.no_alert_at = None;
+    }
+
     /// `self.http.post`, remembering that something was sent.
     fn post_req(&mut self, url: String) -> reqwest::RequestBuilder {
         self.posted_at = Some(std::time::Instant::now());

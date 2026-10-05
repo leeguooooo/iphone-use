@@ -5102,16 +5102,15 @@ fn set_value_dispatch_error(error: anyhow::Error) -> SnapshotElementTapError {
     }
 }
 
-/// Field contents equal up to formatting the field adds itself: spacing,
-/// separators and punctuation (a phone field that shows 090-1234-5678 for
-/// 09012345678, an amount field that shows 1,000).
+/// Field contents equal up to formatting the field adds itself: spacing and
+/// separators the caller did not type (a phone field that shows 090-1234-5678
+/// for 09012345678, an amount field that shows 1,000). A character the caller
+/// typed is never ignored, so "1.5" vs "15" or "-5" vs "5" stay different.
 fn same_text(read_back: &str, wanted: &str) -> bool {
-    let core = |s: &str| {
-        s.chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect::<String>()
-    };
-    read_back == wanted || core(read_back) == core(wanted)
+    const FIELD_FORMATTING: &[char] = &[' ', '\u{3000}', '-', ',', '/', '(', ')', '・'];
+    let added = |c: &char| FIELD_FORMATTING.contains(c) && !wanted.contains(*c);
+    let strip = |s: &str| s.chars().filter(|c| !added(c)).collect::<String>();
+    read_back == wanted || strip(read_back) == strip(wanted)
 }
 
 /// The closed `perform` action vocabulary (fail-closed allowlist): named
@@ -6309,6 +6308,9 @@ async fn wda_control_with_client(
                 .and_then(serde_json::Value::as_str)
                 .filter(|button| !button.is_empty());
             let action = v.get("action").and_then(serde_json::Value::as_str);
+            // An explicit alert action reads the alert live, never the
+            // probe's reused "no alert".
+            w.forget_alert_probe();
             let current = match w.alert_summary().await {
                 Ok(current) => current,
                 Err(error) => {
@@ -11337,6 +11339,9 @@ mod tests {
         assert!(same_text("hello", "hello"));
         assert!(!same_text("", "hello"));
         assert!(!same_text("helo", "hello"));
+        assert!(!same_text("15", "1.5"), "a typed decimal point matters");
+        assert!(!same_text("5", "-5"), "a typed sign matters");
+        assert!(!same_text("1.5", "15"), "a dot the field added to digits is still a change");
     }
 
     fn stats_row(kind: &str, label: &str, rect: [f64; 4], depth: u32) -> crate::wda::ElementRow {
