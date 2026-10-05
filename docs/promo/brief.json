@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "name": "iphone-use-promo",
+  "style": "promo",
+  "languages": ["zh", "en"],
+  "formats": ["landscape", "vertical"],
+  "fps": 30,
+  "theme": { "accent": "#0a84ff" },
+  "music": "builtin",
+  "sfx": true,
+  "scenes": [
+    {
+      "id": "hook",
+      "type": "title",
+      "title": { "zh": "让 AI 用你的\n真 iPhone", "en": "Let AI use\nyour real iPhone" },
+      "subtitle": { "zh": "iphone-use · 没有 API 的 App 也能操作", "en": "iphone-use · even apps with no API" }
+    },
+    {
+      "id": "how",
+      "type": "diagram",
+      "title": { "zh": "怎么连起来的", "en": "How it fits together" },
+      "nodes": [
+        { "id": "agent", "label": { "zh": "AI agent", "en": "AI agent" }, "note": "Claude Code · MCP" },
+        { "id": "mac", "label": "iphone-use", "note": { "zh": "Mac 上的守护进程", "en": "daemon on your Mac" } },
+        { "id": "phone", "label": "iPhone", "note": { "zh": "USB · WebDriverAgent", "en": "USB · WebDriverAgent" } }
+      ],
+      "edges": [
+        { "from": "agent", "to": "mac", "label": { "zh": "/agent/* 接口", "en": "/agent/* API" } },
+        { "from": "mac", "to": "phone", "label": { "zh": "点、滑、输入", "en": "tap · swipe · type" } }
+      ]
+    },
+    {
+      "id": "features",
+      "type": "features",
+      "title": { "zh": "这一版能做什么", "en": "What it does now" },
+      "items": [
+        { "zh": "界面读成文字，按编号点击", "en": "Screen as text, tap by element" },
+        { "zh": "点了没生效会直接说", "en": "Says so when an action did not land" },
+        { "zh": "禁止截屏的 App 也能看", "en": "Sees screens apps hide from capture" },
+        { "zh": "锁屏几秒提示，解锁即连", "en": "Locked? Told in seconds, then connects" },
+        { "zh": "浏览器或 iPhone App 远程操作", "en": "Drive it from a browser or the iOS app" },
+        { "zh": "21 个 MCP 工具", "en": "21 MCP tools" }
+      ]
+    },
+    {
+      "id": "browser",
+      "type": "image",
+      "title": { "zh": "人也能直接上手", "en": "People can drive it too" },
+      "image": "images/hero.png",
+      "caption": { "zh": "浏览器里看实时画面，点击、滑动、输入都发到手机", "en": "Live screen in the browser; clicks, swipes and typing go to the phone" }
+    },
+    {
+      "id": "wireframe",
+      "type": "image",
+      "title": { "zh": "截图被屏蔽？画控件树", "en": "Capture blocked? Draw the tree" },
+      "image": "images/wireframe.png",
+      "caption": { "zh": "支付类 App 截屏是一片白，iphone-use 按控件树画出按钮和文字", "en": "Payment apps blank every capture; iphone-use draws their buttons and text from the accessibility tree" }
+    },
+    {
+      "id": "api",
+      "type": "terminal",
+      "title": { "zh": "agent 的一步：读、点、看结果", "en": "One agent step: read, tap, observe" },
+      "panes": [{ "label": "Terminal" }],
+      "lines": [
+        { "cmd": "curl $HOST/agent/elements" },
+        { "out": "{\"snapshot\":\"…\",\"elements\":[… {\"kind\":\"Button\",\"label\":\"通用\"} …]}", "tone": "dim" },
+        { "cmd": "curl -X POST $HOST/agent/input?return=delta -d '{\"type\":\"tap\",\"element\":7,\"snapshot\":\"…\"}'" },
+        { "out": "{\"ok\":true,\"settle\":{\"reason\":\"stable\",\"captures\":1},\"delta\":{…}}", "tone": "ok" },
+        { "out": { "zh": "点击 + 等画面稳定：约 4 秒（上一版 8.5 秒）", "en": "Tap + settled screen: ~4 s (was 8.5 s)" }, "tone": "dim" }
+      ]
+    },
+    {
+      "id": "start",
+      "type": "steps",
+      "title": { "zh": "三步上手", "en": "Three steps" },
+      "steps": [
+        { "title": { "zh": "装到 Mac 上", "en": "Install on the Mac" }, "body": { "zh": "一行命令", "en": "one command" } },
+        { "title": { "zh": "用 USB 接上 iPhone", "en": "Plug in the iPhone" }, "body": { "zh": "自动装好 WDA", "en": "WDA is set up for you" } },
+        { "title": { "zh": "让 agent 开工", "en": "Let the agent work" }, "body": { "zh": "MCP 或 HTTP", "en": "MCP or HTTP" } }
+      ]
+    },
+    {
+      "id": "outro",
+      "type": "cta",
+      "title": "iphone-use",
+      "subtitle": { "zh": "开源 · 让 AI 操作真 iPhone", "en": "Open source · AI on a real iPhone" },
+      "command": "curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh",
+      "url": "github.com/leeguooooo/iphone-use"
+    }
+  ]
+}
