@@ -18,10 +18,9 @@
   <strong>简体中文</strong>
 </p>
 
-<p align="center">
-  <a href="docs/promo/media/iphone-use-promo-zh-landscape.mp4"><img src="docs/promo/media/cover-zh.jpg" alt="35 秒看懂 iphone-use" width="640"></a><br>
-  <sub>▶ 35 秒演示视频（<a href="docs/promo/media/iphone-use-promo-en-landscape.mp4">English</a>）</sub>
-</p>
+https://github.com/user-attachments/assets/9019ce51-52df-445b-9cfb-22d67056d0ba
+
+<sub>35 秒演示 · [English](https://github.com/user-attachments/assets/a542817d-75b2-4b39-9d2d-c2025493c218)</sub>
 
 iphone-use 让 AI agent 操作一台真 iPhone：把屏幕读成文字，点、滑、输入，操作没生效时直接告诉它。没有 API 的 App 也能用，包括禁止截屏的银行、支付类 App。
 
