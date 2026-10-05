@@ -1331,6 +1331,11 @@ fn indexed_browser_tap_applies_only_when_the_snapshot_still_matches() {
                     std::time::Duration::ZERO,
                     r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string(),
                 ))
+            } else if request.contains("/element/MORE/rect") {
+                Some((
+                    std::time::Duration::ZERO,
+                    r#"{"value":{"x":20,"y":100,"width":80,"height":44}}"#.to_string(),
+                ))
             } else {
                 assert!(
                     request.contains("/element/MORE/click"),
@@ -1404,7 +1409,7 @@ fn indexed_browser_tap_rejects_a_stale_snapshot_without_tapping() {
         let observed_sources = source_count.clone();
         let action_count = Arc::new(AtomicUsize::new(0));
         let observed_actions = action_count.clone();
-        let (base, server) = mock_wda(5, move |request, _| {
+        let (base, server) = mock_wda(6, move |request, _| {
             if request.starts_with("POST /session ") {
                 Some((
                     std::time::Duration::ZERO,
@@ -1428,6 +1433,18 @@ fn indexed_browser_tap_rejects_a_stale_snapshot_without_tapping() {
                 Some((
                     std::time::Duration::ZERO,
                     r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string(),
+                ))
+            } else if request.starts_with("POST") && request.contains("/elements") {
+                // The tap reuses the tree it just served and proves the row
+                // live: lookup, then frame. The button has moved to y=240.
+                Some((
+                    std::time::Duration::ZERO,
+                    r#"{"value":[{"ELEMENT":"MORE"}]}"#.to_string(),
+                ))
+            } else if request.contains("/element/MORE/rect") {
+                Some((
+                    std::time::Duration::ZERO,
+                    r#"{"value":{"x":20,"y":240,"width":80,"height":44}}"#.to_string(),
                 ))
             } else {
                 observed_actions.fetch_add(1, Ordering::SeqCst);
@@ -3847,4 +3864,113 @@ fn a_guessed_action_name_answers_with_the_real_request_shape() {
         "{json}"
     );
     assert!(!lines.iter().any(|l| l.contains("/actions")));
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot-bound taps reuse the tree the caller just read
+// ---------------------------------------------------------------------------
+
+/// Read /agent/elements, optionally send `between` to /control, then tap
+/// snapshot row 1 (the 发送 button). `rect` answers the live frame check.
+/// Returns (status, json, GET /source count, clicked ids).
+fn tap_after_read(
+    rect: &'static str,
+    between: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value, usize, Vec<String>) {
+    block(async move {
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = log.clone();
+        let source = r#"{"value":{"type":"XCUIElementTypeApplication","label":"Chat","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeButton","label":"发送","rect":{"x":300,"y":700,"width":60,"height":44}}]}}"#;
+        let (base, _server) = mock_wda(64, move |request, _| {
+            let line = request.lines().next().unwrap_or("").to_string();
+            seen.lock().unwrap().push(line.clone());
+            let ok = |body: String| Some((std::time::Duration::ZERO, body));
+            if request.starts_with("POST /session ") {
+                ok(r#"{"value":{"sessionId":"SESSION"}}"#.to_string())
+            } else if line.contains("/source") {
+                ok(source.to_string())
+            } else if line.contains("/window/size") {
+                ok(r#"{"value":{"width":390,"height":844}}"#.to_string())
+            } else if line.contains("/alert/") {
+                ok(r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string())
+            } else if line.starts_with("POST") && line.contains("/elements") {
+                ok(r#"{"value":[{"ELEMENT":"SEND"}]}"#.to_string())
+            } else if line.contains("/element/SEND/rect") {
+                ok(format!(r#"{{"value":{rect}}}"#))
+            } else {
+                ok(r#"{"value":null}"#.to_string())
+            }
+        });
+        let app = http::router(build_state_with_wda(&base));
+        let post = |body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/control")
+                .header("x-phone-control", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let elements = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/elements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let raw = elements.into_body().collect().await.unwrap().to_bytes();
+        let snapshot =
+            serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["snapshot"].clone();
+        if let Some(between) = between {
+            let _ = app.clone().oneshot(post(between)).await.unwrap();
+        }
+        let response = app
+            .oneshot(post(
+                serde_json::json!({"type":"tap","element":1,"snapshot":snapshot,"ttl_ms":2000}),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let raw = response.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+        let lines = log.lock().unwrap().clone();
+        let sources = lines.iter().filter(|l| l.contains("/source")).count();
+        let clicked = lines
+            .iter()
+            .filter(|l| l.contains("/click"))
+            .map(|l| l.to_string())
+            .collect();
+        (status, json, sources, clicked)
+    })
+}
+
+#[test]
+fn a_snapshot_tap_right_after_a_read_does_not_read_the_tree_again() {
+    let (status, json, sources, clicked) =
+        tap_after_read(r#"{"x":300,"y":700,"width":60,"height":44}"#, None);
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(sources, 1, "only the elements read touches /source");
+    assert_eq!(clicked.len(), 1);
+}
+
+#[test]
+fn a_reused_row_that_moved_is_a_stale_snapshot_and_nothing_is_sent() {
+    let (status, json, _, clicked) =
+        tap_after_read(r#"{"x":300,"y":500,"width":60,"height":44}"#, None);
+    assert_eq!(json["error"], "stale_element_snapshot", "{status} {json}");
+    assert!(clicked.is_empty());
+}
+
+#[test]
+fn anything_sent_in_between_makes_the_tap_read_the_tree_again() {
+    let (status, json, sources, clicked) = tap_after_read(
+        r#"{"x":300,"y":700,"width":60,"height":44}"#,
+        Some(serde_json::json!({"type":"home","ttl_ms":2000})),
+    );
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(sources, 2, "the tap re-read the tree after the home press");
+    assert_eq!(clicked.len(), 1);
 }

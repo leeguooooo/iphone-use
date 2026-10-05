@@ -4872,6 +4872,64 @@ async fn fetch_snapshot_row(
     Ok((rows, index))
 }
 
+/// How long a tree read stays reusable for a snapshot-bound action.
+const SNAPSHOT_TREE_REUSE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// [`fetch_snapshot_row`] without the second whole-tree read when it can be
+/// avoided. If the daemon's own last read carries the caller's snapshot token,
+/// nothing was sent to WDA since, and the selected row has a semantic locator,
+/// that tree is used and `true` comes back: the caller MUST then prove the
+/// element live (WDA lookup + frame equal to the row's, see
+/// [`verify_reused_row`]) before acting. Otherwise this is a fresh read.
+/// Real sessions: the tree read is ~57 % of WDA time and snapshot-bound taps
+/// paid it twice (once to show the tree, once to check the token).
+async fn fetch_snapshot_row_reusing(
+    w: &mut crate::wda::WdaClient,
+    value: &serde_json::Value,
+) -> Result<(Vec<crate::wda::ElementRow>, usize, bool), SnapshotElementTapError> {
+    let index = value
+        .get("element")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok());
+    let expected = value
+        .get("snapshot")
+        .and_then(serde_json::Value::as_str)
+        .filter(|snapshot| !snapshot.is_empty());
+    if let (Some(index), Some(expected), Some(rows)) =
+        (index, expected, w.recent_tree(SNAPSHOT_TREE_REUSE))
+    {
+        let reusable = index < rows.len()
+            && snapshot_row_locator(&rows[index]).is_some()
+            && element_snapshot_id(&rows).is_ok_and(|id| id == expected);
+        if reusable {
+            return Ok(((*rows).clone(), index, true));
+        }
+    }
+    let (rows, index) = fetch_snapshot_row(w, value).await?;
+    Ok((rows, index, false))
+}
+
+/// A reused tree's row must still be where it was: the live element's frame
+/// equals the row's (`Ok(true)`). A different frame or a vanished element is a
+/// stale snapshot — nothing was sent. A frame WDA cannot read proves nothing
+/// either way (`Ok(false)`): the caller drops the reused tree and starts over
+/// with a fresh read.
+async fn verify_reused_row(
+    w: &mut crate::wda::WdaClient,
+    element_id: &str,
+    row: &crate::wda::ElementRow,
+) -> Result<bool, SnapshotElementTapError> {
+    match w.element_rect(element_id).await {
+        Ok(rect) if rects_match(rect, row.rect) => Ok(true),
+        Ok(_) => Err(SnapshotElementTapError::Stale),
+        Err(error) if wda_error_is_missing_element(&error) => Err(SnapshotElementTapError::Stale),
+        Err(_) => {
+            w.forget_tree();
+            Ok(false)
+        }
+    }
+}
+
 /// Resolve a fresh snapshot row to exactly one live WDA element through its
 /// semantic locator. Rows without semantics cannot be addressed this way.
 async fn resolve_snapshot_row_element(
@@ -4973,7 +5031,9 @@ async fn tap_snapshot_element(
     w: &mut crate::wda::WdaClient,
     value: &serde_json::Value,
 ) -> Result<(), SnapshotElementTapError> {
-    let (rows, index) = fetch_snapshot_row(w, value).await?;
+    // `value` is shadowed by the locator query below.
+    let request = value;
+    let (rows, index, reused) = fetch_snapshot_row_reusing(w, value).await?;
     let row = &rows[index];
     if !allows_occluded(value) {
         if let Some(cover) = occluding_row(&rows, index) {
@@ -5002,6 +5062,9 @@ async fn tap_snapshot_element(
             .map_err(SnapshotElementTapError::BeforeDispatch)?;
         let element_id =
             pick_snapshot_element(w, &rows, index, (using, &value), element_ids).await?;
+        if reused && !verify_reused_row(w, &element_id, row).await? {
+            return Box::pin(tap_snapshot_element(w, request)).await;
+        }
         return w.click_element(&element_id).await.map_err(|error| {
             if wda_error_is_missing_element(&error) {
                 SnapshotElementTapError::NotFound
@@ -5033,10 +5096,14 @@ async fn set_value_snapshot_element(
         .and_then(serde_json::Value::as_str)
         .ok_or(SnapshotElementTapError::Invalid)?
         .to_string();
-    let (rows, index) = fetch_snapshot_row(w, value).await?;
+    let (rows, index, reused) = fetch_snapshot_row_reusing(w, value).await?;
     let row = &rows[index];
     let element_id = if snapshot_row_locator(row).is_some() {
-        resolve_snapshot_row_element(w, &rows, index).await?
+        let element_id = resolve_snapshot_row_element(w, &rows, index).await?;
+        if reused && !verify_reused_row(w, &element_id, row).await? {
+            return Box::pin(set_value_snapshot_element(w, value)).await;
+        }
+        element_id
     } else if TEXT_INPUT_KINDS.contains(&row.kind.as_str()) {
         // A web form's <input> routinely has neither label nor identifier
         // (hardware-hit inside a bank's WKWebView, issue #70). It still has a

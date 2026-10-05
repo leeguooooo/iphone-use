@@ -45,6 +45,9 @@ pub struct WdaClient {
     posted_at: Option<std::time::Instant>,
     /// When the alert probe last found no alert.
     no_alert_at: Option<std::time::Instant>,
+    /// The last tree read and when: snapshot-bound actions reuse it instead
+    /// of reading the whole tree again (see [`Self::recent_tree`]).
+    last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
     /// How long `probe_health` waits for session/lock/apps-list before
     /// settling on "up, not actionable". Tests shrink it.
     actionability_budget: Duration,
@@ -66,6 +69,7 @@ impl WdaClient {
             window: None,
             posted_at: None,
             no_alert_at: None,
+            last_tree: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
         })
     }
@@ -1187,7 +1191,23 @@ impl WdaClient {
                 }
             }
         }
+        self.last_tree = Some((std::sync::Arc::new(rows.clone()), std::time::Instant::now()));
         Ok(rows)
+    }
+
+    /// The last tree read, if nothing has been POSTed to WDA since and it is
+    /// younger than `max_age`. The screen can still have changed on its own
+    /// (a timer, a network load, a person's finger); callers must verify the
+    /// element live before acting on it.
+    pub fn recent_tree(&self, max_age: Duration) -> Option<std::sync::Arc<Vec<ElementRow>>> {
+        let (rows, read_at) = self.last_tree.as_ref()?;
+        let untouched = self.posted_at.is_none_or(|posted| posted < *read_at);
+        (untouched && read_at.elapsed() < max_age).then(|| rows.clone())
+    }
+
+    /// Drop the reusable tree so the next snapshot-bound action reads afresh.
+    pub fn forget_tree(&mut self) {
+        self.last_tree = None;
     }
 
     /// Drop a reused "no alert" answer so the next probe asks WDA.
@@ -1195,9 +1215,20 @@ impl WdaClient {
         self.no_alert_at = None;
     }
 
-    /// `self.http.post`, remembering that something was sent.
+    /// `self.http.post`, remembering that something that can change the screen
+    /// was sent. Session creation, settings and element lookups are POSTs
+    /// too but touch nothing on screen; counting them would void every cache
+    /// keyed on "nothing sent since" (the alert probe opens a session right
+    /// after a tree read).
     fn post_req(&mut self, url: String) -> reqwest::RequestBuilder {
-        self.posted_at = Some(std::time::Instant::now());
+        let path = url.split('?').next().unwrap_or(&url);
+        let read_only = path.ends_with("/session")
+            || path.ends_with("/appium/settings")
+            || path.ends_with("/elements")
+            || path.ends_with("/element");
+        if !read_only {
+            self.posted_at = Some(std::time::Instant::now());
+        }
         self.http.post(url)
     }
 
@@ -1363,6 +1394,7 @@ impl WdaClient {
         self.session = None;
         self.window = None;
         self.no_alert_at = None;
+        self.last_tree = None;
     }
 
     /// `POST /session/:id/wda/lock` — lock the phone's screen.
@@ -1428,7 +1460,7 @@ fn snapshot_settings(
 }
 
 /// One row of the flattened element tree.
-#[derive(Debug, Default, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq)]
 pub struct ElementRow {
     /// Element type without the `XCUIElementType` prefix (e.g. `Button`).
     pub kind: String,
