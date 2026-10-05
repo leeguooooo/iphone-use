@@ -11341,7 +11341,10 @@ mod tests {
         assert!(!same_text("helo", "hello"));
         assert!(!same_text("15", "1.5"), "a typed decimal point matters");
         assert!(!same_text("5", "-5"), "a typed sign matters");
-        assert!(!same_text("1.5", "15"), "a dot the field added to digits is still a change");
+        assert!(
+            !same_text("1.5", "15"),
+            "a dot the field added to digits is still a change"
+        );
     }
 
     fn stats_row(kind: &str, label: &str, rect: [f64; 4], depth: u32) -> crate::wda::ElementRow {
