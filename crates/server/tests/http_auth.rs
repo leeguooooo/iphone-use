@@ -3842,6 +3842,9 @@ fn a_guessed_action_name_answers_with_the_real_request_shape() {
     );
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
     assert_eq!(json["error"], "invalid_action");
-    assert!(json["hint"].as_str().unwrap().contains("scroll_to_visible"), "{json}");
+    assert!(
+        json["hint"].as_str().unwrap().contains("scroll_to_visible"),
+        "{json}"
+    );
     assert!(!lines.iter().any(|l| l.contains("/actions")));
 }

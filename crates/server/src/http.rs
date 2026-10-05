@@ -3561,16 +3561,36 @@ const CAPABILITY_SINGLE_STEP_ACTIONS: &[&str] = &[
 /// so name the exact shape rather than "see the docs".
 const ACTION_TYPE_GUESSES: &[(&[&str], &str)] = &[
     (
-        &["scroll_into_view", "scroll_to_visible", "scroll_to_element", "scroll_to"],
+        &[
+            "scroll_into_view",
+            "scroll_to_visible",
+            "scroll_to_element",
+            "scroll_to",
+        ],
         r#"{"type":"perform","action":"scroll_to_visible","element":N,"snapshot":"…"} (element and snapshot from GET /agent/elements)"#,
     ),
-    (&["click", "press", "touch"], r#"{"type":"tap","element":N,"snapshot":"…"} or {"type":"tap","label":"…"}"#),
-    (&["long_press", "long_tap", "hold"], r#"{"type":"longpress","x":…,"y":…}"#),
-    (&["type", "input", "fill", "type_text", "enter_text"], r#"{"type":"text","text":"…"} after tapping the field, or {"type":"set_value","element":N,"snapshot":"…","value":"…"}"#),
-    (&["open_app", "open", "launch", "activate"], r#"{"type":"launch_app","bundle":"com.example.app"}"#),
+    (
+        &["click", "press", "touch"],
+        r#"{"type":"tap","element":N,"snapshot":"…"} or {"type":"tap","label":"…"}"#,
+    ),
+    (
+        &["long_press", "long_tap", "hold"],
+        r#"{"type":"longpress","x":…,"y":…}"#,
+    ),
+    (
+        &["type", "input", "fill", "type_text", "enter_text"],
+        r#"{"type":"text","text":"…"} after tapping the field, or {"type":"set_value","element":N,"snapshot":"…","value":"…"}"#,
+    ),
+    (
+        &["open_app", "open", "launch", "activate"],
+        r#"{"type":"launch_app","bundle":"com.example.app"}"#,
+    ),
     (&["go_back", "navigate_back"], r#"{"type":"back"}"#),
     (&["press_home", "home_button"], r#"{"type":"home"}"#),
-    (&["toggle", "increment", "decrement", "double_tap"], r#"{"type":"perform","action":"<that name>","element":N,"snapshot":"…"}"#),
+    (
+        &["toggle", "increment", "decrement", "double_tap"],
+        r#"{"type":"perform","action":"<that name>","element":N,"snapshot":"…"}"#,
+    ),
 ];
 
 /// The request shape for an action name agents guess, if it is a known guess.
@@ -5060,12 +5080,9 @@ async fn set_value_snapshot_element(
     match (&typed, after.as_deref()) {
         (_, Some(now)) if same_text(now, &text) => Ok(()),
         // The write failed and the field still holds what it held: not applied.
-        (Err(_), Some(now)) if before.as_deref().is_some_and(|was| was == now) => {
-            Err(SnapshotElementTapError::NoEffect(
-                "value_not_applied",
-                SET_VALUE_NOT_APPLIED_HINT,
-            ))
-        }
+        (Err(_), Some(now)) if before.as_deref().is_some_and(|was| was == now) => Err(
+            SnapshotElementTapError::NoEffect("value_not_applied", SET_VALUE_NOT_APPLIED_HINT),
+        ),
         (Ok(()), Some(_)) => Err(SnapshotElementTapError::NoEffect(
             "value_not_applied",
             SET_VALUE_NOT_APPLIED_HINT,
@@ -5089,7 +5106,11 @@ fn set_value_dispatch_error(error: anyhow::Error) -> SnapshotElementTapError {
 /// separators and punctuation (a phone field that shows 090-1234-5678 for
 /// 09012345678, an amount field that shows 1,000).
 fn same_text(read_back: &str, wanted: &str) -> bool {
-    let core = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+    let core = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    };
     read_back == wanted || core(read_back) == core(wanted)
 }
 
@@ -6092,10 +6113,7 @@ const OCCLUDER_KINDS: &[&str] = &[
 /// the whole target (a full-row accessibility container is not a cover).
 /// Hardware-reported: a menu row sitting under a fixed header — the label tap
 /// was acknowledged and opened the header's points button instead.
-fn occluding_row(
-    rows: &[crate::wda::ElementRow],
-    index: usize,
-) -> Option<&crate::wda::ElementRow> {
+fn occluding_row(rows: &[crate::wda::ElementRow], index: usize) -> Option<&crate::wda::ElementRow> {
     let target = rows.get(index)?;
     let (cx, cy) = element_center(target)?;
     let end = subtree_end(rows, index);
@@ -11264,8 +11282,14 @@ mod tests {
         ];
         let cover = occluding_row(&rows, 4).expect("the header button covers the row centre");
         assert_eq!(cover.label, "ポイント");
-        assert!(occluding_row(&rows, 5).is_none(), "an uncovered row is fine");
-        assert!(occluding_row(&rows, 2).is_none(), "the button itself is on top");
+        assert!(
+            occluding_row(&rows, 5).is_none(),
+            "an uncovered row is fine"
+        );
+        assert!(
+            occluding_row(&rows, 2).is_none(),
+            "the button itself is on top"
+        );
     }
 
     #[test]
@@ -11279,9 +11303,18 @@ mod tests {
             stats_row("Cell", "Bluetooth", [0.0, 150.0, 390.0, 44.0], 1),
             stats_row("Button", "info", [170.0, 160.0, 50.0, 24.0], 2),
         ];
-        assert!(occluding_row(&rows, 2).is_none(), "a wrapper around the switch is not a cover");
-        assert!(occluding_row(&rows, 3).is_none(), "a child is part of its cell");
-        assert!(occluding_row(&rows, 4).is_none(), "an ancestor is not a cover");
+        assert!(
+            occluding_row(&rows, 2).is_none(),
+            "a wrapper around the switch is not a cover"
+        );
+        assert!(
+            occluding_row(&rows, 3).is_none(),
+            "a child is part of its cell"
+        );
+        assert!(
+            occluding_row(&rows, 4).is_none(),
+            "an ancestor is not a cover"
+        );
     }
 
     #[test]
