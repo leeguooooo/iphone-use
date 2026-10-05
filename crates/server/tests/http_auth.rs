@@ -3678,3 +3678,170 @@ fn a_genuinely_empty_screen_is_not_called_redacted() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(redacted, None);
 }
+
+// ---------------------------------------------------------------------------
+// Label taps narrowed by kind, occlusion refusal, set_value read-back
+// ---------------------------------------------------------------------------
+
+/// POST `body` to /control against a WDA whose tree is `source`; `value_now`
+/// answers element value reads. Returns (status, json, WDA request lines).
+fn control_against(
+    source: &'static str,
+    value_now: &'static str,
+    with_snapshot: bool,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value, Vec<String>) {
+    block(async move {
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = seen.clone();
+        let (base, _server) = mock_wda(64, move |request, _| {
+            let line = request.lines().next().unwrap_or("").to_string();
+            log.lock().unwrap().push(line.clone());
+            let ok = |body: String| Some((std::time::Duration::ZERO, body));
+            if request.starts_with("POST /session ") {
+                ok(r#"{"value":{"sessionId":"SESSION"}}"#.to_string())
+            } else if request.contains("/source?format=json") {
+                ok(source.to_string())
+            } else if request.contains("/window/size") {
+                ok(r#"{"value":{"width":390,"height":844}}"#.to_string())
+            } else if request.contains("/alert/") {
+                ok(r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string())
+            } else if line.starts_with("POST") && line.contains("/elements") {
+                ok(r#"{"value":[{"ELEMENT":"FIELD"}]}"#.to_string())
+            } else if line.starts_with("GET") && line.contains("/attribute/value") {
+                ok(format!(r#"{{"value":"{value_now}"}}"#))
+            } else {
+                ok(r#"{"value":null}"#.to_string())
+            }
+        });
+        let app = http::router(build_state_with_wda(&base));
+        let mut body = body;
+        if with_snapshot {
+            let elements = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/agent/elements")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let raw = elements.into_body().collect().await.unwrap().to_bytes();
+            let snapshot =
+                serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["snapshot"].clone();
+            body["snapshot"] = snapshot;
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control")
+                    .header("x-phone-control", "1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let raw = response.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+        let lines = seen.lock().unwrap().clone();
+        (status, json, lines)
+    })
+}
+
+const SAME_LABEL_BUTTON_AND_TEXT: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"Card","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeStaticText","label":"カード番号を見る","rect":{"x":20,"y":200,"width":200,"height":20}},{"type":"XCUIElementTypeButton","label":"カード番号を見る","rect":{"x":20,"y":400,"width":200,"height":44}}]}}"#;
+
+#[test]
+fn a_label_tap_narrowed_by_kind_taps_the_one_match() {
+    let (status, json, lines) = control_against(
+        SAME_LABEL_BUTTON_AND_TEXT,
+        "",
+        false,
+        serde_json::json!({"type":"tap","label":"カード番号を見る","kind":"Button","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(
+        lines.iter().any(|l| l.contains("/actions")),
+        "a tap was dispatched: {lines:?}"
+    );
+}
+
+#[test]
+fn a_label_tap_without_kind_still_reports_both_matches() {
+    let (status, json, lines) = control_against(
+        SAME_LABEL_BUTTON_AND_TEXT,
+        "",
+        false,
+        serde_json::json!({"type":"tap","label":"カード番号を見る","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+    assert_eq!(json["error"], "ambiguous_element_label");
+    assert!(!lines.iter().any(|l| l.contains("/actions")));
+}
+
+#[test]
+fn a_label_tap_under_a_fixed_header_is_refused_unless_allowed() {
+    let source = r#"{"value":{"type":"XCUIElementTypeApplication","label":"Rakuten","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeOther","rect":{"x":0,"y":50,"width":390,"height":60},"children":[{"type":"XCUIElementTypeButton","label":"ポイント","rect":{"x":150,"y":70,"width":120,"height":40}}]},{"type":"XCUIElementTypeTable","rect":{"x":0,"y":50,"width":390,"height":790},"children":[{"type":"XCUIElementTypeCell","label":"Apple Pay","rect":{"x":0,"y":66,"width":390,"height":44}}]}]}}"#;
+    let source: &'static str = Box::leak(source.to_string().into_boxed_str());
+    let (status, json, lines) = control_against(
+        source,
+        "",
+        false,
+        serde_json::json!({"type":"tap","label":"Apple Pay","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], "element_occluded");
+    assert_eq!(json["outcome"], "not_sent");
+    assert!(!lines.iter().any(|l| l.contains("/actions")));
+
+    let (status, json, _) = control_against(
+        source,
+        "",
+        false,
+        serde_json::json!({"type":"tap","label":"Apple Pay","allow_occluded":true,"ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::OK, "{json}");
+}
+
+const ONE_TEXT_FIELD: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"PayPay","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeTextField","label":"メッセージ","rect":{"x":20,"y":700,"width":300,"height":40}}]}}"#;
+
+#[test]
+fn set_value_that_does_not_stick_is_reported_not_applied() {
+    let (status, json, _) = control_against(
+        ONE_TEXT_FIELD,
+        "",
+        true,
+        serde_json::json!({"type":"set_value","element":1,"value":"こんにちは","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], "value_not_applied");
+    assert_eq!(json["outcome"], "no_effect");
+}
+
+#[test]
+fn set_value_that_reads_back_formatted_is_applied() {
+    let (status, json, _) = control_against(
+        ONE_TEXT_FIELD,
+        "090-1234-5678",
+        true,
+        serde_json::json!({"type":"set_value","element":1,"value":"09012345678","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::OK, "{json}");
+}
+
+#[test]
+fn a_guessed_action_name_answers_with_the_real_request_shape() {
+    let (status, json, lines) = control_against(
+        ONE_TEXT_FIELD,
+        "",
+        false,
+        serde_json::json!({"type":"scroll_into_view","element":1,"snapshot":"x","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_action");
+    assert!(json["hint"].as_str().unwrap().contains("scroll_to_visible"), "{json}");
+    assert!(!lines.iter().any(|l| l.contains("/actions")));
+}

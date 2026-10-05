@@ -324,7 +324,7 @@ async fn attach(response: Response, summary: &Summary) -> Response {
     // Buffer only a body of known size under the cap: reading anything else
     // and failing part-way would leave nothing to send but an empty 200.
     let exact = axum::body::HttpBody::size_hint(&body).exact();
-    if !exact.is_some_and(|len| len <= MAX_REWRITE_BYTES as u64) {
+    if exact.is_none_or(|len| len > MAX_REWRITE_BYTES as u64) {
         return Response::from_parts(parts, body);
     }
     let bytes = match axum::body::to_bytes(body, MAX_REWRITE_BYTES).await {

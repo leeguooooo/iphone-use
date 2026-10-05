@@ -249,9 +249,9 @@ impl Canvas<'_> {
         }
         let i = ((y * w + x) * 4) as usize;
         let a = coverage.min(1.0) * colour[3] as f32 / 255.0;
-        for c in 0..3 {
-            let old = self.image.rgba[i + c] as f32;
-            self.image.rgba[i + c] = (old + (colour[c] as f32 - old) * a).round() as u8;
+        for (channel, &target) in self.image.rgba[i..i + 3].iter_mut().zip(&colour[..3]) {
+            let old = *channel as f32;
+            *channel = (old + (target as f32 - old) * a).round() as u8;
         }
         self.image.rgba[i + 3] = 255;
     }

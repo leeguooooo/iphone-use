@@ -3556,6 +3556,32 @@ const CAPABILITY_SINGLE_STEP_ACTIONS: &[&str] = &[
     "text",
 ];
 
+/// What agents guess for an action that exists under another name, and the
+/// request that does it. An error message is an instruction an agent follows,
+/// so name the exact shape rather than "see the docs".
+const ACTION_TYPE_GUESSES: &[(&[&str], &str)] = &[
+    (
+        &["scroll_into_view", "scroll_to_visible", "scroll_to_element", "scroll_to"],
+        r#"{"type":"perform","action":"scroll_to_visible","element":N,"snapshot":"…"} (element and snapshot from GET /agent/elements)"#,
+    ),
+    (&["click", "press", "touch"], r#"{"type":"tap","element":N,"snapshot":"…"} or {"type":"tap","label":"…"}"#),
+    (&["long_press", "long_tap", "hold"], r#"{"type":"longpress","x":…,"y":…}"#),
+    (&["type", "input", "fill", "type_text", "enter_text"], r#"{"type":"text","text":"…"} after tapping the field, or {"type":"set_value","element":N,"snapshot":"…","value":"…"}"#),
+    (&["open_app", "open", "launch", "activate"], r#"{"type":"launch_app","bundle":"com.example.app"}"#),
+    (&["go_back", "navigate_back"], r#"{"type":"back"}"#),
+    (&["press_home", "home_button"], r#"{"type":"home"}"#),
+    (&["toggle", "increment", "decrement", "double_tap"], r#"{"type":"perform","action":"<that name>","element":N,"snapshot":"…"}"#),
+];
+
+/// The request shape for an action name agents guess, if it is a known guess.
+fn guessed_action_hint(typ: &str) -> Option<String> {
+    let lower = typ.to_ascii_lowercase().replace('-', "_");
+    ACTION_TYPE_GUESSES
+        .iter()
+        .find(|(names, _)| names.contains(&lower.as_str()))
+        .map(|(_, shape)| format!("there is no {typ:?} action; use {shape}"))
+}
+
 /// Batch (`POST /agent/actions`) step types, from
 /// `validate_agent_action_value`. The batch layer is validated separately, so
 /// it is advertised separately rather than assumed equal to single-step.
@@ -4379,8 +4405,12 @@ enum WdaControlOutcome {
     InvalidElementTarget,
     /// Wrong-shaped value for the action; nothing was sent.
     InvalidValue(&'static str),
-    /// Dispatched and acknowledged, but the element did not change.
-    NoEffect(&'static str),
+    /// Dispatched and acknowledged, but the element did not change:
+    /// `(error code, hint)`.
+    NoEffect(&'static str, &'static str),
+    /// Refused before anything was sent, for a reason the caller can fix:
+    /// `(error code, hint)` (e.g. `element_occluded`).
+    Refused(&'static str, &'static str),
     /// An `alert` action while no system alert is showing.
     NoAlert,
     /// `force_press` on a device without pressure touch: WDA refused before
@@ -4697,7 +4727,9 @@ enum SnapshotElementTapError {
     InvalidValue(&'static str),
     /// WDA acknowledged the action but the element did not change (a picker
     /// wheel given a value that matches none of its options).
-    NoEffect(&'static str),
+    NoEffect(&'static str, &'static str),
+    /// Refused before dispatch: `(error code, hint)`.
+    Refused(&'static str, &'static str),
     /// WDA refused the gesture because this device cannot perform it (a
     /// force press on an iPhone without 3D Touch). Nothing was sent.
     DeviceUnsupported,
@@ -4736,7 +4768,12 @@ fn snapshot_element_outcome(
         Err(SnapshotElementTapError::Ambiguous) => Err(WdaControlOutcome::AmbiguousElement),
         Err(SnapshotElementTapError::InvalidTarget) => Err(WdaControlOutcome::InvalidElementTarget),
         Err(SnapshotElementTapError::InvalidValue(hint)) => Err(WdaControlOutcome::InvalidValue(hint)),
-        Err(SnapshotElementTapError::NoEffect(hint)) => Err(WdaControlOutcome::NoEffect(hint)),
+        Err(SnapshotElementTapError::NoEffect(error, hint)) => {
+            Err(WdaControlOutcome::NoEffect(error, hint))
+        }
+        Err(SnapshotElementTapError::Refused(error, hint)) => {
+            Err(WdaControlOutcome::Refused(error, hint))
+        }
         Err(SnapshotElementTapError::DeviceUnsupported) => Err(WdaControlOutcome::ForcePressUnsupported),
         Err(SnapshotElementTapError::BeforeDispatch(error)) => {
             w.invalidate_session();
@@ -4918,6 +4955,20 @@ async fn tap_snapshot_element(
 ) -> Result<(), SnapshotElementTapError> {
     let (rows, index) = fetch_snapshot_row(w, value).await?;
     let row = &rows[index];
+    if !allows_occluded(value) {
+        if let Some(cover) = occluding_row(&rows, index) {
+            tracing::info!(
+                "snapshot tap refused: row {index} '{}' is covered by {} '{}'",
+                row.label,
+                cover.kind,
+                cover.label
+            );
+            return Err(SnapshotElementTapError::Refused(
+                "element_occluded",
+                ELEMENT_OCCLUDED_HINT,
+            ));
+        }
+    }
     if let Some(locator) = snapshot_row_locator(row) {
         // System-owned sheets and document pickers can publish stale or offset
         // rectangles while their native XCUIElement remains clickable. The
@@ -4984,19 +5035,62 @@ async fn set_value_snapshot_element(
             }
         });
     }
+    let secure = row.kind == "SecureTextField";
+    let before = if secure {
+        None
+    } else {
+        w.element_value(&element_id).await.ok().flatten()
+    };
     // Clear-then-type is one intentional compound action (same contract as
     // `text` with `clear:true`): the clear is best-effort, the type is still
     // dispatched at most once.
     if let Err(error) = w.clear_element(&element_id).await {
         tracing::warn!("wda clear_element before set_value: {error:#}");
     }
-    w.type_into(&element_id, &text).await.map_err(|error| {
-        if wda_error_is_missing_element(&error) {
-            SnapshotElementTapError::NotFound
-        } else {
-            SnapshotElementTapError::AfterDispatch(error)
+    let typed = w.type_into(&element_id, &text).await;
+    if secure {
+        // A secure field reads back as bullets; nothing to compare.
+        return typed.map_err(set_value_dispatch_error);
+    }
+    // Read the field back. Web inputs (WKWebView, Chrome) and some custom
+    // fields acknowledge a direct value write and keep their old contents
+    // (hardware-reported: a PayPay chat textarea answered ok, a Rakuten
+    // e-NAVI number field answered outcome_unknown, neither changed).
+    let after = w.element_value(&element_id).await.ok().flatten();
+    match (&typed, after.as_deref()) {
+        (_, Some(now)) if same_text(now, &text) => Ok(()),
+        // The write failed and the field still holds what it held: not applied.
+        (Err(_), Some(now)) if before.as_deref().is_some_and(|was| was == now) => {
+            Err(SnapshotElementTapError::NoEffect(
+                "value_not_applied",
+                SET_VALUE_NOT_APPLIED_HINT,
+            ))
         }
-    })
+        (Ok(()), Some(_)) => Err(SnapshotElementTapError::NoEffect(
+            "value_not_applied",
+            SET_VALUE_NOT_APPLIED_HINT,
+        )),
+        // No readback: keep the dispatch outcome as WDA reported it.
+        _ => typed.map_err(set_value_dispatch_error),
+    }
+}
+
+const SET_VALUE_NOT_APPLIED_HINT: &str = "WDA acknowledged the write but the field reads back a different value — web inputs and some custom fields ignore direct value writes, and autocorrect can rewrite text. Tap the field to focus it, send {\"type\":\"text\",\"text\":…}, then read the field again";
+
+fn set_value_dispatch_error(error: anyhow::Error) -> SnapshotElementTapError {
+    if wda_error_is_missing_element(&error) {
+        SnapshotElementTapError::NotFound
+    } else {
+        SnapshotElementTapError::AfterDispatch(error)
+    }
+}
+
+/// Field contents equal up to formatting the field adds itself: spacing,
+/// separators and punctuation (a phone field that shows 090-1234-5678 for
+/// 09012345678, an amount field that shows 1,000).
+fn same_text(read_back: &str, wanted: &str) -> bool {
+    let core = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+    read_back == wanted || core(read_back) == core(wanted)
 }
 
 /// The closed `perform` action vocabulary (fail-closed allowlist): named
@@ -5328,6 +5422,7 @@ async fn perform_snapshot_element(
                 if let Ok(Some(now)) = w.element_value(&element_id).await {
                     if now.trim() != target.trim() {
                         return Err(SnapshotElementTapError::NoEffect(
+                            "adjust_no_effect",
                             "WDA acknowledged the value but the picker did not move; the value must match one of the wheel's options exactly (read the row's value and try the option text as shown)",
                         ));
                     }
@@ -5841,6 +5936,8 @@ enum UniqueLabelTapError {
     /// the ambiguity came from WDA's live query (locator taps).
     Ambiguous(Option<serde_json::Value>),
     InvalidTarget,
+    /// Refused before dispatch: `(error code, hint)`.
+    Refused(&'static str, &'static str),
     BeforeDispatch(anyhow::Error),
     AfterDispatch(anyhow::Error),
 }
@@ -5848,17 +5945,40 @@ enum UniqueLabelTapError {
 async fn tap_unique_label(
     w: &mut crate::wda::WdaClient,
     label: &str,
+    request: &serde_json::Value,
 ) -> Result<(), UniqueLabelTapError> {
+    // Optional narrowing: `"kind":"Button"` picks the Button when a
+    // StaticText carries the same label (reported on iOS 27 apps).
+    let kind = request
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .map(|kind| kind.strip_prefix("XCUIElementType").unwrap_or(kind))
+        .filter(|kind| !kind.is_empty());
     let rows = w
         .elements()
         .await
         .map_err(UniqueLabelTapError::BeforeDispatch)?;
-    let matches: Vec<usize> = rows
+    let label_matches = |row: &crate::wda::ElementRow| {
+        row.label == label && kind.is_none_or(|kind| row.kind == kind)
+    };
+    let mut matches: Vec<usize> = rows
         .iter()
         .enumerate()
-        .filter(|(_, row)| row.label == label)
+        .filter(|(_, row)| label_matches(row))
         .map(|(index, _)| index)
         .collect();
+    // Rows that cannot be on screen (hidden tab grids, off-screen pages kept
+    // in the tree) never compete with a visible match.
+    if matches.len() > 1 {
+        let on_screen: Vec<usize> = matches
+            .iter()
+            .copied()
+            .filter(|&index| row_is_on_screen(&rows, index))
+            .collect();
+        if !on_screen.is_empty() {
+            matches = on_screen;
+        }
+    }
     let row = match matches.as_slice() {
         [] => return Err(UniqueLabelTapError::NotFound),
         [index] => &rows[*index],
@@ -5885,9 +6005,120 @@ async fn tap_unique_label(
         }
     };
     let (x, y) = element_center(row).ok_or(UniqueLabelTapError::InvalidTarget)?;
+    if !allows_occluded(request) {
+        let index = rows
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, row))
+            .unwrap_or_default();
+        if let Some(cover) = occluding_row(&rows, index) {
+            tracing::info!(
+                "label tap refused: '{}' is covered by {} '{}'",
+                row.label,
+                cover.kind,
+                cover.label
+            );
+            return Err(UniqueLabelTapError::Refused(
+                "element_occluded",
+                ELEMENT_OCCLUDED_HINT,
+            ));
+        }
+    }
     w.tap_point(x, y)
         .await
         .map_err(UniqueLabelTapError::AfterDispatch)
+}
+
+const ELEMENT_OCCLUDED_HINT: &str = "nothing was sent: another control (a fixed bar, header, keyboard or floating button) covers the centre of this element, so the tap would land on that instead. Bring it clear first with {\"type\":\"perform\",\"action\":\"scroll_to_visible\",\"element\":N,\"snapshot\":…} or a scroll, read /agent/elements again and retry; send \"allow_occluded\":true only if you mean to tap whatever is on top";
+
+fn allows_occluded(request: &serde_json::Value) -> bool {
+    request
+        .get("allow_occluded")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Index one past the last descendant of `rows[index]` (rows are a pre-order
+/// walk with depths).
+fn subtree_end(rows: &[crate::wda::ElementRow], index: usize) -> usize {
+    let depth = rows[index].depth;
+    rows.iter()
+        .enumerate()
+        .skip(index + 1)
+        .find(|(_, row)| row.depth <= depth)
+        .map_or(rows.len(), |(i, _)| i)
+}
+
+/// The application's frame, from the Application root row when the tree
+/// has one with a real size. No root, no frame: nothing is called off-screen.
+fn screen_rect(rows: &[crate::wda::ElementRow]) -> Option<[f64; 4]> {
+    rows.first()
+        .filter(|row| row.kind == "Application")
+        .map(|row| row.rect)
+        .filter(|[_, _, w, h]| *w > 0.0 && *h > 0.0)
+}
+
+fn row_is_on_screen(rows: &[crate::wda::ElementRow], index: usize) -> bool {
+    let row = &rows[index];
+    if row.visible == Some(false) {
+        return false;
+    }
+    let Some([sx, sy, sw, sh]) = screen_rect(rows) else {
+        return true;
+    };
+    let [x, y, w, h] = row.rect;
+    w > 0.0 && h > 0.0 && x < sx + sw && x + w > sx && y < sy + sh && y + h > sy
+}
+
+/// Kinds that take a touch, or bars pinned over scrolling content.
+const OCCLUDER_KINDS: &[&str] = &[
+    "Button",
+    "Link",
+    "Cell",
+    "Switch",
+    "TextField",
+    "SecureTextField",
+    "SearchField",
+    "TextView",
+    "Slider",
+    "NavigationBar",
+    "TabBar",
+    "Toolbar",
+    "Keyboard",
+];
+
+/// A control that would receive a tap aimed at the centre of `rows[index]`:
+/// visible, of a touchable or bar kind, neither an ancestor nor a descendant
+/// of the target, containing that centre, and not merely a wrapper around
+/// the whole target (a full-row accessibility container is not a cover).
+/// Hardware-reported: a menu row sitting under a fixed header — the label tap
+/// was acknowledged and opened the header's points button instead.
+fn occluding_row(
+    rows: &[crate::wda::ElementRow],
+    index: usize,
+) -> Option<&crate::wda::ElementRow> {
+    let target = rows.get(index)?;
+    let (cx, cy) = element_center(target)?;
+    let end = subtree_end(rows, index);
+    let contains = |rect: [f64; 4], x: f64, y: f64| {
+        let [rx, ry, rw, rh] = rect;
+        x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+    };
+    let wraps_target = |rect: [f64; 4]| {
+        let [tx, ty, tw, th] = target.rect;
+        contains(rect, tx + 0.5, ty + 0.5) && contains(rect, tx + tw - 0.5, ty + th - 0.5)
+    };
+    rows.iter().enumerate().find_map(|(j, row)| {
+        let descendant = j > index && j < end;
+        let ancestor = j < index && subtree_end(rows, j) > index;
+        (j != index
+            && !descendant
+            && !ancestor
+            && row.visible != Some(false)
+            && OCCLUDER_KINDS.contains(&row.kind.as_str())
+            && contains(row.rect, cx, cy)
+            && !wraps_target(row.rect))
+        .then_some(row)
+    })
 }
 
 async fn tap_unique_locator(
@@ -5995,7 +6226,7 @@ async fn wda_control_with_client(
             else {
                 return WdaControlOutcome::Unsupported;
             };
-            match tap_unique_label(w, label).await {
+            match tap_unique_label(w, label, v).await {
                 Ok(()) => Ok(()),
                 Err(UniqueLabelTapError::NotFound) => {
                     return WdaControlOutcome::ElementNotFound;
@@ -6006,6 +6237,9 @@ async fn wda_control_with_client(
                 }
                 Err(UniqueLabelTapError::InvalidTarget) => {
                     return WdaControlOutcome::InvalidElementTarget;
+                }
+                Err(UniqueLabelTapError::Refused(error, hint)) => {
+                    return WdaControlOutcome::Refused(error, hint);
                 }
                 Err(UniqueLabelTapError::BeforeDispatch(error)) => {
                     w.invalidate_session();
@@ -6474,14 +6708,21 @@ fn reject_unknown_single_step_action(value: &serde_json::Value) -> Result<(), Re
             "retry_safe": true,
             "supported": CAPABILITY_SINGLE_STEP_ACTIONS,
         }),
-        Some(typ) if !CAPABILITY_SINGLE_STEP_ACTIONS.contains(&typ) => serde_json::json!({
-            "ok": false,
-            "error": "invalid_action",
-            "detail": format!("unknown action type \"{typ}\""),
-            "outcome": "not_sent",
-            "retry_safe": true,
-            "supported": CAPABILITY_SINGLE_STEP_ACTIONS,
-        }),
+        Some(typ) if !CAPABILITY_SINGLE_STEP_ACTIONS.contains(&typ) => {
+            let mut error = serde_json::json!({
+                "ok": false,
+                "error": "invalid_action",
+                "detail": format!("unknown action type \"{typ}\""),
+                "outcome": "not_sent",
+                "retry_safe": true,
+                "supported": CAPABILITY_SINGLE_STEP_ACTIONS,
+            });
+            // A known guess gets the exact request to send instead.
+            if let Some(hint) = guessed_action_hint(typ) {
+                error["hint"] = serde_json::Value::String(hint);
+            }
+            error
+        }
         Some(_) => return Ok(()),
     };
     Err(with_security_headers(
@@ -6533,7 +6774,7 @@ async fn direct_agent_action(
             else {
                 return WdaControlOutcome::Unsupported;
             };
-            match tap_unique_label(w, label).await {
+            match tap_unique_label(w, label, value).await {
                 Ok(()) => Some(Ok(())),
                 Err(UniqueLabelTapError::NotFound) => {
                     return WdaControlOutcome::ElementNotFound;
@@ -6544,6 +6785,9 @@ async fn direct_agent_action(
                 }
                 Err(UniqueLabelTapError::InvalidTarget) => {
                     return WdaControlOutcome::InvalidElementTarget;
+                }
+                Err(UniqueLabelTapError::Refused(error, hint)) => {
+                    return WdaControlOutcome::Refused(error, hint);
                 }
                 Err(UniqueLabelTapError::BeforeDispatch(error)) => {
                     w.invalidate_session();
@@ -6580,6 +6824,9 @@ async fn direct_agent_action(
                 }
                 Err(UniqueLabelTapError::InvalidTarget) => {
                     return WdaControlOutcome::InvalidElementTarget;
+                }
+                Err(UniqueLabelTapError::Refused(error, hint)) => {
+                    return WdaControlOutcome::Refused(error, hint);
                 }
                 Err(UniqueLabelTapError::BeforeDispatch(error)) => {
                     w.invalidate_session();
@@ -6835,6 +7082,28 @@ async fn direct_control(
     }
     if outcome == WdaControlOutcome::UnsupportedPerformAction {
         return unsupported_perform_action_response();
+    }
+    if outcome == WdaControlOutcome::Unsupported {
+        if let Err(response) = reject_unknown_single_step_action(&value) {
+            return response;
+        }
+    }
+    match outcome {
+        WdaControlOutcome::InvalidValue(hint) => {
+            return hinted_control_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_value",
+                "not_sent",
+                hint,
+            );
+        }
+        WdaControlOutcome::NoEffect(error, hint) => {
+            return hinted_control_response(StatusCode::CONFLICT, error, "no_effect", hint);
+        }
+        WdaControlOutcome::Refused(error, hint) => {
+            return hinted_control_response(StatusCode::CONFLICT, error, "not_sent", hint);
+        }
+        _ => {}
     }
     with_security_headers(
         Response::builder()
@@ -7877,12 +8146,12 @@ async fn agent_actions(
                             "not_sent",
                             true,
                         ),
-                        WdaControlOutcome::NoEffect(_) => (
-                            StatusCode::CONFLICT,
-                            "adjust_no_effect",
-                            "no_effect",
-                            true,
-                        ),
+                        WdaControlOutcome::NoEffect(error, _) => {
+                            (StatusCode::CONFLICT, error, "no_effect", true)
+                        }
+                        WdaControlOutcome::Refused(error, _) => {
+                            (StatusCode::CONFLICT, error, "not_sent", true)
+                        }
                         WdaControlOutcome::ForcePressUnsupported => (
                             StatusCode::UNPROCESSABLE_ENTITY,
                             "force_press_unsupported",
@@ -8878,9 +9147,12 @@ async fn agent_input(
         WdaControlOutcome::InvalidValue(hint) => hinted_control_response(
             StatusCode::UNPROCESSABLE_ENTITY, "invalid_value", "not_sent", hint,
         ),
-        WdaControlOutcome::NoEffect(hint) => hinted_control_response(
-            StatusCode::CONFLICT, "adjust_no_effect", "no_effect", hint,
-        ),
+        WdaControlOutcome::NoEffect(error, hint) => {
+            hinted_control_response(StatusCode::CONFLICT, error, "no_effect", hint)
+        }
+        WdaControlOutcome::Refused(error, hint) => {
+            hinted_control_response(StatusCode::CONFLICT, error, "not_sent", hint)
+        }
         WdaControlOutcome::NoAlert => no_alert_response(),
         WdaControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
         WdaControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
@@ -10977,6 +11249,61 @@ mod tests {
 
         changed[0].rect[1] = 120.0;
         assert_ne!(snapshot, element_snapshot_id(&changed).unwrap());
+    }
+
+    #[test]
+    fn a_fixed_header_over_a_row_centre_occludes_it() {
+        // Application > [header bar > points button], [menu > Apple Pay row]
+        let rows = vec![
+            stats_row("Application", "楽天", [0.0, 0.0, 440.0, 956.0], 0),
+            stats_row("Other", "", [0.0, 50.0, 440.0, 60.0], 1),
+            stats_row("Button", "ポイント", [180.0, 70.0, 120.0, 40.0], 2),
+            stats_row("Table", "", [0.0, 50.0, 440.0, 900.0], 1),
+            stats_row("Cell", "Apple Pay", [0.0, 66.0, 440.0, 44.0], 2),
+            stats_row("Cell", "設定", [0.0, 300.0, 440.0, 44.0], 2),
+        ];
+        let cover = occluding_row(&rows, 4).expect("the header button covers the row centre");
+        assert_eq!(cover.label, "ポイント");
+        assert!(occluding_row(&rows, 5).is_none(), "an uncovered row is fine");
+        assert!(occluding_row(&rows, 2).is_none(), "the button itself is on top");
+    }
+
+    #[test]
+    fn wrappers_ancestors_and_children_never_count_as_covers() {
+        let rows = vec![
+            stats_row("Application", "Settings", [0.0, 0.0, 390.0, 844.0], 0),
+            // full-row accessibility wrapper beside the real switch
+            stats_row("Cell", "Wi-Fi", [0.0, 100.0, 390.0, 44.0], 1),
+            stats_row("Switch", "", [320.0, 106.0, 51.0, 31.0], 1),
+            // a cell with its own child button
+            stats_row("Cell", "Bluetooth", [0.0, 150.0, 390.0, 44.0], 1),
+            stats_row("Button", "info", [170.0, 160.0, 50.0, 24.0], 2),
+        ];
+        assert!(occluding_row(&rows, 2).is_none(), "a wrapper around the switch is not a cover");
+        assert!(occluding_row(&rows, 3).is_none(), "a child is part of its cell");
+        assert!(occluding_row(&rows, 4).is_none(), "an ancestor is not a cover");
+    }
+
+    #[test]
+    fn rows_outside_the_application_frame_are_off_screen() {
+        let rows = vec![
+            stats_row("Application", "Chrome", [0.0, 0.0, 390.0, 844.0], 0),
+            stats_row("Button", "閉じる", [20.0, 900.0, 40.0, 40.0], 1),
+            stats_row("Button", "閉じる", [20.0, 60.0, 40.0, 40.0], 1),
+        ];
+        assert!(!row_is_on_screen(&rows, 1));
+        assert!(row_is_on_screen(&rows, 2));
+        // Without an Application root nothing is ruled out.
+        assert!(row_is_on_screen(&rows[1..], 0));
+    }
+
+    #[test]
+    fn read_back_ignores_formatting_the_field_adds() {
+        assert!(same_text("090-1234-5678", "09012345678"));
+        assert!(same_text("1,000", "1000"));
+        assert!(same_text("hello", "hello"));
+        assert!(!same_text("", "hello"));
+        assert!(!same_text("helo", "hello"));
     }
 
     fn stats_row(kind: &str, label: &str, rect: [f64; 4], depth: u32) -> crate::wda::ElementRow {

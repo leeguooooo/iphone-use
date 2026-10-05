@@ -118,7 +118,8 @@ Actions — coordinates are **normalized [0,1]** over the phone screen
 
 ```bash
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"tap","x":0.5,"y":0.3}'
-curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"tap","label":"新备忘录"}'  # exact label must have one match; ambiguity sends nothing
+curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"tap","label":"新备忘录"}'  # exact label must have one match; ambiguity sends nothing. Add "kind":"Button" when a StaticText shares the label; off-screen rows never compete with a visible one
+# Any element tap whose centre sits under another control (fixed header, keyboard, floating button) answers 409 element_occluded, outcome not_sent: scroll it clear (perform scroll_to_visible) and read again. "allow_occluded":true taps whatever is on top
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"tap","element":3,"snapshot":"<same elements response>"}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":60}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"text","text":"Health"}'
@@ -126,7 +127,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"key",
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"shortcut","name":"home"}'      # home|spotlight
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"longpress","x":0.4,"y":0.6,"duration_ms":700}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"keyboard"}'                     # dismiss the on-screen keyboard
-curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"set_value","element":5,"snapshot":"…","value":"你好"}'  # write a field directly (clear-then-type; "" clears); no focus tap, no keyboard dance
+curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"set_value","element":5,"snapshot":"…","value":"你好"}'  # write a field directly (clear-then-type; "" clears); no focus tap, no keyboard dance. The field is read back: 409 value_not_applied (outcome no_effect) means it did not stick — common in web views (WKWebView, Chrome) — so tap the field and send {"type":"text"} instead
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scroll","element":7,"snapshot":"…","dy":120}'          # scroll INSIDE that element's rect — never strays into a neighboring scroll view
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scroll","page":true,"dy":300}'  # scroll THE PAGE: daemon finds the page scroller and starts the drag clear of fields, buttons, nested scrollers and bars (long web forms); 422 no_page_scroller (not sent) when there is none
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"alert","button":"不是 li guo?"}'  # press a system-alert button by exact name (UIAlertController; use this, NOT an element tap — alert buttons ACK a coordinate/element tap without acting)

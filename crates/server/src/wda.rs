@@ -40,6 +40,11 @@ pub struct WdaClient {
     /// ~180 ms on a real phone — more than a third of a tap. A short TTL keeps
     /// a burst of gestures on one read and still notices a rotation.
     window: Option<((f64, f64), std::time::Instant)>,
+    /// When anything was last POSTed to WDA (every gesture, key, value write,
+    /// launch — and harmless lookups too: over-counting only skips a cache).
+    posted_at: Option<std::time::Instant>,
+    /// When the alert probe last found no alert.
+    no_alert_at: Option<std::time::Instant>,
     /// How long `probe_health` waits for session/lock/apps-list before
     /// settling on "up, not actionable". Tests shrink it.
     actionability_budget: Duration,
@@ -59,6 +64,8 @@ impl WdaClient {
             http,
             session: None,
             window: None,
+            posted_at: None,
+            no_alert_at: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
         })
     }
@@ -229,8 +236,7 @@ impl WdaClient {
                 }
             });
             let text = self
-                .http
-                .post(format!("{}/session", self.base))
+                .post_req(format!("{}/session", self.base))
                 .json(&body)
                 .send_timed()
                 .await
@@ -242,11 +248,11 @@ impl WdaClient {
                 .context("POST /session body")?;
             self.session = Some(parse_session_id(&text)?);
             self.window = None;
+            self.no_alert_at = None;
             {
                 let sid = self.session.as_deref().unwrap().to_string();
                 let result = self
-                    .http
-                    .post(format!("{}/session/{}/appium/settings", self.base, sid))
+                    .post_req(format!("{}/session/{}/appium/settings", self.base, sid))
                     .json(&serde_json::json!({ "settings": {
                         "waitForIdleTimeout": 0,
                         "animationCoolOffTimeout": 0,
@@ -282,8 +288,7 @@ impl WdaClient {
             if let Some(settings) = snapshot_settings_from_env() {
                 let sid = self.session.as_deref().unwrap().to_string();
                 let result = self
-                    .http
-                    .post(format!("{}/session/{}/appium/settings", self.base, sid))
+                    .post_req(format!("{}/session/{}/appium/settings", self.base, sid))
                     .json(&serde_json::json!({ "settings": settings }))
                     .send_timed()
                     .await;
@@ -331,8 +336,7 @@ impl WdaClient {
     pub async fn find_element(&mut self, using: &str, value: &str) -> Result<String> {
         let sid = self.ensure_session().await?.to_string();
         let text = self
-            .http
-            .post(format!("{}/session/{}/element", self.base, sid))
+            .post_req(format!("{}/session/{}/element", self.base, sid))
             .json(&serde_json::json!({ "using": using, "value": value }))
             .send_timed()
             .await
@@ -352,8 +356,7 @@ impl WdaClient {
     pub async fn find_elements(&mut self, using: &str, value: &str) -> Result<Vec<String>> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/elements", self.base, sid))
+            .post_req(format!("{}/session/{}/elements", self.base, sid))
             .json(&serde_json::json!({ "using": using, "value": value }))
             .send_timed()
             .await
@@ -394,8 +397,7 @@ impl WdaClient {
         // adjustToPickerWheelValue, so the wheel reported ok but never moved).
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/element/{}/value",
                 self.base, sid, id
             ))
@@ -412,8 +414,7 @@ impl WdaClient {
     pub async fn click_element(&mut self, element_id: &str) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/element/{}/click",
                 self.base, sid, element_id
             ))
@@ -431,8 +432,7 @@ impl WdaClient {
     pub async fn type_into(&mut self, element_id: &str, text: &str) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/element/{}/value",
                 self.base, sid, element_id
             ))
@@ -452,8 +452,7 @@ impl WdaClient {
     pub async fn clear_element(&mut self, element_id: &str) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/element/{}/clear",
                 self.base, sid, element_id
             ))
@@ -480,8 +479,7 @@ impl WdaClient {
     ) -> Result<Vec<String>> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/element/{}/elements",
                 self.base, sid, element_id
             ))
@@ -516,8 +514,7 @@ impl WdaClient {
         let sid = self.ensure_session().await?.to_string();
         let operation = format!("POST wda/element/{command}");
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/wda/element/{}/{}",
                 self.base, sid, element_id, command
             ))
@@ -637,8 +634,7 @@ impl WdaClient {
     ) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/wda/pickerwheel/{}/select",
                 self.base, sid, element_id
             ))
@@ -657,8 +653,7 @@ impl WdaClient {
     pub async fn adjust_element_value(&mut self, element_id: &str, value: &str) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/element/{}/value",
                 self.base, sid, element_id
             ))
@@ -683,8 +678,7 @@ impl WdaClient {
     pub async fn tap_point(&mut self, x: f64, y: f64) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/actions", self.base, sid))
+            .post_req(format!("{}/session/{}/actions", self.base, sid))
             .json(&serde_json::json!({
                 "actions": [{
                     "type": "pointer",
@@ -712,8 +706,7 @@ impl WdaClient {
     pub async fn longpress_point(&mut self, x: f64, y: f64, duration_ms: u64) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/actions", self.base, sid))
+            .post_req(format!("{}/session/{}/actions", self.base, sid))
             .json(&serde_json::json!({
                 "actions": [{
                     "type": "pointer",
@@ -746,8 +739,7 @@ impl WdaClient {
     ) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/actions", self.base, sid))
+            .post_req(format!("{}/session/{}/actions", self.base, sid))
             .json(&serde_json::json!({
                 "actions": [{
                     "type": "pointer",
@@ -791,8 +783,7 @@ impl WdaClient {
     ) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/actions", self.base, sid))
+            .post_req(format!("{}/session/{}/actions", self.base, sid))
             .json(&serde_json::json!({
                 "actions": [{
                     "type": "pointer",
@@ -824,8 +815,7 @@ impl WdaClient {
     pub async fn press_home(&mut self) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/wda/pressButton", self.base, sid))
+            .post_req(format!("{}/session/{}/wda/pressButton", self.base, sid))
             .json(&serde_json::json!({ "name": "home" }))
             .send_timed()
             .await
@@ -906,8 +896,7 @@ impl WdaClient {
             .context("/element/active body")?;
         let id = parse_element_id(&body)?;
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/element/{}/clear",
                 self.base, sid, id
             ))
@@ -933,8 +922,7 @@ impl WdaClient {
     ) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/appium/settings", self.base, sid))
+            .post_req(format!("{}/session/{}/appium/settings", self.base, sid))
             .json(&serde_json::json!({ "settings": {
                 "mjpegServerFramerate": framerate,
                 "mjpegScalingFactor": scaling,
@@ -950,7 +938,11 @@ impl WdaClient {
     /// Window (screen) size in WDA points — needed to map our normalized
     /// `[0,1]` agent coordinates onto [`Self::tap_point`]'s absolute points.
     pub async fn window_size(&mut self) -> Result<(f64, f64)> {
-        const WINDOW_SIZE_TTL: Duration = Duration::from_secs(3);
+        // Every tree read refreshes this from the Application frame (see
+        // `elements`), so the TTL only matters between reads; a rotation shows
+        // up in the next read. Measured on real sessions: the 3 s TTL re-read
+        // the size on almost every request (~0.24 s each, 6.8 % of WDA time).
+        const WINDOW_SIZE_TTL: Duration = Duration::from_secs(30);
         if let Some((size, at)) = self.window {
             if at.elapsed() < WINDOW_SIZE_TTL {
                 return Ok(size);
@@ -987,8 +979,7 @@ impl WdaClient {
     pub async fn launch_app(&mut self, bundle_id: &str) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/wda/apps/launch", self.base, sid))
+            .post_req(format!("{}/session/{}/wda/apps/launch", self.base, sid))
             .json(&serde_json::json!({ "bundleId": bundle_id }))
             .send_timed()
             .await
@@ -1014,8 +1005,7 @@ impl WdaClient {
         // `POST /session/:sid/url` opens the deep link fine.
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/url", self.base, sid))
+            .post_req(format!("{}/session/{}/url", self.base, sid))
             .json(&serde_json::json!({ "url": url }))
             .send_timed()
             .await
@@ -1030,8 +1020,7 @@ impl WdaClient {
     pub async fn keys(&mut self, text: &str) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/wda/keys", self.base, sid))
+            .post_req(format!("{}/session/{}/wda/keys", self.base, sid))
             .json(&serde_json::json!({ "value": [text] }))
             .send_timed()
             .await
@@ -1075,8 +1064,7 @@ impl WdaClient {
         };
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/actions", self.base, sid))
+            .post_req(format!("{}/session/{}/actions", self.base, sid))
             .json(&serde_json::json!({
                 "actions": [{
                     "type": "key",
@@ -1142,8 +1130,7 @@ impl WdaClient {
         // No accessory button (native keyboard or already gone) — ask WDA to
         // establish the same postcondition with its native dismiss endpoint.
         let response = self
-            .http
-            .post(format!(
+            .post_req(format!(
                 "{}/session/{}/wda/keyboard/dismiss",
                 self.base, sid
             ))
@@ -1183,7 +1170,30 @@ impl WdaClient {
         let tree = self.source().await?;
         let mut rows = Vec::new();
         flatten_tree(&tree, 0, &mut rows);
+        // The Application node's frame IS the window in points: keep the
+        // window-size cache fresh for free instead of a GET /window/size.
+        // Read it from the raw root (an unlabeled root is not emitted as a row).
+        if tree.get("type").and_then(|t| t.as_str()) == Some("XCUIElementTypeApplication") {
+            let field = |name: &str| {
+                tree.get("rect")
+                    .and_then(|rect| rect.get(name))
+                    .and_then(serde_json::Value::as_f64)
+            };
+            if let (Some(x), Some(y), Some(w), Some(h)) =
+                (field("x"), field("y"), field("width"), field("height"))
+            {
+                if x == 0.0 && y == 0.0 && w > 0.0 && h > 0.0 {
+                    self.window = Some(((w, h), std::time::Instant::now()));
+                }
+            }
+        }
         Ok(rows)
+    }
+
+    /// `self.http.post`, remembering that something was sent.
+    fn post_req(&mut self, url: String) -> reqwest::RequestBuilder {
+        self.posted_at = Some(std::time::Instant::now());
+        self.http.post(url)
     }
 
     /// Find an element by its visible label and tap it. Tries the
@@ -1262,6 +1272,17 @@ impl WdaClient {
     /// tree, and an element click on its button was ACKed without effect), so
     /// agents get them as a first-class block instead.
     pub async fn alert_summary(&mut self) -> Result<Option<(String, Vec<String>)>> {
+        // A "no alert" answer stays true until something is sent to the phone:
+        // reads in a row (settle polling, wait_for, repeated elements) skip
+        // the two WDA round trips. Anything POSTed since, or 2 s passing,
+        // asks again.
+        const NO_ALERT_REUSE: Duration = Duration::from_secs(2);
+        if let Some(at) = self.no_alert_at {
+            if at.elapsed() < NO_ALERT_REUSE && self.posted_at.is_none_or(|posted| posted < at) {
+                return Ok(None);
+            }
+        }
+        let asked_at = std::time::Instant::now();
         let sid = self.ensure_session().await?.to_string();
         let response = self
             .http
@@ -1272,7 +1293,10 @@ impl WdaClient {
         let text = match ensure_wda_success(response, "GET /alert/text").await {
             Ok(value) => value.as_str().unwrap_or("").to_string(),
             // W3C maps "no such alert" to HTTP 404.
-            Err(error) if wda_error_is_not_found(&error) => return Ok(None),
+            Err(error) if wda_error_is_not_found(&error) => {
+                self.no_alert_at = Some(asked_at);
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         let response = self
@@ -1305,8 +1329,7 @@ impl WdaClient {
             None => serde_json::json!({}),
         };
         let response = self
-            .http
-            .post(format!("{}/session/{}/alert/accept", self.base, sid))
+            .post_req(format!("{}/session/{}/alert/accept", self.base, sid))
             .json(&body)
             .send_timed()
             .await
@@ -1320,8 +1343,7 @@ impl WdaClient {
     pub async fn alert_dismiss(&mut self) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/alert/dismiss", self.base, sid))
+            .post_req(format!("{}/session/{}/alert/dismiss", self.base, sid))
             .json(&serde_json::json!({}))
             .send_timed()
             .await
@@ -1335,6 +1357,7 @@ impl WdaClient {
     pub fn invalidate_session(&mut self) {
         self.session = None;
         self.window = None;
+        self.no_alert_at = None;
     }
 
     /// `POST /session/:id/wda/lock` — lock the phone's screen.
@@ -1344,8 +1367,7 @@ impl WdaClient {
     pub async fn lock(&mut self) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
-            .http
-            .post(format!("{}/session/{}/wda/lock", self.base, sid))
+            .post_req(format!("{}/session/{}/wda/lock", self.base, sid))
             .json(&serde_json::json!({}))
             .send_timed()
             .await
@@ -2067,6 +2089,42 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    #[test]
+    fn a_tree_read_refreshes_the_window_size_without_asking_wda() {
+        // One request only: the source. A GET /window/size would hang the test.
+        let (base, server) = mock_wda(1, |request| {
+            assert!(request.contains("/source"), "unexpected: {request}");
+            r#"{"value":{"type":"XCUIElementTypeApplication","rect":{"x":0,"y":0,"width":440,"height":956},"children":[]}}"#.to_string()
+        });
+        let mut client = WdaClient::new(base).unwrap();
+        client.session = Some("SESSION".to_string());
+        block(async {
+            client.elements().await.unwrap();
+            assert_eq!(client.window_size().await.unwrap(), (440.0, 956.0));
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_no_alert_answer_is_reused_until_something_is_sent() {
+        let (base, server) = mock_wda(3, |request| {
+            if request.contains("/alert/text") {
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 39\r\nConnection: close\r\n\r\n{\"value\":{\"error\":\"no such alert\"}}  ".to_string()
+            } else {
+                r#"{"value":null}"#.to_string()
+            }
+        });
+        let mut client = WdaClient::new(base).unwrap();
+        client.session = Some("SESSION".to_string());
+        block(async {
+            assert!(client.alert_summary().await.unwrap().is_none()); // asks (1)
+            assert!(client.alert_summary().await.unwrap().is_none()); // reused
+            client.tap_point(10.0, 10.0).await.unwrap(); // POST (2)
+            assert!(client.alert_summary().await.unwrap().is_none()); // asks again (3)
+        });
+        server.join().unwrap();
     }
 
     #[test]
