@@ -119,7 +119,7 @@ Actions — coordinates are **normalized [0,1]** over the phone screen
 ```bash
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"tap","x":0.5,"y":0.3}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"tap","label":"新备忘录"}'  # exact label must have one match; ambiguity sends nothing. Add "kind":"Button" when a StaticText shares the label; off-screen rows never compete with a visible one
-# Any element tap whose centre sits under another control (fixed header, keyboard, floating button) answers 409 element_occluded, outcome not_sent: scroll it clear (perform scroll_to_visible) and read again. "allow_occluded":true taps whatever is on top
+# Any element tap whose centre sits under another control (fixed header, keyboard, floating button) answers 409 element_occluded, outcome not_sent: scroll it clear (perform scroll_to_visible) and read again. A row marked visible:false is in the tree but not drawn (e.g. Chrome keeps its whole tab grid behind the page): tapping it answers 409 element_not_visible, not_sent — ignore such rows when picking a target. "allow_occluded":true taps whatever is on top
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"tap","element":3,"snapshot":"<same elements response>"}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":60}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"text","text":"Health"}'

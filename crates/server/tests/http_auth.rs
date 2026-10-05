@@ -3974,3 +3974,43 @@ fn anything_sent_in_between_makes_the_tap_read_the_tree_again() {
     assert_eq!(sources, 2, "the tap re-read the tree after the home press");
     assert_eq!(clicked.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Rows WDA reports as not drawn (Chrome's tab grid behind the page)
+// ---------------------------------------------------------------------------
+
+const PAGE_OVER_HIDDEN_GRID: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"Chrome","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeButton","label":"Close","rawIdentifier":"GridCellCloseButtonIdentifier","isVisible":false,"rect":{"x":179,"y":214,"width":33,"height":32}},{"type":"XCUIElementTypeButton","label":"Close","rect":{"x":20,"y":600,"width":80,"height":44}},{"type":"XCUIElementTypeButton","label":"Tab title","rawIdentifier":"GridCellIdentifierPrefix0","isVisible":false,"rect":{"x":17,"y":400,"width":195,"height":100}}]}}"#;
+
+#[test]
+fn a_label_tap_prefers_the_drawn_match_over_a_hidden_tab_grid_row() {
+    let (status, json, lines) = control_against(
+        PAGE_OVER_HIDDEN_GRID,
+        "",
+        false,
+        serde_json::json!({"type":"tap","label":"Close","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(lines.iter().any(|l| l.contains("/actions")), "{lines:?}");
+}
+
+#[test]
+fn a_tap_on_a_row_wda_reports_not_visible_is_refused_unless_allowed() {
+    let (status, json, lines) = control_against(
+        PAGE_OVER_HIDDEN_GRID,
+        "",
+        false,
+        serde_json::json!({"type":"tap","label":"Tab title","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], "element_not_visible");
+    assert_eq!(json["outcome"], "not_sent");
+    assert!(!lines.iter().any(|l| l.contains("/actions")));
+
+    let (status, json, _) = control_against(
+        PAGE_OVER_HIDDEN_GRID,
+        "",
+        false,
+        serde_json::json!({"type":"tap","label":"Tab title","allow_occluded":true,"ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::OK, "{json}");
+}

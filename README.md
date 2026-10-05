@@ -282,7 +282,9 @@ Full reference: **[`docs/agent-api.html`](docs/agent-api.html)**. The bundled sk
 - **Taps that would land elsewhere are refused.** An element tap whose centre is covered
   by another control (a fixed header, the keyboard, a floating button) answers
   `409 element_occluded`, `not_sent`: scroll it clear (`perform` `scroll_to_visible`)
-  and read again; `"allow_occluded":true` overrides. Label taps take an optional
+  and read again. A target WDA reports as `visible:false` (in the tree but not drawn, like
+  Chrome's tab grid behind the page) answers `409 element_not_visible`.
+  `"allow_occluded":true` overrides both. Label taps take an optional
   `"kind":"Button"`, and rows outside the screen never compete with a visible match.
 - **`set_value` is read back.** A field that kept its old contents (web views often
   ignore direct writes) answers `409 value_not_applied`, `outcome:"no_effect"`; tap the

@@ -5035,19 +5035,8 @@ async fn tap_snapshot_element(
     let request = value;
     let (rows, index, reused) = fetch_snapshot_row_reusing(w, value).await?;
     let row = &rows[index];
-    if !allows_occluded(value) {
-        if let Some(cover) = occluding_row(&rows, index) {
-            tracing::info!(
-                "snapshot tap refused: row {index} '{}' is covered by {} '{}'",
-                row.label,
-                cover.kind,
-                cover.label
-            );
-            return Err(SnapshotElementTapError::Refused(
-                "element_occluded",
-                ELEMENT_OCCLUDED_HINT,
-            ));
-        }
+    if let Some((error, hint)) = tap_target_refusal(&rows, index, value) {
+        return Err(SnapshotElementTapError::Refused(error, hint));
     }
     if let Some(locator) = snapshot_row_locator(row) {
         // System-owned sheets and document pickers can publish stale or offset
@@ -6092,23 +6081,12 @@ async fn tap_unique_label(
         }
     };
     let (x, y) = element_center(row).ok_or(UniqueLabelTapError::InvalidTarget)?;
-    if !allows_occluded(request) {
-        let index = rows
-            .iter()
-            .position(|candidate| std::ptr::eq(candidate, row))
-            .unwrap_or_default();
-        if let Some(cover) = occluding_row(&rows, index) {
-            tracing::info!(
-                "label tap refused: '{}' is covered by {} '{}'",
-                row.label,
-                cover.kind,
-                cover.label
-            );
-            return Err(UniqueLabelTapError::Refused(
-                "element_occluded",
-                ELEMENT_OCCLUDED_HINT,
-            ));
-        }
+    let index = rows
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, row))
+        .unwrap_or_default();
+    if let Some((error, hint)) = tap_target_refusal(&rows, index, request) {
+        return Err(UniqueLabelTapError::Refused(error, hint));
     }
     w.tap_point(x, y)
         .await
@@ -6116,6 +6094,34 @@ async fn tap_unique_label(
 }
 
 const ELEMENT_OCCLUDED_HINT: &str = "nothing was sent: another control (a fixed bar, header, keyboard or floating button) covers the centre of this element, so the tap would land on that instead. Bring it clear first with {\"type\":\"perform\",\"action\":\"scroll_to_visible\",\"element\":N,\"snapshot\":…} or a scroll, read /agent/elements again and retry; send \"allow_occluded\":true only if you mean to tap whatever is on top";
+
+const ELEMENT_NOT_VISIBLE_HINT: &str = "nothing was sent: WDA reports this element as not visible (visible:false) — it is in the tree but not drawn, like Chrome's tab grid kept behind the page — so a tap would land on whatever is on top. Pick a row without visible:false; send \"allow_occluded\":true only if you mean to tap that spot anyway";
+
+/// Why a tap aimed at `rows[index]` would not reach it, if it would not:
+/// the element is not drawn (`visible:false`), or another control covers its
+/// centre. `"allow_occluded":true` waives both.
+fn tap_target_refusal(
+    rows: &[crate::wda::ElementRow],
+    index: usize,
+    request: &serde_json::Value,
+) -> Option<(&'static str, &'static str)> {
+    if allows_occluded(request) {
+        return None;
+    }
+    let target = rows.get(index)?;
+    if target.visible == Some(false) {
+        tracing::info!("tap refused: row {index} '{}' is not visible", target.label);
+        return Some(("element_not_visible", ELEMENT_NOT_VISIBLE_HINT));
+    }
+    let cover = occluding_row(rows, index)?;
+    tracing::info!(
+        "tap refused: row {index} '{}' is covered by {} '{}'",
+        target.label,
+        cover.kind,
+        cover.label
+    );
+    Some(("element_occluded", ELEMENT_OCCLUDED_HINT))
+}
 
 fn allows_occluded(request: &serde_json::Value) -> bool {
     request
