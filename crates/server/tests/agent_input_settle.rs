@@ -347,6 +347,10 @@ fn a_hung_alert_probe_does_not_hold_up_the_applied_action() {
             if is_source(request) {
                 return Some((Duration::ZERO, simple_tree("搜索")));
             }
+            if request.contains("/screenshot") {
+                // Settle frames are not what this test hangs.
+                return Some((Duration::ZERO, r#"{"value":"iVBORw0KGgo="}"#.to_string()));
+            }
             // The alert probe hangs well past its own 1.5s cap.
             Some((Duration::from_secs(20), r#"{"value":"确认"}"#.to_string()))
         });
@@ -844,4 +848,78 @@ fn a_slow_action_still_gets_its_own_observation_window() {
         );
         assert_eq!(json["settle"]["reason"], "stable");
     });
+}
+
+// ---------------------------------------------------------------------------
+// Settled by identical frames around one tree read
+// ---------------------------------------------------------------------------
+
+/// Press home with ?return=delta against a WDA whose frames are `frame(n)` for
+/// the n-th screenshot and whose tree is `tree`. Returns (json, source reads).
+fn settle_with_frames(
+    tree: String,
+    frame: fn(usize) -> &'static str,
+) -> (serde_json::Value, usize) {
+    block(async move {
+        let sources = Arc::new(AtomicUsize::new(0));
+        let frames = Arc::new(AtomicUsize::new(0));
+        let (seen_sources, seen_frames) = (sources.clone(), frames.clone());
+        let wda = mock_wda(move |request, _| {
+            if is_session(request) {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if is_mutation(request) {
+                return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+            }
+            if is_source(request) {
+                seen_sources.fetch_add(1, Ordering::AcqRel);
+                return Some((Duration::ZERO, tree.clone()));
+            }
+            if request.contains("/screenshot") {
+                let n = seen_frames.fetch_add(1, Ordering::AcqRel);
+                return Some((Duration::ZERO, format!(r#"{{"value":"{}"}}"#, frame(n))));
+            }
+            Some((
+                Duration::ZERO,
+                r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string(),
+            ))
+        });
+        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        (json, sources.load(Ordering::Acquire))
+    })
+}
+
+const FRAME_A: &str = "iVBORw0KGgoAAAA=";
+const FRAME_B: &str = "iVBORw0KGgoBBBB=";
+
+#[test]
+fn identical_frames_around_the_read_settle_on_one_tree_read() {
+    let (json, sources) = settle_with_frames(simple_tree("搜索"), |_| FRAME_A);
+    assert_eq!(json["settle"]["reason"], "stable", "{json}");
+    assert_eq!(json["settle"]["captures"], 1, "{json}");
+    assert_eq!(sources, 1);
+}
+
+#[test]
+fn frames_that_differ_fall_back_to_comparing_trees() {
+    let (json, sources) = settle_with_frames(simple_tree("搜索"), |n| {
+        if n == 0 {
+            FRAME_A
+        } else {
+            FRAME_B
+        }
+    });
+    assert_eq!(json["settle"]["reason"], "stable", "{json}");
+    assert!(sources >= 2, "the tree was read again: {sources}");
+}
+
+#[test]
+fn a_focused_text_field_never_settles_on_frames() {
+    let tree = r#"{"value":{"type":"XCUIElementTypeApplication","label":"测试应用","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeTextField","label":"搜索","isFocused":true,"rect":{"x":20,"y":100,"width":300,"height":40}},{"type":"XCUIElementTypeButton","label":"取消","rect":{"x":330,"y":100,"width":50,"height":40}},{"type":"XCUIElementTypeButton","label":"完成","rect":{"x":20,"y":700,"width":80,"height":44}}]}}"#;
+    let (json, sources) = settle_with_frames(tree.to_string(), |_| FRAME_A);
+    assert!(
+        sources >= 2,
+        "a blinking caret keeps the tree check: {json}"
+    );
 }

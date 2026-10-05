@@ -48,6 +48,9 @@ pub struct WdaClient {
     /// The last tree read and when: snapshot-bound actions reuse it instead
     /// of reading the whole tree again (see [`Self::recent_tree`]).
     last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
+    /// Until when screenshots are not used to judge "settled" (a frame was
+    /// slow or failed; see `settle_frame` in http.rs).
+    settle_frames_paused_until: Option<std::time::Instant>,
     /// How long `probe_health` waits for session/lock/apps-list before
     /// settling on "up, not actionable". Tests shrink it.
     actionability_budget: Duration,
@@ -70,6 +73,7 @@ impl WdaClient {
             posted_at: None,
             no_alert_at: None,
             last_tree: None,
+            settle_frames_paused_until: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
         })
     }
@@ -1203,6 +1207,15 @@ impl WdaClient {
         let (rows, read_at) = self.last_tree.as_ref()?;
         let untouched = self.posted_at.is_none_or(|posted| posted < *read_at);
         (untouched && read_at.elapsed() < max_age).then(|| rows.clone())
+    }
+
+    pub fn settle_frames_usable(&self) -> bool {
+        self.settle_frames_paused_until
+            .is_none_or(|until| std::time::Instant::now() >= until)
+    }
+
+    pub fn pause_settle_frames(&mut self, for_how_long: Duration) {
+        self.settle_frames_paused_until = Some(std::time::Instant::now() + for_how_long);
     }
 
     /// Drop the reusable tree so the next snapshot-bound action reads afresh.

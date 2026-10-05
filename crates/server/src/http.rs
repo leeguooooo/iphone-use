@@ -8663,6 +8663,31 @@ async fn read_elements_once(
 /// Returns the latest readable tree (if any) plus a report of what happened.
 /// This NEVER returns an error to the caller — the action already applied, and
 /// a failed observation is reported, not raised.
+/// One screenshot for the settle check, capped well below the settle budget:
+/// a slow frame must cost at most this, never the observation.
+async fn settle_frame(
+    w: &mut crate::wda::WdaClient,
+    deadline: tokio::time::Instant,
+) -> Option<Vec<u8>> {
+    const SETTLE_FRAME_CAP: std::time::Duration = std::time::Duration::from_millis(1500);
+    // WDA answers one request at a time: a frame that timed out still holds
+    // it, and the tree read behind it waits. After one slow or failed frame
+    // the settle check stays tree-vs-tree for a while.
+    const SLOW_FRAME_BACKOFF: std::time::Duration = std::time::Duration::from_secs(600);
+    if !w.settle_frames_usable() {
+        return None;
+    }
+    let cap = std::cmp::min(deadline, tokio::time::Instant::now() + SETTLE_FRAME_CAP);
+    let frame = tokio::time::timeout_at(cap, w.screenshot_png())
+        .await
+        .ok()
+        .and_then(Result::ok);
+    if frame.is_none() {
+        w.pause_settle_frames(SLOW_FRAME_BACKOFF);
+    }
+    frame
+}
+
 async fn settle_and_read_elements(
     w: &mut crate::wda::WdaClient,
     budget: std::time::Duration,
@@ -8682,6 +8707,8 @@ async fn settle_and_read_elements(
         report.waited_ms = started.elapsed().as_millis() as u64;
         return (None, report);
     }
+    // Best effort: a frame failure just means the tree-vs-tree check below.
+    let frame_before = settle_frame(w, deadline).await;
     let (mut id, mut rows) = match read_elements_once(w, deadline).await {
         SettleRead::Read(id, rows) => (id, rows),
         // No tree, but for opposite reasons: out of time vs. a broken read.
@@ -8698,6 +8725,26 @@ async fn settle_and_read_elements(
     };
     report.captures = 1;
     report.sparse = settle_tree_is_sparse(&rows);
+    // Settled already? Frames taken right before and right after the read are
+    // byte-identical when nothing moved while WDA built the tree — then that
+    // tree is the settled screen and a second whole-tree read (≈1.5 s on real
+    // sessions) is not needed; two screenshots cost ≈0.4 s. A focused text
+    // field's blinking caret never lets frames match, so those screens keep
+    // the tree-vs-tree check; so does anything that moved.
+    if let Some(before) = &frame_before {
+        let typing = rows
+            .iter()
+            .any(|row| row.focused == Some(true) && TEXT_INPUT_KINDS.contains(&row.kind.as_str()));
+        if !typing && !report.sparse && tokio::time::Instant::now() < deadline {
+            let after = settle_frame(w, deadline).await;
+            if after.as_ref() == Some(before) {
+                report.settled = true;
+                report.reason = SettleReason::Stable;
+                report.waited_ms = started.elapsed().as_millis() as u64;
+                return (Some((id, rows)), report);
+            }
+        }
+    }
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
