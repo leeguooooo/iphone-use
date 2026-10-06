@@ -9474,9 +9474,12 @@ async fn watch_bridge_run(
         // poll only the cheap foreground-app query, never the (large)
         // Shortcuts library tree.
         if !look_for_notice {
-            if w.active_bundle().await.ok().flatten().as_deref() == Some("com.apple.springboard") {
-                run.finished = true;
-                return run;
+            // Order in the list varies; finished = Shortcuts is no longer active.
+            if let Ok(active) = w.active_bundles().await {
+                if !active.is_empty() && !active.iter().any(|b| b == "com.apple.shortcuts") {
+                    run.finished = true;
+                    return run;
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             continue;
@@ -9487,6 +9490,14 @@ async fn watch_bridge_run(
                     row.label.contains(crate::focus::NOTICE_TITLE)
                         && row.label.contains(crate::focus::ON_NOTICE)
                 });
+            if run.saw_on_notice {
+                // The notice is SpringBoard's banner, and while it is up the
+                // tree read lands on it rather than the library — so the tile
+                // cannot be watched. Setting DND is the step right after it.
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                run.finished = true;
+                return run;
+            }
             run.finished = rows.iter().any(|row| {
                 row.kind == "Button"
                     && row.identifier.as_deref() == Some("shortcut.button.run")

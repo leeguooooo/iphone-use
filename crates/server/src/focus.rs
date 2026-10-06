@@ -32,7 +32,7 @@ pub const NOTICE_TITLE: &str = "iPhone Use";
 
 /// How long a bridge run may take before the daemon assumes a one-time
 /// permission prompt is holding it (a normal run ends in ~2 s).
-pub const SHORTCUT_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub const SHORTCUT_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub fn opted_out() -> bool {
     std::env::var(OPT_OUT_ENV)
