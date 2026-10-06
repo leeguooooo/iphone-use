@@ -9470,12 +9470,16 @@ async fn watch_bridge_run(
     // or the library from before the run reads as "already finished".
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     while tokio::time::Instant::now() < deadline {
-        // focus_off ends on the Home Screen, where the library never shows.
-        if !look_for_notice
-            && w.active_bundle().await.ok().flatten().as_deref() == Some("com.apple.springboard")
-        {
-            run.finished = true;
-            return run;
+        // focus_off ends on the Home Screen, where the library never shows;
+        // poll only the cheap foreground-app query, never the (large)
+        // Shortcuts library tree.
+        if !look_for_notice {
+            if w.active_bundle().await.ok().flatten().as_deref() == Some("com.apple.springboard") {
+                run.finished = true;
+                return run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            continue;
         }
         if let Ok(rows) = w.elements().await {
             run.saw_on_notice |= look_for_notice
