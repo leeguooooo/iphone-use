@@ -1363,13 +1363,32 @@ impl WdaClient {
             .probe
             .small_tree_at
             .is_some_and(|at| self.posted_at.is_none_or(|posted| posted < at));
+        // After an app switch, ask WDA which app is in front (~20 ms) rather
+        // than probe (~150 ms): a known-small app reads in full at once.
+        if self.probe.app_switched && !untouched && !self.lite_source {
+            // Bounded: a slow answer must not hold up the read it is meant
+            // to speed up; unknown simply means probe.
+            let bundles =
+                tokio::time::timeout(Duration::from_secs(1), self.active_bundles()).await;
+            self.probe.switched_bundle = match bundles {
+                Ok(Ok(bundles)) => bundles.into_iter().next(),
+                Ok(Err(error)) => {
+                    tracing::debug!("elements: frontmost app unknown, probing: {error:#}");
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!("elements: frontmost app lookup timed out, probing");
+                    None
+                }
+            };
+        }
         if !self.probe.should_probe(limit, untouched, self.lite_source) {
             let full = self.source().await?;
             self.probe.record(&full, limit);
-            if self.probe.last_nodes > limit {
+            if self.probe.last_nodes() > limit {
                 // Grew past the limit without a probe: it was read, but the
                 // app now always probes.
-                tracing::warn!("elements: {} nodes read in full without a probe", self.probe.last_nodes);
+                tracing::warn!("elements: {} nodes read in full without a probe", self.probe.last_nodes());
             }
             return Ok((full, false));
         }
@@ -1378,7 +1397,7 @@ impl WdaClient {
         // tree kept lite carry no `accessible`; nothing decides on it.
         let lite = self.source_excluding(Some(PROBE_EXCLUDED_ATTRIBUTES)).await?;
         self.probe.record(&lite, limit);
-        let nodes = self.probe.last_nodes;
+        let nodes = self.probe.last_nodes();
         if keep_lite_source(nodes, limit, self.lite_source) {
             tracing::info!("elements: {nodes} nodes, keeping the tree read without isVisible");
             self.lite_source = true;
@@ -1679,26 +1698,48 @@ const PROBE_WARMUP_READS: u32 = 6;
 /// What [`WdaClient::bounded_source`] has seen of tree sizes. The probe costs
 /// a second `/source` on every small screen (bench: tap label 0.9 s -> 1.15 s,
 /// Settings observed step 5.4 s -> 6.8 s), so it runs only when the next
-/// tree could plausibly be huge.
+/// tree could plausibly be huge. Everything here lives for the daemon run:
+/// agents launch an app, read a few times and leave, so per-visit counts
+/// would never finish warming up.
 #[derive(Debug, Default)]
 struct ProbeMemory {
     /// Something that changes app (launch, activate, Home, open URL) was
     /// sent since the last read.
     app_switched: bool,
+    /// After a switch: the frontmost bundle, when WDA could name it.
+    switched_bundle: Option<String>,
     /// Root `Application` label of the last tree read.
-    last_app: Option<String>,
-    /// Nodes in the last tree read.
-    last_nodes: usize,
-    /// Reads in `last_app` since it became the app on screen.
-    reads_in_app: u32,
-    /// Apps that have ever shown a tree over the limit (per daemon run).
-    heavy_apps: std::collections::HashSet<String>,
+    current: Option<String>,
+    /// Per app label: sizes seen so far.
+    apps: std::collections::HashMap<String, AppSizes>,
+    /// Bundle id -> app label, learned on the first read after a switch, so
+    /// the next switch to a known-small app skips the probe.
+    bundle_labels: std::collections::HashMap<String, String>,
     /// When a tree under the limit was last read; until something is POSTed
     /// after it the screen cannot have become huge on its own.
     small_tree_at: Option<std::time::Instant>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct AppSizes {
+    /// Reads of this app, ever (this daemon run).
+    reads: u32,
+    /// Nodes in its last tree.
+    last_nodes: usize,
+    /// It has shown a tree over the limit at least once.
+    heavy: bool,
+}
+
 impl ProbeMemory {
+    /// The app the next read lands in, as far as is known.
+    fn next_app(&self) -> Option<&str> {
+        if self.app_switched {
+            let bundle = self.switched_bundle.as_deref()?;
+            return self.bundle_labels.get(bundle).map(String::as_str);
+        }
+        self.current.as_deref()
+    }
+
     /// `untouched`: nothing was POSTed since `small_tree_at`.
     fn should_probe(&self, limit: usize, untouched: bool, lite: bool) -> bool {
         if lite {
@@ -1707,13 +1748,10 @@ impl ProbeMemory {
         if untouched {
             return false; // wait_for polls, settle re-reads
         }
-        let Some(app) = self.last_app.as_deref() else {
-            return true;
+        let Some(sizes) = self.next_app().and_then(|app| self.apps.get(app)) else {
+            return true; // an app never measured, or a switch to who knows where
         };
-        self.app_switched
-            || self.heavy_apps.contains(app)
-            || self.last_nodes * 5 >= limit * 4
-            || self.reads_in_app < PROBE_WARMUP_READS
+        sizes.heavy || sizes.last_nodes * 5 >= limit * 4 || sizes.reads < PROBE_WARMUP_READS
     }
 
     fn record(&mut self, tree: &serde_json::Value, limit: usize) {
@@ -1725,20 +1763,27 @@ impl ProbeMemory {
             .unwrap_or("")
             .to_string();
         let nodes = count_nodes(tree);
-        if self.last_app.as_deref() == Some(app.as_str()) {
-            self.reads_in_app = self.reads_in_app.saturating_add(1);
-        } else {
-            self.reads_in_app = 1;
+        if let Some(bundle) = self.switched_bundle.take() {
+            self.bundle_labels.insert(bundle, app.clone());
         }
+        let sizes = self.apps.entry(app.clone()).or_default();
+        sizes.reads = sizes.reads.saturating_add(1);
+        sizes.last_nodes = nodes;
         if nodes > limit {
-            self.heavy_apps.insert(app.clone());
+            sizes.heavy = true;
             self.small_tree_at = None;
         } else {
             self.small_tree_at = Some(std::time::Instant::now());
         }
         self.app_switched = false;
-        self.last_app = Some(app);
-        self.last_nodes = nodes;
+        self.current = Some(app);
+    }
+
+    fn last_nodes(&self) -> usize {
+        self.current
+            .as_deref()
+            .and_then(|app| self.apps.get(app))
+            .map_or(0, |sizes| sizes.last_nodes)
     }
 }
 
@@ -2761,14 +2806,10 @@ mod tests {
         }
         // A measured small app after input: straight to the full read.
         assert!(!memory.should_probe(1_000, false, false));
-        // Anything that changes app makes the next screen unknown.
-        memory.app_switched = true;
-        assert!(memory.should_probe(1_000, false, false));
-        memory.record(&app_tree("Calculator", 40), 1_000);
-        assert!(!memory.should_probe(1_000, false, false));
         // Near the limit: probe.
         memory.record(&app_tree("Calculator", 850), 1_000);
         assert!(memory.should_probe(1_000, false, false));
+        memory.record(&app_tree("Calculator", 40), 1_000);
         // An app that was ever huge keeps probing, even on its small screens.
         memory.record(&app_tree("微信", 3_400), 1_000);
         for _ in 0..10 {
@@ -2779,6 +2820,34 @@ mod tests {
         assert!(!memory.should_probe(1_000, true, false));
         // Lite mode always probes; hysteresis decides when to leave it.
         assert!(memory.should_probe(1_000, true, true));
+    }
+
+    #[test]
+    fn an_app_switch_probes_unless_the_frontmost_app_is_known_small() {
+        let mut memory = ProbeMemory::default();
+        // A switch to an app WDA cannot name, or a bundle never read: probe.
+        memory.app_switched = true;
+        assert!(memory.should_probe(1_000, false, false));
+        memory.switched_bundle = Some("com.apple.calculator".into());
+        assert!(memory.should_probe(1_000, false, false));
+        memory.record(&app_tree("Calculator", 40), 1_000);
+        for _ in 1..PROBE_WARMUP_READS {
+            memory.record(&app_tree("Calculator", 40), 1_000);
+        }
+        // Away and back: the warm-up does not restart on re-entry, and the
+        // bundle is known small, so the first read after the launch is full.
+        memory.record(&app_tree("主屏幕", 120), 1_000);
+        memory.app_switched = true;
+        memory.switched_bundle = Some("com.apple.calculator".into());
+        assert!(!memory.should_probe(1_000, false, false));
+        // A heavy app stays probed after a switch.
+        memory.app_switched = true;
+        memory.switched_bundle = Some("com.tencent.xin".into());
+        memory.record(&app_tree("微信", 3_400), 1_000);
+        memory.record(&app_tree("主屏幕", 120), 1_000);
+        memory.app_switched = true;
+        memory.switched_bundle = Some("com.tencent.xin".into());
+        assert!(memory.should_probe(1_000, false, false));
     }
 
     #[test]

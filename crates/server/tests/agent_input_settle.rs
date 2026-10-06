@@ -159,7 +159,10 @@ fn a_screen_that_keeps_changing_is_reported_unsettled_not_failed() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=800").await;
+        // Every read differs, so no budget ever settles; 1500 ms leaves room
+        // for two samples after a Home press, whose first read also asks
+        // which app is in front and probes the tree size.
+        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=1500").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["settled"], false);

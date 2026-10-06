@@ -158,6 +158,18 @@ pub fn mock_wda(
                 );
                 continue;
             }
+            // After an app switch (Home, launch) the read asks which app is
+            // in front. No test here scripts that: answer "unknown", which
+            // sends the read through the probe answered above.
+            if request.contains("/wda/apps/list") {
+                let body = r#"{"value":[]}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                continue;
+            }
             let scripted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 responder(&request, index)
             }));
