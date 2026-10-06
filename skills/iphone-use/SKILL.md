@@ -41,12 +41,15 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure st
    "$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp" flow run system/spotlight-search --input query=Health
    ```
 
-3. **Otherwise act on what the screen names.** Open the app with `launch_app`.
-   Read `GET /agent/elements` (text, 10× cheaper than a screenshot). Tap by
-   element + snapshot from the same read, by a unique label, or by locator.
-   Use coordinates and screenshots only when there is no semantic target. Once
-   a segment is understood, send it as one batch (`POST /agent/actions` /
-   `phone_run_steps`, up to 24 steps) with `wait_for` after each screen change.
+3. **Otherwise act in batches, not taps.** Every call costs you a full turn;
+   the phone takes ~0.5 s. Open the app with `launch_app`, read
+   `GET /agent/elements` once, then send everything you can already see how to
+   do as ONE batch (`POST /agent/actions` / `phone_run_steps`, up to 24 steps,
+   `wait_for` after each screen change) with `observe:true` (MCP default): the
+   reply carries the screen the batch ended on, so you decide the next batch
+   without another read. Single taps (element + snapshot, unique label,
+   locator) are for exploring a screen you have not read yet; after three in a
+   row the daemon says so (`batch_hint`).
 
 4. **Verify** each step against your postcondition (`?return=delta` /
    `observe:true` returns the settled change in the same call). `ok:true` means

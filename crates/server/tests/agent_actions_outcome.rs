@@ -217,3 +217,37 @@ fn a_batch_refused_before_it_starts_reports_nothing_applied() {
         assert_eq!(json["retry_safe"], true, "{json}");
     });
 }
+
+/// `observe: true` hands back the screen the batch ended on, so the agent's
+/// next decision needs no separate `/agent/elements` round trip.
+#[test]
+fn an_observed_batch_returns_the_screen_it_ended_on() {
+    block(async {
+        let wda = mock_wda(|request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if request.contains("/source?format=json") {
+                return Some((Duration::ZERO, BARE_TREE.to_string()));
+            }
+            Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
+        });
+        let (status, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"home"}}],"observe":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["ok"], true, "{json}");
+        assert!(json["snapshot"].is_string(), "{json}");
+        assert_eq!(json["elements"][0]["label"], "测试应用", "{json}");
+        assert!(json["settle"].is_object(), "{json}");
+
+        let (_, plain) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"home"}}]}"#,
+        )
+        .await;
+        assert!(plain.get("elements").is_none(), "no observation unless asked: {plain}");
+    });
+}

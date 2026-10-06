@@ -146,6 +146,16 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 on every iPhone since XR/11; use `menu`. App uninstall: `{"type":"uninstall","bundle":…}`
 (destructive; HTTP only).
 
+## Batches first
+
+A task should take a few turns, not one per tap. `POST /agent/actions`
+(`phone_run_steps`) runs up to 24 steps under one control lock and stops at the
+first failure; `{"steps":[…], "observe":true}` (MCP: on by default) also
+returns `snapshot`, `elements`, `settle` and `alert` for the screen the batch
+ended on. Pattern: read once → batch what you can see → read the batch's own
+observation → next batch. Three single `/agent/input` actions in a row earn a
+one-shot `batch_hint`; a batch, or a pause over a minute, resets the count.
+
 ## Reading results: settle, delta, wait_for
 
 **`?return=delta`** (MCP `observe:true`) settles after an applied action and

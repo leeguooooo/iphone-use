@@ -282,7 +282,18 @@ impl Trail {
 pub struct FlowTrail {
     current: Trail,
     previous: Option<Trail>,
+    /// Single `/agent/input` actions in a row (a batch resets it).
+    singles: u32,
+    last_single: Option<Instant>,
+    /// The batch hint already went out for this streak.
+    batch_hinted: bool,
 }
+
+/// Single actions in a row before the agent is told to batch.
+pub const BATCH_HINT_AFTER: u32 = 3;
+/// A pause this long between single actions breaks the streak (the agent was
+/// thinking about an unknown screen, which is what single actions are for).
+const SINGLE_STREAK_GAP: Duration = Duration::from_secs(60);
 
 /// One action, translated into a flow v1 step.
 pub enum Converted {
@@ -396,6 +407,38 @@ impl FlowTrail {
     /// The phone was released or handed to a person.
     pub fn reset(&mut self) {
         self.rotate();
+        self.note_batch();
+    }
+
+    /// One single action applied. Returns a `batch_hint` block the first time
+    /// a streak reaches [`BATCH_HINT_AFTER`].
+    pub fn note_single(&mut self, now: Instant) -> Option<Value> {
+        if self
+            .last_single
+            .is_some_and(|last| now.duration_since(last) > SINGLE_STREAK_GAP)
+        {
+            self.note_batch();
+        }
+        self.singles += 1;
+        self.last_single = Some(now);
+        if self.singles < BATCH_HINT_AFTER || self.batch_hinted {
+            return None;
+        }
+        self.batch_hinted = true;
+        Some(json!({
+            "single_actions_in_a_row": self.singles,
+            "message": "Several single actions in a row: each one costs you a full turn. Send the steps you already \
+                        understand as ONE batch (phone_run_steps / POST /agent/actions, wait_for between screens) \
+                        with observe:true, which returns the resulting screen in the same reply. Keep single \
+                        actions for exploring a screen you have not read yet."
+        }))
+    }
+
+    /// A batch ran: the streak is over.
+    pub fn note_batch(&mut self) {
+        self.singles = 0;
+        self.last_single = None;
+        self.batch_hinted = false;
     }
 
     /// `launch_app` applied. Returns whether a `registry` block should go out.
@@ -750,6 +793,24 @@ mod tests {
         assert!(!draft.to_string().contains("secret"));
         assert_eq!(draft["flow"]["steps"][0], json!({"kind":"type","input":"text1","clear":true}));
         assert_eq!(draft["flow"]["inputs"]["text1"]["type"], "string");
+    }
+
+    #[test]
+    fn a_streak_of_single_actions_is_told_once_to_batch() {
+        let now = Instant::now();
+        let mut trail = FlowTrail::default();
+        assert!(trail.note_single(now).is_none());
+        assert!(trail.note_single(now).is_none());
+        let hint = trail.note_single(now).expect("third single action");
+        assert!(hint["message"].as_str().unwrap().contains("observe:true"));
+        assert!(trail.note_single(now).is_none(), "once per streak");
+        trail.note_batch();
+        assert!(trail.note_single(now).is_none());
+        // A long pause (reading an unknown screen) breaks the streak.
+        let mut slow = FlowTrail::default();
+        for i in 0..5 {
+            assert!(slow.note_single(now + SINGLE_STREAK_GAP * (i + 1) * 2).is_none());
+        }
     }
 
     #[test]

@@ -7509,6 +7509,11 @@ async fn direct_control(
 #[serde(deny_unknown_fields)]
 struct AgentActionsRequest {
     steps: Vec<AgentActionStep>,
+    /// After a batch that passed, wait for the screen to settle and return
+    /// it (`snapshot`, `elements`, `settle`, `alert`) in the same response,
+    /// so the agent's next decision needs no separate read.
+    #[serde(default)]
+    observe: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8882,6 +8887,21 @@ async fn agent_actions(
         "applied_actions": applied_actions,
         "steps": step_results
     });
+    if request.observe {
+        // Observation only: the batch's verdict is already fixed above.
+        let budget = std::time::Duration::from_millis(AGENT_INPUT_SETTLE_DEFAULT_MS);
+        let (observed, report) = settle_and_read_elements(&mut w, budget).await;
+        if let Some((snapshot, rows)) = observed {
+            let rows = Arc::new(rows);
+            remember_element_snapshot(&state, &snapshot, &rows);
+            result["snapshot"] = serde_json::json!(snapshot);
+            result["elements"] = serde_json::json!(&*rows);
+        }
+        result["settle"] = report.to_json();
+        if let Some(alert) = alert_json(probe_alert(&mut w).await) {
+            result["alert"] = alert;
+        }
+    }
     for (key, block) in flow_after_actions(&state, &headers, &body) {
         result[key] = block;
     }
@@ -10019,8 +10039,13 @@ fn flow_after_input(
     if headers.contains_key(FLOW_RUN_HEADER) {
         return Vec::new();
     }
-    let launched = record_flow_action(state, action, Instant::now());
-    flow_blocks(state, launched)
+    let now = Instant::now();
+    let launched = record_flow_action(state, action, now);
+    let mut blocks = flow_blocks(state, launched);
+    if let Some(hint) = recover(state.flow_trail.lock()).note_single(now) {
+        blocks.push(("batch_hint", hint));
+    }
+    blocks
 }
 
 /// The same for a successful `/agent/actions` batch, read from its raw body.
@@ -10037,6 +10062,7 @@ fn flow_after_actions(
         return Vec::new();
     };
     let now = Instant::now();
+    recover(state.flow_trail.lock()).note_batch();
     let mut launched = None;
     for step in request
         .get("steps")

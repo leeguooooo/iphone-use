@@ -149,6 +149,11 @@ pub struct RunStepsParams {
     /// first action and stops immediately when any action or wait condition
     /// fails.
     pub steps: Vec<PhoneStep>,
+    /// Return the screen the batch ended on (`snapshot`, `elements`, `alert`)
+    /// in the same reply, so the next decision needs no phone_elements call.
+    /// Default true; set false only when you will not look at the result.
+    #[serde(default)]
+    pub observe: Option<bool>,
 }
 
 /// One step in a bounded multi-step Direct/WDA sequence.
@@ -645,7 +650,9 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Run a sequence of actions in ONE call: the daemon validates the whole \
+        description = "THE DEFAULT WAY TO ACT: run a sequence of actions in ONE call and get the \
+        screen it ended on back in the same reply (observe, on by default) — one turn instead of one \
+        per tap. The daemon validates the whole \
         sequence first, holds one control lock, and stops at the first failure. Use it as soon as a \
         segment is understood; keep single-action tools for exploring an unknown screen. Step kinds: \
         launch_app, tap_locator, tap_label, tap, type, key, shortcut, scroll, swipe, drag, longpress, \
@@ -658,12 +665,17 @@ impl PhoneHandler {
     )]
     async fn phone_run_steps(
         &self,
-        Parameters(RunStepsParams { steps }): Parameters<RunStepsParams>,
+        Parameters(RunStepsParams { steps, observe }): Parameters<RunStepsParams>,
     ) -> CallToolResult {
-        let request = match phone_steps_request(steps) {
+        let mut request = match phone_steps_request(steps) {
             Ok(request) => request,
             Err(error) => return CallToolResult::error(vec![Content::text(error)]),
         };
+        // Observing by default: a batch is how an agent advances, and the
+        // screen it ends on is what the agent decides from next.
+        if observe.unwrap_or(true) {
+            request["observe"] = serde_json::json!(true);
+        }
         // The batch entry point answers with the same structured result the
         // CLI and phone_flow_run do. A failing batch carries the evidence a
         // caller needs — `failed_step`, `applied_actions`, `retry_safe`, and
@@ -1328,7 +1340,9 @@ impl ServerHandler for PhoneHandler {
                  phone_elements in a new app) carry a `registry` block: if a listed flow does the task, \
                  phone_flow_run it — one call instead of dozens. phone_flow_list shows all of them.\n\
                  3. Otherwise read phone_elements and act on what it names (phone_tap_element, \
-                 phone_tap_label for a unique label); batch a segment you understand with phone_run_steps. \
+                 phone_tap_label for a unique label) only to explore; as soon as you know the next few steps, send \
+                 them as ONE phone_run_steps batch (wait_for between screens) — it returns the resulting \
+                 screen, so a task takes a few turns, not one per tap. \
                  Screenshots only when pixels matter.\n\
                  4. Verify each step; `retry_safe:false` means never replay.\n\
                  5. A response carrying `flow_suggestion`, or any finished multi-step task with no flow: \
@@ -2073,6 +2087,7 @@ mod tests {
                 y: 0.5,
                 after_ms: 0,
             }],
+            observe: None,
         })));
         task.join().unwrap();
 
