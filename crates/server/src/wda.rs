@@ -48,6 +48,10 @@ pub struct WdaClient {
     /// The last tree read and when: snapshot-bound actions reuse it instead
     /// of reading the whole tree again (see [`Self::recent_tree`]).
     last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
+    /// The screen as it stood after the last action settled (PNG), kept in
+    /// memory only so `/agent/screenshot` can answer without a new capture.
+    /// Dropped by the next screen-changing POST.
+    settled_frame: Option<(std::sync::Arc<Vec<u8>>, std::time::Instant)>,
     /// Until when screenshots are not used to judge "settled" (a frame was
     /// slow or failed; see `settle_frame` in http.rs).
     settle_frames_paused_until: Option<std::time::Instant>,
@@ -93,6 +97,7 @@ impl WdaClient {
             posted_at: None,
             no_alert_at: None,
             last_tree: None,
+            settled_frame: None,
             settle_frames_paused_until: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
         })
@@ -1331,6 +1336,19 @@ impl WdaClient {
         self.settle_frames_paused_until = Some(std::time::Instant::now() + for_how_long);
     }
 
+    /// Keep `png` as the settled screen (see `settled_frame`).
+    pub fn remember_settled_frame(&mut self, png: Vec<u8>) {
+        self.settled_frame = Some((std::sync::Arc::new(png), std::time::Instant::now()));
+    }
+
+    /// The settled screen, when it is younger than `max_age` and nothing that
+    /// changes the screen was sent since it was captured.
+    pub fn settled_frame(&self, max_age: Duration) -> Option<std::sync::Arc<Vec<u8>>> {
+        let (png, at) = self.settled_frame.as_ref()?;
+        let untouched = self.posted_at.is_none_or(|posted| posted < *at);
+        (untouched && at.elapsed() < max_age).then(|| png.clone())
+    }
+
     /// Drop the reusable tree so the next snapshot-bound action reads afresh.
     pub fn forget_tree(&mut self) {
         self.last_tree = None;
@@ -1359,6 +1377,8 @@ impl WdaClient {
             || path.ends_with("/element");
         if !read_only {
             self.posted_at = Some(std::time::Instant::now());
+            // Shows a screen that is about to change; free it now.
+            self.settled_frame = None;
         }
         self.http.post(url)
     }

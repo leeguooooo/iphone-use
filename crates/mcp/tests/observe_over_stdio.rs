@@ -205,7 +205,12 @@ fn an_unobserved_tap_is_unchanged_on_the_wire() {
     let daemon = ScriptedDaemon::start("200 OK", br#"{"ok":true,"transport":"wda"}"#.to_vec());
     let mut mcp = McpChild::start(&daemon.url);
 
-    let reply = mcp.call_tool(2, "phone_tap", serde_json::json!({ "x": 0.5, "y": 0.5 }));
+    // Observation is on by default; `observe:false` keeps the bare action.
+    let reply = mcp.call_tool(
+        2,
+        "phone_tap",
+        serde_json::json!({ "x": 0.5, "y": 0.5, "observe": false }),
+    );
 
     let result = &reply["result"];
     assert_ne!(result["isError"], true, "{reply}");

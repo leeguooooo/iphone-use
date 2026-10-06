@@ -923,3 +923,89 @@ fn a_focused_text_field_never_settles_on_frames() {
         "a blinking caret keeps the tree check: {json}"
     );
 }
+
+/// After an observed action the settled screen is already in memory: the
+/// next screenshot costs no capture. Anything sent in between makes it stale,
+/// and `?fresh=1` always captures.
+#[test]
+fn the_settled_screen_answers_the_next_screenshot_without_a_capture() {
+    use base64::Engine as _;
+    block(async {
+        let png = server::redaction::encode_png(&server::redaction::Image {
+            width: 4,
+            height: 8,
+            rgba: (0..4 * 8 * 4).map(|i| (i * 7 % 251) as u8).collect(),
+        })
+        .unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+        let frames = Arc::new(AtomicUsize::new(0));
+        let seen_frames = frames.clone();
+        let wda = mock_wda(move |request, _| {
+            if is_session(request) {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if is_mutation(request) {
+                return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+            }
+            if is_source(request) {
+                return Some((Duration::ZERO, simple_tree("搜索")));
+            }
+            if request.contains("/screenshot") {
+                seen_frames.fetch_add(1, Ordering::AcqRel);
+                return Some((Duration::ZERO, format!(r#"{{"value":"{encoded}"}}"#)));
+            }
+            Some((
+                Duration::ZERO,
+                r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string(),
+            ))
+        });
+        let state = build_state_with_wda(wda.url());
+        let screenshot = |uri: &'static str| {
+            let state = state.clone();
+            async move {
+                let response = server::http::router(state)
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                let source = response
+                    .headers()
+                    .get("x-screenshot-source")
+                    .map(|v| v.to_str().unwrap().to_string());
+                (response.status(), source)
+            }
+        };
+
+        let (status, json, _) = request_json(
+            &state,
+            "POST",
+            "/agent/input?return=delta",
+            Some(r#"{"type":"home"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["settle"]["reason"], "stable", "{json}");
+        let after_action = frames.load(Ordering::Acquire);
+
+        let (status, source) = screenshot("/agent/screenshot").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(source.as_deref(), Some("settled-after-action"));
+        assert_eq!(
+            frames.load(Ordering::Acquire),
+            after_action,
+            "no new capture"
+        );
+
+        let (_, source) = screenshot("/agent/screenshot?fresh=1").await;
+        assert_eq!(source, None, "fresh=1 captures");
+        assert_eq!(frames.load(Ordering::Acquire), after_action + 1);
+
+        // An action without observation changes the screen: the kept frame
+        // no longer describes it.
+        let (status, _, _) =
+            request_json(&state, "POST", "/agent/input", Some(r#"{"type":"home"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, source) = screenshot("/agent/screenshot").await;
+        assert_eq!(source, None);
+        assert_eq!(frames.load(Ordering::Acquire), after_action + 2);
+    });
+}

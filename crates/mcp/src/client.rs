@@ -37,6 +37,10 @@ pub struct DaemonClient {
     /// Sent as `X-Phone-Owner` on every control request so the daemon can
     /// refuse a second session that tries to drive the same phone (#72).
     owner: String,
+    /// The last element snapshot this client was handed (an elements read or
+    /// an observed action). An observed action names it as its baseline, so
+    /// the daemon answers with what changed instead of the whole tree.
+    last_snapshot: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -135,6 +139,35 @@ impl DaemonClient {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| format!("mcp-{}", std::process::id())),
+            last_snapshot: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn remember_snapshot(&self, json: Option<&serde_json::Value>) {
+        if let Some(snapshot) = json
+            .and_then(|json| json.get("snapshot"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|snapshot| !snapshot.is_empty())
+        {
+            *self.last_snapshot.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(snapshot.to_string());
+        }
+    }
+
+    /// `/agent/input?return=delta`, with the last snapshot as the baseline
+    /// when there is one.
+    fn observed_input_path(&self) -> String {
+        match self
+            .last_snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+        {
+            Some(since) => format!(
+                "/agent/input?return=delta&since={}",
+                url_query_escape(since)
+            ),
+            None => "/agent/input?return=delta".to_string(),
         }
     }
 
@@ -227,12 +260,12 @@ impl DaemonClient {
         observe: bool,
     ) -> anyhow::Result<DaemonResponse> {
         let path = if observe {
-            "/agent/input?return=delta"
+            self.observed_input_path()
         } else {
-            "/agent/input"
+            "/agent/input".to_string()
         };
         let mut req = self
-            .auth(self.client.post(self.url(path)))
+            .auth(self.client.post(self.url(&path)))
             .header("x-phone-control", "1")
             .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
@@ -240,7 +273,9 @@ impl DaemonClient {
         if observe {
             req = req.timeout(OBSERVE_TIMEOUT);
         }
-        read_response(req.send().await?).await
+        let response = read_response(req.send().await?).await?;
+        self.remember_snapshot(response.json.as_ref());
+        Ok(response)
     }
 
 
@@ -333,7 +368,9 @@ impl DaemonClient {
             .timeout(ELEMENTS_TIMEOUT);
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
-        Ok(resp.text().await?)
+        let body = resp.text().await?;
+        self.remember_snapshot(serde_json::from_str(&body).ok().as_ref());
+        Ok(body)
     }
 
     /// `POST /agent/mode {"mode":"agent"}` — reconnect the configured,
@@ -391,7 +428,9 @@ impl DaemonClient {
             // the ordinary 30s is how a caller stops knowing what happened.
             req = req.timeout(OBSERVE_TIMEOUT);
         }
-        read_response(req.send().await?).await
+        let response = read_response(req.send().await?).await?;
+        self.remember_snapshot(response.json.as_ref());
+        Ok(response)
     }
 
 
@@ -656,6 +695,20 @@ async fn check_status(resp: reqwest::Response) -> anyhow::Result<reqwest::Respon
 // Unit tests — one-shot loopback listeners model daemon responses without
 // starting the real daemon or touching a device.
 // ---------------------------------------------------------------------------
+
+/// Percent-encode a query value (snapshot tokens are URL-safe base64 today;
+/// this keeps a future token from breaking the query).
+fn url_query_escape(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {

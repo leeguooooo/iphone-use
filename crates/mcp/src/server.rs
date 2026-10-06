@@ -36,9 +36,12 @@ pub struct TapParams {
     pub x: f64,
     /// Vertical position, normalized 0–1 (0 = top edge, 1 = bottom edge).
     pub y: f64,
-    /// Ask the daemon to observe the screen after the action and return what
-    /// settled (`settle`, `snapshot`, `delta`). Costs extra latency, so it is
-    /// off unless you need to know what the tap produced.
+    /// On by default: the result carries what the screen settled to — what
+    /// changed since your last look (`delta`), or the whole tree the first
+    /// time — so you rarely need `phone_elements` afterwards. The settled
+    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
+    /// once if you need to see it. `false` skips both for the fastest bare
+    /// action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -55,9 +58,12 @@ pub struct ScrollParams {
     /// Vertical scroll delta. **Positive dy reveals content farther down**;
     /// negative dy reveals content above. ~80 ≈ 15% of a screen, ~400 ≈ 75%.
     pub dy: f64,
-    /// Ask the daemon to observe the screen after the action and return what
-    /// settled (`settle`, `snapshot`, `delta`). Costs extra latency, so it is
-    /// off unless you need to know what the action produced.
+    /// On by default: the result carries what the screen settled to — what
+    /// changed since your last look (`delta`), or the whole tree the first
+    /// time — so you rarely need `phone_elements` afterwards. The settled
+    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
+    /// once if you need to see it. `false` skips both for the fastest bare
+    /// action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -68,9 +74,12 @@ pub struct TypeParams {
     /// Unicode text to send through the device-side input service. Focus the
     /// intended field and verify it before typing.
     pub text: String,
-    /// Ask the daemon to observe the screen after the action and return what
-    /// settled (`settle`, `snapshot`, `delta`). Costs extra latency, so it is
-    /// off unless you need to know what the action produced.
+    /// On by default: the result carries what the screen settled to — what
+    /// changed since your last look (`delta`), or the whole tree the first
+    /// time — so you rarely need `phone_elements` afterwards. The settled
+    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
+    /// once if you need to see it. `false` skips both for the fastest bare
+    /// action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -81,9 +90,12 @@ pub struct TapLabelParams {
     /// The element's visible accessibility label, exactly as shown by
     /// `phone_elements` (e.g. "新备忘录", "Connect").
     pub label: String,
-    /// Ask the daemon to observe the screen after the action and return what
-    /// settled (`settle`, `snapshot`, `delta`). Costs extra latency, so it is
-    /// off unless you need to know what the action produced.
+    /// On by default: the result carries what the screen settled to — what
+    /// changed since your last look (`delta`), or the whole tree the first
+    /// time — so you rarely need `phone_elements` afterwards. The settled
+    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
+    /// once if you need to see it. `false` skips both for the fastest bare
+    /// action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -95,9 +107,12 @@ pub struct TapElementParams {
     pub element: usize,
     /// Snapshot token from the same `phone_elements` response.
     pub snapshot: String,
-    /// Ask the daemon to observe the screen after the action and return what
-    /// settled (`settle`, `snapshot`, `delta`). Costs extra latency, so it is
-    /// off unless you need to know what the action produced.
+    /// On by default: the result carries what the screen settled to — what
+    /// changed since your last look (`delta`), or the whole tree the first
+    /// time — so you rarely need `phone_elements` afterwards. The settled
+    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
+    /// once if you need to see it. `false` skips both for the fastest bare
+    /// action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -122,9 +137,12 @@ pub struct KeyParams {
     /// Supported names: `return`/`enter`, `escape`, `space`, `tab`,
     /// `delete`/`backspace`, `up`, `down`, `left`, `right`.
     pub name: String,
-    /// Ask the daemon to observe the screen after the action and return what
-    /// settled (`settle`, `snapshot`, `delta`). Costs extra latency, so it is
-    /// off unless you need to know what the action produced.
+    /// On by default: the result carries what the screen settled to — what
+    /// changed since your last look (`delta`), or the whole tree the first
+    /// time — so you rarely need `phone_elements` afterwards. The settled
+    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
+    /// once if you need to see it. `false` skips both for the fastest bare
+    /// action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -135,9 +153,12 @@ pub struct ShortcutParams {
     /// Supported names: `home` (Home Screen) and `spotlight` (search).
     /// App Switcher is unsupported by the Direct/WDA backend.
     pub name: String,
-    /// Ask the daemon to observe the screen after the action and return what
-    /// settled (`settle`, `snapshot`, `delta`). Costs extra latency, so it is
-    /// off unless you need to know what the action produced.
+    /// On by default: the result carries what the screen settled to — what
+    /// changed since your last look (`delta`), or the whole tree the first
+    /// time — so you rarely need `phone_elements` afterwards. The settled
+    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
+    /// once if you need to see it. `false` skips both for the fastest bare
+    /// action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -525,7 +546,9 @@ impl PhoneHandler {
     #[tool(
         description = "Capture the current iPhone screen through WDA and return it as \
         an image/png content block (1200 px on the long side unless max_side says \
-        otherwise). Capture only when a current \
+        otherwise). Right after an observed action this is instant: the screen as \
+        it settled was already captured and is returned without a new capture \
+        (header source settled-after-action). Capture only when a current \
         user-requested task needs phone pixels; do not capture or reconnect for \
         initialization, health checks, or to keep the phone ready. Idle release is \
         intentional. If that task cannot proceed because Direct is released/offline, \
@@ -815,7 +838,7 @@ impl PhoneHandler {
             observe,
         }): Parameters<TapElementParams>,
     ) -> CallToolResult {
-        let observe = observe.unwrap_or(false);
+        let observe = observe.unwrap_or(true);
         // Refused here, before anything is sent: this is the one case where a
         // retry is provably safe, so it is reported as such rather than as an
         // unknown outcome.
@@ -861,7 +884,7 @@ impl PhoneHandler {
         &self,
         Parameters(TapLabelParams { label, observe }): Parameters<TapLabelParams>,
     ) -> CallToolResult {
-        let observe = observe.unwrap_or(false);
+        let observe = observe.unwrap_or(true);
         // The snapshot comes from the element read this call performs — never
         // a cached or borrowed baseline.
         match self.daemon.tap_label_observed(&label, observe).await {
@@ -1945,7 +1968,7 @@ async fn send_input_observed(
     msg: &InputMsg,
     observe: Option<bool>,
 ) -> CallToolResult {
-    let observe = observe.unwrap_or(false);
+    let observe = observe.unwrap_or(true);
     match daemon.input_observed(msg, observe).await {
         Ok(response) => daemon_action_result(&response, observe, "ok"),
         // The request may well have reached the phone before the transport
@@ -2061,8 +2084,8 @@ mod tests {
         assert_eq!(structured["snapshot"], "snap-1");
     }
 
-    /// Without `observe` the result stays the short string callers already
-    /// parse, and the request must not have asked for a delta.
+    /// With `observe:false` the result stays the short string callers
+    /// already parse, and the request must not have asked for a delta.
     #[test]
     fn an_unobserved_tap_keeps_its_plain_result() {
         let (url, task) = scripted_daemon(
@@ -2074,7 +2097,7 @@ mod tests {
         let result = block(handler.phone_tap(Parameters(TapParams {
             x: 0.5,
             y: 0.5,
-            observe: None,
+            observe: Some(false),
         })));
         task.join().unwrap();
 
@@ -2298,7 +2321,8 @@ mod tests {
             capabilities.input_schema
         );
 
-        // `observe` is opt-in on every single-step UI tool: in the schema,
+        // `observe` is accepted (and optional — it defaults on) by every
+        // single-step UI tool: in the schema,
         // never required, so calls written before it keep working.
         for name in [
             "phone_tap",

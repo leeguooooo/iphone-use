@@ -9110,6 +9110,35 @@ async fn settle_frame(
     frame
 }
 
+/// How long the settled screen answers `/agent/screenshot` with no new
+/// capture, when nothing was sent since. Long enough for an agent to read an
+/// observation and decide to look; short enough that a screen changing on its
+/// own (a message arriving) is not served stale for long. `?fresh=1` always
+/// captures.
+const SETTLED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Capture the settled screen in the background, unless something was sent
+/// in the meantime (`post_mark` is the last POST the observation saw) — then
+/// that screen is gone and there is nothing to keep.
+fn capture_settled_frame_later(
+    wda: Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
+    post_mark: Option<std::time::Instant>,
+) {
+    tokio::spawn(async move {
+        let mut w = wda.lock().await;
+        if w.last_post() != post_mark || w.settled_frame(SETTLED_FRAME_MAX_AGE).is_some() {
+            return;
+        }
+        if let Ok(Ok(png)) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), w.screenshot_png()).await
+        {
+            if w.last_post() == post_mark && is_valid_png(&png) {
+                w.remember_settled_frame(png);
+            }
+        }
+    });
+}
+
 async fn settle_and_read_elements(
     w: &mut crate::wda::WdaClient,
     budget: std::time::Duration,
@@ -9160,6 +9189,11 @@ async fn settle_and_read_elements(
         if !typing && !report.sparse && tokio::time::Instant::now() < deadline {
             let after = settle_frame(w, deadline).await;
             if after.as_ref() == Some(before) {
+                // That frame IS the settled screen: keep it for a screenshot
+                // request, which then costs no capture.
+                if let Some(after) = after {
+                    w.remember_settled_frame(after);
+                }
                 report.settled = true;
                 report.reason = SettleReason::Stable;
                 report.waited_ms = started.elapsed().as_millis() as u64;
@@ -9612,7 +9646,16 @@ async fn agent_input(
         // deadline and the observation budget.
         alert = probe_alert(&mut client).await;
     }
+    // The settled screen is ready for a screenshot request without a capture:
+    // the settle check kept its frame, or — when it judged by the tree (a
+    // focused text field, a screen that kept moving) — one is taken now, after
+    // the response is on its way, while the agent reads it.
+    let frame_needed = settled.is_some() && client.settled_frame(SETTLED_FRAME_MAX_AGE).is_none();
+    let post_mark = client.last_post();
     drop(client);
+    if frame_needed {
+        capture_settled_frame_later(Arc::clone(wda), post_mark);
+    }
     match outcome {
         WdaControlOutcome::Applied => {
             let body = match settled {
@@ -10555,6 +10598,37 @@ struct ScreenshotQuery {
     /// ~0.9k at 1200. Asking for a size also lets a live frame answer, when
     /// someone is watching and it is current, instead of a WDA capture.
     max_side: Option<u32>,
+    /// `fresh=1`: capture now, even when the screen as it settled after the
+    /// last action is already in memory.
+    fresh: Option<String>,
+}
+
+/// A valid capture, finished for the caller: the wireframe when the app hid
+/// its screen from capture, else the capture shrunk to `max_side` (`raw`
+/// skips both).
+async fn finish_screenshot(
+    wda: &Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
+    bytes: Vec<u8>,
+    raw: bool,
+    max_side: Option<u32>,
+    source: Option<&'static str>,
+) -> Response {
+    if !raw {
+        let wireframe = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            redacted_capture_wireframe(wda, &bytes),
+        )
+        .await
+        .ok()
+        .flatten();
+        if let Some(wireframe) = wireframe {
+            let wireframe = fit_png(wireframe, max_side).await;
+            return png_response(wireframe, Some("accessibility-wireframe"), true);
+        }
+    }
+    // `raw` is WDA's capture untouched, size included.
+    let max_side = if raw { None } else { max_side };
+    png_response(fit_png(bytes, max_side).await, source, false)
 }
 
 /// Shrink a PNG to `max_side` off the async runtime; the original when it
@@ -10706,6 +10780,25 @@ async fn agent_screenshot(
         .as_deref()
         .is_some_and(|v| v == "1" || v == "true");
     let max_side = query.max_side.map(|side| side.clamp(200, 4000));
+    let fresh = query
+        .fresh
+        .as_deref()
+        .is_some_and(|v| v == "1" || v == "true");
+    // The screen as it settled after the last action was captured then (see
+    // `SETTLED_FRAME_MAX_AGE`); nothing was sent since, so it is this screen.
+    if !raw && !fresh {
+        let settled = wda.lock().await.settled_frame(SETTLED_FRAME_MAX_AGE);
+        if let Some(png) = settled {
+            return finish_screenshot(
+                wda,
+                (*png).clone(),
+                false,
+                max_side,
+                Some("settled-after-action"),
+            )
+            .await;
+        }
+    }
     // Someone is watching, so the stream is already producing this screen:
     // its newest frame answers in milliseconds instead of a ~0.5–1.5 s
     // capture. Only for a sized request (the stream is half resolution) and
@@ -10737,22 +10830,7 @@ async fn agent_screenshot(
     .await
     {
         Ok(Ok(bytes)) if is_valid_png(&bytes) => {
-            if !raw {
-                let wireframe = tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
-                    redacted_capture_wireframe(wda, &bytes),
-                )
-                .await
-                .ok()
-                .flatten();
-                if let Some(wireframe) = wireframe {
-                    let wireframe = fit_png(wireframe, max_side).await;
-                    return png_response(wireframe, Some("accessibility-wireframe"), true);
-                }
-            }
-            // `raw` is WDA's capture untouched, size included.
-            let max_side = if raw { None } else { max_side };
-            png_response(fit_png(bytes, max_side).await, None, false)
+            finish_screenshot(wda, bytes, raw, max_side, None).await
         }
         Ok(Ok(bytes)) => {
             tracing::warn!(

@@ -180,7 +180,7 @@ one-shot `batch_hint`; a batch, or a pause over a minute, resets the count.
 
 ## Reading results: settle, delta, wait_for
 
-**`?return=delta`** (MCP `observe:true`) settles after an applied action and
+**`?return=delta`** (MCP act tools: on by default, `observe:false` to skip) settles after an applied action and
 returns `{ok, snapshot, baseline, delta}` (full `elements` when the baseline
 is no longer cached). The action result and the observation are separate facts:
 `ok:true` stands even when the observation fails.
@@ -266,7 +266,12 @@ run / draft / update / publish / report`.
 - Act tools and `phone_capabilities` return JSON in `structuredContent`; the text
   block is a preview trimmed at 8 KiB. `phone_run_steps`, `phone_elements` and
   `phone_flow_*` return complete JSON as text; `phone_screenshot` an image.
-- Single-step act tools take `observe` (= `?return=delta`).
+- Single-step act tools observe by default (= `?return=delta`, baseline = the
+  last snapshot this client saw, so only the change comes back); `observe:false`
+  skips it. The settled screen is captured in memory, not sent: the next
+  `phone_screenshot` / `GET /agent/screenshot` returns it without a capture
+  (`X-Screenshot-Source: settled-after-action`; `?fresh=1` forces one). It is
+  dropped by the next action and never written to disk.
 - Decide by `retry_safe`, not `outcome`: `outcome:"unknown"` with
   `retry_safe:false` may have reached the phone. `not_sent` on one step never
   makes a whole batch replayable.

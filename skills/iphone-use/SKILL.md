@@ -57,8 +57,10 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure st
    locator) are for exploring a screen you have not read yet; after three in a
    row the daemon says so (`batch_hint`).
 
-5. **Verify** each step against your postcondition (`?return=delta` /
-   `observe:true` returns the settled change in the same call). `ok:true` means
+5. **Verify** each step against your postcondition: MCP act tools observe by
+   default (HTTP: `?return=delta`) and return the settled change in the same
+   call; the settled screen is captured too, and `phone_screenshot` returns it
+   instantly — look only when the text is not enough. `ok:true` means
    the action was sent, not that it achieved anything.
    → reference: *Reading results*
 
