@@ -29,7 +29,7 @@ have no API, including banking and payment apps that hide their screens from cap
 A daemon on your Mac runs WebDriverAgent on a USB-connected iPhone and exposes it as:
 
 - an HTTP API for agents and scripts (`/agent/*`),
-- an MCP server with 21 tools for Claude Code, Claude Desktop and other MCP clients,
+- an MCP server with 22 tools for Claude Code, Claude Desktop and other MCP clients,
 - a web page and a native iOS app for people (live screen, tap, type).
 
 Nothing touches the Mac's own screen, cursor or focus.
@@ -84,11 +84,18 @@ model, so they cost no tokens. The official registry is
 **[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**; record a
 flow in the browser's 流程 panel and publish it there with a PR.
 
+Agents find flows on their own: when one enters an app, the response lists that app's flows.
+After an agent does a multi-step task in an app that has none, it asks whether to save the
+task as a flow; the daemon has already recorded the steps as a draft. The daemon keeps the
+registry fresh by itself (`IPHONE_USE_FLOWS_NO_AUTO_UPDATE=1` turns that off,
+`IPHONE_USE_FLOWS_NO_SUGGEST=1` silences the save suggestions).
+
 ```bash
 MCP=~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp
 $MCP flow update                            # sync the registry (sha256-checked)
 $MCP flow list                              # what is available
 $MCP flow run health/export-all-zh-cn       # replay one; failures say which step and why
+$MCP flow draft --out my-task.json          # what you just did on the phone, as a draft flow
 ```
 
 ## More

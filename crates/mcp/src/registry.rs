@@ -691,121 +691,53 @@ pub fn remove(id: &str) -> Result<serde_json::Value> {
 // Hints: bring the registry to the agent instead of hoping it looks
 // ---------------------------------------------------------------------------
 
-/// Installed flows whose app matches a foreground application label (via
-/// `app.json` `aliases` / `name`) — locale-aware without the flow knowing.
-pub fn flows_for_application(index: &LocalIndex, application: &str) -> Vec<(String, LocalFlow)> {
-    let wanted = application.trim();
-    if wanted.is_empty() {
-        return Vec::new();
-    }
-    let app_ids: Vec<&str> = index
-        .apps
-        .iter()
-        .filter(|app| {
-            app.aliases
-                .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(wanted))
-                || app
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(wanted))
-        })
-        .map(|app| app.id.as_str())
-        .collect();
-    if app_ids.is_empty() {
-        return Vec::new();
-    }
-    index
-        .flows
-        .iter()
-        .filter(|(id, _)| app_ids.contains(&id.split('/').next().unwrap_or("")))
-        .map(|(id, entry)| (id.clone(), entry.clone()))
-        .collect()
-}
-
-/// A compact `registry` block for a `/agent/elements` response: the flows that
-/// fit the foreground app, or a nudge to populate the store. Never fails —
-/// hints must not break an elements read.
-pub fn elements_hint(
-    elements_body: &str,
+/// The daemon decides WHEN a `registry` block appears (entering an app) and
+/// which flows it names; this adds what only the CLI side knows: each flow's
+/// `compat` against the app version installed on this phone. A body without a
+/// block, or a store that cannot be read, comes back untouched.
+pub fn enrich_registry(
+    body: String,
     installed: Option<&crate::compat::InstalledApps>,
-) -> Option<serde_json::Value> {
-    let body: serde_json::Value = serde_json::from_str(elements_body).ok()?;
-    let application = body
-        .get("elements")
-        .and_then(|rows| rows.as_array())
-        .and_then(|rows| {
-            rows.iter()
-                .find(|row| row.get("kind").and_then(|k| k.as_str()) == Some("Application"))
-        })
-        .and_then(|row| row.get("label").and_then(|l| l.as_str()))
-        .map(str::to_string);
-    let index = match load_index() {
-        Ok(Some(index)) => index,
-        Ok(None) => {
-            return Some(serde_json::json!({
-                "installed": 0,
-                "hint": "no registry flows installed — call phone_flow_update once, then phone_flow_list before driving this app by hand"
-            }))
-        }
-        Err(_) => return None,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return body;
     };
-    let matches = application
-        .as_deref()
-        .map(|app| flows_for_application(&index, app))
-        .unwrap_or_default();
-    let mut hint = serde_json::json!({
-        "installed": index.flows.len(),
-        "application": application,
-    });
-    if matches.is_empty() {
-        hint["flows"] = serde_json::json!([]);
-        hint["hint"] = serde_json::json!(
-            "no installed flow targets this app — if you complete a multi-step task here, save it with phone_flow_publish so the next run costs one call"
-        );
-    } else {
-        hint["flows"] = serde_json::json!(matches
-            .iter()
-            .map(|(id, entry)| {
-                let report = crate::compat::compat_for(&entry.meta, installed);
-                serde_json::json!({
-                    "id": id,
-                    "name": entry.meta.name,
-                    "risk": entry.meta.risk_label(),
-                    "verified": entry.meta.verified(),
-                    "compat": report.compat.as_str(),
-                    "installed_version": report.installed_version,
-                    "verified_up_to": report.verified_up_to,
-                    "inputs": entry.meta.inputs,
-                })
-            })
-            .collect::<Vec<_>>());
-        let any_runnable = matches.iter().any(|(_, e)| {
-            !crate::compat::compat_for(&e.meta, installed)
-                .compat
-                .blocks_run()
-        });
-        hint["hint"] = serde_json::json!(if any_runnable {
-            "registry flows exist for this app — prefer phone_flow_run over step-by-step exploration when one matches the task; \
-             compat=untested-newer means run it, then take one checkpoint screenshot and publish the new verified_on"
-        } else {
-            "registry flows exist for this app but are broken/incompatible on this phone — explore by hand, then publish the fixed flow"
-        });
+    let Some(flows) = value
+        .get_mut("registry")
+        .and_then(|block| block.get_mut("flows"))
+        .and_then(|flows| flows.as_array_mut())
+    else {
+        return body;
+    };
+    if flows.is_empty() {
+        return body;
     }
-    Some(hint)
-}
-
-/// Attach a `registry` block to a JSON body when it parses as an object;
-/// otherwise return the body untouched.
-pub fn attach_hint(body: String, key: &str, hint: Option<serde_json::Value>) -> String {
-    let Some(hint) = hint else { return body };
-    match serde_json::from_str::<serde_json::Value>(&body) {
-        Ok(mut value) if value.is_object() => {
-            value[key] = hint;
-            value.to_string()
+    let Ok(Some(index)) = load_index() else {
+        return body;
+    };
+    let mut any_runnable = false;
+    for flow in flows.iter_mut() {
+        let Some(entry) = flow
+            .get("id")
+            .and_then(|id| id.as_str())
+            .and_then(|id| index.flows.get(id))
+        else {
+            continue;
+        };
+        let report = crate::compat::compat_for(&entry.meta, installed);
+        any_runnable |= !report.compat.blocks_run();
+        flow["compat"] = serde_json::json!(report.compat.as_str());
+        if let Some(version) = report.installed_version {
+            flow["installed_version"] = serde_json::json!(version);
         }
-        _ => body,
     }
+    if !any_runnable {
+        value["registry"]["next"] = serde_json::json!(
+            "These flows are broken or incompatible with the app version on this phone. Do the task by hand, \
+             then ask the user whether to publish the fixed flow (phone_flow_draft, then phone_flow_publish)."
+        );
+    }
+    value.to_string()
 }
 
 pub fn sources_json() -> Result<serde_json::Value> {
@@ -1052,43 +984,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn elements_hint_matches_foreground_app_by_alias() {
+    async fn enrich_registry_adds_compat_to_the_daemons_block() {
         let _env = setup(&[(
             "health/open",
             &flow_json("Open Health", r#""category":"health","#),
         )]);
-        // Give the app entry aliases through the source index.
-        let source = std::env::var(SOURCE_ENV).unwrap();
-        let index_path = Path::new(&source).join("index.json");
-        let mut index: serde_json::Value =
-            serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
-        index["apps"] = serde_json::json!([{"id":"health","name":"Health","aliases":["健康"]}]);
-        fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
         update().await.unwrap();
 
-        let body = r#"{"snapshot":"s","elements":[{"kind":"Application","label":"健康","rect":[0,0,1,1]}]}"#;
-        let hint = elements_hint(body, None).unwrap();
-        assert_eq!(hint["flows"][0]["id"], "health/open");
-        assert_eq!(hint["application"], "健康");
-        let other = elements_hint(
-            r#"{"elements":[{"kind":"Application","label":"Mail"}]}"#,
-            None,
-        )
-        .unwrap();
-        assert_eq!(other["flows"].as_array().unwrap().len(), 0);
-        assert!(other["hint"]
-            .as_str()
-            .unwrap()
-            .contains("phone_flow_publish"));
-
-        let attached = attach_hint(body.to_string(), "registry", Some(hint));
-        let value: serde_json::Value = serde_json::from_str(&attached).unwrap();
-        assert_eq!(value["registry"]["installed"], 1);
+        let body = r#"{"snapshot":"s","registry":{"key":"健康","flows":[{"id":"health/open"},{"id":"gone/flow"}],"next":"run it"}}"#;
+        let value: serde_json::Value =
+            serde_json::from_str(&enrich_registry(body.to_string(), None)).unwrap();
+        assert!(value["registry"]["flows"][0]["compat"].is_string(), "{value}");
+        assert!(value["registry"]["flows"][1].get("compat").is_none());
         assert_eq!(value["snapshot"], "s");
-        assert_eq!(
-            attach_hint("not json".into(), "registry", Some(serde_json::json!(1))),
-            "not json"
-        );
+        for untouched in [r#"{"elements":[]}"#, "not json", r#"{"registry":{"flows":[]}}"#] {
+            assert_eq!(enrich_registry(untouched.to_string(), None), untouched);
+        }
     }
 
     #[test]

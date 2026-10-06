@@ -53,7 +53,7 @@ pub struct ScrollParams {
     /// Horizontal scroll delta. Positive reveals content to the right.
     pub dx: f64,
     /// Vertical scroll delta. **Positive dy reveals content farther down**;
-    /// negative dy reveals content above. Typical magnitude: 30–120.
+    /// negative dy reveals content above. ~80 ≈ 15% of a screen, ~400 ≈ 75%.
     pub dy: f64,
     /// Ask the daemon to observe the screen after the action and return what
     /// settled (`settle`, `snapshot`, `delta`). Costs extra latency, so it is
@@ -141,7 +141,8 @@ pub struct RunStepsParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PhoneStep {
-    /// Tap normalized screen coordinates. Prefer `tap_label` when possible.
+    /// Tap normalized screen coordinates. Prefer `tap_locator` (durable in a
+    /// saved flow) whenever the target has a label or identifier.
     Tap {
         x: f64,
         y: f64,
@@ -345,7 +346,9 @@ pub struct FlowInfoParams {
 /// Parameters for [`phone_flow_run`].
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FlowRunParams {
-    /// Registry id such as `health/export-all` (see phone_flow_list).
+    /// Registry id such as `health/export-all` (see phone_flow_list), or the
+    /// path of a flow file (`*.json`) — e.g. a draft saved by phone_flow_draft,
+    /// to prove it on the phone before publishing.
     pub id: String,
     /// Runtime string inputs declared by the flow. Values are used for this
     /// run only and never persisted. Never pass passwords, codes, or private
@@ -359,6 +362,15 @@ pub struct FlowRunParams {
     /// Run even when compat is `broken` or `incompatible` for this phone.
     #[serde(default)]
     pub force: bool,
+}
+
+/// Parameters for [`phone_flow_draft`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FlowDraftParams {
+    /// Optional path to write the draft flow to (a new `.json` file; existing
+    /// files are never overwritten). It is validated after writing.
+    #[serde(default)]
+    pub save_as: Option<String>,
 }
 
 /// Parameters for [`phone_flow_publish`].
@@ -515,11 +527,11 @@ impl PhoneHandler {
     // phone_scroll
     // -----------------------------------------------------------------------
 
-    #[tool(description = "Scroll the iPhone screen with a device-side swipe. \
-        x and y are the normalized anchor position (0–1). \
-        Positive dx reveals content to the right. Positive dy reveals content farther \
-        down; negative dy reveals content above. Example: dy=80 scrolls down roughly \
-        one screen-length; dy=-80 scrolls back up.")]
+    #[tool(description = "Scroll with a device-side swipe. x,y = normalized anchor (0–1); \
+        keep it away from text fields and screen edges. Positive dy reveals content farther \
+        down, negative dy content above; dx likewise to the right/left. The swipe travels \
+        1.5×|dy| points, clamped to 15–75% of the screen: dy≈80 moves about 15% of a screen, \
+        dy≈400 about 75%.")]
     async fn phone_scroll(
         &self,
         Parameters(ScrollParams { x, y, dx, dy, observe }): Parameters<ScrollParams>,
@@ -602,19 +614,16 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Execute a bounded sequence of iPhone actions in ONE MCP \
-        call through Direct/WDA. Supported step kinds: tap, longpress, swipe, drag, \
-        tap_label, tap_locator, type, key, shortcut, scroll, launch_app, back, picker, \
-        alert (native system-alert button; taps on alerts do not act), wait_for, and pause. The daemon validates \
-        the complete sequence before dispatch, holds one WDA control lock, and \
-        stops immediately on the first failure. DEFAULT TO THIS TOOL when two or more \
-        consecutive actions are already understood, safe, and verifiable; reserve \
-        atomic action tools for exploring an unknown screen, waiting for human \
-        confirmation, or isolating a failed checkpoint. Use wait_for semantic gates \
-        between page transitions; never batch an unverified, changing, or irreversible flow. \
-        Start from phone_status(drivable=true) and a recent phone_elements read. \
-        The response reports completed/applied counts and the exact failed step; \
-        retry_safe=false means DO NOT replay the whole sequence."
+        description = "Run a sequence of actions in ONE call: the daemon validates the whole \
+        sequence first, holds one control lock, and stops at the first failure. Use it as soon as a \
+        segment is understood; keep single-action tools for exploring an unknown screen. Step kinds: \
+        launch_app, tap_locator, tap_label, tap, type, key, shortcut, scroll, swipe, drag, longpress, \
+        back, alert (system alerts; taps on them do not act), picker, wait_for, pause. Guard every \
+        screen change with wait_for; never batch an irreversible step you have not verified. These \
+        step objects are exactly a saved flow's `steps` — when the response carries \
+        `flow_suggestion`, ask the user whether to keep the task as a flow (phone_flow_draft). \
+        The result names completed/applied counts and the failed step; retry_safe=false means \
+        DO NOT replay."
     )]
     async fn phone_run_steps(
         &self,
@@ -624,7 +633,6 @@ impl PhoneHandler {
             Ok(request) => request,
             Err(error) => return CallToolResult::error(vec![Content::text(error)]),
         };
-        let step_count = request["steps"].as_array().map_or(0, Vec::len);
         // The batch entry point answers with the same structured result the
         // CLI and phone_flow_run do. A failing batch carries the evidence a
         // caller needs — `failed_step`, `applied_actions`, `retry_safe`, and
@@ -642,21 +650,11 @@ impl PhoneHandler {
         // A plain-text `ok` is not a batch result: it carries no per-step
         // outcome, so it can never stand in for one.
         if response.confirms_action() {
-            let body = response.body().to_string();
-            let hint = (step_count >= 3).then(|| {
-                serde_json::json!({
-                    "hint": format!(
-                        "{step_count} steps ran deterministically. If this is a task someone will repeat, \
-                         save it as a flow: write these steps to a v1 JSON file (typed text → named input), \
-                         `flow validate`, then phone_flow_publish (with the user's go-ahead) so the next run \
-                         is one phone_flow_run call. Check phone_flow_list first: it may already exist."
-                    )
-                })
-            });
+            // The daemon adds `registry` after a launch_app and a one-shot
+            // `flow_suggestion` once a task is long enough to keep.
+            let body = with_flow_compat(&self.daemon, response.body().to_string()).await;
             return with_structure(
-                CallToolResult::success(vec![Content::text(crate::registry::attach_hint(
-                    body, "registry", hint,
-                ))]),
+                CallToolResult::success(vec![Content::text(body)]),
                 &response,
             );
         }
@@ -720,28 +718,23 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Read the iPhone's current UI as a flattened element list \
-        (requires Direct/WDA with drivable=true in phone_status). Returns JSON \
-        with an ephemeral snapshot plus elements in document order. Rows include \
-        kind, label, rect, depth and, when useful, identifier, disabled/hidden \
-        state, accessibility/focus state, value, and placeholder. PREFER this over \
-        phone_screenshot for reasoning: it is text (an order of magnitude cheaper), \
-        and carries semantic locator candidates. Snapshot indexes are current-read refs only; never persist them \
-        in a reusable flow."
+        description = "The current screen as text — use this instead of screenshots (an order \
+        of magnitude cheaper). Rows carry kind, label, identifier, value, rect and state, plus a \
+        `snapshot` token for phone_tap_element; indexes and snapshot tokens are valid for this read \
+        only. On the first read in a newly entered app a `registry` block lists saved flows for \
+        it: if one does the task, phone_flow_run it instead of tapping step by step. An `alert` \
+        block means a system alert is up: answer it with an `alert` step, taps on alerts do not act. \
+        Requires phone_status drivable=true."
     )]
     async fn phone_elements(&self) -> CallToolResult {
         match self.daemon.elements().await {
-            Ok(json) => {
-                // Bring the registry to the agent: which installed flows fit
-                // the app that is on screen right now.
-                let installed = crate::compat::installed_apps(&self.daemon).await;
-                let hint = crate::registry::elements_hint(&json, installed.as_ref());
-                CallToolResult::success(vec![Content::text(crate::registry::attach_hint(
-                    json, "registry", hint,
-                ))])
-            }
+            // The daemon adds `registry` on the first read in a newly
+            // entered app; compat per flow is added here.
+            Ok(json) => CallToolResult::success(vec![Content::text(
+                with_flow_compat(&self.daemon, json).await,
+            )]),
             Err(e) => CallToolResult::error(vec![Content::text(format!(
-                "elements failed (is WDA set up? see docs/wda-setup.html): {e:#}"
+                "elements failed: {e:#}. Call phone_status and follow its `hint`; do not retry in a loop."
             ))]),
         }
     }
@@ -908,7 +901,7 @@ impl PhoneHandler {
         reports name, description, risk (read_only|navigation|side_effect|unknown), \
         verified (has a recorded hardware run), compat against the app version installed on THIS phone \
         (verified|untested-newer|incompatible|broken|needs-verification|draft|unknown), inputs, app, and category. Empty store: \
-        call phone_flow_update once. Filters are optional."
+        call phone_flow_update once. Filter with `app` for the app you are about to open."
     )]
     async fn phone_flow_list(
         &self,
@@ -958,7 +951,8 @@ impl PhoneHandler {
     }
 
     #[tool(
-        description = "Run one installed registry flow exactly once through Direct/WDA: \
+        description = "Run one flow exactly once — an installed registry id, or a flow file \
+        path (*.json, e.g. a phone_flow_draft you are proving before publishing): \
         the daemon validates the whole sequence, holds one control lock, and stops at \
         the first failed step. The happy path costs one tool call and zero screenshots. \
         Requires phone_status drivable=true. Pass the flow's declared inputs; a flow \
@@ -977,9 +971,10 @@ impl PhoneHandler {
             force,
         }): Parameters<FlowRunParams>,
     ) -> CallToolResult {
-        if !crate::registry::valid_flow_id(&id) {
+        let is_file = id.ends_with(".json");
+        if !is_file && !crate::registry::valid_flow_id(&id) {
             return CallToolResult::error(vec![Content::text(format!(
-                "{id:?} is not a registry id; expected <app>/<flow> lowercase slugs"
+                "{id:?} is neither a registry id (<app>/<flow> lowercase slugs) nor a .json flow file"
             ))]);
         }
         let path = match crate::registry::resolve_target(&id) {
@@ -1067,6 +1062,48 @@ impl PhoneHandler {
             }
         ));
         CallToolResult::error(vec![Content::text(summary.to_string())])
+    }
+
+    #[tool(
+        description = "Turn what you just did on the phone into a flow. The daemon records \
+        every action it applied in the current app (single actions and phone_run_steps \
+        batches, not flow runs); this returns that trail as a flow v1 document (snapshot \
+        taps become label/identifier locators, typed text becomes named inputs and is never \
+        included) plus a `todo` list of what to fix. Call it when a response carried \
+        `flow_suggestion`, or after any multi-step task with no matching flow — but ASK THE \
+        USER before saving. With save_as, the draft is written to that new file and \
+        validated; fix the todo items, prove it with phone_flow_run(id=<file>), then publish \
+        only with the user's OK."
+    )]
+    async fn phone_flow_draft(
+        &self,
+        Parameters(FlowDraftParams { save_as }): Parameters<FlowDraftParams>,
+    ) -> CallToolResult {
+        let response = match self.daemon.flow_draft().await {
+            Ok(response) => response,
+            Err(e) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "flow draft failed: {e:#}"
+                ))])
+            }
+        };
+        let Some(mut draft) = response.json.clone().filter(|_| response.status.is_success()) else {
+            return CallToolResult::error(vec![Content::text(response.body().to_string())]);
+        };
+        if let Some(path) = save_as {
+            match crate::flow::save_draft(&path, &draft["flow"]) {
+                Ok(validation) => {
+                    draft["saved_as"] = serde_json::json!(path);
+                    draft["validation"] = validation;
+                }
+                Err(e) => {
+                    return CallToolResult::error(vec![Content::text(format!(
+                        "could not save the draft to {path}: {e:#}"
+                    ))])
+                }
+            }
+        }
+        CallToolResult::success(vec![Content::text(draft.to_string())])
     }
 
     #[tool(
@@ -1215,20 +1252,21 @@ impl ServerHandler for PhoneHandler {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "Control an iPhone through the daemon's WDA connection. phone_status() \
-                 is read-only. For initialization, status/health checks, or no unfinished \
-                 user-requested task needing phone access, report the state and stop; \
-                 do not reconnect, hold, or poll screenshots/elements to keep the phone \
-                 ready. Idle release is intentional. Before a current user-requested \
-                 phone operation or screen/UI read, check phone_status() and require \
-                 drivable=true. Prefer phone_elements() \
-                 plus phone_tap_element(); phone_tap_label() is safe only when the \
-                 exact label is unique. Use phone_screenshot() when pixels matter. \
-                 Only if that task cannot proceed because Direct is released/offline, \
-                 check recovery_owner=daemon and hint/setup_blocked_on. Do not reconnect \
-                 while releasing/reconnecting or a blocker remains. When appropriate, \
-                 call phone_reconnect() once, then poll status until drivable=true. \
-                 App Switcher is unsupported.",
+                "Drive a real iPhone. The loop:\n\
+                 1. phone_status — act only when drivable=true. If not, report its `hint` and stop; \
+                 call phone_reconnect once only when the user's current task needs the phone \
+                 (each reconnect may make the user type the passcode), never for health checks.\n\
+                 2. Look for a saved flow FIRST. Responses that enter an app (launch_app, the first \
+                 phone_elements in a new app) carry a `registry` block: if a listed flow does the task, \
+                 phone_flow_run it — one call instead of dozens. phone_flow_list shows all of them.\n\
+                 3. Otherwise read phone_elements and act on what it names (phone_tap_element, \
+                 phone_tap_label for a unique label); batch a segment you understand with phone_run_steps. \
+                 Screenshots only when pixels matter.\n\
+                 4. Verify each step; `retry_safe:false` means never replay.\n\
+                 5. A response carrying `flow_suggestion`, or any finished multi-step task with no flow: \
+                 ASK THE USER whether to save it. Only if they agree: phone_flow_draft, fix its todo list, \
+                 phone_flow_run the file once, then phone_flow_publish(confirm=true) with their OK.\n\
+                 Call phone_release_owner when the task is done.",
             )
     }
 }
@@ -1767,6 +1805,16 @@ fn daemon_read_result(response: &crate::client::DaemonResponse) -> CallToolResul
     )
 }
 
+/// Add per-flow `compat` to a daemon `registry` block, fetching the installed
+/// app inventory only when there is a block to annotate.
+async fn with_flow_compat(daemon: &DaemonClient, body: String) -> String {
+    if !body.contains("\"registry\"") {
+        return body;
+    }
+    let installed = crate::compat::installed_apps(daemon).await;
+    crate::registry::enrich_registry(body, installed.as_ref())
+}
+
 async fn send_input_observed(
     daemon: &DaemonClient,
     msg: &InputMsg,
@@ -2094,10 +2142,11 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            21,
+            22,
             "tool count changed; update README, the skill, and the CI assertion: {names:?}"
         );
         for required in [
+            "phone_flow_draft",
             "phone_capabilities",
             "phone_status",
             "phone_run_steps",

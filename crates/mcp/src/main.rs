@@ -58,6 +58,13 @@ enum FlowCommand {
         /// JSON flow file, or a registry id such as `health/export-all`.
         target: String,
     },
+    /// Print the daemon's recorded action trail as a draft flow (typed text
+    /// becomes named inputs). Ask the user before keeping it.
+    Draft {
+        /// Write the draft flow to this new file and validate it.
+        #[arg(long)]
+        out: Option<String>,
+    },
     /// Run a flow once; never retries an unknown or failed result.
     Run {
         /// JSON flow file, or a registry id such as `health/export-all`.
@@ -171,6 +178,19 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Flow { command }) = cli.command {
         return match command {
             FlowCommand::Validate { target } => flow::validate_command(&target),
+            FlowCommand::Draft { out } => {
+                let response = client::DaemonClient::from_env().flow_draft().await?;
+                let Some(mut draft) = response.json.clone().filter(|_| response.status.is_success())
+                else {
+                    anyhow::bail!("no draft: {}", response.body());
+                };
+                if let Some(path) = out {
+                    draft["validation"] = flow::save_draft(&path, &draft["flow"])?;
+                    draft["saved_as"] = serde_json::json!(path);
+                }
+                println!("{}", serde_json::to_string_pretty(&draft)?);
+                Ok(())
+            }
             FlowCommand::Run {
                 target,
                 inputs,

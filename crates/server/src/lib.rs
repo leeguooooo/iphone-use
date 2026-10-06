@@ -1,5 +1,6 @@
 pub mod apps;
 pub mod config;
+pub mod flows;
 pub mod http;
 pub mod instance;
 pub mod pairing;

@@ -424,6 +424,9 @@ pub struct AppState {
     /// only ever diffs against its own last read or two, and a miss degrades
     /// gracefully to the full tree.
     pub element_snapshots: Arc<Mutex<ElementSnapshotCache>>,
+    /// What the driving agent did in the current app, for `registry` hints,
+    /// `flow_suggestion` and `GET /agent/flow/draft` (see `crate::flows`).
+    pub flow_trail: Arc<Mutex<crate::flows::FlowTrail>>,
     /// Operator/agent "hold" lease: while set and in the future, the idle
     /// watchdog never releases the phone even with no recent actions — a human
     /// in the loop (typing a password, approving a prompt) otherwise trips the
@@ -830,6 +833,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/mjpeg", get(agent_mjpeg))
         .route("/agent/h264", get(agent_h264))
         .route("/agent/elements", get(agent_elements))
+        .route("/agent/flow/draft", get(agent_flow_draft))
+        .route("/agent/reference", get(agent_reference))
         // Shortcuts RPC return path: the phone POSTs structured results here.
         // Safe GET only peeks; destructive consumption has an explicit,
         // CSRF-protected POST endpoint.
@@ -3288,6 +3293,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
     // the next request brings the phone up on demand.
     if !launchd_job_loaded(&gui_domain(), wda_agent_label()) && wda_agent_disabled() {
         state.released.store(true, std::sync::atomic::Ordering::Release);
+        recover(state.flow_trail.lock()).reset();
         tracing::info!("WDA supervisor is parked (disabled); starting released");
     }
     let window = std::time::Duration::from_secs(idle_secs);
@@ -3397,6 +3403,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                     state.wda_actionable.store(false, Ordering::Relaxed);
                     *recover(state.wda_health.lock()) = crate::wda::WdaHealth::down();
                     state.released.store(true, Ordering::Release);
+                    recover(state.flow_trail.lock()).reset();
                     *recover(state.owner.lock()) = None;
                     release_backoff_until = None;
                     release_failures = 0;
@@ -3492,6 +3499,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 state.wda_actionable.store(false, Ordering::Relaxed);
                 *recover(state.wda_health.lock()) = crate::wda::WdaHealth::down();
                 state.released.store(true, Ordering::Release);
+                recover(state.flow_trail.lock()).reset();
                 *recover(state.owner.lock()) = None;
                 was_up = false;
                 release_backoff_until = None;
@@ -8484,15 +8492,16 @@ async fn agent_actions(
         actionable: true,
         locked,
     };
-    agent_actions_json(
-        StatusCode::OK,
-        serde_json::json!({
-            "ok": true,
-            "completed": completed,
-            "applied_actions": applied_actions,
-            "steps": step_results
-        }),
-    )
+    let mut result = serde_json::json!({
+        "ok": true,
+        "completed": completed,
+        "applied_actions": applied_actions,
+        "steps": step_results
+    });
+    for (key, block) in flow_after_actions(&state, &headers, &body) {
+        result[key] = block;
+    }
+    agent_actions_json(StatusCode::OK, result)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9258,6 +9267,7 @@ async fn agent_input(
                 }
             };
             let body = attach_alert(body, alert);
+            let body = attach_flow_blocks(body, flow_after_input(&state, &headers, &value));
             with_security_headers(
                 Response::builder()
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9298,6 +9308,210 @@ async fn agent_input(
         WdaControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
         WdaControlOutcome::Failed => wda_failed_after_dispatch_response(),
     }
+}
+
+/// Header a flow runner sets on its batch: the steps are already a flow, so
+/// they end the current trail instead of joining it.
+const FLOW_RUN_HEADER: &str = "x-phone-flow-run";
+
+/// `registry` block for the first tree read in a newly entered app.
+fn flow_registry_for_tree(
+    state: &AppState,
+    rows: &[crate::wda::ElementRow],
+) -> Option<serde_json::Value> {
+    let label = active_application(rows);
+    let due = recover(state.flow_trail.lock()).saw_app(label.as_deref(), Instant::now());
+    if !due {
+        return None;
+    }
+    crate::flows::registry_block(crate::flows::AppKey::Label(label.as_deref()?))
+}
+
+/// The bundle a `launch_app` action opened, by id or by system-app name.
+fn launched_bundle(action: &serde_json::Value) -> Option<String> {
+    if action.get("type").and_then(serde_json::Value::as_str) != Some("launch_app") {
+        return None;
+    }
+    action
+        .get("bundle")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            action
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .and_then(system_app_bundle)
+        })
+        .map(str::to_string)
+}
+
+/// Record one applied action on the trail; returns the bundle it launched.
+fn record_flow_action(state: &AppState, action: &serde_json::Value, now: Instant) -> Option<String> {
+    let rows = action
+        .get("snapshot")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|snapshot| lookup_element_snapshot(state, snapshot));
+    let bundle = launched_bundle(action);
+    let mut trail = recover(state.flow_trail.lock());
+    if let Some(bundle) = &bundle {
+        trail.launched(bundle, now);
+        trail.record(
+            crate::flows::Converted::Step(serde_json::json!({"kind":"launch_app","bundle":bundle})),
+            now,
+        );
+    } else {
+        trail.record(crate::flows::convert_action(action, rows.as_deref().map(Vec::as_slice)), now);
+    }
+    bundle
+}
+
+/// `registry` (after a launch) and `flow_suggestion` (when due) for one
+/// applied `/agent/input` action.
+fn flow_after_input(
+    state: &AppState,
+    headers: &HeaderMap,
+    action: &serde_json::Value,
+) -> Vec<(&'static str, serde_json::Value)> {
+    if headers.contains_key(FLOW_RUN_HEADER) {
+        return Vec::new();
+    }
+    let launched = record_flow_action(state, action, Instant::now());
+    flow_blocks(state, launched)
+}
+
+/// The same for a successful `/agent/actions` batch, read from its raw body.
+fn flow_after_actions(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &str,
+) -> Vec<(&'static str, serde_json::Value)> {
+    if headers.contains_key(FLOW_RUN_HEADER) {
+        recover(state.flow_trail.lock()).flow_ran();
+        return Vec::new();
+    }
+    let Ok(request) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let now = Instant::now();
+    let mut launched = None;
+    for step in request
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match step.get("kind").and_then(serde_json::Value::as_str) {
+            Some("action") => {
+                if let Some(action) = step.get("action") {
+                    if let Some(bundle) = record_flow_action(state, action, now) {
+                        launched = Some(bundle);
+                    }
+                }
+            }
+            Some("wait_for" | "pause") => {
+                recover(state.flow_trail.lock()).record_step(step.clone(), now)
+            }
+            _ => {}
+        }
+    }
+    flow_blocks(state, launched)
+}
+
+fn flow_blocks(state: &AppState, launched: Option<String>) -> Vec<(&'static str, serde_json::Value)> {
+    let mut blocks = Vec::new();
+    if let Some(block) = launched
+        .as_deref()
+        .and_then(|bundle| crate::flows::registry_block(crate::flows::AppKey::Bundle(bundle)))
+    {
+        blocks.push(("registry", block));
+    }
+    let suggestion = recover(state.flow_trail.lock())
+        .suggestion(&crate::flows::cooldown_path(), crate::flows::unix_day());
+    if let Some(block) = suggestion {
+        blocks.push(("flow_suggestion", block));
+    }
+    blocks
+}
+
+/// Merge flow blocks into a serialized JSON object body.
+fn attach_flow_blocks(body: String, blocks: Vec<(&'static str, serde_json::Value)>) -> String {
+    if blocks.is_empty() {
+        return body;
+    }
+    match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(mut value) if value.is_object() => {
+            for (key, block) in blocks {
+                value[key] = block;
+            }
+            value.to_string()
+        }
+        _ => body,
+    }
+}
+
+/// The agent skill's reference half, compiled in so it always matches this
+/// daemon. The installer ships SKILL.md alone; SKILL.md points here.
+const AGENT_REFERENCE_MD: &str = include_str!("../../../skills/iphone-use/reference.md");
+
+/// `GET /agent/reference` — the skill reference (`text/markdown`).
+async fn agent_reference(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    match browser_or_agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    with_security_headers(
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+            .body(Body::from(AGENT_REFERENCE_MD))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
+}
+
+/// `GET /agent/flow/draft` — the current (or last finished) action trail as a
+/// flow v1 document plus a `todo` list. Typed text is never included; each
+/// typing step references a named input instead. 404 `no_trail` when nothing
+/// worth drafting has been recorded since the daemon started.
+async fn agent_flow_draft(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    match agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    let draft = recover(state.flow_trail.lock()).draft();
+    let (status, body) = match draft {
+        Some(draft) => (StatusCode::OK, draft),
+        None => (
+            StatusCode::NOT_FOUND,
+            serde_json::json!({
+                "ok": false,
+                "error": "no_trail",
+                "hint": "nothing recorded yet: drafts come from actions this daemon applied (single actions and batches, not flow runs) in one app since it started"
+            }),
+        ),
+    };
+    with_security_headers(
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
 }
 
 /// `GET /agent/elements` — the phone's element tree, flattened to
@@ -9491,6 +9705,9 @@ async fn agent_elements(
     };
     if let (Some(object), Some(alert)) = (body.as_object_mut(), alert_json(alert)) {
         object.insert("alert".to_string(), alert);
+    }
+    if let (Some(object), Some(registry)) = (body.as_object_mut(), flow_registry_for_tree(&state, &rows)) {
+        object.insert("registry".to_string(), registry);
     }
     match serde_json::to_string(&body) {
         Ok(body) => json_body(StatusCode::OK, body),
@@ -10199,7 +10416,7 @@ fn system_app_bundle(name: &str) -> Option<&'static str> {
         "文件" | "Files" | "files" => "com.apple.DocumentsApp",
         "快捷指令" | "Shortcuts" | "shortcuts" => "com.apple.shortcuts",
         "音乐" | "Music" | "music" => "com.apple.Music",
-        "App资源库" | "Find My" | "查找" => "com.apple.findmy",
+        "Find My" | "查找" => "com.apple.findmy",
         _ => return None,
     })
 }

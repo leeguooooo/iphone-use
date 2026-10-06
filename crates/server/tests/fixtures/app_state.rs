@@ -47,6 +47,9 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
         mjpeg_stream_activity: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        flow_trail: std::sync::Arc::new(std::sync::Mutex::new(
+            srv::flows::FlowTrail::default(),
+        )),
         element_snapshots: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::VecDeque::new(),
         )),

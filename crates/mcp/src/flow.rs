@@ -542,6 +542,31 @@ pub fn load_flow(path: &Path) -> Result<ValidatedFlow> {
     parse_flow(&bytes, &path.display().to_string())
 }
 
+/// Write a draft flow to a NEW file (0600, never over an existing path) and
+/// validate it. A draft that does not validate yet is still saved — that is
+/// what the `todo` list is for — and the error comes back as data.
+pub fn save_draft(path: &str, flow: &serde_json::Value) -> Result<serde_json::Value> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if !flow.is_object() {
+        bail!("the daemon returned no flow document");
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("create {path} (it must not exist yet)"))?;
+    let mut bytes = serde_json::to_vec_pretty(flow)?;
+    bytes.push(b'\n');
+    file.write_all(&bytes)
+        .with_context(|| format!("write {path}"))?;
+    Ok(match load_flow(Path::new(path)) {
+        Ok(validated) => serde_json::json!({ "valid": true, "summary": flow_summary(&validated) }),
+        Err(error) => serde_json::json!({ "valid": false, "error": format!("{error:#}") }),
+    })
+}
+
 /// JSON summary shared by `flow validate` and `flow info`.
 pub fn flow_summary(flow: &ValidatedFlow) -> serde_json::Value {
     let mut value = serde_json::to_value(&flow.meta).expect("FlowMeta serializes");
@@ -1336,7 +1361,7 @@ pub async fn execute_flow_run(
         .get("version")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    let outcome = match daemon.actions_outcome(&request).await {
+    let outcome = match daemon.flow_actions_outcome(&request).await {
         Ok(response) => RunAnswer::Answered(response),
         // A connection that never opened means nothing reached the phone, and
         // saying so is safe. Anything later — the request was already on the

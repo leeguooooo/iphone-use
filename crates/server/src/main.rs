@@ -597,12 +597,58 @@ fn serve() -> Result<()> {
         live_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         mjpeg_stream_activity: Arc::new(Mutex::new(std::collections::HashMap::new())),
         element_snapshots: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        flow_trail: Arc::new(Mutex::new(server::flows::FlowTrail::default())),
         hold_until: Arc::new(Mutex::new(None)),
         owner: Arc::new(Mutex::new(None)),
         owner_lease_secs: cfg.owner_lease_secs,
     });
 
     run_server(cfg, state, dir)
+}
+
+/// First fetch of the flow registry shortly after start, then a refresh
+/// whenever the store is older than `flows::AUTO_UPDATE_TTL`. Only the default
+/// instance does it (test daemons must not write the user's store); opt out
+/// with `IPHONE_USE_FLOWS_NO_AUTO_UPDATE=1` (also off under `CI`).
+fn spawn_flow_registry_refresh() {
+    use server::flows;
+    if flows::auto_update_disabled()
+        || std::env::var_os("CI").is_some()
+        || !server::instance::current().is_default()
+    {
+        tracing::info!("flow registry auto-update disabled");
+        return;
+    }
+    let Some(mcp) = flows::mcp_binary() else {
+        tracing::info!("flow registry auto-update skipped: iphone-use-mcp not next to the daemon");
+        return;
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        loop {
+            if flows::store_is_stale() {
+                let run = tokio::process::Command::new(&mcp)
+                    .args(["flow", "update"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .output();
+                match tokio::time::timeout(std::time::Duration::from_secs(120), run).await {
+                    Ok(Ok(out)) if out.status.success() => {
+                        tracing::info!("flow registry refreshed")
+                    }
+                    Ok(Ok(out)) => tracing::warn!(
+                        "flow registry refresh failed: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ),
+                    Ok(Err(error)) => tracing::warn!("flow registry refresh failed: {error}"),
+                    Err(_) => tracing::warn!("flow registry refresh timed out"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
 }
 
 /// Background update check: resolve the repo's latest release tag every 24h
@@ -670,6 +716,11 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
 
         // Daily release check → /agent/status {version, latest, update_available}.
         spawn_update_check(state.clone());
+
+        // Keep the flow registry on this Mac fresh so `registry` hints have
+        // something to name. Runs `iphone-use-mcp flow update`, never a
+        // second implementation of fetching and verification.
+        spawn_flow_registry_refresh();
 
         // Idle auto-release owns only the local supervisor. Remote WDA
         // endpoints are externally managed and must never trigger local

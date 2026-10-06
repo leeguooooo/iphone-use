@@ -27,7 +27,7 @@ iphone-use 让 AI agent 操作一台真 iPhone：把屏幕读成文字，点、�
 Mac 上的守护进程通过 USB 在 iPhone 上运行 WebDriverAgent，对外提供：
 
 - 给 agent 和脚本用的 HTTP 接口（`/agent/*`）；
-- 21 个工具的 MCP server，Claude Code、Claude Desktop 等 MCP 客户端直接接；
+- 22 个工具的 MCP server，Claude Code、Claude Desktop 等 MCP 客户端直接接；
 - 给人用的网页和 iOS App：看实时画面，直接点、直接输入。
 
 它不碰 Mac 自己的屏幕、光标和窗口焦点。
@@ -73,11 +73,14 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
 
 重复做的事存成 **flow**：按 App 分类、经过审阅的脚本，重放时不经过模型，不花 token。官方 flow 源是 **[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**。在网页的「流程」面板里操作一遍就能录下来，再提 PR 发布到源里。
 
+AI 不用你提醒就会找 flow：进入某个 App 时，返回结果里就列着这个 App 的 flow。在没有 flow 的 App 里做完一个多步任务后，AI 会问你要不要存成 flow，步骤守护进程已经录好了草稿。守护进程会自己保持 flow 源最新（`IPHONE_USE_FLOWS_NO_AUTO_UPDATE=1` 关闭自动更新，`IPHONE_USE_FLOWS_NO_SUGGEST=1` 关闭保存提示）。
+
 ```bash
 MCP=~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp
 $MCP flow update                            # 同步官方源（逐个校验 sha256）
 $MCP flow list                              # 看有哪些 flow
 $MCP flow run health/export-all-zh-cn       # 重放一个；失败时会说卡在哪一步、为什么
+$MCP flow draft --out my-task.json          # 把刚才在手机上做的事导出成 flow 草稿
 ```
 
 ## 更多

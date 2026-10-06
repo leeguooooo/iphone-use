@@ -254,13 +254,41 @@ impl DaemonClient {
     /// A TRANSPORT failure is still an error: when the request never completed
     /// we do not know what the phone did, and must not pretend otherwise.
     pub async fn actions_outcome(&self, body: &serde_json::Value) -> anyhow::Result<DaemonResponse> {
-        let req = self
+        self.post_actions(body, false).await
+    }
+
+    /// [`Self::actions_outcome`] for a flow run: `X-Phone-Flow-Run` tells the
+    /// daemon these steps are already a flow, so they never become a
+    /// `flow_suggestion` or a draft of themselves.
+    pub async fn flow_actions_outcome(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<DaemonResponse> {
+        self.post_actions(body, true).await
+    }
+
+    async fn post_actions(
+        &self,
+        body: &serde_json::Value,
+        flow_run: bool,
+    ) -> anyhow::Result<DaemonResponse> {
+        let mut req = self
             .auth(self.client.post(self.url("/agent/actions")))
             .timeout(ACTIONS_TIMEOUT)
             .header("x-phone-control", "1")
             .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
+        if flow_run {
+            req = req.header("x-phone-flow-run", "1");
+        }
+        read_response(req.send().await?).await
+    }
+
+    /// `GET /agent/flow/draft` — the daemon's recorded action trail as a flow
+    /// v1 draft (404 `no_trail` when there is nothing to draft).
+    pub async fn flow_draft(&self) -> anyhow::Result<DaemonResponse> {
+        let req = self.auth(self.client.get(self.url("/agent/flow/draft")));
         read_response(req.send().await?).await
     }
 
