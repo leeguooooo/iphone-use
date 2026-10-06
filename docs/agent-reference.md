@@ -188,6 +188,11 @@ fails carries the same `alert` block when one is up. Answer it with
 `{"type":"alert","button":"<exact text>"}` — a permission is the user's call —
 then read again.
 
+Optional alerts: an alert step with `"if_present": true` (MCP/flow:
+`{"kind":"alert","button":"允许粘贴","if_present":true}`) answers the alert when
+one is up and passes as `skipped: "no_alert"` when none is — for prompts that
+appear only sometimes. Flows that use it need a client that knows the field.
+
 ## Reading results: settle, delta, wait_for
 
 **`?return=delta`** (MCP act tools: on by default, `observe:false` to skip) settles after an applied action and

@@ -7987,6 +7987,9 @@ fn validate_agent_action_value(
                     "alert needs exactly one of button (1-200 chars) or action accept|dismiss",
                 );
             }
+            if action.get("if_present").is_some_and(|v| !v.is_boolean()) {
+                return invalid("alert if_present must be true or false");
+            }
         }
         _ => return invalid(&format!("has unsupported type {typ:?}")),
     }
@@ -8550,6 +8553,20 @@ async fn agent_actions(
                         );
                     }
                 };
+                // An optional alert step ({"if_present":true}) that found no
+                // alert is a pass: occasional system prompts ("Allow Paste")
+                // can be written into a flow without failing it when they do
+                // not appear.
+                if outcome == WdaControlOutcome::NoAlert && optional_alert(action) {
+                    step_results.push(serde_json::json!({
+                        "index": index,
+                        "kind": "action",
+                        "ok": true,
+                        "skipped": "no_alert"
+                    }));
+                    completed += 1;
+                    continue;
+                }
                 if outcome != WdaControlOutcome::Applied {
                     let (status, error, outcome_name, current_retry_safe) = match outcome {
                         WdaControlOutcome::NotSent => (
@@ -9766,6 +9783,12 @@ async fn agent_input(
         WdaControlOutcome::Refused(error, hint) => {
             hinted_control_response(StatusCode::CONFLICT, error, "not_sent", hint)
         }
+        WdaControlOutcome::NoAlert if optional_alert(&value) => with_security_headers(
+            Response::builder()
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"ok":true,"skipped":"no_alert","outcome":"not_sent"}"#))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        ),
         WdaControlOutcome::NoAlert => no_alert_response(),
         WdaControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
         WdaControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
@@ -10466,6 +10489,13 @@ async fn agent_elements(
             r#"{"elements":[],"error":"serialization_failed"}"#.to_string(),
         ),
     }
+}
+
+/// `{"type":"alert", …, "if_present":true}`: answer the alert if one is up,
+/// pass quietly when none is.
+fn optional_alert(action: &serde_json::Value) -> bool {
+    action.get("type").and_then(serde_json::Value::as_str) == Some("alert")
+        && action.get("if_present").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
 /// Raised out of the source-read loop when a system alert is what is failing it.

@@ -251,3 +251,48 @@ fn an_observed_batch_returns_the_screen_it_ended_on() {
         assert!(plain.get("elements").is_none(), "no observation unless asked: {plain}");
     });
 }
+
+/// An alert step marked `if_present` passes when no alert is up, so an
+/// occasional system prompt can be written into a flow; without it the same
+/// step still fails as `no_alert`.
+#[test]
+fn an_optional_alert_step_passes_when_no_alert_is_up() {
+    block(async {
+        let wda = mock_wda(|request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if request.contains("/alert/text") {
+                // Real WDA answers "no such alert" with HTTP 404.
+                let body = r#"{"value":{"error":"no such alert","message":"no modal dialog is open"}}"#;
+                return Some((
+                    Duration::ZERO,
+                    format!(
+                        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                ));
+            }
+            Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
+        });
+        let (status, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[
+                {"kind":"action","action":{"type":"alert","button":"允许粘贴","if_present":true}},
+                {"kind":"action","action":{"type":"home"}}
+            ]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["ok"], true, "{json}");
+        assert_eq!(json["completed"], 2, "{json}");
+        assert_eq!(json["steps"][0]["skipped"], "no_alert", "{json}");
+
+        let (_, strict) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"alert","button":"允许粘贴"}}]}"#,
+        )
+        .await;
+        assert_eq!(strict["error"], "no_alert", "{strict}");
+    });
+}

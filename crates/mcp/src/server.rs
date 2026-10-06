@@ -286,6 +286,11 @@ pub enum PhoneStep {
         button: Option<String>,
         #[serde(default)]
         action: Option<String>,
+        /// Pass instead of failing when no alert is up — for prompts that
+        /// appear only sometimes ("Allow Paste"). Flows using it need a
+        /// client that knows it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        if_present: bool,
         #[serde(default)]
         after_ms: u64,
     },
@@ -1701,18 +1706,25 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
             PhoneStep::Alert {
                 button,
                 action,
+                if_present,
                 after_ms,
             } => {
                 validate_after(after_ms)?;
                 let button = button.filter(|b| !b.trim().is_empty());
                 let action = action.filter(|a| !a.trim().is_empty());
+                let optional = |mut action: serde_json::Value| {
+                    if if_present {
+                        action["if_present"] = serde_json::json!(true);
+                    }
+                    action
+                };
                 match (&button, &action) {
                     (Some(b), None) if b.chars().count() <= 200 => action_step(
-                        serde_json::json!({"type":"alert","button":b}),
+                        optional(serde_json::json!({"type":"alert","button":b})),
                         after_ms,
                     ),
                     (None, Some(a)) if a == "accept" || a == "dismiss" => action_step(
-                        serde_json::json!({"type":"alert","action":a}),
+                        optional(serde_json::json!({"type":"alert","action":a})),
                         after_ms,
                     ),
                     _ => {
@@ -2474,11 +2486,13 @@ mod tests {
     fn multi_step_alert_encodes_button_or_action_and_rejects_both_or_neither() {
         let ok = phone_steps_request(vec![
             PhoneStep::Alert {
+                if_present: false,
                 button: Some("导出".into()),
                 action: None,
                 after_ms: 100,
             },
             PhoneStep::Alert {
+                if_present: false,
                 button: None,
                 action: Some("dismiss".into()),
                 after_ms: 0,
@@ -2493,18 +2507,32 @@ mod tests {
             ok["steps"][1]["action"],
             serde_json::json!({"type":"alert","action":"dismiss"})
         );
+        let optional = phone_steps_request(vec![PhoneStep::Alert {
+            if_present: true,
+            button: Some("允许粘贴".into()),
+            action: None,
+            after_ms: 0,
+        }])
+        .unwrap();
+        assert_eq!(
+            optional["steps"][0]["action"],
+            serde_json::json!({"type":"alert","button":"允许粘贴","if_present":true})
+        );
         for step in [
             PhoneStep::Alert {
+                if_present: false,
                 button: None,
                 action: None,
                 after_ms: 0,
             },
             PhoneStep::Alert {
+                if_present: false,
                 button: Some("OK".into()),
                 action: Some("accept".into()),
                 after_ms: 0,
             },
             PhoneStep::Alert {
+                if_present: false,
                 button: None,
                 action: Some("yes".into()),
                 after_ms: 0,
