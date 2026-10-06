@@ -244,6 +244,18 @@ impl DaemonClient {
     }
 
 
+    /// `POST /agent/input` with an arbitrary action body (element taps,
+    /// set_value, …), keeping the daemon's structured result.
+    pub async fn input_value(&self, action: &serde_json::Value) -> anyhow::Result<DaemonResponse> {
+        let req = self
+            .auth(self.client.post(self.url("/agent/input")))
+            .header("x-phone-control", "1")
+            .header("x-phone-owner", &self.owner)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(action.to_string());
+        read_response(req.send().await?).await
+    }
+
     /// `POST /agent/actions`, keeping the response rather than raising it.
     ///
     /// The daemon answers a FAILED flow with a non-2xx status and a complete

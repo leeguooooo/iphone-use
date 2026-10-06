@@ -27,7 +27,7 @@ iphone-use 让 AI agent 操作一台真 iPhone：把屏幕读成文字，点、�
 Mac 上的守护进程通过 USB 在 iPhone 上运行 WebDriverAgent，对外提供：
 
 - 给 agent 和脚本用的 HTTP 接口（`/agent/*`）；
-- 22 个工具的 MCP server，Claude Code、Claude Desktop 等 MCP 客户端直接接；
+- 23 个工具的 MCP server，Claude Code、Claude Desktop 等 MCP 客户端直接接；
 - 给人用的网页和 iOS App：看实时画面，直接点、直接输入。
 
 它不碰 Mac 自己的屏幕、光标和窗口焦点。

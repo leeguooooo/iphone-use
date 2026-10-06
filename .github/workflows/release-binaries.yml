@@ -185,7 +185,7 @@ jobs:
           listing = next(item for item in responses if item.get("id") == 2)
           tools = listing["result"]["tools"]
           names = [tool["name"] for tool in tools]
-          assert len(names) == 22, names
+          assert len(names) == 23, names
           for required in (
               "phone_run_steps",
               "phone_hold",
@@ -222,7 +222,7 @@ jobs:
               assert "observe" in schema["properties"], (name, schema)
               assert "observe" not in schema.get("required", []), (name, schema)
           print(
-              "Bundled MCP exposes 22 tools; observe is optional on "
+              "Bundled MCP exposes 23 tools; observe is optional on "
               f"{len(observing)} single-step UI tools."
           )
 

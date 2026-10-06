@@ -29,7 +29,7 @@ have no API, including banking and payment apps that hide their screens from cap
 A daemon on your Mac runs WebDriverAgent on a USB-connected iPhone and exposes it as:
 
 - an HTTP API for agents and scripts (`/agent/*`),
-- an MCP server with 22 tools for Claude Code, Claude Desktop and other MCP clients,
+- an MCP server with 23 tools for Claude Code, Claude Desktop and other MCP clients,
 - a web page and a native iOS app for people (live screen, tap, type).
 
 Nothing touches the Mac's own screen, cursor or focus.

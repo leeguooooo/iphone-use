@@ -41,7 +41,13 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure st
    "$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp" flow run system/spotlight-search --input query=Health
    ```
 
-3. **Otherwise act in batches, not taps.** Every call costs you a full turn;
+3. **No flow? Hand a clear goal to Jev.** `phone_jev_run` /
+   `iphone-use-mcp jev run --goal "…" [--app <bundle>]` runs a fast on-phone
+   agent (TypeSafe's Jev picks each step, ~1–2 s/step, no model turns) and
+   returns `done` / `blocked` with its step history. Confirm goals that send,
+   pay or delete with the user first; check the end screen yourself.
+
+4. **Otherwise act in batches, not taps.** Every call costs you a full turn;
    the phone takes ~0.5 s. Open the app with `launch_app`, read
    `GET /agent/elements` once, then send everything you can already see how to
    do as ONE batch (`POST /agent/actions` / `phone_run_steps`, up to 24 steps,
@@ -51,12 +57,12 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure st
    locator) are for exploring a screen you have not read yet; after three in a
    row the daemon says so (`batch_hint`).
 
-4. **Verify** each step against your postcondition (`?return=delta` /
+5. **Verify** each step against your postcondition (`?return=delta` /
    `observe:true` returns the settled change in the same call). `ok:true` means
    the action was sent, not that it achieved anything.
    → reference: *Reading results*
 
-5. **Offer to save it.** When a response carries `flow_suggestion`, or you
+6. **Offer to save it.** When a response carries `flow_suggestion`, or you
    finish a multi-step task that no flow covered, **ask the user** whether to
    keep it as a flow. Only if they agree: get the draft
    (`phone_flow_draft(save_as=…)` / `flow draft --out …` /

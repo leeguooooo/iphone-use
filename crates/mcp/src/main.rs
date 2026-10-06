@@ -22,6 +22,7 @@ mod client;
 mod compat;
 mod contrib;
 mod flow;
+mod jev;
 mod outputs;
 mod registry;
 mod server;
@@ -49,6 +50,28 @@ enum Command {
     Flow {
         #[command(subcommand)]
         command: FlowCommand,
+    },
+    /// Fast phone agent: TypeSafe's Jev picks each step from the screen's
+    /// element table (needs TYPESAFE_API_KEY or ~/.config/typesafe/key; text
+    /// fields also TEXT_MODEL_API_KEY or ~/.config/openrouter/key).
+    Jev {
+        #[command(subcommand)]
+        command: JevCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum JevCommand {
+    /// Pursue one goal on the phone until DONE, BLOCKED or --max-steps.
+    Run {
+        /// What to achieve, in plain language.
+        #[arg(long)]
+        goal: String,
+        /// Bundle id to launch first, e.g. com.apple.Preferences.
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long, default_value_t = jev::DEFAULT_MAX_STEPS)]
+        max_steps: usize,
     },
 }
 
@@ -195,6 +218,18 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
+    if let Some(Command::Jev { command: JevCommand::Run { goal, app, max_steps } }) = &cli.command {
+        let report = jev::run(
+            &client::DaemonClient::from_env(),
+            jev::Options { goal: goal.clone(), app: app.clone(), max_steps: *max_steps },
+        )
+        .await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if report["ok"] != true {
+            anyhow::bail!("jev stopped with status {}", report["status"]);
+        }
+        return Ok(());
+    }
     if let Some(Command::Flow { command }) = cli.command {
         return match command {
             FlowCommand::Validate { target } => flow::validate_command(&target),

@@ -146,6 +146,28 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 on every iPhone since XR/11; use `menu`. App uninstall: `{"type":"uninstall","bundle":…}`
 (destructive; HTTP only).
 
+## Jev: hand over a whole goal
+
+`iphone-use-mcp jev run --goal "<goal>" [--app <bundle>] [--max-steps 30]`
+(MCP `phone_jev_run`) is a phone agent: each step reads `/agent/elements`,
+builds an indexed table of the visible controls (buttons, cells, keys, tabs,
+switches, fields), and asks TypeSafe's Jev for the operation — CLICK,
+TYPE_TEXT, SCROLL_DOWN/UP, BACK, PRESS_RETURN (only with a keyboard up), WAIT,
+DONE, BLOCKED — and its target in one request. A small OpenAI-compatible model
+writes a field's text only for TYPE_TEXT (entered with `set_value`, so a
+Chinese keyboard cannot swallow it). Every step is an ordinary daemon action
+with your owner lease, so the daemon's trail — and `phone_flow_draft` — works
+on a Jev run too.
+
+Keys: `TYPESAFE_API_KEY` or `~/.config/typesafe/key`; for typing
+`TEXT_MODEL_API_KEY` or `~/.config/openrouter/key` (`TEXT_MODEL`, default
+`inception/mercury-2.5`; `TEXT_MODEL_BASE_URL`). The report has `status`
+(`done`, `blocked`, `max_steps`, `error`), `history` and a timing split
+(`jev_ms`, `act_ms`, `observe_ms`, `text_ms`). Jev answers BLOCKED rather than
+send, pay, delete or share what the goal did not ask for; still confirm such
+goals with the user, and verify the end screen. The policy is adapted from
+browser-use/jev-ultrafast (MIT) via chrome-use's `jev run`.
+
 ## Batches first
 
 A task should take a few turns, not one per tap. `POST /agent/actions`

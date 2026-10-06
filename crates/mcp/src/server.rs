@@ -391,6 +391,20 @@ pub struct FlowRunParams {
     pub write_fixture: bool,
 }
 
+/// Parameters for [`phone_jev_run`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JevRunParams {
+    /// The whole goal in plain language, with every value it needs
+    /// ("In Settings, turn on Low Power Mode"). Jev never invents personal data.
+    pub goal: String,
+    /// Bundle id to launch first, e.g. `com.apple.Preferences`.
+    #[serde(default)]
+    pub app: Option<String>,
+    /// Step budget (default 30).
+    #[serde(default)]
+    pub max_steps: Option<usize>,
+}
+
 /// Parameters for [`phone_flow_draft`].
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FlowDraftParams {
@@ -1145,6 +1159,34 @@ impl PhoneHandler {
     }
 
     #[tool(
+        description = "Hand ONE whole goal to a fast on-phone agent instead of driving it step by \
+        step: TypeSafe's Jev picks each next operation and target from the screen's element table \
+        (~1–2 s per step instead of a model turn), a small LLM types field values. Use it for a \
+        clear multi-step goal with no saved flow (check phone_flow_list first). It stops with \
+        status done / blocked / max_steps and the step history; it answers BLOCKED rather than \
+        send, pay, delete or share anything the goal did not explicitly ask for — still confirm \
+        such goals with the user first. Verify the end screen yourself. Needs TYPESAFE_API_KEY \
+        (or ~/.config/typesafe/key) and, for typing, TEXT_MODEL_API_KEY (or ~/.config/openrouter/key)."
+    )]
+    async fn phone_jev_run(
+        &self,
+        Parameters(JevRunParams { goal, app, max_steps }): Parameters<JevRunParams>,
+    ) -> CallToolResult {
+        let options = crate::jev::Options {
+            goal,
+            app,
+            max_steps: max_steps.unwrap_or(crate::jev::DEFAULT_MAX_STEPS).clamp(1, 80),
+        };
+        match crate::jev::run(&self.daemon, options).await {
+            Ok(report) if report["ok"] == true => {
+                CallToolResult::success(vec![Content::text(report.to_string())])
+            }
+            Ok(report) => CallToolResult::error(vec![Content::text(report.to_string())]),
+            Err(e) => CallToolResult::error(vec![Content::text(format!("jev did not run: {e:#}"))]),
+        }
+    }
+
+    #[tool(
         description = "Turn what you just did on the phone into a flow. The daemon records \
         every action it applied in the current app (single actions and phone_run_steps \
         batches, not flow runs); this returns that trail as a flow v1 document (snapshot \
@@ -1338,7 +1380,8 @@ impl ServerHandler for PhoneHandler {
                  (each reconnect may make the user type the passcode), never for health checks.\n\
                  2. Look for a saved flow FIRST. Responses that enter an app (launch_app, the first \
                  phone_elements in a new app) carry a `registry` block: if a listed flow does the task, \
-                 phone_flow_run it — one call instead of dozens. phone_flow_list shows all of them.\n\
+                 phone_flow_run it — one call instead of dozens. phone_flow_list shows all of them. No flow but a \
+                 clear goal: phone_jev_run hands the whole goal to a fast on-phone agent (~1–2 s/step).\n\
                  3. Otherwise read phone_elements and act on what it names (phone_tap_element, \
                  phone_tap_label for a unique label) only to explore; as soon as you know the next few steps, send \
                  them as ONE phone_run_steps batch (wait_for between screens) — it returns the resulting \
@@ -2225,10 +2268,11 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            22,
+            23,
             "tool count changed; update README, the skill, and the CI assertion: {names:?}"
         );
         for required in [
+            "phone_jev_run",
             "phone_flow_draft",
             "phone_capabilities",
             "phone_status",
