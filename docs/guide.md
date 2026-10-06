@@ -285,9 +285,22 @@ shortcut. The daemon opens `shortcuts://run-shortcut` on the phone via WDA — n
 or clipboard — and the shortcut posts its result back to `/agent/inbox`.
 
 ```bash
-python3 deploy/make-bridge-shortcut.py --token "$PHONE_REMOTE_AGENT_TOKEN"
-open "iU Bridge.shortcut"     # accept the import; iCloud syncs it to the phone
+python3 deploy/make-bridge-shortcut.py --token "$PHONE_REMOTE_AGENT_TOKEN" \
+  --verb ping --verb battery --verb focus_on --verb focus_off
+cp "iU Bridge.shortcut" ~/Library/Mobile\ Documents/com~apple~CloudDocs/
 ```
+
+Then import it on the phone — an agent can do this itself: Files → search
+`iU Bridge` → tap the file → **Add Shortcut** (no Mac dialog needed; opening the file
+on the Mac and accepting the import works too).
+
+**Do Not Disturb while an agent drives.** With `focus_on` / `focus_off` in the bridge and
+the registry, the daemon turns DND on before an agent session's first action — only if no
+Focus is already on — and off again when the phone is released, idles out or is handed to
+a person. The phone shows a notice both times; the first run asks once to allow the
+bridge's notifications (the agent is told, as `agent_focus: waiting_for_permission`).
+Fire-and-forget, so it works with the return path below left closed.
+`PHONE_REMOTE_AUTO_FOCUS=0` turns it off.
 
 Verbs live in `~/.iphone-use/intents-registry.json` (start from
 [`deploy/intents-registry.example.json`](../deploy/intents-registry.example.json)); the

@@ -208,14 +208,20 @@ is no longer cached). The action result and the observation are separate facts:
   apps. Prefer tapping the on-screen back control.
 - **App launch**: `launch_app` by bundle (or built-in name). Spotlight + typing is
   the slow path and breaks under the Chinese IME.
-- **Do Not Disturb is automatic** when the bridge shortcut has the `focus_on` /
-  `focus_off` verbs (intents registry): the session's first action turns DND on
-  (only if no Focus was on; the phone shows a notice, the Shortcuts app flashes
-  for ~3 s and the previous app comes back), and releasing the phone
-  (`phone_release_owner`), idling out or handing it to a person turns it off.
-  The response that did it carries `agent_focus` — tell the user. Banners
-  otherwise hijack taps (hardware-seen: a chat banner opened WeChat; a recurring
-  alert banner broke flow runs). Opt out with `PHONE_REMOTE_AUTO_FOCUS=0`.
+- **Do Not Disturb is automatic** when the intents registry lists the bridge's
+  `focus_on` / `focus_off` verbs. The session's first action runs `focus_on`
+  (Shortcuts flashes ~5 s, then the previous app comes back); releasing the
+  phone (`phone_release_owner`), idling out or handing it to a person runs
+  `focus_off`. The response that did it carries `agent_focus` — tell the user:
+  - `requested_on` / `requested_off`: DND on for your session / off again; the
+    phone shows a notice each time.
+  - `left_as_is`: a Focus was already on; it is left alone, also on release.
+  - `waiting_for_permission`, with the action refused as
+    `focus_permission_pending` (`not_sent`, retry-safe): a one-time iOS prompt
+    for the bridge (allow notifications) is on screen. It is not in the element
+    tree — screenshot, tap **Allow / 允许**, then send the action again.
+  Banners otherwise hijack taps (hardware-seen: a chat banner opened WeChat; a
+  recurring alert banner broke flow runs). Opt out with `PHONE_REMOTE_AUTO_FOCUS=0`.
 
 ## MCP specifics
 
