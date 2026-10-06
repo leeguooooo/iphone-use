@@ -9732,9 +9732,9 @@ fn attach_flow_blocks(body: String, blocks: Vec<(&'static str, serde_json::Value
     }
 }
 
-/// The agent skill's reference half, compiled in so it always matches this
+/// The agent skill's reference half (docs/agent-reference.md), compiled in so it always matches this
 /// daemon. The installer ships SKILL.md alone; SKILL.md points here.
-const AGENT_REFERENCE_MD: &str = include_str!("../../../skills/iphone-use/reference.md");
+const AGENT_REFERENCE_MD: &str = include_str!("../../../docs/agent-reference.md");
 
 /// `GET /agent/reference` — the skill reference (`text/markdown`).
 async fn agent_reference(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {

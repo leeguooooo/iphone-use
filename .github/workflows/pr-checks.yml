@@ -161,6 +161,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Same gate as release-binaries.yml: the installer ships SKILL.md
+          # alone, so the skill directory must hold exactly that one file
+          # (agent reference lives in docs/agent-reference.md).
+          test "$(find skills/iphone-use -type f | wc -l | tr -d '[:space:]')" = 1
+          test -f skills/iphone-use/SKILL.md
           bash -n install.sh
           bash -n uninstall.sh
           bash -n scripts/setup-wda.sh

@@ -11,7 +11,7 @@ cursor. Use the HTTP API below or the bundled MCP server (`phone_*` tools); the
 loop is the same. Details live in the reference: `curl -s -H "$AUTH"
 "$HOST/agent/reference"` serves the copy that matches the running daemon
 (sections below are named by heading; also
-[reference.md](https://github.com/leeguooooo/iphone-use/blob/main/skills/iphone-use/reference.md)).
+[docs/agent-reference.md](https://github.com/leeguooooo/iphone-use/blob/main/docs/agent-reference.md)).
 
 ```bash
 HOST="${PHONE_REMOTE_URL:-http://127.0.0.1:44321}"
