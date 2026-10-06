@@ -77,6 +77,20 @@ Every answer says whether the action was applied, not sent, or unknown, and whet
 retry is safe. Taps on covered or hidden elements and writes that did not stick are
 refused or reported instead of passing silently.
 
+## Flows: do a task once, replay it with no model
+
+Tasks you repeat are kept as **flows**: reviewed per-app scripts that replay without a
+model, so they cost no tokens. The official registry is
+**[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**; record a
+flow in the browser's 流程 panel and publish it there with a PR.
+
+```bash
+MCP=~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp
+$MCP flow update                            # sync the registry (sha256-checked)
+$MCP flow list                              # what is available
+$MCP flow run health/export-all-zh-cn       # replay one; failures say which step and why
+```
+
 ## More
 
 - [Full guide](docs/guide.md): browser and iOS app, flows and the flow registry,

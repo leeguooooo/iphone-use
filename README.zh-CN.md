@@ -69,6 +69,17 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
 
 每次操作都会说清楚：已执行、没发出去、还是结果不确定，以及能不能安全重试。点到被遮住或看不见的元素、填进去没生效的值，都会被拒绝或报出来，不会悄悄当成功。
 
+## Flow：做过一次的事，沉淀成脚本
+
+重复做的事存成 **flow**：按 App 分类、经过审阅的脚本，重放时不经过模型，不花 token。官方 flow 源是 **[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**。在网页的「流程」面板里操作一遍就能录下来，再提 PR 发布到源里。
+
+```bash
+MCP=~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp
+$MCP flow update                            # 同步官方源（逐个校验 sha256）
+$MCP flow list                              # 看有哪些 flow
+$MCP flow run health/export-all-zh-cn       # 重放一个；失败时会说卡在哪一步、为什么
+```
+
 ## 更多
 
 - [完整指南](docs/guide.zh-CN.md)：网页和 iOS App、flow 与官方 flow 源、生命周期、配置、安全、开发。

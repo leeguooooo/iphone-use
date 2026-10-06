@@ -1,13 +1,21 @@
-"""Generate per-scene narration with edge-tts (Microsoft neural voices).
+"""Generate per-scene narration with Microsoft neural voices.
 
 Writes voiceover/<lang>/<scene-id>.mp3, which motion-use picks up through the
 brief's "voiceover" block; each scene stretches to fit its line.
 
-edge-tts calls Microsoft Edge's read-aloud service; no license for the audio
-has been confirmed. For a published cut, regenerate the same lines with Azure
-Speech (same voices) or record them.
+Engine:
+- Azure Speech (default when AZURE_SPEECH_KEY and AZURE_SPEECH_REGION are set):
+  the licensed service, same voices. The key is read from the environment or,
+  failing that, from the rbw/Bitwarden entry named in AZURE_SPEECH_RBW_ENTRY;
+  it is never printed.
+- edge-tts (`--engine edge`): Microsoft Edge's read-aloud service, preview only —
+  no license for its audio has been confirmed.
 """
+import argparse
+import html
+import os
 import subprocess
+import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -47,14 +55,60 @@ SCRIPT = {
     },
 }
 
+def azure_credentials():
+    key = os.environ.get("AZURE_SPEECH_KEY", "").strip()
+    region = os.environ.get("AZURE_SPEECH_REGION", "").strip()
+    entry = os.environ.get("AZURE_SPEECH_RBW_ENTRY", "").strip()
+    if not key and entry:
+        key = subprocess.run(["rbw", "get", entry], capture_output=True, text=True).stdout.strip()
+    if not key or not region:
+        raise SystemExit(
+            "Azure Speech needs AZURE_SPEECH_REGION and a key "
+            "(AZURE_SPEECH_KEY, or AZURE_SPEECH_RBW_ENTRY naming an rbw entry)."
+        )
+    return key, region
+
+
+def azure_tts(text, voice, rate, mp3, key, region):
+    lang = "-".join(voice.split("-")[:2])
+    ssml = (
+        f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="{lang}">'
+        f'<voice name="{voice}"><prosody rate="{rate}">{html.escape(text)}</prosody></voice></speak>'
+    )
+    request = urllib.request.Request(
+        f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1",
+        data=ssml.encode("utf-8"),
+        headers={
+            "Ocp-Apim-Subscription-Key": key,
+            "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": "audio-24khz-96kbitrate-mono-mp3",
+            "User-Agent": "iphone-use-promo",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        mp3.write_bytes(response.read())
+
+
+def edge_tts(text, voice, rate, mp3):
+    subprocess.run(
+        ["edge-tts", "--voice", voice, f"--rate={rate}", "--text", text, "--write-media", str(mp3)],
+        check=True, capture_output=True,
+    )
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--engine", choices=["azure", "edge"], default="azure")
+args = parser.parse_args()
+credentials = azure_credentials() if args.engine == "azure" else None
+
 for lang, lines in SCRIPT.items():
     voice, rate = VOICES[lang]
     out = HERE / "voiceover" / lang
     out.mkdir(parents=True, exist_ok=True)
     for scene, text in lines.items():
         mp3 = out / f"{scene}.mp3"
-        subprocess.run(
-            ["edge-tts", "--voice", voice, f"--rate={rate}", "--text", text, "--write-media", str(mp3)],
-            check=True, capture_output=True,
-        )
-        print(lang, scene, mp3.stat().st_size)
+        if credentials:
+            azure_tts(text, voice, rate, mp3, *credentials)
+        else:
+            edge_tts(text, voice, rate, mp3)
+        print(args.engine, lang, scene, mp3.stat().st_size)
