@@ -18,7 +18,7 @@ HELPERS = ''.join(function(name) for name in ('_daemon_product_verdict', '_daemo
 
 GATE_START = '    DAEMON_STATUS_TRIES=0\n    DAEMON_PRODUCT_VERDICT=down\n'
 GATE = SOURCE[SOURCE.index(GATE_START):]
-GATE = GATE[:GATE.index('\nif [ "$WDA_MARKER_REFRESH_ALLOWED" = "1" ]; then')]
+GATE = GATE[:GATE.index('\nSUPERVISOR_HANDOFF_COMPLETE=1\n')]
 GATE = 'if [ "$DAEMON_HTTP_READY" = "1" ]; then\n' + GATE + '\n'
 
 # A real v0.6.2 body, trimmed to the fields the verdict reads plus decoys.
@@ -99,7 +99,7 @@ class GateTests(unittest.TestCase):
     def test_locked_phone_passes_after_grace_with_a_hint(self):
         code, log = self.run_gate([status(), status(wda=True, wda_locked=True)] + [status(wda=True, wda_locked=True)] * 10)
         self.assertEqual(code, 0, log)
-        self.assertIn('ok: daemon product status verified: WDA reachable through the relays', log)
+        self.assertIn('ok: daemon product status verified: device runner reachable through the relays', log)
         self.assertTrue(any(line.startswith('warn: the iPhone is locked') for line in log), log)
         self.assertIn('tries=4 verdict=reachable ready=1', log)  # 1 down + 3 reachable (grace)
         self.assertFalse(any(line.startswith('die:') for line in log), log)
@@ -114,7 +114,7 @@ class GateTests(unittest.TestCase):
     def test_unreachable_wda_still_fails_closed(self):
         code, log = self.run_gate([status()] * 6)
         self.assertEqual(code, 1, log)
-        self.assertIn('status: daemon-fail wda daemon never reached WDA after verified WDA handoff', log)
+        self.assertIn('status: daemon-fail wda daemon never reached the device runner after a verified handoff', log)
         self.assertTrue(any(line.startswith('die:') and 'wda=true within 3s' in line for line in log), log)
 
     def test_reachable_unlocked_but_not_actionable_warns_without_locked_hint(self):

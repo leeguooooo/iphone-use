@@ -12,7 +12,8 @@ import unittest
 SOURCE = (Path(__file__).parent / 'setup-wda.sh').read_text()
 HELPERS = SOURCE.split('# BEGIN runner product validation.', 1)[1].split('# END runner product validation.', 1)[0]
 HELPERS += SOURCE.split('# BEGIN ASC signing helpers.', 1)[1].split('# END ASC signing helpers.', 1)[0]
-HELPERS += '\n_safe_expected() {' + SOURCE.split('\n_safe_expected() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
+for _name in ('_safe_expected', '_resolve_xctestrun', '_valid_os_version'):
+    HELPERS += '\n' + _name + '() {' + SOURCE.split('\n' + _name + '() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
 
 
 def create_runner(app, poison=False):
@@ -46,9 +47,11 @@ class ProductTests(unittest.TestCase):
         harness = self.root / 'run.sh'
         harness.write_text('''set -eu
 . "$HELPERS"
-WDA_RUNNER_NAME=iPhoneUse
-WDA_ICON_BUILD_LOCKED=0
+RUNNER_APP_NAME=iPhoneUse-Runner.app
+RUNNER_PRODUCTS_DIR="$PRODUCTS"
+RUNNER_BUILD_LOCKED=0
 WDA_RUNNER_REPAIR_ATTEMPTED="$REPAIR_USED"
+_ios_sdk_version() { return 1; }
 _setstatus() { printf '%s\\n' "$*" >> "$STATUS_LOG"; }
 warn() { printf '%s\\n' "$*"; }
 # Signature verification deliberately succeeds even for an empty framework,
@@ -127,20 +130,51 @@ _run_runner_prebuild() {
         self.assertTrue((self.app / 'Info.plist').is_file())
         self.assertTrue(link.is_symlink())
 
-    def test_plain_path_runs_structure_validation(self):
+    def test_launch_path_builds_validates_and_picks_the_xctestrun(self):
         (self.app / 'Frameworks/Testing.framework/Info.plist').unlink()
+        (self.products.parent / 'IPhoneUseRunner_iphoneos27.0-arm64.xctestrun').write_text('plist')
         body = '''STATE_DIR="$(dirname "$LOG")"
-WDA_DIR="$PRODUCTS"
-WDA_UDID=test
-TEAM_ID=ABCDE12345
-WDA_BUNDLE_ID=com.example.wda
-fake_xcodebuild() { printf '[{"target":"WebDriverAgentRunner","buildSettings":{"BUILT_PRODUCTS_DIR":"%s"}}]' "$PRODUCTS"; }
-XCODEBUILD_BIN=fake_xcodebuild
 _ensure_launchable_runner
+printf '%s\\n' "$WDA_XCTESTRUN" "$RUNNER_BUILT_PRODUCTS" "$RUNNER_APP_PATH"
 '''
         result = self.run_shell(body)
         self.assertEqual(result.returncode, 0, result.stderr)
+        # The (incremental) build always runs first; it restored the product.
         self.assertEqual(self.calls.read_text().splitlines(), ['build'])
+        xctestrun, products, app = result.stdout.splitlines()[-3:]
+        self.assertEqual(xctestrun, str(self.products.parent / 'IPhoneUseRunner_iphoneos27.0-arm64.xctestrun'))
+        self.assertEqual(products, str(self.products))
+        self.assertEqual(app, str(self.app))
+
+    def test_launch_path_repairs_a_poisoned_build_once(self):
+        (self.products.parent / 'IPhoneUseRunner_iphoneos27.0-arm64.xctestrun').write_text('plist')
+        body = '''STATE_DIR="$(dirname "$LOG")"
+_ensure_launchable_runner
+'''
+        result = self.run_shell(body, poison=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls.read_text().splitlines(), ['build', 'build'])
+        self.assertIn('building-fail', self.status.read_text())
+
+    def test_ambiguous_xctestrun_is_not_launchable(self):
+        for sdk in ('26.5', '27.0'):
+            (self.products.parent / f'IPhoneUseRunner_iphoneos{sdk}-arm64.xctestrun').write_text('plist')
+        body = '''STATE_DIR="$(dirname "$LOG")"
+if _ensure_launchable_runner; then exit 99; fi
+printf '%s' "$WDA_RUNNER_VALIDATION_ERROR"
+'''
+        result = self.run_shell(body)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('unique .xctestrun', result.stdout)
+
+    def test_only_this_instances_products_dir_may_be_repaired(self):
+        other = self.root / 'other/Build/Products/Debug-iphoneos'
+        other_app = other / 'iPhoneUse-Runner.app'
+        create_runner(other_app, poison=True)
+        result = self.run_shell('_repair_runner_if_invalid "' + str(other) + '" "$APP" "$LOG"', app=other_app)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(other_app.exists())
+        self.assertFalse(self.calls.exists())
 
 
 if __name__ == '__main__':

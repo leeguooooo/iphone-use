@@ -45,7 +45,7 @@ t bash -n install.sh
 t bash scripts/test-install-release-transaction.sh
 t bash scripts/test-setup-wda-warp-preflight.sh
 t bash scripts/test-setup-wda-lock-backoff.sh
-t bash scripts/test-setup-wda-icon-injection.sh
+t bash scripts/test-setup-wda-runner-build.sh
 t bash scripts/test-setup-wda-probe-threshold.sh
 t python3 scripts/test-setup-wda-status.py
 t python3 scripts/test-setup-wda-runner-product.py

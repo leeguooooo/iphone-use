@@ -1,34 +1,42 @@
 #!/usr/bin/env bash
-# scripts/setup-wda.sh — one-command setup for the L2 element-tree layer (WDA).
+# scripts/setup-wda.sh — one-command setup for the device layer (the iphone-use
+# device runner).
 #
-# Builds Appium's WebDriverAgent, installs it on your iPhone, keeps it running,
-# starts a localhost relay, and points the iphone-use daemon at it. Encodes
-# every pitfall we hit validating this on hardware (see docs/wda-setup.html).
+# Builds the iphone-use device runner (runner/IPhoneUseRunner, an XCTest UI-test
+# bundle that serves the daemon's HTTP API on the phone's port 8100 and an MJPEG
+# stream on 9100), installs it on your iPhone, keeps it running, starts the
+# localhost relays, and points the iphone-use daemon at them. Encodes every
+# pitfall we hit validating this on hardware (see docs/wda-setup.html).
+#
+# The file keeps its name, its WDA_* environment variables, its launchd label and
+# its status file: the daemon, the installer and existing installs all address
+# the device layer through them.
 #
 # Usage:
 #   ./scripts/setup-wda.sh            # full setup (interactive prompts as needed)
-#   ./scripts/setup-wda.sh status     # is WDA + relay up?
-#   ./scripts/setup-wda.sh stop       # stop WDA runner + relay
+#   ./scripts/setup-wda.sh status     # is the runner + relay up?
+#   ./scripts/setup-wda.sh stop       # stop the runner + relays
 #   ./scripts/setup-wda.sh pause      # give the phone back; disable auto-restart
-#   ./scripts/setup-wda.sh resume     # re-enable the managed WDA supervisor
+#   ./scripts/setup-wda.sh resume     # re-enable the managed runner supervisor
+#   ./scripts/setup-wda.sh doctor     # read-only preflight checklist
 #   ./scripts/setup-wda.sh instance-context  # read-only: resolved paths/ports
 #
 # Env overrides:
-#   WDA_UDID=...        target device UDID (default: first xcodebuild iOS device)
+#   WDA_UDID=...        target device UDID (default: the one USB iPhone)
 #   WDA_TEAM_ID=...     Apple dev team (default: Xcode's last-selected team)
 #   WDA_ASC_KEY_PATH=... absolute .p8 path; with both IDs, use ASC API key signing
 #   WDA_ASC_KEY_ID=...  App Store Connect key ID (all three WDA_ASC_* required)
 #   WDA_ASC_ISSUER_ID=... App Store Connect issuer ID
 #   WDA_BUNDLE_ID=...   runner bundle id (default: derived from validated Team ID)
-#   WDA_DIR=...         WDA checkout    (default: ~/.iphone-use/WebDriverAgent)
-#   WDA_REF=...         exact upstream commit (default: pinned v9.15.3 commit)
-#   WDA_RUNNER_ICON=... runner icon: auto, none, or a local .png/.icns (default: auto)
-#   WDA_PORT=...        relay port      (default: 8100; named instances: derived)
+#   IPU_RUNNER_SRC=...  device runner sources (default: ~/.iphone-use/runner, laid
+#                       down by install.sh; a repo checkout uses its own runner/)
+#   WDA_PORT=...        control relay port (default: 8100; named instances: derived)
 #   MJPEG_PORT=...      video relay port (default: 9100; named instances: derived)
 #   PHONE_REMOTE_INSTANCE=... which daemon/phone pair (default: default). A named
-#                       instance keeps its state, checkout, launchd labels and
-#                       ports apart and requires an explicit target UDID (#67).
-#   WDA_ALLOW_LAN=1     permit unauthenticated WDA over LAN (unsafe; default off)
+#                       instance keeps its state, build products, launchd labels
+#                       and ports apart and requires an explicit target UDID (#67).
+#   WDA_ALLOW_LAN=1     permit an unauthenticated LAN relay (unsafe; default off)
+#   WDA_RUNNER_REBUILD=1 ignore the recorded runner product and build again
 #
 # Requirements: Xcode (an Apple ID in Settings → Accounts, or WDA_ASC_* signing),
 # the iPhone paired + Developer Mode on, and `iproxy` for the default USB relay.
@@ -265,13 +273,18 @@ _instance_check_bindings() {
 _instance_resolve
 # END instance context.
 
-WDA_CHECKOUT_MARKER="$STATE_DIR/wda-checkout-owner.v1"
 RUN_LOG="$STATE_DIR/wda-runner.log"
 RUNNER_PID_FILE="$STATE_DIR/wda-runner.pid"
 RELAY_PID_FILE="$STATE_DIR/wda-relay.pid"
-WDA_REPO="https://github.com/appium/WebDriverAgent.git"
-DEFAULT_WDA_REF="54f9fc702b5ba40249017a4b9bf48c69b757389b"
-DEFAULT_WDA_REF_TAG="v9.15.3"
+# The device runner: one UI-test bundle, built with build-for-testing and run with
+# test-without-building. Products live under this instance's state directory, so
+# instances never share (or invalidate) each other's build.
+RUNNER_SCHEME="IPhoneUseRunner"
+RUNNER_TEST_ID="IPhoneUseRunnerUITests/RunnerTests/testServe"
+RUNNER_APP_NAME="iPhoneUse-Runner.app"
+RUNNER_DERIVED_DATA="$STATE_DIR/runner-build"
+RUNNER_PRODUCTS_DIR="$RUNNER_DERIVED_DATA/Build/Products/Debug-iphoneos"
+RUNNER_DEFAULT_SRC="$HOME/.iphone-use/runner"
 WDA_AGENT_PLIST="$HOME/Library/LaunchAgents/$WDA_AGENT_LABEL.plist"
 WDA_AGENT_LOG="$STATE_DIR/wda-agent.log"
 WDA_RETRY_STATE="$STATE_DIR/wda-retry-state.v1"
@@ -280,18 +293,10 @@ DAEMON_PLIST="$HOME/Library/LaunchAgents/$DAEMON_LABEL.plist"
 DAEMON_ROLLBACK_PLIST="$STATE_DIR/daemon.rollback.$$.plist"
 UID_NUM="$(id -u)"
 GUI_DOMAIN="gui/$UID_NUM"
-WDA_CHECKOUT_CREATED_THIS_RUN=0
-WDA_MARKER_REFRESH_ALLOWED=0
-WDA_CANONICAL_DIR=""
-SHASUM_BIN="$(command -v shasum 2>/dev/null || true)"
-WDA_ICON_WORK_DIR=""
-WDA_ICON_PRODUCTS_DIR=""
-WDA_ICON_APP_PATH=""
-WDA_ICON_BACKUP_PATH=""
-WDA_ICON_MUTATION_ACTIVE=0
-WDA_RUNNER_ICON_INJECTED=0
-WDA_ICON_BUILD_LOCKED=0
-WDA_BUILT_SDK_VERSION=""
+RUNNER_BUILT_PRODUCTS=""
+RUNNER_APP_PATH=""
+RUNNER_BUILD_LOCKED=0
+RUNNER_SOURCE_HASH=""
 WDA_RUNNER_REPAIR_ATTEMPTED=0
 WDA_RUNNER_VALIDATION_ERROR=""
 KEEPALIVE_ATTEMPT_ACTIVE=0
@@ -322,11 +327,34 @@ _port_from_daemon_url() {
 }
 
 # Preserve setup-owned supervisor policy on a plain rerun. Precedence is:
-# explicit environment > existing WDA supervisor > daemon endpoint > default.
-# A named instance has its own checkout, so its DerivedData (keyed by project
-# path) never mixes with another instance's build.
+# explicit environment > existing runner supervisor > daemon endpoint > default.
+#
+# WDA_DIR names the WebDriverAgent checkout that releases before the device
+# runner built from. Nothing is built from it any more; it is kept only so a
+# PID-only record from such a release can still be matched against its cwd.
 WDA_DIR="${WDA_DIR:-$(_existing_wda_env WDA_DIR)}"
 WDA_DIR="${WDA_DIR:-$STATE_DIR/WebDriverAgent}"
+
+# Device runner sources. Explicit > persisted in the supervisor > the runner/
+# directory of the repo checkout this script was started from > the copy
+# install.sh lays down. The installed copy of this script never looks next to
+# itself, so ~/.iphone-use cannot be mistaken for a repo.
+_runner_repo_src() {
+    local self_dir repo
+    self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || return 1
+    case "$self_dir" in
+        "$HOME/.iphone-use"|"$HOME/.iphone-use/"*) return 1 ;;
+    esac
+    repo="$(cd "$self_dir/.." 2>/dev/null && pwd)" || return 1
+    [ -f "$repo/runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj/project.pbxproj" ] \
+        && [ -d "$repo/crates/server" ] || return 1
+    printf '%s\n' "$repo/runner"
+}
+RUNNER_SRC="${IPU_RUNNER_SRC:-$(_existing_wda_env IPU_RUNNER_SRC)}"
+[ -n "$RUNNER_SRC" ] || RUNNER_SRC="$(_runner_repo_src || true)"
+RUNNER_SRC="${RUNNER_SRC:-$RUNNER_DEFAULT_SRC}"
+RUNNER_SRC="${RUNNER_SRC%/}"
+RUNNER_PROJECT="$RUNNER_SRC/IPhoneUseRunner/IPhoneUseRunner.xcodeproj"
 WDA_PORT="${WDA_PORT:-$(_existing_wda_env WDA_PORT)}"
 WDA_PORT="${WDA_PORT:-$(_port_from_daemon_url PHONE_REMOTE_WDA_URL)}"
 MJPEG_PORT="${MJPEG_PORT:-$(_existing_wda_env MJPEG_PORT)}"
@@ -363,7 +391,6 @@ fi
 if [ "$INSTANCE_NAME" != default ]; then
     WDA_BUNDLE_ID="${WDA_BUNDLE_ID:-$(_existing_daemon_env WDA_BUNDLE_ID)}"
     WDA_TEAM_ID="${WDA_TEAM_ID:-$(_existing_daemon_env WDA_TEAM_ID)}"
-    WDA_REF="${WDA_REF:-$(_existing_daemon_env WDA_REF)}"
     WDA_ALLOW_LAN="${WDA_ALLOW_LAN:-$(_existing_daemon_env WDA_ALLOW_LAN)}"
     if [ "${WDA_ASC_KEY_PATH:-}${WDA_ASC_KEY_ID:-}${WDA_ASC_ISSUER_ID:-}" = "" ]; then
         WDA_ASC_KEY_PATH="$(_existing_daemon_env WDA_ASC_KEY_PATH)"
@@ -371,30 +398,10 @@ if [ "$INSTANCE_NAME" != default ]; then
         WDA_ASC_ISSUER_ID="$(_existing_daemon_env WDA_ASC_ISSUER_ID)"
     fi
 fi
-WDA_REF="${WDA_REF:-$(_existing_wda_env WDA_REF)}"
-WDA_REF="${WDA_REF:-$DEFAULT_WDA_REF}"
-if [ "$WDA_REF" = "$DEFAULT_WDA_REF" ]; then
-    WDA_REF_LABEL="$DEFAULT_WDA_REF_TAG"
-else
-    WDA_REF_LABEL="custom pin"
-fi
-# Home-screen name of the XCUITest runner app that gets installed on the phone.
-# Upstream leaves it as "WebDriverAgentRunner-Runner", which shows up on the
-# user's device as an unexplained blank-icon app (issue #64). Xcode derives the
-# runner's CFBundleName from the test target's PRODUCT_NAME, so renaming that
-# target — and ONLY that target, in the checked-out project — relabels it.
-# Set to an empty string to keep upstream's name.
-WDA_RUNNER_NAME="${WDA_RUNNER_NAME:-iPhoneUse}"
-case "$WDA_RUNNER_NAME" in
-    ''|*[!A-Za-z0-9_-]*)
-        [ -z "$WDA_RUNNER_NAME" ] || die "WDA_RUNNER_NAME must be ASCII letters, digits, '_' or '-' (got '$WDA_RUNNER_NAME')" ;;
-esac
-# The XCUITest runner is synthesised by Xcode, so a normal target asset catalog
-# lands inside the nested .xctest instead of the home-screen .xctrunner app.
-# `auto` injects the already-installed iPhoneUse app icon after Xcode has built
-# that outer app; `none` preserves upstream's blank placeholder. A local PNG or
-# ICNS path allows callers to supply a different icon without editing WDA.
-WDA_RUNNER_ICON="${WDA_RUNNER_ICON:-auto}"
+# WDA_REF, WDA_RUNNER_NAME and WDA_RUNNER_ICON configured the WebDriverAgent
+# build this script no longer makes. A supervisor plist written by an older
+# release may still carry them; they are read by nothing and dropped on the
+# next supervisor install.
 WDA_ALLOW_LAN="${WDA_ALLOW_LAN:-$(_existing_wda_env WDA_ALLOW_LAN)}"
 WDA_ALLOW_LAN="${WDA_ALLOW_LAN:-0}"
 WDA_UDID="${WDA_UDID:-${PHONE_REMOTE_UDID:-}}"
@@ -432,6 +439,7 @@ if [ "$COMMAND" = "instance-context" ]; then
     printf 'daemon_plist=%s\n' "$DAEMON_PLIST"
     printf 'wda_plist=%s\n' "$WDA_AGENT_PLIST"
     printf 'wda_dir=%s\n' "$WDA_DIR"
+    printf 'runner_src=%s\n' "$RUNNER_SRC"
     printf 'daemon_port=%s\n' "$INSTANCE_DAEMON_PORT"
     printf 'wda_port=%s\n' "$WDA_PORT"
     printf 'mjpeg_port=%s\n' "$MJPEG_PORT"
@@ -487,18 +495,23 @@ _wda_xcodebuild() {
     "$XCODEBUILD_BIN" "${XCODEBUILD_ARGS[@]}"
 }
 
+# The runner is always launched from its built product: build-for-testing
+# produced the .xctestrun, and test-without-building installs it as-is. This
+# argv is also the runner's process identity (see _runner_signature_valid).
 _prepare_runner_args() {
-    if [ -n "${WDA_XCTESTRUN:-}" ]; then
-        _prepare_xcodebuild_args -destination "platform=iOS,id=$WDA_UDID" \
-            test-without-building -xctestrun "$WDA_XCTESTRUN" || return 1
-    else
-        _prepare_xcodebuild_args -project WebDriverAgent.xcodeproj \
-            -scheme WebDriverAgentRunner -destination "platform=iOS,id=$WDA_UDID" \
-            -allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM_ID" \
-            PRODUCT_BUNDLE_IDENTIFIER="$WDA_BUNDLE_ID" test || return 1
-    fi
+    [ -n "${WDA_XCTESTRUN:-}" ] || return 1
+    _prepare_xcodebuild_args -destination "platform=iOS,id=$WDA_UDID" \
+        test-without-building -xctestrun "$WDA_XCTESTRUN" \
+        "-only-testing:$RUNNER_TEST_ID" || return 1
     RUNNER_ARGV=("${XCODEBUILD_ARGS[@]}")
     RUNNER_ARGS="${RUNNER_ARGV[*]}"
+}
+
+# Every build-time xcodebuild of the runner project: build-for-testing and the
+# destination listing. -derivedDataPath keeps products under STATE_DIR.
+_runner_xcodebuild() {
+    _wda_xcodebuild -project "$RUNNER_PROJECT" -scheme "$RUNNER_SCHEME" \
+        -derivedDataPath "$RUNNER_DERIVED_DATA" "$@"
 }
 
 _report_missing_xcode_account() {
@@ -509,88 +522,6 @@ _report_missing_xcode_account() {
    then rerun."
 }
 # END ASC signing helpers.
-
-_cleanup_wda_icon_work_dir() {
-    [ -n "${WDA_ICON_WORK_DIR:-}" ] || return 0
-    # Only remove the exact setup-owned mktemp shape below STATE_DIR. This can
-    # run from the global EXIT trap, so never trust a broader or partial path.
-    case "$WDA_ICON_WORK_DIR" in
-        "$STATE_DIR"/wda-runner-icon.*)
-            /bin/rm -rf -- "$WDA_ICON_WORK_DIR" 2>/dev/null || true
-            ;;
-        *)
-            warn "refusing to remove unexpected runner-icon work path: $WDA_ICON_WORK_DIR"
-            ;;
-    esac
-    WDA_ICON_WORK_DIR=""
-}
-
-_restore_wda_icon_app() {
-    [ "${WDA_ICON_MUTATION_ACTIVE:-0}" = "1" ] || return 0
-    # Mutation starts only after all three paths have been resolved and the
-    # pristine, signed runner has been copied. Revalidate their containment
-    # before removing anything, including during signal/EXIT cleanup.
-    case "${WDA_ICON_PRODUCTS_DIR:-}" in
-        /*/Build/Products/*) ;;
-        *) return 1 ;;
-    esac
-    case "${WDA_ICON_APP_PATH:-}" in
-        "$WDA_ICON_PRODUCTS_DIR"/*-Runner.app) ;;
-        *) return 1 ;;
-    esac
-    [ "${WDA_ICON_BACKUP_PATH:-}" = "$WDA_ICON_WORK_DIR/original.app" ] \
-        && [ -d "$WDA_ICON_BACKUP_PATH" ] || return 1
-
-    /bin/rm -rf -- "$WDA_ICON_APP_PATH" 2>/dev/null || return 1
-    if /usr/bin/ditto "$WDA_ICON_BACKUP_PATH" "$WDA_ICON_APP_PATH" 2>/dev/null \
-        && codesign --verify --deep --strict "$WDA_ICON_APP_PATH" 2>/dev/null; then
-        WDA_ICON_MUTATION_ACTIVE=0
-        return 0
-    fi
-
-    # A missing build product is safe: the unchanged `xcodebuild ... test`
-    # below will rebuild it. A half-restored, invalidly signed product is not.
-    /bin/rm -rf -- "$WDA_ICON_APP_PATH" 2>/dev/null || true
-    WDA_ICON_MUTATION_ACTIVE=0
-    return 1
-}
-
-# Drop an icon-injected runner so the next xcodebuild step rebuilds a pristine,
-# Xcode-signed one. Used after a successful injection (its pristine backup is
-# already gone, so restore is impossible) when the product cannot be launched
-# with `test-without-building`: the plain `test` action would re-emplace the
-# hand-signed bundle's Info.plist and poison the next round (#75). Same
-# containment guard as _restore_wda_icon_app; anything else fails closed.
-_discard_injected_runner() {
-    [ "${WDA_RUNNER_ICON_INJECTED:-0}" = "1" ] || return 0
-    case "${WDA_ICON_PRODUCTS_DIR:-}" in
-        /*/Build/Products/*) ;;
-        *) return 1 ;;
-    esac
-    case "${WDA_ICON_APP_PATH:-}" in
-        "$WDA_ICON_PRODUCTS_DIR"/*-Runner.app) ;;
-        *) return 1 ;;
-    esac
-    [ -L "$WDA_ICON_APP_PATH" ] && return 1
-    /bin/rm -rf -- "$WDA_ICON_APP_PATH" 2>/dev/null || return 1
-    WDA_RUNNER_ICON_INJECTED=0
-    return 0
-}
-
-# An earlier round's injected runner is not a valid incremental-build input:
-# build-for-testing over it re-emplaces Info.plist without re-signing, and the
-# product fails validation ("invalid Info.plist (plist or signature have been
-# modified)"), costing a second, repair build every round (#75). Start the
-# prebuild from a pristine baseline instead: drop the app when it carries the
-# injected icon. A non-injected product is left alone for the incremental build.
-_discard_previous_injection() {
-    local products="$1" app="$2"
-    [ -e "$app/AppIcon60x60@2x.png" ] || return 0
-    WDA_ICON_PRODUCTS_DIR="$products"
-    WDA_ICON_APP_PATH="$app"
-    WDA_RUNNER_ICON_INJECTED=1
-    _discard_injected_runner
-}
 
 if [ "$COMMAND" = "setup" ]; then
     mkdir -p "$STATE_DIR"
@@ -688,7 +619,7 @@ _runner_log_shows_automation_mode_disabled() {
 
 _report_automation_mode_disabled() {
     _setstatus building-fail automation_mode_disabled "$AUTOMATION_MODE_HINT"
-    die "iOS did not enable UI automation for the WDA runner — $AUTOMATION_MODE_HINT, then rerun setup (KeepAlive retries on its own). Log: $RUN_LOG"
+    die "iOS did not enable UI automation for the device runner — $AUTOMATION_MODE_HINT, then rerun setup (KeepAlive retries on its own). Log: $RUN_LOG"
 }
 
 _exponential_retry_delay() {
@@ -783,9 +714,9 @@ _record_keepalive_failure() {
             # made both the daemon hint and the web client tell the operator
             # to read logs and re-run setup for a state that clears by
             # unlocking the phone.
-            _setstatus lock-backoff locked "lock screen blocked WDA; next quiet retry in ${delay}s"
+            _setstatus lock-backoff locked "lock screen blocked the device runner; next quiet retry in ${delay}s"
             if [ "$previous_kind" != "locked" ]; then
-                warn "iPhone lock screen blocked WDA; retrying quietly every 5s to 1min until it is unlocked"
+                warn "iPhone lock screen blocked the device runner; retrying quietly every 5s to 1min until it is unlocked"
             fi
         else
             warn "KeepAlive rebuild failed; next retry in ${delay}s (failure $attempt)"
@@ -1023,52 +954,11 @@ _valid_bundle_id() {
         | LC_ALL=C grep -Eq '^[A-Za-z0-9]+([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]+([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
 }
 
-_valid_wda_ref() {
-    [ "${#1}" -eq 40 ] || return 1
-    case "$1" in
-        *[!0123456789ABCDEFabcdef]*) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
 _valid_port() {
     case "$1" in
         ''|*[!0-9]*) return 1 ;;
     esac
     [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null
-}
-
-_sha256_text() {
-    local value="$1"
-    local output
-    [ -n "$SHASUM_BIN" ] && [ -x "$SHASUM_BIN" ] || return 1
-    output="$(printf '%s' "$value" | "$SHASUM_BIN" -a 256 2>/dev/null)" || return 1
-    output="${output%% *}"
-    [ "${#output}" -eq 64 ] || return 1
-    case "$output" in
-        *[!0-9a-f]*) return 1 ;;
-    esac
-    printf '%s\n' "$output"
-}
-
-_git_metadata_digests() {
-    local checkout="$1"
-    local refs reflog worktrees objects
-    refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$checkout" \
-        for-each-ref --format='%(refname) %(objectname)' 2>/dev/null)" || return 1
-    reflog="$(GIT_OPTIONAL_LOCKS=0 git -C "$checkout" \
-        reflog show --all --format='%H %gD %gs' 2>/dev/null)" || return 1
-    worktrees="$(GIT_OPTIONAL_LOCKS=0 git -C "$checkout" \
-        worktree list --porcelain 2>/dev/null)" || return 1
-    objects="$(GIT_OPTIONAL_LOCKS=0 git -C "$checkout" \
-        cat-file --batch-all-objects --batch-check='%(objectname)' 2>/dev/null)" \
-        || return 1
-    objects="$(printf '%s\n' "$objects" | LC_ALL=C sort)" || return 1
-    WDA_MARKER_REFS_DIGEST="$(_sha256_text "$refs")" || return 1
-    WDA_MARKER_REFLOG_DIGEST="$(_sha256_text "$reflog")" || return 1
-    WDA_MARKER_WORKTREES_DIGEST="$(_sha256_text "$worktrees")" || return 1
-    WDA_MARKER_OBJECTS_DIGEST="$(_sha256_text "$objects")" || return 1
-    return 0
 }
 
 _marker_file_secure() {
@@ -1079,88 +969,6 @@ _marker_file_secure() {
     owner="${metadata%%|*}"
     mode="${metadata#*|}"
     [ "$owner" = "$UID_NUM" ] && [ "$mode" = "600" ]
-}
-
-_existing_marker_matches_checkout() {
-    local checkout="$1"
-    local origin="$2"
-    local head="$3"
-    local marker="$WDA_CHECKOUT_MARKER"
-    local count version path marker_origin marker_head
-    local refs_digest reflog_digest worktrees_digest objects_digest
-    _marker_file_secure "$marker" || return 1
-    count="$(awk 'END { print NR }' "$marker" 2>/dev/null)" || return 1
-    [ "$count" = "9" ] || return 1
-    version="$(sed -n '1s/^version=//p' "$marker")"
-    path="$(sed -n '2s/^path=//p' "$marker")"
-    marker_origin="$(sed -n '3s/^origin=//p' "$marker")"
-    marker_head="$(sed -n '4s/^head=//p' "$marker")"
-    # The old UDID may legitimately differ when setup is moving the managed
-    # checkout to another explicitly selected phone. It is validated and
-    # rebound only after the new device path is fully proven.
-    case "$(sed -n '5s/^udid=//p' "$marker")" in
-        ''|*[!0-9A-Fa-f-]*) return 1 ;;
-    esac
-    refs_digest="$(sed -n '6s/^refs_sha256=//p' "$marker")"
-    reflog_digest="$(sed -n '7s/^reflog_sha256=//p' "$marker")"
-    worktrees_digest="$(sed -n '8s/^worktrees_sha256=//p' "$marker")"
-    objects_digest="$(sed -n '9s/^objects_sha256=//p' "$marker")"
-    [ "$version" = "1" ] \
-        && [ "$path" = "$checkout" ] \
-        && [ "$marker_origin" = "$origin" ] \
-        && [ "$(printf '%s' "$marker_head" | tr 'A-F' 'a-f')" \
-            = "$(printf '%s' "$head" | tr 'A-F' 'a-f')" ] \
-        || return 1
-    _git_metadata_digests "$checkout" || return 1
-    [ "$refs_digest" = "$WDA_MARKER_REFS_DIGEST" ] \
-        && [ "$reflog_digest" = "$WDA_MARKER_REFLOG_DIGEST" ] \
-        && [ "$worktrees_digest" = "$WDA_MARKER_WORKTREES_DIGEST" ] \
-        && [ "$objects_digest" = "$WDA_MARKER_OBJECTS_DIGEST" ]
-}
-
-_write_wda_checkout_marker() {
-    local canonical origin head tmp
-    [ "$WDA_MARKER_REFRESH_ALLOWED" = "1" ] || return 2
-    canonical="$(cd -P "$WDA_DIR" 2>/dev/null && pwd)" || return 1
-    case "$canonical" in
-        *$'\n'*|*$'\r'*) return 1 ;;
-    esac
-    origin="$(git -C "$canonical" config --get remote.origin.url 2>/dev/null || true)"
-    case "$origin" in
-        https://github.com/appium/WebDriverAgent|\
-        https://github.com/appium/WebDriverAgent.git|\
-        git@github.com:appium/WebDriverAgent.git|\
-        ssh://git@github.com/appium/WebDriverAgent.git)
-            ;;
-        *) return 1 ;;
-    esac
-    head="$(git -C "$canonical" rev-parse HEAD 2>/dev/null || true)"
-    [ "$(printf '%s' "$head" | tr 'A-F' 'a-f')" \
-        = "$(printf '%s' "$WDA_REF" | tr 'A-F' 'a-f')" ] || return 1
-    case "$WDA_UDID" in
-        ''|*[!0-9A-Fa-f-]*) return 1 ;;
-    esac
-    _git_metadata_digests "$canonical" || return 1
-    tmp="$(mktemp "$STATE_DIR/wda-checkout-owner.v1.new.XXXXXX")" || return 1
-    if printf '%s\n' \
-        "version=1" \
-        "path=$canonical" \
-        "origin=$origin" \
-        "head=$head" \
-        "udid=$WDA_UDID" \
-        "refs_sha256=$WDA_MARKER_REFS_DIGEST" \
-        "reflog_sha256=$WDA_MARKER_REFLOG_DIGEST" \
-        "worktrees_sha256=$WDA_MARKER_WORKTREES_DIGEST" \
-        "objects_sha256=$WDA_MARKER_OBJECTS_DIGEST" > "$tmp" \
-        && chmod 600 "$tmp" \
-        && mv -f "$tmp" "$WDA_CHECKOUT_MARKER" \
-        && _marker_file_secure "$WDA_CHECKOUT_MARKER" \
-        && _existing_marker_matches_checkout "$canonical" "$origin" "$head"; then
-        WDA_CANONICAL_DIR="$canonical"
-        return 0
-    fi
-    rm -f "$tmp"
-    return 1
 }
 
 # Resolve one signing identity for doctor, setup, and the persisted supervisor.
@@ -1188,18 +996,86 @@ _resolve_signing_identity() {
         SIGNING_ERROR="Invalid WDA_BUNDLE_ID '$WDA_BUNDLE_ID'. Use dot-separated ASCII letters, digits, dots, and hyphens only."
         return 1
     fi
-    if ! _valid_wda_ref "$WDA_REF"; then
-        SIGNING_ERROR="Invalid WDA_REF '$WDA_REF'. Pin one exact 40-character upstream commit SHA."
-        return 1
-    fi
-    WDA_REF="$(printf '%s' "$WDA_REF" | tr 'ABCDEF' 'abcdef')"
-    if [ "$WDA_REF" = "$DEFAULT_WDA_REF" ]; then
-        WDA_REF_LABEL="$DEFAULT_WDA_REF_TAG"
-    else
-        WDA_REF_LABEL="custom pin"
-    fi
     return 0
 }
+
+# BEGIN runner source helpers.
+# The sources are built (and their build scripts run) as this user, so they
+# must be this user's own files that nobody else can change.
+RUNNER_SOURCE_ERROR=""
+_runner_source_valid() {
+    local dir meta
+    RUNNER_SOURCE_ERROR=""
+    case "$RUNNER_SRC" in
+        /*) ;;
+        *) RUNNER_SOURCE_ERROR="IPU_RUNNER_SRC must be an absolute path (got '$RUNNER_SRC')"; return 1 ;;
+    esac
+    case "$RUNNER_SRC" in
+        *[[:space:]]*|*$'\n'*)
+            RUNNER_SOURCE_ERROR="the runner source path must not contain whitespace: $RUNNER_SRC"
+            return 1
+            ;;
+    esac
+    if [ ! -f "$RUNNER_PROJECT/project.pbxproj" ]; then
+        RUNNER_SOURCE_ERROR="device runner sources are missing: $RUNNER_PROJECT
+   Rerun the installer (it lays them down at $RUNNER_DEFAULT_SRC), or set
+   IPU_RUNNER_SRC=<repo>/runner when working from a checkout."
+        return 1
+    fi
+    for dir in "$RUNNER_SRC" "$RUNNER_SRC/IPhoneUseRunner"; do
+        if [ -L "$dir" ]; then
+            RUNNER_SOURCE_ERROR="refusing a symlinked runner source directory: $dir"
+            return 1
+        fi
+        meta="$(/usr/bin/stat -f '%u %Lp' "$dir" 2>/dev/null)" || {
+            RUNNER_SOURCE_ERROR="cannot inspect $dir"
+            return 1
+        }
+        if [ "${meta%% *}" != "$UID_NUM" ]; then
+            RUNNER_SOURCE_ERROR="runner sources are not owned by this user: $dir"
+            return 1
+        fi
+        case "${meta##* }" in
+            *[2367][0-7]|*[0-7][2367])
+                RUNNER_SOURCE_ERROR="runner sources are writable by other users: $dir"
+                return 1
+                ;;
+        esac
+    done
+    return 0
+}
+
+# Content hash of the runner sources: every regular file under IPhoneUseRunner
+# (Xcode's per-user state excluded), path and bytes, in sorted order. It keys
+# the product cache, so an upgraded runner is never mistaken for the old build.
+_runner_source_hash() {
+    python3 - "$RUNNER_SRC/IPhoneUseRunner" <<'PY_RUNNER_HASH'
+import hashlib
+import os
+import sys
+
+root = sys.argv[1]
+digest = hashlib.sha256()
+entries = []
+for directory, dirs, files in os.walk(root, followlinks=False):
+    dirs[:] = sorted(d for d in dirs if d != "xcuserdata" and not d.startswith("."))
+    for name in files:
+        if name.startswith("."):
+            continue
+        full = os.path.join(directory, name)
+        if os.path.islink(full) or not os.path.isfile(full):
+            continue
+        entries.append(os.path.relpath(full, root))
+if not entries:
+    raise SystemExit(1)
+for relative in sorted(entries):
+    digest.update(relative.encode() + b"\0")
+    with open(os.path.join(root, relative), "rb") as handle:
+        digest.update(hashlib.sha256(handle.read()).digest())
+print(digest.hexdigest())
+PY_RUNNER_HASH
+}
+# END runner source helpers.
 
 _wait_job_gone() {
     local label="$1"
@@ -1261,8 +1137,8 @@ _plist_set_env() {
     fi
 }
 
-# Install the same dedicated WDA supervisor used by POST /agent/mode. Keeping
-# setup-wda.sh in its own launchd job means daemon restarts cannot reap WDA, and
+# Install the same dedicated runner supervisor used by POST /agent/mode. Keeping
+# setup-wda.sh in its own launchd job means daemon restarts cannot reap the runner, and
 # KeepAlive can rebuild after sleep/USB/CoreDevice failures.
 _install_wda_supervisor() {
     local env_block=""
@@ -1276,7 +1152,7 @@ _install_wda_supervisor() {
 
     for key in \
         WDA_KEEPALIVE PATH WDA_UDID WDA_TEAM_ID WDA_BUNDLE_ID \
-        WDA_DIR WDA_REF WDA_RUNNER_ICON WDA_PORT MJPEG_PORT WDA_ALLOW_LAN \
+        IPU_RUNNER_SRC WDA_PORT MJPEG_PORT WDA_ALLOW_LAN \
         WDA_ASC_KEY_PATH WDA_ASC_KEY_ID WDA_ASC_ISSUER_ID \
         PHONE_REMOTE_INSTANCE PHONE_REMOTE_STATE_DIR
     do
@@ -1292,9 +1168,12 @@ _install_wda_supervisor() {
             WDA_UDID) value="$WDA_UDID" ;;
             WDA_TEAM_ID) value="$TEAM_ID" ;;
             WDA_BUNDLE_ID) value="$WDA_BUNDLE_ID" ;;
-            WDA_DIR) value="$WDA_DIR" ;;
-            WDA_REF) value="$WDA_REF" ;;
-            WDA_RUNNER_ICON) value="$WDA_RUNNER_ICON" ;;
+            # Only a non-default source is persisted, so an install keeps
+            # following the copy install.sh refreshes.
+            IPU_RUNNER_SRC)
+                [ "$RUNNER_SRC" != "$RUNNER_DEFAULT_SRC" ] || continue
+                value="$RUNNER_SRC"
+                ;;
             WDA_PORT) value="$WDA_PORT" ;;
             MJPEG_PORT) value="$MJPEG_PORT" ;;
             WDA_ALLOW_LAN) value="${WDA_ALLOW_LAN:-}" ;;
@@ -1335,41 +1214,41 @@ PLIST
     then
         rm -f "$WDA_AGENT_STAGED_PLIST"
         WDA_AGENT_STAGED_PLIST=""
-        warn "could not stage the WDA supervisor plist"
+        warn "could not stage the runner supervisor plist"
         return 1
     fi
     if ! chmod 600 "$WDA_AGENT_STAGED_PLIST" \
         || ! plutil -lint "$WDA_AGENT_STAGED_PLIST" >/dev/null 2>&1; then
         rm -f "$WDA_AGENT_STAGED_PLIST"
         WDA_AGENT_STAGED_PLIST=""
-        warn "generated WDA supervisor plist is invalid"
+        warn "generated runner supervisor plist is invalid"
         return 1
     fi
     if ! mv -f "$WDA_AGENT_STAGED_PLIST" "$WDA_AGENT_PLIST"; then
         rm -f "$WDA_AGENT_STAGED_PLIST"
         WDA_AGENT_STAGED_PLIST=""
-        warn "could not atomically install the WDA supervisor plist"
+        warn "could not atomically install the runner supervisor plist"
         return 1
     fi
     WDA_AGENT_STAGED_PLIST=""
 
     launchctl bootout "$GUI_DOMAIN/$WDA_AGENT_LABEL" 2>/dev/null || true
     if ! _wait_job_gone "$WDA_AGENT_LABEL"; then
-        warn "old WDA supervisor did not finish stopping"
+        warn "old runner supervisor did not finish stopping"
         return 1
     fi
-    # A prior installer may have persistently disabled the legacy WDA label.
+    # A prior installer may have persistently disabled the supervisor label.
     # Clear that policy before bootstrap; enabling afterward is too late.
     launchctl enable "$GUI_DOMAIN/$WDA_AGENT_LABEL" 2>/dev/null || true
     if ! launchctl bootstrap "$GUI_DOMAIN" "$WDA_AGENT_PLIST" 2>/dev/null; then
-        warn "could not bootstrap WDA supervisor: $WDA_AGENT_PLIST"
+        warn "could not bootstrap the runner supervisor: $WDA_AGENT_PLIST"
         return 1
     fi
     if launchctl print "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1; then
-        ok "WDA supervisor job loaded: $GUI_DOMAIN/$WDA_AGENT_LABEL"
+        ok "runner supervisor job loaded: $GUI_DOMAIN/$WDA_AGENT_LABEL"
         return 0
     fi
-    warn "launchctl accepted the WDA plist but the job is not visible"
+    warn "launchctl accepted the runner plist but the job is not visible"
     return 1
 }
 
@@ -1712,15 +1591,6 @@ _cleanup_on_exit() {
     local supervisor_restore_ok=1
     local daemon_restore_ok=1
     set +e
-    if [ "${WDA_ICON_MUTATION_ACTIVE:-0}" = "1" ]; then
-        warn "setup stopped during runner-icon injection — restoring the pristine signed app"
-        _restore_wda_icon_app || cleanup_failed=1
-    fi
-    if [ "${WDA_ICON_MUTATION_ACTIVE:-0}" != "1" ]; then
-        _cleanup_wda_icon_work_dir
-    else
-        warn "runner-icon recovery backup retained at: $WDA_ICON_BACKUP_PATH"
-    fi
     if [ "$status" -ne 0 ]; then
         if [ "${STARTED_MJPEG_RELAY:-0}" = "1" ]; then
             _stop_managed_process "$MJPEG_RELAY_PID_FILE" "$LEGACY_MJPEG_EXPECTED" mjpeg \
@@ -1757,12 +1627,12 @@ _cleanup_on_exit() {
     if [ "$status" -ne 0 ] \
         && [ "$SUPERVISOR_TRANSACTION_ACTIVE" = "1" ] \
         && [ "$SUPERVISOR_HANDOFF_COMPLETE" != "1" ]; then
-        warn "setup failed — restoring the prior WDA supervisor file and loaded state"
+        warn "setup failed — restoring the prior runner supervisor file and loaded state"
         launchctl bootout "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1 || true
         if ! _wait_job_gone "$WDA_AGENT_LABEL"; then
             supervisor_restore_ok=0
             cleanup_failed=1
-            warn "new WDA supervisor did not fully stop during rollback"
+            warn "new runner supervisor did not fully stop during rollback"
         fi
         if [ "$PREVIOUS_SUPERVISOR_PLIST_PRESENT" = "1" ]; then
             if ! _restore_backup_file "$WDA_AGENT_ROLLBACK_PLIST" \
@@ -1789,12 +1659,12 @@ _cleanup_on_exit() {
                     || ! launchctl print "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1; then
                     supervisor_restore_ok=0
                     cleanup_failed=1
-                    warn "prior WDA supervisor plist was restored, but its loaded state was not"
+                    warn "prior runner supervisor plist was restored, but its loaded state was not"
                 fi
             else
                 supervisor_restore_ok=0
                 cleanup_failed=1
-                warn "prior WDA supervisor was not restarted because its files were not fully restored"
+                warn "prior runner supervisor was not restarted because its files were not fully restored"
             fi
         fi
         _restore_job_policy "$WDA_AGENT_LABEL" "$PREVIOUS_SUPERVISOR_DISABLED" \
@@ -1889,7 +1759,7 @@ _warp_check() {
     fi
     _setstatus prereq warp "WARP is connected and breaks CoreDevice"
     die "$WARP_PREFLIGHT_ERROR
-   WARP would otherwise invalidate the just-verified WDA session and create a restart loop.
+   WARP would otherwise invalidate the just-verified runner session and create a restart loop.
    See docs/wda-setup.html pitfall (WARP)."
 }
 
@@ -1909,13 +1779,14 @@ if [ "${IPHONE_USE_INTERNAL_TEST_WARP_PREFLIGHT_ONLY:-0}" = "1" ]; then
 fi
 
 # BEGIN Xcode compatibility helpers.
-# Xcode 27 dropped iOS deployment targets below 15.0, while the pinned WDA
-# project still says 12.0, so `xcodebuild` refuses to build it at all. The
-# runner argv is an identity checked by `_runner_signature_valid` and
-# `_command_matches_expected`, so the fix must not add build settings to the
-# command line. Instead setup writes an xcconfig in the state directory and
-# exports XCODE_XCCONFIG_FILE, which every xcodebuild this script starts (and
-# the runner it leaves behind) inherits. The pinned checkout is not edited.
+# A future Xcode can drop iOS deployment targets the runner project still names
+# (Xcode 27 did exactly that to WebDriverAgent's 12.0), and `xcodebuild` then
+# refuses to build at all. The runner argv is an identity checked by
+# `_runner_signature_valid` and `_command_matches_expected`, so the fix must not
+# add build settings to the command line. Instead setup writes an xcconfig in
+# the state directory and exports XCODE_XCCONFIG_FILE, which every xcodebuild
+# this script starts (and the runner it leaves behind) inherits. The runner
+# sources are not edited.
 WDA_XCCONFIG_FILE="$STATE_DIR/wda-xcode-compat.xcconfig"
 WDA_DEPLOYMENT_TARGET_OVERRIDE=""
 WDA_IOS_SDK_VERSION=""
@@ -1972,9 +1843,10 @@ _ios_sdk_min_deployment_target() {
     [ -n "$minimum" ] && printf '%s\n' "$minimum"
 }
 
-# Prints "<lowest> <highest>" IPHONEOS_DEPLOYMENT_TARGET in the WDA project.
+# Prints "<lowest> <highest>" IPHONEOS_DEPLOYMENT_TARGET in the runner project
+# ($1 is the .xcodeproj).
 _wda_project_deployment_targets() {
-    local pbxproj="$1/WebDriverAgent.xcodeproj/project.pbxproj" value low="" high=""
+    local pbxproj="$1/project.pbxproj" value low="" high=""
     [ -f "$pbxproj" ] || return 1
     while IFS= read -r value; do
         _valid_os_version "$value" || continue
@@ -2010,7 +1882,7 @@ _wda_required_deployment_target() {
 _prepare_wda_xcconfig() {
     local target inherited="" tmp
     WDA_IOS_SDK_VERSION="$(_ios_sdk_version || true)"
-    target="$(_wda_required_deployment_target "$WDA_DIR")"
+    target="$(_wda_required_deployment_target "$RUNNER_PROJECT")"
     if [ -L "$WDA_XCCONFIG_FILE" ]; then
         warn "refusing to use a symlinked xcconfig: $WDA_XCCONFIG_FILE"
         return 1
@@ -2037,7 +1909,7 @@ _prepare_wda_xcconfig() {
     tmp="$(mktemp "$STATE_DIR/wda-xcode-compat.xcconfig.new.XXXXXX")" || return 1
     {
         printf '%s\n' "// Generated by setup-wda.sh on every run; edits are overwritten."
-        printf '%s\n' "// The selected Xcode rejects the pinned WDA project's iOS deployment target."
+        printf '%s\n' "// The selected Xcode rejects the runner project's iOS deployment target."
         [ -z "$inherited" ] || printf '#include? "%s"\n' "$inherited"
         printf 'IPHONEOS_DEPLOYMENT_TARGET = %s\n' "$target"
     } > "$tmp" || { rm -f "$tmp"; return 1; }
@@ -2049,21 +1921,16 @@ _prepare_wda_xcconfig() {
     export XCODE_XCCONFIG_FILE="$WDA_XCCONFIG_FILE"
 }
 
-# `xcodebuild test` regenerates the runner's Info.plist from the XCTRunner
-# template on every run that considers the product stale — it wipes the
-# injected icon keys AND does not re-sign, so installd rejects the bundle with
-# 0xe8008001 (hardware-verified: Info.plist was 180s newer than the signature).
-# `test-without-building` installs the already-built product as-is, so the
-# injection survives. Only used when an injection actually happened; without
-# one the original `test` argv is kept untouched.
+# The runner launches from its built product with `test-without-building
+# -xctestrun`, which installs the product as built (a plain `xcodebuild test`
+# would rebuild on every launch).
 #
 # xcodebuild names the file after the SDK it built against
-# (WebDriverAgentRunner_iphoneos27.0-arm64.xctestrun) and never deletes the
-# one an older Xcode left behind, so after an Xcode upgrade the directory holds
-# two. When there is more than one, take the one for the SDK this build used
-# ($2, from the build settings; else the selected SDK). Anything other than
-# exactly one match stays ambiguous and fails: the caller must then not run the
-# normal test action over a hand-signed bundle.
+# (IPhoneUseRunner_iphoneos27.0-arm64.xctestrun) and never deletes the one an
+# older Xcode left behind, so after an Xcode upgrade the directory holds two.
+# When there is more than one, take the one for the SDK this build used ($2;
+# else the selected SDK). Anything other than exactly one match stays ambiguous
+# and fails rather than launching a stale product.
 _resolve_xctestrun() {
     local products_dir="$1" sdk="${2:-}" parent match count
     [ -n "$products_dir" ] || return 1
@@ -2091,30 +1958,27 @@ _resolve_xctestrun() {
 # Read-only doctor checks for the two ways an Xcode upgrade wedged setup.
 _doctor_xcode_compat() {
     local fail=0 major minimum targets required current dir runs sdk matches name
-    local derived="$HOME/Library/Developer/Xcode/DerivedData"
     major="$(_xcode_major)"
     minimum="$(_ios_sdk_min_deployment_target || true)"
-    targets="$(_wda_project_deployment_targets "$WDA_DIR" || true)"
-    required="$(_wda_required_deployment_target "$WDA_DIR")"
+    targets="$(_wda_project_deployment_targets "$RUNNER_PROJECT" || true)"
+    required="$(_wda_required_deployment_target "$RUNNER_PROJECT")"
     if [ -n "$required" ]; then
         current=""
         if [ -f "$WDA_XCCONFIG_FILE" ] && [ ! -L "$WDA_XCCONFIG_FILE" ]; then
             current="$(sed -n 's/^IPHONEOS_DEPLOYMENT_TARGET = \([0-9.]*\)$/\1/p' "$WDA_XCCONFIG_FILE" | tail -1)"
         fi
         if [ -f "$SELF_INSTALL" ] && ! grep -q 'XCODE_XCCONFIG_FILE' "$SELF_INSTALL" 2>/dev/null; then
-            warn "X Xcode ${major:-?} supports iOS deployment targets from $minimum, but WDA sets ${targets%% *}; the installed $SELF_INSTALL predates the override, so KeepAlive builds fail. Rerun setup to install the fixed script"
+            warn "X Xcode ${major:-?} supports iOS deployment targets from $minimum, but the runner project sets ${targets%% *}; the installed $SELF_INSTALL predates the override, so KeepAlive builds fail. Rerun setup to install the fixed script"
             fail=1
         elif [ "$current" = "$required" ]; then
             ok "Xcode ${major:-?} deployment target override: IPHONEOS_DEPLOYMENT_TARGET = $required ($WDA_XCCONFIG_FILE)"
         else
-            warn "~ Xcode ${major:-?} supports iOS deployment targets from $minimum, but WDA sets ${targets%% *}; no override is in place yet. Setup writes $WDA_XCCONFIG_FILE (IPHONEOS_DEPLOYMENT_TARGET = $required) on its next run"
+            warn "~ Xcode ${major:-?} supports iOS deployment targets from $minimum, but the runner project sets ${targets%% *}; no override is in place yet. Setup writes $WDA_XCCONFIG_FILE (IPHONEOS_DEPLOYMENT_TARGET = $required) on its next run"
         fi
-    elif [ -n "$major" ] && [ "$major" -ge 27 ] && [ -z "$targets" ]; then
-        warn "~ Xcode $major requires iOS deployment target ${minimum:-15.0}+; the WDA checkout is not present yet, so setup will decide the override after checking it out"
     fi
 
     sdk="$(_ios_sdk_version || true)"
-    for dir in "$derived"/WebDriverAgent-*/Build/Products; do
+    for dir in "$RUNNER_DERIVED_DATA/Build/Products"; do
         [ -d "$dir" ] || continue
         runs="$(find "$dir" -maxdepth 1 -name '*.xctestrun' 2>/dev/null | sort)"
         [ "$(printf '%s' "$runs" | awk 'NF { c++ } END { print c + 0 }')" -gt 1 ] || continue
@@ -2130,7 +1994,7 @@ _doctor_xcode_compat() {
         if [ "$matches" = "1" ]; then
             printf '     %s\n' "setup uses the one for the current SDK (iphoneos$sdk); the others are stale and can be deleted"
         else
-            printf '     %s\n' "none is uniquely for the current SDK (${sdk:+iphoneos$sdk}); setup rebuilds the runner and skips the custom icon until the stale files are deleted"
+            printf '     %s\n' "none is uniquely for the current SDK (${sdk:+iphoneos$sdk}); setup cannot pick a product to launch until the stale files are deleted"
         fi
     done
     return $fail
@@ -2140,7 +2004,7 @@ _doctor_xcode_compat() {
 # One-shot preflight: report the FIRST blocker as a checklist instead of a blind
 # wait loop.  `setup-wda.sh doctor`
 cmd_doctor() {
-    info "WDA preflight"
+    info "Device runner preflight"
     local fail=0
     local xcode_version
     if [ -d "$STATE_DIR" ]; then
@@ -2163,10 +2027,25 @@ cmd_doctor() {
         else
             ok "Runner bundle ID: $WDA_BUNDLE_ID (explicit or persisted)"
         fi
-        ok "WDA source pin: $WDA_REF_LABEL $WDA_REF"
     else
         warn "X $SIGNING_ERROR"
         fail=1
+    fi
+    if _runner_source_valid; then
+        local source_hash
+        source_hash="$(_runner_source_hash 2>/dev/null || true)"
+        if [ -n "$source_hash" ]; then
+            ok "Device runner source: $RUNNER_SRC (sha256 ${source_hash:0:12})"
+        else
+            warn "X device runner sources could not be read: $RUNNER_SRC"
+            fail=1
+        fi
+    else
+        warn "X $RUNNER_SOURCE_ERROR"
+        fail=1
+    fi
+    if [ -d "$WDA_DIR/.git" ]; then
+        warn "~ a WebDriverAgent checkout from an earlier release is still at $WDA_DIR; nothing uses it any more (uninstall.sh removes it when it can prove ownership)"
     fi
     if _valid_port "$WDA_PORT" && _valid_port "$MJPEG_PORT" \
         && [ "$WDA_PORT" != "$MJPEG_PORT" ]; then
@@ -2193,7 +2072,7 @@ cmd_doctor() {
     usb="$(_usb_udids)"
     usb_count="$(printf '%s' "$usb" | wc -w | tr -d '[:space:]')"
     if [ "$WDA_ALLOW_LAN" = "0" ] && [ -z "$usb" ]; then
-        warn "X default Direct/WDA requires an iPhone connected over USB"
+        warn "X the default device layer requires an iPhone connected over USB"
         fail=1
     elif [ "$WDA_ALLOW_LAN" = "0" ] && [ "$usb_count" -gt 1 ] \
         && [ -z "${WDA_UDID:-}" ]; then
@@ -2224,7 +2103,7 @@ cmd_doctor() {
     fi
     if _valid_port "$WDA_PORT"; then
         curl -s -m 4 "http://127.0.0.1:$WDA_PORT/status" >/dev/null 2>&1 \
-            && ok "WDA already serving on 127.0.0.1:$WDA_PORT"
+            && ok "device runner already serving on 127.0.0.1:$WDA_PORT"
     fi
     if [ "$fail" = 0 ]; then
         ok "preflight checks passed; build, signing, device trust, and launch still require setup verification"
@@ -2331,12 +2210,17 @@ _expected_role_valid() {
 # The optional ASC suffix must be complete and in the order emitted by
 # _prepare_xcodebuild_args. Do not replace it with an arbitrary-arguments tail:
 # these signatures authorize signalling the recorded process.
+#
+# The first form is the device runner this script starts. The two
+# WebDriverAgent forms are what releases before it started; they stay
+# recognised so the first setup/stop/pause after an upgrade can still stop a
+# WDA runner the previous release left behind.
 _runner_signature_valid() {
     local asc_suffix
     _safe_expected "$1" || return 1
     asc_suffix=' -authenticationKeyPath /[^|[:cntrl:]]+\.p8 -authenticationKeyID [A-Za-z0-9]+ -authenticationKeyIssuerID [A-Za-z0-9-]+ -allowProvisioningDeviceRegistration'
     printf '%s\n' "$1" | LC_ALL=C grep -Eq \
-        "^(/[^ ]*/)?xcodebuild (-project WebDriverAgent\\.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=[0-9A-Fa-f-]+ -allowProvisioningUpdates DEVELOPMENT_TEAM=[A-Z0-9]{10} PRODUCT_BUNDLE_IDENTIFIER=[A-Za-z0-9.-]+ test($asc_suffix)?|-destination platform=iOS,id=[0-9A-Fa-f-]+ test-without-building -xctestrun /[^ ]+/WebDriverAgentRunner_[^ /]+\\.xctestrun( -allowProvisioningUpdates$asc_suffix)?)$"
+        "^(/[^ ]*/)?xcodebuild (-destination platform=iOS,id=[0-9A-Fa-f-]+ test-without-building -xctestrun /[^ ]+/IPhoneUseRunner_[^ /]+\\.xctestrun -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe( -allowProvisioningUpdates$asc_suffix)?|-project WebDriverAgent\\.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=[0-9A-Fa-f-]+ -allowProvisioningUpdates DEVELOPMENT_TEAM=[A-Z0-9]{10} PRODUCT_BUNDLE_IDENTIFIER=[A-Za-z0-9.-]+ test($asc_suffix)?|-destination platform=iOS,id=[0-9A-Fa-f-]+ test-without-building -xctestrun /[^ ]+/WebDriverAgentRunner_[^ /]+\\.xctestrun( -allowProvisioningUpdates$asc_suffix)?)$"
 }
 
 _command_matches_expected() {
@@ -2380,16 +2264,11 @@ _command_matches_expected() {
             # exact equality with the full command, including the key path.
             base_command="${command%% -authenticationKeyPath *}"
             base_command="${base_command% -allowProvisioningUpdates}"
+            # PID-only records predate the device runner: they name a
+            # WebDriverAgent runner in either of its two launch forms (the
+            # xctestrun form cannot be combined with -project/-scheme, so it
+            # shares only the destination with the `test` form).
             legacy_argv="xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=$target_udid -allowProvisioningUpdates DEVELOPMENT_TEAM=$team_id PRODUCT_BUNDLE_IDENTIFIER=$bundle_id"
-            # A runner started with an injected icon runs `test-without-building
-            # -xctestrun <path>` instead of `test`. Both are ours; anything else
-            # is not. Matching only `test` would leave `pause`/`stop` unable to
-            # recognise (and therefore unable to stop) an icon-carrying runner.
-            # A runner started with an injected icon runs the xctestrun form,
-            # which xcodebuild forbids combining with -project/-scheme — so it
-            # shares only the destination with the normal form. Both are ours;
-            # matching just one would leave `pause`/`stop` unable to recognise
-            # (and therefore unable to stop) the other.
             xctestrun_argv="xcodebuild -destination platform=iOS,id=$target_udid test-without-building -xctestrun"
             case "$base_command" in
                 "$legacy_argv test"|*/"$legacy_argv test") return 0 ;;
@@ -2663,7 +2542,7 @@ cmd_stop() {
         warn "setup state is not initialized at $STATE_DIR; there are no PID-owned processes to stop safely"
         return 1
     fi
-    info "Stopping the dedicated WDA supervisor and its managed processes"
+    info "Stopping the dedicated runner supervisor and its managed processes"
     launchctl bootout "$GUI_DOMAIN/$WDA_AGENT_LABEL" 2>/dev/null || true
     _wait_job_gone "$WDA_AGENT_LABEL" || failed=1
     _stop_managed_process "$RUNNER_PID_FILE" "$LEGACY_RUNNER_EXPECTED" runner || failed=1
@@ -2676,16 +2555,16 @@ cmd_stop() {
         warn "stop was not fully verified; no unowned process was killed"
         return 1
     fi
-    ok "WDA supervisor and all PID-verified managed processes stopped"
+    ok "runner supervisor and all PID-verified managed processes stopped"
 }
 
 cmd_pause() {
     local failed=0
     if [ ! -d "$STATE_DIR" ]; then
-        warn "setup state is not initialized at $STATE_DIR; there is no managed WDA stack to pause"
+        warn "setup state is not initialized at $STATE_DIR; there is no managed runner stack to pause"
         return 1
     fi
-    info "Pausing managed WDA and giving the phone back to the user"
+    info "Pausing the managed device runner and giving the phone back to the user"
     # Disable the exact launchd label before bootout so KeepAlive cannot race
     # the PID-verified shutdown. Never use pkill: another xcodebuild or relay
     # may belong to the user rather than this setup.
@@ -2705,7 +2584,7 @@ cmd_pause() {
         warn "pause was not fully verified; no process without a matching PID/argv record was killed"
         return 1
     fi
-    ok "WDA paused: supervisor disabled and all PID-verified runner/relay processes stopped"
+    ok "device runner paused: supervisor disabled and all PID-verified runner/relay processes stopped"
     printf '  Resume: %s resume\n' "$SELF_INSTALL"
 }
 
@@ -2717,7 +2596,7 @@ cmd_resume() {
     fi
     if ! _marker_file_secure "$WDA_AGENT_PLIST" \
         || ! plutil -lint "$WDA_AGENT_PLIST" >/dev/null 2>&1; then
-        warn "managed WDA supervisor plist is missing or unsafe: $WDA_AGENT_PLIST; run setup again"
+        warn "managed runner supervisor plist is missing or unsafe: $WDA_AGENT_PLIST; run setup again"
         return 1
     fi
     label="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$WDA_AGENT_PLIST" 2>/dev/null || true)"
@@ -2727,29 +2606,29 @@ cmd_resume() {
         || [ "$interpreter" != "/bin/bash" ] \
         || [ "$program" != "$SELF_INSTALL" ] \
         || [ ! -x "$SELF_INSTALL" ]; then
-        warn "managed WDA supervisor identity is not the expected setup helper; run setup again"
+        warn "managed runner supervisor identity is not the expected setup helper; run setup again"
         return 1
     fi
 
-    info "Resuming the managed WDA supervisor"
+    info "Resuming the managed runner supervisor"
     _reset_keepalive_retry || return 1
     if ! launchctl enable "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1; then
-        warn "could not enable the WDA supervisor"
+        warn "could not enable the runner supervisor"
         return 1
     fi
     if ! launchctl print "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1 \
         && ! launchctl bootstrap "$GUI_DOMAIN" "$WDA_AGENT_PLIST" >/dev/null 2>&1; then
         launchctl disable "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1 || true
-        warn "could not bootstrap the WDA supervisor; it remains paused"
+        warn "could not bootstrap the runner supervisor; it remains paused"
         return 1
     fi
     if [ "$(_job_disabled_state "$WDA_AGENT_LABEL" 2>/dev/null || true)" != "0" ] \
         || ! launchctl print "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1; then
         launchctl disable "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1 || true
-        warn "resume was not verified; the WDA supervisor remains paused"
+        warn "resume was not verified; the runner supervisor remains paused"
         return 1
     fi
-    ok "WDA resume requested; lock-screen failures will retry with quiet backoff"
+    ok "device runner resume requested; lock-screen failures will retry with quiet backoff"
     printf '  Status: %s status\n' "$SELF_INSTALL"
     printf '  Log   : %s\n' "$WDA_AGENT_LOG"
 }
@@ -2766,7 +2645,7 @@ cmd_status() {
         return 1
     fi
     if [ "$(_job_disabled_state "$WDA_AGENT_LABEL" 2>/dev/null || true)" = "1" ]; then
-        warn "WDA is paused; run $SELF_INSTALL resume before the next agent session"
+        warn "the device runner is paused; run $SELF_INSTALL resume before the next agent session"
         return 1
     fi
     if ! command -v lsof >/dev/null 2>&1; then
@@ -2774,15 +2653,15 @@ cmd_status() {
         return 1
     fi
     if launchctl print "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1; then
-        ok "WDA supervisor loaded: $GUI_DOMAIN/$WDA_AGENT_LABEL"
+        ok "runner supervisor loaded: $GUI_DOMAIN/$WDA_AGENT_LABEL"
     else
-        warn "WDA supervisor not loaded"
+        warn "runner supervisor not loaded"
         failed=1
     fi
     if _validate_pid_record "$RUNNER_PID_FILE" "$LEGACY_RUNNER_EXPECTED" runner; then
-        ok "PID-verified WDA runner alive: $VALIDATED_PID"
+        ok "PID-verified device runner alive: $VALIDATED_PID"
     else
-        warn "WDA runner PID record is absent, stale, or does not match its process"
+        warn "device runner PID record is absent, stale, or does not match its process"
         failed=1
     fi
     if _verify_loopback_listener "$RELAY_PID_FILE" "$LEGACY_RELAY_EXPECTED" relay "$WDA_PORT"; then
@@ -2798,9 +2677,9 @@ cmd_status() {
         failed=1
     fi
     if curl -fsS -m 4 "http://127.0.0.1:$WDA_PORT/status" >/dev/null 2>&1; then
-        ok "WDA /status reachable through the loopback relay"
+        ok "device runner /status reachable through the loopback relay"
     else
-        warn "WDA /status is not reachable"
+        warn "device runner /status is not reachable"
         failed=1
     fi
     return "$failed"
@@ -2824,24 +2703,24 @@ _status_begin_run || die "could not initialize the setup status owner"
 
 # A manual setup temporarily owns the lifecycle so an already-running KeepAlive
 # job cannot race its build or relays. A successful run installs and bootstraps
-# the same supervisor again after WDA has been proven reachable.
+# the same supervisor again after the runner has been proven reachable.
 if [ "${WDA_KEEPALIVE:-0}" != "1" ]; then
     SUPERVISOR_TRANSACTION_ACTIVE=1
     PREVIOUS_SUPERVISOR_DISABLED="$(_job_disabled_state "$WDA_AGENT_LABEL")" \
-        || die "could not snapshot the WDA supervisor's launchd disabled policy"
+        || die "could not snapshot the runner supervisor's launchd disabled policy"
     if [ -f "$WDA_AGENT_PLIST" ]; then
         PREVIOUS_SUPERVISOR_PLIST_PRESENT=1
         cp -p "$WDA_AGENT_PLIST" "$WDA_AGENT_ROLLBACK_PLIST" \
-            || die "could not save the existing WDA supervisor plist for rollback"
+            || die "could not save the existing runner supervisor plist for rollback"
     fi
     if launchctl print "$GUI_DOMAIN/$WDA_AGENT_LABEL" >/dev/null 2>&1; then
         [ "$PREVIOUS_SUPERVISOR_PLIST_PRESENT" = "1" ] \
-            || die "WDA supervisor is loaded but its plist is missing; refusing an unrecoverable handoff"
-        info "Pausing existing WDA supervisor for interactive setup"
+            || die "runner supervisor is loaded but its plist is missing; refusing an unrecoverable handoff"
+        info "Pausing the existing runner supervisor for interactive setup"
         PREVIOUS_SUPERVISOR_LOADED=1
         launchctl bootout "$GUI_DOMAIN/$WDA_AGENT_LABEL" 2>/dev/null || true
         _wait_job_gone "$WDA_AGENT_LABEL" \
-            || die "existing WDA supervisor did not stop; refusing to race it"
+            || die "existing runner supervisor did not stop; refusing to race it"
     fi
 fi
 
@@ -2878,7 +2757,6 @@ if ! _system_proxy_check; then
     _setstatus prereq proxy "macOS system proxy is enabled but unusable"
     die "$SYSTEM_PROXY_ERROR"
 fi
-command -v git >/dev/null 2>&1 || die "git is required to fetch the pinned WebDriverAgent source"
 command -v lsof >/dev/null 2>&1 || die "lsof is required to verify exclusive loopback relay ownership"
 XCODEBUILD_BIN="$(command -v xcodebuild || true)"
 [ -n "$XCODEBUILD_BIN" ] \
@@ -2902,7 +2780,6 @@ if [ "$BUNDLE_ID_DERIVED" = "1" ]; then
 else
     ok "Runner bundle ID: $WDA_BUNDLE_ID (explicit or persisted)"
 fi
-ok "WDA source pin: $WDA_REF_LABEL $WDA_REF"
 
 # ── 1. Resolve device ─────────────────────────────────────────────────────────
 info "Resolving target device"
@@ -2944,8 +2821,8 @@ fi
 if [ "$WDA_ALLOW_LAN" = "0" ]; then
     if [ -z "${WDA_UDID:-}" ]; then
         _setstatus prereq usb "no USB iPhone is connected"
-        die "Direct/WDA defaults to USB, but no USB iPhone was found.
-   Plug in and unlock one iPhone, or set WDA_UDID=<USB UDID>; no source was fetched or build started."
+        die "the device layer defaults to USB, but no USB iPhone was found.
+   Plug in and unlock one iPhone, or set WDA_UDID=<USB UDID>; no build was started."
     fi
     if ! _target_on_usb; then
         _setstatus prereq usb "the configured iPhone is not connected over USB"
@@ -2953,132 +2830,19 @@ if [ "$WDA_ALLOW_LAN" = "0" ]; then
    Plug in that iPhone, or set WDA_UDID to the exact USB-connected device; refusing a slow Wi-Fi fallback."
     fi
 elif [ -z "${WDA_UDID:-}" ]; then
-    warn "WDA_ALLOW_LAN=1: no USB target; paired destinations will be enumerated after the pinned checkout"
+    warn "WDA_ALLOW_LAN=1: no USB target; paired destinations will be enumerated from the runner project"
 fi
 _instance_check_bindings "$WDA_PORT" "$MJPEG_PORT" 2>&1 \
     || die "refusing to set up instance $INSTANCE_NAME (see above)"
 _setstatus prereq "" "prerequisites passed"
 
-# ── 2. Clone / update WDA ─────────────────────────────────────────────────────
-info "WebDriverAgent checkout"
-if [ -e "$WDA_DIR" ] && [ ! -d "$WDA_DIR/.git" ]; then
-    die "WDA_DIR exists but is not a Git checkout: $WDA_DIR
-   Move it aside or set WDA_DIR to an empty managed path; no files were overwritten."
-fi
-if [ ! -d "$WDA_DIR/.git" ]; then
-    # A no-checkout clone has an index at the remote HEAD but an empty worktree,
-    # so `git status` reports every tracked file as deleted. That made a clean
-    # first setup fail our dirty-check before it could select the pinned commit.
-    # Check out the clone normally; we still fetch and detach at the exact pin
-    # below before any project source is built or executed.
-    git clone --filter=blob:none "$WDA_REPO" "$WDA_DIR" \
-        || die "could not clone the official WebDriverAgent repository"
-    WDA_CHECKOUT_CREATED_THIS_RUN=1
-fi
-WDA_ORIGIN="$(git -C "$WDA_DIR" remote get-url origin 2>/dev/null || true)"
-case "$WDA_ORIGIN" in
-    https://github.com/appium/WebDriverAgent|https://github.com/appium/WebDriverAgent.git|\
-    git@github.com:appium/WebDriverAgent.git|ssh://git@github.com/appium/WebDriverAgent.git)
-        ;;
-    *)
-        die "refusing to fetch the WDA pin from unexpected origin '$WDA_ORIGIN'.
-   Expected the official appium/WebDriverAgent repository; use a separate WDA_DIR for custom forks."
-        ;;
-esac
-WDA_CANONICAL_DIR="$(cd -P "$WDA_DIR" 2>/dev/null && pwd)" \
-    || die "could not resolve the WDA checkout's canonical path"
-case "$WDA_CANONICAL_DIR" in
-    *$'\n'*|*$'\r'*) die "WDA_DIR contains unsafe newline characters" ;;
-esac
-WDA_PREUPDATE_HEAD="$(git -C "$WDA_DIR" rev-parse HEAD 2>/dev/null || true)"
-if [ "$WDA_CHECKOUT_CREATED_THIS_RUN" = "1" ]; then
-    WDA_MARKER_REFRESH_ALLOWED=1
-elif [ -n "$WDA_PREUPDATE_HEAD" ] \
-    && _existing_marker_matches_checkout \
-        "$WDA_CANONICAL_DIR" "$WDA_ORIGIN" "$WDA_PREUPDATE_HEAD"; then
-    WDA_MARKER_REFRESH_ALLOWED=1
-else
-    warn "This existing checkout has no matching setup ownership marker.
-   Setup will use it, but uninstall will preserve it rather than guessing ownership:
-   $WDA_CANONICAL_DIR"
-fi
-# The runner rename applied after the checkout (below) edits the tracked
-# project.pbxproj, which the guard immediately after this would refuse to
-# overwrite on every later run. Restore that one file when the ONLY thing
-# changed in it is our own PRODUCT_NAME swap, so re-runs work while any other
-# local edit is still reported and refused.
-_restore_runner_rename() {
-    _rrn_pbx='WebDriverAgent.xcodeproj/project.pbxproj'
-    [ -n "$WDA_RUNNER_NAME" ] || return 0
-    [ -n "$(git -C "$WDA_DIR" status --porcelain --untracked-files=no -- "$_rrn_pbx" 2>/dev/null)" ] || return 0
-    # Bail out (leave it dirty for the guard to report) if any changed line is
-    # something other than the exact swap we make.
-    if git -C "$WDA_DIR" diff -U0 -- "$_rrn_pbx" 2>/dev/null \
-        | grep -E '^[+-][^+-]' \
-        | grep -qvE '^\+[[:space:]]*PRODUCT_NAME = '"$WDA_RUNNER_NAME"';$|^-[[:space:]]*PRODUCT_NAME = "\$\(TARGET_NAME\)";$'; then
-        return 0
-    fi
-    git -C "$WDA_DIR" checkout -- "$_rrn_pbx" 2>/dev/null || true
-}
-_restore_runner_rename
-if ! WDA_TRACKED_CHANGES="$(git -C "$WDA_DIR" status --porcelain --untracked-files=no 2>/dev/null)"; then
-    die "could not inspect tracked changes in $WDA_DIR"
-fi
-if [ -n "$WDA_TRACKED_CHANGES" ]; then
-    printf '%s\n' "$WDA_TRACKED_CHANGES" | sed 's/^/    /' >&2
-    die "tracked changes exist in $WDA_DIR; refusing to overwrite them.
-   Commit, stash, or choose a separate WDA_DIR, then rerun."
-fi
-# Already holding the pinned commit (every reconnect after the first): no
-# network round trip, and a reconnect keeps working offline.
-if [ "$(git -C "$WDA_DIR" rev-parse --verify --quiet "$WDA_REF^{commit}" 2>/dev/null)" != "$WDA_REF" ]; then
-    git -C "$WDA_DIR" fetch --depth 1 origin "$WDA_REF" \
-        || die "could not fetch pinned WDA commit $WDA_REF ($WDA_REF_LABEL)"
-fi
-FETCHED_WDA_COMMIT="$(git -C "$WDA_DIR" rev-parse --verify "$WDA_REF^{commit}" 2>/dev/null || true)"
-[ "$FETCHED_WDA_COMMIT" = "$WDA_REF" ] \
-    || die "fetched WDA object did not resolve to the required commit $WDA_REF"
-git -C "$WDA_DIR" checkout --detach --quiet "$WDA_REF" \
-    || die "could not detach the WDA checkout at $WDA_REF; inspect untracked path conflicts"
-WDA_COMMIT="$(git -C "$WDA_DIR" rev-parse HEAD 2>/dev/null || true)"
-[ "$WDA_COMMIT" = "$WDA_REF" ] \
-    || die "WDA checkout verification failed: expected $WDA_REF, found ${WDA_COMMIT:-nothing}"
-WDA_COMMIT_SHORT="$(printf '%.12s' "$WDA_COMMIT")"
-ok "Pinned WDA source: $WDA_REF_LABEL $WDA_COMMIT_SHORT at $WDA_DIR"
-
-# Relabel the runner app that lands on the user's home screen (issue #64).
-# Xcode synthesises the runner as "<PRODUCT_NAME>-Runner" from its own template
-# and ignores the test target's Info.plist, so there is no plist lever —
-# hardware-verified: INFOPLIST_KEY_CFBundleDisplayName is NOT injected into the
-# generated .xctrunner. Patch ONLY the Runner target's build configurations,
-# identified by their INFOPLIST_FILE; passing PRODUCT_NAME= on the xcodebuild
-# command line instead would apply to every target and rename WebDriverAgentLib
-# — the build breakage warned about at the build step below. The bundle id and
-# the xcodebuild argv are untouched, so the runner identity checks still hold.
-if [ -n "$WDA_RUNNER_NAME" ]; then
-    if WDA_RUNNER_NAME="$WDA_RUNNER_NAME" python3 - "$WDA_DIR/WebDriverAgent.xcodeproj/project.pbxproj" <<'PY'
-import os, re, sys
-
-path = sys.argv[1]
-name = os.environ["WDA_RUNNER_NAME"]
-source = open(path).read()
-blocks = re.split(r'(?=\t\t[0-9A-F]{24} /\* (?:Debug|Release) \*/ = \{)', source)
-patched = 0
-for index, block in enumerate(blocks):
-    if ('INFOPLIST_FILE = WebDriverAgentRunner/Info.plist;' in block
-            and 'PRODUCT_NAME = "$(TARGET_NAME)";' in block):
-        blocks[index] = block.replace(
-            'PRODUCT_NAME = "$(TARGET_NAME)";', 'PRODUCT_NAME = %s;' % name)
-        patched += 1
-if patched:
-    open(path, 'w').write(''.join(blocks))
-PY
-    then
-        ok "Runner app installs as ${WDA_RUNNER_NAME}-Runner (set WDA_RUNNER_NAME= to keep upstream's name)"
-    else
-        die "could not relabel the WDA runner target in project.pbxproj"
-    fi
-fi
+# ── 2. Device runner source ──────────────────────────────────────────────────
+info "Device runner source"
+_runner_source_valid || { _setstatus prereq wda "device runner sources are missing or unsafe"; die "$RUNNER_SOURCE_ERROR"; }
+RUNNER_SOURCE_HASH="$(_runner_source_hash)" \
+    || { _setstatus prereq wda "device runner sources could not be read"; die "could not read the device runner sources in $RUNNER_SRC"; }
+ok "Device runner source: $RUNNER_SRC (sha256 ${RUNNER_SOURCE_HASH:0:12})"
+mkdir -p "$RUNNER_DERIVED_DATA" || die "could not create $RUNNER_DERIVED_DATA"
 
 # Must run before the first xcodebuild that reads the project (see the Xcode
 # compatibility helpers): the exported XCODE_XCCONFIG_FILE reaches every build,
@@ -3086,27 +2850,8 @@ fi
 _prepare_wda_xcconfig \
     || die "could not write the Xcode compatibility xcconfig at $WDA_XCCONFIG_FILE"
 if [ -n "$WDA_DEPLOYMENT_TARGET_OVERRIDE" ]; then
-    ok "iOS deployment target raised to $WDA_DEPLOYMENT_TARGET_OVERRIDE for this Xcode (via $WDA_XCCONFIG_FILE; checkout untouched)"
+    ok "iOS deployment target raised to $WDA_DEPLOYMENT_TARGET_OVERRIDE for this Xcode (via $WDA_XCCONFIG_FILE; sources untouched)"
 fi
-
-_runner_icon_fail() {
-    local reason="$1"
-    local recovery=""
-    if [ "${WDA_ICON_MUTATION_ACTIVE:-0}" = "1" ]; then
-        if _restore_wda_icon_app; then
-            recovery="; restored the pristine signed runner"
-        elif [ "${WDA_ICON_MUTATION_ACTIVE:-0}" = "1" ]; then
-            recovery="; automatic restore failed and the recovery backup was retained at $WDA_ICON_BACKUP_PATH"
-        else
-            recovery="; removed the invalid build product so xcodebuild can rebuild it"
-        fi
-    fi
-    if [ "${WDA_ICON_MUTATION_ACTIVE:-0}" != "1" ]; then
-        _cleanup_wda_icon_work_dir
-    fi
-    warn "Runner icon skipped: ${reason}${recovery}. WDA setup will continue without a custom icon."
-    return 1
-}
 
 # BEGIN runner product validation.
 _validate_runner_bundle() {
@@ -3166,21 +2911,22 @@ PY_RUNNER
     WDA_RUNNER_VALIDATION_ERROR=""
 }
 
+# One build-for-testing of the runner. A lock screen seen during the build is
+# not a build failure: RUNNER_BUILD_LOCKED hands it to the lock backoff.
 _run_runner_prebuild() {
     local build_log="$1"
-    _setstatus building "${_BUILD_BLOCKER:-}" "building WDA runner product"
+    _setstatus building "${_BUILD_BLOCKER:-}" "building the device runner"
     : > "$build_log"
     if ! (
-        cd "$WDA_DIR" || exit 1
-        _wda_xcodebuild -project WebDriverAgent.xcodeproj \
-            -scheme WebDriverAgentRunner \
+        cd "$STATE_DIR" || exit 1
+        _runner_xcodebuild \
             -destination "platform=iOS,id=$WDA_UDID" \
             -allowProvisioningUpdates \
             DEVELOPMENT_TEAM="$TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$WDA_BUNDLE_ID" \
             build-for-testing
     ) >>"$build_log" 2>&1; then
         if grep -Eiq 'Unlock iPhone to Continue|device is locked|deviceprep.*Code=-3|Code=-3.*deviceprep' "$build_log"; then
-            WDA_ICON_BUILD_LOCKED=1
+            RUNNER_BUILD_LOCKED=1
         fi
         WDA_RUNNER_VALIDATION_ERROR="build-for-testing failed (log: $build_log)"
         return 1
@@ -3199,10 +2945,11 @@ _repair_runner_if_invalid() {
         _setstatus building-fail wda "runner still invalid after one repair: $reason"
         return 1
     fi
-    # Only the current target's app, at the build-settings-derived products
-    # path, may be discarded. Never clean all DerivedData or follow an app link.
+    # Only this instance's own runner app, at its fixed products path, may be
+    # discarded. Never clean all of DerivedData or follow an app link.
     case "$products" in /*/Build/Products/*) ;; *) return 1 ;; esac
-    if [ "$app" != "$products/${WDA_RUNNER_NAME:-WebDriverAgentRunner}-Runner.app" ] \
+    if [ "$products" != "$RUNNER_PRODUCTS_DIR" ] \
+        || [ "$app" != "$products/$RUNNER_APP_NAME" ] \
         || [ -L "$app" ]; then
         WDA_RUNNER_VALIDATION_ERROR="refusing to remove an unowned runner product"
         return 1
@@ -3224,85 +2971,60 @@ PY_PRODUCT_PATH
     # Deleting the exact poisoned app also discards its .cstemp leftovers;
     # merely unlinking those files would leave missing framework contents.
     # The rebuild gets its own log: the failed build's log is the only record
-    # of which step produced the invalid product, and truncating it destroyed
-    # that evidence every round (#75).
+    # of which step produced the invalid product (#75).
     local repair_log="${build_log%.log}.repair.log"
     warn "Runner repair: keeping the failed build's log at $build_log; rebuild log at $repair_log"
     if ! _run_runner_prebuild "$repair_log" || ! _validate_runner_bundle "$app"; then
         _setstatus building-fail wda "runner repair failed: $WDA_RUNNER_VALIDATION_ERROR"
         return 1
     fi
-    WDA_RUNNER_ICON_INJECTED=0
-    WDA_XCTESTRUN=""
     _setstatus building "${_BUILD_BLOCKER:-}" "runner product rebuilt and verified"
 }
 
+# Build (incrementally) and verify the runner product, then pick its .xctestrun.
+# Sets RUNNER_BUILT_PRODUCTS, RUNNER_APP_PATH and WDA_XCTESTRUN on success.
 _ensure_launchable_runner() {
-    local products="${WDA_ICON_PRODUCTS_DIR:-}" settings app build_log
+    local products="$RUNNER_PRODUCTS_DIR" app build_log
     build_log="$STATE_DIR/wda-runner-product-build.log"
-    if [ -z "$products" ]; then
-        _setstatus building "${_BUILD_BLOCKER:-}" "resolving runner product before launch"
-        settings="$(
-            cd "$WDA_DIR" || exit 1
-            _wda_xcodebuild -project WebDriverAgent.xcodeproj \
-                -scheme WebDriverAgentRunner \
-                -destination "platform=iOS,id=$WDA_UDID" \
-                -allowProvisioningUpdates \
-                DEVELOPMENT_TEAM="$TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$WDA_BUNDLE_ID" \
-                -showBuildSettings -json 2>>"$build_log"
-        )" || { WDA_RUNNER_VALIDATION_ERROR="could not resolve runner build settings"; return 1; }
-        products="$(printf '%s' "$settings" | python3 -c '
-import json,sys
-records=json.load(sys.stdin)
-paths={r.get("buildSettings",{}).get("BUILT_PRODUCTS_DIR") for r in records if r.get("target")=="WebDriverAgentRunner"}
-paths.discard(None)
-if len(paths)!=1: raise SystemExit(1)
-print(paths.pop())
-')" || { WDA_RUNNER_VALIDATION_ERROR="ambiguous runner products directory"; return 1; }
-    fi
-    case "$products" in
-        /*/Build/Products/*) ;;
-        *) WDA_RUNNER_VALIDATION_ERROR="unexpected runner products path"; return 1 ;;
-    esac
-    app="$products/${WDA_RUNNER_NAME:-WebDriverAgentRunner}-Runner.app"
+    app="$products/$RUNNER_APP_NAME"
+    _run_runner_prebuild "$build_log" || return 1
     if [ ! -e "$app" ] && [ ! -L "$app" ]; then
-        _run_runner_prebuild "$build_log" || return 1
+        WDA_RUNNER_VALIDATION_ERROR="build-for-testing produced no $RUNNER_APP_NAME (log: $build_log)"
+        return 1
     fi
-    _repair_runner_if_invalid "$products" "$app" "$build_log"
+    _repair_runner_if_invalid "$products" "$app" "$build_log" || return 1
+    WDA_XCTESTRUN="$(_resolve_xctestrun "$products" "" || true)"
+    if [ -z "$WDA_XCTESTRUN" ]; then
+        WDA_RUNNER_VALIDATION_ERROR="could not resolve a unique .xctestrun next to $products (run doctor)"
+        return 1
+    fi
+    RUNNER_BUILT_PRODUCTS="$products"
+    RUNNER_APP_PATH="$app"
 }
 # END runner product validation.
 
 # BEGIN runner product cache.
-# A verified, icon-injected runner product is recorded before its launch
-# (its products dir + .xctestrun) so the next reconnect installs it as-is with
-# `test-without-building` instead of building twice. Before this, every
-# KeepAlive round ran build-for-testing, found the previous round's injected
-# product "invalid" (the incremental build re-emplaces Info.plist without
-# re-signing), deleted it, rebuilt, and injected the icon again — 20-40s of
-# xcodebuild per reconnect that the phone never needed.
+# A verified runner product is recorded before its launch (its products dir +
+# .xctestrun) so the next reconnect installs it as-is with
+# `test-without-building` instead of running build-for-testing again — even an
+# up-to-date incremental build costs xcodebuild seconds on every reconnect.
 #
-# The record is keyed on everything that changes the product: WDA commit,
-# bundle id, team, target device, the icon source + its content hash, and the Xcode /
-# SDK / deployment target it was built with. Any
-# mismatch, a missing file, or a product that no longer validates falls
-# through to the normal build. A launch that names a failure of the product
-# itself drops the record so the following round rebuilds from scratch.
+# The record is keyed on everything that changes the product: the runner
+# source hash, the signing identity (team, bundle id, ASC key or Xcode
+# account), the target device, and the Xcode / SDK / deployment target it was
+# built with. Any mismatch, a missing file, or a product that no longer
+# validates falls through to the normal build. A launch that names a failure of
+# the product itself drops the record so the following round rebuilds.
 WDA_RUNNER_CACHE="$STATE_DIR/wda-runner-product.json"
 WDA_RUNNER_FROM_CACHE=0
 
 _runner_cache_key() {
-    # The icon's content, not its mtime: every app install rewrites the same
-    # icon file, and keying on mtime made the first connect after each upgrade
-    # (nightly auto-update included) rebuild WDA from scratch.
-    local icon_hash=0
-    if [ -n "${RUNNER_ICON_SOURCE:-}" ] && [ -f "$RUNNER_ICON_SOURCE" ]; then
-        icon_hash="$(shasum -a 256 "$RUNNER_ICON_SOURCE" 2>/dev/null | cut -d' ' -f1)"
-        [ -n "$icon_hash" ] || icon_hash="mtime:$(stat -f %m "$RUNNER_ICON_SOURCE" 2>/dev/null || echo 0)"
+    local signer="account"
+    if _asc_signing_enabled; then
+        signer="asc:${WDA_ASC_KEY_ID:-}"
     fi
-    # The Xcode, SDK and deployment target override are part of the product:
-    # a product (and its .xctestrun) from before an Xcode upgrade is stale.
-    printf 'v2|%s|%s|%s|%s|%s|%s|%s|%s|%s' "${WDA_COMMIT:-}" "${WDA_BUNDLE_ID:-}" "${TEAM_ID:-}" \
-        "${WDA_UDID:-}" "${RUNNER_ICON_SOURCE:-}" "$icon_hash" "${XCODE_VERSION:-}" \
+    printf 'v3|%s|%s|%s|%s|%s|%s|%s|%s' "${RUNNER_SOURCE_HASH:-}" "${WDA_BUNDLE_ID:-}" \
+        "${TEAM_ID:-}" "$signer" "${WDA_UDID:-}" "${XCODE_VERSION:-}" \
         "${WDA_IOS_SDK_VERSION:-}" "${WDA_DEPLOYMENT_TARGET_OVERRIDE:-}"
 }
 
@@ -3314,15 +3036,15 @@ _runner_cache_drop() {
     rm -f "$WDA_RUNNER_CACHE"
 }
 
-# Record the product that just served. Atomic write; a symlinked path is
-# never followed.
+# Record the verified product. Atomic write; a symlinked path is never followed.
 _runner_cache_write() {
-    [ -n "${WDA_ICON_PRODUCTS_DIR:-}" ] && [ -n "${WDA_XCTESTRUN:-}" ] || return 1
+    [ -n "${RUNNER_BUILT_PRODUCTS:-}" ] && [ -n "${WDA_XCTESTRUN:-}" ] || return 1
+    [ -n "${RUNNER_SOURCE_HASH:-}" ] || return 1
     if [ -L "$WDA_RUNNER_CACHE" ]; then
         warn "refusing to write a symlinked runner cache record: $WDA_RUNNER_CACHE"
         return 1
     fi
-    python3 - "$WDA_RUNNER_CACHE" "$(_runner_cache_key)" "$WDA_ICON_PRODUCTS_DIR" "$WDA_XCTESTRUN" <<'PY_CACHE'
+    python3 - "$WDA_RUNNER_CACHE" "$(_runner_cache_key)" "$RUNNER_BUILT_PRODUCTS" "$WDA_XCTESTRUN" <<'PY_CACHE'
 import json, os, sys, tempfile, time
 path, key, products, xctestrun = sys.argv[1:]
 record = {"schema_version": 1, "key": key, "products_dir": products,
@@ -3336,13 +3058,14 @@ PY_CACHE
 }
 
 # Reuse the recorded product when it still matches and still validates.
-# On success sets WDA_ICON_PRODUCTS_DIR + WDA_XCTESTRUN and returns 0.
+# On success sets RUNNER_BUILT_PRODUCTS, RUNNER_APP_PATH and WDA_XCTESTRUN.
 _runner_cache_read() {
     local products xctestrun app
+    [ -n "${RUNNER_SOURCE_HASH:-}" ] || return 1
     [ -f "$WDA_RUNNER_CACHE" ] && [ ! -L "$WDA_RUNNER_CACHE" ] || return 1
-    products="$(python3 - "$WDA_RUNNER_CACHE" "$(_runner_cache_key)" <<'PY_CACHE'
-import json, sys
-path, key = sys.argv[1:]
+    products="$(python3 - "$WDA_RUNNER_CACHE" "$(_runner_cache_key)" "$RUNNER_PRODUCTS_DIR" <<'PY_CACHE'
+import json, posixpath, sys
+path, key, expected_products = sys.argv[1:]
 try:
     with open(path, encoding="utf-8") as handle:
         record = json.load(handle)
@@ -3353,20 +3076,15 @@ if record.get("schema_version") != 1 or record.get("key") != key:
 products, xctestrun = record.get("products_dir"), record.get("xctestrun")
 if not (isinstance(products, str) and isinstance(xctestrun, str)):
     raise SystemExit(1)
-if not products.startswith("/") or "/Build/Products/" not in products:
+# Only this instance's own products directory is ever reused.
+if products.rstrip("/") != expected_products.rstrip("/"):
     raise SystemExit(1)
-# xcodebuild writes the .xctestrun beside the configuration directory, not
-# inside it: .../Build/Products/X.xctestrun next to .../Build/Products/Debug-iphoneos.
-# `_resolve_xctestrun` looks in that parent, so accept either location and
-# keep both inside the same Build/Products tree.
-import posixpath
+if "/Build/Products/" not in products or not xctestrun.endswith(".xctestrun"):
+    raise SystemExit(1)
+# xcodebuild writes the .xctestrun beside the configuration directory:
+# .../Build/Products/X.xctestrun next to .../Build/Products/Debug-iphoneos.
 parent = posixpath.dirname(products.rstrip("/"))
-if not xctestrun.endswith(".xctestrun"):
-    raise SystemExit(1)
-if not (xctestrun.startswith(products.rstrip("/") + "/")
-        or xctestrun.startswith(parent + "/")):
-    raise SystemExit(1)
-if "/Build/Products/" not in xctestrun:
+if posixpath.dirname(xctestrun) != parent:
     raise SystemExit(1)
 print(products)
 print(xctestrun)
@@ -3374,13 +3092,13 @@ PY_CACHE
 )" || return 1
     xctestrun="${products#*$'\n'}"
     products="${products%%$'\n'*}"
-    [ -d "$products" ] && [ -f "$xctestrun" ] || return 1
-    app="$products/${WDA_RUNNER_NAME:-WebDriverAgentRunner}-Runner.app"
+    [ -d "$products" ] && [ -f "$xctestrun" ] && [ ! -L "$xctestrun" ] || return 1
+    app="$products/$RUNNER_APP_NAME"
     [ -d "$app" ] && [ ! -L "$app" ] || return 1
     _validate_runner_bundle "$app" || return 1
-    WDA_ICON_PRODUCTS_DIR="$products"
+    RUNNER_BUILT_PRODUCTS="$products"
+    RUNNER_APP_PATH="$app"
     WDA_XCTESTRUN="$xctestrun"
-    WDA_ICON_APP_PATH="$app"
     WDA_RUNNER_FROM_CACHE=1
     return 0
 }
@@ -3393,319 +3111,11 @@ _runner_log_shows_product_failure() {
 }
 # END runner product cache.
 
-_build_and_inject_runner_icon() {
-    local source="$1"
-    local extension icon_png iconset assets_catalog compiled partial_plist
-    local icon_dimensions has_alpha build_log build_settings products_dir
-    local runner_product signing_identity entitlements nested xctest_count
-
-    extension="$(printf '%s' "${source##*.}" | tr '[:upper:]' '[:lower:]')"
-    case "$extension" in
-        icns)
-            command -v iconutil >/dev/null 2>&1 \
-                || { _runner_icon_fail "iconutil is unavailable" || true; return 1; }
-            ;;
-        png) ;;
-        *)
-            _runner_icon_fail "WDA_RUNNER_ICON must name a .png or .icns file" || true
-            return 1
-            ;;
-    esac
-    command -v sips >/dev/null 2>&1 \
-        || { _runner_icon_fail "sips is unavailable" || true; return 1; }
-    command -v codesign >/dev/null 2>&1 \
-        || { _runner_icon_fail "codesign is unavailable" || true; return 1; }
-    [ -x /usr/bin/ditto ] \
-        || { _runner_icon_fail "/usr/bin/ditto is unavailable" || true; return 1; }
-    xcrun --find actool >/dev/null 2>&1 \
-        || { _runner_icon_fail "Xcode actool is unavailable" || true; return 1; }
-
-    WDA_ICON_WORK_DIR="$(mktemp -d "$STATE_DIR/wda-runner-icon.XXXXXX")" \
-        || { _runner_icon_fail "could not create a private icon work directory" || true; return 1; }
-    icon_png="$WDA_ICON_WORK_DIR/icon-1024.png"
-    assets_catalog="$WDA_ICON_WORK_DIR/Assets.xcassets"
-    compiled="$WDA_ICON_WORK_DIR/compiled"
-    partial_plist="$WDA_ICON_WORK_DIR/partial.plist"
-    mkdir -p "$assets_catalog/AppIcon.appiconset" "$compiled" \
-        || { _runner_icon_fail "could not prepare the asset catalog" || true; return 1; }
-
-    if [ "$extension" = "icns" ]; then
-        iconset="$WDA_ICON_WORK_DIR/source.iconset"
-        if ! iconutil -c iconset "$source" -o "$iconset" \
-            >"$WDA_ICON_WORK_DIR/iconutil.log" 2>&1 \
-            || [ ! -f "$iconset/icon_512x512@2x.png" ]; then
-            _runner_icon_fail "the ICNS has no usable 1024px representation" || true
-            return 1
-        fi
-        cp "$iconset/icon_512x512@2x.png" "$icon_png" \
-            || { _runner_icon_fail "could not stage the ICNS image" || true; return 1; }
-    elif ! sips -s format png -z 1024 1024 "$source" --out "$icon_png" \
-        >"$WDA_ICON_WORK_DIR/sips.log" 2>&1; then
-        _runner_icon_fail "the PNG could not be converted to 1024x1024" || true
-        return 1
-    fi
-
-    icon_dimensions="$(sips -g pixelWidth -g pixelHeight "$icon_png" 2>/dev/null \
-        | awk '/pixelWidth:/ { width=$2 } /pixelHeight:/ { height=$2 } END { printf "%sx%s", width, height }')"
-    if [ "$icon_dimensions" != "1024x1024" ]; then
-        _runner_icon_fail "the staged icon is $icon_dimensions instead of 1024x1024" || true
-        return 1
-    fi
-    has_alpha="$(sips -g hasAlpha "$icon_png" 2>/dev/null \
-        | awk '/hasAlpha:/ { print tolower($2); exit }')"
-    case "$has_alpha" in
-        yes|true)
-            # iOS rejects primary app icons with alpha. `actool` may still
-            # compile them, so flatten first instead of discovering this only
-            # after installation.
-            if ! sips --setProperty hasAlpha false "$icon_png" \
-                >>"$WDA_ICON_WORK_DIR/sips.log" 2>&1; then
-                _runner_icon_fail "the icon alpha channel could not be flattened" || true
-                return 1
-            fi
-            ;;
-    esac
-
-    cat > "$assets_catalog/AppIcon.appiconset/Contents.json" <<'JSON'
-{"images":[{"filename":"icon-1024.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}
-JSON
-    cp "$icon_png" "$assets_catalog/AppIcon.appiconset/icon-1024.png" \
-        || { _runner_icon_fail "could not populate the asset catalog" || true; return 1; }
-    if ! xcrun actool --compile "$compiled" --app-icon AppIcon \
-        --minimum-deployment-target 13.0 --platform iphoneos \
-        --target-device iphone --output-partial-info-plist "$partial_plist" \
-        "$assets_catalog" >"$WDA_ICON_WORK_DIR/actool.log" 2>&1; then
-        _runner_icon_fail "actool could not compile the runner icon" || true
-        return 1
-    fi
-    for nested in Assets.car AppIcon60x60@2x.png AppIcon76x76@2x~ipad.png; do
-        if [ ! -f "$compiled/$nested" ]; then
-            _runner_icon_fail "actool did not produce $nested" || true
-            return 1
-        fi
-    done
-    if [ ! -s "$partial_plist" ]; then
-        _runner_icon_fail "actool did not produce its partial Info.plist" || true
-        return 1
-    fi
-
-    # `xcodebuild ... test` builds, installs, and launches in one action, so
-    # there is otherwise no safe point to edit the synthesised .xctrunner app.
-    # A hardware-verified build-for-testing pass creates it first; the runner is
-    # then launched with `test-without-building -xctestrun`, which installs the
-    # already-built product as-is. The plain `test` action must NOT be used
-    # here: it re-emplaces the runner's Info.plist from the XCTRunner template
-    # without re-signing, which both drops the icon keys and breaks the seal
-    # (hardware-verified: installd rejects it with 0xe8008001).
-    build_log="$STATE_DIR/wda-runner-icon-build.log"
-    build_settings="$WDA_ICON_WORK_DIR/build-settings.json"
-    _setstatus building "${_BUILD_BLOCKER:-}" "resolving WDA build settings"
-    if ! (
-        cd "$WDA_DIR" || exit 1
-        _wda_xcodebuild -project WebDriverAgent.xcodeproj \
-            -scheme WebDriverAgentRunner \
-            -destination "platform=iOS,id=$WDA_UDID" \
-            -allowProvisioningUpdates \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            PRODUCT_BUNDLE_IDENTIFIER="$WDA_BUNDLE_ID" \
-            -showBuildSettings -json
-    ) >"$build_settings" 2>"$build_log"; then
-        _runner_icon_fail "could not resolve the built-products directory (log: $build_log)" || true
-        return 1
-    fi
-    products_dir="$(python3 - "$build_settings" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    records = json.load(handle)
-paths = {
-    record.get("buildSettings", {}).get("BUILT_PRODUCTS_DIR")
-    for record in records
-    if record.get("target") == "WebDriverAgentRunner"
-}
-paths.discard(None)
-if len(paths) != 1:
-    raise SystemExit(1)
-print(paths.pop())
-PY
-    )" || {
-        _runner_icon_fail "xcodebuild returned an ambiguous built-products directory" || true
-        return 1
-    }
-    case "$products_dir" in
-        /*/Build/Products/*) ;;
-        *)
-            _runner_icon_fail "xcodebuild returned an unexpected products path" || true
-            return 1
-            ;;
-    esac
-    # The SDK this build used picks the matching .xctestrun when an older
-    # Xcode left another one beside it (see _resolve_xctestrun).
-    WDA_BUILT_SDK_VERSION="$(python3 - "$build_settings" <<'PY_SDK'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    records = json.load(handle)
-versions = {
-    record.get("buildSettings", {}).get("SDK_VERSION")
-    for record in records
-    if record.get("target") == "WebDriverAgentRunner"
-}
-versions.discard(None)
-if len(versions) == 1:
-    print(versions.pop())
-PY_SDK
-    )" || WDA_BUILT_SDK_VERSION=""
-    # Resolved before the prebuild so the previous round's injected runner can
-    # be dropped first: building over it is what poisoned every KeepAlive
-    # round's product (#75). Build settings do not depend on a built product.
-    runner_product="${WDA_RUNNER_NAME:-WebDriverAgentRunner}-Runner.app"
-    if ! _discard_previous_injection "$products_dir" "$products_dir/$runner_product"; then
-        _runner_icon_fail "refusing to build over the previous round's injected runner, which could not be discarded" || true
-        return 1
-    fi
-    info "Prebuilding WDA so the runner icon can be injected before installation"
-    _setstatus building "${_BUILD_BLOCKER:-}" "prebuilding WDA for runner icon injection"
-    if ! (
-        cd "$WDA_DIR" || exit 1
-        _wda_xcodebuild -project WebDriverAgent.xcodeproj \
-            -scheme WebDriverAgentRunner \
-            -destination "platform=iOS,id=$WDA_UDID" \
-            -allowProvisioningUpdates \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            PRODUCT_BUNDLE_IDENTIFIER="$WDA_BUNDLE_ID" \
-            build-for-testing
-    ) >>"$build_log" 2>&1; then
-        if grep -Eiq 'Unlock iPhone to Continue|device is locked|deviceprep.*Code=-3|Code=-3.*deviceprep' \
-            "$build_log" 2>/dev/null; then
-            # Do not immediately run the guarded `test` action and prompt a
-            # second time in the same cycle. The caller records lock backoff.
-            WDA_ICON_BUILD_LOCKED=1
-            _cleanup_wda_icon_work_dir
-            return 1
-        fi
-        _runner_icon_fail "build-for-testing failed (log: $build_log)" || true
-        return 1
-    fi
-
-    WDA_ICON_PRODUCTS_DIR="$products_dir"
-    WDA_ICON_APP_PATH="$products_dir/$runner_product"
-    if [ ! -f "$WDA_ICON_APP_PATH/Info.plist" ] \
-        || [ ! -d "$WDA_ICON_APP_PATH/PlugIns" ]; then
-        _runner_icon_fail "the expected built runner is missing: $runner_product" || true
-        return 1
-    fi
-    if ! _repair_runner_if_invalid "$products_dir" "$WDA_ICON_APP_PATH" "$build_log"; then
-        _runner_icon_fail "$WDA_RUNNER_VALIDATION_ERROR" || true
-        return 1
-    fi
-    signing_identity="$(codesign -dvv "$WDA_ICON_APP_PATH" 2>&1 \
-        | sed -n 's/^Authority=//p' | head -1 || true)"
-    if [ -z "$signing_identity" ]; then
-        _runner_icon_fail "the runner signing identity could not be read" || true
-        return 1
-    fi
-    entitlements="$WDA_ICON_WORK_DIR/runner-entitlements.plist"
-    if ! codesign -d --entitlements - --xml "$WDA_ICON_APP_PATH" \
-        >"$entitlements" 2>>"$build_log" \
-        || [ ! -s "$entitlements" ] \
-        || ! plutil -lint "$entitlements" >/dev/null 2>&1; then
-        _runner_icon_fail "the runner entitlements could not be preserved" || true
-        return 1
-    fi
-
-    WDA_ICON_BACKUP_PATH="$WDA_ICON_WORK_DIR/original.app"
-    if ! /usr/bin/ditto "$WDA_ICON_APP_PATH" "$WDA_ICON_BACKUP_PATH" \
-        || ! codesign --verify --deep --strict "$WDA_ICON_BACKUP_PATH" 2>>"$build_log"; then
-        _runner_icon_fail "the pristine runner could not be backed up safely" || true
-        return 1
-    fi
-    WDA_ICON_MUTATION_ACTIVE=1
-
-    if ! cp "$compiled/Assets.car" "$compiled/AppIcon60x60@2x.png" \
-        "$compiled/AppIcon76x76@2x~ipad.png" "$WDA_ICON_APP_PATH/"; then
-        _runner_icon_fail "compiled icon assets could not be copied into the runner" || true
-        return 1
-    fi
-    if ! python3 - "$partial_plist" "$WDA_ICON_APP_PATH/Info.plist" <<'PY'
-import os
-import plistlib
-import sys
-import tempfile
-
-partial_path, target_path = sys.argv[1:]
-with open(partial_path, "rb") as handle:
-    generated = plistlib.load(handle)
-with open(target_path, "rb") as handle:
-    original_data = handle.read()
-info = plistlib.loads(original_data)
-info.update(generated)
-name = (info.get("CFBundleIcons", {})
-        .get("CFBundlePrimaryIcon", {})
-        .get("CFBundleIconName"))
-if name != "AppIcon":
-    raise SystemExit("actool plist is missing the primary CFBundleIconName=AppIcon")
-fmt = plistlib.FMT_BINARY if original_data.startswith(b"bplist00") else plistlib.FMT_XML
-mode = os.stat(target_path).st_mode
-with tempfile.NamedTemporaryFile(
-        dir=os.path.dirname(target_path), prefix=".Info.plist.icon.", delete=False) as handle:
-    temp_path = handle.name
-    plistlib.dump(info, handle, fmt=fmt, sort_keys=False)
-os.chmod(temp_path, mode)
-os.replace(temp_path, target_path)
-PY
-    then
-        _runner_icon_fail "actool's icon metadata could not be merged into Info.plist" || true
-        return 1
-    fi
-
-    # Re-sign strictly from the inside out. Signing the app first and then a
-    # nested framework/test bundle invalidates the outer resource seal and
-    # makes installation fail with 0xe8008001.
-    for nested in "$WDA_ICON_APP_PATH"/Frameworks/*.dylib \
-        "$WDA_ICON_APP_PATH"/Frameworks/*.framework; do
-        [ -e "$nested" ] || continue
-        if ! codesign -f -s "$signing_identity" "$nested" >>"$build_log" 2>&1; then
-            _runner_icon_fail "a nested runner framework could not be re-signed" || true
-            return 1
-        fi
-    done
-    xctest_count=0
-    for nested in "$WDA_ICON_APP_PATH"/PlugIns/*.xctest; do
-        [ -e "$nested" ] || continue
-        xctest_count=$((xctest_count + 1))
-        if ! codesign -f -s "$signing_identity" "$nested" >>"$build_log" 2>&1; then
-            _runner_icon_fail "the runner xctest bundle could not be re-signed" || true
-            return 1
-        fi
-    done
-    if [ "$xctest_count" -eq 0 ]; then
-        _runner_icon_fail "the runner contains no xctest bundle to re-sign" || true
-        return 1
-    fi
-    if ! codesign -f -s "$signing_identity" --entitlements "$entitlements" \
-        "$WDA_ICON_APP_PATH" >>"$build_log" 2>&1 \
-        || ! codesign --verify --deep --strict "$WDA_ICON_APP_PATH" \
-            >>"$build_log" 2>&1; then
-        _runner_icon_fail "the final runner signature did not verify" || true
-        return 1
-    fi
-
-    WDA_ICON_MUTATION_ACTIVE=0
-    WDA_RUNNER_ICON_INJECTED=1
-    _cleanup_wda_icon_work_dir
-    ok "Runner icon injected and signature verified (source: $source)"
-    return 0
-}
-
 if [ -z "${WDA_UDID:-}" ]; then
-    # xcodebuild exposes the classic UDID WDA needs. Never use `head -1`: with
-    # multiple paired phones, guessing can build/sign/drive the wrong device.
-    WDA_DESTINATION_UDIDS="$(cd "$WDA_DIR" \
-        && _wda_xcodebuild -project WebDriverAgent.xcodeproj \
-            -scheme WebDriverAgentRunner -showdestinations 2>/dev/null \
+    # xcodebuild exposes the classic UDID the runner needs. Never use `head -1`:
+    # with multiple paired phones, guessing can build/sign/drive the wrong device.
+    WDA_DESTINATION_UDIDS="$(cd "$STATE_DIR" \
+        && _runner_xcodebuild -showdestinations 2>/dev/null \
         | sed -n 's/.*platform:iOS, arch:arm64.*id:\([0-9A-F-]*\),.*/\1/p' \
         | sort -u || true)"
     WDA_DESTINATION_COUNT="$(printf '%s\n' "$WDA_DESTINATION_UDIDS" \
@@ -3860,12 +3270,10 @@ if [ "$(_device_passcode_required)" = "true" ]; then
     done
     ok "iPhone unlocked after $((SECONDS - _lock_wait_started))s"
 fi
-_setstatus building "$_BUILD_BLOCKER" "building + launching WDA"
+_setstatus building "$_BUILD_BLOCKER" "building + launching the device runner"
 
-# ── 4. Build + run WDA (stays running; this is the server) ───────────────────
-# Pitfall: PRODUCT_NAME must NOT be overridden (it renames WebDriverAgentLib
-# and breaks the build) — only PRODUCT_BUNDLE_IDENTIFIER is safe to rebrand.
-info "Building + launching WDA on the phone (first build takes a few minutes)"
+# ── 4. Build + run the device runner (stays running; this is the server) ─────
+info "Building + launching the device runner on the phone (the first build takes a minute or two)"
 _stop_managed_process "$RUNNER_PID_FILE" "$LEGACY_RUNNER_EXPECTED" runner \
     || die "the prior runner PID record does not safely identify a process; refusing to kill anything"
 : > "$RUN_LOG"
@@ -3876,84 +3284,51 @@ _stop_managed_process "$RUNNER_PID_FILE" "$LEGACY_RUNNER_EXPECTED" runner \
 XCODEBUILD_BIN="$(xcrun --find xcodebuild 2>/dev/null || true)"
 [ -n "$XCODEBUILD_BIN" ] && [ -x "$XCODEBUILD_BIN" ] \
     || die "could not resolve the selected Xcode's xcodebuild executable"
-RUNNER_ICON_SOURCE=""
-case "$WDA_RUNNER_ICON" in
-    none)
-        ok "Runner icon injection disabled (WDA_RUNNER_ICON=none)"
-        ;;
-    auto)
-        RUNNER_ICON_SOURCE="$HOME/Applications/iPhoneUse.app/Contents/Resources/AppIcon.icns"
-        if [ ! -f "$RUNNER_ICON_SOURCE" ]; then
-            warn "Runner icon source is not installed at $RUNNER_ICON_SOURCE; continuing with WDA's placeholder icon"
-            RUNNER_ICON_SOURCE=""
-        fi
-        ;;
-    *)
-        RUNNER_ICON_SOURCE="$WDA_RUNNER_ICON"
-        if [ ! -f "$RUNNER_ICON_SOURCE" ]; then
-            warn "WDA_RUNNER_ICON does not name a readable file: $RUNNER_ICON_SOURCE; continuing with WDA's placeholder icon"
-            RUNNER_ICON_SOURCE=""
-        elif RUNNER_ICON_DIR="$(cd -P "$(dirname "$RUNNER_ICON_SOURCE")" 2>/dev/null && pwd)"; then
-            RUNNER_ICON_SOURCE="$RUNNER_ICON_DIR/$(basename "$RUNNER_ICON_SOURCE")"
-            # launchd has no stable working directory. Persist the canonical
-            # absolute path so a custom icon survives supervisor restarts.
-            WDA_RUNNER_ICON="$RUNNER_ICON_SOURCE"
-        else
-            warn "WDA_RUNNER_ICON could not be resolved to an absolute path; continuing with WDA's placeholder icon"
-            RUNNER_ICON_SOURCE=""
-        fi
-        ;;
-esac
 WDA_XCTESTRUN=""
-if [ -n "$RUNNER_ICON_SOURCE" ] && [ "${WDA_RUNNER_REBUILD:-0}" != "1" ] && _runner_cache_read; then
+if [ "${WDA_RUNNER_REBUILD:-0}" != "1" ] && _runner_cache_read; then
     ok "Reusing the runner product from the last bring-up (no rebuild; WDA_RUNNER_REBUILD=1 forces one)"
     _setstatus building "${_BUILD_BLOCKER:-}" "reusing the verified runner product from the last bring-up"
-elif [ -n "$RUNNER_ICON_SOURCE" ]; then
-    if _build_and_inject_runner_icon "$RUNNER_ICON_SOURCE"; then
-        WDA_XCTESTRUN="$(_resolve_xctestrun "$WDA_ICON_PRODUCTS_DIR" "${WDA_BUILT_SDK_VERSION:-}" || true)"
-        if [ -z "$WDA_XCTESTRUN" ]; then
-            if _discard_injected_runner; then
-                warn "Could not resolve a unique .xctestrun; discarded the injected runner so the launch rebuilds a pristine one (the custom icon is skipped this round)"
-            else
-                _setstatus building-fail wda "injected runner cannot be launched and could not be discarded"
-                die "could not resolve a unique .xctestrun for the injected runner, and refusing to run the normal test action over a hand-signed bundle"
-            fi
+elif ! _ensure_launchable_runner; then
+    if [ "$RUNNER_BUILD_LOCKED" = "1" ]; then
+        if [ "${WDA_KEEPALIVE:-0}" = "1" ]; then
+            _prepare_locked_retry
+            exit 1
         fi
+        die "the phone is locked and the runner build exited. Unlock it, then rerun setup."
     fi
-fi
-if [ "$WDA_ICON_BUILD_LOCKED" != "1" ] && ! _ensure_launchable_runner; then
-    if [ "$WDA_ICON_BUILD_LOCKED" != "1" ]; then
-        _setstatus building-fail wda "$WDA_RUNNER_VALIDATION_ERROR"
-        die "runner product is not launchable: $WDA_RUNNER_VALIDATION_ERROR"
+    if grep -q "No Accounts:" "$STATE_DIR/wda-runner-product-build.log" 2>/dev/null; then
+        _report_missing_xcode_account
     fi
-fi
-if [ "$WDA_ICON_BUILD_LOCKED" = "1" ]; then
-    if [ "${WDA_KEEPALIVE:-0}" = "1" ]; then
-        _prepare_locked_retry
-        exit 1
+    if grep -q "No profiles for .* were found\|requires a provisioning profile" \
+        "$STATE_DIR/wda-runner-product-build.log" 2>/dev/null; then
+        _setstatus signing-fail account "Xcode could not create the runner provisioning profile"
+        # "could not find or create the WDA development provisioning" is the
+        # phrase the daemon maps to its `account` blocker; keep it verbatim.
+        die "Xcode could not find or create the WDA development provisioning profile for the device runner.
+   In Xcode → Settings → Accounts, refresh the selected team, keep the iPhone
+   registered, then rerun. With WDA_ASC_* API-key signing, check that the key
+   can manage profiles. Build log: $STATE_DIR/wda-runner-product-build.log"
     fi
-    die "the phone is locked and WDA prebuild exited. Unlock it, then rerun setup."
+    _setstatus building-fail wda "$WDA_RUNNER_VALIDATION_ERROR"
+    die "device runner product is not launchable: $WDA_RUNNER_VALIDATION_ERROR"
 fi
-# Record the product as soon as it is verified launchable, not after WDA
+# Record the product as soon as it is verified launchable, not after the runner
 # serves. A round that builds a good product and then fails for a reason
 # outside it (a locked phone, a dropped device link, a relay error) otherwise
-# leaves no record, so every KeepAlive retry built and injected again (#75).
+# leaves no record, so every KeepAlive retry would build again (#75).
 # A launch that names a failure of the product itself still drops it below.
-if [ -n "${WDA_XCTESTRUN:-}" ] && [ "$WDA_RUNNER_FROM_CACHE" != "1" ]; then
+if [ "$WDA_RUNNER_FROM_CACHE" != "1" ]; then
     _runner_cache_write && ok "Recorded the verified runner product; the next reconnect installs it without rebuilding" \
         || warn "could not record the runner product for reuse; the next reconnect rebuilds"
 fi
-# Keep `RUNNER_COMMAND=` at column 0: the icon regression test isolates the
-# selection block by scanning for it, and indenting it swallowed the runner
-# launch block into that excerpt.
-# `-xctestrun` cannot be combined with `-project`/`-scheme`. Build both launch
-# forms and their signing suffix through one argv source, also used by the
-# exact PID identity record. No eval or string-based command execution.
-_prepare_runner_args || die "could not prepare WDA runner signing arguments"
+# Keep `RUNNER_COMMAND=` at column 0 (tests isolate the launch block by it).
+# One argv source builds the launch command and its signing suffix, and is
+# also the exact PID identity record. No eval or string-based execution.
+_prepare_runner_args || die "could not prepare the device runner launch arguments"
 RUNNER_COMMAND="$XCODEBUILD_BIN $RUNNER_ARGS"
 RUNNER_EXPECTED="runner:$RUNNER_COMMAND"
 (
-    cd "$WDA_DIR" || exit 1
+    cd "$STATE_DIR" || exit 1
     exec nohup "$XCODEBUILD_BIN" "${RUNNER_ARGV[@]}"
 ) > "$RUN_LOG" 2>&1 &
 RUNNER_PID=$!
@@ -3979,8 +3354,8 @@ while [ -z "$PHONE_URL" ]; do
         if _runner_log_shows_automation_mode_disabled "$RUN_LOG"; then
             _report_automation_mode_disabled
         fi
-        _setstatus building-fail wda "WDA did not report its server URL before the startup timeout"
-        die "timed out waiting for WDA to start — check $RUN_LOG"
+        _setstatus building-fail wda "the device runner did not report its server URL before the startup timeout"
+        die "timed out waiting for the device runner to start — check $RUN_LOG"
     fi
     # Read actionable xcodebuild failures before checking whether its PID is
     # still alive. Fast failures can exit between polls; validating the process
@@ -3996,8 +3371,10 @@ while [ -z "$PHONE_URL" ]; do
         if [ -n "${WDA_XCTESTRUN:-}" ]; then
             _runner_cache_drop || true
         fi
-        _setstatus signing-fail account "Xcode could not create the WDA provisioning profile"
-        die "Xcode could not find or create the WDA development provisioning profile.
+        _setstatus signing-fail account "Xcode could not create the runner provisioning profile"
+        # "could not find or create the WDA development provisioning" is the
+        # phrase the daemon maps to its `account` blocker; keep it verbatim.
+        die "Xcode could not find or create the WDA development provisioning profile for the device runner.
    In Xcode → Settings → Accounts, refresh the selected team, keep the iPhone
    registered, then rerun. If WARP is connected, its effective Excluded routes
    must contain fe80::/10 and fd00::/8 (otherwise disconnect it temporarily)."
@@ -4017,7 +3394,7 @@ while [ -z "$PHONE_URL" ]; do
             exit 1
         fi
         if _wda_failure_is_lock_related log-only; then
-            _setstatus building-fail wda "phone is locked and the WDA runner exited"
+            _setstatus building-fail wda "phone is locked and the device runner exited"
             die "the phone is locked and xcodebuild exited. Unlock it, then rerun setup."
         fi
         # Only evict for a failure of the product itself. A runner can also
@@ -4032,8 +3409,8 @@ while [ -z "$PHONE_URL" ]; do
         if _runner_log_shows_automation_mode_disabled "$RUN_LOG"; then
             _report_automation_mode_disabled
         fi
-        _setstatus building-fail wda "WDA runner exited before reporting its server URL"
-        die "the PID-verified WDA runner exited before reporting its server URL — check $RUN_LOG"
+        _setstatus building-fail wda "the device runner exited before reporting its server URL"
+        die "the PID-verified device runner exited before reporting its server URL — check $RUN_LOG"
     fi
     if _wda_failure_is_lock_related log-only \
         && [ -z "$(sed -n 's/.*ServerURLHere->\(http[^<]*\)<-ServerURLHere.*/\1/p' \
@@ -4046,27 +3423,17 @@ while [ -z "$PHONE_URL" ]; do
             || die "the phone remained locked for 5 minutes. Unlock it, then rerun setup."
     elif [ $((TRIES % 10)) -eq 0 ]; then
         BUILD_ELAPSED="$(( $(date +%s) - BUILD_STARTED_AT ))"
-        _setstatus building "$_BUILD_BLOCKER" "building + launching WDA (${BUILD_ELAPSED}s elapsed)"
+        _setstatus building "$_BUILD_BLOCKER" "launching the device runner (${BUILD_ELAPSED}s elapsed)"
     fi
     PHONE_URL="$(sed -n 's/.*ServerURLHere->\(http[^<]*\)<-ServerURLHere.*/\1/p' "$RUN_LOG" | head -1)"
     [ -z "$PHONE_URL" ] && sleep 3
 done
 case "$PHONE_URL" in
     http://*) ;;
-    *) die "WDA reported an unexpected server URL '$PHONE_URL' (plain http:// expected)" ;;
+    *) die "the device runner reported an unexpected server URL '$PHONE_URL' (plain http:// expected)" ;;
 esac
-ok "WDA serving at $PHONE_URL"
-if [ "$WDA_RUNNER_ICON_INJECTED" = "1" ]; then
-    if [ ! -f "$WDA_ICON_APP_PATH/Assets.car" ] \
-        || [ ! -f "$WDA_ICON_APP_PATH/AppIcon60x60@2x.png" ] \
-        || [ ! -f "$WDA_ICON_APP_PATH/AppIcon76x76@2x~ipad.png" ] \
-        || [ "$(/usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' \
-            "$WDA_ICON_APP_PATH/Info.plist" 2>/dev/null || true)" != "AppIcon" ]; then
-        warn "Xcode rebuilt the runner and replaced its injected icon; WDA is healthy, and the next setup run will inject the icon again"
-    fi
-fi
-_setstatus serving "" "WDA serving — starting relay"
+ok "device runner serving at $PHONE_URL"
+_setstatus serving "" "device runner serving — starting relay"
 
 # ── 5. Localhost relay ────────────────────────────────────────────────────────
 # Pitfall (macOS 15+/26): the daemon is a background LaunchAgent and macOS
@@ -4078,7 +3445,7 @@ info "Starting localhost relay on 127.0.0.1:$WDA_PORT"
 PHONE_HOSTPORT="${PHONE_URL#http://}"; PHONE_HOSTPORT="${PHONE_HOSTPORT%/}"
 PHONE_IP="${PHONE_HOSTPORT%%:*}"; PHONE_WDA_PORT="${PHONE_HOSTPORT##*:}"
 _valid_port "$PHONE_WDA_PORT" \
-    || die "WDA reported an invalid device port in '$PHONE_URL'"
+    || die "the device runner reported an invalid device port in '$PHONE_URL'"
 _stop_managed_process "$RELAY_PID_FILE" "$LEGACY_RELAY_EXPECTED" relay \
     || die "the prior control-relay PID record is not safe to stop; refusing to reuse TCP $WDA_PORT"
 _assert_port_free "$WDA_PORT" \
@@ -4095,9 +3462,9 @@ if [ "$TARGET_IS_USB" = "1" ] && command -v iproxy >/dev/null 2>&1; then
     RELAY_PID=$!
     RELAY_DESC="USB iproxy on 127.0.0.1:$WDA_PORT"
 elif [ "$WDA_ALLOW_LAN" = "1" ] && command -v socat >/dev/null; then
-    warn "WDA_ALLOW_LAN=1: WDA has no authentication; use only on a trusted, isolated LAN"
+    warn "WDA_ALLOW_LAN=1: the device runner has no authentication; use only on a trusted, isolated LAN"
     printf '%s\n' "$PHONE_IP" | LC_ALL=C grep -Eq '^[A-Za-z0-9.:%_-]+$' \
-        || die "WDA reported a LAN host that is unsafe for socat: '$PHONE_IP'"
+        || die "the device runner reported a LAN host that is unsafe for socat: '$PHONE_IP'"
     SOCAT_BIN="$(command -v socat)"
     RELAY_COMMAND="$SOCAT_BIN TCP-LISTEN:$WDA_PORT,fork,reuseaddr,bind=127.0.0.1 TCP:$PHONE_IP:$PHONE_WDA_PORT"
     RELAY_EXPECTED="relay:$RELAY_COMMAND"
@@ -4111,9 +3478,9 @@ else
     else
         _setstatus serving wda "no permitted control relay tool is available"
     fi
-    die "Direct/WDA uses USB iproxy by default. Keep this iPhone connected over USB and install
+    die "the device layer uses USB iproxy by default. Keep this iPhone connected over USB and install
    libimobiledevice (brew install libimobiledevice), then rerun.
-   The on-phone WDA server has no HTTP authentication. A LAN relay is therefore disabled
+   The on-phone runner has no HTTP authentication. A LAN relay is therefore disabled
    unless WDA_ALLOW_LAN=1 is explicitly set for a trusted, isolated network."
 fi
 if ! _write_pid_record "$RELAY_PID_FILE" "$RELAY_PID" "$RELAY_EXPECTED" relay; then
@@ -4128,14 +3495,14 @@ _verify_loopback_listener "$RELAY_PID_FILE" "$LEGACY_RELAY_EXPECTED" relay "$WDA
    Expected only PID $RELAY_PID on 127.0.0.1:$WDA_PORT; inspect $STATE_DIR/wda-relay.log"
 ok "PID-verified control relay $RELAY_PID: $RELAY_DESC"
 curl -fsS -m 5 "http://127.0.0.1:$WDA_PORT/status" >/dev/null \
-    || die "relay up but WDA not answering through it — check $STATE_DIR/wda-relay.log"
-ok "WDA reachable at http://127.0.0.1:$WDA_PORT"
-warn "The Mac relay is loopback-only, but WDA on the iPhone has no HTTP authentication.
+    || die "relay up but the device runner is not answering through it — check $STATE_DIR/wda-relay.log"
+ok "device runner reachable at http://127.0.0.1:$WDA_PORT"
+warn "The Mac relay is loopback-only, but the runner on the iPhone has no HTTP authentication.
    Keep the iPhone on a trusted, isolated network even when the Mac relay uses USB."
 
 # ── 5b. MJPEG relay (live video for agent mode — /agent/mjpeg) ─────────────────
-# WDA serves an MJPEG screen stream on the device's :9100, INSIDE the same
-# XCUITest session as control — so live video and driving coexist. The daemon
+# The runner serves an MJPEG screen stream on the device's :9100, inside the
+# same XCUITest session as control — so live video and driving coexist. The daemon
 # needs this stream, so setup does not publish a video URL unless relay ownership and
 # an initial stream byte are both verified.
 PHONE_MJPEG_PORT=9100
@@ -4242,9 +3609,9 @@ if [ -f "$DAEMON_PLIST" ]; then
         _plist_set_env "$DAEMON_STAGED_PLIST" PHONE_REMOTE_WDA_MANAGED true
         _plist_set_env "$DAEMON_STAGED_PLIST" WDA_ALLOW_LAN "$WDA_ALLOW_LAN"
         CONFIG_CHANGED=1
-        ok "daemon plist set to managed direct + fixed device + WDA control/video endpoints (changed:$CHANGED_KEYS)"
+        ok "daemon plist set to managed direct + fixed device + runner control/video endpoints (changed:$CHANGED_KEYS)"
     else
-        ok "daemon plist already has the managed direct + fixed device + WDA endpoint configuration"
+        ok "daemon plist already has the managed direct + fixed device + runner endpoint configuration"
     fi
 
     plutil -lint "$DAEMON_STAGED_PLIST" >/dev/null 2>&1 \
@@ -4264,7 +3631,7 @@ if [ -f "$DAEMON_PLIST" ]; then
             || die "daemon LaunchAgent did not finish stopping"
         launchctl enable "$GUI_DOMAIN/$DAEMON_LABEL" 2>/dev/null || true
         if ! launchctl bootstrap "$GUI_DOMAIN" "$DAEMON_PLIST" 2>/dev/null; then
-            die "WDA is reachable, but the daemon LaunchAgent could not be bootstrapped"
+            die "the device runner is reachable, but the daemon LaunchAgent could not be bootstrapped"
         fi
     fi
     if launchctl print "$GUI_DOMAIN/$DAEMON_LABEL" >/dev/null 2>&1; then
@@ -4291,7 +3658,7 @@ if [ -f "$DAEMON_PLIST" ]; then
         fi
     fi
 else
-    warn "daemon LaunchAgent not found; WDA can be verified, but the product daemon cannot be started"
+    warn "daemon LaunchAgent not found; the runner can be verified, but the product daemon cannot be started"
     printf '    PHONE_REMOTE_BACKEND=direct PHONE_REMOTE_WDA_URL=%s PHONE_REMOTE_WDA_MJPEG_URL=%s iphone-use serve\n' \
         "$TARGET_URL" "$TARGET_MJPEG_URL"
 fi
@@ -4317,10 +3684,10 @@ else
     _validate_pid_record "$RUNNER_PID_FILE" "$LEGACY_RUNNER_EXPECTED" runner \
         || die "interactive runner identity was lost before launchd handoff"
     HANDOFF_OLD_ID="$PID_RECORD_PID|$PID_RECORD_LSTART"
-    _setstatus supervisor "" "handing WDA to its launchd supervisor"
-    info "Handing the verified WDA setup to its dedicated launchd supervisor"
+    _setstatus supervisor "" "handing the device runner to its launchd supervisor"
+    info "Handing the verified runner setup to its dedicated launchd supervisor"
     _install_wda_supervisor \
-        || die "WDA is reachable now, but its launchd supervisor could not be installed"
+        || die "the device runner is reachable now, but its launchd supervisor could not be installed"
 
     # Bootstrap starts a fresh supervisor-owned setup process. Verify that it
     # replaced the interactive runner (not merely that launchctl accepted XML)
@@ -4348,16 +3715,16 @@ else
     done
     if [ "$SUPERVISOR_VERIFIED" != "1" ]; then
         _setstatus supervisor-fail wda "launchd handoff not verified"
-        die "WDA launchd job loaded, but its replacement runner was not verified within 120s.
+        die "runner launchd job loaded, but its replacement runner was not verified within 120s.
    Check: $WDA_AGENT_LOG
    Then:  $SELF_INSTALL status"
     fi
-    ok "launchd replacement verified: runner identity, both loopback relays, and WDA /status"
+    ok "launchd replacement verified: runner identity, both loopback relays, and runner /status"
 fi
 
 if [ "$SUPERVISOR_VERIFIED" != "1" ] || [ "$MJPEG_READY" != "1" ]; then
-    _setstatus supervisor-fail wda "WDA is reachable but launchd supervision is unverified"
-    die "WDA endpoint is up, but dedicated launchd supervision could not be verified"
+    _setstatus supervisor-fail wda "the device runner is reachable but launchd supervision is unverified"
+    die "the device runner endpoint is up, but dedicated launchd supervision could not be verified"
 fi
 
 # Post-handoff verdict from one `/agent/status` body. Prints exactly one word:
@@ -4452,28 +3819,19 @@ if [ "$DAEMON_HTTP_READY" = "1" ]; then
     DAEMON_STATUS=""
     DAEMON_AGENT_SECRET=""
     if [ "$DAEMON_PRODUCT_READY" != "1" ]; then
-        _setstatus daemon-fail wda "daemon never reached WDA after verified WDA handoff"
-        die "WDA, relays, and launchd supervision are verified, but the daemon did not report wda=true within $((DAEMON_STATUS_MAX_TRIES / 2))s.
+        _setstatus daemon-fail wda "daemon never reached the device runner after a verified handoff"
+        die "the device runner, relays, and launchd supervision are verified, but the daemon did not report wda=true within $((DAEMON_STATUS_MAX_TRIES / 2))s.
    Inspect: ~/Library/Logs/iPhoneUse/iphone-use.err"
     fi
     if [ "$DAEMON_PRODUCT_VERDICT" = "drivable" ]; then
         ok "daemon product status verified: drivable=true"
     elif [ "$DAEMON_LOCKED_HINT" = "1" ]; then
-        ok "daemon product status verified: WDA reachable through the relays"
-        warn "the iPhone is locked — unlock it once; the daemon keeps probing and reports drivable=true as soon as WDA can act"
+        ok "daemon product status verified: device runner reachable through the relays"
+        warn "the iPhone is locked — unlock it once; the daemon keeps probing and reports drivable=true as soon as the runner can act"
     else
-        ok "daemon product status verified: WDA reachable through the relays"
-        warn "WDA answers but cannot act yet (drivable=false) — keep the iPhone unlocked and awake; the daemon keeps probing"
+        ok "daemon product status verified: device runner reachable through the relays"
+        warn "the device runner answers but cannot act yet (drivable=false) — keep the iPhone unlocked and awake; the daemon keeps probing"
     fi
-fi
-
-if [ "$WDA_MARKER_REFRESH_ALLOWED" = "1" ]; then
-    _write_wda_checkout_marker \
-        || die "Direct/WDA is healthy, but the checkout ownership marker could not be written atomically.
-   Runtime changes are being rolled back; the checkout will be preserved by uninstall."
-    ok "WDA checkout ownership marker: $WDA_CHECKOUT_MARKER"
-else
-    warn "WDA checkout remains unmarked and will be preserved by uninstall: $WDA_CANONICAL_DIR"
 fi
 
 SUPERVISOR_HANDOFF_COMPLETE=1
@@ -4485,9 +3843,9 @@ rm -f "$WDA_AGENT_ROLLBACK_PLIST" "$DAEMON_ROLLBACK_PLIST" "$SELF_INSTALL_ROLLBA
 SUPERVISOR_TRANSACTION_ACTIVE=0
 DAEMON_TRANSACTION_ACTIVE=0
 SELF_INSTALL_REPLACED_THIS_RUN=0
-_setstatus ready "" "direct WDA backend and launchd supervisor verified"
-printf '\n%s\n' "${BOLD}━━━ WDA device layer verified ━━━${RST}"
-printf '  WDA       : %s (on-phone), %s (verified relay)\n' "$PHONE_URL" "$TARGET_URL"
+_setstatus ready "" "device runner and launchd supervisor verified"
+printf '\n%s\n' "${BOLD}━━━ Device layer verified ━━━${RST}"
+printf '  Runner    : %s (on-phone), %s (verified relay)\n' "$PHONE_URL" "$TARGET_URL"
 printf '  Supervisor: %s (job, runner, and /status verified)\n' "$GUI_DOMAIN/$WDA_AGENT_LABEL"
 printf '  Video     : %s (startup stream + relay ownership verified)\n' "$TARGET_MJPEG_URL"
 if [ "$DAEMON_HTTP_READY" = "1" ]; then
@@ -4500,13 +3858,13 @@ printf '  Try       : curl -H "Authorization: Bearer %s" http://127.0.0.1:%s/age
 printf '  Stop      : %s stop\n' "$SELF_INSTALL"
 printf '  Pause     : %s pause  (give the phone back without auto-restart)\n' "$SELF_INSTALL"
 printf '  Resume    : %s resume\n' "$SELF_INSTALL"
-printf '  WDA source: %s %s (exact checkout)\n' "$WDA_REF_LABEL" "$WDA_REF"
+printf '  Source    : %s (sha256 %s)\n' "$RUNNER_SRC" "${RUNNER_SOURCE_HASH:0:12}"
 printf '  Signing   : free Apple ID profiles may expire after 7 days; re-run setup when needed.\n'
 
 # One health probe, and what it means. Returns 0 to keep holding, 1 to rebuild.
 #
 # A single unanswered probe cannot tell a transient busy period, a network
-# hiccup, and a genuinely dead WDA apart — and treating one 4s timeout as a
+# hiccup, and a genuinely dead runner apart — and treating one 4s timeout as a
 # verdict tore down the runner and both relays during heavy element reads.
 # Requiring consecutive non-answers keeps the distinction the probe cannot
 # make from becoming a decision. Process death and a vanished listener are
@@ -4520,7 +3878,7 @@ _keepalive_probe_verdict() {
     if [ "$KEEPALIVE_PROBE_FAILURES" -ge "$KEEPALIVE_PROBE_MAX_FAILURES" ]; then
         return 1
     fi
-    info "WDA did not answer /status within 4s (${KEEPALIVE_PROBE_FAILURES}/${KEEPALIVE_PROBE_MAX_FAILURES}); the runner and relays are alive, so holding"
+    info "the device runner did not answer /status within 4s (${KEEPALIVE_PROBE_FAILURES}/${KEEPALIVE_PROBE_MAX_FAILURES}); the runner and relays are alive, so holding"
     return 0
 }
 
@@ -4566,14 +3924,14 @@ if [ "${WDA_KEEPALIVE:-0}" = "1" ]; then
             # Report the observation, not a diagnosis: this loop cannot tell
             # which cause it was, and naming one sent a session hunting the
             # wrong thing.
-            warn "WDA did not answer /status ${KEEPALIVE_PROBE_FAILURES} times in a row while the runner and both relays stayed alive — rebuilding"
-            _setstatus building "" "WDA did not answer ${KEEPALIVE_PROBE_FAILURES} consecutive /status probes — rebuilding"
+            warn "the device runner did not answer /status ${KEEPALIVE_PROBE_FAILURES} times in a row while the runner and both relays stayed alive — rebuilding"
+            _setstatus building "" "the device runner did not answer ${KEEPALIVE_PROBE_FAILURES} consecutive /status probes — rebuilding"
             ;;
         relay)
-            warn "the WDA relay stopped listening — exiting so launchd KeepAlive rebuilds it"
+            warn "the runner relay stopped listening — exiting so launchd KeepAlive rebuilds it"
             ;;
         *)
-            warn "the WDA runner exited — exiting so launchd KeepAlive rebuilds it"
+            warn "the device runner exited — exiting so launchd KeepAlive rebuilds it"
             ;;
     esac
     _stop_managed_process "$MJPEG_RELAY_PID_FILE" "$LEGACY_MJPEG_EXPECTED" mjpeg || true

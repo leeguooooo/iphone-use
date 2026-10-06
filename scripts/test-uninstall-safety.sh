@@ -5,7 +5,6 @@ umask 077
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UNINSTALL="$ROOT/uninstall.sh"
-SETUP="$ROOT/scripts/setup-wda.sh"
 TMP_ROOT_RAW="$(mktemp -d "${TMPDIR:-/tmp}/iphone-use-uninstall-test.XXXXXX")"
 TMP_ROOT="$(cd -P "$TMP_ROOT_RAW" && pwd)"
 SLEEP_PIDS=""
@@ -380,32 +379,5 @@ grep -Eq "Git refs changed|worktree" "$TEST_ROOT/err" \
     || fail_test "linked-worktree rejection reason missing"
 pass "linked worktrees and their Git administration data are preserved"
 
-new_home "setup-marker-helper"
-git_init_checkout
-marker_functions="$(sed -n \
-    '/^_sha256_text() {/,/^# Resolve one signing identity/{ /^# Resolve one signing identity/d; p; }' \
-    "$SETUP")"
-(
-    # The extracted production functions consume these globals dynamically.
-    # shellcheck disable=SC2034
-    UID_NUM="$(id -u)"
-    # shellcheck disable=SC2034
-    STATE_DIR="$TEST_HOME/.iphone-use"
-    # shellcheck disable=SC2034
-    WDA_CHECKOUT_MARKER="$STATE_DIR/wda-checkout-owner.v1"
-    # shellcheck disable=SC2034
-    WDA_REF="$WDA_HEAD"
-    # shellcheck disable=SC2034
-    WDA_MARKER_REFRESH_ALLOWED=1
-    # shellcheck disable=SC2034
-    SHASUM_BIN="$(command -v shasum)"
-    eval "$marker_functions"
-    _write_wda_checkout_marker
-    _existing_marker_matches_checkout \
-        "$WDA_DIR" "https://github.com/appium/WebDriverAgent.git" "$WDA_HEAD"
-)
-[ "$(/usr/bin/stat -f '%Lp' "$TEST_HOME/.iphone-use/wda-checkout-owner.v1")" = "600" ] \
-    || fail_test "setup marker mode is not 600"
-pass "setup marker helper writes and revalidates atomically"
 
 printf '1..%d\n' "$pass_count"

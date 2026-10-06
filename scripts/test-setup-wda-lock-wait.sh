@@ -24,7 +24,7 @@ fi
 FAKE
 chmod +x "$tmp/bin/xcrun"
 # The block under test: from the lock-wait header to the build status line.
-block="$(sed -n '/^# ── 3b. Wait for the phone to be unlocked/,/^_setstatus building "\$_BUILD_BLOCKER" "building + launching WDA"$/p' "$here/setup-wda.sh")"
+block="$(sed -n '/^# ── 3b. Wait for the phone to be unlocked/,/^_setstatus building "\$_BUILD_BLOCKER" "building + launching the device runner"$/p' "$here/setup-wda.sh")"
 [ -n "$block" ] || { echo "not ok 1 - lock-wait block not found"; exit 1; }
 devicectl_t="$(sed -n '/^_devicectl_t() {/,/^}/p' "$here/setup-wda.sh")"
 run() {  # $1 = seconds until unlock (or "never"), extra env after

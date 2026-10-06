@@ -73,7 +73,7 @@ run_retry locked >"$TMP_ROOT/locked-first.out"
 [ "$(retry_field '3s/^attempt=//p')" = "1" ] \
     || fail_test "switching to lock backoff did not reset the attempt"
 assert_delay_near 5
-grep -q 'lock screen blocked WDA' "$TMP_ROOT/locked-first.out" \
+grep -q 'lock screen blocked the device runner' "$TMP_ROOT/locked-first.out" \
     || fail_test "first lock transition was not reported"
 # A locked phone is its own blocker. Publishing `wda` here made the daemon
 # hint and the web client tell the operator to read logs and re-run setup for
@@ -107,7 +107,7 @@ run_retry locked >"$TMP_ROOT/locked-second.out"
 [ "$(retry_field '3s/^attempt=//p')" = "2" ] \
     || fail_test "lock retry attempt did not increment"
 assert_delay_near 10
-if grep -q 'lock screen blocked WDA' "$TMP_ROOT/locked-second.out"; then
+if grep -q 'lock screen blocked the device runner' "$TMP_ROOT/locked-second.out"; then
     fail_test "unchanged lock state repeated the user prompt"
 fi
 for _ in 3 4 5 6 7; do
@@ -311,14 +311,14 @@ loaded="$(sed -n 's/^loaded=//p' "$LAUNCH_STATE")"
 disabled="$(sed -n 's/^disabled=//p' "$LAUNCH_STATE")"
 [ "$loaded:$disabled" = "0:1" ] \
     || fail_test "pause did not unload and disable the exact supervisor"
-grep -q 'WDA paused' "$TMP_ROOT/pause.out" \
+grep -q 'device runner paused' "$TMP_ROOT/pause.out" \
     || fail_test "pause did not report the verified result"
 pass "pause disables launchd before stopping the managed stack"
 
 if run_lifecycle status >"$TMP_ROOT/status.out" 2>&1; then
     fail_test "status treated an intentional pause as healthy"
 fi
-grep -q 'WDA is paused' "$TMP_ROOT/status.out" \
+grep -q 'the device runner is paused' "$TMP_ROOT/status.out" \
     || fail_test "status did not explain the intentional pause"
 pass "status distinguishes an intentional pause from an unknown outage"
 
@@ -328,7 +328,7 @@ loaded="$(sed -n 's/^loaded=//p' "$LAUNCH_STATE")"
 disabled="$(sed -n 's/^disabled=//p' "$LAUNCH_STATE")"
 [ "$loaded:$disabled" = "1:0" ] \
     || fail_test "resume did not enable and bootstrap the exact supervisor"
-grep -q 'WDA resume requested' "$TMP_ROOT/resume.out" \
+grep -q 'device runner resume requested' "$TMP_ROOT/resume.out" \
     || fail_test "resume did not report the verified launchd handoff"
 pass "resume validates, enables, and bootstraps the managed supervisor"
 

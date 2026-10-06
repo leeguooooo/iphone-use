@@ -2,9 +2,10 @@
 """Xcode-upgrade regressions in setup-wda.sh, with a fake xcodebuild/xcrun and a
 throwaway state dir — no Xcode, no device, nothing under the real $HOME.
 
-1. Xcode 27 rejects the pinned WDA project's IPHONEOS_DEPLOYMENT_TARGET (12.0).
-   Setup must raise it through an exported XCODE_XCCONFIG_FILE, never through
-   the xcodebuild argv (that argv is the runner's PID identity).
+1. A newer Xcode can reject the runner project's IPHONEOS_DEPLOYMENT_TARGET (as
+   Xcode 27 rejected WebDriverAgent's 12.0). Setup must raise it through an
+   exported XCODE_XCCONFIG_FILE, never through the xcodebuild argv (that argv
+   is the runner's PID identity).
 2. After an SDK upgrade, Build/Products holds one .xctestrun per SDK. The
    resolver must pick the one for the SDK just built, and still refuse when the
    choice is genuinely ambiguous.
@@ -57,8 +58,8 @@ class XcodeCompatTests(unittest.TestCase):
         self.home = self.root / 'home'
         self.state = self.home / '.iphone-use'
         self.state.mkdir(parents=True)
-        self.wda = self.state / 'WebDriverAgent'
-        (self.wda / 'WebDriverAgent.xcodeproj').mkdir(parents=True)
+        self.project = self.state / 'runner' / 'IPhoneUseRunner' / 'IPhoneUseRunner.xcodeproj'
+        self.project.mkdir(parents=True)
         self.set_project_targets('12.0', '12.0')
         self.bin = self.root / 'bin'
         self.bin.mkdir()
@@ -71,8 +72,8 @@ class XcodeCompatTests(unittest.TestCase):
         self.set_sdk_minimum('15.0')
         self.log = self.root / 'xcodebuild.log'
         self.xcconfig = self.state / 'wda-xcode-compat.xcconfig'
-        self.products = (self.home / 'Library/Developer/Xcode/DerivedData'
-                         / 'WebDriverAgent-abcdef/Build/Products')
+        self.derived = self.state / 'runner-build'
+        self.products = self.derived / 'Build/Products'
         (self.products / 'Debug-iphoneos').mkdir(parents=True)
 
     def tearDown(self):
@@ -80,7 +81,7 @@ class XcodeCompatTests(unittest.TestCase):
 
     def set_project_targets(self, *values):
         lines = ''.join(f'\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = {v};\n' for v in values)
-        (self.wda / 'WebDriverAgent.xcodeproj' / 'project.pbxproj').write_text(
+        (self.project / 'project.pbxproj').write_text(
             '// !$*UTF8*$!\n{\n' + lines + '\t\t\t\tTVOS_DEPLOYMENT_TARGET = 10.0;\n}\n')
 
     def set_sdk_minimum(self, minimum):
@@ -95,7 +96,7 @@ class XcodeCompatTests(unittest.TestCase):
     def xctestrun(self, *sdk_arch):
         paths = []
         for name in sdk_arch:
-            path = self.products / f'WebDriverAgentRunner_iphoneos{name}.xctestrun'
+            path = self.products / f'IPhoneUseRunner_iphoneos{name}.xctestrun'
             path.write_text('plist')
             paths.append(path)
         return paths
@@ -105,7 +106,8 @@ class XcodeCompatTests(unittest.TestCase):
         script = self.root / 'run.sh'
         script.write_text(
             'set -eu\n'
-            f'STATE_DIR="{self.state}"\nWDA_DIR="{self.wda}"\n'
+            f'STATE_DIR="{self.state}"\nRUNNER_PROJECT="{self.project}"\n'
+            f'RUNNER_DERIVED_DATA="{self.derived}"\nRUNNER_SCHEME=IPhoneUseRunner\n'
             f'SELF_INSTALL="{self_install or self.state / "setup-wda.sh"}"\n'
             'ok() { printf "ok: %s\\n" "$*"; }\n'
             'warn() { printf "warn: %s\\n" "$*"; }\n'
@@ -130,8 +132,7 @@ class XcodeCompatTests(unittest.TestCase):
             '_prepare_wda_xcconfig\n'
             'echo "override=$WDA_DEPLOYMENT_TARGET_OVERRIDE sdk=$WDA_IOS_SDK_VERSION"\n'
             'XCODEBUILD_BIN="$(command -v xcodebuild)"\n'
-            '_wda_xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner '
-            '-destination platform=iOS,id=0000 -allowProvisioningUpdates '
+            '_runner_xcodebuild -destination platform=iOS,id=0000 -allowProvisioningUpdates '
             'DEVELOPMENT_TEAM=TEAM000000 PRODUCT_BUNDLE_IDENTIFIER=com.example.wda build-for-testing\n')
         self.assertEqual(code, 0, out)
         self.assertIn('override=15.0 sdk=27.0', out)
@@ -140,14 +141,14 @@ class XcodeCompatTests(unittest.TestCase):
         self.assertNotIn('#include', content)
         self.assertEqual(self.xcconfig.stat().st_mode & 0o777, 0o600)
         log = self.log.read_text().splitlines()
-        self.assertEqual(log[0], 'argv: -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner '
+        self.assertEqual(log[0], f'argv: -project {self.project} -scheme IPhoneUseRunner '
+                                 f'-derivedDataPath {self.derived} '
                                  '-destination platform=iOS,id=0000 -allowProvisioningUpdates '
                                  'DEVELOPMENT_TEAM=TEAM000000 PRODUCT_BUNDLE_IDENTIFIER=com.example.wda '
                                  'build-for-testing')
         self.assertEqual(log[1], f'xcconfig:{self.xcconfig}')
-        # The pinned checkout is never edited.
-        self.assertIn('IPHONEOS_DEPLOYMENT_TARGET = 12.0;',
-                      (self.wda / 'WebDriverAgent.xcodeproj' / 'project.pbxproj').read_text())
+        # The runner sources are never edited.
+        self.assertIn('IPHONEOS_DEPLOYMENT_TARGET = 12.0;', (self.project / 'project.pbxproj').read_text())
 
     def test_override_uses_highest_project_value_when_above_minimum(self):
         self.set_project_targets('12.0', '16.0')
@@ -228,9 +229,10 @@ class XcodeCompatTests(unittest.TestCase):
     def test_empty_products_dir_is_ambiguous(self):
         self.assertEqual(self.resolve('27.0'), 'AMBIGUOUS')
 
-    def test_launch_block_passes_the_built_sdk_to_the_resolver(self):
-        self.assertIn('_resolve_xctestrun "$WDA_ICON_PRODUCTS_DIR" "${WDA_BUILT_SDK_VERSION:-}"', SOURCE)
-        self.assertIn('die "could not resolve a unique .xctestrun for the injected runner', SOURCE)
+    def test_launch_path_resolves_the_xctestrun_and_refuses_ambiguity(self):
+        launch = SOURCE.split('\n_ensure_launchable_runner() {', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('_resolve_xctestrun "$products"', launch)
+        self.assertIn('could not resolve a unique .xctestrun', launch)
 
     # ── 3. doctor ─────────────────────────────────────────────────────────
     def doctor(self, **kwargs):
@@ -238,7 +240,7 @@ class XcodeCompatTests(unittest.TestCase):
 
     def test_doctor_warns_when_xcode27_has_no_override_yet(self):
         code, out = self.doctor()
-        self.assertIn('warn: ~ Xcode 27 supports iOS deployment targets from 15.0, but WDA sets 12.0', out)
+        self.assertIn('warn: ~ Xcode 27 supports iOS deployment targets from 15.0, but the runner project sets 12.0', out)
         self.assertIn('rc=0', out)
 
     def test_doctor_fails_when_installed_script_predates_the_override(self):
@@ -265,7 +267,7 @@ class XcodeCompatTests(unittest.TestCase):
         self.xctestrun('26.5-arm64', '27.0-arm64')
         code, out = self.doctor()
         self.assertIn('warn: ~ multiple .xctestrun files in', out)
-        self.assertIn('WebDriverAgentRunner_iphoneos26.5-arm64.xctestrun', out)
+        self.assertIn('IPhoneUseRunner_iphoneos26.5-arm64.xctestrun', out)
         self.assertIn('setup uses the one for the current SDK (iphoneos27.0)', out)
         self.assertIn('rc=0', out)
         code, out = self.doctor(sdk_version='28.0')
