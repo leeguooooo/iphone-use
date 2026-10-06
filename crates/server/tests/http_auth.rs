@@ -86,9 +86,9 @@ fn mock_wda(
                 );
                 continue;
             }
-            // `/agent/elements` probes the tree size without `isVisible`
+            // `/agent/elements` probes the tree size without `isVisible`/`isAccessible`
             // first; a one-node answer sends it on to the scripted full read.
-            if request.starts_with("GET /source?format=json&excluded_attributes=visible ") {
+            if request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible ") {
                 let body = r#"{"value":{"type":"XCUIElementTypeApplication","children":[]}}"#;
                 let _ = stream.write_all(
                     format!(

@@ -149,7 +149,7 @@ pub fn mock_wda(
             // learn its size. Answer that probe with a one-node tree, so the
             // full read follows and each test scripts only the reads it is
             // about, counted and timed as before.
-            if request.starts_with("GET /source?format=json&excluded_attributes=visible ") {
+            if request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible ") {
                 let body = r#"{"value":{"type":"XCUIElementTypeApplication","children":[]}}"#;
                 let _ = write!(
                     stream,
