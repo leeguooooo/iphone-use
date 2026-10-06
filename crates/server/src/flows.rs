@@ -241,12 +241,9 @@ fn registry_block_from(path: Option<&Path>, key: AppKey<'_>) -> Option<Value> {
             .collect(),
     );
     block["next"] = json!(if flows.is_empty() {
-        "No saved flow for this app yet. Drive it step by step; after several steps the daemon \
-         offers a draft flow (GET /agent/flow/draft, MCP phone_flow_draft) — ask the user before saving it."
+        "No saved flow for this app; the daemon will offer a draft after several steps."
     } else {
-        "Before driving this app by hand, check whether one of these flows already does the task: \
-         `iphone-use-mcp flow run <id> --input name=value` (MCP: phone_flow_run). It checks compatibility \
-         and refuses broken ones. side_effect flows need the user's explicit go-ahead."
+        "If one of these does the task, run it instead of driving by hand: phone_flow_run / `flow run <id>`."
     });
     Some(block)
 }
@@ -724,7 +721,7 @@ mod tests {
         }
         let none = registry_block_from(Some(&path), AppKey::Bundle("com.tencent.xin")).unwrap();
         assert_eq!(none["flows"], json!([]));
-        assert!(none["next"].as_str().unwrap().contains("ask the user"));
+        assert!(none["next"].as_str().unwrap().contains("draft"));
     }
 
     #[test]
