@@ -8123,6 +8123,9 @@ async fn agent_actions(
 
     state.touch_activity();
     let focus_block = engage_agent_focus(&state, &mut *wda.lock().await).await;
+    if let Some(waiting) = focus_permission_pending(focus_block.as_ref()) {
+        return waiting;
+    }
     let _priority = state.begin_wda_control();
     let batch_deadline = tokio::time::Instant::now() + AGENT_ACTIONS_DEADLINE;
     let mut w = match tokio::time::timeout_at(batch_deadline, wda.lock()).await {
@@ -9146,6 +9149,9 @@ async fn agent_input(
     // charged to the action's own budget.
     let focus_started = tokio::time::Instant::now();
     let focus_block = engage_agent_focus(&state, &mut *wda.lock().await).await;
+    if let Some(waiting) = focus_permission_pending(focus_block.as_ref()) {
+        return waiting;
+    }
     let agent_wda_deadline = agent_wda_deadline + focus_started.elapsed();
     if tokio::time::Instant::now() >= agent_wda_deadline {
         return wda_deadline_response(false);
@@ -9402,6 +9408,35 @@ async fn engage_agent_focus(
     }
     tracing::info!("agent focus: Do Not Disturb requested on (returned to {previous:?})");
     Some(crate::focus::engaged_block())
+}
+
+/// The Do Not Disturb run is held by a permission prompt: refuse the action
+/// (`not_sent`, safe to retry) rather than dispatch it — an action would move
+/// the phone away and hide the prompt again, leaving the run hanging.
+fn focus_permission_pending(block: Option<&serde_json::Value>) -> Option<Response> {
+    let block = block?;
+    if block.get("do_not_disturb").and_then(serde_json::Value::as_str)
+        != Some("waiting_for_permission")
+    {
+        return None;
+    }
+    let body = serde_json::json!({
+        "ok": false,
+        "error": "focus_permission_pending",
+        "outcome": "not_sent",
+        "failed_step_outcome": "not_sent",
+        "batch_outcome": "nothing_applied",
+        "retry_safe": true,
+        "agent_focus": block,
+        "hint": "your action was NOT sent: answer the permission prompt on screen first (screenshot, tap 'Always Allow'), then send the action again"
+    });
+    Some(with_security_headers(
+        Response::builder()
+            .status(StatusCode::CONFLICT)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    ))
 }
 
 /// Wait for a deep-link run of the bridge to end: the Shortcuts library then
