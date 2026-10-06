@@ -77,6 +77,10 @@ def main() -> int:
         ("tap_locator identifier", lambda: act({"type": "tap_locator", "locator": {"identifier": "Seven"}}), True),
         ("tap label", lambda: act({"type": "tap", "label": "7"}), True),
         ("key return", lambda: act({"type": "key", "name": "return"}), True),
+        # A tap straight after a read (an agent that just looked, a flow whose
+        # wait_for just matched) may reuse that read; only the tap is timed.
+        ("read → tap label", lambda: (request("GET", "/agent/elements"), act({"type": "tap", "label": "7"}))[1], True),
+        ("read → tap_locator", lambda: (request("GET", "/agent/elements"), act({"type": "tap_locator", "locator": {"identifier": "Seven"}}))[1], True),
         ("elements (full tree)", lambda: request("GET", "/agent/elements"), True),
         ("screenshot", lambda: request("GET", "/agent/screenshot"), True),
         ("swipe", lambda: act({"type": "swipe", "x1": 0.5, "y1": 0.6, "x2": 0.5, "y2": 0.4}), True),
