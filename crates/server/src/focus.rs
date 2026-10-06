@@ -48,6 +48,9 @@ pub struct AgentFocus {
     /// focus_on was already dispatched this session (whatever it found), so
     /// later actions do not run it again. Memory only; reset on release.
     attempted: bool,
+    /// An `agent_focus` block not yet delivered: it rides on the next
+    /// successful response, so a failed first action does not swallow it.
+    notice: Option<serde_json::Value>,
     path: Option<PathBuf>,
 }
 
@@ -57,7 +60,7 @@ impl AgentFocus {
         let engaged = std::fs::read_to_string(&path)
             .map(|s| s.trim() == "engaged")
             .unwrap_or(false);
-        Self { engaged, attempted: engaged, path: Some(path) }
+        Self { engaged, attempted: engaged, notice: None, path: Some(path) }
     }
 
     pub fn attempted(&self) -> bool {
@@ -68,6 +71,14 @@ impl AgentFocus {
         self.attempted = true;
     }
 
+    pub fn queue_notice(&mut self, block: serde_json::Value) {
+        self.notice = Some(block);
+    }
+
+    pub fn take_notice(&mut self) -> Option<serde_json::Value> {
+        self.notice.take()
+    }
+
     pub fn engaged(&self) -> bool {
         self.engaged
     }
@@ -76,6 +87,7 @@ impl AgentFocus {
         self.engaged = engaged;
         if !engaged {
             self.attempted = false;
+            self.notice = None;
         }
         if let Some(path) = &self.path {
             persist(path, engaged);
@@ -156,7 +168,9 @@ mod tests {
         let mut focus = AgentFocus::load(path);
         focus.mark_attempted();
         assert!(focus.attempted() && !focus.engaged());
+        focus.queue_notice(serde_json::json!({"do_not_disturb": "left_as_is"}));
         focus.set(false);
         assert!(!focus.attempted(), "release starts the next session fresh");
+        assert!(focus.take_notice().is_none(), "an undelivered notice dies with the session");
     }
 }

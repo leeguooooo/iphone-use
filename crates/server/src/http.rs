@@ -8521,7 +8521,7 @@ async fn agent_actions(
     for (key, block) in flow_after_actions(&state, &headers, &body) {
         result[key] = block;
     }
-    if let Some(block) = focus_block {
+    if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
         result["agent_focus"] = block;
     }
     agent_actions_json(StatusCode::OK, result)
@@ -9299,7 +9299,7 @@ async fn agent_input(
             };
             let body = attach_alert(body, alert);
             let mut blocks = flow_after_input(&state, &headers, &value);
-            if let Some(block) = focus_block {
+            if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
                 blocks.push(("agent_focus", block));
             }
             let body = attach_flow_blocks(body, blocks);
@@ -9412,12 +9412,29 @@ async fn engage_agent_focus(
     if let Err(error) = restored {
         tracing::warn!("agent focus: could not return to {previous:?}: {error:#}");
     }
-    if !ours {
-        tracing::info!("agent focus: a Focus was already on; left alone");
-        return Some(crate::focus::already_focused_block());
+    // The notice is SpringBoard's banner: while it is up, tree reads land on
+    // it instead of the app (hardware: the first tap_locator after DND came
+    // back element_not_found). Let it go before the agent's action runs.
+    if ours {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline {
+            match w.active_bundles().await {
+                Ok(active) if !active.iter().any(|b| b == "com.apple.springboard") => break,
+                Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(400)).await,
+                Err(_) => break,
+            }
+        }
     }
-    tracing::info!("agent focus: Do Not Disturb turned on (returned to {previous:?})");
-    Some(crate::focus::engaged_block())
+    let block = if ours {
+        tracing::info!("agent focus: Do Not Disturb turned on (returned to {previous:?})");
+        crate::focus::engaged_block()
+    } else {
+        tracing::info!("agent focus: a Focus was already on; left alone");
+        crate::focus::already_focused_block()
+    };
+    // Delivered with the next successful response (see `take_focus_notice`).
+    recover(state.agent_focus.lock()).queue_notice(block);
+    None
 }
 
 /// The Do Not Disturb run is held by a permission prompt: refuse the action
