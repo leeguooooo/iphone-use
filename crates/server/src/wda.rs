@@ -1013,10 +1013,10 @@ impl WdaClient {
             .send_timed()
             .await
             .context("GET /wda/apps/list")?;
-        let body = ensure_wda_success(response, "GET /wda/apps/list").await?;
-        Ok(body
-            .get("value")
-            .and_then(serde_json::Value::as_array)
+        // ensure_wda_success already unwraps the W3C `value`.
+        let apps = ensure_wda_success(response, "GET /wda/apps/list").await?;
+        Ok(apps
+            .as_array()
             .map(|apps| {
                 apps.iter()
                     .filter_map(|app| app.get("bundleId").and_then(serde_json::Value::as_str))
@@ -2169,6 +2169,20 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    #[test]
+    fn active_bundles_lists_every_active_app_in_order() {
+        // Hardware shape while SpringBoard shows a banner over Shortcuts.
+        let (base, server) = mock_wda(1, |request| {
+            assert!(request.contains("/wda/apps/list"), "unexpected: {request}");
+            r#"{"value":[{"pid":11146,"bundleId":"com.apple.shortcuts"},{"pid":37,"bundleId":"com.apple.springboard"}],"sessionId":"SESSION"}"#.to_string()
+        });
+        let mut client = WdaClient::new(base).unwrap();
+        client.session = Some("SESSION".to_string());
+        let active = block(client.active_bundles()).unwrap();
+        assert_eq!(active, ["com.apple.shortcuts", "com.apple.springboard"]);
+        server.join().unwrap();
     }
 
     #[test]
