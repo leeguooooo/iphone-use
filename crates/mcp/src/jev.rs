@@ -25,6 +25,8 @@ Do not repeat satisfied steps. Fill required fields before submitting. A typed q
 its matching suggestion or the Return/Search key. Do not toggle a switch already in the requested state.
 SCROLL_DOWN/SCROLL_UP when the needed control is likely off screen. BACK leaves the current screen.
 WAIT only when content is visibly still loading. Prefer a useful visible control over WAIT.
+If the control the goal needs (a search field, a tab, a setting) is not on this screen, go BACK
+or scroll to reach it: being on a sub-page is not a reason to stop.
 DONE requires visible evidence that ALL requirements are satisfied. BLOCKED means no supported
 operation can make progress, or the next step would send, pay, delete or share something the goal
 did not explicitly ask for.";
@@ -73,6 +75,8 @@ struct Target {
 struct Screen {
     snapshot: String,
     app: String,
+    /// The navigation bar's title: which page of the app this is.
+    page: String,
     text: String,
     targets: Vec<Target>,
     keyboard: bool,
@@ -93,6 +97,7 @@ fn observe_screen(tree: &Value) -> Screen {
     let mut seen: Vec<(String, String, String)> = Vec::new();
     let mut text = String::new();
     let mut app = String::new();
+    let mut page = String::new();
     let mut keyboard = false;
     for (row_index, row) in rows.iter().enumerate() {
         let kind = str_of(row, "kind");
@@ -101,6 +106,13 @@ fn observe_screen(tree: &Value) -> Screen {
         }
         if kind == "Keyboard" {
             keyboard = true;
+        }
+        if kind == "NavigationBar" && page.is_empty() {
+            let title = str_of(row, "label").trim();
+            // SwiftUI hosting bars carry a class name, not a title.
+            if !title.is_empty() && !title.starts_with('_') {
+                page = title.to_string();
+            }
         }
         if row.get("visible") == Some(&json!(false)) {
             continue;
@@ -120,7 +132,10 @@ fn observe_screen(tree: &Value) -> Screen {
         if !CLICKABLE.contains(&kind) || row.get("enabled") == Some(&json!(false)) {
             continue;
         }
-        let name = if !label.is_empty() {
+        let name = if str_of(row, "identifier") == "BackButton" {
+            // Say what it is: "设置" alone reads like a destination, not a way back.
+            format!("Back to «{}»", if label.is_empty() { "previous screen" } else { label })
+        } else if !label.is_empty() {
             label.to_string()
         } else if let Some(placeholder) = row.get("placeholder").and_then(Value::as_str) {
             placeholder.to_string()
@@ -151,14 +166,16 @@ fn observe_screen(tree: &Value) -> Screen {
         }
     }
     let fingerprint = format!(
-        "{}|{}|{}",
+        "{}|{}|{}|{}",
         app,
+        page,
         text.chars().take(600).collect::<String>(),
         targets.iter().map(|t| format!("{}={}", t.label, t.value)).collect::<Vec<_>>().join(";")
     );
     Screen {
         snapshot: str_of(tree, "snapshot").to_string(),
         app,
+        page,
         text,
         targets,
         keyboard,
@@ -203,6 +220,27 @@ fn controls(screen: &Screen) -> Vec<(&'static str, &'static str)> {
     }
     list.push(("WAIT", "Wait briefly for content that is visibly still loading."));
     list
+}
+
+/// Operations (with their target label) not to offer again: one that just
+/// changed nothing, or one already taken three times in the last four steps.
+/// Hardware: BACK on a top-level page twelve times in a row; tapping a search
+/// field seventeen times as its keyboard came and went.
+fn stuck_actions(history: &[Value]) -> Vec<(String, Value)> {
+    let key = |h: &Value| (h["action"].as_str().unwrap_or("").to_string(), h["target"].clone());
+    let mut avoid = Vec::new();
+    if let Some(last) = history.last() {
+        if last["page_changed"] == json!(false) {
+            avoid.push(key(last));
+        }
+    }
+    let recent: Vec<_> = history.iter().rev().take(4).map(key).collect();
+    for k in &recent {
+        if recent.iter().filter(|r| *r == k).count() >= 3 && !avoid.contains(k) {
+            avoid.push(k.clone());
+        }
+    }
+    avoid
 }
 
 struct Decision {
@@ -264,11 +302,12 @@ impl Models {
         })
     }
 
-    async fn post(&self, url: &str, key: &str, body: String) -> Result<Value> {
+    async fn post(&self, url: &str, key: &str, body: String, timeout: Duration) -> Result<Value> {
         for attempt in 0..3u32 {
             let resp = self
                 .http
                 .post(url)
+                .timeout(timeout)
                 .bearer_auth(key)
                 .header("content-type", "application/json")
                 .body(body.clone())
@@ -316,9 +355,17 @@ impl Models {
                 h["kind"] == "fill" && h["target"] == json!(t.label) && h["text"] == json!(t.value)
             })
         };
-        let click: Vec<usize> = (0..screen.targets.len()).collect();
+        let avoid = stuck_actions(history);
+        let avoided = |op: &str, label: &str| avoid.iter().any(|(o, t)| o == op && t == &json!(label));
+        let click: Vec<usize> = (0..screen.targets.len())
+            .filter(|&i| !avoided("CLICK", &screen.targets[i].label))
+            .collect();
         let fill: Vec<usize> = (0..screen.targets.len())
-            .filter(|&i| screen.targets[i].fill && !typed_same(&screen.targets[i]))
+            .filter(|&i| {
+                screen.targets[i].fill
+                    && !typed_same(&screen.targets[i])
+                    && !avoided("TYPE_TEXT", &screen.targets[i].label)
+            })
             .collect();
 
         let mut ops: Vec<(String, Value)> = Vec::new();
@@ -332,7 +379,9 @@ impl Models {
             ));
         }
         for (id, label) in controls(screen) {
-            ops.push((id.into(), json!(label)));
+            if !avoid.iter().any(|(o, _)| o == id) || id == "WAIT" {
+                ops.push((id.into(), json!(label)));
+            }
         }
         ops.push(("DONE".into(), json!("Every requirement is visibly satisfied.")));
         ops.push(("BLOCKED".into(), json!("No supported operation can progress.")));
@@ -378,7 +427,15 @@ impl Models {
             ));
         }
         let state = json!({
-            "page": {"url": format!("app://{}", screen.app), "title": screen.app, "text": screen.text},
+            "page": {
+                "url": format!("app://{}/{}", screen.app, screen.page),
+                "title": if screen.page.is_empty() || screen.page == screen.app {
+                    screen.app.clone()
+                } else {
+                    format!("{} › {}", screen.app, screen.page)
+                },
+                "text": screen.text,
+            },
             "elements": elements,
             "recent_actions": history,
         });
@@ -389,7 +446,7 @@ impl Models {
         ]);
         let started = Instant::now();
         let result = self
-            .post("https://api.typesafe.ai/v1/systemone", &self.typesafe_key, body)
+            .post("https://api.typesafe.ai/v1/systemone", &self.typesafe_key, body, Duration::from_secs(20))
             .await?;
         let answers = &result["answers"];
         let operation = valid_choice(&answers["operation"], &op_ids)?;
@@ -428,7 +485,10 @@ impl Models {
         });
         for attempt in 0..2 {
             let result = self
-                .post(&format!("{}/chat/completions", self.text_base), key, body.to_string())
+                // A normal answer takes about a second. A request that hangs is
+                // retried after 8 s instead of costing the run 25 (hardware: one
+                // hung call made a 5-step run take 41 s).
+                .post(&format!("{}/chat/completions", self.text_base), key, body.to_string(), Duration::from_secs(8))
                 .await;
             let parsed = result.ok().and_then(|r| {
                 parse_field_text(r["choices"][0]["message"]["content"].as_str().unwrap_or(""))
@@ -564,12 +624,45 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
                         entry["text"] = json!(text);
                         // set_value writes the whole string through the field
                         // itself, so a Chinese keyboard cannot swallow digits.
-                        act(
+                        let first = act(
                             daemon,
                             json!({"type": "set_value", "element": t.row, "snapshot": screen.snapshot, "value": text}),
                         )
-                        .await
-                        .map(drop)
+                        .await;
+                        match first {
+                            // The field moved under us (a keyboard still
+                            // animating in): find it again by name, once.
+                            Err(e) if format!("{e:#}").contains("stale_element_snapshot") => {
+                                let fresh = read_screen(daemon).await?;
+                                match fresh.targets.iter().find(|f| f.fill && f.label == t.label) {
+                                    Some(f) => act(
+                                        daemon,
+                                        json!({"type": "set_value", "element": f.row, "snapshot": fresh.snapshot, "value": text}),
+                                    )
+                                    .await
+                                    .map(drop),
+                                    None => Err(e),
+                                }
+                            }
+                            // Some fields (Settings' search on iOS 27) turn into
+                            // another element once focused, so set_value cannot
+                            // find them: type into whatever now has focus, after
+                            // focusing it if the run has not just done so.
+                            Err(e) if format!("{e:#}").contains("element_not_found") => {
+                                let just_focused = history.last().is_some_and(|h| {
+                                    h["action"] == "CLICK" && h["target"] == json!(t.label)
+                                });
+                                if !just_focused {
+                                    act(daemon, json!({"type": "tap", "element": t.row, "snapshot": screen.snapshot}))
+                                        .await?;
+                                    tokio::time::sleep(Duration::from_millis(400)).await;
+                                }
+                                act(daemon, json!({"type": "text", "text": text, "clear": true}))
+                                    .await
+                                    .map(drop)
+                            }
+                            other => other.map(drop),
+                        }
                     }
                     Ok(None) => {
                         outcome = "blocked";
@@ -596,6 +689,8 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
             // decision is made from a fresh read of what is actually there.
             entry["error"] = json!(format!("{e:#}"));
         }
+        // Let a transition or a keyboard finish before reading what is there.
+        tokio::time::sleep(Duration::from_millis(300)).await;
         let t = Instant::now();
         let next = read_screen(daemon).await;
         observe_ms += t.elapsed().as_millis();
@@ -663,6 +758,7 @@ mod tests {
         let tree = json!({"snapshot": "s1", "elements": [
             {"kind": "Application", "label": "设置"},
             {"kind": "NavigationBar", "label": "设置"},
+            {"kind": "Button", "label": "通用", "identifier": "BackButton"},
             {"kind": "StaticText", "label": "通用"},
             {"kind": "Cell", "label": "电池", "rect": [0, 100, 440, 44]},
             {"kind": "Cell", "label": "电池", "rect": [0, 100, 440, 44]},
@@ -678,10 +774,11 @@ mod tests {
         assert_eq!(screen.text, "通用");
         assert!(screen.keyboard);
         let labels: Vec<&str> = screen.targets.iter().map(|t| t.label.as_str()).collect();
-        assert_eq!(labels, ["电池", "搜索", "低电量模式"]);
-        assert_eq!(screen.targets[0].row, 3, "taps go to the first tree row");
-        assert!(screen.targets[1].fill);
-        assert_eq!(screen.targets[2].checked, Some(true));
+        assert_eq!(screen.page, "设置");
+        assert_eq!(labels, ["Back to «通用»", "电池", "搜索", "低电量模式"]);
+        assert_eq!(screen.targets[1].row, 4, "taps go to the first tree row");
+        assert!(screen.targets[2].fill);
+        assert_eq!(screen.targets[3].checked, Some(true));
         assert!(controls(&screen).iter().any(|(id, _)| *id == "PRESS_RETURN"));
     }
 
@@ -704,6 +801,23 @@ mod tests {
         assert_eq!(parse_field_text(r#"{"text": ""}"#), None);
         assert_eq!(parse_field_text(r#"{"text": "a", "x": 1}"#), None);
         assert_eq!(parse_field_text("sure! {\"text\":\"a\"}"), None);
+    }
+
+    #[test]
+    fn stuck_actions_are_not_offered_again() {
+        let h = |action: &str, target: Value, changed: bool| {
+            json!({"action": action, "target": target, "page_changed": changed})
+        };
+        let no_change = vec![h("BACK", Value::Null, false)];
+        assert_eq!(stuck_actions(&no_change), vec![("BACK".to_string(), Value::Null)]);
+        let looping = vec![
+            h("CLICK", json!("搜索"), true),
+            h("CLICK", json!("搜索"), true),
+            h("CLICK", json!("搜索"), true),
+        ];
+        assert_eq!(stuck_actions(&looping), vec![("CLICK".to_string(), json!("搜索"))]);
+        let fine = vec![h("CLICK", json!("电池"), true), h("BACK", Value::Null, true)];
+        assert!(stuck_actions(&fine).is_empty());
     }
 
     #[test]
