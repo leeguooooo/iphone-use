@@ -9216,6 +9216,14 @@ fn capture_settled_frame_later(
     });
 }
 
+/// The content band of a PNG frame is one flat colour (see
+/// `crate::redaction::content_band_is_blank`). Undecodable frames count as
+/// not blank: the old byte comparison still applies to them.
+fn frame_is_blank(png: &[u8]) -> bool {
+    crate::redaction::decode_png(png)
+        .is_some_and(|image| crate::redaction::content_band_is_blank(&image))
+}
+
 async fn settle_and_read_elements(
     w: &mut crate::wda::WdaClient,
     budget: std::time::Duration,
@@ -9236,7 +9244,11 @@ async fn settle_and_read_elements(
         return (None, report);
     }
     // Best effort: a frame failure just means the tree-vs-tree check below.
-    let frame_before = settle_frame(w, deadline).await;
+    // A blank capture (an app that hides its screen; see `crate::redaction`)
+    // is identical whether or not the app moved, so it proves nothing.
+    let frame_before = settle_frame(w, deadline)
+        .await
+        .filter(|frame| !frame_is_blank(frame));
     let (mut id, mut rows) = match read_elements_once(w, deadline).await {
         SettleRead::Read(id, rows) => (id, rows),
         // No tree, but for opposite reasons: out of time vs. a broken read.

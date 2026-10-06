@@ -891,7 +891,8 @@ fn settle_with_frames(
 }
 
 const FRAME_A: &str = "iVBORw0KGgoAAAA=";
-const FRAME_B: &str = "iVBORw0KGgoBBBB=";
+// Valid base64 (a non-canonical tail fails to decode and reads as a failed capture).
+const FRAME_B: &str = "iVBORw0KGgq7u7s=";
 
 #[test]
 fn identical_frames_around_the_read_settle_on_one_tree_read() {
@@ -912,6 +913,31 @@ fn frames_that_differ_fall_back_to_comparing_trees() {
     });
     assert_eq!(json["settle"]["reason"], "stable", "{json}");
     assert!(sources >= 2, "the tree was read again: {sources}");
+}
+
+/// A screen the app hides from capture is blank in every frame, moving or
+/// not; identical blank frames prove nothing, so the trees are compared.
+#[test]
+fn blank_frames_never_count_as_settled() {
+    fn blank() -> &'static str {
+        static BLANK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        BLANK.get_or_init(|| {
+            use base64::Engine as _;
+            let png = server::redaction::encode_png(&server::redaction::Image {
+                width: 390,
+                height: 844,
+                rgba: vec![255; 390 * 844 * 4],
+            })
+            .unwrap();
+            base64::engine::general_purpose::STANDARD.encode(png)
+        })
+    }
+    let (json, sources) = settle_with_frames(simple_tree("搜索"), |_| blank());
+    assert_eq!(json["settle"]["reason"], "stable", "{json}");
+    assert!(
+        sources >= 2,
+        "blank frames must not stand in for a tree check: {sources}"
+    );
 }
 
 #[test]
