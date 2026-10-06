@@ -9384,7 +9384,13 @@ async fn engage_agent_focus(
         return None;
     }
     recover(state.agent_focus.lock()).set(true);
-    tokio::time::sleep(crate::focus::SHORTCUT_RUN_WAIT).await;
+    if !wait_bridge_finished(w, &bridge).await {
+        // Most likely a one-time permission prompt (notifications, saving the
+        // marker) over the Shortcuts app. Moving away would hide it and leave
+        // the run hanging, so stay and let the agent answer it.
+        tracing::warn!("agent focus: the bridge did not finish; leaving Shortcuts in front");
+        return Some(crate::focus::waiting_block());
+    }
     let restored = match previous.as_deref() {
         Some(bundle) if bundle != "com.apple.shortcuts" && bundle != "com.apple.springboard" => {
             w.launch_app(bundle).await
@@ -9396,6 +9402,32 @@ async fn engage_agent_focus(
     }
     tracing::info!("agent focus: Do Not Disturb requested on (returned to {previous:?})");
     Some(crate::focus::engaged_block())
+}
+
+/// Wait for a deep-link run of the bridge to end: the Shortcuts library then
+/// shows the bridge's tile with its idle run button (`shortcut.button.run`,
+/// labelled with the shortcut's name in every language). `false` after
+/// [`crate::focus::SHORTCUT_RUN_TIMEOUT`].
+async fn wait_bridge_finished(w: &mut crate::wda::WdaClient, bridge: &str) -> bool {
+    let deadline = tokio::time::Instant::now() + crate::focus::SHORTCUT_RUN_TIMEOUT;
+    // Give the deep link a moment to bring the Shortcuts app forward first,
+    // or the library from before the run reads as "already finished".
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(rows) = w.elements().await {
+            let idle = rows.iter().any(|row| {
+                row.kind == "Button"
+                    && row.identifier.as_deref() == Some("shortcut.button.run")
+                    // ends_with: "iU Bridge v4" must not match "…iU Bridge v4b".
+                    && row.label.trim_end().ends_with(bridge)
+            });
+            if idle {
+                return true;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    false
 }
 
 /// Give Do Not Disturb back. The bridge's `focus_off` acts only on its own
@@ -9417,11 +9449,11 @@ async fn release_agent_focus(state: &AppState) -> Option<serde_json::Value> {
         &new_intent_correlation_id(),
         &serde_json::json!({}),
     );
-    let sent = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    let sent = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let mut w = wda.lock().await;
         let opened = w.open_url(&link).await;
-        if opened.is_ok() {
-            tokio::time::sleep(crate::focus::SHORTCUT_RUN_WAIT).await;
+        if opened.is_ok() && !wait_bridge_finished(&mut w, &bridge).await {
+            tracing::warn!("agent focus: focus_off did not finish (permission prompt?)");
         }
         opened
     })

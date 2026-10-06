@@ -145,8 +145,8 @@ def _conditional(group_id: str, mode: int, verb_output: str | None = None,
                  verb: str | None = None) -> dict:
     params: dict = {"GroupingIdentifier": group_id, "WFControlFlowMode": mode}
     if mode == 0:
-        params["WFInput"] = _output(verb_output, "Match Group")
-        params["WFCondition"] = "Equals"
+        params["WFInput"] = _variable(verb_output, "Match Group")
+        params["WFCondition"] = IS
         params["WFConditionalActionString"] = verb
     return {
         "WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
@@ -154,9 +154,17 @@ def _conditional(group_id: str, mode: int, verb_output: str | None = None,
     }
 
 
-# Shortcuts' numeric conditions for "has any value" / "does not have any value".
+# Shortcuts' numeric conditions, as the Shortcuts app itself stores them:
+# "is", "has any value", "does not have any value".
+IS = 4
 HAS_ANY_VALUE = 100
 HAS_NO_VALUE = 101
+
+
+def _variable(output_uuid: str, name: str) -> dict:
+    """An If block's input. The app wraps it as a Variable; a bare attachment
+    imports fine but the condition never matches (hardware: iOS/macOS 27)."""
+    return {"Type": "Variable", "Variable": _output(output_uuid, name)}
 
 
 def _if_output(group_id: str, output_uuid: str, output_name: str, condition) -> dict:
@@ -164,7 +172,7 @@ def _if_output(group_id: str, output_uuid: str, output_name: str, condition) -> 
     params = {
         "GroupingIdentifier": group_id,
         "WFControlFlowMode": 0,
-        "WFInput": _output(output_uuid, output_name),
+        "WFInput": _variable(output_uuid, output_name),
         "WFCondition": condition,
     }
     return {"WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
@@ -172,7 +180,7 @@ def _if_output(group_id: str, output_uuid: str, output_name: str, condition) -> 
 
 
 def _if_equals(group_id: str, output_uuid: str, output_name: str, text: str) -> dict:
-    action = _if_output(group_id, output_uuid, output_name, "Equals")
+    action = _if_output(group_id, output_uuid, output_name, IS)
     action["WFWorkflowActionParameters"]["WFConditionalActionString"] = text
     return action
 
@@ -240,10 +248,12 @@ def _verb_focus_on(uuid_fn):
         {"WFWorkflowActionIdentifier": "is.workflow.actions.dnd.getfocus",
          "WFWorkflowActionParameters": {"UUID": current}},
         _if_output(branch, current, "Current Focus", HAS_NO_VALUE),
-        _notify(FOCUS_TITLE, "AI 正在操作这台手机，已开启勿扰模式，避免通知打断操作。交还手机时会自动关闭。"),
-        _set_dnd(True),
+        # Marker FIRST: if its one-time save prompt holds the run, DND is not
+        # on yet, so nothing is left on that focus_off would not undo.
         _text(on, "on"),
         _save_marker(on),
+        _notify(FOCUS_TITLE, "AI 正在操作这台手机，已开启勿扰模式，避免通知打断操作。交还手机时会自动关闭。"),
+        _set_dnd(True),
         _conditional(branch, 2),
     ], [])
 
@@ -314,6 +324,12 @@ def build(verbs: list[str], daemon_url: str, token: str) -> dict:
         })
         actions.append(_post_action(text_uuid, daemon_url, token))
         actions.append(_conditional(branch, 2))
+
+    # End with no output: otherwise the deep-link run hands its last value back
+    # and iOS asks "Allow … to output 1 text item?" over whatever app is on
+    # screen (hardware-seen on the first focus_on).
+    actions.append({"WFWorkflowActionIdentifier": "is.workflow.actions.nothing",
+                    "WFWorkflowActionParameters": {}})
 
     return {
         "WFWorkflowMinimumClientVersion": 900,
@@ -397,7 +413,7 @@ def self_test() -> int:
         # A fire-and-forget branch must never try the (default-off) return path.
         start = next(i for i, a in enumerate(workflow["WFWorkflowActions"])
                      if a["WFWorkflowActionParameters"].get("WFConditionalActionString") == verb
-                     and a["WFWorkflowActionParameters"].get("WFCondition") == "Equals"
+                     and a["WFWorkflowActionParameters"].get("WFCondition") == IS
                      and "Match Group" in json.dumps(a["WFWorkflowActionParameters"].get("WFInput")))
         group = workflow["WFWorkflowActions"][start]["WFWorkflowActionParameters"]["GroupingIdentifier"]
         end = next(i for i, a in enumerate(workflow["WFWorkflowActions"]) if i > start

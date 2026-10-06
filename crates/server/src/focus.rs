@@ -25,9 +25,9 @@ pub const FOCUS_ON_VERB: &str = "focus_on";
 pub const FOCUS_OFF_VERB: &str = "focus_off";
 pub const OPT_OUT_ENV: &str = "PHONE_REMOTE_AUTO_FOCUS";
 
-/// How long the bridge needs to post its notification, set the Focus and
-/// write its marker before the daemon moves the phone on.
-pub const SHORTCUT_RUN_WAIT: std::time::Duration = std::time::Duration::from_millis(3500);
+/// How long a bridge run may take before the daemon assumes a one-time
+/// permission prompt is holding it (a normal run ends in ~2 s).
+pub const SHORTCUT_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub fn opted_out() -> bool {
     std::env::var(OPT_OUT_ENV)
@@ -87,6 +87,17 @@ pub fn engaged_block() -> serde_json::Value {
                     (only if no Focus was already on; the phone shows a notice). It is turned off again when \
                     you release the phone (phone_release_owner / POST /agent/owner {\"release\":true}) or it \
                     idles out. Tell the user their phone is on Do Not Disturb while you work."
+    })
+}
+
+/// The bridge did not finish: a first-run permission prompt is up.
+pub fn waiting_block() -> serde_json::Value {
+    serde_json::json!({
+        "do_not_disturb": "waiting_for_permission",
+        "message": "The Do Not Disturb shortcut is waiting on a one-time iOS permission prompt in the Shortcuts \
+                    app (notifications, or saving its marker file). It is not in the element tree: take a \
+                    screenshot and tap 'Always Allow' / 始终允许 (or 'Allow' / 允许), then go back to your app. \
+                    Tell the user their phone is on Do Not Disturb while you work."
     })
 }
 
