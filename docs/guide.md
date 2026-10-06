@@ -86,7 +86,7 @@ is holding it, and reports `human_handoff:true`; while that holds, agent input g
 button then reads **交给 agent** (give to agent); press it, or send `{"mode":"agent"}`, to
 put the phone back under remote control.
 
-The daemon also does this on its own: after 10 minutes without agent activity or a
+The daemon also does this on its own: after 5 minutes (doubling, up to an hour, when the phone is wanted back soon after a release) without agent activity or a
 live viewer it stops the runner and parks its supervisor, and the phone stays parked
 across logouts and reboots. A runner kept up around the clock is relaunched every time
 iOS kills it, and each launch asks for the passcode to enable UI automation — so the
@@ -538,7 +538,7 @@ signature could invalidate.
 | `PHONE_REMOTE_UDID` | detected and persisted by the installer | Canonical iPhone for managed WDA and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `WDA_UDID` to setup. |
 | `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA control and MJPEG loopbacks. Control fails closed when unreachable. |
 | `PHONE_REMOTE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the WDA supervisor/relay lifecycle. |
-| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `600` | Stop WDA and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
+| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | Stop WDA and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
 | `WDA_RUNNER_ICON` | `auto` | Home-screen icon for the runner: `auto` reuses the app icon, `none` keeps WDA's placeholder, or a `.png`/`.icns` path. Failures only warn. |
 | `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | WDA default 50 | Bound the accessibility snapshot depth (try `20`–`30` for apps with huge trees, issue #44). |

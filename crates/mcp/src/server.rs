@@ -820,9 +820,19 @@ impl PhoneHandler {
         match self.daemon.elements().await {
             // The daemon adds `registry` on the first read in a newly
             // entered app; compat per flow is added here.
-            Ok(json) => CallToolResult::success(vec![Content::text(
-                with_flow_compat(&self.daemon, json).await,
-            )]),
+            Ok(json) => {
+                let body = with_flow_compat(&self.daemon, json).await;
+                // One line per row for the model; the JSON rides along as
+                // structured content for programs.
+                let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+                let text = parsed
+                    .as_ref()
+                    .and_then(crate::compact::elements)
+                    .unwrap_or_else(|| body.clone());
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = parsed.filter(serde_json::Value::is_object);
+                result
+            }
             Err(e) => CallToolResult::error(vec![Content::text(format!(
                 "elements failed: {e:#}. Call phone_status and follow its `hint`; do not retry in a loop."
             ))]),
@@ -1905,7 +1915,11 @@ fn daemon_action_result(
 ) -> CallToolResult {
     if response.confirms_action() {
         let text = if observed {
-            response.preview()
+            response
+                .json
+                .as_ref()
+                .and_then(crate::compact::observed)
+                .unwrap_or_else(|| response.preview())
         } else {
             plain_success.to_string()
         };

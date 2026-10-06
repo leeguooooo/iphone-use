@@ -62,7 +62,7 @@ WDA 运行期间会占着手机。想自己用手机，先暂停托管的 WDA，
 
 更省事的是网页控制栏里的 **交还** 按钮（或 `POST /agent/mode {"mode":"human"}`）：daemon 停掉 WDA，手机归拿着它的人用，状态里 `human_handoff:true`。这期间 agent 的输入请求一律 409 `phone_handed_to_human`，不会在你用着的时候把手机抢回去。交还之后同一个按钮变成 **交给 agent**，点它（或 `{"mode":"agent"}`）手机重新交给远程控制。
 
-daemon 也会自己交还：10 分钟没有 agent 活动、也没有人在看画面，它就停掉 runner 并停放 supervisor，注销、重启之后也保持停放。runner 常驻的话，iOS 每杀一次它就被拉起一次，每次拉起 iOS 都要输锁屏密码才能开 UI 自动化，结果没人用的时候手机也整天弹密码。下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 会用缓存的 runner 把 WDA 拉回来（不重新编译），手机锁了就解一下。网页 `/phone` 上停放中的手机会显示 **连接手机**，手机解锁、亮屏后点它即可。`PHONE_REMOTE_IDLE_RELEASE_SECS` 改空闲时长，`0` 表示常驻（v0.6.3–v0.7.3 的行为）。
+daemon 也会自己交还：5 分钟没有 agent 活动（释放后很快又被用到，下次的空闲时长会自动翻倍，最长 1 小时）、也没有人在看画面，它就停掉 runner 并停放 supervisor，注销、重启之后也保持停放。runner 常驻的话，iOS 每杀一次它就被拉起一次，每次拉起 iOS 都要输锁屏密码才能开 UI 自动化，结果没人用的时候手机也整天弹密码。下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 会用缓存的 runner 把 WDA 拉回来（不重新编译），手机锁了就解一下。网页 `/phone` 上停放中的手机会显示 **连接手机**，手机解锁、亮屏后点它即可。`PHONE_REMOTE_IDLE_RELEASE_SECS` 改空闲时长，`0` 表示常驻（v0.6.3–v0.7.3 的行为）。
 
 ### 升级
 
@@ -289,7 +289,7 @@ iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/le
 | `PHONE_REMOTE_UDID` | 安装器识别并持久化 | 托管 WDA 和破坏性命令使用的 canonical iPhone。请求不能临时换机，要改就改部署并重启。setup 时传同值 `WDA_UDID`。 |
 | `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA 控制和 MJPEG 的 loopback。不可达时控制请求直接失败。 |
 | `PHONE_REMOTE_WDA_MANAGED` | loopback 端点默认开 | daemon 是否负责 WDA supervisor / 中继的生命周期。 |
-| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `600` | 空闲多少秒后停 WDA 并停放 supervisor，下一次 agent 请求再拉起；`0` 表示常驻，代价是 iOS 每杀一次 runner 就弹一次密码。 |
+| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | 空闲多少秒后停 WDA 并停放 supervisor，下一次 agent 请求再拉起；`0` 表示常驻，代价是 iOS 每杀一次 runner 就弹一次密码。 |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | `X-Phone-Owner` 租约在没有请求刷新时的存活时间。 |
 | `WDA_RUNNER_ICON` | `auto` | runner 的桌面图标：`auto` 用 app 图标，`none` 用 WDA 占位图，或给 `.png` / `.icns` 路径。失败只警告。 |
 | `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | WDA 默认 50 | 限制辅助功能快照深度（树特别大的 app 试 `20`–`30`，issue #44）。 |

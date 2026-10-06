@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod client;
+mod compact;
 mod compat;
 mod contrib;
 mod flow;

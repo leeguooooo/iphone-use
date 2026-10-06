@@ -3393,7 +3393,7 @@ fn prepare_idle_wda_probe(state: &AppState) -> bool {
 
 /// Idle auto-release — the phone belongs to its owner first. When WDA is
 /// configured and nobody has driven it for `PHONE_REMOTE_IDLE_RELEASE_SECS`
-/// (default 600; `0` disables) and no viewer is streaming, stop the on-phone
+/// (default 300; `0` disables) and no viewer is streaming, stop the on-phone
 /// WDA runner and boot out its KeepAlive LaunchAgent so the device is free for
 /// hands-on use. The next `/agent/input` re-bootstraps WDA (see [`agent_input`]).
 ///
@@ -3405,8 +3405,12 @@ fn prepare_idle_wda_probe(state: &AppState) -> bool {
 const COLD_START_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Idle window before the watchdog releases the phone when
-/// `PHONE_REMOTE_IDLE_RELEASE_SECS` is unset.
-const DEFAULT_IDLE_RELEASE_SECS: u64 = 600;
+/// `PHONE_REMOTE_IDLE_RELEASE_SECS` is unset. Five minutes: while a runner is
+/// up iOS shows its "Automation Running" overlay, so an idle phone should not
+/// keep it long; a phone wanted back soon after a release stretches the next
+/// window (see the adaptive idle window below), so steady work does not pay a
+/// passcode prompt every five minutes.
+const DEFAULT_IDLE_RELEASE_SECS: u64 = 300;
 
 /// Backoff for a release that did not take. Doubles per consecutive failure,
 /// capped, so a supervisor we cannot stop is retried instead of abandoned —
@@ -5290,6 +5294,19 @@ async fn tap_snapshot_element(
     if let Some((error, hint)) = tap_target_refusal(&rows, index, value) {
         return Err(SnapshotElementTapError::Refused(error, hint));
     }
+    // A bar over the centre (iOS 26's floating search pill): bring the
+    // target clear and click it there, else tap the part it leaves clear.
+    if !allows_occluded(value) && center_covered(&rows, index) {
+        if let Some(clicked) = reveal_and_click(w, row).await {
+            return clicked.map_err(SnapshotElementTapError::AfterDispatch);
+        }
+        if let Some((x, y)) = clear_tap_point(&rows, index) {
+            return w
+                .tap_point(x, y)
+                .await
+                .map_err(SnapshotElementTapError::AfterDispatch);
+        }
+    }
     if let Some(locator) = snapshot_row_locator(row) {
         // System-owned sheets and document pickers can publish stale or offset
         // rectangles while their native XCUIElement remains clickable. The
@@ -6289,7 +6306,8 @@ async fn tap_unique_label(
     // moved — falls back to a fresh read, never to an error.
     if let Some(rows) = w.recent_tree(SNAPSHOT_TREE_REUSE) {
         if let Ok((index, x, y)) = label_tap_target(&rows, label, kind, request) {
-            if reused_row_is_live(w, &rows[index]).await {
+            // A covered target goes the fresh way below, which brings it clear.
+            if !center_covered(&rows, index) && reused_row_is_live(w, &rows[index]).await {
                 return w
                     .tap_point(x, y)
                     .await
@@ -6302,7 +6320,12 @@ async fn tap_unique_label(
         .elements()
         .await
         .map_err(UniqueLabelTapError::BeforeDispatch)?;
-    let (_, x, y) = label_tap_target(&rows, label, kind, request)?;
+    let (index, x, y) = label_tap_target(&rows, label, kind, request)?;
+    if !allows_occluded(request) && center_covered(&rows, index) {
+        if let Some(clicked) = reveal_and_click(w, &rows[index]).await {
+            return clicked.map_err(UniqueLabelTapError::AfterDispatch);
+        }
+    }
     w.tap_point(x, y)
         .await
         .map_err(UniqueLabelTapError::AfterDispatch)
@@ -6337,6 +6360,24 @@ fn label_tap_target(
             matches = on_screen;
         }
     }
+    // A button and the text inside it share a label: when every match sits
+    // inside one of them, that outermost one is the target, not an ambiguity
+    // (hardware, Settings: Button "通用" > StaticText "通用").
+    if matches.len() > 1 {
+        let outermost: Vec<usize> = matches
+            .iter()
+            .copied()
+            .filter(|&candidate| {
+                let end = subtree_end(rows, candidate);
+                matches
+                    .iter()
+                    .all(|&other| other == candidate || (other > candidate && other < end))
+            })
+            .collect();
+        if let [only] = outermost.as_slice() {
+            matches = vec![*only];
+        }
+    }
     let row = match matches.as_slice() {
         [] => return Err(UniqueLabelTapError::NotFound),
         [index] => &rows[*index],
@@ -6362,7 +6403,7 @@ fn label_tap_target(
             return Err(UniqueLabelTapError::Ambiguous(detail));
         }
     };
-    let (x, y) = element_center(row).ok_or(UniqueLabelTapError::InvalidTarget)?;
+    element_center(row).ok_or(UniqueLabelTapError::InvalidTarget)?;
     let index = rows
         .iter()
         .position(|candidate| std::ptr::eq(candidate, row))
@@ -6370,6 +6411,15 @@ fn label_tap_target(
     if let Some((error, hint)) = tap_target_refusal(rows, index, request) {
         return Err(UniqueLabelTapError::Refused(error, hint));
     }
+    // Clear of floating bars when the centre is not (see `clear_tap_point`);
+    // `allow_occluded` keeps the centre.
+    let (x, y) = if allows_occluded(request) {
+        element_center(row).ok_or(UniqueLabelTapError::InvalidTarget)?
+    } else {
+        clear_tap_point(rows, index)
+            .or_else(|| element_center(row))
+            .ok_or(UniqueLabelTapError::InvalidTarget)?
+    };
     Ok((index, x, y))
 }
 
@@ -6414,6 +6464,11 @@ fn tap_target_refusal(
         return Some(("element_not_visible", ELEMENT_NOT_VISIBLE_HINT));
     }
     let cover = occluding_row(rows, index)?;
+    if clear_tap_point(rows, index).is_some() {
+        // The centre is covered but part of the target is not: the tap goes
+        // there (see `clear_tap_point`), so this is no refusal.
+        return None;
+    }
     tracing::info!(
         "tap refused: row {index} '{}' is covered by {} '{}'",
         target.label,
@@ -6509,6 +6564,138 @@ fn occluding_row(rows: &[crate::wda::ElementRow], index: usize) -> Option<&crate
             && !wraps_target(row.rect))
         .then_some(row)
     })
+}
+
+/// How far a control's drawn shape can reach past its accessibility frame.
+/// iOS 26's floating glass bars (Settings' bottom search pill) eat touches a
+/// good way outside their frame: hardware, iPhone 13, a tap at the centre of
+/// Settings' 通用 row 8 pt above the search field's frame did nothing.
+const OCCLUDER_MARGIN: f64 = 14.0;
+
+/// Where to tap `rows[index]` so the touch reaches it: its centre when no
+/// other control (grown by [`OCCLUDER_MARGIN`]) is over it, else the middle of
+/// the tallest horizontal band of the target that no control covers.
+/// `None` when every part of it is covered.
+fn clear_tap_point(rows: &[crate::wda::ElementRow], index: usize) -> Option<(f64, f64)> {
+    let target = rows.get(index)?;
+    let (cx, cy) = element_center(target)?;
+    let [tx, ty, tw, th] = target.rect;
+    let end = subtree_end(rows, index);
+    let contains = |rect: [f64; 4], x: f64, y: f64| {
+        let [rx, ry, rw, rh] = rect;
+        x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+    };
+    let wraps_target = |rect: [f64; 4]| {
+        contains(rect, tx + 0.5, ty + 0.5) && contains(rect, tx + tw - 0.5, ty + th - 0.5)
+    };
+    // Covers, grown by the margin, of the controls over the target's centre
+    // column (descendants and ancestors are the target itself).
+    let covers: Vec<(f64, f64)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(j, row)| {
+            let descendant = *j > index && *j < end;
+            let ancestor = *j < index && subtree_end(rows, *j) > index;
+            *j != index
+                && !descendant
+                && !ancestor
+                && row.visible != Some(false)
+                && OCCLUDER_KINDS.contains(&row.kind.as_str())
+                && !wraps_target(row.rect)
+        })
+        .map(|(_, row)| {
+            let [rx, ry, rw, rh] = row.rect;
+            [
+                rx - OCCLUDER_MARGIN,
+                ry - OCCLUDER_MARGIN,
+                rw + 2.0 * OCCLUDER_MARGIN,
+                rh + 2.0 * OCCLUDER_MARGIN,
+            ]
+        })
+        .filter(|grown| grown[0] <= cx && cx <= grown[0] + grown[2])
+        .map(|grown| (grown[1], grown[1] + grown[3]))
+        .collect();
+    if !covers
+        .iter()
+        .any(|(top, bottom)| *top <= cy && cy <= *bottom)
+    {
+        return Some((cx, cy));
+    }
+    // Free vertical bands of the target along x = cx.
+    let mut free = vec![(ty, ty + th)];
+    for (top, bottom) in covers {
+        free = free
+            .into_iter()
+            .flat_map(|(a, b)| {
+                let mut parts = Vec::new();
+                if top > a {
+                    parts.push((a, top.min(b)));
+                }
+                if bottom < b {
+                    parts.push((bottom.max(a), b));
+                }
+                parts
+            })
+            .filter(|(a, b)| b - a > 0.0)
+            .collect();
+    }
+    free.into_iter()
+        .filter(|(a, b)| b - a >= 8.0)
+        .max_by(|x, y| (x.1 - x.0).total_cmp(&(y.1 - y.0)))
+        .map(|(a, b)| (cx, (a + b) / 2.0))
+}
+
+/// The target's centre sits under another control (grown by
+/// [`OCCLUDER_MARGIN`]).
+fn center_covered(rows: &[crate::wda::ElementRow], index: usize) -> bool {
+    match (
+        clear_tap_point(rows, index),
+        rows.get(index).and_then(element_center),
+    ) {
+        (Some(clear), Some(center)) => clear != center,
+        (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
+/// Scroll `row`'s element to the middle of the screen, clear of floating
+/// bars, and click it there. iOS 26's floating search pill eats touches well
+/// past its frame (hardware, iPhone 13 Settings: taps on the visible top of
+/// 通用 above the pill did nothing), so for a covered target this beats any
+/// tap point we could compute. `None` when the row has no unique live
+/// element to scroll — the caller falls back to tapping by coordinates.
+async fn reveal_and_click(
+    w: &mut crate::wda::WdaClient,
+    row: &crate::wda::ElementRow,
+) -> Option<anyhow::Result<()>> {
+    let (using, value) = snapshot_row_locator(row)
+        .as_ref()
+        .and_then(locator_wda_query)?;
+    let ids = w.find_elements(using, &value).await.ok()?;
+    let [id] = ids.as_slice() else {
+        return None;
+    };
+    // Best effort: a scroll WDA calls failed can still have moved it.
+    if let Err(error) = w.scroll_element_to_visible(id).await {
+        tracing::info!("reveal before tap: scrollTo said {error:#}");
+    }
+    w.forget_tree();
+    // A tap while the list still glides only stops the glide (hardware: the
+    // row came to rest clear of the pill and the click did nothing). Wait for
+    // two equal frames of the target, at most 1.5 s.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
+    let mut last = None;
+    while tokio::time::Instant::now() < deadline {
+        let Ok(rect) = w.element_rect(id).await else {
+            break;
+        };
+        if last.is_some_and(|previous| rects_match(previous, rect)) {
+            break;
+        }
+        last = Some(rect);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Some(w.click_element(id).await)
 }
 
 async fn tap_unique_locator(
@@ -13841,6 +14028,33 @@ mod tests {
                 "{unprobed}"
             );
         }
+    }
+
+    #[test]
+    fn a_floating_bar_over_the_centre_moves_the_tap_to_the_clear_part() {
+        let row = |kind: &str, label: &str, rect: [f64; 4], depth: u32| crate::wda::ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            rect,
+            depth,
+            ..Default::default()
+        };
+        // Hardware, iPhone 13 Settings: 通用 [16,745,358,51], search field
+        // [28,778,334,28] floating over its lower half.
+        let rows = vec![
+            row("Application", "设置", [0.0, 0.0, 390.0, 844.0], 0),
+            row("Button", "通用", [16.0, 745.0, 358.0, 51.0], 20),
+            row("SearchField", "搜索", [28.0, 778.0, 334.0, 28.0], 19),
+            row("Button", "电池", [16.0, 661.0, 358.0, 49.0], 20),
+        ];
+        let (x, y) = clear_tap_point(&rows, 1).unwrap();
+        assert_eq!(x, 195.0);
+        assert!(y < 764.0, "above the grown search field, got {y}");
+        assert!(y >= 745.0);
+        // Nothing over it: the centre.
+        assert_eq!(clear_tap_point(&rows, 3), Some((195.0, 685.5)));
+        // Partly covered is not a refusal.
+        assert_eq!(tap_target_refusal(&rows, 1, &serde_json::Value::Null), None);
     }
 
     #[test]

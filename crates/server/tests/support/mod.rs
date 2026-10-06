@@ -145,19 +145,6 @@ pub fn mock_wda(
                 );
                 continue;
             }
-            // `/agent/elements` first reads the tree without `isVisible` to
-            // learn its size. Answer that probe with a one-node tree, so the
-            // full read follows and each test scripts only the reads it is
-            // about, counted and timed as before.
-            if request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible ") {
-                let body = r#"{"value":{"type":"XCUIElementTypeApplication","children":[]}}"#;
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                continue;
-            }
             // After an app switch (Home, launch) the read asks which app is
             // in front. No test here scripts that: answer "unknown", which
             // sends the read through the probe answered above.

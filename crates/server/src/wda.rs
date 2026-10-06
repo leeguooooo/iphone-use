@@ -56,6 +56,9 @@ pub struct WdaClient {
     /// What the read path has learned about tree sizes; decides when a read
     /// needs the size probe (see [`ProbeMemory::should_probe`]).
     probe: ProbeMemory,
+    /// `PHONE_REMOTE_SOURCE_VISIBLE=1`: read trees with `isVisible` again
+    /// (size-probed). Off by default: every read skips it.
+    full_visibility: bool,
     /// The screen as it stood after the last action settled (PNG), kept in
     /// memory only so `/agent/screenshot` can answer without a new capture.
     /// Dropped by the next screen-changing POST.
@@ -107,6 +110,7 @@ impl WdaClient {
             last_tree: None,
             lite_source: false,
             probe: ProbeMemory::default(),
+            full_visibility: full_visibility_requested(),
             settled_frame: None,
             settle_frames_paused_until: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
@@ -1358,6 +1362,20 @@ impl WdaClient {
         if std::env::var("PHONE_REMOTE_SOURCE_PROBE").is_ok_and(|value| value.trim() == "0") {
             return Ok((self.source().await?, false));
         }
+        // Every read skips `isVisible` unless asked otherwise (the approach
+        // callstack/agent-device takes: no per-node hit-testing, visibility
+        // from geometry). Hardware, Settings root: 1225 ms with it, 165 ms
+        // without. The price: a row drawn behind something else INSIDE the
+        // screen (Chrome's tab grid) no longer reads `visible:false`; rows
+        // off-screen or scrolled out of their list still do.
+        if !self.full_visibility {
+            let lite = self
+                .source_excluding(Some(PROBE_EXCLUDED_ATTRIBUTES))
+                .await?;
+            self.probe.record(&lite, full_source_max_nodes());
+            self.lite_source = true;
+            return Ok((lite, true));
+        }
         let limit = full_source_max_nodes();
         let untouched = self
             .probe
@@ -1686,6 +1704,12 @@ fn full_source_max_nodes() -> usize {
         .unwrap_or(1000)
 }
 
+/// `PHONE_REMOTE_SOURCE_VISIBLE=1`: read trees with WDA's `isVisible` again
+/// (size-probed, as before every read went lite).
+fn full_visibility_requested() -> bool {
+    std::env::var("PHONE_REMOTE_SOURCE_VISIBLE").is_ok_and(|value| value.trim() == "1")
+}
+
 /// WDA attributes the size probe does not compute: the two per-node
 /// accessibility queries that make a huge tree's read outlive the runner.
 const PROBE_EXCLUDED_ATTRIBUTES: &str = "visible,accessible";
@@ -1832,6 +1856,76 @@ fn mark_rows_outside_root(tree: &serde_json::Value, rows: &mut [ElementRow]) {
             || y >= ry + rh;
         if outside {
             row.visible = Some(false);
+        }
+    }
+    mark_rows_clipped_by_scroll_containers(tree, rows);
+}
+
+/// Kinds that clip their content to their own frame.
+const SCROLL_CONTAINER_KINDS: &[&str] = &["ScrollView", "Table", "CollectionView", "WebView"];
+
+/// A row scrolled out of its nearest list or scroll view is not drawn even
+/// when its frame is still inside the screen (callstack/agent-device's
+/// visibility fold). Containers are often unlabeled and so not rows, hence
+/// the walk over the raw tree: each node gets the clip of its nearest
+/// container ancestor, and rows — a pre-order subsequence of the nodes — are
+/// matched back by kind and frame.
+fn mark_rows_clipped_by_scroll_containers(tree: &serde_json::Value, rows: &mut [ElementRow]) {
+    fn frame(node: &serde_json::Value) -> [f64; 4] {
+        let field = |name: &str| {
+            node.get("rect")
+                .and_then(|rect| rect.get(name))
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+        };
+        [field("x"), field("y"), field("width"), field("height")]
+    }
+    fn intersects(a: [f64; 4], b: [f64; 4]) -> bool {
+        a[2] > 0.0
+            && a[3] > 0.0
+            && a[0] < b[0] + b[2]
+            && a[0] + a[2] > b[0]
+            && a[1] < b[1] + b[3]
+            && a[1] + a[3] > b[1]
+    }
+    fn walk(
+        node: &serde_json::Value,
+        clip: Option<[f64; 4]>,
+        out: &mut Vec<(String, [f64; 4], bool)>,
+    ) {
+        let kind = node
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim_start_matches("XCUIElementType")
+            .to_string();
+        let rect = frame(node);
+        let clipped = clip.is_some_and(|clip| !intersects(rect, clip));
+        let inner =
+            if SCROLL_CONTAINER_KINDS.contains(&kind.as_str()) && rect[2] > 0.0 && rect[3] > 0.0 {
+                Some(rect)
+            } else {
+                clip
+            };
+        out.push((kind, rect, clipped));
+        if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+            for child in children {
+                walk(child, inner, out);
+            }
+        }
+    }
+    let mut nodes = Vec::new();
+    walk(tree, None, &mut nodes);
+    let mut next = 0;
+    for (kind, rect, clipped) in nodes {
+        let Some(row) = rows.get_mut(next) else {
+            break;
+        };
+        if row.kind == kind && row.rect == rect {
+            if clipped {
+                row.visible = Some(false);
+            }
+            next += 1;
         }
     }
 }
@@ -2649,6 +2743,7 @@ mod tests {
             r#"{"value":{"type":"XCUIElementTypeApplication","rect":{"x":0,"y":0,"width":440,"height":956},"children":[]}}"#.to_string()
         });
         let mut client = WdaClient::new(base).unwrap();
+        client.full_visibility = true; // these cases test the size probe
         client.session = Some("SESSION".to_string());
         block(async {
             client.elements().await.unwrap();
@@ -2685,6 +2780,7 @@ mod tests {
             }
         });
         let mut client = WdaClient::new(base).unwrap();
+        client.full_visibility = true; // these cases test the size probe
         let rows = block(client.elements()).unwrap();
         server.join().unwrap();
         // WDA's own occlusion answer survives for a normal screen.
@@ -2705,12 +2801,44 @@ mod tests {
             tree_with_cells(1_200, "scrolled away")
         });
         let mut client = WdaClient::new(base).unwrap();
+        client.full_visibility = true; // these cases test the size probe
         let rows = block(client.elements()).unwrap();
         server.join().unwrap();
         let far = rows.iter().find(|row| row.label == "scrolled away").unwrap();
         assert_eq!(far.visible, Some(false));
         let near = rows.iter().find(|row| row.label == "chat 0").unwrap();
         assert_eq!(near.visible, None);
+    }
+
+    #[test]
+    fn by_default_a_tree_is_read_once_without_visibility_and_clipped_by_geometry() {
+        let (base, server) = mock_wda(1, |request| {
+            assert!(
+                request
+                    .starts_with("GET /source?format=json&excluded_attributes=visible,accessible "),
+                "{request}"
+            );
+            r#"{"value":{"type":"XCUIElementTypeApplication","label":"设置","rect":{"x":0,"y":0,"width":440,"height":956},
+               "children":[{"type":"XCUIElementTypeTable","rect":{"x":0,"y":100,"width":440,"height":600},
+                 "children":[
+                   {"type":"XCUIElementTypeCell","label":"通用","rect":{"x":0,"y":120,"width":440,"height":50}},
+                   {"type":"XCUIElementTypeCell","label":"滚出列表","rect":{"x":0,"y":800,"width":440,"height":50}}]},
+                 {"type":"XCUIElementTypeButton","label":"屏幕外","rect":{"x":0,"y":2000,"width":40,"height":40}}]}}"#
+                .to_string()
+        });
+        let mut client = WdaClient::new(base).unwrap();
+        client.full_visibility = false;
+        let rows = block(client.elements()).unwrap();
+        server.join().unwrap();
+        let visible = |label: &str| rows.iter().find(|row| row.label == label).unwrap().visible;
+        assert_eq!(visible("通用"), None, "inside its list and the screen");
+        assert_eq!(
+            visible("滚出列表"),
+            Some(false),
+            "on screen but scrolled out of its list"
+        );
+        assert_eq!(visible("屏幕外"), Some(false), "outside the screen");
+        assert!(client.visibility_is_geometric());
     }
 
     #[test]
@@ -2742,6 +2870,7 @@ mod tests {
             }
         });
         let mut client = WdaClient::new(base).unwrap();
+        client.full_visibility = true; // these cases test the size probe
         block(async {
             client.elements().await.unwrap();
             assert!(client.visibility_is_geometric());
@@ -2775,6 +2904,7 @@ mod tests {
             }
         });
         let mut client = WdaClient::new(base).unwrap();
+        client.full_visibility = true; // these cases test the size probe
         client.session = Some("SESSION".to_string());
         block(async {
             client.elements().await.unwrap();

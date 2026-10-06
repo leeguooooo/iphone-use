@@ -86,19 +86,6 @@ fn mock_wda(
                 );
                 continue;
             }
-            // `/agent/elements` probes the tree size without `isVisible`/`isAccessible`
-            // first; a one-node answer sends it on to the scripted full read.
-            if request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible ") {
-                let body = r#"{"value":{"type":"XCUIElementTypeApplication","children":[]}}"#;
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                );
-                continue;
-            }
             let this = index;
             index += 1;
             let Some((delay, body)) = responder(&request, this) else {
@@ -1685,8 +1672,9 @@ fn agent_actions_validates_the_entire_batch_before_touching_wda() {
 #[test]
 fn agent_actions_executes_a_guarded_sequence_under_one_request() {
     block(async {
-        // session, Home, which app is in front (asked after Home), source.
-        let (base, server) = mock_wda(4, |request, _| {
+        // session, Home, source (reads go straight to the lite tree; no
+        // front-app lookup after Home any more).
+        let (base, server) = mock_wda(3, |request, _| {
             let body = if request.starts_with("POST /session ") {
                 r#"{"value":{"sessionId":"SESSION"}}"#
             } else if request.contains("/wda/pressButton") {
@@ -1879,8 +1867,9 @@ fn agent_actions_wait_for_retries_one_stale_source_read() {
 #[test]
 fn agent_actions_stops_before_later_steps_when_an_element_is_missing() {
     block(async {
-        // session, Home, which app is in front (asked after Home), source.
-        let (base, server) = mock_wda(4, |request, _| {
+        // session, Home, source (reads go straight to the lite tree; no
+        // front-app lookup after Home any more).
+        let (base, server) = mock_wda(3, |request, _| {
             let body = if request.starts_with("POST /session ") {
                 r#"{"value":{"sessionId":"SESSION"}}"#
             } else if request.contains("/wda/pressButton") {

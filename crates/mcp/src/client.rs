@@ -56,6 +56,32 @@ struct ElementSummary {
     kind: String,
     #[serde(default)]
     identifier: Option<String>,
+    #[serde(default)]
+    depth: u32,
+}
+
+/// Of several rows with the same label, the one every other match sits
+/// inside (a button and the text in it), if there is exactly one.
+fn outermost_match(elements: &[ElementSummary], matches: &[usize]) -> Option<usize> {
+    let inside = |outer: usize, other: usize| {
+        other > outer
+            && elements[outer + 1..=other]
+                .iter()
+                .all(|row| row.depth > elements[outer].depth)
+    };
+    let outermost: Vec<usize> = matches
+        .iter()
+        .copied()
+        .filter(|&outer| {
+            matches
+                .iter()
+                .all(|&other| other == outer || inside(outer, other))
+        })
+        .collect();
+    match outermost.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
 }
 
 fn unique_label_target(body: &str, label: &str) -> anyhow::Result<(usize, String)> {
@@ -74,6 +100,11 @@ fn unique_label_target(body: &str, label: &str) -> anyhow::Result<(usize, String
         .enumerate()
         .filter(|(_, element)| element.label == label)
         .collect();
+    let indexes: Vec<usize> = matches.iter().map(|(index, _)| *index).collect();
+    if let Some(outer) = outermost_match(&response.elements, &indexes).filter(|_| indexes.len() > 1)
+    {
+        return Ok((outer, response.snapshot));
+    }
     match matches.as_slice() {
         [] => anyhow::bail!("no element matched the exact label '{label}'; no action was sent"),
         [(index, _)] => Ok((*index, response.snapshot)),
@@ -1167,6 +1198,34 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(body).unwrap(),
             request_body
         );
+    }
+
+    #[test]
+    fn a_label_on_a_button_and_its_own_text_taps_the_button() {
+        let body = serde_json::json!({
+            "snapshot": "tree-v1",
+            "elements": [
+                {"kind": "Cell", "label": "", "depth": 4},
+                {"kind": "Button", "label": "通用", "depth": 5},
+                {"kind": "StaticText", "label": "通用", "depth": 6},
+                {"kind": "Button", "label": "通用的下一行", "depth": 5}
+            ]
+        })
+        .to_string();
+        assert_eq!(
+            unique_label_target(&body, "通用").unwrap(),
+            (1, "tree-v1".to_string())
+        );
+        // Two siblings still are an ambiguity.
+        let siblings = serde_json::json!({
+            "snapshot": "tree-v1",
+            "elements": [
+                {"kind": "Button", "label": "通用", "depth": 5},
+                {"kind": "Button", "label": "通用", "depth": 5}
+            ]
+        })
+        .to_string();
+        assert!(unique_label_target(&siblings, "通用").is_err());
     }
 
     #[test]
