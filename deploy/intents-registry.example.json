@@ -49,7 +49,7 @@
       "status": "experiment"
     },
     {
-      "$comment": "Fire-and-forget (no reply; works with the return path off, #59). The daemon dispatches it itself before an agent session's first action unless PHONE_REMOTE_AUTO_FOCUS=0. Turns Do Not Disturb on only when no Focus is active, leaves a marker in the Shortcuts folder, and posts a notice on the phone.",
+      "$comment": "Fire-and-forget (no reply; works with the return path off, #59). The daemon dispatches it itself before an agent session's first action unless PHONE_REMOTE_AUTO_FOCUS=0. Turns Do Not Disturb on only when no Focus is active and posts a notice, which the daemon reads off the screen as its evidence that DND is its own to turn off. First run asks once to allow notifications.",
       "name": "focus_on",
       "summary": "Do Not Disturb on for an agent session (only if no Focus is active)",
       "side_effect": "write",
@@ -61,7 +61,7 @@
       "confirm": "none"
     },
     {
-      "$comment": "Undo of focus_on, dispatched by the daemon when the agent releases the phone, it idles out, or it is handed to a person. Acts only on focus_on's marker, so a Focus the person chose is never turned off; posts a notice and returns to the Home Screen.",
+      "$comment": "Dispatched by the daemon only after it saw focus_on's notice, when the agent releases the phone, it idles out, or it is handed to a person: DND off, a notice, back to the Home Screen.",
       "name": "focus_off",
       "summary": "Do Not Disturb off again after an agent session (only if focus_on turned it on)",
       "side_effect": "write",

@@ -9374,7 +9374,7 @@ async fn engage_agent_focus(
 ) -> Option<serde_json::Value> {
     // Only the daemon's own phone: an external WDA endpoint belongs to
     // someone else's setup (and test daemons never touch the real registry).
-    if !state.managed_wda || recover(state.agent_focus.lock()).engaged() {
+    if !state.managed_wda || recover(state.agent_focus.lock()).attempted() {
         return None;
     }
     let bridge = focus_bridge()?;
@@ -9389,11 +9389,17 @@ async fn engage_agent_focus(
         tracing::warn!("agent focus: could not open the bridge: {error:#}");
         return None;
     }
-    recover(state.agent_focus.lock()).set(true);
-    if !wait_bridge_finished(w, &bridge).await {
-        // Most likely a one-time permission prompt (notifications, saving the
-        // marker) over the Shortcuts app. Moving away would hide it and leave
-        // the run hanging, so stay and let the agent answer it.
+    recover(state.agent_focus.lock()).mark_attempted();
+    let run = watch_bridge_run(w, &bridge, true).await;
+    // The notice is the evidence focus_on turned DND on. A run held by a
+    // prompt counts too: focus_on only prompts inside its "no Focus" branch.
+    let ours = run.saw_on_notice || !run.finished;
+    if ours {
+        recover(state.agent_focus.lock()).set(true);
+    }
+    if !run.finished {
+        // A one-time permission prompt over the Shortcuts app. Moving away
+        // would hide it and leave the run hanging: stay, let the agent answer.
         tracing::warn!("agent focus: the bridge did not finish; leaving Shortcuts in front");
         return Some(crate::focus::waiting_block());
     }
@@ -9406,7 +9412,11 @@ async fn engage_agent_focus(
     if let Err(error) = restored {
         tracing::warn!("agent focus: could not return to {previous:?}: {error:#}");
     }
-    tracing::info!("agent focus: Do Not Disturb requested on (returned to {previous:?})");
+    if !ours {
+        tracing::info!("agent focus: a Focus was already on; left alone");
+        return Some(crate::focus::already_focused_block());
+    }
+    tracing::info!("agent focus: Do Not Disturb turned on (returned to {previous:?})");
     Some(crate::focus::engaged_block())
 }
 
@@ -9439,38 +9449,69 @@ fn focus_permission_pending(block: Option<&serde_json::Value>) -> Option<Respons
     ))
 }
 
-/// Wait for a deep-link run of the bridge to end: the Shortcuts library then
-/// shows the bridge's tile with its idle run button (`shortcut.button.run`,
-/// labelled with the shortcut's name in every language). `false` after
-/// [`crate::focus::SHORTCUT_RUN_TIMEOUT`].
-async fn wait_bridge_finished(w: &mut crate::wda::WdaClient, bridge: &str) -> bool {
+/// What one deep-link run of the bridge was seen to do.
+struct BridgeRun {
+    /// The Shortcuts library shows the bridge's idle run button again
+    /// (`shortcut.button.run`, labelled with the shortcut's name in every
+    /// language). `false` after [`crate::focus::SHORTCUT_RUN_TIMEOUT`].
+    finished: bool,
+    /// focus_on's notice banner was on screen during the run.
+    saw_on_notice: bool,
+}
+
+async fn watch_bridge_run(
+    w: &mut crate::wda::WdaClient,
+    bridge: &str,
+    look_for_notice: bool,
+) -> BridgeRun {
     let deadline = tokio::time::Instant::now() + crate::focus::SHORTCUT_RUN_TIMEOUT;
+    let mut run = BridgeRun { finished: false, saw_on_notice: false };
     // Give the deep link a moment to bring the Shortcuts app forward first,
     // or the library from before the run reads as "already finished".
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     while tokio::time::Instant::now() < deadline {
         if let Ok(rows) = w.elements().await {
-            let idle = rows.iter().any(|row| {
+            run.saw_on_notice |= look_for_notice
+                && rows.iter().any(|row| {
+                    row.label.contains(crate::focus::NOTICE_TITLE)
+                        && row.label.contains(crate::focus::ON_NOTICE)
+                });
+            run.finished = rows.iter().any(|row| {
                 row.kind == "Button"
                     && row.identifier.as_deref() == Some("shortcut.button.run")
                     // ends_with: "iU Bridge v4" must not match "…iU Bridge v4b".
                     && row.label.trim_end().ends_with(bridge)
             });
-            if idle {
-                return true;
+            if run.finished {
+                // The banner stays up for seconds after the run; one more
+                // look if it was missed in the reads during the run.
+                if look_for_notice && !run.saw_on_notice {
+                    if let Ok(rows) = w.elements().await {
+                        run.saw_on_notice = rows.iter().any(|row| {
+                            row.label.contains(crate::focus::NOTICE_TITLE)
+                                && row.label.contains(crate::focus::ON_NOTICE)
+                        });
+                    }
+                }
+                return run;
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    false
+    run
 }
 
-/// Give Do Not Disturb back. The bridge's `focus_off` acts only on its own
-/// marker, so this is safe even when the phone was already on a Focus the
-/// person chose. Best-effort and bounded.
+/// Give Do Not Disturb back — only when this session turned it on (see
+/// `engage_agent_focus`), so a Focus the person chose is never ended.
+/// Best-effort and bounded.
 async fn release_agent_focus(state: &AppState) -> Option<serde_json::Value> {
-    if !recover(state.agent_focus.lock()).engaged() {
-        return None;
+    {
+        let mut focus = recover(state.agent_focus.lock());
+        if !focus.engaged() {
+            // Nothing of ours to undo; the next session tries afresh.
+            focus.set(false);
+            return None;
+        }
     }
     // Even opted out or handed off since: what was turned on goes back off.
     let bridge = match load_intents_registry(&intents_registry_path()) {
@@ -9487,7 +9528,7 @@ async fn release_agent_focus(state: &AppState) -> Option<serde_json::Value> {
     let sent = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let mut w = wda.lock().await;
         let opened = w.open_url(&link).await;
-        if opened.is_ok() && !wait_bridge_finished(&mut w, &bridge).await {
+        if opened.is_ok() && !watch_bridge_run(&mut w, &bridge, false).await.finished {
             tracing::warn!("agent focus: focus_off did not finish (permission prompt?)");
         }
         opened

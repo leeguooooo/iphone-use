@@ -157,7 +157,6 @@ def _conditional(group_id: str, mode: int, verb_output: str | None = None,
 # Shortcuts' numeric conditions, as the Shortcuts app itself stores them:
 # "is", "has any value", "does not have any value".
 IS = 4
-HAS_ANY_VALUE = 100
 HAS_NO_VALUE = 101
 
 
@@ -179,12 +178,6 @@ def _if_output(group_id: str, output_uuid: str, output_name: str, condition) -> 
             "WFWorkflowActionParameters": params}
 
 
-def _if_equals(group_id: str, output_uuid: str, output_name: str, text: str) -> dict:
-    action = _if_output(group_id, output_uuid, output_name, IS)
-    action["WFWorkflowActionParameters"]["WFConditionalActionString"] = text
-    return action
-
-
 def _notify(title: str, body: str) -> dict:
     return {"WFWorkflowActionIdentifier": "is.workflow.actions.notification",
             "WFWorkflowActionParameters": {
@@ -202,23 +195,11 @@ def _set_dnd(enabled: bool) -> dict:
             "WFWorkflowActionParameters": params}
 
 
-def _text(uuid_: str, value: str) -> dict:
-    return {"WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
-            "WFWorkflowActionParameters": {"UUID": uuid_, "WFTextActionText": _token(value, {})}}
-
-
-def _save_marker(text_uuid: str) -> dict:
-    """Overwrite the marker in the Shortcuts folder. Never deleted (no prompt)."""
-    return {"WFWorkflowActionIdentifier": "is.workflow.actions.documentpicker.save",
-            "WFWorkflowActionParameters": {
-                "WFInput": _output(text_uuid, "Text"),
-                "WFAskWhereToSave": False,
-                "WFFileDestinationPath": FOCUS_MARKER,
-                "WFSaveFileOverwrite": True}}
-
-
-FOCUS_MARKER = "iphone-use-focus.txt"
 FOCUS_TITLE = "iPhone Use"
+# The daemon matches FOCUS_ON_TEXT in the notification banner
+# (crate::focus::ON_NOTICE) — change both together.
+FOCUS_ON_TEXT = "AI 正在操作这台手机，已开启勿扰模式，避免通知打断操作。交还手机时会自动关闭。"
+FOCUS_OFF_TEXT = "AI 已交还手机，勿扰模式已关闭。"
 
 
 # Native action per verb. Each entry returns (actions, data_parts) given a
@@ -239,41 +220,29 @@ def _verb_battery(uuid_fn):
 def _verb_focus_on(uuid_fn):
     """Do Not Disturb for an agent session — only when no Focus is active.
 
-    Fire-and-forget: the return path is off by default (#59), so the decision
-    and its memory live on the phone. The marker records that THIS bridge
-    turned DND on, so focus_off never ends a Focus the person chose.
+    Fire-and-forget (the return path is off by default, #59). The notice it
+    posts is also the daemon's evidence: the daemon reads it off the screen
+    and only then counts the session's DND as its own to turn off later. No
+    marker file — iOS 27 asks before EVERY file write from a deep-link run,
+    "Always Allow" notwithstanding (hardware-verified).
     """
-    current, branch, on = uuid_fn(), uuid_fn(), uuid_fn()
+    current, branch = uuid_fn(), uuid_fn()
     return ([
         {"WFWorkflowActionIdentifier": "is.workflow.actions.dnd.getfocus",
          "WFWorkflowActionParameters": {"UUID": current}},
         _if_output(branch, current, "Current Focus", HAS_NO_VALUE),
-        # Marker FIRST: if its one-time save prompt holds the run, DND is not
-        # on yet, so nothing is left on that focus_off would not undo.
-        _text(on, "on"),
-        _save_marker(on),
-        _notify(FOCUS_TITLE, "AI 正在操作这台手机，已开启勿扰模式，避免通知打断操作。交还手机时会自动关闭。"),
+        _notify(FOCUS_TITLE, FOCUS_ON_TEXT),
         _set_dnd(True),
         _conditional(branch, 2),
     ], [])
 
 
-def _verb_focus_off(uuid_fn):
-    """Undo focus_on: only if the marker says this bridge turned DND on."""
-    marker, content, branch, off = uuid_fn(), uuid_fn(), uuid_fn(), uuid_fn()
+def _verb_focus_off(_uuid_fn):
+    """Undo focus_on. The daemon sends it only after it saw focus_on's notice,
+    so it never ends a Focus the person chose."""
     return ([
-        {"WFWorkflowActionIdentifier": "is.workflow.actions.documentpicker.open",
-         "WFWorkflowActionParameters": {
-             "UUID": marker, "WFGetFilePath": FOCUS_MARKER,
-             "WFFileErrorIfNotFound": False, "WFShowFilePicker": False}},
-        {"WFWorkflowActionIdentifier": "is.workflow.actions.detect.text",
-         "WFWorkflowActionParameters": {"UUID": content, "WFInput": _output(marker, "File")}},
-        _if_equals(branch, content, "Text", "on"),
         _set_dnd(False),
-        _text(off, "off"),
-        _save_marker(off),
-        _notify(FOCUS_TITLE, "AI 已交还手机，勿扰模式已关闭。"),
-        _conditional(branch, 2),
+        _notify(FOCUS_TITLE, FOCUS_OFF_TEXT),
         {"WFWorkflowActionIdentifier": "is.workflow.actions.returntohomescreen",
          "WFWorkflowActionParameters": {}},
     ], [])

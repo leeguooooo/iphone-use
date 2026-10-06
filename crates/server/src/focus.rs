@@ -8,13 +8,13 @@
 //!
 //! Both halves run through the reviewed bridge shortcut (`focus_on` /
 //! `focus_off` verbs, see `deploy/make-bridge-shortcut.py`) as fire-and-forget
-//! deep links: the phone-to-Mac return path is off by default (#59), so the
-//! decision lives on the phone. `focus_on` acts only when no Focus is active
-//! and leaves a marker; `focus_off` acts only when that marker is there. A
-//! Focus the person chose is therefore never turned on over, nor off. Each
-//! verb also posts a notification on the phone so the person holding it
-//! knows. The daemon only remembers that it asked, persisted so a restart
-//! still gives the phone back.
+//! deep links: the phone-to-Mac return path is off by default (#59). `focus_on`
+//! acts only when no Focus is active, and then posts a notice; the daemon
+//! reads that notice off the screen as its evidence and only then counts DND
+//! as its own to turn off. A Focus the person chose is never turned on over,
+//! nor off. (A marker file was tried first: iOS 27 asks before every file
+//! write from a deep-link run, even after "Always Allow".) The daemon's
+//! "DND is mine" flag is persisted so a restart still gives the phone back.
 //!
 //! Active when the intents registry lists both verbs; opt out with
 //! `PHONE_REMOTE_AUTO_FOCUS=0`.
@@ -24,6 +24,11 @@ use std::path::{Path, PathBuf};
 pub const FOCUS_ON_VERB: &str = "focus_on";
 pub const FOCUS_OFF_VERB: &str = "focus_off";
 pub const OPT_OUT_ENV: &str = "PHONE_REMOTE_AUTO_FOCUS";
+
+/// Substring of focus_on's notice (`FOCUS_ON_TEXT` in the bridge generator)
+/// — the daemon's evidence that this session turned DND on.
+pub const ON_NOTICE: &str = "已开启勿扰模式";
+pub const NOTICE_TITLE: &str = "iPhone Use";
 
 /// How long a bridge run may take before the daemon assumes a one-time
 /// permission prompt is holding it (a normal run ends in ~2 s).
@@ -40,6 +45,9 @@ pub fn opted_out() -> bool {
 #[derive(Debug, Default)]
 pub struct AgentFocus {
     engaged: bool,
+    /// focus_on was already dispatched this session (whatever it found), so
+    /// later actions do not run it again. Memory only; reset on release.
+    attempted: bool,
     path: Option<PathBuf>,
 }
 
@@ -49,7 +57,15 @@ impl AgentFocus {
         let engaged = std::fs::read_to_string(&path)
             .map(|s| s.trim() == "engaged")
             .unwrap_or(false);
-        Self { engaged, path: Some(path) }
+        Self { engaged, attempted: engaged, path: Some(path) }
+    }
+
+    pub fn attempted(&self) -> bool {
+        self.attempted
+    }
+
+    pub fn mark_attempted(&mut self) {
+        self.attempted = true;
     }
 
     pub fn engaged(&self) -> bool {
@@ -58,6 +74,9 @@ impl AgentFocus {
 
     pub fn set(&mut self, engaged: bool) {
         self.engaged = engaged;
+        if !engaged {
+            self.attempted = false;
+        }
         if let Some(path) = &self.path {
             persist(path, engaged);
         }
@@ -101,6 +120,14 @@ pub fn waiting_block() -> serde_json::Value {
     })
 }
 
+/// focus_on found a Focus already on and left it alone.
+pub fn already_focused_block() -> serde_json::Value {
+    serde_json::json!({
+        "do_not_disturb": "left_as_is",
+        "message": "A Focus was already on, so it was left alone and will not be touched on release."
+    })
+}
+
 /// The block added to the response that gave the phone back.
 pub fn released_block() -> serde_json::Value {
     serde_json::json!({
@@ -124,6 +151,12 @@ mod tests {
         assert!(AgentFocus::load(path.clone()).engaged(), "persisted");
         focus.set(false);
         assert!(!path.exists());
-        assert!(!AgentFocus::load(path).engaged());
+        assert!(!AgentFocus::load(path.clone()).engaged());
+        // A session that found a Focus already on is attempted, not engaged.
+        let mut focus = AgentFocus::load(path);
+        focus.mark_attempted();
+        assert!(focus.attempted() && !focus.engaged());
+        focus.set(false);
+        assert!(!focus.attempted(), "release starts the next session fresh");
     }
 }
