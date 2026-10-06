@@ -1572,7 +1572,14 @@ fn snapshot_settings(
 }
 
 /// One row of the flattened element tree.
+///
+/// Serialized through [`ElementRowJson`], which trims two things every
+/// screen read paid for: whole-point coordinates print as `24`, not `24.0`,
+/// and an `identifier` equal to the `label` (SwiftUI class names, controls
+/// whose label fell back to their name) is printed once, as the label — a
+/// label locator matches that row exactly as the identifier would.
 #[derive(Debug, Clone, Default, serde::Serialize, PartialEq)]
+#[serde(into = "ElementRowJson")]
 pub struct ElementRow {
     /// Element type without the `XCUIElementType` prefix (e.g. `Button`).
     pub kind: String,
@@ -1642,6 +1649,79 @@ pub struct ElementRow {
     /// system surface, not the page control underneath. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<String>,
+}
+
+/// The wire form of [`ElementRow`]; field order and skip rules are the row's.
+#[derive(serde::Serialize)]
+pub struct ElementRowJson {
+    kind: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identifier: Option<String>,
+    rect: [Coordinate; 4],
+    depth: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    visible: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accessible: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focused: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placeholder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    traits: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overlay: Option<String>,
+}
+
+/// A point coordinate: an integer when it is whole, else as WDA gave it.
+struct Coordinate(f64);
+
+impl serde::Serialize for Coordinate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.0.fract() == 0.0 && self.0.abs() < 1e15 {
+            serializer.serialize_i64(self.0 as i64)
+        } else {
+            serializer.serialize_f64(self.0)
+        }
+    }
+}
+
+impl From<ElementRow> for ElementRowJson {
+    fn from(row: ElementRow) -> Self {
+        let identifier = row.identifier.filter(|identifier| *identifier != row.label);
+        Self {
+            kind: row.kind,
+            label: row.label,
+            identifier,
+            rect: row.rect.map(Coordinate),
+            depth: row.depth,
+            value: row.value,
+            enabled: row.enabled,
+            visible: row.visible,
+            accessible: row.accessible,
+            focused: row.focused,
+            placeholder: row.placeholder,
+            actions: row.actions,
+            selected: row.selected,
+            min: row.min,
+            max: row.max,
+            traits: row.traits,
+            overlay: row.overlay,
+        }
+    }
 }
 
 /// Which system overlay an accessibility identifier roots, if any. These are
@@ -2646,6 +2726,25 @@ mod tests {
         let first_cell = rows.iter().position(|r| r.kind == "Cell").unwrap();
         assert_eq!(rows[first_cell + 1].kind, "Button");
         assert_eq!(rows[first_cell + 1].label, "Country 001");
+    }
+
+    #[test]
+    fn row_json_prints_whole_points_as_integers_and_a_label_identifier_once() {
+        let row = |identifier: &str, label: &str| ElementRow {
+            kind: "Button".to_string(),
+            label: label.to_string(),
+            identifier: Some(identifier.to_string()),
+            rect: [24.0, 66.5, 36.0, 0.0],
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&row("SidebarButton", "历史记录")).unwrap(),
+            r#"{"kind":"Button","label":"历史记录","identifier":"SidebarButton","rect":[24,66.5,36,0],"depth":0}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&row("AllClear", "AllClear")).unwrap(),
+            r#"{"kind":"Button","label":"AllClear","rect":[24,66.5,36,0],"depth":0}"#
+        );
     }
 
     #[test]
