@@ -3696,6 +3696,31 @@ fn a_genuinely_empty_screen_is_not_called_redacted() {
     assert_eq!(redacted, None);
 }
 
+#[test]
+fn max_side_shrinks_the_capture_and_the_wireframe() {
+    let empty = r#"{"value":{"type":"XCUIElementTypeApplication","label":"Notes","rect":{"x":0,"y":0,"width":390,"height":844},"children":[]}}"#;
+    let (status, _, png) = screenshot_of_blank_capture(empty, "/agent/screenshot?max_side=422");
+    assert_eq!(status, StatusCode::OK);
+    let image = server::redaction::decode_png(&png).unwrap();
+    assert_eq!((image.width, image.height), (195, 422));
+
+    let (status, redacted, png) =
+        screenshot_of_blank_capture(PROTECTED_SOURCE, "/agent/screenshot?max_side=422");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        redacted.as_deref(),
+        Some("1"),
+        "still flagged after shrinking"
+    );
+    let image = server::redaction::decode_png(&png).unwrap();
+    assert_eq!(image.height, 422);
+
+    // Already smaller than asked: left alone.
+    let (_, _, png) = screenshot_of_blank_capture(empty, "/agent/screenshot?max_side=2000");
+    let image = server::redaction::decode_png(&png).unwrap();
+    assert_eq!((image.width, image.height), (390, 844));
+}
+
 // ---------------------------------------------------------------------------
 // Label taps narrowed by kind, occlusion refusal, set_value read-back
 // ---------------------------------------------------------------------------

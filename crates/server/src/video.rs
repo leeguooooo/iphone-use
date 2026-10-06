@@ -140,6 +140,8 @@ pub struct VideoHub {
     /// When the verdict was last decided, and whether a check is running.
     verdict_at: Mutex<Option<std::time::Instant>>,
     verdict_running: AtomicBool,
+    /// The newest upstream JPEG and when it arrived, while the pipeline runs.
+    latest_jpeg: Mutex<Option<(Bytes, std::time::Instant)>>,
 }
 
 /// Keeps a subscription counted; dropping it lets the pipeline wind down.
@@ -174,6 +176,7 @@ impl VideoHub {
             capture_redacted: AtomicBool::new(false),
             verdict_at: Mutex::new(None),
             verdict_running: AtomicBool::new(false),
+            latest_jpeg: Mutex::new(None),
         })
     }
 
@@ -212,6 +215,26 @@ impl VideoHub {
                 Some(std::time::Instant::now());
         }
         self.verdict_running.store(false, Ordering::Release);
+    }
+
+    /// The live frame, when it is current enough to stand in for a WDA
+    /// screenshot: it arrived within the last half second (WDA streams even a
+    /// still screen), and later than `not_before` — the last action sent, plus
+    /// the stream's own lag — so it shows the screen after that action.
+    /// `None` while nobody watches, and for a blank picture, which the
+    /// screenshot path has to look at itself.
+    pub fn live_frame(&self, not_before: Option<std::time::Instant>) -> Option<Bytes> {
+        const STREAM_LAG: Duration = Duration::from_millis(300);
+        const MAX_AGE: Duration = Duration::from_millis(500);
+        if !*self.running.lock().unwrap_or_else(|e| e.into_inner())
+            || self.frame_blank.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        let latest = self.latest_jpeg.lock().unwrap_or_else(|e| e.into_inner());
+        let (jpeg, at) = latest.as_ref()?;
+        let after_action = not_before.is_none_or(|sent| *at > sent + STREAM_LAG);
+        (at.elapsed() < MAX_AGE && after_action).then(|| jpeg.clone())
     }
 
     /// Whether this build can encode at all (VideoToolbox is macOS-only).
@@ -264,6 +287,7 @@ impl VideoHub {
 
     fn mark_stopped(&self) {
         *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        *self.latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) = None;
         // No picture any more: nothing is blank, nothing is redacted.
         self.frame_blank.store(false, Ordering::Release);
     }
@@ -340,6 +364,8 @@ impl VideoHub {
                     Err(_) => continue,                   // a static screen sends slowly
                 };
                 if let Some(jpeg) = splitter.push(&chunk).pop() {
+                    *self.latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((jpeg.clone(), std::time::Instant::now()));
                     let (lock, ready) = &*slot;
                     *lock.lock().unwrap_or_else(|e| e.into_inner()) = Some(jpeg);
                     ready.notify_one();

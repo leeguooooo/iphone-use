@@ -102,6 +102,20 @@ pub struct TapElementParams {
     pub observe: Option<bool>,
 }
 
+/// `phone_screenshot`'s default size: legible, and ~40 % fewer image tokens
+/// than a full-resolution capture.
+const DEFAULT_SCREENSHOT_MAX_SIDE: u32 = 1200;
+
+/// Parameters for [`phone_screenshot`].
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ScreenshotParams {
+    /// Longest side of the image in pixels. Default 1200, which reads fine and
+    /// costs ~0.9k image tokens instead of ~1.5k at full resolution; ask for
+    /// 0 (full resolution) only to read very small text.
+    #[serde(default)]
+    pub max_side: Option<u32>,
+}
+
 /// Parameters for [`phone_key`].
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct KeyParams {
@@ -491,7 +505,8 @@ impl PhoneHandler {
 
     #[tool(
         description = "Capture the current iPhone screen through WDA and return it as \
-        an image/png content block. Capture only when a current \
+        an image/png content block (1200 px on the long side unless max_side says \
+        otherwise). Capture only when a current \
         user-requested task needs phone pixels; do not capture or reconnect for \
         initialization, health checks, or to keep the phone ready. Idle release is \
         intentional. If that task cannot proceed because Direct is released/offline, \
@@ -499,8 +514,16 @@ impl PhoneHandler {
         reconnect while releasing/reconnecting or a blocker remains. When appropriate, \
         call phone_reconnect once, then poll phone_status until drivable=true."
     )]
-    async fn phone_screenshot(&self) -> CallToolResult {
-        match self.daemon.screenshot().await {
+    async fn phone_screenshot(
+        &self,
+        Parameters(ScreenshotParams { max_side }): Parameters<ScreenshotParams>,
+    ) -> CallToolResult {
+        let max_side = match max_side {
+            None => Some(DEFAULT_SCREENSHOT_MAX_SIDE),
+            Some(0) => None,
+            Some(side) => Some(side),
+        };
+        match self.daemon.screenshot(max_side).await {
             Ok(bytes) if !bytes.is_empty() => {
                 let b64 = B64.encode(&bytes);
                 CallToolResult::success(vec![Content::image(b64, "image/png")])

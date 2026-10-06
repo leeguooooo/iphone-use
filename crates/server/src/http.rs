@@ -8047,6 +8047,69 @@ enum AgentWaitReadError {
     TimedOut,
 }
 
+/// One WDA predicate per `present` locator, when the whole expectation can be
+/// polled that way: only `present` locators, each naming a label or an
+/// identifier, and nothing the predicate cannot say the way the flattened tree
+/// does (`value` is normalised there, a Cell can take its child's label, and
+/// focus/enabled/visible are tree states). `None` keeps the full-tree poll.
+fn wait_probe_predicates(expect: &AgentUiExpectation) -> Option<Vec<String>> {
+    if expect.application.is_some() || !expect.absent.is_empty() || expect.present.is_empty() {
+        return None;
+    }
+    expect
+        .present
+        .iter()
+        .map(|locator| {
+            if locator.value.is_some()
+                || locator.focused.is_some()
+                || locator.enabled.is_some()
+                || locator.visible.is_some()
+                || locator.kind.as_deref() == Some("Cell")
+                || (locator.label.is_none() && locator.identifier.is_none())
+            {
+                return None;
+            }
+            let quote =
+                |text: &str| format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"));
+            let mut clauses = Vec::new();
+            if let Some(kind) = &locator.kind {
+                clauses.push(format!(
+                    "type == {}",
+                    quote(&format!("XCUIElementType{kind}"))
+                ));
+            }
+            if let Some(label) = &locator.label {
+                // A row's label falls back to `name` when `label` is empty.
+                clauses.push(format!("(label == {0} OR name == {0})", quote(label)));
+            }
+            if let Some(identifier) = &locator.identifier {
+                clauses.push(format!("identifier == {}", quote(identifier)));
+            }
+            Some(clauses.join(" AND "))
+        })
+        .collect()
+}
+
+/// True only when a probe answered and found nothing for some locator. A
+/// probe that errors or runs out of time says nothing, so the caller reads the
+/// whole tree as before.
+async fn wait_probe_missed(
+    w: &mut crate::wda::WdaClient,
+    probes: &[String],
+    deadline: tokio::time::Instant,
+) -> bool {
+    for predicate in probes {
+        match tokio::time::timeout_at(deadline, w.find_elements("predicate string", predicate))
+            .await
+        {
+            Ok(Ok(found)) if found.is_empty() => return true,
+            Ok(Ok(_)) => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
 async fn agent_wait_elements(
     w: &mut crate::wda::WdaClient,
     deadline: tokio::time::Instant,
@@ -8469,8 +8532,27 @@ async fn agent_actions(
                 // from "saw it, then lost the read" — a late failure must not
                 // erase history.
                 let mut reads = 0_u64;
+                let probes = wait_probe_predicates(expect);
+                let mut probe_misses = 0_u64;
                 loop {
                     attempts += 1;
+                    // While the targets are not there yet, ask WDA for just
+                    // them (~0.3 s) instead of the whole tree (~0.9–3 s). A
+                    // hit, and the last poll of the window, still read the
+                    // whole tree, so the verdict and its observation are
+                    // exactly what they always were.
+                    if let Some(probes) = &probes {
+                        let poll = std::time::Duration::from_millis(*poll_ms);
+                        if tokio::time::Instant::now() + poll < wait_deadline
+                            && wait_probe_missed(&mut w, probes, wait_deadline).await
+                        {
+                            probe_misses += 1;
+                            let remaining = wait_deadline
+                                .saturating_duration_since(tokio::time::Instant::now());
+                            tokio::time::sleep(std::cmp::min(poll, remaining)).await;
+                            continue;
+                        }
+                    }
                     let rows = match agent_wait_elements(&mut w, wait_deadline).await {
                         Ok(rows) => rows,
                         Err(AgentWaitReadError::Failed(error)) => {
@@ -8558,6 +8640,7 @@ async fn agent_actions(
                             "kind": "wait_for",
                             "ok": true,
                             "attempts": attempts,
+                            "probe_misses": probe_misses,
                             "observation": last_observation
                         }));
                         break;
@@ -10252,6 +10335,45 @@ fn mark_wda_read_path_unactionable(state: &AppState) {
 struct ScreenshotQuery {
     /// `raw=1`: the capture as WDA returned it, even when the app blanked it.
     raw: Option<String>,
+    /// Longest side in pixels (200–4000); the full capture when absent. A
+    /// model sees ~1.5k image tokens for a full-resolution phone screen and
+    /// ~0.9k at 1200. Asking for a size also lets a live frame answer, when
+    /// someone is watching and it is current, instead of a WDA capture.
+    max_side: Option<u32>,
+}
+
+/// Shrink a PNG to `max_side` off the async runtime; the original when it
+/// cannot be decoded or is already small enough.
+async fn fit_png(bytes: Vec<u8>, max_side: Option<u32>) -> Vec<u8> {
+    let Some(max_side) = max_side else {
+        return bytes;
+    };
+    let original = bytes.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::redaction::decode_png(&bytes)
+            .filter(|image| image.width.max(image.height) > max_side)
+            .and_then(|image| {
+                crate::redaction::encode_png(&crate::redaction::fit_within(image, max_side))
+            })
+            .unwrap_or(bytes)
+    })
+    .await
+    .unwrap_or(original)
+}
+
+fn png_response(bytes: Vec<u8>, source: Option<&'static str>, redacted: bool) -> Response {
+    let mut builder = Response::builder().header(header::CONTENT_TYPE, "image/png");
+    if redacted {
+        builder = builder.header("x-capture-redacted", "1");
+    }
+    if let Some(source) = source {
+        builder = builder.header("x-screenshot-source", source);
+    }
+    with_security_headers(
+        builder
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
 }
 
 /// Decide again, in the background, whether a blank live picture is a screen
@@ -10364,17 +10486,38 @@ async fn agent_screenshot(
                 .into_response(),
         );
     };
+    let raw = query
+        .raw
+        .as_deref()
+        .is_some_and(|v| v == "1" || v == "true");
+    let max_side = query.max_side.map(|side| side.clamp(200, 4000));
+    // Someone is watching, so the stream is already producing this screen:
+    // its newest frame answers in milliseconds instead of a ~0.5–1.5 s
+    // capture. Only for a sized request (the stream is half resolution) and
+    // never for `raw`, whose caller wants WDA's own capture.
+    if let (Some(max_side), false, Some(hub)) = (max_side, raw, state.video.as_ref()) {
+        let not_before = wda.lock().await.last_post();
+        if let Some(jpeg) = hub.live_frame(not_before) {
+            let png = tokio::task::spawn_blocking(move || {
+                crate::redaction::decode_jpeg(&jpeg).and_then(|image| {
+                    crate::redaction::encode_png(&crate::redaction::fit_within(image, max_side))
+                })
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(png) = png {
+                return png_response(png, Some("live-frame"), false);
+            }
+        }
+    }
     return match tokio::time::timeout(std::time::Duration::from_secs(20), async {
         wda.lock().await.screenshot_png().await
     })
     .await
     {
         Ok(Ok(bytes)) if is_valid_png(&bytes) => {
-            if !query
-                .raw
-                .as_deref()
-                .is_some_and(|v| v == "1" || v == "true")
-            {
+            if !raw {
                 let wireframe = tokio::time::timeout(
                     std::time::Duration::from_secs(15),
                     redacted_capture_wireframe(wda, &bytes),
@@ -10383,20 +10526,11 @@ async fn agent_screenshot(
                 .ok()
                 .flatten();
                 if let Some(wireframe) = wireframe {
-                    let response = Response::builder()
-                        .header(header::CONTENT_TYPE, "image/png")
-                        .header("x-capture-redacted", "1")
-                        .header("x-screenshot-source", "accessibility-wireframe")
-                        .body(Body::from(wireframe))
-                        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-                    return with_security_headers(response);
+                    let wireframe = fit_png(wireframe, max_side).await;
+                    return png_response(wireframe, Some("accessibility-wireframe"), true);
                 }
             }
-            let response = Response::builder()
-                .header(header::CONTENT_TYPE, "image/png")
-                .body(Body::from(bytes))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-            with_security_headers(response)
+            png_response(fit_png(bytes, max_side).await, None, false)
         }
         Ok(Ok(bytes)) => {
             tracing::warn!(
@@ -13184,6 +13318,39 @@ mod tests {
         };
 
         assert!(snapshot_row_locator(&row).is_none());
+    }
+
+    #[test]
+    fn wait_probes_cover_only_what_a_predicate_can_say() {
+        let expect = |value: serde_json::Value| -> AgentUiExpectation {
+            serde_json::from_value(value).unwrap()
+        };
+        assert_eq!(
+            wait_probe_predicates(&expect(serde_json::json!({"present": [
+                {"label": "通用", "kind": "Button"},
+                {"identifier": "it's"}
+            ]}))),
+            Some(vec![
+                "type == 'XCUIElementTypeButton' AND (label == '通用' OR name == '通用')"
+                    .to_string(),
+                "identifier == 'it\\'s'".to_string(),
+            ])
+        );
+        for unprobed in [
+            serde_json::json!({"application": "设置"}),
+            serde_json::json!({"application": "设置", "present": [{"label": "通用"}]}),
+            serde_json::json!({"present": [{"label": "通用"}], "absent": [{"label": "x"}]}),
+            serde_json::json!({"present": [{"label": "通用", "value": "1"}]}),
+            serde_json::json!({"present": [{"label": "通用", "enabled": true}]}),
+            serde_json::json!({"present": [{"label": "通用", "kind": "Cell"}]}),
+            serde_json::json!({"present": [{"kind": "TextField"}]}),
+        ] {
+            assert_eq!(
+                wait_probe_predicates(&expect(unprobed.clone())),
+                None,
+                "{unprobed}"
+            );
+        }
     }
 
     #[test]

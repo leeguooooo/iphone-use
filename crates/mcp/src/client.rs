@@ -292,9 +292,14 @@ impl DaemonClient {
         read_response(req.send().await?).await
     }
 
-    /// `GET /agent/screenshot` — returns raw PNG bytes.
-    pub async fn screenshot(&self) -> anyhow::Result<Vec<u8>> {
-        let req = self.auth(self.client.get(self.url("/agent/screenshot")));
+    /// `GET /agent/screenshot` — returns raw PNG bytes, shrunk to `max_side`
+    /// on the long side when given.
+    pub async fn screenshot(&self, max_side: Option<u32>) -> anyhow::Result<Vec<u8>> {
+        let path = match max_side {
+            Some(side) => format!("/agent/screenshot?max_side={side}"),
+            None => "/agent/screenshot".to_string(),
+        };
+        let req = self.auth(self.client.get(self.url(&path)));
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
         let bytes = resp.bytes().await?;
@@ -1047,7 +1052,7 @@ mod tests {
         let (url, task) = mock_daemon("503 Service Unavailable", body);
 
         let error = DaemonClient::new(url, None)
-            .screenshot()
+            .screenshot(None)
             .await
             .unwrap_err()
             .to_string();

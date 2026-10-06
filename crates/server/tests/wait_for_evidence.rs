@@ -332,3 +332,52 @@ fn a_single_wait_may_now_be_thirty_seconds_but_the_batch_cap_holds() {
         assert_eq!(json["outcome"], "not_sent");
     });
 }
+
+/// A `present` wait polls WDA for just its targets while they are missing,
+/// and reads the whole tree once they appear — the verdict still comes from
+/// that full read.
+#[test]
+fn a_present_wait_polls_the_target_not_the_whole_tree() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    block(async {
+        let probes = Arc::new(AtomicUsize::new(0));
+        let sources = Arc::new(AtomicUsize::new(0));
+        let (p, s) = (Arc::clone(&probes), Arc::clone(&sources));
+        let wda = mock_wda(move |request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if request.contains("/elements") {
+                // Missing for the first three polls, then there.
+                let found = if p.fetch_add(1, Ordering::SeqCst) < 3 {
+                    r#"{"value":[]}"#
+                } else {
+                    r#"{"value":[{"ELEMENT":"E1"}]}"#
+                };
+                return Some((Duration::ZERO, found.to_string()));
+            }
+            if request.contains("/source?format=json") {
+                s.fetch_add(1, Ordering::SeqCst);
+                return Some((Duration::ZERO, PRESENT_SCREEN.to_string()));
+            }
+            None
+        });
+        let (status, json) = run_actions(
+            wda.url(),
+            r#"{"steps":[{"kind":"wait_for",
+                "expect":{"present":[{"kind":"Button","label":"搜索"}]},
+                "timeout_ms":5000,"poll_ms":50}]}"#,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["steps"][0]["probe_misses"], 3, "{json}");
+        assert_eq!(json["steps"][0]["observation"]["read"], true);
+        assert_eq!(
+            sources.load(Ordering::SeqCst),
+            1,
+            "one full read, on the hit: {json}"
+        );
+    });
+}

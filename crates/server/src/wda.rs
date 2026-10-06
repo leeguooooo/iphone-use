@@ -866,25 +866,62 @@ impl WdaClient {
     /// before reporting success.
     pub async fn open_spotlight(&mut self) -> Result<()> {
         self.press_home().await?;
-        tokio::time::sleep(Duration::from_millis(450)).await;
 
-        let mut search_element = None;
-        for label in ["搜索", "Search", "検索"] {
-            let elements = self.find_elements("accessibility id", label).await?;
-            match elements.as_slice() {
-                [element] => {
-                    search_element = Some(element.clone());
+        // Poll rather than sleep a fixed 450 ms, but only once SpringBoard is
+        // in front: until then the app being left may still answer for a
+        // "搜索" button of its own. A WDA without `apps/list` gets the old
+        // fixed wait.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            match self.active_bundle().await {
+                Ok(Some(bundle)) if bundle == "com.apple.springboard" => break,
+                Ok(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(450)).await;
                     break;
                 }
-                [] => {}
-                _ => return Err(anyhow!("Spotlight Search element is ambiguous for {label}")),
             }
         }
-        let element =
-            search_element.ok_or_else(|| anyhow!("Spotlight Search element not found"))?;
+        let element = loop {
+            let mut found = None;
+            for label in ["搜索", "Search", "検索"] {
+                let elements = self.find_elements("accessibility id", label).await?;
+                match elements.as_slice() {
+                    [element] => {
+                        found = Some(element.clone());
+                        break;
+                    }
+                    [] => {}
+                    _ => return Err(anyhow!("Spotlight Search element is ambiguous for {label}")),
+                }
+            }
+            if let Some(element) = found {
+                break element;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow!("Spotlight Search element not found"));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
         self.click_element(&element).await?;
-        tokio::time::sleep(Duration::from_millis(350)).await;
 
+        // Same for the search field: ask for it alone until it shows, then
+        // confirm on the full tree only if it never did.
+        let field = "type == 'XCUIElementTypeTextField' AND (label == 'SpotlightSearchField' \
+                     OR placeholderValue IN {'搜索', 'Search', '検索'})";
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if matches!(self.find_elements("predicate string", field).await, Ok(found) if !found.is_empty())
+            {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         let rows = self.elements().await?;
         let opened = rows.iter().any(|row| {
             row.kind == "TextField"
@@ -1289,6 +1326,11 @@ impl WdaClient {
     /// too but touch nothing on screen; counting them would void every cache
     /// keyed on "nothing sent since" (the alert probe opens a session right
     /// after a tree read).
+    /// When the last request that can change the screen was sent.
+    pub fn last_post(&self) -> Option<std::time::Instant> {
+        self.posted_at
+    }
+
     fn post_req(&mut self, url: String) -> reqwest::RequestBuilder {
         let path = url.split('?').next().unwrap_or(&url);
         let read_only = path.ends_with("/session")

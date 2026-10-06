@@ -71,6 +71,63 @@ pub fn encode_png(image: &Image) -> Option<Vec<u8>> {
     Some(out)
 }
 
+pub fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(bytes, options);
+    decoder.decode_headers().ok()?;
+    let (width, height) = decoder.dimensions()?;
+    let rgba = decoder.decode().ok()?;
+    (rgba.len() == width * height * 4).then_some(Image {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+    })
+}
+
+/// Shrink so the longer side is at most `max_side`, averaging each source
+/// box (text stays legible where nearest-neighbour would drop strokes).
+/// Never enlarges.
+pub fn fit_within(image: Image, max_side: u32) -> Image {
+    let long = image.width.max(image.height);
+    if long <= max_side || max_side == 0 {
+        return image;
+    }
+    let scale = f64::from(max_side) / f64::from(long);
+    let width = ((f64::from(image.width) * scale).round() as u32).max(1);
+    let height = ((f64::from(image.height) * scale).round() as u32).max(1);
+    let (sw, sh) = (image.width as usize, image.height as usize);
+    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height as usize {
+        let y0 = y * sh / height as usize;
+        let y1 = ((y + 1) * sh / height as usize).max(y0 + 1).min(sh);
+        for x in 0..width as usize {
+            let x0 = x * sw / width as usize;
+            let x1 = ((x + 1) * sw / width as usize).max(x0 + 1).min(sw);
+            let mut sum = [0u32; 4];
+            for row in y0..y1 {
+                let start = (row * sw + x0) * 4;
+                for px in image.rgba[start..start + (x1 - x0) * 4].chunks_exact(4) {
+                    for c in 0..4 {
+                        sum[c] += u32::from(px[c]);
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            let out = (y * width as usize + x) * 4;
+            for c in 0..4 {
+                rgba[out + c] = (sum[c] / n) as u8;
+            }
+        }
+    }
+    Image {
+        width,
+        height,
+        rgba,
+    }
+}
+
 /// Whether the content band is one flat colour (a protected or empty screen).
 pub fn content_band_is_blank(image: &Image) -> bool {
     band_is_flat(image.width as usize, image.height as usize, &image.rgba)
@@ -321,6 +378,23 @@ impl Canvas<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fit_within_averages_and_never_enlarges() {
+        // Two columns, black and white: halving the width averages them.
+        let image = Image {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+            ],
+        };
+        let small = fit_within(image, 1);
+        assert_eq!((small.width, small.height), (1, 1));
+        assert_eq!(small.rgba, vec![127, 127, 127, 255]);
+        let big = fit_within(flat(10, 20, [1, 2, 3]), 40);
+        assert_eq!((big.width, big.height), (10, 20));
+    }
 
     fn flat(width: u32, height: u32, rgb: [u8; 3]) -> Image {
         Image {
