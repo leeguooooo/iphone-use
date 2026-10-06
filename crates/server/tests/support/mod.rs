@@ -145,6 +145,19 @@ pub fn mock_wda(
                 );
                 continue;
             }
+            // `/agent/elements` first reads the tree without `isVisible` to
+            // learn its size. Answer that probe with a one-node tree, so the
+            // full read follows and each test scripts only the reads it is
+            // about, counted and timed as before.
+            if request.starts_with("GET /source?format=json&excluded_attributes=visible ") {
+                let body = r#"{"value":{"type":"XCUIElementTypeApplication","children":[]}}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                continue;
+            }
             let scripted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 responder(&request, index)
             }));

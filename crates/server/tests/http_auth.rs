@@ -86,6 +86,19 @@ fn mock_wda(
                 );
                 continue;
             }
+            // `/agent/elements` probes the tree size without `isVisible`
+            // first; a one-node answer sends it on to the scripted full read.
+            if request.starts_with("GET /source?format=json&excluded_attributes=visible ") {
+                let body = r#"{"value":{"type":"XCUIElementTypeApplication","children":[]}}"#;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                continue;
+            }
             let this = index;
             index += 1;
             let Some((delay, body)) = responder(&request, this) else {

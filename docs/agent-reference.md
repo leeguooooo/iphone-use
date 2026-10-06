@@ -465,13 +465,18 @@ labelled elements = genuinely empty or loading: wait and read again.
 AX first; vision only when the tree is unusable.
 
 - **Mode A — tree too sparse** (games, canvas). Judge `ax_stats`
-  `{n, n_interactive, labeled_frac, coverage, container_only, max_depth}`:
+  `{n, n_interactive, labeled_frac, coverage, container_only, max_depth, visibility?}`:
   `n_interactive == 0 && container_only` → vision; `n_interactive < 3` or
   `labeled_frac < 0.3` or (`coverage < 0.3` and not `container_only`) → hybrid;
   otherwise stay AX.
 - **Mode B — reading the tree kills the runner** (KakaoTalk, #44): elements
   returns 502 `wda_source_failed` / 504 `wda_source_timeout` twice in the same app
-  while screenshots work. Remember that per app for the session.
+  while screenshots work. Remember that per app for the session. Huge trees
+  (WeChat's chat list: 3,400 nodes) no longer cause this: above 1,000 nodes the
+  daemon reads without WDA's per-node `isVisible` (~5 s instead of a runner
+  kill) and says so with `ax_stats.visibility: "geometric"`. On such a tree
+  `visible:false` only marks rows outside the screen; a row hidden inside it is
+  not flagged, so read rects with care before tapping by element.
 
 AX-free loop: screenshot → pick a target yourself → coordinate `tap` /
 `longpress` / `swipe` / `scroll` → verify with a screenshot after ~300–800 ms.

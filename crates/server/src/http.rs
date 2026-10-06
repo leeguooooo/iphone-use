@@ -10458,10 +10458,11 @@ async fn agent_elements(
         // Best-effort: a system alert is reported as its own block because the
         // flattened tree misses or misrepresents it (see WdaClient::alert_summary).
         let alert = probe_alert(&mut w).await;
-        Ok::<_, anyhow::Error>((rows, screen, alert))
+        let geometric = w.visibility_is_geometric();
+        Ok::<_, anyhow::Error>((rows, screen, alert, geometric))
     })
     .await;
-    let (rows, screen, alert) = match result {
+    let (rows, screen, alert, geometric) = match result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) if error.downcast_ref::<BlockingAlert>().is_some() => {
             // The phone is fine; an alert is waiting for an answer.
@@ -10555,6 +10556,14 @@ async fn agent_elements(
             "ax_stats": ax_stats,
         }),
     };
+    // A tree too large to read with WDA's `isVisible` (see
+    // WdaClient::bounded_source) carries a geometric `visible`: off-root rows
+    // are `visible:false`, but rows hidden inside the root rect (a collapsed
+    // cell, Chrome's tab grid) are not, so occlusion refusals are weaker.
+    // Say so where the caller already looks for tree quality.
+    if geometric {
+        body["ax_stats"]["visibility"] = serde_json::json!("geometric");
+    }
     if let (Some(object), Some(alert)) = (body.as_object_mut(), alert_json(alert)) {
         object.insert("alert".to_string(), alert);
     }
