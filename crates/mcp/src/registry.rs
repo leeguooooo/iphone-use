@@ -1010,3 +1010,69 @@ mod tests {
         assert!(stamp.ends_with('Z'));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Locale variants: `health/export-all` (en) and `health/export-all-zh-cn`
+// ---------------------------------------------------------------------------
+
+/// A flow's name without its locale suffix (`export-all-zh-cn` with locale
+/// `zh-CN` → `export-all`); unchanged when it carries none.
+fn locale_base<'a>(name: &'a str, locale: Option<&str>) -> &'a str {
+    let Some(locale) = locale else { return name };
+    let slug = format!("-{}", locale.to_ascii_lowercase().replace('_', "-"));
+    name.strip_suffix(slug.as_str()).unwrap_or(name)
+}
+
+/// Installed flows that do the same task in another UI language: same app
+/// directory, same name once each one's own locale suffix is removed.
+pub fn locale_siblings(index: &LocalIndex, id: &str) -> Vec<String> {
+    let Some(this) = index.flows.get(id) else { return Vec::new() };
+    let Some((dir, name)) = id.split_once('/') else { return Vec::new() };
+    let base = locale_base(name, this.meta.locale.as_deref());
+    index
+        .flows
+        .iter()
+        .filter(|(other_id, other)| {
+            other_id.as_str() != id
+                && other.meta.locale != this.meta.locale
+                && other_id.split_once('/').is_some_and(|(other_dir, other_name)| {
+                    other_dir == dir && locale_base(other_name, other.meta.locale.as_deref()) == base
+                })
+        })
+        .map(|(other_id, _)| other_id.clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::*;
+
+    fn entry(locale: Option<&str>) -> LocalFlow {
+        LocalFlow {
+            source: "official".into(),
+            sha256: "x".into(),
+            meta: serde_json::from_value(serde_json::json!({
+                "name": "n", "steps": 1, "locale": locale
+            }))
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn siblings_pair_language_variants_of_the_same_task() {
+        let mut index = LocalIndex::default();
+        for (id, locale) in [
+            ("health/export-all", Some("en")),
+            ("health/export-all-zh-cn", Some("zh-CN")),
+            ("health/export-keep-both", Some("zh-CN")),
+            ("health/open", None),
+            ("settings/export-all", Some("en")),
+        ] {
+            index.flows.insert(id.into(), entry(locale));
+        }
+        assert_eq!(locale_siblings(&index, "health/export-all"), ["health/export-all-zh-cn"]);
+        assert_eq!(locale_siblings(&index, "health/export-all-zh-cn"), ["health/export-all"]);
+        assert!(locale_siblings(&index, "health/open").is_empty());
+        assert!(locale_siblings(&index, "health/missing").is_empty());
+    }
+}

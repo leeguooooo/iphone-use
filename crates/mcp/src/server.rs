@@ -362,6 +362,14 @@ pub struct FlowRunParams {
     /// Run even when compat is `broken` or `incompatible` for this phone.
     #[serde(default)]
     pub force: bool,
+    /// Compare what the flow read (its `outputs`) against the recorded result
+    /// shape; `verify.ok=false` names what drifted.
+    #[serde(default)]
+    pub verify: bool,
+    /// With verify: record this run's output shape as the fixture (types
+    /// only). Only after checking the values are right.
+    #[serde(default)]
+    pub write_fixture: bool,
 }
 
 /// Parameters for [`phone_flow_draft`].
@@ -952,7 +960,11 @@ impl PhoneHandler {
 
     #[tool(
         description = "Run one flow exactly once — an installed registry id, or a flow file \
-        path (*.json, e.g. a phone_flow_draft you are proving before publishing): \
+        path (*.json, e.g. a phone_flow_draft you are proving before publishing). A flow \
+        that declares `outputs` returns what it read as top-level `outputs` (e.g. today's \
+        steps); verify=true also checks their shape against the recorded fixture. A \
+        read_only/navigation flow that misses an element runs its other-language variant \
+        once (`fallback_from` says so): \
         the daemon validates the whole sequence, holds one control lock, and stops at \
         the first failed step. The happy path costs one tool call and zero screenshots. \
         Requires phone_status drivable=true. Pass the flow's declared inputs; a flow \
@@ -969,6 +981,8 @@ impl PhoneHandler {
             inputs,
             confirm,
             force,
+            verify,
+            write_fixture,
         }): Parameters<FlowRunParams>,
     ) -> CallToolResult {
         let is_file = id.ends_with(".json");
@@ -1001,7 +1015,7 @@ impl PhoneHandler {
         // kept whole and diagnosed, never reverse-parsed out of an error
         // string. An agent driving through MCP sees exactly what a human at
         // the CLI sees.
-        let run = match crate::flow::execute_and_diagnose(&flow, &inputs, &self.daemon, confirm)
+        let mut run = match crate::flow::execute_and_diagnose(&flow, &inputs, &self.daemon, confirm)
             .await
         {
             Ok(run) => run,
@@ -1014,13 +1028,44 @@ impl PhoneHandler {
                 ))])
             }
         };
+        // A read/navigation flow that missed an element runs its locale
+        // variant once (health/export-all ↔ health/export-all-zh-cn).
+        let mut ran_id = id.clone();
+        let mut ran_flow = None;
+        if !run.succeeded {
+            if let Some((sibling_id, sibling, sibling_run)) =
+                crate::flow::locale_fallback(&id, &flow, &inputs, &run.value, &self.daemon).await
+            {
+                let failed = std::mem::replace(&mut run, sibling_run).value;
+                crate::flow::note_fallback(&mut run.value, &id, &failed);
+                ran_id = sibling_id;
+                ran_flow = Some(sibling);
+            }
+        }
+        let outputs = run.value.get("outputs").cloned();
         let mut summary = serde_json::json!({
-            "flow": id,
+            "flow": ran_id,
             "verified": flow.meta.verified(),
             "risk": flow.meta.risk_label(),
             "compat": compat,
             "result": run.value,
         });
+        if let Some(outputs) = outputs {
+            summary["outputs"] = outputs;
+        }
+        if verify || write_fixture {
+            let ran = ran_flow.as_ref().unwrap_or(&flow);
+            match crate::flow::verify_block(
+                &crate::flow::fixture_key(&ran_id),
+                ran,
+                &summary["result"],
+                run.succeeded,
+                write_fixture,
+            ) {
+                Ok(block) => summary["verify"] = block,
+                Err(e) => summary["verify"] = serde_json::json!({"ok": false, "error": format!("{e:#}")}),
+            }
+        }
         if run.succeeded {
             if compat.compat == crate::compat::Compat::UntestedNewer {
                 summary["hint"] = serde_json::json!(

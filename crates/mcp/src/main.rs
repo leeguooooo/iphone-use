@@ -22,6 +22,7 @@ mod client;
 mod compat;
 mod contrib;
 mod flow;
+mod outputs;
 mod registry;
 mod server;
 mod types;
@@ -64,6 +65,25 @@ enum FlowCommand {
         /// Write the draft flow to this new file and validate it.
         #[arg(long)]
         out: Option<String>,
+    },
+    /// Run a flow and check what it read against its recorded result shape
+    /// (`~/.iphone-use/flow-fixtures/`): exit 1 when an output went missing,
+    /// changed type, or came back an empty list.
+    Verify {
+        /// JSON flow file, or a registry id such as `health/export-all`.
+        target: String,
+        /// Ephemeral flow input in KEY=VALUE form. Repeat for multiple inputs.
+        #[arg(long = "input")]
+        inputs: Vec<String>,
+        /// Required for side_effect flows.
+        #[arg(long)]
+        confirm: bool,
+        /// Run even when compat is broken/incompatible.
+        #[arg(long)]
+        force: bool,
+        /// Record this run's output shape as the fixture (types only).
+        #[arg(long)]
+        write_fixture: bool,
     },
     /// Run a flow once; never retries an unknown or failed result.
     Run {
@@ -204,9 +224,17 @@ async fn main() -> anyhow::Result<()> {
                     confirm,
                     force,
                     artifacts_dir.as_deref(),
+                    None,
                 )
                 .await
             }
+            FlowCommand::Verify {
+                target,
+                inputs,
+                confirm,
+                force,
+                write_fixture,
+            } => flow::run_command(&target, &inputs, confirm, force, None, Some(write_fixture)).await,
             FlowCommand::Apps { json } => {
                 let daemon = client::DaemonClient::from_env();
                 match compat::installed_apps(&daemon).await {

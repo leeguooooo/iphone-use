@@ -322,6 +322,38 @@ picker, wait_for, pause`. `wait_for.expect` takes `application`, `present[]`,
 every declared input must be used. New fields wait for a client release before
 they can enter the registry.
 
+### Outputs: flows that return data
+
+A flow can return what it read: `outputs` names values taken off the final
+screen once every step passed. `flow run` / `phone_flow_run` put them in
+`outputs` (top level in MCP); a value that could not be read is `null` and is
+listed in `missing_outputs`.
+
+```json
+"outputs": {
+  "steps":  {"locator": {"identifier": "StepCount"}, "type": "number"},
+  "title":  {"locator": {"kind": "NavigationBar"}, "field": "label"},
+  "chats":  {"locator": {"kind": "Cell"}, "field": "label", "all": true},
+  "km":     {"label_contains": "公里", "type": "number"}
+}
+```
+
+`locator` matches like `tap_locator`; `label_contains` narrows by substring;
+`field` is `value` or `label` (default: value when present); `type: number`
+takes the first number in the text (`8,532 步` → 8532); `all` returns every
+match. End the flow with a `wait_for` on the screen the outputs live on.
+
+**Verify.** `iphone-use-mcp flow verify <flow> --write-fixture` records the
+SHAPE of a good result (types only, under `~/.iphone-use/flow-fixtures/`);
+later `flow verify <flow>` (or `phone_flow_run verify=true`) fails when an
+output went missing, changed type, or came back an empty list — the app
+changed and the flow reads the wrong thing even though every step passed.
+
+**Locale fallback.** A `read_only` / `navigation` registry flow that fails on
+a missing element runs its other-language variant once (`health/export-all`
+↔ `health/export-all-zh-cn`), inputs carried over by name; the result says
+`fallback_from`. Flows that send, pay or delete never re-run.
+
 ### Saving a flow
 
 When a response carries `flow_suggestion`, or you finish a multi-step task no

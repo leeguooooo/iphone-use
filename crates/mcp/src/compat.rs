@@ -443,6 +443,7 @@ mod tests {
                 })
                 .collect(),
             app_version_min: min.map(String::from),
+            outputs: vec![],
             example_inputs: Default::default(),
         }
     }

@@ -68,6 +68,10 @@ struct FlowDocument {
     /// (and a curious human) can run a parameterized flow unattended.
     #[serde(default)]
     example_inputs: BTreeMap<String, String>,
+    /// Values read off the final screen after every step passed (see
+    /// `outputs.rs`). Makes a read task return data, not just "done".
+    #[serde(default)]
+    outputs: BTreeMap<String, crate::outputs::FlowOutput>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -147,6 +151,9 @@ pub struct FlowMeta {
     pub app_version_min: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub example_inputs: BTreeMap<String, String>,
+    /// Names of the values the flow returns (`outputs`), for `flow list`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<String>,
 }
 
 impl FlowMeta {
@@ -180,6 +187,7 @@ pub struct ValidatedFlow {
     pub meta: FlowMeta,
     pub inputs: BTreeMap<String, FlowInputDefinition>,
     pub step_templates: Vec<serde_json::Value>,
+    pub outputs: BTreeMap<String, crate::outputs::FlowOutput>,
 }
 
 impl ValidatedFlow {
@@ -514,6 +522,7 @@ pub fn parse_flow(bytes: &[u8], origin: &str) -> Result<ValidatedFlow> {
 
     validate_metadata(&document)?;
     validate_input_definitions(&document.inputs)?;
+    crate::outputs::validate(&document.outputs)?;
     let step_count = document.steps.len();
     let validated_steps = materialize_steps(&document.steps, &document.inputs, None)?;
     phone_steps_request(validated_steps).map_err(anyhow::Error::msg)?;
@@ -531,9 +540,11 @@ pub fn parse_flow(bytes: &[u8], origin: &str) -> Result<ValidatedFlow> {
             verified_on: document.verified_on,
             app_version_min: document.app_version_min,
             example_inputs: document.example_inputs,
+            outputs: document.outputs.keys().cloned().collect(),
         },
         inputs: document.inputs,
         step_templates: document.steps,
+        outputs: document.outputs,
     })
 }
 
@@ -1095,6 +1106,33 @@ pub struct DiagnosedRun {
 /// Shared by every entry point on purpose: the CLI and the MCP tool are the
 /// same job, and a diagnosis that only one of them can see is a diagnosis the
 /// agent doing the work never reads.
+/// Read the flow's outputs off the screen it ended on. A row can arrive a
+/// moment after the last step, so a read that misses some is retried a few
+/// times; it never sends an action.
+async fn read_outputs(
+    flow: &ValidatedFlow,
+    daemon: &DaemonClient,
+) -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
+    let mut last = (serde_json::Map::new(), flow.outputs.keys().cloned().collect::<Vec<_>>());
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        }
+        let Ok(body) = daemon.elements().await else { continue };
+        let Ok(tree) = serde_json::from_str::<serde_json::Value>(&body) else { continue };
+        last = crate::outputs::extract(&flow.outputs, &tree);
+        if last.1.is_empty() {
+            break;
+        }
+    }
+    if last.0.is_empty() {
+        for name in flow.outputs.keys() {
+            last.0.insert(name.clone(), serde_json::Value::Null);
+        }
+    }
+    last
+}
+
 pub async fn execute_and_diagnose(
     flow: &ValidatedFlow,
     inputs: &BTreeMap<String, String>,
@@ -1153,6 +1191,15 @@ pub async fn execute_and_diagnose(
     if let (Some(object), Some(status)) = (value.as_object_mut(), status) {
         object.insert("http_status".into(), serde_json::json!(status));
     }
+    if succeeded && !flow.outputs.is_empty() {
+        let (values, missing) = read_outputs(flow, daemon).await;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("outputs".into(), serde_json::Value::Object(values));
+            if !missing.is_empty() {
+                object.insert("missing_outputs".into(), serde_json::json!(missing));
+            }
+        }
+    }
     // Reporting only: the run already happened and its verdict is fixed.
     let ran_steps = run.request.get("steps").cloned();
     if let Some(diagnosis) = diagnose_failure(ran_steps.as_ref(), &value, daemon).await {
@@ -1169,6 +1216,109 @@ pub async fn execute_and_diagnose(
     })
 }
 
+/// Errors that mean "the screen did not have what this flow looked for" —
+/// the signature of a flow recorded under another UI language.
+const LOCATOR_MISS_ERRORS: [&str; 3] =
+    ["element_not_found", "expectation_timeout", "ambiguous_element_label"];
+
+/// A registry flow that missed an element runs its locale sibling once
+/// (`health/export-all` ↔ `health/export-all-zh-cn`). Only read_only and
+/// navigation flows: anything that sends, pays or deletes is never re-run.
+/// Inputs carry over by name. `None` when no fallback applies.
+pub async fn locale_fallback(
+    id: &str,
+    flow: &ValidatedFlow,
+    inputs: &BTreeMap<String, String>,
+    failed: &serde_json::Value,
+    daemon: &DaemonClient,
+) -> Option<(String, ValidatedFlow, DiagnosedRun)> {
+    let reads_only = |meta: &FlowMeta| {
+        matches!(meta.risk, Some(FlowRisk::ReadOnly) | Some(FlowRisk::Navigation))
+    };
+    if !registry::valid_flow_id(id) || !reads_only(&flow.meta) {
+        return None;
+    }
+    let error = failed.get("error").and_then(serde_json::Value::as_str)?;
+    if !LOCATOR_MISS_ERRORS.contains(&error) {
+        return None;
+    }
+    let index = registry::load_index().ok().flatten()?;
+    for sibling_id in registry::locale_siblings(&index, id) {
+        let Ok(path) = registry::resolve_target(&sibling_id) else { continue };
+        let Ok(sibling) = load_flow(&path) else { continue };
+        if !reads_only(&sibling.meta) {
+            continue;
+        }
+        let carried: BTreeMap<String, String> = inputs
+            .iter()
+            .filter(|(name, _)| sibling.inputs.contains_key(*name))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if check_input_map(&carried, &sibling.inputs).is_err()
+            || compat_gate(&sibling, daemon, false).await.is_err()
+        {
+            continue;
+        }
+        let Ok(run) = execute_and_diagnose(&sibling, &carried, daemon, false).await else {
+            return None;
+        };
+        return Some((sibling_id, sibling, run));
+    }
+    None
+}
+
+/// Mark a result as having come from a locale sibling.
+pub fn note_fallback(value: &mut serde_json::Value, from: &str, failed: &serde_json::Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "fallback_from".into(),
+            serde_json::json!({
+                "id": from,
+                "error": failed.get("error"),
+                "failed_step": failed.get("failed_step"),
+                "why": "the flow missed an element, which usually means the phone's UI language differs; its locale variant ran instead",
+            }),
+        );
+    }
+}
+
+/// `flow verify` / `verify=true`: compare this run's output shape with the
+/// recorded fixture (or record it). A failed run never verifies.
+pub fn verify_block(
+    key: &str,
+    flow: &ValidatedFlow,
+    value: &serde_json::Value,
+    succeeded: bool,
+    write_fixture: bool,
+) -> Result<serde_json::Value> {
+    if !succeeded {
+        return Ok(serde_json::json!({"ok": false, "problems": ["the run itself failed"]}));
+    }
+    let values = value
+        .get("outputs")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut block = crate::outputs::verify(key, &values, write_fixture)?;
+    if flow.outputs.is_empty() {
+        block["note"] = serde_json::json!(
+            "this flow declares no outputs, so verify only proves it ran; add `outputs` to check what it reads"
+        );
+    }
+    Ok(block)
+}
+
+/// Fixture key: the registry id, or a file's stem.
+pub fn fixture_key(target: &str) -> String {
+    if registry::valid_flow_id(target) {
+        return target.to_string();
+    }
+    Path::new(target)
+        .file_stem()
+        .map(|stem| format!("file-{}", stem.to_string_lossy()))
+        .unwrap_or_else(|| "file".to_string())
+}
+
 /// `flow run <file|id> [--input K=V]... [--confirm]`.
 pub async fn run_command(
     target: &str,
@@ -1176,6 +1326,7 @@ pub async fn run_command(
     confirm: bool,
     force: bool,
     artifacts_dir: Option<&Path>,
+    verify: Option<bool>,
 ) -> Result<()> {
     let path = registry::resolve_target(target)?;
     // Hash the EXACT bytes this run parses. An index entry describes what was
@@ -1195,10 +1346,31 @@ pub async fn run_command(
 
     let started_at = unix_seconds();
     let clock = std::time::Instant::now();
-    let run = execute_and_diagnose(&flow, &inputs, &daemon, confirm).await?;
+    let mut run = execute_and_diagnose(&flow, &inputs, &daemon, confirm).await?;
+    let mut ran_id = target.to_string();
+    let mut ran_flow = None;
+    if !run.succeeded {
+        if let Some((sibling_id, sibling, sibling_run)) =
+            locale_fallback(target, &flow, &inputs, &run.value, &daemon).await
+        {
+            let failed = std::mem::replace(&mut run, sibling_run).value;
+            note_fallback(&mut run.value, target, &failed);
+            ran_id = sibling_id;
+            ran_flow = Some(sibling);
+        }
+    }
     let duration_ms = clock.elapsed().as_millis() as u64;
     let (succeeded, status) = (run.succeeded, run.status);
     let mut value = run.value;
+    let mut verify_failed = false;
+    if let Some(write_fixture) = verify {
+        let ran = ran_flow.as_ref().unwrap_or(&flow);
+        let block = verify_block(&fixture_key(&ran_id), ran, &value, succeeded, write_fixture)?;
+        verify_failed = block.get("ok").and_then(serde_json::Value::as_bool) != Some(true);
+        if let Some(object) = value.as_object_mut() {
+            object.insert("verify".into(), block);
+        }
+    }
 
     if let Some(artifacts) = &artifacts {
         let evidence = build_evidence(
@@ -1227,6 +1399,9 @@ pub async fn run_command(
         }
     }
     println!("{value}");
+    if succeeded && verify_failed {
+        bail!("flow {:?} ran but its result no longer matches the recorded fixture (see `verify` on stdout)", flow.name());
+    }
     if !succeeded {
         // The machine-readable result is on stdout; the exit code still says
         // the run failed. Recording evidence never turns a failure into a
@@ -2067,6 +2242,7 @@ mod tests {
             false,
             true, // --force: compat is not what this test is about
             Some(&runs),
+            None,
         )
         .await
         .expect_err("a failed flow must still exit non-zero");
@@ -2147,6 +2323,48 @@ mod tests {
         let action = requests.recv().unwrap();
         assert!(action.starts_with("POST /agent/actions "));
         assert!(action.to_ascii_lowercase().contains("x-phone-control: 1"));
+    }
+
+    #[tokio::test]
+    async fn a_passing_flow_reads_its_outputs_off_the_final_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flow.json");
+        fs::write(
+            &path,
+            r#"{"version":1,"name":"Steps today","risk":"read_only",
+              "steps":[{"kind":"launch_app","bundle":"com.apple.Health"}],
+              "outputs":{"steps":{"locator":{"identifier":"StepCount"},"type":"number"},
+                         "title":{"locator":{"kind":"NavigationBar"},"field":"label"}}}"#,
+        )
+        .unwrap();
+        let flow = load_flow(&path).unwrap();
+        assert_eq!(flow.meta.outputs, ["steps", "title"]);
+        let status = r#"{"ok":true,"backend":"direct","drivable":true}"#;
+        let result = r#"{"ok":true,"completed":1,"applied_actions":1}"#;
+        let tree = r#"{"snapshot":"s","elements":[{"kind":"NavigationBar","label":"摘要"},{"kind":"StaticText","label":"步数","identifier":"StepCount","value":"8,532 步"}]}"#;
+        let (url, task, _requests) = mock_daemon_sequence(&[
+            ("200 OK", status),
+            ("200 OK", result),
+            ("200 OK", tree),
+        ]);
+        let run = execute_and_diagnose(&flow, &BTreeMap::new(), &DaemonClient::new(url, None), false)
+            .await
+            .unwrap();
+        task.join().unwrap();
+        assert!(run.succeeded);
+        assert_eq!(run.value["outputs"], serde_json::json!({"steps": 8532, "title": "摘要"}));
+        assert!(run.value.get("missing_outputs").is_none());
+
+        let _env = crate::outputs::FIXTURE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let fixtures = tempfile::tempdir().unwrap();
+        std::env::set_var("IPHONE_USE_FLOW_FIXTURES_DIR", fixtures.path());
+        let recorded = verify_block("health/steps", &flow, &run.value, true, true).unwrap();
+        assert_eq!(recorded["ok"], true);
+        let mut drifted = run.value.clone();
+        drifted["outputs"]["steps"] = serde_json::json!("8,532");
+        let verdict = verify_block("health/steps", &flow, &drifted, true, false).unwrap();
+        assert_eq!(verdict["ok"], false, "{verdict}");
+        std::env::remove_var("IPHONE_USE_FLOW_FIXTURES_DIR");
     }
 
     #[tokio::test]
