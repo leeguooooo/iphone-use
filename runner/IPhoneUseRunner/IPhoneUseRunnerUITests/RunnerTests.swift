@@ -123,7 +123,7 @@ final class RunnerTests: XCTestCase {
     let busySince = self.busySince
     busyLock.unlock()
     let bundle = Bundle(for: RunnerTests.self)
-    let bundleID = bundle.bundleIdentifier ?? "com.leeguoo.iphone-use.runner.uitests"
+    let bundleID = bundle.bundleIdentifier ?? "com.leeguoo.iphone-use.runner"
     let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
     var value: [String: Any] = [
       "ready": true,

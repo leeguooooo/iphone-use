@@ -1,6 +1,10 @@
-# XcodeGen spec for the iphone-use native runner.
+# XcodeGen spec for the iphone-use device runner.
 # The generated IPhoneUseRunner.xcodeproj is checked in, so plain `xcodebuild` works without
 # XcodeGen. Regenerate after editing this file:  (cd runner/IPhoneUseRunner && xcodegen generate)
+#
+# One UI-test bundle and no host app, like WebDriverAgent: the phone gets exactly one app,
+# "iPhoneUse-Runner" (bundle id <PRODUCT_BUNDLE_IDENTIFIER>.xctrunner). setup-wda.sh passes
+# DEVELOPMENT_TEAM and a team-specific PRODUCT_BUNDLE_IDENTIFIER on the xcodebuild command line.
 name: IPhoneUseRunner
 options:
   deploymentTarget:
@@ -12,47 +16,31 @@ settings:
     DEVELOPMENT_TEAM: 6ZPXG4KVVS
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "1"
     IPHONEOS_DEPLOYMENT_TARGET: "15.0"
     TARGETED_DEVICE_FAMILY: "1,2"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     CLANG_ENABLE_OBJC_ARC: YES
 targets:
-  IPhoneUseRunner:
-    type: application
-    platform: iOS
-    sources:
-      - IPhoneUseRunner
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.runner
-        PRODUCT_NAME: IPhoneUseRunner
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: "iU Runner"
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
   IPhoneUseRunnerUITests:
     type: bundle.ui-testing
     platform: iOS
     sources:
       - IPhoneUseRunnerUITests
-    dependencies:
-      - target: IPhoneUseRunner
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.runner.uitests
-        PRODUCT_NAME: IPhoneUseRunnerUITests
+        PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.runner
+        # The installed runner app is "<PRODUCT_NAME>-Runner"; the target name (used by
+        # -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe) stays the same.
+        PRODUCT_NAME: iPhoneUse
         GENERATE_INFOPLIST_FILE: YES
-        TEST_TARGET_NAME: IPhoneUseRunner
         SWIFT_OBJC_BRIDGING_HEADER: IPhoneUseRunnerUITests/IPhoneUseRunnerUITests-Bridging-Header.h
         CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF: NO
 schemes:
   IPhoneUseRunner:
     build:
       targets:
-        IPhoneUseRunner: all
         IPhoneUseRunnerUITests: [test]
     test:
       config: Debug

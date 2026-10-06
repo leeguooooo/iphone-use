@@ -205,11 +205,36 @@ final class RunnerHTTPServer {
     self.mainHandler = mainHandler
   }
 
+  /// The phone's Wi-Fi IPv4 address (en0), else 127.0.0.1. Only the LAN relay uses the host
+  /// part; the default USB relay needs just the port.
+  static func deviceAddress() -> String {
+    var head: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&head) == 0, let first = head else { return "127.0.0.1" }
+    defer { freeifaddrs(head) }
+    var cursor: UnsafeMutablePointer<ifaddrs>? = first
+    while let entry = cursor {
+      defer { cursor = entry.pointee.ifa_next }
+      guard let address = entry.pointee.ifa_addr, address.pointee.sa_family == UInt8(AF_INET),
+            String(cString: entry.pointee.ifa_name) == "en0"
+      else { continue }
+      var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+      if getnameinfo(address, socklen_t(address.pointee.sa_len), &host, socklen_t(host.count),
+                     nil, 0, NI_NUMERICHOST) == 0 {
+        return String(cString: host)
+      }
+    }
+    return "127.0.0.1"
+  }
+
   func start() {
     listener.stateUpdateHandler = { [weak self] state in
       switch state {
       case .ready:
-        NSLog("ipu-runner: listening on port %d", Int(self?.listener.port?.rawValue ?? 0))
+        let port = Int(self?.listener.port?.rawValue ?? 0)
+        NSLog("ipu-runner: listening on port %d", port)
+        // The line setup-wda.sh waits for (WebDriverAgent's marker, kept so the relay logic and
+        // its LAN fallback read the device address the same way).
+        NSLog("ServerURLHere->http://%@:%d<-ServerURLHere", RunnerHTTPServer.deviceAddress(), port)
       case .failed(let error):
         NSLog("ipu-runner: listener failed: %@", String(describing: error))
         self?.onFailure?(error)

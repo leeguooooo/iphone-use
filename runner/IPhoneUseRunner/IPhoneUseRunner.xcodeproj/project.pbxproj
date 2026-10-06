@@ -11,27 +11,14 @@
 		603A181324BE3D2D3D9CEF19 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 470393750BF9CDEBE680ECF3 /* RunnerTests.swift */; };
 		6DE77AA9E758F2E53FDAC651 /* RunnerWDA.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7994977E24197EBB0129A53F /* RunnerWDA.swift */; };
 		70CDE4345DB673547F97FC7F /* RunnerHTTP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94BDD3F0E1278AAB2988DB12 /* RunnerHTTP.swift */; };
-		961CAEA869508EAE50F52A33 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E84000940D4FE7B6BE76DD7 /* AppDelegate.swift */; };
 		985FD83F33DC0CB4D8E76A6D /* RunnerMJPEG.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4DD8C426E23E9EBDBA0F0FE /* RunnerMJPEG.swift */; };
 		9CF8432F1753A46FC2F1D2CF /* IPURBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = 9E3171D1115C2E98DD29F3F9 /* IPURBridge.m */; };
 		CBF5659BBA0993E2D2E21C71 /* RunnerActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 929B13B4B2EE3205992F3E2E /* RunnerActions.swift */; };
 /* End PBXBuildFile section */
 
-/* Begin PBXContainerItemProxy section */
-		CF7F97D82347EF8B3AF8601F /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = AC789425D577A4C85F6056B0 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 6EF6EFF8E600FF9ADF776700;
-			remoteInfo = IPhoneUseRunner;
-		};
-/* End PBXContainerItemProxy section */
-
 /* Begin PBXFileReference section */
 		3C28F51DDB8C8EDC604DA1F4 /* IPhoneUseRunnerUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = IPhoneUseRunnerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		470393750BF9CDEBE680ECF3 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
-		4E84000940D4FE7B6BE76DD7 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		72E98968FE4ACB04A47FA0FC /* IPhoneUseRunner.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = IPhoneUseRunner.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		74BD68A60C7ABD17C9DCEB07 /* IPURBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = IPURBridge.h; sourceTree = "<group>"; };
 		7994977E24197EBB0129A53F /* RunnerWDA.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerWDA.swift; sourceTree = "<group>"; };
 		929B13B4B2EE3205992F3E2E /* RunnerActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerActions.swift; sourceTree = "<group>"; };
@@ -46,18 +33,9 @@
 		0B2AC3C3B49C8FE9200944FE /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				72E98968FE4ACB04A47FA0FC /* IPhoneUseRunner.app */,
 				3C28F51DDB8C8EDC604DA1F4 /* IPhoneUseRunnerUITests.xctest */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		89D7127E45813AD4636BE462 /* IPhoneUseRunner */ = {
-			isa = PBXGroup;
-			children = (
-				4E84000940D4FE7B6BE76DD7 /* AppDelegate.swift */,
-			);
-			path = IPhoneUseRunner;
 			sourceTree = "<group>";
 		};
 		9694C7E9B44097594ECF991A /* IPhoneUseRunnerUITests */ = {
@@ -79,7 +57,6 @@
 		96D2C0663F204A0AF7975CDF = {
 			isa = PBXGroup;
 			children = (
-				89D7127E45813AD4636BE462 /* IPhoneUseRunner */,
 				9694C7E9B44097594ECF991A /* IPhoneUseRunnerUITests */,
 				0B2AC3C3B49C8FE9200944FE /* Products */,
 			);
@@ -88,23 +65,6 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		6EF6EFF8E600FF9ADF776700 /* IPhoneUseRunner */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = EAD86820CB90997B6125D74C /* Build configuration list for PBXNativeTarget "IPhoneUseRunner" */;
-			buildPhases = (
-				A7F221D9E9DDB3127B563518 /* Sources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = IPhoneUseRunner;
-			packageProductDependencies = (
-			);
-			productName = IPhoneUseRunner;
-			productReference = 72E98968FE4ACB04A47FA0FC /* IPhoneUseRunner.app */;
-			productType = "com.apple.product-type.application";
-		};
 		88F6F4571B11FE5B273A52C9 /* IPhoneUseRunnerUITests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 176F9333B11757F953CE042E /* Build configuration list for PBXNativeTarget "IPhoneUseRunnerUITests" */;
@@ -114,7 +74,6 @@
 			buildRules = (
 			);
 			dependencies = (
-				4BBE406614ABBE389BC2C39B /* PBXTargetDependency */,
 			);
 			name = IPhoneUseRunnerUITests;
 			packageProductDependencies = (
@@ -132,14 +91,9 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
-					6EF6EFF8E600FF9ADF776700 = {
-						DevelopmentTeam = 6ZPXG4KVVS;
-						ProvisioningStyle = Automatic;
-					};
 					88F6F4571B11FE5B273A52C9 = {
 						DevelopmentTeam = 6ZPXG4KVVS;
 						ProvisioningStyle = Automatic;
-						TestTargetID = 6EF6EFF8E600FF9ADF776700;
 					};
 				};
 			};
@@ -157,21 +111,12 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				6EF6EFF8E600FF9ADF776700 /* IPhoneUseRunner */,
 				88F6F4571B11FE5B273A52C9 /* IPhoneUseRunnerUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A7F221D9E9DDB3127B563518 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				961CAEA869508EAE50F52A33 /* AppDelegate.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		F0142532A949F474CB689D6F /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -187,14 +132,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXTargetDependency section */
-		4BBE406614ABBE389BC2C39B /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 6EF6EFF8E600FF9ADF776700 /* IPhoneUseRunner */;
-			targetProxy = CF7F97D82347EF8B3AF8601F /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		22A671C583D97769977BECBE /* Debug */ = {
@@ -253,7 +190,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -316,7 +253,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -327,48 +264,6 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
-		};
-		53806BCC3EBC63898A799988 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "iU Runner";
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.leeguoo.iphone-use.runner";
-				PRODUCT_NAME = IPhoneUseRunner;
-				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Release;
-		};
-		76B0EFB8D5470A9526A8AFB4 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "iU Runner";
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.leeguoo.iphone-use.runner";
-				PRODUCT_NAME = IPhoneUseRunner;
-				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
 		};
 		8CAF3728D2CD61A311DEADF0 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -381,12 +276,11 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.leeguoo.iphone-use.runner.uitests";
-				PRODUCT_NAME = IPhoneUseRunnerUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.leeguoo.iphone-use.runner";
+				PRODUCT_NAME = iPhoneUse;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "IPhoneUseRunnerUITests/IPhoneUseRunnerUITests-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = IPhoneUseRunner;
 			};
 			name = Release;
 		};
@@ -401,12 +295,11 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.leeguoo.iphone-use.runner.uitests";
-				PRODUCT_NAME = IPhoneUseRunnerUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.leeguoo.iphone-use.runner";
+				PRODUCT_NAME = iPhoneUse;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "IPhoneUseRunnerUITests/IPhoneUseRunnerUITests-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = IPhoneUseRunner;
 			};
 			name = Debug;
 		};
@@ -427,15 +320,6 @@
 			buildConfigurations = (
 				22A671C583D97769977BECBE /* Debug */,
 				2A7E56434819A5A7A8185111 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Debug;
-		};
-		EAD86820CB90997B6125D74C /* Build configuration list for PBXNativeTarget "IPhoneUseRunner" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				76B0EFB8D5470A9526A8AFB4 /* Debug */,
-				53806BCC3EBC63898A799988 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
