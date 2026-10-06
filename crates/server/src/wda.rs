@@ -996,6 +996,27 @@ impl WdaClient {
         Ok(())
     }
 
+    /// Bundle id of the foreground app (`GET /session/:sid/wda/apps/list`,
+    /// which lists only the active app and never walks its element tree —
+    /// unlike `wda/activeAppInfo`, see `probe_health`).
+    pub async fn active_bundle(&mut self) -> Result<Option<String>> {
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .http
+            .get(format!("{}/session/{}/wda/apps/list", self.base, sid))
+            .send_timed()
+            .await
+            .context("GET /wda/apps/list")?;
+        let body = ensure_wda_success(response, "GET /wda/apps/list").await?;
+        Ok(body
+            .get("value")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|apps| apps.first())
+            .and_then(|app| app.get("bundleId"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string))
+    }
+
     /// Open a URL on the device via WDA's **session-scoped** `POST /session/:sid/url`.
     ///
     /// appium-webdriveragent registers this route both with and without a

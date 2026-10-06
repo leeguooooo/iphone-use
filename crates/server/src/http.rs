@@ -427,6 +427,9 @@ pub struct AppState {
     /// What the driving agent did in the current app, for `registry` hints,
     /// `flow_suggestion` and `GET /agent/flow/draft` (see `crate::flows`).
     pub flow_trail: Arc<Mutex<crate::flows::FlowTrail>>,
+    /// Whether this daemon turned Do Not Disturb on for the driving agent
+    /// (see `crate::focus`). Persisted across restarts.
+    pub agent_focus: Arc<Mutex<crate::focus::AgentFocus>>,
     /// Operator/agent "hold" lease: while set and in the future, the idle
     /// watchdog never releases the phone even with no recent actions — a human
     /// in the loop (typing a password, approving a prompt) otherwise trips the
@@ -650,10 +653,14 @@ async fn agent_owner(
         );
     }
     *recover(state.owner.lock()) = None;
+    let mut released = serde_json::json!({"ok": true, "owner": null});
+    if let Some(block) = release_agent_focus(&state).await {
+        released["agent_focus"] = block;
+    }
     with_security_headers(
         Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"ok":true,"owner":null}"#))
+            .body(Body::from(released.to_string()))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
     )
 }
@@ -3483,6 +3490,8 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 "idle {}s with no viewer — releasing the phone (stopping WDA)",
                 state.idle_for().as_secs()
             );
+            // While WDA is still up: give Do Not Disturb back first.
+            release_agent_focus(&state).await;
             let script = setup_sh.clone();
             let stopped = tokio::task::spawn_blocking(move || stop_wda_runner_blocking(&script))
                 .await
@@ -4065,6 +4074,8 @@ async fn agent_mode(
                         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
                 );
             };
+            // The person gets their phone back with notifications on.
+            release_agent_focus(&state).await;
             let script = setup_sh.clone();
             let stopped = tokio::task::spawn_blocking(move || stop_wda_runner_blocking(&script))
                 .await
@@ -8111,6 +8122,7 @@ async fn agent_actions(
     };
 
     state.touch_activity();
+    let focus_block = engage_agent_focus(&state, &mut *wda.lock().await).await;
     let _priority = state.begin_wda_control();
     let batch_deadline = tokio::time::Instant::now() + AGENT_ACTIONS_DEADLINE;
     let mut w = match tokio::time::timeout_at(batch_deadline, wda.lock()).await {
@@ -8505,6 +8517,9 @@ async fn agent_actions(
     });
     for (key, block) in flow_after_actions(&state, &headers, &body) {
         result[key] = block;
+    }
+    if let Some(block) = focus_block {
+        result["agent_focus"] = block;
     }
     agent_actions_json(StatusCode::OK, result)
 }
@@ -9127,6 +9142,11 @@ async fn agent_input(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         );
     };
+    // Do Not Disturb before the first action of a session; its time is not
+    // charged to the action's own budget.
+    let focus_started = tokio::time::Instant::now();
+    let focus_block = engage_agent_focus(&state, &mut *wda.lock().await).await;
+    let agent_wda_deadline = agent_wda_deadline + focus_started.elapsed();
     if tokio::time::Instant::now() >= agent_wda_deadline {
         return wda_deadline_response(false);
     }
@@ -9272,7 +9292,11 @@ async fn agent_input(
                 }
             };
             let body = attach_alert(body, alert);
-            let body = attach_flow_blocks(body, flow_after_input(&state, &headers, &value));
+            let mut blocks = flow_after_input(&state, &headers, &value);
+            if let Some(block) = focus_block {
+                blocks.push(("agent_focus", block));
+            }
+            let body = attach_flow_blocks(body, blocks);
             with_security_headers(
                 Response::builder()
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9312,6 +9336,110 @@ async fn agent_input(
         WdaControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
         WdaControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
         WdaControlOutcome::Failed => wda_failed_after_dispatch_response(),
+    }
+}
+
+/// The bridge shortcut to run for agent Do Not Disturb, when the feature is
+/// on: not opted out, not handed to a person, and the curated intents registry
+/// lists both active focus verbs.
+fn focus_bridge() -> Option<String> {
+    if crate::focus::opted_out() || human_handoff_active() {
+        return None;
+    }
+    let IntentsRegistryLoad::Loaded(registry) = load_intents_registry(&intents_registry_path()) else {
+        return None;
+    };
+    let active = |verb: &str| {
+        registry
+            .intents
+            .iter()
+            .any(|entry| entry.name == verb && entry.status == "active")
+    };
+    (active(crate::focus::FOCUS_ON_VERB) && active(crate::focus::FOCUS_OFF_VERB))
+        .then(|| registry.bridge_name.clone())
+}
+
+/// First control request of a session: ask the phone for Do Not Disturb, then
+/// put the foreground app back (the bridge shortcut opens the Shortcuts app).
+/// Best-effort — any failure leaves the request it precedes untouched.
+async fn engage_agent_focus(
+    state: &AppState,
+    w: &mut crate::wda::WdaClient,
+) -> Option<serde_json::Value> {
+    // Only the daemon's own phone: an external WDA endpoint belongs to
+    // someone else's setup (and test daemons never touch the real registry).
+    if !state.managed_wda || recover(state.agent_focus.lock()).engaged() {
+        return None;
+    }
+    let bridge = focus_bridge()?;
+    let previous = w.active_bundle().await.ok().flatten();
+    let link = intent_deep_link(
+        &bridge,
+        crate::focus::FOCUS_ON_VERB,
+        &new_intent_correlation_id(),
+        &serde_json::json!({}),
+    );
+    if let Err(error) = w.open_url(&link).await {
+        tracing::warn!("agent focus: could not open the bridge: {error:#}");
+        return None;
+    }
+    recover(state.agent_focus.lock()).set(true);
+    tokio::time::sleep(crate::focus::SHORTCUT_RUN_WAIT).await;
+    let restored = match previous.as_deref() {
+        Some(bundle) if bundle != "com.apple.shortcuts" && bundle != "com.apple.springboard" => {
+            w.launch_app(bundle).await
+        }
+        _ => w.press_home().await,
+    };
+    if let Err(error) = restored {
+        tracing::warn!("agent focus: could not return to {previous:?}: {error:#}");
+    }
+    tracing::info!("agent focus: Do Not Disturb requested on (returned to {previous:?})");
+    Some(crate::focus::engaged_block())
+}
+
+/// Give Do Not Disturb back. The bridge's `focus_off` acts only on its own
+/// marker, so this is safe even when the phone was already on a Focus the
+/// person chose. Best-effort and bounded.
+async fn release_agent_focus(state: &AppState) -> Option<serde_json::Value> {
+    if !recover(state.agent_focus.lock()).engaged() {
+        return None;
+    }
+    // Even opted out or handed off since: what was turned on goes back off.
+    let bridge = match load_intents_registry(&intents_registry_path()) {
+        IntentsRegistryLoad::Loaded(registry) => registry.bridge_name,
+        _ => return None,
+    };
+    let wda = state.wda.as_ref()?;
+    let link = intent_deep_link(
+        &bridge,
+        crate::focus::FOCUS_OFF_VERB,
+        &new_intent_correlation_id(),
+        &serde_json::json!({}),
+    );
+    let sent = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let mut w = wda.lock().await;
+        let opened = w.open_url(&link).await;
+        if opened.is_ok() {
+            tokio::time::sleep(crate::focus::SHORTCUT_RUN_WAIT).await;
+        }
+        opened
+    })
+    .await;
+    match sent {
+        Ok(Ok(())) => {
+            recover(state.agent_focus.lock()).set(false);
+            tracing::info!("agent focus: Do Not Disturb requested off");
+            Some(crate::focus::released_block())
+        }
+        Ok(Err(error)) => {
+            tracing::warn!("agent focus: could not open the bridge to release: {error:#}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("agent focus: release timed out");
+            None
+        }
     }
 }
 

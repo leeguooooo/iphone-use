@@ -598,6 +598,9 @@ fn serve() -> Result<()> {
         mjpeg_stream_activity: Arc::new(Mutex::new(std::collections::HashMap::new())),
         element_snapshots: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         flow_trail: Arc::new(Mutex::new(server::flows::FlowTrail::default())),
+        agent_focus: Arc::new(Mutex::new(server::focus::AgentFocus::load(
+            server::focus::state_path(),
+        ))),
         hold_until: Arc::new(Mutex::new(None)),
         owner: Arc::new(Mutex::new(None)),
         owner_lease_secs: cfg.owner_lease_secs,

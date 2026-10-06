@@ -4,7 +4,7 @@
   "bridge": {
     "$comment": "The ONE reviewed bridge shortcut. It takes its JSON request from Shortcut Input (input=text), dispatches on `verb`, runs the native action, and POSTs the result to /agent/inbox. Keep the bearer token only inside the shortcut's stored request headers — it must never appear in the deep link.",
     "name": "iU Bridge",
-    "required_version": 3
+    "required_version": 4
   },
   "intents": [
     {
@@ -15,7 +15,11 @@
       "args_schema": {},
       "returns_schema": {
         "type": "object",
-        "properties": { "bridge_version": { "type": "number" } }
+        "properties": {
+          "bridge_version": {
+            "type": "number"
+          }
+        }
       },
       "min_bridge_version": 3,
       "permission": "none",
@@ -30,13 +34,43 @@
       "returns_schema": {
         "type": "object",
         "properties": {
-          "level": { "type": "number", "minimum": 0, "maximum": 1 },
-          "charging": { "type": "boolean" }
+          "level": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "charging": {
+            "type": "boolean"
+          }
         }
       },
       "min_bridge_version": 3,
       "permission": "none",
       "status": "experiment"
+    },
+    {
+      "$comment": "Fire-and-forget (no reply; works with the return path off, #59). The daemon dispatches it itself before an agent session's first action unless PHONE_REMOTE_AUTO_FOCUS=0. Turns Do Not Disturb on only when no Focus is active, leaves a marker in the Shortcuts folder, and posts a notice on the phone.",
+      "name": "focus_on",
+      "summary": "Do Not Disturb on for an agent session (only if no Focus is active)",
+      "side_effect": "write",
+      "args_schema": {},
+      "returns_schema": {},
+      "min_bridge_version": 4,
+      "permission": "Focus",
+      "status": "active",
+      "confirm": "none"
+    },
+    {
+      "$comment": "Undo of focus_on, dispatched by the daemon when the agent releases the phone, it idles out, or it is handed to a person. Acts only on focus_on's marker, so a Focus the person chose is never turned off; posts a notice and returns to the Home Screen.",
+      "name": "focus_off",
+      "summary": "Do Not Disturb off again after an agent session (only if focus_on turned it on)",
+      "side_effect": "write",
+      "args_schema": {},
+      "returns_schema": {},
+      "min_bridge_version": 4,
+      "permission": "Focus",
+      "status": "active",
+      "confirm": "none"
     }
   ]
 }

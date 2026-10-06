@@ -42,7 +42,7 @@ import sys
 import uuid
 from pathlib import Path
 
-BRIDGE_VERSION = 3
+BRIDGE_VERSION = 4
 
 # Shortcuts renders an attached variable as this single object-replacement
 # character, and the attachment map is keyed by its {offset, length} in the
@@ -154,6 +154,65 @@ def _conditional(group_id: str, mode: int, verb_output: str | None = None,
     }
 
 
+# Shortcuts' numeric conditions for "has any value" / "does not have any value".
+HAS_ANY_VALUE = 100
+HAS_NO_VALUE = 101
+
+
+def _if_output(group_id: str, output_uuid: str, output_name: str, condition) -> dict:
+    """Open an If block on a preceding action's output."""
+    params = {
+        "GroupingIdentifier": group_id,
+        "WFControlFlowMode": 0,
+        "WFInput": _output(output_uuid, output_name),
+        "WFCondition": condition,
+    }
+    return {"WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
+            "WFWorkflowActionParameters": params}
+
+
+def _if_equals(group_id: str, output_uuid: str, output_name: str, text: str) -> dict:
+    action = _if_output(group_id, output_uuid, output_name, "Equals")
+    action["WFWorkflowActionParameters"]["WFConditionalActionString"] = text
+    return action
+
+
+def _notify(title: str, body: str) -> dict:
+    return {"WFWorkflowActionIdentifier": "is.workflow.actions.notification",
+            "WFWorkflowActionParameters": {
+                "WFNotificationActionTitle": title,
+                "WFNotificationActionBody": body,
+                "WFNotificationActionSound": True}}
+
+
+def _set_dnd(enabled: bool) -> dict:
+    # No FocusModes = Do Not Disturb; "Turned Off" = until something turns it off.
+    params: dict = {"Enabled": enabled, "Operation": "Turn"}
+    if enabled:
+        params["AssertionType"] = "Turned Off"
+    return {"WFWorkflowActionIdentifier": "is.workflow.actions.dnd.set",
+            "WFWorkflowActionParameters": params}
+
+
+def _text(uuid_: str, value: str) -> dict:
+    return {"WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
+            "WFWorkflowActionParameters": {"UUID": uuid_, "WFTextActionText": _token(value, {})}}
+
+
+def _save_marker(text_uuid: str) -> dict:
+    """Overwrite the marker in the Shortcuts folder. Never deleted (no prompt)."""
+    return {"WFWorkflowActionIdentifier": "is.workflow.actions.documentpicker.save",
+            "WFWorkflowActionParameters": {
+                "WFInput": _output(text_uuid, "Text"),
+                "WFAskWhereToSave": False,
+                "WFFileDestinationPath": FOCUS_MARKER,
+                "WFSaveFileOverwrite": True}}
+
+
+FOCUS_MARKER = "iphone-use-focus.txt"
+FOCUS_TITLE = "iPhone Use"
+
+
 # Native action per verb. Each entry returns (actions, data_parts) given a
 # fresh UUID; `data_parts` are folded into the response `data` object.
 def _verb_ping(_uuid_fn):
@@ -169,7 +228,52 @@ def _verb_battery(uuid_fn):
     )
 
 
-VERBS = {"ping": _verb_ping, "battery": _verb_battery}
+def _verb_focus_on(uuid_fn):
+    """Do Not Disturb for an agent session — only when no Focus is active.
+
+    Fire-and-forget: the return path is off by default (#59), so the decision
+    and its memory live on the phone. The marker records that THIS bridge
+    turned DND on, so focus_off never ends a Focus the person chose.
+    """
+    current, branch, on = uuid_fn(), uuid_fn(), uuid_fn()
+    return ([
+        {"WFWorkflowActionIdentifier": "is.workflow.actions.dnd.getfocus",
+         "WFWorkflowActionParameters": {"UUID": current}},
+        _if_output(branch, current, "Current Focus", HAS_NO_VALUE),
+        _notify(FOCUS_TITLE, "AI 正在操作这台手机，已开启勿扰模式，避免通知打断操作。交还手机时会自动关闭。"),
+        _set_dnd(True),
+        _text(on, "on"),
+        _save_marker(on),
+        _conditional(branch, 2),
+    ], [])
+
+
+def _verb_focus_off(uuid_fn):
+    """Undo focus_on: only if the marker says this bridge turned DND on."""
+    marker, content, branch, off = uuid_fn(), uuid_fn(), uuid_fn(), uuid_fn()
+    return ([
+        {"WFWorkflowActionIdentifier": "is.workflow.actions.documentpicker.open",
+         "WFWorkflowActionParameters": {
+             "UUID": marker, "WFGetFilePath": FOCUS_MARKER,
+             "WFFileErrorIfNotFound": False, "WFShowFilePicker": False}},
+        {"WFWorkflowActionIdentifier": "is.workflow.actions.detect.text",
+         "WFWorkflowActionParameters": {"UUID": content, "WFInput": _output(marker, "File")}},
+        _if_equals(branch, content, "Text", "on"),
+        _set_dnd(False),
+        _text(off, "off"),
+        _save_marker(off),
+        _notify(FOCUS_TITLE, "AI 已交还手机，勿扰模式已关闭。"),
+        _conditional(branch, 2),
+        {"WFWorkflowActionIdentifier": "is.workflow.actions.returntohomescreen",
+         "WFWorkflowActionParameters": {}},
+    ], [])
+
+
+VERBS = {"ping": _verb_ping, "battery": _verb_battery,
+         "focus_on": _verb_focus_on, "focus_off": _verb_focus_off}
+# Verbs that change device state and report nothing: they work with the
+# return path off (#59), so they must not POST.
+FIRE_AND_FORGET = {"focus_on", "focus_off"}
 
 
 def build(verbs: list[str], daemon_url: str, token: str) -> dict:
@@ -197,6 +301,9 @@ def build(verbs: list[str], daemon_url: str, token: str) -> dict:
         actions.append(_conditional(branch, 0, group_verb, verb))
         verb_actions, data_parts = VERBS[verb](_uuid)
         actions.extend(verb_actions)
+        if verb in FIRE_AND_FORGET:
+            actions.append(_conditional(branch, 2))
+            continue
         text_uuid = _uuid()
         actions.append({
             "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
@@ -262,6 +369,8 @@ def self_test() -> int:
         # Substitute a bare `0`, not a quoted token: a slot may sit inside
         # quotes (`"id":"<var>"`) or outside them (`"level":<var>`), and 0 is
         # the one literal that stays valid JSON in both positions.
+        if not string.startswith('{"id":'):
+            continue  # a plain text value (the focus marker), not a response body
         body = string.replace(OBJ, "0")
         try:
             json.loads(body)
@@ -269,13 +378,33 @@ def self_test() -> int:
             problems.append("response body is not valid JSON (%s): %r" % (error, body))
 
     groups: dict[str, list[int]] = {}
+    open_groups: list[str] = []
     for action in workflow["WFWorkflowActions"]:
         if action["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional":
             params = action["WFWorkflowActionParameters"]
-            groups.setdefault(params["GroupingIdentifier"], []).append(params["WFControlFlowMode"])
+            group, mode = params["GroupingIdentifier"], params["WFControlFlowMode"]
+            groups.setdefault(group, []).append(mode)
+            if mode == 0:
+                open_groups.append(group)
+            elif mode == 2:
+                # Nested Ifs must close innermost-first or Shortcuts mis-pairs them.
+                if not open_groups or open_groups.pop() != group:
+                    problems.append("conditional group %s closes out of order" % group[:8])
     for group, modes in groups.items():
         if modes != [0, 2]:
             problems.append("conditional group %s is unbalanced: %s" % (group[:8], modes))
+    for verb in FIRE_AND_FORGET:
+        # A fire-and-forget branch must never try the (default-off) return path.
+        start = next(i for i, a in enumerate(workflow["WFWorkflowActions"])
+                     if a["WFWorkflowActionParameters"].get("WFConditionalActionString") == verb
+                     and a["WFWorkflowActionParameters"].get("WFCondition") == "Equals"
+                     and "Match Group" in json.dumps(a["WFWorkflowActionParameters"].get("WFInput")))
+        group = workflow["WFWorkflowActions"][start]["WFWorkflowActionParameters"]["GroupingIdentifier"]
+        end = next(i for i, a in enumerate(workflow["WFWorkflowActions"]) if i > start
+                   and a["WFWorkflowActionParameters"].get("GroupingIdentifier") == group)
+        if any(a["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+               for a in workflow["WFWorkflowActions"][start:end]):
+            problems.append("fire-and-forget verb %s posts to the return path" % verb)
 
     for problem in problems:
         print("FAIL: %s" % problem, file=sys.stderr)

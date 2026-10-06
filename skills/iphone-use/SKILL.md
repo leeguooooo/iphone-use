@@ -62,7 +62,9 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure st
    `phone_flow_publish(confirm=true)`. → reference: *Saving a flow*
 
 When the task is done, release the phone: `phone_release_owner` /
-`POST /agent/owner {"release":true}`.
+`POST /agent/owner {"release":true}`. If a response carried `agent_focus`, the
+phone is on Do Not Disturb for your session: tell the user, and releasing turns
+it off again.
 
 ## Core actions
 
