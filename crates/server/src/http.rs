@@ -3307,6 +3307,56 @@ fn release_retry_backoff(failures: &mut u32) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+// ---------------------------------------------------------------------------
+// Adaptive idle window
+// ---------------------------------------------------------------------------
+//
+// Every runner launch makes the phone ask for its passcode, so the runner is
+// released when idle (on demand, never always-up — the v0.7.4 lesson). But a
+// fixed 10-minute window releases between bursts of real work and the next
+// request pays a passcode prompt plus a bring-up. When the phone is wanted
+// back soon after a release, the next window doubles (up to IDLE_STRETCH_CAP
+// doublings, never above IDLE_WINDOW_MAX); a request after a long quiet gap
+// resets it.
+
+/// Doublings applied to the configured idle window (0 = as configured).
+static IDLE_STRETCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// When the watchdog last released the phone.
+static LAST_IDLE_RELEASE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+const IDLE_STRETCH_CAP: u32 = 3;
+const IDLE_WINDOW_MAX: std::time::Duration = std::time::Duration::from_secs(3600);
+/// A reconnect this soon after a release means the release came too early.
+const IDLE_COMEBACK: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+fn stretched_idle_window(base: std::time::Duration, stretch: u32) -> std::time::Duration {
+    let stretched = base.saturating_mul(1u32 << stretch.min(IDLE_STRETCH_CAP));
+    stretched.min(IDLE_WINDOW_MAX.max(base))
+}
+
+fn effective_idle_window(base: std::time::Duration) -> std::time::Duration {
+    stretched_idle_window(base, IDLE_STRETCH.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn note_idle_release() {
+    *recover(LAST_IDLE_RELEASE.lock()) = Some(Instant::now());
+}
+
+/// A released phone is being brought back: stretch or reset the window.
+fn note_reconnect_after_release() {
+    use std::sync::atomic::Ordering;
+    let soon = recover(LAST_IDLE_RELEASE.lock())
+        .is_some_and(|at| at.elapsed() < IDLE_COMEBACK);
+    let next = if soon {
+        (IDLE_STRETCH.load(Ordering::Relaxed) + 1).min(IDLE_STRETCH_CAP)
+    } else {
+        0
+    };
+    IDLE_STRETCH.store(next, Ordering::Relaxed);
+    if soon {
+        tracing::info!("phone wanted back soon after a release: idle window now ×{}", 1u32 << next);
+    }
+}
+
 pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
     if !state.managed_wda || state.wda.is_none() {
         return; // an external/remote WDA is never lifecycle-managed here
@@ -3337,8 +3387,8 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
         recover(state.flow_trail.lock()).reset();
         tracing::info!("WDA supervisor is parked (disabled); starting released");
     }
-    let window = std::time::Duration::from_secs(idle_secs);
-    tracing::info!("idle auto-release enabled: free the phone after {idle_secs}s idle");
+    let base_window = std::time::Duration::from_secs(idle_secs);
+    tracing::info!("idle auto-release enabled: free the phone after {idle_secs}s idle (stretches up to {}s when it is wanted back soon after a release)", stretched_idle_window(base_window, IDLE_STRETCH_CAP).as_secs());
     tokio::spawn(async move {
         use std::sync::atomic::Ordering;
         const POLL: std::time::Duration = std::time::Duration::from_secs(20);
@@ -3348,10 +3398,13 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
         // start from a crash-loop bounce; and the retry state for a stop that
         // does not take (issue #66).
         let mut down_since: Option<std::time::Instant> = None;
+        #[allow(unused_assignments)]
+        let mut window = base_window;
         let mut release_backoff_until: Option<std::time::Instant> = None;
         let mut release_failures: u32 = 0;
         loop {
             tokio::time::sleep(POLL).await;
+            window = effective_idle_window(base_window);
             if state.released.load(Ordering::Relaxed) {
                 continue; // already let go — reconnect is on-demand (agent_input)
             }
@@ -3446,6 +3499,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                     state.released.store(true, Ordering::Release);
                     recover(state.flow_trail.lock()).reset();
                     *recover(state.owner.lock()) = None;
+                    note_idle_release();
                     release_backoff_until = None;
                     release_failures = 0;
                     tracing::info!("phone released: supervisor stopped while WDA was already down");
@@ -3544,6 +3598,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 state.released.store(true, Ordering::Release);
                 recover(state.flow_trail.lock()).reset();
                 *recover(state.owner.lock()) = None;
+                note_idle_release();
                 was_up = false;
                 release_backoff_until = None;
                 release_failures = 0;
@@ -4034,6 +4089,9 @@ async fn agent_mode(
                         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
                 );
             };
+            if state.released.load(std::sync::atomic::Ordering::Acquire) {
+                note_reconnect_after_release();
+            }
             let log = crate::instance::Instance::path_str(&crate::instance::current().agent_log());
             let udid_env = udid.unwrap_or_default();
             // Taking the phone back is decided by this request, not by whether
@@ -9067,6 +9125,7 @@ async fn agent_input(
         }
         let won = state.wda_lifecycle.try_begin_reconnecting();
         if let Some(reconnect_token) = won {
+            note_reconnect_after_release();
             // Someone just asked for the phone, so it is not idle — restart the
             // clock before the supervisor starts building. Otherwise the idle
             // watchdog can reach its window mid-bring-up and stop the very
@@ -14339,6 +14398,18 @@ mod tests {
         assert_eq!(wda_transport(dir.path()), "wifi");
         assert!(transport_hint("wifi", Some(180)).unwrap().contains("~180 ms"));
         assert!(transport_hint("usb", Some(5)).is_none());
+    }
+
+    #[test]
+    fn the_idle_window_stretches_when_the_phone_is_wanted_back_soon() {
+        let base = std::time::Duration::from_secs(600);
+        assert_eq!(stretched_idle_window(base, 0).as_secs(), 600);
+        assert_eq!(stretched_idle_window(base, 1).as_secs(), 1200);
+        assert_eq!(stretched_idle_window(base, 2).as_secs(), 2400);
+        assert_eq!(stretched_idle_window(base, 3).as_secs(), 3600, "capped at an hour");
+        assert_eq!(stretched_idle_window(base, 9).as_secs(), 3600);
+        // A configured window above the cap is never shortened.
+        assert_eq!(stretched_idle_window(std::time::Duration::from_secs(7200), 2).as_secs(), 7200);
     }
 
     #[test]
