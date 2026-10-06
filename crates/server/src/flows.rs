@@ -351,21 +351,25 @@ pub fn convert_action(action: &Value, rows: Option<&[crate::wda::ElementRow]>) -
     }
 }
 
-/// A durable locator for a tree row: identifier when the app supplies one,
-/// otherwise label + kind. Never the snapshot index.
+/// A durable locator for a tree row. Never the snapshot index.
+///
+/// An identifier stands ALONE: `tap_locator` re-resolves through WDA, which
+/// can query an identifier only by itself (accessibility id) — paired with
+/// `kind` it degrades to a kind-only query and every key on a keypad matches
+/// (hardware: Calculator `{identifier:"One",kind:"Key"}` → ambiguous).
+/// Without one, label + kind.
 fn locator_for_row(row: &crate::wda::ElementRow) -> Option<Value> {
-    let mut locator = serde_json::Map::new();
-    if let Some(identifier) = row.identifier.as_deref().filter(|s| !s.is_empty()) {
-        locator.insert("identifier".into(), json!(identifier));
-    } else if !row.label.is_empty() {
-        locator.insert("label".into(), json!(row.label));
-    } else {
+    if let Some(identifier) = row.identifier.as_deref().filter(|s| !s.trim().is_empty()) {
+        return Some(json!({ "identifier": identifier }));
+    }
+    if row.label.trim().is_empty() {
         return None;
     }
+    let mut locator = json!({ "label": row.label });
     if !row.kind.is_empty() {
-        locator.insert("kind".into(), json!(row.kind));
+        locator["kind"] = json!(row.kind);
     }
-    Some(Value::Object(locator))
+    Some(locator)
 }
 
 impl FlowTrail {
@@ -411,7 +415,8 @@ impl FlowTrail {
     /// An element tree showed `label` as the foreground app. Returns whether a
     /// `registry` block should go out (first look at a newly entered app).
     pub fn saw_app(&mut self, label: Option<&str>, now: Instant) -> bool {
-        let Some(label) = label.filter(|l| !l.is_empty()) else {
+        // SpringBoard reports its Application label as " ": not an app name.
+        let Some(label) = label.filter(|l| !l.trim().is_empty()) else {
             return false;
         };
         self.expire_if_idle(now);
@@ -519,8 +524,17 @@ fn draft_json(trail: &Trail, source: &str) -> Value {
         .clone()
         .or_else(|| trail.bundle.clone())
         .unwrap_or_else(|| "App".into());
-    let mut steps = Vec::with_capacity(trail.steps.len() + 1);
-    for step in &trail.steps {
+    // Going Home at the end is the agent tidying up, not part of the task.
+    let is_home = |s: &Value| {
+        s.get("kind").and_then(Value::as_str) == Some("shortcut")
+            && s.get("name").and_then(Value::as_str) == Some("home")
+    };
+    let mut recorded: &[Value] = &trail.steps;
+    while recorded.last().is_some_and(is_home) {
+        recorded = &recorded[..recorded.len() - 1];
+    }
+    let mut steps = Vec::with_capacity(recorded.len() + 1);
+    for step in recorded {
         steps.push(step.clone());
         // Gate the launch on the app actually being in front: the one wait
         // the trail can prove. Later screens need gates a human chooses.
@@ -730,7 +744,7 @@ mod tests {
         let Converted::Step(step) = tap(1) else { panic!() };
         assert_eq!(step, json!({"kind":"tap_locator","locator":{"label":"资料","kind":"Button"}}));
         let Converted::Step(step) = tap(2) else { panic!() };
-        assert_eq!(step["locator"], json!({"identifier":"row-1","kind":"Cell"}));
+        assert_eq!(step["locator"], json!({"identifier":"row-1"}), "identifier stands alone");
 
         let mut trail = FlowTrail::default();
         let now = Instant::now();
@@ -751,6 +765,9 @@ mod tests {
         assert!(!trail.saw_app(Some("健康"), now));
         // The user (or a banner) moved to another app.
         assert!(trail.saw_app(Some("微信"), now));
+        assert!(!trail.saw_app(Some("微信"), now));
+        // The Home screen's blank label is not an app change.
+        assert!(!trail.saw_app(Some(" "), now));
         assert!(!trail.saw_app(Some("微信"), now));
     }
 
@@ -797,8 +814,10 @@ mod tests {
         for _ in 0..SUGGEST_MIN_STEPS {
             trail.record(convert_action(&json!({"type":"tap","x":0.5,"y":0.5}), None), now);
         }
+        trail.record(convert_action(&json!({"type":"shortcut","name":"home"}), None), now);
         trail.saw_app(Some("微信"), now);
         let draft = trail.draft().expect("the finished trail is kept");
+        assert_eq!(draft["flow"]["steps"].as_array().unwrap().len(), 2 + SUGGEST_MIN_STEPS, "trailing Home dropped");
         assert_eq!(draft["source"], "previous");
         let flow = &draft["flow"];
         assert_eq!(flow["app"], "com.apple.Health");

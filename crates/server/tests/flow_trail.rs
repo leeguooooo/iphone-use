@@ -42,7 +42,7 @@ fn batch(bundle: &str, homes: usize) -> String {
     let mut steps = vec![format!(
         r#"{{"kind":"action","action":{{"type":"launch_app","bundle":"{bundle}"}}}}"#
     )];
-    steps.extend((0..homes).map(|_| r#"{"kind":"action","action":{"type":"home"}}"#.to_string()));
+    steps.extend((0..homes).map(|_| r#"{"kind":"action","action":{"type":"key","name":"return"}}"#.to_string()));
     format!(r#"{{"steps":[{}]}}"#, steps.join(","))
 }
 
@@ -94,8 +94,9 @@ fn launches_name_flows_offer_a_draft_and_flow_runs_stay_out_of_it() {
         assert_eq!(draft["flow"]["app"], "com.example.todo");
         let steps = draft["flow"]["steps"].as_array().unwrap();
         assert_eq!(steps[0], serde_json::json!({"kind":"launch_app","bundle":"com.example.todo"}));
-        assert_eq!(steps.len(), 7, "{draft}");
-        assert!(steps[1..].iter().all(|s| s == &serde_json::json!({"kind":"shortcut","name":"home"})));
+        assert_eq!(steps.len(), 6, "{draft}");
+        // The trailing Home from /agent/input above is tidying up, not the task.
+        assert!(steps[1..].iter().all(|s| s == &serde_json::json!({"kind":"key","name":"return"})), "{draft}");
 
         // The skill's reference ships inside the daemon (the installer ships SKILL.md only).
         let response = server::http::router(state.clone())

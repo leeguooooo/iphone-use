@@ -8070,6 +8070,11 @@ async fn agent_actions(
     if let Err(error) = validate_agent_actions(&request) {
         return agent_actions_invalid(error);
     }
+    // A flow run ends the agent's trail whether it passes or fails: what came
+    // before was its own task, and the run's steps are already a flow.
+    if headers.contains_key(FLOW_RUN_HEADER) {
+        recover(state.flow_trail.lock()).flow_ran();
+    }
     if state.managed_wda_pending {
         return target_not_configured_response();
     }
@@ -9385,7 +9390,7 @@ fn flow_after_actions(
     body: &str,
 ) -> Vec<(&'static str, serde_json::Value)> {
     if headers.contains_key(FLOW_RUN_HEADER) {
-        recover(state.flow_trail.lock()).flow_ran();
+        // Already rotated when the batch arrived (see agent_actions).
         return Vec::new();
     }
     let Ok(request) = serde_json::from_str::<serde_json::Value>(body) else {
