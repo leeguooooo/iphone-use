@@ -761,7 +761,11 @@ fn a_sample_cut_off_by_the_budget_marks_the_returned_tree_stale() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=600").await;
+        // The second sample takes 5 s, so any budget well under that cuts it
+        // off; 1500 ms leaves the first sample (a size probe plus the read)
+        // room to finish on a loaded machine, where 600 ms sometimes ran out
+        // before the second sample even started.
+        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=1500").await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["reason"], "budget_exhausted", "{json}");

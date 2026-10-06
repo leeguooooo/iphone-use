@@ -53,6 +53,11 @@ pub struct WdaClient {
     /// geometric, and the next read keeps that mode until the tree shrinks
     /// well below the limit.
     lite_source: bool,
+    /// When a probe last found a tree under the limit. Until something is
+    /// POSTed after it, the screen cannot have jumped to a huge tree on its
+    /// own, so the next read skips the probe (wait_for polls and settle
+    /// re-reads are most reads).
+    small_tree_at: Option<std::time::Instant>,
     /// The screen as it stood after the last action settled (PNG), kept in
     /// memory only so `/agent/screenshot` can answer without a new capture.
     /// Dropped by the next screen-changing POST.
@@ -103,6 +108,7 @@ impl WdaClient {
             no_alert_at: None,
             last_tree: None,
             lite_source: false,
+            small_tree_at: None,
             settled_frame: None,
             settle_frames_paused_until: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
@@ -1354,6 +1360,18 @@ impl WdaClient {
         if std::env::var("PHONE_REMOTE_SOURCE_PROBE").is_ok_and(|value| value.trim() == "0") {
             return Ok((self.source().await?, false));
         }
+        // Nothing sent since a small tree: the same screen, read in full
+        // straight away. Not keyed on the app — one app holds both kinds of
+        // screen, and an input is what moves between them.
+        if let Some(at) = self.small_tree_at {
+            if self.posted_at.is_none_or(|posted| posted < at) {
+                let full = self.source().await?;
+                self.small_tree_at = Some(std::time::Instant::now());
+                return Ok((full, false));
+            }
+        }
+        self.small_tree_at = None;
+        let probed_at = std::time::Instant::now();
         let lite = self.source_excluding(Some("visible")).await?;
         let nodes = count_nodes(&lite);
         if keep_lite_source(nodes, full_source_max_nodes(), self.lite_source) {
@@ -1365,7 +1383,9 @@ impl WdaClient {
         // A small tree whose full read still fails points at WDA itself, not
         // at the tree: report it like any failed read rather than hide it
         // behind the probe.
-        Ok((self.source().await?, false))
+        let full = self.source().await?;
+        self.small_tree_at = Some(probed_at);
+        Ok((full, false))
     }
 
     /// Whether the last [`Self::elements`] judged `visible` by geometry
@@ -2598,6 +2618,41 @@ mod tests {
         });
         server.join().unwrap();
         assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_small_tree_is_reread_without_a_probe_until_something_is_sent() {
+        // read: probe + full · read again: full only · tap · read: probe + full.
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = order.clone();
+        let (base, server) = mock_wda(6, move |request| {
+            let what = if request.contains("excluded_attributes=visible") {
+                "probe"
+            } else if request.contains("/source") {
+                "full"
+            } else {
+                "post"
+            };
+            seen.lock().unwrap().push(what);
+            if what == "post" {
+                r#"{"value":null}"#.to_string()
+            } else {
+                tree_with_cells(3, "far")
+            }
+        });
+        let mut client = WdaClient::new(base).unwrap();
+        client.session = Some("SESSION".to_string());
+        block(async {
+            client.elements().await.unwrap();
+            client.elements().await.unwrap();
+            client.tap_point(10.0, 10.0).await.unwrap();
+            client.elements().await.unwrap();
+        });
+        server.join().unwrap();
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["probe", "full", "full", "post", "probe", "full"]
+        );
     }
 
     #[test]
