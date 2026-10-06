@@ -10,6 +10,9 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
     var humanHandoff: Bool
     var locked: Bool?
     var hint: String
+    /// What a person should do now, in the device language (`next_step`);
+    /// empty when nothing is needed or the daemon predates it.
+    var nextStep: String
     var setupBlockedOn: String
     var recoveryOwner: String
     var version: String
@@ -23,6 +26,7 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         case humanHandoff = "human_handoff"
         case locked = "wda_locked"
         case hint
+        case nextStep = "next_step"
         case setupBlockedOn = "setup_blocked_on"
         case recoveryOwner = "recovery_owner"
         case version
@@ -39,11 +43,18 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         humanHandoff = try c.decodeIfPresent(Bool.self, forKey: .humanHandoff) ?? false
         locked = try c.decodeIfPresent(Bool.self, forKey: .locked)
         hint = try c.decodeIfPresent(String.self, forKey: .hint) ?? ""
+        let steps = try c.decodeIfPresent([String: String].self, forKey: .nextStep) ?? [:]
+        let chinese = Locale.preferredLanguages.first?.hasPrefix("zh") ?? true
+        nextStep = (chinese ? steps["zh"] : steps["en"]) ?? steps["zh"] ?? ""
         setupBlockedOn = try c.decodeIfPresent(String.self, forKey: .setupBlockedOn) ?? ""
         recoveryOwner = try c.decodeIfPresent(String.self, forKey: .recoveryOwner) ?? ""
         version = try c.decodeIfPresent(String.self, forKey: .version) ?? ""
         captureRedacted = try c.decodeIfPresent(Bool.self, forKey: .captureRedacted) ?? false
     }
+
+    /// The line to show a person: the daemon's `next_step`, else (older
+    /// daemons) its diagnostic `hint`.
+    var personHint: String { nextStep.isEmpty ? hint : nextStep }
 }
 
 /// One gesture or command for `POST /control`, in the shape the daemon's

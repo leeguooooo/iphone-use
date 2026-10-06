@@ -1244,6 +1244,10 @@ function managedSetupWillRetry(status) {
 }
 
 function directHintText(status, fallback) {
+  /* The daemon says what to do in one line (`next_step`), the same line the
+     iOS app shows; the substring mapping below is for older daemons. */
+  const nextStep = String(status?.next_step?.zh || '');
+  if (nextStep) return nextStep;
   const hint = String(status?.hint || '');
   if (!hint) return fallback;
   if (hint.includes('canonical iPhone target')) {
@@ -2888,6 +2892,9 @@ function renderRecordedFlow() {
 }
 
 function flowUnavailableCopy() {
+  if (backendStatus?.next_step?.zh && backendStatus?.drivable !== true) {
+    return backendStatus.next_step.zh;
+  }
   if (backendStatus?.setup_blocked_on === 'usb') {
     return '目标 iPhone 尚未通过 USB 连接。连接、解锁并保持亮屏后，这里会自动恢复。';
   }

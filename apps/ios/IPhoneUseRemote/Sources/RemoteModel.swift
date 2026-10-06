@@ -377,7 +377,7 @@ final class RemoteModel {
         if status.released { return "设备空闲中，先点「连接手机」" }
         if status.reconnecting { return "正在连接手机，请稍等" }
         if status.locked == true || status.deviceState == "locked" { return "手机锁屏了，请在手机上解锁" }
-        return status.hint.isEmpty ? "手机暂时不能操作" : status.hint
+        return status.personHint.isEmpty ? "手机暂时不能操作" : status.personHint
     }
 }
 

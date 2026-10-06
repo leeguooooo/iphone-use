@@ -34,7 +34,7 @@ passcode.
 | `released` / `released:true` | Normal idle | Leave it unless the task needs the phone; then see *Reconnect* below. |
 | `releasing` | Release in progress | Do not reconnect or hold. Wait, then reassess, only if the task still needs it. |
 | reconnecting (`reconnecting:true`) | Bring-up running | If `setup_blocked_on` is set, follow `hint`; else report `setup_phase`/`setup_message` and poll. A first build after an Xcode update can take minutes. |
-| `blocked` / `offline` | Something stands in the way | Read `hint` and `setup_blocked_on` (see [Setup blockers](#setup-blockers)); resolve it first. |
+| `blocked` / `offline` | Something stands in the way | Read `hint` and `setup_blocked_on` (see [Setup blockers](#setup-blockers)); resolve it first. When the person has to act, relay `next_step` (`{zh,en}`, the same line the web page and iOS app show) instead of paraphrasing `hint`. |
 | `degraded` | WDA answers but the last read/action did not complete (heavy page, stalled app) | **Not** a blocker; `setup_blocked_on` is empty. Wait `retry_after_secs` (3s) and read again; do not restart anything. |
 | `released` + `human_handoff:true` | The operator handed the phone to a person | Input answers `409 phone_handed_to_human`. Ask the operator before sending `{"mode":"agent"}`. |
 

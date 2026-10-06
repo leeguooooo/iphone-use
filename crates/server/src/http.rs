@@ -2184,35 +2184,41 @@ async fn agent_status(
     // When not drivable, tell the caller HOW to recover (the recovery differs by
     // state, and auto-recovery is blocked by macOS while the phone is in use).
     // Plain text only — kept free of quotes/braces so it drops into the JSON.
-    let hint = if releasing {
-        "direct device service is being released after inactivity — wait for confirmation before reconnecting"
+    // `hint` is for agents (diagnostic English); `advice` names the same
+    // situation so `next_step` can tell a person what to do in one line —
+    // the web page and the iOS app show that instead of translating `hint`.
+    let (advice, hint) = if releasing {
+        ("releasing", "direct device service is being released after inactivity — wait for confirmation before reconnecting")
     } else if !wda {
         if state.managed_wda_pending {
-            "no canonical iPhone target is configured — run setup-wda.sh to persist PHONE_REMOTE_UDID; until then the daemon will not stop or bootstrap local WDA"
+            ("unconfigured", "no canonical iPhone target is configured — run setup-wda.sh to persist PHONE_REMOTE_UDID; until then the daemon will not stop or bootstrap local WDA")
         } else if let Some(blocker_hint) = setup_blocker_hint(&setup_blocked_on) {
-            blocker_hint
+            ("blocker", blocker_hint)
         } else if reconnecting {
-            "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying"
+            ("reconnecting", "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying")
         } else if released && !state.managed_wda {
-            "the remote WDA endpoint is externally managed — restart it on the owning host; this daemon will not stop or bootstrap local services"
+            ("external", "the remote WDA endpoint is externally managed — restart it on the owning host; this daemon will not stop or bootstrap local services")
         } else if released && human_handoff {
-            "the phone was handed to a person (mode=human) and WDA is stopped so they can use it in hand — POST /agent/mode {mode:agent} takes it back"
+            ("handoff", "the phone was handed to a person (mode=human) and WDA is stopped so they can use it in hand — POST /agent/mode {mode:agent} takes it back")
         } else if released {
-            "direct device service was released after inactivity — reconnect to restart WDA, then keep the phone unlocked and awake"
+            ("released", "direct device service was released after inactivity — reconnect to restart WDA, then keep the phone unlocked and awake")
         } else if !state.managed_wda {
-            "the configured remote WDA endpoint is unreachable and externally managed — recover it on the owning host; this daemon will not run local setup or launchctl commands"
+            ("external", "the configured remote WDA endpoint is unreachable and externally managed — recover it on the owning host; this daemon will not run local setup or launchctl commands")
         } else {
-            "direct device service is unreachable — start or repair WDA and the 8100/9100 relays"
+            ("offline", "direct device service is unreachable — start or repair WDA and the 8100/9100 relays")
         }
     } else if reconnecting {
-        "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying"
+        ("reconnecting", "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying")
     } else if wda && !wda_actionable {
         if wda_locked == "true" {
-            "WDA is reachable but the iPhone is locked — unlock it and keep it awake"
+            (
+                "locked",
+                "WDA is reachable but the iPhone is locked — unlock it and keep it awake",
+            )
         } else if !wda_died_reason.is_empty() {
             // We watched it die; say what took it down instead of the generic
             // "cannot act" that made a severed session look like interference.
-            wda_death_hint(wda_died_reason)
+            ("died", wda_death_hint(wda_died_reason))
         } else {
             // Reachable but the last read/action failed, with no death reason
             // and no lock: a `/source` read that timed out on a heavy page, or
@@ -2220,11 +2226,14 @@ async fn agent_status(
             // probe decides — so the hint must say "retry", not "restart".
             // Telling an agent to restart the service here sent it down a
             // recovery path for a condition that clears itself (#74).
-            "WDA is reachable but the last read or action did not complete (usually a /source read that timed out on a heavy page, or a stalled app) — retry the read; the next health probe decides whether this clears or becomes offline"
+            ("degraded", "WDA is reachable but the last read or action did not complete (usually a /source read that timed out on a heavy page, or a stalled app) — retry the read; the next health probe decides whether this clears or becomes offline")
         }
     } else {
-        ""
+        ("", "")
     };
+    let next_step_json = human_next_step(advice, &setup_blocked_on, wda_died_reason)
+        .map(|(zh, en)| serde_json::json!({ "zh": zh, "en": en }).to_string())
+        .unwrap_or_else(|| "null".to_string());
     let device_state = if releasing {
         "releasing"
     } else if !wda && !setup_blocked_on.is_empty() {
@@ -2271,7 +2280,7 @@ async fn agent_status(
     let transport_hint = serde_json::to_string(&transport_hint(transport, rtt))
         .unwrap_or_else(|_| "null".into());
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -2441,6 +2450,105 @@ fn parse_setup_log_blocked_on(txt: &str) -> String {
     } else {
         String::new()
     }
+}
+
+/// One line telling a PERSON what to do, in Chinese and English, for the
+/// situation `/agent/status` named in `advice` (see `agent_status`). The web
+/// page and the iOS app show this verbatim, so all three surfaces say the same
+/// thing; `hint` stays the diagnostic text for agents. `None` when there is
+/// nothing to do.
+fn human_next_step(
+    advice: &str,
+    blocked_on: &str,
+    died_reason: &str,
+) -> Option<(&'static str, &'static str)> {
+    Some(match advice {
+        "releasing" => ("正在释放设备，请稍候", "Releasing the phone — one moment"),
+        "unconfigured" => (
+            "连接、解锁并信任 iPhone，然后在这台 Mac 上运行 ~/.iphone-use/setup-wda.sh setup",
+            "Connect, unlock and trust the iPhone, then run ~/.iphone-use/setup-wda.sh setup on this Mac",
+        ),
+        "blocker" => match blocked_on {
+            "warp" => (
+                "WARP 挡住了 iPhone 的连接：在 WARP 里排除 fe80::/10 和 fd00::/8，或暂时断开 WARP，连接会自动恢复",
+                "WARP is blocking the iPhone tunnel: exclude fe80::/10 and fd00::/8 in WARP, or disconnect it for now — connecting resumes on its own",
+            ),
+            "proxy" => (
+                "系统代理挡住了 iPhone 的连接：对设备连接关闭代理后会自动恢复",
+                "A system proxy is blocking the iPhone tunnel: bypass it for the device and connecting resumes on its own",
+            ),
+            "usb" => (
+                "用 USB 连接这台 iPhone，解锁并保持亮屏，连接会自动恢复",
+                "Plug this iPhone in over USB, unlock it and keep it awake — connecting resumes on its own",
+            ),
+            "trust" => (
+                "在 iPhone 上解锁并点「信任」，保持亮屏，连接会自动恢复",
+                "Unlock the iPhone and tap Trust, keep it awake — connecting resumes on its own",
+            ),
+            "ddi" => (
+                "手机保持连接，打开 Xcode 等设备准备完成，连接会自动恢复",
+                "Open Xcode with the phone connected and let device preparation finish — connecting resumes on its own",
+            ),
+            "account" => (
+                "打开 Xcode › 设置 › 账户，登录 Apple 账号并选好开发团队",
+                "Open Xcode › Settings › Accounts, sign in and pick the development team",
+            ),
+            "automation_mode_disabled" => (
+                "在 iPhone 的 设置 › 开发者 里打开「启用 UI 自动化」，并允许弹出的提示",
+                "On the iPhone, turn on Settings › Developer › Enable UI Automation and allow the prompt",
+            ),
+            "locked" => (
+                "请解锁 iPhone 并保持亮屏，解锁后会自动接着连接",
+                "Unlock the iPhone and keep it awake — connecting continues as soon as it is unlocked",
+            ),
+            "wda" => (
+                "设备服务启动失败：在这台 Mac 上运行 ~/.iphone-use/setup-wda.sh doctor 查看原因",
+                "The device service failed to start: run ~/.iphone-use/setup-wda.sh doctor on this Mac",
+            ),
+            _ => return None,
+        },
+        "reconnecting" => (
+            "正在连接手机；手机锁着的话请解锁一次",
+            "Connecting to the phone — unlock it once if it is locked",
+        ),
+        "external" => (
+            "请在 WDA 所在的主机上恢复服务，这台 Mac 不会接管它",
+            "Recover WDA on the host that runs it; this Mac will not take it over",
+        ),
+        "handoff" => (
+            "手机已交还给持有人；需要远程操作时点「连接手机」",
+            "The phone was handed back; choose Connect to control it remotely again",
+        ),
+        "released" => (
+            "一段时间没人操作，连接已暂停；点「连接手机」继续（手机需解锁亮屏）",
+            "Paused after inactivity; choose Connect to continue (unlock the phone first)",
+        ),
+        "offline" => (
+            "连不上设备服务：在这台 Mac 上运行 ~/.iphone-use/setup-wda.sh status 检查",
+            "The device service is unreachable: run ~/.iphone-use/setup-wda.sh status on this Mac",
+        ),
+        "locked" => (
+            "请在手机上解锁；锁屏密码不能远程输入",
+            "Unlock the phone in hand — the passcode cannot be entered remotely",
+        ),
+        "died" => match died_reason {
+            "idle_release" => ("连接已按空闲规则暂停，下次操作会自动恢复", "Paused after inactivity; the next action restarts it"),
+            "device_locked" => ("手机锁屏了，请解锁并保持亮屏", "The phone locked — unlock it and keep it awake"),
+            "session_severed" => (
+                "连接被中断（常见于 WARP/VPN 重连、Mac 睡眠或手机锁屏），点「连接手机」重新连接",
+                "The connection was cut (WARP/VPN reconnect, Mac sleep or phone lock) — choose Connect to reconnect",
+            ),
+            _ => (
+                "设备服务没有响应，点「连接手机」重新连接；还不行就运行 ~/.iphone-use/setup-wda.sh status",
+                "The device service stopped answering — choose Connect; if that fails run ~/.iphone-use/setup-wda.sh status",
+            ),
+        },
+        "degraded" => (
+            "上一次读取没完成（页面太重或 App 卡住），稍等会自动恢复",
+            "The last read did not finish (a heavy page or a stalled app) — it usually clears on its own",
+        ),
+        _ => return None,
+    })
 }
 
 fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
@@ -13362,6 +13470,41 @@ mod tests {
                 "{unprobed}"
             );
         }
+    }
+
+    #[test]
+    fn every_blocker_and_state_tells_a_person_what_to_do() {
+        for blocker in [
+            "warp",
+            "proxy",
+            "usb",
+            "trust",
+            "ddi",
+            "account",
+            "automation_mode_disabled",
+            "locked",
+            "wda",
+        ] {
+            assert!(setup_blocker_hint(blocker).is_some(), "{blocker}");
+            let (zh, en) = human_next_step("blocker", blocker, "").expect(blocker);
+            assert!(!zh.is_empty() && !en.is_empty(), "{blocker}");
+        }
+        for advice in [
+            "releasing",
+            "unconfigured",
+            "reconnecting",
+            "external",
+            "handoff",
+            "released",
+            "offline",
+            "locked",
+            "died",
+            "degraded",
+        ] {
+            assert!(human_next_step(advice, "", "").is_some(), "{advice}");
+        }
+        assert_eq!(human_next_step("", "", ""), None, "a ready phone needs nothing");
+        assert_eq!(human_next_step("blocker", "unheard_of", ""), None);
     }
 
     #[test]

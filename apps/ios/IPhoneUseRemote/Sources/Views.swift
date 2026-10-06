@@ -164,7 +164,7 @@ struct RemoteView: View {
         if status.reconnecting {
             let blocked = !status.setupBlockedOn.isEmpty
             return .init(title: blocked ? "需要处理一下" : "正在连接手机",
-                         detail: blocked ? status.hint : "手机锁着的话请解锁一次；第一次连接可能要一两分钟。",
+                         detail: blocked ? status.personHint : "手机锁着的话请解锁一次；第一次连接可能要一两分钟。",
                          action: nil)
         }
         if status.released {
@@ -174,7 +174,7 @@ struct RemoteView: View {
             return .init(title: "手机锁屏了", detail: "锁屏密码界面不能远程输入，请在手机上解锁。远程操作时可以把「自动锁定」调长一点。", action: nil)
         }
         if status.deviceState == "offline" || status.deviceState == "blocked" {
-            return .init(title: "连不上手机", detail: status.hint.isEmpty ? "WDA 没有运行" : status.hint,
+            return .init(title: "连不上手机", detail: status.personHint.isEmpty ? "WDA 没有运行" : status.personHint,
                          action: status.recoveryOwner == "daemon" ? .connect : nil)
         }
         if !model.videoLive {
