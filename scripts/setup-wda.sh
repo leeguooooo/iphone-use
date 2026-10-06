@@ -4221,12 +4221,20 @@ if [ -f "$DAEMON_PLIST" ]; then
     CURRENT_MANAGED="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:PHONE_REMOTE_WDA_MANAGED" "$DAEMON_STAGED_PLIST" 2>/dev/null || true)"
     CURRENT_ALLOW_LAN="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:WDA_ALLOW_LAN" "$DAEMON_STAGED_PLIST" 2>/dev/null || true)"
     CONFIG_CHANGED=0
-    if [ "$CURRENT_BACKEND" != "direct" ] \
-        || [ "$CURRENT_UDID" != "$WDA_UDID" ] \
-        || [ "$CURRENT_URL" != "$TARGET_URL" ] \
-        || [ "$CURRENT_MJPEG_URL" != "$TARGET_MJPEG_URL" ] \
-        || [ "$CURRENT_MANAGED" != "true" ] \
-        || [ "$CURRENT_ALLOW_LAN" != "$WDA_ALLOW_LAN" ]; then
+    # Restart the daemon only for settings it reads at startup. WDA_ALLOW_LAN
+    # is not one of them (setup reads it from this plist), and a restart drops
+    # every in-flight request, hold and owner lease — a USB<->Wi-Fi relay change
+    # used to do exactly that mid-session.
+    DAEMON_NEEDS_RESTART=0
+    CHANGED_KEYS=""
+    [ "$CURRENT_BACKEND" != "direct" ] && CHANGED_KEYS="$CHANGED_KEYS PHONE_REMOTE_BACKEND"
+    [ "$CURRENT_UDID" != "$WDA_UDID" ] && CHANGED_KEYS="$CHANGED_KEYS PHONE_REMOTE_UDID"
+    [ "$CURRENT_URL" != "$TARGET_URL" ] && CHANGED_KEYS="$CHANGED_KEYS PHONE_REMOTE_WDA_URL"
+    [ "$CURRENT_MJPEG_URL" != "$TARGET_MJPEG_URL" ] && CHANGED_KEYS="$CHANGED_KEYS PHONE_REMOTE_WDA_MJPEG_URL"
+    [ "$CURRENT_MANAGED" != "true" ] && CHANGED_KEYS="$CHANGED_KEYS PHONE_REMOTE_WDA_MANAGED"
+    [ -n "$CHANGED_KEYS" ] && DAEMON_NEEDS_RESTART=1
+    [ "$CURRENT_ALLOW_LAN" != "$WDA_ALLOW_LAN" ] && CHANGED_KEYS="$CHANGED_KEYS WDA_ALLOW_LAN"
+    if [ -n "$CHANGED_KEYS" ]; then
         _plist_set_env "$DAEMON_STAGED_PLIST" PHONE_REMOTE_BACKEND direct
         _plist_set_env "$DAEMON_STAGED_PLIST" PHONE_REMOTE_UDID "$WDA_UDID"
         _plist_set_env "$DAEMON_STAGED_PLIST" PHONE_REMOTE_WDA_URL "$TARGET_URL"
@@ -4234,7 +4242,7 @@ if [ -f "$DAEMON_PLIST" ]; then
         _plist_set_env "$DAEMON_STAGED_PLIST" PHONE_REMOTE_WDA_MANAGED true
         _plist_set_env "$DAEMON_STAGED_PLIST" WDA_ALLOW_LAN "$WDA_ALLOW_LAN"
         CONFIG_CHANGED=1
-        ok "daemon plist set to managed direct + fixed device + WDA control/video endpoints"
+        ok "daemon plist set to managed direct + fixed device + WDA control/video endpoints (changed:$CHANGED_KEYS)"
     else
         ok "daemon plist already has the managed direct + fixed device + WDA endpoint configuration"
     fi
@@ -4249,7 +4257,7 @@ if [ -f "$DAEMON_PLIST" ]; then
     fi
     DAEMON_STAGED_PLIST=""
 
-    if [ "$CONFIG_CHANGED" = "1" ] \
+    if [ "$DAEMON_NEEDS_RESTART" = "1" ] \
         || ! launchctl print "$GUI_DOMAIN/$DAEMON_LABEL" >/dev/null 2>&1; then
         launchctl bootout "$GUI_DOMAIN/$DAEMON_LABEL" 2>/dev/null || true
         _wait_job_gone "$DAEMON_LABEL" \
