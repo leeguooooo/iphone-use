@@ -157,6 +157,10 @@ jobs:
           set -euo pipefail
           ./target/debug/iphone-use-mcp flow validate examples/flows/open-spotlight.json
 
+      - name: Device runner (unsigned build + coherence)
+        shell: bash
+        run: bash runner/ci-check.sh
+
       - name: Shell and Python helper tests
         shell: bash
         run: |
@@ -174,6 +178,7 @@ jobs:
           bash scripts/test-setup-wda-warp-preflight.sh
           bash scripts/test-setup-wda-lock-backoff.sh
           bash scripts/test-setup-wda-runner-build.sh
+          bash scripts/test-install-runner-sources.sh
           bash scripts/test-setup-wda-proxy-preflight.sh
           bash scripts/test-setup-wda-probe-threshold.sh
           bash scripts/test-setup-wda-runner-repair.sh

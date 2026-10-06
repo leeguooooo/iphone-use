@@ -542,7 +542,10 @@ expected_role_valid() {
 
 # Keep the uninstaller's process identity contract in lockstep with
 # scripts/setup-wda.sh. A PID record is evidence, not authority: the command it
-# contains must still have one of the exact WDA/relay shapes that setup writes.
+# contains must still have one of the exact runner/relay shapes that setup writes.
+# The device runner is launched from its built product; the WebDriverAgent form
+# is what releases before it wrote, and stays recognised for their leftovers.
+RUNNER_ARGV_PATTERN='^(/[^ ]*/)?xcodebuild -destination platform=iOS,id=[0-9A-Fa-f-]+ test-without-building -xctestrun /[^ ]+/IPhoneUseRunner_[^ /]+\.xctestrun -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe( -allowProvisioningUpdates -authenticationKeyPath /[^|[:cntrl:]]+\.p8 -authenticationKeyID [A-Za-z0-9]+ -authenticationKeyIssuerID [A-Za-z0-9-]+ -allowProvisioningDeviceRegistration)?$'
 command_matches_expected() {
     local command="$1"
     local expected="$2"
@@ -551,9 +554,13 @@ command_matches_expected() {
     case "$expected" in
         runner:*)
             signature="${expected#*:}"
-            printf '%s\n' "$signature" | LC_ALL=C grep -Eq \
-                '^(/[^ ]*/)?xcodebuild -project WebDriverAgent\.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=[0-9A-Fa-f-]+ -allowProvisioningUpdates DEVELOPMENT_TEAM=[A-Z0-9]{10} PRODUCT_BUNDLE_IDENTIFIER=[A-Za-z0-9.-]+ test$' \
-                || return 1
+            if printf '%s\n' "$signature" | LC_ALL=C grep -Eq "$RUNNER_ARGV_PATTERN"; then
+                :
+            else
+                printf '%s\n' "$signature" | LC_ALL=C grep -Eq \
+                    '^(/[^ ]*/)?xcodebuild -project WebDriverAgent\.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=[0-9A-Fa-f-]+ -allowProvisioningUpdates DEVELOPMENT_TEAM=[A-Z0-9]{10} PRODUCT_BUNDLE_IDENTIFIER=[A-Za-z0-9.-]+ test$' \
+                    || return 1
+            fi
             [ "$command" = "$signature" ]
             ;;
         relay:*|mjpeg:*)
@@ -661,11 +668,17 @@ verify_loopback_listener() {
     [ -z "$unexpected" ]
 }
 
+# setup-wda.sh starts the device runner from the state directory, and a
+# WebDriverAgent runner (earlier releases) from its configured checkout.
 verify_runner_cwd() {
     local pid="$1"
+    local command="${2:-}"
     local configured="${CONFIGURED_WDA_DIR:-}"
     local expected_dir cwd_data process_cwd
     [ -n "$configured" ] || configured="$WDA_CHECKOUT"
+    if printf '%s\n' "$command" | LC_ALL=C grep -Eq "$RUNNER_ARGV_PATTERN"; then
+        configured="$STATE_DIR"
+    fi
     [ -n "$LSOF_BIN" ] && [ -x "$LSOF_BIN" ] || return 1
     [ ! -L "$configured" ] && [ -d "$configured" ] || return 1
     expected_dir="$(cd -P "$configured" 2>/dev/null && pwd)" || return 1
@@ -781,8 +794,8 @@ stop_pid_record() {
     }
     case "$role" in
         runner)
-            verify_runner_cwd "$pid" || {
-                fail "PID $pid is not a WDA runner rooted in the configured checkout; refusing to signal it"
+            verify_runner_cwd "$pid" "$command" || {
+                fail "PID $pid is not a runner rooted in its expected directory; refusing to signal it"
                 return 1
             }
             ;;
@@ -822,7 +835,7 @@ stop_pid_record() {
     }
     case "$role" in
         runner)
-            verify_runner_cwd "$pid" || {
+            verify_runner_cwd "$pid" "$command" || {
                 fail "PID $pid runner cwd changed before signalling; refusing to kill it"
                 return 1
             }
@@ -1182,6 +1195,10 @@ remove_state_transients() {
             -o -name 'uninstall.sh.restore.*' \
             -o -name 'wda-checkout-owner.v1.new.*' \
             -o -name 'wda-checkout-owner.v1.restore.*' \
+            -o -name '.wda-runner-product.*' \
+            -o -name 'wda-retry-state.v1.new.*' \
+            -o -name 'wda-xcode-compat.xcconfig.new.*' \
+            -o -name 'wda-setup-status.json.?*' \
             -o -name '.lsof-error.*' \
             -o -name '.wda-mjpeg-probe.*' \) \
             -print0 2>/dev/null
@@ -1194,8 +1211,15 @@ state_unknown_entries() {
     while IFS= read -r -d '' entry; do
         name="${entry##*/}"
         case "$name" in
-            WebDriverAgent)
+            WebDriverAgent|runner-build)
                 if [ -L "$entry" ] || [ ! -d "$entry" ]; then
+                    printf '%s\n' "$entry"
+                fi
+                ;;
+            runner)
+                # The installer-owned runner sources live in the default
+                # instance's state directory only.
+                if [ "$INSTANCE_NAME" != default ] || [ -L "$entry" ] || [ ! -d "$entry" ]; then
                     printf '%s\n' "$entry"
                 fi
                 ;;
@@ -1222,7 +1246,12 @@ state_unknown_entries() {
             wda-runner.log|wda-runner.pid|\
             wda-relay.log|wda-relay.pid|\
             wda-mjpeg-relay.log|wda-mjpeg-relay.pid|\
-            wda-agent.log|wda-setup-status.json|\
+            wda-agent.log|wda-setup-status.json|wda-setup-status.json.lock|\
+            wda-runner-product.json|wda-runner-product-build.log|\
+            wda-runner-product-build.repair.log|wda-retry-state.v1|\
+            wda-xcode-compat.xcconfig|wda-relay.log.?*|\
+            .wda-runner-product.*|wda-retry-state.v1.new.*|\
+            wda-xcode-compat.xcconfig.new.*|wda-setup-status.json.?*|\
             .lsof-error.*|.wda-mjpeg-probe.*)
                 if [ -L "$entry" ] || [ ! -f "$entry" ]; then
                     printf '%s\n' "$entry"
@@ -1484,7 +1513,7 @@ if [ "$WDA_RUNTIME_CLEAN" != "1" ] \
     warn "preserved WDA supervisor plist for recovery: $WDA_PLIST"
 fi
 
-info "5/5 removing iphone-use-owned WDA checkout and state"
+info "5/5 removing iphone-use-owned runner builds, WDA checkout and state"
 STATE_TREE_REMOVABLE=1
 if [ "$WDA_RUNTIME_CLEAN" != "1" ]; then
     warn "preserved $STATE_DIR because a WDA process/supervisor could still be active"
@@ -1509,7 +1538,26 @@ fi
 if [ "$FAILED" = "0" ] \
     && [ "$WDA_RUNTIME_CLEAN" = "1" ] \
     && [ "$STATE_SAFE" = "1" ]; then
+    # Device runner build products (per instance). Only reached once the
+    # runner itself is verified stopped.
+    remove_tree "$STATE_DIR/runner-build" "$STATE_DIR/runner-build" "$STATE_DIR"
+    # The runner sources install.sh lays down are shared by every instance:
+    # removed with the default instance, and only when no named instance
+    # remains to build from them.
+    if [ "$FAILED" = "0" ] && [ "$INSTANCE_NAME" = default ]; then
+        if [ -z "$(find "$INSTANCES_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+            remove_tree "$STATE_DIR/runner" "$STATE_DIR/runner" "$STATE_DIR"
+        else
+            warn "kept $STATE_DIR/runner: named instances still build the device runner from it"
+        fi
+    fi
     for state_name in \
+        wda-runner-product.json \
+        wda-runner-product-build.log \
+        wda-runner-product-build.repair.log \
+        wda-retry-state.v1 \
+        wda-xcode-compat.xcconfig \
+        wda-setup-status.json.lock \
         wda-runner.log \
         wda-runner.pid \
         wda-relay.log \

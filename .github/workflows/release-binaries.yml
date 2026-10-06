@@ -44,11 +44,13 @@ jobs:
           bash scripts/test-setup-wda-warp-preflight.sh
           bash scripts/test-setup-wda-lock-backoff.sh
           bash scripts/test-setup-wda-runner-build.sh
+          bash scripts/test-install-runner-sources.sh
           bash scripts/test-setup-wda-runner-repair.sh
           bash scripts/test-setup-wda-probe-threshold.sh
           python3 scripts/test-setup-wda-status.py
           python3 scripts/test-setup-wda-runner-product.py
           python3 scripts/test-setup-wda-asc-signing.py
+          python3 scripts/test-setup-wda-runner-cache.py
           python3 scripts/test-auto-update.py
 
           skill_file_count="$(
@@ -85,6 +87,15 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             test "$GITHUB_REF_NAME" = "v$server_version"
           fi
+
+      # ── Device runner ───────────────────────────────────────────────────────
+      # setup-wda.sh builds runner/IPhoneUseRunner on each user's Mac, so a
+      # release must prove it compiles (unsigned, no device), that its
+      # device-free logic passes, and that the names setup and uninstall rely
+      # on still match the project.
+      - name: Validate the device runner (unsigned build + coherence)
+        shell: bash
+        run: bash runner/ci-check.sh
 
       # ── Rust toolchain ───────────────────────────────────────────────────────
       - name: Install Rust stable
@@ -338,14 +349,35 @@ jobs:
           test "$(tar -tzf iphone-use-mcp-macos-universal.tar.gz)" = "iphone-use-mcp"
           rm -rf "$package_dir"
 
+      # install.sh lays these sources down at ~/.iphone-use/runner; every
+      # entry must sit under runner/ (the installer refuses anything else).
+      - name: Package device runner sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          COPYFILE_DISABLE=1 tar --exclude xcuserdata --exclude .DS_Store \
+            -czf iphone-use-runner.tar.gz runner/IPhoneUseRunner runner/README.md
+          # (`! pipeline` would not stop the step under `set -e`; test explicitly.)
+          if tar -tzf iphone-use-runner.tar.gz | grep -v '^runner/'; then
+            echo "runner archive has entries outside runner/" >&2; exit 1
+          fi
+          if tar -tvzf iphone-use-runner.tar.gz | grep -E '^[lh]'; then
+            echo "runner archive contains links" >&2; exit 1
+          fi
+          tar -tzf iphone-use-runner.tar.gz \
+            | grep -qx 'runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj/project.pbxproj'
+
       - name: Generate SHA-256 checksums
         run: |
           cd "$GITHUB_WORKSPACE"
           shasum -a 256 iPhoneUse.app.zip > iPhoneUse.app.zip.sha256
           shasum -a 256 iphone-use-mcp-macos-universal.tar.gz \
             > iphone-use-mcp-macos-universal.tar.gz.sha256
+          shasum -a 256 iphone-use-runner.tar.gz > iphone-use-runner.tar.gz.sha256
           cat iPhoneUse.app.zip.sha256
           cat iphone-use-mcp-macos-universal.tar.gz.sha256
+          cat iphone-use-runner.tar.gz.sha256
 
       # ── Release (tag push only) ────────────────────────────────────────────
       # On a workflow_dispatch run there is no tag ref, so we upload as an
@@ -359,6 +391,8 @@ jobs:
             iPhoneUse.app.zip.sha256
             iphone-use-mcp-macos-universal.tar.gz
             iphone-use-mcp-macos-universal.tar.gz.sha256
+            iphone-use-runner.tar.gz
+            iphone-use-runner.tar.gz.sha256
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -375,4 +409,6 @@ jobs:
             iPhoneUse.app.zip.sha256
             iphone-use-mcp-macos-universal.tar.gz
             iphone-use-mcp-macos-universal.tar.gz.sha256
+            iphone-use-runner.tar.gz
+            iphone-use-runner.tar.gz.sha256
           retention-days: 7

@@ -210,7 +210,7 @@ if env HOME="$TEST_HOME" \
     /bin/bash "$UNINSTALL" --dry-run >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"; then
     fail_test "wrong runner cwd unexpectedly passed"
 fi
-grep -q "not a WDA runner rooted in the configured checkout" "$TEST_ROOT/err" \
+grep -q "not a runner rooted in its expected directory" "$TEST_ROOT/err" \
     || fail_test "wrong runner cwd rejection reason missing"
 ! grep -q "send SIGTERM" "$TEST_ROOT/out" \
     || fail_test "wrong-cwd runner reached a signal plan"
@@ -379,5 +379,87 @@ grep -Eq "Git refs changed|worktree" "$TEST_ROOT/err" \
     || fail_test "linked-worktree rejection reason missing"
 pass "linked worktrees and their Git administration data are preserved"
 
+
+# ── device runner (replaces WebDriverAgent) ────────────────────────────────
+device_runner_fixture() {
+    new_home "$1"
+    device_runner_command="/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -destination platform=iOS,id=00008110-001234567890001E test-without-building -xctestrun $TEST_HOME/.iphone-use/runner-build/Build/Products/IPhoneUseRunner_iphoneos27.0-arm64.xctestrun -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe"
+    cat > "$TEST_BIN/ps" <<SH
+#!/bin/sh
+case " \$* " in
+  *" -o pid= "*) printf '4343\\n' ;;
+  *" -o uid= "*) printf '%s\\n' "$(id -u)" ;;
+  *" -o lstart= "*) printf 'Mon Jul 28 00:00:00 2026\\n' ;;
+  *" -o command= "*) printf '%s\\n' "$device_runner_command" ;;
+  *) exit 1 ;;
+esac
+SH
+    chmod 700 "$TEST_BIN/ps"
+    printf '%s\n' "4343|Mon Jul 28 00:00:00 2026|runner:$device_runner_command" \
+        > "$TEST_HOME/.iphone-use/wda-runner.pid"
+    chmod 600 "$TEST_HOME/.iphone-use/wda-runner.pid"
+}
+
+device_runner_fixture "device-runner-contract"
+cat > "$TEST_BIN/lsof" <<SH
+#!/bin/sh
+printf 'p4343\\nn%s\\n' "$TEST_HOME/.iphone-use"
+SH
+chmod 700 "$TEST_BIN/lsof"
+env HOME="$TEST_HOME" \
+    IPHONE_USE_LAUNCHCTL="$TEST_BIN/launchctl" \
+    IPHONE_USE_PS="$TEST_BIN/ps" \
+    IPHONE_USE_LSOF="$TEST_BIN/lsof" \
+    /bin/bash "$UNINSTALL" --dry-run >"$TEST_ROOT/out" 2>"$TEST_ROOT/err" || true
+grep -q "send SIGTERM to PID-verified runner process 4343" "$TEST_ROOT/out" \
+    || fail_test "the device runner started from the state directory did not reach the signal plan"
+pass "device runner command plus state-directory cwd reaches the signal plan"
+
+device_runner_fixture "device-runner-wrong-cwd"
+mkdir -p "$TEST_ROOT/elsewhere"
+cat > "$TEST_BIN/lsof" <<SH
+#!/bin/sh
+printf 'p4343\\nn%s\\n' "$TEST_ROOT/elsewhere"
+SH
+chmod 700 "$TEST_BIN/lsof"
+if env HOME="$TEST_HOME" \
+    IPHONE_USE_LAUNCHCTL="$TEST_BIN/launchctl" \
+    IPHONE_USE_PS="$TEST_BIN/ps" \
+    IPHONE_USE_LSOF="$TEST_BIN/lsof" \
+    /bin/bash "$UNINSTALL" --dry-run >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"; then
+    fail_test "a device-runner-shaped xcodebuild outside the state directory was accepted"
+fi
+grep -q "send SIGTERM" "$TEST_ROOT/out" && fail_test "a foreign cwd reached the signal plan"
+pass "device-runner-shaped xcodebuild outside the state directory is rejected"
+
+runner_state_fixture() {
+    new_home "$1"
+    local state="$TEST_HOME/.iphone-use"
+    mkdir -p "$state/runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj" \
+        "$state/runner-build/Build/Products/Debug-iphoneos/iPhoneUse-Runner.app"
+    printf '{}\n' > "$state/runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj/project.pbxproj"
+    for name in wda-runner-product.json wda-runner-product-build.log \
+        wda-runner-product-build.repair.log wda-retry-state.v1 \
+        wda-xcode-compat.xcconfig wda-setup-status.json wda-setup-status.json.lock; do
+        printf 'x\n' > "$state/$name"
+        chmod 600 "$state/$name"
+    done
+}
+
+runner_state_fixture "device-runner-state"
+run_uninstall >"$TEST_ROOT/out" 2>"$TEST_ROOT/err" \
+    || fail_test "uninstall with device-runner state failed: $(cat "$TEST_ROOT/err")"
+[ ! -e "$TEST_HOME/.iphone-use" ] \
+    || fail_test "device-runner state was left behind: $(ls -A "$TEST_HOME/.iphone-use")"
+pass "uninstall removes runner sources, build products and runner state files"
+
+runner_state_fixture "device-runner-shared"
+mkdir -m 700 -p "$TEST_HOME/.iphone-use/instances/lab"
+if run_uninstall >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"; then
+    fail_test "the default instance uninstalled while a named instance remained"
+fi
+[ -f "$TEST_HOME/.iphone-use/runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj/project.pbxproj" ] \
+    || fail_test "runner sources were removed while a named instance still builds from them"
+pass "shared runner sources survive while a named instance remains"
 
 printf '1..%d\n' "$pass_count"

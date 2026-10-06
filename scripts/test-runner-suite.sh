@@ -11,6 +11,7 @@ failed=0
 for test in \
     scripts/test-install-release-transaction.sh \
     scripts/test-install-cli-link.sh \
+    scripts/test-install-runner-sources.sh \
     scripts/test-uninstall-safety.sh \
     scripts/test-setup-wda-warp-preflight.sh \
     scripts/test-setup-wda-lock-backoff.sh \

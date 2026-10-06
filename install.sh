@@ -639,6 +639,7 @@ _installer_cleanup() {
         _restore_old_daemon_plist
         _restore_uninstall
         _restore_setup_wda
+        _restore_runner_sources
         _restore_app
         _restore_wda_transition || true
         _restore_daemon_runtime
@@ -653,6 +654,8 @@ _installer_cleanup() {
     [ -z "$SETUP_WDA_DL" ] || rm -f "$SETUP_WDA_DL" 2>/dev/null || true
     [ -z "$UNINSTALL_STAGE" ] || rm -f "$UNINSTALL_STAGE" 2>/dev/null || true
     [ -z "$UNINSTALL_DL" ] || rm -f "$UNINSTALL_DL" 2>/dev/null || true
+    [ -z "$RUNNER_SRC_STAGE" ] || rm -rf "$RUNNER_SRC_STAGE" 2>/dev/null || true
+    [ -z "$RUNNER_SRC_DL" ] || rm -rf "$RUNNER_SRC_DL" 2>/dev/null || true
     [ -z "$SKILL_STAGE_DIR" ] || rm -rf "$SKILL_STAGE_DIR" 2>/dev/null || true
     [ -z "$SKILL_EXPECTED_DL" ] || rm -f "$SKILL_EXPECTED_DL" 2>/dev/null || true
     [ -z "$TMPDIR_INSTALL" ] || rm -rf "$TMPDIR_INSTALL" 2>/dev/null || true
@@ -665,6 +668,8 @@ _installer_cleanup() {
         || warn "setup-wda.sh recovery backup retained at: $SETUP_WDA_BACKUP"
     [ -z "$UNINSTALL_BACKUP" ] \
         || warn "uninstall.sh recovery backup retained at: $UNINSTALL_BACKUP"
+    [ -z "$RUNNER_SRC_BACKUP" ] || [ ! -d "$RUNNER_SRC_BACKUP" ] \
+        || warn "Device runner source recovery backup retained at: $RUNNER_SRC_BACKUP"
     [ -z "$OLD_DISABLED_BACKUP" ] \
         || warn "Legacy disabled-plist recovery backup retained at: $OLD_DISABLED_BACKUP"
     [ -z "$OLD_PLIST_STAGED" ] \
@@ -970,6 +975,157 @@ download_verified_release_app() {
     ok "SHA-256 verified for release $ref"
 
     extract_verified_release_app_archive "$ref" "$zip" "$destination"
+}
+
+# ── Device runner sources ─────────────────────────────────────────────────────
+# setup-wda.sh builds the iphone-use device runner (an XCTest UI-test bundle)
+# from sources at ~/.iphone-use/runner. They come from the same local checkout
+# or exact release as this installer: a local `runner/` directory, or the
+# release asset iphone-use-runner.tar.gz verified against its .sha256 file.
+# The swap joins the install transaction: the previous tree is kept aside
+# until the daemon commits, and put back on any failure.
+RUNNER_ASSET_NAME="iphone-use-runner.tar.gz"
+RUNNER_SRC_DST="$HOME/.iphone-use/runner"
+RUNNER_SRC_STAGE=""
+RUNNER_SRC_BACKUP=""
+RUNNER_SRC_DL=""
+RUNNER_SRC_HAD_EXISTING=0
+RUNNER_SRC_REPLACED=0
+RUNNER_SRC_COMMITTED=0
+
+# A runner tree: IPhoneUseRunner/ with its project file, and no symlinks.
+runner_tree_valid() {
+    local dir="$1"
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    [ -d "$dir/IPhoneUseRunner" ] && [ ! -L "$dir/IPhoneUseRunner" ] || return 1
+    [ -f "$dir/IPhoneUseRunner/IPhoneUseRunner.xcodeproj/project.pbxproj" ] || return 1
+    ! find "$dir" -type l -print -quit 2>/dev/null | grep -q .
+}
+
+# Downloads and verifies the release's runner sources into $2/runner.
+# Returns 1 (without dying) only when the release has no such asset, so a
+# release that predates the device runner can still be installed.
+download_verified_release_runner() {
+    local ref="$1"
+    local destination="$2"
+    local asset_url="https://github.com/$REPO/releases/download/$ref/$RUNNER_ASSET_NAME"
+    local tarball="$destination/$RUNNER_ASSET_NAME"
+    local expected actual
+    mkdir -p "$destination"
+    info "Downloading $asset_url ..."
+    curl -fsSL "$asset_url" -o "$tarball" 2>/dev/null || return 1
+    curl -fsSL "${asset_url}.sha256" -o "$tarball.sha256" \
+        || die "Release $ref is missing the required $RUNNER_ASSET_NAME.sha256 file."
+    expected="$(awk 'NR == 1 { print $1 }' "$tarball.sha256")"
+    printf '%s' "$expected" | grep -Eq '^[0-9A-Fa-f]{64}$' \
+        || die "Release $ref has an invalid $RUNNER_ASSET_NAME checksum file."
+    actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+    [ "$actual" = "$expected" ] \
+        || die "SHA-256 mismatch for $RUNNER_ASSET_NAME in release $ref (expected $expected, got $actual)."
+    extract_verified_runner_archive "$ref" "$tarball" "$destination"
+    ok "SHA-256 verified for the release's device runner sources"
+}
+
+# Only a runner/ tree, no absolute or parent paths, no links of any kind.
+extract_verified_runner_archive() {
+    local ref="$1"
+    local tarball="$2"
+    local destination="$3"
+    local entries entry
+    entries="$(/usr/bin/tar -tzf "$tarball")" \
+        || die "Could not read the $RUNNER_ASSET_NAME archive of release $ref."
+    [ -n "$entries" ] || die "Release $ref contains an empty $RUNNER_ASSET_NAME."
+    while IFS= read -r entry; do
+        case "$entry" in
+            runner|runner/|runner/*) ;;
+            *) die "Release $ref runner archive contains an unexpected entry: $entry" ;;
+        esac
+        case "$entry" in
+            */../*|*/..|../*|*//*|*/./*)
+                die "Release $ref runner archive contains an unsafe path: $entry"
+                ;;
+        esac
+    done <<EOF
+$entries
+EOF
+    if /usr/bin/tar -tvzf "$tarball" | grep -Eq '^[lh]'; then
+        die "Release $ref runner archive contains a link; refusing unsafe extraction."
+    fi
+    /usr/bin/tar -xzf "$tarball" -C "$destination" \
+        || die "Could not extract the $RUNNER_ASSET_NAME archive of release $ref."
+    runner_tree_valid "$destination/runner" \
+        || die "Release $ref runner archive did not extract a valid runner/ tree."
+}
+
+# Stage a copy of $1 (a runner/ tree) and swap it in at RUNNER_SRC_DST.
+install_runner_sources() {
+    local source="$1"
+    runner_tree_valid "$source" || die "Not a device runner source tree: $source"
+    mkdir -p "$HOME/.iphone-use"
+    [ ! -L "$RUNNER_SRC_DST" ] || die "Refusing a symlinked runner source path: $RUNNER_SRC_DST"
+    RUNNER_SRC_STAGE="$(mktemp -d "$HOME/.iphone-use/.runner.new.XXXXXX")" \
+        || die "Could not stage the device runner sources."
+    /usr/bin/ditto "$source/IPhoneUseRunner" "$RUNNER_SRC_STAGE/IPhoneUseRunner" \
+        || die "Could not copy the device runner sources."
+    if [ -f "$source/README.md" ]; then
+        cp "$source/README.md" "$RUNNER_SRC_STAGE/README.md" \
+            || die "Could not copy the device runner README."
+    fi
+    # Xcode's per-user state never belongs in the shared copy.
+    find "$RUNNER_SRC_STAGE" -name xcuserdata -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    chmod -R go-w "$RUNNER_SRC_STAGE" && chmod 700 "$RUNNER_SRC_STAGE" \
+        || die "Could not secure the staged device runner sources."
+    runner_tree_valid "$RUNNER_SRC_STAGE" \
+        || die "The staged device runner sources are incomplete."
+    if [ -e "$RUNNER_SRC_DST" ]; then
+        [ -d "$RUNNER_SRC_DST" ] || die "$RUNNER_SRC_DST exists but is not a directory."
+        RUNNER_SRC_BACKUP="$HOME/.iphone-use/.runner.backup.$$"
+        rm -rf "$RUNNER_SRC_BACKUP"
+        mv "$RUNNER_SRC_DST" "$RUNNER_SRC_BACKUP" \
+            || die "Could not move the previous device runner sources aside."
+        RUNNER_SRC_HAD_EXISTING=1
+    fi
+    mv "$RUNNER_SRC_STAGE" "$RUNNER_SRC_DST" \
+        || die "Could not install the device runner sources at $RUNNER_SRC_DST."
+    RUNNER_SRC_STAGE=""
+    RUNNER_SRC_REPLACED=1
+    ok "Device runner sources atomically updated: $RUNNER_SRC_DST"
+}
+
+# Where this install's runner sources come from: the local checkout, else the
+# release asset. Sets RUNNER_SOURCE_DIR; returns 1 when neither has them (a
+# release that predates the device runner). A bad checksum or archive dies.
+RUNNER_SOURCE_DIR=""
+resolve_runner_source() {
+    RUNNER_SOURCE_DIR=""
+    if [ "$SCRIPT_IS_LOCAL" = "1" ] && runner_tree_valid "$SCRIPT_DIR/runner"; then
+        RUNNER_SOURCE_DIR="$SCRIPT_DIR/runner"
+        return 0
+    fi
+    ensure_release_ref
+    RUNNER_SRC_DL="$(mktemp -d)"
+    download_verified_release_runner "$RELEASE_REF" "$RUNNER_SRC_DL" || return 1
+    RUNNER_SOURCE_DIR="$RUNNER_SRC_DL/runner"
+}
+
+_restore_runner_sources() {
+    [ "$RUNNER_SRC_REPLACED" = "1" ] || return 0
+    [ "$RUNNER_SRC_COMMITTED" = "0" ] || return 0
+    rm -rf "$RUNNER_SRC_DST" 2>/dev/null || true
+    if [ "$RUNNER_SRC_HAD_EXISTING" = "1" ] && [ -d "$RUNNER_SRC_BACKUP" ]; then
+        if mv "$RUNNER_SRC_BACKUP" "$RUNNER_SRC_DST" 2>/dev/null; then
+            RUNNER_SRC_BACKUP=""
+            warn "Restored the previous device runner sources after an incomplete install."
+        else
+            warn "Could not restore the previous device runner sources from $RUNNER_SRC_BACKUP"
+        fi
+    fi
+    RUNNER_SRC_REPLACED=0
+}
+
+_finish_runner_sources() {
+    [ -z "$RUNNER_SRC_BACKUP" ] || rm -rf "$RUNNER_SRC_BACKUP" 2>/dev/null || true
+    RUNNER_SRC_BACKUP=""
 }
 
 _configure_skill_lock_paths() {
@@ -1628,6 +1784,7 @@ _commit_daemon_transaction() {
     PLIST_COMMITTED=1
     SETUP_WDA_COMMITTED=1
     UNINSTALL_COMMITTED=1
+    RUNNER_SRC_COMMITTED=1
     WDA_TRANSITION_COMMITTED=1
     DAEMON_RUNTIME_COMMITTED=1
     OLD_PLIST_COMMITTED=1
@@ -1700,6 +1857,12 @@ bootstrap_pinned_installer() {
         die "Release $ref contains a shell script that failed syntax validation."
     fi
     download_verified_release_app "$ref" "$asset_dir"
+    # A release whose setup-wda.sh builds the device runner ships its sources
+    # as a verified asset; the inner installer then finds them next to itself.
+    if grep -q 'IPhoneUseRunner' "$helper_dir/scripts/setup-wda.sh"; then
+        download_verified_release_runner "$ref" "$helper_dir" \
+            || die "Release $ref is missing $RUNNER_ASSET_NAME; refusing a mixed-version install."
+    fi
     ok "Raw helper scripts pinned to exact commit $commit"
 
     if [ "${IPHONE_USE_SKIP_SKILL:-0}" = "1" ]; then
@@ -1924,7 +2087,7 @@ install_named_instance() {
     for key in PHONE_REMOTE_IDLE_RELEASE_SECS PHONE_REMOTE_PASSWORD PHONE_REMOTE_NO_UPDATE_CHECK; do
         add_env "$key" "$(pick "$key")"
     done
-    for key in WDA_TEAM_ID WDA_BUNDLE_ID WDA_REF WDA_ALLOW_LAN WDA_RUNNER_NAME WDA_RUNNER_ICON; do
+    for key in WDA_TEAM_ID WDA_BUNDLE_ID WDA_ALLOW_LAN IPU_RUNNER_SRC; do
         add_env "$key" "$(pick "$key" inherit)"
     done
     if [ -n "${WDA_ASC_KEY_PATH:-}${WDA_ASC_KEY_ID:-}${WDA_ASC_ISSUER_ID:-}" ]; then
@@ -2008,9 +2171,16 @@ install_named_instance() {
             && mv -f "$state_dir/$value.new.$$" "$state_dir/$value" \
             || die "Could not install $state_dir/$value"
     done
+    # Every instance builds the device runner from the shared sources.
+    if runner_tree_valid "$SCRIPT_DIR/runner"; then
+        install_runner_sources "$SCRIPT_DIR/runner"
+    elif ! runner_tree_valid "$RUNNER_SRC_DST"; then
+        warn "No device runner sources next to this installer or at $RUNNER_SRC_DST; install the default instance first."
+    fi
 
     named_rollback() {
         warn "Rolling back instance $INSTANCE_NAME: $1"
+        _restore_runner_sources
         launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
         if [ -n "$plist_backup" ]; then mv -f "$plist_backup" "$plist"; else rm -f "$plist"; fi
         if [ -n "$app_backup" ]; then rm -rf "$app_dst"; mv "$app_backup" "$app_dst"; fi
@@ -2034,18 +2204,20 @@ install_named_instance() {
     esac
     [ -z "$app_backup" ] || rm -rf "$app_backup"
     [ -z "$plist_backup" ] || rm -f "$plist_backup"
+    RUNNER_SRC_COMMITTED=1
+    _finish_runner_sources
 
     ok "Instance $INSTANCE_NAME daemon is up on http://127.0.0.1:$daemon_port"
     echo ""
     info "iPhone      : $udid"
     info "Daemon      : http://127.0.0.1:$daemon_port   (launchd $label)"
-    info "WDA relays  : 127.0.0.1:$wda_port control, 127.0.0.1:$mjpeg_port video (launchd $wda_label)"
+    info "Relays      : 127.0.0.1:$wda_port control, 127.0.0.1:$mjpeg_port video (launchd $wda_label)"
     info "Token       : EnvironmentVariables:PHONE_REMOTE_AGENT_TOKEN in $plist"
     info "State       : $state_dir"
     echo ""
     printf '  Agents target this phone with:\n'
     printf "    ${BOLD}PHONE_REMOTE_URL=http://127.0.0.1:%s PHONE_REMOTE_AGENT_TOKEN=<token>${RESET}\n" "$daemon_port"
-    printf '  Next, build and start WebDriverAgent for this phone (keep it unlocked):\n'
+    printf '  Next, build and start the device runner for this phone (keep it unlocked):\n'
     printf "    ${BOLD}PHONE_REMOTE_INSTANCE=%s %s/setup-wda.sh${RESET}\n" "$INSTANCE_NAME" "$state_dir"
     printf '  Remove only this instance with:\n'
     printf "    ${BOLD}%s/uninstall.sh --instance %s${RESET}\n" "$state_dir" "$INSTANCE_NAME"
@@ -2063,6 +2235,32 @@ if [ "${IPHONE_USE_INTERNAL_TEST_RESOLVE_COMMIT_ONLY:-0}" = "1" ]; then
         || die "The internal release-resolution sentinel is missing."
     resolve_release_commit "${IPHONE_USE_INTERNAL_TEST_RELEASE_REF:-v-test}"
     printf '\n'
+    exit 0
+fi
+
+# Exercises the device-runner source transaction (and the release archive
+# checks) in an isolated fake HOME. Same gating as the hooks around it.
+if [ "${IPHONE_USE_INTERNAL_TEST_RUNNER_ONLY:-0}" = "1" ]; then
+    [ "$SCRIPT_IS_LOCAL" = "1" ] \
+        || die "The internal runner-source test hook requires a local installer."
+    [ -f "$HOME/.iphone-use-installer-test-root" ] \
+        || die "The internal runner-source test sentinel is missing."
+    case "${IPHONE_USE_INTERNAL_TEST_RUNNER_SRC:-}${IPHONE_USE_INTERNAL_TEST_RUNNER_ARCHIVE:-}" in
+        "$HOME"/*) ;;
+        *) die "The internal runner fixture must be inside the isolated HOME." ;;
+    esac
+    if [ -n "${IPHONE_USE_INTERNAL_TEST_RUNNER_ARCHIVE:-}" ]; then
+        RUNNER_SRC_DL="$(mktemp -d "$HOME/.runner-archive.XXXXXX")"
+        extract_verified_runner_archive v-test "$IPHONE_USE_INTERNAL_TEST_RUNNER_ARCHIVE" "$RUNNER_SRC_DL"
+        install_runner_sources "$RUNNER_SRC_DL/runner"
+    else
+        install_runner_sources "$IPHONE_USE_INTERNAL_TEST_RUNNER_SRC"
+    fi
+    if [ "${IPHONE_USE_INTERNAL_TEST_RUNNER_FAIL:-0}" = "1" ]; then
+        die "simulated failure after the runner sources were swapped in"
+    fi
+    RUNNER_SRC_COMMITTED=1
+    _finish_runner_sources
     exit 0
 fi
 
@@ -2605,6 +2803,15 @@ UNINSTALL_STAGE=""
 UNINSTALL_REPLACED=1
 ok "Uninstaller atomically updated: $UNINSTALL_DST"
 
+# Device runner sources for setup-wda.sh, from the same checkout or release.
+if resolve_runner_source; then
+    install_runner_sources "$RUNNER_SOURCE_DIR"
+elif runner_tree_valid "$RUNNER_SRC_DST"; then
+    warn "Release ${RELEASE_REF:-?} ships no device runner sources; keeping the existing $RUNNER_SRC_DST."
+else
+    warn "Release ${RELEASE_REF:-?} ships no device runner sources; setup-wda.sh will report them missing until a release that has them is installed."
+fi
+
 info "For cross-network access, put an authenticated HTTPS reverse proxy or a trusted VPN/tunnel in front of the daemon; never expose WDA ports."
 
 # Persist every daemon setting the installer knows about, not just the four
@@ -2635,10 +2842,9 @@ done
 IDLE_RELEASE_SECS="$(env_or_existing PHONE_REMOTE_IDLE_RELEASE_SECS)"
 append_plist_env PHONE_REMOTE_IDLE_RELEASE_SECS "$IDLE_RELEASE_SECS"
 for ENV_KEY in \
-    WDA_REF \
     WDA_TEAM_ID \
     WDA_BUNDLE_ID \
-    WDA_DIR \
+    IPU_RUNNER_SRC \
     WDA_PORT \
     MJPEG_PORT \
     WDA_ALLOW_LAN
@@ -2961,6 +3167,7 @@ PLIST_BACKUP=""
 SETUP_WDA_BACKUP=""
 [ -z "$UNINSTALL_BACKUP" ] || rm -f "$UNINSTALL_BACKUP" 2>/dev/null || true
 UNINSTALL_BACKUP=""
+_finish_runner_sources
 [ -z "$OLD_DISABLED_BACKUP" ] || rm -f "$OLD_DISABLED_BACKUP" 2>/dev/null || true
 OLD_DISABLED_BACKUP=""
 
@@ -2970,7 +3177,7 @@ install_cli_link "$DEST/$BINARY_INSIDE_APP"
 
 # ── Step 9 — First-run work ────────────────────────────────────────────────────
 echo ""
-printf '%b━━━ Device layer (WebDriverAgent) ━━━%b\n' "$BOLD" "$RESET"
+printf '%b━━━ Device layer (iphone-use device runner) ━━━%b\n' "$BOLD" "$RESET"
 echo ""
 if [ "$WDA_MANAGED" = "true" ]; then
     printf "  Before managed setup:\n"

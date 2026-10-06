@@ -11,6 +11,8 @@ options:
     iOS: "15.0"
   createIntermediateGroups: true
   developmentLanguage: en
+  # objectVersion 56: opens in Xcode 14 and later (CI images and older installs).
+  projectFormat: xcode14_0
 settings:
   base:
     DEVELOPMENT_TEAM: 6ZPXG4KVVS
