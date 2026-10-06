@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Smoke test + micro-benchmark for the native iphone-use runner (runner/).
 
-Talks straight to the runner's HTTP port (forwarded with `iproxy 8200 8200`).
+Talks straight to the runner's HTTP port (forwarded with `iproxy 8100 8100`).
 Read-only except for one tap, and only when --tap X Y is given — pick a harmless
 point (an empty area of the current screen).
 
-    python3 scripts/runner-smoke.py [--base http://127.0.0.1:8200] [--runs 5] [--tap 200 60]
+    python3 scripts/runner-smoke.py [--base http://127.0.0.1:8100] [--runs 5] [--tap 200 60]
 
 Reports: /status, /window/size, /apps/active, /alert, then /source timing over
 --runs (with node counts and the runner's backend/depth headers), the xcui
@@ -76,7 +76,7 @@ def summary(samples):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--base", default="http://127.0.0.1:8200")
+    parser.add_argument("--base", default="http://127.0.0.1:8100")
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--tap", nargs=2, type=float, metavar=("X", "Y"),
                         help="tap this point (screen points) once and time it; skipped when absent")

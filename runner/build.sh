@@ -11,11 +11,15 @@
 #
 # Options / environment:
 #   --unsigned                    force an unsigned compile-check build
+#   --device <udid>               (signed builds) build for that connected device and register it
+#                                 in the team, so the provisioning profile includes it
+#                                 (-destination id=<udid> -allowProvisioningDeviceRegistration).
+#                                 Also IPU_RUNNER_DEVICE_ID=<udid>.
 #   IPU_RUNNER_DERIVED_DATA=dir   derived data dir (default: runner/build/DerivedData)
 #   IPU_RUNNER_TEAM_ID=team       signing team (default: 6ZPXG4KVVS)
 #   XCODEBUILD=path               xcodebuild binary (default: xcodebuild)
 #
-# Never prints the ASC key values. Does not install anything or touch a device.
+# Never prints the ASC key values. Never installs or launches anything on a device.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,13 +31,28 @@ XCODEBUILD_BIN="${XCODEBUILD:-xcodebuild}"
 WDA_PLIST="$HOME/Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist"
 
 unsigned="${IPU_RUNNER_UNSIGNED:-0}"
-for argument in "$@"; do
-    case "$argument" in
+device="${IPU_RUNNER_DEVICE_ID:-}"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --unsigned) unsigned=1 ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
-        *) echo "unknown argument: $argument" >&2; exit 2 ;;
+        --device)
+            [ "$#" -ge 2 ] || { echo "--device needs a UDID" >&2; exit 2; }
+            device="$2"
+            shift
+            ;;
+        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
+    shift
 done
+if [ -n "$device" ] && ! printf '%s\n' "$device" | LC_ALL=C grep -Eq '^[A-Za-z0-9-]+$'; then
+    echo "invalid device UDID: $device" >&2
+    exit 2
+fi
+destination="generic/platform=iOS"
+if [ -n "$device" ] && [ "$unsigned" != "1" ]; then
+    destination="id=$device"
+fi
 
 _plist_env() {
     [ -f "$WDA_PLIST" ] || return 0
@@ -50,7 +69,7 @@ args=(
     -project "$PROJECT"
     -scheme "$SCHEME"
     -configuration Debug
-    -destination "generic/platform=iOS"
+    -destination "$destination"
     -derivedDataPath "$DERIVED_DATA"
 )
 
@@ -69,8 +88,16 @@ if [ "$unsigned" != "1" ] && [ -n "${WDA_ASC_KEY_PATH:-}" ] && [ -n "${WDA_ASC_K
         DEVELOPMENT_TEAM="$TEAM_ID"
         CODE_SIGN_STYLE=Automatic
     )
+    if [ -n "$device" ]; then
+        echo "ipu-runner build: registering device $device in the team's provisioning profile" >&2
+        args+=(-allowProvisioningDeviceRegistration)
+    fi
     mode=signed
 else
+    if [ -n "$device" ]; then
+        echo "ipu-runner build: --device ignored, an unsigned build registers nothing" >&2
+        args=("${args[@]/#id=$device/generic/platform=iOS}")
+    fi
     echo "ipu-runner build: unsigned compile check (CODE_SIGNING_ALLOWED=NO)" >&2
     args+=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="")
     mode=unsigned
