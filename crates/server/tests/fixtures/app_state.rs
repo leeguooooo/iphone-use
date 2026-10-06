@@ -56,6 +56,9 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
         element_snapshots: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::VecDeque::new(),
         )),
+        owner_snapshots: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         hold_until: std::sync::Arc::new(std::sync::Mutex::new(None)),
         owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
         owner_lease_secs: 300,

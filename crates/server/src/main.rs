@@ -597,6 +597,7 @@ fn serve() -> Result<()> {
         live_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         mjpeg_stream_activity: Arc::new(Mutex::new(std::collections::HashMap::new())),
         element_snapshots: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        owner_snapshots: Arc::new(Mutex::new(std::collections::HashMap::new())),
         flow_trail: Arc::new(Mutex::new(server::flows::FlowTrail::default())),
         agent_focus: Arc::new(Mutex::new(server::focus::AgentFocus::load(
             server::focus::state_path(),

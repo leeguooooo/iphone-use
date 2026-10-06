@@ -424,6 +424,10 @@ pub struct AppState {
     /// only ever diffs against its own last read or two, and a miss degrades
     /// gracefully to the full tree.
     pub element_snapshots: Arc<Mutex<ElementSnapshotCache>>,
+    /// The last snapshot each named owner (`X-Phone-Owner`) was handed. An
+    /// observed action that names no baseline diffs against it, so a client
+    /// gets only what changed without having to carry the token itself.
+    pub owner_snapshots: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// What the driving agent did in the current app, for `registry` hints,
     /// `flow_suggestion` and `GET /agent/flow/draft` (see `crate::flows`).
     pub flow_trail: Arc<Mutex<crate::flows::FlowTrail>>,
@@ -4816,6 +4820,35 @@ fn remember_element_snapshot(
     }
 }
 
+/// Owners whose last snapshot is remembered; past this the map is cleared
+/// (owners are a handful of agent sessions, not an unbounded set).
+const OWNER_SNAPSHOTS_CAP: usize = 64;
+
+fn named_owner(headers: &HeaderMap) -> Option<&str> {
+    match owner_claim_from_headers(headers) {
+        Ok(OwnerClaim::Named(name) | OwnerClaim::Takeover(name)) => Some(name),
+        _ => None,
+    }
+}
+
+/// Remember `snapshot` as the last screen this request's owner saw.
+fn note_owner_snapshot(state: &AppState, headers: &HeaderMap, snapshot: &str) {
+    let Some(owner) = named_owner(headers) else {
+        return;
+    };
+    let mut owners = recover(state.owner_snapshots.lock());
+    if owners.len() >= OWNER_SNAPSHOTS_CAP && !owners.contains_key(owner) {
+        owners.clear();
+    }
+    owners.insert(owner.to_string(), snapshot.to_string());
+}
+
+/// The last snapshot this request's owner saw, if any.
+fn owner_last_snapshot(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let owner = named_owner(headers)?;
+    recover(state.owner_snapshots.lock()).get(owner).cloned()
+}
+
 fn lookup_element_snapshot(
     state: &AppState,
     snapshot: &str,
@@ -8937,6 +8970,7 @@ async fn agent_actions(
         if let Some((snapshot, rows)) = observed {
             let rows = Arc::new(rows);
             remember_element_snapshot(&state, &snapshot, &rows);
+            note_owner_snapshot(&state, &headers, &snapshot);
             result["snapshot"] = serde_json::json!(snapshot);
             result["elements"] = serde_json::json!(&*rows);
         }
@@ -9714,6 +9748,11 @@ async fn agent_input(
                         }),
                         Some((snapshot, rows)) => {
                             remember_element_snapshot(&state, &snapshot, &rows);
+                            // No baseline named: the last screen this owner
+                            // saw, so a client gets the change without
+                            // carrying the token. Read before noting the new one.
+                            let owner_baseline = owner_last_snapshot(&state, &headers);
+                            note_owner_snapshot(&state, &headers, &snapshot);
                             let baseline = query
                                 .since
                                 .as_deref()
@@ -9721,6 +9760,7 @@ async fn agent_input(
                                 .or_else(|| {
                                     value.get("snapshot").and_then(serde_json::Value::as_str)
                                 })
+                                .or(owner_baseline.as_deref())
                                 .and_then(|since| {
                                     lookup_element_snapshot(&state, since)
                                         .map(|baseline| (since, baseline))
@@ -10467,6 +10507,7 @@ async fn agent_elements(
     };
     let rows = Arc::new(rows);
     remember_element_snapshot(&state, &snapshot, &rows);
+    note_owner_snapshot(&state, &headers, &snapshot);
     // Additive, read-only usability signals over the same rows (visual-fallback
     // design §1.3): the client decides AX-vs-vision policy; the daemon only
     // reports. Computed before `screen` is consumed by JSON conversion.

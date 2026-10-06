@@ -1009,3 +1009,59 @@ fn the_settled_screen_answers_the_next_screenshot_without_a_capture() {
         assert_eq!(frames.load(Ordering::Acquire), after_action + 2);
     });
 }
+
+/// An observed action that names no baseline diffs against the last screen
+/// the same owner was handed, so a plain HTTP client gets only the change.
+#[test]
+fn an_observed_action_diffs_against_the_owners_last_read() {
+    block(async {
+        let wda = mock_wda(move |request, _| {
+            if is_session(request) {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if is_mutation(request) {
+                return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+            }
+            if is_source(request) {
+                return Some((Duration::ZERO, simple_tree("搜索")));
+            }
+            Some((
+                Duration::ZERO,
+                r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string(),
+            ))
+        });
+        let state = build_state_with_wda(wda.url());
+        let send = |method: &'static str, uri: &'static str, owner: Option<&'static str>| {
+            let state = state.clone();
+            async move {
+                let mut builder = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("x-phone-control", "1");
+                if let Some(owner) = owner {
+                    builder = builder.header("x-phone-owner", owner);
+                }
+                let body = if method == "POST" {
+                    builder = builder.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(r#"{"type":"home"}"#)
+                } else {
+                    Body::empty()
+                };
+                let response = server::http::router(state)
+                    .oneshot(builder.body(body).unwrap())
+                    .await
+                    .unwrap();
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+            }
+        };
+
+        let read = send("GET", "/agent/elements", Some("agent-a")).await;
+        let snapshot = read["snapshot"].as_str().unwrap().to_string();
+
+        let observed = send("POST", "/agent/input?return=delta", Some("agent-a")).await;
+        assert_eq!(observed["baseline"], snapshot, "{observed}");
+        assert!(observed["delta"].is_object(), "{observed}");
+        assert!(observed.get("elements").is_none(), "{observed}");
+    });
+}
