@@ -56,6 +56,26 @@ pub struct WdaClient {
     actionability_budget: Duration,
 }
 
+/// Smoothed round trip of WDA's no-op `/status`, in ms (0 = not measured).
+static WDA_RTT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn record_rtt(elapsed: Duration) {
+    use std::sync::atomic::Ordering;
+    let sample = elapsed.as_millis().min(60_000) as u64;
+    let previous = WDA_RTT_MS.load(Ordering::Relaxed);
+    // Exponential smoothing: one Wi-Fi hiccup should not swing the reading.
+    let next = if previous == 0 { sample } else { (previous * 3 + sample) / 4 };
+    WDA_RTT_MS.store(next.max(1), Ordering::Relaxed);
+}
+
+/// The transport's round trip to WDA as last measured, if it has been.
+pub fn wda_rtt_ms() -> Option<u64> {
+    match WDA_RTT_MS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        ms => Some(ms),
+    }
+}
+
 impl WdaClient {
     /// `base_url` is the WDA server root, e.g. `http://<phone-ip>:8100` (LAN) or
     /// `http://127.0.0.1:8100` when tunneled over USB with `iproxy 8100 8100`.
@@ -79,15 +99,21 @@ impl WdaClient {
     }
 
     /// `GET /status` — health/liveness probe (no session required).
-    /// Returns true when WDA answers with a ready state.
+    /// Returns true when WDA answers with a ready state. Each answer also
+    /// feeds [`wda_rtt_ms`]: `/status` does no work on the phone, so its time
+    /// is the transport's round trip.
     pub async fn is_up(&self) -> bool {
+        let started = std::time::Instant::now();
         match self
             .http
             .get(format!("{}/status", self.base))
             .send_timed()
             .await
         {
-            Ok(r) => r.status().is_success(),
+            Ok(r) => {
+                record_rtt(started.elapsed());
+                r.status().is_success()
+            }
             Err(_) => false,
         }
     }

@@ -2261,8 +2261,17 @@ async fn agent_status(
     // that is merely up from one somebody is driving: since v0.6.3 WDA stays
     // up indefinitely, so `device_state:"ready"` alone says nothing about use.
     let idle_secs = state.idle_for().as_secs();
+    let transport = if state.managed_wda {
+        wda_transport(&crate::instance::current().state_dir)
+    } else {
+        "external"
+    };
+    let rtt = crate::wda::wda_rtt_ms();
+    let rtt_json = rtt.map_or("null".to_string(), |ms| ms.to_string());
+    let transport_hint = serde_json::to_string(&transport_hint(transport, rtt))
+        .unwrap_or_else(|_| "null".into());
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":"{hint}","setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -2279,6 +2288,27 @@ async fn agent_status(
         .body(Body::from(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     with_security_headers(resp)
+}
+
+/// How control traffic reaches WDA, from the relay setup-wda.sh recorded:
+/// `iproxy` = USB, `socat` to the phone's address = Wi-Fi.
+fn wda_transport(state_dir: &std::path::Path) -> &'static str {
+    match std::fs::read_to_string(state_dir.join("wda-relay.pid")) {
+        Ok(record) if record.contains("iproxy") => "usb",
+        Ok(record) if record.contains("socat") => "wifi",
+        _ => "unknown",
+    }
+}
+
+/// Why control is slow, when it is the transport. Every WDA call pays one
+/// round trip, and an action is one to three calls.
+fn transport_hint(transport: &str, rtt_ms: Option<u64>) -> Option<String> {
+    (transport == "wifi").then(|| match rtt_ms {
+        Some(ms) => format!(
+            "WDA traffic goes over Wi-Fi (~{ms} ms per call, paid one to three times per action); connect the iPhone to this Mac with a cable and reconnect for faster control"
+        ),
+        None => "WDA traffic goes over Wi-Fi; connect the iPhone to this Mac with a cable and reconnect for faster control".to_string(),
+    })
 }
 
 /// Read `blocked_on` from `setup-wda.sh`'s status file, but only if it was
@@ -14299,6 +14329,18 @@ mod tests {
     /// Three separate surfaces, three separate comparisons — conflating them
     /// is how the first draft of this endpoint advertised a helper function's
     /// arms as if they were the product's entry point.
+    #[test]
+    fn transport_is_read_from_the_recorded_relay() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(wda_transport(dir.path()), "unknown");
+        std::fs::write(dir.path().join("wda-relay.pid"), "1|now|relay:/opt/homebrew/bin/iproxy -s 127.0.0.1 8100:8100 -u X").unwrap();
+        assert_eq!(wda_transport(dir.path()), "usb");
+        std::fs::write(dir.path().join("wda-relay.pid"), "1|now|relay:/opt/homebrew/bin/socat TCP-LISTEN:8100,fork TCP:192.168.0.236:8100").unwrap();
+        assert_eq!(wda_transport(dir.path()), "wifi");
+        assert!(transport_hint("wifi", Some(180)).unwrap().contains("~180 ms"));
+        assert!(transport_hint("usb", Some(5)).is_none());
+    }
+
     #[test]
     fn capability_catalogue_matches_the_dispatchers() {
         fn arms_of(source: &str, signature: &str) -> Vec<String> {
