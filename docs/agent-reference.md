@@ -178,6 +178,16 @@ ended on. Pattern: read once → batch what you can see → read the batch's own
 observation → next batch. Three single `/agent/input` actions in a row earn a
 one-shot `batch_hint`; a batch, or a pause over a minute, resets the count.
 
+## When a read is blocked by an alert
+
+A system alert over the app (paste permission, location, notifications) can
+make every element-tree read fail. `/agent/elements` then answers `409
+{"error":"alert_blocking","alert":{"text","buttons"}}` within about a second
+instead of retrying for its 35 s budget, and a read that still times out or
+fails carries the same `alert` block when one is up. Answer it with
+`{"type":"alert","button":"<exact text>"}` — a permission is the user's call —
+then read again.
+
 ## Reading results: settle, delta, wait_for
 
 **`?return=delta`** (MCP act tools: on by default, `observe:false` to skip) settles after an applied action and

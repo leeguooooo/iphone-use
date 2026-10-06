@@ -2115,6 +2115,13 @@ fn failed_element_read_revokes_cached_actionability() {
                     std::time::Duration::ZERO,
                     r#"{"value":{"sessionId":"SESSION"}}"#.to_string(),
                 ))
+            } else if request.contains("/alert/text") {
+                // A failed read looks for a blocking system alert; none here.
+                Some((
+                    std::time::Duration::ZERO,
+                    r#"{"value":{"error":"no such alert","message":"An attempt was made to operate on a modal dialog when one was not open"}}"#
+                        .to_string(),
+                ))
             } else {
                 assert!(
                     request.contains("/source?format=json"),

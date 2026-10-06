@@ -10308,6 +10308,8 @@ async fn agent_elements(
     let result = tokio::time::timeout_at(deadline, async {
         let mut w = wda.lock().await;
         let mut first_source_error = None;
+        let read_started = tokio::time::Instant::now();
+        let mut alert_probes = 0u8;
         let rows = loop {
             match w.elements().await {
                 Ok(rows) => break rows,
@@ -10315,6 +10317,18 @@ async fn agent_elements(
                     let error = format!("{error:#}");
                     if first_source_error.is_none() {
                         first_source_error = Some(error.clone());
+                    }
+                    // A system alert holding the app makes every /source
+                    // fail until it is answered (hardware: Xiaohongshu's
+                    // "Allow Paste" — 109 failures, 35 s). Look right away and
+                    // once more after ~3 s; /alert/text costs ~0.3 s.
+                    let due = alert_probes == 0
+                        || (alert_probes == 1 && read_started.elapsed() >= std::time::Duration::from_secs(3));
+                    if due {
+                        alert_probes += 1;
+                        if let Some(alert) = alert_json(probe_alert(&mut w).await) {
+                            return Err(anyhow::Error::new(BlockingAlert(alert)));
+                        }
                     }
                     // Source reads are idempotent. System document pickers can
                     // briefly restart the WDA relay/session, so two immediate
@@ -10348,13 +10362,29 @@ async fn agent_elements(
     .await;
     let (rows, screen, alert) = match result {
         Ok(Ok(result)) => result,
+        Ok(Err(error)) if error.downcast_ref::<BlockingAlert>().is_some() => {
+            // The phone is fine; an alert is waiting for an answer.
+            let BlockingAlert(alert) = error.downcast::<BlockingAlert>().expect("checked above");
+            return json_body(
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "elements": [],
+                    "error": "alert_blocking",
+                    "alert": alert,
+                    "hint": "a system alert is up and is blocking the screen read: answer it with {\"type\":\"alert\",\"button\":\"<exact button>\"} (or an alert step in phone_run_steps) — only with the user's OK if it grants a permission — then read again"
+                })
+                .to_string(),
+            );
+        }
         Ok(Err(error)) => {
             tracing::warn!("wda elements failed: {error:#}");
             mark_wda_read_path_unactionable(&state);
-            return json_body(
-                StatusCode::BAD_GATEWAY,
-                r#"{"elements":[],"error":"wda_source_failed","transitioning":true}"#.to_string(),
-            );
+            let body = with_blocking_alert(
+                wda,
+                serde_json::json!({"elements": [], "error": "wda_source_failed", "transitioning": true}),
+            )
+            .await;
+            return json_body(StatusCode::BAD_GATEWAY, body.to_string());
         }
         Err(_) => {
             mark_wda_read_path_unactionable(&state);
@@ -10362,12 +10392,18 @@ async fn agent_elements(
             // page that is already too heavy to serialize — without it the
             // only signal was `transitioning:true`, which says "this may
             // clear" but not when to look again (#74).
-            return json_body(
-                StatusCode::GATEWAY_TIMEOUT,
-                format!(
-                    r#"{{"elements":[],"error":"wda_source_timeout","transitioning":true,"retry_after_secs":{WDA_SOURCE_TIMEOUT_RETRY_AFTER_SECS},"hint":"the accessibility tree took too long to serialize (heavy page or stalled app); wait retry_after_secs and read again, or bring a lighter screen to the foreground first"}}"#
-                ),
-            );
+            let body = with_blocking_alert(
+                wda,
+                serde_json::json!({
+                    "elements": [],
+                    "error": "wda_source_timeout",
+                    "transitioning": true,
+                    "retry_after_secs": WDA_SOURCE_TIMEOUT_RETRY_AFTER_SECS,
+                    "hint": "the accessibility tree took too long to serialize (heavy page or stalled app); wait retry_after_secs and read again, or bring a lighter screen to the foreground first"
+                }),
+            )
+            .await;
+            return json_body(StatusCode::GATEWAY_TIMEOUT, body.to_string());
         }
     };
     let snapshot = match element_snapshot_id(&rows) {
@@ -10430,6 +10466,42 @@ async fn agent_elements(
             r#"{"elements":[],"error":"serialization_failed"}"#.to_string(),
         ),
     }
+}
+
+/// Raised out of the source-read loop when a system alert is what is failing it.
+#[derive(Debug)]
+struct BlockingAlert(serde_json::Value);
+
+impl std::fmt::Display for BlockingAlert {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a system alert is blocking the screen read: {}", self.0)
+    }
+}
+
+impl std::error::Error for BlockingAlert {}
+
+/// A screen read that failed or timed out is often a system alert holding the
+/// app (hardware: Xiaohongshu's "Allow Paste" prompt stalled /source for the
+/// whole 35 s budget). Look once, bounded, and name it in the error so the
+/// agent answers the alert instead of waiting and re-reading.
+async fn with_blocking_alert(
+    wda: &tokio::sync::Mutex<crate::wda::WdaClient>,
+    mut body: serde_json::Value,
+) -> serde_json::Value {
+    let alert = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut w = wda.lock().await;
+        probe_alert(&mut w).await
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(block) = alert_json(alert) {
+        body["alert"] = block;
+        body["hint"] = serde_json::json!(
+            "a system alert is up and is blocking the screen read: answer it with {\"type\":\"alert\",\"button\":\"<exact button>\"} (or an alert step in phone_run_steps) — only with the user's OK if it grants a permission — then read again"
+        );
+    }
+    body
 }
 
 /// Best-effort, time-bounded alert probe for read paths. Any failure (no
