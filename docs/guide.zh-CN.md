@@ -6,14 +6,15 @@ README 是精简版，这里是全部细节。
 
 ```text
 浏览器 <── GET /agent/mjpeg ── iphone-use daemon ── 127.0.0.1:9100 ──┐
-浏览器 ── POST /control ─────> iphone-use daemon ── 127.0.0.1:8100 ──┤ iPhone 上的 WDA
+浏览器 ── POST /control ─────> iphone-use daemon ── 127.0.0.1:8100 ──┤ iPhone 上的设备 runner
 Agent  ── /agent/* ──────────> iphone-use daemon ── 127.0.0.1:8100 ──┘
 ```
 
-- `scripts/setup-wda.sh` 编译并签名 WDA，在手机上启动 XCUITest runner，用 `iproxy` 建两条固定的 loopback 中继：`8100` 控制，`9100` MJPEG 画面。daemon 只和 localhost 说话，后台进程手里不会攥着一个会变的手机 IP。USB 是唯一支持的路径，Wi-Fi 或 `socat` 属于手动实验。
+- `scripts/setup-wda.sh` 编译并签名 iphone-use 的**设备 runner**（`runner/IPhoneUseRunner`，一个 XCTest UI 测试包，取代了 WebDriverAgent，HTTP 接口与它兼容），在手机上启动它，用 `iproxy` 建两条固定的 loopback 中继：`8100` 控制，`9100` MJPEG 画面。daemon 只和 localhost 说话，后台进程手里不会攥着一个会变的手机 IP。USB 是唯一支持的路径，Wi-Fi 或 `socat` 属于手动实验。
 - 浏览器从 `/agent/mjpeg` 拿实时画面（失败时退回 PNG 静帧），通过 `POST /control` 发输入，每条命令都返回成功或失败，不会把一个可能已经断掉的通道当成功。
 - agent 用 `/agent/elements` 读文本形式的辅助功能树，用 `/agent/screenshot` 拿 PNG，用 `/agent/input` 做单步动作，或用 `/agent/actions` 跑一批带检查点的步骤。
-- daemon 负责 WDA 的生命周期：空闲后释放手机、带退避地重建 WDA、把每个状态写进 `/agent/status`。
+- daemon 负责 runner 的生命周期：空闲后释放手机、带退避地重建 runner、把每个状态写进 `/agent/status`。
+- 下文、状态字段（`wda`、`wda_actionable` 等）和环境变量（`WDA_*`、`PHONE_REMOTE_WDA_*`）里的 “WDA” 沿用旧名，指的就是这个设备 runner。
 
 设计、生命周期、失败状态和安全边界见 **[`docs/direct-device-architecture.html`](direct-device-architecture.html)**。
 
@@ -21,9 +22,9 @@ Agent  ── /agent/* ──────────> iphone-use daemon ── 
 
 ### 前置条件
 
-- macOS 15 或更高，装**完整 Xcode.app**（只有 Command Line Tools 不够）。在 Xcode → Settings → Accounts 登录并选一个开发团队；免费 Personal Team 能用，但 WDA 的描述文件要定期续。
+- macOS 15 或更高，装**完整 Xcode.app**（只有 Command Line Tools 不够）。在 Xcode → Settings → Accounts 登录并选一个开发团队；免费 Personal Team 能用，但 runner 的描述文件要定期续。也可以用 App Store Connect API key（`WDA_ASC_KEY_PATH`、`WDA_ASC_KEY_ID`、`WDA_ASC_ISSUER_ID`）签名，不需要 Xcode 账号。
 - iPhone 开启**开发者模式**，通过 USB 与 Mac 配对并点过信任。
-- 编译、启动、使用 WDA 期间手机保持**解锁、亮屏**。WDA 过不了 Face ID 和密码。
+- 编译、启动、使用 runner 期间手机保持**解锁、亮屏**。它过不了 Face ID 和密码。
 - `brew install libimobiledevice` 装 `iproxy`。
 - 只有从源码构建才需要 Rust 工具链。
 
@@ -33,15 +34,15 @@ Agent  ── /agent/* ──────────> iphone-use daemon ── 
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
-安装器下载最新 GitHub Release，注册当前用户的 LaunchAgent，写入 loopback 的 WDA 地址，安装同版本的 agent skill，并把设置脚本放到 `~/.iphone-use/setup-wda.sh`。它不会证明你的团队、手机、runner 和中继能一起工作，那是下一步的事。手机连上、信任、解锁、亮屏后：
+安装器下载最新 GitHub Release，注册当前用户的 LaunchAgent，写入 loopback 的 runner 地址，安装同版本的 agent skill，把设备 runner 的源码放到 `~/.iphone-use/runner`，并把设置脚本放到 `~/.iphone-use/setup-wda.sh`。它不会证明你的团队、手机、runner 和中继能一起工作，那是下一步的事。手机连上、信任、解锁、亮屏后：
 
 ```bash
 ~/.iphone-use/setup-wda.sh doctor    # 解释当前的 USB / 信任 / DDI / WARP 阻塞项
-~/.iphone-use/setup-wda.sh           # 编译、签名、安装、启动 WDA，拉起中继
+~/.iphone-use/setup-wda.sh           # 编译、签名、安装、启动 runner，拉起中继
 ~/.iphone-use/setup-wda.sh status
 ```
 
-然后打开 **`http://<Mac局域网IP>:44321/setup`**。内置向导把 `/agent/status` 翻译成当前的阻塞项（USB、信任、开发者服务、WDA、外部主机），它不会改你的 VPN，也不会替你跑 setup。手机可驱动后进 **`/phone`**，输入 `install.sh` 打印的密码。
+然后打开 **`http://<Mac局域网IP>:44321/setup`**。内置向导把 `/agent/status` 翻译成当前的阻塞项（USB、信任、开发者服务、runner、外部主机），它不会改你的 VPN，也不会替你跑 setup。手机可驱动后进 **`/phone`**，输入 `install.sh` 打印的密码。
 
 配对了多台 iPhone？两处固定同一个 classic UDID：
 
@@ -53,16 +54,16 @@ WDA_UDID="$PHONE_REMOTE_UDID" ~/.iphone-use/setup-wda.sh
 
 ### 把手机还给自己
 
-WDA 运行期间会占着手机。想自己用手机，先暂停托管的 WDA，下次 agent 用之前再恢复：
+runner 运行期间会占着手机。想自己用手机，先暂停它，下次 agent 用之前再恢复：
 
 ```bash
 ~/.iphone-use/setup-wda.sh pause     # 禁用 launchd job，只停 PID 校验通过的进程
 ~/.iphone-use/setup-wda.sh resume
 ```
 
-更省事的是网页控制栏里的 **交还** 按钮（或 `POST /agent/mode {"mode":"human"}`）：daemon 停掉 WDA，手机归拿着它的人用，状态里 `human_handoff:true`。这期间 agent 的输入请求一律 409 `phone_handed_to_human`，不会在你用着的时候把手机抢回去。交还之后同一个按钮变成 **交给 agent**，点它（或 `{"mode":"agent"}`）手机重新交给远程控制。
+更省事的是网页控制栏里的 **交还** 按钮（或 `POST /agent/mode {"mode":"human"}`）：daemon 停掉 runner，手机归拿着它的人用，状态里 `human_handoff:true`。这期间 agent 的输入请求一律 409 `phone_handed_to_human`，不会在你用着的时候把手机抢回去。交还之后同一个按钮变成 **交给 agent**，点它（或 `{"mode":"agent"}`）手机重新交给远程控制。
 
-daemon 也会自己交还：5 分钟没有 agent 活动（释放后很快又被用到，下次的空闲时长会自动翻倍，最长 1 小时）、也没有人在看画面，它就停掉 runner 并停放 supervisor，注销、重启之后也保持停放。runner 常驻的话，iOS 每杀一次它就被拉起一次，每次拉起 iOS 都要输锁屏密码才能开 UI 自动化，结果没人用的时候手机也整天弹密码。下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 会用缓存的 runner 把 WDA 拉回来（不重新编译），手机锁了就解一下。网页 `/phone` 上停放中的手机会显示 **连接手机**，手机解锁、亮屏后点它即可。`PHONE_REMOTE_IDLE_RELEASE_SECS` 改空闲时长，`0` 表示常驻（v0.6.3–v0.7.3 的行为）。
+daemon 也会自己交还：5 分钟没有 agent 活动（释放后很快又被用到，下次的空闲时长会自动翻倍，最长 1 小时）、也没有人在看画面，它就停掉 runner 并停放 supervisor，注销、重启之后也保持停放。runner 常驻的话，iOS 每杀一次它就被拉起一次，每次拉起 iOS 都要输锁屏密码才能开 UI 自动化，结果没人用的时候手机也整天弹密码。下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 会用缓存的 runner 产物把它拉回来（不重新编译），手机锁了就解一下。网页 `/phone` 上停放中的手机会显示 **连接手机**，手机解锁、亮屏后点它即可。`PHONE_REMOTE_IDLE_RELEASE_SECS` 改空闲时长，`0` 表示常驻（v0.6.3–v0.7.3 的行为）。
 
 ### 升级
 
@@ -289,11 +290,12 @@ iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/le
 | `PHONE_REMOTE_UDID` | 安装器识别并持久化 | 托管 WDA 和破坏性命令使用的 canonical iPhone。请求不能临时换机，要改就改部署并重启。setup 时传同值 `WDA_UDID`。 |
 | `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA 控制和 MJPEG 的 loopback。不可达时控制请求直接失败。 |
 | `PHONE_REMOTE_WDA_MANAGED` | loopback 端点默认开 | daemon 是否负责 WDA supervisor / 中继的生命周期。 |
-| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | 空闲多少秒后停 WDA 并停放 supervisor，下一次 agent 请求再拉起；`0` 表示常驻，代价是 iOS 每杀一次 runner 就弹一次密码。 |
+| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | 空闲多少秒后停 runner 并停放 supervisor，下一次 agent 请求再拉起；`0` 表示常驻，代价是 iOS 每杀一次 runner 就弹一次密码。 |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | `X-Phone-Owner` 租约在没有请求刷新时的存活时间。 |
-| `WDA_RUNNER_ICON` | `auto` | runner 的桌面图标：`auto` 用 app 图标，`none` 用 WDA 占位图，或给 `.png` / `.icns` 路径。失败只警告。 |
-| `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | WDA 默认 50 | 限制辅助功能快照深度（树特别大的 app 试 `20`–`30`，issue #44）。 |
-| `PHONE_REMOTE_WDA_SNAPSHOT_TIMEOUT_S` | WDA 默认 15 | 限制快照解析时间，让一次过大的读取失败而不是卡死 runner。 |
+| `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | setup 编译的设备 runner 源码（仓库里的 `scripts/setup-wda.sh` 用仓库自己的 `runner/`）。只有不是默认值时才持久化。 |
+| `WDA_RUNNER_REBUILD` | 关 | `1` 让下一次 setup 忽略记录的 runner 产物、重新编译。 |
+| `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | runner 默认 64 | 只对外部 WebDriverAgent 生效；设备 runner 自己限制读树（深度阶梯、5000 个节点）。 |
+| `PHONE_REMOTE_WDA_SNAPSHOT_TIMEOUT_S` | — | 同上，只对 WebDriverAgent 生效。 |
 | `PHONE_REMOTE_ELEMENTS_AFFORDANCES` | 关 | `1` 给 `/agent/elements` 的行加稀疏的 `actions`、`selected`、`min` / `max`。 |
 | `PHONE_REMOTE_ELEMENTS_TRAITS` | 关 | `1` 再输出原始的辅助功能 trait 名。 |
 | `PHONE_REMOTE_NO_UPDATE_CHECK` | 关 | 跳过每日 release 检查。 |
@@ -302,9 +304,9 @@ iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/le
 
 daemon 把手机的实时控制放到了网络上，它的 URL 和密码要当凭据对待。
 
-- 密码 / cookie / bearer 只保护 `44321`。**手机上 WDA 自己的 `8100` 和 `9100` 没有鉴权**，USB `iproxy` 中继也不会加，手机所在 Wi-Fi 里的另一台机器能直接连过去。只在可信、隔离的网络里用；走 USB 时关掉手机 Wi-Fi 就没有这层暴露。
-- 真正带鉴权的设备传输属于 Phase 2（companion app 或受控隧道）。在此之前，daemon 的登录不等于 WDA 的保护。
-- 从局域网外访问时，经由带鉴权的 HTTPS 反向代理，或可信的 VPN / 隧道（比如 Tailscale）连到 `44321`，绝不要把 WDA 的端口暴露出去。daemon 只提供明文 HTTP，识别 `X-Forwarded-Proto`，session cookie 是 `HttpOnly` + `SameSite=Lax`。
+- 密码 / cookie / bearer 只保护 `44321`。**手机上 runner 自己的 `8100` 和 `9100` 没有鉴权**，USB `iproxy` 中继也不会加，手机所在 Wi-Fi 里的另一台机器能直接连过去。只在可信、隔离的网络里用；走 USB 时关掉手机 Wi-Fi 就没有这层暴露。
+- 真正带鉴权的设备传输属于 Phase 2（companion app 或受控隧道）。在此之前，daemon 的登录保护不到 runner。
+- 从局域网外访问时，经由带鉴权的 HTTPS 反向代理，或可信的 VPN / 隧道（比如 Tailscale）连到 `44321`，绝不要把 runner 的端口暴露出去。daemon 只提供明文 HTTP，识别 `X-Forwarded-Proto`，session cookie 是 `HttpOnly` + `SameSite=Lax`。
 - owner 租约（`X-Phone-Owner`）是协作会话之间的协调机制，不是安全边界。
 - 开放访问期间不要停在支付、私聊或 2FA 画面。不用时停掉 LaunchAgent。
 
@@ -329,13 +331,14 @@ PHONE_REMOTE_HOST=0.0.0.0 PHONE_REMOTE_PASSWORD=secret ./target/release/iphone-u
 
 | 路径 | 内容 |
 |---|---|
-| `crates/server` | daemon：WDA 控制、MJPEG 代理、浏览器 `/control`、agent API |
+| `crates/server` | daemon：设备控制（WebDriverAgent 协议）、MJPEG 代理、浏览器 `/control`、agent API |
+| `runner/` | 设备 runner：在手机上提供控制接口和 MJPEG 的 XCTest UI 测试包 |
 | `crates/mcp` | `iphone-use-mcp`：MCP server、flow 运行器、源客户端、`flow publish` / `report` |
 | `crates/core` | 共用的鉴权工具 |
 | `web/index.html` | 浏览器客户端（MJPEG + `/control`） |
 | `skills/iphone-use` | 安装器随包交付的 agent skill |
-| `scripts/`、`deploy/`、`install.sh` | WDA 设置、打包、LaunchAgent、桥接快捷指令生成器 |
-| `docs/` | 架构、agent API 参考、WDA 设置、flow 调研 |
+| `scripts/`、`deploy/`、`install.sh` | runner 设置、打包、LaunchAgent、桥接快捷指令生成器 |
+| `docs/` | 架构、agent API 参考、设备设置常见坑、flow 调研 |
 
 ### 路线
 

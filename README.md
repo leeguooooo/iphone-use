@@ -10,7 +10,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="Platform: macOS 15+">
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="Built with Rust">
-  <img src="https://img.shields.io/badge/runs%20on-WebDriverAgent-success" alt="Runs on WebDriverAgent">
+  <img src="https://img.shields.io/badge/runs%20on-XCTest-success" alt="Runs on XCTest">
 </p>
 
 <p align="center">
@@ -26,7 +26,8 @@ iphone-use lets an AI agent see and operate a real iPhone: read the screen as te
 swipe and type, and get told plainly when an action did not land. It works on apps that
 have no API, including banking and payment apps that hide their screens from capture.
 
-A daemon on your Mac runs WebDriverAgent on a USB-connected iPhone and exposes it as:
+A daemon on your Mac runs its own XCTest-based device runner on a USB-connected iPhone
+(it replaced WebDriverAgent and speaks the same API) and exposes it as:
 
 - an HTTP API for agents and scripts (`/agent/*`),
 - an MCP server with 23 tools for Claude Code, Claude Desktop and other MCP clients,
@@ -42,7 +43,7 @@ works), an iPhone with Developer Mode on and trusted over USB, and
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-~/.iphone-use/setup-wda.sh           # builds and starts WDA; keep the phone unlocked
+~/.iphone-use/setup-wda.sh           # builds and starts the device runner; keep the phone unlocked
 ```
 
 Then open `http://<mac-ip>:44321/phone` and log in with the password the installer
@@ -103,9 +104,10 @@ $MCP flow draft --out my-task.json          # what you just did on the phone, as
 - [Full guide](docs/guide.md): browser and iOS app, flows and the flow registry,
   lifecycle, configuration, security, development.
 - [Agent API reference](docs/agent-api.html) · [MCP tools](crates/mcp/README.md) ·
-  [Architecture](docs/direct-device-architecture.html) · [WDA setup](docs/wda-setup.html)
-- Security in one line: the password protects port 44321 only; WDA's own ports on the
-  phone are unauthenticated, so use a trusted network ([details](docs/guide.md#security)).
+  [Architecture](docs/direct-device-architecture.html) · [Device setup pitfalls](docs/wda-setup.html) ·
+  [Device runner](runner/README.md)
+- Security in one line: the password protects port 44321 only; the runner's own ports on
+  the phone are unauthenticated, so use a trusted network ([details](docs/guide.md#security)).
 - Issues and ideas: [GitHub issues](https://github.com/leeguooooo/iphone-use/issues).
 
 ## License

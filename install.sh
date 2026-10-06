@@ -2462,7 +2462,7 @@ env_or_existing() {
 if [ "${PHONE_REMOTE_BACKEND:-$(plist_env_get PHONE_REMOTE_BACKEND)}" = "mirror" ] \
     || [ "${PHONE_REMOTE_BACKEND:-$(plist_env_get PHONE_REMOTE_BACKEND)}" = "legacy-mirror" ]; then
     warn "The iPhone Mirroring backend was removed in v0.9; this install serves the phone over WDA."
-    warn "  Run setup-wda.sh once if this Mac has never set WDA up."
+    warn "  Run setup-wda.sh once if this Mac has never set the device runner up."
 fi
 
 # ── Step 1 — Obtain the .app ──────────────────────────────────────────────────
@@ -3297,5 +3297,5 @@ if [ "$DAEMON_HTTP_READY" = "1" ] \
     ok "Installed; daemon HTTP, WDA endpoints, and product drivable status verified."
 else
     ok "Installed; daemon HTTP control plane verified."
-    warn "The device layer is pending: WDA is parked, or still needs setup-wda.sh."
+    warn "The device layer is pending: the device runner is parked, or still needs setup-wda.sh."
 fi

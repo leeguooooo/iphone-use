@@ -6,12 +6,14 @@ The README is the short version; this is everything else.
 
 ```text
 Browser <── GET /agent/mjpeg ── iphone-use daemon ── 127.0.0.1:9100 ──┐
-Browser ── POST /control ─────> iphone-use daemon ── 127.0.0.1:8100 ──┤ WDA on iPhone
+Browser ── POST /control ─────> iphone-use daemon ── 127.0.0.1:8100 ──┤ device runner on iPhone
 Agent   ── /agent/* ──────────> iphone-use daemon ── 127.0.0.1:8100 ──┘
 ```
 
-- `scripts/setup-wda.sh` builds and signs WDA, starts the XCUITest runner on the phone,
-  and pins two `iproxy` loopback relays: `8100` for control, `9100` for the MJPEG screen.
+- `scripts/setup-wda.sh` builds and signs the iphone-use **device runner**
+  (`runner/IPhoneUseRunner`, an XCTest UI-test bundle that replaced WebDriverAgent and
+  speaks the same HTTP API), starts it on the phone, and pins two `iproxy` loopback
+  relays: `8100` for control, `9100` for the MJPEG screen.
   The daemon only ever talks to localhost, so a background process never holds the
   phone's changing IP. USB is the supported path; Wi-Fi/`socat` is a manual experiment.
 - The browser gets the live picture from `/agent/mjpeg` (PNG stills as fallback) and
@@ -19,8 +21,11 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
   command instead of accepting it blindly over a possibly dead channel.
 - Agents read the accessibility tree as text (`/agent/elements`), screenshots as PNG,
   and act through `/agent/input` or a guarded multi-step batch (`/agent/actions`).
-- The daemon owns the WDA lifecycle: it releases the phone after idle time, rebuilds
-  WDA with backoff, and reports every state in `/agent/status`.
+- The daemon owns the runner lifecycle: it releases the phone after idle time, rebuilds
+  the runner with backoff, and reports every state in `/agent/status`.
+- "WDA" below, in status fields (`wda`, `wda_actionable`, …) and in environment
+  variables (`WDA_*`, `PHONE_REMOTE_WDA_*`) is the historical name and now means this
+  device runner.
 
 Design, lifecycle, failure states, and security boundaries:
 **[`docs/direct-device-architecture.html`](direct-device-architecture.html)**.
@@ -31,10 +36,12 @@ Design, lifecycle, failure states, and security boundaries:
 
 - macOS 15 or later, with **full Xcode.app** (Command Line Tools alone are not enough).
   Sign in under Xcode → Settings → Accounts and pick a development team; a free
-  Personal Team works, but its WDA profile needs periodic renewal.
+  Personal Team works, but its runner profile needs periodic renewal. An App Store
+  Connect API key (`WDA_ASC_KEY_PATH`, `WDA_ASC_KEY_ID`, `WDA_ASC_ISSUER_ID`) signs
+  without an Xcode account.
 - An iPhone with **Developer Mode** on, paired with and trusted by the Mac over USB.
-- The phone **unlocked and awake** while WDA is built, launched, and used. WDA cannot
-  get past Face ID or the passcode.
+- The phone **unlocked and awake** while the runner is built, launched, and used. It
+  cannot get past Face ID or the passcode.
 - `iproxy` from `brew install libimobiledevice`.
 - A Rust toolchain only if you build from source.
 
@@ -45,19 +52,20 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.
 ```
 
 The installer fetches the latest GitHub Release, registers a per-user LaunchAgent,
-writes the loopback WDA endpoints, installs the matching
-agent skill, and drops the setup helper at `~/.iphone-use/setup-wda.sh`. It does not
+writes the loopback runner endpoints, installs the matching agent skill, lays the
+device runner sources down at `~/.iphone-use/runner`, and drops the setup helper at
+`~/.iphone-use/setup-wda.sh`. It does not
 prove your team, phone, runner, and relays work together — that is the next step, with
 the phone connected, trusted, unlocked, and awake:
 
 ```bash
 ~/.iphone-use/setup-wda.sh doctor    # explains any USB / trust / DDI / WARP blocker
-~/.iphone-use/setup-wda.sh           # build, sign, install, launch WDA, start relays
+~/.iphone-use/setup-wda.sh           # build, sign, install, launch the runner, start relays
 ~/.iphone-use/setup-wda.sh status
 ```
 
 Then open **`http://<mac-lan-ip>:44321/setup`**. The built-in guide translates
-`/agent/status` into the current blocker (USB, trust, developer service, WDA, external
+`/agent/status` into the current blocker (USB, trust, developer service, runner, external
 host) without changing your VPN or running setup for you. Once the phone is drivable,
 continue to **`/phone`** and enter the password `install.sh` printed.
 
@@ -71,7 +79,7 @@ WDA_UDID="$PHONE_REMOTE_UDID" ~/.iphone-use/setup-wda.sh
 
 ### Hand the phone back to yourself
 
-WDA occupies the phone while it runs. To use the phone by hand, pause managed WDA and
+The runner occupies the phone while it runs. To use the phone by hand, pause it and
 resume it before the next agent session:
 
 ```bash
@@ -80,7 +88,7 @@ resume it before the next agent session:
 ```
 
 Simpler still is the **交还 (hand back)** button in the web toolbar, or
-`POST /agent/mode {"mode":"human"}`: the daemon stops WDA so the phone belongs to whoever
+`POST /agent/mode {"mode":"human"}`: the daemon stops the runner so the phone belongs to whoever
 is holding it, and reports `human_handoff:true`; while that holds, agent input gets
 409 `phone_handed_to_human` instead of restarting the runner under your fingers. The same
 button then reads **交给 agent** (give to agent); press it, or send `{"mode":"agent"}`, to
@@ -91,7 +99,7 @@ live viewer it stops the runner and parks its supervisor, and the phone stays pa
 across logouts and reboots. A runner kept up around the clock is relaunched every time
 iOS kills it, and each launch asks for the passcode to enable UI automation — so the
 phone prompted all day while nobody was using it. The next agent request, or
-`POST /agent/mode {"mode":"agent"}`, brings WDA back from the cached runner (no
+`POST /agent/mode {"mode":"agent"}`, brings the runner back from its cached product (no
 rebuild) — unlock the phone if asked. On `/phone` a parked phone shows **连接手机**
 (connect phone); press it with the phone unlocked and awake. `PHONE_REMOTE_IDLE_RELEASE_SECS` changes the
 window; `0` keeps the runner up (v0.6.3–v0.7.3 behaviour).
@@ -463,12 +471,12 @@ PHONE_REMOTE_INSTANCE=lab ~/.iphone-use/instances/lab/setup-wda.sh
 ```
 
 The instance gets its own copy of the app, state directory
-(`~/.iphone-use/instances/lab`, including its own WebDriverAgent checkout and so its own
-DerivedData), launchd labels (`com.leeguoo.iphone-use.lab`,
+(`~/.iphone-use/instances/lab`, including its own runner build products under
+`runner-build/`; the sources at `~/.iphone-use/runner` are shared), launchd labels (`com.leeguoo.iphone-use.lab`,
 `com.leeguoo.iphone-use.wda.lab`), loopback-only daemon, agent token and ports. Ports
 are derived from the name and persisted. The installer prints them, and
 `PHONE_REMOTE_INSTANCE=lab setup-wda.sh instance-context` shows them later. Signing
-(team, bundle ID, App Store Connect key) is inherited from the default instance's WDA
+(team, bundle ID, App Store Connect key) is inherited from the default instance's runner
 supervisor unless set explicitly. A phone that another instance already drives, or a port
 another instance owns, is refused before anything changes. Agents target the instance
 with `PHONE_REMOTE_URL=http://127.0.0.1:<port>` and that instance's
@@ -535,14 +543,15 @@ signature could invalidate.
 | `PHONE_REMOTE_HOST` / `PHONE_REMOTE_PORT` | `127.0.0.1` / `44321` | Listen address and port (`0.0.0.0` for LAN; a password is then mandatory). |
 | `PHONE_REMOTE_PASSWORD` | *(none)* | Browser login; doubles as the agent bearer only when no agent token is set. |
 | `PHONE_REMOTE_AGENT_TOKEN` | *(none)* | Dedicated agent bearer. When set, it is the **only** accepted bearer. |
-| `PHONE_REMOTE_UDID` | detected and persisted by the installer | Canonical iPhone for managed WDA and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `WDA_UDID` to setup. |
-| `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA control and MJPEG loopbacks. Control fails closed when unreachable. |
-| `PHONE_REMOTE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the WDA supervisor/relay lifecycle. |
-| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | Stop WDA and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
+| `PHONE_REMOTE_UDID` | detected and persisted by the installer | Canonical iPhone for the managed runner and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `WDA_UDID` to setup. |
+| `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | Runner control and MJPEG loopbacks (any WebDriverAgent-compatible endpoint works). Control fails closed when unreachable. |
+| `PHONE_REMOTE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the runner supervisor/relay lifecycle. |
+| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | Stop the runner and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
-| `WDA_RUNNER_ICON` | `auto` | Home-screen icon for the runner: `auto` reuses the app icon, `none` keeps WDA's placeholder, or a `.png`/`.icns` path. Failures only warn. |
-| `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | WDA default 50 | Bound the accessibility snapshot depth (try `20`–`30` for apps with huge trees, issue #44). |
-| `PHONE_REMOTE_WDA_SNAPSHOT_TIMEOUT_S` | WDA default 15 | Bound snapshot resolution time so one oversized read fails instead of wedging the runner. |
+| `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | Device runner sources setup builds (a repo checkout's `scripts/setup-wda.sh` uses its own `runner/`). Persisted only when not the default. |
+| `WDA_RUNNER_REBUILD` | off | `1` makes the next setup ignore the recorded runner product and build again. |
+| `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | runner default 64 | Applies to an external WebDriverAgent only; the device runner bounds its own tree reads (depth ladder, 5000 nodes). |
+| `PHONE_REMOTE_WDA_SNAPSHOT_TIMEOUT_S` | — | Same: WebDriverAgent only. |
 | `PHONE_REMOTE_ELEMENTS_AFFORDANCES` | off | `1` adds sparse `actions`, `selected`, `min`/`max` to `/agent/elements` rows. |
 | `PHONE_REMOTE_ELEMENTS_TRAITS` | off | `1` also emits raw accessibility trait names. |
 | `PHONE_REMOTE_NO_UPDATE_CHECK` | off | Skip the daily release check. |
@@ -552,14 +561,14 @@ signature could invalidate.
 The daemon exposes live phone control over the network; treat its URL and password as
 credentials.
 
-- The password / cookie / bearer protects port `44321` only. **WDA's own `8100` and
-  `9100` on the phone have no authentication**, and the USB `iproxy` relay does not add
+- The password / cookie / bearer protects port `44321` only. **The runner's own `8100`
+  and `9100` on the phone have no authentication**, and the USB `iproxy` relay does not add
   any — another host on the phone's Wi-Fi can reach them directly. Use it only on a
   trusted, isolated network; turning off iPhone Wi-Fi while on USB removes that exposure.
 - A real authenticated device transport is Phase 2 (a companion app or a controlled
-  tunnel). Until then, daemon login is not WDA protection.
+  tunnel). Until then, daemon login does not protect the runner.
 - From outside the LAN, reach `44321` through an authenticated HTTPS reverse proxy or a
-  trusted VPN/tunnel (Tailscale, for example) — never by exposing WDA's ports. The daemon
+  trusted VPN/tunnel (Tailscale, for example) — never by exposing the runner's ports. The daemon
   serves plain HTTP, honours `X-Forwarded-Proto`, and sets an `HttpOnly` +
   `SameSite=Lax` session cookie.
 - The owner lease (`X-Phone-Owner`) is coordination between cooperating sessions, not a
@@ -591,13 +600,14 @@ Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's te
 
 | Path | What lives there |
 |---|---|
-| `crates/server` | daemon: WDA control, MJPEG proxy, browser `/control`, agent API |
+| `crates/server` | daemon: device control (WebDriverAgent protocol), MJPEG proxy, browser `/control`, agent API |
+| `runner/` | the device runner: XCTest UI-test bundle serving the control API and MJPEG on the phone |
 | `crates/mcp` | `iphone-use-mcp`: MCP server, flow runner, registry client, `flow publish` / `report` |
 | `crates/core` | shared auth helpers |
 | `web/index.html` | browser client (MJPEG + `/control`) |
 | `skills/iphone-use` | the agent skill the installer ships |
-| `scripts/`, `deploy/`, `install.sh` | WDA setup, packaging, LaunchAgent, bridge-shortcut generator |
-| `docs/` | architecture, agent API reference, WDA setup, flows research |
+| `scripts/`, `deploy/`, `install.sh` | runner setup, packaging, LaunchAgent, bridge-shortcut generator |
+| `docs/` | architecture, agent API reference, device setup pitfalls, flows research |
 
 ### Roadmap
 

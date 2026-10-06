@@ -10,7 +10,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="许可证：MIT"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="平台：macOS 15+">
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="使用 Rust 构建">
-  <img src="https://img.shields.io/badge/runs%20on-WebDriverAgent-success" alt="基于 WebDriverAgent">
+  <img src="https://img.shields.io/badge/runs%20on-XCTest-success" alt="基于 XCTest">
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@ https://github.com/user-attachments/assets/a9947152-6655-4509-ac1e-49953a3cea70
 
 iphone-use 让 AI agent 操作一台真 iPhone：把屏幕读成文字，点、滑、输入，操作没生效时直接告诉它。没有 API 的 App 也能用，包括禁止截屏的银行、支付类 App。
 
-Mac 上的守护进程通过 USB 在 iPhone 上运行 WebDriverAgent，对外提供：
+Mac 上的守护进程通过 USB 在 iPhone 上运行自己的设备 runner（基于 XCTest，取代了 WebDriverAgent，接口兼容），对外提供：
 
 - 给 agent 和脚本用的 HTTP 接口（`/agent/*`）；
 - 23 个工具的 MCP server，Claude Code、Claude Desktop 等 MCP 客户端直接接；
@@ -38,7 +38,7 @@ Mac 上的守护进程通过 USB 在 iPhone 上运行 WebDriverAgent，对外提
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-~/.iphone-use/setup-wda.sh           # 编译并启动 WDA，期间保持手机解锁
+~/.iphone-use/setup-wda.sh           # 编译并启动设备 runner，期间保持手机解锁
 ```
 
 然后打开 `http://<Mac 的 IP>:44321/phone`，用安装时打印的密码登录。USB、信任、VPN、签名有问题时，跑 `~/.iphone-use/setup-wda.sh doctor` 会告诉你卡在哪；以后升级用 `iphone-use upgrade`。
@@ -86,8 +86,8 @@ $MCP flow draft --out my-task.json          # 把刚才在手机上做的事导�
 ## 更多
 
 - [完整指南](docs/guide.zh-CN.md)：网页和 iOS App、flow 与官方 flow 源、生命周期、配置、安全、开发。
-- [Agent API 参考](docs/agent-api.html) · [MCP 工具](crates/mcp/README.md) · [架构](docs/direct-device-architecture.html) · [WDA 配置](docs/wda-setup.html)
-- 安全只说一句：密码只保护 44321 端口，手机上 WDA 自己的端口没有鉴权，只在可信网络里用（[详情](docs/guide.zh-CN.md#安全)）。
+- [Agent API 参考](docs/agent-api.html) · [MCP 工具](crates/mcp/README.md) · [架构](docs/direct-device-architecture.html) · [设备设置常见坑](docs/wda-setup.html) · [设备 runner](runner/README.md)
+- 安全只说一句：密码只保护 44321 端口，手机上 runner 自己的端口没有鉴权，只在可信网络里用（[详情](docs/guide.zh-CN.md#安全)）。
 - 问题和建议：[GitHub issues](https://github.com/leeguooooo/iphone-use/issues)。
 
 ## 许可证

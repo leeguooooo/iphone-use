@@ -1,6 +1,8 @@
-# iphone-use native runner
+# iphone-use device runner
 
-The runner is the iphone-use device service. It replaces WebDriverAgent. It is a lean XCTest
+The runner is the iphone-use device service. It replaces WebDriverAgent: `scripts/setup-wda.sh`
+builds it, installs it on the phone, keeps it running under the KeepAlive supervisor and points the
+daemon at it (see [Managed by setup-wda.sh](#managed-by-setup-wdash)). It is a lean XCTest
 runner that runs as one long-lived XCTest method (`RunnerTests.testServe`) and serves two things
 on the phone:
 
@@ -36,12 +38,12 @@ What makes it faster than WDA:
 ```
 runner/
   build.sh                         build-for-testing (generic device, or --device <udid>), prints the .xctestrun
+  ci-check.sh                      CI gate: unit check, unsigned build, names setup/uninstall rely on
   unit-check.sh                    Mac-side unit check of the device-independent logic (no device)
   unit-check/                      its test driver and IPURBridge stub
   IPhoneUseRunner/project.yml      XcodeGen spec (the generated .xcodeproj is checked in)
   IPhoneUseRunner/IPhoneUseRunner.xcodeproj
-  IPhoneUseRunner/IPhoneUseRunner/         minimal host app   (com.leeguoo.iphone-use.runner)
-  IPhoneUseRunner/IPhoneUseRunnerUITests/  UI test bundle     (com.leeguoo.iphone-use.runner.uitests)
+  IPhoneUseRunner/IPhoneUseRunnerUITests/  the UI-test bundle (no host app), product name iPhoneUse
     RunnerTests.swift    testServe, dispatch, native routes
     RunnerWDA.swift      WDA-compatible routes
     RunnerElements.swift element tree, locators (predicate / class chain / …), id registry
@@ -53,8 +55,10 @@ scripts/runner-compat.py           host-side WDA compatibility check (every WdaC
 scripts/runner-smoke.py            host-side smoke test / benchmark of the native routes
 ```
 
-The installed test runner app is `com.leeguoo.iphone-use.runner.uitests.xctrunner`. It is the
-process that serves both ports.
+The phone gets exactly one app, **iPhoneUse-Runner** (bundle id `<PRODUCT_BUNDLE_IDENTIFIER>.xctrunner`;
+`com.leeguoo.iphone-use.runner.xctrunner` for `build.sh`, the team-derived `WDA_BUNDLE_ID` for setup).
+It is the process that serves both ports. When the ready listener comes up it logs
+`ServerURLHere->http://<wifi-ip>:8100<-ServerURLHere`, the marker setup waits for.
 
 ## Protocol
 
@@ -242,8 +246,8 @@ How it captures:
 - **Measured fps.** `/status` reports `mjpeg.achievedFps`, `capturePath`, `lastCaptureMs` and
   `lastFrameBytes`. `scripts/runner-compat.py` also measures fps from the client side.
 
-  **Achieved fps: not yet measured on hardware.** This build was never run on a phone. Record the
-  `runner-compat.py` MJPEG line (30 / 50 / 60 settings) here after the first hardware run.
+  **Achieved fps:** 27–28 fps on an iPhone 13 over USB with the daemon's 30 / 50 / 60 settings
+  (`runner-compat.py`, first hardware run).
 
 ## Build
 
@@ -274,6 +278,30 @@ Signing:
 After editing `project.yml`, regenerate the project with
 `(cd runner/IPhoneUseRunner && xcodegen generate)` and commit the result.
 
+## Managed by setup-wda.sh
+
+This is how every install runs the runner; the manual steps below are for development.
+
+- **Sources.** `install.sh` lays `runner/` down at `~/.iphone-use/runner` (from a local checkout,
+  or the release asset `iphone-use-runner.tar.gz`, checked against its `.sha256`). A repo
+  checkout's `scripts/setup-wda.sh` builds its own `runner/`; `IPU_RUNNER_SRC` overrides both.
+  Sources must be owned by the user and not writable by others.
+- **Build.** `xcodebuild -project …/IPhoneUseRunner.xcodeproj -scheme IPhoneUseRunner
+  -destination platform=iOS,id=<udid> -derivedDataPath <state>/runner-build
+  DEVELOPMENT_TEAM=<team> PRODUCT_BUNDLE_IDENTIFIER=<WDA_BUNDLE_ID> build-for-testing`, signed
+  through the Xcode account or the `WDA_ASC_*` API key, exactly as WebDriverAgent was. Each
+  instance has its own `runner-build/`.
+- **Launch.** `xcodebuild -destination platform=iOS,id=<udid> test-without-building -xctestrun
+  <state>/runner-build/Build/Products/IPhoneUseRunner_iphoneos<sdk>-arm64.xctestrun
+  -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe`, from the state directory. That
+  argv is the runner's process identity for stop/pause/status and uninstall.
+- **Reuse.** The verified product is recorded in `<state>/wda-runner-product.json`, keyed on the
+  source hash, signing identity, device and Xcode/SDK; a matching reconnect skips the build.
+  `WDA_RUNNER_REBUILD=1` forces one.
+- **Unchanged.** Relays (`iproxy` 8100/9100), the KeepAlive supervisor and its label, lock wait and
+  backoff, trust/DDI/automation blockers, the status file the daemon reads, and every `WDA_*`
+  variable keep their names and behaviour.
+
 ## Run on a device
 
 ```bash
@@ -294,8 +322,9 @@ python3 scripts/runner-smoke.py --runs 5   # timing of the native routes
   swipes, a cell click), `--tap X Y`, `--keys TEXT`, `--url URL` and `--lock`.
 - **Unlock first.** The phone must be unlocked when the runner starts, as with WDA.
 - **No test timeouts.** Do not pass `-test-timeouts-enabled YES`.
-- **One automation session.** iOS gives one XCTest automation session at a time, so WDA and this
-  runner cannot both run on one phone. Both also want ports 8100 and 9100.
+- **One automation session.** iOS gives one XCTest automation session at a time, so a managed
+  runner (or WebDriverAgent) and a manual one cannot both run on one phone; pause the managed
+  one first (`~/.iphone-use/setup-wda.sh pause`). Both also want ports 8100 and 9100.
 - **Stopping.** `POST /shutdown` ends `testServe` cleanly.
 - **Logs.** Device log lines are prefixed `ipu-runner:`.
 

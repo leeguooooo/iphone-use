@@ -6,7 +6,8 @@ description: Use when a task needs a real iPhone — operating iOS apps that hav
 # iphone-use — drive a real iPhone
 
 The [iphone-use](https://github.com/leeguooooo/iphone-use) daemon drives a
-physical iPhone over WebDriverAgent. It never touches the Mac's screen or
+physical iPhone through its XCTest device runner (WebDriverAgent-compatible; "WDA" in
+field names means it). It never touches the Mac's screen or
 cursor. Use the HTTP API below or the bundled MCP server (`phone_*` tools); the
 loop is the same. Details live in the reference: `curl -s -H "$AUTH"
 "$HOST/agent/reference"` serves the copy that matches the running daemon

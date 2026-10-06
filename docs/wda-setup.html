@@ -46,6 +46,12 @@
   <code>127.0.0.1:8100</code>，手机端 MJPEG 画面走 <code>127.0.0.1:9100</code>。
   浏览器看 <code>/agent/mjpeg</code>、控 <code>/control</code>，agent 走 <code>/agent/*</code>。
   daemon 不碰 Mac 的屏幕、光标和焦点，也不需要任何 macOS 权限授权。</p>
+  <p class="lede"><strong>更新：</strong>iphone-use 已用自己的设备 runner
+  （<code>runner/IPhoneUseRunner</code>，基于 XCTest，接口与 WDA 兼容，见
+  <a href="../runner/README.md">runner/README.md</a>）取代 WebDriverAgent。
+  <code>setup-wda.sh</code> 不再拉取、钉版或改图标 WDA，而是编译安装目录里的
+  <code>~/.iphone-use/runner</code>；端口、中继、签名、锁屏、信任、DDI、WARP 等
+  下面记录的坑全部照旧适用，文中的 “WDA” 读作 “设备 runner” 即可。</p>
 </header>
 
 <h2>工作原理</h2>
