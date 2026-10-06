@@ -170,9 +170,12 @@ jobs:
           # (agent reference lives in docs/agent-reference.md).
           test "$(find skills/iphone-use -type f | wc -l | tr -d '[:space:]')" = 1
           test -f skills/iphone-use/SKILL.md
-          bash -n install.sh
-          bash -n uninstall.sh
-          bash -n scripts/setup-wda.sh
+          # /bin/bash is the 3.2 that launchd and users run; Homebrew bash 5
+          # accepts constructs it rejects (an apostrophe in a heredoc inside
+          # $(...) broke the runner supervisor once).
+          /bin/bash -n install.sh
+          /bin/bash -n uninstall.sh
+          /bin/bash -n scripts/setup-wda.sh
           bash scripts/test-install-release-transaction.sh
           bash scripts/test-install-cli-link.sh
           bash scripts/test-setup-wda-warp-preflight.sh

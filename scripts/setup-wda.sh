@@ -3076,7 +3076,7 @@ if record.get("schema_version") != 1 or record.get("key") != key:
 products, xctestrun = record.get("products_dir"), record.get("xctestrun")
 if not (isinstance(products, str) and isinstance(xctestrun, str)):
     raise SystemExit(1)
-# Only this instance's own products directory is ever reused.
+# Only the products directory of this instance is ever reused.
 if products.rstrip("/") != expected_products.rstrip("/"):
     raise SystemExit(1)
 if "/Build/Products/" not in products or not xctestrun.endswith(".xctestrun"):
