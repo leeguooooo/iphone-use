@@ -24,6 +24,9 @@ FOUNDATION_EXPORT NSString *const IPURTreeNodeCountKey;  // NSNumber
 FOUNDATION_EXPORT NSString *const IPURTreeDepthKey;      // NSNumber: the accepted request depth
 FOUNDATION_EXPORT NSString *const IPURTreeTruncatedKey;  // NSNumber(BOOL)
 FOUNDATION_EXPORT NSString *const IPURTreeExtensionCallsKey; // NSNumber: re-rooted follow-up requests
+/// Node key holding the live XCAccessibilityElement, present only in trees requested with
+/// `includeElements:YES`. Never JSON-serialize such a tree.
+FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 
 @interface IPURBridge : NSObject
 
@@ -84,9 +87,21 @@ FOUNDATION_EXPORT NSString *const IPURTreeExtensionCallsKey; // NSNumber: re-roo
                                    extensionCallLimit:(NSInteger)extensionCallLimit
                                           rememberKey:(nullable NSString *)rememberKey;
 
+/// Same as above; with `includeElements` every node also carries its live accessibility element
+/// under IPURNodeAXElementKey, so it can be re-snapshotted later (element registry).
++ (NSDictionary<NSString *, id> *)wdaTreeForAXElement:(id)axElement
+                                             maxDepth:(NSInteger)maxDepth
+                                             maxNodes:(NSInteger)maxNodes
+                                   extensionCallLimit:(NSInteger)extensionCallLimit
+                                          rememberKey:(nullable NSString *)rememberKey
+                                      includeElements:(BOOL)includeElements;
+
 /// Serializes an already-taken snapshot (public XCUIElementSnapshot or private XCElementSnapshot)
 /// into WDA's /source node shape.
 + (NSDictionary<NSString *, id> *)wdaTreeForSnapshot:(id)snapshot maxNodes:(NSInteger)maxNodes;
++ (NSDictionary<NSString *, id> *)wdaTreeForSnapshot:(id)snapshot
+                                            maxNodes:(NSInteger)maxNodes
+                                     includeElements:(BOOL)includeElements;
 
 /// WDA's "XCUIElementType…" name for an element type raw value.
 + (NSString *)elementTypeName:(NSInteger)elementType;
@@ -103,10 +118,40 @@ FOUNDATION_EXPORT NSString *const IPURTreeExtensionCallsKey; // NSNumber: re-roo
                                        to:(CGPoint)end
                                  duration:(NSTimeInterval)duration
                                       pid:(int)pid;
+/// Several touches in one event record. Each path is an array of steps
+/// `{"type": "down"|"move"|"up", "x": pt, "y": pt, "t": seconds}`; the first step must be "down"
+/// and a path without a final "up" lifts at its last offset. Paths run concurrently on the shared
+/// timeline (offsets are absolute), so sequential touches simply use later offsets.
++ (nullable NSString *)synthesizeTouchPaths:(NSArray<NSArray<NSDictionary<NSString *, id> *> *> *)paths
+                                       name:(NSString *)name;
+
 /// Types into whatever holds keyboard focus. `charactersPerSecond` 0 → 60.
 + (nullable NSString *)synthesizeText:(NSString *)text
                   charactersPerSecond:(NSUInteger)charactersPerSecond
                                   pid:(int)pid;
+
+// MARK: - Screen capture
+
+/// One JPEG of the main screen, safe to call off the main thread. Tries, fastest first:
+/// 1. `XCUIDevice.screenDataSource requestScreenshotWithRequest:withReply:` with an
+///    XCTScreenshotRequest asking testmanagerd for JPEG at `quality` (what WDA's MJPEG server uses);
+/// 2. `XCUIScreen screenshotWithEncoding:options:` with the same JPEG encoding;
+/// 3. the public `XCUIScreen.mainScreen.screenshot` PNG, re-encoded.
+/// `scale` (0 < scale ≤ 1) downsizes with ImageIO and re-encodes at `quality` (0…1).
+/// `path` receives which capture path produced the frame ("request", "encoding", "public").
++ (nullable NSData *)jpegScreenshotWithQuality:(double)quality
+                                         scale:(double)scale
+                                          path:(NSString *_Nullable *_Nullable)path
+                                         error:(NSString *_Nullable *_Nullable)error;
+
+// MARK: - Device
+
+/// Screen lock state from SpringBoardServices (SBGetScreenLockStatus), like WDA. Writes NO into
+/// `known` when the private function is unavailable (the return value is then NO).
++ (BOOL)isScreenLocked:(BOOL *)known;
+
+/// `-[XCUIDevice pressLockButton]`; returns an error string when unavailable.
++ (nullable NSString *)pressLockButton;
 
 @end
 

@@ -9,6 +9,10 @@
 
 #import "IPURBridge.h"
 
+#import <ImageIO/ImageIO.h>
+#import <dlfcn.h>
+#import <stdatomic.h>
+#import <mach/mach.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -19,6 +23,7 @@ NSString *const IPURTreeNodeCountKey = @"nodeCount";
 NSString *const IPURTreeDepthKey = @"depth";
 NSString *const IPURTreeTruncatedKey = @"truncated";
 NSString *const IPURTreeExtensionCallsKey = @"extensionCalls";
+NSString *const IPURNodeAXElementKey = @"__axElement";
 
 static NSString *const IPURSpringBoardBundleID = @"com.apple.springboard";
 
@@ -61,6 +66,7 @@ typedef struct {
   NSInteger nodeCount;
   NSInteger maxNodes;
   BOOL truncated;
+  BOOL includeElements;
 } IPURWalk;
 
 @implementation IPURBridge
@@ -269,6 +275,23 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
     if (cached != nil) return cached;
   }
   id bundleID = IPURObject([self applicationForPID:pid], @"bundleID");
+  if (![bundleID isKindOfClass:NSString.class] || [(NSString *)bundleID length] == 0) {
+    // XCUIApplicationMonitor applicationProcessWithPID: knows processes XCTest did not launch.
+    id monitor = IPURObject(XCUIDevice.sharedDevice, @"applicationMonitor");
+    SEL processSelector = NSSelectorFromString(@"applicationProcessWithPID:");
+    if (monitor != nil && [monitor respondsToSelector:processSelector]) {
+      @try {
+        id process = ((IPURMsgSendObjectInt)objc_msgSend)(monitor, processSelector, pid);
+        bundleID = IPURObject(process, @"bundleID");
+      } @catch (__unused NSException *exception) {
+        bundleID = nil;
+      }
+    }
+  }
+  if ((![bundleID isKindOfClass:NSString.class] || [(NSString *)bundleID length] == 0)
+      && pid == [self pidForAXElement:[self systemApplicationElement] ?: NSNull.null]) {
+    bundleID = IPURSpringBoardBundleID;
+  }
   if (![bundleID isKindOfClass:NSString.class] || [(NSString *)bundleID length] == 0) return nil;
   @synchronized(cache) {
     cache[@(pid)] = bundleID;
@@ -471,6 +494,10 @@ static NSMutableDictionary *IPURSerialize(
   node[@"rect"] = IPURRect(snapshot);
   node[@"isEnabled"] = IPURBoolString(snapshot, @"enabled", YES);
   node[@"isFocused"] = IPURBoolString(snapshot, @"hasFocus", NO);
+  if (walk->includeElements) {
+    id element = IPURKVC(snapshot, @"accessibilityElement");
+    if (element != nil) node[IPURNodeAXElementKey] = element;
+  }
 
   NSMutableArray *children = [NSMutableArray array];
   for (id child in IPURChildren(snapshot)) {
@@ -523,6 +550,21 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
                                    extensionCallLimit:(NSInteger)extensionCallLimit
                                           rememberKey:(nullable NSString *)rememberKey
 {
+  return [self wdaTreeForAXElement:axElement
+                          maxDepth:maxDepth
+                          maxNodes:maxNodes
+                extensionCallLimit:extensionCallLimit
+                       rememberKey:rememberKey
+                   includeElements:NO];
+}
+
++ (NSDictionary<NSString *, id> *)wdaTreeForAXElement:(id)axElement
+                                             maxDepth:(NSInteger)maxDepth
+                                             maxNodes:(NSInteger)maxNodes
+                                   extensionCallLimit:(NSInteger)extensionCallLimit
+                                          rememberKey:(nullable NSString *)rememberKey
+                                      includeElements:(BOOL)includeElements
+{
   maxDepth = MAX(1, maxDepth);
   maxNodes = MAX(1, maxNodes);
   NSMutableArray<NSNumber *> *depths = [NSMutableArray arrayWithObject:@(maxDepth)];
@@ -564,7 +606,7 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
     }
   }
 
-  IPURWalk walk = {.nodeCount = 0, .maxNodes = maxNodes, .truncated = NO};
+  IPURWalk walk = {.nodeCount = 0, .maxNodes = maxNodes, .truncated = NO, .includeElements = includeElements};
   NSMutableArray<IPURFrontier *> *leaves = extensionCallLimit > 0 ? [NSMutableArray array] : nil;
   NSMutableDictionary *rootNode = IPURSerialize(root, 0, &walk, leaves);
   if (rootNode == nil) {
@@ -616,7 +658,14 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
 
 + (NSDictionary<NSString *, id> *)wdaTreeForSnapshot:(id)snapshot maxNodes:(NSInteger)maxNodes
 {
-  IPURWalk walk = {.nodeCount = 0, .maxNodes = MAX(1, maxNodes), .truncated = NO};
+  return [self wdaTreeForSnapshot:snapshot maxNodes:maxNodes includeElements:NO];
+}
+
++ (NSDictionary<NSString *, id> *)wdaTreeForSnapshot:(id)snapshot
+                                            maxNodes:(NSInteger)maxNodes
+                                     includeElements:(BOOL)includeElements
+{
+  IPURWalk walk = {.nodeCount = 0, .maxNodes = MAX(1, maxNodes), .truncated = NO, .includeElements = includeElements};
   NSMutableDictionary *rootNode = IPURSerialize(snapshot, 0, &walk, nil);
   if (rootNode == nil) {
     return @{IPURTreeOkKey: @NO, IPURTreeErrorKey: @"snapshot could not be serialized"};
@@ -811,6 +860,260 @@ static NSString *IPURSynthesize(id record, id path)
     ((IPURMsgSendTypeText)objc_msgSend)(
       path, typeText, text, 0.0, (unsigned long long)(charactersPerSecond > 0 ? charactersPerSecond : 60), NO);
     return IPURSynthesize(record, path);
+  } @catch (NSException *exception) {
+    return [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
+  }
+}
+
++ (nullable NSString *)synthesizeTouchPaths:(NSArray<NSArray<NSDictionary<NSString *, id> *> *> *)paths
+                                       name:(NSString *)name
+{
+  if (paths.count == 0) return @"no touch paths to synthesize";
+  @try {
+    id record = nil;
+    NSString *error = IPURCreateGestureRecord(name, 0, &record);
+    if (error != nil) return error;
+    for (NSArray<NSDictionary<NSString *, id> *> *steps in paths) {
+      NSDictionary *first = steps.firstObject;
+      if (first == nil || ![first[@"type"] isEqual:@"down"]) {
+        return @"touch path must start with a down step";
+      }
+      double lastOffset = [first[@"t"] doubleValue];
+      id path = IPURNewTouchPath(CGPointMake([first[@"x"] doubleValue], [first[@"y"] doubleValue]), lastOffset);
+      if (path == nil) return @"private XCTest event synthesis failed: could not create pointer path";
+      BOOL lifted = NO;
+      for (NSUInteger index = 1; index < steps.count && !lifted; index++) {
+        NSDictionary *step = steps[index];
+        double offset = MAX(lastOffset, [step[@"t"] doubleValue]);
+        if ([step[@"type"] isEqual:@"move"]) {
+          IPURMove(path, CGPointMake([step[@"x"] doubleValue], [step[@"y"] doubleValue]), offset);
+        } else if ([step[@"type"] isEqual:@"up"]) {
+          IPURLift(path, offset);
+          lifted = YES;
+        } else {
+          return [NSString stringWithFormat:@"unsupported touch step type %@", step[@"type"]];
+        }
+        lastOffset = offset;
+      }
+      if (!lifted) IPURLift(path, lastOffset + 0.01);
+      ((IPURMsgSendAddPath)objc_msgSend)(record, NSSelectorFromString(@"addPointerEventPath:"), path);
+    }
+    NSError *synthesisError = nil;
+    BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(
+      record, NSSelectorFromString(@"synthesizeWithError:"), &synthesisError);
+    if (!ok) {
+      return [NSString stringWithFormat:@"private XCTest event synthesis failed: %@",
+                                        synthesisError.localizedDescription ?: @"synthesizeWithError returned NO"];
+    }
+    return nil;
+  } @catch (NSException *exception) {
+    return [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
+  }
+}
+
+// MARK: - Screen capture
+
+static id IPURJPEGEncoding(double quality)
+{
+  Class encodingClass = NSClassFromString(@"XCTImageEncoding");
+  SEL initSelector = NSSelectorFromString(@"initWithUniformTypeIdentifier:compressionQuality:");
+  if (encodingClass == Nil || ![encodingClass instancesRespondToSelector:initSelector]) return nil;
+  return ((id (*)(id, SEL, NSString *, double))objc_msgSend)(
+    [encodingClass alloc], initSelector, @"public.jpeg", quality);
+}
+
+/// XCTImage / XCUIScreenshot → its encoded bytes.
+static NSData *IPURImageData(id image)
+{
+  if (image == nil) return nil;
+  id data = IPURObject(image, @"data");
+  if ([data isKindOfClass:NSData.class]) return data;
+  return nil;
+}
+
+static NSData *IPURCaptureViaRequest(id encoding, NSString **error)
+{
+  id dataSource = IPURObject(XCUIDevice.sharedDevice, @"screenDataSource");
+  SEL requestSelector = NSSelectorFromString(@"requestScreenshotWithRequest:withReply:");
+  Class requestClass = NSClassFromString(@"XCTScreenshotRequest");
+  SEL initSelector = NSSelectorFromString(@"initWithScreenID:rect:encoding:options:");
+  if (dataSource == nil || ![dataSource respondsToSelector:requestSelector] || requestClass == Nil
+      || ![requestClass instancesRespondToSelector:initSelector]) {
+    if (error) *error = @"screenshot request API unavailable";
+    return nil;
+  }
+  long long screenID = (long long)IPURMainDisplayID();
+  id request = ((id (*)(id, SEL, long long, CGRect, id, unsigned long long))objc_msgSend)(
+    [requestClass alloc], initSelector, screenID, CGRectNull, encoding, 0ULL);
+  if (request == nil) {
+    if (error) *error = @"could not build XCTScreenshotRequest";
+    return nil;
+  }
+  __block NSData *result = nil;
+  __block NSString *failure = nil;
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  void (^reply)(id, NSError *) = ^(id image, NSError *replyError) {
+    result = IPURImageData(image);
+    if (result == nil) failure = replyError.localizedDescription ?: @"screenshot reply carried no data";
+    dispatch_semaphore_signal(done);
+  };
+  ((void (*)(id, SEL, id, id))objc_msgSend)(dataSource, requestSelector, request, reply);
+  if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC))) != 0) {
+    if (error) *error = @"screenshot request timed out";
+    return nil;
+  }
+  if (result == nil && error) *error = failure;
+  return result;
+}
+
+static NSData *IPURCaptureViaEncoding(id encoding, NSString **error)
+{
+  id screen = XCUIScreen.mainScreen;
+  SEL selector = NSSelectorFromString(@"screenshotWithEncoding:options:");
+  if (![screen respondsToSelector:selector]) {
+    if (error) *error = @"XCUIScreen screenshotWithEncoding:options: unavailable";
+    return nil;
+  }
+  id screenshot = ((id (*)(id, SEL, id, unsigned long long))objc_msgSend)(screen, selector, encoding, 0ULL);
+  NSData *data = IPURImageData(IPURObject(screenshot, @"internalImage"));
+  if (data == nil && error) *error = @"encoded screenshot carried no data";
+  return data;
+}
+
+/// Downscales and/or re-encodes as JPEG with ImageIO. `scale` 1 with `reencode` NO returns the
+/// input untouched.
+static NSData *IPURJPEGTranscode(NSData *input, double scale, double quality, BOOL reencode)
+{
+  if (input == nil) return nil;
+  if (scale >= 0.999 && !reencode) return input;
+  CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)input, NULL);
+  if (source == NULL) return nil;
+  CGImageRef image = NULL;
+  if (scale < 0.999) {
+    NSDictionary *properties = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, NULL));
+    double width = [properties[(id)kCGImagePropertyPixelWidth] doubleValue];
+    double height = [properties[(id)kCGImagePropertyPixelHeight] doubleValue];
+    NSUInteger maxPixels = (NSUInteger)MAX(16.0, round(MAX(width, height) * scale));
+    NSDictionary *options = @{
+      (id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+      (id)kCGImageSourceThumbnailMaxPixelSize: @(maxPixels),
+      (id)kCGImageSourceCreateThumbnailWithTransform: @YES,
+      (id)kCGImageSourceShouldCacheImmediately: @YES,
+    };
+    image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+  } else {
+    image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+  }
+  CFRelease(source);
+  if (image == NULL) return nil;
+  NSMutableData *output = [NSMutableData data];
+  CGImageDestinationRef destination =
+    CGImageDestinationCreateWithData((__bridge CFMutableDataRef)output, CFSTR("public.jpeg"), 1, NULL);
+  if (destination == NULL) {
+    CGImageRelease(image);
+    return nil;
+  }
+  NSDictionary *properties = @{(id)kCGImageDestinationLossyCompressionQuality: @(quality)};
+  CGImageDestinationAddImage(destination, image, (__bridge CFDictionaryRef)properties);
+  BOOL ok = CGImageDestinationFinalize(destination);
+  CFRelease(destination);
+  CGImageRelease(image);
+  return ok ? output : nil;
+}
+
++ (nullable NSData *)jpegScreenshotWithQuality:(double)quality
+                                         scale:(double)scale
+                                          path:(NSString *_Nullable *_Nullable)path
+                                         error:(NSString *_Nullable *_Nullable)error
+{
+  quality = MIN(1.0, MAX(0.01, quality));
+  scale = (scale <= 0 || scale > 1) ? 1.0 : scale;
+  // Paths that failed once are not retried on every frame.
+  static atomic_bool requestBroken = false;
+  static atomic_bool encodingBroken = false;
+  NSString *lastError = nil;
+  @try {
+    id encoding = IPURJPEGEncoding(quality);
+    if (encoding != nil && !atomic_load(&requestBroken)) {
+      NSString *failure = nil;
+      NSData *jpeg = IPURCaptureViaRequest(encoding, &failure);
+      if (jpeg != nil) {
+        if (path) *path = @"request";
+        return IPURJPEGTranscode(jpeg, scale, quality, NO);
+      }
+      // A timeout is transient (testmanagerd busy, a reply routed through a busy main thread);
+      // anything else means the path does not work here.
+      if ([failure isEqualToString:@"screenshot request timed out"]) {
+        NSLog(@"ipu-runner: screenshot request timed out; using the next path for this frame");
+      } else {
+        NSLog(@"ipu-runner: screenshot request path failed, not retrying it: %@", failure);
+        atomic_store(&requestBroken, true);
+      }
+      lastError = failure;
+    }
+    if (encoding != nil && !atomic_load(&encodingBroken)) {
+      NSString *failure = nil;
+      NSData *jpeg = IPURCaptureViaEncoding(encoding, &failure);
+      if (jpeg != nil) {
+        if (path) *path = @"encoding";
+        return IPURJPEGTranscode(jpeg, scale, quality, NO);
+      }
+      NSLog(@"ipu-runner: screenshot encoding path failed, not retrying it: %@", failure);
+      atomic_store(&encodingBroken, true);
+      lastError = failure;
+    }
+    NSData *png = XCUIScreen.mainScreen.screenshot.PNGRepresentation;
+    NSData *jpeg = IPURJPEGTranscode(png, scale, quality, YES);
+    if (jpeg != nil) {
+      if (path) *path = @"public";
+      return jpeg;
+    }
+    lastError = @"public screenshot could not be encoded";
+  } @catch (NSException *exception) {
+    lastError = [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
+  }
+  if (error) *error = lastError;
+  return nil;
+}
+
+// MARK: - Device
+
++ (BOOL)isScreenLocked:(BOOL *)known
+{
+  // The same SpringBoardServices calls WDA's fb_isScreenLocked makes.
+  typedef mach_port_t (*IPURServerPort)(void);
+  typedef void (*IPURLockStatus)(mach_port_t, BOOL *, BOOL *);
+  static IPURServerPort serverPort;
+  static IPURLockStatus lockStatus;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    void *handle = dlopen(
+      "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
+    if (handle != NULL) {
+      serverPort = (IPURServerPort)dlsym(handle, "SBSSpringBoardServerPort");
+      lockStatus = (IPURLockStatus)dlsym(handle, "SBGetScreenLockStatus");
+    }
+  });
+  if (serverPort == NULL || lockStatus == NULL) {
+    if (known != NULL) *known = NO;
+    return NO;
+  }
+  BOOL locked = NO;
+  BOOL passcodeEnabled = NO;
+  lockStatus(serverPort(), &locked, &passcodeEnabled);
+  if (known != NULL) *known = YES;
+  return locked;
+}
+
++ (nullable NSString *)pressLockButton
+{
+  SEL selector = NSSelectorFromString(@"pressLockButton");
+  if (![XCUIDevice.sharedDevice respondsToSelector:selector]) {
+    return @"XCUIDevice pressLockButton is unavailable";
+  }
+  @try {
+    ((void (*)(id, SEL))objc_msgSend)(XCUIDevice.sharedDevice, selector);
+    return nil;
   } @catch (NSException *exception) {
     return [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
   }

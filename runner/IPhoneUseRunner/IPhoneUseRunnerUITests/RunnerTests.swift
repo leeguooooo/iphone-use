@@ -11,17 +11,31 @@ import XCTest
 
 final class RunnerTests: XCTestCase {
   static let springBoardBundleID = "com.apple.springboard"
-  static let defaultPort: UInt16 = 8200
+  /// WDA's ports, so existing relays and daemon config work unchanged.
+  static let defaultPort: UInt16 = 8100
+  static let defaultMJPEGPort: UInt16 = 9100
   static let defaultMaxDepth = 64
   static let defaultMaxNodes = 5000
   static let defaultExtensionCalls = 8
 
-  private var server: RunnerHTTPServer?
-  private var serveExpectation: XCTestExpectation?
-  private let busyLock = NSLock()
-  private var busySince: Date?
+  var server: RunnerHTTPServer?
+  var mjpeg: RunnerMJPEGServer?
+  var serveExpectation: XCTestExpectation?
+  let busyLock = NSLock()
+  var busySince: Date?
   /// Issues XCTest recorded while the current request ran (fallback XCUI paths report through here).
-  private var recordedIssues: [String] = []
+  var recordedIssues: [String] = []
+
+  // WDA-compatible surface (RunnerWDA.swift).
+  /// The one session id this runner hands out; any id is accepted in session paths.
+  static let sessionID = UUID().uuidString
+  static let systemVersion = UIDevice.current.systemVersion
+  let elements = ElementRegistry()
+  /// Last alert scan and when it ran; reused for a second while nothing was POSTed (WdaClient asks
+  /// /alert/text and /wda/alert/buttons back to back).
+  var alertCache: (at: Date, alert: FoundAlert?)?
+  /// appium/settings values, accepted and echoed (the runner never waits for idle anyway).
+  var wdaSettings: [String: Any] = ["waitForIdleTimeout": 0, "animationCoolOffTimeout": 0]
 
   override func setUp() {
     continueAfterFailure = true
@@ -63,39 +77,81 @@ final class RunnerTests: XCTestCase {
     self.server = server
     server.start()
 
+    // MJPEG stream; IPU_RUNNER_MJPEG_PORT=0 turns it off. A failure here must not take the
+    // command API down with it.
+    let mjpegPort = environment["IPU_RUNNER_MJPEG_PORT"].flatMap { UInt16($0) } ?? Self.defaultMJPEGPort
+    if mjpegPort > 0 {
+      do {
+        let mjpeg = try RunnerMJPEGServer(port: mjpegPort)
+        mjpeg.start()
+        self.mjpeg = mjpeg
+      } catch {
+        NSLog("ipu-runner: MJPEG server not started: %@", String(describing: error))
+      }
+    }
+
     // Block this test (and keep the main run loop spinning for the request handlers) for a year,
     // or until POST /shutdown.
     let result = XCTWaiter.wait(for: [expectation], timeout: 365 * 24 * 60 * 60)
     NSLog("ipu-runner: serve loop ended (%@)", String(describing: result))
     server.stop()
+    mjpeg?.stop()
   }
 
   // MARK: - Dispatch
 
   /// Answered on the transport queue: liveness must not wait behind a slow command on main.
-  private func inlineResponse(_ request: HTTPRequest) -> HTTPResponse? {
-    guard request.method == "GET", request.path == "/status" else { return nil }
+  func inlineResponse(_ request: HTTPRequest) -> HTTPResponse? {
+    guard request.method == "GET" else { return nil }
+    if request.path == "/status" {
+      return .value(statusValue(), sessionId: Self.sessionID)
+    }
+    // WDA serves the lock state without a session; the daemon reads it first precisely because a
+    // locked phone stalls everything else, so it must not queue behind main either.
+    if request.path == "/wda/locked"
+      || (request.path.hasPrefix("/session/") && request.path.hasSuffix("/wda/locked")) {
+      var known = ObjCBool(false)
+      let locked = IPURBridge.isScreenLocked(&known)
+      if known.boolValue { return .value(locked) }
+      return nil  // unknown: answered on main (see RunnerWDA.locked)
+    }
+    return nil
+  }
+
+  func statusValue() -> [String: Any] {
     busyLock.lock()
     let busySince = self.busySince
     busyLock.unlock()
     let bundle = Bundle(for: RunnerTests.self)
+    let bundleID = bundle.bundleIdentifier ?? "com.leeguoo.iphone-use.runner.uitests"
+    let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
     var value: [String: Any] = [
       "ready": true,
-      "bundle": bundle.bundleIdentifier ?? "com.leeguoo.iphone-use.runner.uitests",
-      "version": bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0",
+      "message": "iphone-use native runner is ready to accept commands",
+      "state": "success",
+      "sessionId": Self.sessionID,
+      "os": ["name": "iOS", "version": Self.systemVersion, "sdkVersion": Self.systemVersion],
+      "ios": ["ip": NSNull()],
+      "build": ["productBundleIdentifier": bundleID, "version": version, "runner": "iphone-use-native"],
+      "bundle": bundleID,
+      "version": version,
       "busy": busySince != nil,
     ]
+    if let mjpeg { value["mjpeg"] = mjpeg.statusValue() }
     if let busySince {
       value["busyMs"] = Int(Date().timeIntervalSince(busySince) * 1000)
     }
-    return .value(value)
+    return value
   }
 
-  private func handleOnMain(_ request: HTTPRequest) -> HTTPResponse {
+  func handleOnMain(_ request: HTTPRequest) -> HTTPResponse {
     busyLock.lock()
     busySince = Date()
     busyLock.unlock()
     recordedIssues.removeAll()
+    if request.method != "GET", Self.mayChangeScreen(request.path) {
+      alertCache = nil
+    }
     defer {
       busyLock.lock()
       busySince = nil
@@ -118,7 +174,8 @@ final class RunnerTests: XCTestCase {
     return response
   }
 
-  private func route(_ request: HTTPRequest) throws -> HTTPResponse {
+  func route(_ request: HTTPRequest) throws -> HTTPResponse {
+    if let response = try routeWDA(request) { return response }
     switch (request.method, request.path) {
     case ("GET", "/source"): return try source(request)
     case ("POST", "/tap"): return try tap(request)
@@ -142,7 +199,7 @@ final class RunnerTests: XCTestCase {
 
   // MARK: - Foreground application
 
-  private struct Foreground {
+  struct Foreground {
     let element: AnyObject?
     let pid: Int32
     var bundleID: String? { IPURBridge.bundleID(forPID: pid) }
@@ -155,12 +212,12 @@ final class RunnerTests: XCTestCase {
     }
   }
 
-  private func screenCenter() -> CGPoint {
+  func screenCenter() -> CGPoint {
     let size = windowSizePoints()
     return CGPoint(x: size.width / 2, y: size.height / 2)
   }
 
-  private func foreground() -> Foreground {
+  func foreground() -> Foreground {
     var pid: Int32 = 0
     let element = IPURBridge.foregroundApplicationElement(withProbePoint: screenCenter(), pid: &pid)
     return Foreground(element: element as AnyObject?, pid: pid)
@@ -168,20 +225,20 @@ final class RunnerTests: XCTestCase {
 
   // MARK: - Arguments
 
-  private func number(_ object: [String: Any], _ key: String) -> Double? {
+  func number(_ object: [String: Any], _ key: String) -> Double? {
     if let value = object[key] as? NSNumber { return value.doubleValue }
     if let value = object[key] as? String { return Double(value) }
     return nil
   }
 
-  private func requiredNumber(_ object: [String: Any], _ key: String) throws -> Double {
+  func requiredNumber(_ object: [String: Any], _ key: String) throws -> Double {
     guard let value = number(object, key), value.isFinite else {
       throw RunnerError.invalidArgument("'\(key)' must be a number")
     }
     return value
   }
 
-  private func requiredString(_ object: [String: Any], _ keys: String...) throws -> String {
+  func requiredString(_ object: [String: Any], _ keys: String...) throws -> String {
     for key in keys {
       if let value = object[key] as? String, !value.isEmpty { return value }
     }
@@ -190,7 +247,7 @@ final class RunnerTests: XCTestCase {
 
   // MARK: - /source
 
-  private func source(_ request: HTTPRequest) throws -> HTTPResponse {
+  func source(_ request: HTTPRequest) throws -> HTTPResponse {
     let explicitDepth = request.query["max_depth"].flatMap { Int($0) }
     let maxDepth = max(1, explicitDepth ?? Self.defaultMaxDepth)
     let maxNodes = max(1, request.query["max_nodes"].flatMap { Int($0) } ?? Self.defaultMaxNodes)
@@ -237,7 +294,7 @@ final class RunnerTests: XCTestCase {
     return .value(root, headers: treeHeaders(tree, backend: "xcui-snapshot", pid: target.pid))
   }
 
-  private func treeHeaders(_ tree: [String: Any], backend: String, pid: Int32) -> [String: String] {
+  func treeHeaders(_ tree: [String: Any], backend: String, pid: Int32) -> [String: String] {
     [
       "X-IPU-Backend": backend,
       "X-IPU-Node-Count": "\(tree[IPURTreeNodeCountKey] ?? 0)",
@@ -252,7 +309,7 @@ final class RunnerTests: XCTestCase {
 
   /// Runs a synthesized gesture; when the private path is missing or fails, runs `fallback`
   /// (public XCUICoordinate API, quiescence skipped) and reports which path acted.
-  private func gesture(
+  func gesture(
     _ name: String,
     synthesized: () -> String?,
     fallback: (XCUIApplication) -> Void
@@ -276,12 +333,12 @@ final class RunnerTests: XCTestCase {
     return .value(NSNull(), headers: ["X-IPU-Gesture": "synthesized"])
   }
 
-  private func coordinate(_ application: XCUIApplication, _ point: CGPoint) -> XCUICoordinate {
+  func coordinate(_ application: XCUIApplication, _ point: CGPoint) -> XCUICoordinate {
     application.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
       .withOffset(CGVector(dx: point.x, dy: point.y))
   }
 
-  private func tap(_ request: HTTPRequest) throws -> HTTPResponse {
+  func tap(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     let point = CGPoint(x: try requiredNumber(body, "x"), y: try requiredNumber(body, "y"))
     return try gesture("tap", synthesized: { IPURBridge.synthesizeTap(at: point, pid: 0) }) { app in
@@ -289,7 +346,7 @@ final class RunnerTests: XCTestCase {
     }
   }
 
-  private func swipe(_ request: HTTPRequest) throws -> HTTPResponse {
+  func swipe(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     let start = CGPoint(x: try requiredNumber(body, "x1"), y: try requiredNumber(body, "y1"))
     let end = CGPoint(x: try requiredNumber(body, "x2"), y: try requiredNumber(body, "y2"))
@@ -301,7 +358,7 @@ final class RunnerTests: XCTestCase {
     }
   }
 
-  private func longPress(_ request: HTTPRequest) throws -> HTTPResponse {
+  func longPress(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     let point = CGPoint(x: try requiredNumber(body, "x"), y: try requiredNumber(body, "y"))
     let duration = max(0.05, (number(body, "duration_ms") ?? 1000) / 1000)
@@ -314,7 +371,7 @@ final class RunnerTests: XCTestCase {
 
   // MARK: - Text, buttons, apps
 
-  private func typeText(_ request: HTTPRequest) throws -> HTTPResponse {
+  func typeText(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     guard let text = body["text"] as? String else {
       throw RunnerError.invalidArgument("'text' must be a string")
@@ -337,14 +394,14 @@ final class RunnerTests: XCTestCase {
     return .value(NSNull(), headers: ["X-IPU-Gesture": "synthesized"])
   }
 
-  private func home() throws -> HTTPResponse {
+  func home() throws -> HTTPResponse {
     if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(.home) }) {
       throw RunnerError.failed("home failed: \(exception)")
     }
     return .value(NSNull())
   }
 
-  private func launch(_ request: HTTPRequest) throws -> HTTPResponse {
+  func launch(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     let bundle = try requiredString(body, "bundle", "bundleId")
     let application = XCUIApplication(bundleIdentifier: bundle)
@@ -359,7 +416,7 @@ final class RunnerTests: XCTestCase {
     return .value(["bundle": bundle, "pid": Int(IPURBridge.pid(for: application))])
   }
 
-  private func activeApp() throws -> HTTPResponse {
+  func activeApp() throws -> HTTPResponse {
     let target = foreground()
     guard target.pid > 0 else {
       throw RunnerError.notFound("no active application", code: "unknown error")
@@ -373,7 +430,7 @@ final class RunnerTests: XCTestCase {
 
   // MARK: - Screen
 
-  private func screenshot() throws -> HTTPResponse {
+  func screenshot() throws -> HTTPResponse {
     var png = Data()
     if let exception = IPURBridge.catchException({ png = XCUIScreen.main.screenshot().pngRepresentation }) {
       throw RunnerError.failed("screenshot failed: \(exception)")
@@ -382,7 +439,7 @@ final class RunnerTests: XCTestCase {
     return .value(png.base64EncodedString())
   }
 
-  private func windowSizePoints() -> CGSize {
+  func windowSizePoints() -> CGSize {
     var size = UIScreen.main.bounds.size
     let landscape = XCUIDevice.shared.orientation.isLandscape
     if landscape != (size.width > size.height) {
@@ -391,14 +448,14 @@ final class RunnerTests: XCTestCase {
     return size
   }
 
-  private func windowSize() -> HTTPResponse {
+  func windowSize() -> HTTPResponse {
     let size = windowSizePoints()
     return .value(["width": size.width, "height": size.height])
   }
 
   // MARK: - Alerts
 
-  private struct FoundAlert {
+  struct FoundAlert {
     let node: [String: Any]
     let pid: Int32
     let text: String
@@ -408,7 +465,7 @@ final class RunnerTests: XCTestCase {
   /// Looks for an XCUIElementTypeAlert in SpringBoard first (system prompts) and then in the
   /// foreground app, using the private AX snapshot. Falls back to XCUI queries when the private
   /// client is unavailable.
-  private func findAlert() -> FoundAlert? {
+  func findAlert() -> FoundAlert? {
     var candidates: [(AnyObject, Int32)] = []
     if let springBoard = IPURBridge.systemApplicationElement() {
       candidates.append((springBoard as AnyObject, IPURBridge.pid(forAXElement: springBoard)))
@@ -434,7 +491,7 @@ final class RunnerTests: XCTestCase {
     return findAlertWithQueries()
   }
 
-  private func firstNode(in node: [String: Any], type: String) -> [String: Any]? {
+  func firstNode(in node: [String: Any], type: String) -> [String: Any]? {
     if node["type"] as? String == type { return node }
     for child in node["children"] as? [[String: Any]] ?? [] {
       if let found = firstNode(in: child, type: type) { return found }
@@ -442,7 +499,7 @@ final class RunnerTests: XCTestCase {
     return nil
   }
 
-  private func describeAlert(_ alert: [String: Any], pid: Int32) -> FoundAlert {
+  func describeAlert(_ alert: [String: Any], pid: Int32) -> FoundAlert {
     var texts: [String] = []
     var buttons: [(String, CGRect)] = []
     func label(_ node: [String: Any]) -> String? {
@@ -473,7 +530,7 @@ final class RunnerTests: XCTestCase {
     return FoundAlert(node: alert, pid: pid, text: texts.joined(separator: "\n"), buttons: buttons)
   }
 
-  private func findAlertWithQueries() -> FoundAlert? {
+  func findAlertWithQueries() -> FoundAlert? {
     var found: FoundAlert?
     _ = IPURBridge.catchException {
       for application in [XCUIApplication(bundleIdentifier: Self.springBoardBundleID), foreground().application] {
@@ -490,7 +547,7 @@ final class RunnerTests: XCTestCase {
     return found
   }
 
-  private func alert() throws -> HTTPResponse {
+  func alert() throws -> HTTPResponse {
     guard let alert = findAlert() else {
       throw RunnerError.notFound("no alert is open", code: "no such alert")
     }
@@ -501,7 +558,7 @@ final class RunnerTests: XCTestCase {
     ])
   }
 
-  private func alertTap(_ request: HTTPRequest) throws -> HTTPResponse {
+  func alertTap(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     let wanted = try requiredString(body, "button", "name")
     guard let alert = findAlert() else {

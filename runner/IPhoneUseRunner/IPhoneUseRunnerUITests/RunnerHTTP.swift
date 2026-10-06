@@ -81,8 +81,10 @@ struct HTTPResponse {
   var headers: [String: String] = [:]
 
   /// WDA-style success envelope: `{"value": <value>}`.
-  static func value(_ value: Any, headers: [String: String] = [:]) -> HTTPResponse {
-    HTTPResponse(status: 200, body: encode(["value": value]), headers: headers)
+  static func value(_ value: Any, headers: [String: String] = [:], sessionId: String? = nil) -> HTTPResponse {
+    var envelope: [String: Any] = ["value": value]
+    if let sessionId { envelope["sessionId"] = sessionId }
+    return HTTPResponse(status: 200, body: encode(envelope), headers: headers)
   }
 
   /// WDA-style error envelope: `{"value": {"error": code, "message": message}}`.
@@ -134,35 +136,43 @@ struct HTTPResponse {
   }
 }
 
-enum RunnerError: Error {
-  case invalidArgument(String)
-  case notFound(String, code: String = "no such element")
-  case failed(String)
-  case unsupported(String)
+/// A failed request, carried to the WDA error envelope `{"value":{"error":code,"message":...}}`.
+/// The codes are WDA's / W3C's, so the daemon's 404 checks ("no such alert", stale elements) hold.
+struct RunnerError: Error {
+  let status: Int
+  let code: String
+  let message: String
 
-  var status: Int {
-    switch self {
-    case .invalidArgument: return 400
-    case .notFound: return 404
-    case .failed: return 500
-    case .unsupported: return 501
-    }
+  static func invalidArgument(_ message: String) -> RunnerError {
+    RunnerError(status: 400, code: "invalid argument", message: message)
   }
 
-  var code: String {
-    switch self {
-    case .invalidArgument: return "invalid argument"
-    case .notFound(_, let code): return code
-    case .failed: return "unknown error"
-    case .unsupported: return "unsupported operation"
-    }
+  static func notFound(_ message: String, code: String = "no such element") -> RunnerError {
+    RunnerError(status: 404, code: code, message: message)
   }
 
-  var message: String {
-    switch self {
-    case .invalidArgument(let message), .notFound(let message, _), .failed(let message), .unsupported(let message):
-      return message
-    }
+  static func failed(_ message: String) -> RunnerError {
+    RunnerError(status: 500, code: "unknown error", message: message)
+  }
+
+  static func unsupported(_ message: String) -> RunnerError {
+    RunnerError(status: 501, code: "unsupported operation", message: message)
+  }
+
+  static func invalidSelector(_ message: String) -> RunnerError {
+    RunnerError(status: 400, code: "invalid selector", message: message)
+  }
+
+  static func staleElement(_ id: String) -> RunnerError {
+    RunnerError(
+      status: 404, code: "stale element reference",
+      message: "The previously found element \(id) is not present in the current view anymore")
+  }
+
+  static func noSuchAlert() -> RunnerError {
+    RunnerError(
+      status: 404, code: "no such alert",
+      message: "An attempt was made to operate on a modal dialog when one was not open")
   }
 }
 
