@@ -871,35 +871,50 @@ impl WdaClient {
         // the ONLY active app: until then the app being left may still answer
         // for a "搜索" button of its own, and while a notification banner is up
         // SpringBoard is listed next to that app in no fixed order. A WDA
-        // without `apps/list` gets the old fixed wait.
+        // without `apps/list` gets the old fixed wait; one that answers but
+        // never shows SpringBoard alone is an error, not a search in the app.
+        // Every query is bounded by what is left of its phase's deadline.
+        let left = |deadline: std::time::Instant| {
+            deadline.saturating_duration_since(std::time::Instant::now())
+        };
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut list_answered = false;
         loop {
-            match self.active_bundles().await {
-                Ok(bundles) if bundles == ["com.apple.springboard"] => break,
-                Ok(_) if std::time::Instant::now() < deadline => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                _ => {
+            match tokio::time::timeout(left(deadline), self.active_bundles()).await {
+                Ok(Ok(bundles)) if bundles == ["com.apple.springboard"] => break,
+                Ok(Ok(_)) => list_answered = true,
+                Ok(Err(_)) if !list_answered => {
                     tokio::time::sleep(Duration::from_millis(450)).await;
                     break;
                 }
+                Ok(Err(_)) | Err(_) => {}
             }
+            if std::time::Instant::now() >= deadline {
+                if list_answered {
+                    return Err(anyhow!(
+                        "the Home Screen did not come to the front, so Spotlight was not opened"
+                    ));
+                }
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let element = loop {
-            let mut found = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let element = 'found: loop {
             for label in ["搜索", "Search", "検索"] {
-                let elements = self.find_elements("accessibility id", label).await?;
-                match elements.as_slice() {
-                    [element] => {
-                        found = Some(element.clone());
-                        break;
-                    }
+                let Ok(elements) = tokio::time::timeout(
+                    left(deadline),
+                    self.find_elements("accessibility id", label),
+                )
+                .await
+                else {
+                    break;
+                };
+                match elements?.as_slice() {
+                    [element] => break 'found element.clone(),
                     [] => {}
                     _ => return Err(anyhow!("Spotlight Search element is ambiguous for {label}")),
                 }
-            }
-            if let Some(element) = found {
-                break element;
             }
             if std::time::Instant::now() >= deadline {
                 return Err(anyhow!("Spotlight Search element not found"));
@@ -914,8 +929,12 @@ impl WdaClient {
                      OR placeholderValue IN {'搜索', 'Search', '検索'})";
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
-            if matches!(self.find_elements("predicate string", field).await, Ok(found) if !found.is_empty())
-            {
+            let found = tokio::time::timeout(
+                left(deadline),
+                self.find_elements("predicate string", field),
+            )
+            .await;
+            if matches!(found, Ok(Ok(found)) if !found.is_empty()) {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
@@ -1573,11 +1592,8 @@ fn snapshot_settings(
 
 /// One row of the flattened element tree.
 ///
-/// Serialized through [`ElementRowJson`], which trims two things every
-/// screen read paid for: whole-point coordinates print as `24`, not `24.0`,
-/// and an `identifier` equal to the `label` (SwiftUI class names, controls
-/// whose label fell back to their name) is printed once, as the label — a
-/// label locator matches that row exactly as the identifier would.
+/// Serialized through [`ElementRowJson`], which prints whole-point
+/// coordinates as `24`, not `24.0` — a fifth of every row was ".0".
 #[derive(Debug, Clone, Default, serde::Serialize, PartialEq)]
 #[serde(into = "ElementRowJson")]
 pub struct ElementRow {
@@ -1701,11 +1717,10 @@ impl serde::Serialize for Coordinate {
 
 impl From<ElementRow> for ElementRowJson {
     fn from(row: ElementRow) -> Self {
-        let identifier = row.identifier.filter(|identifier| *identifier != row.label);
         Self {
             kind: row.kind,
             label: row.label,
-            identifier,
+            identifier: row.identifier,
             rect: row.rect.map(Coordinate),
             depth: row.depth,
             value: row.value,
@@ -2729,7 +2744,7 @@ mod tests {
     }
 
     #[test]
-    fn row_json_prints_whole_points_as_integers_and_a_label_identifier_once() {
+    fn row_json_prints_whole_points_as_integers_and_keeps_identifiers() {
         let row = |identifier: &str, label: &str| ElementRow {
             kind: "Button".to_string(),
             label: label.to_string(),
@@ -2743,7 +2758,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&row("AllClear", "AllClear")).unwrap(),
-            r#"{"kind":"Button","label":"AllClear","rect":[24,66.5,36,0],"depth":0}"#
+            r#"{"kind":"Button","label":"AllClear","identifier":"AllClear","rect":[24,66.5,36,0],"depth":0}"#
         );
     }
 

@@ -3715,6 +3715,11 @@ fn max_side_shrinks_the_capture_and_the_wireframe() {
     let image = server::redaction::decode_png(&png).unwrap();
     assert_eq!(image.height, 422);
 
+    // `raw` is WDA's capture untouched, size included.
+    let (_, _, png) = screenshot_of_blank_capture(empty, "/agent/screenshot?raw=1&max_side=422");
+    let image = server::redaction::decode_png(&png).unwrap();
+    assert_eq!((image.width, image.height), (390, 844));
+
     // Already smaller than asked: left alone.
     let (_, _, png) = screenshot_of_blank_capture(empty, "/agent/screenshot?max_side=2000");
     let image = server::redaction::decode_png(&png).unwrap();

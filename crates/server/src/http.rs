@@ -8547,9 +8547,13 @@ async fn agent_actions(
                             && wait_probe_missed(&mut w, probes, wait_deadline).await
                         {
                             probe_misses += 1;
+                            // Never sleep through the window: with less than a
+                            // poll left, go straight to the final full read.
                             let remaining = wait_deadline
                                 .saturating_duration_since(tokio::time::Instant::now());
-                            tokio::time::sleep(std::cmp::min(poll, remaining)).await;
+                            if remaining > poll {
+                                tokio::time::sleep(poll).await;
+                            }
                             continue;
                         }
                     }
@@ -10499,9 +10503,14 @@ async fn agent_screenshot(
         let not_before = wda.lock().await.last_post();
         if let Some(jpeg) = hub.live_frame(not_before) {
             let png = tokio::task::spawn_blocking(move || {
-                crate::redaction::decode_jpeg(&jpeg).and_then(|image| {
-                    crate::redaction::encode_png(&crate::redaction::fit_within(image, max_side))
-                })
+                // The stream checks for a blank picture only every few
+                // frames; a blank one here goes to the WDA path, which draws
+                // the wireframe of a screen hidden from capture.
+                crate::redaction::decode_jpeg(&jpeg)
+                    .filter(|image| !crate::redaction::content_band_is_blank(image))
+                    .and_then(|image| {
+                        crate::redaction::encode_png(&crate::redaction::fit_within(image, max_side))
+                    })
             })
             .await
             .ok()
@@ -10530,6 +10539,8 @@ async fn agent_screenshot(
                     return png_response(wireframe, Some("accessibility-wireframe"), true);
                 }
             }
+            // `raw` is WDA's capture untouched, size included.
+            let max_side = if raw { None } else { max_side };
             png_response(fit_png(bytes, max_side).await, None, false)
         }
         Ok(Ok(bytes)) => {
