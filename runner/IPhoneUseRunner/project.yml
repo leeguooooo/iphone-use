@@ -1,0 +1,61 @@
+# XcodeGen spec for the iphone-use native runner.
+# The generated IPhoneUseRunner.xcodeproj is checked in, so plain `xcodebuild` works without
+# XcodeGen. Regenerate after editing this file:  (cd runner/IPhoneUseRunner && xcodegen generate)
+name: IPhoneUseRunner
+options:
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+settings:
+  base:
+    DEVELOPMENT_TEAM: 6ZPXG4KVVS
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    CLANG_ENABLE_OBJC_ARC: YES
+targets:
+  IPhoneUseRunner:
+    type: application
+    platform: iOS
+    sources:
+      - IPhoneUseRunner
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.runner
+        PRODUCT_NAME: IPhoneUseRunner
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: "iU Runner"
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+  IPhoneUseRunnerUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - IPhoneUseRunnerUITests
+    dependencies:
+      - target: IPhoneUseRunner
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.runner.uitests
+        PRODUCT_NAME: IPhoneUseRunnerUITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: IPhoneUseRunner
+        SWIFT_OBJC_BRIDGING_HEADER: IPhoneUseRunnerUITests/IPhoneUseRunnerUITests-Bridging-Header.h
+        CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF: NO
+schemes:
+  IPhoneUseRunner:
+    build:
+      targets:
+        IPhoneUseRunner: all
+        IPhoneUseRunnerUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - name: IPhoneUseRunnerUITests
+          parallelizable: false
