@@ -868,13 +868,14 @@ impl WdaClient {
         self.press_home().await?;
 
         // Poll rather than sleep a fixed 450 ms, but only once SpringBoard is
-        // in front: until then the app being left may still answer for a
-        // "搜索" button of its own. A WDA without `apps/list` gets the old
-        // fixed wait.
+        // the ONLY active app: until then the app being left may still answer
+        // for a "搜索" button of its own, and while a notification banner is up
+        // SpringBoard is listed next to that app in no fixed order. A WDA
+        // without `apps/list` gets the old fixed wait.
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
-            match self.active_bundle().await {
-                Ok(Some(bundle)) if bundle == "com.apple.springboard" => break,
+            match self.active_bundles().await {
+                Ok(bundles) if bundles == ["com.apple.springboard"] => break,
                 Ok(_) if std::time::Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
