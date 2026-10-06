@@ -232,6 +232,11 @@ pub enum PhoneStep {
     /// field. Zero or multiple matches send no tap.
     TapLocator {
         locator: PhoneElementLocator,
+        /// `point`: tap the centre of the element's live frame instead of
+        /// XCUIElement's click — for custom controls that ACK a click and do
+        /// nothing. Default `element`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<String>,
         #[serde(default)]
         after_ms: u64,
     },
@@ -1590,8 +1595,13 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                 }
                 action_step(serde_json::json!({"type":"tap","label":label}), after_ms)
             }
-            PhoneStep::TapLocator { locator, after_ms } => {
+            PhoneStep::TapLocator { locator, via, after_ms } => {
                 validate_after(after_ms)?;
+                if via.as_deref().is_some_and(|v| v != "element" && v != "point") {
+                    return Err(format!(
+                        "steps[{index}].via must be \"element\" or \"point\"; no action was sent"
+                    ));
+                }
                 if !phone_locator_has_condition(&locator) {
                     return Err(format!(
                         "steps[{index}].locator must include at least one condition; no action was sent"
@@ -1602,10 +1612,11 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                         "steps[{index}] locator serialization failed: {error}; no action was sent"
                     )
                 })?;
-                action_step(
-                    serde_json::json!({"type":"tap_locator","locator":locator}),
-                    after_ms,
-                )
+                let mut action = serde_json::json!({"type":"tap_locator","locator":locator});
+                if via.as_deref() == Some("point") {
+                    action["via"] = serde_json::json!("point");
+                }
+                action_step(action, after_ms)
             }
             PhoneStep::Type {
                 text,
@@ -2383,6 +2394,7 @@ mod tests {
                 after_ms: 0,
             },
             PhoneStep::TapLocator {
+                via: None,
                 locator: PhoneElementLocator {
                     label: None,
                     identifier: Some("search-field".to_string()),

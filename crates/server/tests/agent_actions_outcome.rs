@@ -296,3 +296,52 @@ fn an_optional_alert_step_passes_when_no_alert_is_up() {
         assert_eq!(strict["error"], "no_alert", "{strict}");
     });
 }
+
+/// `tap_locator` with `"via":"point"` taps the centre of the element's LIVE
+/// frame through W3C actions — never XCUIElement's click, which custom
+/// controls such as Xiaohongshu's back button acknowledge and ignore.
+#[test]
+fn a_point_locator_tap_hits_the_live_frame_centre() {
+    block(async {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = seen.clone();
+        let wda = mock_wda(move |request, _| {
+            record.lock().unwrap().push(request.to_string());
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if request.contains("/source?format=json") {
+                return Some((
+                    Duration::ZERO,
+                    r#"{"value":{"type":"XCUIElementTypeApplication","label":"小红书","rect":{"x":0,"y":0,"width":440,"height":956},"children":[
+                        {"type":"XCUIElementTypeButton","label":"返回","rect":{"x":15,"y":69,"width":30,"height":30}}]}}"#
+                        .to_string(),
+                ));
+            }
+            if request.starts_with("POST ") && request.contains("/elements") {
+                return Some((Duration::ZERO, r#"{"value":[{"ELEMENT":"E1","element-6066-11e4-a52e-4f735466cecf":"E1"}]}"#.to_string()));
+            }
+            if request.contains("/element/E1/rect") {
+                return Some((Duration::ZERO, r#"{"value":{"x":15,"y":69,"width":30,"height":30}}"#.to_string()));
+            }
+            Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
+        });
+        let (status, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"返回","kind":"Button"},"via":"point"}}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let seen = seen.lock().unwrap();
+        assert!(!seen.iter().any(|r| r.contains("/click")), "no element click: {seen:?}");
+        let actions = seen.iter().find(|r| r.contains("/actions")).expect("a W3C tap");
+        assert!(actions.contains("\"x\":30") && actions.contains("\"y\":84"), "{actions}");
+
+        let (bad, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"返回"},"via":"elsewhere"}}]}"#,
+        )
+        .await;
+        assert_eq!(bad, StatusCode::BAD_REQUEST, "{json}");
+    });
+}

@@ -6481,6 +6481,7 @@ fn occluding_row(rows: &[crate::wda::ElementRow], index: usize) -> Option<&crate
 async fn tap_unique_locator(
     w: &mut crate::wda::WdaClient,
     locator: &AgentElementLocator,
+    via_point: bool,
 ) -> Result<(), UniqueLabelTapError> {
     // Same reuse as label taps: a recent untouched tree may prove uniqueness,
     // and the live lookup below (exactly one element, same frame) proves the
@@ -6530,7 +6531,7 @@ async fn tap_unique_locator(
         // The reused tree is the doubt, not the locator: read afresh.
         _ if reused_rect.is_some() => {
             w.forget_tree();
-            return Box::pin(tap_unique_locator(w, locator)).await;
+            return Box::pin(tap_unique_locator(w, locator, via_point)).await;
         }
         [] => return Err(UniqueLabelTapError::NotFound),
         _ => return Err(UniqueLabelTapError::Ambiguous(None)),
@@ -6538,8 +6539,26 @@ async fn tap_unique_locator(
     if let Some(rect) = reused_rect {
         if !matches!(w.element_rect(element_id).await, Ok(live) if rects_match(live, rect)) {
             w.forget_tree();
-            return Box::pin(tap_unique_locator(w, locator)).await;
+            return Box::pin(tap_unique_locator(w, locator, via_point)).await;
         }
+    }
+    if via_point {
+        // `"via":"point"`: some custom controls ignore XCUIElement's click
+        // (hardware: Xiaohongshu's 30×30 back button ACKed two clicks and
+        // stayed put; a coordinate tap at its centre worked). Tap the centre
+        // of the element's LIVE frame — from WDA's element query, not the
+        // possibly stale /source rect the default path avoids.
+        let [x, y, width, height] = w
+            .element_rect(element_id)
+            .await
+            .map_err(UniqueLabelTapError::BeforeDispatch)?;
+        if !(width > 0.0 && height > 0.0) {
+            return Err(UniqueLabelTapError::InvalidTarget);
+        }
+        return w
+            .tap_point(x + width / 2.0, y + height / 2.0)
+            .await
+            .map_err(UniqueLabelTapError::AfterDispatch);
     }
     w.click_element(element_id).await.map_err(|error| {
         if wda_error_is_missing_element(&error) {
@@ -7202,7 +7221,8 @@ async fn direct_agent_action(
             else {
                 return WdaControlOutcome::Unsupported;
             };
-            match tap_unique_locator(w, &locator).await {
+            let via_point = value.get("via").and_then(serde_json::Value::as_str) == Some("point");
+            match tap_unique_locator(w, &locator, via_point).await {
                 Ok(()) => Some(Ok(())),
                 Err(UniqueLabelTapError::NotFound) => {
                     return WdaControlOutcome::ElementNotFound;
@@ -7686,6 +7706,12 @@ fn validate_agent_action_value(
                 return invalid(
                     "tap_locator needs one non-empty strict locator with supported fields",
                 );
+            }
+            if action
+                .get("via")
+                .is_some_and(|via| !matches!(via.as_str(), Some("element" | "point")))
+            {
+                return invalid("tap_locator via must be \"element\" (default) or \"point\"");
             }
         }
         "longpress" => {
