@@ -6249,10 +6249,40 @@ async fn tap_unique_label(
         .and_then(serde_json::Value::as_str)
         .map(|kind| kind.strip_prefix("XCUIElementType").unwrap_or(kind))
         .filter(|kind| !kind.is_empty());
+    // A tree read moments ago with nothing sent since (a wait_for that just
+    // matched, an elements read) answers the uniqueness and occlusion
+    // questions as well as a new one; the target is then checked live. Any
+    // doubt about the reused tree — no unique match, a refusal, a target that
+    // moved — falls back to a fresh read, never to an error.
+    if let Some(rows) = w.recent_tree(SNAPSHOT_TREE_REUSE) {
+        if let Ok((index, x, y)) = label_tap_target(&rows, label, kind, request) {
+            if reused_row_is_live(w, &rows[index]).await {
+                return w
+                    .tap_point(x, y)
+                    .await
+                    .map_err(UniqueLabelTapError::AfterDispatch);
+            }
+        }
+        w.forget_tree();
+    }
     let rows = w
         .elements()
         .await
         .map_err(UniqueLabelTapError::BeforeDispatch)?;
+    let (_, x, y) = label_tap_target(&rows, label, kind, request)?;
+    w.tap_point(x, y)
+        .await
+        .map_err(UniqueLabelTapError::AfterDispatch)
+}
+
+/// The row a label tap targets on `rows` and where it would land, or why it
+/// must not be sent.
+fn label_tap_target(
+    rows: &[crate::wda::ElementRow],
+    label: &str,
+    kind: Option<&str>,
+    request: &serde_json::Value,
+) -> Result<(usize, f64, f64), UniqueLabelTapError> {
     let label_matches = |row: &crate::wda::ElementRow| {
         row.label == label && kind.is_none_or(|kind| row.kind == kind)
     };
@@ -6268,7 +6298,7 @@ async fn tap_unique_label(
         let on_screen: Vec<usize> = matches
             .iter()
             .copied()
-            .filter(|&index| row_is_on_screen(&rows, index))
+            .filter(|&index| row_is_on_screen(rows, index))
             .collect();
         if !on_screen.is_empty() {
             matches = on_screen;
@@ -6281,7 +6311,7 @@ async fn tap_unique_label(
             // Hand the agent what it would otherwise re-read: the snapshot
             // token plus a compact view of every match, so the next call can
             // be a snapshot-bound tap on the right one.
-            let detail = element_snapshot_id(&rows).ok().map(|snapshot| {
+            let detail = element_snapshot_id(rows).ok().map(|snapshot| {
                 serde_json::json!({
                     "snapshot": snapshot,
                     "matches": matches.iter().map(|&index| {
@@ -6304,12 +6334,30 @@ async fn tap_unique_label(
         .iter()
         .position(|candidate| std::ptr::eq(candidate, row))
         .unwrap_or_default();
-    if let Some((error, hint)) = tap_target_refusal(&rows, index, request) {
+    if let Some((error, hint)) = tap_target_refusal(rows, index, request) {
         return Err(UniqueLabelTapError::Refused(error, hint));
     }
-    w.tap_point(x, y)
-        .await
-        .map_err(UniqueLabelTapError::AfterDispatch)
+    Ok((index, x, y))
+}
+
+/// Whether a row from a reused tree is still where the tree put it: its
+/// semantic locator finds exactly one live element with the same frame.
+/// Anything less (no locator, several matches, a read error) is "not proven",
+/// and the caller reads afresh.
+async fn reused_row_is_live(w: &mut crate::wda::WdaClient, row: &crate::wda::ElementRow) -> bool {
+    let Some((using, value)) = snapshot_row_locator(row)
+        .as_ref()
+        .and_then(locator_wda_query)
+    else {
+        return false;
+    };
+    let Ok(ids) = w.find_elements(using, &value).await else {
+        return false;
+    };
+    let [id] = ids.as_slice() else {
+        return false;
+    };
+    matches!(w.element_rect(id).await, Ok(rect) if rects_match(rect, row.rect))
 }
 
 const ELEMENT_OCCLUDED_HINT: &str = "nothing was sent: another control (a fixed bar, header, keyboard or floating button) covers the centre of this element, so the tap would land on that instead. Bring it clear first with {\"type\":\"perform\",\"action\":\"scroll_to_visible\",\"element\":N,\"snapshot\":…} or a scroll, read /agent/elements again and retry; send \"allow_occluded\":true only if you mean to tap whatever is on top";
@@ -6434,18 +6482,36 @@ async fn tap_unique_locator(
     w: &mut crate::wda::WdaClient,
     locator: &AgentElementLocator,
 ) -> Result<(), UniqueLabelTapError> {
-    let rows = w
-        .elements()
-        .await
-        .map_err(UniqueLabelTapError::BeforeDispatch)?;
-    let mut matches = rows
-        .iter()
-        .filter(|row| agent_locator_matches(row, locator));
-    let row = matches.next().ok_or(UniqueLabelTapError::NotFound)?;
-    if matches.next().is_some() {
-        return Err(UniqueLabelTapError::Ambiguous(None));
-    }
-    let _ = row;
+    // Same reuse as label taps: a recent untouched tree may prove uniqueness,
+    // and the live lookup below (exactly one element, same frame) proves the
+    // target; otherwise read afresh.
+    let reused = w.recent_tree(SNAPSHOT_TREE_REUSE).and_then(|rows| {
+        let mut matches = rows
+            .iter()
+            .filter(|row| agent_locator_matches(row, locator));
+        match (matches.next(), matches.next()) {
+            (Some(row), None) => Some(row.rect),
+            _ => None,
+        }
+    });
+    let reused_rect = match reused {
+        Some(rect) => Some(rect),
+        None => {
+            w.forget_tree();
+            let rows = w
+                .elements()
+                .await
+                .map_err(UniqueLabelTapError::BeforeDispatch)?;
+            let mut matches = rows
+                .iter()
+                .filter(|row| agent_locator_matches(row, locator));
+            matches.next().ok_or(UniqueLabelTapError::NotFound)?;
+            if matches.next().is_some() {
+                return Err(UniqueLabelTapError::Ambiguous(None));
+            }
+            None
+        }
+    };
 
     // `/source?format=json` can report stale/wrong rectangles for elements in
     // system-owned sheets (hardware-reproduced with the iOS share sheet's
@@ -6460,10 +6526,21 @@ async fn tap_unique_locator(
         .await
         .map_err(UniqueLabelTapError::BeforeDispatch)?;
     let element_id = match element_ids.as_slice() {
-        [] => return Err(UniqueLabelTapError::NotFound),
         [element_id] => element_id,
+        // The reused tree is the doubt, not the locator: read afresh.
+        _ if reused_rect.is_some() => {
+            w.forget_tree();
+            return Box::pin(tap_unique_locator(w, locator)).await;
+        }
+        [] => return Err(UniqueLabelTapError::NotFound),
         _ => return Err(UniqueLabelTapError::Ambiguous(None)),
     };
+    if let Some(rect) = reused_rect {
+        if !matches!(w.element_rect(element_id).await, Ok(live) if rects_match(live, rect)) {
+            w.forget_tree();
+            return Box::pin(tap_unique_locator(w, locator)).await;
+        }
+    }
     w.click_element(element_id).await.map_err(|error| {
         if wda_error_is_missing_element(&error) {
             UniqueLabelTapError::NotFound

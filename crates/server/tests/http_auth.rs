@@ -3907,6 +3907,15 @@ fn tap_after_read(
     rect: &'static str,
     between: Option<serde_json::Value>,
 ) -> (StatusCode, serde_json::Value, usize, Vec<String>) {
+    tap_after_read_with(rect, between, None)
+}
+
+/// [`tap_after_read`] with any tap body instead of the snapshot tap.
+fn tap_after_read_with(
+    rect: &'static str,
+    between: Option<serde_json::Value>,
+    tap: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value, usize, Vec<String>) {
     block(async move {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
         let seen = log.clone();
@@ -3933,9 +3942,15 @@ fn tap_after_read(
         });
         let app = http::router(build_state_with_wda(&base));
         let post = |body: serde_json::Value| {
+            // The browser's /control has no locator taps; agents send them.
+            let uri = if body["type"] == "tap_locator" {
+                "/agent/input"
+            } else {
+                "/control"
+            };
             Request::builder()
                 .method("POST")
-                .uri("/control")
+                .uri(uri)
                 .header("x-phone-control", "1")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
@@ -3957,12 +3972,10 @@ fn tap_after_read(
         if let Some(between) = between {
             let _ = app.clone().oneshot(post(between)).await.unwrap();
         }
-        let response = app
-            .oneshot(post(
-                serde_json::json!({"type":"tap","element":1,"snapshot":snapshot,"ttl_ms":2000}),
-            ))
-            .await
-            .unwrap();
+        let tap = tap.unwrap_or_else(
+            || serde_json::json!({"type":"tap","element":1,"snapshot":snapshot,"ttl_ms":2000}),
+        );
+        let response = app.oneshot(post(tap)).await.unwrap();
         let status = response.status();
         let raw = response.into_body().collect().await.unwrap().to_bytes();
         let json = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
@@ -3970,7 +3983,7 @@ fn tap_after_read(
         let sources = lines.iter().filter(|l| l.contains("/source")).count();
         let clicked = lines
             .iter()
-            .filter(|l| l.contains("/click"))
+            .filter(|l| l.contains("/click") || l.contains("/actions"))
             .map(|l| l.to_string())
             .collect();
         (status, json, sources, clicked)
@@ -4003,6 +4016,43 @@ fn anything_sent_in_between_makes_the_tap_read_the_tree_again() {
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(sources, 2, "the tap re-read the tree after the home press");
     assert_eq!(clicked.len(), 1);
+}
+
+#[test]
+fn label_and_locator_taps_right_after_a_read_reuse_its_tree() {
+    for tap in [
+        serde_json::json!({"type":"tap","label":"发送","ttl_ms":2000}),
+        serde_json::json!({"type":"tap_locator","locator":{"label":"发送","kind":"Button"},"ttl_ms":2000}),
+    ] {
+        let (status, json, sources, clicked) = tap_after_read_with(
+            r#"{"x":300,"y":700,"width":60,"height":44}"#,
+            None,
+            Some(tap.clone()),
+        );
+        assert_eq!(status, StatusCode::OK, "{tap} {json}");
+        assert_eq!(sources, 1, "only the elements read touches /source: {tap}");
+        assert_eq!(clicked.len(), 1, "{tap}");
+    }
+}
+
+#[test]
+fn a_label_or_locator_target_that_moved_since_the_read_is_read_again_not_refused() {
+    for tap in [
+        serde_json::json!({"type":"tap","label":"发送","ttl_ms":2000}),
+        serde_json::json!({"type":"tap_locator","locator":{"label":"发送","kind":"Button"},"ttl_ms":2000}),
+    ] {
+        let (status, json, sources, clicked) = tap_after_read_with(
+            r#"{"x":300,"y":500,"width":60,"height":44}"#,
+            None,
+            Some(tap.clone()),
+        );
+        assert_eq!(status, StatusCode::OK, "{tap} {json}");
+        assert_eq!(
+            sources, 2,
+            "the moved target sent it back to a fresh read: {tap}"
+        );
+        assert_eq!(clicked.len(), 1, "{tap}");
+    }
 }
 
 // ---------------------------------------------------------------------------
