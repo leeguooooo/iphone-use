@@ -34,15 +34,23 @@ Agent  ── /agent/* ──────────> iphone-use daemon ── 
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
-安装器下载最新 GitHub Release，注册当前用户的 LaunchAgent，写入 loopback 的 runner 地址，安装同版本的 agent skill，把设备 runner 的源码放到 `~/.iphone-use/runner`，并把设置脚本放到 `~/.iphone-use/setup-wda.sh`。它不会证明你的团队、手机、runner 和中继能一起工作，那是下一步的事。手机连上、信任、解锁、亮屏后：
+安装器下载最新 GitHub Release，注册当前用户的 LaunchAgent，写入 loopback 的 runner 地址，安装同版本的 agent skill，把设备 runner 的源码放到 `~/.iphone-use/runner`，并把 `iphone-use` 命令链接到 `~/.local/bin`。在终端里首次安装时，它会接着做完：
+
+- 插着 iPhone 的话，运行 `iphone-use setup`（编译、签名、安装并启动 runner，拉起中继）和 `iphone-use try`（打开设置、读屏、回桌面），安装结束前你就能看到 agent 操作手机；
+- 装了 Claude Code 的话，注册 MCP server（`claude mcp add-json -s user iphone-use …`，撤销用 `claude mcp remove -s user iphone-use`）。server 自己从 LaunchAgent 读守护进程地址和令牌，Claude 的配置里不会留下密钥；
+- 用一次性登录链接在浏览器里打开控制页，并打印一个手机相机能扫的二维码，不用抄密码。
+
+`--no-setup`（或 `IPHONE_USE_NO_SETUP=1`）跳过配置手机这一步；升级时从不运行它。之后：
 
 ```bash
-~/.iphone-use/setup-wda.sh doctor    # 解释当前的 USB / 信任 / DDI / WARP 阻塞项
-~/.iphone-use/setup-wda.sh           # 编译、签名、安装、启动 runner，拉起中继
-~/.iphone-use/setup-wda.sh status
+iphone-use doctor    # 缺什么：Xcode、Apple ID、USB、开发者模式、WARP……
+iphone-use setup     # 编译、签名、安装、启动 runner，拉起中继
+iphone-use status    # 能不能给 agent 用（能用时退出码为 0）
+iphone-use try       # 再跑一次无害的首次体验
+iphone-use login     # 新的一次性浏览器登录链接和手机二维码
 ```
 
-然后打开 **`http://<Mac局域网IP>:44321/setup`**。内置向导把 `/agent/status` 翻译成当前的阻塞项（USB、信任、开发者服务、runner、外部主机），它不会改你的 VPN，也不会替你跑 setup。手机可驱动后进 **`/phone`**，输入 `install.sh` 打印的密码。
+`iphone-use setup` 运行的是 `~/.iphone-use/setup-wda.sh`，它还接受 `status`、`pause`、`resume`、`stop`（如 `iphone-use setup status`）。控制页在 **`http://<Mac局域网IP>:44321/phone`**；**`/setup`** 把 `/agent/status` 翻译成当前的阻塞项（USB、信任、开发者服务、runner、外部主机），它不会改你的 VPN，也不会替你跑 setup。
 
 配对了多台 iPhone？两处固定同一个 classic UDID：
 

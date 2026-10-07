@@ -18,16 +18,43 @@
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
+**Let an AI agent use your real iPhone:** it reads the screen as text, taps, swipes and
+types, and is told plainly when an action did not land.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
+```
+
 https://github.com/user-attachments/assets/f1e6574d-3134-4c23-9092-4b51bc79af2c
 
 <sub>2-minute demo · [中文版](https://github.com/user-attachments/assets/a9947152-6655-4509-ac1e-49953a3cea70)</sub>
 
-iphone-use lets an AI agent see and operate a real iPhone: read the screen as text, tap,
-swipe and type, and get told plainly when an action did not land. It works on apps that
-have no API, including banking and payment apps that hide their screens from capture.
+**What you need**
 
-A daemon on your Mac runs its own XCTest-based device runner on a USB-connected iPhone
-(it replaced WebDriverAgent and speaks the same API) and exposes it as:
+- A Mac (macOS 15+) with Xcode, signed in to an Apple ID — a free one works.
+- An iPhone with Developer Mode on (Settings → Privacy & Security → Developer Mode).
+- A USB cable. Plug the iPhone in and unlock it before you install.
+
+The installer then sets the phone up, shows an agent opening Settings and reading it,
+registers the MCP server with Claude Code, and opens the control page in your browser
+with a one-time sign-in — there is no password to copy. If anything is missing it says
+what and how to fix it.
+
+```bash
+iphone-use status    # is the phone ready for agents?
+iphone-use doctor    # what is missing, and how to fix it
+iphone-use setup     # set the phone up again (after a new iPhone or Xcode)
+iphone-use try       # a harmless check: open Settings, read the screen, go Home
+iphone-use login     # sign a browser in again, with a QR code for the iPhone
+iphone-use upgrade   # update everything
+```
+
+## What it is
+
+iphone-use works on apps that have no API, including banking and payment apps that
+hide their screens from capture. A daemon on your Mac runs its own XCTest-based device
+runner on the iPhone (it replaced WebDriverAgent and speaks the same API) and exposes it
+as:
 
 - an HTTP API for agents and scripts (`/agent/*`),
 - an MCP server with 23 tools for Claude Code, Claude Desktop and other MCP clients,
@@ -35,31 +62,17 @@ A daemon on your Mac runs its own XCTest-based device runner on a USB-connected 
 
 Nothing touches the Mac's own screen, cursor or focus.
 
-## Install
-
-You need macOS 15+, full Xcode signed in to a development team (a free Personal Team
-works), and an iPhone with Developer Mode on and trusted over USB. Nothing else: no
-Homebrew packages.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-~/.iphone-use/setup-wda.sh           # builds and starts the device runner; keep the phone unlocked
-```
-
-Then open `http://<mac-ip>:44321/phone` and log in with the password the installer
-printed. `~/.iphone-use/setup-wda.sh doctor` explains a USB, trust, VPN or signing
-problem; `iphone-use upgrade` updates everything later.
-
 ## Use it from an agent
 
-The installer also installs the agent skill. For MCP clients:
+The installer installs the agent skill and, when Claude Code is present, registers the
+MCP server. Any other MCP client needs only the command; on this Mac the server finds
+the daemon and its token by itself:
 
 ```json
 {
   "mcpServers": {
     "iphone-use": {
-      "command": "/Users/YOU/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp",
-      "env": { "PHONE_REMOTE_URL": "http://127.0.0.1:44321", "PHONE_REMOTE_TOKEN": "<agent token>" }
+      "command": "/Users/YOU/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
     }
   }
 }
@@ -71,7 +84,7 @@ Or call the HTTP API directly:
 AUTH="Authorization: Bearer $TOKEN"; CTL="X-Phone-Control: 1"
 curl -s -H "$AUTH" $HOST/agent/elements                     # the screen as text + a snapshot token
 curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
-  -d '{"type":"tap","element":7,"snapshot":"…"}'            # tap, then what changed (~4 s)
+  -d '{"type":"tap","element":7,"snapshot":"…"}'            # tap, then what changed (~2 s)
 ```
 
 Every answer says whether the action was applied, not sent, or unknown, and whether a

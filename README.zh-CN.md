@@ -18,13 +18,36 @@
   <strong>简体中文</strong>
 </p>
 
+**让 AI agent 直接用你的真 iPhone：**把屏幕读成文字，点、滑、输入，操作没生效时直接告诉它。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
+```
+
 https://github.com/user-attachments/assets/a9947152-6655-4509-ac1e-49953a3cea70
 
 <sub>2 分钟演示 · [English](https://github.com/user-attachments/assets/f1e6574d-3134-4c23-9092-4b51bc79af2c)</sub>
 
-iphone-use 让 AI agent 操作一台真 iPhone：把屏幕读成文字，点、滑、输入，操作没生效时直接告诉它。没有 API 的 App 也能用，包括禁止截屏的银行、支付类 App。
+**需要准备**
 
-Mac 上的守护进程通过 USB 在 iPhone 上运行自己的设备 runner（基于 XCTest，取代了 WebDriverAgent，接口兼容），对外提供：
+- 一台 Mac（macOS 15 以上），装好 Xcode 并登录 Apple ID，免费账号就行。
+- iPhone 打开开发者模式（设置 → 隐私与安全性 → 开发者模式）。
+- 一根数据线。安装前把 iPhone 插上并解锁。
+
+安装脚本接着会把手机配好，让 agent 打开「设置」读一遍屏幕给你看，在 Claude Code 里注册好 MCP server，再用一次性链接在浏览器里打开控制页，不用抄密码。缺什么会直接告诉你缺什么、怎么补。
+
+```bash
+iphone-use status    # 手机现在能不能给 agent 用
+iphone-use doctor    # 缺什么、怎么补
+iphone-use setup     # 重新配置手机（换了 iPhone 或 Xcode 之后）
+iphone-use try       # 无害的检查：打开设置、读屏、回桌面
+iphone-use login     # 重新登录浏览器，附手机扫码用的二维码
+iphone-use upgrade   # 升级全部组件
+```
+
+## 它是什么
+
+没有 API 的 App 也能用，包括禁止截屏的银行、支付类 App。Mac 上的守护进程在 iPhone 上运行自己的设备 runner（基于 XCTest，取代了 WebDriverAgent，接口兼容），对外提供：
 
 - 给 agent 和脚本用的 HTTP 接口（`/agent/*`）；
 - 23 个工具的 MCP server，Claude Code、Claude Desktop 等 MCP 客户端直接接；
@@ -32,27 +55,15 @@ Mac 上的守护进程通过 USB 在 iPhone 上运行自己的设备 runner（�
 
 它不碰 Mac 自己的屏幕、光标和窗口焦点。
 
-## 安装
-
-需要 macOS 15 以上、完整的 Xcode 并登录开发者团队（免费的 Personal Team 也行）、开了开发者模式并通过 USB 信任这台 Mac 的 iPhone。不需要别的，也不用装 Homebrew 包。
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-~/.iphone-use/setup-wda.sh           # 编译并启动设备 runner，期间保持手机解锁
-```
-
-然后打开 `http://<Mac 的 IP>:44321/phone`，用安装时打印的密码登录。USB、信任、VPN、签名有问题时，跑 `~/.iphone-use/setup-wda.sh doctor` 会告诉你卡在哪；以后升级用 `iphone-use upgrade`。
-
 ## 接到 agent 上
 
-安装时会顺带装好 agent 的 skill。MCP 客户端这样配：
+安装时会装好 agent 的 skill；装了 Claude Code 的话，还会自动注册 MCP server。其他 MCP 客户端只要填命令，在这台 Mac 上 server 会自己找到守护进程和令牌：
 
 ```json
 {
   "mcpServers": {
     "iphone-use": {
-      "command": "/Users/你的用户名/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp",
-      "env": { "PHONE_REMOTE_URL": "http://127.0.0.1:44321", "PHONE_REMOTE_TOKEN": "<agent 令牌>" }
+      "command": "/Users/你的用户名/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
     }
   }
 }
@@ -64,7 +75,7 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.
 AUTH="Authorization: Bearer $TOKEN"; CTL="X-Phone-Control: 1"
 curl -s -H "$AUTH" $HOST/agent/elements                     # 屏幕读成文字，附一个快照令牌
 curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
-  -d '{"type":"tap","element":7,"snapshot":"…"}'            # 点击，并返回界面变化（约 4 秒）
+  -d '{"type":"tap","element":7,"snapshot":"…"}'            # 点击，并返回界面变化（约 2 秒）
 ```
 
 每次操作都会说清楚：已执行、没发出去、还是结果不确定，以及能不能安全重试。点到被遮住或看不见的元素、填进去没生效的值，都会被拒绝或报出来，不会悄悄当成功。

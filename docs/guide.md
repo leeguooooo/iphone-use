@@ -54,21 +54,34 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.
 
 The installer fetches the latest GitHub Release, registers a per-user LaunchAgent,
 writes the loopback runner endpoints, installs the matching agent skill, lays the
-device runner sources down at `~/.iphone-use/runner`, and drops the setup helper at
-`~/.iphone-use/setup-wda.sh`. It does not
-prove your team, phone, runner, and relays work together — that is the next step, with
-the phone connected, trusted, unlocked, and awake:
+device runner sources down at `~/.iphone-use/runner`, and links the `iphone-use`
+command into `~/.local/bin`. On a first install in a terminal it then carries on:
+
+- with an iPhone plugged in, it runs `iphone-use setup` (build, sign, install and launch
+  the runner, start the relays) and `iphone-use try` (open Settings, read the screen, go
+  Home), so you see an agent drive the phone before the installer exits;
+- with Claude Code installed, it registers the MCP server (`claude mcp add-json -s user
+  iphone-use …`; undo with `claude mcp remove -s user iphone-use`) — the server reads the
+  daemon URL and token from the LaunchAgent, so no secret lands in Claude's config;
+- it opens the control page in your browser with a one-time sign-in link and prints a
+  QR code the iPhone camera can scan, so nobody copies the password.
+
+`--no-setup` (or `IPHONE_USE_NO_SETUP=1`) skips the phone step; upgrades never run it.
+Afterwards:
 
 ```bash
-~/.iphone-use/setup-wda.sh doctor    # explains any USB / trust / DDI / WARP blocker
-~/.iphone-use/setup-wda.sh           # build, sign, install, launch the runner, start relays
-~/.iphone-use/setup-wda.sh status
+iphone-use doctor    # what is missing: Xcode, the Apple ID, USB, Developer Mode, WARP …
+iphone-use setup     # build, sign, install, launch the runner, start relays
+iphone-use status    # ready for agents? (exit 0 when it is)
+iphone-use try       # the harmless first run again
+iphone-use login     # a new one-time browser sign-in and phone QR code
 ```
 
-Then open **`http://<mac-lan-ip>:44321/setup`**. The built-in guide translates
-`/agent/status` into the current blocker (USB, trust, developer service, runner, external
-host) without changing your VPN or running setup for you. Once the phone is drivable,
-continue to **`/phone`** and enter the password `install.sh` printed.
+`iphone-use setup` runs `~/.iphone-use/setup-wda.sh`, which also takes `status`, `pause`,
+`resume` and `stop` (`iphone-use setup status`). The control page is
+**`http://<mac-lan-ip>:44321/phone`**; **`/setup`** translates `/agent/status` into the
+current blocker (USB, trust, developer service, runner, external host) without changing
+your VPN or running setup for you.
 
 More than one iPhone paired? Pin the same classic UDID in both places:
 
@@ -468,7 +481,7 @@ named instance for it; the default install is left exactly as it is:
 
 ```bash
 ./install.sh --instance lab --udid <UDID>      # UDID from: xcrun devicectl list devices
-PHONE_REMOTE_INSTANCE=lab ~/.iphone-use/instances/lab/setup-wda.sh
+iphone-use setup --instance lab                # what the installer runs when that phone is plugged in
 ```
 
 The instance gets its own copy of the app, state directory
