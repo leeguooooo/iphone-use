@@ -298,10 +298,34 @@ is no longer cached). The action result and the observation are separate facts:
   Banners otherwise hijack taps (hardware-seen: a chat banner opened WeChat; a
   recurring alert banner broke flow runs). Opt out with `PHONE_REMOTE_AUTO_FOCUS=0`.
 
+## Logging in from the password vault
+
+When an app shows its login page during a task the user asked for, call
+`phone_login` (HTTP `POST /agent/login`, CLI `iphone-use auth login --bwu`). The
+daemon matches the app to an entry in the user's own vault (bitwarden-use on the
+Mac: an `iosapp://<bundle>` URI, then a web host the bundle id implies, then the
+app's name), reads it, types the account and password into the fields and taps
+Log in. Nothing in the answer, the logs or later element reads carries a value:
+the entry is named, the account masked (`le***@qq.com`), and password fields
+always read `••••••••`.
+
+| Answer | Meaning / what to do |
+|---|---|
+| `ok:true`, `filled`, `submitted` | Read the screen to confirm. `login_form_still_visible:true` → an error on screen (wrong password, captcha): tell the user. |
+| `needs_code: {via}` | The app sent a code: call `phone_login` with `code_via` `sms`/`mail` and `code_from` (the sender) once it arrived (`POST /agent/login/code`). At most two code requests per login. An authenticator code from the entry is entered automatically. |
+| `ambiguous_vault_entry` + `candidates` | Ask the user which entry; pass its name as `item` (and `user` when names repeat). |
+| `no_vault_entry` | Ask the user which entry to use. Never guess. |
+| `vault_locked` | Ask the user to unlock the vault on the Mac (`bwu unlock`). |
+| `not_a_login_form` | Two password fields: sign-up or a password change. Not done automatically. |
+| `value_not_applied` | The account field rejected the typed text (a composing keyboard): ask the user to switch the phone's keyboard to English. |
+
+Existing-account login only: never sign-up, password changes or payment, and a
+push approval on another device needs the user.
+
 ## MCP specifics
 
-22 tools: `phone_status`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
-`phone_release_owner`, `phone_screenshot`, `phone_elements`, `phone_tap`,
+24 tools: `phone_status`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
+`phone_release_owner`, `phone_login`, `phone_jev_run`, `phone_screenshot`, `phone_elements`, `phone_tap`,
 `phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_type`,
 `phone_key`, `phone_shortcut`, `phone_run_steps`, and `phone_flow_list / info /
 run / draft / update / publish / report`.

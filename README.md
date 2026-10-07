@@ -61,7 +61,7 @@ runner on the iPhone (it replaced WebDriverAgent and speaks the same API) and ex
 as:
 
 - an HTTP API for agents and scripts (`/agent/*`),
-- an MCP server with 23 tools for Claude Code, Claude Desktop and other MCP clients,
+- an MCP server with 24 tools for Claude Code, Claude Desktop and other MCP clients,
 - a web page and a native iOS app for people (live screen, tap, type).
 
 Nothing touches the Mac's own screen, cursor or focus.

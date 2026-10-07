@@ -261,6 +261,12 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Sign the app on the phone in from your own password vault
+    /// (bitwarden-use), or enter the verification code it asks for.
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
     /// Run a test suite on the phone (see `iphone-use test --help` for the
     /// flags; they are `iphone-use-mcp test`'s).
     #[command(disable_help_flag = true)]
@@ -555,6 +561,44 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 }
 
 #[derive(Subcommand)]
+enum AuthAction {
+    /// Fill and submit the login form on screen from the vault entry for the
+    /// app in front. The values go from the vault to the phone inside the
+    /// daemon; nothing prints them.
+    Login {
+        /// Read the credentials from bitwarden-use (the only source today).
+        #[arg(long)]
+        bwu: bool,
+        /// Vault entry name or id, when several match the app.
+        #[arg(long)]
+        item: Option<String>,
+        /// Username, when entries share a name.
+        #[arg(long)]
+        user: Option<String>,
+        /// Fill the fields but do not tap Log in.
+        #[arg(long)]
+        no_submit: bool,
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Enter the verification code the app asked for: from an SMS
+    /// (message-use), an email (mail-use) or the entry's authenticator.
+    Code {
+        /// sms, mail, totp or auto (SMS, then email).
+        #[arg(long, default_value = "auto")]
+        via: String,
+        /// Sender, brand or subject fragment of the message.
+        #[arg(long)]
+        from: Option<String>,
+        /// Seconds to wait for the code to arrive (at most 25).
+        #[arg(long)]
+        wait: Option<u64>,
+        #[arg(long)]
+        instance: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum DeviceQuery {
     /// Name, iOS version, model and build (no pairing session needed).
     Info {
@@ -690,6 +734,34 @@ fn main() -> Result<()> {
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_status(&target, json)?)
         }
+        Command::Auth { action } => match action {
+            AuthAction::Login {
+                bwu,
+                item,
+                user,
+                no_submit,
+                instance,
+            } => {
+                if !bwu {
+                    anyhow::bail!(
+                        "say where the credentials come from: iphone-use auth login --bwu"
+                    );
+                }
+                let target = onboarding::Target::resolve(instance.as_deref())?;
+                let body = serde_json::json!({ "item": item, "user": user, "submit": !no_submit });
+                std::process::exit(onboarding::run_auth(&target, "/agent/login", body)?)
+            }
+            AuthAction::Code {
+                via,
+                from,
+                wait,
+                instance,
+            } => {
+                let target = onboarding::Target::resolve(instance.as_deref())?;
+                let body = serde_json::json!({ "via": via, "from": from, "wait_secs": wait });
+                std::process::exit(onboarding::run_auth(&target, "/agent/login/code", body)?)
+            }
+        },
         Command::Try { instance } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_try(&target)?)

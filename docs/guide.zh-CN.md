@@ -141,6 +141,8 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 | `POST` | `/agent/mode` | `{"mode":"agent"}` 在已配置的手机上拉起 WDA，不换 UDID。`{"mode":"human"}` 停掉 WDA，把手机交还给持有人；之后 agent 输入返回 `409 phone_handed_to_human`，直到 `agent` 把手机要回来。 |
 | `POST` | `/agent/hold` | `{"secs":N}`（0 清除，上限 14400）在人工暂停期间阻止空闲释放。释放已经开始时返回 `503 device_release_in_progress`。 |
 | `POST` | `/agent/owner` | `{"release":true}` 提前归还 owner 租约。 |
+| `POST` | `/agent/login` | 用用户自己密码库（bitwarden-use）里的条目填写并提交 App 的登录表单（`{"item"?, "user"?, "submit"?}`）。账号密码在 daemon 内部从密码库直接写进手机，返回里只有条目名和打码后的账号。命令行：`iphone-use auth login --bwu`。 |
+| `POST` | `/agent/login/code` | 填写 App 要的验证码：来自短信（message-use）、邮件（mail-use）或条目自带的动态码（`{"via":"sms"\|"mail"\|"totp"\|"auto", "from"?, "wait_secs"?}`），每次登录最多两次。命令行：`iphone-use auth code`。 |
 | `GET` | `/agent/apps` | 已安装 App 及其 `version` / `bundle_version` / `system`，外加 `device.ios`，由 daemon 所在 Mac 上的 `devicectl` 读取。缓存 10 分钟；`?bundle=<id>` 过滤，`?refresh=1` 绕过缓存。失败返回 `503 apps_unavailable`（绝不返回空列表）；连着多台手机又没配置 UDID 时返回 `409 target_required`。 |
 | `GET` | `/agent/intents` | 语义意图注册表，见[语义意图](#语义意图手机端快捷指令)。 |
 | `POST` | `/agent/intent` | 派发一个已注册的 verb，结果落到 `/agent/inbox`。 |

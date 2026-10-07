@@ -54,7 +54,7 @@ iphone-use upgrade   # 升级全部组件
 没有 API 的 App 也能用，包括禁止截屏的银行、支付类 App。Mac 上的守护进程在 iPhone 上运行自己的设备 runner（基于 XCTest，取代了 WebDriverAgent，接口兼容），对外提供：
 
 - 给 agent 和脚本用的 HTTP 接口（`/agent/*`）；
-- 23 个工具的 MCP server，Claude Code、Claude Desktop 等 MCP 客户端直接接；
+- 24 个工具的 MCP server，Claude Code、Claude Desktop 等 MCP 客户端直接接；
 - 给人用的网页和 iOS App：看实时画面，直接点、直接输入。
 
 它不碰 Mac 自己的屏幕、光标和窗口焦点。

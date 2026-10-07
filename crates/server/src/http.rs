@@ -621,7 +621,7 @@ fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<bool, Resp
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::RETRY_AFTER, other.lease_remaining_secs.max(1).to_string())
                 .body(Body::from(format!(
-                    r#"{{"ok":false,"error":"phone_owned","owner":{},"owner_lease_remaining_secs":{},"outcome":"not_sent","hint":"another session is driving this phone; wait for its lease to lapse, ask it to release via POST /agent/owner, or send X-Phone-Owner-Takeover: 1 only if you are sure it is abandoned"}}"#,
+                    r#"{{"ok":false,"error":"phone_owned","owner":{},"owner_lease_remaining_secs":{},"outcome":"not_sent","hint":"another session is driving this phone; wait for its lease to lapse, or ask the user whether that session can release it (POST /agent/owner)"}}"#,
                     serde_json::to_string(&other.owner).unwrap_or_else(|_| "null".into()),
                     other.lease_remaining_secs
                 )))
@@ -923,6 +923,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/intents", get(agent_intents))
         .route("/agent/intent", post(agent_intent))
         .route("/agent/hold", post(agent_hold))
+        .route("/agent/login", post(agent_login))
+        .route("/agent/login/code", post(agent_login_code))
         .route("/agent/owner", post(agent_owner))
         .route("/agent/prewarm", post(agent_prewarm))
         .route("/agent/login-link", post(agent_login_link))
@@ -11418,6 +11420,146 @@ fn hold_owner_lease(
     };
     let hold = std::time::Duration::from_secs(secs);
     owner.last_seen = if hold > lease { now + (hold - lease) } else { now };
+}
+
+/// The gate every `/agent/login*` call passes: auth, the control header, the
+/// phone lease, and a drivable runner. On success, the WDA client.
+fn login_gate(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<Arc<tokio::sync::Mutex<crate::wda::WdaClient>>, Response> {
+    match agent_auth(state, headers) {
+        AgentAuth::Locked => {
+            return Err(with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            ))
+        }
+        AgentAuth::Denied => {
+            return Err(with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            ))
+        }
+        AgentAuth::Ok => {}
+    }
+    if !has_phone_control_header(headers) {
+        return Err(missing_phone_control_header_response());
+    }
+    claim_phone_owner(state, headers)?;
+    if state.managed_wda_pending {
+        return Err(target_not_configured_response());
+    }
+    if state.wda_lifecycle.is_transitioning()
+        || state.released.load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err(agent_actions_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({
+                "ok": false,
+                "error": "device_not_drivable",
+                "hint": "check /agent/status, reconnect if instructed, then retry once drivable=true"
+            }),
+        ));
+    }
+    state.wda.clone().ok_or_else(|| {
+        agent_actions_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({ "ok": false, "error": "wda_not_configured" }),
+        )
+    })
+}
+
+fn login_response(result: Result<serde_json::Value, crate::login::LoginError>) -> Response {
+    match result {
+        Ok(body) => agent_actions_json(StatusCode::OK, body),
+        Err(error) => agent_actions_json(
+            StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY),
+            error.body(),
+        ),
+    }
+}
+
+/// `POST /agent/login {"item"?, "user"?, "submit"?}` — fill the app's login
+/// form from the user's own password vault (bitwarden-use) and submit it. The
+/// credentials go from the vault to the phone inside the daemon; the response
+/// names the entry and a masked account, never a value. See `login.rs`.
+async fn agent_login(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let wda = match login_gate(&state, &headers) {
+        Ok(wda) => wda,
+        Err(refused) => return refused,
+    };
+    let request: crate::login::LoginRequest = if body.trim().is_empty() {
+        Default::default()
+    } else {
+        match serde_json::from_str(&body) {
+            Ok(request) => request,
+            Err(_) => {
+                return agent_actions_json(
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "invalid_request",
+                        "hint": "body is {\"item\"?: name or id, \"user\"?: username, \"submit\"?: bool}"
+                    }),
+                )
+            }
+        }
+    };
+    let vault = match crate::login::Vault::locate() {
+        Ok(vault) => vault,
+        Err(error) => return login_response(Err(error)),
+    };
+    state.touch_activity();
+    // A recorded trail must never splice a login into a flow: the steps
+    // before it were their own task, and the login itself is not replayable.
+    recover(state.flow_trail.lock()).flow_ran();
+    let _priority = state.begin_wda_control();
+    let mut w = wda.lock().await;
+    let result = crate::login::sign_in(&mut w, &vault, &request).await;
+    drop(w);
+    recover(state.flow_trail.lock()).flow_ran();
+    login_response(result)
+}
+
+/// `POST /agent/login/code {"via"?: "sms"|"mail"|"totp"|"auto", "from"?, "wait_secs"?}`
+/// — fetch a verification code for the login in progress and enter it. At
+/// most two per login.
+async fn agent_login_code(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let wda = match login_gate(&state, &headers) {
+        Ok(wda) => wda,
+        Err(refused) => return refused,
+    };
+    let request: crate::login::CodeRequest = if body.trim().is_empty() {
+        Default::default()
+    } else {
+        match serde_json::from_str(&body) {
+            Ok(request) => request,
+            Err(_) => {
+                return agent_actions_json(
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "invalid_request",
+                        "hint": "body is {\"via\"?: sms|mail|totp|auto, \"from\"?: sender, \"wait_secs\"?: up to 25}"
+                    }),
+                )
+            }
+        }
+    };
+    state.touch_activity();
+    let _priority = state.begin_wda_control();
+    let mut w = wda.lock().await;
+    let result = crate::login::enter_code(&mut w, &request).await;
+    drop(w);
+    recover(state.flow_trail.lock()).flow_ran();
+    login_response(result)
 }
 
 async fn agent_hold(

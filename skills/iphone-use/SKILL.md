@@ -94,6 +94,7 @@ it off again.
 | Home / Spotlight | `shortcut` | `phone_shortcut` | `shortcut` |
 | Scroll | `scroll` `dy` (80 ≈ 15% of a screen, 400 ≈ 75%) | `phone_scroll` | `scroll` |
 | System alert | `alert` `button` / `action` | `phone_run_steps` step | `alert` |
+| App asks you to log in | `POST /agent/login` (`iphone-use auth login --bwu`) | `phone_login` | — |
 | Switch / slider | `perform` `toggle` / `adjust` | — (not in MCP) | — |
 
 All actions, including swipe, drag, picker, set_value and the scroll variants,
@@ -163,7 +164,10 @@ reference: *Flows*.
 5. **One session per phone.** Send `X-Phone-Owner`. On `409 phone_owned`, wait;
    never take over unless the user says the other session is abandoned. Release
    your lease when done.
-6. **Saving and publishing are the user's call.** Ask before saving a flow, and
+6. **Log in only through `phone_login` / `iphone-use auth login --bwu`.** It
+   fills the user's own vault entry inside the daemon. Never ask for, type or
+   repeat a password or code yourself; never sign up, change a password or pay.
+7. **Saving and publishing are the user's call.** Ask before saving a flow, and
    ask again before publishing it or filing an issue. Both use their GitHub
    account.
 
