@@ -5119,6 +5119,17 @@ fn devicectl_installed_apps(
     Ok((device, body))
 }
 
+/// Control coordinates are fractions of the screen. A point-sized value used
+/// to come back as "the runner is unavailable", which sends an agent off to
+/// reconnect a phone that is fine.
+const COORDINATES_HINT: &str = "x and y are fractions of the screen from 0 to 1 (0.5,0.5 is the centre), not points: divide by the screen size that GET /agent/elements reports";
+
+/// Every coordinate is present and finite, but at least one is outside 0..=1.
+fn coordinates_out_of_range(values: &[Option<f64>]) -> bool {
+    values.iter().all(|v| v.is_some_and(f64::is_finite))
+        && values.iter().flatten().any(|n| !(0.0..=1.0).contains(n))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WdaControlOutcome {
     Applied,
@@ -7498,6 +7509,9 @@ async fn wda_control_with_client(
                     }
                     .await
                 }
+                (x, y) if coordinates_out_of_range(&[x, y]) => {
+                    return WdaControlOutcome::InvalidValue(COORDINATES_HINT);
+                }
                 _ => return WdaControlOutcome::Unsupported,
             }
         }
@@ -7518,6 +7532,9 @@ async fn wda_control_with_client(
                 }
                 .await
             }
+            (x, y) if coordinates_out_of_range(&[x, y]) => {
+                return WdaControlOutcome::InvalidValue(COORDINATES_HINT);
+            }
             _ => return WdaControlOutcome::Unsupported,
         },
         "scroll" => {
@@ -7525,6 +7542,9 @@ async fn wda_control_with_client(
             let ny = v.get("y").and_then(|y| y.as_f64()).unwrap_or(0.5);
             let dx = v.get("dx").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let dy = v.get("dy").and_then(|y| y.as_f64()).unwrap_or(0.0);
+            if coordinates_out_of_range(&[Some(nx), Some(ny)]) {
+                return WdaControlOutcome::InvalidValue(COORDINATES_HINT);
+            }
             if !(0.0..=1.0).contains(&nx) || !(0.0..=1.0).contains(&ny) || (dx == 0.0 && dy == 0.0)
             {
                 return WdaControlOutcome::Unsupported;
@@ -7592,6 +7612,9 @@ async fn wda_control_with_client(
                         }
                     }
                     .await
+                }
+                (x1, y1, x2, y2) if coordinates_out_of_range(&[x1, y1, x2, y2]) => {
+                    return WdaControlOutcome::InvalidValue(COORDINATES_HINT);
                 }
                 _ => return WdaControlOutcome::Unsupported,
             }
