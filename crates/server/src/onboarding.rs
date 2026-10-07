@@ -198,6 +198,7 @@ pub fn run_doctor(target: &Target) -> i32 {
 
 struct Daemon<'a> {
     target: &'a Target,
+    owner: String,
     runtime: tokio::runtime::Runtime,
     client: reqwest::Client,
 }
@@ -206,6 +207,7 @@ impl<'a> Daemon<'a> {
     fn new(target: &'a Target) -> Result<Self> {
         Ok(Daemon {
             target,
+            owner: TRY_OWNER.to_string(),
             runtime: tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?,
@@ -226,7 +228,7 @@ impl<'a> Daemon<'a> {
         let mut request = self
             .client
             .request(method.clone(), format!("{}{path}", self.target.base()))
-            .header("X-Phone-Owner", TRY_OWNER);
+            .header("X-Phone-Owner", &self.owner);
         if let Some(token) = &self.target.token {
             request = request.bearer_auth(token);
         }
@@ -331,6 +333,38 @@ fn hint(status: &Value) -> Option<String> {
             .filter(|h| !h.is_empty())
             .map(str::to_string)
     })
+}
+
+// ---------------------------------------------------------------------------
+// auth: log the app on the phone in from the password vault
+// ---------------------------------------------------------------------------
+
+/// `iphone-use auth login --bwu` / `auth code`: one call to the daemon, which
+/// reads the vault itself. Prints the daemon's answer; the exit code is 0 only
+/// when it says ok.
+pub fn run_auth(target: &Target, path: &str, body: Value) -> Result<i32> {
+    let mut daemon = Daemon::new(target)?;
+    daemon.owner = std::env::var("PHONE_REMOTE_OWNER")
+        .ok()
+        .filter(|owner| !owner.trim().is_empty())
+        .unwrap_or_else(|| "iphone-use-auth".to_string());
+    let (code, value) = daemon.call(reqwest::Method::POST, path, Some(body))?;
+    if code == 409 && value.get("error").and_then(Value::as_str) == Some("phone_owned") {
+        bail!("{}", owned_message(&value));
+    }
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    // Sent is not done: a form still on screen after the tap is a failure.
+    let still = |key: &str| value.get(key) == Some(&Value::Bool(true));
+    Ok(
+        if value.get("ok") == Some(&Value::Bool(true))
+            && !still("login_form_still_visible")
+            && !still("code_field_still_visible")
+        {
+            0
+        } else {
+            1
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

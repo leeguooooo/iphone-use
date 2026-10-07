@@ -494,6 +494,26 @@ pub struct PhoneHandler {
     progress: std::sync::Arc<std::sync::Mutex<crate::hints::ProgressTracker>>,
 }
 
+/// Parameters for [`PhoneHandler::phone_login`].
+#[derive(Debug, Default, serde::Deserialize, JsonSchema)]
+pub struct LoginParams {
+    /// Vault entry name or id, when several entries match the app.
+    #[serde(default)]
+    pub item: Option<String>,
+    /// Username, to pick between entries with the same name.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Tap the app's Log in button after filling (default true).
+    #[serde(default)]
+    pub submit: Option<bool>,
+    /// Enter a verification code instead of logging in: sms, mail, totp or auto.
+    #[serde(default)]
+    pub code_via: Option<String>,
+    /// Sender, brand or subject fragment of the message with the code.
+    #[serde(default)]
+    pub code_from: Option<String>,
+}
+
 /// Parameters for [`PhoneHandler::phone_hold`].
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct HoldParams {
@@ -1082,6 +1102,43 @@ impl PhoneHandler {
         match self.daemon.release_owner().await {
             Ok(body) => CallToolResult::success(vec![Content::text(body)]),
             Err(e) => CallToolResult::error(vec![Content::text(format!("release failed: {e:#}"))]),
+        }
+    }
+
+    #[tool(
+        description = "Log the app on screen in with the user's OWN account from their password \
+        vault (bitwarden-use on the Mac). The daemon reads the vault entry and types it into the \
+        phone, so no password or username passes through this conversation. Use it when an app \
+        shows its login page during a task the user asked for. The entry is matched to the app; \
+        when several match, the answer lists their names: ask the user, then pass `item` (and \
+        `user` when names repeat). Existing-account login only: never sign-up, password changes \
+        or payment. When the answer has needs_code, the app sent a verification code: call again \
+        with code_via (sms or mail) and code_from (the sender) once it has arrived; at most two \
+        code requests per login. A push approval on another device needs the user. Read the \
+        screen afterwards to confirm the login."
+    )]
+    async fn phone_login(&self, Parameters(params): Parameters<LoginParams>) -> CallToolResult {
+        let (path, body) = match &params.code_via {
+            Some(via) => (
+                "/agent/login/code",
+                serde_json::json!({ "via": via, "from": params.code_from, "wait_secs": 20 }),
+            ),
+            None => (
+                "/agent/login",
+                serde_json::json!({
+                    "item": params.item,
+                    "user": params.user,
+                    "submit": params.submit.unwrap_or(true),
+                }),
+            ),
+        };
+        match self
+            .daemon
+            .request_json(reqwest::Method::POST, path, Some(&body))
+            .await
+        {
+            Ok(response) => daemon_read_result(&response),
+            Err(e) => CallToolResult::error(vec![Content::text(format!("login failed: {e:#}"))]),
         }
     }
 
@@ -2426,10 +2483,11 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            23,
+            24,
             "tool count changed; update README, the skill, and the CI assertion: {names:?}"
         );
         for required in [
+            "phone_login",
             "phone_jev_run",
             "phone_flow_draft",
             "phone_capabilities",

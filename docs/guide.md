@@ -264,6 +264,8 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
 | `POST` | `/agent/mode` | `{"mode":"agent"}` brings WDA up on the configured target (never changes the UDID). `{"mode":"human"}` stops WDA and hands the phone to its holder; agent input then answers `409 phone_handed_to_human` until `agent` takes it back. |
 | `POST` | `/agent/hold` | `{"secs":N}` (0 clears, max 14400) keeps the phone from idle release around a human pause. `503 device_release_in_progress` if release already started. |
 | `POST` | `/agent/owner` | `{"release":true}` hands the owner lease back early. |
+| `POST` | `/agent/login` | Fill and submit the app's login form from the user's own bitwarden-use vault entry (`{"item"?, "user"?, "submit"?}`). The values go from the vault to the phone inside the daemon; the answer names the entry and a masked account only. CLI: `iphone-use auth login --bwu`. |
+| `POST` | `/agent/login/code` | Enter the verification code the app asked for, from an SMS (message-use), an email (mail-use) or the entry's authenticator (`{"via":"sms"\|"mail"\|"totp"\|"auto", "from"?, "wait_secs"?}`); at most two per login. CLI: `iphone-use auth code`. |
 | `GET` | `/agent/apps` | Installed apps with `version` / `bundle_version` / `system`, plus `device.ios`, from `devicectl` on the daemon's Mac. Cached 10 min; `?bundle=<id>` filters, `?refresh=1` bypasses the cache. `503 apps_unavailable` on failure (never an empty list); `409 target_required` with several phones and no configured UDID. |
 | `GET` | `/agent/intents` | The curated semantic-intent registry (see [Semantic intents](#semantic-intents-shortcuts-on-device)). |
 | `POST` | `/agent/intent` | Dispatch one registered verb; the result arrives on `/agent/inbox`. |

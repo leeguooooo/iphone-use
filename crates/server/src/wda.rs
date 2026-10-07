@@ -2480,6 +2480,21 @@ fn flatten_node(
             serde_json::Value::Bool(b) => Some(b.to_string()),
             _ => None,
         });
+        // A password field never leaves the daemon with its contents — not
+        // even as bullets, whose count is the password's length. Its
+        // placeholder (shown while empty) is not secret and stays.
+        let placeholder = non_empty_string(node, "placeholderValue");
+        let value = if kind == "SecureTextField" {
+            value.map(|v| {
+                if placeholder.as_deref() == Some(v.as_str()) {
+                    v
+                } else {
+                    SECURE_VALUE_MASK.to_string()
+                }
+            })
+        } else {
+            value
+        };
         let enabled = wda_bool(node, "isEnabled").filter(|value| !value);
         let visible = wda_bool(node, "isVisible").filter(|value| !value);
         let accessible = wda_bool(node, "isAccessible").filter(|value| *value);
@@ -2515,7 +2530,7 @@ fn flatten_node(
             visible,
             accessible,
             focused,
-            placeholder: non_empty_string(node, "placeholderValue"),
+            placeholder,
             actions,
             selected,
             min,
@@ -2530,6 +2545,9 @@ fn flatten_node(
         }
     }
 }
+
+/// What a non-empty password field reads as in every element row.
+pub const SECURE_VALUE_MASK: &str = "••••••••";
 
 /// Action-level WDA health (see [`WdaClient::probe_health`]). Distinguishes a
 /// runner that merely answers `/status` from one that can actually act.
