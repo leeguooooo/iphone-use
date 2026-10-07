@@ -105,6 +105,9 @@ pub struct DaemonClient {
     /// an observed action). An observed action names it as its baseline, so
     /// the daemon answers with what changed instead of the whole tree.
     last_snapshot: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Sent as `X-Agent-Call` so the daemon's task metrics can tell a flow
+    /// replay from a hand-driven call.
+    call_kind: Option<&'static str>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -250,6 +253,7 @@ impl DaemonClient {
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| format!("mcp-{}", std::process::id())),
             last_snapshot: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            call_kind: None,
         }
     }
 
@@ -295,9 +299,21 @@ impl DaemonClient {
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let req = match self.call_kind {
+            Some(kind) => req.header("x-agent-call", kind),
+            None => req,
+        };
         match &self.token {
             Some(t) => req.header(header::AUTHORIZATION, format!("Bearer {t}")),
             None => req,
+        }
+    }
+
+    /// The same client, marking every request as part of a flow replay.
+    pub fn for_flow(&self) -> Self {
+        Self {
+            call_kind: Some("flow"),
+            ..self.clone()
         }
     }
 
@@ -496,7 +512,11 @@ impl DaemonClient {
             Some(side) => format!("/agent/screenshot?max_side={side}"),
             None => "/agent/screenshot".to_string(),
         };
-        let req = self.auth(self.client.get(self.url(&path)));
+        // The owner rides along on reads too: the daemon attributes them to
+        // this session's run and remembers the screen it last saw.
+        let req = self
+            .auth(self.client.get(self.url(&path)))
+            .header("x-phone-owner", &self.owner);
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
         let bytes = resp.bytes().await?;
@@ -515,6 +535,7 @@ impl DaemonClient {
         // request while it still owns the WDA lock.
         let req = self
             .auth(self.client.get(self.url("/agent/elements")))
+            .header("x-phone-owner", &self.owner)
             .timeout(ELEMENTS_TIMEOUT);
         let resp = req.send().await?;
         let resp = check_status(resp).await?;

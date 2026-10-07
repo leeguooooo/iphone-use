@@ -254,10 +254,14 @@ fn extra_blocks(json: &Value, out: &mut Vec<String>) {
             out.push(format!("{key}: {block}"));
         }
     }
-    for key in ["hint", "delta_error", "no_progress"] {
+    for key in ["hint", "delta_error"] {
         if let Some(line) = text(json, key) {
             out.push(format!("{key}: {line}"));
         }
+    }
+    // The daemon's advice already names itself ("no_progress (advice only): …").
+    if let Some(line) = text(json, "no_progress") {
+        out.push(line);
     }
     if json.get("capture_redacted") == Some(&Value::Bool(true)) {
         out.push("capture_redacted: the app hides this screen from screenshots".to_string());

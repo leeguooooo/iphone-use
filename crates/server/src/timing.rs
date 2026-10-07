@@ -32,6 +32,26 @@ tokio::task_local! {
 #[derive(Default)]
 struct Recorder {
     calls: Vec<Call>,
+    /// This request's task-metrics start, registered only once the request
+    /// authenticates (see [`authenticated`]); a refused request never
+    /// touches anyone's metrics.
+    pending: Option<crate::metrics::CallStart>,
+    /// Set by [`authenticated`]. Dropped unfinished (a cancelled request), it
+    /// records the call as cancelled.
+    guard: Option<crate::metrics::CallGuard>,
+}
+
+/// Called by the auth checks when a request authenticates: register its
+/// task-metrics call now. A no-op outside a timed request, and after the
+/// first call in the same request.
+pub fn authenticated() {
+    let _ = RECORDER.try_with(|recorder| {
+        if let Ok(mut recorder) = recorder.lock() {
+            if let Some(start) = recorder.pending.take() {
+                recorder.guard = Some(crate::metrics::begin_call(start));
+            }
+        }
+    });
 }
 
 struct Call {
@@ -199,7 +219,7 @@ pub async fn layer(request: Request, next: Next) -> Response {
     // Task metrics: attributed now, at the start, from the caller's own
     // headers (validated by the aggregator). Polls and the metrics routes
     // themselves are not agent work.
-    let (token, flow_call) = {
+    let (pending, flow_call) = {
         let header = |name: &str| {
             request
                 .headers()
@@ -210,24 +230,28 @@ pub async fn layer(request: Request, next: Next) -> Response {
         let counted =
             !matches!(path.as_str(), "/agent/status" | "/agent/metrics" | "/agent/run");
         let flow_call = header("x-agent-call").as_deref() == Some("flow");
-        let token = counted.then(|| {
-            crate::metrics::begin_call(crate::metrics::CallStart {
-                start_ms: started_ms,
-                owner: header("x-phone-owner"),
-                run_id: header("x-agent-run"),
-            })
+        let pending = counted.then(|| crate::metrics::CallStart {
+            start_ms: started_ms,
+            owner: header("x-phone-owner"),
+            run_id: header("x-agent-run"),
         });
-        (token, flow_call)
+        (pending, flow_call)
     };
     let (response, recorder) = RECORDER
-        .scope(Mutex::new(Recorder::default()), async move {
+        .scope(
+            Mutex::new(Recorder {
+                pending,
+                ..Recorder::default()
+            }),
+            async move {
             let response = next.run(request).await;
             let recorder = RECORDER.with(|r| match r.lock() {
                 Ok(mut r) => std::mem::take(&mut *r),
                 Err(_) => Recorder::default(),
             });
             (response, recorder)
-        })
+        },
+        )
         .await;
     let summary = Summary::new(&recorder, started.elapsed());
     if path != "/agent/status" && summary.total_ms >= 1000 {
@@ -259,10 +283,9 @@ pub async fn layer(request: Request, next: Next) -> Response {
     }
     let status = response.status();
     let (response, json) = attach(response, &summary).await;
-    if let Some(token) = token {
-        if matches!(status.as_u16(), 401 | 403 | 429) {
-            crate::metrics::discard_call(token);
-        } else {
+    let mut recorder = recorder;
+    if let Some(guard) = recorder.guard.take() {
+        {
             let end_ms = started_ms.saturating_add(started.elapsed().as_millis() as u64);
             let runner_intervals = recorder
                 .calls
@@ -280,8 +303,7 @@ pub async fn layer(request: Request, next: Next) -> Response {
             } else {
                 crate::metrics::CallKind::Single
             };
-            crate::metrics::finish_call(
-                token,
+            guard.finish(
                 crate::metrics::CallEnd {
                     end_ms,
                     kind,
@@ -417,14 +439,12 @@ async fn attach(response: Response, summary: &Summary) -> (Response, Option<serd
     let bytes = match axum::body::to_bytes(body, MAX_REWRITE_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            parts.status = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+            // The handler already ran: whatever it did may have happened.
+            // Say the outcome is unknown rather than inventing a failure.
             parts.headers.remove(header::CONTENT_LENGTH);
             return (
-                Response::from_parts(
-                    parts,
-                    Body::from(r#"{"ok":false,"error":"response_body_unreadable"}"#),
-                ),
-                None,
+                Response::from_parts(parts, Body::from(UNKNOWN_BODY)),
+                serde_json::from_str(UNKNOWN_BODY).ok(),
             );
         }
     };
@@ -442,6 +462,10 @@ async fn attach(response: Response, summary: &Summary) -> (Response, Option<serd
         None => (Response::from_parts(parts, Body::from(bytes)), json),
     }
 }
+
+/// Sent when a response body could not be read back after its handler ran.
+pub const UNKNOWN_BODY: &str =
+    r#"{"ok":false,"error":"outcome_unknown","outcome":"unknown","retry_safe":false,"hint":"the response could not be read back; re-read the screen before retrying"}"#;
 
 /// Splice `"timing":{…}` in before the object's closing brace, leaving every
 /// other byte (and so the field order) as the handler wrote it. `None` for
@@ -506,6 +530,7 @@ mod tests {
                     bytes: Some(700_000),
                 },
             ],
+            ..Recorder::default()
         };
         let s = Summary::new(&recorder, Duration::from_millis(11_500));
         assert_eq!(s.wda_ms, 11_180);
@@ -560,6 +585,7 @@ mod tests {
                     elapsed: Duration::from_millis(5),
                     bytes: None,
                 }],
+                ..Recorder::default()
             },
             Duration::from_millis(9),
         );

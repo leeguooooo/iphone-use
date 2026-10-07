@@ -50,7 +50,30 @@ pub fn reset(owner: &str) {
 /// can key it: taps by label, by element + snapshot, by point, and scrolls.
 pub fn action_of(body: &Value) -> Option<OwnedAction> {
     let num = |key: &str| body.get(key).and_then(Value::as_f64);
+    // Relative targets (a page scroller, an element, a locator) cannot be
+    // keyed from the request alone: no key means no advice.
+    let relative = ["page", "element", "locator", "snapshot"]
+        .iter()
+        .any(|key| {
+            body.get(*key)
+                .is_some_and(|v| !v.is_null() && *v != Value::Bool(false))
+        });
     match body.get("type").and_then(Value::as_str)? {
+        "scroll" => {
+            if relative {
+                return None;
+            }
+            let (dx, dy) = (num("dx"), num("dy"));
+            if dx.is_none() && dy.is_none() {
+                return None;
+            }
+            Some(OwnedAction::Scroll(
+                num("x")?,
+                num("y")?,
+                dx.unwrap_or(0.0),
+                dy.unwrap_or(0.0),
+            ))
+        }
         "tap" => {
             if let Some(label) = body.get("label").and_then(Value::as_str) {
                 return Some(OwnedAction::Label(label.to_string()));
@@ -63,12 +86,6 @@ pub fn action_of(body: &Value) -> Option<OwnedAction> {
             }
             Some(OwnedAction::Point(num("x")?, num("y")?))
         }
-        "scroll" => Some(OwnedAction::Scroll(
-            num("x").unwrap_or(0.5),
-            num("y").unwrap_or(0.5),
-            num("dx").unwrap_or(0.0),
-            num("dy").unwrap_or(0.0),
-        )),
         _ => None,
     }
 }
@@ -99,4 +116,39 @@ pub fn begin(owner: &str, action: &OwnedAction) -> ProgressGuard {
         },
     };
     ProgressGuard::begin(&tracker(owner), &action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_absolute_targets_are_keyed() {
+        assert!(matches!(
+            action_of(&json!({"type": "scroll", "x": 0.5, "y": 0.6, "dy": 300})),
+            Some(OwnedAction::Scroll(..))
+        ));
+        // No coordinates, a page scroller, an element scroll: no key.
+        assert!(action_of(&json!({"type": "scroll", "dy": 300})).is_none());
+        assert!(action_of(&json!({"type": "scroll", "page": true, "dy": 300})).is_none());
+        assert!(action_of(
+            &json!({"type": "scroll", "element": 3, "snapshot": "S", "x": 0.5, "y": 0.5, "dy": 1})
+        )
+        .is_none());
+        assert!(
+            action_of(&json!({"type": "scroll", "x": 0.5, "y": 0.5})).is_none(),
+            "no distance"
+        );
+        assert!(matches!(
+            action_of(&json!({"type": "tap", "label": "通用"})),
+            Some(OwnedAction::Label(_))
+        ));
+        assert!(matches!(
+            action_of(&json!({"type": "tap", "element": 2, "snapshot": "S"})),
+            Some(OwnedAction::Element(2, _))
+        ));
+        assert!(action_of(&json!({"type": "tap_locator", "locator": {"label": "x"}})).is_none());
+        assert!(action_of(&json!({"type": "text", "text": "hi"})).is_none());
+    }
 }

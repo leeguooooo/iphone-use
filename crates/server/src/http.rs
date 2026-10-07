@@ -646,7 +646,16 @@ fn owner_status(state: &AppState) -> (Option<String>, u64) {
 /// `POST /agent/owner {"release":true}` — give up the lease. Only the current
 /// owner (matching `X-Phone-Owner`) may release it; anyone may release a
 /// lapsed one. Never takes a lease itself.
-async fn agent_owner(
+/// `/agent/owner` (claim or release the lease): a run boundary for the
+/// owner's `no_progress` tracker.
+async fn agent_owner(state: State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    if let Some(owner) = trusted_owner(&state, &headers) {
+        crate::advice::reset(&owner);
+    }
+    agent_owner_inner(state, headers, body).await
+}
+
+async fn agent_owner_inner(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
@@ -1636,6 +1645,7 @@ enum AgentAuth {
 fn agent_auth(state: &AppState, headers: &HeaderMap) -> AgentAuth {
     // Open mode: no credential of any kind is configured.
     if state.agent_token.is_none() && state.password.is_none() {
+        crate::timing::authenticated();
         return AgentAuth::Ok;
     }
     {
@@ -1646,11 +1656,34 @@ fn agent_auth(state: &AppState, headers: &HeaderMap) -> AgentAuth {
     }
     if check_bearer(state, headers) {
         state.auth_limiter.lock().unwrap().record_success();
+        // Only now does the request count for task metrics.
+        crate::timing::authenticated();
         AgentAuth::Ok
     } else {
         state.auth_limiter.lock().unwrap().record_failure();
         AgentAuth::Denied
     }
+}
+
+/// Would this request authenticate? Read-only: it neither advances the auth
+/// limiter nor registers anything, so wrappers can decide whether to act
+/// on the caller's behalf without changing state for a refused request.
+fn credentials_ok(state: &AppState, headers: &HeaderMap) -> bool {
+    if state.agent_token.is_none() && state.password.is_none() {
+        return true;
+    }
+    if state.auth_limiter.lock().is_ok_and(|limiter| limiter.is_locked()) {
+        return false;
+    }
+    is_authed(state, headers) || check_bearer(state, headers)
+}
+
+/// The caller's owner, but only for a request that will authenticate: the
+/// `no_progress` state of an owner is never touched by a refused request.
+fn trusted_owner(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    named_owner(headers)
+        .filter(|_| credentials_ok(state, headers))
+        .map(str::to_string)
 }
 
 /// Authorize a route shared by the browser UI and bearer-authenticated agents.
@@ -1661,6 +1694,7 @@ fn agent_auth(state: &AppState, headers: &HeaderMap) -> AgentAuth {
 /// repeatedly lock out a legitimate MCP client.
 fn browser_or_agent_auth(state: &AppState, headers: &HeaderMap) -> AgentAuth {
     if is_authed(state, headers) {
+        crate::timing::authenticated();
         AgentAuth::Ok
     } else if headers.contains_key(header::AUTHORIZATION) {
         agent_auth(state, headers)
@@ -4535,10 +4569,17 @@ async fn agent_run(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
     let Some(run_id) = value.get("run_id").and_then(serde_json::Value::as_str) else {
         return invalid("run_id is required");
     };
+    if !crate::metrics::valid_id(&owner) || !crate::metrics::valid_id(run_id) {
+        return invalid("owner and run_id: 1–64 characters of A-Z a-z 0-9 . _ : @ -");
+    }
+    // A run boundary: the no_progress tracker starts over.
+    crate::advice::reset(&owner);
     match value.get("action").and_then(serde_json::Value::as_str) {
         Some("start") => {
             let complete = value.get("complete_trace") == Some(&serde_json::Value::Bool(true));
-            crate::metrics::start_run(Some(owner), run_id.to_string(), complete);
+            if !crate::metrics::start_run(Some(owner), run_id.to_string(), complete) {
+                return invalid("the run could not be started");
+            }
             json_response(StatusCode::OK, serde_json::json!({"ok": true}))
         }
         Some("end") => {
@@ -4641,7 +4682,16 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
 /// * `{"mode":"human"}` — stop the managed runner so the person holding the
 ///   phone has it to themselves; agent input then answers 409
 ///   `phone_handed_to_human` until `agent` takes it back.
-async fn agent_mode(
+/// `/agent/mode` (reconnect, hand to a human): the screen the owner's
+/// `no_progress` tracker knew is gone.
+async fn agent_mode(state: State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    if let Some(owner) = trusted_owner(&state, &headers) {
+        crate::advice::reset(&owner);
+    }
+    agent_mode_inner(state, headers, body).await
+}
+
+async fn agent_mode_inner(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
@@ -9276,12 +9326,12 @@ async fn agent_actions(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let owner = named_owner(&headers).map(str::to_string);
-    let response = agent_actions_inner(state, headers, body).await;
-    if let Some(owner) = owner.filter(|_| !refused_as_unauthenticated(&response)) {
+    // A batch changes the screen under the tracker: forget it now, after
+    // authentication and before the batch runs.
+    if let Some(owner) = trusted_owner(&state, &headers) {
         crate::advice::reset(&owner);
     }
-    response
+    agent_actions_inner(state, headers, body).await
 }
 
 async fn agent_actions_inner(
@@ -10280,10 +10330,16 @@ async fn read_json_response(response: Response) -> (Response, Option<serde_json:
             let json = serde_json::from_slice(&bytes).ok();
             (Response::from_parts(parts, Body::from(bytes)), json)
         }
-        Err(_) => (
-            Response::from_parts(parts, Body::from(r#"{"ok":false,"error":"response_body_unreadable"}"#)),
-            None,
-        ),
+        Err(_) => {
+            // The mutation may already have applied: never claim a known
+            // failure. Say the outcome is unknown, and drop the old length.
+            let mut parts = parts;
+            parts.headers.remove(header::CONTENT_LENGTH);
+            (
+                Response::from_parts(parts, Body::from(crate::timing::UNKNOWN_BODY)),
+                None,
+            )
+        }
     }
 }
 
@@ -10300,7 +10356,7 @@ async fn agent_input(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let Some(owner) = named_owner(&headers).map(str::to_string) else {
+    let Some(owner) = trusted_owner(&state, &headers) else {
         return agent_input_inner(state, Query(query), headers, body).await;
     };
     let observed = query.return_mode.as_deref() == Some("delta");
@@ -10309,17 +10365,15 @@ async fn agent_input(
         .and_then(|value| crate::advice::action_of(&value));
     let guard = match (observed, &action) {
         (true, Some(action)) => Some(crate::advice::begin(&owner, action)),
-        _ => None,
+        _ => {
+            // Anything the tracker cannot judge changes the screen under it:
+            // forget it now, before the action runs.
+            crate::advice::reset(&owner);
+            None
+        }
     };
     let response = agent_input_inner(state, Query(query), headers, body).await;
-    if refused_as_unauthenticated(&response) {
-        if let Some(guard) = guard {
-            guard.withdraw();
-        }
-        return response;
-    }
     let Some(guard) = guard else {
-        crate::advice::reset(&owner);
         return response;
     };
     let (response, json) = read_json_response(response).await;
@@ -11295,12 +11349,21 @@ async fn agent_elements(
     query: Query<AgentElementsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let owner = named_owner(&headers).map(str::to_string);
+    let owner = trusted_owner(&state, &headers);
     let full_read = query.since.is_none();
     let scope = query.scope.clone();
     let image_auto = query.image.as_deref() == Some("auto");
     if let Err(error) = crate::scope::validate(scope.as_deref(), query.since.as_deref()) {
-        return json_response(StatusCode::BAD_REQUEST, error);
+        // Authenticate first: a refused caller learns nothing about scopes.
+        return match browser_or_agent_auth(&state, &headers) {
+            AgentAuth::Ok => json_response(StatusCode::BAD_REQUEST, error),
+            AgentAuth::Locked => with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            ),
+            AgentAuth::Denied => with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            ),
+        };
     }
     let response = agent_elements_inner(state.clone(), query, headers.clone()).await;
     if refused_as_unauthenticated(&response) {
