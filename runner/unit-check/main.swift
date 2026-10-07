@@ -264,6 +264,22 @@ do {
   }
 }
 
+// ScrollDrag (scrollTo without momentum)
+do {
+  let paths = try W3CActions.pointerPaths(
+    ScrollDrag.actions(from: CGPoint(x: 200, y: 620), to: CGPoint(x: 200, y: 330))) { _ in .zero }
+  check(paths.count == 1, "one touch path")
+  let steps = paths[0]
+  check(steps.first?["type"] as? String == "down" && steps.last?["type"] as? String == "up", "down … up")
+  // Speed over the last 100 ms before the lift: below the ~250 pt/s where a list starts to glide.
+  let upT = steps.last?["t"] as? Double ?? 0
+  let recent = steps.filter { ($0["t"] as? Double ?? 0) >= upT - 0.1 }
+  let ys = recent.compactMap { $0["y"] as? Double }
+  let speed = abs((ys.last ?? 0) - (ys.first ?? 0)) / 0.1
+  check(speed < 200, "tail speed \(Int(speed)) pt/s stays under the fling threshold")
+  check(abs((steps.last?["y"] as? Double ?? 0) - 330) < 0.01, "ends where asked")
+}
+
 // ScreenSettle (on-device settle)
 do {
   let gray = [UInt8](repeating: 120, count: 100)

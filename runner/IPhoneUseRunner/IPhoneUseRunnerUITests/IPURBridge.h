@@ -118,13 +118,6 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                        to:(CGPoint)end
                                  duration:(NSTimeInterval)duration
                                       pid:(int)pid;
-/// A drag that rests at `end` for `hold` seconds before lifting, so the scroll view sees no
-/// release velocity and stops where the finger stopped (no momentum glide).
-+ (nullable NSString *)synthesizeDragFrom:(CGPoint)start
-                                       to:(CGPoint)end
-                                 duration:(NSTimeInterval)duration
-                                holdAtEnd:(NSTimeInterval)hold
-                                      pid:(int)pid;
 /// Several touches in one event record. Each path is an array of steps
 /// `{"type": "down"|"move"|"up", "x": pt, "y": pt, "t": seconds}`; the first step must be "down"
 /// and a path without a final "up" lifts at its last offset. Paths run concurrently on the shared

@@ -153,3 +153,26 @@ enum ScreenSettle {
     }
   }
 }
+
+/// A scroll drag that leaves no momentum: most of the distance quickly, then a slow tail, so the
+/// release speed (which the list would keep gliding with) is below UIKit's fling threshold.
+/// Hardware, iPhone 17 Pro Max: a constant 380 pt/s glided on; a tail of ~150 pt/s stopped dead.
+enum ScrollDrag {
+  /// Fraction of the distance covered by the slow tail.
+  static let tailFraction = 0.15
+  static let fastMs = 220.0
+  static let tailMs = 250.0
+
+  static func actions(from start: CGPoint, to end: CGPoint) -> [[String: Any]] {
+    let split = CGPoint(
+      x: start.x + (end.x - start.x) * CGFloat(1 - tailFraction),
+      y: start.y + (end.y - start.y) * CGFloat(1 - tailFraction))
+    return [
+      ["type": "pointerMove", "duration": 0, "x": Double(start.x), "y": Double(start.y)],
+      ["type": "pointerDown", "button": 0],
+      ["type": "pointerMove", "duration": fastMs, "x": Double(split.x), "y": Double(split.y)],
+      ["type": "pointerMove", "duration": tailMs, "x": Double(end.x), "y": Double(end.y)],
+      ["type": "pointerUp", "button": 0],
+    ]
+  }
+}

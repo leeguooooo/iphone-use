@@ -383,10 +383,17 @@ impl WdaClient {
     /// [`Self::source`] with WDA's `excluded_attributes` (comma-separated
     /// attribute names such as `visible`), which WDA then never computes.
     async fn source_excluding(&mut self, excluded: Option<&str>) -> Result<serde_json::Value> {
-        let url = match excluded {
+        let mut url = match excluded {
             Some(names) => format!("{}/source?format=json&excluded_attributes={names}", self.base),
             None => format!("{}/source?format=json", self.base),
         };
+        // The native runner answers "is a system alert up?" beside the tree.
+        // It is free when the tree already shows it; otherwise it costs a
+        // SpringBoard snapshot, so ask only when the alert probe would have to
+        // go out anyway (WebDriverAgent ignores the parameter).
+        if !self.no_alert_known() {
+            url.push_str("&alert_scan=1");
+        }
         let asked_at = std::time::Instant::now();
         let response = self
             .http
@@ -460,6 +467,19 @@ impl WdaClient {
             }
         };
         let stable = value.get("stable").and_then(serde_json::Value::as_bool)?;
+        let frames = value
+            .get("frames")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        // Fewer than two frames compared (a capture failed or timed out) is
+        // no verdict at all: the caller settles the old way rather than
+        // reporting a still screen as unsettled.
+        if !stable && frames < 2 {
+            if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+                tracing::info!("on-device settle compared {frames} frame(s): {error}");
+            }
+            return None;
+        }
         self.device_settle = Some(true);
         Some(DeviceSettle {
             stable,
@@ -467,10 +487,7 @@ impl WdaClient {
                 .get("blank")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
-            frames: value
-                .get("frames")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
+            frames,
         })
     }
 
@@ -1687,16 +1704,19 @@ impl WdaClient {
     /// badly (hardware-hit on stock Settings: the alert was absent from the
     /// tree, and an element click on its button was ACKed without effect), so
     /// agents get them as a first-class block instead.
-    pub async fn alert_summary(&mut self) -> Result<Option<(String, Vec<String>)>> {
-        // A "no alert" answer stays true until something is sent to the phone:
-        // reads in a row (settle polling, wait_for, repeated elements) skip
-        // the two WDA round trips. Anything POSTed since, or 2 s passing,
-        // asks again.
+    /// A "no alert" answer stays true until something is sent to the phone:
+    /// reads in a row (settle polling, wait_for, repeated elements) skip the
+    /// two WDA round trips. Anything POSTed since, or 2 s passing, asks again.
+    fn no_alert_known(&self) -> bool {
         const NO_ALERT_REUSE: Duration = Duration::from_secs(2);
-        if let Some(at) = self.no_alert_at {
-            if at.elapsed() < NO_ALERT_REUSE && self.posted_at.is_none_or(|posted| posted < at) {
-                return Ok(None);
-            }
+        self.no_alert_at.is_some_and(|at| {
+            at.elapsed() < NO_ALERT_REUSE && self.posted_at.is_none_or(|posted| posted < at)
+        })
+    }
+
+    pub async fn alert_summary(&mut self) -> Result<Option<(String, Vec<String>)>> {
+        if self.no_alert_known() {
+            return Ok(None);
         }
         let asked_at = std::time::Instant::now();
         let sid = self.ensure_session().await?.to_string();
@@ -2882,10 +2902,12 @@ mod tests {
     #[test]
     fn a_small_tree_is_read_again_with_visibility() {
         let (base, server) = mock_wda(2, |request| {
-            if request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible ") {
+            if request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible&alert_scan=1 ") {
                 tree_with_cells(3, "far")
             } else {
-                assert!(request.starts_with("GET /source?format=json "), "{request}");
+                // A fresh client has no "no alert" answer yet: the read asks
+                // the runner for one beside the tree.
+                assert!(request.starts_with("GET /source?format=json&alert_scan=1 "), "{request}");
                 r#"{"value":{"type":"XCUIElementTypeApplication","rect":{"x":0,"y":0,"width":440,"height":956},
                    "children":[{"type":"XCUIElementTypeButton","label":"behind","isVisible":"0",
                    "rect":{"x":0,"y":100,"width":40,"height":40}}]}}"#
@@ -2908,7 +2930,7 @@ mod tests {
         // outlived the runner. One request only — a second would hang.
         let (base, server) = mock_wda(1, |request| {
             assert!(
-                request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible "),
+                request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible&alert_scan=1 "),
                 "{request}"
             );
             tree_with_cells(1_200, "scrolled away")
@@ -2928,7 +2950,7 @@ mod tests {
         let (base, server) = mock_wda(1, |request| {
             assert!(
                 request
-                    .starts_with("GET /source?format=json&excluded_attributes=visible,accessible "),
+                    .starts_with("GET /source?format=json&excluded_attributes=visible,accessible&alert_scan=1 "),
                 "{request}"
             );
             r#"{"value":{"type":"XCUIElementTypeApplication","label":"设置","rect":{"x":0,"y":0,"width":440,"height":956},
@@ -3207,7 +3229,9 @@ mod tests {
     #[test]
     fn source_uses_sessionless_active_application_endpoint() {
         let (base, server) = mock_wda(1, |request| {
-            assert!(request.starts_with("GET /source?format=json "), "{request}");
+            // A fresh client has no "no alert" answer yet: the read asks
+                // the runner for one beside the tree.
+                assert!(request.starts_with("GET /source?format=json&alert_scan=1 "), "{request}");
             assert!(!request.contains("/session/"), "{request}");
             r#"{"value":{"type":"XCUIElementTypeApplication","label":"Files","children":[]}}"#
                 .to_string()

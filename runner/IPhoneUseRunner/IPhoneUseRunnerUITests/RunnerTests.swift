@@ -302,7 +302,8 @@ final class RunnerTests: XCTestCase {
       if (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] {
         var headers = treeHeaders(tree, backend: "private-ax", pid: target.pid)
         let scanStarted = Date()
-        if let alert = alertBesideTree(root as? [String: Any], pid: target.pid) {
+        if let alert = alertBesideTree(
+          root as? [String: Any], pid: target.pid, scanSpringBoard: request.query["alert_scan"] == "1") {
           headers["X-IPU-Alert"] = alert
           headers["X-IPU-Alert-Ms"] = String(Int(Date().timeIntervalSince(scanStarted) * 1000))
         }
@@ -334,11 +335,15 @@ final class RunnerTests: XCTestCase {
   }
 
   /// The system-alert answer for the screen a tree read just described, so the daemon need not
-  /// ask `/alert/text` separately (two more snapshots). An alert inside the app is in `root`
-  /// already; a system alert lives in SpringBoard, whose snapshot is small while an app is in
-  /// front. `"1"`/`"0"`, and the scan primes `alertCache` for an `/alert/text` right after;
-  /// `nil` when SpringBoard could not be read (the daemon then asks the usual way).
-  func alertBesideTree(_ root: [String: Any]?, pid: Int32) -> String? {
+  /// ask `/alert/text` separately (≈0.15–0.2 s: two more snapshots). `"1"`/`"0"`, priming
+  /// `alertCache` for an `/alert/text` right after; `nil` when this read cannot tell.
+  ///
+  /// Free when the answer is in the tree already: an alert in the front app, or SpringBoard in
+  /// front (hardware: with SpringBoard's tel: prompt up, the centre probe resolves SpringBoard,
+  /// so the prompt is in the tree just read). With an app in front and no alert in it, only a
+  /// SpringBoard snapshot can rule one out (≈70 ms, more than half of a tree read), so that
+  /// runs only when asked (`alert_scan=1`: the daemon's own "no alert" answer went stale).
+  func alertBesideTree(_ root: [String: Any]?, pid: Int32, scanSpringBoard: Bool) -> String? {
     var found: FoundAlert?
     if let root, let alert = firstNode(in: root, type: "XCUIElementTypeAlert") {
       found = describeAlert(alert, pid: pid)
@@ -346,6 +351,7 @@ final class RunnerTests: XCTestCase {
       guard let springBoard = IPURBridge.systemApplicationElement() else { return nil }
       let springBoardPid = IPURBridge.pid(forAXElement: springBoard)
       if springBoardPid != pid {
+        guard scanSpringBoard else { return nil }
         let tree = IPURBridge.wdaTree(
           forAXElement: springBoard, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
           extensionCallLimit: 0, rememberKey: springBoardPid > 0 ? String(springBoardPid) : nil)

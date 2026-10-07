@@ -836,39 +836,6 @@ static NSString *IPURSynthesize(id record, id path)
   }
 }
 
-+ (nullable NSString *)synthesizeDragFrom:(CGPoint)start
-                                       to:(CGPoint)end
-                                 duration:(NSTimeInterval)duration
-                                holdAtEnd:(NSTimeInterval)hold
-                                      pid:(int)pid
-{
-  @try {
-    id record = nil;
-    NSString *error = IPURCreateGestureRecord(@"ipu-drag-hold", pid, &record);
-    if (error != nil) return error;
-    id path = IPURNewTouchPath(start, 0.0);
-    if (path == nil) return @"private XCTest event synthesis failed: could not create pointer path";
-    duration = MAX(0.05, duration);
-    hold = MAX(0.0, hold);
-    NSInteger steps = MIN(60, MAX(2, (NSInteger)ceil(duration / 0.016)));
-    for (NSInteger step = 1; step <= steps; step++) {
-      double t = (double)step / (double)steps;
-      CGPoint point = CGPointMake(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t);
-      IPURMove(path, point, duration * t);
-    }
-    // Resting samples at the end point: the last movement samples before the lift carry no
-    // distance, so UIScrollView computes zero release velocity.
-    NSInteger rests = MAX(1, (NSInteger)ceil(hold / 0.016));
-    for (NSInteger rest = 1; rest <= rests; rest++) {
-      IPURMove(path, end, duration + hold * (double)rest / (double)rests);
-    }
-    IPURLift(path, duration + hold + 0.01);
-    return IPURSynthesize(record, path);
-  } @catch (NSException *exception) {
-    return [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
-  }
-}
-
 + (nullable NSString *)synthesizeText:(NSString *)text
                   charactersPerSecond:(NSUInteger)charactersPerSecond
                                   pid:(int)pid

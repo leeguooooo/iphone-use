@@ -620,13 +620,15 @@ extension RunnerTests {
         start = CGPoint(x: screen.width * 0.2, y: screen.height / 2)
         end = CGPoint(x: screen.width * 0.8, y: screen.height / 2)
       }
-      // The finger rests before lifting, so the list stops where the drag ended instead of
-      // gliding on: the element's frame is final as soon as the drag returns, and a tap right
-      // after lands (a tap during a glide only stops the glide).
-      if let error = IPURBridge.synthesizeDrag(from: start, to: end, duration: 0.3, holdAtEnd: 0.12, pid: 0) {
+      // Most of the way fast, the last stretch slow: the release speed is what the list keeps
+      // gliding with, and resting the finger before lifting does not reset it (hardware, iPhone
+      // 17 Pro Max: a 200 ms rest still glided ~130 pt). With a slow tail the list stops where
+      // the drag ended, so the element's frame is final at once and a tap right after lands — a
+      // tap during a glide only stops the glide.
+      let paths = try W3CActions.pointerPaths(ScrollDrag.actions(from: start, to: end)) { _ in .zero }
+      if let error = IPURBridge.synthesizeTouchPaths(paths, name: "ipu-scroll-to") {
         throw RunnerError.failed("scrollTo failed: \(error)")
       }
-      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
     throw RunnerError.failed("could not scroll element \(id) into view")
   }
@@ -901,12 +903,18 @@ extension RunnerTests {
     return .value(value)
   }
 
-  /// One small grayscale capture, taken off the main thread (the capture reply can be routed
-  /// through main, which keeps spinning here).
+  /// One small grayscale capture, taken off the main thread. The result comes back through a
+  /// lock, not the main queue: this handler already runs inside a main-queue block, so a block
+  /// queued behind it would only run after it returned. Main keeps spinning its run loop meanwhile
+  /// (a capture reply can be routed through it).
   private func captureGrayFrame(_ failure: inout String?) -> (pixels: [UInt8], width: Int, height: Int)? {
-    var result: (pixels: [UInt8], width: Int, height: Int)?
-    var error: String?
-    var done = false
+    final class Box {
+      let lock = NSLock()
+      var done = false
+      var frame: (pixels: [UInt8], width: Int, height: Int)?
+      var error: String?
+    }
+    let box = Box()
     DispatchQueue.global(qos: .userInitiated).async {
       var width: UInt = 0, height: UInt = 0
       var message: NSString?
@@ -915,20 +923,28 @@ extension RunnerTests {
         else { return nil }
         return ([UInt8](data), Int(width), Int(height))
       }
-      let text = message as String?
-      DispatchQueue.main.async {
-        result = frame
-        error = frame == nil ? text ?? "capture failed" : nil
-        done = true
-      }
+      box.lock.lock()
+      box.frame = frame
+      box.error = frame == nil ? (message as String?) ?? "capture failed" : nil
+      box.done = true
+      box.lock.unlock()
     }
     let deadline = Date().addingTimeInterval(3)
-    while !done && Date() < deadline {
-      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+    while Date() < deadline {
+      box.lock.lock()
+      let done = box.done
+      box.lock.unlock()
+      if done { break }
+      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.002))
     }
-    if !done { error = "capture timed out" }
-    if let error { failure = error }
-    return result
+    box.lock.lock()
+    defer { box.lock.unlock() }
+    guard box.done else {
+      failure = "capture timed out"
+      return nil
+    }
+    if let error = box.error { failure = error }
+    return box.frame
   }
 
   // MARK: - Alerts

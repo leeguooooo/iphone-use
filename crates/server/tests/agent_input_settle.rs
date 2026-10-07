@@ -1249,3 +1249,37 @@ fn a_runner_without_on_device_settle_is_asked_once() {
         assert_eq!(settles.load(Ordering::Acquire), 1, "a 404 is remembered");
     });
 }
+
+#[test]
+fn an_on_device_settle_that_compared_no_frames_falls_back() {
+    block(async {
+        let wda = mock_native_runner(move |request, _| {
+            if is_session(request) {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if is_mutation(request) {
+                return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+            }
+            if is_device_settle(request) {
+                // Hardware: the capture's reply never came back to the runner.
+                return Some((
+                    Duration::ZERO,
+                    r#"{"value":{"stable":false,"frames":0,"error":"capture timed out"}}"#
+                        .to_string(),
+                ));
+            }
+            if is_source(request) {
+                return Some((Duration::ZERO, simple_tree("搜索")));
+            }
+            None
+        });
+
+        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["settle"]["reason"], "stable",
+            "no frames compared is no verdict, not an unsettled screen: {json}"
+        );
+        assert_eq!(json["settle"]["captures"], 2);
+    });
+}
