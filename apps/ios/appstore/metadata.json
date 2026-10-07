@@ -12,6 +12,7 @@
   "ageRating": {
     "alcoholTobaccoOrDrugUseOrReferences": "NONE",
     "contests": "NONE",
+    "gunsOrOtherWeapons": "NONE",
     "gamblingSimulated": "NONE",
     "horrorOrFearThemes": "NONE",
     "matureOrSuggestiveThemes": "NONE",
