@@ -1112,13 +1112,37 @@ impl Setup {
                 format!("build-for-testing failed (log: {})", build_log.display());
             return Ok(false);
         };
-        let built = proc::run_logged(
+        // Xcode reuses a cached profile until it has expired; one that is due
+        // goes aside so this build carries a fresh one (7 days on a free
+        // Apple ID), and comes back if the build fails.
+        let aside = runner::set_aside_due_profiles(
+            &signing.team,
+            &signing.bundle,
+            &self.ctx.state_dir().join("profiles-renewed"),
+            super::retry::now(),
+        );
+        if !aside.is_empty() {
+            ok(&format!(
+                "Renewing the runner provisioning profile ({} due within {}h)",
+                aside.len(),
+                runner::PROFILE_RENEW_SECS / 3600
+            ));
+        }
+        let result = proc::run_logged(
             xcodebuild,
             &args,
             Some(self.ctx.state_dir()),
             build_log,
             &self.xcconfig,
-        )?;
+        );
+        if matches!(result, Ok(true)) {
+            for stale in &aside {
+                let _ = std::fs::remove_file(stale);
+            }
+        } else {
+            runner::restore_profiles(&aside);
+        }
+        let built = result?;
         if !built {
             if runner::log_shows_lock(build_log) {
                 self.build_locked = true;

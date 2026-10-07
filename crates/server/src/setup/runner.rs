@@ -459,6 +459,124 @@ pub fn cache_write(ctx: &Ctx, key: &str, products: &Path, xctestrun: &Path) -> b
     sys::write_atomic(&ctx.runner_cache, record.to_string().as_bytes(), 0o600).is_ok()
 }
 
+// ── provisioning profile lifetime ───────────────────────────────────────────
+
+/// A runner whose profile expires within this window is rebuilt with a fresh
+/// profile. Free Apple ID profiles last 7 days, so a product reused right up
+/// to its expiry would stop launching between two reconnects.
+pub const PROFILE_RENEW_SECS: u64 = 48 * 3600;
+
+/// Where Xcode keeps the profiles `-allowProvisioningUpdates` downloads.
+pub fn xcode_profiles_dir() -> PathBuf {
+    sys::home().join("Library/Developer/Xcode/UserData/Provisioning Profiles")
+}
+
+/// Expiry (Unix seconds) of a `.mobileprovision`, decoded by `security cms`.
+pub fn profile_expiry(profile: &Path) -> Option<u64> {
+    let xml = sys::stdout_of("security", &["cms", "-D", "-i", &profile.to_string_lossy()]);
+    plist_date(&xml, "ExpirationDate")
+}
+
+/// The application identifier a profile is for (`TEAMID.bundle.id`).
+fn profile_app_id(profile: &Path) -> Option<String> {
+    let xml = sys::stdout_of("security", &["cms", "-D", "-i", &profile.to_string_lossy()]);
+    plist_string(&xml, "application-identifier")
+}
+
+/// Expiry of the profile embedded in a built runner app.
+pub fn embedded_profile_expiry(app: &Path) -> Option<u64> {
+    profile_expiry(&app.join("embedded.mobileprovision"))
+}
+
+/// Whether a profile expiring at `expiry` is due for renewal at `now`.
+pub fn profile_due(expiry: u64, now: u64) -> bool {
+    expiry <= now.saturating_add(PROFILE_RENEW_SECS)
+}
+
+/// Move the profiles Xcode cached for this runner that are due for renewal
+/// into `aside`, so the next `-allowProvisioningUpdates` build asks for a new
+/// one instead of reusing them. Returns what was moved, for `restore_profiles`.
+pub fn set_aside_due_profiles(team: &str, bundle: &str, aside: &Path, now: u64) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(xcode_profiles_dir()) else {
+        return Vec::new();
+    };
+    let app_id = format!("{team}.{bundle}");
+    let mut moved = Vec::new();
+    for path in entries.flatten().map(|e| e.path()) {
+        if path.extension().is_none_or(|ext| ext != "mobileprovision") {
+            continue;
+        }
+        let ours = profile_app_id(&path).is_some_and(|id| runner_app_id(&id, &app_id));
+        let due = profile_expiry(&path).is_some_and(|expiry| profile_due(expiry, now));
+        if !(ours && due) {
+            continue;
+        }
+        let target = aside.join(path.file_name().unwrap_or_default());
+        if std::fs::create_dir_all(aside).is_ok() && std::fs::rename(&path, &target).is_ok() {
+            moved.push(target);
+        }
+    }
+    moved
+}
+
+/// Put back profiles `set_aside_due_profiles` moved (after a failed build).
+pub fn restore_profiles(moved: &[PathBuf]) {
+    let dir = xcode_profiles_dir();
+    for path in moved {
+        if let Some(name) = path.file_name() {
+            if !dir.join(name).exists() {
+                let _ = std::fs::rename(path, dir.join(name));
+            }
+        }
+    }
+}
+
+/// The runner app and its UI-test host (`….xctrunner`) share one profile
+/// family; both belong to this runner.
+fn runner_app_id(id: &str, app_id: &str) -> bool {
+    id == app_id
+        || id
+            .strip_prefix(app_id)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// `<key>name</key><date>…</date>` in a decoded profile, as Unix seconds.
+fn plist_date(xml: &str, name: &str) -> Option<u64> {
+    epoch_from_utc(&plist_value(xml, name, "date")?)
+}
+
+fn plist_string(xml: &str, name: &str) -> Option<String> {
+    plist_value(xml, name, "string")
+}
+
+fn plist_value(xml: &str, name: &str, tag: &str) -> Option<String> {
+    let after = &xml[xml.find(&format!("<key>{name}</key>"))? + name.len() + 11..];
+    let rest = after.trim_start().strip_prefix(&format!("<{tag}>"))?;
+    Some(rest[..rest.find(&format!("</{tag}>"))?].trim().to_string())
+}
+
+/// `2026-10-14T07:11:39Z` as Unix seconds.
+fn epoch_from_utc(text: &str) -> Option<u64> {
+    let b = text.as_bytes();
+    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[19] != b'Z' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| text.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Days from civil (Howard Hinnant), proleptic Gregorian.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()
+}
+
 /// The recorded product, when its key still matches and it still validates.
 pub fn cache_read(ctx: &Ctx, key: &str) -> Option<(PathBuf, PathBuf, PathBuf)> {
     let meta = std::fs::symlink_metadata(&ctx.runner_cache).ok()?;
@@ -478,6 +596,12 @@ pub fn cache_read(ctx: &Ctx, key: &str) -> Option<(PathBuf, PathBuf, PathBuf)> {
         return None;
     }
     validate_bundle(&app).ok()?;
+    // A product whose profile is about to expire would stop launching; build
+    // again, with a fresh profile.
+    if embedded_profile_expiry(&app).is_some_and(|expiry| profile_due(expiry, super::retry::now()))
+    {
+        return None;
+    }
     Some((products, app, xctestrun))
 }
 
@@ -568,6 +692,71 @@ pub fn prepare_xcconfig(ctx: &Ctx) -> Result<(String, Option<PathBuf>), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `security cms -D -i embedded.mobileprovision` of a free Apple ID runner,
+    // trimmed to the keys read.
+    const PROFILE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>CreationDate</key>
+	<date>2026-10-07T07:11:39Z</date>
+	<key>Entitlements</key>
+	<dict>
+		<key>application-identifier</key>
+		<string>X547QK48BD.com.leeguoo.iphone-use.wda.x547qk48bd.xctrunner</string>
+	</dict>
+	<key>ExpirationDate</key>
+	<date>2026-10-14T07:11:39Z</date>
+</dict>
+</plist>"#;
+
+    #[test]
+    fn profile_dates_and_app_id_read_from_the_decoded_profile() {
+        assert_eq!(
+            plist_date(PROFILE_XML, "ExpirationDate"),
+            Some(1_791_961_899)
+        );
+        assert_eq!(
+            plist_date(PROFILE_XML, "CreationDate"),
+            Some(1_791_961_899 - 7 * 86_400)
+        );
+        assert_eq!(
+            plist_string(PROFILE_XML, "application-identifier").as_deref(),
+            Some("X547QK48BD.com.leeguoo.iphone-use.wda.x547qk48bd.xctrunner")
+        );
+        assert_eq!(plist_date(PROFILE_XML, "Missing"), None);
+        assert_eq!(plist_date("", "ExpirationDate"), None);
+    }
+
+    #[test]
+    fn utc_dates_convert_like_date_dash_j() {
+        assert_eq!(epoch_from_utc("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch_from_utc("2000-02-29T12:00:00Z"), Some(951_825_600));
+        assert_eq!(epoch_from_utc("2026-10-14T07:11:39Z"), Some(1_791_961_899));
+        assert_eq!(epoch_from_utc("2026-13-01T00:00:00Z"), None);
+        assert_eq!(epoch_from_utc("2026-10-14 07:11:39"), None);
+        assert_eq!(epoch_from_utc("1969-12-31T23:59:59Z"), None);
+    }
+
+    #[test]
+    fn a_profile_is_due_within_the_renewal_window() {
+        let expiry = 1_791_961_899;
+        assert!(!profile_due(expiry, expiry - PROFILE_RENEW_SECS - 1));
+        assert!(profile_due(expiry, expiry - PROFILE_RENEW_SECS));
+        assert!(profile_due(expiry, expiry + 1), "an expired profile is due");
+    }
+
+    #[test]
+    fn the_runner_and_its_xctrunner_host_share_the_profile_family() {
+        let ours = "X547QK48BD.com.leeguoo.iphone-use.wda.x547qk48bd";
+        assert!(runner_app_id(ours, ours));
+        assert!(runner_app_id(&format!("{ours}.xctrunner"), ours));
+        assert!(
+            !runner_app_id(&format!("{ours}2"), ours),
+            "a longer bundle id is another app"
+        );
+        assert!(!runner_app_id("X547QK48BD.com.example.app", ours));
+    }
 
     #[test]
     fn the_refusal_wait_is_measured_from_the_last_running_tests_line() {
