@@ -10,7 +10,8 @@ Browser ── POST /control ─────> iphone-use daemon ── 127.0.0.1
 Agent   ── /agent/* ──────────> iphone-use daemon ── 127.0.0.1:8100 ──┘
 ```
 
-- `scripts/setup-wda.sh` builds and signs the iphone-use **device runner**
+- `iphone-use setup` (entry point `scripts/setup-wda.sh`, engine `iphone-use setup-native`
+  in `crates/server/src/setup`) builds and signs the iphone-use **device runner**
   (`runner/IPhoneUseRunner`, an XCTest UI-test bundle that replaced WebDriverAgent and
   speaks the same HTTP API), starts it on the phone, and pins two loopback relays
   (`iphone-use relay`, over macOS's own usbmuxd): `8100` for control, `9100` for the MJPEG screen.
@@ -659,6 +660,7 @@ Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's te
 | Path | What lives there |
 |---|---|
 | `crates/server` | daemon: device control (WebDriverAgent protocol), MJPEG proxy, browser `/control`, agent API |
+| `crates/server/src/setup` | the device-layer setup engine (`iphone-use setup-native`): doctor, build/sign/launch, relays, the launchd supervisor, status protocol. `scripts/setup-wda.sh` is only its entry point for launchd, the daemon and the installers |
 | `runner/` | the device runner: XCTest UI-test bundle serving the control API and MJPEG on the phone |
 | `crates/mcp` | `iphone-use-mcp`: MCP server, flow runner, registry client, `flow publish` / `report` |
 | `crates/core` | shared auth helpers |

@@ -688,6 +688,38 @@ mod tests {
     }
 
     #[test]
+    fn the_bindings_verdict_is_cached_until_an_instance_plist_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("Library/LaunchAgents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let instance = Instance::derive("lab", home.path(), None).unwrap();
+        let mut ctx = Ctx::paths(instance);
+        std::fs::create_dir_all(ctx.state_dir()).unwrap();
+        ctx.wda_port = "8601".into();
+        ctx.mjpeg_port = "9601".into();
+        let other = agents.join("com.leeguoo.iphone-use.other.plist");
+        let plist = |port: &str| {
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Label</key><string>com.leeguoo.iphone-use.other</string><key>EnvironmentVariables</key><dict><key>WDA_PORT</key><string>{port}</string></dict></dict></plist>"
+            )
+        };
+        std::fs::write(&other, plist("8700")).unwrap();
+        assert!(check_bindings_cached(&ctx, &["8601", "9601"]).is_ok());
+        assert!(
+            ctx.state_dir().join(".instance-bindings.ok").is_file(),
+            "a pass is remembered"
+        );
+        // Another instance now claims 8601: the changed plist re-checks.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&other, plist("8601")).unwrap();
+        assert!(check_bindings_cached(&ctx, &["8601", "9601"]).is_err());
+        assert!(
+            !ctx.state_dir().join(".instance-bindings.ok").exists(),
+            "a refusal is never cached"
+        );
+    }
+
+    #[test]
     fn ports_and_loopback_urls() {
         assert_eq!(valid_port("8100"), Some(8100));
         assert_eq!(valid_port("0"), None);

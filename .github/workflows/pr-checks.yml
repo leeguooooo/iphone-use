@@ -73,6 +73,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p iphone-use-mcp --locked
+          # setup-wda.sh hands its commands to this binary (shim + instance-context tests).
+          cargo build -p server --bin iphone-use --locked
 
       # Discovery over the real protocol, against the binary this PR builds.
       # A documented tool count can drift from what the server exposes; this
@@ -178,23 +180,9 @@ jobs:
           /bin/bash -n scripts/setup-wda.sh
           bash scripts/test-install-release-transaction.sh
           bash scripts/test-install-cli-link.sh
-          bash scripts/test-setup-wda-warp-preflight.sh
-          bash scripts/test-setup-wda-lock-backoff.sh
-          bash scripts/test-setup-wda-xcode-too-old.sh
-          bash scripts/test-setup-wda-runner-build.sh
           bash scripts/test-install-runner-sources.sh
-          bash scripts/test-setup-wda-proxy-preflight.sh
-          bash scripts/test-setup-wda-probe-threshold.sh
-          bash scripts/test-setup-wda-runner-repair.sh
-          bash scripts/test-setup-wda-devicectl-timeout.sh
-          bash scripts/test-setup-wda-lock-wait.sh
-          bash scripts/test-setup-wda-fast-reconnect.sh
           bash scripts/test-uninstall-safety.sh
-          python3 scripts/test-setup-wda-status.py
-          python3 scripts/test-setup-wda-runner-product.py
-          python3 scripts/test-setup-wda-asc-signing.py
-          python3 scripts/test-setup-wda-runner-cache.py
-          python3 scripts/test-setup-wda-xcode-compat.py
+          bash scripts/test-setup-wda-shim.sh
           python3 scripts/test-auto-update.py
           python3 scripts/test-instance-context.py
           # The nightly re-verification canary decides whether an installed

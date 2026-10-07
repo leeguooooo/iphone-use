@@ -838,7 +838,7 @@ pub fn relay_binary(ctx: &Ctx) -> Option<PathBuf> {
 /// setup: a deployment target the new Xcode rejects, and stale .xctestrun
 /// files an earlier Xcode left. `false` when one blocks setup.
 pub fn doctor_xcode_compat(ctx: &Ctx) -> bool {
-    let mut passed = true;
+    let passed = true;
     let major = xcode_major();
     let major = if major.is_empty() {
         "?".to_string()
@@ -862,16 +862,7 @@ pub fn doctor_xcode_compat(ctx: &Ctx) -> bool {
                     .map(str::to_string)
             })
             .unwrap_or_default();
-        let installed_predates = ctx.self_install.is_file()
-            && !std::fs::read_to_string(&ctx.self_install)
-                .is_ok_and(|text| text.contains("XCODE_XCCONFIG_FILE"));
-        if installed_predates {
-            warn(&format!(
-                "X Xcode {major} supports iOS deployment targets from {minimum}, but the runner project sets {lowest}; the installed {} predates the override, so KeepAlive builds fail. Rerun setup to install the fixed script",
-                ctx.self_install.display()
-            ));
-            passed = false;
-        } else if current == required {
+        if current == required {
             ok(&format!(
                 "Xcode {major} deployment target override: IPHONEOS_DEPLOYMENT_TARGET = {required} ({})",
                 ctx.xcconfig_file.display()
@@ -1099,6 +1090,96 @@ print(digest.hexdigest())
         }
         let expected = String::from_utf8_lossy(&out.stdout).trim().to_string();
         assert_eq!(runner_source_hash(dir.path()).unwrap(), expected);
+    }
+
+    /// A fake tool on disk, executable.
+    fn fake_tool(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/bash\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    static PREFLIGHT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn warp_preflight_with_a_fake_client() {
+        let _env = PREFLIGHT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            ("Status update: Disconnected", "Mode: Warp", "", true),
+            (
+                "Status update: Connected",
+                "Mode: Warp",
+                "Excluded:\n  fe80::/10\n  fd00::/8\n",
+                true,
+            ),
+            (
+                "Status update: Connected",
+                "Mode: Warp",
+                "Excluded:\n  fe80::/10\n",
+                false,
+            ),
+            (
+                "Status update: Connected",
+                "Mode: WarpProxy on port 40000",
+                "",
+                true,
+            ),
+        ];
+        for (status, settings, dump, passes) in cases {
+            let cli = fake_tool(
+                dir.path(),
+                "warp-cli",
+                &format!(
+                    "case \"$1\" in status) echo '{status}';; settings) echo '{settings}';; tunnel) printf '{dump}';; esac"
+                ),
+            );
+            std::env::set_var("IPHONE_USE_INTERNAL_TEST_WARP_CLI", &cli);
+            assert_eq!(
+                warp_preflight().is_ok(),
+                passes,
+                "{status} / {settings} / {dump:?}"
+            );
+        }
+        std::env::remove_var("IPHONE_USE_INTERNAL_TEST_WARP_CLI");
+    }
+
+    #[test]
+    fn proxy_check_with_a_fake_scutil_and_probe() {
+        let _env = PREFLIGHT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let none = fake_tool(
+            dir.path(),
+            "scutil-none",
+            "printf '<dictionary> {\\n  FTPPassive : 1\\n}\\n'",
+        );
+        let dead = fake_tool(
+            dir.path(),
+            "scutil-dead",
+            "printf '<dictionary> {\\n  HTTPEnable : 1\\n  HTTPProxy : 127.0.0.1\\n  HTTPPort : 7890\\n}\\n'",
+        );
+        let broken = fake_tool(dir.path(), "scutil-broken", "printf 'garbage\\n'");
+        let refused = fake_tool(dir.path(), "probe-refused", "exit 1");
+        let answers = fake_tool(dir.path(), "probe-answers", "exit 0");
+        std::env::set_var("IPHONE_USE_INTERNAL_TEST_SCUTIL", &none);
+        assert!(system_proxy_check().is_ok(), "no enabled proxy");
+        std::env::set_var("IPHONE_USE_INTERNAL_TEST_SCUTIL", &dead);
+        std::env::set_var("IPHONE_USE_INTERNAL_TEST_PROXY_PROBE", &refused);
+        let error = system_proxy_check().unwrap_err();
+        assert!(error.contains("HTTP 127.0.0.1:7890"), "{error}");
+        std::env::set_var("IPHONE_USE_INTERNAL_TEST_PROXY_PROBE", &answers);
+        assert!(
+            system_proxy_check().is_ok(),
+            "a live loopback proxy only warns"
+        );
+        std::env::set_var("IPHONE_USE_INTERNAL_TEST_SCUTIL", &broken);
+        assert!(system_proxy_check()
+            .unwrap_err()
+            .contains("Could not inspect"));
+        std::env::remove_var("IPHONE_USE_INTERNAL_TEST_SCUTIL");
+        std::env::remove_var("IPHONE_USE_INTERNAL_TEST_PROXY_PROBE");
     }
 
     #[test]

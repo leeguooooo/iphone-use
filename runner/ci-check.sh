@@ -2,7 +2,8 @@
 # CI gate for the iphone-use device runner (release-binaries.yml, pr-checks.yml):
 #   1. the device-independent logic passes (runner/unit-check.sh);
 #   2. the UI-test bundle compiles for iOS, unsigned (CODE_SIGNING_ALLOWED=NO);
-#   3. the names setup-wda.sh and uninstall.sh rely on match the project.
+#   3. the names the setup engine (crates/server/src/setup) and uninstall.sh
+#      rely on match the project.
 # Needs Xcode; never signs, installs or touches a device.
 set -euo pipefail
 
@@ -17,14 +18,16 @@ PROJECT=runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj
 [ -f "$PROJECT/project.pbxproj" ] || fail "missing $PROJECT"
 [ -f "$PROJECT/xcshareddata/xcschemes/IPhoneUseRunner.xcscheme" ] \
     || fail "the shared IPhoneUseRunner scheme setup-wda.sh builds is missing"
-grep -q '^RUNNER_SCHEME="IPhoneUseRunner"$' scripts/setup-wda.sh \
-    || fail "setup-wda.sh does not build the IPhoneUseRunner scheme"
-grep -q '^RUNNER_TEST_ID="IPhoneUseRunnerUITests/RunnerTests/testServe"$' scripts/setup-wda.sh \
-    || fail "setup-wda.sh does not launch IPhoneUseRunnerUITests/RunnerTests/testServe"
+# The setup engine (crates/server/src/setup) builds and launches the runner.
+SETUP_CTX=crates/server/src/setup/ctx.rs
+grep -q '^pub const RUNNER_SCHEME: &str = "IPhoneUseRunner";$' "$SETUP_CTX" \
+    || fail "the setup engine does not build the IPhoneUseRunner scheme"
+grep -q '^pub const RUNNER_TEST_ID: &str = "IPhoneUseRunnerUITests/RunnerTests/testServe";$' "$SETUP_CTX" \
+    || fail "the setup engine does not launch IPhoneUseRunnerUITests/RunnerTests/testServe"
 grep -q 'func testServe()' runner/IPhoneUseRunner/IPhoneUseRunnerUITests/RunnerTests.swift \
     || fail "RunnerTests.testServe, the method setup-wda.sh launches, is missing"
-grep -q '^RUNNER_APP_NAME="iPhoneUse-Runner.app"$' scripts/setup-wda.sh \
-    || fail "setup-wda.sh expects a different runner app name"
+grep -q '^pub const RUNNER_APP_NAME: &str = "iPhoneUse-Runner.app";$' "$SETUP_CTX" \
+    || fail "the setup engine expects a different runner app name"
 grep -q 'PRODUCT_NAME: iPhoneUse$' runner/IPhoneUseRunner/project.yml \
     || fail "project.yml no longer names the runner product iPhoneUse"
 grep -q 'static let defaultPort: UInt16 = 8100' runner/IPhoneUseRunner/IPhoneUseRunnerUITests/RunnerTests.swift \
@@ -34,7 +37,7 @@ grep -q 'ServerURLHere->' runner/IPhoneUseRunner/IPhoneUseRunnerUITests/RunnerHT
     || fail "the runner no longer prints the ServerURLHere marker setup-wda.sh waits for"
 grep -q 'IPhoneUseRunner_\[\^ /\]+\\\.xctestrun -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe' uninstall.sh \
     || fail "uninstall.sh does not recognise the runner process setup-wda.sh starts"
-echo "runner ci-check: names coherent across project, setup-wda.sh and uninstall.sh"
+echo "runner ci-check: names coherent across project, the setup engine and uninstall.sh"
 
 # ── 1. device-independent logic ─────────────────────────────────────────────
 bash runner/unit-check.sh

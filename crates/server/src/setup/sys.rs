@@ -437,3 +437,24 @@ pub fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// devicectl can hang forever on a wedged tunnel; every call is bounded.
+    #[test]
+    fn a_hung_child_is_killed_at_its_deadline() {
+        let started = Instant::now();
+        let (_, ok) = run_bounded("/bin/sleep", &["30"], Duration::from_millis(500));
+        assert!(!ok);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let (out, ok) = run_bounded("/bin/echo", &["hi"], Duration::from_secs(5));
+        assert!(ok);
+        assert_eq!(out.trim(), "hi");
+    }
+}
