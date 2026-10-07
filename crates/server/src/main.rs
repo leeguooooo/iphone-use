@@ -265,6 +265,28 @@ enum Command {
     },
 }
 
+/// `test` and `schedule` hand everything after the subcommand to
+/// iphone-use-mcp, so clap only sees `--instance` when it comes first. Pull it
+/// out of the passthrough too, so `iphone-use test suite.yaml --instance i13`
+/// works like `iphone-use try --instance i13`.
+fn take_instance(instance: Option<String>, args: Vec<String>) -> (Option<String>, Vec<String>) {
+    let mut found = instance;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--instance" {
+            if let Some(value) = iter.next() {
+                found = Some(value);
+            }
+        } else if let Some(value) = arg.strip_prefix("--instance=") {
+            found = Some(value.to_string());
+        } else {
+            rest.push(arg);
+        }
+    }
+    (found, rest)
+}
+
 /// Once-a-day "new version available" line on stderr for one-shot commands.
 /// Cached in `${XDG_CACHE_HOME:-~/.cache}/iphone-use/update-check.json`;
 /// a stale cache costs at most a 2 s lookup. Silent on any failure.
@@ -660,11 +682,13 @@ fn main() -> Result<()> {
             std::process::exit(onboarding::run_login(&target, !no_open)?)
         }
         Command::Test { instance, args } => {
+            let (instance, args) = take_instance(instance, args);
             let target = onboarding::Target::resolve(instance.as_deref())?;
             let args = [vec!["test".to_string()], args].concat();
             std::process::exit(onboarding::run_mcp(&target, &args))
         }
         Command::Schedule { instance, args } => {
+            let (instance, args) = take_instance(instance, args);
             let target = onboarding::Target::resolve(instance.as_deref())?;
             let args = [vec!["schedule".to_string()], args].concat();
             std::process::exit(onboarding::run_mcp(&target, &args))
@@ -1617,5 +1641,30 @@ mod tests {
         atomic_replace_private(&path, b"{\"version\":1}\n").unwrap();
         let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+}
+
+#[cfg(test)]
+mod take_instance_tests {
+    use super::take_instance;
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn instance_is_found_anywhere_in_the_passthrough() {
+        let (instance, rest) =
+            take_instance(None, strings(&["suite.yaml", "--instance", "i13", "--json"]));
+        assert_eq!(instance.as_deref(), Some("i13"));
+        assert_eq!(rest, strings(&["suite.yaml", "--json"]));
+
+        let (instance, rest) = take_instance(None, strings(&["--instance=i13", "suite.yaml"]));
+        assert_eq!(instance.as_deref(), Some("i13"));
+        assert_eq!(rest, strings(&["suite.yaml"]));
+
+        let (instance, rest) = take_instance(Some("a".into()), strings(&["list"]));
+        assert_eq!(instance.as_deref(), Some("a"));
+        assert_eq!(rest, strings(&["list"]));
     }
 }
