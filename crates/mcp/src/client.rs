@@ -303,6 +303,10 @@ impl DaemonClient {
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // Every request names this session's owner — mutations need it for
+        // the lease, reads and polls for attribution (task metrics, the
+        // owner's last screen).
+        let req = req.header("x-phone-owner", &self.owner);
         let req = match self.call_kind {
             Some(kind) => req.header("x-agent-call", kind),
             None => req,
@@ -336,11 +340,14 @@ impl DaemonClient {
         });
         let req = self
             .auth(self.client.post(self.url("/agent/run")))
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
         let resp = check_status(req.send().await?).await?;
         let text = resp.text().await?;
+        // Only a run the daemon accepted becomes the active one.
+        if !body_says_ok(&text) {
+            anyhow::bail!("the daemon did not start the run: {text}");
+        }
         if let Ok(mut run) = self.run_id.lock() {
             *run = Some(run_id.to_string());
         }
@@ -359,23 +366,26 @@ impl DaemonClient {
         }
         let req = self
             .auth(self.client.post(self.url("/agent/run")))
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
-        let result = check_status(req.send().await?).await;
+        // A refused end (any HTTP error, or a body without ok:true) keeps
+        // the run active, so the next calls do not silently lose it.
+        let text = check_status(req.send().await?).await?.text().await?;
+        if !body_says_ok(&text) {
+            anyhow::bail!("the daemon did not end the run: {text}");
+        }
         if let Ok(mut run) = self.run_id.lock() {
             if run.as_deref() == Some(run_id) {
                 *run = None;
             }
         }
-        Ok(result?.text().await?)
+        Ok(text)
     }
 
     pub async fn hold(&self, secs: u64) -> anyhow::Result<String> {
         let req = self
             .auth(self.client.post(self.url("/agent/hold")))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(format!(r#"{{"secs":{secs}}}"#));
         let resp = req.send().await?;
@@ -392,7 +402,6 @@ impl DaemonClient {
             .auth(self.client.post(self.url("/agent/prewarm")))
             .timeout(Duration::from_secs(15))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(serde_json::json!({ "reason": reason }).to_string());
         let resp = req.send().await?;
@@ -405,7 +414,6 @@ impl DaemonClient {
         let req = self
             .auth(self.client.post(self.url("/agent/owner")))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(r#"{"release":true}"#);
         let resp = req.send().await?;
@@ -439,8 +447,7 @@ impl DaemonClient {
     /// connection and takes no owner lease.
     pub async fn capabilities(&self) -> anyhow::Result<DaemonResponse> {
         let req = self
-            .auth(self.client.get(self.url("/agent/capabilities")))
-            .header("x-phone-owner", &self.owner);
+            .auth(self.client.get(self.url("/agent/capabilities")));
         read_response(req.send().await?).await
     }
 
@@ -462,7 +469,6 @@ impl DaemonClient {
         let mut req = self
             .auth(self.client.post(self.url(&path)))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(msg.to_json());
         if observe {
@@ -480,7 +486,6 @@ impl DaemonClient {
         let req = self
             .auth(self.client.post(self.url("/agent/input")))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(action.to_string());
         read_response(req.send().await?).await
@@ -518,7 +523,6 @@ impl DaemonClient {
             .auth(self.client.post(self.url("/agent/actions")))
             .timeout(ACTIONS_TIMEOUT)
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
         if flow_run {
@@ -539,8 +543,7 @@ impl DaemonClient {
         let mut req = self.auth(self.client.request(method, self.url(path)));
         if mutation {
             req = req
-                .header("x-phone-control", "1")
-                .header("x-phone-owner", &self.owner);
+                .header("x-phone-control", "1");
         }
         if let Some(body) = body {
             req = req
@@ -564,11 +567,7 @@ impl DaemonClient {
             Some(side) => format!("/agent/screenshot?max_side={side}"),
             None => "/agent/screenshot".to_string(),
         };
-        // The owner rides along on reads too: the daemon attributes them to
-        // this session's run and remembers the screen it last saw.
-        let req = self
-            .auth(self.client.get(self.url(&path)))
-            .header("x-phone-owner", &self.owner);
+        let req = self.auth(self.client.get(self.url(&path)));
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
         let bytes = resp.bytes().await?;
@@ -587,7 +586,6 @@ impl DaemonClient {
         // request while it still owns the WDA lock.
         let req = self
             .auth(self.client.get(self.url("/agent/elements")))
-            .header("x-phone-owner", &self.owner)
             .timeout(ELEMENTS_TIMEOUT);
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
@@ -611,7 +609,6 @@ impl DaemonClient {
             .auth(self.client.post(self.url("/agent/mode")))
             .timeout(RECONNECT_TIMEOUT)
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(r#"{"mode":"agent"}"#);
         let resp = req.send().await?;
@@ -649,7 +646,6 @@ impl DaemonClient {
         let mut req = self
             .auth(self.client.post(self.url(path)))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(json);
         if observe {
@@ -885,6 +881,13 @@ pub async fn read_response(resp: reqwest::Response) -> anyhow::Result<DaemonResp
         json,
         too_large,
     })
+}
+
+fn body_says_ok(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| value.get("ok").and_then(serde_json::Value::as_bool))
+        == Some(true)
 }
 
 /// Turn a non-2xx status into an `anyhow::Error` that includes the status code

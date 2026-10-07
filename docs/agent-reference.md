@@ -9,6 +9,7 @@ Details behind [SKILL.md](SKILL.md). Read the section you need, when you need it
 - [Reading results: settle, delta, wait_for](#reading-results-settle-delta-wait_for)
 - [Gestures and controls](#gestures-and-controls)
 - [MCP specifics](#mcp-specifics)
+- [Task metrics, runs and advice](#task-metrics-runs-and-advice)
 - [Flows: format, compat, saving, fixing](#flows-format-compat-saving-fixing)
 - [Screens hidden from capture](#screens-hidden-from-capture)
 - [Vision fallback](#vision-fallback)
@@ -330,11 +331,12 @@ push approval on another device needs the user.
 
 ## MCP specifics
 
-24 tools: `phone_status`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
-`phone_release_owner`, `phone_login`, `phone_jev_run`, `phone_screenshot`, `phone_elements`, `phone_tap`,
+26 tools: `phone_status`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
+`phone_release_owner`, `phone_login`, `phone_screenshot`, `phone_elements`, `phone_tap`,
 `phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_type`,
-`phone_key`, `phone_shortcut`, `phone_run_steps`, and `phone_flow_list / info /
-run / draft / update / publish / report`.
+`phone_key`, `phone_shortcut`, `phone_run_steps`, `phone_jev_run`,
+`phone_run_start`, `phone_run_end`, and `phone_flow_list / info / run / draft /
+update / publish / report`.
 
 - Act tools and `phone_capabilities` return JSON in `structuredContent`; the text
   block is a preview trimmed at 8 KiB. `phone_run_steps`, `phone_elements` and
@@ -351,6 +353,53 @@ run / draft / update / publish / report`.
 - Not in MCP: `perform`, `set_value`, `keyboard`, element/page `scroll`,
   uninstall, intents. `launch_app`, `alert`, `picker`, `swipe`, `drag`,
   `longpress`, `back` exist only as `phone_run_steps` step kinds.
+
+## Task metrics, runs and advice
+
+**Metrics.** `GET /agent/metrics[?owner=NAME]` (CLI `iphone-use metrics
+[--owner NAME] [--json]`) reports open runs, recent closed runs and loss
+counters. A run counts HTTP calls to the daemon — **not model turns** —
+plus batches, observed actions, flow calls, stale and unknown outcomes,
+failure classes, and p50/p95 call time over `stored_calls`.
+`runner_busy_union_ms` counts overlapping runner time once;
+`runner_summed_ms` is the plain sum. Only authenticated calls count;
+`/agent/status`, `/agent/metrics` and `/agent/run` never do. A call that was
+cancelled, dropped or rejected makes the run `incomplete`. Closed runs are
+appended to `agent-runs.jsonl` in the state directory.
+
+**Runs.** Without an explicit run, runs are inferred per `X-Phone-Owner` from
+idle gaps of more than 2 minutes. To count one task exactly, use
+`POST /agent/run {"action":"start","run_id":"…"}` (MCP `phone_run_start`), send
+`X-Agent-Run: <id>` on its calls (the MCP client does this for you), and end
+with `{"action":"end","run_id":"…"}` (`phone_run_end`). `model_round_trips` is
+reported only if the start declared `"complete_trace":true` and the end hands
+over every model turn id, including turns that made no tool call; `[]` means
+the task used no model turns. Otherwise it is `null`.
+
+**`no_progress` advice.** When the same observed tap or scroll, on the same
+screen, settles twice in a row with an identical accessibility tree and no
+app switch, the answer carries `no_progress`. It is advice: nothing was resent.
+Re-read and change approach. It never fires while a spinner is on screen,
+across overlapping calls, or for targets it cannot name: relative scrolls and
+locators.
+
+**Scoped reads.** `GET /agent/elements?scope=…` filters the same fresh read.
+The `snapshot` and every row's original `index` stay valid for taps.
+- `app`: the active app's subtree, plus the keyboard. The top-level `alert`
+  block is kept.
+- `interactive`: controls only.
+- `focused`: the focused field's container.
+- `changed`: needs `since=<snapshot>`. A baseline the daemon no longer holds
+  answers 400 `baseline_unavailable`; it never falls back to a full tree.
+
+**Images only when needed.** `?image=auto` attaches a screenshot only when the
+tree is unusable (no interactive rows, containers only). The screenshot is
+always a fresh capture taken after the read. It is labelled with
+`requested_at_ms`, `received_at_ms`, its `source` and its own
+`capture_redacted`, never presented as the same instant as the tree. It is
+sized to keep the whole answer under about 3.5 MB; otherwise the answer says
+`image_omitted` and the text stays. MCP `phone_elements` does the same on its
+own.
 
 ## Flows: format, compat, saving, fixing
 

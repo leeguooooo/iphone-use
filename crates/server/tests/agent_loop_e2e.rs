@@ -821,6 +821,12 @@ fn an_explicit_run_through_the_mcp_tools() {
     assert!(started.contains("\"ok\":true"), "{started}");
     mcp.call("phone_elements", serde_json::json!({}));
     mcp.call("phone_tap", serde_json::json!({"x": 0.5, "y": 0.5, "observe": true}));
+    // A read that is not elements/screenshot (the flow draft) is in the run too.
+    mcp.call("phone_flow_draft", serde_json::json!({}));
+    // Ending a run that is not open is refused (404): the session's run stays.
+    let refused = mcp.call("phone_run_end", serde_json::json!({"run_id": "not-open"}));
+    assert!(refused.contains("run end failed"), "{refused}");
+    mcp.call("phone_elements", serde_json::json!({}));
     let ended = mcp.call(
         "phone_run_end",
         serde_json::json!({"run_id": "mcp-task", "turn_ids": ["t1", "t2", "t3"]}),
@@ -829,7 +835,10 @@ fn an_explicit_run_through_the_mcp_tools() {
     let run = &summary["run"];
     assert_eq!(run["key"]["run_id"], "mcp-task", "{run}");
     assert_eq!(run["key"]["owner"], "e2e-mcp", "{run}");
-    assert_eq!(run["tool_calls"], 2, "{run}");
+    // elements, /agent/apps (the first read in a newly entered app carries a
+    // registry block, whose compat check reads the installed apps), tap,
+    // flow draft, elements after the refused end
+    assert_eq!(run["tool_calls"], 5, "{run}");
     assert_eq!(run["observed_calls"], 1, "{run}");
     assert_eq!(run["model_round_trips"], 3, "{run}");
     // After the end, the session's calls no longer carry the run.
@@ -837,4 +846,99 @@ fn an_explicit_run_through_the_mcp_tools() {
     let (_, metrics) = http(daemon.port, "GET", "/agent/metrics?owner=e2e-mcp", TOKEN, &[], "");
     let open = metrics["open"].as_array().unwrap();
     assert!(open.iter().all(|r| r["key"]["kind"] == "inferred"), "{metrics}");
+}
+
+/// A scripted daemon: answers each connection with the next (status, body)
+/// and records every request it saw.
+fn scripted_daemon(
+    script: Vec<(&'static str, &'static str)>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    std::thread::spawn(move || {
+        for (status, body) in script {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buffer = [0_u8; 8192];
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            record
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase());
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (format!("http://{address}"), seen)
+}
+
+/// A run end the daemon refuses (500, 401, or a 200 without ok:true) keeps
+/// the run active: the next calls still carry it. Only an accepted end
+/// clears it.
+#[test]
+fn a_refused_run_end_keeps_the_run_active_in_the_mcp_client() {
+    const READ: &str = r#"{"snapshot":"S","elements":[{"kind":"Button","label":"通用"}]}"#;
+    let (url, seen) = scripted_daemon(vec![
+        ("200 OK", r#"{"ok":true}"#),
+        ("500 Internal Server Error", r#"{"ok":false,"error":"boom"}"#),
+        ("200 OK", READ),
+        ("401 Unauthorized", "unauthorized"),
+        ("200 OK", READ),
+        ("200 OK", r#"{"ok":false,"error":"no_such_run"}"#),
+        ("200 OK", READ),
+        ("200 OK", r#"{"ok":true,"run":{}}"#),
+        ("200 OK", READ),
+    ]);
+    let home = private_dir();
+    let home_path = home.path().canonicalize().unwrap();
+    let mut child = Command::new(mcp_binary())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home_path)
+        .env("PHONE_REMOTE_URL", &url)
+        .env("PHONE_REMOTE_TOKEN", TOKEN)
+        .env("PHONE_REMOTE_OWNER", "e2e-mcp")
+        .env("IPHONE_USE_MCP_PREWARM", "0")
+        .env("IPHONE_USE_NO_UPDATE_CHECK", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let reader = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut mcp = Mcp {
+        child,
+        reader,
+        next_id: 1,
+    };
+    mcp.request(
+        "initialize",
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "run-state", "version": "0"}}),
+    );
+    mcp.call("phone_run_start", serde_json::json!({"run_id": "keep-me"}));
+    for _ in 0..3 {
+        mcp.call("phone_run_end", serde_json::json!({"run_id": "keep-me"}));
+        mcp.call("phone_elements", serde_json::json!({}));
+    }
+    mcp.call("phone_run_end", serde_json::json!({"run_id": "keep-me"}));
+    mcp.call("phone_elements", serde_json::json!({}));
+
+    let seen = seen.lock().unwrap();
+    let reads: Vec<&String> = seen
+        .iter()
+        .filter(|r| r.starts_with("get /agent/elements"))
+        .collect();
+    assert_eq!(reads.len(), 4, "{seen:?}");
+    for read in &reads[..3] {
+        assert!(read.contains("x-agent-run: keep-me"), "the run survived a refused end: {read}");
+    }
+    assert!(!reads[3].contains("x-agent-run"), "an accepted end clears it: {}", reads[3]);
 }

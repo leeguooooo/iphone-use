@@ -125,6 +125,14 @@ curl -s -H "$AUTH" -H "$MUTATION" -H "$OWNER" -X POST "$HOST/agent/actions" -d '
 | Repeat an action that came back `no_progress` | Re-read the screen, then a different control or a `wait_for` |
 | Reconnect to check health | `phone_status`; reconnect only when the task needs the phone |
 | Type without checking focus | Confirm the foreground app and focused field, then type |
+| Repeat a label that was not found | Use the `did you mean` label the error offers, or re-read |
+
+Task metrics: `iphone-use metrics` / `GET /agent/metrics` count HTTP calls, not
+model turns. To count one task exactly, wrap it in `phone_run_start` /
+`phone_run_end` (HTTP: `POST /agent/run`). `GET /agent/elements?scope=app`
+(or `interactive`, `focused`, `changed&since=…`) returns a smaller view of the
+same read; `?image=auto` adds a screenshot only when the tree is unusable.
+→ reference: *Task metrics, runs and advice*
 
 ## A flow is just these steps saved
 

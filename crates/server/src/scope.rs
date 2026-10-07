@@ -160,6 +160,8 @@ pub enum ImageOutcome {
         /// `wda-capture`, or the daemon's own source label.
         source: String,
         max_side: u32,
+        /// This capture's own `x-capture-redacted`: a wireframe, not pixels.
+        redacted: bool,
     },
     TooLarge,
     Unavailable,
@@ -176,8 +178,10 @@ pub fn attach_image(json: &mut Value, outcome: ImageOutcome) {
             received_ms,
             source,
             max_side,
+            redacted,
         } => {
             json["image"] = json!({
+                "capture_redacted": redacted,
                 "png_base64": base64::engine::general_purpose::STANDARD.encode(png),
                 "requested_at_ms": requested_ms,
                 "received_at_ms": received_ms,
@@ -307,6 +311,7 @@ mod tests {
                 received_ms: 7,
                 source: "wda-capture".into(),
                 max_side: 800,
+                redacted: false,
             },
         );
         assert_eq!(

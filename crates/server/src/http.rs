@@ -11410,6 +11410,17 @@ async fn agent_elements(
             crate::advice::note_screen(owner, json.as_ref());
         }
     }
+    // The baseline can be evicted between the precheck and the read; a full
+    // tree is then never passed off as `scope=changed`.
+    if scope.as_deref() == Some("changed")
+        && !json.as_ref().is_some_and(|json| json.get("delta").is_some())
+    {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "baseline_unavailable",
+                "hint": "the baseline was evicted during the read; read /agent/elements again and diff against the new one"}),
+        );
+    }
     let Some(mut json) = json.filter(|json| json.get("elements").is_some()) else {
         return response;
     };
@@ -11420,6 +11431,8 @@ async fn agent_elements(
         refresh_capture_verdict(&state, hub);
         if hub.capture_redacted() {
             json["capture_redacted"] = serde_json::Value::Bool(true);
+            json["capture_redacted_source"] =
+                serde_json::Value::String("live-view verdict (cached)".to_string());
         }
     }
     if image_auto && crate::scope::needs_image(&json) {
@@ -11446,6 +11459,10 @@ async fn agent_elements(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("wda-capture")
                 .to_string();
+            let redacted = shot
+                .headers()
+                .get("x-capture-redacted")
+                .is_some_and(|v| v.as_bytes() == b"1");
             let Ok(png) = axum::body::to_bytes(shot.into_body(), 32 << 20).await else {
                 break;
             };
@@ -11461,6 +11478,7 @@ async fn agent_elements(
                 received_ms,
                 source,
                 max_side: side,
+                redacted,
             };
             break;
         }
