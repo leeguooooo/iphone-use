@@ -83,6 +83,27 @@ $MCP flow run health/export-all-zh-cn       # 重放一个；失败时会说卡�
 $MCP flow draft --out my-task.json          # 把刚才在手机上做的事导出成 flow 草稿
 ```
 
+## 自研 device runner
+
+iphone-use 用自己的 XCTest runner（[`runner/`](runner/README.md)）操作手机。它从 v0.14.0
+起取代了 WebDriverAgent，接口与 WebDriverAgent 兼容，可以直接替换。它是为速度设计的：
+
+- 读屏只做一次无障碍快照，只取固定的几个属性，不再逐个元素、逐个属性地查询。
+- 直接合成触摸事件，动作前不等 App 空闲；画面是否稳定由 daemon 在动作之后检查。
+- 一个小 App 自带 HTTP 服务和 MJPEG 视频流，手机上不需要别的依赖。
+
+同一台 iPhone 13、USB 连接，与 [agent-device](https://github.com/callstack/agent-device)
+对比（2026 年 10 月实测）：
+
+| | iphone-use runner | agent-device |
+|---|---|---|
+| 读屏（无障碍树） | 0.08–0.135 秒 | 约 0.7 秒 |
+| 点击并等画面稳定 | 1.0 秒 | 2.8–3.3 秒 |
+
+走完整的 agent 接口，在 iPhone 17 Pro Max 上按标签点击并带回稳定后的变化约 1.9 秒，基于
+WebDriverAgent 的版本是 4.2 秒。实时画面 27–28 fps。每台手机有独立的 daemon 和 runner，
+两台同时操作时，每台都和单独操作一样快。
+
 ## 更多
 
 - [完整指南](docs/guide.zh-CN.md)：网页和 iOS App、flow 与官方 flow 源、生命周期、配置、安全、开发。

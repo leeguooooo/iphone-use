@@ -99,6 +99,32 @@ $MCP flow run health/export-all-zh-cn       # replay one; failures say which ste
 $MCP flow draft --out my-task.json          # what you just did on the phone, as a draft flow
 ```
 
+## The device runner
+
+iphone-use drives the phone through its own XCTest runner ([`runner/`](runner/README.md)).
+It replaced WebDriverAgent in v0.14.0 and speaks the same HTTP API, so it is a drop-in
+backend. It is built for speed:
+
+- It reads the screen with one accessibility snapshot of a fixed attribute set, instead of
+  walking the element tree attribute by attribute.
+- It synthesizes touches directly and does not wait for the app to go idle before acting;
+  the daemon checks that the screen has settled afterwards.
+- It is one small app with a built-in HTTP server and MJPEG stream; there are no extra
+  dependencies on the phone.
+
+Measured on the same iPhone 13 over USB, against
+[agent-device](https://github.com/callstack/agent-device) (October 2026):
+
+| | iphone-use runner | agent-device |
+|---|---|---|
+| Read the screen (accessibility tree) | 0.08–0.135 s | ~0.7 s |
+| Tap, then wait for the screen to settle | 1.0 s | 2.8–3.3 s |
+
+Through the full agent API, a tap by label that returns the settled change takes about
+1.9 s on an iPhone 17 Pro Max; the WebDriverAgent-based release took 4.2 s. The live view
+streams at 27–28 fps. Each phone gets its own daemon and runner, so two phones driven at
+the same time run as fast as either one alone.
+
 ## More
 
 - [Full guide](docs/guide.md): browser and iOS app, flows and the flow registry,
