@@ -89,7 +89,16 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 ## 在浏览器里操作手机
 
-`/phone` 显示手机实时画面：浏览器支持 WebCodecs 时走 `/agent/h264`（device runner 在手机上直接编码 H.264，daemon 原样转发：静止画面约 0.4 Mbit/s，滚动时约 2 Mbit/s；用 WebDriverAgent 或旧版 runner 时，daemon 退回到在 Mac 上把 JPEG 帧重新编码），否则退回 `/agent/mjpeg`（12–40 Mbit/s，只适合局域网）。设 `PHONE_REMOTE_H264_PASSTHROUGH=0` 可强制在 Mac 上重新编码。页面把你的点击、拖动、长按、滚动和输入（含中文）变成带 `ttl_ms` 上限、逐条确认的 `POST /control` 命令，不抢 Mac 焦点。**控件**面板列出辅助功能树，可以按精确标签点，不用对像素。
+`/phone` 显示手机实时画面：浏览器支持 WebCodecs 时走 `/agent/h264`（device runner 在手机上直接编码 H.264，daemon 原样转发；用 WebDriverAgent 或旧版 runner 时，daemon 退回到在 Mac 上把 JPEG 帧重新编码），否则退回 `/agent/mjpeg`（12–40 Mbit/s，只适合局域网）。设 `PHONE_REMOTE_H264_PASSTHROUGH=0` 可强制在 Mac 上重新编码。
+
+工具栏的 **性能 / 画质** 按钮切换画面模式，每个浏览器各自记住（iOS App 里也有同样的按钮）；其他客户端在 `/agent/h264`、`/agent/mjpeg` 上加 `?mode=performance|quality` 即可：
+
+| 模式 | 画面 | 静止时 | 滚动时 |
+|---|---|---|---|
+| 性能（默认） | 半分辨率，最高 30 fps | 约 0.04 Mbit/s | 约 1.5 Mbit/s |
+| 画质 | 原生分辨率（17 Pro Max 为 1320×2868），约 50 fps | 约 0.1 Mbit/s | 约 6 Mbit/s |
+
+画面没变时 runner 不重新编码，只每秒发一个心跳帧；关键帧只在有新观看者、或观看者请求时才发（`POST /agent/h264/keyframe`，网页在解码跟不上时会自动请求）。所有观看者共用一路上游，只要有一个画质观看者，上游就按画质跑。页面把你的点击、拖动、长按、滚动和输入（含中文）变成带 `ttl_ms` 上限、逐条确认的 `POST /control` 命令，不抢 Mac 焦点。**控件**面板列出辅助功能树，可以按精确标签点，不用对像素。
 
 **流程**面板把你的操作录成可重放的 flow 文件：
 

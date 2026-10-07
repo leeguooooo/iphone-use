@@ -3,6 +3,17 @@
 // needs no extra relay. The daemon used to receive MJPEG (~69 KiB a frame, 15 Mbit/s at 28 fps)
 // and re-encode it on the Mac; with this stream it passes the phone's own encode through.
 //
+// Two modes (`mode=performance|quality`; explicit fps/scale/kbps/gop/skip override them):
+//   performance (default) - half size, up to 30 fps, 1.5 Mbit/s, Main profile, keyframe fallback 10 s;
+//   quality - full size, up to 60 fps (whatever capture sustains), 10 Mbit/s, High profile, 10 s.
+// Keyframes are on demand (a new viewer, or any byte a client sends; the daemon forwards viewers'
+// `POST /agent/h264/keyframe`). Over TCP nothing is lost in transit, so the fallback interval only
+// bounds a viewer that cannot ask; at full size each keyframe is ~25 KiB, so a short one would be
+// most of a still screen's bandwidth. An unchanged screen is neither decoded
+// nor encoded (`skip=0` turns that off): the capture's encoded bytes are compared with the
+// previous capture's, and only a heartbeat frame goes out every second, so viewers and the
+// daemon's 8 s inactivity timeout know the stream is alive.
+//
 // Response: an HTTP/1.0 header block, then messages in the daemon's `/agent/h264` framing
 // (crates/server/src/video.rs):
 //
@@ -13,7 +24,9 @@
 // strips bit 1 before forwarding. Any byte the client sends asks for a keyframe, so one upstream
 // connection can serve viewers that join later.
 //
-// One capture thread and one encoder serve every client, and run only while one is connected.
+// One capture thread feeds one decode+encode thread (latest wins, so a slow encode drops stale
+// captures instead of queueing them); both serve every client and run only while one is connected.
+// Overlapping the two lets full-size quality mode reach the frame rate capture alone allows.
 
 import CoreGraphics
 import CoreMedia
@@ -26,8 +39,28 @@ final class RunnerH264Stream {
   struct Settings: Equatable {
     var fps = 30
     var scalePercent = 50
-    var kbps = 2500
+    var kbps = 1500
+    var mode = Mode.performance
+    /// Longest gap between keyframes. Keyframes are otherwise sent on demand.
+    var keyframeSeconds = 10.0
+    var highProfile = false
+    var skipUnchanged = true
+
+    enum Mode: String { case performance, quality }
+
+    static func preset(_ mode: Mode) -> Settings {
+      switch mode {
+      case .performance:
+        return Settings()
+      case .quality:
+        return Settings(fps: 60, scalePercent: 100, kbps: 10_000, mode: .quality,
+                        keyframeSeconds: 10, highProfile: true, skipUnchanged: true)
+      }
+    }
   }
+
+  /// While the screen does not change, one frame a second still goes out.
+  static let heartbeatSeconds = 1.0
 
   static let flagKeyframe: UInt8 = 0x01
   static let flagBlank: UInt8 = 0x02
@@ -39,7 +72,18 @@ final class RunnerH264Stream {
   private var settings = Settings()
   private var forceKeyframe = true
   private var blank = false
-  private var stats = (frames: 0, bytes: 0, since: Date(), fps: 0.0, kbps: 0.0, captureMs: 0.0, encodeMs: 0.0)
+  private var stats = (frames: 0, bytes: 0, since: Date(), fps: 0.0, kbps: 0.0, captureMs: 0.0, encodeMs: 0.0,
+                       captures: 0, skipped: 0, skipRatio: 0.0, decodeMs: 0.0)
+
+  /// Capture → encoder handoff. Only the newest capture waits; a keyframe request carries over.
+  private struct Pending {
+    var capture: Data
+    var settings: Settings
+    var keyframe: Bool
+  }
+  private let handoff = NSCondition()
+  private var pending: Pending?
+  private var encoderRunning = false
 
   private final class Client {
     let connection: NWConnection
@@ -75,28 +119,40 @@ final class RunnerH264Stream {
     defer { lock.unlock() }
     return [
       "clients": clients.count,
+      "mode": settings.mode.rawValue,
       "fps": settings.fps,
       "scale": settings.scalePercent,
       "kbps": settings.kbps,
       "achievedFps": (stats.fps * 10).rounded() / 10,
       "achievedKbps": stats.kbps.rounded(),
       "captureMs": (stats.captureMs * 10).rounded() / 10,
+      "decodeMs": (stats.decodeMs * 10).rounded() / 10,
       "encodeMs": (stats.encodeMs * 10).rounded() / 10,
+      "keyframeSeconds": settings.keyframeSeconds,
+      "skipUnchanged": settings.skipUnchanged,
+      "skippedRatio": (stats.skipRatio * 100).rounded() / 100,
     ]
   }
 
   static func settings(from head: String) -> Settings {
-    var result = Settings()
     let requestLine = head.split(separator: "\r\n", maxSplits: 1).first.map(String.init) ?? head
     let target = requestLine.split(separator: " ").dropFirst().first.map(String.init) ?? ""
-    guard let query = target.split(separator: "?", maxSplits: 1).dropFirst().first else { return result }
-    for pair in query.split(separator: "&") {
+    guard let query = target.split(separator: "?", maxSplits: 1).dropFirst().first else { return Settings() }
+    let pairs = query.split(separator: "&").compactMap { pair -> (String, String)? in
       let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
-      guard parts.count == 2, let value = Int(parts[1]) else { continue }
-      switch parts[0] {
+      return parts.count == 2 ? (parts[0], parts[1]) : nil
+    }
+    // The mode picks the preset; explicit values then override it.
+    let mode = pairs.last { $0.0 == "mode" }.flatMap { Settings.Mode(rawValue: $0.1) } ?? .performance
+    var result = Settings.preset(mode)
+    for (key, raw) in pairs {
+      guard let value = Int(raw) else { continue }
+      switch key {
       case "fps": result.fps = min(60, max(1, value))
       case "scale": result.scalePercent = min(100, max(10, value))
       case "kbps": result.kbps = min(20_000, max(200, value))
+      case "gop": result.keyframeSeconds = Double(min(60, max(1, value)))
+      case "skip": result.skipUnchanged = value != 0
       default: break
       }
     }
@@ -113,7 +169,7 @@ final class RunnerH264Stream {
     let startCapture = !capturing
     if startCapture {
       capturing = true
-      stats = (0, 0, Date(), 0, 0, 0, 0)
+      stats = (0, 0, Date(), 0, 0, 0, 0, 0, 0, 0, 0)
     }
     let count = clients.count
     lock.unlock()
@@ -157,9 +213,20 @@ final class RunnerH264Stream {
 
   private func captureLoop() {
     NSLog("ipu-runner: H.264 capture started")
-    var encoder: Encoder?
-    var frameIndex = 0
-    let started = Date()
+    handoff.lock()
+    let startEncoder = !encoderRunning
+    encoderRunning = true
+    pending = nil
+    handoff.unlock()
+    if startEncoder {
+      let thread = Thread { [weak self] in self?.encodeLoop() }
+      thread.name = "ipu-runner-h264-encode"
+      thread.qualityOfService = .userInitiated
+      thread.start()
+    }
+    var lastCapture: Data?
+    var lastSettings: Settings?
+    var lastSentAt = Date.distantPast
     while true {
       lock.lock()
       if clients.isEmpty {
@@ -173,25 +240,90 @@ final class RunnerH264Stream {
       lock.unlock()
 
       let frameStart = Date()
+      let interval = 1.0 / Double(max(1, current.fps))
       var error: NSString?
-      let image: CGImage? = autoreleasepool {
-        IPURBridge.screenImage(
-          withQuality: 0.85, scale: Double(current.scalePercent) / 100, path: nil, error: &error)
+      let capture: Data? = autoreleasepool {
+        IPURBridge.screenCapture(withQuality: 0.85, path: nil, error: &error)
       }
-      guard let image else {
+      guard let capture else {
         NSLog("ipu-runner: H.264 capture failed: %@", (error as String?) ?? "unknown")
         Thread.sleep(forTimeInterval: 0.5)
         continue
       }
       let captureMs = Date().timeIntervalSince(frameStart) * 1000
+      // The same screen captures to the same bytes: skip the decode and the encode, unless a
+      // keyframe was asked for, the settings changed, or the heartbeat is due.
+      let unchanged = current.skipUnchanged && lastSettings == current && capture == lastCapture
+      let heartbeatDue = frameStart.timeIntervalSince(lastSentAt) >= Self.heartbeatSeconds
+      let skip = unchanged && !keyframe && !heartbeatDue
+      lock.lock()
+      stats.captures += 1
+      stats.captureMs = captureMs
+      if skip { stats.skipped += 1 }
+      lock.unlock()
+      if !skip {
+        lastCapture = capture
+        lastSettings = current
+        lastSentAt = frameStart
+        handoff.lock()
+        let carried = pending?.keyframe ?? false
+        pending = Pending(capture: capture, settings: current, keyframe: keyframe || carried)
+        handoff.signal()
+        handoff.unlock()
+      }
+      let remaining = interval - Date().timeIntervalSince(frameStart)
+      if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
+    }
+    handoff.lock()
+    pending = nil
+    handoff.broadcast()
+    handoff.unlock()
+    NSLog("ipu-runner: H.264 capture stopped (no clients)")
+  }
+
+  /// Decodes and encodes the newest capture; exits once capture has stopped.
+  private func encodeLoop() {
+    var encoder: Encoder?
+    var frameIndex = 0
+    var lastBlankCheck = Date.distantPast
+    let started = Date()
+    while true {
+      handoff.lock()
+      while pending == nil {
+        lock.lock()
+        let stillCapturing = capturing
+        lock.unlock()
+        if !stillCapturing {
+          encoderRunning = false
+          handoff.unlock()
+          encoder?.invalidate()
+          return
+        }
+        _ = handoff.wait(until: Date().addingTimeInterval(0.5))
+      }
+      let job = pending!
+      pending = nil
+      handoff.unlock()
+
+      let decodeStart = Date()
+      let image: CGImage? = autoreleasepool {
+        IPURBridge.decodeScreenCapture(job.capture, scale: Double(job.settings.scalePercent) / 100)
+      }
+      guard let image else {
+        NSLog("ipu-runner: H.264 frame could not be decoded")
+        continue
+      }
       // H.264 wants even dimensions; drop the odd last row/column.
       let width = image.width & ~1
       let height = image.height & ~1
+      var rebuilt = false
       if encoder == nil || encoder?.width != width || encoder?.height != height
-        || encoder?.settings != current {
-        encoder = Encoder(width: width, height: height, settings: current) { [weak self] data, isKey, pts in
+        || encoder?.settings != job.settings {
+        encoder?.invalidate()
+        encoder = Encoder(width: width, height: height, settings: job.settings) { [weak self] data, isKey, pts in
           self?.broadcast(data, keyframe: isKey, pts: pts)
         }
+        rebuilt = true
         if encoder == nil {
           NSLog("ipu-runner: H.264 encoder could not start (%dx%d)", width, height)
           Thread.sleep(forTimeInterval: 1)
@@ -199,7 +331,12 @@ final class RunnerH264Stream {
         }
       }
       guard let encoder, let buffer = encoder.pixelBuffer(drawing: image) else { continue }
-      if frameIndex % 10 == 0 {
+      let decodeMs = Date().timeIntervalSince(decodeStart) * 1000
+      // A few times a second is plenty to notice a protected screen; a still one is checked on
+      // its heartbeat.
+      let now = Date()
+      if now.timeIntervalSince(lastBlankCheck) >= 0.3 {
+        lastBlankCheck = now
         let flat = Self.contentBandIsFlat(buffer)
         lock.lock()
         blank = flat
@@ -207,20 +344,14 @@ final class RunnerH264Stream {
       }
       frameIndex += 1
       let encodeStart = Date()
-      let pts = Date().timeIntervalSince(started)
-      encoder.encode(buffer, pts: pts, forceKeyframe: keyframe || frameIndex == 1)
+      encoder.encode(buffer, pts: encodeStart.timeIntervalSince(started),
+                     forceKeyframe: job.keyframe || rebuilt || frameIndex == 1)
       let encodeMs = Date().timeIntervalSince(encodeStart) * 1000
       lock.lock()
-      stats.captureMs = captureMs
+      stats.decodeMs = decodeMs
       stats.encodeMs = encodeMs
       lock.unlock()
-
-      let interval = 1.0 / Double(max(1, current.fps))
-      let remaining = interval - Date().timeIntervalSince(frameStart)
-      if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
     }
-    encoder?.invalidate()
-    NSLog("ipu-runner: H.264 capture stopped (no clients)")
   }
 
   private func broadcast(_ annexB: Data, keyframe: Bool, pts: Double) {
@@ -233,8 +364,11 @@ final class RunnerH264Stream {
     if window >= 2 {
       stats.fps = Double(stats.frames) / window
       stats.kbps = Double(stats.bytes) * 8 / 1000 / window
+      stats.skipRatio = stats.captures > 0 ? Double(stats.skipped) / Double(stats.captures) : 0
       stats.frames = 0
       stats.bytes = 0
+      stats.captures = 0
+      stats.skipped = 0
       stats.since = now
     }
     // A viewer gets nothing until its first keyframe; after that a client still writing the
@@ -342,12 +476,14 @@ final class RunnerH264Stream {
       let properties: [CFString: Any] = [
         kVTCompressionPropertyKey_RealTime: kCFBooleanTrue!,
         kVTCompressionPropertyKey_AllowFrameReordering: kCFBooleanFalse!,
-        kVTCompressionPropertyKey_ProfileLevel: kVTProfileLevel_H264_Main_AutoLevel,
+        kVTCompressionPropertyKey_ProfileLevel: settings.highProfile
+          ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_H264_Main_AutoLevel,
         kVTCompressionPropertyKey_AverageBitRate: bitrate,
         // Bytes per second over one second: caps bursts at 1.5× the average.
         kVTCompressionPropertyKey_DataRateLimits: [bitrate * 3 / 2 / 8, 1] as CFArray,
         kVTCompressionPropertyKey_ExpectedFrameRate: settings.fps,
-        kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: 2,
+        // Keyframes come on demand; this only bounds a lossy viewer's wait for a clean one.
+        kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: settings.keyframeSeconds,
       ]
       for (key, value) in properties {
         VTSessionSetProperty(created, key: key, value: value as CFTypeRef)

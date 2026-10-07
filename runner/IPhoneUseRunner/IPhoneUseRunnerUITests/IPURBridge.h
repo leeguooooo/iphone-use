@@ -158,6 +158,16 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                          path:(NSString *_Nullable *_Nullable)path
                                         error:(NSString *_Nullable *_Nullable)error CF_RETURNS_RETAINED;
 
+/// The encoded bytes of one capture (JPEG at `quality`, or PNG on the public path), undecoded:
+/// the H.264 stream compares them with the previous capture and skips an unchanged screen
+/// without decoding it.
++ (nullable NSData *)screenCaptureWithQuality:(double)quality
+                                         path:(NSString *_Nullable *_Nullable)path
+                                        error:(NSString *_Nullable *_Nullable)error;
+
+/// Decode `screenCaptureWithQuality:` bytes no larger than `scale` of full size. Caller releases.
++ (nullable CGImageRef)decodeScreenCapture:(NSData *)data scale:(double)scale CF_RETURNS_RETAINED;
+
 // MARK: - Device
 
 /// Screen lock state from SpringBoardServices (SBGetScreenLockStatus), like WDA. Writes NO into

@@ -32,6 +32,17 @@ final class RemoteModel {
         demo = DemoSession()
         if demo == nil { phase = .failed(String(localized: "演示内容缺失，请重新安装 App")) }
     }
+
+    /// Viewing mode, remembered on this device: performance (half size, low
+    /// bandwidth) or quality (native resolution, high frame rate). Switching
+    /// reconnects the stream, which starts on a fresh keyframe.
+    var videoQuality: Bool = UserDefaults.standard.bool(forKey: "videoQuality") {
+        didSet {
+            guard videoQuality != oldValue else { return }
+            UserDefaults.standard.set(videoQuality, forKey: "videoQuality")
+            restartStream()
+        }
+    }
     private var redactedTask: Task<Void, Never>?
 
     private var client: DaemonClient?
@@ -191,6 +202,11 @@ final class RemoteModel {
         updateStream()
     }
 
+    func requestKeyframe() {
+        guard let client else { return }
+        Task { await client.requestKeyframe() }
+    }
+
     func frameArrived() {
         lastFrameAt = Date()
         if !videoLive { videoLive = true }
@@ -203,7 +219,9 @@ final class RemoteModel {
             && status.deviceState != "offline" && status.deviceState != "blocked"
         if wanted, reader == nil {
             let reader = H264StreamReader(
-                request: client.request("agent/h264"),
+                request: client.request(
+                    "agent/h264",
+                    query: [URLQueryItem(name: "mode", value: videoQuality ? "quality" : "performance")]),
                 onMessage: { [weak self] message in self?.video?.enqueue(message) },
                 onState: { [weak self] ok, why in
                     self?.videoMessage = why
@@ -220,6 +238,13 @@ final class RemoteModel {
             self.reader = nil
             videoLive = false
         }
+    }
+
+    private func restartStream() {
+        reader?.stop()
+        reader = nil
+        videoLive = false
+        updateStream()
     }
 
     /// The app came back to the foreground: allow one more automatic start,

@@ -71,6 +71,9 @@ final class VideoDisplayView: UIView {
     private(set) var videoSize: CGSize = .zero
     var onVideoSize: ((CGSize) -> Void)?
     var onFrame: (() -> Void)?
+    /// The decoder lost its place and waits for a keyframe; keyframes are
+    /// otherwise ~10 s apart, so ask the daemon for one.
+    var onNeedKeyframe: (() -> Void)?
 
     private var format: CMVideoFormatDescription?
     private var waitingForKeyframe = true
@@ -121,6 +124,7 @@ final class VideoDisplayView: UIView {
         if renderer.status == .failed {
             renderer.flush(removingDisplayedImage: false) {}
             waitingForKeyframe = true
+            onNeedKeyframe?()
             return
         }
         renderer.enqueue(sample)

@@ -826,6 +826,11 @@
     <svg viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 012 2v12a2 2 0 01-2 2h-3"/><path d="M10 17l-5-5 5-5"/><path d="M15 12H5"/></svg>
     <span class="lbl">退出</span>
   </button>
+  <button id="btnQuality" class="tbtn" type="button" aria-pressed="false"
+          title="画面模式：性能（半分辨率、省流量）↔ 画质（原生分辨率、高帧率）">
+    <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15l3-4 3 3 2-2 2 3"/></svg>
+    <span class="lbl" id="qualityLabel">性能</span>
+  </button>
   <span class="tbtn spacer" aria-hidden="true"></span>
   <button id="btnImmersive" class="tbtn" title="全屏（收起控制栏）" type="button">
     <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M21 16v3a2 2 0 01-2 2h-3M3 16v3a2 2 0 002 2h3"/></svg>
@@ -1633,6 +1638,13 @@ const H264_MAX_DECODE_QUEUE = 3;
 const H264_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 let h264Disabled = false;
 let h264Session = null;
+// Viewing mode, per browser: 'performance' (half size, low bandwidth) or 'quality'
+// (native resolution, high frame rate). Storage can be unavailable (private mode).
+const VIDEO_MODE_KEY = 'iphone-use.videoMode';
+let videoMode = (() => {
+  try { return localStorage.getItem(VIDEO_MODE_KEY) === 'quality' ? 'quality' : 'performance'; }
+  catch { return 'performance'; }
+})();
 let h264Ctx = null;
 function hasFreshDirectFrame(now = performance.now()) {
   const mjpegFresh = mjpegLive &&
@@ -1925,6 +1937,14 @@ function h264RenderFrame(session, frame) {
   lastMjpegActivityAt = performance.now();
   if (!mjpegFreshnessTimer) armMjpegFreshnessTimer(session.generation);
 }
+function h264RequestKeyframe(session) {
+  const now = performance.now();
+  if (session.keyAskedAt && now - session.keyAskedAt < 1000) return;
+  session.keyAskedAt = now;
+  fetch('/agent/h264/keyframe', {
+    method: 'POST', credentials: 'same-origin', headers: { 'X-Phone-Control': '1' },
+  }).catch(() => {});
+}
 async function h264HandleMessage(session, msg) {
   if (msg.keyframe) {
     if (session.keyTimer) { clearTimeout(session.keyTimer); session.keyTimer = null; }
@@ -1938,6 +1958,13 @@ async function h264HandleMessage(session, msg) {
       if (!support.supported) {
         h264Failed(session, 'unsupported ' + codec, true);
         return;
+      }
+      // A new SPS mid-stream (the stream switched between 性能 and 画质, so the
+      // picture size changed): Chrome's decoder goes silent after a second
+      // configure(), so start a fresh one instead.
+      if (session.decoder) {
+        try { session.decoder.close(); } catch (_) {}
+        session.decoder = null;
       }
       if (!session.decoder) {
         session.decoder = new VideoDecoder({
@@ -1953,9 +1980,11 @@ async function h264HandleMessage(session, msg) {
     session.needKey = false;
   } else {
     if (!session.decoder || session.needKey) return;
-    // Latency over completeness: a backed-up decoder skips to the next keyframe.
+    // Latency over completeness: a backed-up decoder skips to the next keyframe,
+    // and asks for one now (keyframes are otherwise ~10 s apart).
     if (session.decoder.decodeQueueSize > H264_MAX_DECODE_QUEUE) {
       session.needKey = true;
+      h264RequestKeyframe(session);
       return;
     }
   }
@@ -1969,7 +1998,7 @@ async function pumpH264(session) {
   let response;
   try {
     response = await fetch(
-      `/agent/h264?stream_id=${encodeURIComponent(session.streamId)}&t=${Date.now()}`,
+      `/agent/h264?stream_id=${encodeURIComponent(session.streamId)}&mode=${videoMode}&t=${Date.now()}`,
       { credentials: 'same-origin', cache: 'no-store', signal: session.controller.signal },
     );
   } catch (e) {
@@ -2102,7 +2131,7 @@ function startMjpegAttempt(generation) {
   }
   mjpegFrame.onload = () => mjpegReady(generation);
   mjpegFrame.onerror = () => mjpegFailed(generation);
-  mjpegFrame.src = `/agent/mjpeg?stream_id=${encodeURIComponent(mjpegStreamId)}&t=${Date.now()}`;
+  mjpegFrame.src = `/agent/mjpeg?stream_id=${encodeURIComponent(mjpegStreamId)}&mode=${videoMode}&t=${Date.now()}`;
   // Streaming images need not dispatch load until the multipart response ends.
   // naturalWidth becomes non-zero after the first decoded frame, so poll that
   // as the authoritative readiness signal and bound a silent TCP connection.
@@ -4452,6 +4481,22 @@ function setImmersive(on) {
   if (gridOn) requestAnimationFrame(drawGrid);
 }
 btnImmersive.addEventListener('click', () => setImmersive(true));
+
+const btnQuality = document.getElementById('btnQuality');
+const qualityLabel = document.getElementById('qualityLabel');
+function renderVideoMode() {
+  const quality = videoMode === 'quality';
+  qualityLabel.textContent = quality ? '画质' : '性能';
+  btnQuality.setAttribute('aria-pressed', quality ? 'true' : 'false');
+}
+btnQuality.addEventListener('click', () => {
+  videoMode = videoMode === 'quality' ? 'performance' : 'quality';
+  try { localStorage.setItem(VIDEO_MODE_KEY, videoMode); } catch {}
+  renderVideoMode();
+  // Reconnect the live feed in the new mode; it starts on a fresh keyframe.
+  if (directFeedActive) startMjpegAttempt(stillsGeneration);
+});
+renderVideoMode();
 grabber.addEventListener('click', () => setImmersive(false));
 window.addEventListener('resize', syncToolbarReserve);
 window.addEventListener('orientationchange', () => setTimeout(syncToolbarReserve, 200));

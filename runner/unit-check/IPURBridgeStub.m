@@ -50,4 +50,17 @@ NSString *const IPURNodeAXElementKey = @"__axElement";
   return NULL;
 }
 
++ (nullable NSData *)screenCaptureWithQuality:(double)quality
+                                         path:(NSString *_Nullable *_Nullable)path
+                                        error:(NSString *_Nullable *_Nullable)error
+{
+  if (error) *error = @"no screen on the Mac";
+  return nil;
+}
+
++ (nullable CGImageRef)decodeScreenCapture:(NSData *)data scale:(double)scale
+{
+  return NULL;
+}
+
 @end

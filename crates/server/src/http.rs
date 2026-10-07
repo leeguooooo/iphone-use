@@ -817,6 +817,8 @@ fn valid_mjpeg_stream_id(stream_id: &str) -> bool {
 #[derive(Default, Deserialize)]
 struct MjpegStreamQuery {
     stream_id: Option<String>,
+    /// `performance` (default) or `quality`; see [`crate::video::VideoMode`].
+    mode: Option<String>,
 }
 
 /// One message in the [`AppState::inbox`] — arbitrary JSON the phone POSTed back,
@@ -856,6 +858,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/screenshot", get(agent_screenshot))
         .route("/agent/mjpeg", get(agent_mjpeg))
         .route("/agent/h264", get(agent_h264))
+        .route("/agent/h264/keyframe", post(agent_h264_keyframe))
         .route("/agent/elements", get(agent_elements))
         .route("/agent/flow/draft", get(agent_flow_draft))
         .route("/agent/reference", get(agent_reference))
@@ -11702,12 +11705,14 @@ async fn agent_mjpeg(
     // here just leaves WDA's defaults (~9 fps) — still usable. Never wait behind
     // a control/status holder: opening video must not outlive the browser's own
     // first-frame timeout merely to change optional settings.
+    let (framerate, scaling, quality) =
+        crate::video::VideoMode::parse(query.mode.as_deref()).mjpeg_settings();
     if let Some(wda) = &state.wda {
         let _priority = state.begin_wda_control();
         if let Ok(mut client) = wda.try_lock() {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(750),
-                client.set_mjpeg_settings(30, 50, 60),
+                client.set_mjpeg_settings(framerate, scaling, quality),
             )
             .await;
         }
@@ -11887,17 +11892,19 @@ async fn agent_h264(
             (StatusCode::TOO_MANY_REQUESTS, "too many live viewers (maximum 4)").into_response(),
         );
     };
+    let mode = crate::video::VideoMode::parse(query.mode.as_deref());
+    let (framerate, scaling, quality) = mode.mjpeg_settings();
     if let Some(wda) = &state.wda {
         let _priority = state.begin_wda_control();
         if let Ok(mut client) = wda.try_lock() {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(750),
-                client.set_mjpeg_settings(30, 50, 60),
+                client.set_mjpeg_settings(framerate, scaling, quality),
             )
             .await;
         }
     }
-    let subscription = hub.subscribe();
+    let subscription = hub.subscribe(mode);
     let activity_guard = stream_id.map(|stream_id| {
         MjpegActivityGuard::register(state.mjpeg_stream_activity.clone(), stream_id)
     });
@@ -11936,6 +11943,29 @@ async fn agent_h264(
         .body(Body::from_stream(frames))
         .map(with_security_headers)
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// `POST /agent/h264/keyframe` — a viewer whose decoder dropped frames asks for
+/// a fresh entry point. Keyframes otherwise go only to new viewers and every
+/// ~10 s, so a viewer that cannot ask would stay frozen until the next one.
+async fn agent_h264_keyframe(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = authorize_extension(&state, &headers, true) {
+        return refused;
+    }
+    if let Some(hub) = &state.video {
+        hub.request_keyframe();
+    }
+    with_security_headers(
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"ok":true}"#,
+        )
+            .into_response(),
+    )
 }
 
 /// True when `bytes` is a plausibly-decodable PNG: the 8-byte signature plus
