@@ -501,9 +501,16 @@ impl DaemonClient {
             .timeout(ELEMENTS_TIMEOUT);
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
-        let body = resp.text().await?;
-        self.remember_snapshot(serde_json::from_str(&body).ok().as_ref());
-        Ok(body)
+        // Bounded like every structured daemon read: a runaway tree is
+        // refused, not held in memory.
+        let response = read_response(resp).await?;
+        if response.too_large {
+            anyhow::bail!(
+                "/agent/elements answered more than {DAEMON_RESPONSE_READ_LIMIT} bytes; not read"
+            );
+        }
+        self.remember_snapshot(response.json.as_ref());
+        Ok(response.body)
     }
 
     /// `POST /agent/mode {"mode":"agent"}` — reconnect the configured,
