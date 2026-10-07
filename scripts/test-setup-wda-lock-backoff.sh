@@ -163,6 +163,42 @@ done
 if grep -q 'exited before reporting' "$TMP_ROOT/automation-die.out"; then
     fail_test "automation-mode failure still reported the generic runner exit"
 fi
+
+# A phone that vanished from the Mac (unplugged, out of Wi-Fi range) makes
+# xcodebuild time out waiting for the destination. That is the `usb` blocker
+# with a cable/unlock fix, not the generic `wda` runner exit; and the missing
+# iOS-platform error, which no cable fixes, must not match it.
+(
+    for fn in _runner_log_shows_device_unavailable _report_device_unavailable; do
+        awk -v fn="$fn" '
+            index($0, fn "()") == 1 { copying=1 }
+            copying { print }
+            copying && /^}/ { exit }
+        ' "$SETUP"
+    done > "$TMP_ROOT/device-unavailable.sh"
+    RUN_LOG="$TMP_ROOT/unavailable-runner.log"
+    printf '%s\n' \
+        'xcodebuild: error: Timed out waiting for all destinations matching the provided destination specifier to become available' \
+        '		{ platform:iOS, arch:arm64e, id:00008150-000A60EC1A02401C, name:iPhone, error:Browsing on the local area network for iPhone }' \
+        > "$RUN_LOG"
+    _setstatus() { printf '%s|%s|%s\n' "$1" "$2" "$3" > "$TMP_ROOT/unavailable-status.out"; }
+    die() { printf '%s\n' "$*" > "$TMP_ROOT/unavailable-die.out"; exit 42; }
+    . "$TMP_ROOT/device-unavailable.sh"
+    printf '%s\n' 'xcodebuild: error: Unable to find a destination matching the provided destination specifier: { generic:1, platform:iOS }' \
+        > "$TMP_ROOT/no-platform.log"
+    _runner_log_shows_device_unavailable "$TMP_ROOT/no-platform.log" \
+        && fail_test "a missing iOS platform was classified as an unreachable phone"
+    _runner_log_shows_device_unavailable "$RUN_LOG" \
+        || fail_test "the destination timeout was not recognised"
+    _report_device_unavailable
+) || unavailable_rc=$?
+[ "${unavailable_rc:-0}" = "42" ] \
+    || fail_test "unreachable-phone report did not stop setup through die (rc=${unavailable_rc:-0})"
+[ "$(cut -d'|' -f1-2 "$TMP_ROOT/unavailable-status.out")" = "building-fail|usb" ] \
+    || fail_test "unreachable phone did not publish the usb blocker"
+grep -qF 'cable' "$TMP_ROOT/unavailable-die.out" \
+    || fail_test "unreachable-phone setup output omits the cable fix"
+pass "a phone the Mac cannot reach publishes the usb blocker, not a generic runner exit"
 # The report goes through die, so KeepAlive records it as an ordinary failure:
 # the 5s-to-5min generic backoff, not the lock schedule.
 if awk '/^_report_automation_mode_disabled\(\)/,/^}/' "$SETUP" \

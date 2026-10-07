@@ -676,6 +676,20 @@ _runner_log_shows_automation_mode_disabled() {
         "${1:-$RUN_LOG}" 2>/dev/null
 }
 
+# xcodebuild could not see the phone at all: unplugged, out of range on
+# Wi-Fi, or CoreDevice lost it. Only this exact timeout — "Unable to find a
+# destination" also fires for a missing iOS platform in Xcode, which no cable
+# fixes.
+_runner_log_shows_device_unavailable() {
+    grep -Eiq 'Timed out waiting for all destinations matching the provided destination specifier to become available' \
+        "${1:-$RUN_LOG}" 2>/dev/null
+}
+
+_report_device_unavailable() {
+    _setstatus building-fail usb "this Mac cannot reach the iPhone (xcodebuild timed out waiting for it) — connect it with a cable, unlock it and keep it awake"
+    die "this Mac cannot reach the iPhone: xcodebuild timed out waiting for it to become available. Connect it with a USB cable, unlock it and keep it awake; KeepAlive retries on its own. Log: $RUN_LOG"
+}
+
 _report_automation_mode_disabled() {
     _setstatus building-fail automation_mode_disabled "$AUTOMATION_MODE_HINT"
     die "iOS did not enable UI automation for the device runner — $AUTOMATION_MODE_HINT, then rerun setup (KeepAlive retries on its own). Log: $RUN_LOG"
@@ -3952,6 +3966,12 @@ while [ -z "$PHONE_URL" ]; do
         fi
         if _runner_log_shows_automation_mode_disabled "$RUN_LOG"; then
             _report_automation_mode_disabled
+        fi
+        # The phone vanished from this Mac before the runner could start: say
+        # so, instead of the generic exit that sends the operator to a log
+        # and, through the daemon hint, to "unlock and wait".
+        if _runner_log_shows_device_unavailable "$RUN_LOG"; then
+            _report_device_unavailable
         fi
         _setstatus building-fail wda "the device runner exited before reporting its server URL"
         die "the PID-verified device runner exited before reporting its server URL — check $RUN_LOG"
