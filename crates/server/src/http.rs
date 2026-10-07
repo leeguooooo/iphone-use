@@ -11365,6 +11365,20 @@ async fn agent_elements(
             ),
         };
     }
+    if scope.as_deref() == Some("changed") && credentials_ok(&state, &headers) {
+        let held = query
+            .since
+            .as_deref()
+            .is_some_and(|since| lookup_element_snapshot(&state, since).is_some());
+        if !held {
+            crate::timing::authenticated();
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": "baseline_unavailable",
+                    "hint": "this daemon no longer holds that snapshot (unknown or evicted); read /agent/elements again and diff against the new one"}),
+            );
+        }
+    }
     let response = agent_elements_inner(state.clone(), query, headers.clone()).await;
     if refused_as_unauthenticated(&response) {
         return response;
@@ -11379,26 +11393,57 @@ async fn agent_elements(
         return response;
     };
     // Stamp the read so a screenshot taken for it can say how it relates.
-    let tree_returned_ms = crate::metrics::now_ms();
-    json["tree_returned_at_ms"] = serde_json::json!(tree_returned_ms);
+    json["tree_returned_at_ms"] = serde_json::json!(crate::metrics::now_ms());
+    // From its real source: the video hub's verdict, as /agent/status reports.
+    if let Some(hub) = state.video.as_ref() {
+        refresh_capture_verdict(&state, hub);
+        if hub.capture_redacted() {
+            json["capture_redacted"] = serde_json::Value::Bool(true);
+        }
+    }
     if image_auto && crate::scope::needs_image(&json) {
-        let screenshot = agent_screenshot(
-            state,
-            headers,
-            Query(ScreenshotQuery {
-                raw: None,
-                max_side: Some(1200),
-                fresh: Some("1".to_string()),
-            }),
-        )
-        .await;
-        let ok = screenshot.status().is_success();
-        let png = if ok {
-            axum::body::to_bytes(screenshot.into_body(), 16 << 20).await.ok()
-        } else {
-            None
-        };
-        crate::scope::attach_image(&mut json, png.as_deref(), crate::metrics::now_ms());
+        let budget = crate::scope::image_budget_bytes();
+        let mut outcome = crate::scope::ImageOutcome::Unavailable;
+        for side in crate::scope::IMAGE_SIDES {
+            let requested_ms = crate::metrics::now_ms();
+            let shot = agent_screenshot(
+                state.clone(),
+                headers.clone(),
+                Query(ScreenshotQuery {
+                    raw: None,
+                    max_side: Some(side),
+                    fresh: Some("1".to_string()),
+                }),
+            )
+            .await;
+            if !shot.status().is_success() {
+                break;
+            }
+            let source = shot
+                .headers()
+                .get("x-screenshot-source")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("wda-capture")
+                .to_string();
+            let Ok(png) = axum::body::to_bytes(shot.into_body(), 32 << 20).await else {
+                break;
+            };
+            let received_ms = crate::metrics::now_ms();
+            let encoded = png.len().div_ceil(3) * 4;
+            if json.to_string().len() + encoded + 512 > budget {
+                outcome = crate::scope::ImageOutcome::TooLarge;
+                continue;
+            }
+            outcome = crate::scope::ImageOutcome::Attached {
+                png: png.to_vec(),
+                requested_ms,
+                received_ms,
+                source,
+                max_side: side,
+            };
+            break;
+        }
+        crate::scope::attach_image(&mut json, outcome);
     }
     if let Some(scope) = scope.as_deref().filter(|scope| *scope != "changed") {
         crate::scope::apply(&mut json, scope);
@@ -12258,7 +12303,9 @@ async fn agent_screenshot(
     // its newest frame answers in milliseconds instead of a ~0.5–1.5 s
     // capture. Only for a sized request (the stream is half resolution) and
     // never for `raw`, whose caller wants WDA's own capture.
-    if let (Some(max_side), false, Some(hub)) = (max_side, raw, state.video.as_ref()) {
+    if let (Some(max_side), false, false, Some(hub)) =
+        (max_side, raw, fresh, state.video.as_ref())
+    {
         let not_before = wda.lock().await.last_post();
         if let Some(jpeg) = hub.live_frame(not_before) {
             let png = tokio::task::spawn_blocking(move || {

@@ -307,9 +307,11 @@ pub async fn layer(request: Request, next: Next) -> Response {
                 crate::metrics::CallEnd {
                     end_ms,
                     kind,
-                    observed: json
-                        .as_ref()
-                        .is_some_and(|j| j.get("delta").is_some() || j.get("settle").is_some()),
+                    // Only an action can be observed; a read's diff is a read.
+                    observed: matches!(path.as_str(), "/agent/input" | "/agent/actions")
+                        && json
+                            .as_ref()
+                            .is_some_and(|j| j.get("delta").is_some() || j.get("settle").is_some()),
                     outcome: classify(status, json.as_ref()),
                     runner_intervals,
                 },

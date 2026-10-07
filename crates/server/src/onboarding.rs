@@ -273,6 +273,12 @@ impl<'a> Daemon<'a> {
         if code == 404 {
             bail!("this daemon has no /agent/metrics yet; upgrade it (iphone-use upgrade)");
         }
+        // Only a 2xx that says ok:true is a report; anything else is an
+        // error, never rendered as "0 runs".
+        if !(200..300).contains(&code) || value["ok"] != Value::Bool(true) {
+            let reason = value["error"].as_str().unwrap_or("no report in the answer");
+            bail!("the daemon could not report metrics (HTTP {code}: {reason})");
+        }
         Ok(value)
     }
 

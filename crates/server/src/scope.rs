@@ -34,12 +34,12 @@ const SCROLLERS: &[&str] = &["ScrollView", "Table", "CollectionView", "WebView"]
 /// baseline it must be measured against (never guessed).
 pub fn validate(scope: Option<&str>, since: Option<&str>) -> Result<(), Value> {
     match scope {
-        None | Some("interactive") | Some("focused") => Ok(()),
+        None | Some("app") | Some("interactive") | Some("focused") => Ok(()),
         Some("changed") if since.is_some_and(|s| !s.is_empty()) => Ok(()),
         Some("changed") => Err(json!({"ok": false, "error": "scope_needs_baseline",
             "hint": "scope=changed needs since=<the snapshot you last read>"})),
         Some(_) => Err(json!({"ok": false, "error": "invalid_scope",
-            "hint": "scope is interactive, focused, or changed (with since)"})),
+            "hint": "scope is app, interactive, focused, or changed (with since)"})),
     }
 }
 
@@ -60,6 +60,31 @@ pub fn apply(json: &mut Value, scope: &str) {
     let total = rows.len();
     let focused = rows.iter().position(|row| truthy(row, "focused"));
     let keep: Vec<usize> = match scope {
+        // The active app's own subtree (the first Application row), plus any
+        // keyboard wherever it sits. A system alert is the top-level
+        // `alert` block, which every scope keeps as it is.
+        "app" => {
+            let depth = |i: usize| rows[i].get("depth").and_then(Value::as_u64).unwrap_or(0);
+            let app = rows.iter().position(|row| kind(row) == "Application");
+            let app_end = app.map(|a| {
+                (a + 1..total)
+                    .find(|&i| depth(i) <= depth(a))
+                    .unwrap_or(total)
+            });
+            let mut keep: Vec<usize> = match (app, app_end) {
+                (Some(a), Some(end)) => (a..end).collect(),
+                _ => (0..total).collect(),
+            };
+            for k in (0..total).filter(|&i| kind(&rows[i]) == "Keyboard") {
+                let end = (k + 1..total)
+                    .find(|&i| depth(i) <= depth(k))
+                    .unwrap_or(total);
+                keep.extend(k..end);
+            }
+            keep.sort_unstable();
+            keep.dedup();
+            keep
+        }
         "interactive" => (0..total)
             .filter(|&i| INTERACTIVE.contains(&kind(&rows[i])) || Some(i) == focused)
             .collect(),
@@ -109,19 +134,63 @@ pub fn needs_image(json: &Value) -> bool {
     stats.get("n_interactive").and_then(Value::as_u64) == Some(0) && truthy(stats, "container_only")
 }
 
-/// Attach a screenshot taken after the read, or say it is unavailable. The
-/// image is never presented as the same instant as the tree.
-pub fn attach_image(json: &mut Value, png: Option<&[u8]>, captured_ms: u64) {
+/// Longest sides tried, largest first, until the image fits the budget.
+pub const IMAGE_SIDES: [u32; 3] = [1200, 800, 500];
+/// The whole JSON answer must stay under a standard client's 4 MB read
+/// limit, so text is never pushed out by an image.
+pub const DEFAULT_IMAGE_BUDGET_BYTES: usize = 3_500_000;
+
+/// The response budget (`IPHONE_USE_IMAGE_BUDGET_BYTES` overrides it).
+pub fn image_budget_bytes() -> usize {
+    std::env::var("IPHONE_USE_IMAGE_BUDGET_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_IMAGE_BUDGET_BYTES)
+}
+
+/// What became of the image for a Mode A read.
+pub enum ImageOutcome {
+    Attached {
+        png: Vec<u8>,
+        /// When the screenshot was asked for and when its bytes arrived: the
+        /// capture happened somewhere in this interval, never stated as an
+        /// exact instant.
+        requested_ms: u64,
+        received_ms: u64,
+        /// `wda-capture`, or the daemon's own source label.
+        source: String,
+        max_side: u32,
+    },
+    TooLarge,
+    Unavailable,
+}
+
+/// Attach the screenshot (taken after the read, labelled with its real
+/// interval and source), or say why there is none. Text is never dropped.
+pub fn attach_image(json: &mut Value, outcome: ImageOutcome) {
     use base64::Engine as _;
-    match png.filter(|png| !png.is_empty()) {
-        Some(png) => {
+    match outcome {
+        ImageOutcome::Attached {
+            png,
+            requested_ms,
+            received_ms,
+            source,
+            max_side,
+        } => {
             json["image"] = json!({
                 "png_base64": base64::engine::general_purpose::STANDARD.encode(png),
-                "captured_at_ms": captured_ms,
-                "relation": "captured after this snapshot, not the same instant",
+                "requested_at_ms": requested_ms,
+                "received_at_ms": received_ms,
+                "source": source,
+                "max_side": max_side,
+                "relation": "requested after this snapshot was read; not the same instant",
             });
         }
-        None => {
+        ImageOutcome::TooLarge => {
+            json["image_unavailable"] = json!(true);
+            json["image_omitted"] = json!("too_large_for_response_budget");
+        }
+        ImageOutcome::Unavailable => {
             json["image_unavailable"] = json!(true);
         }
     }
@@ -175,6 +244,28 @@ mod tests {
     }
 
     #[test]
+    fn app_keeps_the_app_subtree_and_the_keyboard() {
+        let mut json = json!({"snapshot": "H", "alert": {"text": "允许?"}, "elements": [
+            {"kind": "Window", "label": "status", "depth": 0},
+            {"kind": "Application", "label": "设置", "depth": 0},
+            {"kind": "Button", "label": "通用", "depth": 1},
+            {"kind": "Other", "label": "overlay", "depth": 0},
+            {"kind": "Keyboard", "label": "", "depth": 0},
+            {"kind": "Key", "label": "a", "depth": 1},
+        ]});
+        apply(&mut json, "app");
+        let indexes: Vec<u64> = json["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(indexes, vec![1, 2, 4, 5]);
+        assert_eq!(json["alert"]["text"], "允许?", "the alert block is kept");
+        assert!(validate(Some("app"), None).is_ok());
+    }
+
+    #[test]
     fn focused_is_the_focused_rows_parent_subtree() {
         let mut json = read();
         apply(&mut json, "focused");
@@ -204,11 +295,30 @@ mod tests {
         ));
         assert!(!needs_image(&json!({"capture_redacted": true,
             "ax_stats": {"n_interactive": 0, "container_only": true}})));
-        attach_image(&mut sparse, None, 5);
+        attach_image(&mut sparse, ImageOutcome::Unavailable);
         assert_eq!(sparse["image_unavailable"], true);
         assert!(sparse.get("image").is_none());
         let mut ok = json!({});
-        attach_image(&mut ok, Some(b"png"), 7);
-        assert_eq!(ok["image"]["captured_at_ms"], 7);
+        attach_image(
+            &mut ok,
+            ImageOutcome::Attached {
+                png: b"png".to_vec(),
+                requested_ms: 5,
+                received_ms: 7,
+                source: "wda-capture".into(),
+                max_side: 800,
+            },
+        );
+        assert_eq!(
+            (
+                ok["image"]["requested_at_ms"].as_u64(),
+                ok["image"]["received_at_ms"].as_u64()
+            ),
+            (Some(5), Some(7))
+        );
+        assert!(
+            ok["image"].get("captured_at_ms").is_none(),
+            "never a made-up instant"
+        );
     }
 }

@@ -26,8 +26,23 @@ const TREE: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"设
 /// A 1×1 PNG, so screenshot-based settle compares identical frames.
 const PNG_1X1: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
+/// A free port no other test in this process has been given: tests run in
+/// parallel, and a port released by one probe could otherwise be handed to
+/// two daemons.
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    static USED: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    let mut used = USED.lock().unwrap();
+    loop {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if !used.contains(&port) {
+            used.push(port);
+            return port;
+        }
+    }
 }
 
 struct Daemon {
@@ -43,10 +58,20 @@ impl Drop for Daemon {
 }
 
 fn spawn_daemon(runner: &str, state: &std::path::Path, home: &std::path::Path) -> Daemon {
+    spawn_daemon_with(runner, state, home, &[])
+}
+
+fn spawn_daemon_with(
+    runner: &str,
+    state: &std::path::Path,
+    home: &std::path::Path,
+    extra: &[(&str, &str)],
+) -> Daemon {
     let port = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_iphone-use"))
         .arg("serve")
         .env_clear()
+        .envs(extra.iter().copied())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("TMPDIR", state)
@@ -150,12 +175,20 @@ fn wait_drivable(port: u16) {
 }
 
 fn runner() -> support::MockWda {
-    mock_wda(|request, _| {
+    runner_with(TREE)
+}
+
+/// A container with nothing to act on: the tree is unusable (Mode A).
+const SPARSE_TREE: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"游戏","rect":{"x":0,"y":0,"width":390,"height":844},"children":[
+    {"type":"XCUIElementTypeOther","label":"","rect":{"x":0,"y":0,"width":390,"height":844}}]}}"#;
+
+fn runner_with(tree: &'static str) -> support::MockWda {
+    mock_wda(move |request, _| {
         let line = request.lines().next().unwrap_or("");
         let body = if line.starts_with("POST /session ") {
             SESSION.to_string()
         } else if line.contains("/source") {
-            TREE.to_string()
+            tree.to_string()
         } else if line.contains("/wda/locked") {
             r#"{"value":false}"#.to_string()
         } else if line.contains("/window/size") {
@@ -220,6 +253,23 @@ fn metrics_runs_advice_and_cli_through_the_real_daemon() {
     assert!(scoped["elements"].as_array().unwrap().iter().all(|r| r["index"].is_u64()));
     let (status, refused) = http(port, "GET", "/agent/elements?scope=changed", TOKEN, &control, "");
     assert_eq!((status, refused["error"].as_str()), (400, Some("scope_needs_baseline")));
+    // An unknown (or evicted) baseline is refused, never answered with a full tree.
+    let (status, unknown) = http(
+        port,
+        "GET",
+        "/agent/elements?scope=changed&since=not-a-held-snapshot",
+        TOKEN,
+        &control,
+        "",
+    );
+    assert_eq!((status, unknown["error"].as_str()), (400, Some("baseline_unavailable")));
+    let held = format!(
+        "/agent/elements?scope=changed&since={}",
+        read["snapshot"].as_str().unwrap()
+    );
+    let (status, diff) = http(port, "GET", &held, TOKEN, &control, "");
+    assert_eq!(status, 200, "{diff}");
+    assert!(diff.get("delta").is_some(), "a held baseline gives the change: {diff}");
 
     // The inferred run for this owner counted the authenticated calls only.
     let (_, metrics) = http(port, "GET", "/agent/metrics?owner=e2e-agent", TOKEN, &[], "");
@@ -227,7 +277,8 @@ fn metrics_runs_advice_and_cli_through_the_real_daemon() {
     assert_eq!(open.len(), 1, "{metrics}");
     let run = &open[0];
     assert_eq!(run["inferred"], true);
-    assert_eq!(run["tool_calls"], 5, "{run}"); // read, 2 taps, scoped read, refused scope
+    // read, 2 taps, scoped read, refused scope, unknown baseline, held diff
+    assert_eq!(run["tool_calls"], 7, "{run}");
     assert_eq!(run["observed_calls"], 2, "{run}");
 
     // An explicit run with a complete trace closes with a summary on disk.
@@ -591,4 +642,103 @@ fn a_real_flow_replay_counts_as_flow_calls() {
         .filter_map(|r| r["flow_calls"].as_u64())
         .sum();
     assert!(flow_calls > 0, "flow output: {out}\nmetrics: {metrics}");
+}
+
+
+/// Mode A with `image=auto`: after an observed action left a settled frame
+/// in memory, the image is still a fresh capture taken after the read, and
+/// says so; with a tiny response budget the image is omitted and the text
+/// stays.
+#[test]
+fn mode_a_images_are_fresh_labelled_and_budgeted() {
+    let runner = runner_with(SPARSE_TREE);
+    let state = private_dir();
+    let home = private_dir();
+    let state_path = state.path().canonicalize().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let daemon = spawn_daemon(runner.url(), &state_path, &home_path);
+    let port = daemon.port;
+    let control = [("X-Phone-Control", "1"), ("X-Phone-Owner", "img")];
+    // An observed tap leaves a settled frame the screenshot route could reuse.
+    http(port, "GET", "/agent/elements", TOKEN, &control, "");
+    http(
+        port,
+        "POST",
+        "/agent/input?return=delta",
+        TOKEN,
+        &control,
+        r#"{"type":"tap","x":0.5,"y":0.5}"#,
+    );
+    let (status, read) = http(port, "GET", "/agent/elements?image=auto", TOKEN, &control, "");
+    assert_eq!(status, 200, "{read}");
+    let image = &read["image"];
+    assert!(image["png_base64"].is_string(), "{read}");
+    assert_eq!(image["source"], "wda-capture", "fresh, not the settled frame: {image}");
+    let tree = read["tree_returned_at_ms"].as_u64().unwrap();
+    let requested = image["requested_at_ms"].as_u64().unwrap();
+    let received = image["received_at_ms"].as_u64().unwrap();
+    assert!(tree <= requested && requested <= received, "{read}");
+    assert!(image.get("captured_at_ms").is_none());
+    drop(daemon);
+
+    let state = private_dir();
+    let state_path = state.path().canonicalize().unwrap();
+    let daemon = spawn_daemon_with(
+        runner.url(),
+        &state_path,
+        &home_path,
+        &[("IPHONE_USE_IMAGE_BUDGET_BYTES", "200")],
+    );
+    let (status, read) = http(daemon.port, "GET", "/agent/elements?image=auto", TOKEN, &control, "");
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["image_omitted"], "too_large_for_response_budget", "{read}");
+    assert!(read.get("image").is_none());
+    assert!(!read["elements"].as_array().unwrap().is_empty(), "text kept: {read}");
+}
+
+/// A daemon that answers one request with a fixed status and body.
+fn one_shot_daemon(status: &'static str, body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://{address}")
+}
+
+#[test]
+fn cli_metrics_fails_loudly_on_anything_but_an_ok_report() {
+    let home = private_dir();
+    let home_path = home.path().canonicalize().unwrap();
+    for (status, body) in [
+        ("500 Internal Server Error", r#"{"ok":false,"error":"boom"}"#),
+        ("200 OK", r#"{"ok":false,"error":"not_ready"}"#),
+        ("200 OK", r#"{"open":[],"recent":[]}"#),
+    ] {
+        let url = one_shot_daemon(status, body);
+        let output = Command::new(env!("CARGO_BIN_EXE_iphone-use"))
+            .args(["metrics"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home_path)
+            .env("PHONE_REMOTE_URL", url)
+            .env("PHONE_REMOTE_TOKEN", TOKEN)
+            .env("IPHONE_USE_NO_UPDATE_CHECK", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{status} {body}: exit 0, printed {stdout}");
+        assert!(!stdout.contains("runs:"), "never rendered as a report: {stdout}");
+        assert!(stderr.contains("could not report metrics"), "{stderr}");
+    }
 }
