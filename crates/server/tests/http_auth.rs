@@ -2163,11 +2163,11 @@ fn failed_element_read_revokes_cached_actionability() {
             .unwrap();
         server.join().unwrap();
 
-        // The read fails at the 35s budget either way; which code surfaces
-        // depends on whether the inner retry or the outer timer is polled
-        // first once the shared deadline passes. Both are correct — what this
-        // test guards is the revocation below, so accept either and check the
-        // body agrees with the status.
+        // The read now gives up after a bounded number of failed reads (a
+        // 502), well inside the 35 s budget; a 504 is still accepted should
+        // the outer timer win on a slow machine. What this test guards is the
+        // revocation below, so accept either and check the body agrees with
+        // the status.
         let status = response.status();
         assert!(
             matches!(status, StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT),

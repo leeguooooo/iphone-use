@@ -5975,7 +5975,12 @@ async fn tap_snapshot_element(
     // target clear and click it there, else tap the part it leaves clear.
     if !allows_occluded(value) && center_covered(&rows, index) {
         if let Some(clicked) = reveal_and_click(w, row).await {
-            return clicked.map_err(SnapshotElementTapError::AfterDispatch);
+            return clicked.map_err(|error| match error {
+                RevealError::Occluded => {
+                    SnapshotElementTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
+                }
+                RevealError::Dispatch(error) => SnapshotElementTapError::AfterDispatch(error),
+            });
         }
         if let Some((x, y)) = clear_tap_point(&rows, index) {
             return w
@@ -7000,7 +7005,12 @@ async fn tap_unique_label(
     let (index, x, y) = label_tap_target(&rows, label, kind, request)?;
     if !allows_occluded(request) && center_covered(&rows, index) {
         if let Some(clicked) = reveal_and_click(w, &rows[index]).await {
-            return clicked.map_err(UniqueLabelTapError::AfterDispatch);
+            return clicked.map_err(|error| match error {
+                RevealError::Occluded => {
+                    UniqueLabelTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
+                }
+                RevealError::Dispatch(error) => UniqueLabelTapError::AfterDispatch(error),
+            });
         }
     }
     w.tap_point(x, y)
@@ -7344,7 +7354,7 @@ fn center_covered(rows: &[crate::wda::ElementRow], index: usize) -> bool {
 async fn reveal_and_click(
     w: &mut crate::wda::WdaClient,
     row: &crate::wda::ElementRow,
-) -> Option<anyhow::Result<()>> {
+) -> Option<Result<(), RevealError>> {
     let (using, value) = snapshot_row_locator(row)
         .as_ref()
         .and_then(locator_wda_query)?;
@@ -7353,7 +7363,41 @@ async fn reveal_and_click(
         return None;
     };
     reveal_element(w, id).await;
-    Some(w.click_element(id).await)
+    // The scroll can fail, or the row can have nowhere to go (last row of a
+    // list): look again before touching. A click on a centre that is still
+    // under the floating search pill lands on the pill and scrolls the list
+    // (agent-loop A/B, iPhone 13: "tapped 通用", stayed on Settings).
+    if let Ok(rows) = w.elements().await {
+        if let Some(index) = same_row(&rows, row) {
+            if center_covered(&rows, index) {
+                return Some(match clear_tap_point(&rows, index) {
+                    Some((x, y)) => w.tap_point(x, y).await.map_err(RevealError::Dispatch),
+                    None => Err(RevealError::Occluded),
+                });
+            }
+        }
+    }
+    Some(w.click_element(id).await.map_err(RevealError::Dispatch))
+}
+
+/// Why a covered target was not clicked after revealing it.
+enum RevealError {
+    /// Still fully covered after the scroll: nothing was sent.
+    Occluded,
+    /// The click (or clear-point tap) was sent and failed.
+    Dispatch(anyhow::Error),
+}
+
+/// `row` again in a fresh read: the single row with its kind, label and
+/// identifier. `None` when it is gone or no longer unique.
+fn same_row(rows: &[crate::wda::ElementRow], row: &crate::wda::ElementRow) -> Option<usize> {
+    let mut matches = rows.iter().enumerate().filter(|(_, candidate)| {
+        candidate.kind == row.kind
+            && candidate.label == row.label
+            && candidate.identifier == row.identifier
+    });
+    let (index, _) = matches.next()?;
+    matches.next().is_none().then_some(index)
 }
 
 /// Scroll a live element clear of floating bars and wait until it stops
@@ -7461,6 +7505,24 @@ async fn tap_unique_locator(
     // taps do.
     if covered {
         reveal_element(w, element_id).await;
+        // Look again, as `reveal_and_click` does: a centre still under the
+        // pill must not be clicked.
+        if let Ok(rows) = w.elements().await {
+            if let Ok(index) = unique_match(&rows, locator) {
+                if center_covered(&rows, index) {
+                    return match clear_tap_point(&rows, index) {
+                        Some((x, y)) => w
+                            .tap_point(x, y)
+                            .await
+                            .map_err(UniqueLabelTapError::AfterDispatch),
+                        None => Err(UniqueLabelTapError::Refused(
+                            "element_occluded",
+                            ELEMENT_OCCLUDED_HINT,
+                        )),
+                    };
+                }
+            }
+        }
     }
     if via_point {
         // `"via":"point"`: some custom controls ignore XCUIElement's click
@@ -11571,11 +11633,13 @@ async fn agent_elements_inner(
         let mut first_source_error = None;
         let read_started = tokio::time::Instant::now();
         let mut alert_probes = 0u8;
+        let mut source_failures = 0u32;
         let rows = loop {
             match w.elements().await {
                 Ok(rows) => break rows,
                 Err(error) => {
                     let error = format!("{error:#}");
+                    source_failures += 1;
                     if first_source_error.is_none() {
                         first_source_error = Some(error.clone());
                     }
@@ -11594,18 +11658,26 @@ async fn agent_elements_inner(
                     // Source reads are idempotent. System document pickers can
                     // briefly restart the WDA relay/session, so two immediate
                     // attempts are not a meaningful recovery window. Keep
-                    // rebuilding with a bounded delay until the endpoint's
-                    // existing total deadline; no mutation is replayed.
+                    // rebuilding, but back off and stop after a few failures:
+                    // a fixed 250 ms retry against a runner that keeps failing
+                    // was 137 /source calls in 35 s (agent-loop A/B, iPhone 13)
+                    // and still ended in a bare 504. No mutation is replayed.
                     w.invalidate_session();
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if remaining.is_zero() {
-                        anyhow::bail!(
-                            "WDA source never recovered; last error: {error}; first error: {}",
+                    if remaining.is_zero() || source_failures >= SOURCE_READ_MAX_FAILURES {
+                        tracing::warn!(
+                            "wda source gave up after {source_failures} failed reads in {} ms; \
+                             last error: {error}; first error: {}",
+                            read_started.elapsed().as_millis(),
                             first_source_error.as_deref().unwrap_or("unknown")
                         );
+                        return Err(anyhow::Error::new(SourceGaveUp {
+                            attempts: source_failures,
+                            elapsed_ms: read_started.elapsed().as_millis() as u64,
+                        }));
                     }
                     tokio::time::sleep(std::cmp::min(
-                        std::time::Duration::from_millis(250),
+                        source_retry_delay(source_failures),
                         remaining,
                     ))
                     .await;
@@ -11641,11 +11713,14 @@ async fn agent_elements_inner(
         Ok(Err(error)) => {
             tracing::warn!("wda elements failed: {error:#}");
             mark_wda_read_path_unactionable(&state);
-            let body = with_blocking_alert(
-                wda,
-                serde_json::json!({"elements": [], "error": "wda_source_failed", "transitioning": true}),
-            )
-            .await;
+            let mut body = serde_json::json!({"elements": [], "error": "wda_source_failed", "transitioning": true});
+            if let Some(gave_up) = error.downcast_ref::<SourceGaveUp>() {
+                body["source_attempts"] = gave_up.attempts.into();
+                body["elapsed_ms"] = gave_up.elapsed_ms.into();
+                body["retry_after_secs"] = WDA_SOURCE_TIMEOUT_RETRY_AFTER_SECS.into();
+                body["hint"] = SOURCE_GAVE_UP_HINT.into();
+            }
+            let body = with_blocking_alert(wda, body).await;
             return json_body(StatusCode::BAD_GATEWAY, body.to_string());
         }
         Err(_) => {
@@ -12103,6 +12178,37 @@ struct AgentElementsQuery {
 /// Long enough that a retry is not just a second timeout on the same heavy
 /// page, short enough that a transient stall does not stall the agent.
 const WDA_SOURCE_TIMEOUT_RETRY_AFTER_SECS: u64 = 3;
+
+/// Failed `/source` reads one elements request tolerates before answering.
+/// With [`source_retry_delay`] that is about 11 s, not the 35 s deadline.
+const SOURCE_READ_MAX_FAILURES: u32 = 8;
+
+/// Wait before retry `failures` (1-based): 250 ms doubling, capped at 2 s.
+fn source_retry_delay(failures: u32) -> std::time::Duration {
+    let shift = failures.saturating_sub(1).min(3);
+    std::time::Duration::from_millis(250 << shift)
+}
+
+/// The element read stopped retrying a `/source` that kept failing.
+#[derive(Debug)]
+struct SourceGaveUp {
+    attempts: u32,
+    elapsed_ms: u64,
+}
+
+impl std::fmt::Display for SourceGaveUp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the device runner failed {} screen reads in a row ({} ms)",
+            self.attempts, self.elapsed_ms
+        )
+    }
+}
+
+impl std::error::Error for SourceGaveUp {}
+
+const SOURCE_GAVE_UP_HINT: &str = "the device runner kept failing to read the screen (not a slow page: every read errored). Wait retry_after_secs and read once more; if it keeps failing, check /agent/status and reconnect the phone rather than reading in a loop";
 
 fn mark_wda_read_path_unactionable(state: &AppState) {
     state
