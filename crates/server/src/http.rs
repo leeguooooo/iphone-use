@@ -2306,10 +2306,11 @@ async fn agent_status(
 }
 
 /// How control traffic reaches WDA, from the relay setup-wda.sh recorded:
+/// `iphone-use relay` (usbmuxd, started only for a USB phone) or a legacy
 /// `iproxy` = USB, `socat` to the phone's address = Wi-Fi.
 fn wda_transport(state_dir: &std::path::Path) -> &'static str {
     match std::fs::read_to_string(state_dir.join("wda-relay.pid")) {
-        Ok(record) if record.contains("iproxy") => "usb",
+        Ok(record) if record.contains("/iphone-use relay ") || record.contains("iproxy") => "usb",
         Ok(record) if record.contains("socat") => "wifi",
         _ => "unknown",
     }
@@ -15393,6 +15394,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(wda_transport(dir.path()), "unknown");
         std::fs::write(dir.path().join("wda-relay.pid"), "1|now|relay:/opt/homebrew/bin/iproxy -s 127.0.0.1 8100:8100 -u X").unwrap();
+        assert_eq!(wda_transport(dir.path()), "usb");
+        std::fs::write(dir.path().join("wda-relay.pid"), "1|now|relay:/Users/u/Applications/iPhoneUse.app/Contents/MacOS/iphone-use relay --udid X --listen 127.0.0.1:8100 --device-port 8100").unwrap();
         assert_eq!(wda_transport(dir.path()), "usb");
         std::fs::write(dir.path().join("wda-relay.pid"), "1|now|relay:/opt/homebrew/bin/socat TCP-LISTEN:8100,fork TCP:192.168.0.236:8100").unwrap();
         assert_eq!(wda_transport(dir.path()), "wifi");

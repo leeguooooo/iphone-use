@@ -39,13 +39,15 @@
 #   WDA_RUNNER_REBUILD=1 ignore the recorded runner product and build again
 #
 # Requirements: Xcode (an Apple ID in Settings → Accounts, or WDA_ASC_* signing),
-# the iPhone paired + Developer Mode on, and `iproxy` for the default USB relay.
-# `socat` is accepted only with the explicit WDA_ALLOW_LAN=1 escape hatch.
+# the iPhone paired + Developer Mode on. The USB relay is `iphone-use relay`
+# (macOS usbmuxd; no libimobiledevice needed); a Homebrew `iproxy` is used only
+# when the app binary is missing or predates it. `socat` is accepted only with
+# the explicit WDA_ALLOW_LAN=1 escape hatch.
 set -eu
 umask 077
 
 # When spawned by the daemon (POST /agent/mode) the environment is a bare
-# LaunchAgent PATH — Homebrew tools (socat, iproxy) and even xcrun helpers
+# LaunchAgent PATH — Homebrew tools (socat, legacy iproxy) and even xcrun helpers
 # live outside it. Extend deterministically rather than relying on the shell.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin:$PATH"
 
@@ -1271,6 +1273,35 @@ except Exception: pass
 PY
 }
 
+# The iphone-use binary that serves the USB relays: the daemon this setup
+# configures (an instance runs its own runtime copy), then the standard app
+# locations. It must understand `relay` (older releases do not) and sit
+# on a path without spaces, because the PID record matches its exact argv.
+_relay_binary() {
+    local candidate program
+    program=""
+    if [ -f "$DAEMON_PLIST" ]; then
+        program="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$DAEMON_PLIST" 2>/dev/null || true)"
+    fi
+    for candidate in "${IPHONE_USE_RELAY_BIN:-}" "$program" \
+        "$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use" \
+        "/Applications/iPhoneUse.app/Contents/MacOS/iphone-use"; do
+        [ -n "$candidate" ] || continue
+        case "$candidate" in
+            /*/iphone-use) ;;
+            *) continue ;;
+        esac
+        case "$candidate" in
+            *[[:space:]]*) continue ;;
+        esac
+        [ -x "$candidate" ] || continue
+        "$candidate" relay --help >/dev/null 2>&1 || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
 _target_on_usb() {
     [ -n "${WDA_UDID:-}" ] || return 1
     case " $(_usb_udids) " in
@@ -2128,7 +2159,7 @@ cmd_doctor() {
         warn "X $SYSTEM_PROXY_ERROR"
         fail=1
     fi
-    local usb usb_count
+    local usb usb_count relay_bin
     usb="$(_usb_udids)"
     usb_count="$(printf '%s' "$usb" | wc -w | tr -d '[:space:]')"
     if [ "$WDA_ALLOW_LAN" = "0" ] && [ -z "$usb" ]; then
@@ -2169,17 +2200,17 @@ cmd_doctor() {
         warn "~ could not read the iPhone iOS version to compare with the Xcode SDK${sdk_ios:+ (iOS $sdk_ios)}"
     fi
     if command -v lsof >/dev/null 2>&1; then ok "lsof present for listener ownership checks"; else warn "X lsof is required"; fail=1; fi
-    if [ "$WDA_ALLOW_LAN" = "0" ]; then
-        if command -v iproxy >/dev/null 2>&1; then
-            ok "iproxy present for the default USB-only relay"
-        else
-            warn "X iproxy is required for the default USB relay: brew install libimobiledevice"
-            fail=1
-        fi
-    elif command -v iproxy >/dev/null 2>&1 || command -v socat >/dev/null 2>&1; then
-        ok "relay tool present for explicit WDA_ALLOW_LAN=1 mode"
-    else
-        warn "X WDA_ALLOW_LAN=1 still requires iproxy or socat"
+    if relay_bin="$(_relay_binary)"; then
+        ok "USB relay: $relay_bin relay (macOS usbmuxd)"
+    elif command -v iproxy >/dev/null 2>&1; then
+        ok "USB relay: iproxy (this iphone-use app predates the built-in relay; upgrade with: iphone-use upgrade)"
+    elif [ "$WDA_ALLOW_LAN" = "0" ]; then
+        warn "X no USB relay: the iPhoneUse app is missing or too old — reinstall or run: iphone-use upgrade"
+        fail=1
+    fi
+    if [ "$WDA_ALLOW_LAN" = "1" ] && ! command -v socat >/dev/null 2>&1 \
+        && ! _relay_binary >/dev/null && ! command -v iproxy >/dev/null 2>&1; then
+        warn "X WDA_ALLOW_LAN=1 needs a USB relay or socat"
         fail=1
     fi
     if _valid_port "$WDA_PORT"; then
@@ -2318,6 +2349,9 @@ _command_matches_expected() {
         relay:*|mjpeg:*)
             signature="${expected#*:}"
             if printf '%s\n' "$signature" | LC_ALL=C grep -Eq \
+                '^/[^ ]+/iphone-use relay --udid [0-9A-Fa-f-]+ --listen 127\.0\.0\.1:[0-9]+ --device-port [0-9]+$'; then
+                :
+            elif printf '%s\n' "$signature" | LC_ALL=C grep -Eq \
                 '^(/[^ ]*/)?iproxy -s 127\.0\.0\.1 [0-9]+:[0-9]+ -u [0-9A-Fa-f-]+$'; then
                 :
             elif printf '%s\n' "$signature" | LC_ALL=C grep -Eq \
@@ -3529,8 +3563,8 @@ _setstatus serving "" "device runner serving — starting relay"
 # ── 5. Localhost relay ────────────────────────────────────────────────────────
 # Pitfall (macOS 15+/26): the daemon is a background LaunchAgent and macOS
 # Local Network privacy silently blocks its LAN egress — so it must reach WDA
-# via 127.0.0.1 (exempt). WDA itself has no HTTP authentication, so USB iproxy
-# is mandatory by default. A LAN relay is available only behind the explicit,
+# via 127.0.0.1 (exempt). WDA itself has no HTTP authentication, so a USB relay
+# (`iphone-use relay` over usbmuxd, or a legacy iproxy) is mandatory by default. A LAN relay is available only behind the explicit,
 # security-reducing WDA_ALLOW_LAN=1 escape hatch.
 info "Starting localhost relay on 127.0.0.1:$WDA_PORT"
 PHONE_HOSTPORT="${PHONE_URL#http://}"; PHONE_HOSTPORT="${PHONE_HOSTPORT%/}"
@@ -3544,8 +3578,20 @@ _assert_port_free "$WDA_PORT" \
 : > "$STATE_DIR/wda-relay.log"
 TARGET_IS_USB=0
 _target_on_usb && TARGET_IS_USB=1
-if [ "$TARGET_IS_USB" = "1" ] && command -v iproxy >/dev/null 2>&1; then
-    IPROXY_BIN="$(command -v iproxy)"
+RELAY_BIN=""
+IPROXY_BIN=""
+if [ "$TARGET_IS_USB" = "1" ]; then
+    RELAY_BIN="$(_relay_binary || true)"
+    [ -n "$RELAY_BIN" ] || IPROXY_BIN="$(command -v iproxy 2>/dev/null || true)"
+fi
+if [ -n "$RELAY_BIN" ]; then
+    RELAY_COMMAND="$RELAY_BIN relay --udid $WDA_UDID --listen 127.0.0.1:$WDA_PORT --device-port $PHONE_WDA_PORT"
+    RELAY_EXPECTED="relay:$RELAY_COMMAND"
+    nohup "$RELAY_BIN" relay --udid "$WDA_UDID" --listen "127.0.0.1:$WDA_PORT" \
+        --device-port "$PHONE_WDA_PORT" > "$STATE_DIR/wda-relay.log" 2>&1 &
+    RELAY_PID=$!
+    RELAY_DESC="USB relay (usbmuxd) on 127.0.0.1:$WDA_PORT"
+elif [ -n "$IPROXY_BIN" ]; then
     RELAY_COMMAND="$IPROXY_BIN -s 127.0.0.1 $WDA_PORT:$PHONE_WDA_PORT -u $WDA_UDID"
     RELAY_EXPECTED="relay:$RELAY_COMMAND"
     nohup "$IPROXY_BIN" -s 127.0.0.1 "$WDA_PORT:$PHONE_WDA_PORT" -u "$WDA_UDID" \
@@ -3569,8 +3615,8 @@ else
     else
         _setstatus serving wda "no permitted control relay tool is available"
     fi
-    die "the device layer uses USB iproxy by default. Keep this iPhone connected over USB and install
-   libimobiledevice (brew install libimobiledevice), then rerun.
+    die "the device layer relays over USB by default. Keep this iPhone connected over USB; if it is,
+   the iPhoneUse app is missing or too old to relay — reinstall it or run: iphone-use upgrade.
    The on-phone runner has no HTTP authentication. A LAN relay is therefore disabled
    unless WDA_ALLOW_LAN=1 is explicitly set for a trusted, isolated network."
 fi
@@ -3602,7 +3648,14 @@ _stop_managed_process "$MJPEG_RELAY_PID_FILE" "$LEGACY_MJPEG_EXPECTED" mjpeg \
 _assert_port_free "$MJPEG_PORT" \
     || die "TCP $MJPEG_PORT must be free before starting the managed video relay"
 : > "$STATE_DIR/wda-mjpeg-relay.log"
-if [ "$TARGET_IS_USB" = "1" ] && command -v iproxy >/dev/null 2>&1; then
+if [ -n "$RELAY_BIN" ]; then
+    MJPEG_RELAY_COMMAND="$RELAY_BIN relay --udid $WDA_UDID --listen 127.0.0.1:$MJPEG_PORT --device-port $PHONE_MJPEG_PORT"
+    MJPEG_RELAY_EXPECTED="mjpeg:$MJPEG_RELAY_COMMAND"
+    nohup "$RELAY_BIN" relay --udid "$WDA_UDID" --listen "127.0.0.1:$MJPEG_PORT" \
+        --device-port "$PHONE_MJPEG_PORT" > "$STATE_DIR/wda-mjpeg-relay.log" 2>&1 &
+    MJPEG_RELAY_PID=$!
+    MJPEG_RELAY_DESC="USB relay (usbmuxd) on 127.0.0.1:$MJPEG_PORT"
+elif [ -n "$IPROXY_BIN" ]; then
     MJPEG_RELAY_COMMAND="$IPROXY_BIN -s 127.0.0.1 $MJPEG_PORT:$PHONE_MJPEG_PORT -u $WDA_UDID"
     MJPEG_RELAY_EXPECTED="mjpeg:$MJPEG_RELAY_COMMAND"
     nohup "$IPROXY_BIN" -s 127.0.0.1 "$MJPEG_PORT:$PHONE_MJPEG_PORT" -u "$WDA_UDID" \
@@ -3623,7 +3676,7 @@ else
         _setstatus serving wda "no permitted video relay tool is available"
     fi
     die "Direct video requires the same permitted relay path as control.
-   Keep USB iproxy available, or explicitly use WDA_ALLOW_LAN=1 only on a trusted, isolated LAN."
+   Keep the iPhone on USB, or explicitly use WDA_ALLOW_LAN=1 only on a trusted, isolated LAN."
 fi
 if ! _write_pid_record "$MJPEG_RELAY_PID_FILE" "$MJPEG_RELAY_PID" \
     "$MJPEG_RELAY_EXPECTED" mjpeg; then

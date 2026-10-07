@@ -10,7 +10,7 @@ README 是精简版，这里是全部细节。
 Agent  ── /agent/* ──────────> iphone-use daemon ── 127.0.0.1:8100 ──┘
 ```
 
-- `scripts/setup-wda.sh` 编译并签名 iphone-use 的**设备 runner**（`runner/IPhoneUseRunner`，一个 XCTest UI 测试包，取代了 WebDriverAgent，HTTP 接口与它兼容），在手机上启动它，用 `iproxy` 建两条固定的 loopback 中继：`8100` 控制，`9100` MJPEG 画面。daemon 只和 localhost 说话，后台进程手里不会攥着一个会变的手机 IP。USB 是唯一支持的路径，Wi-Fi 或 `socat` 属于手动实验。
+- `scripts/setup-wda.sh` 编译并签名 iphone-use 的**设备 runner**（`runner/IPhoneUseRunner`，一个 XCTest UI 测试包，取代了 WebDriverAgent，HTTP 接口与它兼容），在手机上启动它，用内置的 `iphone-use relay`（走 macOS 自带的 usbmuxd）建两条固定的 loopback 中继：`8100` 控制，`9100` MJPEG 画面。daemon 只和 localhost 说话，后台进程手里不会攥着一个会变的手机 IP。USB 是唯一支持的路径，Wi-Fi 或 `socat` 属于手动实验。
 - 浏览器从 `/agent/mjpeg` 拿实时画面（失败时退回 PNG 静帧），通过 `POST /control` 发输入，每条命令都返回成功或失败，不会把一个可能已经断掉的通道当成功。
 - agent 用 `/agent/elements` 读文本形式的辅助功能树，用 `/agent/screenshot` 拿 PNG，用 `/agent/input` 做单步动作，或用 `/agent/actions` 跑一批带检查点的步骤。
 - daemon 负责 runner 的生命周期：空闲后释放手机、带退避地重建 runner、把每个状态写进 `/agent/status`。
@@ -25,7 +25,7 @@ Agent  ── /agent/* ──────────> iphone-use daemon ── 
 - macOS 15 或更高，装**完整 Xcode.app**（只有 Command Line Tools 不够）。在 Xcode → Settings → Accounts 登录并选一个开发团队；免费 Personal Team 能用，但 runner 的描述文件要定期续。也可以用 App Store Connect API key（`WDA_ASC_KEY_PATH`、`WDA_ASC_KEY_ID`、`WDA_ASC_ISSUER_ID`）签名，不需要 Xcode 账号。
 - iPhone 开启**开发者模式**，通过 USB 与 Mac 配对并点过信任。
 - 编译、启动、使用 runner 期间手机保持**解锁、亮屏**。它过不了 Face ID 和密码。
-- `brew install libimobiledevice` 装 `iproxy`。
+- 不需要装任何 Homebrew 包：USB 中继内置在 App 里（`iphone-use relay`）；只有 App 版本太旧时才会退回 Homebrew 的 `iproxy`。
 - 只有从源码构建才需要 Rust 工具链。
 
 ### 安装并接上第一台手机
@@ -304,7 +304,7 @@ iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/le
 
 daemon 把手机的实时控制放到了网络上，它的 URL 和密码要当凭据对待。
 
-- 密码 / cookie / bearer 只保护 `44321`。**手机上 runner 自己的 `8100` 和 `9100` 没有鉴权**，USB `iproxy` 中继也不会加，手机所在 Wi-Fi 里的另一台机器能直接连过去。只在可信、隔离的网络里用；走 USB 时关掉手机 Wi-Fi 就没有这层暴露。
+- 密码 / cookie / bearer 只保护 `44321`。**手机上 runner 自己的 `8100` 和 `9100` 没有鉴权**，USB 中继也不会加，手机所在 Wi-Fi 里的另一台机器能直接连过去。只在可信、隔离的网络里用；走 USB 时关掉手机 Wi-Fi 就没有这层暴露。
 - 真正带鉴权的设备传输属于 Phase 2（companion app 或受控隧道）。在此之前，daemon 的登录保护不到 runner。
 - 从局域网外访问时，经由带鉴权的 HTTPS 反向代理，或可信的 VPN / 隧道（比如 Tailscale）连到 `44321`，绝不要把 runner 的端口暴露出去。daemon 只提供明文 HTTP，识别 `X-Forwarded-Proto`，session cookie 是 `HttpOnly` + `SameSite=Lax`。
 - owner 租约（`X-Phone-Owner`）是协作会话之间的协调机制，不是安全边界。

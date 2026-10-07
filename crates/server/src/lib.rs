@@ -10,6 +10,7 @@ pub mod redaction;
 pub mod runtime_dir;
 pub mod timing;
 pub mod update;
+pub mod usbmux;
 pub mod video;
 pub mod wda;
 

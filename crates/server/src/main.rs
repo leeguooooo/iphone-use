@@ -160,6 +160,20 @@ enum Command {
     /// instances rejects the subcommand outright, so it can never be started
     /// against the wrong phone (#67).
     InstanceContext,
+    /// Forward a loopback TCP port to a port on a USB-connected iPhone through
+    /// macOS's usbmuxd (what libimobiledevice's iproxy did). Setup runs one
+    /// for the runner's control port and one for its video port.
+    Relay {
+        /// The iPhone's UDID (with or without the dash).
+        #[arg(long)]
+        udid: String,
+        /// Loopback address to listen on, e.g. 127.0.0.1:8100.
+        #[arg(long)]
+        listen: std::net::SocketAddr,
+        /// Port on the iPhone to connect each client to.
+        #[arg(long)]
+        device_port: u16,
+    },
     /// Upgrade to the latest GitHub release (daemon app and agent skill).
     ///
     /// Runs the same install.sh the daemon was installed with, then refreshes
@@ -454,6 +468,15 @@ fn main() -> Result<()> {
             result
         }
         Command::InstanceContext => instance_context(),
+        Command::Relay {
+            udid,
+            listen,
+            device_port,
+        } => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("start the relay runtime")?
+            .block_on(server::usbmux::run_relay(&udid, listen, device_port)),
         Command::Upgrade { check, json } => std::process::exit(upgrade(check || json, json)),
     };
 

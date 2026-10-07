@@ -12,8 +12,8 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
 
 - `scripts/setup-wda.sh` builds and signs the iphone-use **device runner**
   (`runner/IPhoneUseRunner`, an XCTest UI-test bundle that replaced WebDriverAgent and
-  speaks the same HTTP API), starts it on the phone, and pins two `iproxy` loopback
-  relays: `8100` for control, `9100` for the MJPEG screen.
+  speaks the same HTTP API), starts it on the phone, and pins two loopback relays
+  (`iphone-use relay`, over macOS's own usbmuxd): `8100` for control, `9100` for the MJPEG screen.
   The daemon only ever talks to localhost, so a background process never holds the
   phone's changing IP. USB is the supported path; Wi-Fi/`socat` is a manual experiment.
 - The browser gets the live picture from `/agent/mjpeg` (PNG stills as fallback) and
@@ -42,7 +42,8 @@ Design, lifecycle, failure states, and security boundaries:
 - An iPhone with **Developer Mode** on, paired with and trusted by the Mac over USB.
 - The phone **unlocked and awake** while the runner is built, launched, and used. It
   cannot get past Face ID or the passcode.
-- `iproxy` from `brew install libimobiledevice`.
+- No Homebrew packages: the USB relay is built into the app (`iphone-use relay`). A
+  Homebrew `iproxy` is used only if the app binary predates it.
 - A Rust toolchain only if you build from source.
 
 ### Install and connect the first phone
@@ -566,7 +567,7 @@ The daemon exposes live phone control over the network; treat its URL and passwo
 credentials.
 
 - The password / cookie / bearer protects port `44321` only. **The runner's own `8100`
-  and `9100` on the phone have no authentication**, and the USB `iproxy` relay does not add
+  and `9100` on the phone have no authentication**, and the USB relay does not add
   any — another host on the phone's Wi-Fi can reach them directly. Use it only on a
   trusted, isolated network; turning off iPhone Wi-Fi while on USB removes that exposure.
 - A real authenticated device transport is Phase 2 (a companion app or a controlled

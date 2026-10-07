@@ -2638,7 +2638,7 @@ LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/nu
 [ -n "$LAN_IP" ] || LAN_IP="<this-mac-LAN-ip>"
 
 # Direct mode defaults to deterministic localhost endpoints. setup-wda.sh owns
-# the USB iproxy relays behind these URLs; a LAN/socat relay is available only
+# the USB relays (`iphone-use relay` over usbmuxd) behind these URLs; a LAN/socat relay is available only
 # through the explicit WDA_ALLOW_LAN=1 escape hatch. WDA itself has no auth, so
 # the Mac and phone still belong on a trusted or isolated network.
 WDA_URL="$(env_or_existing PHONE_REMOTE_WDA_URL)"
@@ -3184,7 +3184,6 @@ if [ "$WDA_MANAGED" = "true" ]; then
     printf "    • Install full Xcode and sign in: Xcode → Settings → Accounts.\n"
     printf "    • Enable Developer Mode on the iPhone; connect it over USB.\n"
     printf "    • Keep the iPhone unlocked and awake during the first build.\n"
-    printf '    • Install the default USB loopback relay: %bbrew install libimobiledevice%b (iproxy).\n' "$BOLD" "$RESET"
     printf "    • Keep the Mac and iPhone on a trusted/isolated network: WDA itself has no authentication.\n"
     printf "    • Keep Cloudflare WARP / tunnel VPN manually disconnected while Xcode mounts developer services.\n"
     printf "    • WDA_ALLOW_LAN=1 + socat is an explicit unsafe fallback, not automatic recovery.\n"

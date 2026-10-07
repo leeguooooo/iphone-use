@@ -34,7 +34,7 @@ Mac 上的守护进程通过 USB 在 iPhone 上运行自己的设备 runner（�
 
 ## 安装
 
-需要 macOS 15 以上、完整的 Xcode 并登录开发者团队（免费的 Personal Team 也行）、开了开发者模式并通过 USB 信任这台 Mac 的 iPhone，以及 `brew install libimobiledevice`。
+需要 macOS 15 以上、完整的 Xcode 并登录开发者团队（免费的 Personal Team 也行）、开了开发者模式并通过 USB 信任这台 Mac 的 iPhone。不需要别的，也不用装 Homebrew 包。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh

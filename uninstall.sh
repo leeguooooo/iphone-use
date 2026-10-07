@@ -3,7 +3,7 @@
 #
 # The default is deliberately local-only: it stops and removes product-owned
 # LaunchAgents, PID-verified WDA processes, apps, logs, and ~/.iphone-use state.
-# It never removes Xcode, Homebrew, iproxy, socat, or the WDA runner installed on
+# It never removes Xcode, Homebrew, a legacy iproxy, socat, or the WDA runner installed on
 # the phone. Removing the phone runner requires explicit target identifiers.
 set -u
 umask 077
@@ -566,6 +566,9 @@ command_matches_expected() {
         relay:*|mjpeg:*)
             signature="${expected#*:}"
             if printf '%s\n' "$signature" | LC_ALL=C grep -Eq \
+                '^/[^ ]+/iphone-use relay --udid [0-9A-Fa-f-]+ --listen 127\.0\.0\.1:[0-9]+ --device-port [0-9]+$'; then
+                :
+            elif printf '%s\n' "$signature" | LC_ALL=C grep -Eq \
                 '^(/[^ ]*/)?iproxy -s 127\.0\.0\.1 [0-9]+:[0-9]+ -u [0-9A-Fa-f-]+$'; then
                 :
             elif printf '%s\n' "$signature" | LC_ALL=C grep -Eq \
@@ -625,6 +628,10 @@ expected_listener_port() {
         relay:*|mjpeg:*)
             signature="${expected#*:}"
             case "$signature" in
+                *"/iphone-use relay "*)
+                    rest="${signature#* --listen 127.0.0.1:}"
+                    port="${rest%% *}"
+                    ;;
                 *"iproxy -s 127.0.0.1 "*)
                     rest="${signature#*iproxy -s 127.0.0.1 }"
                     pair="${rest%% *}"

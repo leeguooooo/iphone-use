@@ -298,7 +298,7 @@ This is how every install runs the runner; the manual steps below are for develo
 - **Reuse.** The verified product is recorded in `<state>/wda-runner-product.json`, keyed on the
   source hash, signing identity, device and Xcode/SDK; a matching reconnect skips the build.
   `WDA_RUNNER_REBUILD=1` forces one.
-- **Unchanged.** Relays (`iproxy` 8100/9100), the KeepAlive supervisor and its label, lock wait and
+- **Unchanged.** Relays (8100/9100, now `iphone-use relay`), the KeepAlive supervisor and its label, lock wait and
   backoff, trust/DDI/automation blockers, the status file the daemon reads, and every `WDA_*`
   variable keep their names and behaviour.
 

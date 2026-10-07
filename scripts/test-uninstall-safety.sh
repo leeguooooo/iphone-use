@@ -249,6 +249,44 @@ grep -q "does not exclusively own 127.0.0.1:8100" "$TEST_ROOT/err" \
     || fail_test "foreign-listener relay reached a signal plan"
 pass "WDA relay must exclusively own its exact loopback listener"
 
+# The built-in usbmux relay (`iphone-use relay`) is held to the same rules,
+# with its listen port read from --listen.
+builtin_relay_case() {  # builtin_relay_case <home-name> <lsof-pid>
+    new_home "$1"
+    relay_command="/Users/tester/Applications/iPhoneUse.app/Contents/MacOS/iphone-use relay --udid 00008110-001234567890001E --listen 127.0.0.1:8100 --device-port 8100"
+    cat > "$TEST_BIN/ps" <<SH
+#!/bin/sh
+case " \$* " in
+  *" -o pid= "*) printf '4243\\n' ;;
+  *" -o uid= "*) printf '%s\\n' "$(id -u)" ;;
+  *" -o lstart= "*) printf 'Mon Jul 28 00:00:01 2026\\n' ;;
+  *" -o command= "*) printf '%s\\n' "$relay_command" ;;
+  *) exit 1 ;;
+esac
+SH
+    printf '#!/bin/sh\nprintf '"'"'p%s\\nn127.0.0.1:8100\\n'"'"'\n' "$2" > "$TEST_BIN/lsof"
+    chmod 700 "$TEST_BIN/ps" "$TEST_BIN/lsof"
+    printf '%s\n' "4243|Mon Jul 28 00:00:01 2026|relay:$relay_command" \
+        > "$TEST_HOME/.iphone-use/wda-relay.pid"
+    chmod 600 "$TEST_HOME/.iphone-use/wda-relay.pid"
+    env HOME="$TEST_HOME" \
+        IPHONE_USE_LAUNCHCTL="$TEST_BIN/launchctl" \
+        IPHONE_USE_PS="$TEST_BIN/ps" \
+        IPHONE_USE_LSOF="$TEST_BIN/lsof" \
+        /bin/bash "$UNINSTALL" --dry-run >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+}
+if builtin_relay_case "builtin-relay-foreign" 9999; then
+    fail_test "built-in relay with a foreign listener owner unexpectedly passed"
+fi
+grep -q "does not exclusively own 127.0.0.1:8100" "$TEST_ROOT/err" \
+    || fail_test "built-in relay listener ownership rejection reason missing"
+! grep -q "send SIGTERM" "$TEST_ROOT/out" \
+    || fail_test "foreign-listener built-in relay reached a signal plan"
+builtin_relay_case "builtin-relay-owned" 4243 || true
+grep -q "send SIGTERM" "$TEST_ROOT/out" \
+    || fail_test "an owned built-in relay was not planned for SIGTERM: $(cat "$TEST_ROOT/err")"
+pass "built-in usbmux relay is recognized and must own its loopback listener"
+
 new_home "pid-mode"
 /bin/sleep 60 &
 victim_pid=$!

@@ -38,8 +38,8 @@ Nothing touches the Mac's own screen, cursor or focus.
 ## Install
 
 You need macOS 15+, full Xcode signed in to a development team (a free Personal Team
-works), an iPhone with Developer Mode on and trusted over USB, and
-`brew install libimobiledevice`.
+works), and an iPhone with Developer Mode on and trusted over USB. Nothing else: no
+Homebrew packages.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
