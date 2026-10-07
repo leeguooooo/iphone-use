@@ -2354,6 +2354,9 @@ async fn agent_status(
     } else {
         ("", "")
     };
+    // Hints name commands and ports for the default instance; a second
+    // phone has its own relay ports and needs `--instance NAME`.
+    let hint = hint_for_this_daemon(hint, crate::instance::current(), &relay_ports_label());
     let hint_json = serde_json::to_string(&hint).unwrap_or_else(|_| "\"\"".into());
     let next_step_json = human_next_step(advice, &setup_blocked_on, wda_died_reason)
         .map(|(zh, en)| {
@@ -2700,6 +2703,35 @@ fn for_instance(text: &str, instance: &crate::instance::Instance) -> String {
         out = out.replace(command, &format!("{command} --instance {}", instance.name));
     }
     out
+}
+
+/// This daemon's loopback relay ports as hints print them (`8538/9538`),
+/// from the endpoints it was configured with; 8100/9100 when unset.
+fn relay_ports_label() -> String {
+    let port = |key: &str, default: &str| {
+        std::env::var(key)
+            .ok()
+            .and_then(|url| {
+                url.trim_end_matches('/')
+                    .rsplit(':')
+                    .next()
+                    .map(str::to_string)
+            })
+            .filter(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+            .unwrap_or_else(|| default.to_string())
+    };
+    format!(
+        "{}/{}",
+        port("PHONE_REMOTE_WDA_URL", "8100"),
+        port("PHONE_REMOTE_WDA_MJPEG_URL", "9100")
+    )
+}
+
+/// A `hint` aimed at this daemon: its own relay ports instead of the
+/// default instance's 8100/9100, and `--instance NAME` on every
+/// `iphone-use` command it names.
+fn hint_for_this_daemon(text: &str, instance: &crate::instance::Instance, ports: &str) -> String {
+    for_instance(&text.replace("8100/9100", ports), instance)
 }
 
 /// [`setup_blocker_hint`] for a specific instance: the `wda` blocker names
@@ -14429,6 +14461,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hints_name_this_instances_relay_ports_and_cli() {
+        // Seen on a second phone (relays 8538/9538): the offline hint told the
+        // operator to repair "the 8100/9100 relays" and run a bare
+        // `iphone-use doctor`, which checks the default instance.
+        let offline = "direct device service is unreachable — start or repair the device runner and the 8100/9100 relays (iphone-use doctor)";
+        let second = crate::instance::Instance::derive("i13", "/Users/x", None).unwrap();
+        let hint = hint_for_this_daemon(offline, &second, "8538/9538");
+        assert!(hint.contains("the 8538/9538 relays"), "{hint}");
+        assert!(hint.contains("iphone-use doctor --instance i13"), "{hint}");
+        assert!(!hint.contains("8100"), "{hint}");
+        let died = hint_for_this_daemon(wda_death_hint("unreachable"), &second, "8538/9538");
+        assert!(died.contains("the 8538/9538 relay died"), "{died}");
+        assert!(died.contains("iphone-use setup --instance i13"), "{died}");
+        let default = crate::instance::Instance::derive("", "/Users/x", None).unwrap();
+        assert_eq!(
+            hint_for_this_daemon(offline, &default, "8100/9100"),
+            offline
+        );
     }
 
     #[test]
