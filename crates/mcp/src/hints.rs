@@ -3,8 +3,6 @@
 //! Both are advice only. Nothing here sends an action, goes back, or replays
 //! anything: a hint names what was seen so the next call can be different.
 
-use std::collections::VecDeque;
-
 use serde_json::Value;
 
 /// Fold the differences a model gets wrong without meaning anything by them:
@@ -82,99 +80,247 @@ pub fn repeated_without_progress<K: PartialEq + Clone>(history: &[(K, bool)]) ->
     avoid
 }
 
-/// Watches observed actions in one MCP session and warns when the same action
-/// keeps leaving the screen unchanged.
-#[derive(Debug, Default)]
-pub struct ProgressTracker {
-    /// (app, action signature, changed) for the last few observed actions.
-    recent: VecDeque<(String, String, bool)>,
-}
-
-const KEEP: usize = 6;
-
-impl ProgressTracker {
-    /// Record one observed action and return a `no_progress` line when the
-    /// action has stopped making progress. `json` is the daemon's observed
-    /// response; an unobserved or unparseable one is ignored (no evidence).
-    pub fn record(&mut self, signature: &str, json: Option<&Value>) -> Option<String> {
-        let json = json?;
-        if json.get("ok") != Some(&Value::Bool(true)) {
-            return None;
-        }
-        // Still loading: an unsettled screen or a spinner is waiting, not
-        // stuck, so it neither counts nor warns.
-        if still_loading(json) {
-            return None;
-        }
-        let changed = json.get("no_visible_change") != Some(&Value::Bool(true));
-        let app = json
-            .get("application")
-            .or_else(|| json.get("app"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if self
-            .recent
-            .back()
-            .is_some_and(|(last_app, _, _)| *last_app != app)
-        {
-            self.recent.clear();
-        }
-        self.recent.push_back((app, signature.to_string(), changed));
-        while self.recent.len() > KEEP {
-            self.recent.pop_front();
-        }
-        let history: Vec<(String, bool)> = self
-            .recent
-            .iter()
-            .map(|(_, sig, changed)| (sig.clone(), *changed))
-            .collect();
-        let unchanged_streak = history
-            .iter()
-            .rev()
-            .take_while(|(sig, changed)| sig == signature && !changed)
-            .count();
-        let looping = history
-            .iter()
-            .rev()
-            .take(4)
-            .filter(|(sig, _)| sig == signature)
-            .count()
-            >= 3;
-        if unchanged_streak >= 2 || (looping && !changed) {
-            Some(format!(
-                "no_progress: `{signature}` left the screen unchanged {} time(s) in a row — \
-                 re-read the screen (phone_elements) and try a different control or wait for \
-                 a condition. Do not resend an action whose outcome was unknown.",
-                unchanged_streak.max(1)
-            ))
-        } else {
-            None
-        }
+/// A bounded fingerprint: a 64-bit hash, never the raw labels.
+fn fingerprint(parts: impl IntoIterator<Item = String>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for part in parts {
+        part.hash(&mut hasher);
     }
+    hasher.finish()
 }
 
-fn still_loading(json: &Value) -> bool {
-    if let Some(settle) = json.get("settle") {
-        if settle.get("settled") == Some(&Value::Bool(false)) {
+/// A stable digest of a full screen read: the kind and label of every row,
+/// in order. Snapshot tokens change on every read, so they prove freshness
+/// but cannot identify a screen.
+fn screen_digest(rows: &[Value]) -> u64 {
+    fingerprint(rows.iter().map(|row| {
+        format!(
+            "{}\u{1f}{}",
+            row.get("kind").and_then(Value::as_str).unwrap_or(""),
+            row.get("label").and_then(Value::as_str).unwrap_or("")
+        )
+    }))
+}
+
+/// Too little in the tree to say anything about it (Mode A territory).
+fn sparse(json: &Value, rows: &[Value]) -> bool {
+    if let Some(stats) = json.get("ax_stats") {
+        let interactive = stats.get("n_interactive").and_then(Value::as_u64);
+        let container_only = stats.get("container_only") == Some(&Value::Bool(true));
+        if interactive == Some(0) || container_only {
             return true;
         }
     }
-    let spinner = |rows: Option<&Value>| {
-        rows.and_then(Value::as_array).is_some_and(|rows| {
-            rows.iter().any(|row| {
-                let row = row.get("element").unwrap_or(row);
-                matches!(
-                    row.get("kind").and_then(Value::as_str),
-                    Some("ActivityIndicator" | "ProgressIndicator")
-                )
-            })
+    rows.len() < 3
+}
+
+/// What one tool call did, as the tracker sees it.
+pub enum Action<'a> {
+    /// Tap by label on the current screen.
+    TapLabel(&'a str),
+    /// Tap by element index against a snapshot.
+    TapElement { index: u64, snapshot: &'a str },
+    /// Tap a normalized point.
+    TapPoint { x: f64, y: f64 },
+    /// Scroll from an anchor.
+    Scroll { x: f64, y: f64, dx: f64, dy: f64 },
+}
+
+/// The screen the tracker last saw in full.
+#[derive(Debug, Clone)]
+struct Screen {
+    digest: u64,
+    snapshot: String,
+    /// (kind, label) per row, for resolving an element index to a target.
+    rows: Vec<(String, String)>,
+}
+
+/// Watches observed actions in one MCP session and warns when the same
+/// action, on the same screen, keeps settling with nothing changed.
+///
+/// It only speaks when it can prove its claim: a known screen (from a full
+/// read), a target it can name on that screen, and consecutive complete,
+/// settled observations with no change and the same app in front. Anything
+/// else — an unobserved action, a failure, loading, a missing field, a long
+/// idle, a call that overlapped another — resets the streak.
+#[derive(Debug, Default)]
+pub struct ProgressTracker {
+    screen: Option<Screen>,
+    /// (target fingerprint, consecutive unchanged count).
+    streak: Option<(u64, u32)>,
+    last_ms: u64,
+    /// Calls started but not yet recorded; >1 means calls overlapped.
+    in_flight: u32,
+    overlapped: bool,
+}
+
+/// Silence longer than this ends a streak.
+pub const PROGRESS_IDLE_MS: u64 = 120_000;
+
+impl ProgressTracker {
+    /// Forget everything (run boundary, owner released, idle).
+    pub fn reset(&mut self) {
+        let in_flight = self.in_flight;
+        *self = Self::default();
+        self.in_flight = in_flight;
+    }
+
+    /// A full screen read (`phone_elements`, or an observed answer that
+    /// carried the whole tree because there was no baseline).
+    pub fn note_screen(&mut self, json: &Value) {
+        let Some(rows) = json.get("elements").and_then(Value::as_array) else {
+            self.screen = None;
+            return;
+        };
+        let snapshot = json.get("snapshot").and_then(Value::as_str).unwrap_or("");
+        if snapshot.is_empty() || sparse(json, rows) {
+            self.screen = None;
+            self.streak = None;
+            return;
+        }
+        let digest = screen_digest(rows);
+        if self.screen.as_ref().is_some_and(|s| s.digest != digest) {
+            self.streak = None;
+        }
+        self.screen = Some(Screen {
+            digest,
+            snapshot: snapshot.to_string(),
+            rows: rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.get("kind")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        row.get("label")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    )
+                })
+                .collect(),
+        });
+    }
+
+    /// An action that returns no observation (type, key, shortcut, batch,
+    /// flow, unobserved tap…): the screen is no longer known.
+    pub fn note_unobserved(&mut self) {
+        self.screen = None;
+        self.streak = None;
+    }
+
+    /// Call when an observed action starts.
+    pub fn begin(&mut self) {
+        self.in_flight += 1;
+        if self.in_flight > 1 {
+            self.overlapped = true;
+        }
+    }
+
+    /// The stable target of an action on the known screen, or `None` when it
+    /// cannot be named (then no hint is possible).
+    fn target(&self, action: &Action) -> Option<u64> {
+        let screen = self.screen.as_ref()?;
+        let what = match action {
+            Action::TapLabel(label) => format!("label\u{1f}{label}"),
+            Action::TapElement { index, snapshot } => {
+                // The index means something only against the snapshot the
+                // tracker saw for this screen.
+                if *snapshot != screen.snapshot {
+                    return None;
+                }
+                let (kind, label) = screen.rows.get(usize::try_from(*index).ok()?)?;
+                if label.is_empty() {
+                    return None;
+                }
+                format!("element\u{1f}{kind}\u{1f}{label}")
+            }
+            Action::TapPoint { x, y } => format!("point\u{1f}{:.2}\u{1f}{:.2}", x, y),
+            Action::Scroll { x, y, dx, dy } => {
+                format!("scroll\u{1f}{:.2}\u{1f}{:.2}\u{1f}{dx}\u{1f}{dy}", x, y)
+            }
+        };
+        Some(fingerprint([screen.digest.to_string(), what]))
+    }
+
+    /// Record the daemon's answer to an observed action that started with
+    /// [`begin`](Self::begin). Returns a `no_progress` advisory or `None`.
+    pub fn record(&mut self, action: Action, json: Option<&Value>, now_ms: u64) -> Option<String> {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        let overlapped = std::mem::take(&mut self.overlapped) || self.in_flight > 0;
+        let idle = self.last_ms != 0 && now_ms.saturating_sub(self.last_ms) > PROGRESS_IDLE_MS;
+        self.last_ms = now_ms;
+        if overlapped || idle {
+            self.reset();
+            return None;
+        }
+        let target = self.target(&action);
+        let Some(json) = json else {
+            self.note_unobserved();
+            return None;
+        };
+        let unchanged = complete_unchanged(json);
+        if json.get("elements").is_some() {
+            // No baseline: the whole tree came back. It is a fresh screen,
+            // not evidence about this action.
+            self.note_screen(json);
+            self.streak = None;
+            return None;
+        }
+        let (Some(target), Some(true)) = (target, unchanged) else {
+            // A change, or anything we cannot read as "complete and
+            // unchanged": the screen is no longer known in full.
+            self.note_unobserved();
+            return None;
+        };
+        // Unchanged: the screen digest still holds; refresh the snapshot so
+        // a following tap_element against the new token resolves.
+        if let (Some(screen), Some(snapshot)) = (
+            self.screen.as_mut(),
+            json.get("snapshot").and_then(Value::as_str),
+        ) {
+            screen.snapshot = snapshot.to_string();
+        }
+        let count = match self.streak {
+            Some((last, count)) if last == target => count + 1,
+            _ => 1,
+        };
+        self.streak = Some((target, count));
+        (count >= 2).then(|| {
+            format!(
+                "no_progress (advice only): this same action on this same screen has now settled \
+                 {count} times in a row with no change in the accessibility tree and no app \
+                 switch. A change the tree does not show (sound, haptics, pixels only) would not \
+                 appear here. Nothing was resent. Re-read the screen with phone_elements, then \
+                 try a different control or wait for a specific condition; do not repeat an \
+                 action whose outcome was unknown."
+            )
         })
-    };
-    spinner(json.get("elements"))
-        || json
-            .get("delta")
-            .is_some_and(|d| spinner(d.get("added")) || spinner(d.get("changed")))
+    }
+}
+
+/// `Some(true)` only for a complete, settled delta that reports no visible
+/// change and no app switch; `Some(false)` for a complete delta that changed;
+/// `None` when the answer is not usable evidence either way.
+fn complete_unchanged(json: &Value) -> Option<bool> {
+    if json.get("ok") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    let settle = json.get("settle")?;
+    if settle.get("settled") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    if json.get("delta_error").is_some() || json.get("snapshot").is_none() {
+        return None;
+    }
+    json.get("delta")?.as_object()?;
+    json.get("baseline")?.as_str()?;
+    if json.get("app_changed").is_some_and(|v| !v.is_null()) {
+        return Some(false);
+    }
+    Some(json.get("no_visible_change") == Some(&Value::Bool(true)))
 }
 
 #[cfg(test)]
@@ -210,44 +356,195 @@ mod tests {
         assert!(repeated_without_progress(&[("A", true), ("B", true)]).is_empty());
     }
 
-    fn observed(app: &str, unchanged: bool) -> Value {
-        json!({"ok": true, "application": app, "no_visible_change": unchanged,
-               "settle": {"settled": true, "reason": "stable"}})
+    /// A full read in the daemon's `/agent/elements` shape.
+    fn screen(snapshot: &str, labels: &[&str]) -> Value {
+        let rows: Vec<Value> = labels
+            .iter()
+            .map(|label| json!({"kind": "Button", "label": label}))
+            .collect();
+        json!({"snapshot": snapshot, "elements": rows,
+               "ax_stats": {"n": rows.len(), "n_interactive": rows.len(), "container_only": false}})
     }
 
-    #[test]
-    fn warns_after_two_unchanged_repeats_only() {
-        let mut t = ProgressTracker::default();
-        assert!(t
-            .record("tap 搜索", Some(&observed("设置", true)))
-            .is_none());
-        let warn = t.record("tap 搜索", Some(&observed("设置", true))).unwrap();
-        assert!(warn.starts_with("no_progress:") && warn.contains("2 time"));
-        // A different action that changes the screen resets nothing falsely.
-        assert!(t
-            .record("tap 通用", Some(&observed("设置", false)))
-            .is_none());
-    }
-
-    #[test]
-    fn loading_and_unobserved_never_warn() {
-        let mut t = ProgressTracker::default();
-        let loading = json!({"ok": true, "application": "a", "no_visible_change": true,
-                             "settle": {"settled": false, "reason": "budget"}});
-        let spinner = json!({"ok": true, "application": "a", "no_visible_change": true,
-                             "delta": {"added": [{"index": 3, "element": {"kind": "ActivityIndicator"}}]}});
-        for _ in 0..4 {
-            assert!(t.record("tap x", Some(&loading)).is_none());
-            assert!(t.record("tap x", Some(&spinner)).is_none());
-            assert!(t.record("tap x", None).is_none());
-            assert!(t.record("tap x", Some(&json!({"ok": false}))).is_none());
+    /// An observed action in the daemon's `?return=delta` shape.
+    fn delta(snapshot: &str, unchanged: bool) -> Value {
+        let mut body = json!({"ok": true, "transport": "wda", "snapshot": snapshot,
+            "baseline": "base", "delta": {"added": [], "removed": [], "changed": []},
+            "settle": {"settled": true, "reason": "stable", "captures": 2, "waited_ms": 600}});
+        if unchanged {
+            body["no_visible_change"] = json!(true);
         }
+        body
+    }
+
+    fn act(t: &mut ProgressTracker, action: Action, json: Value, now: u64) -> Option<String> {
+        t.begin();
+        t.record(action, Some(&json), now)
+    }
+
+    fn settings() -> ProgressTracker {
+        let mut t = ProgressTracker::default();
+        t.note_screen(&screen("s1", &["通用", "蓝牙", "无障碍"]));
+        t
     }
 
     #[test]
-    fn switching_apps_starts_over() {
+    fn two_consecutive_unchanged_on_the_same_screen_warn() {
+        let mut t = settings();
+        assert!(act(&mut t, Action::TapLabel("通用"), delta("s2", true), 1_000).is_none());
+        let warn = act(&mut t, Action::TapLabel("通用"), delta("s3", true), 2_000).unwrap();
+        assert!(warn.starts_with("no_progress (advice only)") && warn.contains("2 times"));
+        assert!(warn.contains("Nothing was resent"));
+    }
+
+    #[test]
+    fn progress_in_between_is_not_a_loop() {
+        // A changed, A changed, B changed, A unchanged → one unchanged only.
+        let mut t = settings();
+        for (label, unchanged) in [("通用", false), ("通用", false), ("蓝牙", false)] {
+            assert!(act(
+                &mut t,
+                Action::TapLabel(label),
+                delta("x", unchanged),
+                1_000
+            )
+            .is_none());
+            t.note_screen(&screen("s1", &["通用", "蓝牙", "无障碍"]));
+        }
+        assert!(act(&mut t, Action::TapLabel("通用"), delta("y", true), 2_000).is_none());
+    }
+
+    #[test]
+    fn unusable_answers_reset_the_streak() {
+        let missing_settle = {
+            let mut d = delta("s", true);
+            d.as_object_mut().unwrap().remove("settle");
+            d
+        };
+        let loading = {
+            let mut d = delta("s", true);
+            d["settle"]["settled"] = json!(false);
+            d
+        };
+        let no_baseline = {
+            let mut d = delta("s", true);
+            d.as_object_mut().unwrap().remove("baseline");
+            d
+        };
+        let delta_error = {
+            let mut d = delta("s", true);
+            d["delta_error"] = json!("tree read failed");
+            d
+        };
+        for bad in [
+            missing_settle,
+            loading,
+            no_baseline,
+            delta_error,
+            json!({"ok": false}),
+        ] {
+            let mut t = settings();
+            assert!(act(&mut t, Action::TapLabel("通用"), delta("a", true), 1_000).is_none());
+            assert!(act(&mut t, Action::TapLabel("通用"), bad, 1_100).is_none());
+            // The screen is no longer known, so even a clean unchanged answer
+            // cannot be attributed until it is read again.
+            assert!(act(&mut t, Action::TapLabel("通用"), delta("b", true), 1_200).is_none());
+        }
+        // A transport error (no answer) and an unobserved action reset too.
+        let mut t = settings();
+        act(&mut t, Action::TapLabel("通用"), delta("a", true), 1_000);
+        t.begin();
+        assert!(t.record(Action::TapLabel("通用"), None, 1_100).is_none());
+        t.note_screen(&screen("s1", &["通用", "蓝牙", "无障碍"]));
+        act(&mut t, Action::TapLabel("通用"), delta("a", true), 1_200);
+        t.note_unobserved(); // e.g. phone_type
+        t.note_screen(&screen("s1", &["通用", "蓝牙", "无障碍"]));
+        assert!(act(&mut t, Action::TapLabel("通用"), delta("b", true), 1_300).is_none());
+    }
+
+    #[test]
+    fn same_label_on_a_different_screen_is_a_different_target() {
+        let mut t = settings();
+        act(&mut t, Action::TapLabel("通用"), delta("a", true), 1_000);
+        t.note_screen(&screen("z1", &["通用", "关于本机", "软件更新"]));
+        assert!(act(&mut t, Action::TapLabel("通用"), delta("b", true), 1_100).is_none());
+    }
+
+    #[test]
+    fn element_index_resolves_against_its_snapshot_only() {
+        let mut t = settings();
+        let tap = |snapshot| Action::TapElement { index: 1, snapshot };
+        assert!(act(&mut t, tap("s1"), delta("s2", true), 1_000).is_none());
+        // The unchanged answer refreshed the snapshot, so the new token resolves.
+        assert!(act(&mut t, tap("s2"), delta("s3", true), 1_100).is_some());
+        // A token the tracker never saw cannot be named: no hint, streak ends.
+        let mut t = settings();
+        act(&mut t, tap("s1"), delta("s2", true), 1_000);
+        assert!(act(&mut t, tap("other"), delta("s3", true), 1_100).is_none());
+    }
+
+    #[test]
+    fn scroll_start_points_are_part_of_the_target() {
+        let mut t = settings();
+        let scroll = |y| Action::Scroll {
+            x: 0.5,
+            y,
+            dx: 0.0,
+            dy: 300.0,
+        };
+        act(&mut t, scroll(0.5), delta("a", true), 1_000);
+        assert!(act(&mut t, scroll(0.8), delta("b", true), 1_100).is_none());
+        assert!(act(&mut t, scroll(0.8), delta("c", true), 1_200).is_some());
+    }
+
+    #[test]
+    fn app_switch_long_idle_and_sparse_trees_never_warn() {
+        let mut t = settings();
+        let mut switched = delta("a", true);
+        switched["app_changed"] = json!({"from": "设置", "to": "微信"});
+        act(&mut t, Action::TapLabel("通用"), switched, 1_000);
+        assert!(act(&mut t, Action::TapLabel("通用"), delta("b", true), 1_100).is_none());
+
+        let mut t = settings();
+        act(&mut t, Action::TapLabel("通用"), delta("a", true), 1_000);
+        assert!(act(
+            &mut t,
+            Action::TapLabel("通用"),
+            delta("b", true),
+            1_000 + PROGRESS_IDLE_MS + 1
+        )
+        .is_none());
+
         let mut t = ProgressTracker::default();
-        assert!(t.record("tap x", Some(&observed("a", true))).is_none());
-        assert!(t.record("tap x", Some(&observed("b", true))).is_none());
+        let mut thin = screen("s1", &["通用", "蓝牙", "无障碍"]);
+        thin["ax_stats"]["n_interactive"] = json!(0);
+        t.note_screen(&thin);
+        act(&mut t, Action::TapLabel("通用"), delta("a", true), 1_000);
+        assert!(act(&mut t, Action::TapLabel("通用"), delta("b", true), 1_100).is_none());
+    }
+
+    #[test]
+    fn overlapping_calls_reset_instead_of_guessing() {
+        let mut t = settings();
+        act(&mut t, Action::TapLabel("通用"), delta("a", true), 1_000);
+        t.begin();
+        t.begin(); // a second call started before the first answered
+        assert!(t
+            .record(Action::TapLabel("通用"), Some(&delta("b", true)), 1_100)
+            .is_none());
+        assert!(t
+            .record(Action::TapLabel("通用"), Some(&delta("c", true)), 1_200)
+            .is_none());
+    }
+
+    #[test]
+    fn no_baseline_answers_are_a_fresh_screen_not_evidence() {
+        let mut t = settings();
+        act(&mut t, Action::TapLabel("通用"), delta("a", true), 1_000);
+        let mut full = screen("f", &["通用", "蓝牙", "无障碍"]);
+        full["ok"] = json!(true);
+        full["settle"] = json!({"settled": true});
+        assert!(act(&mut t, Action::TapLabel("通用"), full, 1_100).is_none());
+        assert!(act(&mut t, Action::TapLabel("通用"), delta("b", true), 1_200).is_none());
     }
 }

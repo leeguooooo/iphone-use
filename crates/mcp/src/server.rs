@@ -510,18 +510,40 @@ impl PhoneHandler {
         }
     }
 
-    /// Append a `no_progress` advisory when this observed action has stopped
-    /// changing the screen. Advice only: nothing is resent or undone.
-    fn note_progress(&self, signature: String, mut result: CallToolResult) -> CallToolResult {
-        let warning = self
-            .progress
-            .lock()
-            .ok()
-            .and_then(|mut tracker| tracker.record(&signature, result.structured_content.as_ref()));
+    /// Mark the start of an observed action for the `no_progress` tracker.
+    fn progress_begin(&self) {
+        if let Ok(mut tracker) = self.progress.lock() {
+            tracker.begin();
+        }
+    }
+
+    /// Record an observed action's result; append a `no_progress` advisory
+    /// when the tracker can prove the same action keeps changing nothing.
+    /// Advice only: nothing is resent or undone. Any result without a usable
+    /// observation (an error, a transport failure) resets the tracker.
+    fn note_progress(
+        &self,
+        action: crate::hints::Action,
+        mut result: CallToolResult,
+    ) -> CallToolResult {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let warning = self.progress.lock().ok().and_then(|mut tracker| {
+            tracker.record(action, result.structured_content.as_ref(), now_ms)
+        });
         if let Some(line) = warning {
             result.content.push(Content::text(line));
         }
         result
+    }
+
+    /// An action that returns no observation, or a boundary: the tracker no
+    /// longer knows the screen.
+    fn progress_unobserved(&self) {
+        if let Ok(mut tracker) = self.progress.lock() {
+            tracker.note_unobserved();
+        }
     }
 
     fn remember_flow_failure(&self, context: crate::contrib::ReportContext) {
@@ -620,8 +642,9 @@ impl PhoneHandler {
         &self,
         Parameters(TapParams { x, y, observe }): Parameters<TapParams>,
     ) -> CallToolResult {
+        self.progress_begin();
         let result = send_input_observed(&self.daemon, &InputMsg::Tap { x, y }, observe).await;
-        self.note_progress(format!("tap {x:.2},{y:.2}"), result)
+        self.note_progress(crate::hints::Action::TapPoint { x, y }, result)
     }
 
     // -----------------------------------------------------------------------
@@ -637,9 +660,10 @@ impl PhoneHandler {
         &self,
         Parameters(ScrollParams { x, y, dx, dy, observe }): Parameters<ScrollParams>,
     ) -> CallToolResult {
+        self.progress_begin();
         let result =
             send_input_observed(&self.daemon, &InputMsg::Scroll { x, y, dx, dy }, observe).await;
-        self.note_progress(format!("scroll dx={dx:?} dy={dy:?}"), result)
+        self.note_progress(crate::hints::Action::Scroll { x, y, dx, dy }, result)
     }
 
     // -----------------------------------------------------------------------
@@ -655,6 +679,7 @@ impl PhoneHandler {
         &self,
         Parameters(TypeParams { text, observe }): Parameters<TypeParams>,
     ) -> CallToolResult {
+        self.progress_unobserved();
         send_input_observed(&self.daemon, &InputMsg::Text { text }, observe).await
     }
 
@@ -669,6 +694,7 @@ impl PhoneHandler {
         &self,
         Parameters(KeyParams { name, observe }): Parameters<KeyParams>,
     ) -> CallToolResult {
+        self.progress_unobserved();
         let name = name.trim().to_ascii_lowercase();
         match name.as_str() {
             "return" | "enter" | "escape" | "space" | "tab" | "delete" | "backspace" | "up"
@@ -696,6 +722,7 @@ impl PhoneHandler {
         &self,
         Parameters(ShortcutParams { name, observe }): Parameters<ShortcutParams>,
     ) -> CallToolResult {
+        self.progress_unobserved();
         let name = name.trim().to_ascii_lowercase();
         match name.as_str() {
             "home" | "spotlight" => {
@@ -734,6 +761,7 @@ impl PhoneHandler {
         &self,
         Parameters(RunStepsParams { steps, observe }): Parameters<RunStepsParams>,
     ) -> CallToolResult {
+        self.progress_unobserved();
         let mut request = match phone_steps_request(steps) {
             Ok(request) => request,
             Err(error) => return CallToolResult::error(vec![Content::text(error)]),
@@ -849,6 +877,9 @@ impl PhoneHandler {
                     .as_ref()
                     .and_then(crate::compact::elements)
                     .unwrap_or_else(|| body.clone());
+                if let (Some(json), Ok(mut tracker)) = (parsed.as_ref(), self.progress.lock()) {
+                    tracker.note_screen(json);
+                }
                 let mut result = CallToolResult::success(vec![Content::text(text)]);
                 result.structured_content = parsed.filter(serde_json::Value::is_object);
                 result
@@ -893,24 +924,29 @@ impl PhoneHandler {
         // The snapshot is the caller's. This never substitutes one of its own,
         // so the daemon's staleness check runs against the tree the caller
         // actually read.
-        match self
+        self.progress_begin();
+        let result = match self
             .daemon
             .tap_element_observed(element, &snapshot, observe)
             .await
         {
-            Ok(response) => self.note_progress(
-                format!("tap_element #{element}"),
-                daemon_action_result(
-                    &response,
-                    observe,
-                    &format!("tapped element #{element} from the supplied snapshot"),
-                ),
+            Ok(response) => daemon_action_result(
+                &response,
+                observe,
+                &format!("tapped element #{element} from the supplied snapshot"),
             ),
             Err(e) => unknown_action_result(
                 "transport_error",
                 format!("tap_element #{element} failed: {e:#}."),
             ),
-        }
+        };
+        self.note_progress(
+            crate::hints::Action::TapElement {
+                index: element as u64,
+                snapshot: &snapshot,
+            },
+            result,
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -930,11 +966,11 @@ impl PhoneHandler {
         let observe = observe.unwrap_or(true);
         // The snapshot comes from the element read this call performs — never
         // a cached or borrowed baseline.
-        match self.daemon.tap_label_observed(&label, observe).await {
-            Ok(response) => self.note_progress(
-                format!("tap_label {label}"),
-                daemon_action_result(&response, observe, &format!("tapped element: {label}")),
-            ),
+        self.progress_begin();
+        let result = match self.daemon.tap_label_observed(&label, observe).await {
+            Ok(response) => {
+                daemon_action_result(&response, observe, &format!("tapped element: {label}"))
+            }
             // `tap_label` resolves the label with reads and only then taps.
             // Which half failed is known structurally, so it is reported
             // exactly — not inferred from the text of an error, and not
@@ -955,7 +991,8 @@ impl PhoneHandler {
                      the phone acted on it is unknown."
                 ),
             ),
-        }
+        };
+        self.note_progress(crate::hints::Action::TapLabel(&label), result)
     }
 
     // -----------------------------------------------------------------------
@@ -1007,6 +1044,10 @@ impl PhoneHandler {
         to lapse. Only the current owner can release."
     )]
     async fn phone_release_owner(&self) -> CallToolResult {
+        // A released lease is a run boundary.
+        if let Ok(mut tracker) = self.progress.lock() {
+            tracker.reset();
+        }
         match self.daemon.release_owner().await {
             Ok(body) => CallToolResult::success(vec![Content::text(body)]),
             Err(e) => CallToolResult::error(vec![Content::text(format!("release failed: {e:#}"))]),
