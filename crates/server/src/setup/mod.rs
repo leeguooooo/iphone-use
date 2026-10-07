@@ -37,6 +37,7 @@ pub const COMMANDS: &[&str] = &[
     "resume",
     "setup",
     "owner-check",
+    "instance-context",
 ];
 
 /// `iphone-use setup-native <command> [args…]`. Returns the exit code.
@@ -71,14 +72,9 @@ pub fn main(args: &[String]) -> i32 {
                 "pause" => commands::pause(&ctx),
                 "resume" => commands::resume(&ctx),
                 "owner-check" => owner::check(&ctx),
+                "instance-context" => commands::instance_context(&ctx),
                 _ if ctx.keepalive => flow::Setup::new(ctx).run_keepalive(),
-                _ => {
-                    eprintln!(
-                        "an interactive setup still runs in setup-wda.sh; run: {}",
-                        ctx.rerun_command()
-                    );
-                    2
-                }
+                _ => flow::Setup::new(ctx).run_interactive(),
             }
         }
         other => {

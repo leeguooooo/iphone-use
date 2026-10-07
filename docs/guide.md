@@ -519,14 +519,21 @@ Measured on an iPhone 17 Pro Max (iOS 27): an unlocked cold connect is drivable 
 13–22 s; a locked one shows "unlock" in ~4 s and is drivable ~14 s after the unlock; a
 snapshot-bound tap with `?return=delta` (tap, then the settled tree) takes ~4 s. `POST /agent/mode {"mode":"agent"}` (or MCP `phone_reconnect`) restarts the
 configured target once — do not loop it; read `hint` and `setup_blocked_on`
-(`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|xcode_too_old|locked`) first.
+(`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|xcode_too_old|locked`) first.
 `automation_mode_disabled` means the phone is unlocked but iOS has not enabled UI
 automation: turn on Settings › Developer › Enable UI Automation and accept any passcode or
 "Allow automation" prompt on the phone.
 `xcode_too_old` means the runner exited with code 74 and the phone runs a newer iOS
 than the selected Xcode supports: install an Xcode that supports it (a beta Xcode for a
-beta iOS). KeepAlive then retries only every 15 minutes, since each attempt launches the
-runner on the phone; `setup-wda.sh doctor` prints the phone's iOS next to the Xcode SDK.
+beta iOS) and give this phone that Xcode with `iphone-use setup --xcode <Xcode.app>`
+(other phones keep the Mac's `xcode-select` choice; `--xcode system` goes back to it).
+KeepAlive then retries only every 15 minutes, since each attempt launches the runner on
+the phone; `iphone-use doctor` prints the phone's iOS next to the Xcode SDK and which Xcode
+the phone uses.
+`automation_not_allowed` is the same code-74 refusal with an Xcode that does support the
+phone's iOS: the phone has not allowed the UI-automation session yet. Unlock it, turn on
+Settings › Developer › Enable UI Automation and accept the passcode or Allow prompt;
+KeepAlive retries quietly every 5 s to 1 min.
 
 **Who may end a reconnect.** A bring-up is owned by the task that started it, and only
 that owner ends it. Every begin mints a generation, so a late task cannot end the round

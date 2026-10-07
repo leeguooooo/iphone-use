@@ -47,6 +47,8 @@ pub struct Setup {
     build_locked: bool,
     validation_error: String,
     warned_link_drop: bool,
+    sup: SupervisorTx,
+    self_install: SelfInstallTx,
     /// Where the runner serves (for restarting only the relays).
     phone_url: String,
     /// The runner's Home Screen icon source, when one is injected.
@@ -101,6 +103,8 @@ impl Setup {
             build_locked: false,
             validation_error: String::new(),
             warned_link_drop: false,
+            sup: SupervisorTx::default(),
+            self_install: SelfInstallTx::default(),
             phone_url: String::new(),
             icon_source: None,
             from_probe: false,
@@ -225,6 +229,9 @@ impl Setup {
                 failed = true;
             }
         }
+        if !self.rollback_interactive(status) {
+            failed = true;
+        }
         if status != 0 && self.daemon.active && !self.daemon.touched {
             // Nothing was changed, so nothing is restored. Reloading anyway
             // killed the daemon that had just asked for the stop.
@@ -261,6 +268,10 @@ impl Setup {
                     );
                     if previous != Some(Kind::Locked) {
                         warn("iPhone lock screen blocked the device runner; retrying quietly every 5s to 1min until it is unlocked");
+                    }
+                } else if self.failure_kind == Kind::Automation {
+                    if previous != Some(Kind::Automation) {
+                        warn("the iPhone has not allowed UI automation; retrying quietly every 5s to 1min until it does");
                     }
                 } else if self.failure_kind == Kind::Owned {
                     warn(&format!(
@@ -424,7 +435,11 @@ impl Setup {
         self.phone_url = url.clone();
         let target_url = self.relays(&url)?;
         let daemon = self.configure_daemon(&target_url)?;
-        self.verify_supervision(&target_url)?;
+        if self.ctx.keepalive {
+            self.verify_supervision(&target_url)?;
+        } else {
+            self.handoff(&target_url)?;
+        }
         self.verify_product(&daemon)?;
         self.handoff_complete = true;
         if self.ctx.keepalive {
@@ -434,7 +449,11 @@ impl Setup {
             }
         }
         let _ = std::fs::remove_file(&self.daemon.rollback);
+        let _ = std::fs::remove_file(&self.sup.rollback);
+        let _ = std::fs::remove_file(&self.self_install.rollback);
         self.daemon.active = false;
+        self.sup.active = false;
+        self.self_install.replaced = false;
         self.phase("ready", "", "device runner and launchd supervisor verified");
         self.summary(&url, &target_url, &daemon, &source_hash);
         Ok(())
@@ -451,7 +470,7 @@ impl Setup {
         // the next build pass; `serving` is the first evidence they cleared.
         self.build_blocker = if matches!(
             previous.as_str(),
-            "trust" | "automation_mode_disabled" | "xcode_too_old"
+            "trust" | "automation_mode_disabled" | "xcode_too_old" | "automation_not_allowed"
         ) {
             previous.clone()
         } else {
@@ -1185,6 +1204,20 @@ impl Setup {
         })
     }
 
+    fn report_automation_not_allowed<T>(&mut self) -> Step<T> {
+        const HINT: &str = "unlock the iPhone, turn on Settings › Developer › Enable UI Automation, and accept any passcode or Allow prompt";
+        self.phase(
+            "building-fail",
+            "automation_not_allowed",
+            &format!("the iPhone refused the UI-automation session (runner exit code 74) — {HINT}"),
+        );
+        self.failure_kind = Kind::Automation;
+        die(format!(
+            "the iPhone refused the device runner's UI-automation session (exit code 74, IDE channel refused) although this Xcode supports its iOS — {HINT}. KeepAlive retries quietly every 5 s to 1 min. Log: {}",
+            self.ctx.run_log.display()
+        ))
+    }
+
     fn report_xcode_too_old<T>(&mut self, message: &str) -> Step<T> {
         self.phase("building-fail", "xcode_too_old", message);
         self.failure_kind = Kind::XcodeTooOld;
@@ -1281,6 +1314,11 @@ impl Setup {
                 if let Some(message) = self.xcode_too_old() {
                     return self.report_xcode_too_old(&message);
                 }
+                // The same refusal with an Xcode that supports this iOS: the
+                // phone itself has not allowed UI automation yet.
+                if runner::log_shows_ide_refusal(&self.ctx.run_log) {
+                    return self.report_automation_not_allowed();
+                }
                 if runner::log_shows_automation_disabled(&self.ctx.run_log) {
                     return self.report_automation_disabled();
                 }
@@ -1353,6 +1391,11 @@ impl Setup {
                 }
                 if let Some(message) = self.xcode_too_old() {
                     return self.report_xcode_too_old(&message);
+                }
+                // The same refusal with an Xcode that supports this iOS: the
+                // phone itself has not allowed UI automation yet.
+                if runner::log_shows_ide_refusal(&self.ctx.run_log) {
+                    return self.report_automation_not_allowed();
                 }
                 if runner::log_shows_automation_disabled(&self.ctx.run_log) {
                     return self.report_automation_disabled();
@@ -2262,6 +2305,11 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_plist_values_are_escaped() {
+        assert_eq!(xml_escape("/a&b/<x>.p8"), "/a&amp;b/&lt;x&gt;.p8");
+    }
+
+    #[test]
     fn verdicts() {
         assert_eq!(
             Verdict::of(&serde_json::json!({"drivable": true, "wda": true})),
@@ -2277,4 +2325,511 @@ mod tests {
         );
         assert_eq!(Verdict::of(&serde_json::Value::Null), Verdict::Down);
     }
+}
+
+// ── interactive setup (a person ran `iphone-use setup`) ───────────────────────
+
+/// The runner supervisor as it was before an interactive setup took the
+/// lifecycle over, so a failed setup can put it back exactly.
+#[derive(Default)]
+pub struct SupervisorTx {
+    active: bool,
+    prev_loaded: bool,
+    prev_present: bool,
+    prev_disabled: bool,
+    rollback: PathBuf,
+    staged: Option<PathBuf>,
+}
+
+/// The fixed copy of the setup script the supervisor runs, replaced by a
+/// setup started from somewhere else (a checkout, a fresh install).
+#[derive(Default)]
+pub struct SelfInstallTx {
+    replaced: bool,
+    had_previous: bool,
+    rollback: PathBuf,
+}
+
+impl Setup {
+    /// An interactive setup: build and prove the runner, then hand it to the
+    /// dedicated launchd supervisor and verify the hand-off.
+    pub fn run_interactive(mut self) -> i32 {
+        proc::install_signal_handlers();
+        if let Err(code) = self.install_self() {
+            return code;
+        }
+        let code = match self.interactive() {
+            Ok(()) => 0,
+            Err(Exit(code)) => code,
+        };
+        self.cleanup(code)
+    }
+
+    fn interactive(&mut self) -> Step {
+        // Another session's lease: this setup would replace its runner.
+        if owner::check(&self.ctx) != 0 {
+            return Err(Exit(1));
+        }
+        // Before anything is paused or built, so stopping here undoes nothing.
+        if sys::stdout_is_tty() && !self.first_run_checklist() {
+            return die(format!(
+                "fix the ✗ items above, then run: {}",
+                self.ctx.rerun_command()
+            ));
+        }
+        if let Err(code) = self.begin_status() {
+            return Err(Exit(code));
+        }
+        self.pause_supervisor()?;
+        self.body()
+    }
+
+    /// `setup-wda.sh` keeps a copy at a fixed path so the daemon can start and
+    /// stop the runner without knowing where the repo lives. Only a setup run
+    /// from somewhere else replaces it; the prior copy is kept for rollback.
+    fn install_self(&mut self) -> Result<(), i32> {
+        let target = self.ctx.self_install.clone();
+        self.self_install.rollback = self
+            .ctx
+            .state_dir()
+            .join(format!("setup-wda.rollback.{}.sh", std::process::id()));
+        let Some(script) = self.ctx.script.clone() else {
+            return Ok(());
+        };
+        let same = script.canonicalize().ok() == target.canonicalize().ok() && target.exists();
+        if same {
+            return Ok(());
+        }
+        let _ = std::fs::create_dir_all(self.ctx.state_dir());
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(
+                self.ctx.state_dir(),
+                std::fs::Permissions::from_mode(0o700),
+            );
+        }
+        if target.is_file() {
+            if !copy_preserving(&target, &self.self_install.rollback) {
+                eprintln!("could not back up existing setup-wda.sh");
+                return Err(1);
+            }
+            self.self_install.had_previous = true;
+        }
+        match std::fs::read(&script) {
+            Ok(bytes) if sys::write_atomic(&target, &bytes, 0o700).is_ok() => {
+                self.self_install.replaced = true;
+                Ok(())
+            }
+            _ => {
+                eprintln!(
+                    "could not atomically install setup-wda.sh at {}",
+                    target.display()
+                );
+                Err(1)
+            }
+        }
+    }
+
+    /// What a person has to do by hand before the first build, one plain fix
+    /// per missing item.
+    fn first_run_checklist(&self) -> bool {
+        use super::term::checklist_line;
+        let ctx = &self.ctx;
+        let mut missing = false;
+        println!("\n{BOLD}Before the first build{RST}");
+        if checks::xcode_version().is_empty() {
+            checklist_line(
+                false,
+                "Xcode is installed",
+                &format!("get it from the App Store ({XCODE_APP_STORE_URL}) and open it once"),
+            );
+            missing = true;
+        } else {
+            checklist_line(true, "Xcode is installed", "");
+        }
+        // Any source setup itself would sign with counts: an explicit or
+        // persisted team, an App Store Connect key, the team last picked in
+        // Xcode, or a signed-in account.
+        let account = !ctx.team_id.is_empty()
+            || ctx.asc_signing_enabled()
+            || !sys::plist_env(&ctx.wda_agent_plist, "WDA_TEAM_ID").is_empty()
+            || !sys::defaults_read(
+                "com.apple.dt.Xcode",
+                "IDEProvisioningTeamManagerLastSelectedTeamID",
+            )
+            .is_empty()
+            || !checks::xcode_account_teams().is_empty();
+        checklist_line(
+            account,
+            "Xcode is signed in to an Apple account",
+            "Xcode → Settings → Accounts → + → Apple ID (a free one works)",
+        );
+        missing |= !account;
+        if !ctx.lan() {
+            let usb = checks::usb_udids();
+            if usb.is_empty() {
+                checklist_line(
+                    false,
+                    "iPhone connected over USB",
+                    "plug it in with a cable, unlock it, and tap Trust",
+                );
+                missing = true;
+            } else {
+                checklist_line(true, "iPhone connected over USB", "");
+                if usb.len() == 1 {
+                    match checks::developer_mode_status(&usb[0]).as_str() {
+                        "enabled" => checklist_line(true, "Developer Mode is on", ""),
+                        "disabled" => {
+                            checklist_line(
+                                false,
+                                "Developer Mode is on",
+                                "on the iPhone: Settings → Privacy & Security → Developer Mode → On, then let it restart",
+                            );
+                            missing = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        println!("  Keep the iPhone unlocked and awake until setup finishes.\n");
+        if missing && !account {
+            checks::open_xcode_for_account(ctx);
+        }
+        !missing
+    }
+
+    /// A manual setup owns the lifecycle while it runs, so an already-running
+    /// supervisor cannot race its build or relays. Its plist, loaded state and
+    /// enable policy are saved first.
+    fn pause_supervisor(&mut self) -> Step {
+        let ctx = self.ctx.clone();
+        let label = ctx.instance.wda_label.clone();
+        self.sup.active = true;
+        self.sup.rollback = ctx.state_dir().join(format!(
+            "wda-supervisor.rollback.{}.plist",
+            std::process::id()
+        ));
+        let Some(disabled) = launchd::disabled_state(&ctx, &label) else {
+            return die("could not snapshot the runner supervisor's launchd disabled policy");
+        };
+        self.sup.prev_disabled = disabled;
+        if ctx.wda_agent_plist.is_file() {
+            self.sup.prev_present = true;
+            if !copy_preserving(&ctx.wda_agent_plist, &self.sup.rollback) {
+                return die("could not save the existing runner supervisor plist for rollback");
+            }
+        }
+        if launchd::loaded(&ctx, &label) {
+            if !self.sup.prev_present {
+                return die("runner supervisor is loaded but its plist is missing; refusing an unrecoverable handoff");
+            }
+            info("Pausing the existing runner supervisor for interactive setup");
+            self.sup.prev_loaded = true;
+            launchd::bootout(&ctx, &label);
+            if !launchd::wait_gone(&ctx, &label) {
+                return die("existing runner supervisor did not stop; refusing to race it");
+            }
+        }
+        Ok(())
+    }
+
+    /// Write and bootstrap the supervisor plist: launchd runs the fixed copy
+    /// of the setup script with `WDA_KEEPALIVE=1` and this run's settings.
+    fn install_supervisor(&mut self) -> bool {
+        let ctx = self.ctx.clone();
+        if !sys::is_executable(&ctx.self_install) {
+            warn(&format!(
+                "fixed setup script is missing or not executable: {}",
+                ctx.self_install.display()
+            ));
+            return false;
+        }
+        let mut env: Vec<(&str, String)> = Vec::new();
+        if !ctx.instance.is_default() {
+            env.push(("PHONE_REMOTE_INSTANCE", ctx.instance.name.clone()));
+        }
+        // The key order is the script's, so a plist reads the same either way.
+        let mut pairs: Vec<(&str, String)> = vec![
+            ("WDA_KEEPALIVE", "1".into()),
+            ("PATH", super::ctx::SUPERVISOR_PATH.into()),
+            ("WDA_UDID", ctx.udid.clone()),
+            ("WDA_TEAM_ID", ctx.team_id.clone()),
+            ("WDA_BUNDLE_ID", ctx.bundle_id.clone()),
+        ];
+        if ctx.runner_src != ctx.runner_default_src {
+            pairs.push((
+                "IPU_RUNNER_SRC",
+                ctx.runner_src.to_string_lossy().into_owned(),
+            ));
+        }
+        pairs.push(("WDA_PORT", ctx.wda_port.clone()));
+        pairs.push(("MJPEG_PORT", ctx.mjpeg_port.clone()));
+        pairs.push(("WDA_ALLOW_LAN", ctx.allow_lan.clone()));
+        if let Ok(icon) = std::env::var("WDA_RUNNER_ICON") {
+            if !icon.is_empty() && icon != "auto" {
+                pairs.push(("WDA_RUNNER_ICON", icon));
+            }
+        }
+        if ctx.asc_signing_enabled() {
+            pairs.push(("WDA_ASC_KEY_PATH", ctx.asc_key_path.clone()));
+            pairs.push(("WDA_ASC_KEY_ID", ctx.asc_key_id.clone()));
+            pairs.push(("WDA_ASC_ISSUER_ID", ctx.asc_issuer_id.clone()));
+        }
+        pairs.extend(env);
+        if let Some(dir) = &ctx.developer_dir {
+            pairs.push(("DEVELOPER_DIR", dir.to_string_lossy().into_owned()));
+        }
+        if let Ok(dir) = std::env::var("PHONE_REMOTE_STATE_DIR") {
+            pairs.push(("PHONE_REMOTE_STATE_DIR", dir));
+        }
+        let env_block: String = pairs
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(key, value)| {
+                format!(
+                    "        <key>{key}</key><string>{}</string>\n",
+                    xml_escape(value)
+                )
+            })
+            .collect();
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>Label</key><string>{label}</string>
+    <key>ProgramArguments</key>
+    <array><string>/bin/bash</string><string>{setup}</string></array>
+    <key>EnvironmentVariables</key>
+    <dict>
+{env_block}    </dict>
+    <key>KeepAlive</key><true/>
+    <!-- The script persists a 5s→10s→…300s retry schedule. Keep launchd's
+         own floor at 5s so it does not flatten the first retry steps. -->
+    <key>ThrottleInterval</key><integer>5</integer>
+    <key>RunAtLoad</key><true/>
+    <key>StandardOutPath</key><string>{log}</string>
+    <key>StandardErrorPath</key><string>{log}</string>
+</dict></plist>
+"#,
+            label = ctx.instance.wda_label,
+            setup = xml_escape(&ctx.self_install.to_string_lossy()),
+            log = xml_escape(&ctx.wda_agent_log.to_string_lossy()),
+        );
+        let _ = std::fs::create_dir_all(ctx.home.join("Library/LaunchAgents"));
+        let staged = PathBuf::from(format!(
+            "{}.install.{}",
+            ctx.wda_agent_plist.display(),
+            std::process::id()
+        ));
+        self.sup.staged = Some(staged.clone());
+        if sys::write_atomic(&staged, plist.as_bytes(), 0o600).is_err() {
+            warn("could not stage the runner supervisor plist");
+            return false;
+        }
+        if !plist_lints(&staged) {
+            warn("generated runner supervisor plist is invalid");
+            return false;
+        }
+        if std::fs::rename(&staged, &ctx.wda_agent_plist).is_err() {
+            warn("could not atomically install the runner supervisor plist");
+            return false;
+        }
+        self.sup.staged = None;
+        let label = ctx.instance.wda_label.clone();
+        launchd::bootout(&ctx, &label);
+        if !launchd::wait_gone(&ctx, &label) {
+            warn("old runner supervisor did not finish stopping");
+            return false;
+        }
+        // A prior installer may have disabled the label persistently.
+        launchd::enable(&ctx, &label);
+        if !launchd::bootstrap(&ctx, &ctx.wda_agent_plist) {
+            warn(&format!(
+                "could not bootstrap the runner supervisor: {}",
+                ctx.wda_agent_plist.display()
+            ));
+            return false;
+        }
+        if launchd::loaded(&ctx, &label) {
+            ok(&format!(
+                "runner supervisor job loaded: {}",
+                launchd::service(&ctx, &label)
+            ));
+            true
+        } else {
+            warn("launchctl accepted the runner plist but the job is not visible");
+            false
+        }
+    }
+
+    /// Hand the proven runner and relays to the supervisor and verify that a
+    /// fresh supervisor-owned runner replaced this run's, with both relays
+    /// and `/status`, within two minutes.
+    fn handoff(&mut self, target_url: &str) -> Step {
+        let ctx = self.ctx.clone();
+        let Some(record) = pid::validate(
+            &ctx,
+            &ctx.runner_pid_file,
+            &self.legacy.runner,
+            Role::Runner,
+            false,
+        )
+        .and_then(|_| pid::parse(&ctx.runner_pid_file, &self.legacy.runner)) else {
+            return die("interactive runner identity was lost before launchd handoff");
+        };
+        let old_id = (record.pid, record.lstart.clone());
+        self.phase(
+            "supervisor",
+            "",
+            "handing the device runner to its launchd supervisor",
+        );
+        info("Handing the verified runner setup to its dedicated launchd supervisor");
+        if !self.install_supervisor() {
+            return die("the device runner is reachable now, but its launchd supervisor could not be installed");
+        }
+        let wda_port = valid_port(&ctx.wda_port).unwrap_or(8100);
+        let mjpeg_port = valid_port(&ctx.mjpeg_port).unwrap_or(9100);
+        for _ in 0..60 {
+            let new_id = pid::validate(
+                &ctx,
+                &ctx.runner_pid_file,
+                &self.legacy.runner,
+                Role::Runner,
+                false,
+            )
+            .and_then(|_| pid::parse(&ctx.runner_pid_file, &self.legacy.runner))
+            .map(|record| (record.pid, record.lstart));
+            let replaced = new_id
+                .as_ref()
+                .is_some_and(|id| *id != old_id && !id.1.is_empty());
+            if replaced
+                && launchd::loaded(&ctx, &ctx.instance.wda_label)
+                && pid::verify_loopback_listener(
+                    &ctx,
+                    &ctx.relay_pid_file,
+                    &self.legacy.relay,
+                    Role::Relay,
+                    wda_port,
+                )
+                && pid::verify_loopback_listener(
+                    &ctx,
+                    &ctx.mjpeg_relay_pid_file,
+                    &self.legacy.mjpeg,
+                    Role::Mjpeg,
+                    mjpeg_port,
+                )
+                && status::phase_is(&ctx.status_file, "ready")
+                && sys::http_ok(&format!("{target_url}/status"), Duration::from_secs(4))
+            {
+                ok("launchd replacement verified: runner identity, both loopback relays, and runner /status");
+                return Ok(());
+            }
+            proc::sleep(Duration::from_secs(2))?;
+        }
+        self.phase("supervisor-fail", "wda", "launchd handoff not verified");
+        die(format!(
+            "runner launchd job loaded, but its replacement runner was not verified within 120s.\n   Check: {}\n   Then:  {} status",
+            ctx.wda_agent_log.display(),
+            ctx.self_install.display()
+        ))
+    }
+
+    /// The script's EXIT-trap rollbacks for the two things only an
+    /// interactive setup changes: the fixed script copy and the supervisor.
+    fn rollback_interactive(&mut self, status: i32) -> bool {
+        let mut ok_all = true;
+        let mut self_ok = true;
+        if status != 0 && self.self_install.replaced {
+            if self.self_install.had_previous {
+                if restore_backup(&self.self_install.rollback, &self.ctx.self_install, 0o700) {
+                    let _ = std::fs::remove_file(&self.self_install.rollback);
+                } else {
+                    self_ok = false;
+                    ok_all = false;
+                    warn(&format!(
+                        "could not restore the prior setup script; rescue backup retained at:\n   {}",
+                        self.self_install.rollback.display()
+                    ));
+                }
+            } else {
+                let _ = std::fs::remove_file(&self.ctx.self_install);
+                if self.ctx.self_install.exists() {
+                    self_ok = false;
+                    ok_all = false;
+                    warn(&format!(
+                        "could not remove the newly installed setup script: {}",
+                        self.ctx.self_install.display()
+                    ));
+                }
+            }
+        }
+        if status != 0 && self.sup.active && !self.handoff_complete {
+            let ctx = self.ctx.clone();
+            let label = ctx.instance.wda_label.clone();
+            let mut sup_ok = true;
+            warn("setup failed — restoring the prior runner supervisor file and loaded state");
+            launchd::bootout(&ctx, &label);
+            if !launchd::wait_gone(&ctx, &label) {
+                sup_ok = false;
+                warn("new runner supervisor did not fully stop during rollback");
+            }
+            if self.sup.prev_present {
+                if !restore_backup(&self.sup.rollback, &ctx.wda_agent_plist, 0o600) {
+                    sup_ok = false;
+                    warn(&format!(
+                        "could not restore the prior supervisor plist; rescue backup retained at:\n   {}",
+                        self.sup.rollback.display()
+                    ));
+                }
+            } else {
+                let _ = std::fs::remove_file(&ctx.wda_agent_plist);
+                if ctx.wda_agent_plist.exists() {
+                    sup_ok = false;
+                    warn(&format!(
+                        "could not remove the newly created supervisor plist: {}",
+                        ctx.wda_agent_plist.display()
+                    ));
+                }
+            }
+            if self.sup.prev_loaded {
+                if sup_ok && self_ok && plist_lints(&ctx.wda_agent_plist) {
+                    launchd::enable(&ctx, &label);
+                    if !launchd::bootstrap(&ctx, &ctx.wda_agent_plist)
+                        || !launchd::loaded(&ctx, &label)
+                    {
+                        sup_ok = false;
+                        warn("prior runner supervisor plist was restored, but its loaded state was not");
+                    }
+                } else {
+                    sup_ok = false;
+                    warn("prior runner supervisor was not restarted because its files were not fully restored");
+                }
+            }
+            if !launchd::restore_policy(&ctx, &label, self.sup.prev_disabled) {
+                sup_ok = false;
+            }
+            if sup_ok {
+                let _ = std::fs::remove_file(&self.sup.rollback);
+            } else {
+                ok_all = false;
+                if self.sup.rollback.is_file() {
+                    warn(&format!(
+                        "supervisor rescue backup retained at: {}",
+                        self.sup.rollback.display()
+                    ));
+                }
+            }
+        }
+        if let Some(staged) = self.sup.staged.take() {
+            let _ = std::fs::remove_file(staged);
+        }
+        ok_all
+    }
+}
+
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

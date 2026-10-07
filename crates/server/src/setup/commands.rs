@@ -22,6 +22,54 @@ fn stop_all(ctx: &Ctx, legacy: &Legacy) -> bool {
     runner && relay && mjpeg
 }
 
+/// `instance-context`: what this instance resolves to, one `key=value` per
+/// line, for install.sh and uninstall.sh. Read-only; exits 1 (after the
+/// lines) when a port or the phone is already bound to another instance.
+pub fn instance_context(ctx: &Ctx) -> i32 {
+    let first = super::ctx::derive_ports(ctx, false).unwrap_or((0, 0, 0));
+    let mut daemon_port = std::env::var("PHONE_REMOTE_PORT").unwrap_or_default();
+    if daemon_port.is_empty() {
+        daemon_port = sys::plist_env(&ctx.daemon_plist, "PHONE_REMOTE_PORT");
+    }
+    if daemon_port.is_empty() {
+        daemon_port = if ctx.instance.is_default() {
+            "44321".into()
+        } else if first.1.to_string() == ctx.wda_port && first.2.to_string() == ctx.mjpeg_port {
+            first.0.to_string()
+        } else {
+            match super::ctx::derive_ports(ctx, true) {
+                Some(slot) => slot.0.to_string(),
+                None => return 1,
+            }
+        };
+    }
+    println!("name={}", ctx.instance.name);
+    println!("state_dir={}", ctx.state_dir().display());
+    println!("daemon_label={}", ctx.instance.daemon_label);
+    println!("wda_label={}", ctx.instance.wda_label);
+    println!("daemon_plist={}", ctx.daemon_plist.display());
+    println!("wda_plist={}", ctx.wda_agent_plist.display());
+    println!("wda_dir={}", ctx.wda_dir.display());
+    println!("runner_src={}", ctx.runner_src.display());
+    println!("daemon_port={daemon_port}");
+    println!("wda_port={}", ctx.wda_port);
+    println!("mjpeg_port={}", ctx.mjpeg_port);
+    println!("udid={}", ctx.udid);
+    println!("first_slot_ports={} {} {}", first.0, first.1, first.2);
+    let ports = [
+        daemon_port.as_str(),
+        ctx.wda_port.as_str(),
+        ctx.mjpeg_port.as_str(),
+    ];
+    match super::ctx::check_bindings(ctx, &ports) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
+}
+
 pub fn stop(ctx: &Ctx) -> i32 {
     if !ctx.state_dir().is_dir() {
         warn(&format!(
