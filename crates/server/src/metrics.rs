@@ -520,7 +520,8 @@ impl RunAggregator {
         };
         let key = self.explicit_live.get(&(owner, run_id))?.clone();
         let trace = turn_ids.map(|ids| {
-            if ids.is_empty() || ids.len() > MAX_TURNS || !ids.iter().all(|id| valid_id(id)) {
+            // An empty list is a legitimate run with no model turns.
+            if ids.len() > MAX_TURNS || !ids.iter().all(|id| valid_id(id)) {
                 return None;
             }
             let distinct: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
@@ -734,19 +735,27 @@ impl SummaryLog {
             .parent()
             .ok_or_else(|| std::io::Error::other("log path has no directory"))?;
         check_private_dir(parent)?;
+        // Lock a sidecar that never rotates, for the whole open / check /
+        // rotate / append sequence. Locking the log itself would let a writer
+        // that opened the old inode before a rotation lock it afterwards and
+        // write into (or rotate away) the wrong generation.
+        let mut lock_path = self.path.clone().into_os_string();
+        lock_path.push(".lock");
+        let lock = open_private(Path::new(&lock_path))?;
+        lock_exclusive(&lock)?;
         let mut file = open_private(&self.path)?;
-        lock_exclusive(&file)?;
         if file.metadata()?.len() >= self.rotate_bytes {
             let mut rotated = self.path.clone().into_os_string();
             rotated.push(".1");
             let rotated = PathBuf::from(rotated);
+            drop(file);
             std::fs::rename(&self.path, &rotated)?;
             // The rotated generation stays owner-only, whatever it was.
             drop(open_private(&rotated)?);
             file = open_private(&self.path)?;
-            lock_exclusive(&file)?;
         }
         file.write_all(line.as_bytes())
+        // `lock` drops here, releasing the sidecar lock after the append.
     }
 }
 
@@ -1032,7 +1041,7 @@ mod tests {
 
         // Declared but delivered with a duplicate, an invalid id, nothing, or
         // an empty list: null + trace_incomplete.
-        for bad in [ids(&["t1", "t1"]), ids(&["t1", "bad id"]), None, ids(&[])] {
+        for bad in [ids(&["t1", "t1"]), ids(&["t1", "bad id"]), None] {
             agg.start_run(Some("a".into()), "b".into(), 0, true);
             one(&mut agg, 0, 10, Some("a"), Some("b"));
             let s = agg.end_run(Some("a".into()), "b".into(), bad).unwrap();
@@ -1044,6 +1053,12 @@ mod tests {
             .end_run(Some("a".into()), "m".into(), Some(too_many))
             .unwrap();
         assert!(s.trace_incomplete && s.model_round_trips.is_none());
+
+        // A complete trace with no turns is a run that used no model: zero.
+        agg.start_run(Some("a".into()), "z".into(), 0, true);
+        one(&mut agg, 0, 10, Some("a"), Some("z"));
+        let s = agg.end_run(Some("a".into()), "z".into(), ids(&[])).unwrap();
+        assert_eq!((s.model_round_trips, s.trace_incomplete), (Some(0), false));
 
         // Declared after calls began: never a total.
         one(&mut agg, 0, 10, Some("a"), Some("late"));
@@ -1193,6 +1208,40 @@ mod tests {
         std::fs::set_permissions(shared.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
         let path = shared.path().join("agent-runs.jsonl");
         assert!(SummaryLog::new(path, 1 << 20).append(&summary()).is_err());
+    }
+
+    #[test]
+    fn concurrent_writers_lose_nothing_across_rotations() {
+        let dir = private_dir();
+        let path = dir.path().join("agent-runs.jsonl");
+        let line = serde_json::to_string(&summary()).unwrap().len() as u64 + 1;
+        // Rotate after every 3 lines, with 6 writers racing.
+        let threads: Vec<_> = (0..6)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let log = SummaryLog::new(path, line * 3);
+                    for _ in 0..40 {
+                        log.append(&summary()).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        // Each rotation overwrites `.1`, so only the last two generations
+        // survive; but the live file must be whole lines, at most 3, and no
+        // writer may have appended to a rotated-away inode past the limit.
+        let live = std::fs::read_to_string(&path).unwrap();
+        let old = std::fs::read_to_string(dir.path().join("agent-runs.jsonl.1")).unwrap();
+        for text in [&live, &old] {
+            assert!(text.lines().count() <= 3, "{} lines", text.lines().count());
+            assert!(text
+                .lines()
+                .all(|l| serde_json::from_str::<RunSummary>(l).is_ok()));
+        }
+        assert_eq!(old.lines().count(), 3, "a full generation was rotated");
     }
 
     #[test]
