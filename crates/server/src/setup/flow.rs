@@ -2215,6 +2215,17 @@ impl Setup {
         .is_some_and(|value| value.get("value") == Some(&serde_json::Value::Bool(true)))
     }
 
+    /// The installed runner's profile is a free-account one due for renewal,
+    /// no session holds the phone, and the phone is unlocked (a locked phone
+    /// cannot launch the rebuilt runner, so it would only trade a working
+    /// runner for a wait).
+    fn free_profile_renewal_due(&self) -> bool {
+        let app = self.ctx.runner_products_dir.join(RUNNER_APP_NAME);
+        runner::free_profile_due(&app, retry::now())
+            && owner::current(&self.ctx).is_none()
+            && !self.endpoint_locked()
+    }
+
     /// Stay alive while the runner and both relays do; launchd sees the exit
     /// and rebuilds. A single unanswered `/status` cannot tell a busy runner
     /// from a dead one, so three in a row (~32 s) count; a dead process or a
@@ -2232,7 +2243,18 @@ impl Setup {
         let mut probes = ProbeCount::default();
         let mut relay_restarts: Vec<Instant> = Vec::new();
         let mut warned_owner = false;
+        // A free Apple ID's runner profile lasts 7 days. Replace the runner
+        // while the phone is free and unlocked, before it lapses, instead of
+        // leaving the next reconnect to find it expired.
+        const RENEW_CHECK: Duration = Duration::from_secs(30 * 60);
+        let mut renew_checked = Instant::now();
         let cause = loop {
+            if renew_checked.elapsed() >= RENEW_CHECK {
+                renew_checked = Instant::now();
+                if self.free_profile_renewal_due() {
+                    break "renew";
+                }
+            }
             if pid::validate(
                 &self.ctx,
                 &self.ctx.runner_pid_file,
@@ -2337,6 +2359,17 @@ impl Setup {
             "relay" => warn(
                 "the runner relay stopped listening — exiting so launchd KeepAlive rebuilds it",
             ),
+            "renew" => {
+                info(&format!(
+                    "the runner's free Apple ID provisioning profile expires within {}h; the phone is free and unlocked, so rebuilding it with a fresh profile",
+                    runner::PROFILE_RENEW_SECS / 3600
+                ));
+                self.phase(
+                    "building",
+                    "",
+                    "renewing the runner's 7-day provisioning profile",
+                );
+            }
             _ => warn("the device runner exited — exiting so launchd KeepAlive rebuilds it"),
         }
         pid::stop(
