@@ -42,7 +42,7 @@ run() { env -i HOME="$HOME_DIR" PATH=/usr/bin:/bin FAKE_LOG="$TMP/log" "$@"; }
 for command in setup status stop pause resume doctor instance-context; do
     rm -f "$TMP/log"
     if [ "$command" = setup ]; then args=(); else args=("$command"); fi
-    run IPHONE_USE_SETUP_BIN="$FAKE" WDA_UDID=0000AB /bin/bash "$SETUP" "${args[@]}"
+    run IPHONE_USE_SETUP_BIN="$FAKE" WDA_UDID=0000AB /bin/bash "$SETUP" ${args[@]+"${args[@]}"}
     code=$?
     check "$command is handed to setup-native with its exit code" \
         "[ $code = 7 ] && grep -qx 'args=setup-native $command' '$TMP/log'"
