@@ -2680,6 +2680,10 @@ fn human_next_step(
                 "系统代理挡住了 iPhone 的连接：对设备连接关闭代理后会自动恢复",
                 "A system proxy is blocking the iPhone tunnel: bypass it for the device and connecting resumes on its own",
             ),
+            "not_connected" => (
+                "iPhone 没有连到这台 Mac：用 USB 线插上（或连到同一个 Wi-Fi）并解锁，手机回来后会自动重连",
+                "The iPhone isn't connected to this Mac: plug it in over USB (or join the same Wi-Fi) and unlock it — it reconnects on its own once the phone is back",
+            ),
             "usb" => (
                 "用 USB 连接这台 iPhone，解锁并保持亮屏，连接会自动恢复",
                 "Plug this iPhone in over USB, unlock it and keep it awake — connecting resumes on its own",
@@ -2832,6 +2836,9 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
         "proxy" => Some(
             "a system proxy is blocking the CoreDevice tunnel to the device runner — disable the proxy for the device tunnel, then poll status; do not send another reconnect request while this blocker remains",
         ),
+        "not_connected" => Some(
+            "the iPhone isn't connected to this Mac — plug it in over USB (or join the same Wi-Fi) and unlock it; usbmuxd and CoreDevice both report it absent, so nothing is rebuilt or relaunched until it is back, and the managed service reconnects on its own — the relays are not the problem, so do not send another reconnect request",
+        ),
         "usb" => Some(
             "the configured iPhone is not available over USB — connect that phone, unlock it, and keep it awake while the managed service retries",
         ),
@@ -2894,6 +2901,7 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
             | "automation_mode_disabled"
             | "xcode_too_old"
             | "automation_not_allowed"
+            | "not_connected"
             | "locked"
             | "wda"
     ) {
@@ -14722,6 +14730,7 @@ mod tests {
             "account",
             "automation_mode_disabled",
             "automation_not_allowed",
+            "not_connected",
             "xcode_too_old",
             "locked",
             "wda",
@@ -14827,6 +14836,7 @@ mod tests {
             "account",
             "automation_mode_disabled",
             "automation_not_allowed",
+            "not_connected",
             "xcode_too_old",
             "locked",
             "wda",
@@ -14948,6 +14958,23 @@ mod tests {
         assert!(!hint.contains("wda-agent.log"), "{hint}");
         // The hint is spliced into the status JSON unescaped.
         assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
+    }
+
+    #[test]
+    fn not_connected_says_to_plug_the_phone_in_not_to_repair_relays() {
+        // Hardware: the 17 Pro Max unplugged — devicectl lists it
+        // `unavailable`, usbmuxd has no entry. The generic `offline` hint sent
+        // the operator to debug the relays.
+        let payload = r#"{"phase":"prereq","blocked_on":"not_connected","message":"the iPhone isn't connected to this Mac","ts":1000}"#;
+        let status = parse_setup_status(payload, 1100).expect("fresh status");
+        assert_eq!(status.blocked_on, "not_connected");
+        let hint = setup_blocker_hint("not_connected").unwrap();
+        assert!(hint.contains("plug it in over USB"), "{hint}");
+        assert!(hint.contains("reconnects on its own"), "{hint}");
+        assert!(!hint.contains("8100") && !hint.contains("doctor"), "{hint}");
+        assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
+        let (zh, en) = human_next_step("blocker", "not_connected", "").unwrap();
+        assert!(zh.contains("USB") && en.contains("plug it in"), "{en}");
     }
 
     #[test]

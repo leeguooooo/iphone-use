@@ -24,6 +24,8 @@ use super::term::{die, info, ok, warn, Exit, Step, BOLD, RST};
 
 const RUNNER_DEVICE_PORT: u16 = 8100;
 const MJPEG_DEVICE_PORT: u16 = 9100;
+/// Published as `not_connected`; the daemon's hint says the same.
+const NOT_CONNECTED_MESSAGE: &str = "the iPhone isn't connected to this Mac — plug it in over USB (or join the same Wi-Fi) and unlock it";
 const AUTOMATION_MODE_HINT: &str = "enable UI automation on the iPhone: Settings › Developer › Enable UI Automation, then accept any passcode or Allow automation prompt while the phone is unlocked";
 
 /// The state of one setup run that cleanup needs.
@@ -272,6 +274,11 @@ impl Setup {
                 } else if self.failure_kind == Kind::Automation {
                     if previous != Some(Kind::Automation) {
                         warn("the iPhone has not allowed UI automation; retrying quietly every 5s to 1min until it does");
+                    }
+                } else if self.failure_kind == Kind::NotConnected {
+                    self.phase("waiting", "not_connected", NOT_CONNECTED_MESSAGE);
+                    if previous != Some(Kind::NotConnected) {
+                        warn("the iPhone is not connected to this Mac; waiting for it without rebuilding anything");
                     }
                 } else if self.failure_kind == Kind::Owned {
                     warn(&format!(
@@ -582,6 +589,9 @@ impl Setup {
                 ));
             }
         }
+        if !self.ctx.udid.is_empty() {
+            self.wait_until_connected()?;
+        }
         if !self.ctx.lan() {
             if self.ctx.udid.is_empty() {
                 self.phase("prereq", "usb", "no USB iPhone is connected");
@@ -771,6 +781,58 @@ impl Setup {
         }
     }
 
+    /// `not_connected` when the phone left this Mac entirely, else `usb`
+    /// (it is still reachable, just not over the cable).
+    fn disconnected_blocker(&mut self) -> &'static str {
+        if checks::presence(&self.ctx.udid) == checks::Presence::Absent {
+            self.failure_kind = Kind::NotConnected;
+            "not_connected"
+        } else {
+            "usb"
+        }
+    }
+
+    /// Holds while the phone is not connected to this Mac at all, without
+    /// building or launching anything, and returns once it is back. usbmuxd
+    /// is asked every 2 s (it sees a cable at once); CoreDevice, slower but
+    /// also aware of a Wi-Fi phone, every 10 s. An unreadable CoreDevice
+    /// answer never counts as absent. Interactive setup gives up after 10
+    /// minutes; KeepAlive waits as long as it takes.
+    fn wait_until_connected(&mut self) -> Step {
+        const POLL: Duration = Duration::from_secs(2);
+        const INTERACTIVE_LIMIT: u32 = 300;
+        let udid = self.ctx.udid.clone();
+        let mut tick: u32 = 0;
+        loop {
+            let present = if tick % 5 == 0 {
+                checks::presence(&udid) != checks::Presence::Absent
+            } else {
+                checks::usbmux_lists(&udid)
+            };
+            if present {
+                if tick > 0 {
+                    ok("the iPhone is connected to this Mac again");
+                }
+                return Ok(());
+            }
+            if tick == 0 {
+                self.phase("prereq", "not_connected", NOT_CONNECTED_MESSAGE);
+                warn(&format!(
+                    "{NOT_CONNECTED_MESSAGE}. Waiting for {udid}; nothing is built or launched until it is back."
+                ));
+            } else if !self.ctx.keepalive && tick % 30 == 0 {
+                warn("still waiting for the iPhone — plug it in over USB and unlock it ...");
+            }
+            if !self.ctx.keepalive && tick >= INTERACTIVE_LIMIT {
+                return die(format!(
+                    "{NOT_CONNECTED_MESSAGE}; it did not come back within 10 minutes, and no build was started"
+                ));
+            }
+            proc::sleep(POLL)?;
+            tick += 1;
+        }
+    }
+
     fn ddi_ready(&self) -> bool {
         let udid = &self.ctx.udid;
         let mounted = sys::block_on(async {
@@ -830,6 +892,12 @@ impl Setup {
         while !self.ddi_ready() {
             proc::check()?;
             tries += 1;
+            // Developer services never come up for a phone that left: wait
+            // for it to come back instead of counting toward a DDI failure.
+            if tries % 5 == 0 && checks::presence(&self.ctx.udid) == checks::Presence::Absent {
+                self.wait_until_connected()?;
+                tries = 0;
+            }
             self.phase(
                 "ddi-wait",
                 &blocker,
@@ -1643,9 +1711,10 @@ impl Setup {
                     (phone_ip, device_port) = split_host_port(&lan_url);
                 }
                 None => {
+                    let blocker = self.disconnected_blocker();
                     self.phase(
                         "serving",
-                        "usb",
+                        blocker,
                         "the configured iPhone disconnected before the control relay started",
                     );
                     return die("the iPhone left USB after its runner started, and its network address is not known yet; reconnect the cable and retry");
@@ -1674,9 +1743,10 @@ impl Setup {
         }
         let Some(tool) = tool else {
             if !self.ctx.lan() && !target_is_usb {
+                let blocker = self.disconnected_blocker();
                 self.phase(
                     "serving",
-                    "usb",
+                    blocker,
                     "the configured iPhone disconnected before the control relay started",
                 );
             } else {
@@ -2165,6 +2235,23 @@ impl Setup {
             }
             proc::sleep(Duration::from_secs(10))?;
         };
+        // An unplugged phone takes its runner down with it. Nothing can be
+        // rebuilt until it is back, so say so and wait instead.
+        if checks::presence(&self.ctx.udid) == checks::Presence::Absent {
+            warn(&format!(
+                "the device runner went away with the iPhone ({cause}); waiting for the phone to come back"
+            ));
+            self.phase("waiting", "not_connected", NOT_CONNECTED_MESSAGE);
+            self.failure_kind = Kind::NotConnected;
+            for (file, legacy, role) in [
+                (&self.ctx.mjpeg_relay_pid_file, &self.legacy.mjpeg, Role::Mjpeg),
+                (&self.ctx.relay_pid_file, &self.legacy.relay, Role::Relay),
+                (&self.ctx.runner_pid_file, &self.legacy.runner, Role::Runner),
+            ] {
+                pid::stop(&self.ctx, file, legacy, role);
+            }
+            return Err(Exit(1));
+        }
         if runner::log_shows_lock(&self.ctx.run_log) || self.endpoint_locked() {
             return self.locked_retry();
         }

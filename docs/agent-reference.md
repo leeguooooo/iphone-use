@@ -77,7 +77,7 @@ for it explicitly; the answer is `started` or `skipped` with a reason
 
 ## Setup blockers
 
-`setup_blocked_on` is one of `warp | proxy | usb | trust | ddi | account |
+`setup_blocked_on` is one of `warp | proxy | not_connected | usb | trust | ddi | account |
 automation_mode_disabled | automation_not_allowed | xcode_too_old | locked | wda` (empty = known prerequisites passed;
 KeepAlive keeps the last concrete blocker while it re-checks).
 
@@ -89,6 +89,11 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   full-tunnel WARP, add both IPv6 exclusions to the Zero Trust device profile.
   `warp-cli disconnect` is only a temporary workaround. `iphone-use doctor`
   tells the states apart.
+- **`not_connected`**: the iPhone is not connected to this Mac at all (usbmuxd
+  does not list it and CoreDevice reports it unavailable). Ask the operator to plug
+  it in over USB (or join the same Wi-Fi) and unlock it. Nothing is rebuilt while it
+  is away; the managed service reconnects on its own when it comes back. The relays
+  are not the problem; do not reconnect or run doctor for this.
 - **`proxy`**: an enabled macOS HTTP/HTTPS/SOCKS entry is malformed or points at
   a loopback port with no listener; start that proxy app or disable the stale entry.
 - **`trust`**: a one-time "trust the Apple Development certificate" tap on the phone.

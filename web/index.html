@@ -1192,6 +1192,8 @@ function setupBlockerCopy(blockedOn) {
       ];
     case 'proxy':
       return ['系统代理不可用', '请启动代理应用，或关闭已失效的代理项；修复后会自动重试'];
+    case 'not_connected':
+      return ['iPhone 没有连到这台 Mac', '用 USB 线插上 iPhone（或连到同一个 Wi-Fi）并解锁；手机回来后会自动重连'];
     case 'usb':
       return ['请连接 iPhone', '请用 USB 连接并解锁这台 iPhone，保持亮屏；连接后会自动继续'];
     case 'trust':
@@ -1220,7 +1222,7 @@ function setupBlockerCopy(blockedOn) {
    reconnect spinner over it would promise a retry that cannot succeed. It is
    not in managedSetupWillRetry for the same reason. */
 const ACTIONABLE_SETUP_BLOCKERS = new Set(
-  ['locked', 'trust', 'automation_mode_disabled', 'automation_not_allowed', 'usb', 'ddi', 'warp', 'proxy', 'xcode_too_old'],
+  ['locked', 'trust', 'automation_mode_disabled', 'automation_not_allowed', 'not_connected', 'usb', 'ddi', 'warp', 'proxy', 'xcode_too_old'],
 );
 /* The managed retry loop alternates between building and its backoff, and it
    publishes the blocker only during the backoff. Reading each poll on its own
@@ -1251,7 +1253,7 @@ function effectiveSetupBlocker(status) {
 function managedSetupWillRetry(status) {
   const managed = status?.recovery_owner === 'daemon' ||
     status?.managed_wda === true;
-  return managed && new Set(['warp', 'proxy', 'usb', 'trust', 'ddi', 'automation_mode_disabled', 'automation_not_allowed', 'locked'])
+  return managed && new Set(['warp', 'proxy', 'not_connected', 'usb', 'trust', 'ddi', 'automation_mode_disabled', 'automation_not_allowed', 'locked'])
     .has(status?.setup_blocked_on);
 }
 

@@ -546,7 +546,10 @@ Measured on an iPhone 17 Pro Max (iOS 27): an unlocked cold connect is drivable 
 13–22 s; a locked one shows "unlock" in ~4 s and is drivable ~14 s after the unlock; a
 snapshot-bound tap with `?return=delta` (tap, then the settled tree) takes ~4 s. `POST /agent/mode {"mode":"agent"}` (or MCP `phone_reconnect`) restarts the
 configured target once — do not loop it; read `hint` and `setup_blocked_on`
-(`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|xcode_too_old|locked`) first.
+(`warp|proxy|not_connected|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|xcode_too_old|locked`) first.
+`not_connected` means the iPhone is not connected to this Mac at all: plug it in over USB
+(or join the same Wi-Fi) and unlock it. Nothing is rebuilt while it is away, and the
+connection comes back on its own when the phone does.
 `automation_mode_disabled` means the phone is unlocked but iOS has not enabled UI
 automation: turn on Settings › Developer › Enable UI Automation and accept any passcode or
 "Allow automation" prompt on the phone.
