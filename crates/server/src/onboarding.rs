@@ -63,7 +63,8 @@ impl Target {
     }
 
     fn named(&self) -> Option<&str> {
-        (self.instance.name != server::instance::DEFAULT_NAME).then_some(self.instance.name.as_str())
+        (self.instance.name != server::instance::DEFAULT_NAME)
+            .then_some(self.instance.name.as_str())
     }
 
     /// The command that reaches this same instance again, for messages.
@@ -82,7 +83,13 @@ fn plist_env(label: &str, key: &str) -> Option<String> {
         return None;
     }
     let out = std::process::Command::new("/usr/bin/plutil")
-        .args(["-extract", &format!("EnvironmentVariables.{key}"), "raw", "-o", "-"])
+        .args([
+            "-extract",
+            &format!("EnvironmentVariables.{key}"),
+            "raw",
+            "-o",
+            "-",
+        ])
         .arg(&plist)
         .stderr(std::process::Stdio::null())
         .output()
@@ -149,7 +156,12 @@ impl<'a> Daemon<'a> {
         })
     }
 
-    fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<(u16, Value)> {
+    fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(u16, Value)> {
         let mut request = self
             .client
             .request(method.clone(), format!("{}{path}", self.target.base()))
@@ -194,7 +206,10 @@ impl<'a> Daemon<'a> {
         if value.get("ok") != Some(&Value::Bool(true)) {
             bail!(
                 "the phone did not accept the step: {}",
-                value.get("error").and_then(Value::as_str).unwrap_or("unknown error")
+                value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error")
             );
         }
         Ok(value)
@@ -278,7 +293,10 @@ pub fn run_status(target: &Target, as_json: bool) -> Result<i32> {
 
 fn print_status(target: &Target, status: &Value) {
     let version = status["version"].as_str().unwrap_or("?");
-    let instance = target.named().map(|n| format!(" ({n})")).unwrap_or_default();
+    let instance = target
+        .named()
+        .map(|n| format!(" ({n})"))
+        .unwrap_or_default();
     if status["drivable"] == Value::Bool(true) {
         println!("✓ iphone-use {version}{instance}: the iPhone is ready for agents");
     } else {
@@ -381,7 +399,10 @@ fn try_steps(daemon: &Daemon) -> Result<()> {
     }
     daemon.input(json!({ "type": "shortcut", "name": "home" }))?;
     println!("✓ Back on the Home Screen. An agent can now drive this iPhone the same way.");
-    println!("  Connect one: the iphone-use MCP server, or the HTTP API on {}", daemon.target.base());
+    println!(
+        "  Connect one: the iphone-use MCP server, or the HTTP API on {}",
+        daemon.target.base()
+    );
     Ok(())
 }
 
@@ -393,7 +414,10 @@ fn visible_labels(screen: &Value, limit: usize) -> Vec<String> {
         if row["visible"] == Value::Bool(false) {
             continue;
         }
-        if !matches!(row["kind"].as_str(), Some("Button" | "Cell" | "Switch" | "Link")) {
+        if !matches!(
+            row["kind"].as_str(),
+            Some("Button" | "Cell" | "Switch" | "Link")
+        ) {
             continue;
         }
         let Some(label) = row["label"].as_str().map(str::trim) else {
@@ -423,7 +447,9 @@ pub fn run_login(target: &Target, open: bool) -> Result<i32> {
     if code != 200 {
         bail!("the daemon could not make a sign-in link (HTTP {code})");
     }
-    let url = link["url"].as_str().context("no sign-in link in the answer")?;
+    let url = link["url"]
+        .as_str()
+        .context("no sign-in link in the answer")?;
     let minutes = link["expires_in_secs"].as_u64().unwrap_or(300) / 60;
     if open && can_open_browser() {
         let opened = std::process::Command::new("/usr/bin/open")
@@ -437,7 +463,9 @@ pub fn run_login(target: &Target, open: bool) -> Result<i32> {
             println!("Open this one-time sign-in link in a browser on this Mac ({minutes} min):\n  {url}");
         }
     } else {
-        println!("Open this one-time sign-in link in a browser on this Mac ({minutes} min):\n  {url}");
+        println!(
+            "Open this one-time sign-in link in a browser on this Mac ({minutes} min):\n  {url}"
+        );
     }
     if let Some(lan_url) = link["lan_url"].as_str() {
         if let Some(qr) = terminal_qr(lan_url) {
@@ -483,7 +511,10 @@ mod tests {
             {"kind": "Cell", "label": "无障碍"},
             {"kind": "Switch", "label": "飞行模式"},
         ]});
-        assert_eq!(visible_labels(&screen, 8), vec!["通用", "无障碍", "飞行模式"]);
+        assert_eq!(
+            visible_labels(&screen, 8),
+            vec!["通用", "无障碍", "飞行模式"]
+        );
         assert_eq!(visible_labels(&screen, 1), vec!["通用"]);
     }
 

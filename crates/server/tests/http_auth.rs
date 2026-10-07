@@ -905,7 +905,7 @@ fn pending_managed_target_is_reported_as_unconfigured() {
         assert_eq!(status["wda_actionable"], false);
         assert!(status["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("setup-wda.sh")));
+            .is_some_and(|hint| hint.contains("iphone-use setup")));
 
         for uri in ["/agent/elements", "/agent/screenshot", "/agent/mjpeg"] {
             let resp = app

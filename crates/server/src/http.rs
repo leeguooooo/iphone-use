@@ -1746,18 +1746,18 @@ fn classify_wda_death(
 fn wda_death_hint(reason: &str) -> &'static str {
     match reason {
         "idle_release" => {
-            "WDA was released on purpose after idle — the next control request re-bootstraps it; nothing is broken"
+            "the device runner was released on purpose after idle — the next control request starts it again; nothing is broken"
         }
         "device_locked" => {
-            "the iPhone locked while WDA was driving it — unlock it and keep it awake"
+            "the iPhone locked while the device runner was driving it — unlock it and keep it awake"
         }
         // Named in likelihood order from what has actually caused this in the
         // field; the daemon cannot see which of them fired.
         "session_severed" => {
-            "WDA still answers but its test session was torn down — a WARP/VPN reconnect, Mac sleep, or a phone lock does this; restart the direct device service, and if WARP is on, exclude the CoreDevice tunnel"
+            "the device runner still answers but its test session was torn down — a WARP/VPN reconnect, Mac sleep, or a phone lock does this; restart the direct device service, and if WARP is on, exclude the CoreDevice tunnel"
         }
         "unreachable" => {
-            "WDA stopped answering entirely — the runner exited, the 8100/9100 relay died, or the phone's Wi-Fi address changed; re-run setup-wda.sh and check the relay"
+            "the device runner stopped answering entirely — the runner exited, the 8100/9100 relay died, or the phone's Wi-Fi address changed; run iphone-use doctor, then iphone-use setup"
         }
         _ => "",
     }
@@ -2264,21 +2264,21 @@ async fn agent_status(
         ("releasing", "direct device service is being released after inactivity — wait for confirmation before reconnecting")
     } else if !wda {
         if state.managed_wda_pending {
-            ("unconfigured", "no canonical iPhone target is configured — run setup-wda.sh to persist PHONE_REMOTE_UDID; until then the daemon will not stop or bootstrap local WDA")
+            ("unconfigured", "no canonical iPhone target is configured — run iphone-use setup to persist PHONE_REMOTE_UDID; until then the daemon will not stop or start the local device runner")
         } else if let Some(blocker_hint) = setup_hint.as_deref() {
             ("blocker", blocker_hint)
         } else if reconnecting {
             ("reconnecting", "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying")
         } else if released && !state.managed_wda {
-            ("external", "the remote WDA endpoint is externally managed — restart it on the owning host; this daemon will not stop or bootstrap local services")
+            ("external", "the remote device runner endpoint is externally managed — restart it on the owning host; this daemon will not stop or bootstrap local services")
         } else if released && human_handoff {
-            ("handoff", "the phone was handed to a person (mode=human) and WDA is stopped so they can use it in hand — POST /agent/mode {mode:agent} takes it back")
+            ("handoff", "the phone was handed to a person (mode=human) and the device runner is stopped so they can use it in hand — POST /agent/mode {mode:agent} takes it back")
         } else if released {
-            ("released", "direct device service was released after inactivity — reconnect to restart WDA, then keep the phone unlocked and awake")
+            ("released", "direct device service was released after inactivity — reconnect to restart the device runner, then keep the phone unlocked and awake")
         } else if !state.managed_wda {
-            ("external", "the configured remote WDA endpoint is unreachable and externally managed — recover it on the owning host; this daemon will not run local setup or launchctl commands")
+            ("external", "the configured remote device runner endpoint is unreachable and externally managed — recover it on the owning host; this daemon will not run local setup or launchctl commands")
         } else {
-            ("offline", "direct device service is unreachable — start or repair WDA and the 8100/9100 relays")
+            ("offline", "direct device service is unreachable — start or repair the device runner and the 8100/9100 relays (iphone-use doctor)")
         }
     } else if reconnecting {
         ("reconnecting", "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying")
@@ -2286,7 +2286,7 @@ async fn agent_status(
         if wda_locked == "true" {
             (
                 "locked",
-                "WDA is reachable but the iPhone is locked — unlock it and keep it awake",
+                "the device runner is reachable but the iPhone is locked — unlock it and keep it awake",
             )
         } else if !wda_died_reason.is_empty() {
             // We watched it die; say what took it down instead of the generic
@@ -2299,14 +2299,21 @@ async fn agent_status(
             // probe decides — so the hint must say "retry", not "restart".
             // Telling an agent to restart the service here sent it down a
             // recovery path for a condition that clears itself (#74).
-            ("degraded", "WDA is reachable but the last read or action did not complete (usually a /source read that timed out on a heavy page, or a stalled app) — retry the read; the next health probe decides whether this clears or becomes offline")
+            ("degraded", "the device runner is reachable but the last read or action did not complete (usually a /source read that timed out on a heavy page, or a stalled app) — retry the read; the next health probe decides whether this clears or becomes offline")
         }
     } else {
         ("", "")
     };
     let hint_json = serde_json::to_string(&hint).unwrap_or_else(|_| "\"\"".into());
     let next_step_json = human_next_step(advice, &setup_blocked_on, wda_died_reason)
-        .map(|(zh, en)| serde_json::json!({ "zh": zh, "en": en }).to_string())
+        .map(|(zh, en)| {
+            let instance = crate::instance::current();
+            serde_json::json!({
+                "zh": for_instance(zh, instance),
+                "en": for_instance(en, instance),
+            })
+            .to_string()
+        })
         .unwrap_or_else(|| "null".to_string());
     let device_state = if releasing {
         "releasing"
@@ -2542,8 +2549,8 @@ fn human_next_step(
     Some(match advice {
         "releasing" => ("正在释放设备，请稍候", "Releasing the phone — one moment"),
         "unconfigured" => (
-            "连接、解锁并信任 iPhone，然后在这台 Mac 上运行 ~/.iphone-use/setup-wda.sh setup",
-            "Connect, unlock and trust the iPhone, then run ~/.iphone-use/setup-wda.sh setup on this Mac",
+            "连接、解锁并信任 iPhone，然后在这台 Mac 上运行 iphone-use setup",
+            "Connect, unlock and trust the iPhone, then run iphone-use setup on this Mac",
         ),
         "blocker" => match blocked_on {
             "warp" => (
@@ -2567,8 +2574,8 @@ fn human_next_step(
                 "Open Xcode with the phone connected and let device preparation finish — connecting resumes on its own",
             ),
             "account" => (
-                "打开 Xcode › 设置 › 账户，登录 Apple 账号并选好开发团队",
-                "Open Xcode › Settings › Accounts, sign in and pick the development team",
+                "打开 Xcode › 设置 › 账户，点 + 登录 Apple ID（免费账号也行）",
+                "Open Xcode › Settings › Accounts and add your Apple ID (a free one works)",
             ),
             "automation_mode_disabled" => (
                 "在 iPhone 的 设置 › 开发者 里打开「启用 UI 自动化」，并允许弹出的提示",
@@ -2583,8 +2590,8 @@ fn human_next_step(
                 "The iPhone runs a newer iOS than this Mac's Xcode supports: install an Xcode that supports it (a beta Xcode for a beta iOS) — retrying or reconnecting will not help",
             ),
             "wda" => (
-                "设备服务启动失败：在这台 Mac 上运行 ~/.iphone-use/setup-wda.sh doctor 查看原因",
-                "The device service failed to start: run ~/.iphone-use/setup-wda.sh doctor on this Mac",
+                "设备 runner 启动失败：在这台 Mac 上运行 iphone-use doctor 查看原因",
+                "The device runner failed to start: run iphone-use doctor on this Mac",
             ),
             _ => return None,
         },
@@ -2593,8 +2600,8 @@ fn human_next_step(
             "Connecting to the phone — unlock it once if it is locked",
         ),
         "external" => (
-            "请在 WDA 所在的主机上恢复服务，这台 Mac 不会接管它",
-            "Recover WDA on the host that runs it; this Mac will not take it over",
+            "请在设备 runner 所在的主机上恢复服务，这台 Mac 不会接管它",
+            "Recover the device runner on the host that runs it; this Mac will not take it over",
         ),
         "handoff" => (
             "手机已交还给持有人；需要远程操作时点「连接手机」",
@@ -2605,8 +2612,8 @@ fn human_next_step(
             "Paused after inactivity; choose Connect to continue (unlock the phone first)",
         ),
         "offline" => (
-            "连不上设备服务：在这台 Mac 上运行 ~/.iphone-use/setup-wda.sh status 检查",
-            "The device service is unreachable: run ~/.iphone-use/setup-wda.sh status on this Mac",
+            "连不上设备 runner：在这台 Mac 上运行 iphone-use doctor 检查",
+            "The device runner is unreachable: run iphone-use doctor on this Mac",
         ),
         "locked" => (
             "请在手机上解锁；锁屏密码不能远程输入",
@@ -2620,8 +2627,8 @@ fn human_next_step(
                 "The connection was cut (WARP/VPN reconnect, Mac sleep or phone lock) — choose Connect to reconnect",
             ),
             _ => (
-                "设备服务没有响应，点「连接手机」重新连接；还不行就运行 ~/.iphone-use/setup-wda.sh status",
-                "The device service stopped answering — choose Connect; if that fails run ~/.iphone-use/setup-wda.sh status",
+                "设备 runner 没有响应，点「连接手机」重新连接；还不行就运行 iphone-use doctor",
+                "The device runner stopped answering — choose Connect; if that fails run iphone-use doctor",
             ),
         },
         "degraded" => (
@@ -2630,6 +2637,19 @@ fn human_next_step(
         ),
         _ => return None,
     })
+}
+
+/// `iphone-use setup|doctor|status` in a next step, aimed at this daemon's
+/// own instance: a second phone needs `--instance NAME` on each command.
+fn for_instance(text: &str, instance: &crate::instance::Instance) -> String {
+    if instance.name == crate::instance::DEFAULT_NAME {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    for command in ["iphone-use setup", "iphone-use doctor", "iphone-use status"] {
+        out = out.replace(command, &format!("{command} --instance {}", instance.name));
+    }
+    out
 }
 
 /// [`setup_blocker_hint`] for a specific instance: the `wda` blocker names
@@ -2642,7 +2662,7 @@ fn instance_setup_blocker_hint(
     if blocked_on == "wda" {
         return Some(
             format!(
-                "WebDriverAgent failed to start — inspect {} and run {} doctor before retrying",
+                "the device runner failed to start — inspect {} and run {} doctor (iphone-use doctor) before retrying",
                 instance.agent_log().display(),
                 instance.setup_sh().display(),
             )
@@ -2658,7 +2678,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "WARP is capturing the CoreDevice device tunnel — for selected destinations, ask the Zero Trust administrator for Traffic only mode with Split Tunnels Include limited to those destination IPs/CIDRs; otherwise exclude fe80::/10 and fd00::/8 in full-tunnel mode (or temporarily run warp-cli disconnect), then wait for policy propagation and poll status; do not send another reconnect request while this blocker remains",
         ),
         "proxy" => Some(
-            "a system proxy is blocking CoreDevice/WDA — disable the proxy for the device tunnel, then poll status; do not send another reconnect request while this blocker remains",
+            "a system proxy is blocking the CoreDevice tunnel to the device runner — disable the proxy for the device tunnel, then poll status; do not send another reconnect request while this blocker remains",
         ),
         "usb" => Some(
             "the configured iPhone is not available over USB — connect that phone, unlock it, and keep it awake while the managed service retries",
@@ -2670,10 +2690,10 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iPhone Developer Disk Image is unavailable — open Xcode with the phone connected, let device preparation finish, then poll status",
         ),
         "account" => Some(
-            "Xcode has no usable signed-in Apple account or WDA provisioning profile — open Xcode → Settings → Accounts, sign in and select the development team, then poll status; the managed service retries automatically",
+            "Xcode has no usable signed-in Apple account or provisioning profile for the device runner — open Xcode → Settings → Accounts and add an Apple ID (a free one works), then poll status; the managed service retries automatically",
         ),
         "automation_mode_disabled" => Some(
-            "iOS has not enabled UI automation for WDA — on the unlocked iPhone turn on Settings › Developer › Enable UI Automation and accept any passcode or Allow automation prompt; the managed service retries on its own backoff, so do not send another reconnect request",
+            "iOS has not enabled UI automation for the device runner — on the unlocked iPhone turn on Settings › Developer › Enable UI Automation and accept any passcode or Allow automation prompt; the managed service retries on its own backoff, so do not send another reconnect request",
         ),
         "locked" => Some(
             "the iPhone is locked — unlock it and keep it awake; connecting continues on its own as soon as it is unlocked, so do not send another reconnect request",
@@ -2682,7 +2702,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iPhone runs a newer iOS than the selected Xcode supports (setup_message names both versions) — install an Xcode that supports that iOS (a beta Xcode for a beta iOS) and select it with xcode-select; retrying or reconnecting cannot fix this, so do not send another reconnect request",
         ),
         "wda" => Some(
-            "WebDriverAgent failed to start — inspect ~/.iphone-use/wda-agent.log and run setup-wda.sh doctor before retrying",
+            "the device runner failed to start — inspect ~/.iphone-use/wda-agent.log and run iphone-use doctor before retrying",
         ),
         _ => None,
     }
@@ -14308,6 +14328,36 @@ mod tests {
         assert!(locked.contains("on its own"), "{locked}");
         assert!(!locked.contains("wda-agent.log"), "{locked}");
         assert!(!locked.contains("doctor"), "{locked}");
+    }
+
+    #[test]
+    fn next_steps_name_the_cli_for_this_instance() {
+        let (zh, en) = human_next_step("blocker", "wda", "").unwrap();
+        assert!(
+            en.contains("iphone-use doctor") && zh.contains("iphone-use doctor"),
+            "{en}"
+        );
+        assert!(
+            !en.contains("setup-wda.sh") && !zh.contains("setup-wda.sh"),
+            "{en}"
+        );
+        let default = crate::instance::Instance::derive("", "/Users/x", None).unwrap();
+        assert_eq!(for_instance(en, &default), en);
+        let second = crate::instance::Instance::derive("i13", "/Users/x", None).unwrap();
+        assert_eq!(
+            for_instance("run iphone-use setup, then iphone-use doctor", &second),
+            "run iphone-use setup --instance i13, then iphone-use doctor --instance i13"
+        );
+        // No next step sends a person to a script path or calls the runner WDA.
+        for advice in ["unconfigured", "offline", "external", "died"] {
+            let (zh, en) = human_next_step(advice, "", "unreachable").unwrap();
+            for text in [zh, en] {
+                assert!(
+                    !text.contains("setup-wda.sh") && !text.contains("WDA"),
+                    "{text}"
+                );
+            }
+        }
     }
 
     #[test]

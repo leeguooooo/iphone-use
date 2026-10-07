@@ -77,7 +77,7 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   prefer **Traffic only** mode with Split Tunnels **Include** limited to those
   IPs (avoids the Local proxy timeout that breaks long Git uploads). For
   full-tunnel WARP, add both IPv6 exclusions to the Zero Trust device profile.
-  `warp-cli disconnect` is only a temporary workaround. `setup-wda.sh doctor`
+  `warp-cli disconnect` is only a temporary workaround. `iphone-use doctor`
   tells the states apart.
 - **`proxy`**: an enabled macOS HTTP/HTTPS/SOCKS entry is malformed or points at
   a loopback port with no listener; start that proxy app or disable the stale entry.

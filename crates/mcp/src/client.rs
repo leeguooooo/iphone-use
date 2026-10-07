@@ -39,8 +39,8 @@ fn daemon_target(
     });
     let token = env("PHONE_REMOTE_TOKEN").or_else(|| {
         // Only a daemon on this Mac can be the one the plist describes.
-        let local = base_url.starts_with("http://127.0.0.1:")
-            || base_url.starts_with("http://localhost:");
+        let local =
+            base_url.starts_with("http://127.0.0.1:") || base_url.starts_with("http://localhost:");
         local
             .then(|| {
                 plist(&label, "PHONE_REMOTE_AGENT_TOKEN")
@@ -59,7 +59,13 @@ fn launch_agent_env(label: &str, key: &str) -> Option<String> {
         return None;
     }
     let out = std::process::Command::new("/usr/bin/plutil")
-        .args(["-extract", &format!("EnvironmentVariables.{key}"), "raw", "-o", "-"])
+        .args([
+            "-extract",
+            &format!("EnvironmentVariables.{key}"),
+            "raw",
+            "-o",
+            "-",
+        ])
         .arg(&plist)
         .stderr(std::process::Stdio::null())
         .output()
@@ -1173,21 +1179,31 @@ mod tests {
         let none = |_: &str| None;
         assert_eq!(
             daemon_target(none, plist),
-            ("http://127.0.0.1:45432".to_string(), Some("agent".to_string()))
+            (
+                "http://127.0.0.1:45432".to_string(),
+                Some("agent".to_string())
+            )
         );
         let i13 = |key: &str| (key == "PHONE_REMOTE_INSTANCE").then(|| "i13".to_string());
         assert_eq!(
             daemon_target(i13, plist),
-            ("http://127.0.0.1:45838".to_string(), Some("pw13".to_string()))
+            (
+                "http://127.0.0.1:45838".to_string(),
+                Some("pw13".to_string())
+            )
         );
         // Explicit settings win, and a remote URL never borrows a local secret.
-        let remote = |key: &str| (key == "PHONE_REMOTE_URL").then(|| "http://10.0.0.5:44321".to_string());
+        let remote =
+            |key: &str| (key == "PHONE_REMOTE_URL").then(|| "http://10.0.0.5:44321".to_string());
         assert_eq!(
             daemon_target(remote, plist),
             ("http://10.0.0.5:44321".to_string(), None)
         );
         let nothing = |_: &str, _: &str| None;
-        assert_eq!(daemon_target(none, nothing), (DEFAULT_URL.to_string(), None));
+        assert_eq!(
+            daemon_target(none, nothing),
+            (DEFAULT_URL.to_string(), None)
+        );
     }
 
     #[test]
