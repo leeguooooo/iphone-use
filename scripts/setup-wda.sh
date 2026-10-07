@@ -1503,6 +1503,29 @@ _device_tool() {
     return 1
 }
 
+# The setup engine moved to Rust (`iphone-use setup-native <command>`); this
+# script stays the entry point launchd, the daemon and the installer know.
+# A command the installed binary implements is handed over with the same
+# environment; one it does not (an older binary) keeps running here.
+# IPHONE_USE_SHELL_SETUP=1 forces this script's own implementation.
+_native_setup_exec() {
+    local command="$1" candidate program self
+    [ "${IPHONE_USE_SHELL_SETUP:-0}" != "1" ] || return 0
+    program=""
+    if [ -f "$DAEMON_PLIST" ]; then
+        program="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$DAEMON_PLIST" 2>/dev/null || true)"
+    fi
+    self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+    for candidate in "${IPHONE_USE_SETUP_BIN:-}" "$program" \
+        "$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use" \
+        "/Applications/iPhoneUse.app/Contents/MacOS/iphone-use"; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+        "$candidate" setup-native --supports "$command" >/dev/null 2>&1 || continue
+        IPHONE_USE_SETUP_SCRIPT="$self" exec "$candidate" setup-native "$command"
+    done
+    return 0
+}
+
 # Run `iphone-use device <query>` for the target into DEVICE_QUERY_JSON.
 # Exit status: 0 read, 3 the phone is not attached to usbmuxd, 1 otherwise.
 DEVICE_QUERY_JSON=""
@@ -3075,7 +3098,7 @@ case "$COMMAND" in
     pause)  cmd_pause;  exit $? ;;
     resume) cmd_resume; exit $? ;;
     status) cmd_status; exit $? ;;
-    doctor) cmd_doctor; exit $? ;;
+    doctor) _native_setup_exec doctor; cmd_doctor; exit $? ;;
     setup)  ;;
     *) die "unknown command: $1 (use: setup|status|stop|pause|resume|doctor|instance-context)" ;;
 esac

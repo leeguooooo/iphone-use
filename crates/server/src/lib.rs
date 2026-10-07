@@ -10,6 +10,7 @@ pub mod protocol;
 pub mod redaction;
 pub mod runtime_dir;
 pub mod schedules;
+pub mod setup;
 pub mod timing;
 pub mod update;
 pub mod usbmux;
