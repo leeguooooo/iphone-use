@@ -170,7 +170,15 @@ fn unique_label_target(body: &str, label: &str) -> anyhow::Result<(usize, String
         return Ok((outer, response.snapshot));
     }
     match matches.as_slice() {
-        [] => anyhow::bail!("no element matched the exact label '{label}'; no action was sent"),
+        [] => {
+            let hint = crate::hints::did_you_mean(
+                label,
+                response.elements.iter().map(|element| element.label.as_str()),
+            )
+            .map(|hint| format!(" — {hint}"))
+            .unwrap_or_default();
+            anyhow::bail!("no element matched the exact label '{label}'; no action was sent{hint}")
+        }
         [(index, _)] => Ok((*index, response.snapshot)),
         _ => {
             let candidates = matches

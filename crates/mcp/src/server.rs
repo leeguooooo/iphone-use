@@ -490,6 +490,8 @@ pub struct PhoneHandler {
     /// The most recent failed `phone_flow_run`, kept so `phone_flow_report`
     /// can file an issue with the real failure instead of a retelling.
     last_flow_failure: std::sync::Arc<std::sync::Mutex<Option<crate::contrib::ReportContext>>>,
+    /// Observed actions this session took, for the `no_progress` advisory.
+    progress: std::sync::Arc<std::sync::Mutex<crate::hints::ProgressTracker>>,
 }
 
 /// Parameters for [`PhoneHandler::phone_hold`].
@@ -504,7 +506,22 @@ impl PhoneHandler {
         Self {
             daemon,
             last_flow_failure: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            progress: std::sync::Arc::default(),
         }
+    }
+
+    /// Append a `no_progress` advisory when this observed action has stopped
+    /// changing the screen. Advice only: nothing is resent or undone.
+    fn note_progress(&self, signature: String, mut result: CallToolResult) -> CallToolResult {
+        let warning = self
+            .progress
+            .lock()
+            .ok()
+            .and_then(|mut tracker| tracker.record(&signature, result.structured_content.as_ref()));
+        if let Some(line) = warning {
+            result.content.push(Content::text(line));
+        }
+        result
     }
 
     fn remember_flow_failure(&self, context: crate::contrib::ReportContext) {
@@ -603,7 +620,8 @@ impl PhoneHandler {
         &self,
         Parameters(TapParams { x, y, observe }): Parameters<TapParams>,
     ) -> CallToolResult {
-        send_input_observed(&self.daemon, &InputMsg::Tap { x, y }, observe).await
+        let result = send_input_observed(&self.daemon, &InputMsg::Tap { x, y }, observe).await;
+        self.note_progress(format!("tap {x:.2},{y:.2}"), result)
     }
 
     // -----------------------------------------------------------------------
@@ -619,7 +637,9 @@ impl PhoneHandler {
         &self,
         Parameters(ScrollParams { x, y, dx, dy, observe }): Parameters<ScrollParams>,
     ) -> CallToolResult {
-        send_input_observed(&self.daemon, &InputMsg::Scroll { x, y, dx, dy }, observe).await
+        let result =
+            send_input_observed(&self.daemon, &InputMsg::Scroll { x, y, dx, dy }, observe).await;
+        self.note_progress(format!("scroll dx={dx:?} dy={dy:?}"), result)
     }
 
     // -----------------------------------------------------------------------
@@ -878,10 +898,13 @@ impl PhoneHandler {
             .tap_element_observed(element, &snapshot, observe)
             .await
         {
-            Ok(response) => daemon_action_result(
-                &response,
-                observe,
-                &format!("tapped element #{element} from the supplied snapshot"),
+            Ok(response) => self.note_progress(
+                format!("tap_element #{element}"),
+                daemon_action_result(
+                    &response,
+                    observe,
+                    &format!("tapped element #{element} from the supplied snapshot"),
+                ),
             ),
             Err(e) => unknown_action_result(
                 "transport_error",
@@ -908,9 +931,10 @@ impl PhoneHandler {
         // The snapshot comes from the element read this call performs — never
         // a cached or borrowed baseline.
         match self.daemon.tap_label_observed(&label, observe).await {
-            Ok(response) => {
-                daemon_action_result(&response, observe, &format!("tapped element: {label}"))
-            }
+            Ok(response) => self.note_progress(
+                format!("tap_label {label}"),
+                daemon_action_result(&response, observe, &format!("tapped element: {label}")),
+            ),
             // `tap_label` resolves the label with reads and only then taps.
             // Which half failed is known structurally, so it is reported
             // exactly — not inferred from the text of an error, and not
