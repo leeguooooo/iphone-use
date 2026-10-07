@@ -68,7 +68,7 @@ to keep the phone ready without a task.
 ## Setup blockers
 
 `setup_blocked_on` is one of `warp | proxy | usb | trust | ddi | account |
-automation_mode_disabled | locked | wda` (empty = known prerequisites passed;
+automation_mode_disabled | xcode_too_old | locked | wda` (empty = known prerequisites passed;
 KeepAlive keeps the last concrete blocker while it re-checks).
 
 - **`warp`** (the #1 blocker): Cloudflare WARP or another VPN wedges the
@@ -86,6 +86,11 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   automation (runner log: "Timed out while enabling automation mode"). Ask the
   operator to turn on **Settings › Developer › Enable UI Automation** and accept
   any passcode / "Allow automation" prompt. KeepAlive retries; do not loop reconnect.
+- **`xcode_too_old`**: the runner exited with code 74 (testmanagerd refused the
+  IDE channel) and the phone runs a newer iOS than the selected Xcode SDK;
+  `setup_message` names both versions. Only installing an Xcode that supports
+  that iOS (a beta Xcode for a beta iOS) fixes it. KeepAlive waits 15 minutes
+  between attempts; do not reconnect.
 - **`locked`**: unlock the phone. **`usb` / `ddi` / `account` / `wda`**: follow `hint`.
 
 Repeated bootstrap requests hide the real blocker — fix it, then reconnect once.

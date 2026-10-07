@@ -2255,7 +2255,7 @@ async fn agent_status(
     } else if wda {
         // NOT "blocked". A blocker is something a human has to clear, and
         // `blocked` above always comes with a named `setup_blocked_on`
-        // (warp|proxy|usb|trust|ddi|account|automation_mode_disabled). This
+        // (warp|proxy|usb|trust|ddi|account|automation_mode_disabled|…). This
         // branch has no blocker at all — WDA answers, the last read just
         // failed. An agent that saw `blocked` here went looking for
         // `setup_blocked_on`, found it empty, and had nothing left to do but
@@ -2507,6 +2507,10 @@ fn human_next_step(
                 "请解锁 iPhone 并保持亮屏，解锁后会自动接着连接",
                 "Unlock the iPhone and keep it awake — connecting continues as soon as it is unlocked",
             ),
+            "xcode_too_old" => (
+                "iPhone 的 iOS 比这台 Mac 上的 Xcode 新：安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），重试和重连都解决不了",
+                "The iPhone runs a newer iOS than this Mac's Xcode supports: install an Xcode that supports it (a beta Xcode for a beta iOS) — retrying or reconnecting will not help",
+            ),
             "wda" => (
                 "设备服务启动失败：在这台 Mac 上运行 ~/.iphone-use/setup-wda.sh doctor 查看原因",
                 "The device service failed to start: run ~/.iphone-use/setup-wda.sh doctor on this Mac",
@@ -2603,6 +2607,9 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
         "locked" => Some(
             "the iPhone is locked — unlock it and keep it awake; connecting continues on its own as soon as it is unlocked, so do not send another reconnect request",
         ),
+        "xcode_too_old" => Some(
+            "the iPhone runs a newer iOS than the selected Xcode supports (setup_message names both versions) — install an Xcode that supports that iOS (a beta Xcode for a beta iOS) and select it with xcode-select; retrying or reconnecting cannot fix this, so do not send another reconnect request",
+        ),
         "wda" => Some(
             "WebDriverAgent failed to start — inspect ~/.iphone-use/wda-agent.log and run setup-wda.sh doctor before retrying",
         ),
@@ -2619,7 +2626,15 @@ fn parse_setup_blocked_on(txt: &str, now: u64) -> String {
 
 fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
     let mut status: WdaSetupStatus = serde_json::from_str(txt).ok()?;
-    if now.saturating_sub(status.ts) > 300 {
+    // An Xcode too old for the phone is published once, then KeepAlive waits
+    // out a 900 s backoff with no heartbeat (#126); keep it visible across
+    // that wait and the next attempt instead of letting it age out at 300 s.
+    let max_age = if status.blocked_on == "xcode_too_old" {
+        1200
+    } else {
+        300
+    };
+    if now.saturating_sub(status.ts) > max_age {
         return None;
     }
     if !matches!(
@@ -2631,6 +2646,7 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
             | "ddi"
             | "account"
             | "automation_mode_disabled"
+            | "xcode_too_old"
             | "locked"
             | "wda"
     ) {
@@ -14089,6 +14105,7 @@ mod tests {
             "ddi",
             "account",
             "automation_mode_disabled",
+            "xcode_too_old",
             "locked",
             "wda",
         ] {
@@ -14192,6 +14209,7 @@ mod tests {
             "ddi",
             "account",
             "automation_mode_disabled",
+            "xcode_too_old",
             "locked",
             "wda",
         ] {
@@ -14261,6 +14279,38 @@ mod tests {
         assert!(!hint.contains("wda-agent.log"), "{hint}");
         // The hint is spliced into the status JSON unescaped.
         assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
+    }
+
+    #[test]
+    fn xcode_too_old_blocker_says_to_install_xcode_and_outlives_the_backoff() {
+        // #126: the runner exits with code 74 when the phone runs a newer iOS
+        // than the Xcode SDK; setup names that instead of the generic `wda`.
+        let payload = r#"{"phase":"building-fail","blocked_on":"xcode_too_old","message":"iPhone runs iOS 27.2 but this Xcode's SDK is iOS 27.0","ts":1000}"#;
+        let status = parse_setup_status(payload, 1100).expect("fresh status");
+        assert_eq!(status.blocked_on, "xcode_too_old");
+        let hint = setup_blocker_hint("xcode_too_old").unwrap();
+        assert!(hint.contains("install an Xcode"), "{hint}");
+        assert!(
+            hint.contains("do not send another reconnect request"),
+            "{hint}"
+        );
+        assert!(!hint.contains("wda-agent.log"), "{hint}");
+        assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
+        let (zh, en) = human_next_step("blocker", "xcode_too_old", "").unwrap();
+        assert!(
+            zh.contains("Xcode") && en.contains("install an Xcode"),
+            "{en}"
+        );
+        // KeepAlive publishes it once, then waits 900 s with no heartbeat:
+        // it stays visible through that wait, and other blockers still age
+        // out at 300 s.
+        assert_eq!(
+            parse_setup_blocked_on(payload, 1000 + 1000),
+            "xcode_too_old"
+        );
+        assert_eq!(parse_setup_blocked_on(payload, 1000 + 1300), "");
+        let usb = r#"{"phase":"prereq","blocked_on":"usb","ts":1000}"#;
+        assert_eq!(parse_setup_blocked_on(usb, 1000 + 400), "");
     }
 
     #[test]

@@ -270,6 +270,11 @@
         setup: '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并在手机上确认密码或“允许自动化”提示，再重新运行设置命令。',
         retry: '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并确认手机上的密码或“允许自动化”提示；服务会自动重试。',
       },
+      xcode_too_old: {
+        title: 'Xcode 版本太旧，不支持这台 iPhone 的 iOS',
+        setup: '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode），用 xcode-select 选中它，再重新运行设置命令。',
+        retry: '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode）；在那之前自动重试也不会成功。',
+      },
       wda: {
         title: '设备服务启动失败',
         setup: '保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。',
@@ -294,7 +299,7 @@
     function showBlocker(code, managedRetry = false) {
       const blockerCopy = blockers[code];
       blocker.hidden = !blockerCopy;
-      blocker.className = `callout${blockerCopy ? (code === 'wda' ? ' danger' : ' warn') : ''}`;
+      blocker.className = `callout${blockerCopy ? ((code === 'wda' || code === 'xcode_too_old') ? ' danger' : ' warn') : ''}`;
       if (blockerCopy) {
         blockerTitle.textContent = blockerCopy.title;
         blockerDetail.textContent = managedRetry ? blockerCopy.retry : blockerCopy.setup;

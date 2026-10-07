@@ -180,6 +180,7 @@ jobs:
           bash scripts/test-install-cli-link.sh
           bash scripts/test-setup-wda-warp-preflight.sh
           bash scripts/test-setup-wda-lock-backoff.sh
+          bash scripts/test-setup-wda-xcode-too-old.sh
           bash scripts/test-setup-wda-runner-build.sh
           bash scripts/test-install-runner-sources.sh
           bash scripts/test-setup-wda-proxy-preflight.sh

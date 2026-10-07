@@ -649,7 +649,7 @@ _read_keepalive_retry_state() {
     KEEPALIVE_RETRY_ATTEMPT="$(sed -n '3s/^attempt=//p' "$WDA_RETRY_STATE")"
     KEEPALIVE_RETRY_NEXT_AT="$(sed -n '4s/^next_at=//p' "$WDA_RETRY_STATE")"
     case "$KEEPALIVE_RETRY_KIND" in
-        generic|locked) ;;
+        generic|locked|xcode_too_old) ;;
         *) return 1 ;;
     esac
     case "$KEEPALIVE_RETRY_ATTEMPT" in
@@ -699,6 +699,9 @@ _record_keepalive_failure() {
         # that check and the runner start. The old 30 s → 15 min backoff
         # kept a just-unlocked phone waiting minutes for its next attempt.
         locked) delay=5; cap=60 ;;
+        # Only a different Xcode fixes this; each attempt would launch the
+        # runner on the phone again for nothing.
+        xcode_too_old) delay=900; cap=900 ;;
         *) delay=5; cap=300; KEEPALIVE_FAILURE_KIND="generic" ;;
     esac
     delay="$(_exponential_retry_delay "$delay" "$cap" "$attempt")"
@@ -836,7 +839,7 @@ def publish(operation):
                 "schema_version": 1, "run_id": run_id,
                 "owner_pid": owner_pid, "owner_start": owner_start,
                 "phase": "starting", "phase_started_at": now,
-                "blocked_on": blocker if blocker in {"warp", "proxy", "usb", "trust", "ddi", "automation_mode_disabled", "wda"} else "",
+                "blocked_on": blocker if blocker in {"warp", "proxy", "usb", "trust", "ddi", "automation_mode_disabled", "xcode_too_old", "wda"} else "",
                 "message": "starting setup", "active": True, "terminal": False,
             }
         elif data.get("run_id") != run_id:
@@ -1736,7 +1739,7 @@ if [ -n "${IPHONE_USE_INTERNAL_TEST_KEEPALIVE_RETRY_KIND:-}" ]; then
     [ "$COMMAND" = "doctor" ] \
         || die "internal KeepAlive retry fixture requires the read-only doctor command"
     case "$IPHONE_USE_INTERNAL_TEST_KEEPALIVE_RETRY_KIND" in
-        generic|locked)
+        generic|locked|xcode_too_old)
             KEEPALIVE_FAILURE_KIND="$IPHONE_USE_INTERNAL_TEST_KEEPALIVE_RETRY_KIND"
             _record_keepalive_failure
             ;;
@@ -1820,6 +1823,63 @@ _ios_sdk_version() {
     local version
     version="$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)"
     _valid_os_version "$version" && printf '%s\n' "$version"
+}
+
+# The phone's iOS version ("27.2"), read from devicectl's JSON, or nothing.
+# Failures are tolerated: the version only sharpens a diagnosis and never
+# gates setup on its own.
+_device_ios_version() {
+    local udid="${1:-${WDA_UDID:-}}" j version
+    [ -n "$udid" ] || return 0
+    j="$(mktemp "${TMPDIR:-/tmp}/iphone-use-device-details.XXXXXX")" || return 0
+    _devicectl_t 10 device info details --device "$udid" -j "$j" >/dev/null 2>&1 || true
+    version="$(sed -nE 's/.*"osVersionNumber"[[:space:]]*:[[:space:]]*"([0-9.]+)".*/\1/p' "$j" 2>/dev/null | head -1)"
+    rm -f "$j"
+    if _valid_os_version "$version"; then
+        printf '%s\n' "$version"
+    fi
+    return 0
+}
+
+# "27.2.1" -> "27.2", "27" -> "27.0".
+_os_major_minor() {
+    printf '%s\n' "$1" | awk -F. '{ printf "%d.%d\n", $1, $2 }'
+}
+
+# testmanagerd refuses the IDE channel and the runner exits with code 74,
+# sometimes without the "refused channel" line (#126).
+_runner_log_shows_ide_refusal() {
+    grep -Eq 'with code 74([^0-9]|$)|XCTestManager_IDEInterface|before establishing connection' \
+        "${1:-$RUN_LOG}" 2>/dev/null
+}
+
+# Succeeds, with XCODE_TOO_OLD_MESSAGE set, when the runner log carries the
+# refusal signature AND the phone's iOS major.minor is newer than the SDK's.
+# The version gap alone is not enough to fail: Xcode usually drives an iOS one
+# minor release ahead of its SDK (Xcode 15.4 / SDK 17.5 runs iOS 17.6), so a
+# version-only preflight would block setups that work today. With matching
+# versions the refusal keeps its existing classification.
+XCODE_TOO_OLD_MESSAGE=""
+_runner_failure_is_xcode_too_old() {
+    local log="${1:-$RUN_LOG}" device sdk
+    XCODE_TOO_OLD_MESSAGE=""
+    _runner_log_shows_ide_refusal "$log" || return 1
+    sdk="$(_ios_sdk_version || true)"
+    device="$(_device_ios_version || true)"
+    [ -n "$sdk" ] && [ -n "$device" ] || return 1
+    sdk="$(_os_major_minor "$sdk")"
+    device="$(_os_major_minor "$device")"
+    _version_lt "$sdk" "$device" || return 1
+    XCODE_TOO_OLD_MESSAGE="iPhone runs iOS $device but this Xcode's SDK is iOS $sdk — install an Xcode that supports iOS $device (a beta Xcode for a beta iOS)"
+    return 0
+}
+
+# Every retry launches an app on the phone and cannot succeed until Xcode is
+# replaced, so KeepAlive waits its longest backoff (see _record_keepalive_failure).
+_report_xcode_too_old() {
+    _setstatus building-fail xcode_too_old "$XCODE_TOO_OLD_MESSAGE"
+    KEEPALIVE_FAILURE_KIND="xcode_too_old"
+    die "$XCODE_TOO_OLD_MESSAGE. Retrying or reconnecting cannot fix this; KeepAlive waits 15 minutes between attempts. Log: $RUN_LOG"
 }
 
 # Lowest iOS deployment target the selected iPhoneOS SDK accepts, read from
@@ -2086,6 +2146,27 @@ cmd_doctor() {
         ok "iPhone on USB: $usb"
     else
         warn "~ WDA_ALLOW_LAN=1: no USB iPhone; setup will require one unambiguous paired destination"
+    fi
+    # Informational, never a failure: Xcode usually drives an iOS one minor
+    # release ahead of its SDK, so only the runner's own refusal is decisive.
+    local target_udid device_ios sdk_ios
+    target_udid="${WDA_UDID:-}"
+    if [ -z "$target_udid" ] && [ "$usb_count" = "1" ]; then
+        target_udid="$usb"
+    fi
+    sdk_ios="$(_ios_sdk_version || true)"
+    device_ios=""
+    if [ -n "$target_udid" ]; then
+        device_ios="$(_device_ios_version "$target_udid" || true)"
+    fi
+    if [ -n "$device_ios" ] && [ -n "$sdk_ios" ]; then
+        if _version_lt "$(_os_major_minor "$sdk_ios")" "$(_os_major_minor "$device_ios")"; then
+            warn "~ iPhone runs iOS $device_ios but the Xcode SDK is iOS $sdk_ios. A one-minor bump often still works; a beta iOS or a newer major makes the runner exit with code 74. If setup then reports xcode_too_old, install an Xcode that supports iOS $(_os_major_minor "$device_ios")"
+        else
+            ok "iPhone iOS $device_ios is covered by the Xcode SDK (iOS $sdk_ios)"
+        fi
+    elif [ -n "$target_udid" ]; then
+        warn "~ could not read the iPhone iOS version to compare with the Xcode SDK${sdk_ios:+ (iOS $sdk_ios)}"
     fi
     if command -v lsof >/dev/null 2>&1; then ok "lsof present for listener ownership checks"; else warn "X lsof is required"; fail=1; fi
     if [ "$WDA_ALLOW_LAN" = "0" ]; then
@@ -2730,7 +2811,7 @@ fi
 # flicker between the real cause and an empty blocker every few seconds.
 _PREVIOUS_BLOCKER="$(sed -n 's/.*"blocked_on":"\([^"]*\)".*/\1/p' "$STATUS_FILE" 2>/dev/null | head -1)"
 case "$_PREVIOUS_BLOCKER" in
-    warp|proxy|usb|trust|ddi|automation_mode_disabled|wda) ;;
+    warp|proxy|usb|trust|ddi|automation_mode_disabled|xcode_too_old|wda) ;;
     *) _PREVIOUS_BLOCKER="" ;;
 esac
 # A USB blocker from an earlier default-mode attempt is incompatible with an
@@ -2745,9 +2826,10 @@ fi
 # still required the same manual approval. `serving` below is the first
 # authoritative evidence that trust was restored, and clears it there. The
 # UI-automation switch is the same kind of on-phone approval, seen at the same
-# point, and is kept visible the same way.
+# point, and is kept visible the same way; so is an Xcode too old for the
+# phone, which only a different Xcode clears.
 case "$_PREVIOUS_BLOCKER" in
-    trust|automation_mode_disabled) _BUILD_BLOCKER="$_PREVIOUS_BLOCKER" ;;
+    trust|automation_mode_disabled|xcode_too_old) _BUILD_BLOCKER="$_PREVIOUS_BLOCKER" ;;
     *) _BUILD_BLOCKER="" ;;
 esac
 _setstatus prereq "$_PREVIOUS_BLOCKER" "checking prerequisites"
@@ -3351,6 +3433,9 @@ while [ -z "$PHONE_URL" ]; do
             _runner_cache_drop || true
             warn "the recorded runner product failed to install or launch; the next round rebuilds it"
         fi
+        if _runner_failure_is_xcode_too_old "$RUN_LOG"; then
+            _report_xcode_too_old
+        fi
         if _runner_log_shows_automation_mode_disabled "$RUN_LOG"; then
             _report_automation_mode_disabled
         fi
@@ -3405,6 +3490,12 @@ while [ -z "$PHONE_URL" ]; do
         if [ -n "${WDA_XCTESTRUN:-}" ] && _runner_log_shows_product_failure "$RUN_LOG"; then
             _runner_cache_drop || true
             warn "the recorded runner product failed to install or launch; the next round rebuilds it"
+        fi
+        # After the lock checks (a locked phone has its own blocker) and
+        # before the automation check: a refusal from an Xcode too old for
+        # the phone otherwise reads as a generic runner failure (#126).
+        if _runner_failure_is_xcode_too_old "$RUN_LOG"; then
+            _report_xcode_too_old
         fi
         if _runner_log_shows_automation_mode_disabled "$RUN_LOG"; then
             _report_automation_mode_disabled
