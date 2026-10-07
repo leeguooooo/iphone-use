@@ -9,7 +9,9 @@
 //! using it).
 //!
 //! The caller is "that owner" when `PHONE_REMOTE_OWNER` names the lease
-//! holder; `--force` (`IPHONE_USE_SETUP_FORCE=1`) overrides on purpose.
+//! holder; `--force` (`IPHONE_USE_SETUP_FORCE=1`) overrides on purpose. The
+//! refusal never names either: a model reading it would copy the switch
+//! instead of waiting (chrome-use #433). They are documented in --help only.
 
 use std::time::Duration;
 
@@ -109,12 +111,10 @@ pub fn overridden(ctx: &Ctx) -> bool {
 }
 
 pub fn refusal(lease: &Lease, ctx: &Ctx) -> String {
+    let _ = ctx;
     format!(
-        "the iPhone is being driven by session \"{}\" (owner lease, {}s left); setup would replace the runner it is using. Wait until it releases the phone, run setup as that owner (PHONE_REMOTE_OWNER={}), or take it over on purpose: {} --force",
-        lease.owner,
-        lease.remaining_secs,
-        lease.owner,
-        ctx.rerun_command()
+        "the iPhone is being driven by session \"{}\" (owner lease, {}s left); setup would replace the runner it is using. Wait until that session releases the phone, or ask it (or the person running it) to release it, then run setup again.",
+        lease.owner, lease.remaining_secs,
     )
 }
 
@@ -200,7 +200,10 @@ mod tests {
         );
         assert!(text.contains("\"prewarm-ab\""), "{text}");
         assert!(text.contains("120s left"), "{text}");
-        assert!(text.contains("PHONE_REMOTE_OWNER=prewarm-ab"), "{text}");
-        assert!(text.contains("iphone-use setup --force"), "{text}");
+        assert!(text.contains("release"), "{text}");
+        // No bypass in the refusal: a model would copy it instead of waiting.
+        for bypass in ["--force", "PHONE_REMOTE_OWNER", "IPHONE_USE_SETUP_FORCE"] {
+            assert!(!text.contains(bypass), "{text}");
+        }
     }
 }
