@@ -307,6 +307,23 @@ impl DaemonClient {
         Ok(resp.text().await?)
     }
 
+    /// `POST /agent/prewarm {"reason":…}` — ask the daemon to start bringing
+    /// a released phone back before the first action needs it. Advisory: the
+    /// daemon decides (recent use, lock state, rate limit) and never takes
+    /// the owner lease for it.
+    pub async fn prewarm(&self, reason: &str) -> anyhow::Result<String> {
+        let req = self
+            .auth(self.client.post(self.url("/agent/prewarm")))
+            .timeout(Duration::from_secs(15))
+            .header("x-phone-control", "1")
+            .header("x-phone-owner", &self.owner)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(serde_json::json!({ "reason": reason }).to_string());
+        let resp = req.send().await?;
+        let resp = check_status(resp).await?;
+        Ok(resp.text().await?)
+    }
+
     /// `POST /agent/owner {"release":true}` — hand the phone lease back.
     pub async fn release_owner(&self) -> anyhow::Result<String> {
         let req = self

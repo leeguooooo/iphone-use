@@ -70,6 +70,10 @@ pub struct StatusResponse {
     /// True while a managed WDA supervisor is being bootstrapped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnecting: Option<bool>,
+    /// True while a reconnect the daemon started ahead of time (pre-warm,
+    /// after this MCP server started or status was read) is coming up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warming: Option<bool>,
     /// Human-readable recovery guidance from the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,

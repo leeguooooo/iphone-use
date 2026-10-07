@@ -63,7 +63,15 @@ abandoned. Release yours when done: `POST /agent/owner {"release":true}` / MCP
 approves a prompt, fetches a code): `POST /agent/hold {"secs":600}` / MCP
 `phone_hold(secs)` (max 14400; 0 clears). Clear it when the pause ends. A hold
 prevents idle release; it does not start WDA or prove readiness. Never use it
-to keep the phone ready without a task.
+to keep the phone ready without a task. A live owner lease also prevents idle
+release; the idle window starts when you release it.
+
+**Pre-warm.** A released phone may already be coming back when you look:
+`warming:true` means the daemon started the bring-up ahead of time (MCP does
+this on startup and when status is read). Poll status until `drivable:true`
+instead of calling reconnect. `POST /agent/prewarm {"reason":"status"}` asks
+for it explicitly; the answer is `started` or `skipped` with a reason
+(`no_recent_activity`, `locked`, `rate_limited`, …) and never takes the lease.
 
 ## Setup blockers
 
@@ -119,7 +127,7 @@ when practical, turn off iPhone Wi-Fi and keep the relays on USB loopback.
 | `GET /agent/reference` | This document, as compiled into the running daemon (`text/markdown`) |
 | `GET /agent/apps` | Installed apps `{device, apps:[{bundle,name,version,bundle_version,system,…}]}`; `?bundle=`; cached 10 min (`?refresh=1`). `503 apps_unavailable` = unknown, not "not installed" |
 | `GET /agent/intents`, `POST /agent/intent` | Semantic intents ([below](#semantic-intents)) |
-| `POST /agent/mode`, `/agent/hold`, `/agent/owner` | Reconnect / hold / release lease ([above](#phone-states-and-recovery)) |
+| `POST /agent/mode`, `/agent/hold`, `/agent/owner`, `/agent/prewarm` | Reconnect / hold / release lease / pre-warm ([above](#phone-states-and-recovery)) |
 
 Every state-changing POST needs `X-Phone-Control: 1`; a 403 names the missing
 header — fix the request once, do not repeat it. Give your client **at least

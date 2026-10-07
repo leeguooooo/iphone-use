@@ -119,7 +119,20 @@ phone prompted all day while nobody was using it. The next agent request, or
 `POST /agent/mode {"mode":"agent"}`, brings the runner back from its cached product (no
 rebuild) — unlock the phone if asked. On `/phone` a parked phone shows **连接手机**
 (connect phone); press it with the phone unlocked and awake. `PHONE_REMOTE_IDLE_RELEASE_SECS` changes the
-window; `0` keeps the runner up (v0.6.3–v0.7.3 behaviour).
+window; `0` keeps the runner up (v0.6.3–v0.7.3 behaviour). While a session holds the
+owner lease the phone is never idle-released; the idle window starts when the lease is
+released or expires.
+
+Bringing a parked runner back takes ~5 s with the screen on and 10–25 s once iOS has
+turned it off. To hide that wait the daemon **pre-warms**: when an MCP server starts,
+when a model reads status through MCP, or when a session takes the owner lease, it
+starts the bring-up in the background (`warming:true` in status), so the first action
+finds the phone ready. Because every runner launch can ask for the passcode, a
+pre-warm only happens for a phone an agent drove within the last hour (a lease is
+exempt), never on a locked phone or one whose lock state CoreDevice cannot report,
+never against a hand-off, a setup blocker or another session, and at most once per
+10 minutes per trigger. `PHONE_REMOTE_PREWARM=0` turns it off;
+`IPHONE_USE_MCP_PREWARM=0` stops one MCP server from asking.
 
 ### Upgrade
 
@@ -590,6 +603,7 @@ signature could invalidate.
 | `PHONE_REMOTE_UDID` | detected and persisted by the installer | Canonical iPhone for the managed runner and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `WDA_UDID` to setup. |
 | `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | Runner control and MJPEG loopbacks (any WebDriverAgent-compatible endpoint works). Control fails closed when unreachable. |
 | `PHONE_REMOTE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the runner supervisor/relay lifecycle. |
+| `PHONE_REMOTE_PREWARM` | on | `0` turns pre-warm off (see Lifecycle). `PHONE_REMOTE_PREWARM_RECENT_SECS` (default `3600`) is how recently an agent must have driven the phone; `PHONE_REMOTE_PREWARM_INTERVAL_SECS` (default `600`) limits each trigger. |
 | `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | Stop the runner and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
 | `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | Device runner sources setup builds (a repo checkout's `scripts/setup-wda.sh` uses its own `runner/`). Persisted only when not the default. |
