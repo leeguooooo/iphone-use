@@ -209,6 +209,61 @@ pub fn xcode_account_teams() -> Vec<String> {
     teams
 }
 
+/// Team IDs of the valid Apple Development signing identities in the
+/// keychain (deduplicated, sorted). Xcode 26 no longer writes
+/// `IDEProvisioningTeamByIdentifier` when an account is added, so a fresh
+/// install with one signed-in Apple ID finds no team there; the team is the
+/// OU of the development certificate Xcode created for that account.
+pub fn dev_cert_teams() -> Vec<String> {
+    let identities = sys::stdout_of("security", &["find-identity", "-v", "-p", "codesigning"]);
+    let certs = sys::stdout_of(
+        "security",
+        &["find-certificate", "-a", "-c", "Apple Development"],
+    );
+    teams_from_keychain_dump(&certs, &identities)
+}
+
+/// The OU of every `Apple Development` certificate in a `security
+/// find-certificate -a` dump whose label is also a valid identity in
+/// `security find-identity -v` (a private key is present and the
+/// certificate is neither expired nor revoked).
+fn teams_from_keychain_dump(certs: &str, identities: &str) -> Vec<String> {
+    let mut teams = Vec::new();
+    let mut label = String::new();
+    for line in certs.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("\"labl\"<blob>=\"") {
+            label = rest.trim_end_matches('"').to_string();
+        } else if let Some(rest) = line.strip_prefix("\"subj\"<blob>=0x") {
+            let hex = rest.split_whitespace().next().unwrap_or_default();
+            let valid = !label.is_empty() && identities.contains(&format!("\"{label}\""));
+            if let Some(team) = valid.then(|| subject_ou(hex)).flatten() {
+                teams.push(team);
+            }
+        }
+    }
+    teams.sort();
+    teams.dedup();
+    teams
+}
+
+/// The organizationalUnitName (2.5.4.11) of a hex-encoded DER subject, when
+/// it is a valid team ID.
+fn subject_ou(hex: &str) -> Option<String> {
+    let bytes: Vec<u8> = (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok())
+        .collect::<Option<_>>()?;
+    const OU_OID: [u8; 5] = [0x06, 0x03, 0x55, 0x04, 0x0B];
+    let at = bytes.windows(OU_OID.len()).position(|w| w == OU_OID)? + OU_OID.len();
+    let (&tag, rest) = bytes.get(at..)?.split_first()?;
+    let (&len, rest) = rest.split_first()?;
+    // UTF8String or PrintableString, short-form length.
+    if !matches!(tag, 0x0C | 0x13) || len >= 0x80 {
+        return None;
+    }
+    let team = std::str::from_utf8(rest.get(..usize::from(len))?).ok()?;
+    valid_team_id(team).then(|| team.to_string())
+}
+
 pub fn valid_team_id(team: &str) -> bool {
     team.len() == 10
         && team
@@ -252,12 +307,16 @@ pub fn resolve_signing(ctx: &Ctx) -> Result<Signing, String> {
     }
     if team.is_empty() {
         // Signing in lists the account teams; only selecting one in a project
-        // records the "last selected" key. One team is unambiguous.
-        let teams = xcode_account_teams();
+        // records the "last selected" key. One team is unambiguous. Xcode 26
+        // no longer lists the teams there; its development certificate does.
+        let mut teams = xcode_account_teams();
+        if teams.is_empty() {
+            teams = dev_cert_teams();
+        }
         match teams.len() {
             1 => team = teams[0].clone(),
             0 => {
-                return Err("Xcode is not signed in to an Apple account. Open Xcode → Settings → Accounts, click + and add your Apple ID (a free Apple ID works), then rerun.".into())
+                return Err("Xcode is not signed in to an Apple account, or the account has no Apple Development certificate yet. Open Xcode → Settings → Accounts, click + and add your Apple ID (a free Apple ID works); then select its team → Manage Certificates → + → Apple Development, and rerun.".into())
             }
             _ => {
                 return Err(format!(
@@ -1029,6 +1088,52 @@ pub fn xcode_missing_message() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `security find-certificate -a -c "Apple Development"`, trimmed to the
+    // attributes read; the subject is the DER of a real development
+    // certificate with the personal fields replaced.
+    const CERT_DUMP: &str = r#"keychain: "/Users/me/Library/Keychains/login.keychain-db"
+version: 512
+class: 0x80001000
+attributes:
+    "alis"<blob>="Apple Development: me@example.com (ab12cd34ef)"
+    "labl"<blob>="Apple Development: me@example.com (AB12CD34EF)"
+    "subj"<blob>=0x305B3137303506035504030C2E4170706C6520446576656C6F706D656E743A206D65406578616D706C652E636F6D2028414231324344333445462931133011060355040B0C0A58353437514B34384244310B3009060355040613025553  "0\201\2051..."
+keychain: "/Users/me/Library/Keychains/login.keychain-db"
+attributes:
+    "labl"<blob>="Apple Development: old@example.com (ZZ99ZZ99ZZ)"
+    "subj"<blob>=0x301531133011060355040B0C0A5A5A39395A5A39395A5A
+"#;
+
+    #[test]
+    fn dev_cert_team_is_the_subject_ou_of_a_valid_identity() {
+        let identities = r#"  1) 9A84910CBD8B11B6A4B6410E364A3849262C9985 "Apple Development: me@example.com (AB12CD34EF)"
+     1 valid identities found"#;
+        assert_eq!(
+            teams_from_keychain_dump(CERT_DUMP, identities),
+            vec!["X547QK48BD"]
+        );
+        assert!(
+            teams_from_keychain_dump(CERT_DUMP, "     0 valid identities found").is_empty(),
+            "an expired, revoked or keyless certificate names no team"
+        );
+    }
+
+    #[test]
+    fn subject_ou_reads_only_a_team_shaped_value() {
+        assert_eq!(
+            subject_ou("31133011060355040B0C0A41424344453132333435"),
+            Some("ABCDE12345".into())
+        );
+        assert_eq!(
+            subject_ou("31113011060355040B0C086162636465666768"),
+            None,
+            "not a team ID"
+        );
+        assert_eq!(subject_ou("3009060355040613025553"), None, "no OU");
+        assert_eq!(subject_ou("zz"), None);
+        assert_eq!(subject_ou("060355040B0C0A4142"), None, "truncated");
+    }
 
     #[test]
     fn coredevice_says_absent_only_for_an_unavailable_phone_without_transport() {
