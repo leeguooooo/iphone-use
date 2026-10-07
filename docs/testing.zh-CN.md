@@ -9,6 +9,8 @@
 
 两者都走 `flow run` 的同一套引擎，没有新的路径去碰手机。
 
+`iphone-use test …` 和 `iphone-use schedule …` 是同样的命令，会自动连到已安装的 daemon；第二台手机加 `--instance 名字`。
+
 ## 测试套件
 
 ```bash

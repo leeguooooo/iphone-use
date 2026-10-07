@@ -11,6 +11,9 @@ Two things build on flows:
 
 Both run through the same engine as `flow run`. Nothing new talks to the phone.
 
+`iphone-use test …` and `iphone-use schedule …` are the same commands, pointed at the installed
+daemon for you. Add `--instance NAME` to use a second phone.
+
 ## Test suites
 
 ```bash

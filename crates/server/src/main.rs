@@ -9,6 +9,8 @@
 //! iphone-use status  # is the phone ready for agents (exit 0 when it is)
 //! iphone-use try     # a harmless first run: open Settings, read it, go Home
 //! iphone-use login   # one-time browser sign-in + a QR code for the phone
+//! iphone-use test    # run a test suite (iphone-use-mcp test)
+//! iphone-use schedule # scheduled flows and suites (iphone-use-mcp schedule)
 //! ```
 //!
 //! The device runner on the phone (an XCTest runner with a
@@ -233,6 +235,24 @@ enum Command {
         /// Print the link instead of opening the browser.
         #[arg(long)]
         no_open: bool,
+    },
+    /// Run a test suite on the phone (see `iphone-use test --help` for the
+    /// flags; they are `iphone-use-mcp test`'s).
+    #[command(disable_help_flag = true)]
+    Test {
+        #[arg(long)]
+        instance: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Scheduled flows and test suites: add, list, runs, run, enable,
+    /// disable, rm (`iphone-use-mcp schedule`).
+    #[command(disable_help_flag = true)]
+    Schedule {
+        #[arg(long)]
+        instance: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -543,6 +563,16 @@ fn main() -> Result<()> {
         Command::Login { instance, no_open } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_login(&target, !no_open)?)
+        }
+        Command::Test { instance, args } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            let args = [vec!["test".to_string()], args].concat();
+            std::process::exit(onboarding::run_mcp(&target, &args))
+        }
+        Command::Schedule { instance, args } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            let args = [vec!["schedule".to_string()], args].concat();
+            std::process::exit(onboarding::run_mcp(&target, &args))
         }
     };
 

@@ -7,6 +7,9 @@ use reqwest::Method;
 
 fn answer(response: DaemonResponse) -> Result<serde_json::Value> {
     let json = response.json.clone().unwrap_or_default();
+    if response.status == reqwest::StatusCode::NOT_FOUND && response.json.is_none() {
+        bail!("this daemon has no schedules API (it predates them); upgrade with `iphone-use upgrade`");
+    }
     if !response.status.is_success() {
         let why = json
             .get("message")

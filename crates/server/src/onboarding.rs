@@ -101,6 +101,32 @@ fn plist_env(label: &str, key: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// test / schedule: iphone-use-mcp, pointed at this instance
+// ---------------------------------------------------------------------------
+
+/// Run `iphone-use-mcp <args…>` against this instance's daemon and return
+/// its exit code. The token goes through the environment, never argv.
+pub fn run_mcp(target: &Target, args: &[String]) -> i32 {
+    let Some(mcp) = server::flows::mcp_binary() else {
+        eprintln!("iphone-use-mcp is not installed next to iphone-use; re-run the installer");
+        return 2;
+    };
+    let mut command = std::process::Command::new(mcp);
+    command.args(args).env("PHONE_REMOTE_URL", target.base());
+    match &target.token {
+        Some(token) => command.env("PHONE_REMOTE_TOKEN", token),
+        None => command.env_remove("PHONE_REMOTE_TOKEN"),
+    };
+    match command.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            eprintln!("could not run iphone-use-mcp: {error}");
+            2
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // setup / doctor: the instance's own setup-wda.sh
 // ---------------------------------------------------------------------------
 
