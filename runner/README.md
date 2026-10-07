@@ -249,6 +249,38 @@ How it captures:
   **Achieved fps:** 27–28 fps on an iPhone 13 over USB with the daemon's 30 / 50 / 60 settings
   (`runner-compat.py`, first hardware run).
 
+### H.264 (`GET /h264` on the MJPEG port)
+
+`RunnerH264.swift` encodes the screen on the phone with VideoToolbox, so the daemon can pass it
+straight to viewers instead of decoding MJPEG and re-encoding it on the Mac. It shares the MJPEG
+port (no extra relay): a request for `/h264?fps=30&scale=50&kbps=2500` gets the H.264 stream,
+anything else gets MJPEG.
+
+- **Capture.** The same testmanagerd paths as MJPEG, decoded once by ImageIO at the requested
+  scale and drawn into a pooled BGRA `CVPixelBuffer`.
+- **Encoder.** H.264 Main, real-time, no frame reordering, a keyframe at least every 2 s, average
+  bitrate `kbps` with bursts capped at 1.5×. One encoder serves every client and runs only while
+  one is connected.
+- **Framing.** An HTTP/1.0 header block with `X-Video-Format: iphone-use-h264-annexb-v1`, then
+  `[u32 BE length][u8 flags][u64 BE pts µs][Annex-B access unit]` per frame — the daemon's own
+  `/agent/h264` framing. Flags: bit 0 keyframe (SPS + PPS in band), bit 1 the content band is one
+  flat colour (an app hiding its screen from capture; the daemon uses it for `capture_redacted`
+  and strips it before forwarding).
+- **Keyframes on request.** Any byte the client sends asks for a keyframe, so one upstream
+  connection serves viewers that join later. A new client waits for the next keyframe; a client
+  still writing the previous frame drops the current one and gets a fresh keyframe.
+- **`/status`** reports `h264.achievedFps`, `achievedKbps`, `captureMs` and `encodeMs`.
+
+Measured on an iPhone 13 over USB (30 fps, 50 % scale), same runner:
+
+| | fps | still screen | scrolling |
+|---|---|---|---|
+| MJPEG, quality 60 | 28.3–28.7 | 11.8 Mbit/s | 12.7 Mbit/s |
+| H.264, 2500 kbps | 28.3 | 0.38 Mbit/s | 1.7 Mbit/s |
+
+Through the daemon, passthrough runs at 28.2 fps and ~1.9 Mbit/s while scrolling with the daemon
+at 0.4 % CPU, against 6.7 % for the Mac re-encode of the MJPEG stream.
+
 ## Build
 
 ```bash

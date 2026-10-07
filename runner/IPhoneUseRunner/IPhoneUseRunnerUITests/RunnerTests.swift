@@ -137,7 +137,10 @@ final class RunnerTests: XCTestCase {
       "version": version,
       "busy": busySince != nil,
     ]
-    if let mjpeg { value["mjpeg"] = mjpeg.statusValue() }
+    if let mjpeg {
+      value["mjpeg"] = mjpeg.statusValue()
+      value["h264"] = mjpeg.h264.statusValue()
+    }
     if let busySince {
       value["busyMs"] = Int(Date().timeIntervalSince(busySince) * 1000)
     }

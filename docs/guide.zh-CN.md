@@ -89,7 +89,7 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 ## 在浏览器里操作手机
 
-`/phone` 显示手机实时画面：浏览器支持 WebCodecs 时走 `/agent/h264`（daemon 把 WDA 的 JPEG 帧用 Mac 的硬件编码器转成 H.264，码率约 0.7–2.5 Mbit/s），否则退回 `/agent/mjpeg`（25–40 Mbit/s，只适合局域网）。页面把你的点击、拖动、长按、滚动和输入（含中文）变成带 `ttl_ms` 上限、逐条确认的 `POST /control` 命令，不抢 Mac 焦点。**控件**面板列出辅助功能树，可以按精确标签点，不用对像素。
+`/phone` 显示手机实时画面：浏览器支持 WebCodecs 时走 `/agent/h264`（device runner 在手机上直接编码 H.264，daemon 原样转发：静止画面约 0.4 Mbit/s，滚动时约 2 Mbit/s；用 WebDriverAgent 或旧版 runner 时，daemon 退回到在 Mac 上把 JPEG 帧重新编码），否则退回 `/agent/mjpeg`（12–40 Mbit/s，只适合局域网）。设 `PHONE_REMOTE_H264_PASSTHROUGH=0` 可强制在 Mac 上重新编码。页面把你的点击、拖动、长按、滚动和输入（含中文）变成带 `ttl_ms` 上限、逐条确认的 `POST /control` 命令，不抢 Mac 焦点。**控件**面板列出辅助功能树，可以按精确标签点，不用对像素。
 
 **流程**面板把你的操作录成可重放的 flow 文件：
 

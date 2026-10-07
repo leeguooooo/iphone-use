@@ -144,6 +144,14 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                           path:(NSString *_Nullable *_Nullable)path
                                          error:(NSString *_Nullable *_Nullable)error;
 
+/// The main screen as a decoded image no larger than `scale` of full size, for the H.264 stream
+/// (RunnerH264.swift): the same capture paths as `jpegScreenshotWithQuality:`, decoded once by
+/// ImageIO instead of re-encoded. Caller releases the image.
++ (nullable CGImageRef)screenImageWithQuality:(double)quality
+                                        scale:(double)scale
+                                         path:(NSString *_Nullable *_Nullable)path
+                                        error:(NSString *_Nullable *_Nullable)error CF_RETURNS_RETAINED;
+
 // MARK: - Device
 
 /// Screen lock state from SpringBoardServices (SBGetScreenLockStatus), like WDA. Writes NO into

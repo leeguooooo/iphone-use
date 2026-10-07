@@ -13,5 +13,6 @@ trap 'rm -rf "$OUT"' EXIT
 clang -fobjc-arc -c "$SCRIPT_DIR/unit-check/IPURBridgeStub.m" -o "$OUT/stub.o"
 swiftc -O -import-objc-header "$SCRIPT_DIR/unit-check/IPURBridgeStub.h" \
     "$SOURCES/RunnerHTTP.swift" "$SOURCES/RunnerActions.swift" "$SOURCES/RunnerElements.swift" \
+    "$SOURCES/RunnerH264.swift" \
     "$SCRIPT_DIR/unit-check/main.swift" "$OUT/stub.o" -o "$OUT/unit-check"
 "$OUT/unit-check"

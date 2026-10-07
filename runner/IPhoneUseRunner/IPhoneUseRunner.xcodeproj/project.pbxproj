@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		075A08DD9BA77808A042E207 /* RunnerElements.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70866DAEACF7115FC193101 /* RunnerElements.swift */; };
+		27EDCFAE3E699437A5C156C9 /* RunnerH264.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D45CD0277AA9A24C681156E /* RunnerH264.swift */; };
 		603A181324BE3D2D3D9CEF19 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 470393750BF9CDEBE680ECF3 /* RunnerTests.swift */; };
 		6DE77AA9E758F2E53FDAC651 /* RunnerWDA.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7994977E24197EBB0129A53F /* RunnerWDA.swift */; };
 		70CDE4345DB673547F97FC7F /* RunnerHTTP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94BDD3F0E1278AAB2988DB12 /* RunnerHTTP.swift */; };
@@ -17,6 +18,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		0D45CD0277AA9A24C681156E /* RunnerH264.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerH264.swift; sourceTree = "<group>"; };
 		3C28F51DDB8C8EDC604DA1F4 /* IPhoneUseRunnerUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = IPhoneUseRunnerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		470393750BF9CDEBE680ECF3 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
 		74BD68A60C7ABD17C9DCEB07 /* IPURBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = IPURBridge.h; sourceTree = "<group>"; };
@@ -46,6 +48,7 @@
 				9E3171D1115C2E98DD29F3F9 /* IPURBridge.m */,
 				929B13B4B2EE3205992F3E2E /* RunnerActions.swift */,
 				B70866DAEACF7115FC193101 /* RunnerElements.swift */,
+				0D45CD0277AA9A24C681156E /* RunnerH264.swift */,
 				94BDD3F0E1278AAB2988DB12 /* RunnerHTTP.swift */,
 				F4DD8C426E23E9EBDBA0F0FE /* RunnerMJPEG.swift */,
 				470393750BF9CDEBE680ECF3 /* RunnerTests.swift */,
@@ -124,6 +127,7 @@
 				9CF8432F1753A46FC2F1D2CF /* IPURBridge.m in Sources */,
 				CBF5659BBA0993E2D2E21C71 /* RunnerActions.swift in Sources */,
 				075A08DD9BA77808A042E207 /* RunnerElements.swift in Sources */,
+				27EDCFAE3E699437A5C156C9 /* RunnerH264.swift in Sources */,
 				70CDE4345DB673547F97FC7F /* RunnerHTTP.swift in Sources */,
 				985FD83F33DC0CB4D8E76A6D /* RunnerMJPEG.swift in Sources */,
 				603A181324BE3D2D3D9CEF19 /* RunnerTests.swift in Sources */,
