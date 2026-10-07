@@ -179,10 +179,12 @@ pub enum RunKey {
     },
 }
 
-/// How a run ended.
+/// Whether a live run is open, or how a closed run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Closed {
+    /// A live summary only; never written as a closed run.
+    Open,
     /// The caller ended it (run_end).
     Ended,
     /// The owner went idle past the gap (inferred runs).
@@ -200,6 +202,7 @@ pub enum Closed {
 pub struct RunSummary {
     pub key: RunKey,
     pub inferred: bool,
+    /// `open` for live reports; the real close reason for closed summaries.
     pub closed: Closed,
     /// Something is missing: calls in flight at close, dropped or rejected
     /// calls, or dropped intervals.
@@ -596,7 +599,7 @@ impl RunAggregator {
     pub fn peek(&self, key: &RunKey) -> Option<RunSummary> {
         self.open
             .get(key)
-            .map(|run| summarize(key, run, Closed::Ended, None))
+            .map(|run| summarize(key, run, Closed::Open, None))
     }
 
     /// A call whose request was cancelled before it answered (the client
@@ -637,7 +640,7 @@ impl RunAggregator {
     pub fn open_summaries(&self) -> Vec<RunSummary> {
         self.open
             .iter()
-            .map(|(key, run)| summarize(key, run, Closed::Ended, None))
+            .map(|(key, run)| summarize(key, run, Closed::Open, None))
             .collect()
     }
 
@@ -652,6 +655,9 @@ impl RunAggregator {
         how: Closed,
         trace: Option<Option<u64>>,
     ) -> Option<RunSummary> {
+        if how == Closed::Open {
+            return None; // Live reports never enter the closed queue.
+        }
         let run = self.open.remove(key)?;
         match key {
             RunKey::Inferred { owner, .. } => {
@@ -955,6 +961,12 @@ impl SummaryLog {
     }
 
     pub fn append(&self, summary: &RunSummary) -> std::io::Result<()> {
+        if summary.closed == Closed::Open {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "live run summaries cannot be persisted as closed runs",
+            ));
+        }
         let mut line = serde_json::to_string(summary).map_err(std::io::Error::other)?;
         line.push('\n');
         let parent = self
@@ -1068,6 +1080,41 @@ mod tests {
 
     fn ids(list: &[&str]) -> Option<Vec<String>> {
         Some(list.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn live_reports_stay_open_without_ending_the_run() {
+        let mut agg = RunAggregator::new();
+        assert!(agg.start_run(Some("a".into()), "live".into(), 0, true));
+        one(&mut agg, 0, 100, Some("a"), Some("live"));
+        let key = agg.open_summaries()[0].key.clone();
+        let live = agg.peek(&key).unwrap();
+        assert_eq!(live.closed, Closed::Open);
+        assert_eq!(serde_json::to_value(&live).unwrap()["closed"], "open");
+        assert_eq!(live.tool_calls, 1);
+        assert_eq!(agg.open_summaries()[0].closed, Closed::Open);
+        assert!(agg.close_with(&key, Closed::Open, None).is_none());
+        assert!(agg.peek(&key).is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runs.jsonl");
+        let log = SummaryLog::new(path.clone(), RUNS_LOG_ROTATE_BYTES);
+        assert_eq!(
+            log.append(&live).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(!path.exists(), "live queries never create a closed-run log");
+        assert!(
+            agg.drain_closed().is_empty(),
+            "queries do not close or log runs"
+        );
+        let ended = agg
+            .end_run(Some("a".into()), "live".into(), Some(vec![]))
+            .unwrap();
+        assert_eq!(ended.closed, Closed::Ended);
+        assert_eq!(ended.tool_calls, live.tool_calls);
+        assert_eq!(ended.model_round_trips, Some(0));
+        assert!(agg.open_summaries().is_empty());
+        assert_eq!(agg.drain_closed()[0].closed, Closed::Ended);
     }
 
     #[test]

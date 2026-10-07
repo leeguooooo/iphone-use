@@ -1056,3 +1056,105 @@ fn scope_changed_keeps_real_read_failures() {
     assert!(matches!(status, 502 | 504), "{status} {body}");
     assert_ne!(body["error"], "baseline_unavailable", "{body}");
 }
+
+/// Live HTTP/CLI summaries stay open until run_end, which preserves the real
+/// close reason, counters, zero-model trace and persisted summary.
+#[test]
+fn live_metrics_report_open_until_the_run_ends() {
+    let runner = runner();
+    let state = private_dir();
+    let home = private_dir();
+    let state_path = state.path().canonicalize().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let daemon = spawn_daemon(runner.url(), &state_path, &home_path);
+    let owner = [("X-Phone-Owner", "live-state")];
+    let (status, _) = http(
+        daemon.port,
+        "POST",
+        "/agent/run",
+        TOKEN,
+        &owner,
+        r#"{"action":"start","run_id":"task","complete_trace":true}"#,
+    );
+    assert_eq!(status, 200);
+    let in_run = [("X-Phone-Owner", "live-state"), ("X-Agent-Run", "task")];
+    let (status, _) = http(daemon.port, "GET", "/agent/elements", TOKEN, &in_run, "");
+    assert_eq!(status, 200);
+    let (_, report) = http(
+        daemon.port,
+        "GET",
+        "/agent/metrics?owner=live-state",
+        TOKEN,
+        &[],
+        "",
+    );
+    assert_eq!(report["open"].as_array().unwrap().len(), 1);
+    assert_eq!(report["open"][0]["closed"], "open");
+    assert_eq!(report["open"][0]["tool_calls"], 1);
+    assert!(report["recent"].as_array().unwrap().is_empty());
+
+    let cli = |json: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_iphone-use"));
+        command.args(["metrics", "--owner", "live-state"]);
+        if json {
+            command.arg("--json");
+        }
+        let output = command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home_path)
+            .env(
+                "PHONE_REMOTE_URL",
+                format!("http://127.0.0.1:{}", daemon.port),
+            )
+            .env("PHONE_REMOTE_TOKEN", TOKEN)
+            .env("IPHONE_USE_NO_UPDATE_CHECK", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let live: serde_json::Value = serde_json::from_str(&cli(true)).unwrap();
+    assert_eq!(live["open"][0]["closed"], "open");
+    assert!(cli(false).contains("task [state: open]"));
+    let (status, ended) = http(
+        daemon.port,
+        "POST",
+        "/agent/run",
+        TOKEN,
+        &owner,
+        r#"{"action":"end","run_id":"task","turn_ids":[]}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(ended["run"]["closed"], "ended");
+    assert_eq!(
+        ended["run"]["tool_calls"], 1,
+        "metrics queries never count as work"
+    );
+    assert_eq!(ended["run"]["model_round_trips"], 0);
+    let recent: serde_json::Value = serde_json::from_str(&cli(true)).unwrap();
+    assert!(recent["open"].as_array().unwrap().is_empty());
+    assert_eq!(recent["recent"][0]["closed"], "ended");
+    assert!(cli(false).contains("task [state: ended]"));
+    let path = state_path.join("agent-runs.jsonl");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let logged = std::fs::read_to_string(&path).unwrap_or_default();
+        if !logged.is_empty() {
+            let summary: serde_json::Value =
+                serde_json::from_str(logged.lines().next().unwrap()).unwrap();
+            assert_eq!(summary["closed"], "ended");
+            assert_eq!(summary["tool_calls"], 1);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "closed summary was not persisted"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}

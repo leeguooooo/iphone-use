@@ -364,7 +364,10 @@ update / publish / report`.
 
 **Metrics.** `GET /agent/metrics[?owner=NAME]` (CLI `iphone-use metrics
 [--owner NAME] [--json]`) reports open runs, recent closed runs and loss
-counters. A run counts HTTP calls to the daemon — **not model turns** —
+counters. Live summaries in `open` carry `closed:"open"`; `recent` and the
+JSONL log retain the actual close reason (`ended`, `idle`, `expired`,
+`lifetime_exceeded`, or `evicted`). The CLI prints that state on each run.
+A run counts HTTP calls to the daemon — **not model turns** —
 plus batches, observed actions, flow calls, stale and unknown outcomes,
 failure classes, and p50/p95 call time over `stored_calls`.
 `runner_busy_union_ms` counts overlapping runner time once;
