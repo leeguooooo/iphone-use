@@ -83,6 +83,11 @@ while [ "$#" -gt 0 ]; do
             esac
             shift 2
             ;;
+        --no-setup)
+            # Exported so the pinned inner installer sees it too.
+            export IPHONE_USE_NO_SETUP=1
+            shift
+            ;;
         *)
             INSTALL_ARGS+=("$1")
             shift
@@ -614,7 +619,7 @@ _restore_wda_transition() {
     if _restore_launchd_job "$WDA_PLIST_LABEL" "$WDA_PLIST_DST" \
         "$PREINSTALL_WDA_LOADED" "$PREINSTALL_WDA_DISABLED"; then
         WDA_RUNTIME_TOUCHED=0
-        warn "Restored the previous WDA supervisor enabled/loaded state after an incomplete install."
+        warn "Restored the previous device runner supervisor enabled/loaded state after an incomplete install."
     else
         warn "WDA supervisor rollback was incomplete; recovery plist retained at $WDA_PLIST_DST"
         return 1
@@ -731,6 +736,116 @@ install_cli_link() {
         *) warn "$dir is not on PATH; add it to use \`iphone-use upgrade\` (or run $target)." ;;
     esac
     return 0
+}
+
+# ── First run ─────────────────────────────────────────────────────────────────
+# A first install goes on to set the phone up (when one is plugged in), show
+# that an agent can drive it, register the MCP server with Claude Code, and
+# sign the browser in with a one-time link. Upgrades (`iphone-use upgrade`,
+# the auto-update job) and runs without a terminal skip the parts that touch
+# the phone or open windows; --no-setup / IPHONE_USE_NO_SETUP=1 skips setup.
+first_run_interactive() {
+    [ -t 1 ] && [ -z "${CI:-}" ]
+}
+
+can_open_windows() {
+    [ -z "${SSH_CONNECTION:-}${SSH_TTY:-}" ] && [ -x /usr/bin/open ]
+}
+
+# USB-attached iPhones, by UDID, straight from usbmuxd (no extra tools).
+usb_iphones() {
+    python3 - 2>/dev/null <<'PY'
+import socket, struct, plistlib
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(3)
+    s.connect("/var/run/usbmuxd")
+    p = plistlib.dumps({"MessageType": "ListDevices", "ClientVersionString": "x", "ProgName": "x"})
+    s.sendall(struct.pack("<IIII", len(p) + 16, 1, 8, 1) + p)
+    h = s.recv(16); n = struct.unpack("<I", h[:4])[0]; d = b""
+    while len(d) < n - 16:
+        d += s.recv(n - 16 - len(d))
+    devices = plistlib.loads(d).get("DeviceList", [])
+    print(" ".join(sorted({x["Properties"]["SerialNumber"] for x in devices
+                           if x["Properties"].get("ConnectionType") == "USB"})))
+except Exception:
+    pass
+PY
+}
+
+# first_run_setup <cli> <wanted-udid-or-empty> [--instance NAME]
+# Sets FIRST_SETUP_DONE=1 when setup and the demo both succeeded.
+FIRST_SETUP_DONE=0
+first_run_setup() {
+    local cli="$1" wanted="$2" usb rerun="iphone-use setup"
+    shift 2
+    [ "$#" -eq 0 ] || rerun="$rerun $*"
+    echo ""
+    printf '%b━━━ Set up the iPhone ━━━%b\n' "$BOLD" "$RESET"
+    if [ "${IPHONE_USE_NO_SETUP:-0}" = "1" ]; then
+        info "Skipped (--no-setup). When the iPhone is plugged in and unlocked, run: $rerun"
+        return 0
+    fi
+    usb="$(usb_iphones)"
+    if [ -z "$usb" ] || { [ -n "$wanted" ] && case " $usb " in *" $wanted "*) false ;; *) true ;; esac; }; then
+        info "Plug the iPhone in with a cable, unlock it, then run: $rerun"
+        return 0
+    fi
+    info "An iPhone is plugged in; setting it up now (keep it unlocked; the first build takes a few minutes)."
+    echo ""
+    if ! "$cli" setup "$@"; then
+        echo ""
+        warn "Setup stopped. Fix what it said above, then run: $rerun"
+        return 0
+    fi
+    echo ""
+    printf '%b━━━ First run ━━━%b\n' "$BOLD" "$RESET"
+    if "$cli" try "$@"; then
+        FIRST_SETUP_DONE=1
+    else
+        warn "The phone is set up but the first run did not finish; check with: iphone-use status${*:+ $*}"
+    fi
+}
+
+# register_claude_mcp <mcp-binary> <server-name> [instance]
+# The bare command is enough: the MCP server reads its daemon URL and token
+# from the daemon's own LaunchAgent, so no secret lands in Claude's config.
+register_claude_mcp() {
+    local mcp="$1" name="$2" instance="${3:-}" existing json
+    command -v claude >/dev/null 2>&1 || {
+        info "MCP command for agents: $mcp${instance:+ (env PHONE_REMOTE_INSTANCE=$instance)}"
+        return 0
+    }
+    if existing="$(claude mcp get "$name" 2>/dev/null)"; then
+        if printf '%s' "$existing" | grep -qF "$mcp"; then
+            ok "Claude Code already has the $name MCP server."
+        else
+            warn "Claude Code already has an MCP server named $name with another command; left it unchanged."
+        fi
+        return 0
+    fi
+    if [ -n "$instance" ]; then
+        json="$(printf '{"type":"stdio","command":"%s","args":[],"env":{"PHONE_REMOTE_INSTANCE":"%s"}}' "$mcp" "$instance")"
+    else
+        json="$(printf '{"type":"stdio","command":"%s","args":[]}' "$mcp")"
+    fi
+    if claude mcp add-json -s user "$name" "$json" >/dev/null 2>&1; then
+        ok "Claude Code can now use the iPhone (MCP server \"$name\"). Undo: claude mcp remove -s user $name"
+    else
+        warn "Could not register the MCP server with Claude Code; add it by hand: claude mcp add -s user $name -- $mcp"
+    fi
+}
+
+# first_run_login <cli> [--instance NAME]: one-time browser sign-in + phone QR.
+first_run_login() {
+    local cli="$1"
+    shift
+    echo ""
+    printf '%b━━━ Open the control page ━━━%b\n' "$BOLD" "$RESET"
+    if can_open_windows; then
+        "$cli" login "$@" || warn "Could not make a sign-in link; run: iphone-use login${*:+ $*}"
+    else
+        "$cli" login --no-open "$@" || warn "Could not make a sign-in link; run: iphone-use login${*:+ $*}"
+    fi
 }
 
 validate_release_ref() {
@@ -2029,11 +2144,13 @@ install_named_instance() {
     done
     [ "$daemon_port" != "$wda_port" ] && [ "$daemon_port" != "$mjpeg_port" ] \
         && [ "$wda_port" != "$mjpeg_port" ] \
-        || die "Daemon, WDA and video ports must differ."
+        || die "Daemon, runner control and video ports must differ."
 
     runtime="$state_dir/runtime"
     app_dst="$runtime/$APP_NAME"
     binary="$app_dst/$BINARY_INSIDE_APP"
+    local first_install=1
+    [ ! -f "$plist" ] || first_install=0
     if [ -f "$plist" ]; then
         [ ! -L "$plist" ] || die "Refusing symlinked plist: $plist"
         [ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$plist" 2>/dev/null)" = "$label" ] \
@@ -2215,12 +2332,20 @@ install_named_instance() {
     info "Token       : EnvironmentVariables:PHONE_REMOTE_AGENT_TOKEN in $plist"
     info "State       : $state_dir"
     echo ""
-    printf '  Agents target this phone with:\n'
+    printf '  Agents target this phone with PHONE_REMOTE_INSTANCE=%s (the MCP server\n' "$INSTANCE_NAME"
+    printf '  reads the URL and token from the plist), or with:\n'
     printf "    ${BOLD}PHONE_REMOTE_URL=http://127.0.0.1:%s PHONE_REMOTE_AGENT_TOKEN=<token>${RESET}\n" "$daemon_port"
-    printf '  Next, build and start the device runner for this phone (keep it unlocked):\n'
-    printf "    ${BOLD}PHONE_REMOTE_INSTANCE=%s %s/setup-wda.sh${RESET}\n" "$INSTANCE_NAME" "$state_dir"
     printf '  Remove only this instance with:\n'
     printf "    ${BOLD}%s/uninstall.sh --instance %s${RESET}\n" "$state_dir" "$INSTANCE_NAME"
+    if [ "$first_install" = 1 ] && first_run_interactive; then
+        first_run_setup "$binary" "$udid" --instance "$INSTANCE_NAME"
+        echo ""
+        printf '%b━━━ Agents ━━━%b\n' "$BOLD" "$RESET"
+        register_claude_mcp "$app_dst/$MCP_BINARY_INSIDE_APP" "iphone-use-$INSTANCE_NAME" "$INSTANCE_NAME"
+    else
+        echo ""
+        info "Set up or repair this phone with: iphone-use setup --instance $INSTANCE_NAME"
+    fi
     exit 0
 }
 
@@ -2461,7 +2586,7 @@ env_or_existing() {
 # phone over WDA. An older plist may still say mirror: say so and move on.
 if [ "${PHONE_REMOTE_BACKEND:-$(plist_env_get PHONE_REMOTE_BACKEND)}" = "mirror" ] \
     || [ "${PHONE_REMOTE_BACKEND:-$(plist_env_get PHONE_REMOTE_BACKEND)}" = "legacy-mirror" ]; then
-    warn "The iPhone Mirroring backend was removed in v0.9; this install serves the phone over WDA."
+    warn "The iPhone Mirroring backend was removed in v0.9; this install serves the phone over the device runner."
     warn "  Run setup-wda.sh once if this Mac has never set the device runner up."
 fi
 
@@ -2704,7 +2829,7 @@ if [ -z "$WDA_MANAGED" ]; then
         WDA_MANAGED="true"
         [ -n "$WDA_URL" ] || WDA_URL="http://127.0.0.1:8100"
         [ -n "$WDA_MJPEG_URL" ] || WDA_MJPEG_URL="http://127.0.0.1:9100"
-        info "Legacy product-owned WDA supervisor detected; migrating lifecycle ownership."
+        info "Legacy product-owned runner supervisor detected; migrating lifecycle ownership."
     elif [ "$WDA_URL" = "http://127.0.0.1:8100" ] \
         && [ "$WDA_MJPEG_URL" = "http://127.0.0.1:9100" ]; then
         WDA_MANAGED="true"
@@ -2812,7 +2937,7 @@ else
     warn "Release ${RELEASE_REF:-?} ships no device runner sources; setup-wda.sh will report them missing until a release that has them is installed."
 fi
 
-info "For cross-network access, put an authenticated HTTPS reverse proxy or a trusted VPN/tunnel in front of the daemon; never expose WDA ports."
+info "For cross-network access, put an authenticated HTTPS reverse proxy or a trusted VPN/tunnel in front of the daemon; never expose the device runner ports."
 
 # Persist every daemon setting the installer knows about, not just the four
 # headline values. This is intentionally an allow-list: it preserves supported
@@ -2948,14 +3073,14 @@ if [ "$PRODUCT_WDA_SUPERVISOR_OWNED" = "1" ] \
         # purpose. Enabling it here made the next login start the runner, and
         # iOS then asked for the passcode on a phone nobody had asked for. The
         # daemon enables it again on the next agent request.
-        ok "Product WDA supervisor stays parked; the daemon starts it on the next agent request"
+        ok "Device runner supervisor stays parked; the daemon starts it on the next agent request"
     else
         if [ "$PREINSTALL_WDA_DISABLED" = "1" ]; then
             WDA_RUNTIME_TOUCHED=1
         fi
         launchctl enable "gui/$UID_NUM/$WDA_PLIST_LABEL" 2>/dev/null \
-            || die "Could not re-enable the product WDA supervisor for Direct mode"
-        ok "Product WDA supervisor enabled for Direct mode"
+            || die "Could not re-enable the device runner supervisor"
+        ok "Device runner supervisor enabled"
     fi
 fi
 
@@ -2968,9 +3093,9 @@ WDA_READY=0
 if command -v curl >/dev/null 2>&1 \
     && curl -fsS --noproxy '*' -m 4 "${WDA_URL%/}/status" >/dev/null 2>&1; then
     WDA_READY=1
-    ok "Existing WDA endpoint verified; the direct daemon can start now"
+    ok "Existing device runner endpoint verified; the direct daemon can start now"
 elif launchctl print "gui/$UID_NUM/$WDA_PLIST_LABEL" >/dev/null 2>&1; then
-    info "Existing WDA launchd supervisor found; it can recover the device layer."
+    info "Existing device runner supervisor found; it can recover the device layer."
 else
     info "Direct control plane will start offline; run setup-wda.sh to connect the device layer."
 fi
@@ -3142,7 +3267,7 @@ if [ "$WDA_READY" = "1" ] \
     DAEMON_STATUS=""
     DAEMON_AGENT_SECRET=""
     [ "$DAEMON_PRODUCT_READY" = "1" ] \
-        || die "WDA answered before install, but the restarted daemon did not report drivable=true within 15s; the previous install and daemon state were restored. Inspect $LOG_DIR."
+        || die "The device runner answered before install, but the restarted daemon did not report drivable=true within 15s; the previous install and daemon state were restored. Inspect $LOG_DIR."
     ok "Daemon product status verified: drivable=true"
 fi
 
@@ -3180,33 +3305,24 @@ echo ""
 printf '%b━━━ Device layer (iphone-use device runner) ━━━%b\n' "$BOLD" "$RESET"
 echo ""
 if [ "$WDA_MANAGED" = "true" ]; then
-    printf "  Before managed setup:\n"
-    printf "    • Install full Xcode and sign in: Xcode → Settings → Accounts.\n"
-    printf "    • Enable Developer Mode on the iPhone; connect it over USB.\n"
-    printf "    • Keep the iPhone unlocked and awake during the first build.\n"
-    printf "    • Keep the Mac and iPhone on a trusted/isolated network: WDA itself has no authentication.\n"
-    printf "    • Keep Cloudflare WARP / tunnel VPN manually disconnected while Xcode mounts developer services.\n"
-    printf "    • WDA_ALLOW_LAN=1 + socat is an explicit unsafe fallback, not automatic recovery.\n"
-    echo ""
-    if [ -x "$SETUP_WDA_DST" ]; then
-        printf "  1. Check prerequisites (read-only):\n"
-        printf "       ${BOLD}%s doctor${RESET}\n" "$SETUP_WDA_DST"
-        printf "  2. Build, sign, install, relay, and verify WDA:\n"
-        printf "       ${BOLD}%s${RESET}\n" "$SETUP_WDA_DST"
-    else
-        warn "WDA setup script disappeared after commit; rerun install.sh to restore $SETUP_WDA_DST."
-    fi
+    printf "  What the iPhone needs (once):\n"
+    printf "    • Xcode installed and signed in to an Apple ID (Xcode → Settings → Accounts; a free one works).\n"
+    printf "    • Developer Mode on (iPhone Settings → Privacy & Security → Developer Mode).\n"
+    printf "    • Plugged in with a cable, unlocked, and this Mac trusted.\n"
+    printf "  %biphone-use doctor%b says what is missing; %biphone-use setup%b does the rest.\n" "$BOLD" "$RESET" "$BOLD" "$RESET"
+    [ -x "$SETUP_WDA_DST" ] \
+        || warn "The setup script disappeared after commit; rerun install.sh to restore $SETUP_WDA_DST."
 else
-    info "Using an externally managed WDA endpoint:"
+    info "Using an externally managed device runner endpoint:"
     printf "    control: %s\n" "$WDA_URL"
     printf "    video  : %s\n" "$WDA_MJPEG_URL"
     printf "  The installer will not start, stop, or rewrite that service.\n"
 fi
 echo ""
 if [ "$WDA_READY" = "1" ]; then
-    ok "WDA was already reachable during this install."
+    ok "The device runner was already reachable during this install."
 elif [ "$WDA_MANAGED" = "false" ]; then
-    warn "The external WDA endpoint was not reachable; verify it independently."
+    warn "The external device runner endpoint was not reachable; verify it independently."
 else
     warn "The phone is not reported ready yet; completion is intentionally deferred to setup-wda.sh."
 fi
@@ -3229,10 +3345,9 @@ else
 fi
 
 echo ""
-printf '%b━━━ MCP server ━━━%b\n' "$BOLD" "$RESET"
-ok "Installed release-matched MCP executable:"
-printf '  %s\n' "$DEST/$MCP_BINARY_INSIDE_APP"
-info "Use this absolute path as the MCP client command; the bridge connects to the installed daemon."
+printf '%b━━━ Agents ━━━%b\n' "$BOLD" "$RESET"
+register_claude_mcp "$DEST/$MCP_BINARY_INSIDE_APP" "iphone-use"
+info "Other MCP clients: command $DEST/$MCP_BINARY_INSIDE_APP (no env needed on this Mac)."
 
 echo ""
 printf '%b━━━ Upgrade ━━━%b\n' "$BOLD" "$RESET"
@@ -3252,49 +3367,42 @@ else
     info "Daemon job is staged but not loaded."
 fi
 if [ "$WDA_MANAGED" = "false" ]; then
-    info "WDA endpoint is externally managed; no local supervisor status is asserted."
+    info "The device runner endpoint is externally managed; no local supervisor status is asserted."
 elif launchctl print "gui/$UID_NUM/$WDA_PLIST_LABEL" >/dev/null 2>&1; then
-    ok "WDA supervisor loaded: gui/$UID_NUM/$WDA_PLIST_LABEL"
+    ok "Device runner supervisor loaded: gui/$UID_NUM/$WDA_PLIST_LABEL"
 else
-    info "WDA supervisor is parked or not set up yet (it starts on the next agent request)."
+    info "Device runner supervisor is parked or not set up yet (it starts on the next agent request)."
 fi
-
-echo ""
-if [ "$DAEMON_HTTP_READY" = "1" ]; then
-    printf '%b━━━ Connect from your iPhone ━━━%b\n' "$BOLD" "$RESET"
-    ok "Daemon HTTP endpoint verified at $DAEMON_PROBE_URL"
-else
-    printf '%b━━━ Connect after first-run setup ━━━%b\n' "$BOLD" "$RESET"
-    if [ "$WDA_MANAGED" = "true" ]; then
-        warn "Run setup-wda.sh first; the installer has not verified a usable daemon yet."
-    else
-        warn "Verify the external WDA endpoints and restart the daemon before connecting."
-    fi
-fi
-printf "  1. Keep the iPhone and Mac on the same trusted Wi-Fi.\n"
-printf "  2. In iPhone Safari open:  ${BOLD}http://%s:%s/phone${RESET}\n" "$LAN_IP" "$PORT"
-printf "  3. Password: ${BOLD}%s${RESET}\n" "$PASSWORD"
-if [ "$PW_SOURCE" = "generated" ]; then
-    printf "     ${YELLOW}(generated — save it; it's stored in %s)${RESET}\n" "$PLIST_DST"
-fi
-printf "     Change it later by editing PHONE_REMOTE_PASSWORD in that plist + kickstart.\n"
 
 echo ""
 printf '%b━━━ Quick reference ━━━%b\n' "$BOLD" "$RESET"
-printf "  Status  : launchctl print gui/%s/%s\n"       "$UID_NUM" "$PLIST_LABEL"
-printf "  Restart : launchctl kickstart -k gui/%s/%s\n" "$UID_NUM" "$PLIST_LABEL"
-printf "  Stop    : launchctl bootout gui/%s/%s\n"      "$UID_NUM" "$PLIST_LABEL"
-printf "  Uninstall: %s\n" "$UNINSTALL_DST"
-printf "  Logs    : tail -f %s/iphone-use.log\n"    "$LOG_DIR"
-printf "  Errors  : tail -f %s/iphone-use.err\n"    "$LOG_DIR"
-printf "  WDA     : %s status\n" "$SETUP_WDA_DST"
-printf "  WDA log : tail -f %s/.iphone-use/wda-agent.log\n" "$HOME"
+printf "  Ready?    : iphone-use status         Fix: iphone-use doctor\n"
+printf "  Set up    : iphone-use setup          Try: iphone-use try\n"
+printf "  Control   : http://%s:%s/phone\n" "$LAN_IP" "$PORT"
+printf "  Sign in   : iphone-use login          (one-time link + QR code for the iPhone)\n"
+printf "  Password  : PHONE_REMOTE_PASSWORD in %s\n" "$PLIST_DST"
+printf "  Restart   : launchctl kickstart -k gui/%s/%s\n" "$UID_NUM" "$PLIST_LABEL"
+printf "  Uninstall : %s\n" "$UNINSTALL_DST"
+printf "  Logs      : %s/iphone-use.log, %s/.iphone-use/wda-agent.log\n" "$LOG_DIR" "$HOME"
 echo ""
 if [ "$DAEMON_HTTP_READY" = "1" ] \
     && [ "$WDA_READY" = "1" ] \
     && [ "$DAEMON_PRODUCT_READY" = "1" ]; then
-    ok "Installed; daemon HTTP, WDA endpoints, and product drivable status verified."
+    ok "Installed; the daemon and the device runner are up, and the iPhone is drivable."
 else
     ok "Installed; daemon HTTP control plane verified."
-    warn "The device layer is pending: the device runner is parked, or still needs setup-wda.sh."
+    if [ "$WDA_MANAGED" = "true" ]; then
+        info "The device runner is parked or not set up yet."
+    fi
+fi
+
+# ── Step 11 — First run ──────────────────────────────────────────────────────
+# Only a first install, in a terminal: upgrades must not relaunch a parked
+# runner on someone's phone (each launch can ask for the passcode) or open
+# browser windows from the auto-update job.
+if [ "$PLIST_HAD_EXISTING" = "0" ] && first_run_interactive; then
+    if [ "$WDA_MANAGED" = "true" ] && [ "$WDA_READY" != "1" ]; then
+        first_run_setup "$DEST/$BINARY_INSIDE_APP" ""
+    fi
+    [ "$DAEMON_HTTP_READY" != "1" ] || first_run_login "$DEST/$BINARY_INSIDE_APP"
 fi

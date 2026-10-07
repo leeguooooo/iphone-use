@@ -976,6 +976,112 @@ _marker_file_secure() {
     [ "$owner" = "$UID_NUM" ] && [ "$mode" = "600" ]
 }
 
+# Team IDs of the accounts signed in to Xcode, one per line (deduplicated).
+XCODE_APP_STORE_URL="https://apps.apple.com/app/xcode/id497799835"
+
+_xcode_account_teams() {
+    defaults export com.apple.dt.Xcode - 2>/dev/null | python3 -c '
+import plistlib, sys
+try:
+    prefs = plistlib.loads(sys.stdin.buffer.read())
+except Exception:
+    sys.exit(0)
+teams = set()
+for entries in (prefs.get("IDEProvisioningTeamByIdentifier") or {}).values():
+    for team in entries if isinstance(entries, list) else []:
+        team_id = team.get("teamID") if isinstance(team, dict) else None
+        if isinstance(team_id, str) and team_id:
+            teams.add(team_id)
+print("\n".join(sorted(teams)))
+' 2>/dev/null || true
+}
+
+# Best effort, interactive runs only: put Xcode in front so the person can add
+# an account. Never from launchd or over SSH, where nobody sees the window.
+_open_xcode_for_account() {
+    [ "${WDA_KEEPALIVE:-0}" != "1" ] || return 0
+    [ -t 1 ] || return 0
+    [ -z "${SSH_CONNECTION:-}${SSH_TTY:-}" ] || return 0
+    open -a Xcode >/dev/null 2>&1 || return 0
+    info "Opened Xcode: Settings (⌘,) → Accounts → + → Apple ID"
+}
+
+_checklist_line() {  # _checklist_line 1|0 <item> [fix]
+    if [ "$1" = 1 ]; then
+        printf '  %s %s\n' "${GRN}✓${RST}" "$2"
+    else
+        printf '  %s %s — %s\n' "${RED}✗${RST}" "$2" "$3"
+    fi
+}
+
+# "enabled", "disabled", or nothing when devicectl cannot tell.
+_developer_mode_status() {
+    local j
+    j="$(mktemp "${TMPDIR:-/tmp}/iphone-use-devmode.XXXXXX")" || return 0
+    if _devicectl_t 5 device info details --device "$1" -j "$j" >/dev/null 2>&1; then
+        python3 -c '
+import json, sys
+try:
+    props = json.load(open(sys.argv[1]))["result"]["deviceProperties"]
+    print(props.get("developerModeStatus", ""))
+except Exception:
+    pass
+' "$j" 2>/dev/null || true
+    fi
+    rm -f "$j"
+}
+
+# What a person has to do by hand before the first build, one plain fix per
+# missing item. Only an interactive run shows it (launchd and the tests have
+# no terminal); the detailed checks that follow stay the source of truth.
+_first_run_checklist() {
+    local missing=0 account=1 usb count devmode
+    printf '\n%s\n' "${BOLD}Before the first build${RST}"
+    if xcodebuild -version >/dev/null 2>&1; then
+        _checklist_line 1 "Xcode is installed"
+    else
+        _checklist_line 0 "Xcode is installed" "get it from the App Store ($XCODE_APP_STORE_URL) and open it once"
+        missing=1
+    fi
+    if [ -z "${WDA_TEAM_ID:-}" ] \
+        && [ -z "$(defaults read com.apple.dt.Xcode IDEProvisioningTeamManagerLastSelectedTeamID 2>/dev/null || true)" ] \
+        && [ -z "$(_xcode_account_teams)" ]; then
+        account=0
+    fi
+    if [ "$account" = 1 ]; then
+        _checklist_line 1 "Xcode is signed in to an Apple account"
+    else
+        _checklist_line 0 "Xcode is signed in to an Apple account" "Xcode → Settings → Accounts → + → Apple ID (a free one works)"
+        missing=1
+    fi
+    if [ "$WDA_ALLOW_LAN" != "1" ]; then
+        usb="$(_usb_udids)"
+        count="$(printf '%s' "$usb" | wc -w | tr -d '[:space:]')"
+        if [ "$count" = 0 ]; then
+            _checklist_line 0 "iPhone connected over USB" "plug it in with a cable, unlock it, and tap Trust"
+            missing=1
+        else
+            _checklist_line 1 "iPhone connected over USB"
+            if [ "$count" = 1 ]; then
+                devmode="$(_developer_mode_status "$usb")"
+                case "$devmode" in
+                    enabled) _checklist_line 1 "Developer Mode is on" ;;
+                    disabled)
+                        _checklist_line 0 "Developer Mode is on" "on the iPhone: Settings → Privacy & Security → Developer Mode → On, then let it restart"
+                        missing=1
+                        ;;
+                esac
+            fi
+        fi
+    fi
+    printf '  %s\n\n' "Keep the iPhone unlocked and awake until setup finishes."
+    if [ "$missing" = 1 ]; then
+        [ "$account" = 1 ] || _open_xcode_for_account
+        return 1
+    fi
+    return 0
+}
+
 # Resolve one signing identity for doctor, setup, and the persisted supervisor.
 # A shared default bundle ID cannot work across Apple Developer teams, so a fresh
 # install derives a legal, team-specific suffix only after the Team ID validates.
@@ -984,8 +1090,23 @@ _resolve_signing_identity() {
     BUNDLE_ID_DERIVED=0
     TEAM_ID="${WDA_TEAM_ID:-$(defaults read com.apple.dt.Xcode IDEProvisioningTeamManagerLastSelectedTeamID 2>/dev/null || true)}"
     if [ -z "$TEAM_ID" ]; then
-        SIGNING_ERROR="No Apple Team ID. In Xcode open Settings → Accounts, select the team, then rerun; or export WDA_TEAM_ID=<10-character Team ID>."
-        return 1
+        # Signing in to Xcode lists the account teams, but only selecting one
+        # in a project records the "last selected" key read above. One team
+        # is unambiguous, so use it rather than send a first-time user into
+        # Xcode project settings.
+        local teams
+        teams="$(_xcode_account_teams)"
+        case "$(printf '%s' "$teams" | wc -w | tr -d '[:space:]')" in
+            1) TEAM_ID="$teams" ;;
+            0)
+                SIGNING_ERROR="Xcode is not signed in to an Apple account. Open Xcode → Settings → Accounts, click + and add your Apple ID (a free Apple ID works), then rerun."
+                return 1
+                ;;
+            *)
+                SIGNING_ERROR="Xcode is signed in to several teams ($(printf '%s' "$teams" | tr '\n' ' ' | sed 's/ $//')); pick one: export WDA_TEAM_ID=<one of them>, then rerun."
+                return 1
+                ;;
+        esac
     fi
     if ! _valid_team_id "$TEAM_ID"; then
         SIGNING_ERROR="Invalid WDA_TEAM_ID '$TEAM_ID'. Expected exactly 10 uppercase ASCII letters/digits, e.g. ABCD123456."
@@ -2108,7 +2229,7 @@ cmd_doctor() {
         ok "Full Xcode: $xcode_version"
         _doctor_xcode_compat || fail=1
     else
-        warn "X full Xcode unavailable (install Xcode, then select it with xcode-select)"
+        warn "X Xcode is not installed: get it from the App Store ($XCODE_APP_STORE_URL), open it once, then rerun"
         fail=1
     fi
     if _resolve_signing_identity; then
@@ -2120,6 +2241,7 @@ cmd_doctor() {
         fi
     else
         warn "X $SIGNING_ERROR"
+        _open_xcode_for_account
         fail=1
     fi
     if _runner_source_valid; then
@@ -2217,6 +2339,12 @@ cmd_doctor() {
         curl -s -m 4 "http://127.0.0.1:$WDA_PORT/status" >/dev/null 2>&1 \
             && ok "device runner already serving on 127.0.0.1:$WDA_PORT"
     fi
+    # Caveats the installer used to print to everyone; they matter only when
+    # something above goes wrong, so they live here.
+    printf '%s\n' "${BOLD}Notes${RST}"
+    printf '  %s\n' "• The device runner on the iPhone has no password of its own. The Mac relays it on 127.0.0.1 only;"
+    printf '  %s\n' "  WDA_ALLOW_LAN=1 (a socat relay over Wi-Fi) is an explicit, unsafe fallback for trusted networks."
+    printf '  %s\n' "• Cloudflare WARP or another tunnel VPN can break Xcode's connection to the phone; disconnect it during setup if setup stalls."
     if [ "$fail" = 0 ]; then
         ok "preflight checks passed; build, signing, device trust, and launch still require setup verification"
     else
@@ -2810,6 +2938,15 @@ case "$COMMAND" in
     *) die "unknown command: $1 (use: setup|status|stop|pause|resume|doctor|instance-context)" ;;
 esac
 
+# Before anything is paused or built, so stopping here leaves nothing to undo.
+if [ "${WDA_KEEPALIVE:-0}" != "1" ] && [ -t 1 ]; then
+    if ! _first_run_checklist; then
+        _rerun="iphone-use setup"
+        [ "$INSTANCE_NAME" = default ] || _rerun="$_rerun --instance $INSTANCE_NAME"
+        die "fix the ✗ items above, then run: $_rerun"
+    fi
+fi
+
 if [ "${WDA_KEEPALIVE:-0}" = "1" ]; then
     _wait_for_keepalive_retry
     KEEPALIVE_ATTEMPT_ACTIVE=1
@@ -2876,7 +3013,7 @@ fi
 command -v lsof >/dev/null 2>&1 || die "lsof is required to verify exclusive loopback relay ownership"
 XCODEBUILD_BIN="$(command -v xcodebuild || true)"
 [ -n "$XCODEBUILD_BIN" ] \
-    || die "xcodebuild is unavailable (install full Xcode, then select it with xcode-select)"
+    || die "Xcode is not installed. Get it from the App Store ($XCODE_APP_STORE_URL), open it once, then rerun"
 _valid_port "$WDA_PORT" \
     || die "WDA_PORT must be a decimal TCP port from 1 to 65535 (got '$WDA_PORT')"
 _valid_port "$MJPEG_PORT" \
@@ -2885,11 +3022,14 @@ _valid_port "$MJPEG_PORT" \
     || die "WDA_PORT and MJPEG_PORT must be different (both are '$WDA_PORT')"
 XCODE_VERSION="$("$XCODEBUILD_BIN" -version 2>/dev/null | head -1 || true)"
 [ -n "$XCODE_VERSION" ] \
-    || die "full Xcode is unavailable (install Xcode, then select it with xcode-select)"
+    || die "full Xcode is not selected. Install it from the App Store ($XCODE_APP_STORE_URL), then run: sudo xcode-select -s /Applications/Xcode.app"
 ok "Xcode: $XCODE_VERSION"
 
 # Resolve and validate one identity before touching the managed checkout.
-_resolve_signing_identity || die "$SIGNING_ERROR"
+if ! _resolve_signing_identity; then
+    _open_xcode_for_account
+    die "$SIGNING_ERROR"
+fi
 ok "Team: $TEAM_ID"
 if [ "$BUNDLE_ID_DERIVED" = "1" ]; then
     ok "Runner bundle ID: $WDA_BUNDLE_ID (derived for this team)"
@@ -3418,9 +3558,9 @@ elif ! _ensure_launchable_runner; then
     if grep -q "No profiles for .* were found\|requires a provisioning profile" \
         "$STATE_DIR/wda-runner-product-build.log" 2>/dev/null; then
         _setstatus signing-fail account "Xcode could not create the runner provisioning profile"
-        # "could not find or create the WDA development provisioning" is the
+        # "could not find or create a development provisioning" is the
         # phrase the daemon maps to its `account` blocker; keep it verbatim.
-        die "Xcode could not find or create the WDA development provisioning profile for the device runner.
+        die "Xcode could not find or create a development provisioning profile for the device runner.
    In Xcode → Settings → Accounts, refresh the selected team, keep the iPhone
    registered, then rerun. With WDA_ASC_* API-key signing, check that the key
    can manage profiles. Build log: $STATE_DIR/wda-runner-product-build.log"
@@ -3491,9 +3631,9 @@ while [ -z "$PHONE_URL" ]; do
             _runner_cache_drop || true
         fi
         _setstatus signing-fail account "Xcode could not create the runner provisioning profile"
-        # "could not find or create the WDA development provisioning" is the
+        # "could not find or create a development provisioning" is the
         # phrase the daemon maps to its `account` blocker; keep it verbatim.
-        die "Xcode could not find or create the WDA development provisioning profile for the device runner.
+        die "Xcode could not find or create a development provisioning profile for the device runner.
    In Xcode → Settings → Accounts, refresh the selected team, keep the iPhone
    registered, then rerun. If WARP is connected, its effective Excluded routes
    must contain fe80::/10 and fd00::/8 (otherwise disconnect it temporarily)."

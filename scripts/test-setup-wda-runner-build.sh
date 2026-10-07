@@ -176,7 +176,7 @@ pass "a signed-out Xcode during the build reports the account blocker"
 
 : > "$STATUS_LOG"
 trace="$(CACHE=miss BUILD=profile run_launch)"
-case "$trace" in *"could not find or create the WDA development provisioning"*) ;; *) fail_test "the profile failure lost the phrase the daemon maps to 'account': $trace" ;; esac
+case "$trace" in *"could not find or create a development provisioning"*) ;; *) fail_test "the profile failure lost the phrase the daemon maps to 'account': $trace" ;; esac
 grep -q '^signing-fail|account|' "$STATUS_LOG" || fail_test "the profile failure did not publish the account blocker"
 pass "a provisioning failure keeps the daemon's account phrase and blocker"
 

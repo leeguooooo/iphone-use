@@ -1,12 +1,18 @@
 //! `iphone-use` daemon CLI.
 //!
 //! ```text
-//! iphone-use serve   # serve the phone over WebDriverAgent → axum
+//! iphone-use serve   # serve the phone over the device runner → axum
 //! iphone-use stop    # best-effort: kill the recorded pid
 //! iphone-use upgrade # install the latest release + refresh the skill (--check / --json)
+//! iphone-use setup   # build + start the device runner on the connected iPhone
+//! iphone-use doctor  # what is missing on the Mac, in Xcode, or on the iPhone
+//! iphone-use status  # is the phone ready for agents (exit 0 when it is)
+//! iphone-use try     # a harmless first run: open Settings, read it, go Home
+//! iphone-use login   # one-time browser sign-in + a QR code for the phone
 //! ```
 //!
-//! WebDriverAgent on the phone does the input and serves the video, so the
+//! The device runner on the phone (an XCTest runner with a
+//! WebDriverAgent-compatible API) does the input and serves the video, so the
 //! daemon needs no iPhone Mirroring, no Mac TCC grant, and never touches the
 //! Mac's screen or pointer.
 
@@ -17,6 +23,8 @@ use clap::{Parser, Subcommand};
 
 use server::config::Config;
 use server::http::{self, AppState};
+
+mod onboarding;
 
 /// PID file name inside the runtime dir.
 const PID_FILE: &str = "iphone-use.pid";
@@ -187,6 +195,44 @@ enum Command {
         /// Like --check, as JSON: name, current, latest, update_available, skills.
         #[arg(long)]
         json: bool,
+    },
+    /// Build, install and start the device runner on the connected iPhone.
+    ///
+    /// Keep the iPhone unlocked. Extra arguments go to the setup script
+    /// (`status`, `stop`, `uninstall`, …).
+    Setup {
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        #[arg(long)]
+        instance: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Check the Mac, Xcode and the iPhone, and say how to fix what is missing.
+    Doctor {
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Is the iPhone ready for agents? Exit 0 when it is.
+    Status {
+        #[arg(long)]
+        instance: Option<String>,
+        /// The daemon's full status as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// A harmless first run: open Settings, read the screen, go Home.
+    Try {
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Sign this Mac's browser in with a one-time link and show a QR code
+    /// for the iPhone, without typing the password.
+    Login {
+        #[arg(long)]
+        instance: Option<String>,
+        /// Print the link instead of opening the browser.
+        #[arg(long)]
+        no_open: bool,
     },
 }
 
@@ -478,6 +524,26 @@ fn main() -> Result<()> {
             .context("start the relay runtime")?
             .block_on(server::usbmux::run_relay(&udid, listen, device_port)),
         Command::Upgrade { check, json } => std::process::exit(upgrade(check || json, json)),
+        Command::Setup { instance, args } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            std::process::exit(onboarding::run_setup(&target, &args))
+        }
+        Command::Doctor { instance } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            std::process::exit(onboarding::run_setup(&target, &["doctor".to_string()]))
+        }
+        Command::Status { instance, json } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            std::process::exit(onboarding::run_status(&target, json)?)
+        }
+        Command::Try { instance } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            std::process::exit(onboarding::run_try(&target)?)
+        }
+        Command::Login { instance, no_open } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            std::process::exit(onboarding::run_login(&target, !no_open)?)
+        }
     };
 
     // Issue #28: under launchd `KeepAlive=true`, a startup that fails fast

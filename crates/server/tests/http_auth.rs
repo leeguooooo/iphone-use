@@ -3213,6 +3213,70 @@ fn pair_new_requires_a_session_and_the_control_header() {
 }
 
 #[test]
+fn a_login_link_signs_this_mac_in_once_without_the_password_in_any_url() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        let link_request = |bearer: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/agent/login-link")
+                .header(header::HOST, "127.0.0.1:45432")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header("x-phone-control", "1")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let resp = app.clone().oneshot(link_request("wrong")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app.clone().oneshot(link_request("hunter2")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let link = body_json(resp).await;
+        let url = link["url"].as_str().unwrap();
+        assert!(url.starts_with("http://127.0.0.1:45432/pair?c="), "{url}");
+        assert!(url.ends_with("&to=browser"), "{url}");
+        assert!(!url.contains("hunter2"));
+        let code = url
+            .split("c=")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches("&to=browser")
+            .to_string();
+
+        // Opening it does not spend the code; the page submits itself.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(url.trim_start_matches("http://127.0.0.1:45432"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes())
+            .to_string();
+        assert!(html.contains("document.forms[0].submit()"), "{html}");
+        assert!(!html.contains("iphoneuse://"), "{html}");
+
+        let submit = || {
+            Request::builder()
+                .method("POST")
+                .uri("/pair")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("c={code}")))
+                .unwrap()
+        };
+        let resp = app.clone().oneshot(submit()).await.unwrap();
+        assert!(resp.status().is_redirection(), "{}", resp.status());
+        assert!(!cookie_pair(&resp).is_empty());
+        let resp = app.oneshot(submit()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    });
+}
+
+#[test]
 fn pair_url_uses_the_address_the_browser_reached() {
     block(async {
         let app = http::router(build_state(Some("hunter2")));

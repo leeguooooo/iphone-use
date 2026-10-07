@@ -11,6 +11,64 @@ use reqwest::{header, Client};
 use std::time::Duration;
 
 const DEFAULT_URL: &str = "http://127.0.0.1:44321";
+const DAEMON_LABEL: &str = "com.leeguoo.iphone-use";
+
+/// Daemon URL and bearer token: the environment first, then the installed
+/// daemon's own LaunchAgent. The agent token wins over the password because
+/// a daemon with an agent token refuses the password as a bearer.
+fn daemon_target(
+    env: impl Fn(&str) -> Option<String>,
+    plist: impl Fn(&str, &str) -> Option<String>,
+) -> (String, Option<String>) {
+    let label = match env("PHONE_REMOTE_INSTANCE") {
+        Some(name)
+            if name != "default"
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') =>
+        {
+            format!("{DAEMON_LABEL}.{name}")
+        }
+        _ => DAEMON_LABEL.to_string(),
+    };
+    let base_url = env("PHONE_REMOTE_URL").unwrap_or_else(|| {
+        plist(&label, "PHONE_REMOTE_PORT")
+            .and_then(|port| port.trim().parse::<u16>().ok())
+            .map(|port| format!("http://127.0.0.1:{port}"))
+            .unwrap_or_else(|| DEFAULT_URL.to_string())
+    });
+    let token = env("PHONE_REMOTE_TOKEN").or_else(|| {
+        // Only a daemon on this Mac can be the one the plist describes.
+        let local = base_url.starts_with("http://127.0.0.1:")
+            || base_url.starts_with("http://localhost:");
+        local
+            .then(|| {
+                plist(&label, "PHONE_REMOTE_AGENT_TOKEN")
+                    .or_else(|| plist(&label, "PHONE_REMOTE_PASSWORD"))
+            })
+            .flatten()
+    });
+    (base_url, token)
+}
+
+/// One `EnvironmentVariables` value from `~/Library/LaunchAgents/<label>.plist`.
+fn launch_agent_env(label: &str, key: &str) -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let plist = std::path::Path::new(&home).join(format!("Library/LaunchAgents/{label}.plist"));
+    if !plist.is_file() {
+        return None;
+    }
+    let out = std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", &format!("EnvironmentVariables.{key}"), "raw", "-o", "-"])
+        .arg(&plist)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ELEMENTS_TIMEOUT: Duration = Duration::from_secs(45);
@@ -138,10 +196,17 @@ impl DaemonClient {
     /// * `PHONE_REMOTE_URL`   — daemon base URL (default `http://127.0.0.1:44321`)
     /// * `PHONE_REMOTE_TOKEN` — bearer token / password (optional; omit for
     ///   open-mode daemons running on localhost)
+    ///
+    /// Either one left unset is read from the installed daemon's LaunchAgent
+    /// (`PHONE_REMOTE_INSTANCE` picks a named one), so an MCP client config
+    /// needs no secret: the installer registers the bare command.
     pub fn from_env() -> Self {
-        let base_url =
-            std::env::var("PHONE_REMOTE_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
-        let token = std::env::var("PHONE_REMOTE_TOKEN").ok();
+        let env = |key: &str| {
+            std::env::var(key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        };
+        let (base_url, token) = daemon_target(env, launch_agent_env);
         Self::new(base_url, token)
     }
 
@@ -1093,6 +1158,36 @@ mod tests {
             c.url("/agent/screenshot"),
             "http://192.168.1.50:44321/agent/screenshot"
         );
+    }
+
+    #[test]
+    fn an_unset_target_is_read_from_the_installed_launch_agent() {
+        let plist = |label: &str, key: &str| match (label, key) {
+            ("com.leeguoo.iphone-use", "PHONE_REMOTE_PORT") => Some("45432".to_string()),
+            ("com.leeguoo.iphone-use", "PHONE_REMOTE_AGENT_TOKEN") => Some("agent".to_string()),
+            ("com.leeguoo.iphone-use", "PHONE_REMOTE_PASSWORD") => Some("pw".to_string()),
+            ("com.leeguoo.iphone-use.i13", "PHONE_REMOTE_PORT") => Some("45838".to_string()),
+            ("com.leeguoo.iphone-use.i13", "PHONE_REMOTE_PASSWORD") => Some("pw13".to_string()),
+            _ => None,
+        };
+        let none = |_: &str| None;
+        assert_eq!(
+            daemon_target(none, plist),
+            ("http://127.0.0.1:45432".to_string(), Some("agent".to_string()))
+        );
+        let i13 = |key: &str| (key == "PHONE_REMOTE_INSTANCE").then(|| "i13".to_string());
+        assert_eq!(
+            daemon_target(i13, plist),
+            ("http://127.0.0.1:45838".to_string(), Some("pw13".to_string()))
+        );
+        // Explicit settings win, and a remote URL never borrows a local secret.
+        let remote = |key: &str| (key == "PHONE_REMOTE_URL").then(|| "http://10.0.0.5:44321".to_string());
+        assert_eq!(
+            daemon_target(remote, plist),
+            ("http://10.0.0.5:44321".to_string(), None)
+        );
+        let nothing = |_: &str, _: &str| None;
+        assert_eq!(daemon_target(none, nothing), (DEFAULT_URL.to_string(), None));
     }
 
     #[test]

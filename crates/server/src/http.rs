@@ -861,6 +861,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/intent", post(agent_intent))
         .route("/agent/hold", post(agent_hold))
         .route("/agent/owner", post(agent_owner))
+        .route("/agent/login-link", post(agent_login_link))
         .route("/agent/capabilities", get(agent_capabilities))
         // Per-request WDA timing on every /agent/* answer (see `timing`).
         .layer(axum::middleware::from_fn(crate::timing::layer))
@@ -1243,6 +1244,60 @@ async fn pair_new(
     )
 }
 
+/// `POST /agent/login-link` — one-time sign-in links for the installer and
+/// `iphone-use login`, so nobody copies the password: `url` signs this Mac's
+/// browser in (loopback, opened locally), `lan_url` is the same scan-to-connect
+/// page a phone reaches (absent when the daemon listens on loopback only).
+/// Each link carries its own single-use code that expires with [`CODE_TTL`];
+/// the password itself is never part of a URL.
+///
+/// [`CODE_TTL`]: crate::pairing::CODE_TTL
+async fn agent_login_link(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    match agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    let host_header = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (_, request_port) = crate::pairing::split_host(host_header);
+    let port = request_port.map(|p| format!(":{p}")).unwrap_or_default();
+    let url = format!(
+        "http://127.0.0.1{port}/pair?c={}&to=browser",
+        state.pairing.issue()
+    );
+    let lan_url = if state.pairing.lan_reachable {
+        crate::pairing::lan_addresses()
+            .into_iter()
+            .next()
+            .map(|(_, ip)| format!("http://{ip}{port}/pair?c={}", state.pairing.issue()))
+    } else {
+        None
+    };
+    pair_json(
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": true,
+            "url": url,
+            "lan_url": lan_url,
+            "expires_in_secs": crate::pairing::CODE_TTL.as_secs(),
+        }),
+    )
+}
+
 const PAIR_HTML: &str = r#"<!doctype html><html lang="zh-CN"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>扫码连接 · iphone-use</title>
@@ -1273,6 +1328,9 @@ fn pair_expired_html() -> String {
 #[derive(Default, Deserialize)]
 struct PairQuery {
     c: Option<String>,
+    /// `browser`: a sign-in link opened on this Mac (see `agent_login_link`)
+    /// submits itself instead of offering the phone app.
+    to: Option<String>,
 }
 
 /// `GET /pair?c=` — where the system camera lands. Does not consume the
@@ -1287,6 +1345,16 @@ async fn pair_page(
         let mut resp = Html(pair_expired_html()).into_response();
         *resp.status_mut() = StatusCode::GONE;
         return with_security_headers(resp);
+    }
+    if query.to.as_deref() == Some("browser") {
+        // The code is spent by the POST, never by this GET, so a link
+        // preview or prefetch cannot use it up; scripts off → one click.
+        let body = format!(
+            r#"<h1>正在登录 iphone-use…</h1>
+<form method="POST" action="/pair"><input type="hidden" name="c" value="{code}"><button type="submit">打开控制页</button></form>
+<script>document.forms[0].submit()</script>"#
+        );
+        return with_security_headers(Html(render_pair_page(&body)).into_response());
     }
     let scheme = if request_is_https(&state, &headers) {
         "https"
@@ -2448,6 +2516,8 @@ fn parse_setup_log_blocked_on(txt: &str) -> String {
         "usb".to_string()
     } else if latest_attempt.contains("has no signed-in Apple account")
         || latest_attempt.contains("No Accounts:")
+        || latest_attempt.contains("could not find or create a development provisioning")
+        // the wording before v0.15, still in logs an older script wrote
         || latest_attempt.contains("could not find or create the WDA development provisioning")
     {
         // A signed-out Xcode (common after an Xcode update) fails every WDA
