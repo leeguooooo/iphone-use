@@ -4173,3 +4173,32 @@ fn a_tap_on_a_row_wda_reports_not_visible_is_refused_unless_allowed() {
     );
     assert_eq!(status, StatusCode::OK, "{json}");
 }
+
+// A viewer whose decoder dropped frames asks for a keyframe; the ask needs the
+// same auth as the stream plus the mutation header (no CSRF-able request).
+#[test]
+fn a_viewer_can_ask_for_a_keyframe_only_with_auth_and_the_control_header() {
+    block(async {
+        // A password: without one the daemon runs open and needs no auth.
+        let state = build_state_with_agent_token(Some("pw"), Some("tok"));
+        let app = http::router(state.clone());
+        let ask = |auth: bool, control: bool| {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/agent/h264/keyframe");
+            if auth {
+                req = req.header("authorization", "Bearer tok");
+            }
+            if control {
+                req = req.header("x-phone-control", "1");
+            }
+            req.body(Body::empty()).unwrap()
+        };
+        let no_auth = app.clone().oneshot(ask(false, true)).await.unwrap();
+        assert_eq!(no_auth.status(), StatusCode::UNAUTHORIZED);
+        let no_header = app.clone().oneshot(ask(true, false)).await.unwrap();
+        assert_ne!(no_header.status(), StatusCode::OK);
+        let ok = app.clone().oneshot(ask(true, true)).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+    });
+}

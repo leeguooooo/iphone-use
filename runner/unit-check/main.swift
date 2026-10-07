@@ -219,6 +219,15 @@ do {
   let clamped = RunnerH264Stream.settings(from: "GET /h264?fps=999&scale=1&kbps=5 HTTP/1.1\r\n\r\n")
   check(clamped == RunnerH264Stream.Settings(fps: 60, scalePercent: 10, kbps: 200), "h264 query clamped")
   check(RunnerH264Stream.settings(from: "GET /h264 HTTP/1.1\r\n\r\n") == RunnerH264Stream.Settings(), "h264 defaults")
+  let quality = RunnerH264Stream.settings(from: "GET /h264?mode=quality HTTP/1.1\r\n\r\n")
+  check(quality == RunnerH264Stream.Settings.preset(.quality), "h264 quality preset")
+  check(quality.scalePercent == 100 && quality.highProfile && quality.fps == 60, "quality = full size, High, 60 fps")
+  let overridden = RunnerH264Stream.settings(from: "GET /h264?scale=60&mode=quality&gop=5&skip=0 HTTP/1.1\r\n\r\n")
+  check(overridden.mode == .quality && overridden.scalePercent == 60 && overridden.keyframeSeconds == 5
+        && !overridden.skipUnchanged && overridden.kbps == 10_000, "explicit values override the mode")
+  let performance = RunnerH264Stream.settings(from: "GET /h264?mode=nonsense HTTP/1.1\r\n\r\n")
+  check(performance == RunnerH264Stream.Settings() && performance.skipUnchanged
+        && performance.keyframeSeconds == 10, "unknown mode = performance, skip on, 10 s keyframes")
 
   // A flat white band is blank; one with a dark stripe through it is not.
   let w = 120, h = 240

@@ -170,6 +170,7 @@ struct RemoteScreen: UIViewRepresentable {
         let view = RemoteScreenUIView(display: video)
         view.onAction = { action in model.send(action) }
         video.onFrame = { model.frameArrived() }
+        video.onNeedKeyframe = { model.requestKeyframe() }
         model.attach(video: video)
         return view
     }

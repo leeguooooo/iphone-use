@@ -1104,13 +1104,11 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
   return image;
 }
 
-+ (nullable CGImageRef)screenImageWithQuality:(double)quality
-                                        scale:(double)scale
++ (nullable NSData *)screenCaptureWithQuality:(double)quality
                                          path:(NSString *_Nullable *_Nullable)path
                                         error:(NSString *_Nullable *_Nullable)error
 {
   quality = MIN(1.0, MAX(0.01, quality));
-  scale = (scale <= 0 || scale > 1) ? 1.0 : scale;
   static atomic_bool requestBroken = false;
   static atomic_bool encodingBroken = false;
   NSString *lastError = nil;
@@ -1121,7 +1119,7 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
       NSData *jpeg = IPURCaptureViaRequest(encoding, &failure);
       if (jpeg != nil) {
         if (path) *path = @"request";
-        return IPURDecodeScaled(jpeg, scale);
+        return jpeg;
       }
       if (![failure isEqualToString:@"screenshot request timed out"]) {
         atomic_store(&requestBroken, true);
@@ -1133,22 +1131,40 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
       NSData *jpeg = IPURCaptureViaEncoding(encoding, &failure);
       if (jpeg != nil) {
         if (path) *path = @"encoding";
-        return IPURDecodeScaled(jpeg, scale);
+        return jpeg;
       }
       atomic_store(&encodingBroken, true);
       lastError = failure;
     }
-    CGImageRef image = IPURDecodeScaled(XCUIScreen.mainScreen.screenshot.PNGRepresentation, scale);
-    if (image != NULL) {
+    NSData *png = XCUIScreen.mainScreen.screenshot.PNGRepresentation;
+    if (png != nil) {
       if (path) *path = @"public";
-      return image;
+      return png;
     }
-    lastError = @"public screenshot could not be decoded";
+    lastError = @"public screenshot returned no data";
   } @catch (NSException *exception) {
     lastError = [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
   }
   if (error) *error = lastError;
-  return NULL;
+  return nil;
+}
+
++ (nullable CGImageRef)decodeScreenCapture:(NSData *)data scale:(double)scale
+{
+  scale = (scale <= 0 || scale > 1) ? 1.0 : scale;
+  return IPURDecodeScaled(data, scale);
+}
+
++ (nullable CGImageRef)screenImageWithQuality:(double)quality
+                                        scale:(double)scale
+                                         path:(NSString *_Nullable *_Nullable)path
+                                        error:(NSString *_Nullable *_Nullable)error
+{
+  NSData *capture = [self screenCaptureWithQuality:quality path:path error:error];
+  if (capture == nil) return NULL;
+  CGImageRef image = [self decodeScreenCapture:capture scale:scale];
+  if (image == NULL && error) *error = @"screenshot could not be decoded";
+  return image;
 }
 
 + (nullable NSData *)grayScreenWithMaxSide:(NSUInteger)maxSide

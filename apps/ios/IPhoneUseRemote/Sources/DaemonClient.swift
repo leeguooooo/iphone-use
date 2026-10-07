@@ -242,6 +242,15 @@ final class DaemonClient: @unchecked Sendable {
         return json
     }
 
+    /// Ask the live stream for a keyframe (the decoder lost its place).
+    func requestKeyframe() async {
+        var request = URLRequest(url: base.appending(path: "agent/h264/keyframe"))
+        request.httpMethod = "POST"
+        request.setValue("1", forHTTPHeaderField: "X-Phone-Control")
+        request.timeoutInterval = 5
+        _ = try? await send(request)
+    }
+
     /// `agent` brings WDA up for remote control; `human` gives the phone back
     /// to the person holding it.
     func setMode(_ mode: String) async throws {
@@ -274,6 +283,15 @@ final class DaemonClient: @unchecked Sendable {
     func request(_ path: String) -> URLRequest {
         var request = URLRequest(url: base.appending(path: path))
         if let cookie { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
+        return request
+    }
+
+    func request(_ path: String, query: [URLQueryItem]) -> URLRequest {
+        var request = request(path)
+        if let url = request.url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.queryItems = query
+            request.url = components.url ?? url
+        }
         return request
     }
 

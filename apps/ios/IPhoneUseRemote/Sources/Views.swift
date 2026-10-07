@@ -280,6 +280,10 @@ struct Toolbar: View {
             } else {
                 ToolButton(title: "交还", symbol: "iphone.and.arrow.forward") { model.handBack() }
             }
+            ToolButton(title: model.videoQuality ? "画质" : "性能",
+                       symbol: model.videoQuality ? "sparkles.tv" : "bolt.horizontal.circle") {
+                model.videoQuality.toggle()
+            }
             ToolButton(title: "设置", symbol: "gearshape") { showSettings = true }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)

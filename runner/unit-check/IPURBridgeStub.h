@@ -14,6 +14,10 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                         scale:(double)scale
                                          path:(NSString *_Nullable *_Nullable)path
                                         error:(NSString *_Nullable *_Nullable)error CF_RETURNS_RETAINED;
++ (nullable NSData *)screenCaptureWithQuality:(double)quality
+                                         path:(NSString *_Nullable *_Nullable)path
+                                        error:(NSString *_Nullable *_Nullable)error;
++ (nullable CGImageRef)decodeScreenCapture:(NSData *)data scale:(double)scale CF_RETURNS_RETAINED;
 @end
 
 NS_ASSUME_NONNULL_END

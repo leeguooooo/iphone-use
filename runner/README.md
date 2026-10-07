@@ -253,14 +253,27 @@ How it captures:
 
 `RunnerH264.swift` encodes the screen on the phone with VideoToolbox, so the daemon can pass it
 straight to viewers instead of decoding MJPEG and re-encoding it on the Mac. It shares the MJPEG
-port (no extra relay): a request for `/h264?fps=30&scale=50&kbps=2500` gets the H.264 stream,
-anything else gets MJPEG.
+port (no extra relay): a request for `/h264?mode=performance` (or `quality`) gets the H.264
+stream, anything else gets MJPEG. `fps`, `scale`, `kbps`, `gop` (keyframe fallback, seconds)
+and `skip=0` override the mode's preset.
 
-- **Capture.** The same testmanagerd paths as MJPEG, decoded once by ImageIO at the requested
-  scale and drawn into a pooled BGRA `CVPixelBuffer`.
-- **Encoder.** H.264 Main, real-time, no frame reordering, a keyframe at least every 2 s, average
-  bitrate `kbps` with bursts capped at 1.5×. One encoder serves every client and runs only while
-  one is connected.
+| Mode | Scale | fps | Bitrate | Profile | Keyframe fallback |
+|---|---|---|---|---|---|
+| `performance` (default) | 50 % | 30 | 1.5 Mbit/s | Main | 10 s |
+| `quality` | 100 % | 60 (capture-bound, ~50) | 10 Mbit/s | High | 10 s |
+
+- **Capture.** The same testmanagerd paths as MJPEG. A capture thread hands the newest encoded
+  capture to a decode+encode thread (latest wins), which decodes it once by ImageIO at the
+  requested scale into a pooled BGRA `CVPixelBuffer`; overlapping the two is what lets quality
+  mode run at full size near capture speed.
+- **Unchanged screens are skipped.** A capture with the same bytes as the previous one is
+  neither decoded nor encoded; a heartbeat frame still goes out every second (the daemon closes a
+  viewer after 8 s of silence). `/status` reports the skipped share as `h264.skippedRatio`.
+- **Encoder.** H.264 (Main or High), real-time, no frame reordering, average bitrate `kbps` with
+  bursts capped at 1.5×. Keyframes on demand, with a fallback interval (`gop`). One encoder
+  serves every client and runs only while one is connected. VideoToolbox writes no VUI
+  bitstream restriction, so decoders would buffer up to a DPB of frames; the daemon rewrites each
+  SPS to declare zero reordering (`crates/server/src/h264sps.rs`).
 - **Framing.** An HTTP/1.0 header block with `X-Video-Format: iphone-use-h264-annexb-v1`, then
   `[u32 BE length][u8 flags][u64 BE pts µs][Annex-B access unit]` per frame — the daemon's own
   `/agent/h264` framing. Flags: bit 0 keyframe (SPS + PPS in band), bit 1 the content band is one
@@ -269,7 +282,8 @@ anything else gets MJPEG.
 - **Keyframes on request.** Any byte the client sends asks for a keyframe, so one upstream
   connection serves viewers that join later. A new client waits for the next keyframe; a client
   still writing the previous frame drops the current one and gets a fresh keyframe.
-- **`/status`** reports `h264.achievedFps`, `achievedKbps`, `captureMs` and `encodeMs`.
+- **`/status`** reports `h264.mode`, `achievedFps`, `achievedKbps`, `captureMs`, `decodeMs`,
+  `encodeMs`, `keyframeSeconds`, `skipUnchanged` and `skippedRatio`.
 
 Measured on an iPhone 13 over USB (30 fps, 50 % scale), same runner:
 
@@ -280,6 +294,20 @@ Measured on an iPhone 13 over USB (30 fps, 50 % scale), same runner:
 
 Through the daemon, passthrough runs at 28.2 fps and ~1.9 Mbit/s while scrolling with the daemon
 at 0.4 % CPU, against 6.7 % for the Mac re-encode of the MJPEG stream.
+
+The two modes on an iPhone 17 Pro Max over USB, Settings list, 12–15 s per row. The first row
+is the encoder before modes (2 s keyframes, every frame encoded), from the same runner via
+`gop=2&skip=0&kbps=2500`:
+
+| | still screen | scrolling | fps (scrolling) |
+|---|---|---|---|
+| before modes, 50 % | 0.14 Mbit/s | 2.3 Mbit/s | 27 |
+| `performance` | 0.04 Mbit/s (96 % of captures skipped) | 1.5 Mbit/s | 26–27 |
+| `quality`, 1320×2868 | 0.10 Mbit/s | 5.7–6.0 Mbit/s | 48–50 |
+
+Quality ran at 39 fps before capture and decode+encode were overlapped. Through the daemon the
+daemon used 0.0–0.4 % CPU in every case, and elements, screenshot and tap+delta took the same
+time with a quality viewer connected as with none.
 
 ## Build
 

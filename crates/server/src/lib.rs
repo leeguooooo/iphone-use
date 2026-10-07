@@ -2,6 +2,7 @@ pub mod apps;
 pub mod config;
 pub mod flows;
 pub mod focus;
+pub mod h264sps;
 pub mod http;
 pub mod instance;
 pub mod lockdown;

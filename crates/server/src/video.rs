@@ -15,6 +15,13 @@
 //! IDR so its decoder has an entry point, and a slow encoder never queues:
 //! only the newest JPEG waits for it, older ones are dropped.
 //!
+//! Two viewing modes ([`VideoMode`], `?mode=performance|quality` on
+//! `/agent/h264` and `/agent/mjpeg`): performance (half size, ≤30 fps,
+//! ~1.5 Mbit/s) is the default; quality asks the runner for full size, up to
+//! 60 fps and ~10 Mbit/s. One upstream serves every viewer, so it runs in
+//! quality while any quality viewer is connected and drops back when the last
+//! one leaves.
+//!
 //! Wire format of `GET /agent/h264` (see [`frame_message`]): a stream of
 //! messages, each `[u32 BE length of the rest][u8 flags][u64 BE pts µs][Annex-B
 //! access unit]`, flags bit 0 = keyframe. Keyframes carry SPS and PPS in-band,
@@ -38,6 +45,88 @@ pub struct H264Frame {
 
 /// Flags byte, bit 0.
 pub const FLAG_KEYFRAME: u8 = 0x01;
+
+/// A keyframe with its SPS rewritten so decoders show every frame at once
+/// (see [`crate::h264sps`]). The SPS is the same on every keyframe of a
+/// stream, so the last rewrite is reused.
+fn low_delay(mut frame: H264Frame) -> H264Frame {
+    if !frame.keyframe {
+        return frame;
+    }
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(Bytes, Bytes)>> = const { std::cell::RefCell::new(None) };
+    }
+    let cached = LAST.with(|last| {
+        last.borrow()
+            .as_ref()
+            .filter(|(input, _)| *input == frame.data)
+            .map(|(_, output)| output.clone())
+    });
+    if let Some(output) = cached {
+        frame.data = output;
+        return frame;
+    }
+    if let Some(rewritten) = crate::h264sps::low_delay_access_unit(&frame.data) {
+        let rewritten = Bytes::from(rewritten);
+        LAST.with(|last| *last.borrow_mut() = Some((frame.data.clone(), rewritten.clone())));
+        frame.data = rewritten;
+    }
+    frame
+}
+
+/// How a viewer wants the live screen: small and cheap, or sharp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoMode {
+    /// Half size, up to 30 fps, ~1.5 Mbit/s; unchanged frames are skipped.
+    #[default]
+    Performance,
+    /// Full size, as many frames as the phone captures (up to 60), ~10 Mbit/s.
+    Quality,
+}
+
+impl VideoMode {
+    /// `quality` (or `画质`) is quality; anything else, including nothing, is
+    /// performance.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some(v) if v.eq_ignore_ascii_case("quality") || v == "画质" => Self::Quality,
+            _ => Self::Performance,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Performance => "performance",
+            Self::Quality => "quality",
+        }
+    }
+
+    /// The runner's `/h264` query. `performance_kbps` is the configured
+    /// performance bitrate (`PHONE_REMOTE_H264_KBPS`); quality keeps the
+    /// runner's own preset.
+    pub fn runner_query(self, performance_kbps: u32) -> String {
+        match self {
+            Self::Performance => format!("mode=performance&kbps={performance_kbps}"),
+            Self::Quality => "mode=quality".to_string(),
+        }
+    }
+
+    /// `(framerate, scaling %, JPEG quality)` for an MJPEG upstream.
+    pub fn mjpeg_settings(self) -> (u32, u32, u32) {
+        match self {
+            Self::Performance => (30, 50, 60),
+            Self::Quality => (30, 100, 85),
+        }
+    }
+
+    /// Bitrate for the Mac-side encoder (the MJPEG transcode path).
+    fn transcode_bitrate(self, performance_bitrate: u32) -> u32 {
+        match self {
+            Self::Performance => performance_bitrate,
+            Self::Quality => performance_bitrate.max(8_000_000),
+        }
+    }
+}
 
 /// Serialize one frame for the `/agent/h264` stream.
 pub fn frame_message(frame: &H264Frame) -> Bytes {
@@ -132,7 +221,14 @@ pub struct VideoHub {
     mjpeg_url: String,
     tx: tokio::sync::broadcast::Sender<H264Frame>,
     subscribers: Arc<AtomicUsize>,
+    /// Subscribers that asked for [`VideoMode::Quality`] (also counted in
+    /// `subscribers`).
+    quality_subscribers: Arc<AtomicUsize>,
     force_idr: Arc<AtomicBool>,
+    /// Wakes the passthrough loop as soon as a keyframe is asked for or a
+    /// viewer arrives, instead of at its next read timeout (up to 1 s on a
+    /// still screen, where the runner sends one frame a second).
+    wake: tokio::sync::Notify,
     running: Mutex<bool>,
     bitrate: u32,
     /// The live frame's content band is one flat colour (checked every few
@@ -152,10 +248,14 @@ pub struct VideoHub {
 pub struct Subscription {
     pub frames: tokio::sync::broadcast::Receiver<H264Frame>,
     subscribers: Arc<AtomicUsize>,
+    quality: Option<Arc<AtomicUsize>>,
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
+        if let Some(quality) = &self.quality {
+            quality.fetch_sub(1, Ordering::AcqRel);
+        }
         self.subscribers.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -166,14 +266,16 @@ impl VideoHub {
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
             .filter(|kbps| (300..=20_000).contains(kbps))
-            .unwrap_or(2_500)
+            .unwrap_or(1_500)
             * 1000;
         let (tx, _) = tokio::sync::broadcast::channel(64);
         Arc::new(Self {
             mjpeg_url,
             tx,
             subscribers: Arc::new(AtomicUsize::new(0)),
+            quality_subscribers: Arc::new(AtomicUsize::new(0)),
             force_idr: Arc::new(AtomicBool::new(true)),
+            wake: tokio::sync::Notify::new(),
             running: Mutex::new(false),
             bitrate,
             frame_blank: Arc::new(AtomicBool::new(false)),
@@ -246,12 +348,26 @@ impl VideoHub {
         cfg!(target_os = "macos")
     }
 
+    /// The mode the upstream should run in: quality while any viewer wants it.
+    pub fn effective_mode(&self) -> VideoMode {
+        if self.quality_subscribers.load(Ordering::Acquire) > 0 {
+            VideoMode::Quality
+        } else {
+            VideoMode::Performance
+        }
+    }
+
     /// Subscribe to the encoded stream, starting the pipeline if needed.
-    pub fn subscribe(self: &Arc<Self>) -> Subscription {
+    pub fn subscribe(self: &Arc<Self>, mode: VideoMode) -> Subscription {
         let frames = self.tx.subscribe();
+        let quality = (mode == VideoMode::Quality).then(|| {
+            self.quality_subscribers.fetch_add(1, Ordering::AcqRel);
+            Arc::clone(&self.quality_subscribers)
+        });
         self.subscribers.fetch_add(1, Ordering::AcqRel);
         // The newcomer's decoder needs an entry point now, not at the next GOP.
         self.force_idr.store(true, Ordering::Release);
+        self.wake.notify_one();
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if !*running {
             *running = true;
@@ -268,12 +384,14 @@ impl VideoHub {
         Subscription {
             frames,
             subscribers: Arc::clone(&self.subscribers),
+            quality,
         }
     }
 
     /// Ask for an IDR on the next encoded frame (a subscriber fell behind).
     pub fn request_keyframe(&self) {
         self.force_idr.store(true, Ordering::Release);
+        self.wake.notify_one();
     }
 
     pub fn subscriber_count(&self) -> usize {
@@ -310,6 +428,8 @@ impl VideoHub {
                         return Ok(());
                     }
                     Passthrough::Unsupported => break,
+                    // A viewer switched modes: reconnect at once with the new one.
+                    Passthrough::ModeChanged => {}
                     Passthrough::Lost => {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         if self.should_stop(&mut idle_since) {
@@ -343,9 +463,10 @@ impl VideoHub {
             return Passthrough::Lost;
         };
         let _ = stream.set_nodelay(true);
+        let mode = self.effective_mode();
         let request = format!(
-            "GET /h264?fps=30&scale=50&kbps={} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n",
-            self.bitrate / 1000
+            "GET /h264?{} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n",
+            mode.runner_query(self.bitrate / 1000)
         );
         if stream.write_all(request.as_bytes()).await.is_err() {
             return Passthrough::Lost;
@@ -374,7 +495,10 @@ impl VideoHub {
             return Passthrough::Unsupported;
         }
         buf.drain(..head_end);
-        tracing::info!("h264: passing the device runner's own H.264 through");
+        tracing::info!(
+            "h264: passing the device runner's own H.264 through ({})",
+            mode.as_str()
+        );
         // No JPEG frames on this path: screenshots go to the runner.
         *self.latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
@@ -382,10 +506,14 @@ impl VideoHub {
         loop {
             while let Some((frame, blank)) = take_message(&mut buf) {
                 self.frame_blank.store(blank, Ordering::Release);
-                let _ = self.tx.send(frame);
+                let _ = self.tx.send(low_delay(frame));
             }
             if self.should_stop(idle_since) {
                 return Passthrough::Stopped;
+            }
+            if self.effective_mode() != mode {
+                // The new connection starts with a keyframe for everyone.
+                return Passthrough::ModeChanged;
             }
             // A new or lagging viewer needs an entry point: any byte asks the
             // runner for a keyframe.
@@ -393,7 +521,12 @@ impl VideoHub {
             {
                 return Passthrough::Lost;
             }
-            match tokio::time::timeout(Duration::from_secs(1), stream.read(&mut chunk)).await {
+            let read = tokio::select! {
+                read = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut chunk)) => read,
+                // A keyframe request or a new viewer: handle it at the top of the loop.
+                () = self.wake.notified() => continue,
+            };
+            match read {
                 Ok(Ok(0)) | Ok(Err(_)) => return Passthrough::Lost,
                 Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
                 Err(_) => {} // a still screen sends little; check viewers again
@@ -420,7 +553,7 @@ impl VideoHub {
             let tx = self.tx.clone();
             let force_idr = Arc::clone(&self.force_idr);
             let frame_blank = Arc::clone(&self.frame_blank);
-            let bitrate = self.bitrate;
+            let bitrate = self.effective_mode().transcode_bitrate(self.bitrate);
             std::thread::Builder::new()
                 .name("h264-encoder".into())
                 .spawn(move || encoder_loop(slot, stop, tx, force_idr, frame_blank, bitrate))?
@@ -524,6 +657,8 @@ enum Passthrough {
     Unsupported,
     /// Connection refused, dropped or stalled; try again.
     Lost,
+    /// The effective [`VideoMode`] changed; reconnect with the new one.
+    ModeChanged,
 }
 
 /// Runner flag: the frame's content band is one flat colour.
@@ -879,7 +1014,7 @@ mod imp {
         let sample = unsafe { &*sample_buffer };
         match encoded_frame(sample) {
             Ok(frame) => {
-                let _ = context.tx.send(frame);
+                let _ = context.tx.send(super::low_delay(frame));
             }
             Err(error) => tracing::debug!("h264 output: {error}"),
         }
@@ -1340,7 +1475,7 @@ mod tests {
         assert!(!second.keyframe);
         let (line, extra) = seen.await.unwrap();
         assert!(
-            line.starts_with("GET /h264?fps=30&scale=50&kbps=2500 "),
+            line.starts_with("GET /h264?mode=performance&kbps=1500 "),
             "{line}"
         );
         assert_eq!(
@@ -1351,6 +1486,109 @@ mod tests {
             run.await.unwrap(),
             "a closed upstream is lost, to be retried"
         );
+    }
+
+    #[test]
+    fn modes_parse_and_map_to_runner_and_mjpeg_settings() {
+        assert_eq!(VideoMode::parse(None), VideoMode::Performance);
+        assert_eq!(VideoMode::parse(Some("nonsense")), VideoMode::Performance);
+        assert_eq!(VideoMode::parse(Some("Quality")), VideoMode::Quality);
+        assert_eq!(VideoMode::parse(Some("画质")), VideoMode::Quality);
+        assert_eq!(
+            VideoMode::Performance.runner_query(1500),
+            "mode=performance&kbps=1500"
+        );
+        assert_eq!(VideoMode::Quality.runner_query(1500), "mode=quality");
+        assert_eq!(VideoMode::Performance.mjpeg_settings(), (30, 50, 60));
+        assert_eq!(VideoMode::Quality.mjpeg_settings().1, 100);
+    }
+
+    #[test]
+    fn the_upstream_runs_in_quality_while_any_quality_viewer_watches() {
+        let hub = VideoHub::new("http://127.0.0.1:9".into());
+        assert_eq!(hub.effective_mode(), VideoMode::Performance);
+        hub.quality_subscribers.fetch_add(1, Ordering::AcqRel);
+        hub.subscribers.fetch_add(1, Ordering::AcqRel);
+        let quality = Subscription {
+            frames: hub.tx.subscribe(),
+            subscribers: Arc::clone(&hub.subscribers),
+            quality: Some(Arc::clone(&hub.quality_subscribers)),
+        };
+        hub.subscribers.fetch_add(1, Ordering::AcqRel);
+        let performance = Subscription {
+            frames: hub.tx.subscribe(),
+            subscribers: Arc::clone(&hub.subscribers),
+            quality: None,
+        };
+        assert_eq!(hub.effective_mode(), VideoMode::Quality);
+        drop(performance);
+        assert_eq!(hub.effective_mode(), VideoMode::Quality);
+        drop(quality);
+        assert_eq!(hub.effective_mode(), VideoMode::Performance);
+        assert_eq!(hub.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn a_quality_viewer_asks_the_runner_for_quality_and_a_switch_reconnects() {
+        block_on(quality_request_and_switch());
+    }
+
+    async fn quality_request_and_switch() {
+        let (url, seen) = fake_upstream_open(
+            "HTTP/1.0 200 OK\r\nX-Video-Format: iphone-use-h264-annexb-v1\r\n\r\n",
+            runner_message(FLAG_KEYFRAME, 1, &[0, 0, 0, 1, 0x67, 0x64]),
+        )
+        .await;
+        let hub = VideoHub::new(url);
+        hub.subscribers.store(1, Ordering::Release);
+        hub.quality_subscribers.store(1, Ordering::Release);
+        let mut frames = hub.tx.subscribe();
+        let run = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                let mut idle = None;
+                matches!(hub.passthrough(&mut idle).await, Passthrough::ModeChanged)
+            })
+        };
+        let wait = Duration::from_secs(3);
+        tokio::time::timeout(wait, frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let line = tokio::time::timeout(wait, seen).await.unwrap().unwrap();
+        assert!(line.starts_with("GET /h264?mode=quality "), "{line}");
+        // The quality viewer leaves: the open upstream is dropped for a
+        // performance one.
+        hub.quality_subscribers.store(0, Ordering::Release);
+        assert!(tokio::time::timeout(wait, run).await.unwrap().unwrap());
+    }
+
+    /// Like [`fake_upstream`], but keeps the connection open after the body so
+    /// only the daemon can end it; reports the request line.
+    async fn fake_upstream_open(
+        head: &'static str,
+        body: Vec<u8>,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let n = socket.read(&mut request).await.unwrap();
+            let line = String::from_utf8_lossy(&request[..n])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let _ = tx.send(line);
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            let mut sink = [0u8; 64];
+            while matches!(socket.read(&mut sink).await, Ok(n) if n > 0) {}
+        });
+        (url, rx)
     }
 
     async fn mjpeg_answer_is_unsupported() {
