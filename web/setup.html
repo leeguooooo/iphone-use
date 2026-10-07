@@ -255,6 +255,11 @@
         setup: '使用 USB 连接目标 iPhone，解锁并保持亮屏；出现提示时点“信任”。',
         retry: '使用 USB 连接这台 iPhone，解锁并保持亮屏；连接后服务会自动继续。',
       },
+      not_connected: {
+        title: 'iPhone 没有连到这台 Mac',
+        setup: '用 USB 线插上目标 iPhone（或连到同一个 Wi-Fi）并解锁，再重新运行设置命令。',
+        retry: '用 USB 线插上 iPhone（或连到同一个 Wi-Fi）并解锁；手机回来后服务会自动重连。',
+      },
       trust: {
         title: '开发者证书尚未信任',
         setup: '在 iPhone 的“设置 → 通用 → VPN 与设备管理”中信任对应开发者证书。',
@@ -286,7 +291,7 @@
         retry: '保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。',
       },
     };
-    const managedRetryBlockers = new Set(['warp', 'proxy', 'usb', 'trust', 'ddi', 'automation_mode_disabled', 'automation_not_allowed']);
+    const managedRetryBlockers = new Set(['warp', 'proxy', 'not_connected', 'usb', 'trust', 'ddi', 'automation_mode_disabled', 'automation_not_allowed']);
 
     function setState(title, detail, tone = 'warn') {
       stateTitle.textContent = title;

@@ -18,6 +18,9 @@ pub enum Kind {
     /// The phone refused the UI-automation session (code 74, matching
     /// versions): a person has to allow it on the phone.
     Automation,
+    /// The phone is not connected to this Mac at all. The next attempt
+    /// waits in place for it, so this only spaces out supervisor restarts.
+    NotConnected,
 }
 
 impl Kind {
@@ -28,6 +31,7 @@ impl Kind {
             Kind::XcodeTooOld => "xcode_too_old",
             Kind::Owned => "owned",
             Kind::Automation => "automation",
+            Kind::NotConnected => "not_connected",
         }
     }
 
@@ -38,6 +42,7 @@ impl Kind {
             "xcode_too_old" => Some(Kind::XcodeTooOld),
             "owned" => Some(Kind::Owned),
             "automation" => Some(Kind::Automation),
+            "not_connected" => Some(Kind::NotConnected),
             _ => None,
         }
     }
@@ -55,6 +60,7 @@ impl Kind {
             Kind::Owned => (15, 60),
             // Like a lock: quiet retries until a person allows it.
             Kind::Automation => (5, 60),
+            Kind::NotConnected => (3, 10),
             Kind::Generic => (5, 300),
         }
     }

@@ -752,6 +752,77 @@ pub fn on_usb(udid: &str, usb: &[String]) -> bool {
             .any(|serial| crate::usbmux::normalize_udid(serial) == want)
 }
 
+/// Whether this Mac can reach the phone at all, by any transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    Present,
+    /// Not in usbmuxd, and CoreDevice says it is unavailable or does not
+    /// list it: nothing to build for or launch on.
+    Absent,
+    /// devicectl gave no readable answer. Never treated as absent.
+    Unknown,
+}
+
+/// usbmuxd lists `udid`, over USB or the network. Cheap and cannot hang.
+pub fn usbmux_lists(udid: &str) -> bool {
+    sys::block_on(async {
+        tokio::time::timeout(Duration::from_secs(3), crate::usbmux::find_attached(udid))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .is_some()
+    })
+}
+
+/// usbmuxd first; only when it does not list the phone, ask CoreDevice.
+pub fn presence(udid: &str) -> Presence {
+    if udid.is_empty() || usbmux_lists(udid) {
+        return Presence::Present;
+    }
+    match sys::devicectl_json(10, &["list", "devices"]) {
+        Some(json) => coredevice_presence(&json, udid),
+        None => Presence::Unknown,
+    }
+}
+
+/// CoreDevice's view of `udid` in `devicectl list devices -j` output. An
+/// unplugged phone stays listed with `tunnelState: unavailable` and no
+/// transport; a Wi-Fi one has a `localNetwork` transport.
+pub fn coredevice_presence(json: &str, udid: &str) -> Presence {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Presence::Unknown;
+    };
+    let Some(devices) = value
+        .pointer("/result/devices")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Presence::Unknown;
+    };
+    let want = crate::usbmux::normalize_udid(udid);
+    let Some(device) = devices.iter().find(|device| {
+        device
+            .pointer("/hardwareProperties/udid")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| crate::usbmux::normalize_udid(id) == want)
+    }) else {
+        return Presence::Absent;
+    };
+    let tunnel = device
+        .pointer("/connectionProperties/tunnelState")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let transport = device
+        .pointer("/connectionProperties/transportType")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if tunnel == "unavailable" && transport.is_empty() {
+        Presence::Absent
+    } else {
+        Presence::Present
+    }
+}
+
 /// The phone's iOS version: lockdownd over usbmuxd, else devicectl's JSON.
 /// Never gates setup on its own.
 pub fn device_ios_version(udid: &str) -> Option<String> {
@@ -926,6 +997,44 @@ pub fn xcode_missing_message() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coredevice_says_absent_only_for_an_unavailable_phone_without_transport() {
+        // Shapes taken from `devicectl list devices -j` with one phone wired,
+        // one unplugged, and one reachable over Wi-Fi.
+        let json = r#"{"result":{"devices":[
+            {"hardwareProperties":{"udid":"00008110-0002346211A0401E"},
+             "connectionProperties":{"tunnelState":"connected","transportType":"wired"}},
+            {"hardwareProperties":{"udid":"00008150-000A60EC1A02401C"},
+             "connectionProperties":{"tunnelState":"unavailable","pairingState":"paired"}},
+            {"hardwareProperties":{"udid":"00008110-001C18203AD2401E"},
+             "connectionProperties":{"tunnelState":"disconnected","transportType":"localNetwork"}}
+        ]}}"#;
+        assert_eq!(
+            coredevice_presence(json, "00008110-0002346211A0401E"),
+            Presence::Present
+        );
+        assert_eq!(
+            coredevice_presence(json, "00008150000a60ec1a02401c"),
+            Presence::Absent,
+            "dash and case do not matter"
+        );
+        assert_eq!(
+            coredevice_presence(json, "00008110-001C18203AD2401E"),
+            Presence::Present,
+            "a Wi-Fi phone is reachable"
+        );
+        assert_eq!(
+            coredevice_presence(json, "00008101-0000000000000001"),
+            Presence::Absent,
+            "a phone CoreDevice does not list is not connected"
+        );
+        assert_eq!(coredevice_presence("", "00008150"), Presence::Unknown);
+        assert_eq!(
+            coredevice_presence(r#"{"error":{}}"#, "00008150"),
+            Presence::Unknown
+        );
+    }
 
     #[test]
     fn versions_compare_like_the_shell() {

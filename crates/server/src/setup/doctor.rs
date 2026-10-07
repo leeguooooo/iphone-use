@@ -114,7 +114,16 @@ pub fn run(ctx: &Ctx) -> i32 {
     }
     let usb = checks::usb_udids();
     let usb_list = usb.join(" ");
-    if !ctx.lan() && usb.is_empty() {
+    let absent = !ctx.udid.is_empty()
+        && !checks::on_usb(&ctx.udid, &usb)
+        && checks::presence(&ctx.udid) == checks::Presence::Absent;
+    if absent {
+        warn(&format!(
+            "X configured target {} is not connected to this Mac (usbmuxd does not list it; CoreDevice reports it unavailable) — plug it in over USB (or join the same Wi-Fi) and unlock it",
+            ctx.udid
+        ));
+        fail = true;
+    } else if !ctx.lan() && usb.is_empty() {
         warn("X the default device layer requires an iPhone connected over USB");
         fail = true;
     } else if !ctx.lan() && usb.len() > 1 && ctx.udid.is_empty() {
