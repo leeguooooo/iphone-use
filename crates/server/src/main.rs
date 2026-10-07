@@ -222,6 +222,11 @@ enum Command {
     /// Setup refuses while another session holds the phone's owner lease.
     /// `--force` takes the phone over anyway: a person's decision, made
     /// knowing which session loses its runner.
+    ///
+    /// `--xcode <Xcode.app>` gives this phone its own Xcode (for example a
+    /// beta for a beta iOS), remembered for its supervisor and reconnects;
+    /// other phones and the Mac's xcode-select choice are untouched.
+    /// `--xcode system` goes back to the Mac's choice.
     Setup {
         /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]

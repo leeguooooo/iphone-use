@@ -1767,6 +1767,16 @@ impl Setup {
         if current("PHONE_REMOTE_WDA_MANAGED") != "true" {
             changed.push("PHONE_REMOTE_WDA_MANAGED");
         }
+        // A per-phone Xcode reaches the daemon's own devicectl/xcrun calls
+        // through its environment, which it reads at startup.
+        let want_dir = ctx
+            .developer_dir
+            .as_ref()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if current("DEVELOPER_DIR") != want_dir {
+            changed.push("DEVELOPER_DIR");
+        }
         let needs_restart = !changed.is_empty();
         if current("WDA_ALLOW_LAN") != ctx.allow_lan {
             changed.push("WDA_ALLOW_LAN");
@@ -1782,6 +1792,11 @@ impl Setup {
                 ("WDA_ALLOW_LAN", ctx.allow_lan.as_str()),
             ] {
                 plist_set_env(&staged, key, value);
+            }
+            if want_dir.is_empty() {
+                plist_buddy(&staged, "Delete :EnvironmentVariables:DEVELOPER_DIR");
+            } else {
+                plist_set_env(&staged, "DEVELOPER_DIR", &want_dir);
             }
             ok(&format!(
                 "daemon plist set to managed direct + fixed device + runner control/video endpoints (changed: {})",

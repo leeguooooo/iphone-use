@@ -144,12 +144,33 @@ pub fn run_setup(target: &Target, args: &[String]) -> i32 {
         return 2;
     }
     // `--force`: take the phone over even while another session holds it.
+    // `--xcode <Xcode.app|system>`: this phone's own Xcode, persisted.
     let force = args.iter().any(|a| a == "--force");
-    let args: Vec<&String> = args.iter().filter(|a| *a != "--force").collect();
+    let mut xcode = None;
+    let mut rest: Vec<&String> = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--force" {
+            continue;
+        }
+        if arg == "--xcode" {
+            xcode = iter.next().cloned();
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--xcode=") {
+            xcode = Some(value.to_string());
+            continue;
+        }
+        rest.push(arg);
+    }
+    let args = rest;
     let mut command = std::process::Command::new("/bin/bash");
     command.arg(&script).args(args);
     if force {
         command.env("IPHONE_USE_SETUP_FORCE", "1");
+    }
+    if let Some(xcode) = xcode {
+        command.env("IPHONE_USE_XCODE", xcode);
     }
     if let Some(name) = target.named() {
         command.env("PHONE_REMOTE_INSTANCE", name);
