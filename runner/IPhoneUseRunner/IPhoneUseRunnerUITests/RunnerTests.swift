@@ -176,8 +176,9 @@ final class RunnerTests: XCTestCase {
   }
 
   func handleOnMain(_ request: HTTPRequest) -> HTTPResponse {
+    let started = Date()
     busyLock.lock()
-    busySince = Date()
+    busySince = started
     busyLock.unlock()
     recordedIssues.removeAll()
     if request.method != "GET", Self.mayChangeScreen(request.path) {
@@ -202,6 +203,7 @@ final class RunnerTests: XCTestCase {
     if !recordedIssues.isEmpty {
       response.headers["X-IPU-XCTest-Issues"] = String(recordedIssues.count)
     }
+    response.headers["X-IPU-Ms"] = String(Int(Date().timeIntervalSince(started) * 1000))
     return response
   }
 
@@ -298,7 +300,14 @@ final class RunnerTests: XCTestCase {
         rememberKey: target.pid > 0 ? String(target.pid) : nil
       )
       if (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] {
-        return .value(root, headers: treeHeaders(tree, backend: "private-ax", pid: target.pid))
+        var headers = treeHeaders(tree, backend: "private-ax", pid: target.pid)
+        let scanStarted = Date()
+        if let alert = alertBesideTree(
+          root as? [String: Any], pid: target.pid, scanSpringBoard: request.query["alert_scan"] == "1") {
+          headers["X-IPU-Alert"] = alert
+          headers["X-IPU-Alert-Ms"] = String(Int(Date().timeIntervalSince(scanStarted) * 1000))
+        }
+        return .value(root, headers: headers)
       }
       privateError = tree[IPURTreeErrorKey] as? String ?? "private AX snapshot failed"
       NSLog("ipu-runner: private AX snapshot failed, falling back to XCUI snapshot: %@", privateError!)
@@ -323,6 +332,38 @@ final class RunnerTests: XCTestCase {
       throw RunnerError.failed(tree[IPURTreeErrorKey] as? String ?? "snapshot serialization failed")
     }
     return .value(root, headers: treeHeaders(tree, backend: "xcui-snapshot", pid: target.pid))
+  }
+
+  /// The system-alert answer for the screen a tree read just described, so the daemon need not
+  /// ask `/alert/text` separately (≈0.15–0.2 s: two more snapshots). `"1"`/`"0"`, priming
+  /// `alertCache` for an `/alert/text` right after; `nil` when this read cannot tell.
+  ///
+  /// Free when the answer is in the tree already: an alert in the front app, or SpringBoard in
+  /// front (hardware: with SpringBoard's tel: prompt up, the centre probe resolves SpringBoard,
+  /// so the prompt is in the tree just read). With an app in front and no alert in it, only a
+  /// SpringBoard snapshot can rule one out (≈70 ms, more than half of a tree read), so that
+  /// runs only when asked (`alert_scan=1`: the daemon's own "no alert" answer went stale).
+  func alertBesideTree(_ root: [String: Any]?, pid: Int32, scanSpringBoard: Bool) -> String? {
+    var found: FoundAlert?
+    if let root, let alert = firstNode(in: root, type: "XCUIElementTypeAlert") {
+      found = describeAlert(alert, pid: pid)
+    } else {
+      guard let springBoard = IPURBridge.systemApplicationElement() else { return nil }
+      let springBoardPid = IPURBridge.pid(forAXElement: springBoard)
+      if springBoardPid != pid {
+        guard scanSpringBoard else { return nil }
+        let tree = IPURBridge.wdaTree(
+          forAXElement: springBoard, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
+          extensionCallLimit: 0, rememberKey: springBoardPid > 0 ? String(springBoardPid) : nil)
+        guard (tree[IPURTreeOkKey] as? Bool) == true, let springRoot = tree[IPURTreeRootKey] as? [String: Any]
+        else { return nil }
+        if let alert = firstNode(in: springRoot, type: "XCUIElementTypeAlert") {
+          found = describeAlert(alert, pid: springBoardPid)
+        }
+      }
+    }
+    alertCache = (Date(), found)
+    return found == nil ? "0" : "1"
   }
 
   func treeHeaders(_ tree: [String: Any], backend: String, pid: Int32) -> [String: String] {

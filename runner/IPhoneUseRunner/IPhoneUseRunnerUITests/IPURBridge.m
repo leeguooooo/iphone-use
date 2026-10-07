@@ -1151,6 +1151,52 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
   return NULL;
 }
 
++ (nullable NSData *)grayScreenWithMaxSide:(NSUInteger)maxSide
+                                     width:(NSUInteger *)width
+                                    height:(NSUInteger *)height
+                                     error:(NSString *_Nullable *_Nullable)error
+{
+  maxSide = MAX((NSUInteger)16, MIN((NSUInteger)512, maxSide));
+  NSString *failure = nil;
+  NSData *jpeg = [self jpegScreenshotWithQuality:0.5 scale:1.0 path:NULL error:&failure];
+  if (jpeg == nil) {
+    if (error) *error = failure ?: @"screen capture failed";
+    return nil;
+  }
+  CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg, NULL);
+  if (source == NULL) {
+    if (error) *error = @"capture could not be decoded";
+    return nil;
+  }
+  NSDictionary *options = @{
+    (id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+    (id)kCGImageSourceThumbnailMaxPixelSize: @(maxSide),
+    (id)kCGImageSourceCreateThumbnailWithTransform: @YES,
+  };
+  CGImageRef image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+  CFRelease(source);
+  if (image == NULL) {
+    if (error) *error = @"capture thumbnail failed";
+    return nil;
+  }
+  size_t w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+  NSMutableData *pixels = [NSMutableData dataWithLength:w * h];
+  CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+  CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, w, h, 8, w, gray, kCGImageAlphaNone);
+  CGColorSpaceRelease(gray);
+  if (context == NULL) {
+    CGImageRelease(image);
+    if (error) *error = @"grayscale context failed";
+    return nil;
+  }
+  CGContextDrawImage(context, CGRectMake(0, 0, w, h), image);
+  CGContextRelease(context);
+  CGImageRelease(image);
+  if (width) *width = w;
+  if (height) *height = h;
+  return pixels;
+}
+
 // MARK: - Device
 
 + (BOOL)isScreenLocked:(BOOL *)known

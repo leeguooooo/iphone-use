@@ -120,6 +120,31 @@ pub fn mock_wda_with_apps(
         + std::panic::RefUnwindSafe
         + 'static,
 ) -> MockWda {
+    mock_wda_inner(apps, false, responder)
+}
+
+/// [`mock_wda`] for the native runner: `GET /wda/settle` (on-device settle)
+/// reaches the script like any other request. Plain mocks answer it the way
+/// WebDriverAgent does — 404, outside the script — so their scripts only see
+/// the old settle traffic.
+#[allow(dead_code)]
+pub fn mock_native_runner(
+    responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)>
+        + Send
+        + std::panic::RefUnwindSafe
+        + 'static,
+) -> MockWda {
+    mock_wda_inner("[]", true, responder)
+}
+
+fn mock_wda_inner(
+    apps: &'static str,
+    native: bool,
+    responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)>
+        + Send
+        + std::panic::RefUnwindSafe
+        + 'static,
+) -> MockWda {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -161,6 +186,15 @@ pub fn mock_wda_with_apps(
             // After an app switch (Home, launch) the read asks which app is
             // in front. No test here scripts that: answer "unknown", which
             // sends the read through the probe answered above.
+            if !native && request.contains("/wda/settle") {
+                let body = r#"{"value":{"error":"unknown command","message":"GET /wda/settle is not supported"}}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                continue;
+            }
             if request.contains("/wda/apps/list") {
                 let body = format!(r#"{{"value":{apps}}}"#);
                 let _ = write!(

@@ -143,6 +143,12 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                          scale:(double)scale
                                           path:(NSString *_Nullable *_Nullable)path
                                          error:(NSString *_Nullable *_Nullable)error;
+/// The screen as an 8-bit grayscale thumbnail whose longer side is at most `maxSide` pixels,
+/// for cheap on-device change detection. Row-major, `width` × `height` bytes.
++ (nullable NSData *)grayScreenWithMaxSide:(NSUInteger)maxSide
+                                     width:(NSUInteger *)width
+                                    height:(NSUInteger *)height
+                                     error:(NSString *_Nullable *_Nullable)error;
 
 /// The main screen as a decoded image no larger than `scale` of full size, for the H.264 stream
 /// (RunnerH264.swift): the same capture paths as `jpegScreenshotWithQuality:`, decoded once by
