@@ -13,20 +13,7 @@ for test in \
     scripts/test-install-cli-link.sh \
     scripts/test-install-runner-sources.sh \
     scripts/test-uninstall-safety.sh \
-    scripts/test-setup-wda-warp-preflight.sh \
-    scripts/test-setup-wda-lock-backoff.sh \
-    scripts/test-setup-wda-proxy-preflight.sh \
-    scripts/test-setup-wda-probe-threshold.sh \
-    scripts/test-setup-wda-runner-repair.sh \
-    scripts/test-setup-wda-devicectl-timeout.sh \
-    scripts/test-setup-wda-lock-wait.sh \
-    scripts/test-setup-wda-runner-build.sh \
-    scripts/test-setup-wda-status.py \
-    scripts/test-setup-wda-runner-product.py \
-    scripts/test-setup-wda-asc-signing.py \
-    scripts/test-setup-wda-runner-cache.py \
-    scripts/test-setup-wda-xcode-compat.py \
-    scripts/test-setup-wda-product-verdict.py \
+    scripts/test-setup-wda-shim.sh \
     scripts/test-instance-context.py \
     scripts/test-auto-update.py
 do

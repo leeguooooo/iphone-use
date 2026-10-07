@@ -2090,8 +2090,8 @@ fi
 # A second phone gets a second daemon. Everything below writes only that
 # instance's plist, its private app copy and its state directory; the default
 # instance's app, plists and runtime are read (signing policy) but never
-# changed. Paths, labels and ports come from setup-wda.sh `instance-context`,
-# the one shell implementation of the derivation.
+# changed. Paths, labels and ports come from setup-wda.sh `instance-context`
+# (the setup engine in the app being installed).
 named_plist_env() {
     [ -f "$1" ] || { printf ''; return; }
     /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$2" "$1" 2>/dev/null || printf ''
@@ -2117,6 +2117,7 @@ install_named_instance() {
     # name, a port another instance owns, or a phone another daemon drives
     # all fail here.
     if ! ctx="$(env PHONE_REMOTE_INSTANCE="$INSTANCE_NAME" \
+        IPHONE_USE_SETUP_BIN="$app_src/Contents/MacOS/iphone-use" \
         ${INSTANCE_UDID:+WDA_UDID="$INSTANCE_UDID"} \
         ${INSTANCE_PORT:+PHONE_REMOTE_PORT="$INSTANCE_PORT"} \
         /bin/bash "$setup_src" instance-context 2>&1)"; then

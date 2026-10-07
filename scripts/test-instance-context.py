@@ -24,6 +24,12 @@ SETUP = ROOT / "scripts" / "setup-wda.sh"
 UNINSTALL = ROOT / "uninstall.sh"
 FIXTURE = json.loads((ROOT / "scripts" / "fixtures" / "instance-derivation.json").read_text())
 FIXTURE_HOME = "/Users/leo"
+# setup-wda.sh hands instance-context to the setup engine; use this
+# workspace's build of it.
+BIN = ROOT / "target" / "debug" / "iphone-use"
+if not BIN.exists():
+    subprocess.run(["cargo", "build", "-q", "-p", "server", "--bin", "iphone-use"],
+                   cwd=ROOT, check=True)
 
 failures = []
 
@@ -38,6 +44,7 @@ def run(script, args, home, env_extra=None, unset=()):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("PHONE_REMOTE_", "WDA_", "MJPEG_"))}
     env["HOME"] = str(home)
+    env["IPHONE_USE_SETUP_BIN"] = str(BIN)
     for key in unset:
         env.pop(key, None)
     env.update(env_extra or {})

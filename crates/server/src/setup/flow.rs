@@ -891,16 +891,11 @@ impl Setup {
     /// launch the moment it unlocks (two explicit "unlocked" reads in a row;
     /// an unreadable one proves nothing).
     fn wait_for_unlock(&mut self) -> Step {
-        let limit = match std::env::var("WDA_LOCK_WAIT_SECS") {
-            Ok(value) if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) => {
-                warn(&format!(
-                    "WDA_LOCK_WAIT_SECS='{value}' is not a whole number of seconds; using 300"
-                ));
-                300
-            }
-            Ok(value) => value.parse::<u64>().unwrap_or(300),
-            Err(_) => 300,
-        };
+        let (limit, complaint) =
+            lock_wait_limit(std::env::var("WDA_LOCK_WAIT_SECS").ok().as_deref());
+        if let Some(complaint) = complaint {
+            warn(&complaint);
+        }
         if self.passcode_required() != Some(true) {
             return Ok(());
         }
@@ -911,16 +906,16 @@ impl Setup {
             "the iPhone is locked — unlock it and connecting continues on its own",
         );
         let started = Instant::now();
-        let mut unlocked_reads = 0;
-        while unlocked_reads < 2 {
+        let mut wait = UnlockWait::default();
+        loop {
             proc::check()?;
-            match self.passcode_required() {
-                Some(false) => {
-                    unlocked_reads += 1;
-                    continue;
-                }
-                Some(true) => unlocked_reads = 0,
-                None => {}
+            let reading = self.passcode_required();
+            if wait.observe(reading) {
+                break;
+            }
+            if reading == Some(false) {
+                // One unlocked reading: read again at once for the second.
+                continue;
             }
             if started.elapsed().as_secs() >= limit {
                 if self.ctx.keepalive {
@@ -1177,6 +1172,18 @@ impl Setup {
         die("Xcode has no signed-in Apple account. Open Xcode → Settings → Accounts,\n   sign in and select the development team, or configure WDA_ASC_KEY_PATH,\n   WDA_ASC_KEY_ID and WDA_ASC_ISSUER_ID for App Store Connect API key signing,\n   then rerun.")
     }
 
+    fn report_device_unavailable<T>(&mut self) -> Step<T> {
+        self.phase(
+            "building-fail",
+            "usb",
+            "this Mac cannot reach the iPhone (xcodebuild timed out waiting for it) — connect it with a cable, unlock it and keep it awake",
+        );
+        die(format!(
+            "this Mac cannot reach the iPhone: xcodebuild timed out waiting for it to become available. Connect it with a USB cable, unlock it and keep it awake; KeepAlive retries on its own. Log: {}",
+            self.ctx.run_log.display()
+        ))
+    }
+
     fn report_automation_disabled<T>(&self) -> Step<T> {
         self.phase(
             "building-fail",
@@ -1195,13 +1202,10 @@ impl Setup {
         if !runner::log_shows_ide_refusal(&self.ctx.run_log) {
             return None;
         }
-        let sdk = checks::os_major_minor(&checks::ios_sdk_version()?);
-        let device = checks::os_major_minor(&checks::device_ios_version(&self.ctx.udid)?);
-        checks::version_lt(&sdk, &device).then(|| {
-            format!(
-                "iPhone runs iOS {device} but this Xcode's SDK is iOS {sdk} — install an Xcode that supports iOS {device} (a beta Xcode for a beta iOS)"
-            )
-        })
+        xcode_too_old_message(
+            checks::ios_sdk_version().as_deref(),
+            checks::device_ios_version(&self.ctx.udid).as_deref(),
+        )
     }
 
     fn report_automation_not_allowed<T>(&mut self) -> Step<T> {
@@ -1399,6 +1403,12 @@ impl Setup {
                 }
                 if runner::log_shows_automation_disabled(&self.ctx.run_log) {
                     return self.report_automation_disabled();
+                }
+                // The phone vanished from this Mac before the runner could
+                // start: say so, instead of the generic exit that sends the
+                // operator to a log (#166).
+                if runner::log_shows_device_unavailable(&self.ctx.run_log) {
+                    return self.report_device_unavailable();
                 }
                 self.phase(
                     "building-fail",
@@ -2076,11 +2086,12 @@ impl Setup {
             return Ok(());
         }
         info("KeepAlive mode: holding while the PID-verified runner and relays stay healthy");
-        const MAX_FAILURES: u32 = 3;
+        const MAX_FAILURES: u32 = ProbeCount::MAX;
         let wda_port = valid_port(&self.ctx.wda_port).unwrap_or(8100);
         let mjpeg_port = valid_port(&self.ctx.mjpeg_port).unwrap_or(9100);
         let status_url = format!("http://127.0.0.1:{wda_port}/status");
         let mut failures = 0;
+        let mut probes = ProbeCount::default();
         let mut relay_restarts: Vec<Instant> = Vec::new();
         let mut warned_owner = false;
         let cause = loop {
@@ -2121,13 +2132,14 @@ impl Setup {
                 self.relays(&url)?;
                 ok("relays restored; the runner kept running");
                 failures = 0;
+                probes = ProbeCount::default();
                 continue;
             }
-            if sys::http_ok(&status_url, Duration::from_secs(4)) {
-                failures = 0;
-            } else {
-                failures += 1;
-                if failures >= MAX_FAILURES {
+            let answered = sys::http_ok(&status_url, Duration::from_secs(4));
+            let rebuild = probes.observe(answered);
+            failures = probes.failures;
+            if !answered {
+                if rebuild {
                     // A slow runner under another session's lease is that
                     // session's to wait for, not ours to replace.
                     if let Some(lease) =
@@ -2141,6 +2153,7 @@ impl Setup {
                             warned_owner = true;
                         }
                         failures = 0;
+                        probes = ProbeCount::default();
                         proc::sleep(Duration::from_secs(10))?;
                         continue;
                     }
@@ -2288,6 +2301,79 @@ pub fn restore_backup(backup: &Path, target: &Path, mode: u32) -> bool {
     restored
 }
 
+// ── pure decisions (unit-tested below) ──────────────────────────────────────
+
+/// `WDA_LOCK_WAIT_SECS`: whole seconds; anything else falls back to 300 with
+/// a complaint instead of breaking the comparison.
+pub fn lock_wait_limit(raw: Option<&str>) -> (u64, Option<String>) {
+    match raw {
+        None => (300, None),
+        Some(value) if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) => {
+            (value.parse().unwrap_or(300), None)
+        }
+        Some(value) => (
+            300,
+            Some(format!(
+                "WDA_LOCK_WAIT_SECS='{value}' is not a whole number of seconds; using 300"
+            )),
+        ),
+    }
+}
+
+/// The pre-launch lock wait: unlocked only after two explicit "no passcode
+/// required" readings in a row. A failed read proves neither lock nor unlock
+/// (on hardware, failed reads during a lock launched into "Unlock iPhone to
+/// Continue").
+#[derive(Debug, Default)]
+pub struct UnlockWait {
+    unlocked_reads: u32,
+}
+
+impl UnlockWait {
+    /// Feed one reading (`Some(true)` = passcode required); `true` = unlocked.
+    pub fn observe(&mut self, passcode_required: Option<bool>) -> bool {
+        match passcode_required {
+            Some(false) => self.unlocked_reads += 1,
+            Some(true) => self.unlocked_reads = 0,
+            None => {}
+        }
+        self.unlocked_reads >= 2
+    }
+}
+
+/// #126: only when the SDK's major.minor is older than the phone's does a
+/// code-74 refusal mean the Xcode is too old.
+pub fn xcode_too_old_message(sdk: Option<&str>, device: Option<&str>) -> Option<String> {
+    let sdk = checks::os_major_minor(sdk?);
+    let device = checks::os_major_minor(device?);
+    checks::version_lt(&sdk, &device).then(|| {
+        format!(
+            "iPhone runs iOS {device} but this Xcode's SDK is iOS {sdk} — install an Xcode that supports iOS {device} (a beta Xcode for a beta iOS)"
+        )
+    })
+}
+
+/// The holding loop's patience: three unanswered `/status` probes in a row
+/// (~32 s) before a rebuild; one answer resets it.
+#[derive(Debug, Default)]
+pub struct ProbeCount {
+    pub failures: u32,
+}
+
+impl ProbeCount {
+    pub const MAX: u32 = 3;
+
+    /// `true` once the runner has missed [`Self::MAX`] probes in a row.
+    pub fn observe(&mut self, answered: bool) -> bool {
+        if answered {
+            self.failures = 0;
+        } else {
+            self.failures += 1;
+        }
+        self.failures >= Self::MAX
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2307,6 +2393,67 @@ mod tests {
     #[test]
     fn supervisor_plist_values_are_escaped() {
         assert_eq!(xml_escape("/a&b/<x>.p8"), "/a&amp;b/&lt;x&gt;.p8");
+    }
+
+    #[test]
+    fn lock_wait_limits() {
+        assert_eq!(lock_wait_limit(None), (300, None));
+        assert_eq!(lock_wait_limit(Some("45")), (45, None));
+        let (limit, complaint) = lock_wait_limit(Some("five"));
+        assert_eq!(limit, 300);
+        assert!(complaint.unwrap().contains("not a whole number"));
+        assert_eq!(lock_wait_limit(Some("")).0, 300);
+    }
+
+    #[test]
+    fn unlocking_needs_two_explicit_readings_in_a_row() {
+        let mut wait = UnlockWait::default();
+        assert!(!wait.observe(Some(false)));
+        assert!(wait.observe(Some(false)), "two unlocked readings in a row");
+        let mut wait = UnlockWait::default();
+        assert!(!wait.observe(Some(false)));
+        assert!(!wait.observe(Some(true)), "a locked reading starts over");
+        assert!(!wait.observe(Some(false)));
+        assert!(!wait.observe(None), "an unreadable state is not an unlock");
+        assert!(!wait.observe(None));
+        assert!(wait.observe(Some(false)));
+        let mut wait = UnlockWait::default();
+        for _ in 0..10 {
+            assert!(!wait.observe(None), "unreadable never counts as unlocked");
+        }
+    }
+
+    #[test]
+    fn xcode_is_too_old_only_when_the_phone_is_newer() {
+        assert!(xcode_too_old_message(Some("27.0"), Some("27.2"))
+            .unwrap()
+            .contains("iOS 27.2"));
+        assert!(xcode_too_old_message(Some("27.0"), Some("28.0")).is_some());
+        assert!(
+            xcode_too_old_message(Some("27.2"), Some("27.2")).is_none(),
+            "matching: automation_not_allowed"
+        );
+        assert!(
+            xcode_too_old_message(Some("27.0"), Some("27.0.1")).is_none(),
+            "a patch gap is not too old"
+        );
+        assert!(xcode_too_old_message(Some("27.2"), Some("27.0")).is_none());
+        assert!(
+            xcode_too_old_message(None, Some("27.2")).is_none(),
+            "unknown versions never fail"
+        );
+        assert!(xcode_too_old_message(Some("27.0"), None).is_none());
+    }
+
+    #[test]
+    fn the_hold_rebuilds_after_three_missed_probes_in_a_row() {
+        let mut probes = ProbeCount::default();
+        assert!(!probes.observe(false));
+        assert!(!probes.observe(false));
+        assert!(!probes.observe(true), "an answer resets the count");
+        assert!(!probes.observe(false));
+        assert!(!probes.observe(false));
+        assert!(probes.observe(false));
     }
 
     #[test]

@@ -39,18 +39,9 @@ jobs:
           set -euo pipefail
           bash -n install.sh
           bash -n scripts/test-install-release-transaction.sh
-          bash -n scripts/test-setup-wda-warp-preflight.sh
           bash scripts/test-install-release-transaction.sh
-          bash scripts/test-setup-wda-warp-preflight.sh
-          bash scripts/test-setup-wda-lock-backoff.sh
-          bash scripts/test-setup-wda-runner-build.sh
           bash scripts/test-install-runner-sources.sh
-          bash scripts/test-setup-wda-runner-repair.sh
-          bash scripts/test-setup-wda-probe-threshold.sh
-          python3 scripts/test-setup-wda-status.py
-          python3 scripts/test-setup-wda-runner-product.py
-          python3 scripts/test-setup-wda-asc-signing.py
-          python3 scripts/test-setup-wda-runner-cache.py
+          bash scripts/test-setup-wda-shim.sh
           python3 scripts/test-auto-update.py
 
           skill_file_count="$(
