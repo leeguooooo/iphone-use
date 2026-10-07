@@ -1,12 +1,19 @@
-"""Matched-task A/B through the real MCP entry point, on the iPhone 13.
+"""Matched-task A/B through the real MCP entry point (see README.md).
 
-Task: from the Settings top page, open 通用 → 关于本机. Postcondition: a
-fresh read (outside the run) shows 名称. Variant A drives it with single
-calls (read, tap_label, tap_label, read); variant B with one phone_run_steps
-batch. Each trial is an explicit run (phone_run_start / phone_run_end), so the
-daemon's own summary gives the counts. Order: one cold round per variant
-(recorded, reported separately), then ABBA ×2. Raw records → records.jsonl.
-Never prints tokens.
+Task: from the Settings top page, open 蓝牙 (the row "蓝牙、打开"). The
+postcondition is a fresh read outside the run that shows the Switch 蓝牙.
+Variant A uses single calls (phone_elements, phone_tap_label, phone_elements);
+variant B uses one phone_run_steps batch (tap_locator + wait_for). Each trial
+is an explicit run (phone_run_start / phone_run_end), so the daemon's own
+summary gives the counts.
+
+The daemon and the MCP server start once. The first two rounds are their
+first use; the records label them "cold", and the report calls them "first
+round" (not an independent cold start). Then A B B A A B B A.
+
+Needs: AB_UDID (the phone's UDID), a phone instance whose relays answer on
+127.0.0.1:8538/9538 and whose daemon is on 45838. Writes records.jsonl and
+meta.json next to this file. Never prints tokens.
 """
 import json
 import os
@@ -18,7 +25,8 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = sys.argv[1]
-I13_PORT, RELAY, MJPEG, UDID = 45838, "http://127.0.0.1:8538", "http://127.0.0.1:9538", "00008110-0002346211A0401E"
+I13_PORT, RELAY, MJPEG = 45838, "http://127.0.0.1:8538", "http://127.0.0.1:9538"
+UDID = os.environ["AB_UDID"]  # required; not committed
 PORT, OWNER = 45690, "ab-agent"
 TOKEN = secrets.token_hex(16)
 I13_TOKEN = subprocess.run(

@@ -239,9 +239,8 @@ enum Command {
         #[arg(long)]
         instance: Option<String>,
     },
-    /// Is the iPhone ready for agents? Exit 0 when it is.
-    /// Per-run task metrics: calls, batches, observed actions, failures,
-    /// p50/p95 (calls are HTTP calls to the daemon, not model turns).
+    /// Per-run task metrics: HTTP calls (not model turns), batches, observed
+    /// actions, failures and p50/p95.
     Metrics {
         #[arg(long)]
         instance: Option<String>,
@@ -251,6 +250,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Is the iPhone ready for agents? Exit 0 when it is.
     Status {
         #[arg(long)]
         instance: Option<String>,

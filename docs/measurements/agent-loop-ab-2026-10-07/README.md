@@ -77,6 +77,11 @@ It measures a product problem, not the two styles:
 
 Both are outside this change and are reported separately.
 
-The records in this directory carry no tool-output text: it contained
-on-screen account details. They keep the structure, the counts, the daemon's
-run summaries and the error codes.
+## Redaction
+
+The raw tool output from these runs contained on-screen identity data: an
+Apple account name, a Wi-Fi network name and the phone's device name. None
+of it is published here. The records keep only the structure, the counts,
+the daemon's run summaries and the error codes. A scan for those names,
+device UDIDs and tokens finds nothing. The phone's UDID is not in
+[`ab.py`](ab.py) either; the driver reads it from `AB_UDID`.

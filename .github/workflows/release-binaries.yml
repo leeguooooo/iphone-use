@@ -224,7 +224,7 @@ jobs:
               assert "observe" in schema["properties"], (name, schema)
               assert "observe" not in schema.get("required", []), (name, schema)
           print(
-              "Bundled MCP exposes 24 tools; observe is optional on "
+              f"Bundled MCP exposes {len(names)} tools; observe is optional on "
               f"{len(observing)} single-step UI tools."
           )
 
