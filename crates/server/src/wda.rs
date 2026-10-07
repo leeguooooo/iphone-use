@@ -162,7 +162,9 @@ impl WdaClient {
             .context("parse /wda/locked")?;
         parse_wda_value(&body, "GET /wda/locked")?
             .as_bool()
-            .ok_or_else(|| anyhow!("GET /wda/locked returned a non-boolean value: {body}"))
+            .ok_or_else(|| {
+                anyhow!("GET /wda/locked returned a non-boolean value ({})", body_summary(&body))
+            })
     }
 
     /// Session-less `GET /wda/locked`. WDA serves this route `withoutSession`
@@ -182,7 +184,9 @@ impl WdaClient {
             .context("parse /wda/locked (unattached)")?;
         parse_wda_value(&body, "GET /wda/locked (unattached)")?
             .as_bool()
-            .ok_or_else(|| anyhow!("GET /wda/locked returned a non-boolean value: {body}"))
+            .ok_or_else(|| {
+                anyhow!("GET /wda/locked returned a non-boolean value ({})", body_summary(&body))
+            })
     }
 
     /// Probe WDA at the ACTION level, not just `/status`. `GET /status` lies:
@@ -2610,15 +2614,21 @@ async fn ensure_wda_success(
     parse_wda_value(&body, operation)
 }
 
+/// Errors never quote a runner response: a /source body is the whole screen,
+/// including field values. Name its size instead.
+fn body_summary(body: &str) -> String {
+    format!("{} bytes", body.len())
+}
+
 /// Parse a W3C response value while preserving error semantics. WDA sometimes
 /// returns a JSON error envelope that still has a decodable `value`; treating
 /// that object as a successful source tree or `false` lock state is unsafe.
 fn parse_wda_value(body: &str, operation: &str) -> Result<serde_json::Value> {
     let root: serde_json::Value = serde_json::from_str(body)
-        .with_context(|| format!("{operation} response is not JSON: {body}"))?;
+        .with_context(|| format!("{operation} response is not JSON ({})", body_summary(body)))?;
     let value = root
         .get("value")
-        .ok_or_else(|| anyhow!("{operation} response has no value: {body}"))?;
+        .ok_or_else(|| anyhow!("{operation} response has no value ({})", body_summary(body)))?;
     if let Some(code) = value.get("error").and_then(serde_json::Value::as_str) {
         let message = value
             .get("message")
@@ -2633,7 +2643,7 @@ fn parse_wda_value(body: &str, operation: &str) -> Result<serde_json::Value> {
 /// top-level `sessionId` (older WDA) and `value.sessionId` (W3C) placements.
 fn parse_session_id(body: &str) -> Result<String> {
     let v: serde_json::Value =
-        serde_json::from_str(body).with_context(|| format!("session resp not JSON: {body}"))?;
+        serde_json::from_str(body).with_context(|| format!("session resp not JSON ({})", body_summary(body)))?;
     if let Some(code) = v
         .get("value")
         .and_then(|value| value.get("error"))
@@ -2656,7 +2666,7 @@ fn parse_session_id(body: &str) -> Result<String> {
     {
         return Ok(s.to_string());
     }
-    Err(anyhow!("no sessionId in WDA response: {body}"))
+    Err(anyhow!("no sessionId in WDA response ({})", body_summary(body)))
 }
 
 /// Pull an element id out of a find/`POST element` response. WDA returns it
@@ -2665,14 +2675,14 @@ fn parse_session_id(body: &str) -> Result<String> {
 fn parse_element_id(body: &str) -> Result<String> {
     const W3C_KEY: &str = "element-6066-11e4-a52e-4f735466cecf";
     let v: serde_json::Value =
-        serde_json::from_str(body).with_context(|| format!("element resp not JSON: {body}"))?;
-    let val = v.get("value").ok_or_else(|| anyhow!("no value: {body}"))?;
+        serde_json::from_str(body).with_context(|| format!("element resp not JSON ({})", body_summary(body)))?;
+    let val = v.get("value").ok_or_else(|| anyhow!("element resp has no value ({})", body_summary(body)))?;
     for key in ["ELEMENT", W3C_KEY] {
         if let Some(s) = val.get(key).and_then(|s| s.as_str()) {
             return Ok(s.to_string());
         }
     }
-    Err(anyhow!("no element id in WDA response: {body}"))
+    Err(anyhow!("no element id in WDA response ({})", body_summary(body)))
 }
 
 /// WDA refused a force press because the device has no pressure-sensitive
@@ -3951,5 +3961,27 @@ mod overlay_tests {
     fn rows_without_overlays_serialize_without_the_field() {
         let rows = flatten(&node("Button", "OK", Some("ok-button"), vec![]));
         assert!(!serde_json::to_string(&rows).unwrap().contains("overlay"));
+    }
+}
+
+#[cfg(test)]
+mod body_summary_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_responses_never_quote_the_body() {
+        let secret = "hunter2-sentinel";
+        let not_json = format!("<html>{secret}</html>");
+        let error = parse_wda_value(&not_json, "source").unwrap_err();
+        assert!(!format!("{error:#}").contains(secret), "{error:#}");
+
+        let no_value = format!(r#"{{"tree":"{secret}"}}"#);
+        let error = parse_wda_value(&no_value, "source").unwrap_err();
+        assert!(!format!("{error:#}").contains(secret), "{error:#}");
+
+        let error = parse_element_id(&no_value).unwrap_err();
+        assert!(!format!("{error:#}").contains(secret), "{error:#}");
+        let error = parse_element_id(&not_json).unwrap_err();
+        assert!(!format!("{error:#}").contains(secret), "{error:#}");
     }
 }
