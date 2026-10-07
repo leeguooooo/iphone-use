@@ -257,6 +257,8 @@ pub struct AggregatorStats {
     pub lifetime_closed_runs: u64,
     /// Closed summaries discarded because nobody drained them in time.
     pub dropped_summaries: u64,
+    /// Calls that turned out unauthenticated: discarded, never counted.
+    pub unauthenticated_events: u64,
 }
 
 #[derive(Debug)]
@@ -572,6 +574,44 @@ impl RunAggregator {
             .map(|run| summarize(key, run, Closed::Ended, None))
     }
 
+    /// Withdraw a call that should never have counted (it was refused as
+    /// unauthenticated). A run that only this call had opened disappears.
+    pub fn discard(&mut self, token: CallToken) {
+        self.stats.unauthenticated_events += 1;
+        let Some(key) = token.key else {
+            // It was counted as unattributed at `begin`; take that back.
+            self.stats.unattributed_events = self.stats.unattributed_events.saturating_sub(1);
+            return;
+        };
+        let Some(run) = self.open.get_mut(&key) else {
+            return;
+        };
+        run.outstanding.remove(&token.id);
+        let empty =
+            run.total_calls == 0 && run.outstanding.is_empty() && run.trace_declared.is_none();
+        if empty {
+            self.open.remove(&key);
+            match &key {
+                RunKey::Inferred { owner, .. } => {
+                    if self.inferred_current.get(owner) == Some(&key) {
+                        self.inferred_current.remove(owner);
+                    }
+                }
+                RunKey::Explicit { owner, run_id, .. } => {
+                    self.explicit_live.remove(&(owner.clone(), run_id.clone()));
+                }
+            }
+        }
+    }
+
+    /// Live summaries of every open run.
+    pub fn open_summaries(&self) -> Vec<RunSummary> {
+        self.open
+            .iter()
+            .map(|(key, run)| summarize(key, run, Closed::Ended, None))
+            .collect()
+    }
+
     /// Losses, force-closes and rejections so far.
     pub fn stats(&self) -> AggregatorStats {
         self.stats
@@ -679,6 +719,137 @@ fn summarize(
         trace_incomplete,
         arithmetic_overflow: overflow,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The daemon's aggregator: one per process, fed by the `timing` layer.
+// ---------------------------------------------------------------------------
+
+/// Closed summaries kept for `GET /agent/metrics` after they are logged.
+pub const RECENT_RUNS: usize = 50;
+/// Rotate `agent-runs.jsonl` past this size.
+pub const RUNS_LOG_ROTATE_BYTES: u64 = 10 << 20;
+
+struct Daemon {
+    aggregator: RunAggregator,
+    recent: VecDeque<RunSummary>,
+}
+
+static DAEMON: std::sync::OnceLock<std::sync::Mutex<Daemon>> = std::sync::OnceLock::new();
+static RUNS_LOG: std::sync::OnceLock<SummaryLog> = std::sync::OnceLock::new();
+
+fn daemon() -> std::sync::MutexGuard<'static, Daemon> {
+    let lock = DAEMON.get_or_init(|| {
+        std::sync::Mutex::new(Daemon {
+            aggregator: RunAggregator::new(),
+            recent: VecDeque::new(),
+        })
+    });
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Where closed run summaries are appended (next to `agent-timing.jsonl`).
+pub fn set_runs_log(path: PathBuf) {
+    let _ = RUNS_LOG.set(SummaryLog::new(path, RUNS_LOG_ROTATE_BYTES));
+}
+
+/// Wall-clock now in ms since the Unix epoch.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Register a daemon request at its start.
+pub fn begin_call(start: CallStart) -> CallToken {
+    daemon().aggregator.begin(start)
+}
+
+/// Finish a daemon request.
+pub fn finish_call(token: CallToken, end: CallEnd) {
+    daemon().aggregator.finish(token, end);
+    flush(now_ms());
+}
+
+/// Withdraw an unauthenticated request.
+pub fn discard_call(token: CallToken) {
+    daemon().aggregator.discard(token);
+}
+
+/// `POST /agent/run` start.
+pub fn start_run(owner: Option<String>, run_id: String, complete_trace: bool) {
+    daemon()
+        .aggregator
+        .start_run(owner, run_id, now_ms(), complete_trace);
+}
+
+/// `POST /agent/run` end.
+pub fn end_run(
+    owner: Option<String>,
+    run_id: String,
+    turns: Option<Vec<String>>,
+) -> Option<RunSummary> {
+    let summary = daemon().aggregator.end_run(owner, run_id, turns);
+    flush(now_ms());
+    summary
+}
+
+/// Close what is due, keep recent summaries, and append them to the log
+/// off the request path.
+pub fn flush(now_ms: u64) {
+    let closed = {
+        let mut daemon = daemon();
+        daemon.aggregator.sweep(now_ms);
+        let closed = daemon.aggregator.drain_closed();
+        for summary in &closed {
+            if daemon.recent.len() >= RECENT_RUNS {
+                daemon.recent.pop_front();
+            }
+            daemon.recent.push_back(summary.clone());
+        }
+        closed
+    };
+    if closed.is_empty() {
+        return;
+    }
+    if let Some(log) = RUNS_LOG.get() {
+        let write = move || {
+            for summary in &closed {
+                if let Err(error) = log.append(summary) {
+                    tracing::warn!(%error, "could not append run summary");
+                    break;
+                }
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(write);
+            }
+            Err(_) => write(),
+        }
+    }
+}
+
+/// `GET /agent/metrics`: open runs (optionally one owner's), recent closed
+/// runs, and the loss counters.
+pub fn report(owner: Option<&str>) -> serde_json::Value {
+    flush(now_ms());
+    let daemon = daemon();
+    let mine = |summary: &&RunSummary| {
+        owner.is_none_or(|owner| match &summary.key {
+            RunKey::Explicit { owner: o, .. } | RunKey::Inferred { owner: o, .. } => o == owner,
+        })
+    };
+    let open: Vec<RunSummary> = daemon.aggregator.open_summaries();
+    serde_json::json!({
+        "ok": true,
+        "definitions": "tool_calls are HTTP calls to this daemon, not model turns; \
+            model_round_trips is null unless the caller declared and delivered a complete trace",
+        "open": open.iter().filter(mine).collect::<Vec<_>>(),
+        "recent": daemon.recent.iter().filter(mine).collect::<Vec<_>>(),
+        "stats": daemon.aggregator.stats(),
+    })
 }
 
 /// Nearest-rank percentile of sorted values; `None` for an empty slice.
@@ -1112,6 +1283,23 @@ mod tests {
         let s = end_run(&mut agg, "a", "r");
         assert_eq!(s.tool_calls, MAX_IN_FLIGHT_PER_RUN as u64);
         assert!(s.incomplete);
+    }
+
+    #[test]
+    fn unauthenticated_calls_leave_no_trace() {
+        let mut agg = RunAggregator::new();
+        let token = agg.begin(start(0, Some("forger"), None));
+        agg.discard(token);
+        let token = agg.begin(start(0, None, None));
+        agg.discard(token);
+        assert!(agg.open_summaries().is_empty());
+        assert_eq!(agg.stats().unauthenticated_events, 2);
+        assert_eq!(agg.stats().unattributed_events, 0);
+        // A run that already had real calls keeps them.
+        one(&mut agg, 0, 10, Some("a"), Some("r"));
+        let token = agg.begin(start(20, Some("a"), Some("r")));
+        agg.discard(token);
+        assert_eq!(end_run(&mut agg, "a", "r").tool_calls, 1);
     }
 
     #[test]

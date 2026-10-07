@@ -88,6 +88,15 @@ impl ProgressTracker {
 
     /// An action that started but will never be judged (a cancelled call):
     /// it leaves the tracker reset.
+    /// A started action that turned out not to be the caller's at all (it was
+    /// refused as unauthenticated): release its slot without touching state.
+    pub fn withdraw(&mut self) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        if self.in_flight == 0 {
+            self.overlapped = false;
+        }
+    }
+
     pub fn abandon(&mut self) {
         self.in_flight = self.in_flight.saturating_sub(1);
         if self.in_flight == 0 {
@@ -273,6 +282,15 @@ impl ProgressGuard {
         Self {
             tracker: tracker.clone(),
             ticket,
+        }
+    }
+
+    /// The request was not the caller's (refused as unauthenticated).
+    pub fn withdraw(mut self) {
+        if self.ticket.take().is_some() {
+            if let Ok(mut tracker) = self.tracker.lock() {
+                tracker.withdraw();
+            }
         }
     }
 

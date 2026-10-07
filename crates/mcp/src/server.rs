@@ -548,7 +548,14 @@ impl PhoneHandler {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
-        if let Some(line) = guard.finish(result.structured_content.as_ref(), now_ms) {
+        let line = guard.finish(result.structured_content.as_ref(), now_ms);
+        // A daemon that judged the same answer already said so (its
+        // `no_progress` is rendered with the observation): say it once.
+        let daemon_said = result
+            .structured_content
+            .as_ref()
+            .is_some_and(|json| json.get("no_progress").is_some());
+        if let Some(line) = line.filter(|_| !daemon_said) {
             result.content.push(Content::text(line));
         }
         result

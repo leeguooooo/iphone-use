@@ -881,6 +881,8 @@ fn serve() -> Result<()> {
             .state_dir
             .join("agent-timing.jsonl"),
     );
+    // One summary per finished agent run (see `metrics`).
+    server::metrics::set_runs_log(server::instance::current().state_dir.join("agent-runs.jsonl"));
     let state = Arc::new(AppState {
         password: cfg.password.clone(),
         secret,

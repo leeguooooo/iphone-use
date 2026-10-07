@@ -929,6 +929,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/prewarm", post(agent_prewarm))
         .route("/agent/login-link", post(agent_login_link))
         .route("/agent/capabilities", get(agent_capabilities))
+        .route("/agent/metrics", get(agent_metrics))
+        .route("/agent/run", post(agent_run))
         // Scheduled flows and test suites (see `schedules`).
         .route("/schedules", get(crate::schedules::page))
         .route(
@@ -4463,6 +4465,105 @@ fn capability_availability(state: &AppState, headers: &HeaderMap) -> serde_json:
 /// `recovery_owner: external` narrows only the *lifecycle* routes the daemon
 /// will drive; it does not narrow the control and observation this daemon can
 /// still perform against that endpoint.
+fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
+    with_security_headers(
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
+}
+
+/// `GET /agent/metrics[?owner=NAME]` — per-run task metrics: open runs,
+/// recent closed runs and loss counters (see `metrics`).
+async fn agent_metrics(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    match agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    json_response(
+        StatusCode::OK,
+        crate::metrics::report(query.get("owner").map(String::as_str)),
+    )
+}
+
+/// `POST /agent/run` — mark a run boundary for the caller (`X-Phone-Owner`):
+/// `{"action":"start","run_id":…,"complete_trace":true?}` or
+/// `{"action":"end","run_id":…,"turn_ids":[…]?}`. An explicit run makes the
+/// metrics count one task exactly; without one, runs are inferred from idle
+/// gaps. A complete trace lets `model_round_trips` be reported.
+async fn agent_run(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    match agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    let invalid = |hint: &str| {
+        json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "invalid_run", "hint": hint}),
+        )
+    };
+    let Some(owner) = named_owner(&headers).map(str::to_string) else {
+        return invalid("send X-Phone-Owner: a run belongs to a caller");
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return invalid("body must be JSON");
+    };
+    let Some(run_id) = value.get("run_id").and_then(serde_json::Value::as_str) else {
+        return invalid("run_id is required");
+    };
+    match value.get("action").and_then(serde_json::Value::as_str) {
+        Some("start") => {
+            let complete = value.get("complete_trace") == Some(&serde_json::Value::Bool(true));
+            crate::metrics::start_run(Some(owner), run_id.to_string(), complete);
+            json_response(StatusCode::OK, serde_json::json!({"ok": true}))
+        }
+        Some("end") => {
+            let turns = value.get("turn_ids").and_then(|ids| {
+                ids.as_array().map(|ids| {
+                    ids.iter()
+                        .map(|id| id.as_str().unwrap_or("\u{0}").to_string())
+                        .collect::<Vec<_>>()
+                })
+            });
+            match crate::metrics::end_run(Some(owner), run_id.to_string(), turns) {
+                Some(summary) => json_response(
+                    StatusCode::OK,
+                    serde_json::json!({"ok": true, "run": summary}),
+                ),
+                None => json_response(
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({"ok": false, "error": "no_such_run"}),
+                ),
+            }
+        }
+        _ => invalid("action must be start or end"),
+    }
+}
+
 async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     match browser_or_agent_auth(&state, &headers) {
         AgentAuth::Locked => {
@@ -9168,7 +9269,22 @@ fn agent_actions_failure(
 /// held for the sequence so another daemon client cannot interleave gestures.
 /// Any failed action, expectation, read, lifecycle transition, or deadline stops
 /// the sequence immediately; later actions are never attempted.
+/// `/agent/actions`: a batch changes the screen without an observation the
+/// `no_progress` tracker can judge, so the owner's screen is forgotten.
 async fn agent_actions(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let owner = named_owner(&headers).map(str::to_string);
+    let response = agent_actions_inner(state, headers, body).await;
+    if let Some(owner) = owner.filter(|_| !refused_as_unauthenticated(&response)) {
+        crate::advice::reset(&owner);
+    }
+    response
+}
+
+async fn agent_actions_inner(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
@@ -10143,7 +10259,83 @@ async fn settle_and_read_elements(
 ///
 /// Coordinates are normalized `[0,1]` over the phone screen (geometry-agnostic,
 /// like the web client). Returns 200 on accept, 400 on an unparseable message.
+/// Responses are rewritten for advice only when they are JSON of a sane size.
+const ADVICE_MAX_BODY: usize = 8 << 20;
+
+/// Read a handler's response so advice can look at it; hand back an
+/// equivalent response either way.
+async fn read_json_response(response: Response) -> (Response, Option<serde_json::Value>) {
+    let (parts, body) = response.into_parts();
+    let is_json = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    let exact = axum::body::HttpBody::size_hint(&body).exact();
+    if !is_json || exact.is_none_or(|len| len > ADVICE_MAX_BODY as u64) {
+        return (Response::from_parts(parts, body), None);
+    }
+    match axum::body::to_bytes(body, ADVICE_MAX_BODY).await {
+        Ok(bytes) => {
+            let json = serde_json::from_slice(&bytes).ok();
+            (Response::from_parts(parts, Body::from(bytes)), json)
+        }
+        Err(_) => (
+            Response::from_parts(parts, Body::from(r#"{"ok":false,"error":"response_body_unreadable"}"#)),
+            None,
+        ),
+    }
+}
+
+fn refused_as_unauthenticated(response: &Response) -> bool {
+    matches!(response.status().as_u16(), 401 | 403 | 429)
+}
+
+/// `/agent/input` with `no_progress` advice for plain HTTP callers: an
+/// observed tap or scroll by a named owner is judged by the same tracker the
+/// MCP server uses; any other input forgets the owner's screen.
 async fn agent_input(
+    state: State<Arc<AppState>>,
+    Query(query): Query<AgentInputQuery>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let Some(owner) = named_owner(&headers).map(str::to_string) else {
+        return agent_input_inner(state, Query(query), headers, body).await;
+    };
+    let observed = query.return_mode.as_deref() == Some("delta");
+    let action = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| crate::advice::action_of(&value));
+    let guard = match (observed, &action) {
+        (true, Some(action)) => Some(crate::advice::begin(&owner, action)),
+        _ => None,
+    };
+    let response = agent_input_inner(state, Query(query), headers, body).await;
+    if refused_as_unauthenticated(&response) {
+        if let Some(guard) = guard {
+            guard.withdraw();
+        }
+        return response;
+    }
+    let Some(guard) = guard else {
+        crate::advice::reset(&owner);
+        return response;
+    };
+    let (response, json) = read_json_response(response).await;
+    let Some(hint) = guard.finish(json.as_ref(), crate::metrics::now_ms()) else {
+        return response;
+    };
+    let Some(mut json) = json.filter(serde_json::Value::is_object) else {
+        return response;
+    };
+    json["no_progress"] = serde_json::Value::String(hint);
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(json.to_string()))
+}
+
+async fn agent_input_inner(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AgentInputQuery>,
     headers: HeaderMap,
@@ -11096,7 +11288,28 @@ async fn agent_flow_draft(State(state): State<Arc<AppState>>, headers: HeaderMap
 /// change little of them per step, so this is the main token/latency saver.
 /// An unknown or evicted `since` falls back to the full tree, so old callers
 /// and cold caches behave exactly as before.
+/// `/agent/elements`, feeding the owner's `no_progress` tracker the screen
+/// it just read (a full, baseline-free read only).
 async fn agent_elements(
+    state: State<Arc<AppState>>,
+    query: Query<AgentElementsQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let owner = named_owner(&headers).map(str::to_string);
+    let full_read = query.since.is_none();
+    let response = agent_elements_inner(state, query, headers).await;
+    let Some(owner) = owner.filter(|_| !refused_as_unauthenticated(&response)) else {
+        return response;
+    };
+    if !full_read {
+        return response;
+    }
+    let (response, json) = read_json_response(response).await;
+    crate::advice::note_screen(&owner, json.as_ref());
+    response
+}
+
+async fn agent_elements_inner(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AgentElementsQuery>,
     headers: HeaderMap,

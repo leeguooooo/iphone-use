@@ -254,7 +254,7 @@ fn extra_blocks(json: &Value, out: &mut Vec<String>) {
             out.push(format!("{key}: {block}"));
         }
     }
-    for key in ["hint", "delta_error"] {
+    for key in ["hint", "delta_error", "no_progress"] {
         if let Some(line) = text(json, key) {
             out.push(format!("{key}: {line}"));
         }
