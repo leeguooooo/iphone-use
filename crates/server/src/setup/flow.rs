@@ -1172,6 +1172,18 @@ impl Setup {
         die("Xcode has no signed-in Apple account. Open Xcode → Settings → Accounts,\n   sign in and select the development team, or configure WDA_ASC_KEY_PATH,\n   WDA_ASC_KEY_ID and WDA_ASC_ISSUER_ID for App Store Connect API key signing,\n   then rerun.")
     }
 
+    fn report_device_unavailable<T>(&mut self) -> Step<T> {
+        self.phase(
+            "building-fail",
+            "usb",
+            "this Mac cannot reach the iPhone (xcodebuild timed out waiting for it) — connect it with a cable, unlock it and keep it awake",
+        );
+        die(format!(
+            "this Mac cannot reach the iPhone: xcodebuild timed out waiting for it to become available. Connect it with a USB cable, unlock it and keep it awake; KeepAlive retries on its own. Log: {}",
+            self.ctx.run_log.display()
+        ))
+    }
+
     fn report_automation_disabled<T>(&self) -> Step<T> {
         self.phase(
             "building-fail",
@@ -1391,6 +1403,12 @@ impl Setup {
                 }
                 if runner::log_shows_automation_disabled(&self.ctx.run_log) {
                     return self.report_automation_disabled();
+                }
+                // The phone vanished from this Mac before the runner could
+                // start: say so, instead of the generic exit that sends the
+                // operator to a log (#166).
+                if runner::log_shows_device_unavailable(&self.ctx.run_log) {
+                    return self.report_device_unavailable();
                 }
                 self.phase(
                     "building-fail",

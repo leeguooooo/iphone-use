@@ -125,6 +125,16 @@ pub fn log_shows_ide_refusal(path: &Path) -> bool {
     })
 }
 
+/// xcodebuild could not see the phone at all: unplugged, out of range on
+/// Wi-Fi, or CoreDevice lost it (#166). Only this exact timeout — "Unable to
+/// find a destination" also fires for a missing iOS platform in Xcode, which
+/// no cable fixes.
+pub fn log_shows_device_unavailable(path: &Path) -> bool {
+    read_log(path).to_lowercase().contains(
+        "timed out waiting for all destinations matching the provided destination specifier to become available",
+    )
+}
+
 pub fn log_shows_automation_disabled(path: &Path) -> bool {
     let text = read_log(path).to_lowercase();
     text.contains("timed out while enabling automation mode")
@@ -523,6 +533,15 @@ mod tests {
         assert!(log_shows_automation_disabled(
             log("(Underlying Error: Timed out while enabling automation mode.)").path()
         ));
+        assert!(log_shows_device_unavailable(
+            log("xcodebuild: error: Timed out waiting for all destinations matching the provided destination specifier to become available\n\t\t{ platform:iOS, id:00008150-000A60EC1A02401C, error:Browsing on the local area network for iPhone }").path()
+        ));
+        assert!(
+            !log_shows_device_unavailable(
+                log("xcodebuild: error: Unable to find a destination matching the provided destination specifier: { generic:1, platform:iOS }").path()
+            ),
+            "a missing iOS platform is not an unreachable phone"
+        );
         assert!(log_shows_product_failure(log("Error 0xE8008001").path()));
         assert!(!log_shows_product_failure(
             log("Failed to establish communication with the test runner").path()
