@@ -1,0 +1,100 @@
+/* English UI. Keys are the Chinese source strings (the development language is zh-Hans). */
+
+/* Connect */
+"扫码连接" = "Scan to connect";
+"在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，再用这里扫一下。用 iPhone 自带相机扫也可以。" = "Open the iphone-use page on your Mac, tap Scan in its toolbar, and scan the code here. The iPhone Camera app works too.";
+"试用演示" = "Try the demo";
+"还没装好 Mac 端？先看看：播放一段从真实 iPhone 录下的画面，可以点几下体验操作方式。不连接任何设备。" = "No Mac set up yet? Take a look first: screens recorded from a real iPhone, which you can tap through to see how the remote works. Nothing is connected.";
+"或者手动输入" = "Or enter it manually";
+"控制密码" = "Control password";
+"地址和密码在 Mac 上运行安装程序时会打印出来。手机和 Mac 需要在同一个网络里，或者通过 VPN 连通。" = "The installer on your Mac prints the address and password. This iPhone and the Mac need to be on the same network, or connected through a VPN.";
+"用密码连接" = "Connect with password";
+"正在连接…" = "Connecting…";
+"连接到这台 Mac？" = "Connect to this Mac?";
+"连接" = "Connect";
+"取消" = "Cancel";
+"%@\n只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。" = "%@\nTap Connect only if you just scanned the code on your own Mac.";
+
+/* Scanner */
+"扫描 Mac 上 iphone-use 页面里「扫码」按钮显示的二维码" = "Scan the code that the Scan button shows on the iphone-use page on your Mac";
+"打开设置" = "Open Settings";
+"没有相机权限：请在「设置 › iPhone Use」里打开相机" = "No camera access: turn on Camera in Settings › iPhone Use";
+"这台设备没有可用的相机" = "This device has no usable camera";
+"相机无法识别二维码" = "The camera cannot read QR codes";
+
+/* Remote */
+"主屏幕" = "Home";
+"键盘" = "Keyboard";
+"连接手机" = "Connect phone";
+"交还" = "Hand back";
+"设置" = "Settings";
+"未连接" = "Not connected";
+"可操作 · H.264" = "Ready · H.264";
+"手机已交还" = "Phone handed back";
+"手机在持有人手里，远程控制已停止。需要远程操作时点「连接手机」。" = "The phone is with its holder and remote control has stopped. Tap Connect phone to drive it again.";
+"正在释放设备" = "Releasing the device";
+"请稍候" = "One moment";
+"请解锁手机" = "Unlock the phone";
+"手机锁着屏，设备服务启动不了。解锁并保持亮屏后会自动接着连接。" = "The phone is locked, so the device service cannot start. Unlock it and keep the screen on; connecting continues on its own.";
+"需要处理一下" = "Needs attention";
+"正在连接手机" = "Connecting to the phone";
+"手机锁着的话请解锁一次；第一次连接可能要一两分钟。" = "If the phone is locked, unlock it once. The first connection can take a minute or two.";
+"设备空闲中" = "Device idle";
+"一段时间没人操作，设备连接已暂停。点「连接手机」继续（手机需解锁亮屏）。" = "Nobody used it for a while, so the device connection is paused. Tap Connect phone to continue (the phone needs to be unlocked with its screen on).";
+"手机锁屏了" = "The phone is locked";
+"锁屏密码界面不能远程输入，请在手机上解锁。远程操作时可以把「自动锁定」调长一点。" = "The passcode screen cannot be typed into remotely; unlock it on the phone. A longer Auto-Lock helps while driving it remotely.";
+"连不上手机" = "Cannot reach the phone";
+"设备服务没有运行" = "The device service is not running";
+"正在加载画面…" = "Loading the picture…";
+"画面暂不可用（%lld）" = "Picture unavailable (%lld)";
+"画面断开，正在重连…" = "Picture dropped, reconnecting…";
+
+/* Typing */
+"先在手机画面上点一下输入框，再在这里输入；支持中文。" = "Tap a text field on the phone's screen first, then type here. Any language works.";
+"要输入的文字" = "Text to type";
+"输入文字" = "Type text";
+"关闭" = "Close";
+"发送" = "Send";
+
+/* Settings */
+"服务地址" = "Server address";
+"服务版本" = "Server version";
+"设备状态" = "Device state";
+"断开" = "Disconnect";
+"忘记这台 Mac" = "Forget this Mac";
+"完成" = "Done";
+
+/* Messages */
+"扫码连接失败：%@" = "Scan to connect failed: %@";
+"登录已过期，请重新扫码或输入密码（%@）" = "Sign-in expired. Scan again or enter the password (%@)";
+"登录已刷新，请再操作一次" = "Signed in again. Please repeat that action";
+"没有送达：%@" = "Not delivered: %@";
+"正在连接手机…手机锁着的话请解锁一次" = "Connecting to the phone… unlock it once if it is locked";
+"已交还，远程控制已停止" = "Handed back; remote control has stopped";
+"还没连上服务" = "Not connected to the server yet";
+"手机已交还，先点「连接手机」" = "The phone was handed back. Tap Connect phone first";
+"设备空闲中，先点「连接手机」" = "The device is idle. Tap Connect phone first";
+"正在连接手机，请稍等" = "Connecting to the phone, one moment";
+"手机锁屏了，请在手机上解锁" = "The phone is locked. Unlock it on the phone";
+"手机暂时不能操作" = "The phone cannot be driven right now";
+"地址格式不对，应该像 http://192.168.1.11:44321" = "That address doesn't look right. It should look like http://192.168.1.11:44321";
+"密码不对" = "Wrong password";
+"登录已过期" = "Sign-in expired";
+"二维码已用过或已过期，请在 Mac 上点「换一个」再扫" = "This code was already used or has expired. Tap New code on the Mac and scan again";
+"配对已失效（可能改过控制密码），请重新扫码" = "The pairing no longer works (the control password may have changed). Scan again";
+"密码错误次数太多，30 秒后再试" = "Too many wrong passwords. Try again in 30 seconds";
+"服务返回 %lld：%@" = "The server answered %lld: %@";
+"连不上服务：%@" = "Cannot reach the server: %@";
+"配对没有返回设备令牌" = "Pairing returned no device token";
+"Mac 上的 iphone-use 版本太旧，不支持扫码连接，请先升级" = "The iphone-use on your Mac is too old for scanning. Upgrade it first";
+"登录没有返回会话" = "Sign-in returned no session";
+
+/* Demo */
+"演示 · 录制的画面" = "Demo · recorded screens";
+"这是演示：画面是事先录好的，不会连接或操作任何手机。" = "This is a demo: the screens were recorded in advance. Nothing is connected or controlled.";
+"退出演示" = "Exit demo";
+"演示里只有蓝框标出的地方能点" = "In the demo, only the places outlined in blue can be tapped";
+"演示画面是录好的，不能滚动；连上自己的 Mac 后就能真实操作" = "Demo screens are recordings and don't scroll. Connect your own Mac to drive a real phone";
+"演示里只能点按和从左边缘右滑返回" = "In the demo you can tap, and swipe right from the left edge to go back";
+"连上自己的 Mac 后，可以在这里给手机输入文字" = "Once your own Mac is connected, you can type text into the phone here";
+"演示内容缺失，请重新安装 App" = "The demo content is missing. Reinstall the app";

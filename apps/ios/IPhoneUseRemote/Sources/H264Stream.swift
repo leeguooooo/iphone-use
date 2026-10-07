@@ -242,7 +242,7 @@ final class H264StreamReader: NSObject, URLSessionDataDelegate, @unchecked Senda
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         if ok { attempt = 0 }
         let onState = self.onState
-        await MainActor.run { onState(ok, ok ? nil : "画面暂不可用（\(code)）") }
+        await MainActor.run { onState(ok, ok ? nil : String(localized: "画面暂不可用（\(code)）")) }
         return ok ? .allow : .cancel
     }
 
@@ -263,7 +263,7 @@ final class H264StreamReader: NSObject, URLSessionDataDelegate, @unchecked Senda
         let delay = min(5.0, 0.4 * Double(attempt))
         let onState = self.onState
         DispatchQueue.main.async {
-            MainActor.assumeIsolated { onState(false, "画面断开，正在重连…") }
+            MainActor.assumeIsolated { onState(false, String(localized: "画面断开，正在重连…")) }
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.connect()

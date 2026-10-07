@@ -98,14 +98,14 @@ enum DaemonError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .badAddress: return "地址格式不对，应该像 http://192.168.1.11:44321"
-        case .wrongPassword: return "密码不对"
-        case .sessionExpired: return "登录已过期"
-        case .pairingCodeInvalid: return "二维码已用过或已过期，请在 Mac 上点「换一个」再扫"
-        case .pairingRevoked: return "配对已失效（可能改过控制密码），请重新扫码"
-        case .lockedOut: return "密码错误次数太多，30 秒后再试"
-        case let .http(code, body): return "服务返回 \(code)：\(body.prefix(160))"
-        case let .unreachable(why): return "连不上服务：\(why)"
+        case .badAddress: return String(localized: "地址格式不对，应该像 http://192.168.1.11:44321")
+        case .wrongPassword: return String(localized: "密码不对")
+        case .sessionExpired: return String(localized: "登录已过期")
+        case .pairingCodeInvalid: return String(localized: "二维码已用过或已过期，请在 Mac 上点「换一个」再扫")
+        case .pairingRevoked: return String(localized: "配对已失效（可能改过控制密码），请重新扫码")
+        case .lockedOut: return String(localized: "密码错误次数太多，30 秒后再试")
+        case let .http(code, body): return String(localized: "服务返回 \(code)：\(String(body.prefix(160)))")
+        case let .unreachable(why): return String(localized: "连不上服务：\(why)")
         }
     }
 }
@@ -170,7 +170,7 @@ final class DaemonClient: @unchecked Sendable {
         try takeSessionCookie(from: response)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let token = json["device_token"] as? String else {
-            throw DaemonError.http(response.statusCode, "配对没有返回设备令牌")
+            throw DaemonError.http(response.statusCode, String(localized: "配对没有返回设备令牌"))
         }
         return token
     }
@@ -195,7 +195,7 @@ final class DaemonClient: @unchecked Sendable {
         case 429:
             throw DaemonError.lockedOut
         case 404:
-            throw DaemonError.http(404, "Mac 上的 iphone-use 版本太旧，不支持扫码连接，请先升级")
+            throw DaemonError.http(404, String(localized: "Mac 上的 iphone-use 版本太旧，不支持扫码连接，请先升级"))
         default:
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
         }
@@ -205,7 +205,7 @@ final class DaemonClient: @unchecked Sendable {
         let header = response.value(forHTTPHeaderField: "Set-Cookie") ?? ""
         guard let pair = header.split(separator: ";").first.map(String.init),
               pair.hasPrefix("phone_session=") else {
-            throw DaemonError.http(response.statusCode, "登录没有返回会话")
+            throw DaemonError.http(response.statusCode, String(localized: "登录没有返回会话"))
         }
         cookie = pair
     }

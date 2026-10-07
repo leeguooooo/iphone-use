@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "iPhone Use";
+"NSCameraUsageDescription" = "Scan the QR code on the iphone-use page on your Mac to connect without typing the address and password.";
+"NSLocalNetworkUsageDescription" = "Connect to iphone-use on your own Mac to view and control your phone remotely.";

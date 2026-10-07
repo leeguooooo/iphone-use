@@ -199,6 +199,54 @@ pub fn tree_has_hidden_content(rows: &[ElementRow], window: (f64, f64)) -> bool 
         >= MIN_LABELLED_ROWS
 }
 
+/// Luma spread inside a row's rectangle that counts as ink (text, an icon),
+/// not one flat fill. Grey secondary text on a grouped background is ~100.
+const INK_SPREAD: i32 = 40;
+/// Share of labelled rows that may show ink in the capture before it no longer
+/// counts as hidden: a protected screen blanks every row, a sparse real one
+/// (a spinner and a single card, iOS's Software Update) still draws its text.
+const MAX_INKED_SHARE: f64 = 0.2;
+
+/// Whether the capture actually draws the labelled rows the tree reports.
+/// `content_band_is_blank` alone mistakes a sparse page for a protected one:
+/// a grey background with one white card and a spinner is ~99% "one colour".
+pub fn labelled_rows_show_content(image: &Image, rows: &[ElementRow], window: (f64, f64)) -> bool {
+    let (w, h) = (image.width as usize, image.height as usize);
+    if w == 0 || h == 0 || image.rgba.len() < w * h * 4 {
+        return false;
+    }
+    let scale = w as f64 / window.0.max(1.0);
+    let (band_top, band_bottom) = (h as f64 * BAND_TOP, h as f64 * BAND_BOTTOM);
+    let mut labelled = 0usize;
+    let mut inked = 0usize;
+    for row in drawable_rows(rows, window).filter(|row| !row.label.trim().is_empty()) {
+        let [x, y, rw, rh] = row.rect.map(|v| v * scale);
+        let x0 = x.max(0.0) as usize;
+        let x1 = ((x + rw).min(w as f64)) as usize;
+        let y0 = y.max(band_top) as usize;
+        let y1 = ((y + rh).min(band_bottom)) as usize;
+        if x1 <= x0 + 2 || y1 <= y0 + 2 {
+            continue;
+        }
+        labelled += 1;
+        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+        // Every other pixel: text strokes are a few pixels wide.
+        for py in (y0..y1).step_by(2) {
+            for px in (x0..x1).step_by(2) {
+                let i = (py * w + px) * 4;
+                let p = &image.rgba[i..i + 3];
+                let luma = (299 * p[0] as i32 + 587 * p[1] as i32 + 114 * p[2] as i32) / 1000;
+                lo = lo.min(luma);
+                hi = hi.max(luma);
+            }
+        }
+        if hi - lo > INK_SPREAD {
+            inked += 1;
+        }
+    }
+    labelled > 0 && inked as f64 > labelled as f64 * MAX_INKED_SHARE
+}
+
 const FONT_PATHS: &[&str] = &[
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
     "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
@@ -469,6 +517,36 @@ mod tests {
             row("Button", "c", [0.0, 800.0, 50.0, 40.0]),
         ];
         assert!(!tree_has_hidden_content(&bars, window));
+    }
+
+    #[test]
+    fn a_sparse_real_page_draws_its_rows_and_a_protected_one_does_not() {
+        // iOS's Software Update while checking: grey background, one white
+        // card, a grey caption — "blank" by the band test, yet every
+        // labelled row has its text drawn. Seen on hardware 2026-10-07.
+        let window = (390.0, 844.0);
+        let rows = vec![
+            row("Cell", "自动更新", [16.0, 120.0, 358.0, 48.0]),
+            row("StaticText", "正在检查更新…", [140.0, 500.0, 110.0, 20.0]),
+            row("Button", "返回", [16.0, 50.0, 44.0, 44.0]),
+        ];
+        let mut real = flat(390, 844, [242, 242, 247]);
+        let ink = |image: &mut Image, x: usize, y: usize, grey: u8| {
+            for dy in 0..8 {
+                for dx in 0..30 {
+                    let i = ((y + dy) * 390 + x + dx) * 4;
+                    image.rgba[i..i + 3].copy_from_slice(&[grey, grey, grey]);
+                }
+            }
+        };
+        ink(&mut real, 30, 140, 0); // "自动更新" in black
+        ink(&mut real, 150, 506, 140); // the caption in grey
+        assert!(content_band_is_blank(&real), "the band test alone calls it blank");
+        assert!(labelled_rows_show_content(&real, &rows, window));
+
+        // A protected screen: the same tree over a capture with nothing drawn.
+        let protected = flat(390, 844, [255, 255, 255]);
+        assert!(!labelled_rows_show_content(&protected, &rows, window));
     }
 
     #[test]

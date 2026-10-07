@@ -34,6 +34,15 @@ struct RootView: View {
     @Bindable var model: RemoteModel
 
     var body: some View {
+        if let demo = model.demo {
+            DemoView(session: demo) { model.demo = nil }
+        } else {
+            phaseView
+        }
+    }
+
+    @ViewBuilder
+    private var phaseView: some View {
         switch model.phase {
         case .connected:
             RemoteView(model: model)
@@ -71,6 +80,19 @@ struct ConnectView: View {
                     .listRowBackground(Color.clear)
                 } footer: {
                     Text("在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，再用这里扫一下。用 iPhone 自带相机扫也可以。")
+                }
+                Section {
+                    Button {
+                        model.startDemo()
+                    } label: {
+                        Label("试用演示", systemImage: "play.rectangle")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                } footer: {
+                    Text("还没装好 Mac 端？先看看：播放一段从真实 iPhone 录下的画面，可以点几下体验操作方式。不连接任何设备。")
                 }
                 if case let .failed(why) = model.phase {
                     Section {
@@ -153,32 +175,32 @@ struct RemoteView: View {
     private var overlay: StatusOverlay.Content? {
         guard let status = model.status else { return nil }
         if status.humanHandoff {
-            return .init(title: "手机已交还", detail: "手机在持有人手里，远程控制已停止。需要远程操作时点「连接手机」。", action: .connect)
+            return .init(title: String(localized: "手机已交还"), detail: String(localized: "手机在持有人手里，远程控制已停止。需要远程操作时点「连接手机」。"), action: .connect)
         }
         if status.releasing {
-            return .init(title: "正在释放设备", detail: "请稍候", action: nil)
+            return .init(title: String(localized: "正在释放设备"), detail: String(localized: "请稍候"), action: nil)
         }
         if status.setupBlockedOn == "locked" {
-            return .init(title: "请解锁手机", detail: "手机锁着屏，设备服务启动不了。解锁并保持亮屏后会自动接着连接。", action: nil)
+            return .init(title: String(localized: "请解锁手机"), detail: String(localized: "手机锁着屏，设备服务启动不了。解锁并保持亮屏后会自动接着连接。"), action: nil)
         }
         if status.reconnecting {
             let blocked = !status.setupBlockedOn.isEmpty
-            return .init(title: blocked ? "需要处理一下" : "正在连接手机",
-                         detail: blocked ? status.personHint : "手机锁着的话请解锁一次；第一次连接可能要一两分钟。",
+            return .init(title: blocked ? String(localized: "需要处理一下") : String(localized: "正在连接手机"),
+                         detail: blocked ? status.personHint : String(localized: "手机锁着的话请解锁一次；第一次连接可能要一两分钟。"),
                          action: nil)
         }
         if status.released {
-            return .init(title: "设备空闲中", detail: "一段时间没人操作，设备连接已暂停。点「连接手机」继续（手机需解锁亮屏）。", action: .connect)
+            return .init(title: String(localized: "设备空闲中"), detail: String(localized: "一段时间没人操作，设备连接已暂停。点「连接手机」继续（手机需解锁亮屏）。"), action: .connect)
         }
         if status.deviceState == "locked" || status.locked == true {
-            return .init(title: "手机锁屏了", detail: "锁屏密码界面不能远程输入，请在手机上解锁。远程操作时可以把「自动锁定」调长一点。", action: nil)
+            return .init(title: String(localized: "手机锁屏了"), detail: String(localized: "锁屏密码界面不能远程输入，请在手机上解锁。远程操作时可以把「自动锁定」调长一点。"), action: nil)
         }
         if status.deviceState == "offline" || status.deviceState == "blocked" {
-            return .init(title: "连不上手机", detail: status.personHint.isEmpty ? "WDA 没有运行" : status.personHint,
+            return .init(title: String(localized: "连不上手机"), detail: status.personHint.isEmpty ? String(localized: "设备服务没有运行") : status.personHint,
                          action: status.recoveryOwner == "daemon" ? .connect : nil)
         }
         if !model.videoLive {
-            return .init(title: "正在加载画面…", detail: model.videoMessage ?? "", action: nil)
+            return .init(title: String(localized: "正在加载画面…"), detail: model.videoMessage ?? "", action: nil)
         }
         return nil
     }
@@ -237,8 +259,8 @@ struct StatusPill: View {
     }
 
     private var label: String {
-        guard let status = model.status else { return "未连接" }
-        if status.drivable && model.videoLive { return "可操作 · H.264" }
+        guard let status = model.status else { return String(localized: "未连接") }
+        if status.drivable && model.videoLive { return String(localized: "可操作 · H.264") }
         return status.deviceState
     }
 }
@@ -268,7 +290,7 @@ struct Toolbar: View {
 }
 
 struct ToolButton: View {
-    let title: String
+    let title: LocalizedStringKey
     let symbol: String
     let action: () -> Void
 

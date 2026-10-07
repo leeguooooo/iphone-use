@@ -1,0 +1,31 @@
+{
+  "start": "general",
+  "home": "general",
+  "screens": [
+    {
+      "id": "general",
+      "image": "demo-general.jpg",
+      "back": null,
+      "taps": [
+        { "rect": [0.041, 0.72, 0.9179, 0.0585], "to": "airdrop" },
+        { "rect": [0.041, 0.8369, 0.9179, 0.0585], "to": "pip" }
+      ]
+    },
+    {
+      "id": "airdrop",
+      "image": "demo-airdrop.jpg",
+      "back": "general",
+      "taps": [
+        { "rect": [0.035, 0.052, 0.125, 0.062], "to": "general" }
+      ]
+    },
+    {
+      "id": "pip",
+      "image": "demo-pip.jpg",
+      "back": "general",
+      "taps": [
+        { "rect": [0.035, 0.052, 0.125, 0.062], "to": "general" }
+      ]
+    }
+  ]
+}
