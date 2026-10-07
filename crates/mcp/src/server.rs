@@ -971,8 +971,8 @@ impl PhoneHandler {
                         ));
                     } else if json.get("image_unavailable").is_some() {
                         content.push(Content::text(
-                            "image_unavailable: the tree has no interactive rows and the \
-                             screenshot failed; the text above is still current.",
+                            "image_unavailable: the auto image policy requested a screenshot \
+                             but the capture failed; the text above is still usable.",
                         ));
                     }
                 }
