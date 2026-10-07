@@ -548,7 +548,7 @@ Measured on an iPhone 17 Pro Max (iOS 27): an unlocked cold connect is drivable 
 13–22 s; a locked one shows "unlock" in ~4 s and is drivable ~14 s after the unlock; a
 snapshot-bound tap with `?return=delta` (tap, then the settled tree) takes ~4 s. `POST /agent/mode {"mode":"agent"}` (or MCP `phone_reconnect`) restarts the
 configured target once — do not loop it; read `hint` and `setup_blocked_on`
-(`warp|proxy|not_connected|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|xcode_too_old|locked`) first.
+(`warp|proxy|not_connected|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|wifi_automation_refused|xcode_too_old|locked`) first.
 `not_connected` means the iPhone is not connected to this Mac at all: plug it in over USB
 (or join the same Wi-Fi) and unlock it. Nothing is rebuilt while it is away, and the
 connection comes back on its own when the phone does.
@@ -565,9 +565,16 @@ KeepAlive then retries only every 15 minutes, since each attempt launches the ru
 the phone; `iphone-use doctor` prints the phone's iOS next to the Xcode SDK and which Xcode
 the phone uses.
 `automation_not_allowed` is the same code-74 refusal with an Xcode that does support the
-phone's iOS: the phone has not allowed the UI-automation session yet. Unlock it, turn on
-Settings › Developer › Enable UI Automation and accept the passcode or Allow prompt;
-KeepAlive retries quietly every 5 s to 1 min.
+phone's iOS, over USB: the phone did not authorize the UI-automation session. A passcode or
+Allow prompt appears on the iPhone while the runner starts and times out after about 30 s,
+so unlock it, check Settings › Developer › Enable UI Automation, and answer that prompt on the
+next attempt; KeepAlive retries quietly every 5 s to 1 min.
+`wifi_automation_refused` is that refusal over Wi-Fi: iOS cannot show the passcode prompt
+over Wi-Fi, and some iOS versions (seen on an iOS 27.2 beta) refuse the session there
+entirely, with no prompt, about 30 s after the runner starts — `setup_message` records the
+wait. Connect the phone by USB and enter the passcode when it asks; if Wi-Fi still fails
+afterwards, keep that phone on USB. KeepAlive waits 15 minutes between Wi-Fi attempts (each
+one launches the runner on the phone) and retries at once when the phone is plugged in.
 
 **Who may end a reconnect.** A bring-up is owned by the task that started it, and only
 that owner ends it. Every begin mints a generation, so a late task cannot end the round

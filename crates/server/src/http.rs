@@ -2772,8 +2772,12 @@ fn human_next_step(
                 "The iPhone runs a newer iOS than this Mac's Xcode supports: install an Xcode that supports it (a beta Xcode for a beta iOS), then run iphone-use setup --xcode <that Xcode.app> for this phone — retrying or reconnecting will not help",
             ),
             "automation_not_allowed" => (
-                "iPhone 拒绝了这次 UI 自动化：解锁手机，打开 设置 › 开发者 › 启用 UI 自动化，并确认手机上的密码或「允许」提示；会自动重试",
-                "The iPhone refused UI automation: unlock it, turn on Settings › Developer › Enable UI Automation, and accept the passcode or Allow prompt — it retries on its own",
+                "iPhone 没有授权这次 UI 自动化：runner 启动时手机上会弹出密码或「允许」提示，约 30 秒不处理就会失败；请解锁手机、确认 设置 › 开发者 › 启用 UI 自动化 已打开，下次重试时完成这个提示；会自动重试",
+                "The iPhone did not authorize UI automation: a passcode or Allow prompt appears on the iPhone while the runner starts and times out after about 30 s — unlock it, check Settings › Developer › Enable UI Automation, and answer that prompt on the next attempt; it retries on its own",
+            ),
+            "wifi_automation_refused" => (
+                "通过 Wi-Fi 时 iPhone 没有授权 UI 自动化（Wi-Fi 下弹不出输密码的提示，有些 iOS 版本干脆拒绝）：请用 USB 连接这台 iPhone，并在它要求时输入密码；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB；重试和重连 Wi-Fi 都解决不了",
+                "Over Wi-Fi the iPhone did not authorize UI automation (iOS cannot show the passcode prompt over Wi-Fi, and some iOS versions refuse it entirely): connect it by USB and enter the passcode when it asks; if Wi-Fi still fails afterwards, keep this phone on USB — retrying or reconnecting over Wi-Fi will not help",
             ),
             "wda" => (
                 "设备 runner 启动失败：在这台 Mac 上运行 iphone-use doctor 查看原因",
@@ -2920,7 +2924,10 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iPhone runs a newer iOS than the selected Xcode supports (setup_message names both versions) — install an Xcode that supports that iOS (a beta Xcode for a beta iOS) and point this phone at it with iphone-use setup --xcode /Applications/Xcode-beta.app (other phones keep theirs), or select it for the whole Mac with xcode-select; retrying or reconnecting cannot fix this, so do not send another reconnect request",
         ),
         "automation_not_allowed" => Some(
-            "the iPhone refused the device runner's UI-automation session although this Xcode supports its iOS (the runner exited with code 74, testmanagerd refused the IDE channel) — unlock the iPhone, turn on Settings › Developer › Enable UI Automation, and accept any passcode or Allow prompt; the managed service retries quietly every 5 s to 1 min, so do not send another reconnect request",
+            "the iPhone did not authorize the device runner's UI-automation session although this Xcode supports its iOS (the runner exited with code 74, testmanagerd refused the IDE channel) — a passcode or Allow prompt appears on the iPhone while the runner starts and times out after about 30 s; unlock the iPhone, check Settings › Developer › Enable UI Automation, and have a person answer that prompt on the next attempt; the managed service retries quietly every 5 s to 1 min, so do not send another reconnect request",
+        ),
+        "wifi_automation_refused" => Some(
+            "over Wi-Fi the iPhone did not authorize the device runner's UI-automation session (code 74, testmanagerd refused the IDE channel after waiting; setup_message has the wait) — iOS cannot show the passcode prompt over Wi-Fi, and some iOS versions refuse it entirely; connect the iPhone by USB and have a person enter the passcode when it asks, and keep it on USB if Wi-Fi still fails afterwards; retrying over Wi-Fi cannot fix this (the managed service waits 15 minutes between attempts and retries at once when the phone is plugged in), so do not send another reconnect request",
         ),
         "wda" => Some(
             "the device runner failed to start — inspect ~/.iphone-use/wda-agent.log and run iphone-use doctor before retrying",
@@ -2941,7 +2948,10 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
     // An Xcode too old for the phone is published once, then KeepAlive waits
     // out a 900 s backoff with no heartbeat (#126); keep it visible across
     // that wait and the next attempt instead of letting it age out at 300 s.
-    let max_age = if status.blocked_on == "xcode_too_old" {
+    let max_age = if matches!(
+        status.blocked_on.as_str(),
+        "xcode_too_old" | "wifi_automation_refused"
+    ) {
         1200
     } else {
         300
@@ -2960,6 +2970,7 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
             | "automation_mode_disabled"
             | "xcode_too_old"
             | "automation_not_allowed"
+            | "wifi_automation_refused"
             | "not_connected"
             | "locked"
             | "wda"
@@ -15301,6 +15312,7 @@ mod tests {
             "account",
             "automation_mode_disabled",
             "automation_not_allowed",
+            "wifi_automation_refused",
             "not_connected",
             "xcode_too_old",
             "locked",
@@ -15407,6 +15419,7 @@ mod tests {
             "account",
             "automation_mode_disabled",
             "automation_not_allowed",
+            "wifi_automation_refused",
             "not_connected",
             "xcode_too_old",
             "locked",
@@ -15574,6 +15587,35 @@ mod tests {
         assert!(setup_blocker_hint("xcode_too_old")
             .unwrap()
             .contains("--xcode"));
+    }
+
+    #[test]
+    fn wifi_automation_refused_points_to_usb_and_outlives_its_backoff() {
+        // Hardware (iPhone 14, iOS 27.2 beta, Xcode 27.2 beta, versions
+        // matching): over Wi-Fi testmanagerd refused the IDE channel 30 s
+        // after "Running tests" with no prompt on the phone, even right after
+        // a USB passcode authorization; over USB the same phone worked.
+        let payload = r#"{"phase":"building-fail","blocked_on":"wifi_automation_refused","message":"over Wi-Fi the iPhone did not authorize the device runner's UI-automation session","ts":1000}"#;
+        let status = parse_setup_status(payload, 1100).expect("fresh status");
+        assert_eq!(status.blocked_on, "wifi_automation_refused");
+        assert!(
+            parse_setup_status(payload, 1000 + 900).is_some(),
+            "visible across the 900 s Wi-Fi backoff"
+        );
+        let hint = setup_blocker_hint("wifi_automation_refused").unwrap();
+        assert!(hint.contains("by USB"), "{hint}");
+        assert!(hint.contains("Wi-Fi"), "{hint}");
+        assert!(
+            hint.contains("do not send another reconnect request"),
+            "{hint}"
+        );
+        assert!(!hint.contains("--"), "no bypass flags: {hint}");
+        assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
+        let (zh, en) = human_next_step("blocker", "wifi_automation_refused", "").unwrap();
+        assert!(zh.contains("USB") && en.contains("by USB"), "{en}");
+        // The USB reading now says the prompt is time-limited.
+        let usb = setup_blocker_hint("automation_not_allowed").unwrap();
+        assert!(usb.contains("about 30 s"), "{usb}");
     }
 
     #[test]

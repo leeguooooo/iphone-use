@@ -276,9 +276,14 @@
         retry: '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并确认手机上的密码或“允许自动化”提示；服务会自动重试。',
       },
       automation_not_allowed: {
-        title: 'iPhone 拒绝了 UI 自动化',
-        setup: '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并确认手机上的密码或“允许”提示，再重新运行设置命令。',
-        retry: '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并确认手机上的密码或“允许”提示；服务会自动安静重试。',
+        title: 'iPhone 没有授权 UI 自动化',
+        setup: 'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败。解锁 iPhone，确认“设置 › 开发者 › 启用 UI 自动化”已打开，重新运行设置命令时盯着手机完成这个提示。',
+        retry: 'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败；解锁 iPhone、确认已打开“启用 UI 自动化”，下次重试时完成这个提示；服务会自动安静重试。',
+      },
+      wifi_automation_refused: {
+        title: 'Wi-Fi 下无法授权 UI 自动化',
+        setup: '通过 Wi-Fi 时手机弹不出输密码的提示（有些 iOS 版本干脆拒绝）。请用 USB 连接这台 iPhone，在它要求时输入密码，再重新运行设置命令；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB。',
+        retry: '通过 Wi-Fi 重试解决不了：请用 USB 连接这台 iPhone，插上后服务会立刻重试，并在手机要求时输入密码。',
       },
       xcode_too_old: {
         title: 'Xcode 版本太旧，不支持这台 iPhone 的 iOS',

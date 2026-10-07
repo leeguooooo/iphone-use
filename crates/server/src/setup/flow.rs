@@ -190,6 +190,19 @@ impl Setup {
                     "KeepAlive retry backoff: waiting {wait}s before the next rebuild"
                 ));
             }
+            if state.kind == Kind::WifiAutomation {
+                // Only USB clears a Wi-Fi refusal: stop waiting the moment
+                // the phone is plugged in, checking usbmuxd every few seconds.
+                while retry::now() < state.next_at {
+                    if checks::transport(&self.ctx.udid) == checks::Transport::Usb {
+                        info("the iPhone is now on USB; retrying the device runner");
+                        break;
+                    }
+                    let left = state.next_at.saturating_sub(retry::now()).clamp(1, 5);
+                    proc::sleep(Duration::from_secs(left))?;
+                }
+                return Ok(());
+            }
             proc::sleep(Duration::from_secs(wait))?;
         }
         Ok(())
@@ -274,6 +287,10 @@ impl Setup {
                 } else if self.failure_kind == Kind::Automation {
                     if previous != Some(Kind::Automation) {
                         warn("the iPhone has not allowed UI automation; retrying quietly every 5s to 1min until it does");
+                    }
+                } else if self.failure_kind == Kind::WifiAutomation {
+                    if previous != Some(Kind::WifiAutomation) {
+                        warn("the iPhone refused UI automation over Wi-Fi; waiting 15 min between attempts, or until it is plugged in over USB");
                     }
                 } else if self.failure_kind == Kind::NotConnected {
                     self.phase("waiting", "not_connected", NOT_CONNECTED_MESSAGE);
@@ -477,7 +494,11 @@ impl Setup {
         // the next build pass; `serving` is the first evidence they cleared.
         self.build_blocker = if matches!(
             previous.as_str(),
-            "trust" | "automation_mode_disabled" | "xcode_too_old" | "automation_not_allowed"
+            "trust"
+                | "automation_mode_disabled"
+                | "xcode_too_old"
+                | "automation_not_allowed"
+                | "wifi_automation_refused"
         ) {
             previous.clone()
         } else {
@@ -1285,18 +1306,32 @@ impl Setup {
         )
     }
 
-    fn report_automation_not_allowed<T>(&mut self) -> Step<T> {
-        const HINT: &str = "unlock the iPhone, turn on Settings › Developer › Enable UI Automation, and accept any passcode or Allow prompt";
-        self.phase(
-            "building-fail",
-            "automation_not_allowed",
-            &format!("the iPhone refused the UI-automation session (runner exit code 74) — {HINT}"),
-        );
-        self.failure_kind = Kind::Automation;
-        die(format!(
-            "the iPhone refused the device runner's UI-automation session (exit code 74, IDE channel refused) although this Xcode supports its iOS — {HINT}. KeepAlive retries quietly every 5 s to 1 min. Log: {}",
-            self.ctx.run_log.display()
-        ))
+    /// testmanagerd refused the IDE channel with an Xcode that supports this
+    /// iOS. Over USB the phone wants a passcode or Allow prompt answered;
+    /// over Wi-Fi iOS cannot show that prompt at all, so it is its own
+    /// blocker with a long backoff instead of a minute-by-minute relaunch.
+    fn report_ide_refusal<T>(&mut self) -> Step<T> {
+        let wait = runner::ide_refusal_wait_secs(&self.ctx.run_log);
+        let transport = checks::transport(&self.ctx.udid);
+        let log = self.ctx.run_log.display().to_string();
+        match ide_refusal_blocker(transport) {
+            "wifi_automation_refused" => {
+                let message = wifi_automation_message(wait);
+                self.phase("building-fail", "wifi_automation_refused", &message);
+                self.failure_kind = Kind::WifiAutomation;
+                die(format!(
+                    "{message}. Retrying over Wi-Fi cannot fix this; KeepAlive waits 15 minutes between attempts and starts again as soon as the iPhone is plugged in over USB. Log: {log}"
+                ))
+            }
+            _ => {
+                let message = automation_message(wait);
+                self.phase("building-fail", "automation_not_allowed", &message);
+                self.failure_kind = Kind::Automation;
+                die(format!(
+                    "{message}. KeepAlive retries quietly every 5 s to 1 min. Log: {log}"
+                ))
+            }
+        }
     }
 
     fn report_xcode_too_old<T>(&mut self, message: &str) -> Step<T> {
@@ -1396,9 +1431,9 @@ impl Setup {
                     return self.report_xcode_too_old(&message);
                 }
                 // The same refusal with an Xcode that supports this iOS: the
-                // phone itself has not allowed UI automation yet.
+                // phone did not authorize the UI-automation session.
                 if runner::log_shows_ide_refusal(&self.ctx.run_log) {
-                    return self.report_automation_not_allowed();
+                    return self.report_ide_refusal();
                 }
                 if runner::log_shows_automation_disabled(&self.ctx.run_log) {
                     return self.report_automation_disabled();
@@ -1474,9 +1509,9 @@ impl Setup {
                     return self.report_xcode_too_old(&message);
                 }
                 // The same refusal with an Xcode that supports this iOS: the
-                // phone itself has not allowed UI automation yet.
+                // phone did not authorize the UI-automation session.
                 if runner::log_shows_ide_refusal(&self.ctx.run_log) {
-                    return self.report_automation_not_allowed();
+                    return self.report_ide_refusal();
                 }
                 if runner::log_shows_automation_disabled(&self.ctx.run_log) {
                     return self.report_automation_disabled();
@@ -2439,6 +2474,35 @@ impl UnlockWait {
 
 /// #126: only when the SDK's major.minor is older than the phone's does a
 /// code-74 refusal mean the Xcode is too old.
+/// Which blocker an IDE-channel refusal (code 74, supported iOS) is: over
+/// Wi-Fi iOS never shows the authorization prompt, so it is not something a
+/// person can allow on the phone. An unknown transport keeps the USB reading.
+pub fn ide_refusal_blocker(transport: checks::Transport) -> &'static str {
+    match transport {
+        checks::Transport::Network => "wifi_automation_refused",
+        checks::Transport::Usb | checks::Transport::Unknown => "automation_not_allowed",
+    }
+}
+
+fn waited(wait: Option<u64>) -> String {
+    wait.map(|secs| format!(" after waiting {secs} s"))
+        .unwrap_or_default()
+}
+
+pub fn wifi_automation_message(wait: Option<u64>) -> String {
+    format!(
+        "over Wi-Fi the iPhone did not authorize the device runner's UI-automation session (runner exit code 74, IDE channel refused{}) — iOS cannot show the passcode prompt over Wi-Fi, and some iOS versions refuse it entirely. Connect the iPhone by USB and enter the passcode when it asks; if it still fails over Wi-Fi afterwards, keep this phone on USB",
+        waited(wait)
+    )
+}
+
+pub fn automation_message(wait: Option<u64>) -> String {
+    format!(
+        "the iPhone did not authorize the device runner's UI-automation session (runner exit code 74, IDE channel refused{}) although this Xcode supports its iOS — a passcode or Allow prompt appears on the iPhone while the runner starts and times out after about 30 s; unlock the iPhone, check Settings › Developer › Enable UI Automation, and answer that prompt during the next attempt",
+        waited(wait)
+    )
+}
+
 pub fn xcode_too_old_message(sdk: Option<&str>, device: Option<&str>) -> Option<String> {
     let sdk = checks::os_major_minor(sdk?);
     let device = checks::os_major_minor(device?);
@@ -2516,6 +2580,33 @@ mod tests {
         let mut wait = UnlockWait::default();
         for _ in 0..10 {
             assert!(!wait.observe(None), "unreadable never counts as unlocked");
+        }
+    }
+
+    #[test]
+    fn a_wifi_refusal_is_its_own_blocker_and_names_usb() {
+        assert_eq!(
+            ide_refusal_blocker(checks::Transport::Network),
+            "wifi_automation_refused"
+        );
+        assert_eq!(
+            ide_refusal_blocker(checks::Transport::Usb),
+            "automation_not_allowed"
+        );
+        assert_eq!(
+            ide_refusal_blocker(checks::Transport::Unknown),
+            "automation_not_allowed",
+            "without evidence of Wi-Fi, keep the on-phone reading"
+        );
+        let wifi = wifi_automation_message(Some(30));
+        assert!(wifi.contains("over Wi-Fi"), "{wifi}");
+        assert!(wifi.contains("by USB"), "{wifi}");
+        assert!(wifi.contains("after waiting 30 s"), "{wifi}");
+        let usb = automation_message(None);
+        assert!(usb.contains("about 30 s"), "{usb}");
+        assert!(!usb.contains("after waiting"), "{usb}");
+        for text in [wifi, usb, automation_message(Some(2))] {
+            assert!(!text.contains("--"), "never a bypass flag: {text}");
         }
     }
 
