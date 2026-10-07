@@ -559,6 +559,8 @@ automation: turn on Settings › Developer › Enable UI Automation and accept a
 than the selected Xcode supports: install an Xcode that supports it (a beta Xcode for a
 beta iOS) and give this phone that Xcode with `iphone-use setup --xcode <Xcode.app>`
 (other phones keep the Mac's `xcode-select` choice; `--xcode system` goes back to it).
+The choice is remembered for that phone as soon as setup starts, so a setup that then
+fails still leaves every later reconnect on that Xcode.
 KeepAlive then retries only every 15 minutes, since each attempt launches the runner on
 the phone; `iphone-use doctor` prints the phone's iOS next to the Xcode SDK and which Xcode
 the phone uses.

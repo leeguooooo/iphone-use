@@ -21,6 +21,10 @@ pub const RUNNER_SCHEME: &str = "IPhoneUseRunner";
 pub const RUNNER_TEST_ID: &str = "IPhoneUseRunnerUITests/RunnerTests/testServe";
 pub const RUNNER_APP_NAME: &str = "iPhoneUse-Runner.app";
 pub const XCODE_APP_STORE_URL: &str = "https://apps.apple.com/app/xcode/id497799835";
+/// Under an instance's state dir: the Xcode this phone was given with
+/// `--xcode`, kept apart from the plists so a setup that fails (and rolls the
+/// plists back) still leaves the choice for the supervisor's next attempt.
+pub const XCODE_CHOICE_FILE: &str = "xcode-developer-dir";
 pub const SUPERVISOR_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin";
 
 #[derive(Debug, Clone)]
@@ -71,6 +75,10 @@ pub struct Ctx {
     /// DEVELOPER_DIR in its plists and exported to every xcodebuild, xcrun
     /// and devicectl; `None` uses the Mac's xcode-select choice.
     pub developer_dir: Option<PathBuf>,
+    /// What an interactive setup must remember for this phone before it does
+    /// anything else: `Some(Some(dir))` keeps that Xcode, `Some(None)` goes
+    /// back to the Mac's choice, `None` leaves the remembered choice alone.
+    pub xcode_to_persist: Option<Option<PathBuf>>,
 }
 
 fn env(key: &str) -> Option<String> {
@@ -130,6 +138,7 @@ impl Ctx {
             udid: String::new(),
             keepalive: false,
             developer_dir: None,
+            xcode_to_persist: None,
             script: None,
             instance,
             home,
@@ -264,22 +273,16 @@ impl Ctx {
             udid = wda_env("WDA_UDID");
         }
 
-        // --xcode > DEVELOPER_DIR in the environment > this instance's
-        // supervisor plist > its daemon plist. `system` clears it.
-        ctx.developer_dir = match env("IPHONE_USE_XCODE") {
-            Some(choice) if choice == "system" => None,
-            Some(choice) => Some(developer_dir_for(&choice).map_err(|message| (message, 2))?),
-            None => {
-                let mut chosen = env("DEVELOPER_DIR").unwrap_or_default();
-                if chosen.is_empty() {
-                    chosen = wda_env("DEVELOPER_DIR");
-                }
-                if chosen.is_empty() {
-                    chosen = daemon_env("DEVELOPER_DIR");
-                }
-                (!chosen.is_empty()).then(|| PathBuf::from(chosen))
-            }
-        };
+        // This phone's own Xcode; the order is in `choose_xcode`.
+        (ctx.developer_dir, ctx.xcode_to_persist) = choose_xcode(XcodeInputs {
+            flag: env("IPHONE_USE_XCODE"),
+            environment: env("DEVELOPER_DIR"),
+            keepalive: ctx.keepalive,
+            remembered: read_xcode_choice(&ctx.instance.state_dir),
+            supervisor_plist: wda_env("DEVELOPER_DIR"),
+            daemon_plist: daemon_env("DEVELOPER_DIR"),
+        })
+        .map_err(|message| (message, 2))?;
         ctx.wda_dir = wda_dir;
         ctx.runner_src = runner_src;
         ctx.runner_project = runner_project;
@@ -325,6 +328,85 @@ impl Ctx {
     pub fn mjpeg_port_number(&self) -> Option<u16> {
         valid_port(&self.mjpeg_port)
     }
+}
+
+/// Everything that can name this phone's Xcode, for [`choose_xcode`].
+pub struct XcodeInputs {
+    /// `iphone-use setup --xcode` (IPHONE_USE_XCODE).
+    pub flag: Option<String>,
+    /// DEVELOPER_DIR in this process's environment.
+    pub environment: Option<String>,
+    /// This run is the launchd supervisor's.
+    pub keepalive: bool,
+    /// [`read_xcode_choice`].
+    pub remembered: Option<Option<PathBuf>>,
+    pub supervisor_plist: String,
+    pub daemon_plist: String,
+}
+
+/// This phone's Xcode for this run, and what an interactive setup should
+/// remember: --xcode > (interactive) DEVELOPER_DIR in the environment > the
+/// remembered choice > the supervisor plist > the daemon plist. `system` (or
+/// `default`) goes back to the Mac's choice and is remembered too. Under
+/// launchd the environment's DEVELOPER_DIR is only the supervisor plist's
+/// copy, so a remembered choice wins over it.
+pub fn choose_xcode(
+    inputs: XcodeInputs,
+) -> Result<(Option<PathBuf>, Option<Option<PathBuf>>), String> {
+    if let Some(choice) = inputs.flag {
+        if is_system_choice(&choice) {
+            return Ok((None, Some(None)));
+        }
+        let dir = developer_dir_for(&choice)?;
+        return Ok((Some(dir.clone()), Some(Some(dir))));
+    }
+    if !inputs.keepalive {
+        if let Some(chosen) = inputs.environment.clone() {
+            let keep = developer_dir_for(&chosen).ok().map(Some);
+            return Ok((Some(PathBuf::from(chosen)), keep));
+        }
+    }
+    if let Some(choice) = inputs.remembered {
+        return Ok((choice, None));
+    }
+    let chosen = [
+        inputs.environment.unwrap_or_default(),
+        inputs.supervisor_plist,
+        inputs.daemon_plist,
+    ]
+    .into_iter()
+    .find(|value| !value.is_empty());
+    Ok((chosen.map(PathBuf::from), None))
+}
+
+/// `--xcode system` / `default`: back to the Mac's `xcode-select` choice.
+fn is_system_choice(choice: &str) -> bool {
+    matches!(choice, "system" | "default")
+}
+
+/// The Xcode this instance remembers: `Some(Some(dir))` its own Xcode (while
+/// it still holds an xcodebuild), `Some(None)` the Mac's choice on purpose,
+/// `None` nothing remembered.
+pub fn read_xcode_choice(state_dir: &Path) -> Option<Option<PathBuf>> {
+    let text = std::fs::read_to_string(state_dir.join(XCODE_CHOICE_FILE)).ok()?;
+    let choice = text.trim();
+    if is_system_choice(choice) {
+        return Some(None);
+    }
+    developer_dir_for(choice).ok().map(Some)
+}
+
+/// Remember this instance's Xcode (`None` = the Mac's choice). Written at
+/// once, so a setup that fails later still leaves it for every later run.
+pub fn write_xcode_choice(state_dir: &Path, dir: Option<&Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_dir)?;
+    let text = match dir {
+        Some(dir) => format!("{}\n", dir.display()),
+        None => "system\n".to_string(),
+    };
+    let staged = state_dir.join(format!(".{XCODE_CHOICE_FILE}.tmp"));
+    std::fs::write(&staged, text)?;
+    std::fs::rename(&staged, state_dir.join(XCODE_CHOICE_FILE))
 }
 
 /// `/Applications/Xcode-beta.app` or its `Contents/Developer` → the
@@ -685,6 +767,136 @@ mod tests {
             developer_dir_for("Xcode.app").is_err(),
             "relative paths are refused"
         );
+    }
+
+    fn fake_xcode(root: &Path, name: &str) -> PathBuf {
+        let developer = root.join(name).join("Contents/Developer");
+        std::fs::create_dir_all(developer.join("usr/bin")).unwrap();
+        std::fs::write(developer.join("usr/bin/xcodebuild"), "").unwrap();
+        developer
+    }
+
+    fn inputs() -> XcodeInputs {
+        XcodeInputs {
+            flag: None,
+            environment: None,
+            keepalive: false,
+            remembered: None,
+            supervisor_plist: String::new(),
+            daemon_plist: String::new(),
+        }
+    }
+
+    #[test]
+    fn an_xcode_choice_is_remembered_and_cleared_per_instance() {
+        let root = tempfile::tempdir().unwrap();
+        let beta = fake_xcode(root.path(), "Xcode-beta.app");
+        let guouli = root.path().join("instances/guouli");
+        let other = root.path().join("instances/i13");
+
+        // Nothing remembered yet, and no state dir needed to say so.
+        assert_eq!(read_xcode_choice(&guouli), None);
+
+        // --xcode is written at once (setup may fail later and roll back).
+        write_xcode_choice(&guouli, Some(&beta)).unwrap();
+        assert_eq!(read_xcode_choice(&guouli), Some(Some(beta.clone())));
+        assert_eq!(
+            read_xcode_choice(&other),
+            None,
+            "other instances unaffected"
+        );
+
+        // `--xcode system` is remembered as a choice of its own.
+        write_xcode_choice(&guouli, None).unwrap();
+        assert_eq!(read_xcode_choice(&guouli), Some(None));
+
+        // A remembered Xcode that was deleted is ignored, not trusted.
+        std::fs::write(guouli.join(XCODE_CHOICE_FILE), "/nowhere/Xcode.app\n").unwrap();
+        assert_eq!(read_xcode_choice(&guouli), None);
+    }
+
+    #[test]
+    fn the_xcode_order_keeps_an_explicit_choice_through_a_failed_setup() {
+        let root = tempfile::tempdir().unwrap();
+        let beta = fake_xcode(root.path(), "Xcode-beta.app");
+        let beta_app = root
+            .path()
+            .join("Xcode-beta.app")
+            .to_string_lossy()
+            .into_owned();
+
+        // --xcode: used now and remembered.
+        let (dir, keep) = choose_xcode(XcodeInputs {
+            flag: Some(beta_app.clone()),
+            ..inputs()
+        })
+        .unwrap();
+        assert_eq!(dir.as_deref(), Some(beta.as_path()));
+        assert_eq!(keep, Some(Some(beta.clone())));
+        assert!(choose_xcode(XcodeInputs {
+            flag: Some("/nowhere.app".into()),
+            ..inputs()
+        })
+        .is_err());
+
+        // `system` / `default`: the Mac's choice, remembered as such.
+        for word in ["system", "default"] {
+            let (dir, keep) = choose_xcode(XcodeInputs {
+                flag: Some(word.into()),
+                ..inputs()
+            })
+            .unwrap();
+            assert_eq!((dir, keep), (None, Some(None)), "{word}");
+        }
+
+        // After a failed first setup the plists hold nothing, but the
+        // supervisor's next attempt (and doctor) still get the phone's Xcode.
+        let remembered = Some(Some(beta.clone()));
+        for keepalive in [true, false] {
+            let (dir, keep) = choose_xcode(XcodeInputs {
+                keepalive,
+                remembered: remembered.clone(),
+                ..inputs()
+            })
+            .unwrap();
+            assert_eq!(
+                dir.as_deref(),
+                Some(beta.as_path()),
+                "keepalive={keepalive}"
+            );
+            assert_eq!(keep, None, "nothing new to remember");
+        }
+
+        // Under launchd, DEVELOPER_DIR is the supervisor plist's (maybe stale)
+        // copy: a remembered `system` wins over it.
+        let (dir, _) = choose_xcode(XcodeInputs {
+            keepalive: true,
+            environment: Some(beta.to_string_lossy().into_owned()),
+            remembered: Some(None),
+            ..inputs()
+        })
+        .unwrap();
+        assert_eq!(dir, None);
+
+        // Interactively, DEVELOPER_DIR is a choice and gets remembered.
+        let (dir, keep) = choose_xcode(XcodeInputs {
+            environment: Some(beta.to_string_lossy().into_owned()),
+            remembered: Some(None),
+            ..inputs()
+        })
+        .unwrap();
+        assert_eq!(dir.as_deref(), Some(beta.as_path()));
+        assert_eq!(keep, Some(Some(beta.clone())));
+
+        // Nothing remembered: the plists, as before.
+        let (dir, keep) = choose_xcode(XcodeInputs {
+            daemon_plist: beta.to_string_lossy().into_owned(),
+            ..inputs()
+        })
+        .unwrap();
+        assert_eq!(dir.as_deref(), Some(beta.as_path()));
+        assert_eq!(keep, None);
+        assert_eq!(choose_xcode(inputs()).unwrap(), (None, None));
     }
 
     #[test]
