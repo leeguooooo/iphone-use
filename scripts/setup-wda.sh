@@ -3094,12 +3094,15 @@ cmd_status() {
 }
 
 case "$COMMAND" in
-    stop)   cmd_stop;   exit $? ;;
-    pause)  cmd_pause;  exit $? ;;
-    resume) cmd_resume; exit $? ;;
-    status) cmd_status; exit $? ;;
+    stop)   _native_setup_exec stop;   cmd_stop;   exit $? ;;
+    pause)  _native_setup_exec pause;  cmd_pause;  exit $? ;;
+    resume) _native_setup_exec resume; cmd_resume; exit $? ;;
+    status) _native_setup_exec status; cmd_status; exit $? ;;
     doctor) _native_setup_exec doctor; cmd_doctor; exit $? ;;
-    setup)  ;;
+    setup)
+        # The launchd supervisor's run; an interactive setup stays here.
+        [ "${WDA_KEEPALIVE:-0}" != "1" ] || _native_setup_exec setup
+        ;;
     *) die "unknown command: $1 (use: setup|status|stop|pause|resume|doctor|instance-context)" ;;
 esac
 
