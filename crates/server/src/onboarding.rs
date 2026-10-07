@@ -143,8 +143,14 @@ pub fn run_setup(target: &Target, args: &[String]) -> i32 {
         );
         return 2;
     }
+    // `--force`: take the phone over even while another session holds it.
+    let force = args.iter().any(|a| a == "--force");
+    let args: Vec<&String> = args.iter().filter(|a| *a != "--force").collect();
     let mut command = std::process::Command::new("/bin/bash");
     command.arg(&script).args(args);
+    if force {
+        command.env("IPHONE_USE_SETUP_FORCE", "1");
+    }
     if let Some(name) = target.named() {
         command.env("PHONE_REMOTE_INSTANCE", name);
     }

@@ -45,6 +45,7 @@ pub fn stop(ctx: &Ctx) -> i32 {
         return 1;
     }
     ok("runner supervisor and all PID-verified managed processes stopped");
+    sweep_device_runner(ctx);
     0
 }
 
@@ -79,6 +80,7 @@ pub fn pause(ctx: &Ctx) -> i32 {
         return 1;
     }
     ok("device runner paused: supervisor disabled and all PID-verified runner/relay processes stopped");
+    sweep_device_runner(ctx);
     println!("  Resume: {} resume", ctx.self_install.display());
     0
 }
@@ -223,4 +225,100 @@ pub fn status(ctx: &Ctx) -> i32 {
         failed = true;
     }
     i32::from(failed)
+}
+
+/// The runner app on the phone, when it still serves after the Mac side
+/// stopped: xcodebuild dying does not always end the on-phone process, and a
+/// parked phone with a live runner on its device ports is what the next
+/// session trips over. Found over USB (usbmuxd) and ended through devicectl;
+/// a Wi-Fi-only phone is left alone (nothing to ask).
+fn sweep_device_runner(ctx: &Ctx) {
+    if ctx.udid.is_empty() {
+        return;
+    }
+    let udid = ctx.udid.clone();
+    let serving = sys::block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::lockdown::runner_status(&udid, 8100),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+    })
+    .is_some();
+    if !serving {
+        return;
+    }
+    let pids = sys::devicectl_json(15, &["device", "info", "processes", "--device", &ctx.udid])
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .map(|value| runner_pids(&value))
+        .unwrap_or_default();
+    if pids.is_empty() {
+        warn("the runner still answers on the phone, but its process could not be found to end it");
+        return;
+    }
+    for pid in pids {
+        let pid = pid.to_string();
+        let (_, ended) = sys::run_bounded(
+            "xcrun",
+            &[
+                "devicectl",
+                "device",
+                "process",
+                "terminate",
+                "--device",
+                &ctx.udid,
+                "--pid",
+                &pid,
+            ],
+            Duration::from_secs(15),
+        );
+        if ended {
+            ok(&format!(
+                "ended the runner left running on the phone (pid {pid})"
+            ));
+        } else {
+            warn(&format!(
+                "could not end the runner left running on the phone (pid {pid})"
+            ));
+        }
+    }
+}
+
+/// Pids of the runner app (`…/iPhoneUse-Runner.app/…`) in a devicectl
+/// `device info processes` listing.
+fn runner_pids(listing: &serde_json::Value) -> Vec<u64> {
+    listing
+        .get("result")
+        .and_then(|r| r.get("runningProcesses"))
+        .and_then(|p| p.as_array())
+        .map(|processes| {
+            processes
+                .iter()
+                .filter(|p| {
+                    p.get("executable")
+                        .and_then(|e| e.as_str())
+                        .is_some_and(|e| e.contains("/iPhoneUse-Runner.app/"))
+                })
+                .filter_map(|p| p.get("processIdentifier").and_then(|n| n.as_u64()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_pids_from_a_devicectl_listing() {
+        let listing = serde_json::json!({"result": {"runningProcesses": [
+            {"executable": "file:///private/var/containers/Bundle/Application/AB/iPhoneUse-Runner.app/iPhoneUse-Runner", "processIdentifier": 4012},
+            {"executable": "file:///Applications/MobileSafari.app/MobileSafari", "processIdentifier": 77},
+            {"executable": "file:///private/var/containers/Bundle/Application/CD/iPhoneUse.app/iPhoneUse", "processIdentifier": 9}
+        ]}});
+        assert_eq!(runner_pids(&listing), vec![4012]);
+        assert!(runner_pids(&serde_json::json!({})).is_empty());
+    }
 }

@@ -13,6 +13,8 @@ pub enum Kind {
     Generic,
     Locked,
     XcodeTooOld,
+    /// Another session holds the phone and its runner is alive.
+    Owned,
 }
 
 impl Kind {
@@ -21,6 +23,7 @@ impl Kind {
             Kind::Generic => "generic",
             Kind::Locked => "locked",
             Kind::XcodeTooOld => "xcode_too_old",
+            Kind::Owned => "owned",
         }
     }
 
@@ -29,6 +32,7 @@ impl Kind {
             "generic" => Some(Kind::Generic),
             "locked" => Some(Kind::Locked),
             "xcode_too_old" => Some(Kind::XcodeTooOld),
+            "owned" => Some(Kind::Owned),
             _ => None,
         }
     }
@@ -42,6 +46,8 @@ impl Kind {
             // Only a different Xcode fixes this; every attempt would launch
             // the runner on the phone again for nothing.
             Kind::XcodeTooOld => (900, 900),
+            // Re-check the lease soon; never replace the live runner meanwhile.
+            Kind::Owned => (15, 60),
             Kind::Generic => (5, 300),
         }
     }
