@@ -43,7 +43,8 @@
       "keywords": "remote,iphone,control,automation,ai agent,mirror,screen,mcp,mac,xcode,testing,ui automation",
       "supportUrl": "https://github.com/leeguooooo/iphone-use/issues",
       "marketingUrl": "https://github.com/leeguooooo/iphone-use",
-      "privacyPolicyUrl": "https://github.com/leeguooooo/iphone-use/blob/main/docs/privacy.md"
+      "privacyPolicyUrl": "https://github.com/leeguooooo/iphone-use/blob/main/docs/privacy.md",
+      "whatsNew": "Adds a Speed / Quality switch for the live picture. Quality shows the phone at full resolution and up to about 50 fps; Speed keeps bandwidth low."
     },
     "zh-Hans": {
       "name": "iPhone Use",
@@ -53,7 +54,8 @@
       "keywords": "遥控,远程控制,iPhone,自动化,AI,agent,投屏,屏幕,MCP,Mac,测试,UI自动化",
       "supportUrl": "https://github.com/leeguooooo/iphone-use/issues",
       "marketingUrl": "https://github.com/leeguooooo/iphone-use",
-      "privacyPolicyUrl": "https://github.com/leeguooooo/iphone-use/blob/main/docs/privacy.zh-CN.md"
+      "privacyPolicyUrl": "https://github.com/leeguooooo/iphone-use/blob/main/docs/privacy.zh-CN.md",
+      "whatsNew": "新增「性能 / 画质」画面切换：画质模式按手机原生分辨率显示，最高约 50 帧，更清楚流畅；性能模式更省流量。"
     }
   }
 }
