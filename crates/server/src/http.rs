@@ -602,6 +602,9 @@ fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<bool, Resp
                     tracing::warn!("phone owner lease taken over: {} -> {name}", prev.name);
                 }
             }
+            // Every control request passes here (pre-warm never does), so this
+            // is the "an agent drove the phone" clock its gate reads.
+            crate::prewarm::note_driven();
             let live_previous = previous
                 .filter(|owner| now.saturating_duration_since(owner.last_seen) < lease)
                 .map(|owner| owner.name);
@@ -4078,7 +4081,7 @@ async fn maybe_prewarm(
         other_owner,
         blocker: &blocker,
         since_last_start: prewarm::since_last_start(trigger),
-        since_activity: state.idle_for(),
+        since_activity: prewarm::since_driven(),
     };
     prewarm::Policy::from_env().check(&inputs)?;
     let udid = state.device_udid.clone().unwrap_or_default();

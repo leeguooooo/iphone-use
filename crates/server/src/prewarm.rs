@@ -105,8 +105,9 @@ pub struct Inputs<'a> {
     pub blocker: &'a str,
     /// Since this trigger last started a pre-warm.
     pub since_last_start: Option<Duration>,
-    /// Since an agent last drove the phone.
-    pub since_activity: Duration,
+    /// Since an agent last drove the phone in this daemon process; `None`
+    /// when it has not yet (a restart is not use).
+    pub since_activity: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +181,9 @@ impl Policy {
                 ));
             }
         }
-        if i.trigger.needs_recent_activity() && i.since_activity > self.recent {
+        if i.trigger.needs_recent_activity()
+            && i.since_activity.map_or(true, |since| since > self.recent)
+        {
             return Err(Skip::NoRecentActivity);
         }
         Ok(())
@@ -202,6 +205,21 @@ pub fn lock_gate(passcode_required: Option<bool>) -> Result<(), Skip> {
 // ---------------------------------------------------------------------------
 
 static LAST_START: Mutex<Option<HashMap<Trigger, Instant>>> = Mutex::new(None);
+/// When an agent last drove the phone. Deliberately not the daemon's idle
+/// clock, which a fresh process starts at "now": after a reboot or upgrade a
+/// phone nobody has touched for days must not count as recently used.
+static LAST_DRIVEN: Mutex<Option<Instant>> = Mutex::new(None);
+
+pub fn note_driven() {
+    *LAST_DRIVEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+}
+
+pub fn since_driven() -> Option<Duration> {
+    LAST_DRIVEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|at| at.elapsed())
+}
 static WARMING: AtomicBool = AtomicBool::new(false);
 
 fn lock_last_start() -> std::sync::MutexGuard<'static, Option<HashMap<Trigger, Instant>>> {
@@ -297,7 +315,7 @@ mod tests {
             other_owner: false,
             blocker: "",
             since_last_start: None,
-            since_activity: Duration::from_secs(400),
+            since_activity: Some(Duration::from_secs(400)),
         }
     }
 
@@ -354,7 +372,11 @@ mod tests {
     fn automatic_triggers_need_recent_use_but_a_lease_does_not() {
         let policy = Policy::default();
         let mut i = inputs(Trigger::SessionStart);
-        i.since_activity = Duration::from_secs(5 * 3600);
+        i.since_activity = Some(Duration::from_secs(5 * 3600));
+        assert_eq!(policy.check(&i), Err(Skip::NoRecentActivity));
+        // A daemon that has not been driven since it started (reboot,
+        // upgrade) has no recent use, whatever its idle clock says.
+        i.since_activity = None;
         assert_eq!(policy.check(&i), Err(Skip::NoRecentActivity));
         i.trigger = Trigger::Status;
         assert_eq!(policy.check(&i), Err(Skip::NoRecentActivity));

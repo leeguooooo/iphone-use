@@ -63,8 +63,10 @@ abandoned. Release yours when done: `POST /agent/owner {"release":true}` / MCP
 approves a prompt, fetches a code): `POST /agent/hold {"secs":600}` / MCP
 `phone_hold(secs)` (max 14400; 0 clears). Clear it when the pause ends. A hold
 prevents idle release; it does not start WDA or prove readiness. Never use it
-to keep the phone ready without a task. A live owner lease also prevents idle
-release; the idle window starts when you release it.
+to keep the phone ready without a task. Taking a hold extends your owner
+lease to cover it, so no other session can drive the phone during the pause.
+A live owner lease also prevents idle release; the idle window starts when you
+release it.
 
 **Pre-warm.** A released phone may already be coming back when you look:
 `warming:true` means the daemon started the bring-up ahead of time (MCP does
