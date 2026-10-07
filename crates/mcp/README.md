@@ -288,6 +288,8 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 | `phone_flow_update` | — | Mirror the official registry (checksum + strict validation); network only, phone untouched |
 | `phone_flow_publish` | `source`, `id`, `app_name?`, `aliases?`, `note?`, `confirm` | Fork/branch/PR a validated flow into the registry via `gh`; `confirm=true` only after the user agreed |
 | `phone_flow_report` | `id`, `note?`, `confirm` | File a registry issue for a failed flow using the captured last failure (redacted); `confirm=true` only after the user agreed |
+| `phone_run_start` | `run_id`, `complete_trace?` | Mark one task's start for the daemon's task metrics; this session's calls carry the run until `phone_run_end` (optional — runs are otherwise inferred from idle gaps) |
+| `phone_run_end` | `run_id`, `turn_ids?` | Close the task and return its summary: HTTP calls (not model turns), batches, observed and flow calls, stale/unknown, failures, p50/p95; model round trips only for a declared complete trace |
 
 ### Reading a result: `structuredContent` vs the text block
 

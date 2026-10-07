@@ -649,7 +649,7 @@ fn owner_status(state: &AppState) -> (Option<String>, u64) {
 /// `/agent/owner` (claim or release the lease): a run boundary for the
 /// owner's `no_progress` tracker.
 async fn agent_owner(state: State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
-    if let Some(owner) = trusted_owner(&state, &headers) {
+    if let Some(owner) = trusted_bearer_owner(&state, &headers) {
         crate::advice::reset(&owner);
     }
     agent_owner_inner(state, headers, body).await
@@ -1676,6 +1676,27 @@ fn credentials_ok(state: &AppState, headers: &HeaderMap) -> bool {
         return false;
     }
     is_authed(state, headers) || check_bearer(state, headers)
+}
+
+/// The bearer-only gate (`agent_auth`) as a read-only predicate, for routes
+/// that do not accept the browser cookie.
+fn bearer_ok(state: &AppState, headers: &HeaderMap) -> bool {
+    if state.agent_token.is_none() && state.password.is_none() {
+        return true;
+    }
+    if state.auth_limiter.lock().is_ok_and(|limiter| limiter.is_locked()) {
+        return false;
+    }
+    check_bearer(state, headers)
+}
+
+/// [`trusted_owner`] for bearer-only routes (input, actions, owner, run): a
+/// valid cookie with a wrong bearer is refused there, so it must not let the
+/// wrapper act either.
+fn trusted_bearer_owner(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    named_owner(headers)
+        .filter(|_| bearer_ok(state, headers))
+        .map(str::to_string)
 }
 
 /// The caller's owner, but only for a request that will authenticate: the
@@ -9328,7 +9349,7 @@ async fn agent_actions(
 ) -> Response {
     // A batch changes the screen under the tracker: forget it now, after
     // authentication and before the batch runs.
-    if let Some(owner) = trusted_owner(&state, &headers) {
+    if let Some(owner) = trusted_bearer_owner(&state, &headers) {
         crate::advice::reset(&owner);
     }
     agent_actions_inner(state, headers, body).await
@@ -10356,7 +10377,7 @@ async fn agent_input(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let Some(owner) = trusted_owner(&state, &headers) else {
+    let Some(owner) = trusted_bearer_owner(&state, &headers) else {
         return agent_input_inner(state, Query(query), headers, body).await;
     };
     let observed = query.return_mode.as_deref() == Some("delta");

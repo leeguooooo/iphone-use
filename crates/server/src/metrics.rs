@@ -227,8 +227,8 @@ pub struct RunSummary {
     pub call_p95_ms: Option<u64>,
     /// `None` when intervals were dropped or the sum overflowed.
     pub runner_busy_union_ms: Option<u64>,
-    /// The sum over calls of each call's own runner-busy union (overlap
-    /// between concurrent calls counted twice — compare with the union).
+    /// The plain sum of every clipped runner interval's duration (overlaps
+    /// counted as many times as they occur — compare with the union).
     pub runner_summed_ms: Option<u64>,
     pub clipped_intervals: u64,
     pub rejected_intervals: u64,
@@ -286,6 +286,9 @@ struct OpenRun {
     rejected_intervals: u64,
     dropped_intervals: u64,
     cancelled: u64,
+    /// Plain sum of every call's clipped runner durations; `None` once it
+    /// overflowed.
+    summed: Option<u64>,
     /// Token ids issued and not yet finished.
     outstanding: BTreeSet<u64>,
     started_ms: u64,
@@ -359,6 +362,7 @@ impl RunAggregator {
                 started_ms: now_ms,
                 ended_ms: now_ms,
                 last_activity_ms: now_ms,
+                summed: Some(0),
                 ..OpenRun::default()
             },
         );
@@ -500,6 +504,9 @@ impl RunAggregator {
             if (cs, ce) != (s, e) {
                 run.clipped += 1;
             }
+            // The plain sum keeps every clipped duration; the merge below is
+            // only for the union and for capped storage.
+            run.summed = run.summed.and_then(|sum| sum.checked_add(ce - cs));
             clipped.push((cs, ce));
         }
         let merged = merge_intervals(clipped);
@@ -692,10 +699,7 @@ fn summarize(
     }
     let mut durations: Vec<u64> = calls.iter().map(|c| c.duration_ms).collect();
     durations.sort_unstable();
-    let summed = run
-        .intervals
-        .iter()
-        .try_fold(0u64, |acc, (s, e)| acc.checked_add(e - s));
+    let summed = run.summed;
     let union = interval_union_ms(&run.intervals);
     let overflow = summed.is_none() || union.is_none();
     let intervals_whole = run.dropped_intervals == 0;
@@ -1189,10 +1193,20 @@ mod tests {
         agg.finish(token, e);
         let s = end_run(&mut agg, "a", "r");
         assert_eq!(s.runner_busy_union_ms, Some(100));
-        // The sum is over each call's own union: (120,150) lies inside the
-        // clipped (100,200), so this one call contributes 100.
-        assert_eq!(s.runner_summed_ms, Some(100));
+        // The plain sum: clipped (100,200) and (120,150) → 100 + 30.
+        assert_eq!(s.runner_summed_ms, Some(130));
         assert_eq!((s.clipped_intervals, s.rejected_intervals), (1, 2));
+
+        // Overlapping intervals in one call: union 150, plain sum 200.
+        let token = agg.begin(start(0, Some("a"), Some("o")));
+        let mut e = end(200);
+        e.runner_intervals = vec![(0, 100), (50, 150)];
+        agg.finish(token, e);
+        let s = end_run(&mut agg, "a", "o");
+        assert_eq!(
+            (s.runner_busy_union_ms, s.runner_summed_ms),
+            (Some(150), Some(200))
+        );
 
         // A dozen back-to-back runner calls (an observed tap) merge into one
         // interval: nothing dropped, the run stays complete.
@@ -1362,7 +1376,10 @@ mod tests {
         let token = agg.begin(start(20, Some("a"), Some("r")));
         agg.cancel(token, 70);
         let s = end_run(&mut agg, "a", "r");
-        assert_eq!((s.tool_calls, s.cancelled_events, s.outcome_unknown), (2, 1, 1));
+        assert_eq!(
+            (s.tool_calls, s.cancelled_events, s.outcome_unknown),
+            (2, 1, 1)
+        );
         assert!(s.incomplete);
         assert_eq!((s.in_flight_at_close, s.ended_ms), (0, 70));
         assert_eq!(agg.stats().cancelled_events, 1);

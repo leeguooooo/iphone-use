@@ -108,6 +108,9 @@ pub struct DaemonClient {
     /// Sent as `X-Agent-Call` so the daemon's task metrics can tell a flow
     /// replay from a hand-driven call.
     call_kind: Option<&'static str>,
+    /// The explicit run this session opened with `phone_run_start`, sent as
+    /// `X-Agent-Run` on every request until `phone_run_end`.
+    run_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -254,6 +257,7 @@ impl DaemonClient {
                 .unwrap_or_else(|| format!("mcp-{}", std::process::id())),
             last_snapshot: std::sync::Arc::new(std::sync::Mutex::new(None)),
             call_kind: None,
+            run_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -303,6 +307,11 @@ impl DaemonClient {
             Some(kind) => req.header("x-agent-call", kind),
             None => req,
         };
+        let run = self.run_id.lock().ok().and_then(|run| run.clone());
+        let req = match run {
+            Some(run) => req.header("x-agent-run", run),
+            None => req,
+        };
         match &self.token {
             Some(t) => req.header(header::AUTHORIZATION, format!("Bearer {t}")),
             None => req,
@@ -319,6 +328,49 @@ impl DaemonClient {
 
     /// `POST /agent/hold {"secs":N}` — keep the phone from idle release for a
     /// bounded human-in-the-loop pause; `0` clears the hold.
+    /// `POST /agent/run` start: open an explicit run for this owner; every
+    /// later request carries it until [`Self::run_end`].
+    pub async fn run_start(&self, run_id: &str, complete_trace: bool) -> anyhow::Result<String> {
+        let body = serde_json::json!({
+            "action": "start", "run_id": run_id, "complete_trace": complete_trace
+        });
+        let req = self
+            .auth(self.client.post(self.url("/agent/run")))
+            .header("x-phone-owner", &self.owner)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        let resp = check_status(req.send().await?).await?;
+        let text = resp.text().await?;
+        if let Ok(mut run) = self.run_id.lock() {
+            *run = Some(run_id.to_string());
+        }
+        Ok(text)
+    }
+
+    /// `POST /agent/run` end: close the run and return its summary.
+    pub async fn run_end(
+        &self,
+        run_id: &str,
+        turn_ids: Option<Vec<String>>,
+    ) -> anyhow::Result<String> {
+        let mut body = serde_json::json!({"action": "end", "run_id": run_id});
+        if let Some(turns) = turn_ids {
+            body["turn_ids"] = serde_json::json!(turns);
+        }
+        let req = self
+            .auth(self.client.post(self.url("/agent/run")))
+            .header("x-phone-owner", &self.owner)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        let result = check_status(req.send().await?).await;
+        if let Ok(mut run) = self.run_id.lock() {
+            if run.as_deref() == Some(run_id) {
+                *run = None;
+            }
+        }
+        Ok(result?.text().await?)
+    }
+
     pub async fn hold(&self, secs: u64) -> anyhow::Result<String> {
         let req = self
             .auth(self.client.post(self.url("/agent/hold")))

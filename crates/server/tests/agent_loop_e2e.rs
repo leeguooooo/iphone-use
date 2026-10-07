@@ -742,3 +742,99 @@ fn cli_metrics_fails_loudly_on_anything_but_an_ok_report() {
         assert!(stderr.contains("could not report metrics"), "{stderr}");
     }
 }
+
+/// Log in with the password and return the session cookie (`name=value`).
+fn session_cookie(port: u16, password: &str) -> String {
+    let body = format!("password={password}");
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        stream,
+        "POST /login HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    raw.lines()
+        .find_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower
+                .starts_with("set-cookie:")
+                .then(|| line["set-cookie:".len()..].trim().split(';').next().unwrap().to_string())
+        })
+        .unwrap_or_else(|| panic!("no session cookie: {raw}"))
+}
+
+/// A valid browser cookie with a wrong bearer is refused by the bearer-only
+/// routes, and must not let their wrappers touch the owner's state first.
+#[test]
+fn a_cookie_with_a_wrong_bearer_changes_nothing_on_bearer_routes() {
+    let runner = runner();
+    let state = private_dir();
+    let home = private_dir();
+    let state_path = state.path().canonicalize().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let daemon = spawn_daemon(runner.url(), &state_path, &home_path);
+    let port = daemon.port;
+    let cookie = session_cookie(port, "e2e-password-not-the-token");
+    let victim = [("X-Phone-Control", "1"), ("X-Phone-Owner", "victim")];
+    let tap = r#"{"type":"tap","x":0.5,"y":0.5}"#;
+    http(port, "GET", "/agent/elements", TOKEN, &victim, "");
+    http(port, "POST", "/agent/input?return=delta", TOKEN, &victim, tap);
+    let (_, before) = http(port, "GET", "/agent/metrics?owner=victim", TOKEN, &[], "");
+
+    let with_cookie = [
+        ("X-Phone-Control", "1"),
+        ("X-Phone-Owner", "victim"),
+        ("Cookie", cookie.as_str()),
+    ];
+    for (path, body) in [
+        ("/agent/input", r#"{"type":"text","text":"x"}"#),
+        ("/agent/actions", r#"{"steps":[]}"#),
+        ("/agent/owner", r#"{"release":true}"#),
+    ] {
+        let (status, _) = http(port, "POST", path, "wrong-token", &with_cookie, body);
+        assert_eq!(status, 401, "{path} refuses a cookie without the bearer");
+    }
+    let after = get_after_lockout(port, "/agent/metrics?owner=victim");
+    assert_eq!(before["open"], after["open"]);
+    let (_, second) = http(port, "POST", "/agent/input?return=delta", TOKEN, &victim, tap);
+    assert!(second["no_progress"].is_string(), "the streak survived: {second}");
+}
+
+/// An explicit run opened and closed through the standard MCP tools carries
+/// every call of the session in between, and closes with its summary.
+#[test]
+fn an_explicit_run_through_the_mcp_tools() {
+    let runner = runner();
+    let state = private_dir();
+    let home = private_dir();
+    let state_path = state.path().canonicalize().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let daemon = spawn_daemon(runner.url(), &state_path, &home_path);
+    let mut mcp = Mcp::start(daemon.port, &home_path);
+    let started = mcp.call(
+        "phone_run_start",
+        serde_json::json!({"run_id": "mcp-task", "complete_trace": true}),
+    );
+    assert!(started.contains("\"ok\":true"), "{started}");
+    mcp.call("phone_elements", serde_json::json!({}));
+    mcp.call("phone_tap", serde_json::json!({"x": 0.5, "y": 0.5, "observe": true}));
+    let ended = mcp.call(
+        "phone_run_end",
+        serde_json::json!({"run_id": "mcp-task", "turn_ids": ["t1", "t2", "t3"]}),
+    );
+    let summary: serde_json::Value = serde_json::from_str(&ended).unwrap_or_else(|_| panic!("{ended}"));
+    let run = &summary["run"];
+    assert_eq!(run["key"]["run_id"], "mcp-task", "{run}");
+    assert_eq!(run["key"]["owner"], "e2e-mcp", "{run}");
+    assert_eq!(run["tool_calls"], 2, "{run}");
+    assert_eq!(run["observed_calls"], 1, "{run}");
+    assert_eq!(run["model_round_trips"], 3, "{run}");
+    // After the end, the session's calls no longer carry the run.
+    mcp.call("phone_elements", serde_json::json!({}));
+    let (_, metrics) = http(daemon.port, "GET", "/agent/metrics?owner=e2e-mcp", TOKEN, &[], "");
+    let open = metrics["open"].as_array().unwrap();
+    assert!(open.iter().all(|r| r["key"]["kind"] == "inferred"), "{metrics}");
+}

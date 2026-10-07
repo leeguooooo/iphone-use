@@ -514,6 +514,28 @@ pub struct LoginParams {
     pub code_from: Option<String>,
 }
 
+/// Parameters for [`PhoneHandler::phone_run_start`].
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct RunStartParams {
+    /// A short id for this task: 1–64 of A-Z a-z 0-9 . _ : @ -
+    pub run_id: String,
+    /// Set only if you will pass the id of EVERY model turn of this task to
+    /// phone_run_end (including turns that made no tool call); only then are
+    /// model round trips reported.
+    #[serde(default)]
+    pub complete_trace: Option<bool>,
+}
+
+/// Parameters for [`PhoneHandler::phone_run_end`].
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct RunEndParams {
+    pub run_id: String,
+    /// Every model turn id of the task, when phone_run_start declared a
+    /// complete trace; `[]` for a task that used no model turns.
+    #[serde(default)]
+    pub turn_ids: Option<Vec<String>>,
+}
+
 /// Parameters for [`PhoneHandler::phone_hold`].
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct HoldParams {
@@ -1079,6 +1101,41 @@ impl PhoneHandler {
             Err(e) => {
                 CallToolResult::error(vec![Content::text(format!("reconnect failed: {e:#}"))])
             }
+        }
+    }
+
+    #[tool(
+        description = "Mark the start of one task for the daemon's task metrics: every \
+        later call of this session counts toward this run until phone_run_end. Optional \
+        — without it, runs are inferred from idle gaps. Set complete_trace only if you \
+        will hand every model turn id to phone_run_end."
+    )]
+    async fn phone_run_start(
+        &self,
+        Parameters(params): Parameters<RunStartParams>,
+    ) -> CallToolResult {
+        self.progress_reset();
+        match self
+            .daemon
+            .run_start(&params.run_id, params.complete_trace.unwrap_or(false))
+            .await
+        {
+            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
+            Err(e) => CallToolResult::error(vec![Content::text(format!("run start failed: {e:#}"))]),
+        }
+    }
+
+    #[tool(
+        description = "Close the task opened with phone_run_start and get its summary: \
+        tool calls (HTTP calls, not model turns), batches, observed actions, flow calls, \
+        stale/unknown outcomes, failures and p50/p95 call time. Pass turn_ids only if \
+        phone_run_start declared complete_trace."
+    )]
+    async fn phone_run_end(&self, Parameters(params): Parameters<RunEndParams>) -> CallToolResult {
+        self.progress_reset();
+        match self.daemon.run_end(&params.run_id, params.turn_ids).await {
+            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
+            Err(e) => CallToolResult::error(vec![Content::text(format!("run end failed: {e:#}"))]),
         }
     }
 
@@ -2490,7 +2547,7 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            24,
+            26,
             "tool count changed; update README, the skill, and the CI assertion: {names:?}"
         );
         for required in [
