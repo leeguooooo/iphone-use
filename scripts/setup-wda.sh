@@ -272,6 +272,35 @@ _instance_check_bindings() {
     fi
 }
 
+# _instance_check_bindings reads every instance plist through PlistBuddy
+# (~0.7 s with three instances) on each reconnect, yet its answer depends only
+# on those files. Remember a passing verdict keyed on the instance, the ports,
+# the target and each plist's path, mtime and size; any change re-checks.
+# A refusal is never cached.
+_instance_bindings_stamp() {
+    local plist
+    printf '%s|%s|%s|' "$INSTANCE_NAME" "$*" "${WDA_UDID:-}"
+    for plist in "$HOME/Library/LaunchAgents/$INSTANCE_LABEL_PREFIX".plist \
+        "$HOME/Library/LaunchAgents/$INSTANCE_LABEL_PREFIX".*.plist; do
+        [ -f "$plist" ] || continue
+        stat -f '%N:%m:%z;' "$plist" 2>/dev/null || printf '%s:?;' "$plist"
+    done
+}
+
+_instance_check_bindings_cached() {
+    local cache stamp
+    cache="$STATE_DIR/.instance-bindings.ok"
+    stamp="$(_instance_bindings_stamp "$@")"
+    if [ -f "$cache" ] && [ ! -L "$cache" ] \
+        && [ "$(cat "$cache" 2>/dev/null)" = "$stamp" ]; then
+        return 0
+    fi
+    _instance_check_bindings "$@" || { rm -f "$cache" 2>/dev/null; return 1; }
+    if [ ! -L "$cache" ]; then
+        printf '%s' "$stamp" > "$cache" 2>/dev/null || true
+    fi
+}
+
 _instance_resolve
 # END instance context.
 
@@ -745,6 +774,22 @@ _prepare_locked_retry() {
     _stop_managed_process "$MJPEG_RELAY_PID_FILE" "$LEGACY_MJPEG_EXPECTED" mjpeg || true
     _stop_managed_process "$RELAY_PID_FILE" "$LEGACY_RELAY_EXPECTED" relay || true
     _stop_managed_process "$RUNNER_PID_FILE" "$LEGACY_RUNNER_EXPECTED" runner || true
+}
+
+# Wait (up to $2 seconds, default 3) until something accepts on loopback port
+# $1. A relay binds within milliseconds of starting; the fixed `sleep 1` that
+# used to precede each relay check was pure waiting on the reconnect path.
+# Ownership is still proven afterwards by _verify_loopback_listener.
+_wait_tcp_listening() {
+    local port="$1" limit="${2:-3}" tick=0
+    while [ "$tick" -lt $((limit * 20)) ]; do
+        if ( : <>"/dev/tcp/127.0.0.1/$port" ) 2>/dev/null; then
+            return 0
+        fi
+        tick=$((tick + 1))
+        sleep 0.05
+    done
+    return 1
 }
 
 _interactive_lock_wait_tick() {
@@ -1428,6 +1473,53 @@ _relay_binary() {
     return 1
 }
 
+# The iphone-use binary that reads device facts from lockdownd over usbmuxd
+# (`iphone-use device info|ddi`), in place of a devicectl process per read:
+# ~15-50 ms over USB against ~0.2-0.3 s, and no CoreDevice round trip. Same
+# candidates as the relay binary; resolved once per run into DEVICE_TOOL_BIN
+# (call it directly, not in $(...), or the result is lost with the subshell).
+# An older binary without `device` leaves the devicectl paths in charge.
+DEVICE_TOOL_RESOLVED=0
+DEVICE_TOOL_BIN=""
+_device_tool() {
+    local candidate program
+    if [ "$DEVICE_TOOL_RESOLVED" = "1" ]; then
+        [ -n "$DEVICE_TOOL_BIN" ]
+        return
+    fi
+    DEVICE_TOOL_RESOLVED=1
+    program=""
+    if [ -f "$DAEMON_PLIST" ]; then
+        program="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$DAEMON_PLIST" 2>/dev/null || true)"
+    fi
+    for candidate in "${IPHONE_USE_RELAY_BIN:-}" "$program" \
+        "$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use" \
+        "/Applications/iPhoneUse.app/Contents/MacOS/iphone-use"; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+        "$candidate" device info --help >/dev/null 2>&1 || continue
+        DEVICE_TOOL_BIN="$candidate"
+        return 0
+    done
+    return 1
+}
+
+# Run `iphone-use device <query>` for the target into DEVICE_QUERY_JSON.
+# Exit status: 0 read, 3 the phone is not attached to usbmuxd, 1 otherwise.
+DEVICE_QUERY_JSON=""
+_device_query() {
+    local query="$1"
+    DEVICE_QUERY_JSON=""
+    [ -n "${WDA_UDID:-}" ] || return 1
+    _device_tool || return 1
+    DEVICE_QUERY_JSON="$("$DEVICE_TOOL_BIN" device "$query" --udid "$WDA_UDID" 2>/dev/null)"
+}
+
+# A string or boolean field from DEVICE_QUERY_JSON (one flat JSON object).
+_device_field() {
+    printf '%s\n' "$DEVICE_QUERY_JSON" \
+        | sed -nE "s/.*\"$1\":(\"([^\"]*)\"|(true|false)).*/\\2\\3/p" | head -1
+}
+
 _target_on_usb() {
     [ -n "${WDA_UDID:-}" ] || return 1
     case " $(_usb_udids) " in
@@ -1446,6 +1538,9 @@ PREVIOUS_SUPERVISOR_DISABLED=0
 SUPERVISOR_TRANSACTION_ACTIVE=0
 SUPERVISOR_HANDOFF_COMPLETE=0
 DAEMON_TRANSACTION_ACTIVE=0
+# Set once this run installs a changed daemon plist or reloads the daemon job.
+# Until then the rollback has nothing to undo and must leave the daemon alone.
+DAEMON_TOUCHED=0
 DAEMON_JOB_WAS_LOADED=0
 DAEMON_WAS_DISABLED=0
 STARTED_RUNNER=0
@@ -1837,7 +1932,14 @@ _cleanup_on_exit() {
                 && warn "supervisor rescue backup retained at: $WDA_AGENT_ROLLBACK_PLIST"
         fi
     fi
-    if [ "$status" -ne 0 ] && [ "$DAEMON_TRANSACTION_ACTIVE" = "1" ]; then
+    # A round that found the daemon already configured changed nothing, so
+    # there is nothing to restore. Reloading it anyway killed the daemon that
+    # had just asked for the stop: a `{"mode":"human"}` sent while a reconnect
+    # round was still finishing lost its connection and the daemon restarted.
+    if [ "$status" -ne 0 ] && [ "$DAEMON_TRANSACTION_ACTIVE" = "1" ] \
+        && [ "$DAEMON_TOUCHED" != "1" ]; then
+        rm -f "$DAEMON_ROLLBACK_PLIST"
+    elif [ "$status" -ne 0 ] && [ "$DAEMON_TRANSACTION_ACTIVE" = "1" ]; then
         warn "setup failed — restoring the prior daemon configuration and loaded state"
         launchctl bootout "$GUI_DOMAIN/$DAEMON_LABEL" >/dev/null 2>&1 || true
         if ! _wait_job_gone "$DAEMON_LABEL"; then
@@ -1971,6 +2073,34 @@ _version_lt() {
 }
 
 # Major version of the selected Xcode ("Xcode 27.0" -> 27), or nothing.
+# "Xcode 27.0", cached per selected developer directory. `xcodebuild -version`
+# costs ~0.4 s and ran on every reconnect; the cache key is the developer
+# directory plus the mtime of its version.plist, so switching or updating
+# Xcode re-reads it. Any read failure falls back to asking xcodebuild.
+_xcode_version_cached() {
+    local xcodebuild="$1" developer stamp cache line version
+    developer="$(xcode-select -p 2>/dev/null || true)"
+    stamp=""
+    if [ -n "$developer" ] && [ -f "$developer/../version.plist" ]; then
+        stamp="$developer|$(stat -f '%m' "$developer/../version.plist" 2>/dev/null || true)"
+    fi
+    cache="$STATE_DIR/.xcode-version.cache"
+    if [ -n "$stamp" ] && [ -f "$cache" ] && [ ! -L "$cache" ]; then
+        line="$(head -1 "$cache" 2>/dev/null || true)"
+        if [ "${line%%	*}" = "$stamp" ]; then
+            version="${line#*	}"
+            case "$version" in
+                "Xcode "[0-9]*) printf '%s\n' "$version"; return 0 ;;
+            esac
+        fi
+    fi
+    version="$("$xcodebuild" -version 2>/dev/null | head -1 || true)"
+    if [ -n "$stamp" ] && [ -n "$version" ] && [ ! -L "$cache" ]; then
+        printf '%s\t%s\n' "$stamp" "$version" > "$cache" 2>/dev/null || true
+    fi
+    printf '%s\n' "$version"
+}
+
 _xcode_major() {
     xcodebuild -version 2>/dev/null \
         | sed -n '1s/^Xcode \([0-9][0-9]*\).*/\1/p'
@@ -1982,12 +2112,19 @@ _ios_sdk_version() {
     _valid_os_version "$version" && printf '%s\n' "$version"
 }
 
-# The phone's iOS version ("27.2"), read from devicectl's JSON, or nothing.
-# Failures are tolerated: the version only sharpens a diagnosis and never
-# gates setup on its own.
+# The phone's iOS version ("27.2"), read from lockdownd (`iphone-use device
+# info`) or devicectl's JSON, or nothing. Failures are tolerated: the version
+# only sharpens a diagnosis and never gates setup on its own.
 _device_ios_version() {
     local udid="${1:-${WDA_UDID:-}}" j version
     [ -n "$udid" ] || return 0
+    if WDA_UDID="$udid" _device_query info; then
+        version="$(_device_field product_version)"
+        if _valid_os_version "$version"; then
+            printf '%s\n' "$version"
+            return 0
+        fi
+    fi
     j="$(mktemp "${TMPDIR:-/tmp}/iphone-use-device-details.XXXXXX")" || return 0
     _devicectl_t 10 device info details --device "$udid" -j "$j" >/dev/null 2>&1 || true
     version="$(sed -nE 's/.*"osVersionNumber"[[:space:]]*:[[:space:]]*"([0-9.]+)".*/\1/p' "$j" 2>/dev/null | head -1)"
@@ -3025,7 +3162,7 @@ _valid_port "$MJPEG_PORT" \
     || die "MJPEG_PORT must be a decimal TCP port from 1 to 65535 (got '$MJPEG_PORT')"
 [ "$WDA_PORT" != "$MJPEG_PORT" ] \
     || die "WDA_PORT and MJPEG_PORT must be different (both are '$WDA_PORT')"
-XCODE_VERSION="$("$XCODEBUILD_BIN" -version 2>/dev/null | head -1 || true)"
+XCODE_VERSION="$(_xcode_version_cached "$XCODEBUILD_BIN")"
 [ -n "$XCODE_VERSION" ] \
     || die "full Xcode is not selected. Install it from the App Store ($XCODE_APP_STORE_URL), then run: sudo xcode-select -s /Applications/Xcode.app"
 ok "Xcode: $XCODE_VERSION"
@@ -3093,7 +3230,7 @@ if [ "$WDA_ALLOW_LAN" = "0" ]; then
 elif [ -z "${WDA_UDID:-}" ]; then
     warn "WDA_ALLOW_LAN=1: no USB target; paired destinations will be enumerated from the runner project"
 fi
-_instance_check_bindings "$WDA_PORT" "$MJPEG_PORT" 2>&1 \
+_instance_check_bindings_cached "$WDA_PORT" "$MJPEG_PORT" 2>&1 \
     || die "refusing to set up instance $INSTANCE_NAME (see above)"
 _setstatus prereq "" "prerequisites passed"
 
@@ -3396,12 +3533,26 @@ esac
 _refresh_legacy_contracts
 # Show WHICH phone was picked (auto-detect grabs the first destination; with
 # several paired iPhones it can choose an unavailable one — let the user catch it).
-PICKED_NAME="$(_devicectl_t 8 device info details --device "$WDA_UDID" \
-              | sed -nE 's/.*[Mm]arketing ?[Nn]ame: *//p' | head -1 || true)"
+# Over USB lockdownd names the phone in milliseconds, and a target it finds
+# attached by cable is the phone in hand, so the paired-device count (a full
+# `devicectl list devices`) is only worth reading when it cannot.
+PICKED_NAME=""
+PICKED_OVER_USB=0
+if _device_query info && [ "$(_device_field connection)" = "usb" ]; then
+    PICKED_OVER_USB=1
+    PICKED_NAME="$(_device_field name)"
+    PICKED_IOS="$(_device_field product_version)"
+    PICKED_NAME="${PICKED_NAME}${PICKED_IOS:+, iOS $PICKED_IOS}"
+else
+    PICKED_NAME="$(_devicectl_t 8 device info details --device "$WDA_UDID" \
+                  | sed -nE 's/.*[Mm]arketing ?[Nn]ame: *//p' | head -1 || true)"
+fi
 ok "Device UDID: $WDA_UDID${PICKED_NAME:+  ($PICKED_NAME)}"
-IOS_COUNT="$(_devicectl_t 8 list devices | grep -ciE 'iPhone|iPad' || true)"
-if [ "${IOS_COUNT:-0}" -gt 1 ]; then
-    warn "$IOS_COUNT iOS devices are paired — if the wrong one was picked, re-run with WDA_UDID=<classic-udid> (the 00008…/8-… id)."
+if [ "$PICKED_OVER_USB" != "1" ]; then
+    IOS_COUNT="$(_devicectl_t 8 list devices | grep -ciE 'iPhone|iPad' || true)"
+    if [ "${IOS_COUNT:-0}" -gt 1 ]; then
+        warn "$IOS_COUNT iOS devices are paired — if the wrong one was picked, re-run with WDA_UDID=<classic-udid> (the 00008…/8-… id)."
+    fi
 fi
 
 # ── 3. Wait for dev services (DDI) ────────────────────────────────────────────
@@ -3430,6 +3581,12 @@ TRIES=0
 # text could never pass (#81). The text form stays as a fallback for older
 # Xcode builds whose -j output may lack the key.
 _ddi_ready() {
+    # lockdownd's image mounter says directly whether the developer image is
+    # mounted (~50 ms over USB). Anything short of "mounted" falls through to
+    # CoreDevice, which also covers Wi-Fi-only phones.
+    if _device_query ddi && [ "$(_device_field mounted)" = "true" ]; then
+        return 0
+    fi
     local j; j="$(mktemp)"
     local text; text="$(_devicectl_t 10 device info details --device "$WDA_UDID" -j "$j")"
     local r=1
@@ -3582,6 +3739,19 @@ if [ "$WDA_RUNNER_FROM_CACHE" != "1" ]; then
     _runner_cache_write && ok "Recorded the verified runner product; the next reconnect installs it without rebuilding" \
         || warn "could not record the runner product for reuse; the next reconnect rebuilds"
 fi
+# Readiness straight from the runner's device port (see the wait below). The
+# runner mints a new session id per launch, so the one answering now, if any
+# (a runner from the previous round still exiting), is recorded first and
+# only a different one counts as this launch serving.
+RUNNER_DEVICE_PORT=8100
+RUNNER_PROBE=0
+RUNNER_PREVIOUS_SESSION=""
+if _target_on_usb && _device_tool; then
+    RUNNER_PROBE=1
+    if _device_query runner-status; then
+        RUNNER_PREVIOUS_SESSION="$(_device_field session_id)"
+    fi
+fi
 # Keep `RUNNER_COMMAND=` at column 0 (tests isolate the launch block by it).
 # One argv source builds the launch command and its signing suffix, and is
 # also the exact PID identity record. No eval or string-based execution.
@@ -3605,9 +3775,34 @@ info "Waiting for ServerURLHere (or a trust error) ..."
 PHONE_URL=""
 TRIES=0
 BUILD_STARTED_AT="$(date +%s)"
+# The runner serves ~2-3 s after launch on a cached product, but xcodebuild
+# copies its ServerURLHere line into $RUN_LOG through a block buffer: on an
+# iPhone 13 the line landed ~4 s after the server was up, and the old 3 s poll
+# added up to 3 s more. Over USB the runner's port is asked directly every
+# 0.2 s (a new session id means this launch is serving); the log marker still
+# counts, and is what a Wi-Fi-only phone waits for. The failure checks below
+# spawn ps/grep and run once per second (TRIES counts those rounds; 360 of
+# them is the old 120 x 3 s budget).
+READY_POLL_TICK=0
+PHONE_URL_FROM_PROBE=0
 while [ -z "$PHONE_URL" ]; do
+    PHONE_URL="$(sed -n 's/.*ServerURLHere->\(http[^<]*\)<-ServerURLHere.*/\1/p' "$RUN_LOG" | head -1)"
+    [ -z "$PHONE_URL" ] || break
+    if [ "$RUNNER_PROBE" = "1" ] && _device_query runner-status; then
+        _probe_session="$(_device_field session_id)"
+        if [ -n "$_probe_session" ] && [ "$_probe_session" != "$RUNNER_PREVIOUS_SESSION" ]; then
+            PHONE_URL="http://127.0.0.1:$RUNNER_DEVICE_PORT"
+            PHONE_URL_FROM_PROBE=1
+            break
+        fi
+    fi
+    READY_POLL_TICK=$((READY_POLL_TICK + 1))
+    if [ $((READY_POLL_TICK % 5)) -ne 1 ]; then
+        sleep 0.2
+        continue
+    fi
     TRIES=$((TRIES+1))
-    if [ $TRIES -gt 120 ]; then
+    if [ $TRIES -gt 360 ]; then
         if [ -n "${WDA_XCTESTRUN:-}" ] && _runner_log_shows_product_failure "$RUN_LOG"; then
             _runner_cache_drop || true
             warn "the recorded runner product failed to install or launch; the next round rebuilds it"
@@ -3691,18 +3886,21 @@ while [ -z "$PHONE_URL" ]; do
         fi
         _interactive_lock_wait_tick \
             || die "the phone remained locked for 5 minutes. Unlock it, then rerun setup."
-    elif [ $((TRIES % 10)) -eq 0 ]; then
+    elif [ $((TRIES % 30)) -eq 0 ]; then
         BUILD_ELAPSED="$(( $(date +%s) - BUILD_STARTED_AT ))"
         _setstatus building "$_BUILD_BLOCKER" "launching the device runner (${BUILD_ELAPSED}s elapsed)"
     fi
-    PHONE_URL="$(sed -n 's/.*ServerURLHere->\(http[^<]*\)<-ServerURLHere.*/\1/p' "$RUN_LOG" | head -1)"
-    [ -z "$PHONE_URL" ] && sleep 3
+    sleep 0.2
 done
 case "$PHONE_URL" in
     http://*) ;;
     *) die "the device runner reported an unexpected server URL '$PHONE_URL' (plain http:// expected)" ;;
 esac
-ok "device runner serving at $PHONE_URL"
+if [ "$PHONE_URL_FROM_PROBE" = "1" ]; then
+    ok "device runner serving on device port $RUNNER_DEVICE_PORT (answered over USB, session ${_probe_session:0:8}…)"
+else
+    ok "device runner serving at $PHONE_URL"
+fi
 _setstatus serving "" "device runner serving — starting relay"
 
 # ── 5. Localhost relay ────────────────────────────────────────────────────────
@@ -3723,6 +3921,28 @@ _assert_port_free "$WDA_PORT" \
 : > "$STATE_DIR/wda-relay.log"
 TARGET_IS_USB=0
 _target_on_usb && TARGET_IS_USB=1
+# Readiness seen over USB carries no LAN address. Only the socat fallback (the
+# phone left USB since, with WDA_ALLOW_LAN=1) needs one: take it from the
+# ServerURLHere line once xcodebuild's buffer delivers it.
+if [ "$PHONE_URL_FROM_PROBE" = "1" ] && [ "$TARGET_IS_USB" != "1" ]; then
+    _lan_url=""
+    for _ in $(seq 1 50); do
+        _lan_url="$(sed -n 's/.*ServerURLHere->\(http[^<]*\)<-ServerURLHere.*/\1/p' "$RUN_LOG" | head -1)"
+        [ -z "$_lan_url" ] || break
+        sleep 0.2
+    done
+    case "$_lan_url" in
+        http://*)
+            PHONE_URL="$_lan_url"
+            PHONE_HOSTPORT="${PHONE_URL#http://}"; PHONE_HOSTPORT="${PHONE_HOSTPORT%/}"
+            PHONE_IP="${PHONE_HOSTPORT%%:*}"; PHONE_WDA_PORT="${PHONE_HOSTPORT##*:}"
+            ;;
+        *)
+            _setstatus serving usb "the configured iPhone disconnected before the control relay started"
+            die "the iPhone left USB after its runner started, and its network address is not known yet; reconnect the cable and retry"
+            ;;
+    esac
+fi
 RELAY_BIN=""
 IPROXY_BIN=""
 if [ "$TARGET_IS_USB" = "1" ]; then
@@ -3771,7 +3991,7 @@ if ! _write_pid_record "$RELAY_PID_FILE" "$RELAY_PID" "$RELAY_EXPECTED" relay; t
 fi
 STARTED_CONTROL_RELAY=1
 RELAY_PID="$VALIDATED_PID"
-sleep 1
+_wait_tcp_listening "$WDA_PORT" || true
 _verify_loopback_listener "$RELAY_PID_FILE" "$LEGACY_RELAY_EXPECTED" relay "$WDA_PORT" \
     || die "control relay ownership/bind verification failed.
    Expected only PID $RELAY_PID on 127.0.0.1:$WDA_PORT; inspect $STATE_DIR/wda-relay.log"
@@ -3830,7 +4050,7 @@ if ! _write_pid_record "$MJPEG_RELAY_PID_FILE" "$MJPEG_RELAY_PID" \
 fi
 STARTED_MJPEG_RELAY=1
 MJPEG_RELAY_PID="$VALIDATED_PID"
-sleep 1
+_wait_tcp_listening "$MJPEG_PORT" || true
 _verify_loopback_listener "$MJPEG_RELAY_PID_FILE" "$LEGACY_MJPEG_EXPECTED" mjpeg "$MJPEG_PORT" \
     || die "video relay ownership/bind verification failed.
    Expected only PID $MJPEG_RELAY_PID on 127.0.0.1:$MJPEG_PORT; inspect $STATE_DIR/wda-mjpeg-relay.log"
@@ -3906,6 +4126,7 @@ if [ -f "$DAEMON_PLIST" ]; then
     plutil -lint "$DAEMON_STAGED_PLIST" >/dev/null 2>&1 \
         || die "staged daemon LaunchAgent plist is invalid after configuration"
     if [ "$CONFIG_CHANGED" = "1" ]; then
+        DAEMON_TOUCHED=1
         mv -f "$DAEMON_STAGED_PLIST" "$DAEMON_PLIST" \
             || die "could not atomically install the configured daemon plist"
     else
@@ -3915,6 +4136,7 @@ if [ -f "$DAEMON_PLIST" ]; then
 
     if [ "$DAEMON_NEEDS_RESTART" = "1" ] \
         || ! launchctl print "$GUI_DOMAIN/$DAEMON_LABEL" >/dev/null 2>&1; then
+        DAEMON_TOUCHED=1
         launchctl bootout "$GUI_DOMAIN/$DAEMON_LABEL" 2>/dev/null || true
         _wait_job_gone "$DAEMON_LABEL" \
             || die "daemon LaunchAgent did not finish stopping"

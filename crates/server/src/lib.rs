@@ -4,6 +4,7 @@ pub mod flows;
 pub mod focus;
 pub mod http;
 pub mod instance;
+pub mod lockdown;
 pub mod pairing;
 pub mod protocol;
 pub mod redaction;

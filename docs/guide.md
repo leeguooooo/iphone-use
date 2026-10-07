@@ -43,7 +43,10 @@ Design, lifecycle, failure states, and security boundaries:
 - The phone **unlocked and awake** while the runner is built, launched, and used. It
   cannot get past Face ID or the passcode.
 - No Homebrew packages: the USB relay is built into the app (`iphone-use relay`). A
-  Homebrew `iproxy` is used only if the app binary predates it.
+  Homebrew `iproxy` is used only if the app binary predates it. Over USB, setup reads
+  the phone's name, iOS version, developer-image state and runner readiness straight
+  from the phone (`iphone-use device info|ddi|runner-status`, JSON) instead of
+  `devicectl`; only the lock check and Wi-Fi-only phones still go through `devicectl`.
 - A Rust toolchain only if you build from source.
 
 ### Install and connect the first phone

@@ -25,7 +25,7 @@ Agent  ── /agent/* ──────────> iphone-use daemon ── 
 - macOS 15 或更高，装**完整 Xcode.app**（只有 Command Line Tools 不够）。在 Xcode → Settings → Accounts 登录并选一个开发团队；免费 Personal Team 能用，但 runner 的描述文件要定期续。也可以用 App Store Connect API key（`WDA_ASC_KEY_PATH`、`WDA_ASC_KEY_ID`、`WDA_ASC_ISSUER_ID`）签名，不需要 Xcode 账号。
 - iPhone 开启**开发者模式**，通过 USB 与 Mac 配对并点过信任。
 - 编译、启动、使用 runner 期间手机保持**解锁、亮屏**。它过不了 Face ID 和密码。
-- 不需要装任何 Homebrew 包：USB 中继内置在 App 里（`iphone-use relay`）；只有 App 版本太旧时才会退回 Homebrew 的 `iproxy`。
+- 不需要装任何 Homebrew 包：USB 中继内置在 App 里（`iphone-use relay`）；只有 App 版本太旧时才会退回 Homebrew 的 `iproxy`。USB 连接时，setup 直接从手机读取名称、iOS 版本、开发者磁盘映像状态和 runner 是否就绪（`iphone-use device info|ddi|runner-status`，输出 JSON），不再调用 `devicectl`；只有锁屏检查和只走 Wi‑Fi 的手机还用 `devicectl`。
 - 只有从源码构建才需要 Rust 工具链。
 
 ### 安装并接上第一台手机

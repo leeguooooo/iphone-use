@@ -35,6 +35,11 @@ axum = "0.7"
 # HTTP client for WDA and the release check. rustls-tls: no native-tls/openssl.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
+# Lockdown sessions with the iPhone (device facts without devicectl). Same
+# rustls + ring stack reqwest already pulls in; no new crates.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
 # Stream combinators — attach a live-view drop guard to the proxied MJPEG
 # stream so an open viewer counts as activity for the idle-release watchdog.
 futures-util = "0.3"

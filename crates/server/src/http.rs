@@ -1940,7 +1940,11 @@ impl Default for WdaReadinessBudget {
         Self {
             total: std::time::Duration::from_secs(WDA_READINESS_TIMEOUT_SECS),
             probe: std::time::Duration::from_secs(20),
-            poll: std::time::Duration::from_secs(2),
+            // Until the runner serves, a probe fails at once (nothing on the
+            // loopback port, or the relay closes immediately), so a short gap
+            // costs nothing — and a 2 s gap added up to 2 s to every
+            // reconnect after the runner was already answering.
+            poll: std::time::Duration::from_millis(250),
         }
     }
 }

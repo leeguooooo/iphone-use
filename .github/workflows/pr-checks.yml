@@ -188,6 +188,8 @@ jobs:
           bash scripts/test-setup-wda-runner-repair.sh
           bash scripts/test-setup-wda-devicectl-timeout.sh
           bash scripts/test-setup-wda-lock-wait.sh
+          bash scripts/test-setup-wda-fast-reconnect.sh
+          bash scripts/test-uninstall-safety.sh
           python3 scripts/test-setup-wda-status.py
           python3 scripts/test-setup-wda-runner-product.py
           python3 scripts/test-setup-wda-asc-signing.py

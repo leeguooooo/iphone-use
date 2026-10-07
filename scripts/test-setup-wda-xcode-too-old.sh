@@ -36,7 +36,7 @@ extract() {
 }
 extract _valid_os_version _version_lt _ios_sdk_version _device_ios_version \
     _os_major_minor _runner_log_shows_ide_refusal _runner_failure_is_xcode_too_old \
-    _report_xcode_too_old > "$TMP_ROOT/helpers.sh"
+    _report_xcode_too_old _device_field > "$TMP_ROOT/helpers.sh"
 for fn in _device_ios_version _runner_failure_is_xcode_too_old _report_xcode_too_old; do
     grep -q "^$fn() {" "$TMP_ROOT/helpers.sh" || fail_test "could not extract $fn from setup-wda.sh"
 done
@@ -64,6 +64,16 @@ _devicectl_t() {
   }
 }
 JSON
+}
+# lockdownd (`iphone-use device info`) answers first over USB; empty
+# LOCKDOWN_VERSION means the phone is not attached to usbmuxd (exit 3), which
+# leaves devicectl in charge, as on a Wi-Fi-only phone.
+LOCKDOWN_VERSION=""
+DEVICE_QUERY_JSON=""
+_device_query() {
+    DEVICE_QUERY_JSON=""
+    [ -n "$LOCKDOWN_VERSION" ] || return 3
+    DEVICE_QUERY_JSON="{\"connection\":\"usb\",\"ok\":true,\"product_version\":\"$LOCKDOWN_VERSION\"}"
 }
 STATUS_OUT="$TMP_ROOT/status.out"
 _setstatus() { printf '%s|%s|%s\n' "$1" "$2" "$3" > "$STATUS_OUT"; }
@@ -123,6 +133,16 @@ pass "without the code-74 signature a newer phone is not xcode_too_old"
 [ "$(verdict 27.0 '' "$REFUSED")" = other ] || fail_test "a failed devicectl read produced xcode_too_old"
 [ "$(verdict '' 27.2 "$REFUSED")" = other ] || fail_test "a missing SDK version produced xcode_too_old"
 pass "an unreadable device or SDK version falls back to the existing classification"
+
+# 6b. Over USB the version comes from lockdownd; devicectl is not needed.
+LOCKDOWN_VERSION=27.2
+[ "$(verdict 27.0 '' "$REFUSED")" = too_old ] \
+    || fail_test "the lockdown version was not used when devicectl could not read one"
+LOCKDOWN_VERSION=27.0
+[ "$(verdict 27.0 27.2 "$REFUSED")" = other ] \
+    || fail_test "devicectl overrode the version lockdown read"
+LOCKDOWN_VERSION=""
+pass "the phone's iOS version is read from lockdownd first, devicectl second"
 
 # 7. Reporting publishes the blocker and selects the long KeepAlive backoff.
 SDK_VERSION=27.0; DEVICE_VERSION=27.2; printf '%s\n' "$REFUSED" > "$RUN_LOG"

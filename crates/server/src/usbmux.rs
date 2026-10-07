@@ -80,16 +80,49 @@ async fn forward(mut client: TcpStream, want: &str, device_port: u16) -> Result<
 /// The usbmux device id for `want` (a normalized UDID), preferring a USB
 /// attachment over a network one.
 async fn find_device(want: &str) -> Result<Option<u64>> {
+    Ok(find_attached(want)
+        .await?
+        .map(|attached| attached.device_id))
+}
+
+/// One phone as usbmuxd lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Attached {
+    pub device_id: u64,
+    /// The UDID exactly as usbmuxd spells it; pair records are keyed by it.
+    pub serial: String,
+    pub usb: bool,
+}
+
+/// `want` (a normalized UDID) as usbmuxd currently lists it, preferring a USB
+/// attachment over a network one.
+pub(crate) async fn find_attached(want: &str) -> Result<Option<Attached>> {
     let mut mux = UnixStream::connect(USBMUXD_SOCKET)
         .await
         .context("connect /var/run/usbmuxd")?;
     let reply = request(&mut mux, &list_devices_message()).await?;
-    Ok(pick_device(&reply, want))
+    Ok(pick_attached(&reply, want))
+}
+
+/// The pairing record usbmuxd keeps for `serial` (the plist bytes of
+/// `/var/db/lockdown/<udid>.plist`, which only root can read directly).
+pub(crate) async fn read_pair_record(serial: &str) -> Result<Vec<u8>> {
+    let mut mux = UnixStream::connect(USBMUXD_SOCKET)
+        .await
+        .context("connect /var/run/usbmuxd")?;
+    let reply = request(&mut mux, &read_pair_record_message(serial)).await?;
+    match reply.get("PairRecordData") {
+        Some(Value::Data(bytes)) => Ok(bytes.clone()),
+        _ => match reply.get("Number").and_then(Value::as_int) {
+            Some(code) => bail!("usbmuxd has no pairing record for {serial} (result {code}); trust this Mac on the iPhone"),
+            None => bail!("usbmuxd ReadPairRecord reply had no record"),
+        },
+    }
 }
 
 /// Ask usbmuxd to tunnel to `port` on `device_id`; the returned stream is the
 /// tunnel once usbmuxd has answered `Result 0`.
-async fn connect(device_id: u64, port: u16) -> Result<UnixStream> {
+pub(crate) async fn connect(device_id: u64, port: u16) -> Result<UnixStream> {
     let mut mux = UnixStream::connect(USBMUXD_SOCKET)
         .await
         .context("connect /var/run/usbmuxd")?;
@@ -146,6 +179,21 @@ fn list_devices_message() -> String {
     plist_dict("<key>MessageType</key><string>ListDevices</string>")
 }
 
+fn read_pair_record_message(serial: &str) -> String {
+    plist_dict(&format!(
+        "<key>MessageType</key><string>ReadPairRecord</string>\
+         <key>PairRecordID</key><string>{}</string>",
+        escape(serial)
+    ))
+}
+
+/// XML text escaping for the few strings this module writes.
+pub(crate) fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 fn connect_message(device_id: u64, port: u16) -> String {
     // usbmuxd takes the port in network byte order, read as a host integer.
     let port_number = port.swap_bytes();
@@ -165,32 +213,45 @@ pub fn normalize_udid(udid: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn pick_device(reply: &Value, want: &str) -> Option<u64> {
+    pick_attached(reply, want).map(|attached| attached.device_id)
+}
+
+fn pick_attached(reply: &Value, want: &str) -> Option<Attached> {
     let mut network = None;
     for entry in reply.get("DeviceList")?.as_array()? {
         let Some(properties) = entry.get("Properties") else {
             continue;
         };
-        let serial = properties.get("SerialNumber").and_then(Value::as_str);
-        if serial.map(normalize_udid).as_deref() != Some(want) {
+        let Some(serial) = properties.get("SerialNumber").and_then(Value::as_str) else {
+            continue;
+        };
+        if normalize_udid(serial) != want {
             continue;
         }
-        let Some(id) = entry
+        let Some(device_id) = entry
             .get("DeviceID")
             .or_else(|| properties.get("DeviceID"))
             .and_then(Value::as_int)
         else {
             continue;
         };
-        match properties.get("ConnectionType").and_then(Value::as_str) {
-            Some("USB") => return Some(id),
-            _ => network = network.or(Some(id)),
+        let usb = properties.get("ConnectionType").and_then(Value::as_str) == Some("USB");
+        let attached = Attached {
+            device_id,
+            serial: serial.to_string(),
+            usb,
+        };
+        if usb {
+            return Some(attached);
         }
+        network = network.or(Some(attached));
     }
     network
 }
 
-// ── A minimal XML property-list reader (only what usbmuxd sends) ───────────
+// ── A minimal XML property-list reader (what usbmuxd and lockdownd send) ───
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -199,31 +260,44 @@ pub enum Value {
     String(String),
     Int(u64),
     Bool(bool),
+    Data(Vec<u8>),
     Other,
 }
 
 impl Value {
-    fn get(&self, key: &str) -> Option<&Value> {
+    pub(crate) fn get(&self, key: &str) -> Option<&Value> {
         match self {
             Value::Dict(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
-    fn as_array(&self) -> Option<&[Value]> {
+    pub(crate) fn as_array(&self) -> Option<&[Value]> {
         match self {
             Value::Array(items) => Some(items),
             _ => None,
         }
     }
-    fn as_str(&self) -> Option<&str> {
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(s) => Some(s),
             _ => None,
         }
     }
-    fn as_int(&self) -> Option<u64> {
+    pub(crate) fn as_int(&self) -> Option<u64> {
         match self {
             Value::Int(n) => Some(*n),
+            _ => None,
+        }
+    }
+    pub(crate) fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+    pub(crate) fn as_data(&self) -> Option<&[u8]> {
+        match self {
+            Value::Data(bytes) => Some(bytes),
             _ => None,
         }
     }
@@ -327,7 +401,15 @@ impl<'a> Parser<'a> {
                     .and_then(|n| u64::try_from(n).ok())
                     .map_or(Value::Other, Value::Int))
             }
-            "true" | "false" | "data" | "date" | "real" => {
+            "data" => {
+                use base64::Engine as _;
+                let text = self.text_until_close("data")?;
+                let compact: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+                Ok(base64::engine::general_purpose::STANDARD
+                    .decode(compact.as_bytes())
+                    .map_or(Value::Other, Value::Data))
+            }
+            "true" | "false" | "date" | "real" => {
                 let bool_value = name == "true";
                 self.text_until_close(name)?;
                 Ok(match name {

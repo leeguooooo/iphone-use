@@ -184,6 +184,15 @@ enum Command {
         #[arg(long)]
         device_port: u16,
     },
+    /// Read device facts from the iPhone's lockdownd over usbmuxd, as one JSON
+    /// line: `info` (name, iOS version, model, build) or `ddi` (whether the
+    /// Developer Disk Image is mounted). Setup uses these instead of
+    /// `devicectl`. Exit 0 on success, 3 when the phone is not attached to
+    /// usbmuxd (callers fall back to devicectl), 1 on any other failure.
+    Device {
+        #[command(subcommand)]
+        query: DeviceQuery,
+    },
     /// Upgrade to the latest GitHub release (daemon app and agent skill).
     ///
     /// Runs the same install.sh the daemon was installed with, then refreshes
@@ -507,6 +516,91 @@ fn dirs_home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
+#[derive(Subcommand)]
+enum DeviceQuery {
+    /// Name, iOS version, model and build (no pairing session needed).
+    Info {
+        /// The iPhone's UDID (with or without the dash).
+        #[arg(long)]
+        udid: String,
+    },
+    /// Whether the Developer Disk Image is mounted (paired session).
+    Ddi {
+        /// The iPhone's UDID (with or without the dash).
+        #[arg(long)]
+        udid: String,
+    },
+    /// The device runner's `/status` on its device port, straight through
+    /// usbmuxd (session id and state). Exit 1 when nothing answers yet.
+    RunnerStatus {
+        /// The iPhone's UDID (with or without the dash).
+        #[arg(long)]
+        udid: String,
+        /// The runner's port on the iPhone.
+        #[arg(long, default_value_t = 8100)]
+        port: u16,
+    },
+}
+
+/// `iphone-use device …`: one JSON line on stdout, exit 0 / 3 (not attached) / 1.
+fn device_query(query: DeviceQuery) -> i32 {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({"ok": false, "error": error.to_string()})
+            );
+            return 1;
+        }
+    };
+    let result = runtime.block_on(async {
+        match query {
+            DeviceQuery::Info { udid } => server::lockdown::device_info(&udid)
+                .await
+                .and_then(|info| Ok(serde_json::to_value(info)?)),
+            DeviceQuery::Ddi { udid } => server::lockdown::ddi_status(&udid)
+                .await
+                .and_then(|status| Ok(serde_json::to_value(status)?)),
+            DeviceQuery::RunnerStatus { udid, port } => {
+                server::lockdown::runner_status(&udid, port)
+                    .await
+                    .and_then(|status| Ok(serde_json::to_value(status)?))
+            }
+        }
+    });
+    match result {
+        Ok(mut value) => {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("ok".into(), serde_json::Value::Bool(true));
+            }
+            println!("{value}");
+            0
+        }
+        Err(error) => {
+            let not_attached = error
+                .downcast_ref::<server::lockdown::NotAttached>()
+                .is_some();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": false,
+                    "not_attached": not_attached,
+                    "error": format!("{error:#}"),
+                })
+            );
+            if not_attached {
+                3
+            } else {
+                1
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -543,6 +637,7 @@ fn main() -> Result<()> {
             .build()
             .context("start the relay runtime")?
             .block_on(server::usbmux::run_relay(&udid, listen, device_port)),
+        Command::Device { query } => std::process::exit(device_query(query)),
         Command::Upgrade { check, json } => std::process::exit(upgrade(check || json, json)),
         Command::Setup { instance, args } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;
