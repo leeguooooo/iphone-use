@@ -398,8 +398,9 @@ always a fresh capture taken after the read. It is labelled with
 `requested_at_ms`, `received_at_ms`, its `source` and its own
 `capture_redacted`, never presented as the same instant as the tree. It is
 sized to keep the whole answer under about 3.5 MB; otherwise the answer says
-`image_omitted` and the text stays. MCP `phone_elements` does the same on its
-own.
+`image_omitted` and the text stays. MCP `phone_elements` reads with
+`image=auto` and returns that same image once as image content, with its
+labels in the text and no base64 in the text or the structured copy.
 
 ## Flows: format, compat, saving, fixing
 

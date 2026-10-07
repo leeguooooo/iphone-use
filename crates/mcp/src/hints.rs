@@ -3,8 +3,6 @@
 //! Both are advice only. Nothing here sends an action, goes back, or replays
 //! anything: a hint names what was seen so the next call can be different.
 
-use serde_json::Value;
-
 /// Fold the differences a model gets wrong without meaning anything by them:
 /// case, every kind of whitespace (including the ideographic space U+3000),
 /// and full-width ASCII (`Ｗｉ－Ｆｉ` → `wi-fi`).
@@ -80,21 +78,6 @@ pub fn repeated_without_progress<K: PartialEq + Clone>(history: &[(K, bool)]) ->
     avoid
 }
 
-/// Attach a screenshot to a screen read only when the tree is unusable: no
-/// interactive rows and nothing but containers (the reference's Mode A
-/// "vision" rule). A capture-redacted screen is excluded — its screenshot is
-/// blank or a wireframe of the same tree, so it adds nothing.
-pub fn needs_image(json: &Value) -> bool {
-    if json.get("capture_redacted") == Some(&Value::Bool(true)) {
-        return false;
-    }
-    let Some(stats) = json.get("ax_stats") else {
-        return false;
-    };
-    stats.get("n_interactive").and_then(Value::as_u64) == Some(0)
-        && stats.get("container_only") == Some(&Value::Bool(true))
-}
-
 pub use iu_core::progress::{Action, ProgressGuard, ProgressTracker};
 
 #[cfg(test)]
@@ -120,19 +103,6 @@ mod tests {
         assert!(near_misses("   ", labels).is_empty());
         assert!(did_you_mean("蓝牙", labels).is_none());
         assert!(did_you_mean("通用", labels).unwrap().contains("\"通 用\""));
-    }
-
-    #[test]
-    fn images_only_for_an_unusable_tree() {
-        let mode_a = json!({"ax_stats": {"n_interactive": 0, "container_only": true}});
-        assert!(needs_image(&mode_a));
-        let hybrid = json!({"ax_stats": {"n_interactive": 2, "container_only": false}});
-        assert!(!needs_image(&hybrid));
-        let no_stats = json!({"elements": []});
-        assert!(!needs_image(&no_stats));
-        let redacted = json!({"capture_redacted": true,
-                              "ax_stats": {"n_interactive": 0, "container_only": true}});
-        assert!(!needs_image(&redacted));
     }
 
     #[test]

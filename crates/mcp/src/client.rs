@@ -579,13 +579,25 @@ impl DaemonClient {
     /// `{"snapshot":"…","elements":[{kind,label,identifier?,rect,
     /// enabled?,visible?,accessible?,focused?,placeholder?,depth},…]}`.
     pub async fn elements(&self) -> anyhow::Result<String> {
+        self.elements_at("/agent/elements").await
+    }
+
+    /// [`Self::elements`] with the daemon's `image=auto` policy: when the tree
+    /// is unusable the answer carries a fresh, budget-bounded screenshot
+    /// taken after the read (never a cached frame). For the model-facing
+    /// read only; flow and lookup reads stay text.
+    pub async fn elements_with_image(&self) -> anyhow::Result<String> {
+        self.elements_at("/agent/elements?image=auto").await
+    }
+
+    async fn elements_at(&self, path: &str) -> anyhow::Result<String> {
         // A cold WDA call may create a session and then request the source tree;
         // each upstream step is bounded by the daemon, but together can exceed
         // the generic 30-second MCP timeout. Wait long enough for the daemon to
         // return its authoritative success/error instead of abandoning the
         // request while it still owns the WDA lock.
         let req = self
-            .auth(self.client.get(self.url("/agent/elements")))
+            .auth(self.client.get(self.url(path)))
             .timeout(ELEMENTS_TIMEOUT);
         let resp = req.send().await?;
         let resp = check_status(resp).await?;

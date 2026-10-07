@@ -922,14 +922,24 @@ impl PhoneHandler {
         Requires phone_status drivable=true."
     )]
     async fn phone_elements(&self) -> CallToolResult {
-        match self.daemon.elements().await {
+        match self.daemon.elements_with_image().await {
             // The daemon adds `registry` on the first read in a newly
             // entered app; compat per flow is added here.
             Ok(json) => {
                 let body = with_flow_compat(&self.daemon, json).await;
                 // One line per row for the model; the JSON rides along as
                 // structured content for programs.
-                let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+                let mut parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+                // The daemon decided (image=auto): an image only when the tree
+                // is unusable, fresh and within the response budget. Lift it
+                // out once as image content; the text and the structured copy
+                // keep only its labels, never the base64.
+                let png = parsed
+                    .as_mut()
+                    .and_then(|json| json.get_mut("image"))
+                    .and_then(|image| image.as_object_mut())
+                    .and_then(|image| image.remove("png_base64"))
+                    .and_then(|b64| b64.as_str().map(str::to_string));
                 let text = parsed
                     .as_ref()
                     .and_then(crate::compact::elements)
@@ -938,25 +948,32 @@ impl PhoneHandler {
                     tracker.note_screen(parsed.as_ref());
                 }
                 let mut content = vec![Content::text(text)];
-                // Text first. An image only when the tree cannot be used at
-                // all (Mode A), so the model needs no second call to see it.
-                if let Some(json) = parsed.as_ref().filter(|json| crate::hints::needs_image(json)) {
-                    let snapshot = json.get("snapshot").and_then(serde_json::Value::as_str);
-                    let snapshot = snapshot.unwrap_or("?");
-                    match self.daemon.screenshot(Some(DEFAULT_SCREENSHOT_MAX_SIDE)).await {
-                        Ok(bytes) if !bytes.is_empty() => {
-                            content.push(Content::text(format!(
-                                "image: the tree has no interactive rows (ax_stats Mode A), so a \
-                                 screenshot is attached. It was captured right after snapshot \
-                                 {snapshot} — a separate capture, not the same instant."
-                            )));
-                            content.push(Content::image(B64.encode(&bytes), "image/png"));
-                        }
-                        _ => content.push(Content::text(format!(
-                            "image_unavailable: the tree has no interactive rows, but the \
-                             screenshot after snapshot {snapshot} failed; the text above is \
-                             still current."
-                        ))),
+                if let Some(json) = parsed.as_ref() {
+                    if let (Some(png), Some(image)) = (png, json.get("image")) {
+                        content.push(Content::text(format!(
+                            "image: the daemon's auto image policy attached a screenshot — \
+                             source {}, requested at {} and received at {} (ms), after this \
+                             snapshot was read, not the same instant{}.",
+                            image["source"].as_str().unwrap_or("?"),
+                            image["requested_at_ms"],
+                            image["received_at_ms"],
+                            if image["capture_redacted"] == serde_json::Value::Bool(true) {
+                                "; the app hides this screen, so it is a wireframe"
+                            } else {
+                                ""
+                            },
+                        )));
+                        content.push(Content::image(png, "image/png"));
+                    } else if json.get("image_omitted").is_some() {
+                        content.push(Content::text(
+                            "image_omitted: the screenshot would not fit the response budget; \
+                             the text above is complete.",
+                        ));
+                    } else if json.get("image_unavailable").is_some() {
+                        content.push(Content::text(
+                            "image_unavailable: the tree has no interactive rows and the \
+                             screenshot failed; the text above is still current.",
+                        ));
                     }
                 }
                 let mut result = CallToolResult::success(content);

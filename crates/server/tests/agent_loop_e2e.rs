@@ -942,3 +942,117 @@ fn a_refused_run_end_keeps_the_run_active_in_the_mcp_client() {
     }
     assert!(!reads[3].contains("x-agent-run"), "an accepted end clears it: {}", reads[3]);
 }
+
+/// The MCP read reuses the daemon's image policy: after an observed action
+/// left a settled frame in memory, a Mode A `phone_elements` still gets a
+/// fresh capture, once, as image content, labelled in the text; with a tiny
+/// budget it gets no image and the text survives.
+#[test]
+fn mcp_mode_a_images_are_fresh_once_and_budgeted() {
+    let runner = runner_with(SPARSE_TREE);
+    let state = private_dir();
+    let home = private_dir();
+    let state_path = state.path().canonicalize().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let daemon = spawn_daemon(runner.url(), &state_path, &home_path);
+    let mut mcp = Mcp::start(daemon.port, &home_path);
+    mcp.call("phone_tap", serde_json::json!({"x": 0.5, "y": 0.5, "observe": true}));
+    let response = mcp.request(
+        "tools/call",
+        serde_json::json!({"name": "phone_elements", "arguments": {}}),
+    );
+    let content = response["result"]["content"].as_array().unwrap();
+    let images: Vec<_> = content.iter().filter(|c| c["type"] == "image").collect();
+    assert_eq!(images.len(), 1, "{response}");
+    let text: String = content
+        .iter()
+        .filter_map(|c| c["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("source wda-capture"), "a fresh capture, not the settled frame: {text}");
+    assert!(!text.contains("iVBOR"), "no base64 in the text");
+    let structured = response["result"]["structuredContent"].to_string();
+    assert!(!structured.contains("png_base64"), "no base64 in the structured copy");
+    drop(mcp);
+    drop(daemon);
+
+    let state = private_dir();
+    let state_path = state.path().canonicalize().unwrap();
+    let daemon = spawn_daemon_with(
+        runner.url(),
+        &state_path,
+        &home_path,
+        &[("IPHONE_USE_IMAGE_BUDGET_BYTES", "200")],
+    );
+    let mut mcp = Mcp::start(daemon.port, &home_path);
+    let response = mcp.request(
+        "tools/call",
+        serde_json::json!({"name": "phone_elements", "arguments": {}}),
+    );
+    let content = response["result"]["content"].as_array().unwrap();
+    assert!(content.iter().all(|c| c["type"] != "image"), "{response}");
+    let text = content[0]["text"].as_str().unwrap_or("");
+    assert!(text.contains("游戏"), "the rows survive: {text}");
+    assert!(
+        content.iter().any(|c| c["text"].as_str().is_some_and(|t| t.contains("image_omitted"))),
+        "{response}"
+    );
+}
+
+/// A runner whose tree read starts failing once `fail` is set.
+fn runner_failing(fail: std::sync::Arc<std::sync::atomic::AtomicBool>) -> support::MockWda {
+    mock_wda(move |request, _| {
+        let line = request.lines().next().unwrap_or("");
+        let body = if line.starts_with("POST /session ") {
+            SESSION.to_string()
+        } else if line.contains("/source") {
+            if fail.load(std::sync::atomic::Ordering::SeqCst) {
+                let body = r#"{"value":{"error":"unknown error","message":"source failed"}}"#;
+                format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            } else {
+                TREE.to_string()
+            }
+        } else if line.contains("/wda/locked") {
+            r#"{"value":false}"#.to_string()
+        } else if line.contains("/alert/text") {
+            let body = r#"{"value":{"error":"no such alert","message":"none"}}"#;
+            format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        } else {
+            r#"{"value":null}"#.to_string()
+        };
+        Some((Duration::ZERO, body))
+    })
+}
+
+/// A real read failure under `scope=changed` keeps its own status; only a
+/// successful full-tree fallback is reported as a missing baseline.
+#[test]
+fn scope_changed_keeps_real_read_failures() {
+    let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let runner = runner_failing(fail.clone());
+    let state = private_dir();
+    let home = private_dir();
+    let state_path = state.path().canonicalize().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let daemon = spawn_daemon(runner.url(), &state_path, &home_path);
+    let owner = [("X-Phone-Owner", "scope")];
+    let (_, read) = http(daemon.port, "GET", "/agent/elements", TOKEN, &owner, "");
+    let since = read["snapshot"].as_str().unwrap_or_else(|| panic!("{read}")).to_string();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = http(
+        daemon.port,
+        "GET",
+        &format!("/agent/elements?scope=changed&since={since}"),
+        TOKEN,
+        &owner,
+        "",
+    );
+    assert!(matches!(status, 502 | 504), "{status} {body}");
+    assert_ne!(body["error"], "baseline_unavailable", "{body}");
+}

@@ -11413,6 +11413,7 @@ async fn agent_elements(
     // The baseline can be evicted between the precheck and the read; a full
     // tree is then never passed off as `scope=changed`.
     if scope.as_deref() == Some("changed")
+        && response.status().is_success()
         && !json.as_ref().is_some_and(|json| json.get("delta").is_some())
     {
         return json_response(
