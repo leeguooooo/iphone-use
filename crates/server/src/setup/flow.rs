@@ -1241,6 +1241,15 @@ impl Setup {
     }
 
     fn report_device_unavailable<T>(&mut self) -> Step<T> {
+        // Gone from this Mac entirely is its own blocker; the next attempt
+        // waits for the phone instead of building again.
+        if self.disconnected_blocker() == "not_connected" {
+            self.phase("building-fail", "not_connected", NOT_CONNECTED_MESSAGE);
+            return die(format!(
+                "{NOT_CONNECTED_MESSAGE}; xcodebuild timed out waiting for it. KeepAlive waits for it to come back. Log: {}",
+                self.ctx.run_log.display()
+            ));
+        }
         self.phase(
             "building-fail",
             "usb",
