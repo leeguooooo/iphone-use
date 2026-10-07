@@ -880,7 +880,29 @@ impl PhoneHandler {
                 if let (Some(json), Ok(mut tracker)) = (parsed.as_ref(), self.progress.lock()) {
                     tracker.note_screen(json);
                 }
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                let mut content = vec![Content::text(text)];
+                // Text first. An image only when the tree cannot be used at
+                // all (Mode A), so the model needs no second call to see it.
+                if let Some(json) = parsed.as_ref().filter(|json| crate::hints::needs_image(json)) {
+                    let snapshot = json.get("snapshot").and_then(serde_json::Value::as_str);
+                    let snapshot = snapshot.unwrap_or("?");
+                    match self.daemon.screenshot(Some(DEFAULT_SCREENSHOT_MAX_SIDE)).await {
+                        Ok(bytes) if !bytes.is_empty() => {
+                            content.push(Content::text(format!(
+                                "image: the tree has no interactive rows (ax_stats Mode A), so a \
+                                 screenshot is attached. It was captured right after snapshot \
+                                 {snapshot} — a separate capture, not the same instant."
+                            )));
+                            content.push(Content::image(B64.encode(&bytes), "image/png"));
+                        }
+                        _ => content.push(Content::text(format!(
+                            "image_unavailable: the tree has no interactive rows, but the \
+                             screenshot after snapshot {snapshot} failed; the text above is \
+                             still current."
+                        ))),
+                    }
+                }
+                let mut result = CallToolResult::success(content);
                 result.structured_content = parsed.filter(serde_json::Value::is_object);
                 result
             }
