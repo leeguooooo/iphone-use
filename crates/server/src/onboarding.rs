@@ -421,13 +421,14 @@ fn format_metrics(report: &Value) -> String {
     let line = |run: &Value| {
         let owner = run["key"]["owner"].as_str().unwrap_or("?");
         let id = run["key"]["run_id"].as_str().unwrap_or("(inferred)");
+        let state = run["closed"].as_str().unwrap_or("unknown");
         let ms = |key: &str| {
             run[key]
                 .as_u64()
                 .map_or("-".to_string(), |v| format!("{v}ms"))
         };
         format!(
-            "  {owner} {id}: {} calls ({} batch, {} observed, {} flow), p50 {} p95 {}, \
+            "  {owner} {id} [state: {state}]: {} calls ({} batch, {} observed, {} flow), p50 {} p95 {}, \
              stale {}, unknown {}, model turns {}{}\n",
             run["tool_calls"],
             run["batch_calls"],
