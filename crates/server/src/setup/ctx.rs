@@ -83,6 +83,11 @@ impl Ctx {
     /// `setup-wda.sh` used (2 for an unusable instance, 1 otherwise).
     pub fn resolve() -> Result<Ctx, (String, i32)> {
         let instance = Instance::from_env().map_err(|message| (message, 2))?;
+        Self::resolve_for(instance)
+    }
+
+    /// Every path for `instance`, before any configuration is read.
+    pub fn paths(instance: Instance) -> Ctx {
         let home = instance.home.clone();
         let state = instance.state_dir.clone();
         let daemon_plist = home
@@ -92,8 +97,7 @@ impl Ctx {
         let runner_derived_data = state.join("runner-build");
         let runner_default_src = home.join(".iphone-use/runner");
         let uid = sys::uid();
-        let script = env("IPHONE_USE_SETUP_SCRIPT").map(PathBuf::from);
-        let mut ctx = Ctx {
+        Ctx {
             gui_domain: format!("gui/{uid}"),
             self_install: state.join("setup-wda.sh"),
             run_log: state.join("wda-runner.log"),
@@ -107,10 +111,10 @@ impl Ctx {
             runner_cache: state.join("wda-runner-product.json"),
             runner_products_dir: runner_derived_data.join("Build/Products/Debug-iphoneos"),
             runner_derived_data,
-            runner_default_src: runner_default_src.clone(),
-            runner_src: PathBuf::new(),
-            runner_project: PathBuf::new(),
-            wda_dir: PathBuf::new(),
+            runner_src: runner_default_src.clone(),
+            runner_project: runner_default_src.join("IPhoneUseRunner/IPhoneUseRunner.xcodeproj"),
+            runner_default_src,
+            wda_dir: state.join("WebDriverAgent"),
             wda_port: String::new(),
             mjpeg_port: String::new(),
             bundle_id: String::new(),
@@ -118,16 +122,24 @@ impl Ctx {
             asc_key_path: String::new(),
             asc_key_id: String::new(),
             asc_issuer_id: String::new(),
-            allow_lan: String::new(),
+            allow_lan: "0".into(),
             udid: String::new(),
-            keepalive: std::env::var("WDA_KEEPALIVE").is_ok_and(|v| v == "1"),
+            keepalive: false,
+            script: None,
             instance,
             home,
             uid,
             daemon_plist,
             wda_agent_plist,
-            script,
-        };
+        }
+    }
+
+    fn resolve_for(instance: Instance) -> Result<Ctx, (String, i32)> {
+        let state = instance.state_dir.clone();
+        let mut ctx = Ctx::paths(instance);
+        ctx.script = env("IPHONE_USE_SETUP_SCRIPT").map(PathBuf::from);
+        ctx.keepalive = std::env::var("WDA_KEEPALIVE").is_ok_and(|v| v == "1");
+        let runner_default_src = ctx.runner_default_src.clone();
         let wda_env = |key: &str| sys::plist_env(&ctx.wda_agent_plist, key);
         let daemon_env = |key: &str| sys::plist_env(&ctx.daemon_plist, key);
 
@@ -565,6 +577,22 @@ fn bindings_stamp(ctx: &Ctx, ports: &[&str]) -> String {
         }
     }
     stamp
+}
+
+#[cfg(test)]
+pub mod tests_support {
+    use super::*;
+
+    /// A context for a throwaway HOME, with nothing configured.
+    pub fn ctx() -> Ctx {
+        let home =
+            std::env::temp_dir().join(format!("iphone-use-setup-test-{}", std::process::id()));
+        let instance = Instance::derive("", &home, None).expect("default instance");
+        let mut ctx = Ctx::paths(instance);
+        ctx.wda_port = "8100".into();
+        ctx.mjpeg_port = "9100".into();
+        ctx
+    }
 }
 
 #[cfg(test)]

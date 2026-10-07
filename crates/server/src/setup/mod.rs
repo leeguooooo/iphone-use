@@ -5,20 +5,29 @@
 //! environment, so file names, launchd labels, the status file and every
 //! `WDA_*` variable keep working unchanged.
 //!
-//! Implemented here so far: `doctor` and the setup status protocol
-//! (`status-watch` is the heartbeat watcher a setup run starts).
+//! Implemented here so far: `doctor`, `status`, `stop`, `pause`, `resume`,
+//! and `setup` as the launchd supervisor runs it (`WDA_KEEPALIVE=1`), plus
+//! the setup status protocol (`status-watch` is a run's heartbeat watcher).
 
 pub mod checks;
+pub mod commands;
 pub mod ctx;
 pub mod doctor;
+pub mod flow;
+pub mod launchd;
+pub mod pid;
+pub mod proc;
+pub mod retry;
+pub mod runner;
 pub mod status;
 pub mod sys;
 pub mod term;
 
 /// Commands `setup-native` accepts; the shim asks before handing one over
 /// (`iphone-use setup-native --supports <command>`), so a script newer than
-/// its binary keeps running the command itself.
-pub const COMMANDS: &[&str] = &["doctor"];
+/// its binary keeps running the command itself. `setup` is supported for the
+/// launchd supervisor's run only; an interactive setup stays in the script.
+pub const COMMANDS: &[&str] = &["doctor", "status", "stop", "pause", "resume", "setup"];
 
 /// `iphone-use setup-native <command> [args…]`. Returns the exit code.
 pub fn main(args: &[String]) -> i32 {
@@ -29,14 +38,29 @@ pub fn main(args: &[String]) -> i32 {
     match command.as_str() {
         "--supports" => i32::from(!rest.first().is_some_and(|c| COMMANDS.contains(&c.as_str()))),
         "status-watch" => status::watch(rest),
-        "doctor" => {
+        name if COMMANDS.contains(&name) => {
             sys::extend_path();
             term::start_clock();
-            match ctx::Ctx::resolve() {
-                Ok(ctx) => doctor::run(&ctx),
+            let ctx = match ctx::Ctx::resolve() {
+                Ok(ctx) => ctx,
                 Err((message, code)) => {
                     eprintln!("{message}");
-                    code
+                    return code;
+                }
+            };
+            match name {
+                "doctor" => doctor::run(&ctx),
+                "status" => commands::status(&ctx),
+                "stop" => commands::stop(&ctx),
+                "pause" => commands::pause(&ctx),
+                "resume" => commands::resume(&ctx),
+                _ if ctx.keepalive => flow::Setup::new(ctx).run_keepalive(),
+                _ => {
+                    eprintln!(
+                        "an interactive setup still runs in setup-wda.sh; run: {}",
+                        ctx.rerun_command()
+                    );
+                    2
                 }
             }
         }
