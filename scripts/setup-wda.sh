@@ -1328,7 +1328,7 @@ _install_wda_supervisor() {
 
     for key in \
         WDA_KEEPALIVE PATH WDA_UDID WDA_TEAM_ID WDA_BUNDLE_ID \
-        IPU_RUNNER_SRC WDA_PORT MJPEG_PORT WDA_ALLOW_LAN \
+        IPU_RUNNER_SRC WDA_PORT MJPEG_PORT WDA_ALLOW_LAN WDA_RUNNER_ICON \
         WDA_ASC_KEY_PATH WDA_ASC_KEY_ID WDA_ASC_ISSUER_ID \
         PHONE_REMOTE_INSTANCE PHONE_REMOTE_STATE_DIR
     do
@@ -1353,6 +1353,12 @@ _install_wda_supervisor() {
             WDA_PORT) value="$WDA_PORT" ;;
             MJPEG_PORT) value="$MJPEG_PORT" ;;
             WDA_ALLOW_LAN) value="${WDA_ALLOW_LAN:-}" ;;
+            # The runner's Home Screen icon (auto by default, applied by the
+            # native build); only a deliberate choice is persisted.
+            WDA_RUNNER_ICON)
+                case "${WDA_RUNNER_ICON:-auto}" in auto) continue ;; esac
+                value="$WDA_RUNNER_ICON"
+                ;;
             WDA_ASC_KEY_PATH|WDA_ASC_KEY_ID|WDA_ASC_ISSUER_ID)
                 _asc_signing_enabled || continue
                 value="${!key}"
@@ -3411,6 +3417,13 @@ _ensure_launchable_runner() {
     local products="$RUNNER_PRODUCTS_DIR" app build_log
     build_log="$STATE_DIR/wda-runner-product-build.log"
     app="$products/$RUNNER_APP_NAME"
+    # The native supervisor injects the Home Screen icon into this app and
+    # re-signs it; building over that re-emplaces Info.plist without
+    # re-signing (#75). Start from a pristine product instead.
+    if [ -e "$app/AppIcon60x60@2x.png" ] && [ ! -L "$app" ] \
+        && [ "$products" = "$RUNNER_PRODUCTS_DIR" ]; then
+        rm -rf -- "$app" || return 1
+    fi
     _run_runner_prebuild "$build_log" || return 1
     if [ ! -e "$app" ] && [ ! -L "$app" ]; then
         WDA_RUNNER_VALIDATION_ERROR="build-for-testing produced no $RUNNER_APP_NAME (log: $build_log)"

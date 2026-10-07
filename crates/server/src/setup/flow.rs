@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use super::checks::{self, Signing};
 use super::ctx::{valid_port, Ctx, RUNNER_APP_NAME, XCODE_APP_STORE_URL};
+use super::icon;
 use super::launchd;
 use super::pid::{self, Legacy, Role};
 use super::proc::{self, XcconfigEnv};
@@ -45,6 +46,8 @@ pub struct Setup {
     build_locked: bool,
     validation_error: String,
     warned_link_drop: bool,
+    /// The runner's Home Screen icon source, when one is injected.
+    icon_source: Option<PathBuf>,
     /// Readiness came straight over USB (no LAN address known yet).
     from_probe: bool,
     interactive_lock: Option<InteractiveLock>,
@@ -95,6 +98,7 @@ impl Setup {
             build_locked: false,
             validation_error: String::new(),
             warned_link_drop: false,
+            icon_source: None,
             from_probe: false,
             interactive_lock: None,
         }
@@ -364,15 +368,21 @@ impl Setup {
         }
         let xcode_version =
             checks::xcode_version_cached(self.ctx.state_dir(), &xcodebuild.to_string_lossy());
-        let key = runner::cache_key(
-            &self.ctx,
-            &source_hash,
-            &self.ctx.bundle_id,
-            &self.ctx.team_id,
-            &self.ctx.udid,
-            &xcode_version,
-            sdk.as_deref().unwrap_or(""),
-            &deployment_override,
+        self.icon_source = icon::source(&self.ctx);
+        // The icon is part of the product: a different icon rebuilds.
+        let key = format!(
+            "{}|{}",
+            runner::cache_key(
+                &self.ctx,
+                &source_hash,
+                &self.ctx.bundle_id,
+                &self.ctx.team_id,
+                &self.ctx.udid,
+                &xcode_version,
+                sdk.as_deref().unwrap_or(""),
+                &deployment_override,
+            ),
+            icon::cache_component(self.icon_source.as_deref())
         );
         let (_products, xctestrun, from_cache) = self.product(&xcodebuild, &key)?;
         let url = self.launch(&xcodebuild, &xctestrun, from_cache)?;
@@ -987,6 +997,11 @@ impl Setup {
     ) -> Step<Option<(PathBuf, PathBuf)>> {
         let products = self.ctx.runner_products_dir.clone();
         let app = products.join(RUNNER_APP_NAME);
+        // An injected app is not a valid incremental-build input (#75).
+        if let Err(error) = icon::discard_previous_injection(&self.ctx, &app) {
+            self.validation_error = error;
+            return Ok(None);
+        }
         if !self.prebuild(xcodebuild, build_log)? {
             return Ok(None);
         }
@@ -1007,6 +1022,10 @@ impl Setup {
             );
             return Ok(None);
         };
+        if let Some(source) = self.icon_source.clone() {
+            // Failure restores the pristine app; setup continues without it.
+            icon::inject(&self.ctx, &app, &source);
+        }
         Ok(Some((products, xctestrun)))
     }
 
