@@ -14,6 +14,7 @@ pub mod commands;
 pub mod ctx;
 pub mod doctor;
 pub mod flow;
+pub mod icon;
 pub mod launchd;
 pub mod pid;
 pub mod proc;
