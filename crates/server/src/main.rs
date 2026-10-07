@@ -193,6 +193,13 @@ enum Command {
         #[command(subcommand)]
         query: DeviceQuery,
     },
+    /// The device-layer setup engine `setup-wda.sh` hands its commands to
+    /// (same environment, same files). Not for direct use.
+    #[command(hide = true, disable_help_flag = true)]
+    SetupNative {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Upgrade to the latest GitHub release (daemon app and agent skill).
     ///
     /// Runs the same install.sh the daemon was installed with, then refreshes
@@ -665,9 +672,10 @@ fn main() -> Result<()> {
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_setup(&target, &args))
         }
+        Command::SetupNative { args } => std::process::exit(server::setup::main(&args)),
         Command::Doctor { instance } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;
-            std::process::exit(onboarding::run_setup(&target, &["doctor".to_string()]))
+            std::process::exit(onboarding::run_doctor(&target))
         }
         Command::Status { instance, json } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;

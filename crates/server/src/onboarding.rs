@@ -157,6 +157,14 @@ pub fn run_setup(target: &Target, args: &[String]) -> i32 {
     }
 }
 
+/// `iphone-use doctor`: the native preflight, for this instance.
+pub fn run_doctor(target: &Target) -> i32 {
+    // Before any thread exists: the setup engine resolves the instance (and
+    // everything else) from the environment, exactly as the script does.
+    std::env::set_var("PHONE_REMOTE_INSTANCE", &target.instance.name);
+    server::setup::main(&["doctor".to_string()])
+}
+
 // ---------------------------------------------------------------------------
 // a tiny blocking client for the daemon's agent API
 // ---------------------------------------------------------------------------

@@ -104,6 +104,34 @@ pub(crate) async fn find_attached(want: &str) -> Result<Option<Attached>> {
     Ok(pick_attached(&reply, want))
 }
 
+/// Serial numbers (UDIDs as usbmuxd spells them) of the iPhones attached over
+/// USB right now, sorted and deduplicated. Network attachments are left out.
+pub async fn usb_serials() -> Result<Vec<String>> {
+    let mut mux = UnixStream::connect(USBMUXD_SOCKET)
+        .await
+        .context("connect /var/run/usbmuxd")?;
+    let reply = request(&mut mux, &list_devices_message()).await?;
+    Ok(usb_serials_in(&reply))
+}
+
+fn usb_serials_in(reply: &Value) -> Vec<String> {
+    let mut serials: Vec<String> = reply
+        .get("DeviceList")
+        .and_then(Value::as_array)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| entry.get("Properties"))
+        .filter(|properties| {
+            properties.get("ConnectionType").and_then(Value::as_str) == Some("USB")
+        })
+        .filter_map(|properties| properties.get("SerialNumber").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    serials.sort();
+    serials.dedup();
+    serials
+}
+
 /// The pairing record usbmuxd keeps for `serial` (the plist bytes of
 /// `/var/db/lockdown/<udid>.plist`, which only root can read directly).
 pub(crate) async fn read_pair_record(serial: &str) -> Result<Vec<u8>> {
@@ -513,6 +541,17 @@ mod tests {
         let reply = parse_plist(LIST_REPLY).unwrap();
         let want = normalize_udid("00008110-0002346211a0401e");
         assert_eq!(pick_device(&reply, &want), Some(3));
+    }
+
+    #[test]
+    fn usb_serials_lists_only_cable_attachments() {
+        let reply = parse_plist(LIST_REPLY).unwrap();
+        assert_eq!(
+            usb_serials_in(&reply),
+            vec!["000081100002346211A0401E".to_string()]
+        );
+        let none = parse_plist(&LIST_REPLY.replace(">USB<", ">Network<")).unwrap();
+        assert!(usb_serials_in(&none).is_empty());
     }
 
     #[test]
