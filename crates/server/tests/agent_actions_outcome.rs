@@ -305,20 +305,25 @@ fn a_covered_locator_tap_reveals_before_clicking() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let record = seen.clone();
+        let scrolled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let moved = scrolled.clone();
         let wda = mock_wda(move |request, _| {
             record.lock().unwrap().push(request.to_string());
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
+            if request.contains("/scrollTo") {
+                moved.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             if request.contains("/source?format=json") {
-                return Some((
-                    Duration::ZERO,
-                    r#"{"value":{"type":"XCUIElementTypeApplication","label":"设置","rect":{"x":0,"y":0,"width":390,"height":844},"children":[
-                        {"type":"XCUIElementTypeButton","label":"电池","rect":{"x":16,"y":661,"width":358,"height":49}},
-                        {"type":"XCUIElementTypeButton","label":"通用","rect":{"x":16,"y":745,"width":358,"height":51}},
-                        {"type":"XCUIElementTypeSearchField","label":"搜索","rect":{"x":28,"y":778,"width":334,"height":28}}]}}"#
-                        .to_string(),
-                ));
+                // After the reveal scroll the row sits mid-screen, clear of
+                // the pill: the read the tap makes before clicking sees that.
+                let y = if moved.load(std::sync::atomic::Ordering::SeqCst) {
+                    400
+                } else {
+                    745
+                };
+                return Some((Duration::ZERO, settings_tree_with_general_at(y, 51)));
             }
             if request.starts_with("POST ") && request.contains("/elements") {
                 return Some((Duration::ZERO, r#"{"value":[{"ELEMENT":"E1","element-6066-11e4-a52e-4f735466cecf":"E1"}]}"#.to_string()));
@@ -338,6 +343,205 @@ fn a_covered_locator_tap_reveals_before_clicking() {
         let scroll = seen.iter().position(|r| r.contains("/E1/scrollTo")).expect("a reveal scroll");
         let click = seen.iter().position(|r| r.contains("/E1/click")).expect("an element click");
         assert!(scroll < click, "reveal before click: {seen:?}");
+    });
+}
+
+/// The iPhone 13 Settings top page with 通用 at `y` (height `h`) and iOS 26's
+/// floating search pill at y 778–806.
+fn settings_tree_with_general_at(y: u32, h: u32) -> String {
+    format!(
+        r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"设置","rect":{{"x":0,"y":0,"width":390,"height":844}},"children":[
+            {{"type":"XCUIElementTypeButton","label":"电池","rect":{{"x":16,"y":661,"width":358,"height":49}}}},
+            {{"type":"XCUIElementTypeButton","label":"通用","rect":{{"x":16,"y":{y},"width":358,"height":{h}}}}},
+            {{"type":"XCUIElementTypeSearchField","label":"搜索","rect":{{"x":28,"y":778,"width":334,"height":28}}}}]}}}}"#
+    )
+}
+
+/// A covered row the reveal scroll cannot move (the scroll failed, or the
+/// row had nowhere to go) is still under the pill when the tap looks again:
+/// tap the part the pill leaves clear, never the covered centre (agent-loop
+/// A/B, iPhone 13: "tapped 通用", the pill took it and the list scrolled).
+#[test]
+fn a_label_tap_still_covered_after_the_reveal_taps_the_clear_part() {
+    block(async {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = seen.clone();
+        let wda = mock_wda(move |request, _| {
+            record.lock().unwrap().push(request.to_string());
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if request.contains("/source?format=json") {
+                return Some((Duration::ZERO, settings_tree_with_general_at(745, 51)));
+            }
+            if request.starts_with("POST ") && request.contains("/elements") {
+                return Some((
+                    Duration::ZERO,
+                    r#"{"value":[{"ELEMENT":"E1","element-6066-11e4-a52e-4f735466cecf":"E1"}]}"#
+                        .to_string(),
+                ));
+            }
+            if request.contains("/element/E1/rect") {
+                return Some((
+                    Duration::ZERO,
+                    r#"{"value":{"x":16,"y":745,"width":358,"height":51}}"#.to_string(),
+                ));
+            }
+            Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
+        });
+        let (status, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap","label":"通用"}}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter().any(|r| r.contains("/E1/scrollTo")),
+            "a reveal scroll: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|r| r.contains("/E1/click")),
+            "no click on the covered centre: {seen:?}"
+        );
+        let tap = seen
+            .iter()
+            .rev()
+            .find(|r| r.starts_with("POST ") && r.contains("/actions"))
+            .expect("a coordinate tap on the clear part");
+        // The clear band is y 745–764 (pill 778 grown by the 14 pt margin).
+        let y = tap
+            .split("\"y\":")
+            .nth(1)
+            .and_then(|rest| rest.split(|c: char| c != '.' && !c.is_ascii_digit()).next())
+            .and_then(|number| number.parse::<f64>().ok())
+            .expect("a y coordinate");
+        assert!((745.0..764.0).contains(&y), "tap at y {y}: {tap}");
+    });
+}
+
+/// A row the reveal scroll pushes fully under the pill is refused before
+/// anything is sent: `element_occluded`, no click, no coordinate tap.
+#[test]
+fn a_locator_tap_fully_covered_after_the_reveal_is_refused_unsent() {
+    block(async {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = seen.clone();
+        let scrolled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let moved = scrolled.clone();
+        let wda = mock_wda(move |request, _| {
+            record.lock().unwrap().push(request.to_string());
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if request.contains("/scrollTo") {
+                moved.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if request.contains("/source?format=json") {
+                let tree = if moved.load(std::sync::atomic::Ordering::SeqCst) {
+                    settings_tree_with_general_at(770, 36)
+                } else {
+                    settings_tree_with_general_at(745, 51)
+                };
+                return Some((Duration::ZERO, tree));
+            }
+            if request.starts_with("POST ") && request.contains("/elements") {
+                return Some((
+                    Duration::ZERO,
+                    r#"{"value":[{"ELEMENT":"E1","element-6066-11e4-a52e-4f735466cecf":"E1"}]}"#
+                        .to_string(),
+                ));
+            }
+            if request.contains("/element/E1/rect") {
+                return Some((
+                    Duration::ZERO,
+                    r#"{"value":{"x":16,"y":770,"width":358,"height":36}}"#.to_string(),
+                ));
+            }
+            Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
+        });
+        let (_, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"通用","kind":"Button"}}}]}"#,
+        )
+        .await;
+        assert_eq!(json["ok"], false, "{json}");
+        assert!(json.to_string().contains("element_occluded"), "{json}");
+        let seen = seen.lock().unwrap();
+        assert!(!seen.iter().any(|r| r.contains("/E1/click")), "{seen:?}");
+        assert!(
+            !seen
+                .iter()
+                .any(|r| r.starts_with("POST ") && r.contains("/actions")),
+            "no tap sent: {seen:?}"
+        );
+    });
+}
+
+/// A runner whose every screen read errors gets a bounded, backed-off number
+/// of reads and a clear 502 — not a fixed 250 ms retry for the whole 35 s
+/// budget (agent-loop A/B, iPhone 13: 137 /source calls, then a bare 504).
+#[test]
+fn a_screen_read_that_keeps_failing_backs_off_and_stops() {
+    block(async {
+        let sources = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = sources.clone();
+        let wda = mock_wda(move |request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if request.contains("/source?format=json") {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Some((
+                    Duration::ZERO,
+                    r#"{"value":{"error":"unknown error","message":"source unavailable"}}"#
+                        .to_string(),
+                ));
+            }
+            if request.contains("/alert/text") {
+                let body =
+                    r#"{"value":{"error":"no such alert","message":"no modal dialog is open"}}"#;
+                return Some((
+                    Duration::ZERO,
+                    format!(
+                        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                ));
+            }
+            Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
+        });
+        let app = server::http::router(build_state_with_wda(wda.url()));
+        let started = std::time::Instant::now();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/elements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+        assert_eq!(json["error"], "wda_source_failed", "{json}");
+        assert_eq!(json["source_attempts"], 8, "{json}");
+        assert!(
+            json["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("kept failing")),
+            "{json}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "gave up after {elapsed:?}"
+        );
+        // One read per attempt (a lite read; the fallback probe may add one).
+        let reads = sources.load(std::sync::atomic::Ordering::SeqCst);
+        assert!((8..=16).contains(&reads), "{reads} /source calls");
     });
 }
 
