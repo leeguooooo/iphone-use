@@ -15,6 +15,9 @@ pub enum Kind {
     XcodeTooOld,
     /// Another session holds the phone and its runner is alive.
     Owned,
+    /// The phone refused the UI-automation session (code 74, matching
+    /// versions): a person has to allow it on the phone.
+    Automation,
 }
 
 impl Kind {
@@ -24,6 +27,7 @@ impl Kind {
             Kind::Locked => "locked",
             Kind::XcodeTooOld => "xcode_too_old",
             Kind::Owned => "owned",
+            Kind::Automation => "automation",
         }
     }
 
@@ -33,6 +37,7 @@ impl Kind {
             "locked" => Some(Kind::Locked),
             "xcode_too_old" => Some(Kind::XcodeTooOld),
             "owned" => Some(Kind::Owned),
+            "automation" => Some(Kind::Automation),
             _ => None,
         }
     }
@@ -48,6 +53,8 @@ impl Kind {
             Kind::XcodeTooOld => (900, 900),
             // Re-check the lease soon; never replace the live runner meanwhile.
             Kind::Owned => (15, 60),
+            // Like a lock: quiet retries until a person allows it.
+            Kind::Automation => (5, 60),
             Kind::Generic => (5, 300),
         }
     }

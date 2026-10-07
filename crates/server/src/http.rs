@@ -2652,8 +2652,12 @@ fn human_next_step(
                 "Unlock the iPhone and keep it awake — connecting continues as soon as it is unlocked",
             ),
             "xcode_too_old" => (
-                "iPhone 的 iOS 比这台 Mac 上的 Xcode 新：安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），重试和重连都解决不了",
-                "The iPhone runs a newer iOS than this Mac's Xcode supports: install an Xcode that supports it (a beta Xcode for a beta iOS) — retrying or reconnecting will not help",
+                "iPhone 的 iOS 比这台 Mac 上的 Xcode 新：安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），再运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它；重试和重连都解决不了",
+                "The iPhone runs a newer iOS than this Mac's Xcode supports: install an Xcode that supports it (a beta Xcode for a beta iOS), then run iphone-use setup --xcode <that Xcode.app> for this phone — retrying or reconnecting will not help",
+            ),
+            "automation_not_allowed" => (
+                "iPhone 拒绝了这次 UI 自动化：解锁手机，打开 设置 › 开发者 › 启用 UI 自动化，并确认手机上的密码或「允许」提示；会自动重试",
+                "The iPhone refused UI automation: unlock it, turn on Settings › Developer › Enable UI Automation, and accept the passcode or Allow prompt — it retries on its own",
             ),
             "wda" => (
                 "设备 runner 启动失败：在这台 Mac 上运行 iphone-use doctor 查看原因",
@@ -2794,7 +2798,10 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iPhone is locked — unlock it and keep it awake; connecting continues on its own as soon as it is unlocked, so do not send another reconnect request",
         ),
         "xcode_too_old" => Some(
-            "the iPhone runs a newer iOS than the selected Xcode supports (setup_message names both versions) — install an Xcode that supports that iOS (a beta Xcode for a beta iOS) and select it with xcode-select; retrying or reconnecting cannot fix this, so do not send another reconnect request",
+            "the iPhone runs a newer iOS than the selected Xcode supports (setup_message names both versions) — install an Xcode that supports that iOS (a beta Xcode for a beta iOS) and point this phone at it with iphone-use setup --xcode /Applications/Xcode-beta.app (other phones keep theirs), or select it for the whole Mac with xcode-select; retrying or reconnecting cannot fix this, so do not send another reconnect request",
+        ),
+        "automation_not_allowed" => Some(
+            "the iPhone refused the device runner's UI-automation session although this Xcode supports its iOS (the runner exited with code 74, testmanagerd refused the IDE channel) — unlock the iPhone, turn on Settings › Developer › Enable UI Automation, and accept any passcode or Allow prompt; the managed service retries quietly every 5 s to 1 min, so do not send another reconnect request",
         ),
         "wda" => Some(
             "the device runner failed to start — inspect ~/.iphone-use/wda-agent.log and run iphone-use doctor before retrying",
@@ -2833,6 +2840,7 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
             | "account"
             | "automation_mode_disabled"
             | "xcode_too_old"
+            | "automation_not_allowed"
             | "locked"
             | "wda"
     ) {
@@ -14449,6 +14457,7 @@ mod tests {
             "ddi",
             "account",
             "automation_mode_disabled",
+            "automation_not_allowed",
             "xcode_too_old",
             "locked",
             "wda",
@@ -14553,6 +14562,7 @@ mod tests {
             "ddi",
             "account",
             "automation_mode_disabled",
+            "automation_not_allowed",
             "xcode_too_old",
             "locked",
             "wda",
@@ -14674,6 +14684,34 @@ mod tests {
         assert!(!hint.contains("wda-agent.log"), "{hint}");
         // The hint is spliced into the status JSON unescaped.
         assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
+    }
+
+    #[test]
+    fn automation_not_allowed_names_the_phone_switch_and_the_quiet_retry() {
+        // A code-74 refusal with an Xcode that supports the phone's iOS
+        // (hardware: iOS 27.2 beta with Xcode 27.2 beta): the phone has not
+        // allowed UI automation, which is not an Xcode problem.
+        let payload = r#"{"phase":"building-fail","blocked_on":"automation_not_allowed","message":"the iPhone refused the UI-automation session","ts":1000}"#;
+        let status = parse_setup_status(payload, 1100).expect("fresh status");
+        assert_eq!(status.blocked_on, "automation_not_allowed");
+        let hint = setup_blocker_hint("automation_not_allowed").unwrap();
+        assert!(hint.contains("Enable UI Automation"), "{hint}");
+        assert!(hint.contains("unlock"), "{hint}");
+        assert!(
+            hint.contains("do not send another reconnect request"),
+            "{hint}"
+        );
+        assert!(!hint.contains("install an Xcode"), "{hint}");
+        assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
+        let (zh, en) = human_next_step("blocker", "automation_not_allowed", "").unwrap();
+        assert!(
+            zh.contains("启用 UI 自动化") && en.contains("Enable UI Automation"),
+            "{en}"
+        );
+        // The Xcode hint now offers a per-phone Xcode.
+        assert!(setup_blocker_hint("xcode_too_old")
+            .unwrap()
+            .contains("--xcode"));
     }
 
     #[test]
