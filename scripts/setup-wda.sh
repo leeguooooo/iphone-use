@@ -3112,6 +3112,20 @@ case "$COMMAND" in
     *) die "unknown command: $1 (use: setup|status|stop|pause|resume|doctor|instance-context)" ;;
 esac
 
+# Another session's owner lease: an interactive setup would replace the
+# runner it is driving. The installed binary knows the lease (`--force` /
+# IPHONE_USE_SETUP_FORCE=1 overrides, PHONE_REMOTE_OWNER names the caller).
+if [ "${WDA_KEEPALIVE:-0}" != "1" ] && [ "${IPHONE_USE_SHELL_SETUP:-0}" != "1" ]; then
+    _owner_bin="${IPHONE_USE_SETUP_BIN:-}"
+    if [ -z "$_owner_bin" ] && [ -f "$DAEMON_PLIST" ]; then
+        _owner_bin="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$DAEMON_PLIST" 2>/dev/null || true)"
+    fi
+    if [ -n "$_owner_bin" ] && [ -x "$_owner_bin" ] \
+        && "$_owner_bin" setup-native --supports owner-check >/dev/null 2>&1; then
+        "$_owner_bin" setup-native owner-check || exit 1
+    fi
+fi
+
 # Before anything is paused or built, so stopping here leaves nothing to undo.
 if [ "${WDA_KEEPALIVE:-0}" != "1" ] && [ -t 1 ]; then
     if ! _first_run_checklist; then

@@ -16,6 +16,7 @@ pub mod doctor;
 pub mod flow;
 pub mod icon;
 pub mod launchd;
+pub mod owner;
 pub mod pid;
 pub mod proc;
 pub mod retry;
@@ -28,7 +29,15 @@ pub mod term;
 /// (`iphone-use setup-native --supports <command>`), so a script newer than
 /// its binary keeps running the command itself. `setup` is supported for the
 /// launchd supervisor's run only; an interactive setup stays in the script.
-pub const COMMANDS: &[&str] = &["doctor", "status", "stop", "pause", "resume", "setup"];
+pub const COMMANDS: &[&str] = &[
+    "doctor",
+    "status",
+    "stop",
+    "pause",
+    "resume",
+    "setup",
+    "owner-check",
+];
 
 /// `iphone-use setup-native <command> [args…]`. Returns the exit code.
 pub fn main(args: &[String]) -> i32 {
@@ -55,6 +64,7 @@ pub fn main(args: &[String]) -> i32 {
                 "stop" => commands::stop(&ctx),
                 "pause" => commands::pause(&ctx),
                 "resume" => commands::resume(&ctx),
+                "owner-check" => owner::check(&ctx),
                 _ if ctx.keepalive => flow::Setup::new(ctx).run_keepalive(),
                 _ => {
                     eprintln!(

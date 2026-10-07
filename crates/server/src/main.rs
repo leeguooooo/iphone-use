@@ -218,6 +218,10 @@ enum Command {
     ///
     /// Keep the iPhone unlocked. Extra arguments go to the setup script
     /// (`status`, `stop`, `uninstall`, …).
+    ///
+    /// Setup refuses while another session holds the phone's owner lease.
+    /// `--force` takes the phone over anyway: a person's decision, made
+    /// knowing which session loses its runner.
     Setup {
         /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]

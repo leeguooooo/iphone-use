@@ -13,6 +13,7 @@ use super::checks::{self, Signing};
 use super::ctx::{valid_port, Ctx, RUNNER_APP_NAME, XCODE_APP_STORE_URL};
 use super::icon;
 use super::launchd;
+use super::owner;
 use super::pid::{self, Legacy, Role};
 use super::proc::{self, XcconfigEnv};
 use super::retry::{self, Kind};
@@ -46,6 +47,8 @@ pub struct Setup {
     build_locked: bool,
     validation_error: String,
     warned_link_drop: bool,
+    /// Where the runner serves (for restarting only the relays).
+    phone_url: String,
     /// The runner's Home Screen icon source, when one is injected.
     icon_source: Option<PathBuf>,
     /// Readiness came straight over USB (no LAN address known yet).
@@ -98,6 +101,7 @@ impl Setup {
             build_locked: false,
             validation_error: String::new(),
             warned_link_drop: false,
+            phone_url: String::new(),
             icon_source: None,
             from_probe: false,
             interactive_lock: None,
@@ -258,6 +262,10 @@ impl Setup {
                     if previous != Some(Kind::Locked) {
                         warn("iPhone lock screen blocked the device runner; retrying quietly every 5s to 1min until it is unlocked");
                     }
+                } else if self.failure_kind == Kind::Owned {
+                    warn(&format!(
+                        "another session holds the phone; checking its lease again in {delay}s"
+                    ));
                 } else {
                     warn(&format!(
                         "KeepAlive rebuild failed; next retry in {delay}s (failure {attempt})"
@@ -353,6 +361,33 @@ impl Setup {
             "building + launching the device runner",
         );
         info("Building + launching the device runner on the phone (the first build takes a minute or two)");
+        // Replacing a live runner takes the phone from whoever drives it.
+        // Recovering a dead one is fine: nobody can be using it.
+        if !owner::overridden(&self.ctx)
+            && pid::validate(
+                &self.ctx,
+                &self.ctx.runner_pid_file,
+                &self.legacy.runner,
+                Role::Runner,
+                false,
+            )
+            .is_some()
+        {
+            if let Some(lease) =
+                owner::foreign(owner::current(&self.ctx), owner::caller().as_deref())
+            {
+                self.failure_kind = Kind::Owned;
+                self.phase(
+                    "building",
+                    "",
+                    &format!(
+                        "the phone is in use by session {}; not replacing its live runner",
+                        lease.owner
+                    ),
+                );
+                return die(owner::refusal(&lease, &self.ctx));
+            }
+        }
         if !pid::stop(
             &self.ctx,
             &self.ctx.runner_pid_file,
@@ -386,6 +421,7 @@ impl Setup {
         );
         let (_products, xctestrun, from_cache) = self.product(&xcodebuild, &key)?;
         let url = self.launch(&xcodebuild, &xctestrun, from_cache)?;
+        self.phone_url = url.clone();
         let target_url = self.relays(&url)?;
         let daemon = self.configure_daemon(&target_url)?;
         self.verify_supervision(&target_url)?;
@@ -1987,6 +2023,8 @@ impl Setup {
         let mjpeg_port = valid_port(&self.ctx.mjpeg_port).unwrap_or(9100);
         let status_url = format!("http://127.0.0.1:{wda_port}/status");
         let mut failures = 0;
+        let mut relay_restarts: Vec<Instant> = Vec::new();
+        let mut warned_owner = false;
         let cause = loop {
             if pid::validate(
                 &self.ctx,
@@ -2012,13 +2050,42 @@ impl Setup {
                 Role::Mjpeg,
                 mjpeg_port,
             ) {
-                break "relay";
+                // The runner is alive: rebuild only the relays, so whoever is
+                // driving the phone keeps its runner and test session. At most
+                // three times in ten minutes; past that, a full rebuild.
+                relay_restarts.retain(|at| at.elapsed() < Duration::from_secs(600));
+                if relay_restarts.len() >= 3 || self.phone_url.is_empty() {
+                    break "relay";
+                }
+                relay_restarts.push(Instant::now());
+                warn("a runner relay stopped listening while the runner stayed alive — restarting the relays only");
+                let url = self.phone_url.clone();
+                self.relays(&url)?;
+                ok("relays restored; the runner kept running");
+                failures = 0;
+                continue;
             }
             if sys::http_ok(&status_url, Duration::from_secs(4)) {
                 failures = 0;
             } else {
                 failures += 1;
                 if failures >= MAX_FAILURES {
+                    // A slow runner under another session's lease is that
+                    // session's to wait for, not ours to replace.
+                    if let Some(lease) =
+                        owner::foreign(owner::current(&self.ctx), owner::caller().as_deref())
+                    {
+                        if !warned_owner {
+                            warn(&format!(
+                                "the device runner did not answer /status {failures} times in a row, but session \"{}\" holds the phone; not replacing the runner it is using",
+                                lease.owner
+                            ));
+                            warned_owner = true;
+                        }
+                        failures = 0;
+                        proc::sleep(Duration::from_secs(10))?;
+                        continue;
+                    }
                     break "unreachable";
                 }
                 info(&format!(
