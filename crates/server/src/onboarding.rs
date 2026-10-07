@@ -353,11 +353,18 @@ pub fn run_auth(target: &Target, path: &str, body: Value) -> Result<i32> {
         bail!("{}", owned_message(&value));
     }
     println!("{}", serde_json::to_string_pretty(&value)?);
-    Ok(if value.get("ok") == Some(&Value::Bool(true)) {
-        0
-    } else {
-        1
-    })
+    // Sent is not done: a form still on screen after the tap is a failure.
+    let still = |key: &str| value.get(key) == Some(&Value::Bool(true));
+    Ok(
+        if value.get("ok") == Some(&Value::Bool(true))
+            && !still("login_form_still_visible")
+            && !still("code_field_still_visible")
+        {
+            0
+        } else {
+            1
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

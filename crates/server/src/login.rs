@@ -675,37 +675,70 @@ fn code_channel(rows: &[ElementRow]) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// The live element for a row, matched by class and frame.
+///
+/// A web page can shift between the tree read and this lookup (Safari's
+/// toolbar settling after a load moved a login form on hardware), so when no
+/// frame matches exactly, the one element of the same class and size that
+/// moved the least is taken — only when it is unambiguous.
 async fn element_for(w: &mut WdaClient, row: &ElementRow) -> Result<String, LoginError> {
     let ids = w
         .find_elements("class chain", &format!("**/XCUIElementType{}", row.kind))
         .await
         .map_err(|_| phone_error("field lookup"))?;
-    let mut found = None;
+    let mut live = Vec::new();
     for id in ids {
         if let Ok(rect) = w.element_rect(&id).await {
-            if rect
-                .iter()
-                .zip(row.rect.iter())
-                .all(|(a, b)| (a - b).abs() <= 2.0)
-            {
-                if found.is_some() {
-                    return Err(LoginError::new(
-                        422,
-                        "field_ambiguous",
-                        "two fields share that frame; finish this login by hand",
-                    ));
-                }
-                found = Some(id);
-            }
+            live.push((id, rect));
         }
     }
-    found.ok_or_else(|| {
-        LoginError::new(
+    let rects: Vec<[f64; 4]> = live.iter().map(|(_, rect)| *rect).collect();
+    match pick_frame(&rects, row.rect) {
+        Ok(index) => Ok(live.swap_remove(index).0),
+        Err(FrameMatch::Ambiguous) => Err(LoginError::new(
+            422,
+            "field_ambiguous",
+            "two fields share that frame; finish this login by hand",
+        )),
+        Err(FrameMatch::Missing) => Err(LoginError::new(
             422,
             "field_not_found",
             "the login field moved; read the screen and try again",
-        )
-    })
+        )),
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum FrameMatch {
+    Missing,
+    Ambiguous,
+}
+
+/// Which live frame is the row's: an exact frame (±2 pt), else the single
+/// same-size frame within 80 pt, and never a guess between two.
+pub fn pick_frame(live: &[[f64; 4]], wanted: [f64; 4]) -> Result<usize, FrameMatch> {
+    let close = |a: &[f64; 4], indices: std::ops::Range<usize>| {
+        indices.into_iter().all(|i| (a[i] - wanted[i]).abs() <= 2.0)
+    };
+    let exact: Vec<usize> = (0..live.len()).filter(|&i| close(&live[i], 0..4)).collect();
+    match exact.as_slice() {
+        [one] => return Ok(*one),
+        [_, _, ..] => return Err(FrameMatch::Ambiguous),
+        [] => {}
+    }
+    let moved: Vec<(usize, f64)> = (0..live.len())
+        .filter(|&i| close(&live[i], 2..4))
+        .map(|i| {
+            let dx = live[i][0] - wanted[0];
+            let dy = live[i][1] - wanted[1];
+            (i, (dx * dx + dy * dy).sqrt())
+        })
+        .filter(|(_, distance)| *distance <= 80.0)
+        .collect();
+    match moved.as_slice() {
+        [(one, _)] => Ok(*one),
+        [] => Err(FrameMatch::Missing),
+        _ => Err(FrameMatch::Ambiguous),
+    }
 }
 
 fn same_text(a: &str, b: &str) -> bool {
@@ -713,36 +746,112 @@ fn same_text(a: &str, b: &str) -> bool {
     strip(a) == strip(b)
 }
 
-/// Replace a field's contents with a secret. `verify` reads a non-secure
-/// field back and compares in the daemon; nothing read is returned.
+/// Whether the field now holds the secret, judged inside the daemon. A text
+/// field must read back equal; a password field cannot be read, so it must at
+/// least have left its placeholder.
+async fn holds(w: &mut WdaClient, id: &str, row: &ElementRow, secret: &Secret) -> bool {
+    let Ok(now) = w.element_value(id).await else {
+        return false;
+    };
+    let now = now.unwrap_or_default();
+    if row.kind == "SecureTextField" {
+        !now.is_empty() && Some(now.as_str()) != row.placeholder.as_deref()
+    } else {
+        same_text(&now, secret.expose())
+    }
+}
+
+/// Replace a field's contents with a secret; nothing read is returned.
+///
+/// The direct element write comes first: native fields take it. Web inputs
+/// (WKWebView) acknowledge it and keep their contents (hardware: Safari on
+/// iOS 27, and issue #70's bank form), so the fallback focuses the field like
+/// a person and types into the focus. Web inputs also report `focused` for
+/// every field, so focus cannot be confirmed up front: instead every other
+/// text field is checked afterwards, and a value that landed in one is
+/// cleared at once.
 async fn fill(
     w: &mut WdaClient,
     row: &ElementRow,
     secret: &Secret,
-    verify: bool,
     what: &'static str,
 ) -> Result<(), LoginError> {
     let id = element_for(w, row).await?;
     let _ = w.clear_element(&id).await;
-    w.type_into(&id, secret.expose())
+    if w.type_into(&id, secret.expose()).await.is_ok() && holds(w, &id, row, secret).await {
+        return Ok(());
+    }
+    let _ = w.clear_element(&id).await;
+    // Tap the element where it is now, not where the tree read saw it: a page
+    // that shifted in between turned a frame tap into a tap on another field.
+    w.click_element(&id)
+        .await
+        .map_err(|_| phone_error(&format!("{what} focus")))?;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    w.keys(secret.expose())
         .await
         .map_err(|_| phone_error(&format!("{what} entry")))?;
-    if verify {
-        if let Ok(Some(now)) = w.element_value(&id).await {
-            if !same_text(&now, secret.expose()) {
-                return Err(LoginError::new(
-                    422,
-                    "value_not_applied",
-                    format!(
-                        "the {what} field holds something other than what was typed (a keyboard \
-                         language that composes letters, or autocorrect); switch the phone's \
-                         keyboard to English and try again"
-                    ),
-                ));
+    let landed = holds(w, &id, row, secret).await;
+    // Anywhere else it may have gone: a plain field showing it in clear text.
+    // The target is told apart by where it is now (element ids are handed out
+    // per lookup, so they cannot be compared).
+    let target_now = w.element_rect(&id).await.ok();
+    if let Ok(rows) = w.elements().await {
+        for other in rows.iter().filter(|r| {
+            matches!(r.kind.as_str(), "TextField" | "SearchField" | "TextView")
+                && r.value
+                    .as_deref()
+                    .is_some_and(|value| value.contains(secret.expose()))
+                && !target_now.is_some_and(|now| {
+                    now.iter()
+                        .zip(r.rect.iter())
+                        .all(|(a, b)| (a - b).abs() <= 2.0)
+                })
+        }) {
+            if let Ok(stray) = element_for(w, other).await {
+                let _ = w.clear_element(&stray).await;
             }
+            return Err(LoginError::new(
+                422,
+                "value_landed_elsewhere",
+                format!(
+                    "the {what} went into another field and was cleared; finish this login by hand"
+                ),
+            ));
         }
     }
-    Ok(())
+    if landed {
+        return Ok(());
+    }
+    let _ = w.clear_element(&id).await;
+    Err(LoginError::new(
+        422,
+        "value_not_applied",
+        format!(
+            "the {what} field did not take the typed text (a keyboard language that composes \
+             letters, or autocorrect); switch the phone's keyboard to English and try again"
+        ),
+    ))
+}
+
+/// Press the form's button the way a person would: the keyboard away first
+/// (it can cover the button), then the button found again on a fresh read and
+/// clicked where it is now — a tap on the frame an earlier read saw missed it
+/// on hardware while Safari's page was still settling. Returns the screen just
+/// before the click, to compare the next one against; `None` when there is no
+/// such button.
+async fn press(w: &mut WdaClient, verbs: &[&str]) -> Result<Option<Vec<ElementRow>>, LoginError> {
+    let _ = w.dismiss_keyboard().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let rows = w.elements().await.map_err(|_| phone_error("screen read"))?;
+    let Some(button) = submit_button(&rows, verbs) else {
+        return Ok(None);
+    };
+    match element_for(w, &rows[button]).await {
+        Ok(id) => w.click_element(&id).await.map_err(|_| phone_error("tap"))?,
+        Err(_) => tap_row(w, &rows[button]).await?,
+    }
+    Ok(Some(rows))
 }
 
 async fn tap_row(w: &mut WdaClient, row: &ElementRow) -> Result<(), LoginError> {
@@ -923,7 +1032,7 @@ pub async fn sign_in(
     let mut filled: Vec<&str> = Vec::new();
 
     if let (Some(index), Some(username)) = (form.account, &credentials.username) {
-        fill(w, &rows[index], username, true, "account").await?;
+        fill(w, &rows[index], username, "account").await?;
         filled.push("account");
     }
     if form.password.is_none() {
@@ -938,7 +1047,7 @@ pub async fn sign_in(
                 "filled the account; the password page comes after Next",
             ));
         }
-        let Some(next) = submit_button(&rows, LOGIN_VERBS) else {
+        let Some(before) = press(w, LOGIN_VERBS).await? else {
             return Ok(done(
                 &entry,
                 &filled,
@@ -948,8 +1057,7 @@ pub async fn sign_in(
                 "filled the account but found no Next or Log in button; read the screen",
             ));
         };
-        tap_row(w, &rows[next]).await?;
-        rows = next_screen(w, &rows, Duration::from_secs(6)).await;
+        rows = next_screen(w, &before, Duration::from_secs(6)).await;
         form = read_form(&rows);
         if form.secure_fields >= 2 {
             return Err(not_a_login_form());
@@ -957,18 +1065,21 @@ pub async fn sign_in(
     }
     let mut submitted = false;
     if let (Some(index), Some(password)) = (form.password, &credentials.password) {
-        fill(w, &rows[index], password, false, "password").await?;
+        fill(w, &rows[index], password, "password").await?;
         filled.push("password");
         if submit {
-            match submit_button(&rows, LOGIN_VERBS) {
-                Some(button) => tap_row(w, &rows[button]).await?,
-                None => w
-                    .named_key("return")
-                    .await
-                    .map_err(|_| phone_error("submit"))?,
-            }
+            let before = match press(w, LOGIN_VERBS).await? {
+                Some(before) => before,
+                None => {
+                    // No button: Return submits most forms.
+                    w.named_key("return")
+                        .await
+                        .map_err(|_| phone_error("submit"))?;
+                    rows.clone()
+                }
+            };
             submitted = true;
-            rows = next_screen(w, &rows, Duration::from_secs(8)).await;
+            rows = next_screen(w, &before, Duration::from_secs(8)).await;
         }
     }
     if filled.is_empty() {
@@ -993,11 +1104,10 @@ pub async fn sign_in(
             if credentials.has_totp {
                 let code = vault.totp(&entry.id).await?;
                 if let Some(index) = after.code {
-                    fill(w, &rows[index], &code, false, "verification code").await?;
+                    fill(w, &rows[index], &code, "verification code").await?;
                     filled.push("one_time_code");
-                    if let Some(button) = submit_button(&rows, VERIFY_VERBS) {
-                        tap_row(w, &rows[button]).await?;
-                        rows = next_screen(w, &rows, Duration::from_secs(8)).await;
+                    if let Some(before) = press(w, VERIFY_VERBS).await? {
+                        rows = next_screen(w, &before, Duration::from_secs(8)).await;
                     }
                 }
             } else {
@@ -1104,14 +1214,13 @@ pub async fn enter_code(w: &mut WdaClient, request: &CodeRequest) -> Result<Valu
             ));
         }
     };
-    fill(w, &rows[index], &code, false, "verification code").await?;
+    fill(w, &rows[index], &code, "verification code").await?;
     drop(code);
     let mut submitted = false;
     let mut after = rows.clone();
-    if let Some(button) = submit_button(&rows, VERIFY_VERBS) {
-        tap_row(w, &rows[button]).await?;
+    if let Some(before) = press(w, VERIFY_VERBS).await? {
         submitted = true;
-        after = next_screen(w, &rows, Duration::from_secs(8)).await;
+        after = next_screen(w, &before, Duration::from_secs(8)).await;
     }
     let still = read_form(&after).code.is_some();
     Ok(json!({
@@ -1438,6 +1547,28 @@ mod tests {
         assert_eq!(mail_code(mail, None).unwrap().expose(), "222222");
         assert_eq!(mail_code(mail, Some("shop")).unwrap().expose(), "111111");
         assert!(mail_code(br#"{"success":false,"error":"x"}"#, None).is_none());
+    }
+
+    #[test]
+    fn a_shifted_page_still_finds_its_field_but_never_guesses() {
+        let email = [20.0, 200.0, 350.0, 44.0];
+        let search = [20.0, 60.0, 350.0, 44.0];
+        let address = [10.0, 780.0, 370.0, 50.0];
+        assert_eq!(pick_frame(&[search, email, address], email), Ok(1));
+        // Safari's toolbar settled and the form moved up 30 pt.
+        let moved = [20.0, 170.0, 350.0, 44.0];
+        assert_eq!(pick_frame(&[search, moved, address], email), Ok(1));
+        // Two same-size fields within reach: no guess.
+        let below = [20.0, 230.0, 350.0, 44.0];
+        assert_eq!(
+            pick_frame(&[moved, below], email),
+            Err(FrameMatch::Ambiguous)
+        );
+        assert_eq!(pick_frame(&[address], email), Err(FrameMatch::Missing));
+        assert_eq!(
+            pick_frame(&[email, email], email),
+            Err(FrameMatch::Ambiguous)
+        );
     }
 
     #[test]

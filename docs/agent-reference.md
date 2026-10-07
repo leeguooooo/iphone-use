@@ -318,6 +318,7 @@ always read `••••••••`.
 | `vault_locked` | Ask the user to unlock the vault on the Mac (`bwu unlock`). |
 | `not_a_login_form` | Two password fields: sign-up or a password change. Not done automatically. |
 | `value_not_applied` | The account field rejected the typed text (a composing keyboard): ask the user to switch the phone's keyboard to English. |
+| `value_landed_elsewhere` | Typing went into another field; that field was cleared at once. Finish this login by hand with the user. |
 
 Existing-account login only: never sign-up, password changes or payment, and a
 push approval on another device needs the user.
