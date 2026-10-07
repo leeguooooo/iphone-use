@@ -155,6 +155,10 @@ pub struct ProgressTracker {
     streak: Option<(u64, u32)>,
     epoch: u64,
     last_ms: u64,
+    /// Observed actions started and not yet finished or abandoned.
+    in_flight: u32,
+    /// Two actions overlapped: nothing counts until all of them are done.
+    overlapped: bool,
 }
 
 /// Everything an action's result is judged against, fixed when it started.
@@ -173,13 +177,26 @@ impl ProgressTracker {
         self.streak = None;
     }
 
+    /// An action that started but will never be judged (a cancelled call):
+    /// it leaves the tracker reset.
+    pub fn abandon(&mut self) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        if self.in_flight == 0 {
+            self.overlapped = false;
+        }
+        self.reset();
+    }
+
     /// A full screen read. Anything but a usable, non-sparse tree with a
     /// valid snapshot resets the tracker.
     pub fn note_screen(&mut self, json: Option<&Value>) {
         let usable = json.and_then(|json| {
             let rows = json.get("elements")?.as_array()?;
             let snapshot = json.get("snapshot")?.as_str()?;
-            (valid_snapshot(snapshot) && !sparse(json, rows)).then(|| snapshot.to_string())
+            // A spinner on screen means the page may still be loading even
+            // when the tree is stable, so it is not a screen to judge on.
+            (valid_snapshot(snapshot) && !sparse(json, rows) && !rows.iter().any(is_spinner))
+                .then(|| snapshot.to_string())
         });
         match usable {
             Some(snapshot) => {
@@ -196,6 +213,12 @@ impl ProgressTracker {
     /// Start an observed action: capture the screen and the action's key
     /// now, and void any ticket still outstanding (overlapping calls).
     pub fn begin(&mut self, action: &Action) -> Ticket {
+        self.in_flight += 1;
+        if self.in_flight > 1 {
+            // Overlapping actions: neither completion can count.
+            self.overlapped = true;
+            self.streak = None;
+        }
         self.epoch += 1;
         let screen = self.screen.clone();
         let key = screen.as_deref().and_then(|screen| {
@@ -239,6 +262,14 @@ impl ProgressTracker {
     /// advisory, or `None`. A ticket from before a reset or an overlapping
     /// call changes nothing.
     pub fn finish(&mut self, ticket: &Ticket, json: Option<&Value>, now_ms: u64) -> Option<String> {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        if self.overlapped {
+            if self.in_flight == 0 {
+                self.overlapped = false;
+            }
+            self.reset();
+            return None;
+        }
         if ticket.epoch != self.epoch {
             return None;
         }
@@ -276,11 +307,30 @@ impl ProgressTracker {
     }
 }
 
+/// A loading indicator row (`ActivityIndicator` / `ProgressIndicator`), in
+/// either the flat row shape or a delta entry's `element`.
+fn is_spinner(row: &Value) -> bool {
+    let row = row.get("element").unwrap_or(row);
+    matches!(
+        row.get("kind").and_then(Value::as_str),
+        Some("ActivityIndicator" | "ProgressIndicator")
+    )
+}
+
 /// True only for a settled answer whose baseline is `screen`, whose snapshot
 /// is still `screen`, whose delta lists are all present and empty, with no
 /// app switch and no delta error.
 fn unchanged_on(json: &Value, screen: &str) -> bool {
     let str_of = |key: &str| json.get(key).and_then(Value::as_str);
+    let spinner_in = |key: &str| {
+        json.get("delta")
+            .and_then(|d| d.get(key))
+            .and_then(Value::as_array)
+            .is_some_and(|rows| rows.iter().any(is_spinner))
+    };
+    if spinner_in("added") || spinner_in("changed") {
+        return false;
+    }
     let empty = |key: &str| {
         json.get("delta")
             .and_then(|d| d.get(key))
@@ -330,7 +380,7 @@ impl Drop for ProgressGuard {
     fn drop(&mut self) {
         if self.ticket.take().is_some() {
             if let Ok(mut tracker) = self.tracker.lock() {
-                tracker.reset();
+                tracker.abandon();
             }
         }
     }
@@ -581,14 +631,45 @@ mod tests {
         act(&mut t, Action::TapLabel("通用"), answer(H, H, None), 1_000);
         let older = t.begin(&Action::TapLabel("通用"));
         let newer = t.begin(&Action::TapLabel("通用"));
-        // The older call answers after the newer one began: ignored.
-        assert!(t.finish(&older, Some(&answer(H, H, None)), 1_100).is_none());
-        assert!(t.finish(&newer, Some(&answer(H, H, None)), 1_200).is_some());
+        // Overlapping calls: neither completion counts, in either order,
+        // even though one unchanged answer was already on the streak.
+        assert!(t
+            .finish(&older, Some(&json!({"ok": false})), 1_100)
+            .is_none());
+        assert!(t.finish(&newer, Some(&answer(H, H, None)), 1_200).is_none());
+        assert!(t.streak.is_none() && t.screen.is_none());
+        // Once both are done, a fresh read and two clean answers count again.
+        t.note_screen(Some(&screen(H, &["通用", "蓝牙", "无障碍"])));
+        act(&mut t, Action::TapLabel("通用"), answer(H, H, None), 1_250);
+        assert!(act(&mut t, Action::TapLabel("通用"), answer(H, H, None), 1_260).is_some());
         // After a reset an old ticket cannot revive the streak.
         let old = t.begin(&Action::TapLabel("通用"));
         t.reset();
         assert!(t.finish(&old, Some(&answer(H, H, None)), 1_300).is_none());
         assert!(t.streak.is_none() && t.screen.is_none());
+    }
+
+    #[test]
+    fn loading_screens_never_warn() {
+        // A stable tree that still shows a spinner is not a screen to judge.
+        let mut t = ProgressTracker::default();
+        let mut loading = screen(H, &["通用", "蓝牙", "无障碍"]);
+        loading["elements"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"kind": "ActivityIndicator", "label": ""}));
+        t.note_screen(Some(&loading));
+        act(&mut t, Action::TapLabel("通用"), answer(H, H, None), 1_000);
+        assert!(act(&mut t, Action::TapLabel("通用"), answer(H, H, None), 1_100).is_none());
+
+        // A spinner appearing in the delta invalidates the streak.
+        let mut t = settings();
+        act(&mut t, Action::TapLabel("通用"), answer(H, H, None), 1_000);
+        let mut spinning = answer(H, H, None);
+        spinning["delta"]["added"] =
+            json!([{"index": 3, "element": {"kind": "ProgressIndicator", "label": ""}}]);
+        assert!(act(&mut t, Action::TapLabel("通用"), spinning, 1_100).is_none());
+        assert!(act(&mut t, Action::TapLabel("通用"), answer(H, H, None), 1_200).is_none());
     }
 
     #[test]
