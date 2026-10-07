@@ -45,6 +45,8 @@ iphone-use login     # 重新登录浏览器，附手机扫码用的二维码
 iphone-use upgrade   # 升级全部组件
 ```
 
+[产品指南：安装、MCP 接入、流程和选型](https://blog.leeguoo.com/zh/posts/iphone-use/)
+
 ## 它是什么
 
 没有 API 的 App 也能用，包括禁止截屏的银行、支付类 App。Mac 上的守护进程在 iPhone 上运行自己的设备 runner（基于 XCTest，取代了 WebDriverAgent，接口兼容），对外提供：
