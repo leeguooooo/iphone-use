@@ -94,6 +94,8 @@ $MCP flow run health/export-all-zh-cn       # 重放一个；失败时会说卡�
 $MCP flow draft --out my-task.json          # 把刚才在手机上做的事导出成 flow 草稿
 ```
 
+flow 还能组成可重跑的测试套件（`$MCP test suite.yaml`，退出码可直接接 CI），也能交给 daemon 按 cron 定时运行（`$MCP schedule add`）：见[测试与定时任务](docs/testing.zh-CN.md)。
+
 ## 自研 device runner
 
 iphone-use 用自己的 XCTest runner（[`runner/`](runner/README.md)）操作手机。它从 v0.14.0

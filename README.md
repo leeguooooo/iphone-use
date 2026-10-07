@@ -112,6 +112,10 @@ $MCP flow run health/export-all-zh-cn       # replay one; failures say which ste
 $MCP flow draft --out my-task.json          # what you just did on the phone, as a draft flow
 ```
 
+Flows also make rerunnable test suites (`$MCP test suite.yaml`, exit code ready for CI) and
+scheduled runs the daemon starts on a cron line (`$MCP schedule add`): see
+[Testing and scheduled runs](docs/testing.md).
+
 ## The device runner
 
 iphone-use drives the phone through its own XCTest runner ([`runner/`](runner/README.md)).

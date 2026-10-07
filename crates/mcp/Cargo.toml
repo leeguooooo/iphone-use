@@ -45,6 +45,9 @@ hex = "0.4"
 # `flow publish` clones the registry into a scratch directory
 tempfile = "3"
 
+# `test` suites are usually written in YAML (JSON works too)
+serde_yaml = "0.9"
+
 # Structured errors
 anyhow = "1"
 thiserror = "2"

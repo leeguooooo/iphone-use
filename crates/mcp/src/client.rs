@@ -434,6 +434,29 @@ impl DaemonClient {
         read_response(req.send().await?).await
     }
 
+    /// Any JSON call on the agent API, keeping the daemon's answer. A
+    /// non-GET carries the control and owner headers like every mutation.
+    pub async fn request_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> anyhow::Result<DaemonResponse> {
+        let mutation = method != reqwest::Method::GET;
+        let mut req = self.auth(self.client.request(method, self.url(path)));
+        if mutation {
+            req = req
+                .header("x-phone-control", "1")
+                .header("x-phone-owner", &self.owner);
+        }
+        if let Some(body) = body {
+            req = req
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body.to_string());
+        }
+        read_response(req.send().await?).await
+    }
+
     /// `GET /agent/flow/draft` — the daemon's recorded action trail as a flow
     /// v1 draft (404 `no_trail` when there is nothing to draft).
     pub async fn flow_draft(&self) -> anyhow::Result<DaemonResponse> {

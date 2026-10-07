@@ -863,6 +863,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/owner", post(agent_owner))
         .route("/agent/login-link", post(agent_login_link))
         .route("/agent/capabilities", get(agent_capabilities))
+        // Scheduled flows and test suites (see `schedules`).
+        .route("/schedules", get(crate::schedules::page))
+        .route(
+            "/agent/schedules",
+            get(crate::schedules::list).post(crate::schedules::create),
+        )
+        .route("/agent/schedules/runs", get(crate::schedules::all_runs))
+        .route(
+            "/agent/schedules/:id",
+            axum::routing::delete(crate::schedules::remove).patch(crate::schedules::update),
+        )
+        .route("/agent/schedules/:id/runs", get(crate::schedules::runs))
+        .route("/agent/schedules/:id/run", post(crate::schedules::run_now))
         // Per-request WDA timing on every /agent/* answer (see `timing`).
         .layer(axum::middleware::from_fn(crate::timing::layer))
         .with_state(state)
@@ -1011,6 +1024,7 @@ button{background:#4f8cff;border:1px solid #4f8cff;color:#fff;border-radius:12px
 fn login_destination(next: Option<&str>) -> &'static str {
     match next {
         Some("/setup") => "/setup",
+        Some("/schedules") => "/schedules",
         _ => "/phone",
     }
 }
@@ -1018,6 +1032,7 @@ fn login_destination(next: Option<&str>) -> &'static str {
 fn render_login(error: &str, next: Option<&str>) -> String {
     let next_input = match login_destination(next) {
         "/setup" => r#"<input type="hidden" name="next" value="/setup">"#,
+        "/schedules" => r#"<input type="hidden" name="next" value="/schedules">"#,
         _ => "",
     };
     LOGIN_HTML
@@ -1597,6 +1612,37 @@ fn has_phone_control_header(headers: &HeaderMap) -> bool {
         .get("x-phone-control")
         .and_then(|value| value.to_str().ok())
         == Some("1")
+}
+
+/// Auth for routes that live in other modules (`schedules`): a signed-in
+/// browser or a bearer agent, and `X-Phone-Control: 1` on a mutation.
+pub(crate) fn authorize_extension(
+    state: &AppState,
+    headers: &HeaderMap,
+    mutation: bool,
+) -> Result<(), Response> {
+    match browser_or_agent_auth(state, headers) {
+        AgentAuth::Locked => {
+            return Err(with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            ))
+        }
+        AgentAuth::Denied => {
+            return Err(with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            ))
+        }
+        AgentAuth::Ok => {}
+    }
+    if mutation && !has_phone_control_header(headers) {
+        return Err(missing_phone_control_header_response());
+    }
+    Ok(())
+}
+
+/// [`with_security_headers`] for routes that live in other modules.
+pub(crate) fn secured(response: Response) -> Response {
+    with_security_headers(response)
 }
 
 fn missing_phone_control_header_response() -> Response {

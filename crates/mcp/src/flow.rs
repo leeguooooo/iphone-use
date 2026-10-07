@@ -370,6 +370,31 @@ fn materialize_steps(
     definitions: &BTreeMap<String, FlowInputDefinition>,
     values: Option<&BTreeMap<String, String>>,
 ) -> Result<Vec<PhoneStep>> {
+    materialize(templates, definitions, values)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, step)| {
+            serde_json::from_value::<PhoneStep>(step)
+                .with_context(|| format!("validate steps[{index}]"))
+        })
+        .collect()
+}
+
+/// A flow's steps as JSON with `values` substituted for its inputs — what a
+/// test suite's `{kind: flow}` step expands to.
+pub fn materialize_step_values(
+    templates: &[serde_json::Value],
+    definitions: &BTreeMap<String, FlowInputDefinition>,
+    values: &BTreeMap<String, String>,
+) -> Result<Vec<serde_json::Value>> {
+    materialize(templates, definitions, Some(values))
+}
+
+fn materialize(
+    templates: &[serde_json::Value],
+    definitions: &BTreeMap<String, FlowInputDefinition>,
+    values: Option<&BTreeMap<String, String>>,
+) -> Result<Vec<serde_json::Value>> {
     let mut referenced = BTreeSet::new();
     let mut steps = Vec::with_capacity(templates.len());
     for (index, template) in templates.iter().enumerate() {
@@ -392,9 +417,7 @@ fn materialize_steps(
             object.remove("input");
             object.insert("text".to_string(), serde_json::Value::String(value));
         }
-        let step = serde_json::from_value::<PhoneStep>(materialized)
-            .with_context(|| format!("validate steps[{index}]"))?;
-        steps.push(step);
+        steps.push(materialized);
     }
     let unused = definitions
         .keys()

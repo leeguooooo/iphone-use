@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>定时任务 · iphone-use</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #08090c;
+      --panel: #11131a;
+      --panel-2: #171a24;
+      --fg: #eef2ff;
+      --muted: #9199ad;
+      --border: #292e3d;
+      --accent: #4f8cff;
+      --ok: #57d68d;
+      --warn: #f6c85f;
+      --danger: #ff6570;
+      --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html { min-height: 100%; background: var(--bg); }
+    body {
+      min-height: 100vh; margin: 0; color: var(--fg); background:
+        radial-gradient(circle at 50% -20%, rgba(79,140,255,.15), transparent 42%), var(--bg);
+      font-family: var(--sans); line-height: 1.55;
+    }
+    .shell { width: min(100% - 32px, 880px); margin: 0 auto; padding: 24px 0 40px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    .brand { font-size: 13px; font-weight: 750; letter-spacing: .05em; }
+    .back {
+      min-height: 40px; display: inline-flex; align-items: center; padding: 7px 12px;
+      border: 1px solid var(--border); border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 13px;
+    }
+    section {
+      border: 1px solid var(--border); border-radius: 16px; background: rgba(17,19,26,.96);
+      padding: 20px; margin-bottom: 18px;
+    }
+    h1 { margin: 0 0 4px; font-size: 26px; }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .empty { color: var(--muted); font-size: 14px; padding: 12px 0; }
+    .row {
+      display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; align-items: center;
+      padding: 12px 0; border-top: 1px solid var(--border);
+    }
+    .row:first-child { border-top: 0; }
+    .title { font-weight: 650; overflow-wrap: anywhere; }
+    .meta { color: var(--muted); font: 12px/1.5 var(--mono); overflow-wrap: anywhere; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    button {
+      min-height: 36px; padding: 6px 12px; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--panel-2); color: var(--fg); font: 600 13px var(--sans); cursor: pointer;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.danger { color: var(--danger); }
+    .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font: 600 11px/1.6 var(--mono); border: 1px solid var(--border); }
+    .passed { color: var(--ok); border-color: rgba(87,214,141,.4); }
+    .failed, .missed { color: var(--danger); border-color: rgba(255,101,112,.4); }
+    .running, .pending { color: var(--accent); border-color: rgba(79,140,255,.4); }
+    .postponed, .waiting_unlock, .skipped { color: var(--warn); border-color: rgba(246,200,95,.4); }
+    form { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+    label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; }
+    label.wide { grid-column: 1 / -1; }
+    label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 500; }
+    input, select {
+      background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 9px 11px; font: 14px var(--sans);
+    }
+    .hint { color: var(--muted); font-size: 12px; font-weight: 400; }
+    .err { color: var(--danger); font-size: 13px; min-height: 1em; grid-column: 1 / -1; }
+    @media (max-width: 600px) { form { grid-template-columns: 1fr; } .row { grid-template-columns: 1fr; } .actions { justify-content: flex-start; } }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="topbar">
+    <span class="brand">IPHONE-USE</span>
+    <a class="back" href="/phone">← 返回手机</a>
+  </div>
+
+  <section>
+    <h1>定时任务</h1>
+    <p class="muted">按时自动运行 flow 或测试套件。手机被别的会话占用、有人在看画面时会推迟；锁屏时等解锁后再跑；超过时间窗口仍没跑上记为“错过”。失败和错过会弹出系统通知。</p>
+  </section>
+
+  <section>
+    <h2>任务</h2>
+    <div id="schedules"><div class="empty">加载中…</div></div>
+  </section>
+
+  <section>
+    <h2>最近运行</h2>
+    <div id="runs"><div class="empty">加载中…</div></div>
+  </section>
+
+  <section>
+    <h2>新建任务</h2>
+    <form id="create">
+      <label>类型
+        <select name="kind"><option value="flow">flow</option><option value="test">测试套件</option></select>
+      </label>
+      <label>时间（cron，本地时间）
+        <input name="cron" placeholder="0 9 * * 1-5" required>
+        <span class="hint">分 时 日 月 周；如 <code>0 9 * * 1-5</code> 为工作日 9:00</span>
+      </label>
+      <label class="wide">目标
+        <input name="target" placeholder="health/export-all 或 /Users/me/suites/smoke.yaml" required>
+        <span class="hint">flow 填 registry id 或绝对路径；测试套件填绝对路径</span>
+      </label>
+      <label>名称（可选）<input name="name" maxlength="100"></label>
+      <label>时间窗口（分钟）<input name="window_mins" type="number" min="1" max="1440" value="60"></label>
+      <label class="check wide"><input type="checkbox" name="confirm_side_effects"> 这个任务会发送、发布、付款或删除，我确认允许它定时执行</label>
+      <div class="err" id="createErr"></div>
+      <div><button class="primary" type="submit">创建</button></div>
+    </form>
+  </section>
+</div>
+<script>
+const STATE_LABEL = {
+  pending: '排队中', postponed: '已推迟', waiting_unlock: '等待解锁', running: '运行中',
+  passed: '通过', failed: '失败', missed: '错过', skipped: '跳过'
+};
+const fmt = (unix) => unix ? new Date(unix * 1000).toLocaleString() : '—';
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+async function api(method, path, body) {
+  const init = { method, credentials: 'same-origin', headers: {} };
+  if (method !== 'GET') init.headers['X-Phone-Control'] = '1';
+  if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
+  const res = await fetch(path, init);
+  if (res.status === 401) { location.href = '/login?next=%2Fschedules'; throw new Error('unauthorized'); }
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.message || json.error || ('HTTP ' + res.status));
+  return json;
+}
+function pill(state) { return el('span', 'pill ' + state, STATE_LABEL[state] || state); }
+let names = {};
+async function load() {
+  try {
+    const data = await api('GET', '/agent/schedules');
+    const box = document.getElementById('schedules');
+    box.replaceChildren();
+    names = {};
+    if (!data.mcp_available) box.append(el('div', 'empty', '没有找到 iphone-use-mcp，任务无法运行；请重新安装。'));
+    if (!data.schedules.length) box.append(el('div', 'empty', '还没有任务。用下面的表单创建一个，或运行 iphone-use-mcp schedule add。'));
+    for (const s of data.schedules) {
+      names[s.id] = s.name || s.target;
+      const row = el('div', 'row');
+      const info = el('div');
+      info.append(el('div', 'title', (s.name || s.target) + (s.enabled ? '' : '（已暂停）')));
+      info.append(el('div', 'meta', `${s.kind} · ${s.target} · cron "${s.cron}" · 下次 ${fmt(s.next_run_at)}`));
+      if (s.last_run) {
+        const last = el('div', 'meta');
+        last.append(pill(s.last_run.state), document.createTextNode(' ' + fmt(s.last_run.scheduled_for) + ' ' + (s.last_run.summary || s.last_run.error || s.last_run.reason || '')));
+        info.append(last);
+      }
+      const actions = el('div', 'actions');
+      const run = el('button', '', '立即运行');
+      run.onclick = () => act(() => api('POST', `/agent/schedules/${s.id}/run`));
+      const toggle = el('button', '', s.enabled ? '暂停' : '恢复');
+      toggle.onclick = () => act(() => api('PATCH', `/agent/schedules/${s.id}`, { enabled: !s.enabled }));
+      const del = el('button', 'danger', '删除');
+      del.onclick = () => { if (confirm('删除这个任务和它的运行记录？')) act(() => api('DELETE', `/agent/schedules/${s.id}`)); };
+      actions.append(run, toggle, del);
+      row.append(info, actions);
+      box.append(row);
+    }
+    const runs = await api('GET', '/agent/schedules/runs');
+    const list = document.getElementById('runs');
+    list.replaceChildren();
+    if (!runs.runs.length) list.append(el('div', 'empty', '还没有运行记录。'));
+    for (const r of runs.runs.slice(0, 30)) {
+      const row = el('div', 'row');
+      const info = el('div');
+      const head = el('div', 'title');
+      head.append(pill(r.state), document.createTextNode(' ' + (names[r.schedule_id] || r.schedule_id) + (r.manual ? '（手动）' : '')));
+      info.append(head);
+      const bits = [`计划 ${fmt(r.scheduled_for)}`];
+      if (r.duration_ms != null) bits.push(`耗时 ${(r.duration_ms / 1000).toFixed(1)}s`);
+      info.append(el('div', 'meta', bits.join(' · ')));
+      const detail = r.summary || r.error || r.reason;
+      if (detail) info.append(el('div', 'meta', detail));
+      if (r.artifacts) info.append(el('div', 'meta', '证据：' + r.artifacts));
+      row.append(info, el('div'));
+      list.append(row);
+    }
+  } catch (e) {
+    if (e.message !== 'unauthorized') document.getElementById('schedules').replaceChildren(el('div', 'empty', '加载失败：' + e.message));
+  }
+}
+async function act(fn) { try { await fn(); } catch (e) { alert(e.message); } load(); }
+document.getElementById('create').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const f = event.target;
+  const body = {
+    kind: f.kind.value, cron: f.cron.value.trim(), target: f.target.value.trim(),
+    confirm_side_effects: f.confirm_side_effects.checked,
+    window_mins: Number(f.window_mins.value) || 60,
+  };
+  if (f.name.value.trim()) body.name = f.name.value.trim();
+  const err = document.getElementById('createErr');
+  err.textContent = '';
+  try { await api('POST', '/agent/schedules', body); f.reset(); load(); }
+  catch (e) { err.textContent = e.message; }
+});
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>

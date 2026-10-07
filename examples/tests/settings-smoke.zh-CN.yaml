@@ -1,0 +1,43 @@
+# Settings smoke test for an iPhone whose UI language is 简体中文.
+# Read-only navigation: it opens Settings, walks into 通用 › 关于本机 and back.
+#
+#   iphone-use-mcp test examples/tests/settings-smoke.zh-CN.yaml
+#
+# English UI: examples/tests/settings-smoke.en.yaml
+suite: 设置冒烟测试
+app: com.apple.Preferences
+risk: navigation
+setup:
+  # Settings reopens where it was left: go back to its root, then to the top.
+  - {kind: back, after_ms: 300}
+  - {kind: back, after_ms: 300}
+  - {kind: scroll, x: 0.5, y: 0.5, dx: 0, dy: -300}
+  - {kind: scroll, x: 0.5, y: 0.5, dx: 0, dy: -300}
+cases:
+  - name: 首页列出通用
+    assert:
+      - application: 设置
+        present: [{label: 通用, kind: Button}]
+
+  - name: 打开通用
+    steps:
+      # On a small phone the row sits under the floating search bar; scroll it clear.
+      - {kind: scroll, x: 0.5, y: 0.5, dx: 0, dy: 200, after_ms: 2500}
+      - {kind: tap_locator, locator: {label: 通用, kind: Button}}
+    assert:
+      - present: 关于本机
+        timeout_ms: 8000
+
+  - name: 打开关于本机
+    steps:
+      - {kind: tap_locator, locator: {label: 关于本机, kind: Button}}
+    assert:
+      - present: 名称
+
+  - name: 返回首页
+    steps:
+      - {kind: back, after_ms: 400}
+      - {kind: back, after_ms: 400}
+    assert:
+      - present: [{label: 无障碍, kind: Button}]
+        absent: 关于本机

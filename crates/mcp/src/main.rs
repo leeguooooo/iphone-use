@@ -26,7 +26,9 @@ mod flow;
 mod jev;
 mod outputs;
 mod registry;
+mod schedule;
 mod server;
+mod suite;
 mod types;
 
 #[derive(Debug, Parser)]
@@ -52,6 +54,37 @@ enum Command {
         #[command(subcommand)]
         command: FlowCommand,
     },
+    /// Run a test suite (YAML or JSON): setup, then cases of steps and
+    /// assertions. Exit 0 all passed, 1 a case failed, 2 the suite is
+    /// invalid or the phone cannot be driven. See docs/testing.md.
+    Test {
+        /// Suite file (`.yaml`, `.yml` or `.json`).
+        suite: String,
+        /// Print the full report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Also write a JUnit XML report here.
+        #[arg(long, value_name = "FILE")]
+        junit: Option<PathBuf>,
+        /// Required for suites that send, publish, pay or delete.
+        #[arg(long)]
+        confirm: bool,
+        /// Where failed cases leave their evidence
+        /// (default ./iphone-use-test-artifacts).
+        #[arg(long = "artifacts-dir", value_name = "DIR")]
+        artifacts_dir: Option<PathBuf>,
+        /// Phone owner name for this run (X-Phone-Owner).
+        #[arg(long)]
+        owner: Option<String>,
+        /// Only parse and validate; never contacts the daemon.
+        #[arg(long)]
+        validate: bool,
+    },
+    /// Scheduled flows and test suites, run by the daemon.
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommand,
+    },
     /// Fast phone agent: TypeSafe's Jev picks each step from the screen's
     /// element table (needs TYPESAFE_API_KEY or ~/.config/typesafe/key; text
     /// fields also TEXT_MODEL_API_KEY or ~/.config/openrouter/key).
@@ -59,6 +92,55 @@ enum Command {
         #[command(subcommand)]
         command: JevCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScheduleCommand {
+    /// Schedule a flow or a suite on a 5-field cron line (local time).
+    Add {
+        /// e.g. "0 9 * * 1-5" (weekdays 9:00), "*/30 * * * *", "@daily".
+        #[arg(long)]
+        cron: String,
+        /// Registry id or flow file to run.
+        #[arg(long, conflicts_with = "test")]
+        flow: Option<String>,
+        /// Test suite file to run.
+        #[arg(long)]
+        test: Option<String>,
+        /// Flow input in KEY=VALUE form (stored with the schedule).
+        #[arg(long = "input", value_name = "KEY=VALUE")]
+        inputs: Vec<String>,
+        /// Allow a job that sends, publishes, pays or deletes to run unattended.
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long)]
+        name: Option<String>,
+        /// POST a JSON event here when a run fails or is missed.
+        #[arg(long)]
+        webhook: Option<String>,
+        /// Minutes after the scheduled time a run may still start (default 60).
+        #[arg(long)]
+        window_mins: Option<u32>,
+    },
+    /// List schedules with their next and last run.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show recent runs (of one schedule, or all).
+    Runs {
+        id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Queue a run now.
+    Run { id: String },
+    /// Pause a schedule.
+    Disable { id: String },
+    /// Resume a paused schedule.
+    Enable { id: String },
+    /// Delete a schedule and its run history.
+    Rm { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -230,6 +312,41 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("jev stopped with status {}", report["status"]);
         }
         return Ok(());
+    }
+    if let Some(Command::Test { suite, json, junit, confirm, artifacts_dir, owner, validate }) = &cli.command {
+        if let Some(owner) = owner {
+            std::env::set_var("PHONE_REMOTE_OWNER", owner);
+        }
+        let code = suite::test_command(
+            suite,
+            suite::TestOptions {
+                json: *json,
+                junit: junit.clone(),
+                confirm: *confirm,
+                artifacts_dir: artifacts_dir.clone(),
+                validate_only: *validate,
+            },
+        )
+        .await;
+        std::process::exit(code);
+    }
+    if let Some(Command::Schedule { command }) = cli.command {
+        let daemon = client::DaemonClient::from_env();
+        return match command {
+            ScheduleCommand::Add { cron, flow, test, inputs, confirm, name, webhook, window_mins } => {
+                schedule::add(
+                    &daemon,
+                    schedule::AddOptions { cron, flow, test, inputs, confirm, name, webhook, window_mins },
+                )
+                .await
+            }
+            ScheduleCommand::List { json } => schedule::list(&daemon, json).await,
+            ScheduleCommand::Runs { id, json } => schedule::runs(&daemon, id.as_deref(), json).await,
+            ScheduleCommand::Run { id } => schedule::run_now(&daemon, &id).await,
+            ScheduleCommand::Disable { id } => schedule::set_enabled(&daemon, &id, false).await,
+            ScheduleCommand::Enable { id } => schedule::set_enabled(&daemon, &id, true).await,
+            ScheduleCommand::Rm { id } => schedule::remove(&daemon, &id).await,
+        };
     }
     if let Some(Command::Flow { command }) = cli.command {
         return match command {

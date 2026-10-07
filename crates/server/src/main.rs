@@ -815,6 +815,15 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
         // second implementation of fetching and verification.
         spawn_flow_registry_refresh();
 
+        // Scheduled flows and test suites. The scheduler drives the phone
+        // through this daemon's own API, as an agent would.
+        server::schedules::start(
+            &cfg.host,
+            cfg.port,
+            cfg.agent_token.clone().or_else(|| cfg.password.clone()),
+            &server::instance::current().state_dir,
+        );
+
         // Idle auto-release owns only the local supervisor. Remote WDA
         // endpoints are externally managed and must never trigger local
         // launchctl/setup commands.

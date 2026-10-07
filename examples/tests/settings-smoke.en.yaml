@@ -1,0 +1,43 @@
+# Settings smoke test for an iPhone whose UI language is English.
+# Read-only navigation: it opens Settings, walks into General › About and back.
+#
+#   iphone-use-mcp test examples/tests/settings-smoke.en.yaml
+#
+# 简体中文 UI: examples/tests/settings-smoke.zh-CN.yaml
+suite: Settings smoke
+app: com.apple.Preferences
+risk: navigation
+setup:
+  # Settings reopens where it was left: go back to its root, then to the top.
+  - {kind: back, after_ms: 300}
+  - {kind: back, after_ms: 300}
+  - {kind: scroll, x: 0.5, y: 0.5, dx: 0, dy: -300}
+  - {kind: scroll, x: 0.5, y: 0.5, dx: 0, dy: -300}
+cases:
+  - name: root lists General
+    assert:
+      - application: Settings
+        present: [{label: General, kind: Button}]
+
+  - name: open General
+    steps:
+      # On a small phone the row sits under the floating search bar; scroll it clear.
+      - {kind: scroll, x: 0.5, y: 0.5, dx: 0, dy: 200, after_ms: 2500}
+      - {kind: tap_locator, locator: {label: General, kind: Button}}
+    assert:
+      - present: About
+        timeout_ms: 8000
+
+  - name: open About
+    steps:
+      - {kind: tap_locator, locator: {label: About, kind: Button}}
+    assert:
+      - present: Name
+
+  - name: back to the root
+    steps:
+      - {kind: back, after_ms: 400}
+      - {kind: back, after_ms: 400}
+    assert:
+      - present: [{label: Accessibility, kind: Button}]
+        absent: About
