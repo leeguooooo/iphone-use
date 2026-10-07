@@ -1,13 +1,14 @@
 ---
 name: iphone-use
-description: Use when a task needs a real iPhone — operating iOS apps that have no API (Apple Health, banking, IM apps), exporting on-phone data, tapping/typing/scrolling on the phone, or taking phone screenshots. Replays saved per-app flows from the iphone-use-flows registry in one call and offers to save new ones after multi-step tasks. Drives the iphone-use daemon's Direct/WDA HTTP agent API (or its MCP server).
+description: Use when a task needs a real iPhone — operating iOS apps that have no API (Apple Health, banking, IM apps), exporting on-phone data, tapping/typing/scrolling on the phone, or taking phone screenshots. Replays saved per-app flows from the iphone-use-flows registry in one call and offers to save new ones after multi-step tasks. Drives the iphone-use daemon through its custom XCTest device runner, HTTP agent API or MCP server.
 ---
 
 # iphone-use — drive a real iPhone
 
 The [iphone-use](https://github.com/leeguooooo/iphone-use) daemon drives a
-physical iPhone through its XCTest device runner (WebDriverAgent-compatible; "WDA" in
-field names means it). It never touches the Mac's screen or
+physical iPhone through its own XCTest device runner. This runner replaced
+WebDriverAgent in v0.14.0; it does not use iPhone Mirroring. The HTTP interface
+is WebDriverAgent-compatible, and legacy "WDA" field names refer to this runner. It never touches the Mac's screen or
 cursor. Use the HTTP API below or the bundled MCP server (`phone_*` tools); the
 loop is the same. Details live in the reference: `curl -s -H "$AUTH"
 "$HOST/agent/reference"` serves the copy that matches the running daemon
