@@ -21,6 +21,8 @@ final class RunnerTests: XCTestCase {
   var server: RunnerHTTPServer?
   var mjpeg: RunnerMJPEGServer?
   var serveExpectation: XCTestExpectation?
+  /// Why the command listener stopped, when it failed rather than being shut down.
+  var listenFailure: Error?
   let busyLock = NSLock()
   var busySince: Date?
   /// Issues XCTest recorded while the current request ran (fallback XCUI paths report through here).
@@ -47,9 +49,17 @@ final class RunnerTests: XCTestCase {
   /// The runner must outlive any XCTest failure: a recorded issue would otherwise end the serving
   /// test case. Issues are logged and attached to the request that caused them.
   override func record(_ issue: XCTIssue) {
+    if serveEnded {
+      super.record(issue)
+      return
+    }
     NSLog("ipu-runner: xctest issue suppressed: %@", issue.compactDescription)
     recordedIssues.append(issue.compactDescription)
   }
+
+  /// Set once the serve loop is over: from then on a failure is the test's own verdict (a listener
+  /// that never came up), not a request's, and must reach xcodebuild.
+  var serveEnded = false
 
   func testServe() throws {
     let patched = IPURBridge.installQuiescenceBypass()
@@ -71,8 +81,11 @@ final class RunnerTests: XCTestCase {
         return self.handleOnMain(request)
       }
     )
-    server.onFailure = { [weak self] _ in
-      DispatchQueue.main.async { self?.serveExpectation?.fulfill() }
+    server.onFailure = { [weak self] error in
+      DispatchQueue.main.async {
+        self?.listenFailure = error
+        self?.serveExpectation?.fulfill()
+      }
     }
     self.server = server
     server.start()
@@ -96,6 +109,21 @@ final class RunnerTests: XCTestCase {
     NSLog("ipu-runner: serve loop ended (%@)", String(describing: result))
     server.stop()
     mjpeg?.stop()
+    // A runner that never served must not end as a passing test: xcodebuild would print
+    // "TEST EXECUTE SUCCEEDED" for a phone nobody can drive. The usual cause is another runner
+    // still holding the port on the phone.
+    if let failure = listenFailure {
+      let busy = (failure as? NWError).map { error -> Bool in
+        if case .posix(let code) = error { return code == .EADDRINUSE }
+        return false
+      } ?? false
+      let message = busy
+        ? "ipu-runner: port \(port) on the phone is already in use — another runner (or a previous one still exiting) holds it"
+        : "ipu-runner: could not listen on port \(port): \(failure)"
+      NSLog("%@", message)
+      serveEnded = true
+      XCTFail(message)
+    }
   }
 
   // MARK: - Dispatch

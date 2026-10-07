@@ -451,10 +451,25 @@ pub struct AppState {
 }
 
 /// The current phone owner: a client-chosen name and when it last acted.
+/// While that owner holds the phone (`POST /agent/hold`), `last_seen` sits in
+/// the future so the lease lasts as long as the hold: a long hold that only
+/// kept the phone from idle release used to let the lease lapse after five
+/// quiet minutes, and the next session took a phone its owner still held.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhoneOwner {
     pub name: String,
     pub last_seen: Instant,
+}
+
+/// Time left on a lease whose owner last acted at `last_seen` (which a hold
+/// may put in the future).
+fn lease_remaining(
+    last_seen: Instant,
+    now: Instant,
+    lease: std::time::Duration,
+) -> std::time::Duration {
+    lease.saturating_sub(now.saturating_duration_since(last_seen))
+        + last_seen.saturating_duration_since(now)
 }
 
 /// What a control request asked for, ownership-wise.
@@ -502,7 +517,9 @@ fn arbitrate_owner(
             Ok(())
         }
         (Some(current), OwnerClaim::Named(name)) if current.name == name => {
-            *slot = Some(PhoneOwner { name: current.name, last_seen: now });
+            // Never shorten a lease a hold extended.
+            let last_seen = current.last_seen.max(now);
+            *slot = Some(PhoneOwner { name: current.name, last_seen });
             Ok(())
         }
         (Some(_), OwnerClaim::Takeover(name)) => {
@@ -510,9 +527,7 @@ fn arbitrate_owner(
             Ok(())
         }
         (Some(current), _) => Err(OwnedByOther {
-            lease_remaining_secs: lease
-                .saturating_sub(now.saturating_duration_since(current.last_seen))
-                .as_secs(),
+            lease_remaining_secs: lease_remaining(current.last_seen, now, lease).as_secs(),
             owner: current.name,
         }),
     }
@@ -589,9 +604,7 @@ fn owner_status(state: &AppState) -> (Option<String>, u64) {
     match recover(state.owner.lock()).as_ref() {
         Some(owner) if now.saturating_duration_since(owner.last_seen) < lease => (
             Some(owner.name.clone()),
-            lease
-                .saturating_sub(now.saturating_duration_since(owner.last_seen))
-                .as_secs(),
+            lease_remaining(owner.last_seen, now, lease).as_secs(),
         ),
         _ => (None, 0),
     }
@@ -11070,6 +11083,24 @@ fn try_take_hold(
     true
 }
 
+/// The owner who takes a hold keeps the phone for as long as the hold lasts:
+/// its lease runs to the hold's end instead of five quiet minutes. Clearing
+/// the hold (`secs == 0`) gives it an ordinary lease from now. Only the
+/// current owner's own lease moves; `claim_phone_owner` already admitted it.
+fn hold_owner_lease(
+    slot: &mut Option<PhoneOwner>,
+    holder: &str,
+    now: Instant,
+    secs: u64,
+    lease: std::time::Duration,
+) {
+    let Some(owner) = slot.as_mut().filter(|owner| owner.name == holder) else {
+        return;
+    };
+    let hold = std::time::Duration::from_secs(secs);
+    owner.last_seen = if hold > lease { now + (hold - lease) } else { now };
+}
+
 async fn agent_hold(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -11108,6 +11139,10 @@ async fn agent_hold(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         );
     };
+    let holder = match owner_claim_from_headers(&headers) {
+        Ok(OwnerClaim::Named(name) | OwnerClaim::Takeover(name)) => Some(name.to_string()),
+        _ => None,
+    };
     if !try_take_hold(&state.wda_lifecycle, &state.hold_until, secs) {
         return with_security_headers(
             Response::builder()
@@ -11118,6 +11153,16 @@ async fn agent_hold(
                     r#"{"ok":false,"error":"device_release_in_progress","hint":"retry the hold after the release finishes"}"#,
                 ))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        );
+    }
+    if let Some(holder) = holder {
+        let mut owner = recover(state.owner.lock());
+        hold_owner_lease(
+            &mut owner,
+            &holder,
+            Instant::now(),
+            secs,
+            std::time::Duration::from_secs(state.owner_lease_secs),
         );
     }
     state.touch_activity();
@@ -13567,6 +13612,45 @@ mod tests {
         assert!(arbitrate_owner(&mut slot, OwnerClaim::Takeover("b"), t0 + std::time::Duration::from_secs(1), lease).is_ok());
         assert_eq!(slot.as_ref().map(|o| o.name.as_str()), Some("b"));
         assert!(arbitrate_owner(&mut slot, OwnerClaim::Named("a"), t0 + std::time::Duration::from_secs(2), lease).is_err());
+    }
+
+    // Found driving the iPhone 13 for the H.264 work: a 40-minute hold kept
+    // the phone from idle release, but the 5-minute owner lease lapsed under
+    // it, another session took the phone, and the holder could not even clear
+    // its own hold any more.
+    #[test]
+    fn a_hold_keeps_its_owners_lease_until_the_hold_ends() {
+        let lease = std::time::Duration::from_secs(300);
+        let secs = std::time::Duration::from_secs;
+        let t0 = Instant::now();
+        let mut slot = None;
+        assert!(arbitrate_owner(&mut slot, OwnerClaim::Named("holder"), t0, lease).is_ok());
+        hold_owner_lease(&mut slot, "holder", t0, 2400, lease);
+
+        // Quiet for half an hour: still the owner's phone, with the hold's
+        // time left reported.
+        let refused = arbitrate_owner(&mut slot, OwnerClaim::Named("other"), t0 + secs(1800), lease)
+            .unwrap_err();
+        assert_eq!(refused.owner, "holder");
+        assert_eq!(refused.lease_remaining_secs, 600);
+        // The holder's own request refreshes without shortening the lease.
+        assert!(arbitrate_owner(&mut slot, OwnerClaim::Named("holder"), t0 + secs(1800), lease).is_ok());
+        assert!(arbitrate_owner(&mut slot, OwnerClaim::Named("other"), t0 + secs(2390), lease).is_err());
+        // After the hold, the ordinary lease applies again.
+        assert!(arbitrate_owner(&mut slot, OwnerClaim::Named("other"), t0 + secs(2401), lease).is_ok());
+
+        // Clearing the hold gives an ordinary lease from that moment.
+        let mut slot = None;
+        assert!(arbitrate_owner(&mut slot, OwnerClaim::Named("holder"), t0, lease).is_ok());
+        hold_owner_lease(&mut slot, "holder", t0, 2400, lease);
+        hold_owner_lease(&mut slot, "holder", t0 + secs(60), 0, lease);
+        assert!(arbitrate_owner(&mut slot, OwnerClaim::Named("other"), t0 + secs(361), lease).is_ok());
+
+        // A hold never moves somebody else's lease.
+        let mut slot = None;
+        assert!(arbitrate_owner(&mut slot, OwnerClaim::Named("a"), t0, lease).is_ok());
+        hold_owner_lease(&mut slot, "b", t0, 2400, lease);
+        assert!(arbitrate_owner(&mut slot, OwnerClaim::Named("c"), t0 + secs(301), lease).is_ok());
     }
 
     #[test]
