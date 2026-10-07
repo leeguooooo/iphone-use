@@ -514,6 +514,28 @@ pub struct LoginParams {
     pub code_from: Option<String>,
 }
 
+/// Parameters for [`PhoneHandler::phone_run_start`].
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct RunStartParams {
+    /// A short id for this task: 1–64 of A-Z a-z 0-9 . _ : @ -
+    pub run_id: String,
+    /// Set only if you will pass the id of EVERY model turn of this task to
+    /// phone_run_end (including turns that made no tool call); only then are
+    /// model round trips reported.
+    #[serde(default)]
+    pub complete_trace: Option<bool>,
+}
+
+/// Parameters for [`PhoneHandler::phone_run_end`].
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct RunEndParams {
+    pub run_id: String,
+    /// Every model turn id of the task, when phone_run_start declared a
+    /// complete trace; `[]` for a task that used no model turns.
+    #[serde(default)]
+    pub turn_ids: Option<Vec<String>>,
+}
+
 /// Parameters for [`PhoneHandler::phone_hold`].
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct HoldParams {
@@ -548,7 +570,14 @@ impl PhoneHandler {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
-        if let Some(line) = guard.finish(result.structured_content.as_ref(), now_ms) {
+        let line = guard.finish(result.structured_content.as_ref(), now_ms);
+        // A daemon that judged the same answer already said so (its
+        // `no_progress` is rendered with the observation): say it once.
+        let daemon_said = result
+            .structured_content
+            .as_ref()
+            .is_some_and(|json| json.get("no_progress").is_some());
+        if let Some(line) = line.filter(|_| !daemon_said) {
             result.content.push(Content::text(line));
         }
         result
@@ -893,14 +922,24 @@ impl PhoneHandler {
         Requires phone_status drivable=true."
     )]
     async fn phone_elements(&self) -> CallToolResult {
-        match self.daemon.elements().await {
+        match self.daemon.elements_with_image().await {
             // The daemon adds `registry` on the first read in a newly
             // entered app; compat per flow is added here.
             Ok(json) => {
                 let body = with_flow_compat(&self.daemon, json).await;
                 // One line per row for the model; the JSON rides along as
                 // structured content for programs.
-                let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+                let mut parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+                // The daemon decided (image=auto): an image only when the tree
+                // is unusable, fresh and within the response budget. Lift it
+                // out once as image content; the text and the structured copy
+                // keep only its labels, never the base64.
+                let png = parsed
+                    .as_mut()
+                    .and_then(|json| json.get_mut("image"))
+                    .and_then(|image| image.as_object_mut())
+                    .and_then(|image| image.remove("png_base64"))
+                    .and_then(|b64| b64.as_str().map(str::to_string));
                 let text = parsed
                     .as_ref()
                     .and_then(crate::compact::elements)
@@ -909,25 +948,32 @@ impl PhoneHandler {
                     tracker.note_screen(parsed.as_ref());
                 }
                 let mut content = vec![Content::text(text)];
-                // Text first. An image only when the tree cannot be used at
-                // all (Mode A), so the model needs no second call to see it.
-                if let Some(json) = parsed.as_ref().filter(|json| crate::hints::needs_image(json)) {
-                    let snapshot = json.get("snapshot").and_then(serde_json::Value::as_str);
-                    let snapshot = snapshot.unwrap_or("?");
-                    match self.daemon.screenshot(Some(DEFAULT_SCREENSHOT_MAX_SIDE)).await {
-                        Ok(bytes) if !bytes.is_empty() => {
-                            content.push(Content::text(format!(
-                                "image: the tree has no interactive rows (ax_stats Mode A), so a \
-                                 screenshot is attached. It was captured right after snapshot \
-                                 {snapshot} — a separate capture, not the same instant."
-                            )));
-                            content.push(Content::image(B64.encode(&bytes), "image/png"));
-                        }
-                        _ => content.push(Content::text(format!(
-                            "image_unavailable: the tree has no interactive rows, but the \
-                             screenshot after snapshot {snapshot} failed; the text above is \
-                             still current."
-                        ))),
+                if let Some(json) = parsed.as_ref() {
+                    if let (Some(png), Some(image)) = (png, json.get("image")) {
+                        content.push(Content::text(format!(
+                            "image: the daemon's auto image policy attached a screenshot — \
+                             source {}, requested at {} and received at {} (ms), after this \
+                             snapshot was read, not the same instant{}.",
+                            image["source"].as_str().unwrap_or("?"),
+                            image["requested_at_ms"],
+                            image["received_at_ms"],
+                            if image["capture_redacted"] == serde_json::Value::Bool(true) {
+                                "; the app hides this screen, so it is a wireframe"
+                            } else {
+                                ""
+                            },
+                        )));
+                        content.push(Content::image(png, "image/png"));
+                    } else if json.get("image_omitted").is_some() {
+                        content.push(Content::text(
+                            "image_omitted: the screenshot would not fit the response budget; \
+                             the text above is complete.",
+                        ));
+                    } else if json.get("image_unavailable").is_some() {
+                        content.push(Content::text(
+                            "image_unavailable: the auto image policy requested a screenshot \
+                             but the capture failed; the text above is still usable.",
+                        ));
                     }
                 }
                 let mut result = CallToolResult::success(content);
@@ -1072,6 +1118,41 @@ impl PhoneHandler {
             Err(e) => {
                 CallToolResult::error(vec![Content::text(format!("reconnect failed: {e:#}"))])
             }
+        }
+    }
+
+    #[tool(
+        description = "Mark the start of one task for the daemon's task metrics: every \
+        later call of this session counts toward this run until phone_run_end. Optional \
+        — without it, runs are inferred from idle gaps. Set complete_trace only if you \
+        will hand every model turn id to phone_run_end."
+    )]
+    async fn phone_run_start(
+        &self,
+        Parameters(params): Parameters<RunStartParams>,
+    ) -> CallToolResult {
+        self.progress_reset();
+        match self
+            .daemon
+            .run_start(&params.run_id, params.complete_trace.unwrap_or(false))
+            .await
+        {
+            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
+            Err(e) => CallToolResult::error(vec![Content::text(format!("run start failed: {e:#}"))]),
+        }
+    }
+
+    #[tool(
+        description = "Close the task opened with phone_run_start and get its summary: \
+        tool calls (HTTP calls, not model turns), batches, observed actions, flow calls, \
+        stale/unknown outcomes, failures and p50/p95 call time. Pass turn_ids only if \
+        phone_run_start declared complete_trace."
+    )]
+    async fn phone_run_end(&self, Parameters(params): Parameters<RunEndParams>) -> CallToolResult {
+        self.progress_reset();
+        match self.daemon.run_end(&params.run_id, params.turn_ids).await {
+            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
+            Err(e) => CallToolResult::error(vec![Content::text(format!("run end failed: {e:#}"))]),
         }
     }
 
@@ -2483,7 +2564,7 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            24,
+            26,
             "tool count changed; update README, the skill, and the CI assertion: {names:?}"
         );
         for required in [

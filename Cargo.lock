@@ -922,6 +922,7 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "core",
  "hex",
  "libc",
  "reqwest",

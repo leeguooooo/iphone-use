@@ -1,3 +1,4 @@
+pub mod advice;
 pub mod apps;
 pub mod config;
 pub mod flows;
@@ -14,6 +15,7 @@ pub mod protocol;
 pub mod redaction;
 pub mod runtime_dir;
 pub mod schedules;
+pub mod scope;
 pub mod setup;
 pub mod timing;
 pub mod update;

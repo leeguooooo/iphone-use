@@ -120,7 +120,7 @@ jobs:
           tools = listing["result"]["tools"]
           names = sorted(tool["name"] for tool in tools)
 
-          assert len(names) == 24, names
+          assert len(names) == 26, names
           for required in (
               "phone_capabilities",
               "phone_status",

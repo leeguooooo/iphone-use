@@ -32,10 +32,32 @@ tokio::task_local! {
 #[derive(Default)]
 struct Recorder {
     calls: Vec<Call>,
+    /// This request's task-metrics start, registered only once the request
+    /// authenticates (see [`authenticated`]); a refused request never
+    /// touches anyone's metrics.
+    pending: Option<crate::metrics::CallStart>,
+    /// Set by [`authenticated`]. Dropped unfinished (a cancelled request), it
+    /// records the call as cancelled.
+    guard: Option<crate::metrics::CallGuard>,
+}
+
+/// Called by the auth checks when a request authenticates: register its
+/// task-metrics call now. A no-op outside a timed request, and after the
+/// first call in the same request.
+pub fn authenticated() {
+    let _ = RECORDER.try_with(|recorder| {
+        if let Ok(mut recorder) = recorder.lock() {
+            if let Some(start) = recorder.pending.take() {
+                recorder.guard = Some(crate::metrics::begin_call(start));
+            }
+        }
+    });
 }
 
 struct Call {
     route: String,
+    /// When the call started (now minus its duration at record time).
+    started: Instant,
     elapsed: Duration,
     bytes: Option<u64>,
 }
@@ -44,8 +66,10 @@ struct Call {
 pub fn record(route: String, elapsed: Duration, bytes: Option<u64>) {
     let _ = RECORDER.try_with(|recorder| {
         if let Ok(mut recorder) = recorder.lock() {
+            let now = Instant::now();
             recorder.calls.push(Call {
                 route,
+                started: now.checked_sub(elapsed).unwrap_or(now),
                 elapsed,
                 bytes,
             });
@@ -188,18 +212,46 @@ pub async fn layer(request: Request, next: Next) -> Response {
         return next.run(request).await;
     }
     let started = Instant::now();
+    let started_ms = crate::metrics::now_ms();
     let method = request.method().to_string();
     let owner = owner_of(&request);
     let query = query_keys(&request);
+    // Task metrics: attributed now, at the start, from the caller's own
+    // headers (validated by the aggregator). Polls and the metrics routes
+    // themselves are not agent work.
+    let (pending, flow_call) = {
+        let header = |name: &str| {
+            request
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let counted =
+            !matches!(path.as_str(), "/agent/status" | "/agent/metrics" | "/agent/run");
+        let flow_call = header("x-agent-call").as_deref() == Some("flow");
+        let pending = counted.then(|| crate::metrics::CallStart {
+            start_ms: started_ms,
+            owner: header("x-phone-owner"),
+            run_id: header("x-agent-run"),
+        });
+        (pending, flow_call)
+    };
     let (response, recorder) = RECORDER
-        .scope(Mutex::new(Recorder::default()), async move {
+        .scope(
+            Mutex::new(Recorder {
+                pending,
+                ..Recorder::default()
+            }),
+            async move {
             let response = next.run(request).await;
             let recorder = RECORDER.with(|r| match r.lock() {
                 Ok(mut r) => std::mem::take(&mut *r),
                 Err(_) => Recorder::default(),
             });
             (response, recorder)
-        })
+        },
+        )
         .await;
     let summary = Summary::new(&recorder, started.elapsed());
     if path != "/agent/status" && summary.total_ms >= 1000 {
@@ -229,7 +281,65 @@ pub async fn layer(request: Request, next: Next) -> Response {
         .to_string();
         tokio::task::spawn_blocking(move || append_log_line(line));
     }
-    attach(response, &summary).await
+    let status = response.status();
+    let (response, json) = attach(response, &summary).await;
+    let mut recorder = recorder;
+    if let Some(guard) = recorder.guard.take() {
+        {
+            let end_ms = started_ms.saturating_add(started.elapsed().as_millis() as u64);
+            let runner_intervals = recorder
+                .calls
+                .iter()
+                .map(|call| {
+                    let offset = call.started.saturating_duration_since(started).as_millis() as u64;
+                    let from = started_ms.saturating_add(offset);
+                    (from, from.saturating_add(call.elapsed.as_millis() as u64))
+                })
+                .collect();
+            let kind = if flow_call {
+                crate::metrics::CallKind::Flow
+            } else if path == "/agent/actions" {
+                crate::metrics::CallKind::Batch
+            } else {
+                crate::metrics::CallKind::Single
+            };
+            guard.finish(
+                crate::metrics::CallEnd {
+                    end_ms,
+                    kind,
+                    // Only an action can be observed; a read's diff is a read.
+                    observed: matches!(path.as_str(), "/agent/input" | "/agent/actions")
+                        && json
+                            .as_ref()
+                            .is_some_and(|j| j.get("delta").is_some() || j.get("settle").is_some()),
+                    outcome: classify(status, json.as_ref()),
+                    runner_intervals,
+                },
+            );
+        }
+    }
+    response
+}
+
+/// What a response says about its call, from its status and JSON body.
+fn classify(
+    status: axum::http::StatusCode,
+    json: Option<&serde_json::Value>,
+) -> crate::metrics::Outcome {
+    use crate::metrics::{FailureClass, Outcome};
+    let str_of = |key: &str| json.and_then(|j| j.get(key)).and_then(serde_json::Value::as_str);
+    let error = str_of("error");
+    if error == Some("stale_element_snapshot") {
+        return Outcome::Stale;
+    }
+    if error == Some("outcome_unknown") || str_of("outcome") == Some("unknown") {
+        return Outcome::OutcomeUnknown;
+    }
+    let ok = json.and_then(|j| j.get("ok")).and_then(serde_json::Value::as_bool);
+    match (status.is_success(), ok) {
+        (true, Some(true)) | (true, None) => Outcome::Ok,
+        _ => Outcome::Failed(error.map_or(FailureClass::Other, FailureClass::from_code)),
+    }
 }
 
 struct Summary {
@@ -306,7 +416,10 @@ impl Summary {
     }
 }
 
-async fn attach(response: Response, summary: &Summary) -> Response {
+/// Add the timing header (and, for a JSON body that reached WDA, the timing
+/// field), and hand back the parsed body for the task metrics. A body that
+/// is not JSON, too large, or of unknown size passes through unread.
+async fn attach(response: Response, summary: &Summary) -> (Response, Option<serde_json::Value>) {
     let (mut parts, body) = response.into_parts();
     if let Ok(value) = HeaderValue::from_str(&summary.server_timing()) {
         parts.headers.insert("server-timing", value);
@@ -316,36 +429,45 @@ async fn attach(response: Response, summary: &Summary) -> Response {
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.starts_with("application/json"));
-    // A request that never reached WDA keeps its body untouched; the header
-    // still carries its total.
-    if !is_json || summary.calls == 0 {
-        return Response::from_parts(parts, body);
+    if !is_json {
+        return (Response::from_parts(parts, body), None);
     }
     // Buffer only a body of known size under the cap: reading anything else
     // and failing part-way would leave nothing to send but an empty 200.
     let exact = axum::body::HttpBody::size_hint(&body).exact();
     if exact.is_none_or(|len| len > MAX_REWRITE_BYTES as u64) {
-        return Response::from_parts(parts, body);
+        return (Response::from_parts(parts, body), None);
     }
     let bytes = match axum::body::to_bytes(body, MAX_REWRITE_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            parts.status = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+            // The handler already ran: whatever it did may have happened.
+            // Say the outcome is unknown rather than inventing a failure.
             parts.headers.remove(header::CONTENT_LENGTH);
-            return Response::from_parts(
-                parts,
-                Body::from(r#"{"ok":false,"error":"response_body_unreadable"}"#),
+            return (
+                Response::from_parts(parts, Body::from(UNKNOWN_BODY)),
+                serde_json::from_str(UNKNOWN_BODY).ok(),
             );
         }
     };
+    let json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+    // A request that never reached WDA keeps its body byte for byte; the
+    // header still carries its total.
+    if summary.calls == 0 {
+        return (Response::from_parts(parts, Body::from(bytes)), json);
+    }
     match with_timing_field(&bytes, &summary.json()) {
         Some(body) => {
             parts.headers.remove(header::CONTENT_LENGTH);
-            Response::from_parts(parts, Body::from(body))
+            (Response::from_parts(parts, Body::from(body)), json)
         }
-        None => Response::from_parts(parts, Body::from(bytes)),
+        None => (Response::from_parts(parts, Body::from(bytes)), json),
     }
 }
+
+/// Sent when a response body could not be read back after its handler ran.
+pub const UNKNOWN_BODY: &str =
+    r#"{"ok":false,"error":"outcome_unknown","outcome":"unknown","retry_safe":false,"hint":"the response could not be read back; re-read the screen before retrying"}"#;
 
 /// Splice `"timing":{…}` in before the object's closing brace, leaving every
 /// other byte (and so the field order) as the handler wrote it. `None` for
@@ -393,20 +515,24 @@ mod tests {
             calls: vec![
                 Call {
                     route: "GET /source".into(),
+                    started: Instant::now(),
                     elapsed: Duration::from_millis(6000),
                     bytes: Some(800_000),
                 },
                 Call {
                     route: "GET /window/size".into(),
+                    started: Instant::now(),
                     elapsed: Duration::from_millis(180),
                     bytes: Some(90),
                 },
                 Call {
                     route: "GET /source".into(),
+                    started: Instant::now(),
                     elapsed: Duration::from_millis(5000),
                     bytes: Some(700_000),
                 },
             ],
+            ..Recorder::default()
         };
         let s = Summary::new(&recorder, Duration::from_millis(11_500));
         assert_eq!(s.wda_ms, 11_180);
@@ -457,9 +583,11 @@ mod tests {
             &Recorder {
                 calls: vec![Call {
                     route: "GET /source".into(),
+                    started: Instant::now(),
                     elapsed: Duration::from_millis(5),
                     bytes: None,
                 }],
+                ..Recorder::default()
             },
             Duration::from_millis(9),
         );
@@ -468,7 +596,8 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(big.clone()))
             .unwrap();
-        let out = attach(response, &summary).await;
+        let (out, json) = attach(response, &summary).await;
+        assert!(json.is_none(), "an oversized body is passed through unread");
         assert_eq!(out.status(), axum::http::StatusCode::OK);
         assert!(out.headers().contains_key("server-timing"));
         let body = axum::body::to_bytes(out.into_body(), usize::MAX)
@@ -487,7 +616,7 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from_stream(stream))
             .unwrap();
-        let out = attach(response, &summary).await;
+        let (out, _) = attach(response, &summary).await;
         let body = axum::body::to_bytes(out.into_body(), usize::MAX)
             .await
             .unwrap();

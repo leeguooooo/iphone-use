@@ -9,6 +9,8 @@ name = "iphone-use-mcp"
 path = "src/main.rs"
 
 [dependencies]
+# Renamed: a dependency called `core` shadows std's `core` in derive macros.
+iu_core = { package = "core", path = "../core" }
 # MCP protocol — official Rust SDK.
 # Version 1.7.0 (stable as of 2026-06).  Features:
 #   server        — ServerHandler trait + tool routing macros (default-on)

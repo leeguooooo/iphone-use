@@ -60,7 +60,9 @@ pub const MAX_EVENTS_PER_RUN: usize = 5_000;
 /// Calls in flight per run; more are rejected.
 pub const MAX_IN_FLIGHT_PER_RUN: usize = 64;
 /// Runner intervals accepted per call.
-pub const MAX_INTERVALS_PER_CALL: usize = 8;
+pub const MAX_INTERVALS_PER_CALL: usize = 64;
+/// Raw intervals read per call before merging; the rest are dropped.
+pub const MAX_RAW_INTERVALS_PER_CALL: usize = 4_096;
 /// Runner intervals stored per run.
 pub const MAX_INTERVALS_PER_RUN: usize = 20_000;
 /// Closed summaries kept in memory until [`RunAggregator::drain_closed`].
@@ -212,6 +214,8 @@ pub struct RunSummary {
     pub stored_calls: u64,
     pub dropped_events: u64,
     pub rejected_events: u64,
+    /// Calls cancelled before they answered (counted, outcome unknown).
+    pub cancelled_events: u64,
     pub batch_calls: u64,
     pub flow_calls: u64,
     pub observed_calls: u64,
@@ -223,6 +227,8 @@ pub struct RunSummary {
     pub call_p95_ms: Option<u64>,
     /// `None` when intervals were dropped or the sum overflowed.
     pub runner_busy_union_ms: Option<u64>,
+    /// The plain sum of every clipped runner interval's duration (overlaps
+    /// counted as many times as they occur — compare with the union).
     pub runner_summed_ms: Option<u64>,
     pub clipped_intervals: u64,
     pub rejected_intervals: u64,
@@ -257,6 +263,8 @@ pub struct AggregatorStats {
     pub lifetime_closed_runs: u64,
     /// Closed summaries discarded because nobody drained them in time.
     pub dropped_summaries: u64,
+    /// Calls whose request was cancelled before it answered.
+    pub cancelled_events: u64,
 }
 
 #[derive(Debug)]
@@ -277,6 +285,10 @@ struct OpenRun {
     clipped: u64,
     rejected_intervals: u64,
     dropped_intervals: u64,
+    cancelled: u64,
+    /// Plain sum of every call's clipped runner durations; `None` once it
+    /// overflowed.
+    summed: Option<u64>,
     /// Token ids issued and not yet finished.
     outstanding: BTreeSet<u64>,
     started_ms: u64,
@@ -300,8 +312,9 @@ pub struct RunAggregator {
     stats: AggregatorStats,
 }
 
-/// Accept an id from a caller only if it is short and plain.
-fn valid_id(id: &str) -> bool {
+/// Accept an id from a caller only if it is short and plain. Shared with
+/// the HTTP routes so they refuse exactly what the aggregator would.
+pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_LEN
         && id
@@ -349,6 +362,7 @@ impl RunAggregator {
                 started_ms: now_ms,
                 ended_ms: now_ms,
                 last_activity_ms: now_ms,
+                summed: Some(0),
                 ..OpenRun::default()
             },
         );
@@ -402,10 +416,9 @@ impl RunAggregator {
         run_id: String,
         now_ms: u64,
         complete_trace: bool,
-    ) {
+    ) -> bool {
         let (Ok(Some(owner)), Ok(Some(run_id))) = (self.id(owner), self.id(Some(run_id))) else {
-            self.stats.unattributed_events += 1;
-            return;
+            return false;
         };
         let key = self.explicit_key(owner, run_id, now_ms);
         if let Some(run) = self.open.get_mut(&key) {
@@ -414,6 +427,7 @@ impl RunAggregator {
                 run.trace_declared = Some(early);
             }
         }
+        true
     }
 
     /// Register a call when it starts; the run it belongs to is decided now.
@@ -474,11 +488,14 @@ impl RunAggregator {
         run.total_calls = run.total_calls.saturating_add(1);
         run.ended_ms = run.ended_ms.max(end.end_ms);
         run.last_activity_ms = run.last_activity_ms.max(end.end_ms);
-        let accepted = end.runner_intervals.len().min(MAX_INTERVALS_PER_CALL);
-        let over = (end.runner_intervals.len() - accepted) as u64;
-        run.dropped_intervals += over;
-        self.stats.dropped_intervals += over;
-        for &(s, e) in &end.runner_intervals[..accepted] {
+        // One observed tap is a dozen runner calls back to back, so a call's
+        // intervals are clipped to the call, then merged into its union
+        // before any cap applies; a cap that dropped them would mark every
+        // ordinary run incomplete.
+        let read = end.runner_intervals.len().min(MAX_RAW_INTERVALS_PER_CALL);
+        let mut over = (end.runner_intervals.len() - read) as u64;
+        let mut clipped = Vec::with_capacity(read);
+        for &(s, e) in &end.runner_intervals[..read] {
             let (cs, ce) = (s.max(token.start_ms), e.min(end.end_ms));
             if ce <= cs {
                 run.rejected_intervals += 1;
@@ -487,13 +504,23 @@ impl RunAggregator {
             if (cs, ce) != (s, e) {
                 run.clipped += 1;
             }
+            // The plain sum keeps every clipped duration; the merge below is
+            // only for the union and for capped storage.
+            run.summed = run.summed.and_then(|sum| sum.checked_add(ce - cs));
+            clipped.push((cs, ce));
+        }
+        let merged = merge_intervals(clipped);
+        let kept = merged.len().min(MAX_INTERVALS_PER_CALL);
+        over += (merged.len() - kept) as u64;
+        for &interval in &merged[..kept] {
             if run.intervals.len() < MAX_INTERVALS_PER_RUN {
-                run.intervals.push((cs, ce));
+                run.intervals.push(interval);
             } else {
-                run.dropped_intervals += 1;
-                self.stats.dropped_intervals += 1;
+                over += 1;
             }
         }
+        run.dropped_intervals += over;
+        self.stats.dropped_intervals += over;
         if run.calls.len() < MAX_EVENTS_PER_RUN {
             run.calls.push(Stored {
                 duration_ms: end.end_ms - token.start_ms,
@@ -572,6 +599,48 @@ impl RunAggregator {
             .map(|run| summarize(key, run, Closed::Ended, None))
     }
 
+    /// A call whose request was cancelled before it answered (the client
+    /// went away): counted as a call with an unknown outcome, and the run is
+    /// marked incomplete — never left in flight.
+    pub fn cancel(&mut self, token: CallToken, now_ms: u64) {
+        let Some(key) = token.key else {
+            return;
+        };
+        let Some(run) = self.open.get_mut(&key) else {
+            self.stats.late_events += 1;
+            return;
+        };
+        if !run.outstanding.remove(&token.id) {
+            self.stats.duplicate_finishes += 1;
+            return;
+        }
+        run.cancelled += 1;
+        self.stats.cancelled_events += 1;
+        run.total_calls = run.total_calls.saturating_add(1);
+        let end_ms = now_ms.max(token.start_ms);
+        run.ended_ms = run.ended_ms.max(end_ms);
+        run.last_activity_ms = run.last_activity_ms.max(end_ms);
+        if run.calls.len() < MAX_EVENTS_PER_RUN {
+            run.calls.push(Stored {
+                duration_ms: end_ms - token.start_ms,
+                kind: CallKind::Single,
+                observed: false,
+                outcome: Outcome::OutcomeUnknown,
+            });
+        } else {
+            run.dropped_events += 1;
+            self.stats.dropped_events += 1;
+        }
+    }
+
+    /// Live summaries of every open run.
+    pub fn open_summaries(&self) -> Vec<RunSummary> {
+        self.open
+            .iter()
+            .map(|(key, run)| summarize(key, run, Closed::Ended, None))
+            .collect()
+    }
+
     /// Losses, force-closes and rejections so far.
     pub fn stats(&self) -> AggregatorStats {
         self.stats
@@ -630,15 +699,13 @@ fn summarize(
     }
     let mut durations: Vec<u64> = calls.iter().map(|c| c.duration_ms).collect();
     durations.sort_unstable();
-    let summed = run
-        .intervals
-        .iter()
-        .try_fold(0u64, |acc, (s, e)| acc.checked_add(e - s));
+    let summed = run.summed;
     let union = interval_union_ms(&run.intervals);
     let overflow = summed.is_none() || union.is_none();
     let intervals_whole = run.dropped_intervals == 0;
     let in_flight = run.outstanding.len() as u64;
     let incomplete = in_flight > 0
+        || run.cancelled > 0
         || run.dropped_events > 0
         || run.rejected_events > 0
         || run.dropped_intervals > 0;
@@ -662,6 +729,7 @@ fn summarize(
         stored_calls: calls.len() as u64,
         dropped_events: run.dropped_events,
         rejected_events: run.rejected_events,
+        cancelled_events: run.cancelled,
         batch_calls: calls.iter().filter(|c| c.kind == CallKind::Batch).count() as u64,
         flow_calls: calls.iter().filter(|c| c.kind == CallKind::Flow).count() as u64,
         observed_calls: calls.iter().filter(|c| c.observed).count() as u64,
@@ -681,6 +749,152 @@ fn summarize(
     }
 }
 
+// ---------------------------------------------------------------------------
+// The daemon's aggregator: one per process, fed by the `timing` layer.
+// ---------------------------------------------------------------------------
+
+/// Closed summaries kept for `GET /agent/metrics` after they are logged.
+pub const RECENT_RUNS: usize = 50;
+/// Rotate `agent-runs.jsonl` past this size.
+pub const RUNS_LOG_ROTATE_BYTES: u64 = 10 << 20;
+
+struct Daemon {
+    aggregator: RunAggregator,
+    recent: VecDeque<RunSummary>,
+}
+
+static DAEMON: std::sync::OnceLock<std::sync::Mutex<Daemon>> = std::sync::OnceLock::new();
+static RUNS_LOG: std::sync::OnceLock<SummaryLog> = std::sync::OnceLock::new();
+
+fn daemon() -> std::sync::MutexGuard<'static, Daemon> {
+    let lock = DAEMON.get_or_init(|| {
+        std::sync::Mutex::new(Daemon {
+            aggregator: RunAggregator::new(),
+            recent: VecDeque::new(),
+        })
+    });
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Where closed run summaries are appended (next to `agent-timing.jsonl`).
+pub fn set_runs_log(path: PathBuf) {
+    let _ = RUNS_LOG.set(SummaryLog::new(path, RUNS_LOG_ROTATE_BYTES));
+}
+
+/// Wall-clock now in ms since the Unix epoch.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// A daemon request registered with the metrics. Finishing consumes it;
+/// dropping it unfinished (the request was cancelled) records the call as
+/// cancelled instead of leaving it in flight.
+pub struct CallGuard {
+    token: Option<CallToken>,
+}
+
+impl CallGuard {
+    pub fn finish(mut self, end: CallEnd) {
+        if let Some(token) = self.token.take() {
+            daemon().aggregator.finish(token, end);
+            flush(now_ms());
+        }
+    }
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            daemon().aggregator.cancel(token, now_ms());
+        }
+    }
+}
+
+/// Register an authenticated daemon request, attributed to its start.
+pub fn begin_call(start: CallStart) -> CallGuard {
+    CallGuard {
+        token: Some(daemon().aggregator.begin(start)),
+    }
+}
+
+/// `POST /agent/run` start; `false` when the owner or run id is invalid.
+pub fn start_run(owner: Option<String>, run_id: String, complete_trace: bool) -> bool {
+    daemon()
+        .aggregator
+        .start_run(owner, run_id, now_ms(), complete_trace)
+}
+
+/// `POST /agent/run` end.
+pub fn end_run(
+    owner: Option<String>,
+    run_id: String,
+    turns: Option<Vec<String>>,
+) -> Option<RunSummary> {
+    let summary = daemon().aggregator.end_run(owner, run_id, turns);
+    flush(now_ms());
+    summary
+}
+
+/// Close what is due, keep recent summaries, and append them to the log
+/// off the request path.
+pub fn flush(now_ms: u64) {
+    let closed = {
+        let mut daemon = daemon();
+        daemon.aggregator.sweep(now_ms);
+        let closed = daemon.aggregator.drain_closed();
+        for summary in &closed {
+            if daemon.recent.len() >= RECENT_RUNS {
+                daemon.recent.pop_front();
+            }
+            daemon.recent.push_back(summary.clone());
+        }
+        closed
+    };
+    if closed.is_empty() {
+        return;
+    }
+    if let Some(log) = RUNS_LOG.get() {
+        let write = move || {
+            for summary in &closed {
+                if let Err(error) = log.append(summary) {
+                    tracing::warn!(%error, "could not append run summary");
+                    break;
+                }
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(write);
+            }
+            Err(_) => write(),
+        }
+    }
+}
+
+/// `GET /agent/metrics`: open runs (optionally one owner's), recent closed
+/// runs, and the loss counters.
+pub fn report(owner: Option<&str>) -> serde_json::Value {
+    flush(now_ms());
+    let daemon = daemon();
+    let mine = |summary: &&RunSummary| {
+        owner.is_none_or(|owner| match &summary.key {
+            RunKey::Explicit { owner: o, .. } | RunKey::Inferred { owner: o, .. } => o == owner,
+        })
+    };
+    let open: Vec<RunSummary> = daemon.aggregator.open_summaries();
+    serde_json::json!({
+        "ok": true,
+        "definitions": "tool_calls are HTTP calls to this daemon, not model turns; \
+            model_round_trips is null unless the caller declared and delivered a complete trace",
+        "open": open.iter().filter(mine).collect::<Vec<_>>(),
+        "recent": daemon.recent.iter().filter(mine).collect::<Vec<_>>(),
+        "stats": daemon.aggregator.stats(),
+    })
+}
+
 /// Nearest-rank percentile of sorted values; `None` for an empty slice.
 pub fn percentile(sorted: &[u64], pct: u32) -> Option<u64> {
     if sorted.is_empty() {
@@ -688,6 +902,19 @@ pub fn percentile(sorted: &[u64], pct: u32) -> Option<u64> {
     }
     let rank = ((pct as f64 / 100.0) * sorted.len() as f64).ceil() as usize;
     Some(sorted[rank.clamp(1, sorted.len()) - 1])
+}
+
+/// Sort and merge overlapping or touching intervals.
+fn merge_intervals(mut intervals: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    intervals.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(intervals.len());
+    for (start, end) in intervals {
+        match merged.last_mut() {
+            Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 /// Total length covered by possibly overlapping `(start, end)` intervals;
@@ -966,13 +1193,36 @@ mod tests {
         agg.finish(token, e);
         let s = end_run(&mut agg, "a", "r");
         assert_eq!(s.runner_busy_union_ms, Some(100));
+        // The plain sum: clipped (100,200) and (120,150) → 100 + 30.
         assert_eq!(s.runner_summed_ms, Some(130));
         assert_eq!((s.clipped_intervals, s.rejected_intervals), (1, 2));
 
-        let token = agg.begin(start(0, Some("a"), Some("q")));
+        // Overlapping intervals in one call: union 150, plain sum 200.
+        let token = agg.begin(start(0, Some("a"), Some("o")));
+        let mut e = end(200);
+        e.runner_intervals = vec![(0, 100), (50, 150)];
+        agg.finish(token, e);
+        let s = end_run(&mut agg, "a", "o");
+        assert_eq!(
+            (s.runner_busy_union_ms, s.runner_summed_ms),
+            (Some(150), Some(200))
+        );
+
+        // A dozen back-to-back runner calls (an observed tap) merge into one
+        // interval: nothing dropped, the run stays complete.
+        let token = agg.begin(start(0, Some("a"), Some("t")));
         let mut e = end(1_000);
+        e.runner_intervals = (0..12).map(|i| (i * 50, i * 50 + 50)).collect();
+        agg.finish(token, e);
+        let s = end_run(&mut agg, "a", "t");
+        assert_eq!((s.dropped_intervals, s.incomplete), (0, false));
+        assert_eq!(s.runner_busy_union_ms, Some(600));
+
+        // Distinct gaps past the cap are counted, and the run is incomplete.
+        let token = agg.begin(start(0, Some("a"), Some("q")));
+        let mut e = end(10_000);
         e.runner_intervals = (0..MAX_INTERVALS_PER_CALL as u64 + 3)
-            .map(|i| (i, i + 1))
+            .map(|i| (i * 10, i * 10 + 1))
             .collect();
         agg.finish(token, e);
         let s = end_run(&mut agg, "a", "q");
@@ -985,10 +1235,15 @@ mod tests {
     #[test]
     fn overflow_is_flagged_never_wrapped() {
         let mut agg = RunAggregator::new();
-        let token = agg.begin(start(0, Some("a"), Some("r")));
-        let mut e = end(u64::MAX);
-        e.runner_intervals = vec![(0, u64::MAX), (0, u64::MAX)];
-        agg.finish(token, e);
+        // Two concurrent calls each busy for the whole range: their sum
+        // overflows (the union does not).
+        let first = agg.begin(start(0, Some("a"), Some("r")));
+        let second = agg.begin(start(0, Some("a"), Some("r")));
+        for token in [first, second] {
+            let mut e = end(u64::MAX);
+            e.runner_intervals = vec![(0, u64::MAX)];
+            agg.finish(token, e);
+        }
         let s = end_run(&mut agg, "a", "r");
         assert!(s.arithmetic_overflow);
         assert_eq!(s.runner_summed_ms, None);
@@ -1112,6 +1367,31 @@ mod tests {
         let s = end_run(&mut agg, "a", "r");
         assert_eq!(s.tool_calls, MAX_IN_FLIGHT_PER_RUN as u64);
         assert!(s.incomplete);
+    }
+
+    #[test]
+    fn a_cancelled_call_is_counted_unknown_and_the_run_incomplete() {
+        let mut agg = RunAggregator::new();
+        one(&mut agg, 0, 10, Some("a"), Some("r"));
+        let token = agg.begin(start(20, Some("a"), Some("r")));
+        agg.cancel(token, 70);
+        let s = end_run(&mut agg, "a", "r");
+        assert_eq!(
+            (s.tool_calls, s.cancelled_events, s.outcome_unknown),
+            (2, 1, 1)
+        );
+        assert!(s.incomplete);
+        assert_eq!((s.in_flight_at_close, s.ended_ms), (0, 70));
+        assert_eq!(agg.stats().cancelled_events, 1);
+    }
+
+    #[test]
+    fn invalid_run_starts_are_refused() {
+        let mut agg = RunAggregator::new();
+        assert!(!agg.start_run(Some("a".into()), "bad id".into(), 0, false));
+        assert!(!agg.start_run(None, "r".into(), 0, false));
+        assert!(agg.start_run(Some("a".into()), "r".into(), 0, false));
+        assert!(agg.open_summaries().len() == 1);
     }
 
     #[test]

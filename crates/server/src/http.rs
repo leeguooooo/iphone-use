@@ -646,7 +646,16 @@ fn owner_status(state: &AppState) -> (Option<String>, u64) {
 /// `POST /agent/owner {"release":true}` — give up the lease. Only the current
 /// owner (matching `X-Phone-Owner`) may release it; anyone may release a
 /// lapsed one. Never takes a lease itself.
-async fn agent_owner(
+/// `/agent/owner` (claim or release the lease): a run boundary for the
+/// owner's `no_progress` tracker.
+async fn agent_owner(state: State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    if let Some(owner) = trusted_bearer_owner(&state, &headers) {
+        crate::advice::reset(&owner);
+    }
+    agent_owner_inner(state, headers, body).await
+}
+
+async fn agent_owner_inner(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
@@ -929,6 +938,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/prewarm", post(agent_prewarm))
         .route("/agent/login-link", post(agent_login_link))
         .route("/agent/capabilities", get(agent_capabilities))
+        .route("/agent/metrics", get(agent_metrics))
+        .route("/agent/run", post(agent_run))
         // Scheduled flows and test suites (see `schedules`).
         .route("/schedules", get(crate::schedules::page))
         .route(
@@ -1634,6 +1645,7 @@ enum AgentAuth {
 fn agent_auth(state: &AppState, headers: &HeaderMap) -> AgentAuth {
     // Open mode: no credential of any kind is configured.
     if state.agent_token.is_none() && state.password.is_none() {
+        crate::timing::authenticated();
         return AgentAuth::Ok;
     }
     {
@@ -1644,11 +1656,55 @@ fn agent_auth(state: &AppState, headers: &HeaderMap) -> AgentAuth {
     }
     if check_bearer(state, headers) {
         state.auth_limiter.lock().unwrap().record_success();
+        // Only now does the request count for task metrics.
+        crate::timing::authenticated();
         AgentAuth::Ok
     } else {
         state.auth_limiter.lock().unwrap().record_failure();
         AgentAuth::Denied
     }
+}
+
+/// Would this request authenticate? Read-only: it neither advances the auth
+/// limiter nor registers anything, so wrappers can decide whether to act
+/// on the caller's behalf without changing state for a refused request.
+fn credentials_ok(state: &AppState, headers: &HeaderMap) -> bool {
+    if state.agent_token.is_none() && state.password.is_none() {
+        return true;
+    }
+    if state.auth_limiter.lock().is_ok_and(|limiter| limiter.is_locked()) {
+        return false;
+    }
+    is_authed(state, headers) || check_bearer(state, headers)
+}
+
+/// The bearer-only gate (`agent_auth`) as a read-only predicate, for routes
+/// that do not accept the browser cookie.
+fn bearer_ok(state: &AppState, headers: &HeaderMap) -> bool {
+    if state.agent_token.is_none() && state.password.is_none() {
+        return true;
+    }
+    if state.auth_limiter.lock().is_ok_and(|limiter| limiter.is_locked()) {
+        return false;
+    }
+    check_bearer(state, headers)
+}
+
+/// [`trusted_owner`] for bearer-only routes (input, actions, owner, run): a
+/// valid cookie with a wrong bearer is refused there, so it must not let the
+/// wrapper act either.
+fn trusted_bearer_owner(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    named_owner(headers)
+        .filter(|_| bearer_ok(state, headers))
+        .map(str::to_string)
+}
+
+/// The caller's owner, but only for a request that will authenticate: the
+/// `no_progress` state of an owner is never touched by a refused request.
+fn trusted_owner(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    named_owner(headers)
+        .filter(|_| credentials_ok(state, headers))
+        .map(str::to_string)
 }
 
 /// Authorize a route shared by the browser UI and bearer-authenticated agents.
@@ -1659,6 +1715,7 @@ fn agent_auth(state: &AppState, headers: &HeaderMap) -> AgentAuth {
 /// repeatedly lock out a legitimate MCP client.
 fn browser_or_agent_auth(state: &AppState, headers: &HeaderMap) -> AgentAuth {
     if is_authed(state, headers) {
+        crate::timing::authenticated();
         AgentAuth::Ok
     } else if headers.contains_key(header::AUTHORIZATION) {
         agent_auth(state, headers)
@@ -4463,6 +4520,112 @@ fn capability_availability(state: &AppState, headers: &HeaderMap) -> serde_json:
 /// `recovery_owner: external` narrows only the *lifecycle* routes the daemon
 /// will drive; it does not narrow the control and observation this daemon can
 /// still perform against that endpoint.
+fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
+    with_security_headers(
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
+}
+
+/// `GET /agent/metrics[?owner=NAME]` — per-run task metrics: open runs,
+/// recent closed runs and loss counters (see `metrics`).
+async fn agent_metrics(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    match agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    json_response(
+        StatusCode::OK,
+        crate::metrics::report(query.get("owner").map(String::as_str)),
+    )
+}
+
+/// `POST /agent/run` — mark a run boundary for the caller (`X-Phone-Owner`):
+/// `{"action":"start","run_id":…,"complete_trace":true?}` or
+/// `{"action":"end","run_id":…,"turn_ids":[…]?}`. An explicit run makes the
+/// metrics count one task exactly; without one, runs are inferred from idle
+/// gaps. A complete trace lets `model_round_trips` be reported.
+async fn agent_run(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    match agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    let invalid = |hint: &str| {
+        json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "invalid_run", "hint": hint}),
+        )
+    };
+    let Some(owner) = named_owner(&headers).map(str::to_string) else {
+        return invalid("send X-Phone-Owner: a run belongs to a caller");
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return invalid("body must be JSON");
+    };
+    let Some(run_id) = value.get("run_id").and_then(serde_json::Value::as_str) else {
+        return invalid("run_id is required");
+    };
+    if !crate::metrics::valid_id(&owner) || !crate::metrics::valid_id(run_id) {
+        return invalid("owner and run_id: 1–64 characters of A-Z a-z 0-9 . _ : @ -");
+    }
+    // A run boundary: the no_progress tracker starts over.
+    crate::advice::reset(&owner);
+    match value.get("action").and_then(serde_json::Value::as_str) {
+        Some("start") => {
+            let complete = value.get("complete_trace") == Some(&serde_json::Value::Bool(true));
+            if !crate::metrics::start_run(Some(owner), run_id.to_string(), complete) {
+                return invalid("the run could not be started");
+            }
+            json_response(StatusCode::OK, serde_json::json!({"ok": true}))
+        }
+        Some("end") => {
+            let turns = value.get("turn_ids").and_then(|ids| {
+                ids.as_array().map(|ids| {
+                    ids.iter()
+                        .map(|id| id.as_str().unwrap_or("\u{0}").to_string())
+                        .collect::<Vec<_>>()
+                })
+            });
+            match crate::metrics::end_run(Some(owner), run_id.to_string(), turns) {
+                Some(summary) => json_response(
+                    StatusCode::OK,
+                    serde_json::json!({"ok": true, "run": summary}),
+                ),
+                None => json_response(
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({"ok": false, "error": "no_such_run"}),
+                ),
+            }
+        }
+        _ => invalid("action must be start or end"),
+    }
+}
+
 async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     match browser_or_agent_auth(&state, &headers) {
         AgentAuth::Locked => {
@@ -4540,7 +4703,16 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
 /// * `{"mode":"human"}` — stop the managed runner so the person holding the
 ///   phone has it to themselves; agent input then answers 409
 ///   `phone_handed_to_human` until `agent` takes it back.
-async fn agent_mode(
+/// `/agent/mode` (reconnect, hand to a human): the screen the owner's
+/// `no_progress` tracker knew is gone.
+async fn agent_mode(state: State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    if let Some(owner) = trusted_owner(&state, &headers) {
+        crate::advice::reset(&owner);
+    }
+    agent_mode_inner(state, headers, body).await
+}
+
+async fn agent_mode_inner(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
@@ -9168,7 +9340,22 @@ fn agent_actions_failure(
 /// held for the sequence so another daemon client cannot interleave gestures.
 /// Any failed action, expectation, read, lifecycle transition, or deadline stops
 /// the sequence immediately; later actions are never attempted.
+/// `/agent/actions`: a batch changes the screen without an observation the
+/// `no_progress` tracker can judge, so the owner's screen is forgotten.
 async fn agent_actions(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    // A batch changes the screen under the tracker: forget it now, after
+    // authentication and before the batch runs.
+    if let Some(owner) = trusted_bearer_owner(&state, &headers) {
+        crate::advice::reset(&owner);
+    }
+    agent_actions_inner(state, headers, body).await
+}
+
+async fn agent_actions_inner(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
@@ -10143,7 +10330,87 @@ async fn settle_and_read_elements(
 ///
 /// Coordinates are normalized `[0,1]` over the phone screen (geometry-agnostic,
 /// like the web client). Returns 200 on accept, 400 on an unparseable message.
+/// Responses are rewritten for advice only when they are JSON of a sane size.
+const ADVICE_MAX_BODY: usize = 8 << 20;
+
+/// Read a handler's response so advice can look at it; hand back an
+/// equivalent response either way.
+async fn read_json_response(response: Response) -> (Response, Option<serde_json::Value>) {
+    let (parts, body) = response.into_parts();
+    let is_json = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    let exact = axum::body::HttpBody::size_hint(&body).exact();
+    if !is_json || exact.is_none_or(|len| len > ADVICE_MAX_BODY as u64) {
+        return (Response::from_parts(parts, body), None);
+    }
+    match axum::body::to_bytes(body, ADVICE_MAX_BODY).await {
+        Ok(bytes) => {
+            let json = serde_json::from_slice(&bytes).ok();
+            (Response::from_parts(parts, Body::from(bytes)), json)
+        }
+        Err(_) => {
+            // The mutation may already have applied: never claim a known
+            // failure. Say the outcome is unknown, and drop the old length.
+            let mut parts = parts;
+            parts.headers.remove(header::CONTENT_LENGTH);
+            (
+                Response::from_parts(parts, Body::from(crate::timing::UNKNOWN_BODY)),
+                None,
+            )
+        }
+    }
+}
+
+fn refused_as_unauthenticated(response: &Response) -> bool {
+    matches!(response.status().as_u16(), 401 | 403 | 429)
+}
+
+/// `/agent/input` with `no_progress` advice for plain HTTP callers: an
+/// observed tap or scroll by a named owner is judged by the same tracker the
+/// MCP server uses; any other input forgets the owner's screen.
 async fn agent_input(
+    state: State<Arc<AppState>>,
+    Query(query): Query<AgentInputQuery>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let Some(owner) = trusted_bearer_owner(&state, &headers) else {
+        return agent_input_inner(state, Query(query), headers, body).await;
+    };
+    let observed = query.return_mode.as_deref() == Some("delta");
+    let action = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| crate::advice::action_of(&value));
+    let guard = match (observed, &action) {
+        (true, Some(action)) => Some(crate::advice::begin(&owner, action)),
+        _ => {
+            // Anything the tracker cannot judge changes the screen under it:
+            // forget it now, before the action runs.
+            crate::advice::reset(&owner);
+            None
+        }
+    };
+    let response = agent_input_inner(state, Query(query), headers, body).await;
+    let Some(guard) = guard else {
+        return response;
+    };
+    let (response, json) = read_json_response(response).await;
+    let Some(hint) = guard.finish(json.as_ref(), crate::metrics::now_ms()) else {
+        return response;
+    };
+    let Some(mut json) = json.filter(serde_json::Value::is_object) else {
+        return response;
+    };
+    json["no_progress"] = serde_json::Value::String(hint);
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(json.to_string()))
+}
+
+async fn agent_input_inner(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AgentInputQuery>,
     headers: HeaderMap,
@@ -11096,7 +11363,137 @@ async fn agent_flow_draft(State(state): State<Arc<AppState>>, headers: HeaderMap
 /// change little of them per step, so this is the main token/latency saver.
 /// An unknown or evicted `since` falls back to the full tree, so old callers
 /// and cold caches behave exactly as before.
+/// `/agent/elements`, feeding the owner's `no_progress` tracker the screen
+/// it just read (a full, baseline-free read only).
 async fn agent_elements(
+    state: State<Arc<AppState>>,
+    query: Query<AgentElementsQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let owner = trusted_owner(&state, &headers);
+    let full_read = query.since.is_none();
+    let scope = query.scope.clone();
+    let image_auto = query.image.as_deref() == Some("auto");
+    if let Err(error) = crate::scope::validate(scope.as_deref(), query.since.as_deref()) {
+        // Authenticate first: a refused caller learns nothing about scopes.
+        return match browser_or_agent_auth(&state, &headers) {
+            AgentAuth::Ok => json_response(StatusCode::BAD_REQUEST, error),
+            AgentAuth::Locked => with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            ),
+            AgentAuth::Denied => with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            ),
+        };
+    }
+    if scope.as_deref() == Some("changed") && credentials_ok(&state, &headers) {
+        let held = query
+            .since
+            .as_deref()
+            .is_some_and(|since| lookup_element_snapshot(&state, since).is_some());
+        if !held {
+            crate::timing::authenticated();
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": "baseline_unavailable",
+                    "hint": "this daemon no longer holds that snapshot (unknown or evicted); read /agent/elements again and diff against the new one"}),
+            );
+        }
+    }
+    let response = agent_elements_inner(state.clone(), query, headers.clone()).await;
+    if refused_as_unauthenticated(&response) {
+        return response;
+    }
+    let (response, json) = read_json_response(response).await;
+    if full_read {
+        if let Some(owner) = &owner {
+            crate::advice::note_screen(owner, json.as_ref());
+        }
+    }
+    // The baseline can be evicted between the precheck and the read; a full
+    // tree is then never passed off as `scope=changed`.
+    if scope.as_deref() == Some("changed")
+        && response.status().is_success()
+        && !json.as_ref().is_some_and(|json| json.get("delta").is_some())
+    {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "baseline_unavailable",
+                "hint": "the baseline was evicted during the read; read /agent/elements again and diff against the new one"}),
+        );
+    }
+    let Some(mut json) = json.filter(|json| json.get("elements").is_some()) else {
+        return response;
+    };
+    // Stamp the read so a screenshot taken for it can say how it relates.
+    json["tree_returned_at_ms"] = serde_json::json!(crate::metrics::now_ms());
+    // From its real source: the video hub's verdict, as /agent/status reports.
+    if let Some(hub) = state.video.as_ref() {
+        refresh_capture_verdict(&state, hub);
+        if hub.capture_redacted() {
+            json["capture_redacted"] = serde_json::Value::Bool(true);
+            json["capture_redacted_source"] =
+                serde_json::Value::String("live-view verdict (cached)".to_string());
+        }
+    }
+    if image_auto && crate::scope::needs_image(&json) {
+        let budget = crate::scope::image_budget_bytes();
+        let mut outcome = crate::scope::ImageOutcome::Unavailable;
+        for side in crate::scope::IMAGE_SIDES {
+            let requested_ms = crate::metrics::now_ms();
+            let shot = agent_screenshot(
+                state.clone(),
+                headers.clone(),
+                Query(ScreenshotQuery {
+                    raw: None,
+                    max_side: Some(side),
+                    fresh: Some("1".to_string()),
+                }),
+            )
+            .await;
+            if !shot.status().is_success() {
+                break;
+            }
+            let source = shot
+                .headers()
+                .get("x-screenshot-source")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("wda-capture")
+                .to_string();
+            let redacted = shot
+                .headers()
+                .get("x-capture-redacted")
+                .is_some_and(|v| v.as_bytes() == b"1");
+            let Ok(png) = axum::body::to_bytes(shot.into_body(), 32 << 20).await else {
+                break;
+            };
+            let received_ms = crate::metrics::now_ms();
+            let encoded = png.len().div_ceil(3) * 4;
+            if json.to_string().len() + encoded + 512 > budget {
+                outcome = crate::scope::ImageOutcome::TooLarge;
+                continue;
+            }
+            outcome = crate::scope::ImageOutcome::Attached {
+                png: png.to_vec(),
+                requested_ms,
+                received_ms,
+                source,
+                max_side: side,
+                redacted,
+            };
+            break;
+        }
+        crate::scope::attach_image(&mut json, outcome);
+    }
+    if let Some(scope) = scope.as_deref().filter(|scope| *scope != "changed") {
+        crate::scope::apply(&mut json, scope);
+    }
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(json.to_string()))
+}
+
+async fn agent_elements_inner(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AgentElementsQuery>,
     headers: HeaderMap,
@@ -11675,6 +12072,13 @@ struct AgentElementsQuery {
     /// Prior `snapshot` token to diff against (see [`agent_elements`]).
     #[serde(default)]
     since: Option<String>,
+    /// A task-scoped view of the same fresh read (see [`crate::scope`]):
+    /// `interactive`, `focused`, or `changed` (needs `since`).
+    #[serde(default)]
+    scope: Option<String>,
+    /// `auto`: attach a screenshot only when the tree is unusable (Mode A).
+    #[serde(default)]
+    image: Option<String>,
 }
 
 /// A read-path failure is enough to revoke `drivable`, even when the last
@@ -11939,7 +12343,9 @@ async fn agent_screenshot(
     // its newest frame answers in milliseconds instead of a ~0.5–1.5 s
     // capture. Only for a sized request (the stream is half resolution) and
     // never for `raw`, whose caller wants WDA's own capture.
-    if let (Some(max_side), false, Some(hub)) = (max_side, raw, state.video.as_ref()) {
+    if let (Some(max_side), false, false, Some(hub)) =
+        (max_side, raw, fresh, state.video.as_ref())
+    {
         let not_before = wda.lock().await.last_post();
         if let Some(jpeg) = hub.live_frame(not_before) {
             let png = tokio::task::spawn_blocking(move || {

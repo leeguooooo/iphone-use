@@ -1526,6 +1526,9 @@ pub async fn execute_flow_run(
     daemon: &DaemonClient,
     confirm: bool,
 ) -> Result<FlowRun> {
+    // Every request of the replay says it is one (task metrics count flows).
+    let flow_client = daemon.for_flow();
+    let daemon = &flow_client;
     if flow.meta.risk == Some(FlowRisk::SideEffect) && !confirm {
         bail!(
             "flow {:?} is declared risk=side_effect (sends, publishes, pays, or deletes); \

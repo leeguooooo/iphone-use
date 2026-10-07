@@ -239,6 +239,17 @@ enum Command {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// Per-run task metrics: HTTP calls (not model turns), batches, observed
+    /// actions, failures and p50/p95.
+    Metrics {
+        #[arg(long)]
+        instance: Option<String>,
+        /// Only this owner's runs.
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Is the iPhone ready for agents? Exit 0 when it is.
     Status {
         #[arg(long)]
@@ -730,6 +741,14 @@ fn main() -> Result<()> {
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_doctor(&target))
         }
+        Command::Metrics {
+            instance,
+            owner,
+            json,
+        } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            std::process::exit(onboarding::run_metrics(&target, owner.as_deref(), json)?)
+        }
         Command::Status { instance, json } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_status(&target, json)?)
@@ -881,6 +900,8 @@ fn serve() -> Result<()> {
             .state_dir
             .join("agent-timing.jsonl"),
     );
+    // One summary per finished agent run (see `metrics`).
+    server::metrics::set_runs_log(server::instance::current().state_dir.join("agent-runs.jsonl"));
     let state = Arc::new(AppState {
         password: cfg.password.clone(),
         secret,

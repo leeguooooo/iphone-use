@@ -105,6 +105,12 @@ pub struct DaemonClient {
     /// an observed action). An observed action names it as its baseline, so
     /// the daemon answers with what changed instead of the whole tree.
     last_snapshot: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Sent as `X-Agent-Call` so the daemon's task metrics can tell a flow
+    /// replay from a hand-driven call.
+    call_kind: Option<&'static str>,
+    /// The explicit run this session opened with `phone_run_start`, sent as
+    /// `X-Agent-Run` on every request until `phone_run_end`.
+    run_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -250,6 +256,8 @@ impl DaemonClient {
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| format!("mcp-{}", std::process::id())),
             last_snapshot: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            call_kind: None,
+            run_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -295,19 +303,89 @@ impl DaemonClient {
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // Every request names this session's owner — mutations need it for
+        // the lease, reads and polls for attribution (task metrics, the
+        // owner's last screen).
+        let req = req.header("x-phone-owner", &self.owner);
+        let req = match self.call_kind {
+            Some(kind) => req.header("x-agent-call", kind),
+            None => req,
+        };
+        let run = self.run_id.lock().ok().and_then(|run| run.clone());
+        let req = match run {
+            Some(run) => req.header("x-agent-run", run),
+            None => req,
+        };
         match &self.token {
             Some(t) => req.header(header::AUTHORIZATION, format!("Bearer {t}")),
             None => req,
         }
     }
 
+    /// The same client, marking every request as part of a flow replay.
+    pub fn for_flow(&self) -> Self {
+        Self {
+            call_kind: Some("flow"),
+            ..self.clone()
+        }
+    }
+
     /// `POST /agent/hold {"secs":N}` — keep the phone from idle release for a
     /// bounded human-in-the-loop pause; `0` clears the hold.
+    /// `POST /agent/run` start: open an explicit run for this owner; every
+    /// later request carries it until [`Self::run_end`].
+    pub async fn run_start(&self, run_id: &str, complete_trace: bool) -> anyhow::Result<String> {
+        let body = serde_json::json!({
+            "action": "start", "run_id": run_id, "complete_trace": complete_trace
+        });
+        let req = self
+            .auth(self.client.post(self.url("/agent/run")))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        let resp = check_status(req.send().await?).await?;
+        let text = resp.text().await?;
+        // Only a run the daemon accepted becomes the active one.
+        if !body_says_ok(&text) {
+            anyhow::bail!("the daemon did not start the run: {text}");
+        }
+        if let Ok(mut run) = self.run_id.lock() {
+            *run = Some(run_id.to_string());
+        }
+        Ok(text)
+    }
+
+    /// `POST /agent/run` end: close the run and return its summary.
+    pub async fn run_end(
+        &self,
+        run_id: &str,
+        turn_ids: Option<Vec<String>>,
+    ) -> anyhow::Result<String> {
+        let mut body = serde_json::json!({"action": "end", "run_id": run_id});
+        if let Some(turns) = turn_ids {
+            body["turn_ids"] = serde_json::json!(turns);
+        }
+        let req = self
+            .auth(self.client.post(self.url("/agent/run")))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        // A refused end (any HTTP error, or a body without ok:true) keeps
+        // the run active, so the next calls do not silently lose it.
+        let text = check_status(req.send().await?).await?.text().await?;
+        if !body_says_ok(&text) {
+            anyhow::bail!("the daemon did not end the run: {text}");
+        }
+        if let Ok(mut run) = self.run_id.lock() {
+            if run.as_deref() == Some(run_id) {
+                *run = None;
+            }
+        }
+        Ok(text)
+    }
+
     pub async fn hold(&self, secs: u64) -> anyhow::Result<String> {
         let req = self
             .auth(self.client.post(self.url("/agent/hold")))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(format!(r#"{{"secs":{secs}}}"#));
         let resp = req.send().await?;
@@ -324,7 +402,6 @@ impl DaemonClient {
             .auth(self.client.post(self.url("/agent/prewarm")))
             .timeout(Duration::from_secs(15))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(serde_json::json!({ "reason": reason }).to_string());
         let resp = req.send().await?;
@@ -337,7 +414,6 @@ impl DaemonClient {
         let req = self
             .auth(self.client.post(self.url("/agent/owner")))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(r#"{"release":true}"#);
         let resp = req.send().await?;
@@ -371,8 +447,7 @@ impl DaemonClient {
     /// connection and takes no owner lease.
     pub async fn capabilities(&self) -> anyhow::Result<DaemonResponse> {
         let req = self
-            .auth(self.client.get(self.url("/agent/capabilities")))
-            .header("x-phone-owner", &self.owner);
+            .auth(self.client.get(self.url("/agent/capabilities")));
         read_response(req.send().await?).await
     }
 
@@ -394,7 +469,6 @@ impl DaemonClient {
         let mut req = self
             .auth(self.client.post(self.url(&path)))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(msg.to_json());
         if observe {
@@ -412,7 +486,6 @@ impl DaemonClient {
         let req = self
             .auth(self.client.post(self.url("/agent/input")))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(action.to_string());
         read_response(req.send().await?).await
@@ -450,7 +523,6 @@ impl DaemonClient {
             .auth(self.client.post(self.url("/agent/actions")))
             .timeout(ACTIONS_TIMEOUT)
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
         if flow_run {
@@ -471,8 +543,7 @@ impl DaemonClient {
         let mut req = self.auth(self.client.request(method, self.url(path)));
         if mutation {
             req = req
-                .header("x-phone-control", "1")
-                .header("x-phone-owner", &self.owner);
+                .header("x-phone-control", "1");
         }
         if let Some(body) = body {
             req = req
@@ -508,13 +579,25 @@ impl DaemonClient {
     /// `{"snapshot":"…","elements":[{kind,label,identifier?,rect,
     /// enabled?,visible?,accessible?,focused?,placeholder?,depth},…]}`.
     pub async fn elements(&self) -> anyhow::Result<String> {
+        self.elements_at("/agent/elements").await
+    }
+
+    /// [`Self::elements`] with the daemon's `image=auto` policy: when the tree
+    /// is unusable the answer carries a fresh, budget-bounded screenshot
+    /// taken after the read (never a cached frame). For the model-facing
+    /// read only; flow and lookup reads stay text.
+    pub async fn elements_with_image(&self) -> anyhow::Result<String> {
+        self.elements_at("/agent/elements?image=auto").await
+    }
+
+    async fn elements_at(&self, path: &str) -> anyhow::Result<String> {
         // A cold WDA call may create a session and then request the source tree;
         // each upstream step is bounded by the daemon, but together can exceed
         // the generic 30-second MCP timeout. Wait long enough for the daemon to
         // return its authoritative success/error instead of abandoning the
         // request while it still owns the WDA lock.
         let req = self
-            .auth(self.client.get(self.url("/agent/elements")))
+            .auth(self.client.get(self.url(path)))
             .timeout(ELEMENTS_TIMEOUT);
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
@@ -538,7 +621,6 @@ impl DaemonClient {
             .auth(self.client.post(self.url("/agent/mode")))
             .timeout(RECONNECT_TIMEOUT)
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(r#"{"mode":"agent"}"#);
         let resp = req.send().await?;
@@ -576,7 +658,6 @@ impl DaemonClient {
         let mut req = self
             .auth(self.client.post(self.url(path)))
             .header("x-phone-control", "1")
-            .header("x-phone-owner", &self.owner)
             .header(header::CONTENT_TYPE, "application/json")
             .body(json);
         if observe {
@@ -812,6 +893,13 @@ pub async fn read_response(resp: reqwest::Response) -> anyhow::Result<DaemonResp
         json,
         too_large,
     })
+}
+
+fn body_says_ok(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| value.get("ok").and_then(serde_json::Value::as_bool))
+        == Some(true)
 }
 
 /// Turn a non-2xx status into an `anyhow::Error` that includes the status code

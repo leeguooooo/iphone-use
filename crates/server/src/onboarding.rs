@@ -261,6 +261,27 @@ impl<'a> Daemon<'a> {
         Ok(value)
     }
 
+    fn metrics(&self, owner: Option<&str>) -> Result<Value> {
+        let path = match owner {
+            Some(owner) => format!("/agent/metrics?owner={}", urlencode(owner)),
+            None => "/agent/metrics".to_string(),
+        };
+        let (code, value) = self.call(reqwest::Method::GET, &path, None)?;
+        if code == 401 {
+            bail!("the daemon refused the token in its LaunchAgent (HTTP 401)");
+        }
+        if code == 404 {
+            bail!("this daemon has no /agent/metrics yet; upgrade it (iphone-use upgrade)");
+        }
+        // Only a 2xx that says ok:true is a report; anything else is an
+        // error, never rendered as "0 runs".
+        if !(200..300).contains(&code) || value["ok"] != Value::Bool(true) {
+            let reason = value["error"].as_str().unwrap_or("no report in the answer");
+            bail!("the daemon could not report metrics (HTTP {code}: {reason})");
+        }
+        Ok(value)
+    }
+
     fn input(&self, action: Value) -> Result<Value> {
         let (code, value) = self.call(reqwest::Method::POST, "/agent/input", Some(action))?;
         if code == 409 {
@@ -370,6 +391,72 @@ pub fn run_auth(target: &Target, path: &str, body: Value) -> Result<i32> {
 // ---------------------------------------------------------------------------
 // status
 // ---------------------------------------------------------------------------
+
+fn urlencode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// `iphone-use metrics`: per-run task metrics from the daemon.
+pub fn run_metrics(target: &Target, owner: Option<&str>, as_json: bool) -> Result<i32> {
+    let daemon = Daemon::new(target)?;
+    let report = daemon.metrics(owner)?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+    print!("{}", format_metrics(&report));
+    Ok(0)
+}
+
+/// A short human view of `/agent/metrics`: one line per run.
+fn format_metrics(report: &Value) -> String {
+    let mut out = String::new();
+    let line = |run: &Value| {
+        let owner = run["key"]["owner"].as_str().unwrap_or("?");
+        let id = run["key"]["run_id"].as_str().unwrap_or("(inferred)");
+        let ms = |key: &str| {
+            run[key]
+                .as_u64()
+                .map_or("-".to_string(), |v| format!("{v}ms"))
+        };
+        format!(
+            "  {owner} {id}: {} calls ({} batch, {} observed, {} flow), p50 {} p95 {}, \
+             stale {}, unknown {}, model turns {}{}\n",
+            run["tool_calls"],
+            run["batch_calls"],
+            run["observed_calls"],
+            run["flow_calls"],
+            ms("call_p50_ms"),
+            ms("call_p95_ms"),
+            run["stale"],
+            run["outcome_unknown"],
+            run["model_round_trips"]
+                .as_u64()
+                .map_or("n/a".to_string(), |v| v.to_string()),
+            if run["incomplete"] == Value::Bool(true) {
+                " — incomplete"
+            } else {
+                ""
+            },
+        )
+    };
+    for (title, key) in [("open runs", "open"), ("recent runs", "recent")] {
+        let runs = report[key].as_array().cloned().unwrap_or_default();
+        out.push_str(&format!("{title}: {}\n", runs.len()));
+        for run in &runs {
+            out.push_str(&line(run));
+        }
+    }
+    out.push_str("calls are HTTP calls to this daemon, not model turns\n");
+    out
+}
 
 pub fn run_status(target: &Target, as_json: bool) -> Result<i32> {
     let daemon = Daemon::new(target)?;
