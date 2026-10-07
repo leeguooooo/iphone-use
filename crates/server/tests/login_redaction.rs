@@ -47,6 +47,13 @@ struct Phone {
     password: String,
     focus: Option<&'static str>,
     logged_in: bool,
+    /// An SMS-style login: a code field where the password field would be.
+    code_form: bool,
+    /// Log in was pressed (tap or click), whatever the outcome.
+    login_pressed: bool,
+    /// Safari zooms in on a small-font input: once the account is filled the
+    /// password field moves and grows.
+    zoom_on_account: bool,
     /// Element ids are handed out per lookup, as the runner does.
     lookups: usize,
     /// Every value write and key press, as the runner received it.
@@ -54,6 +61,15 @@ struct Phone {
 }
 
 impl Phone {
+    /// The password field's top and height, after any zoom.
+    fn password_frame(&self) -> (f64, f64) {
+        if self.zoom_on_account && !self.account.is_empty() {
+            (PASSWORD_Y + 90.0, FIELD_H * 1.5)
+        } else {
+            (PASSWORD_Y, FIELD_H)
+        }
+    }
+
     fn field(&mut self, name: &str) -> &mut String {
         match name {
             "search" => &mut self.search,
@@ -78,6 +94,20 @@ impl Phone {
                 format!(r#""value":{},"#, serde_json::to_string(text).unwrap())
             }
         };
+        let second = if self.code_form {
+            format!(
+                r#"{{"type":"XCUIElementTypeTextField","label":"","placeholderValue":"Verification code",
+                "rect":{{"x":20,"y":{PASSWORD_Y},"width":350,"height":{FIELD_H}}},"isEnabled":true,"children":[]}},"#
+            )
+        } else {
+            let (top, height) = self.password_frame();
+            format!(
+                r#"{{"type":"XCUIElementTypeSecureTextField","label":"","placeholderValue":"Password",{password}
+                "rect":{{"x":20,"y":{top},"width":350,"height":{height}}},"isEnabled":true,"children":[]}},"#,
+                // The worst case: the runner reporting the password itself.
+                password = value(&self.password),
+            )
+        };
         format!(
             r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"Shop",
             "rect":{{"x":0,"y":0,"width":390,"height":844}},"children":[
@@ -85,8 +115,7 @@ impl Phone {
                 "rect":{{"x":20,"y":{SEARCH_Y},"width":350,"height":{FIELD_H}}},"isEnabled":true,"children":[]}},
               {{"type":"XCUIElementTypeTextField","label":"","placeholderValue":"Email",{account}
                 "rect":{{"x":20,"y":{ACCOUNT_Y},"width":350,"height":{FIELD_H}}},"isEnabled":true,"children":[]}},
-              {{"type":"XCUIElementTypeSecureTextField","label":"","placeholderValue":"Password",{password}
-                "rect":{{"x":20,"y":{PASSWORD_Y},"width":350,"height":{FIELD_H}}},"isEnabled":true,"children":[]}},
+              {second}
               {{"type":"XCUIElementTypeButton","label":"Forgot password",
                 "rect":{{"x":20,"y":320,"width":350,"height":{FIELD_H}}},"isEnabled":true,"children":[]}},
               {{"type":"XCUIElementTypeButton","label":"Log in",
@@ -94,8 +123,6 @@ impl Phone {
             ]}}}}"#,
             search = value(&self.search),
             account = value(&self.account),
-            // The worst case: the runner reporting the password itself.
-            password = value(&self.password),
         )
     }
 }
@@ -133,9 +160,17 @@ fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockWda {
             phone.lookups += 1;
             let n = phone.lookups;
             if body.contains("SecureTextField") {
+                if phone.code_form {
+                    return reply(r#"{"value":[]}"#.to_string());
+                }
                 return reply(format!(r#"{{"value":[{{"ELEMENT":"pw-{n}"}}]}}"#));
             }
             if body.contains("TextField") {
+                if phone.code_form {
+                    return reply(format!(
+                        r#"{{"value":[{{"ELEMENT":"search-{n}"}},{{"ELEMENT":"acct-{n}"}},{{"ELEMENT":"code-{n}"}}]}}"#
+                    ));
+                }
                 return reply(format!(
                     r#"{{"value":[{{"ELEMENT":"search-{n}"}},{{"ELEMENT":"acct-{n}"}}]}}"#
                 ));
@@ -156,6 +191,7 @@ fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockWda {
                 return reply(rect(y));
             }
             if line.contains("/click") && id == "login" {
+                phone.login_pressed = true;
                 phone.logged_in = phone.account == USERNAME && phone.password == PASSWORD;
             }
             return reply(r#"{"value":null}"#.to_string());
@@ -164,12 +200,19 @@ fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockWda {
             ("search", SEARCH_Y, "Search"),
             ("acct", ACCOUNT_Y, "Email"),
             ("pw", PASSWORD_Y, "Password"),
+            ("code", PASSWORD_Y, "Verification code"),
         ] {
             let element = format!("/session/SESSION/element/{id}-");
             if !line.contains(&element) {
                 continue;
             }
             if line.ends_with("/rect HTTP/1.1") || line.contains("/rect ") {
+                if id == "pw" {
+                    let (top, height) = phone.password_frame();
+                    return reply(format!(
+                        r#"{{"value":{{"x":20,"y":{top},"width":350,"height":{height}}}}}"#
+                    ));
+                }
                 return reply(rect(y));
             }
             if line.contains("/attribute/value") {
@@ -212,6 +255,7 @@ fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockWda {
             if let Some(y) = tapped_y(&body) {
                 let hit = |top: f64| y >= top && y <= top + FIELD_H;
                 if hit(LOGIN_Y) {
+                    phone.login_pressed = true;
                     phone.logged_in = phone.account == USERNAME && phone.password == PASSWORD;
                 } else if hit(ACCOUNT_Y) || hit(PASSWORD_Y) {
                     phone.focus = Some(match mode {
@@ -454,6 +498,69 @@ fn a_web_form_is_filled_by_typing_into_the_focused_field() {
             "the scripted app accepted the login"
         );
     });
+    assert_side_channels_clean();
+}
+
+/// Focusing a small-font web input zooms Safari (hardware: an admin login): the
+/// password field moves and grows after the account is filled, and is found
+/// again by its role rather than its old frame.
+#[test]
+fn a_page_that_zooms_after_the_account_still_gets_its_password() {
+    harness();
+    let phone = Arc::new(Mutex::new(Phone {
+        zoom_on_account: true,
+        ..Phone::default()
+    }));
+    let wda = scripted_runner(Runner::Native, phone.clone());
+    let state = build_state_with_wda(wda.url());
+    block(async {
+        let (status, login) = call(&state, "POST", "/agent/login", "{}").await;
+        assert_eq!(status, StatusCode::OK, "{login}");
+        assert_clean("login response", &login);
+        let json: serde_json::Value = serde_json::from_str(&login).unwrap();
+        assert_eq!(
+            json["filled"],
+            serde_json::json!(["account", "password"]),
+            "{login}"
+        );
+    });
+    assert!(
+        phone.lock().unwrap().logged_in,
+        "the scripted app accepted the login"
+    );
+    assert_side_channels_clean();
+}
+
+/// An SMS-style login (hardware: PlayPop, phone number + code on one screen, and
+/// "unregistered numbers are signed up on first login"). There is no password
+/// page behind Log in, so pressing it would submit an empty code and could
+/// create an account. Only the account is filled; nothing is submitted.
+#[test]
+fn a_code_login_fills_the_account_and_presses_nothing() {
+    harness();
+    let phone = Arc::new(Mutex::new(Phone {
+        code_form: true,
+        ..Phone::default()
+    }));
+    let wda = scripted_runner(Runner::Native, phone.clone());
+    let state = build_state_with_wda(wda.url());
+    block(async {
+        let (status, login) = call(&state, "POST", "/agent/login", "{}").await;
+        assert_eq!(status, StatusCode::OK, "{login}");
+        assert_clean("login response", &login);
+        let json: serde_json::Value = serde_json::from_str(&login).unwrap();
+        assert_eq!(json["filled"], serde_json::json!(["account"]), "{login}");
+        assert_eq!(json["submitted"], false, "{login}");
+        assert!(json["needs_code"].is_object(), "{login}");
+        assert!(
+            json["hint"].as_str().unwrap_or_default().contains("one-time code"),
+            "{login}"
+        );
+    });
+    let phone = phone.lock().unwrap();
+    assert_eq!(phone.account, USERNAME, "the account reached the phone");
+    assert!(!phone.login_pressed, "Log in must not be pressed on a code login");
+    drop(phone);
     assert_side_channels_clean();
 }
 

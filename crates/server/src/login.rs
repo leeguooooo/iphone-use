@@ -578,6 +578,30 @@ fn describe(row: &ElementRow) -> String {
     .to_lowercase()
 }
 
+const PHONE_HINTS: &[&str] = &["phone", "mobile", "tel", "手机", "电话", "電話", "携帯"];
+/// Words that make an account field also take something other than a number
+/// (`手机号/邮箱`, "Email or phone").
+const NOT_ONLY_PHONE_HINTS: &[&str] = &[
+    "mail", "user", "account", "邮箱", "用户名", "账号", "帐号", "账户", "メール", "ユーザー", "アカウント",
+];
+
+/// An account field that takes a phone number and nothing else.
+fn phone_only_field(row: &ElementRow) -> bool {
+    let text = describe(row);
+    PHONE_HINTS.iter().any(|hint| text.contains(hint))
+        && !NOT_ONLY_PHONE_HINTS.iter().any(|hint| text.contains(hint))
+}
+
+/// Digits, with an optional leading `+` and the usual separators.
+fn phone_shaped(value: &str) -> bool {
+    let digits: String = value
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '(' | ')' | '.'))
+        .collect();
+    let digits = digits.strip_prefix('+').unwrap_or(&digits);
+    digits.len() >= 5 && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 fn mentions(text: &str, hints: &[&str]) -> bool {
     hints.iter().any(|hint| text.contains(hint))
         || text
@@ -596,9 +620,28 @@ pub struct Form {
     pub secure_fields: usize,
 }
 
+const TOKEN_HINTS: &[&str] = &[
+    "token", "bearer", "api key", "api-key", "apikey", "secret key", "access key", "密钥", "令牌",
+];
+
+/// A secure field for pasting an access token, not a password (hardware: an
+/// admin login with "或直接粘贴 Bearer Token" under the password). An empty web
+/// input reports its placeholder as its value, so that is read too; a secure
+/// field's typed value reads as bullets and carries no words.
+fn token_field(row: &ElementRow) -> bool {
+    let mut text = describe(row);
+    if let Some(value) = &row.value {
+        text.push(' ');
+        text.push_str(&value.to_lowercase());
+    }
+    TOKEN_HINTS.iter().any(|hint| text.contains(hint))
+}
+
 pub fn read_form(rows: &[ElementRow]) -> Form {
     let secure: Vec<usize> = (0..rows.len())
-        .filter(|&i| rows[i].kind == "SecureTextField" && usable(&rows[i]))
+        .filter(|&i| {
+            rows[i].kind == "SecureTextField" && usable(&rows[i]) && !token_field(&rows[i])
+        })
         .collect();
     let text: Vec<usize> = (0..rows.len())
         .filter(|&i| rows[i].kind == "TextField" && usable(&rows[i]))
@@ -761,6 +804,59 @@ async fn holds(w: &mut WdaClient, id: &str, row: &ElementRow, secret: &Secret) -
     }
 }
 
+/// Titles of iOS's own password picker. Tapping a web password field on a phone
+/// with saved passwords opens it full-screen (hardware: Safari, iOS 27): the
+/// keys typed next went to the field behind it, and a tree read showed only the
+/// sheet, so a secret that landed in a plain field could not be seen.
+const AUTOFILL_SHEET_TITLES: &[&str] = &[
+    "自动填充密码",
+    "自動填充密碼",
+    "AutoFill Password",
+    "AutoFill Passwords",
+    "パスワードを自動入力",
+];
+const SHEET_CLOSE_LABELS: &[&str] = &["取消", "Cancel", "Close", "关闭", "キャンセル"];
+
+/// The close button of the system password sheet when one is up.
+fn autofill_sheet_close(rows: &[ElementRow]) -> Option<usize> {
+    let sheet = rows.iter().any(|r| {
+        matches!(r.kind.as_str(), "NavigationBar" | "StaticText")
+            && AUTOFILL_SHEET_TITLES.contains(&r.label.trim())
+    });
+    if !sheet {
+        return None;
+    }
+    // The close button sits in the sheet's title bar, at the top.
+    rows.iter().position(|r| {
+        r.kind == "Button" && SHEET_CLOSE_LABELS.contains(&r.label.trim()) && r.rect[1] < 220.0
+    })
+}
+
+/// Close the system password sheet if it is up. `Ok(true)` when the screen is
+/// clear of it; `Ok(false)` when it is still there after trying.
+async fn close_autofill_sheet(w: &mut WdaClient) -> Result<bool, LoginError> {
+    for _ in 0..2 {
+        let rows = w.elements().await.map_err(|_| phone_error("screen read"))?;
+        let sheet_up = rows.iter().any(|r| {
+            matches!(r.kind.as_str(), "NavigationBar" | "StaticText")
+                && AUTOFILL_SHEET_TITLES.contains(&r.label.trim())
+        });
+        if !sheet_up {
+            return Ok(true);
+        }
+        let Some(close) = autofill_sheet_close(&rows) else {
+            return Ok(false);
+        };
+        // A click on the element acknowledged and left the sheet up on
+        // hardware; a tap on its frame closes it.
+        tap_row(w, &rows[close]).await?;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    }
+    let rows = w.elements().await.map_err(|_| phone_error("screen read"))?;
+    Ok(autofill_sheet_close(&rows).is_none()
+        && !rows.iter().any(|r| AUTOFILL_SHEET_TITLES.contains(&r.label.trim())))
+}
+
 /// Replace a field's contents with a secret; nothing read is returned.
 ///
 /// The direct element write comes first: native fields take it. Web inputs
@@ -788,9 +884,20 @@ async fn fill(
         .await
         .map_err(|_| phone_error(&format!("{what} focus")))?;
     tokio::time::sleep(Duration::from_millis(800)).await;
+    // Never type while the system password sheet covers the page: the keys go
+    // to whatever field was focused before, in clear text.
+    if !close_autofill_sheet(w).await? {
+        return Err(LoginError::new(
+            409,
+            "autofill_sheet",
+            "iOS's password picker opened over the form and would not close; nothing was typed. Close it on the phone and try again",
+        ));
+    }
     w.keys(secret.expose())
         .await
         .map_err(|_| phone_error(&format!("{what} entry")))?;
+    // A sheet that opened while typing would hide the page from the check below.
+    let _ = close_autofill_sheet(w).await;
     let landed = holds(w, &id, row, secret).await;
     // Anywhere else it may have gone: a plain field showing it in clear text.
     // The target is told apart by where it is now (element ids are handed out
@@ -1032,8 +1139,51 @@ pub async fn sign_in(
     let mut filled: Vec<&str> = Vec::new();
 
     if let (Some(index), Some(username)) = (form.account, &credentials.username) {
+        // Found on hardware: a site username typed into a phone-number field
+        // loses its letters, and the failure then read as a keyboard problem.
+        if phone_only_field(&rows[index]) && !phone_shaped(username.expose()) {
+            return Err(LoginError::new(
+                422,
+                "account_not_a_phone_number",
+                "this app's account field takes a phone number, but the vault entry's username is not one; nothing was typed. Pick an entry that holds the phone number, or use another way to sign in that the app offers",
+            ));
+        }
         fill(w, &rows[index], username, "account").await?;
         filled.push("account");
+        if form.password.is_some() {
+            // Focusing a small-font web input zooms Safari (hardware: an admin
+            // login), which moves and resizes the password field. Find it again
+            // by its role on a fresh read, not by the frame it had before.
+            rows = w.elements().await.map_err(|_| phone_error("screen read"))?;
+            form = read_form(&rows);
+            if form.secure_fields >= 2 {
+                return Err(not_a_login_form());
+            }
+        }
+    }
+    if form.password.is_none() && form.code.is_some() {
+        if filled.is_empty() {
+            return Err(LoginError::new(
+                422,
+                "nothing_to_fill",
+                "the vault entry has no username for the account field on screen",
+            ));
+        }
+        // Account and one-time code on one screen (an SMS or email login): there
+        // is no password page behind a Next button. Pressing Log in now would
+        // submit an empty code, and apps that sign up unknown numbers on first
+        // login (found on hardware) could create an account. Stop after the
+        // account: the caller sends the code with the app's own button, then
+        // calls POST /agent/login/code, which needs this session.
+        remember_session(&entry);
+        return Ok(done(
+            &entry,
+            &filled,
+            false,
+            &rows,
+            Some(code_channel(&rows)),
+            CODE_LOGIN_HINT,
+        ));
     }
     if form.password.is_none() {
         // A two-step login: the account page first.
@@ -1090,11 +1240,7 @@ pub async fn sign_in(
         ));
     }
 
-    *SESSION.lock().unwrap_or_else(|e| e.into_inner()) = Some(Session {
-        started: Instant::now(),
-        entry_id: entry.id.clone(),
-        code_requests: 0,
-    });
+    remember_session(&entry);
 
     // A second factor, when the app asks for one.
     let mut needs_code = None;
@@ -1121,6 +1267,17 @@ pub async fn sign_in(
         None => "read the screen to confirm the login went through",
     };
     Ok(done(&entry, &filled, submitted, &rows, needs_code, hint))
+}
+
+const CODE_LOGIN_HINT: &str = "this login uses a one-time code instead of a password: the account is filled and nothing was submitted; send the code with the app's own button (it may sign up a number it does not know — check the screen's wording with the user first), then call POST /agent/login/code";
+
+/// The login in progress, for a follow-up `POST /agent/login/code`.
+fn remember_session(entry: &VaultEntry) {
+    *SESSION.lock().unwrap_or_else(|e| e.into_inner()) = Some(Session {
+        started: Instant::now(),
+        entry_id: entry.id.clone(),
+        code_requests: 0,
+    });
 }
 
 fn not_a_login_form() -> LoginError {
@@ -1380,6 +1537,64 @@ mod tests {
             user: Some(user.to_string()),
             uris: uris.iter().map(|u| Value::String(u.to_string())).collect(),
         }
+    }
+
+    #[test]
+    fn the_system_password_sheet_is_recognised_with_its_close_button() {
+        // Hardware: Safari on iOS 27 opened 自动填充密码 over a web login.
+        let mut close = row("Button", "取消", 111.0);
+        close.rect = [20.0, 111.0, 36.0, 36.0];
+        let rows = vec![
+            row("NavigationBar", "自动填充密码", 73.0),
+            close,
+            row("Button", "创建新密码…", 111.0),
+        ];
+        assert_eq!(autofill_sheet_close(&rows), Some(1));
+
+        // A form's own Cancel button is not the sheet's.
+        let rows = vec![row("StaticText", "管理员登录", 143.0), row("Button", "取消", 111.0)];
+        assert_eq!(autofill_sheet_close(&rows), None);
+    }
+
+    #[test]
+    fn a_token_paste_field_is_not_a_second_password() {
+        // Hardware: an admin login with "或直接粘贴 Bearer Token" under the
+        // password was refused as a sign-up page.
+        let mut token = row("SecureTextField", "", 535.0);
+        token.value = Some("或直接粘贴 Bearer Token".to_string());
+        let rows = vec![
+            row("TextField", "账号", 280.0),
+            row("SecureTextField", "", 363.0),
+            token,
+        ];
+        let form = read_form(&rows);
+        assert_eq!(form.secure_fields, 1);
+        assert_eq!(form.password, Some(1));
+        assert_eq!(form.account, Some(0));
+
+        // A real sign-up page still counts both password fields.
+        let rows = vec![
+            row("TextField", "Email", 200.0),
+            row("SecureTextField", "Password", 260.0),
+            row("SecureTextField", "Confirm password", 320.0),
+        ];
+        assert_eq!(read_form(&rows).secure_fields, 2);
+    }
+
+    #[test]
+    fn a_phone_only_field_refuses_a_username_that_is_not_a_number() {
+        // Hardware: PlayPop's 电话号码 field dropped a site username's letters.
+        assert!(phone_only_field(&row("TextField", "电话号码", 240.0)));
+        assert!(phone_only_field(&row("TextField", "Phone number", 240.0)));
+        assert!(!phone_only_field(&row("TextField", "手机号/邮箱", 240.0)));
+        assert!(!phone_only_field(&row("TextField", "Email or phone", 240.0)));
+        assert!(!phone_only_field(&row("TextField", "Username", 240.0)));
+
+        assert!(phone_shaped("+81 90-1234-5678"));
+        assert!(phone_shaped("13800138000"));
+        assert!(!phone_shaped("someone@example.com"));
+        assert!(!phone_shaped("player_one99"));
+        assert!(!phone_shaped("123"));
     }
 
     #[test]
