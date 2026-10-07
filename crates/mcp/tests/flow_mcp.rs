@@ -97,6 +97,8 @@ impl McpServer {
             .env("HOME", home)
             .env("PHONE_REMOTE_URL", url)
             .env("PHONE_REMOTE_TOKEN", "test-token")
+            // The scripted daemon answers only the requests each test lists.
+            .env("IPHONE_USE_MCP_PREWARM", "0")
             .env("IPHONE_USE_FLOWS_DIR", store)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

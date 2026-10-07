@@ -795,6 +795,17 @@ impl PhoneHandler {
     async fn phone_status(&self) -> CallToolResult {
         match self.daemon.status().await {
             Ok(s) => {
+                // A model reading status is about to act more often than
+                // not; a released phone starts coming back now (the daemon
+                // gates this on recent use and an unlocked phone).
+                if s.released == Some(true)
+                    && std::env::var("IPHONE_USE_MCP_PREWARM").map_or(true, |v| v.trim() != "0")
+                {
+                    let daemon = self.daemon.clone();
+                    tokio::spawn(async move {
+                        let _ = daemon.prewarm("status").await;
+                    });
+                }
                 let json =
                     serde_json::to_string(&s).unwrap_or_else(|_| r#"{"ok":true}"#.to_string());
                 CallToolResult::success(vec![Content::text(json)])

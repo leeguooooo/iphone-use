@@ -4202,3 +4202,67 @@ fn a_viewer_can_ask_for_a_keyframe_only_with_auth_and_the_control_header() {
         assert_eq!(ok.status(), StatusCode::OK);
     });
 }
+
+// Pre-warm is advisory: it answers at once, never takes the owner lease, and
+// on a daemon that does not manage a runner it has nothing to start.
+#[test]
+fn prewarm_is_gated_and_never_takes_the_lease() {
+    block(async {
+        let state = build_state_with_agent_token(None, Some("tok"));
+        let app = http::router(state.clone());
+        let prewarm = |body: &'static str, control: bool| {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/agent/prewarm")
+                .header("authorization", "Bearer tok")
+                .header("x-phone-owner", "mcp-a")
+                .header("content-type", "application/json");
+            if control {
+                req = req.header("x-phone-control", "1");
+            }
+            req.body(Body::from(body)).unwrap()
+        };
+        let read = |response: axum::response::Response| async move {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+
+        let unauthenticated = Request::builder()
+            .method("POST")
+            .uri("/agent/prewarm")
+            .header("x-phone-control", "1")
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(unauthenticated).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_ne!(
+            app.clone().oneshot(prewarm("{}", false)).await.unwrap().status(),
+            StatusCode::OK,
+            "a state-changing request needs X-Phone-Control"
+        );
+        let bad = app.clone().oneshot(prewarm(r#"{"reason":"whenever"}"#, true)).await.unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .clone()
+            .oneshot(prewarm(r#"{"reason":"session_start"}"#, true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read(response).await;
+        assert_eq!(json["prewarm"], "skipped", "{json}");
+        assert_eq!(json["skipped"], "not_managed", "{json}");
+        assert_eq!(json["reason"], "session_start");
+        assert!(state.owner.lock().unwrap().is_none(), "pre-warm must not take the lease");
+
+        let status = Request::builder()
+            .uri("/agent/status")
+            .header("authorization", "Bearer tok")
+            .body(Body::empty())
+            .unwrap();
+        let json = read(app.clone().oneshot(status).await.unwrap()).await;
+        assert_eq!(json["warming"], false, "{json}");
+    });
+}

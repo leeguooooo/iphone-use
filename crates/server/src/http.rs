@@ -483,6 +483,23 @@ enum OwnerClaim<'a> {
     Takeover(&'a str),
 }
 
+/// How long the phone has really been idle, for the release watchdog.
+/// `None` while the owner lease is live: a session holding the phone is not
+/// idle even between actions. Once the lease has ended the clock runs from
+/// the later of the last action and the lease's end, so a session that just
+/// let go still gets a full idle window.
+fn lease_idle_clock(
+    activity_age: std::time::Duration,
+    owner_age: Option<std::time::Duration>,
+    lease: std::time::Duration,
+) -> Option<std::time::Duration> {
+    match owner_age {
+        Some(age) if age < lease => None,
+        Some(age) => Some(activity_age.min(age - lease)),
+        None => Some(activity_age),
+    }
+}
+
 /// Why a control request was refused on ownership grounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnedByOther {
@@ -566,21 +583,37 @@ fn owner_claim_from_headers(headers: &HeaderMap) -> Result<OwnerClaim<'_>, Respo
 
 /// Gate a device-control request on the phone owner lease. Call right after
 /// the mutation-header check in every handler that drives the phone.
-fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+///
+/// `Ok(true)` when this request took a lease nobody (or someone else) held a
+/// moment ago — a session starting to drive the phone, which may pre-warm a
+/// released runner (see [`maybe_prewarm`]).
+fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<bool, Response> {
     let claim = owner_claim_from_headers(headers)?;
     let lease = std::time::Duration::from_secs(state.owner_lease_secs);
+    let now = Instant::now();
     let mut slot = recover(state.owner.lock());
     let previous = slot.clone();
-    let outcome = arbitrate_owner(&mut slot, claim, Instant::now(), lease);
+    let outcome = arbitrate_owner(&mut slot, claim, now, lease);
     drop(slot);
     match outcome {
         Ok(()) => {
-            if let (OwnerClaim::Takeover(name), Some(prev)) = (claim, previous) {
+            if let (OwnerClaim::Takeover(name), Some(prev)) = (claim, previous.as_ref()) {
                 if prev.name != name {
                     tracing::warn!("phone owner lease taken over: {} -> {name}", prev.name);
                 }
             }
-            Ok(())
+            // Every control request passes here (pre-warm never does), so this
+            // is the "an agent drove the phone" clock its gate reads.
+            crate::prewarm::note_driven();
+            let live_previous = previous
+                .filter(|owner| now.saturating_duration_since(owner.last_seen) < lease)
+                .map(|owner| owner.name);
+            Ok(match claim {
+                OwnerClaim::Named(name) | OwnerClaim::Takeover(name) => {
+                    live_previous.as_deref() != Some(name)
+                }
+                OwnerClaim::Anonymous => false,
+            })
         }
         Err(other) => Err(with_security_headers(
             Response::builder()
@@ -670,6 +703,9 @@ async fn agent_owner(
         );
     }
     *recover(state.owner.lock()) = None;
+    // While a lease is live the idle watchdog leaves the phone alone; the
+    // idle window starts when it is given back, not at the last action.
+    state.touch_activity();
     let mut released = serde_json::json!({"ok": true, "owner": null});
     if let Some(block) = release_agent_focus(&state).await {
         released["agent_focus"] = block;
@@ -717,6 +753,17 @@ impl AppState {
     /// How long since the last remote-driving activity.
     fn idle_for(&self) -> std::time::Duration {
         recover(self.last_activity.lock()).elapsed()
+    }
+
+    /// Whether the idle watchdog must keep the phone for now: a live owner
+    /// lease keeps it, and the idle window counts from whichever came later,
+    /// the last action or the end of the lease (see [`lease_idle_clock`]).
+    fn idle_release_waits(&self, window: std::time::Duration) -> bool {
+        let lease = std::time::Duration::from_secs(self.owner_lease_secs);
+        let owner_age = recover(self.owner.lock())
+            .as_ref()
+            .map(|owner| owner.last_seen.elapsed());
+        lease_idle_clock(self.idle_for(), owner_age, lease).map_or(true, |idle| idle < window)
     }
 
     /// Give a Direct control operation priority over background health work.
@@ -877,6 +924,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/intent", post(agent_intent))
         .route("/agent/hold", post(agent_hold))
         .route("/agent/owner", post(agent_owner))
+        .route("/agent/prewarm", post(agent_prewarm))
         .route("/agent/login-link", post(agent_login_link))
         .route("/agent/capabilities", get(agent_capabilities))
         // Scheduled flows and test suites (see `schedules`).
@@ -2429,8 +2477,10 @@ async fn agent_status(
     let rtt_json = rtt.map_or("null".to_string(), |ms| ms.to_string());
     let transport_hint = serde_json::to_string(&transport_hint(transport, rtt))
         .unwrap_or_else(|_| "null".into());
+    // A reconnect a pre-warm started (see `crate::prewarm`).
+    let warming = crate::prewarm::warming() && reconnecting;
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -3804,7 +3854,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 }
                 if state.viewer_busy()
                     || state.held()
-                    || state.idle_for() < window
+                    || state.idle_release_waits(window)
                     || state.wda_control_pending.load(Ordering::Acquire) != 0
                 {
                     continue;
@@ -3828,7 +3878,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 };
                 if state.viewer_busy()
                     || state.held()
-                    || state.idle_for() < window
+                    || state.idle_release_waits(window)
                     || state.wda_control_pending.load(Ordering::Acquire) != 0
                     || setup_in_flight(&crate::instance::current().state_dir)
                 {
@@ -3896,7 +3946,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
             if state.wda_control_pending.load(Ordering::Acquire) != 0 {
                 continue; // a real control request outranks idle release
             }
-            if state.idle_for() < window {
+            if state.idle_release_waits(window) {
                 continue; // driven recently
             }
             // The WDA probe waits behind the shared client lock. Activity may
@@ -3904,7 +3954,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
             // the release transition.
             if state.viewer_busy()
                 || state.held()
-                || state.idle_for() < window
+                || state.idle_release_waits(window)
                 || state.wda_control_pending.load(Ordering::Acquire) != 0
             {
                 continue;
@@ -3919,7 +3969,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
             // fail fast and cannot start a new device action.
             if state.viewer_busy()
                 || state.held()
-                || state.idle_for() < window
+                || state.idle_release_waits(window)
                 || state.wda_control_pending.load(Ordering::Acquire) != 0
             {
                 state.wda_lifecycle.finish_releasing(release_token);
@@ -3967,6 +4017,194 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
             state.wda_lifecycle.finish_releasing(release_token);
         }
     });
+}
+
+/// Bring an idle-released phone back in the background: the same bring-up
+/// an action on a released phone starts. Returns whether this call started
+/// it (false when another reconnect or release already owns the lifecycle).
+fn start_released_recovery(state: &Arc<AppState>) -> bool {
+    let Some(reconnect_token) = state.wda_lifecycle.try_begin_reconnecting() else {
+        return false;
+    };
+    note_reconnect_after_release();
+    // Someone just asked for the phone, so it is not idle — restart the
+    // clock before the supervisor starts building. Otherwise the idle
+    // watchdog can reach its window mid-bring-up and stop the very build
+    // this request triggered.
+    state.touch_activity();
+    let recovery_state = state.clone();
+    let setup_sh = crate::instance::Instance::path_str(&crate::instance::current().setup_sh());
+    let log = crate::instance::Instance::path_str(&crate::instance::current().agent_log());
+    let udid = state.device_udid.clone().unwrap_or_default();
+    tokio::spawn(async move {
+        let bootstrapped = tokio::task::spawn_blocking(move || {
+            write_and_bootstrap_wda_agent(&setup_sh, &log, &udid)
+        })
+        .await
+        .unwrap_or(false);
+        if bootstrapped {
+            *recover(recovery_state.wda_health.lock()) = crate::wda::WdaHealth::down();
+            recovery_state
+                .wda_actionable
+                .store(false, std::sync::atomic::Ordering::Release);
+            spawn_wda_readiness_wait(recovery_state, reconnect_token);
+        } else {
+            recovery_state
+                .wda_lifecycle
+                .finish_reconnecting(reconnect_token);
+        }
+    });
+    true
+}
+
+/// Pre-warm a released phone (see `crate::prewarm`): run the policy gate,
+/// read the lock state only once that passes, and start the same background
+/// bring-up an action would. Never blocks on the bring-up and never takes the
+/// owner lease. `caller` is the asking session's `X-Phone-Owner`, if any.
+async fn maybe_prewarm(
+    state: &Arc<AppState>,
+    trigger: crate::prewarm::Trigger,
+    caller: Option<&str>,
+) -> Result<(), crate::prewarm::Skip> {
+    use crate::prewarm;
+    let (owner, _) = owner_status(state);
+    let other_owner = owner.is_some_and(|owner| Some(owner.as_str()) != caller);
+    let blocker = read_structured_setup_status()
+        .map(|status| status.blocked_on)
+        .unwrap_or_default();
+    let inputs = prewarm::Inputs {
+        trigger,
+        managed: state.managed_wda && state.wda.is_some() && !state.managed_wda_pending,
+        released: state.released.load(std::sync::atomic::Ordering::Acquire),
+        human_handoff: human_handoff_active(),
+        lifecycle_busy: state.wda_lifecycle.is_transitioning(),
+        other_owner,
+        blocker: &blocker,
+        since_last_start: prewarm::since_last_start(trigger),
+        since_activity: prewarm::since_driven(),
+    };
+    prewarm::Policy::from_env().check(&inputs)?;
+    let udid = state.device_udid.clone().unwrap_or_default();
+    let reading = tokio::task::spawn_blocking(move || {
+        prewarm::device_passcode_required(&udid, std::time::Duration::from_secs(5))
+    })
+    .await
+    .unwrap_or(None);
+    prewarm::lock_gate(reading)?;
+    // The lock read took a device round trip; another request may have
+    // started (or handed off) the phone in the meantime.
+    if !state.released.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(prewarm::Skip::NotReleased);
+    }
+    if human_handoff_active() {
+        return Err(prewarm::Skip::HumanHandoff);
+    }
+    if !start_released_recovery(state) {
+        return Err(prewarm::Skip::LifecycleBusy);
+    }
+    prewarm::note_start(trigger);
+    prewarm::set_warming(true);
+    tracing::info!("pre-warm ({}): bringing the released phone back", trigger.as_str());
+    let watched = state.clone();
+    tokio::spawn(async move {
+        // The readiness wait owns the reconnect; `warming` mirrors it.
+        let started = Instant::now();
+        while watched.wda_lifecycle.is_reconnecting()
+            && started.elapsed() < std::time::Duration::from_secs(300)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        prewarm::set_warming(false);
+    });
+    Ok(())
+}
+
+/// A session took the owner lease: pre-warm in the background so a batch
+/// refused on a released phone finds it ready on the retry.
+fn prewarm_on_new_lease(state: &Arc<AppState>, headers: &HeaderMap) {
+    if !state.released.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let caller = headers
+        .get("x-phone-owner")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let state = state.clone();
+    tokio::spawn(async move {
+        if let Err(skip) =
+            maybe_prewarm(&state, crate::prewarm::Trigger::Lease, caller.as_deref()).await
+        {
+            tracing::debug!("pre-warm (lease) skipped: {}", skip.reason());
+        }
+    });
+}
+
+/// `POST /agent/prewarm {"reason":"session_start"|"status"|"lease"}` — start
+/// bringing a released phone back so the next action does not wait for the
+/// runner. Advisory: answers with `started` or `skipped` and a reason; it
+/// never takes the owner lease.
+async fn agent_prewarm(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    match agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    let reason = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| value.get("reason").and_then(|r| r.as_str()).map(String::from))
+        .unwrap_or_else(|| "status".to_string());
+    let Some(trigger) = crate::prewarm::Trigger::parse(&reason) else {
+        return with_security_headers(
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"ok":false,"error":"invalid_prewarm","hint":"reason must be session_start, status or lease"}"#,
+                ))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        );
+    };
+    let caller = match owner_claim_from_headers(&headers) {
+        Ok(OwnerClaim::Named(name) | OwnerClaim::Takeover(name)) => Some(name.to_string()),
+        Ok(OwnerClaim::Anonymous) => None,
+        Err(response) => return response,
+    };
+    let body = match maybe_prewarm(&state, trigger, caller.as_deref()).await {
+        Ok(()) => serde_json::json!({"ok": true, "prewarm": "started", "reason": trigger.as_str()}),
+        Err(skip) => {
+            let mut body = serde_json::json!({
+                "ok": true,
+                "prewarm": "skipped",
+                "reason": trigger.as_str(),
+                "skipped": skip.reason(),
+            });
+            if let crate::prewarm::Skip::RateLimited(secs) = skip {
+                body["retry_after_secs"] = secs.into();
+            }
+            body
+        }
+    };
+    with_security_headers(
+        Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
 }
 
 /// Whether the phone was last handed to a person via `{"mode":"human"}`.
@@ -8918,8 +9156,10 @@ async fn agent_actions(
     if !has_phone_control_header(&headers) {
         return missing_phone_control_header_response();
     }
-    if let Err(refused) = claim_phone_owner(&state, &headers) {
-        return refused;
+    match claim_phone_owner(&state, &headers) {
+        Err(refused) => return refused,
+        Ok(true) => prewarm_on_new_lease(&state, &headers),
+        Ok(false) => {}
     }
     if body.len() > AGENT_ACTIONS_MAX_BODY_BYTES {
         return agent_actions_invalid(format!(
@@ -10047,37 +10287,7 @@ async fn agent_input(
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
             );
         }
-        let won = state.wda_lifecycle.try_begin_reconnecting();
-        if let Some(reconnect_token) = won {
-            note_reconnect_after_release();
-            // Someone just asked for the phone, so it is not idle — restart the
-            // clock before the supervisor starts building. Otherwise the idle
-            // watchdog can reach its window mid-bring-up and stop the very
-            // build this request triggered.
-            state.touch_activity();
-            let recovery_state = state.clone();
-            let setup_sh = crate::instance::Instance::path_str(&crate::instance::current().setup_sh());
-            let log = crate::instance::Instance::path_str(&crate::instance::current().agent_log());
-            let udid = state.device_udid.clone().unwrap_or_default();
-            tokio::spawn(async move {
-                let bootstrapped = tokio::task::spawn_blocking(move || {
-                    write_and_bootstrap_wda_agent(&setup_sh, &log, &udid)
-                })
-                .await
-                .unwrap_or(false);
-                if bootstrapped {
-                    *recover(recovery_state.wda_health.lock()) = crate::wda::WdaHealth::down();
-                    recovery_state
-                        .wda_actionable
-                        .store(false, std::sync::atomic::Ordering::Release);
-                    spawn_wda_readiness_wait(recovery_state, reconnect_token);
-                } else {
-                    recovery_state
-                        .wda_lifecycle
-                        .finish_reconnecting(reconnect_token);
-                }
-            });
-        }
+        start_released_recovery(&state);
         if state.wda_lifecycle.is_releasing() {
             return with_security_headers(
                 Response::builder()
@@ -11231,8 +11441,10 @@ async fn agent_hold(
     if !has_phone_control_header(&headers) {
         return missing_phone_control_header_response();
     }
-    if let Err(refused) = claim_phone_owner(&state, &headers) {
-        return refused;
+    match claim_phone_owner(&state, &headers) {
+        Err(refused) => return refused,
+        Ok(true) => prewarm_on_new_lease(&state, &headers),
+        Ok(false) => {}
     }
     let secs = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
@@ -12694,8 +12906,10 @@ async fn agent_intent(
     if !has_phone_control_header(&headers) {
         return missing_phone_control_header_response();
     }
-    if let Err(refused) = claim_phone_owner(&state, &headers) {
-        return refused;
+    match claim_phone_owner(&state, &headers) {
+        Err(refused) => return refused,
+        Ok(true) => prewarm_on_new_lease(&state, &headers),
+        Ok(false) => {}
     }
     // Same total server deadline as `/agent/input`: the authoritative outcome
     // must arrive before a 30-second MCP client can abandon the call.
@@ -15895,6 +16109,37 @@ mod tests {
         assert_eq!(stretched_idle_window(base, 9).as_secs(), 3600);
         // A configured window above the cap is never shortened.
         assert_eq!(stretched_idle_window(std::time::Duration::from_secs(7200), 2).as_secs(), 7200);
+    }
+
+    #[test]
+    fn a_live_owner_lease_keeps_the_phone_and_the_idle_window_starts_when_it_ends() {
+        let secs = std::time::Duration::from_secs;
+        let lease = secs(300);
+        // A session holding the lease is never idle, however long since its
+        // last action.
+        assert_eq!(lease_idle_clock(secs(900), Some(secs(299)), lease), None);
+        // Lease ended 100 s ago: idle for 100 s, not since the last action.
+        assert_eq!(lease_idle_clock(secs(900), Some(secs(400)), lease), Some(secs(100)));
+        // A later action (an anonymous client) still restarts the clock.
+        assert_eq!(lease_idle_clock(secs(30), Some(secs(400)), lease), Some(secs(30)));
+        // No owner at all: plain activity clock.
+        assert_eq!(lease_idle_clock(secs(250), None, lease), Some(secs(250)));
+    }
+
+    #[test]
+    fn owner_claims_report_a_newly_taken_lease_once() {
+        let state = readiness_test_state();
+        let named = |name: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-phone-owner", name.parse().unwrap());
+            headers
+        };
+        assert_eq!(claim_phone_owner(&state, &named("a")).ok(), Some(true));
+        assert_eq!(claim_phone_owner(&state, &named("a")).ok(), Some(false));
+        assert!(claim_phone_owner(&state, &HeaderMap::new()).is_err());
+        *recover(state.owner.lock()) = None;
+        assert_eq!(claim_phone_owner(&state, &HeaderMap::new()).ok(), Some(false));
+        assert_eq!(claim_phone_owner(&state, &named("b")).ok(), Some(true));
     }
 
     #[test]

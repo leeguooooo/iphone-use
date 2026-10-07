@@ -538,6 +538,19 @@ async fn main() -> anyhow::Result<()> {
         "iphone-use-mcp starting"
     );
 
+    // A session that drove the phone recently is likely to again: let the
+    // daemon start bringing a released phone back now, in the background.
+    // `IPHONE_USE_MCP_PREWARM=0` turns this off for this server.
+    if std::env::var("IPHONE_USE_MCP_PREWARM").map_or(true, |v| v.trim() != "0") {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            match daemon.prewarm("session_start").await {
+                Ok(body) => tracing::debug!(%body, "pre-warm"),
+                Err(e) => tracing::debug!("pre-warm request failed: {e:#}"),
+            }
+        });
+    }
+
     // Run until the MCP client closes the pipe.
     let handler = server::PhoneHandler::new(daemon);
     let service = handler.serve(stdio()).await?;
