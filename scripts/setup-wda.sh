@@ -443,6 +443,34 @@ case "$WDA_ALLOW_LAN" in
     *) printf 'WDA_ALLOW_LAN must be 0 or 1\n' >&2; exit 1 ;;
 esac
 
+# This phone's own Xcode (`iphone-use setup --xcode`): --xcode >
+# DEVELOPER_DIR in the environment > this instance's supervisor plist > its
+# daemon plist; `system` goes back to xcode-select. Exported, so every
+# xcodebuild, xcrun and devicectl below uses it; persisted into both plists
+# so the supervisor and reconnects do too. Other instances are untouched.
+case "${IPHONE_USE_XCODE:-}" in
+    system) INSTANCE_DEVELOPER_DIR="" ;;
+    "")
+        INSTANCE_DEVELOPER_DIR="${DEVELOPER_DIR:-$(_existing_wda_env DEVELOPER_DIR)}"
+        INSTANCE_DEVELOPER_DIR="${INSTANCE_DEVELOPER_DIR:-$(_existing_daemon_env DEVELOPER_DIR)}"
+        ;;
+    *.app|*.app/) INSTANCE_DEVELOPER_DIR="${IPHONE_USE_XCODE%/}/Contents/Developer" ;;
+    *) INSTANCE_DEVELOPER_DIR="${IPHONE_USE_XCODE%/}" ;;
+esac
+if [ -n "$INSTANCE_DEVELOPER_DIR" ]; then
+    case "$INSTANCE_DEVELOPER_DIR" in
+        /*) ;;
+        *) printf -- '--xcode %s: an absolute path to an Xcode.app is required\n' "$INSTANCE_DEVELOPER_DIR" >&2; exit 2 ;;
+    esac
+    if [ ! -x "$INSTANCE_DEVELOPER_DIR/usr/bin/xcodebuild" ]; then
+        printf -- '--xcode: %s is not an Xcode (no usr/bin/xcodebuild)\n' "$INSTANCE_DEVELOPER_DIR" >&2
+        exit 2
+    fi
+    export DEVELOPER_DIR="$INSTANCE_DEVELOPER_DIR"
+else
+    unset DEVELOPER_DIR
+fi
+
 # Read-only: what this instance resolves to, for install.sh/uninstall.sh and
 # the fixture test. Exits non-zero when a port or the phone is already bound
 # to another instance, before anything is touched.
@@ -1328,7 +1356,7 @@ _install_wda_supervisor() {
 
     for key in \
         WDA_KEEPALIVE PATH WDA_UDID WDA_TEAM_ID WDA_BUNDLE_ID \
-        IPU_RUNNER_SRC WDA_PORT MJPEG_PORT WDA_ALLOW_LAN WDA_RUNNER_ICON \
+        IPU_RUNNER_SRC WDA_PORT MJPEG_PORT WDA_ALLOW_LAN WDA_RUNNER_ICON DEVELOPER_DIR \
         WDA_ASC_KEY_PATH WDA_ASC_KEY_ID WDA_ASC_ISSUER_ID \
         PHONE_REMOTE_INSTANCE PHONE_REMOTE_STATE_DIR
     do
@@ -1353,6 +1381,7 @@ _install_wda_supervisor() {
             WDA_PORT) value="$WDA_PORT" ;;
             MJPEG_PORT) value="$MJPEG_PORT" ;;
             WDA_ALLOW_LAN) value="${WDA_ALLOW_LAN:-}" ;;
+            DEVELOPER_DIR) value="${INSTANCE_DEVELOPER_DIR:-}" ;;
             # The runner's Home Screen icon (auto by default, applied by the
             # native build); only a deliberate choice is persisted.
             WDA_RUNNER_ICON)
@@ -4149,6 +4178,7 @@ if [ -f "$DAEMON_PLIST" ]; then
     CURRENT_MJPEG_URL="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:PHONE_REMOTE_WDA_MJPEG_URL" "$DAEMON_STAGED_PLIST" 2>/dev/null || true)"
     CURRENT_MANAGED="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:PHONE_REMOTE_WDA_MANAGED" "$DAEMON_STAGED_PLIST" 2>/dev/null || true)"
     CURRENT_ALLOW_LAN="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:WDA_ALLOW_LAN" "$DAEMON_STAGED_PLIST" 2>/dev/null || true)"
+    CURRENT_DEVELOPER_DIR="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:DEVELOPER_DIR" "$DAEMON_STAGED_PLIST" 2>/dev/null || true)"
     CONFIG_CHANGED=0
     # Restart the daemon only for settings it reads at startup. WDA_ALLOW_LAN
     # is not one of them (setup reads it from this plist), and a restart drops
@@ -4161,6 +4191,8 @@ if [ -f "$DAEMON_PLIST" ]; then
     [ "$CURRENT_URL" != "$TARGET_URL" ] && CHANGED_KEYS="$CHANGED_KEYS PHONE_REMOTE_WDA_URL"
     [ "$CURRENT_MJPEG_URL" != "$TARGET_MJPEG_URL" ] && CHANGED_KEYS="$CHANGED_KEYS PHONE_REMOTE_WDA_MJPEG_URL"
     [ "$CURRENT_MANAGED" != "true" ] && CHANGED_KEYS="$CHANGED_KEYS PHONE_REMOTE_WDA_MANAGED"
+    # The daemon's own devicectl/xcrun calls read DEVELOPER_DIR at startup.
+    [ "$CURRENT_DEVELOPER_DIR" != "${INSTANCE_DEVELOPER_DIR:-}" ] && CHANGED_KEYS="$CHANGED_KEYS DEVELOPER_DIR"
     [ -n "$CHANGED_KEYS" ] && DAEMON_NEEDS_RESTART=1
     [ "$CURRENT_ALLOW_LAN" != "$WDA_ALLOW_LAN" ] && CHANGED_KEYS="$CHANGED_KEYS WDA_ALLOW_LAN"
     if [ -n "$CHANGED_KEYS" ]; then
@@ -4170,6 +4202,11 @@ if [ -f "$DAEMON_PLIST" ]; then
         _plist_set_env "$DAEMON_STAGED_PLIST" PHONE_REMOTE_WDA_MJPEG_URL "$TARGET_MJPEG_URL"
         _plist_set_env "$DAEMON_STAGED_PLIST" PHONE_REMOTE_WDA_MANAGED true
         _plist_set_env "$DAEMON_STAGED_PLIST" WDA_ALLOW_LAN "$WDA_ALLOW_LAN"
+        if [ -n "${INSTANCE_DEVELOPER_DIR:-}" ]; then
+            _plist_set_env "$DAEMON_STAGED_PLIST" DEVELOPER_DIR "$INSTANCE_DEVELOPER_DIR"
+        else
+            /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:DEVELOPER_DIR" "$DAEMON_STAGED_PLIST" 2>/dev/null || true
+        fi
         CONFIG_CHANGED=1
         ok "daemon plist set to managed direct + fixed device + runner control/video endpoints (changed:$CHANGED_KEYS)"
     else

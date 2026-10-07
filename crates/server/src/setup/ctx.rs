@@ -67,6 +67,10 @@ pub struct Ctx {
     pub udid: String,
     /// `WDA_KEEPALIVE=1`: the launchd supervisor's run.
     pub keepalive: bool,
+    /// This phone's own Xcode (`iphone-use setup --xcode`), persisted as
+    /// DEVELOPER_DIR in its plists and exported to every xcodebuild, xcrun
+    /// and devicectl; `None` uses the Mac's xcode-select choice.
+    pub developer_dir: Option<PathBuf>,
 }
 
 fn env(key: &str) -> Option<String> {
@@ -125,6 +129,7 @@ impl Ctx {
             allow_lan: "0".into(),
             udid: String::new(),
             keepalive: false,
+            developer_dir: None,
             script: None,
             instance,
             home,
@@ -259,6 +264,22 @@ impl Ctx {
             udid = wda_env("WDA_UDID");
         }
 
+        // --xcode > DEVELOPER_DIR in the environment > this instance's
+        // supervisor plist > its daemon plist. `system` clears it.
+        ctx.developer_dir = match env("IPHONE_USE_XCODE") {
+            Some(choice) if choice == "system" => None,
+            Some(choice) => Some(developer_dir_for(&choice).map_err(|message| (message, 2))?),
+            None => {
+                let mut chosen = env("DEVELOPER_DIR").unwrap_or_default();
+                if chosen.is_empty() {
+                    chosen = wda_env("DEVELOPER_DIR");
+                }
+                if chosen.is_empty() {
+                    chosen = daemon_env("DEVELOPER_DIR");
+                }
+                (!chosen.is_empty()).then(|| PathBuf::from(chosen))
+            }
+        };
         ctx.wda_dir = wda_dir;
         ctx.runner_src = runner_src;
         ctx.runner_project = runner_project;
@@ -303,6 +324,24 @@ impl Ctx {
 
     pub fn mjpeg_port_number(&self) -> Option<u16> {
         valid_port(&self.mjpeg_port)
+    }
+}
+
+/// `/Applications/Xcode-beta.app` or its `Contents/Developer` → the
+/// developer directory, when it holds an xcodebuild.
+pub fn developer_dir_for(choice: &str) -> Result<PathBuf, String> {
+    let path = Path::new(choice.trim_end_matches('/'));
+    let dir = if path.extension().is_some_and(|e| e == "app") {
+        path.join("Contents/Developer")
+    } else {
+        path.to_path_buf()
+    };
+    if dir.is_absolute() && dir.join("usr/bin/xcodebuild").is_file() {
+        Ok(dir)
+    } else {
+        Err(format!(
+            "--xcode {choice}: not an Xcode (expected /Applications/Xcode….app or its Contents/Developer with usr/bin/xcodebuild)"
+        ))
     }
 }
 
@@ -620,6 +659,32 @@ mod tests {
                 .unwrap();
             assert_eq!(posix_cksum(name.as_bytes()), expected, "{name:?}");
         }
+    }
+
+    #[test]
+    fn a_per_phone_xcode_is_an_app_or_its_developer_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Xcode-beta.app");
+        let developer = app.join("Contents/Developer");
+        std::fs::create_dir_all(developer.join("usr/bin")).unwrap();
+        std::fs::write(developer.join("usr/bin/xcodebuild"), "").unwrap();
+        assert_eq!(
+            developer_dir_for(&app.to_string_lossy()).unwrap(),
+            developer
+        );
+        assert_eq!(
+            developer_dir_for(&format!("{}/", app.display())).unwrap(),
+            developer
+        );
+        assert_eq!(
+            developer_dir_for(&developer.to_string_lossy()).unwrap(),
+            developer
+        );
+        assert!(developer_dir_for(&dir.path().join("Nope.app").to_string_lossy()).is_err());
+        assert!(
+            developer_dir_for("Xcode.app").is_err(),
+            "relative paths are refused"
+        );
     }
 
     #[test]

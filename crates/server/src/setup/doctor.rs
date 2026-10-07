@@ -26,6 +26,13 @@ pub fn run(ctx: &Ctx) -> i32 {
         fail = true;
     } else {
         ok(&format!("Full Xcode: {xcode}"));
+        match &ctx.developer_dir {
+            Some(dir) => ok(&format!("This phone uses its own Xcode: {}", dir.display())),
+            None => ok(&format!(
+                "This phone uses the Mac's selected Xcode: {}",
+                sys::stdout_of("xcode-select", &["-p"])
+            )),
+        }
         if !checks::doctor_xcode_compat(ctx) {
             fail = true;
         }

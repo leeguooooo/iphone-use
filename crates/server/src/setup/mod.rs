@@ -58,6 +58,12 @@ pub fn main(args: &[String]) -> i32 {
                     return code;
                 }
             };
+            // This phone's own Xcode reaches every child: xcodebuild, xcrun,
+            // devicectl, actool, codesign. Set before any thread exists.
+            match &ctx.developer_dir {
+                Some(dir) => std::env::set_var("DEVELOPER_DIR", dir),
+                None => std::env::remove_var("DEVELOPER_DIR"),
+            }
             match name {
                 "doctor" => doctor::run(&ctx),
                 "status" => commands::status(&ctx),
