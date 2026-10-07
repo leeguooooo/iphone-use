@@ -18,6 +18,8 @@
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
+**Current device backend:** our own XCTest runner, replacing WebDriverAgent since v0.14.0. Its API is WDA-compatible; current control does not depend on iPhone Mirroring.
+
 **Let an AI agent use your real iPhone:** it reads the screen as text, taps, swipes and
 types, and is told plainly when an action did not land.
 

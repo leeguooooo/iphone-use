@@ -18,6 +18,8 @@
   <strong>简体中文</strong>
 </p>
 
+**当前设备后端：**自研 XCTest runner，从 v0.14.0 起取代 WebDriverAgent。接口兼容 WDA；当前控制不依赖 iPhone Mirroring。
+
 **让 AI agent 直接用你的真 iPhone：**把屏幕读成文字，点、滑、输入，操作没生效时直接告诉它。
 
 ```bash
