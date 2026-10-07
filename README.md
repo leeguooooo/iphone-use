@@ -49,6 +49,8 @@ iphone-use login     # sign a browser in again, with a QR code for the iPhone
 iphone-use upgrade   # update everything
 ```
 
+[Product guide: installation, MCP setup, flows and comparison](https://blog.leeguoo.com/en/posts/iphone-use/)
+
 ## What it is
 
 iphone-use works on apps that have no API, including banking and payment apps that
