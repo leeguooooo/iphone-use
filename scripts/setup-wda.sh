@@ -1043,7 +1043,12 @@ _first_run_checklist() {
         _checklist_line 0 "Xcode is installed" "get it from the App Store ($XCODE_APP_STORE_URL) and open it once"
         missing=1
     fi
+    # Any source setup itself would sign with counts: an explicit or persisted
+    # team (an App Store Connect API key setup has no Xcode account at all),
+    # the team last picked in Xcode, or a signed-in account.
     if [ -z "${WDA_TEAM_ID:-}" ] \
+        && ! _asc_signing_enabled \
+        && [ -z "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:WDA_TEAM_ID' "$WDA_AGENT_PLIST" 2>/dev/null || true)" ] \
         && [ -z "$(defaults read com.apple.dt.Xcode IDEProvisioningTeamManagerLastSelectedTeamID 2>/dev/null || true)" ] \
         && [ -z "$(_xcode_account_teams)" ]; then
         account=0

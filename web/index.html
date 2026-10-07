@@ -865,7 +865,7 @@
   <header class="element-panel-header">
     <div class="element-panel-heading">
       <h2 id="elementPanelTitle">iPhone 可访问控件</h2>
-      <p>来自当前设备画面的 WDA 元素树</p>
+      <p>来自当前设备画面的元素树</p>
     </div>
     <button id="elementRefresh" class="element-panel-action" type="button">刷新</button>
     <button id="elementClose" class="element-panel-action" type="button">关闭</button>
@@ -1049,7 +1049,7 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
   ) {
     toast(backendStatus.recovery_owner === 'unconfigured'
       ? '请先完成 iPhone 设备设置'
-      : '请在 WDA 所在主机恢复服务');
+      : '请在设备 runner 所在主机恢复服务');
     return;
   }
   reconnectActionBusy = true;
@@ -1168,7 +1168,7 @@ function recoveryFailureText(result = {}) {
     case 'target_not_configured':
       return '尚未选择 iPhone，请先运行设备设置';
     case 'wda_is_externally_managed':
-      return 'WDA 由外部服务管理，请在来源主机恢复';
+      return '设备 runner 由外部服务管理，请在来源主机恢复';
     case 'device_release_in_progress':
       return '设备正在释放，请稍后再试';
     case 'reconnect_in_progress':
@@ -1259,7 +1259,7 @@ function directHintText(status, fallback) {
     return '请连接、解锁并信任 iPhone，然后在这台 Mac 上完成首次设置';
   }
   if (hint.includes('externally managed')) {
-    return '请在 WDA 所在主机恢复服务；本机不会接管或重启它';
+    return '请在设备 runner 所在主机恢复服务；本机不会接管或重启它';
   }
   if (hint.includes('locked')) {
     return '请解锁 iPhone 并保持亮屏，连接会自动恢复';
@@ -1276,19 +1276,19 @@ function updateSetupHelp(kind) {
   let command = '';
   let label = '在这台 Mac 的终端运行';
   if (kind === 'unconfigured') {
-    command = '~/.iphone-use/setup-wda.sh setup';
+    command = 'iphone-use setup';
     label = '连接并解锁 iPhone 后，在这台 Mac 的终端运行';
   } else if (
     kind === 'setup-blocked' &&
     !managedSetupWillRetry(backendStatus)
   ) {
-    command = '~/.iphone-use/setup-wda.sh setup';
+    command = 'iphone-use setup';
     label = '处理上面的阻塞项后，在这台 Mac 的终端运行';
   } else if (
     kind === 'offline' &&
     backendStatus?.recovery_owner !== 'external'
   ) {
-    command = '~/.iphone-use/setup-wda.sh status';
+    command = 'iphone-use status';
     label = '在这台 Mac 的终端检查设备服务';
   }
   setupHelp.hidden = command.length === 0;
@@ -1348,10 +1348,10 @@ function showOverlay(kind) {
     ));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'external') {
-    setTextIfChanged(olTitle, '外部 WDA 未连接');
+    setTextIfChanged(olTitle, '外部设备 runner 未连接');
     setTextIfChanged(olSub, directHintText(
       backendStatus,
-      '请在设备服务所在主机恢复 WDA；本机不会擅自重启外部服务',
+      '请在设备服务所在主机恢复设备 runner；本机不会擅自重启外部服务',
     ));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'setup-blocked') {
@@ -1386,7 +1386,7 @@ function showOverlay(kind) {
     setTextIfChanged(olTitle, '设备控制暂不可用');
     setTextIfChanged(olSub, directHintText(
       backendStatus,
-      '设备服务仍在线，但当前不能执行操作。请重新连接；若仍失败，请检查 WDA 状态',
+      '设备服务仍在线，但当前不能执行操作。请重新连接；若仍失败，在这台 Mac 上运行 iphone-use doctor',
     ));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'frame-stale') {
@@ -2177,7 +2177,7 @@ function updateStatusLine() {
       case 'locked': setStatus('设备不可用 · 请解锁'); break;
       case 'setup-blocked': setStatus('设备设置被阻塞'); break;
       case 'unconfigured': setStatus('尚未选择 iPhone'); break;
-      case 'external': setStatus('外部 WDA 未连接'); break;
+      case 'external': setStatus('外部设备 runner 未连接'); break;
       case 'blocked': setStatus('设备控制暂不可用'); break;
       default: setStatus('设备未连接');
     }
@@ -4082,7 +4082,7 @@ if (btnHandoff) btnHandoff.addEventListener('click', async () => {
     await takePhoneBackForAgent();
     return;
   }
-  if (backendStatus?.recovery_owner === 'external') { toast('WDA 在别的主机上，本机无法交还'); return; }
+  if (backendStatus?.recovery_owner === 'external') { toast('设备 runner 在别的主机上，本机无法交还'); return; }
   if (!confirm('把手机交还给持有人？远程控制会停止，手机留给拿着它的人用；需要时再点「交给 agent」。')) return;
   btnHandoff.disabled = true;
   try {

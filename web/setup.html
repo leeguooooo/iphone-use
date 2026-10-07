@@ -158,7 +158,7 @@
     </div>
     <main>
       <header>
-        <p class="eyebrow">Direct · WebDriverAgent</p>
+        <p class="eyebrow">Direct · 设备 runner</p>
         <h1>连接真实 iPhone</h1>
         <p class="lede">这里会持续检查设备状态。设置仍由这台 Mac 上的受控脚本完成；页面不会擅自断开 VPN、修改代理、选择另一台手机或绕过系统信任。</p>
         <div id="liveState" class="live-state" data-tone="warn" role="status" aria-live="polite" aria-atomic="true">
@@ -191,7 +191,7 @@
                 <strong>在这台 Mac 的终端运行一次设置</strong>
                 <p>它会检查 Xcode、网络、签名、设备信任以及 8100/9100 本地中继。</p>
                 <div class="command">
-                  <code id="setupCommand">~/.iphone-use/setup-wda.sh setup</code>
+                  <code id="setupCommand">iphone-use setup</code>
                   <button id="copy" type="button">复制命令</button>
                 </div>
               </div>
@@ -210,8 +210,8 @@
           <p id="blockerDetail"></p>
         </aside>
         <aside id="externalHelp" class="callout warn" hidden>
-          <strong>这台服务不拥有 WDA</strong>
-          <p>请到 WDA 实际运行的主机恢复它。本页只会重新检查连接，不会在本机启动、停止或替换外部服务。</p>
+          <strong>这台服务不管理设备 runner</strong>
+          <p>请到设备 runner 实际运行的主机恢复它。本页只会重新检查连接，不会在本机启动、停止或替换外部服务。</p>
         </aside>
 
         <div class="actions">
@@ -347,7 +347,7 @@
         return;
       }
       if (external) {
-        setState('外部 WDA 未连接', '请在设备服务所在主机恢复；本页会自动重新检查。', 'danger');
+        setState('外部设备 runner 未连接', '请在设备服务所在主机恢复；本页会自动重新检查。', 'danger');
         return;
       }
       if (setupRequired) {

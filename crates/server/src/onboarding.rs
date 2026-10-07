@@ -20,7 +20,7 @@ const START_WAIT: Duration = Duration::from_secs(150);
 
 pub struct Target {
     pub instance: Instance,
-    port: u16,
+    base: String,
     token: Option<String>,
 }
 
@@ -32,20 +32,30 @@ impl Target {
             .unwrap_or_default();
         let home = std::env::var("HOME").context("HOME is not set")?;
         let instance = Instance::derive(&name, home, None).map_err(|e| anyhow!(e))?;
-        let port = plist_env(&instance.daemon_label, "PHONE_REMOTE_PORT")
-            .and_then(|p| p.trim().parse::<u16>().ok())
-            .unwrap_or(DEFAULT_PORT);
-        let token = plist_env(&instance.daemon_label, "PHONE_REMOTE_AGENT_TOKEN")
-            .or_else(|| plist_env(&instance.daemon_label, "PHONE_REMOTE_PASSWORD"));
+        // The same order as the MCP server: explicit environment first, then
+        // the daemon's own LaunchAgent.
+        let env = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+        let base = env("PHONE_REMOTE_URL")
+            .map(|url| url.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| {
+                let port = plist_env(&instance.daemon_label, "PHONE_REMOTE_PORT")
+                    .and_then(|p| p.trim().parse::<u16>().ok())
+                    .unwrap_or(DEFAULT_PORT);
+                format!("http://127.0.0.1:{port}")
+            });
+        let token = env("PHONE_REMOTE_TOKEN").or_else(|| {
+            plist_env(&instance.daemon_label, "PHONE_REMOTE_AGENT_TOKEN")
+                .or_else(|| plist_env(&instance.daemon_label, "PHONE_REMOTE_PASSWORD"))
+        });
         Ok(Target {
             instance,
-            port,
+            base,
             token,
         })
     }
 
     fn base(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        self.base.clone()
     }
 
     fn setup_script(&self) -> std::path::PathBuf {
