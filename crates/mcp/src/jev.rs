@@ -227,20 +227,16 @@ fn controls(screen: &Screen) -> Vec<(&'static str, &'static str)> {
 /// Hardware: BACK on a top-level page twelve times in a row; tapping a search
 /// field seventeen times as its keyboard came and went.
 fn stuck_actions(history: &[Value]) -> Vec<(String, Value)> {
-    let key = |h: &Value| (h["action"].as_str().unwrap_or("").to_string(), h["target"].clone());
-    let mut avoid = Vec::new();
-    if let Some(last) = history.last() {
-        if last["page_changed"] == json!(false) {
-            avoid.push(key(last));
-        }
-    }
-    let recent: Vec<_> = history.iter().rev().take(4).map(key).collect();
-    for k in &recent {
-        if recent.iter().filter(|r| *r == k).count() >= 3 && !avoid.contains(k) {
-            avoid.push(k.clone());
-        }
-    }
-    avoid
+    let keyed: Vec<((String, Value), bool)> = history
+        .iter()
+        .map(|h| {
+            (
+                (h["action"].as_str().unwrap_or("").to_string(), h["target"].clone()),
+                h["page_changed"] != json!(false),
+            )
+        })
+        .collect();
+    crate::hints::repeated_without_progress(&keyed)
 }
 
 struct Decision {

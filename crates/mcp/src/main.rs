@@ -31,6 +31,7 @@ mod compact;
 mod compat;
 mod contrib;
 mod flow;
+mod hints;
 mod jev;
 mod outputs;
 mod registry;

@@ -110,6 +110,21 @@ curl -s -H "$AUTH" -H "$MUTATION" -H "$OWNER" -X POST "$HOST/agent/actions" -d '
   {"kind":"wait_for","expect":{"present":[{"label":"导出所有健康数据"}]},"timeout_ms":8000}]}'
 ```
 
+### Don't → do instead
+
+| Don't | Do instead |
+|---|---|
+| Tap coordinates guessed from a screenshot | Read `phone_elements`, tap by element + snapshot or by label |
+| Take a screenshot after every step | `observe:true` / `?return=delta` returns the change |
+| One tap per call when the next steps are visible | One `phone_run_steps` / `/agent/actions` batch with `wait_for` |
+| `sleep` a fixed number of seconds | `wait_for` with `present` / `absent` / `application` |
+| Tap a system alert's button | The `alert` action (`button` or `action`) |
+| Tap a switch or slider | `perform` `toggle` / `adjust` (HTTP) |
+| Resend after `outcome_unknown` or `retry_safe:false` | Read the screen first; the phone may already have acted |
+| Repeat an action that came back `no_progress` | Re-read the screen, then a different control or a `wait_for` |
+| Reconnect to check health | `phone_status`; reconnect only when the task needs the phone |
+| Type without checking focus | Confirm the foreground app and focused field, then type |
+
 ## A flow is just these steps saved
 
 ```json

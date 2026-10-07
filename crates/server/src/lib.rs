@@ -6,6 +6,7 @@ pub mod h264sps;
 pub mod http;
 pub mod instance;
 pub mod lockdown;
+pub mod metrics;
 pub mod pairing;
 pub mod prewarm;
 pub mod protocol;

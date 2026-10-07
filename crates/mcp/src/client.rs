@@ -170,7 +170,15 @@ fn unique_label_target(body: &str, label: &str) -> anyhow::Result<(usize, String
         return Ok((outer, response.snapshot));
     }
     match matches.as_slice() {
-        [] => anyhow::bail!("no element matched the exact label '{label}'; no action was sent"),
+        [] => {
+            let hint = crate::hints::did_you_mean(
+                label,
+                response.elements.iter().map(|element| element.label.as_str()),
+            )
+            .map(|hint| format!(" — {hint}"))
+            .unwrap_or_default();
+            anyhow::bail!("no element matched the exact label '{label}'; no action was sent{hint}")
+        }
         [(index, _)] => Ok((*index, response.snapshot)),
         _ => {
             let candidates = matches
@@ -510,9 +518,16 @@ impl DaemonClient {
             .timeout(ELEMENTS_TIMEOUT);
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
-        let body = resp.text().await?;
-        self.remember_snapshot(serde_json::from_str(&body).ok().as_ref());
-        Ok(body)
+        // Bounded like every structured daemon read: a runaway tree is
+        // refused, not held in memory.
+        let response = read_response(resp).await?;
+        if response.too_large {
+            anyhow::bail!(
+                "/agent/elements answered more than {DAEMON_RESPONSE_READ_LIMIT} bytes; not read"
+            );
+        }
+        self.remember_snapshot(response.json.as_ref());
+        Ok(response.body)
     }
 
     /// `POST /agent/mode {"mode":"agent"}` — reconnect the configured,
