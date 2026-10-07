@@ -41,4 +41,13 @@ NSString *const IPURNodeAXElementKey = @"__axElement";
   }
 }
 
++ (nullable CGImageRef)screenImageWithQuality:(double)quality
+                                        scale:(double)scale
+                                         path:(NSString *_Nullable *_Nullable)path
+                                        error:(NSString *_Nullable *_Nullable)error
+{
+  if (error) *error = @"no screen on the Mac";
+  return NULL;
+}
+
 @end

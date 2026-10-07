@@ -1,11 +1,15 @@
 //! Live video as H.264.
 //!
-//! WDA serves the phone screen as MJPEG: every frame a full JPEG, ~120 KiB at
-//! 660×1434, which is 25–40 Mbit/s at 28 fps. Fine on a LAN, unusable over a
-//! phone's cellular link. This module turns that into a compact H.264 stream:
-//! one upstream MJPEG connection per daemon, each JPEG decoded (zune-jpeg) and
-//! re-encoded on the Mac's hardware encoder (VideoToolbox), and the encoded
-//! access units fanned out to every subscriber.
+//! The device runner encodes H.264 on the phone (`GET /h264` on its MJPEG
+//! port, see runner/README.md): the daemon passes those access units through
+//! to every subscriber, ~0.4–2 Mbit/s and no decode or encode on the Mac.
+//!
+//! WebDriverAgent and older runners only serve MJPEG: every frame a full
+//! JPEG, ~55–120 KiB at 660×1434, which is 12–40 Mbit/s at 28 fps. For those
+//! this module transcodes: one upstream MJPEG connection per daemon, each
+//! JPEG decoded (zune-jpeg) and re-encoded on the Mac's hardware encoder
+//! (VideoToolbox), and the encoded access units fanned out to every
+//! subscriber. Only this path keeps the newest JPEG for `live_frame`.
 //!
 //! The encoder runs only while somebody watches. A new subscriber forces an
 //! IDR so its decoder has an entry point, and a slow encoder never queues:
@@ -293,6 +297,116 @@ impl VideoHub {
     }
 
     async fn pipeline(&self) -> anyhow::Result<()> {
+        // The device runner encodes H.264 itself: pass that through and skip
+        // the MJPEG decode + Mac re-encode. WebDriverAgent and older runners
+        // answer `/h264` with their MJPEG stream; those take the transcode
+        // path below.
+        if passthrough_enabled() {
+            let mut idle_since: Option<std::time::Instant> = None;
+            loop {
+                match self.passthrough(&mut idle_since).await {
+                    Passthrough::Stopped => {
+                        self.frame_blank.store(false, Ordering::Release);
+                        return Ok(());
+                    }
+                    Passthrough::Unsupported => break,
+                    Passthrough::Lost => {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        if self.should_stop(&mut idle_since) {
+                            self.frame_blank.store(false, Ordering::Release);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        self.transcode().await
+    }
+
+    /// Relay the runner's own H.264 (`GET /h264` on its MJPEG port, framed
+    /// exactly like `/agent/h264`) until nobody watches or the stream ends.
+    async fn passthrough(&self, idle_since: &mut Option<std::time::Instant>) -> Passthrough {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let Some((host, port)) = reqwest::Url::parse(&self.mjpeg_url)
+            .ok()
+            .and_then(|url| Some((url.host_str()?.to_string(), url.port_or_known_default()?)))
+        else {
+            return Passthrough::Unsupported;
+        };
+        let connect = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect((host.as_str(), port)),
+        )
+        .await;
+        let Ok(Ok(mut stream)) = connect else {
+            return Passthrough::Lost;
+        };
+        let _ = stream.set_nodelay(true);
+        let request = format!(
+            "GET /h264?fps=30&scale=50&kbps={} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n",
+            self.bitrate / 1000
+        );
+        if stream.write_all(request.as_bytes()).await.is_err() {
+            return Passthrough::Lost;
+        }
+
+        // Response head: the runner marks its H.264 stream; anything else
+        // (an MJPEG multipart answer) means this upstream cannot do it.
+        let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);
+        let head_end = loop {
+            if let Some(end) = find(&buf, b"\r\n\r\n") {
+                break end + 4;
+            }
+            if buf.len() > 16 * 1024 {
+                return Passthrough::Unsupported;
+            }
+            let mut chunk = [0u8; 4096];
+            match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk)).await {
+                Ok(Ok(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+                _ => return Passthrough::Lost,
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+        if !(head.starts_with("http/1.0 200") || head.starts_with("http/1.1 200"))
+            || !head.contains("x-video-format: iphone-use-h264-annexb-v1")
+        {
+            return Passthrough::Unsupported;
+        }
+        buf.drain(..head_end);
+        tracing::info!("h264: passing the device runner's own H.264 through");
+        // No JPEG frames on this path: screenshots go to the runner.
+        *self.latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            while let Some((frame, blank)) = take_message(&mut buf) {
+                self.frame_blank.store(blank, Ordering::Release);
+                let _ = self.tx.send(frame);
+            }
+            if self.should_stop(idle_since) {
+                return Passthrough::Stopped;
+            }
+            // A new or lagging viewer needs an entry point: any byte asks the
+            // runner for a keyframe.
+            if self.force_idr.swap(false, Ordering::AcqRel) && stream.write_all(b"K").await.is_err()
+            {
+                return Passthrough::Lost;
+            }
+            match tokio::time::timeout(Duration::from_secs(1), stream.read(&mut chunk)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => return Passthrough::Lost,
+                Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+                Err(_) => {} // a still screen sends little; check viewers again
+            }
+            if buf.len() > MAX_BUFFERED {
+                return Passthrough::Lost;
+            }
+        }
+    }
+
+    /// The MJPEG → H.264 path: decode each upstream JPEG and encode it on the
+    /// Mac.
+    async fn transcode(&self) -> anyhow::Result<()> {
         use futures_util::StreamExt;
 
         // Latest-wins handoff to the encoder thread: a slow encode drops stale
@@ -400,6 +514,51 @@ impl VideoHub {
         *running = false;
         true
     }
+}
+
+/// How one passthrough attempt ended.
+enum Passthrough {
+    /// Nobody watches any more; the pipeline is marked stopped.
+    Stopped,
+    /// The upstream does not serve H.264 (WebDriverAgent, an older runner).
+    Unsupported,
+    /// Connection refused, dropped or stalled; try again.
+    Lost,
+}
+
+/// Runner flag: the frame's content band is one flat colour.
+const FLAG_BLANK: u8 = 0x02;
+
+/// `PHONE_REMOTE_H264_PASSTHROUGH=0` always re-encodes on the Mac.
+fn passthrough_enabled() -> bool {
+    std::env::var("PHONE_REMOTE_H264_PASSTHROUGH").map_or(true, |value| value.trim() != "0")
+}
+
+/// One complete runner message off the front of `buf`: the frame and its
+/// blank flag. `None` until the whole message has arrived.
+fn take_message(buf: &mut Vec<u8>) -> Option<(H264Frame, bool)> {
+    if buf.len() < 4 {
+        return None;
+    }
+    let rest = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if buf.len() < 4 + rest {
+        return None;
+    }
+    let message: Vec<u8> = buf.drain(..4 + rest).collect();
+    if rest < 9 {
+        return None;
+    }
+    let flags = message[4];
+    let mut pts = [0u8; 8];
+    pts.copy_from_slice(&message[5..13]);
+    Some((
+        H264Frame {
+            data: Bytes::copy_from_slice(&message[13..]),
+            keyframe: flags & FLAG_KEYFRAME != 0,
+            pts_micros: u64::from_be_bytes(pts),
+        },
+        flags & FLAG_BLANK != 0,
+    ))
 }
 
 /// Decode the newest JPEG, encode it, repeat until told to stop.
@@ -1059,5 +1218,153 @@ mod tests {
         assert_eq!(size, (8, 16));
         assert_eq!(pixels.len(), 8 * 16 * 4);
         assert!(decode_bgra(&jpeg[..20], &mut pixels).is_err());
+    }
+
+    fn runner_message(flags: u8, pts: u64, data: &[u8]) -> Vec<u8> {
+        let mut out = ((1 + 8 + data.len()) as u32).to_be_bytes().to_vec();
+        out.push(flags);
+        out.extend_from_slice(&pts.to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    #[test]
+    fn runner_messages_split_across_reads_and_carry_the_blank_flag() {
+        let mut stream = runner_message(FLAG_KEYFRAME, 7, &[0, 0, 0, 1, 0x67]);
+        stream.extend(runner_message(FLAG_BLANK, 9, &[0, 0, 0, 1, 0x41, 1]));
+        let mut buf = Vec::new();
+        let mut out = Vec::new();
+        for chunk in stream.chunks(5) {
+            buf.extend_from_slice(chunk);
+            while let Some(message) = take_message(&mut buf) {
+                out.push(message);
+            }
+        }
+        assert_eq!(out.len(), 2);
+        assert!(out[0].0.keyframe && !out[0].1);
+        assert_eq!(out[0].0.pts_micros, 7);
+        assert!(
+            !out[1].0.keyframe && out[1].1,
+            "blank flag read, not a keyframe"
+        );
+        assert_eq!(&out[1].0.data[..], &[0, 0, 0, 1, 0x41, 1]);
+        // Forwarded to viewers, only the keyframe bit survives.
+        assert_eq!(frame_message(&out[1].0)[4], 0);
+        assert!(buf.is_empty());
+    }
+
+    /// One-connection fake upstream: answers the first request with `head`
+    /// then `body`, and reports the request line and any bytes sent after it.
+    async fn fake_upstream(
+        head: &'static str,
+        body: Vec<u8>,
+    ) -> (String, tokio::sync::oneshot::Receiver<(String, Vec<u8>)>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 4096];
+            let n = socket.read(&mut request).await.unwrap();
+            let line = String::from_utf8_lossy(&request[..n])
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            let mut extra = Vec::new();
+            let mut byte = [0u8; 16];
+            if let Ok(Ok(n)) =
+                tokio::time::timeout(Duration::from_millis(1500), socket.read(&mut byte)).await
+            {
+                extra.extend_from_slice(&byte[..n]);
+            }
+            let _ = tx.send((line, extra));
+        });
+        (url, rx)
+    }
+
+    /// `#[tokio::test]` expands to `::core::…`, which this crate's `core`
+    /// dependency shadows.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn the_runners_h264_is_passed_through_and_a_keyframe_requested() {
+        block_on(passes_through_and_requests_a_keyframe());
+    }
+
+    #[test]
+    fn an_mjpeg_answer_means_the_upstream_cannot_pass_h264_through() {
+        block_on(mjpeg_answer_is_unsupported());
+    }
+
+    async fn passes_through_and_requests_a_keyframe() {
+        let mut body = runner_message(FLAG_KEYFRAME, 1, &[0, 0, 0, 1, 0x67, 0x42]);
+        body.extend(runner_message(0, 2, &[0, 0, 0, 1, 0x41]));
+        let (url, seen) = fake_upstream(
+            "HTTP/1.0 200 OK\r\nX-Video-Format: iphone-use-h264-annexb-v1\r\n\r\n",
+            body,
+        )
+        .await;
+        let hub = VideoHub::new(url);
+        hub.subscribers.store(1, Ordering::Release);
+        let mut frames = hub.tx.subscribe();
+        hub.force_idr.store(true, Ordering::Release);
+        let run = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                let mut idle = None;
+                matches!(hub.passthrough(&mut idle).await, Passthrough::Lost)
+            })
+        };
+        let wait = Duration::from_secs(3);
+        let first = tokio::time::timeout(wait, frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.keyframe);
+        assert_eq!(&first.data[..], &[0, 0, 0, 1, 0x67, 0x42]);
+        let second = tokio::time::timeout(wait, frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!second.keyframe);
+        let (line, extra) = seen.await.unwrap();
+        assert!(
+            line.starts_with("GET /h264?fps=30&scale=50&kbps=2500 "),
+            "{line}"
+        );
+        assert_eq!(
+            extra, b"K",
+            "the pending keyframe request reaches the runner"
+        );
+        assert!(
+            run.await.unwrap(),
+            "a closed upstream is lost, to be retried"
+        );
+    }
+
+    async fn mjpeg_answer_is_unsupported() {
+        let (url, _seen) = fake_upstream(
+            "HTTP/1.0 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=--BoundaryString\r\n\r\n",
+            part(JPEG_A, true),
+        )
+        .await;
+        let hub = VideoHub::new(url);
+        hub.subscribers.store(1, Ordering::Release);
+        let mut idle = None;
+        assert!(matches!(
+            hub.passthrough(&mut idle).await,
+            Passthrough::Unsupported
+        ));
     }
 }

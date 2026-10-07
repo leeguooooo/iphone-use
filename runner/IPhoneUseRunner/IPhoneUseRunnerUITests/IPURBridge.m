@@ -1076,6 +1076,81 @@ static NSData *IPURJPEGTranscode(NSData *input, double scale, double quality, BO
   return nil;
 }
 
+/// Encoded screenshot bytes (JPEG, or PNG on the public path) → one decoded image no larger than
+/// `scale` of full size.
+static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAINED
+{
+  if (input == nil) return NULL;
+  CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)input, NULL);
+  if (source == NULL) return NULL;
+  CGImageRef image = NULL;
+  if (scale < 0.999) {
+    NSDictionary *properties = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, NULL));
+    double width = [properties[(id)kCGImagePropertyPixelWidth] doubleValue];
+    double height = [properties[(id)kCGImagePropertyPixelHeight] doubleValue];
+    NSUInteger maxPixels = (NSUInteger)MAX(16.0, round(MAX(width, height) * scale));
+    NSDictionary *options = @{
+      (id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+      (id)kCGImageSourceThumbnailMaxPixelSize: @(maxPixels),
+      (id)kCGImageSourceCreateThumbnailWithTransform: @YES,
+      (id)kCGImageSourceShouldCacheImmediately: @YES,
+    };
+    image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+  } else {
+    NSDictionary *options = @{(id)kCGImageSourceShouldCacheImmediately: @YES};
+    image = CGImageSourceCreateImageAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+  }
+  CFRelease(source);
+  return image;
+}
+
++ (nullable CGImageRef)screenImageWithQuality:(double)quality
+                                        scale:(double)scale
+                                         path:(NSString *_Nullable *_Nullable)path
+                                        error:(NSString *_Nullable *_Nullable)error
+{
+  quality = MIN(1.0, MAX(0.01, quality));
+  scale = (scale <= 0 || scale > 1) ? 1.0 : scale;
+  static atomic_bool requestBroken = false;
+  static atomic_bool encodingBroken = false;
+  NSString *lastError = nil;
+  @try {
+    id encoding = IPURJPEGEncoding(quality);
+    if (encoding != nil && !atomic_load(&requestBroken)) {
+      NSString *failure = nil;
+      NSData *jpeg = IPURCaptureViaRequest(encoding, &failure);
+      if (jpeg != nil) {
+        if (path) *path = @"request";
+        return IPURDecodeScaled(jpeg, scale);
+      }
+      if (![failure isEqualToString:@"screenshot request timed out"]) {
+        atomic_store(&requestBroken, true);
+      }
+      lastError = failure;
+    }
+    if (encoding != nil && !atomic_load(&encodingBroken)) {
+      NSString *failure = nil;
+      NSData *jpeg = IPURCaptureViaEncoding(encoding, &failure);
+      if (jpeg != nil) {
+        if (path) *path = @"encoding";
+        return IPURDecodeScaled(jpeg, scale);
+      }
+      atomic_store(&encodingBroken, true);
+      lastError = failure;
+    }
+    CGImageRef image = IPURDecodeScaled(XCUIScreen.mainScreen.screenshot.PNGRepresentation, scale);
+    if (image != NULL) {
+      if (path) *path = @"public";
+      return image;
+    }
+    lastError = @"public screenshot could not be decoded";
+  } @catch (NSException *exception) {
+    lastError = [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
+  }
+  if (error) *error = lastError;
+  return NULL;
+}
+
 // MARK: - Device
 
 + (BOOL)isScreenLocked:(BOOL *)known

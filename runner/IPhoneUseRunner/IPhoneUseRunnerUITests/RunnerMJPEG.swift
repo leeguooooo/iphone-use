@@ -25,6 +25,8 @@ final class RunnerMJPEGServer {
   private var clients: [ObjectIdentifier: Client] = [:]
   private var capturing = false
   private var stats = (frames: 0, since: Date(), fps: 0.0, lastPath: "-", lastBytes: 0, lastCaptureMs: 0.0)
+  /// Takes `GET /h264…` connections on this port (RunnerH264.swift); everything else is MJPEG.
+  let h264 = RunnerH264Stream()
 
   private final class Client {
     let connection: NWConnection
@@ -101,8 +103,14 @@ final class RunnerMJPEGServer {
     connection.start(queue: queue)
     // Like WDA: wait for the request (any bytes), then answer with the stream headers.
     connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, _, error in
-      guard let self, error == nil, data != nil else {
+      guard let self, error == nil, let data else {
         connection.cancel()
+        return
+      }
+      let request = String(decoding: data, as: UTF8.self)
+      if request.hasPrefix("GET /h264") {
+        connection.stateUpdateHandler = nil
+        self.h264.attach(connection, head: request)
         return
       }
       let head = [

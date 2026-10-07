@@ -169,8 +169,11 @@ own installed copy from the new release. `run --force` skips the idle gate;
 ## Drive the phone from the browser
 
 `/phone` shows the live screen: as H.264 from `/agent/h264` where the browser has
-WebCodecs (the daemon re-encodes WDA's JPEG frames on the Mac's hardware encoder,
-~0.7–2.5 Mbit/s), otherwise as `/agent/mjpeg` (25–40 Mbit/s, LAN only). It turns your clicks, drags, long-presses,
+WebCodecs (the device runner encodes it on the phone and the daemon passes it through,
+~0.4 Mbit/s for a still screen and ~2 Mbit/s while scrolling; with WebDriverAgent or an
+older runner the daemon re-encodes the JPEG frames on the Mac instead), otherwise as
+`/agent/mjpeg` (12–40 Mbit/s, LAN only). `PHONE_REMOTE_H264_PASSTHROUGH=0` forces the Mac
+re-encode. It turns your clicks, drags, long-presses,
 scrolls, and typing (Unicode included) into acknowledged `POST /control` commands with a
 bounded `ttl_ms`. Nothing steals Mac focus. The **Controls** panel shows the accessibility
 tree so you can tap by exact label instead of by pixel.

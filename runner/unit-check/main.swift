@@ -211,5 +211,58 @@ do {
   }
 }
 
+// MARK: - H.264 stream
+
+do {
+  let parsed = RunnerH264Stream.settings(from: "GET /h264?fps=20&scale=40&kbps=900 HTTP/1.1\r\nHost: x\r\n\r\n")
+  check(parsed == RunnerH264Stream.Settings(fps: 20, scalePercent: 40, kbps: 900), "h264 query parsed")
+  let clamped = RunnerH264Stream.settings(from: "GET /h264?fps=999&scale=1&kbps=5 HTTP/1.1\r\n\r\n")
+  check(clamped == RunnerH264Stream.Settings(fps: 60, scalePercent: 10, kbps: 200), "h264 query clamped")
+  check(RunnerH264Stream.settings(from: "GET /h264 HTTP/1.1\r\n\r\n") == RunnerH264Stream.Settings(), "h264 defaults")
+
+  // A flat white band is blank; one with a dark stripe through it is not.
+  let w = 120, h = 240
+  var white = [UInt8](repeating: 255, count: w * h * 4)
+  check(white.withUnsafeBufferPointer {
+    RunnerH264Stream.bandIsFlat(width: w, height: h, rowBytes: w * 4, pixels: $0.baseAddress!)
+  }, "flat band is blank")
+  for y in 60..<180 { for x in 0..<60 { for c in 0..<3 { white[(y * w + x) * 4 + c] = 0 } } }
+  check(!white.withUnsafeBufferPointer {
+    RunnerH264Stream.bandIsFlat(width: w, height: h, rowBytes: w * 4, pixels: $0.baseAddress!)
+  }, "band with content is not blank")
+
+  // A real VideoToolbox encode: the first frame is a keyframe in Annex-B with SPS and PPS.
+  var outputs: [(Data, Bool)] = []
+  let done = DispatchSemaphore(value: 0)
+  if let encoder = RunnerH264Stream.Encoder(
+    width: 64, height: 128, settings: RunnerH264Stream.Settings(fps: 30, scalePercent: 50, kbps: 500),
+    output: { data, key, _ in outputs.append((data, key)); done.signal() }),
+    let context = CGContext(data: nil, width: 64, height: 128, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue),
+    let image: CGImage = {
+      context.setFillColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1)
+      context.fill(CGRect(x: 0, y: 0, width: 64, height: 128))
+      return context.makeImage()
+    }(),
+    let buffer = encoder.pixelBuffer(drawing: image) {
+    encoder.encode(buffer, pts: 0, forceKeyframe: true)
+    encoder.invalidate()
+    _ = done.wait(timeout: .now() + 5)
+    let first = outputs.first
+    check(first?.1 == true, "first encoded frame is a keyframe")
+    let bytes = [UInt8](first?.0 ?? Data())
+    check(bytes.starts(with: [0, 0, 0, 1]) && bytes.count > 5 && bytes[4] & 0x1F == 7,
+          "keyframe starts with an Annex-B SPS")
+    let nalTypes = Set(stride(from: 0, to: max(0, bytes.count - 4), by: 1).compactMap { i -> UInt8? in
+      bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 0 && bytes[i + 3] == 1 && i + 4 < bytes.count
+        ? bytes[i + 4] & 0x1F : nil
+    })
+    check(nalTypes.isSuperset(of: [7, 8, 5]), "keyframe carries SPS, PPS and an IDR slice")
+  } else {
+    check(false, "VideoToolbox H.264 encoder starts")
+  }
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)
