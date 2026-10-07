@@ -477,6 +477,32 @@ pub fn profile_expiry(profile: &Path) -> Option<u64> {
     plist_date(&xml, "ExpirationDate")
 }
 
+/// A free Apple ID (Personal Team) profile lasts 7 days; a paid team's lasts
+/// a year. The extra hour absorbs clock rounding in the issued dates.
+pub const FREE_PROFILE_MAX_SECS: u64 = 7 * 86_400 + 3600;
+
+/// The installed runner app carries a short-lived free-account profile that
+/// is due for renewal at `now`. Paid profiles are left to the regular
+/// rebuild path; renewing one ahead of time would gain nothing.
+pub fn free_profile_due(app: &Path, now: u64) -> bool {
+    let profile = app.join("embedded.mobileprovision");
+    let xml = sys::stdout_of("security", &["cms", "-D", "-i", &profile.to_string_lossy()]);
+    short_lived_and_due(
+        plist_date(&xml, "CreationDate"),
+        plist_date(&xml, "ExpirationDate"),
+        now,
+    )
+}
+
+fn short_lived_and_due(created: Option<u64>, expiry: Option<u64>, now: u64) -> bool {
+    match (created, expiry) {
+        (Some(created), Some(expiry)) => {
+            expiry.saturating_sub(created) <= FREE_PROFILE_MAX_SECS && profile_due(expiry, now)
+        }
+        _ => false,
+    }
+}
+
 /// The application identifier a profile is for (`TEAMID.bundle.id`).
 fn profile_app_id(profile: &Path) -> Option<String> {
     let xml = sys::stdout_of("security", &["cms", "-D", "-i", &profile.to_string_lossy()]);
@@ -736,6 +762,25 @@ mod tests {
         assert_eq!(epoch_from_utc("2026-13-01T00:00:00Z"), None);
         assert_eq!(epoch_from_utc("2026-10-14 07:11:39"), None);
         assert_eq!(epoch_from_utc("1969-12-31T23:59:59Z"), None);
+    }
+
+    #[test]
+    fn only_a_short_lived_profile_is_renewed_ahead_of_time() {
+        let created = 1_791_961_899 - 7 * 86_400;
+        let expiry = 1_791_961_899;
+        let early = expiry - PROFILE_RENEW_SECS - 1;
+        let due = expiry - 3600;
+        assert!(!short_lived_and_due(Some(created), Some(expiry), early));
+        assert!(short_lived_and_due(Some(created), Some(expiry), due));
+        let paid_created = expiry - 365 * 86_400;
+        assert!(
+            !short_lived_and_due(Some(paid_created), Some(expiry), due),
+            "a paid team's year-long profile is not renewed ahead of time"
+        );
+        assert!(
+            !short_lived_and_due(None, Some(expiry), due),
+            "unreadable profile"
+        );
     }
 
     #[test]
