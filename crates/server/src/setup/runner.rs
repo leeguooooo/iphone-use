@@ -125,6 +125,67 @@ pub fn log_shows_ide_refusal(path: &Path) -> bool {
     })
 }
 
+/// Seconds between the runner's last `Running tests...` and testmanagerd's
+/// refusal of the IDE channel. About 30 s means the session sat waiting for
+/// an authorization that never came; an instant refusal is the phone saying
+/// no. `None` when either line or its timestamp is missing.
+pub fn ide_refusal_wait_secs(path: &Path) -> Option<u64> {
+    refusal_wait_in(&read_log(path))
+}
+
+fn refusal_wait_in(text: &str) -> Option<u64> {
+    let mut started = None;
+    for line in text.lines() {
+        if line.contains("Running tests...") {
+            started = log_line_time(line);
+        } else if line.contains("XCTestManager_IDEInterface") {
+            let refused = log_line_time(line)?;
+            return started.and_then(|start: i64| u64::try_from(refused - start).ok());
+        }
+    }
+    None
+}
+
+/// `2026-10-07 16:35:25.719450+0900 …` → seconds since the epoch.
+fn log_line_time(line: &str) -> Option<i64> {
+    let stamp = line.get(..19)?;
+    let (date, time) = stamp.split_once(' ')?;
+    let mut ymd = date.split('-').map(|part| part.parse::<i64>().ok());
+    let (year, month, day) = (ymd.next()??, ymd.next()??, ymd.next()??);
+    let mut hms = time.split(':').map(|part| part.parse::<i64>().ok());
+    let (hour, minute, second) = (hms.next()??, hms.next()??, hms.next()??);
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let rest = &line[19..];
+    let rest = rest.strip_prefix('.').map_or(rest, |frac| {
+        frac.trim_start_matches(|c: char| c.is_ascii_digit())
+    });
+    let offset = match rest.get(..5) {
+        Some(zone) if zone.starts_with('+') || zone.starts_with('-') => {
+            let hours = zone.get(1..3)?.parse::<i64>().ok()?;
+            let minutes = zone.get(3..5)?.parse::<i64>().ok()?;
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            sign * (hours * 3600 + minutes * 60)
+        }
+        _ => 0,
+    };
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
 /// xcodebuild could not see the phone at all: unplugged, out of range on
 /// Wi-Fi, or CoreDevice lost it (#166). Only this exact timeout — "Unable to
 /// find a destination" also fires for a missing iOS platform in Xcode, which
@@ -507,6 +568,29 @@ pub fn prepare_xcconfig(ctx: &Ctx) -> Result<(String, Option<PathBuf>), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_refusal_wait_is_measured_from_the_last_running_tests_line() {
+        // Hardware (guouli over Wi-Fi): 30 s from "Running tests" to the refusal.
+        let text = "\
+2026-10-07 16:35:25.719450+0900 iPhoneUse-Runner[3279:926495] [Default] Running tests...
+2026-10-07 16:35:55.771658+0900 iPhoneUse-Runner[3279:926528] [DTXConnection] Connection peer refused channel request for \"dtxproxy:XCTestDriverInterface:XCTestManager_IDEInterface\"; channel canceled
+";
+        assert_eq!(refusal_wait_in(text), Some(30));
+        // An instant refusal, across midnight and a timezone offset.
+        let instant = "\
+2026-10-07 23:59:59.900000-0700 r[1:2] [Default] Running tests...
+2026-10-08 00:00:00.100000-0700 r[1:3] refused channel request for \"dtxproxy:XCTestDriverInterface:XCTestManager_IDEInterface\"
+";
+        assert_eq!(refusal_wait_in(instant), Some(1));
+        assert_eq!(refusal_wait_in("Testing failed: exited with code 74"), None);
+        assert_eq!(
+            refusal_wait_in(
+                "garbage Running tests...\n2026-10-07 16:35:55 refused XCTestManager_IDEInterface"
+            ),
+            None
+        );
+    }
 
     fn log(text: &str) -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().unwrap();

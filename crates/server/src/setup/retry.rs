@@ -18,6 +18,9 @@ pub enum Kind {
     /// The phone refused the UI-automation session (code 74, matching
     /// versions): a person has to allow it on the phone.
     Automation,
+    /// The same refusal over Wi-Fi: iOS cannot show the authorization there,
+    /// so retrying over the network never helps; only USB does.
+    WifiAutomation,
     /// The phone is not connected to this Mac at all. The next attempt
     /// waits in place for it, so this only spaces out supervisor restarts.
     NotConnected,
@@ -31,6 +34,7 @@ impl Kind {
             Kind::XcodeTooOld => "xcode_too_old",
             Kind::Owned => "owned",
             Kind::Automation => "automation",
+            Kind::WifiAutomation => "wifi_automation",
             Kind::NotConnected => "not_connected",
         }
     }
@@ -42,6 +46,7 @@ impl Kind {
             "xcode_too_old" => Some(Kind::XcodeTooOld),
             "owned" => Some(Kind::Owned),
             "automation" => Some(Kind::Automation),
+            "wifi_automation" => Some(Kind::WifiAutomation),
             "not_connected" => Some(Kind::NotConnected),
             _ => None,
         }
@@ -60,6 +65,10 @@ impl Kind {
             Kind::Owned => (15, 60),
             // Like a lock: quiet retries until a person allows it.
             Kind::Automation => (5, 60),
+            // Every attempt launches the runner on the phone and waits 30 s
+            // for an authorization Wi-Fi never delivers; the supervisor cuts
+            // this short as soon as the phone is plugged in.
+            Kind::WifiAutomation => (900, 900),
             Kind::NotConnected => (3, 10),
             Kind::Generic => (5, 300),
         }
@@ -191,6 +200,9 @@ mod tests {
         let state = read(&path).unwrap().unwrap();
         assert_eq!(state.kind, Kind::Locked);
         assert_eq!(record_failure(&path, Kind::XcodeTooOld).unwrap().1, 900);
+        // A Wi-Fi refusal waits as long, and its kind survives a re-read.
+        assert_eq!(record_failure(&path, Kind::WifiAutomation).unwrap().1, 900);
+        assert_eq!(read(&path).unwrap().unwrap().kind, Kind::WifiAutomation);
         reset(&path).unwrap();
         assert_eq!(read(&path), Ok(None));
     }

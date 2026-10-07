@@ -78,7 +78,7 @@ for it explicitly; the answer is `started` or `skipped` with a reason
 ## Setup blockers
 
 `setup_blocked_on` is one of `warp | proxy | not_connected | usb | trust | ddi | account |
-automation_mode_disabled | automation_not_allowed | xcode_too_old | locked | wda` (empty = known prerequisites passed;
+automation_mode_disabled | automation_not_allowed | wifi_automation_refused | xcode_too_old | locked | wda` (empty = known prerequisites passed;
 KeepAlive keeps the last concrete blocker while it re-checks).
 
 - **`warp`** (the #1 blocker): Cloudflare WARP or another VPN wedges the
@@ -108,10 +108,16 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   phone that Xcode with `iphone-use setup --xcode <Xcode.app>`. KeepAlive waits
   15 minutes between attempts; do not reconnect.
 - **`automation_not_allowed`**: the same code-74 refusal, but this Xcode supports
-  the phone's iOS: the phone has not allowed the UI-automation session. Ask the
-  operator to unlock it, turn on **Settings › Developer › Enable UI Automation**
-  and accept the passcode / "Allow" prompt. KeepAlive retries quietly every
-  5 s to 1 min; do not loop reconnect.
+  the phone's iOS (over USB): the phone did not authorize the UI-automation
+  session. A passcode / "Allow" prompt appears on the phone while the runner
+  starts and times out after about 30 s; ask the operator to unlock it, check
+  **Settings › Developer › Enable UI Automation**, and answer that prompt on the
+  next attempt. KeepAlive retries quietly every 5 s to 1 min; do not loop reconnect.
+- **`wifi_automation_refused`**: that refusal over Wi-Fi. iOS cannot show the
+  passcode prompt over Wi-Fi, and some iOS versions refuse the session there
+  entirely. Ask the operator to connect the phone by USB and enter the passcode
+  when asked (and to keep it on USB if Wi-Fi still fails). KeepAlive waits
+  15 minutes between Wi-Fi attempts and retries at once on USB; do not reconnect.
 - **`locked`**: unlock the phone. **`usb` / `ddi` / `account` / `wda`**: follow `hint`.
 
 Repeated bootstrap requests hide the real blocker — fix it, then reconnect once.

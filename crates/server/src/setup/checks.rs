@@ -763,15 +763,47 @@ pub enum Presence {
     Unknown,
 }
 
+/// How usbmuxd reaches the phone right now. USB wins when it is attached both
+/// ways; `Unknown` when usbmuxd does not list it or cannot be asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Usb,
+    Network,
+    Unknown,
+}
+
+pub fn transport(udid: &str) -> Transport {
+    sys::block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::usbmux::find_attached(&crate::usbmux::normalize_udid(udid)),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .map_or(Transport::Unknown, |attached| {
+            if attached.usb {
+                Transport::Usb
+            } else {
+                Transport::Network
+            }
+        })
+    })
+}
+
 /// usbmuxd lists `udid`, over USB or the network. Cheap and cannot hang.
 pub fn usbmux_lists(udid: &str) -> bool {
     sys::block_on(async {
-        tokio::time::timeout(Duration::from_secs(3), crate::usbmux::find_attached(udid))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .flatten()
-            .is_some()
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::usbmux::find_attached(&crate::usbmux::normalize_udid(udid)),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .is_some()
     })
 }
 
