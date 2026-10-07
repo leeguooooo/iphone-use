@@ -25,6 +25,13 @@ final class RemoteModel {
     var lastFrameAt: Date?
     /// Wireframe shown over a picture the app blanked (see `captureRedacted`).
     var redactedImage: UIImage?
+    /// The recorded demo, while someone is trying the app without a Mac.
+    var demo: DemoSession?
+
+    func startDemo() {
+        demo = DemoSession()
+        if demo == nil { phase = .failed(String(localized: "演示内容缺失，请重新安装 App")) }
+    }
     private var redactedTask: Task<Void, Never>?
 
     private var client: DaemonClient?
@@ -43,6 +50,11 @@ final class RemoteModel {
         // UI checks on the simulator: `-address <url> -password <pw>`, or
         // `-pair <QR text>` standing in for a scan (the simulator has no camera).
         let defaults = UserDefaults.standard
+        // Screenshots: `-demo YES [-demoScreen <id>]` opens the demo directly.
+        if defaults.bool(forKey: "demo") {
+            demo = DemoSession(startingAt: defaults.string(forKey: "demoScreen"))
+            return
+        }
         if let scanned = defaults.string(forKey: "pair"), let link = PairLink.parse(scanned) {
             phase = .connecting
             Task { await pair(link) }
@@ -114,7 +126,7 @@ final class RemoteModel {
             Keychain.save(password: token, for: Self.deviceAccount(newAddress))
         } catch {
             if wasConnected {
-                show("扫码连接失败：\(error.localizedDescription)")
+                show(String(localized: "扫码连接失败：\(error.localizedDescription)"))
             } else {
                 phase = .failed(error.localizedDescription)
             }
@@ -296,7 +308,7 @@ final class RemoteModel {
                 if case DaemonError.pairingRevoked = error {
                     Keychain.delete(for: Self.deviceAccount(self.address))
                 }
-                self.phase = .failed("登录已过期，请重新扫码或输入密码（\(error.localizedDescription)）")
+                self.phase = .failed(String(localized: "登录已过期，请重新扫码或输入密码（\(error.localizedDescription)）"))
                 self.statusTask?.cancel()
                 self.reader?.stop()
                 self.reader = nil
@@ -324,9 +336,9 @@ final class RemoteModel {
                 try await client.control(action)
             } catch DaemonError.sessionExpired {
                 // Do not replay the gesture: the screen may have moved on.
-                if await relogin() { show("登录已刷新，请再操作一次") }
+                if await relogin() { show(String(localized: "登录已刷新，请再操作一次")) }
             } catch {
-                show("没有送达：\(error.localizedDescription)")
+                show(String(localized: "没有送达：\(error.localizedDescription)"))
                 if let status = try? await client.status() {
                     self.status = status
                     updateStream()
@@ -337,12 +349,12 @@ final class RemoteModel {
 
     /// Bring WDA up so the phone can be driven again.
     func connectPhone() {
-        setMode("agent", success: "正在连接手机…手机锁着的话请解锁一次")
+        setMode("agent", success: String(localized: "正在连接手机…手机锁着的话请解锁一次"))
     }
 
     /// Stop remote control and leave the phone to whoever holds it.
     func handBack() {
-        setMode("human", success: "已交还，远程控制已停止")
+        setMode("human", success: String(localized: "已交还，远程控制已停止"))
     }
 
     private func setMode(_ mode: String, success: String) {
@@ -372,12 +384,12 @@ final class RemoteModel {
     }
 
     private func hintForUndrivable() -> String {
-        guard let status else { return "还没连上服务" }
-        if status.humanHandoff { return "手机已交还，先点「连接手机」" }
-        if status.released { return "设备空闲中，先点「连接手机」" }
-        if status.reconnecting { return "正在连接手机，请稍等" }
-        if status.locked == true || status.deviceState == "locked" { return "手机锁屏了，请在手机上解锁" }
-        return status.personHint.isEmpty ? "手机暂时不能操作" : status.personHint
+        guard let status else { return String(localized: "还没连上服务") }
+        if status.humanHandoff { return String(localized: "手机已交还，先点「连接手机」") }
+        if status.released { return String(localized: "设备空闲中，先点「连接手机」") }
+        if status.reconnecting { return String(localized: "正在连接手机，请稍等") }
+        if status.locked == true || status.deviceState == "locked" { return String(localized: "手机锁屏了，请在手机上解锁") }
+        return status.personHint.isEmpty ? String(localized: "手机暂时不能操作") : status.personHint
     }
 }
 

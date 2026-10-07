@@ -11407,10 +11407,25 @@ fn refresh_capture_verdict(state: &Arc<AppState>, hub: &Arc<crate::video::VideoH
     let hub = Arc::clone(hub);
     tokio::spawn(async move {
         let verdict = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            let mut w = wda.lock().await;
-            let rows = w.elements().await.ok()?;
-            let window = w.window_size().await.ok()?;
-            Some(crate::redaction::tree_has_hidden_content(&rows, window))
+            let (rows, window, png) = {
+                let mut w = wda.lock().await;
+                let rows = w.elements().await.ok()?;
+                let window = w.window_size().await.ok()?;
+                let png = w.screenshot_png().await.ok()?;
+                (rows, window, png)
+            };
+            if !crate::redaction::tree_has_hidden_content(&rows, window) {
+                return Some(false);
+            }
+            // The live frame only says "flat"; a sparse real page is flat
+            // too. Check that the capture leaves the labelled rows undrawn.
+            tokio::task::spawn_blocking(move || {
+                let image = crate::redaction::decode_png(&png)?;
+                Some(!crate::redaction::labelled_rows_show_content(&image, &rows, window))
+            })
+            .await
+            .ok()
+            .flatten()
         })
         .await
         .ok()
@@ -11449,6 +11464,11 @@ async fn redacted_capture_wireframe(
         return None;
     }
     tokio::task::spawn_blocking(move || {
+        // A sparse real page (one card and a spinner) is "blank" too; only
+        // a capture that leaves the tree's labelled rows undrawn is hidden.
+        if crate::redaction::labelled_rows_show_content(&blank, &rows, window) {
+            return None;
+        }
         let mut image = blank;
         crate::redaction::draw_wireframe(&mut image, &rows, window);
         crate::redaction::encode_png(&image)

@@ -1,6 +1,18 @@
 import SwiftUI
 import UIKit
 
+/// What the touch surface draws the phone's screen with: the live video, or
+/// the demo's recorded screens. `contentRect` is where the picture actually
+/// sits inside the view, so touches map onto the phone's screen.
+@MainActor
+protocol ScreenDisplay: UIView {
+    var contentRect: CGRect { get }
+}
+
+extension VideoDisplayView: ScreenDisplay {
+    var contentRect: CGRect { videoRect }
+}
+
 /// The phone's screen plus the touch surface that drives it.
 ///
 /// Gestures follow the browser client's model, decided on lift:
@@ -9,7 +21,7 @@ import UIKit
 /// becomes one `/control` action, and the touch point is drawn immediately so
 /// the person sees their input before the phone's picture catches up.
 final class RemoteScreenUIView: UIView {
-    let video = VideoDisplayView()
+    let display: any ScreenDisplay
     var onAction: ((PhoneAction) -> Void)?
 
     private let holdThreshold: TimeInterval = 0.5
@@ -23,11 +35,12 @@ final class RemoteScreenUIView: UIView {
     private let trail = CAShapeLayer()
     private let trailPath = UIBezierPath()
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    init(display: any ScreenDisplay) {
+        self.display = display
+        super.init(frame: .zero)
         backgroundColor = .black
         isMultipleTouchEnabled = false
-        addSubview(video)
+        addSubview(display)
         dot.path = UIBezierPath(ovalIn: CGRect(x: -18, y: -18, width: 36, height: 36)).cgPath
         dot.fillColor = UIColor.white.withAlphaComponent(0.35).cgColor
         dot.strokeColor = UIColor.white.withAlphaComponent(0.8).cgColor
@@ -45,12 +58,12 @@ final class RemoteScreenUIView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        video.frame = bounds
+        display.frame = bounds
     }
 
     /// Normalize a point to the phone screen; nil outside the picture.
     private func normalized(_ point: CGPoint) -> (Double, Double)? {
-        let rect = video.videoRect
+        let rect = display.contentRect
         guard rect.width > 0, rect.height > 0, rect.insetBy(dx: -2, dy: -2).contains(point) else {
             return nil
         }
@@ -153,10 +166,11 @@ struct RemoteScreen: UIViewRepresentable {
     let model: RemoteModel
 
     func makeUIView(context: Context) -> RemoteScreenUIView {
-        let view = RemoteScreenUIView()
+        let video = VideoDisplayView()
+        let view = RemoteScreenUIView(display: video)
         view.onAction = { action in model.send(action) }
-        view.video.onFrame = { model.frameArrived() }
-        model.attach(video: view.video)
+        video.onFrame = { model.frameArrived() }
+        model.attach(video: video)
         return view
     }
 

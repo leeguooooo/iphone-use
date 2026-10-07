@@ -56,6 +56,10 @@ struct QRScannerView: UIViewControllerRepresentable {
 }
 
 final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    /// The one failure the person can fix in Settings; the sheet offers a
+    /// button for it.
+    static let noCameraPermission = String(localized: "没有相机权限：请在「设置 › iPhone Use」里打开相机")
+
     var onFound: ((PairLink) -> Void)?
     var onFailure: ((String) -> Void)?
 
@@ -72,11 +76,11 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 DispatchQueue.main.async {
-                    granted ? self.configure() : self.fail("没有相机权限：请在「设置 › iPhone Use」里打开相机")
+                    granted ? self.configure() : self.fail(Self.noCameraPermission)
                 }
             }
         default:
-            fail("没有相机权限：请在「设置 › iPhone Use」里打开相机")
+            fail(Self.noCameraPermission)
         }
     }
 
@@ -84,13 +88,13 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
         guard let camera = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: camera),
               session.canAddInput(input) else {
-            fail("这台设备没有可用的相机")
+            fail(String(localized: "这台设备没有可用的相机"))
             return
         }
         session.addInput(input)
         let output = AVCaptureMetadataOutput()
         guard session.canAddOutput(output) else {
-            fail("相机无法识别二维码")
+            fail(String(localized: "相机无法识别二维码"))
             return
         }
         session.addOutput(output)
@@ -147,7 +151,7 @@ struct ScanSheet: View {
                 VStack(spacing: 16) {
                     Image(systemName: "camera.fill").font(.largeTitle).foregroundStyle(.secondary)
                     Text(failure).multilineTextAlignment(.center)
-                    if failure.contains("设置") {
+                    if failure == ScannerController.noCameraPermission {
                         Button("打开设置") {
                             if let url = URL(string: UIApplication.openSettingsURLString) {
                                 UIApplication.shared.open(url)
