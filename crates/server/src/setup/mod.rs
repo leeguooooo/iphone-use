@@ -65,6 +65,18 @@ pub fn main(args: &[String]) -> i32 {
                 Some(dir) => std::env::set_var("DEVELOPER_DIR", dir),
                 None => std::env::remove_var("DEVELOPER_DIR"),
             }
+            // An interactive setup remembers this phone's Xcode before anything
+            // can fail: a first setup that rolls back must not lose the choice,
+            // or every later supervisor attempt runs the Mac's Xcode again.
+            if name == "setup" && !ctx.keepalive {
+                if let Some(choice) = &ctx.xcode_to_persist {
+                    if let Err(error) = ctx::write_xcode_choice(ctx.state_dir(), choice.as_deref())
+                    {
+                        eprintln!("could not remember this phone's Xcode: {error}");
+                        return 1;
+                    }
+                }
+            }
             match name {
                 "doctor" => doctor::run(&ctx),
                 "status" => commands::status(&ctx),
