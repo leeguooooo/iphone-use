@@ -11297,16 +11297,52 @@ async fn agent_elements(
 ) -> Response {
     let owner = named_owner(&headers).map(str::to_string);
     let full_read = query.since.is_none();
-    let response = agent_elements_inner(state, query, headers).await;
-    let Some(owner) = owner.filter(|_| !refused_as_unauthenticated(&response)) else {
-        return response;
-    };
-    if !full_read {
+    let scope = query.scope.clone();
+    let image_auto = query.image.as_deref() == Some("auto");
+    if let Err(error) = crate::scope::validate(scope.as_deref(), query.since.as_deref()) {
+        return json_response(StatusCode::BAD_REQUEST, error);
+    }
+    let response = agent_elements_inner(state.clone(), query, headers.clone()).await;
+    if refused_as_unauthenticated(&response) {
         return response;
     }
     let (response, json) = read_json_response(response).await;
-    crate::advice::note_screen(&owner, json.as_ref());
-    response
+    if full_read {
+        if let Some(owner) = &owner {
+            crate::advice::note_screen(owner, json.as_ref());
+        }
+    }
+    let Some(mut json) = json.filter(|json| json.get("elements").is_some()) else {
+        return response;
+    };
+    // Stamp the read so a screenshot taken for it can say how it relates.
+    let tree_returned_ms = crate::metrics::now_ms();
+    json["tree_returned_at_ms"] = serde_json::json!(tree_returned_ms);
+    if image_auto && crate::scope::needs_image(&json) {
+        let screenshot = agent_screenshot(
+            state,
+            headers,
+            Query(ScreenshotQuery {
+                raw: None,
+                max_side: Some(1200),
+                fresh: Some("1".to_string()),
+            }),
+        )
+        .await;
+        let ok = screenshot.status().is_success();
+        let png = if ok {
+            axum::body::to_bytes(screenshot.into_body(), 16 << 20).await.ok()
+        } else {
+            None
+        };
+        crate::scope::attach_image(&mut json, png.as_deref(), crate::metrics::now_ms());
+    }
+    if let Some(scope) = scope.as_deref().filter(|scope| *scope != "changed") {
+        crate::scope::apply(&mut json, scope);
+    }
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(json.to_string()))
 }
 
 async fn agent_elements_inner(
@@ -11888,6 +11924,13 @@ struct AgentElementsQuery {
     /// Prior `snapshot` token to diff against (see [`agent_elements`]).
     #[serde(default)]
     since: Option<String>,
+    /// A task-scoped view of the same fresh read (see [`crate::scope`]):
+    /// `interactive`, `focused`, or `changed` (needs `since`).
+    #[serde(default)]
+    scope: Option<String>,
+    /// `auto`: attach a screenshot only when the tree is unusable (Mode A).
+    #[serde(default)]
+    image: Option<String>,
 }
 
 /// A read-path failure is enough to revoke `drivable`, even when the last

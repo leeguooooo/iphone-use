@@ -21,7 +21,9 @@ static TRACKERS: OnceLock<Mutex<HashMap<String, Shared>>> = OnceLock::new();
 
 fn tracker(owner: &str) -> Shared {
     let map = TRACKERS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut map = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if map.len() >= MAX_OWNERS && !map.contains_key(owner) {
         map.clear();
     }

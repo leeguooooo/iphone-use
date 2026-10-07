@@ -489,16 +489,19 @@ mod tests {
             calls: vec![
                 Call {
                     route: "GET /source".into(),
+                    started: Instant::now(),
                     elapsed: Duration::from_millis(6000),
                     bytes: Some(800_000),
                 },
                 Call {
                     route: "GET /window/size".into(),
+                    started: Instant::now(),
                     elapsed: Duration::from_millis(180),
                     bytes: Some(90),
                 },
                 Call {
                     route: "GET /source".into(),
+                    started: Instant::now(),
                     elapsed: Duration::from_millis(5000),
                     bytes: Some(700_000),
                 },
@@ -553,6 +556,7 @@ mod tests {
             &Recorder {
                 calls: vec![Call {
                     route: "GET /source".into(),
+                    started: Instant::now(),
                     elapsed: Duration::from_millis(5),
                     bytes: None,
                 }],
@@ -564,7 +568,8 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(big.clone()))
             .unwrap();
-        let out = attach(response, &summary).await;
+        let (out, json) = attach(response, &summary).await;
+        assert!(json.is_none(), "an oversized body is passed through unread");
         assert_eq!(out.status(), axum::http::StatusCode::OK);
         assert!(out.headers().contains_key("server-timing"));
         let body = axum::body::to_bytes(out.into_body(), usize::MAX)
@@ -583,7 +588,7 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from_stream(stream))
             .unwrap();
-        let out = attach(response, &summary).await;
+        let (out, _) = attach(response, &summary).await;
         let body = axum::body::to_bytes(out.into_body(), usize::MAX)
             .await
             .unwrap();

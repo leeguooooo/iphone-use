@@ -240,6 +240,17 @@ enum Command {
         instance: Option<String>,
     },
     /// Is the iPhone ready for agents? Exit 0 when it is.
+    /// Per-run task metrics: calls, batches, observed actions, failures,
+    /// p50/p95 (calls are HTTP calls to the daemon, not model turns).
+    Metrics {
+        #[arg(long)]
+        instance: Option<String>,
+        /// Only this owner's runs.
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     Status {
         #[arg(long)]
         instance: Option<String>,
@@ -729,6 +740,14 @@ fn main() -> Result<()> {
         Command::Doctor { instance } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_doctor(&target))
+        }
+        Command::Metrics {
+            instance,
+            owner,
+            json,
+        } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            std::process::exit(onboarding::run_metrics(&target, owner.as_deref(), json)?)
         }
         Command::Status { instance, json } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;
