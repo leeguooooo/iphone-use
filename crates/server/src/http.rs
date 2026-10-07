@@ -6914,7 +6914,9 @@ async fn reveal_element(w: &mut crate::wda::WdaClient, id: &str) {
     w.forget_tree();
     // A tap while the list still glides only stops the glide (hardware: the
     // row came to rest clear of the pill and the click did nothing). Wait for
-    // two equal frames of the target, at most 1.5 s.
+    // two equal frames of the target, at most 1.5 s. The native runner's
+    // scrollTo rests the finger before lifting, so its list does not glide
+    // and the first two reads already match.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
     let mut last = None;
     while tokio::time::Instant::now() < deadline {
@@ -6925,7 +6927,7 @@ async fn reveal_element(w: &mut crate::wda::WdaClient, id: &str) {
             break;
         }
         last = Some(rect);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
@@ -9656,6 +9658,67 @@ fn frame_is_blank(png: &[u8]) -> bool {
         .is_some_and(|image| crate::redaction::content_band_is_blank(&image))
 }
 
+/// The native runner waits on the phone until the screen holds still
+/// (`GET /wda/settle`: small grayscale captures compared every ~50 ms there),
+/// then the tree is read ONCE. Hardware, iPhone 13: a tap that pushes a
+/// Settings page used to take 4–5 tree reads and two screenshots shipped
+/// here (≈1.3 s); the frame taken 150 ms after the tap caught the push
+/// animation, so the tree-vs-tree loop ran. `None` — settle the old way on
+/// what is left of the budget — when the runner has no such route, or its
+/// captures are blank (an app hiding its screen: frames prove nothing).
+async fn settle_on_device(
+    w: &mut crate::wda::WdaClient,
+    started: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+    budget: std::time::Duration,
+) -> Option<(Option<(String, Vec<crate::wda::ElementRow>)>, SettleReport)> {
+    /// Unchanged this long counts as settled; a push or a sheet animates
+    /// continuously, so a quiet gap this long means it ended.
+    const QUIET: std::time::Duration = std::time::Duration::from_millis(150);
+    /// The action's own reaction can start a frame or two after the tap
+    /// returns; frames before that would look "settled".
+    const MIN_WAIT: std::time::Duration = std::time::Duration::from_millis(80);
+    /// Kept for the one tree read after the screen is still.
+    const TREE_RESERVE: std::time::Duration = std::time::Duration::from_millis(700);
+    let room = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let device_budget = room.checked_sub(TREE_RESERVE + MIN_WAIT)?;
+    if device_budget < std::time::Duration::from_millis(200) {
+        return None;
+    }
+    let device = w.device_settle(device_budget, QUIET, MIN_WAIT).await?;
+    if device.blank {
+        return None;
+    }
+    let mut report = SettleReport::new(budget.as_millis() as u64);
+    let observed = match read_elements_once(w, deadline).await {
+        SettleRead::Read(id, rows) => {
+            report.captures = 1;
+            report.sparse = settle_tree_is_sparse(&rows);
+            // A still screen whose tree is bare is a screen we cannot see,
+            // not a settled one — the same rule as two equal bare trees.
+            if device.stable && !report.sparse {
+                report.settled = true;
+                report.reason = SettleReason::Stable;
+            }
+            Some((id, rows))
+        }
+        SettleRead::Deadline => None,
+        SettleRead::Failed(error) => {
+            report.reason = SettleReason::ObservationFailed;
+            report.error = Some(format!("{error:#}"));
+            None
+        }
+    };
+    report.waited_ms = started.elapsed().as_millis() as u64;
+    tracing::debug!(
+        "settle on device: stable={} frames={} waited={}ms",
+        device.stable,
+        device.frames,
+        report.waited_ms
+    );
+    Some((observed, report))
+}
+
 async fn settle_and_read_elements(
     w: &mut crate::wda::WdaClient,
     budget: std::time::Duration,
@@ -9667,6 +9730,9 @@ async fn settle_and_read_elements(
         return (None, report);
     }
     let deadline = started + budget;
+    if let Some(settled) = settle_on_device(w, started, deadline, budget).await {
+        return settled;
+    }
     tokio::time::sleep(std::cmp::min(std::time::Duration::from_millis(150), budget)).await;
     // An already-expired deadline must read "no budget", never "the read
     // failed": polling an expired `timeout_at` would report a self-inflicted

@@ -89,3 +89,67 @@ enum ElementReference {
     return object[w3cKey] as? String ?? object["ELEMENT"] as? String
   }
 }
+
+/// On-device settle (GET /wda/settle): grayscale thumbnails of consecutive frames are compared
+/// here, so the daemon learns the screen stopped moving without shipping screenshots to the Mac.
+/// Pure logic, exercised by runner/unit-check.sh.
+enum ScreenSettle {
+  /// Pixels whose gray level moved by more than `threshold` between two frames of equal size;
+  /// `Int.max` when the sizes differ (rotation, a new capture size).
+  static func changedPixels(_ a: [UInt8], _ b: [UInt8], threshold: Int = 10) -> Int {
+    guard a.count == b.count else { return Int.max }
+    var changed = 0
+    for index in 0..<a.count where abs(Int(a[index]) - Int(b[index])) > threshold {
+      changed += 1
+    }
+    return changed
+  }
+
+  /// The content band (status bar and home-indicator strips excluded) is one flat colour: the
+  /// capture of an app that hides its screen. Such frames match whether or not the app moved,
+  /// so they prove nothing about settling.
+  static func isBlank(_ pixels: [UInt8], width: Int, height: Int, spread: Int = 8) -> Bool {
+    guard width > 0, height > 0, pixels.count >= width * height else { return false }
+    let top = Int(Double(height) * 0.08), bottom = Int(Double(height) * 0.90)
+    guard bottom > top else { return false }
+    var low = 255, high = 0
+    for row in top..<bottom {
+      for column in 0..<width {
+        let value = Int(pixels[row * width + column])
+        low = min(low, value)
+        high = max(high, value)
+        if high - low > spread { return false }
+      }
+    }
+    return true
+  }
+
+  /// Tracks a stream of frames: stable once no frame changed (beyond `tolerance` pixels) for
+  /// `quietMs`, judged from at least two frames.
+  struct Tracker {
+    let quietMs: Double
+    let tolerance: Int
+    private(set) var frames = 0
+    private(set) var lastChanged = 0
+    private var previous: [UInt8]?
+    private var lastChangeAt: Double = 0
+
+    init(quietMs: Double, tolerance: Int) {
+      self.quietMs = quietMs
+      self.tolerance = tolerance
+    }
+
+    /// Feeds one frame taken at `atMs`; returns whether the screen counts as settled now.
+    mutating func add(_ frame: [UInt8], atMs: Double) -> Bool {
+      frames += 1
+      if let previous {
+        lastChanged = ScreenSettle.changedPixels(previous, frame)
+        if lastChanged > tolerance { lastChangeAt = atMs }
+      } else {
+        lastChangeAt = atMs
+      }
+      previous = frame
+      return frames >= 2 && atMs - lastChangeAt >= quietMs
+    }
+  }
+}

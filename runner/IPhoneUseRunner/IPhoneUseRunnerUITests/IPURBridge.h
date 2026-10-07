@@ -118,6 +118,13 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                        to:(CGPoint)end
                                  duration:(NSTimeInterval)duration
                                       pid:(int)pid;
+/// A drag that rests at `end` for `hold` seconds before lifting, so the scroll view sees no
+/// release velocity and stops where the finger stopped (no momentum glide).
++ (nullable NSString *)synthesizeDragFrom:(CGPoint)start
+                                       to:(CGPoint)end
+                                 duration:(NSTimeInterval)duration
+                                holdAtEnd:(NSTimeInterval)hold
+                                      pid:(int)pid;
 /// Several touches in one event record. Each path is an array of steps
 /// `{"type": "down"|"move"|"up", "x": pt, "y": pt, "t": seconds}`; the first step must be "down"
 /// and a path without a final "up" lifts at its last offset. Paths run concurrently on the shared
@@ -143,6 +150,12 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                          scale:(double)scale
                                           path:(NSString *_Nullable *_Nullable)path
                                          error:(NSString *_Nullable *_Nullable)error;
+/// The screen as an 8-bit grayscale thumbnail whose longer side is at most `maxSide` pixels,
+/// for cheap on-device change detection. Row-major, `width` × `height` bytes.
++ (nullable NSData *)grayScreenWithMaxSide:(NSUInteger)maxSide
+                                     width:(NSUInteger *)width
+                                    height:(NSUInteger *)height
+                                     error:(NSString *_Nullable *_Nullable)error;
 
 /// The main screen as a decoded image no larger than `scale` of full size, for the H.264 stream
 /// (RunnerH264.swift): the same capture paths as `jpegScreenshotWithQuality:`, decoded once by

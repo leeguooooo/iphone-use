@@ -836,6 +836,39 @@ static NSString *IPURSynthesize(id record, id path)
   }
 }
 
++ (nullable NSString *)synthesizeDragFrom:(CGPoint)start
+                                       to:(CGPoint)end
+                                 duration:(NSTimeInterval)duration
+                                holdAtEnd:(NSTimeInterval)hold
+                                      pid:(int)pid
+{
+  @try {
+    id record = nil;
+    NSString *error = IPURCreateGestureRecord(@"ipu-drag-hold", pid, &record);
+    if (error != nil) return error;
+    id path = IPURNewTouchPath(start, 0.0);
+    if (path == nil) return @"private XCTest event synthesis failed: could not create pointer path";
+    duration = MAX(0.05, duration);
+    hold = MAX(0.0, hold);
+    NSInteger steps = MIN(60, MAX(2, (NSInteger)ceil(duration / 0.016)));
+    for (NSInteger step = 1; step <= steps; step++) {
+      double t = (double)step / (double)steps;
+      CGPoint point = CGPointMake(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t);
+      IPURMove(path, point, duration * t);
+    }
+    // Resting samples at the end point: the last movement samples before the lift carry no
+    // distance, so UIScrollView computes zero release velocity.
+    NSInteger rests = MAX(1, (NSInteger)ceil(hold / 0.016));
+    for (NSInteger rest = 1; rest <= rests; rest++) {
+      IPURMove(path, end, duration + hold * (double)rest / (double)rests);
+    }
+    IPURLift(path, duration + hold + 0.01);
+    return IPURSynthesize(record, path);
+  } @catch (NSException *exception) {
+    return [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
+  }
+}
+
 + (nullable NSString *)synthesizeText:(NSString *)text
                   charactersPerSecond:(NSUInteger)charactersPerSecond
                                   pid:(int)pid
@@ -1149,6 +1182,52 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
   }
   if (error) *error = lastError;
   return NULL;
+}
+
++ (nullable NSData *)grayScreenWithMaxSide:(NSUInteger)maxSide
+                                     width:(NSUInteger *)width
+                                    height:(NSUInteger *)height
+                                     error:(NSString *_Nullable *_Nullable)error
+{
+  maxSide = MAX((NSUInteger)16, MIN((NSUInteger)512, maxSide));
+  NSString *failure = nil;
+  NSData *jpeg = [self jpegScreenshotWithQuality:0.5 scale:1.0 path:NULL error:&failure];
+  if (jpeg == nil) {
+    if (error) *error = failure ?: @"screen capture failed";
+    return nil;
+  }
+  CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg, NULL);
+  if (source == NULL) {
+    if (error) *error = @"capture could not be decoded";
+    return nil;
+  }
+  NSDictionary *options = @{
+    (id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+    (id)kCGImageSourceThumbnailMaxPixelSize: @(maxSide),
+    (id)kCGImageSourceCreateThumbnailWithTransform: @YES,
+  };
+  CGImageRef image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+  CFRelease(source);
+  if (image == NULL) {
+    if (error) *error = @"capture thumbnail failed";
+    return nil;
+  }
+  size_t w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+  NSMutableData *pixels = [NSMutableData dataWithLength:w * h];
+  CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+  CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, w, h, 8, w, gray, kCGImageAlphaNone);
+  CGColorSpaceRelease(gray);
+  if (context == NULL) {
+    CGImageRelease(image);
+    if (error) *error = @"grayscale context failed";
+    return nil;
+  }
+  CGContextDrawImage(context, CGRectMake(0, 0, w, h), image);
+  CGContextRelease(context);
+  CGImageRelease(image);
+  if (width) *width = w;
+  if (height) *height = h;
+  return pixels;
 }
 
 // MARK: - Device

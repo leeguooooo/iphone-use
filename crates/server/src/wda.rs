@@ -43,8 +43,14 @@ pub struct WdaClient {
     /// When anything was last POSTed to WDA (every gesture, key, value write,
     /// launch — and harmless lookups too: over-counting only skips a cache).
     posted_at: Option<std::time::Instant>,
-    /// When the alert probe last found no alert.
+    /// When the alert probe last found no alert. A tree read from the native
+    /// runner sets it too: its `X-IPU-Alert: 0` header answers the same
+    /// question from the same snapshot.
     no_alert_at: Option<std::time::Instant>,
+    /// Whether the runner answers `GET /wda/settle` (on-device settle):
+    /// `None` until asked, `Some(false)` after a 404 (WebDriverAgent, an older
+    /// runner). Asked again whenever a new session starts (a new runner).
+    device_settle: Option<bool>,
     /// The last tree read and when: snapshot-bound actions reuse it instead
     /// of reading the whole tree again (see [`Self::recent_tree`]).
     last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
@@ -107,6 +113,7 @@ impl WdaClient {
             window: None,
             posted_at: None,
             no_alert_at: None,
+            device_settle: None,
             last_tree: None,
             lite_source: false,
             probe: ProbeMemory::default(),
@@ -302,6 +309,7 @@ impl WdaClient {
             self.session = Some(parse_session_id(&text)?);
             self.window = None;
             self.no_alert_at = None;
+            self.device_settle = None;
             {
                 let sid = self.session.as_deref().unwrap().to_string();
                 let result = self
@@ -379,18 +387,91 @@ impl WdaClient {
             Some(names) => format!("{}/source?format=json&excluded_attributes={names}", self.base),
             None => format!("{}/source?format=json", self.base),
         };
-        let body = self
+        let asked_at = std::time::Instant::now();
+        let response = self
             .http
             .get(url)
             .send_timed()
             .await
             .context("GET /source")?
             .error_for_status()
-            .context("/source status")?
-            .text()
-            .await
-            .context("parse /source")?;
-        parse_wda_value(&body, "GET /source")
+            .context("/source status")?;
+        // The native runner checks for a system alert in the same pass
+        // (`X-IPU-Alert`), so the alert probe after this read costs nothing.
+        let alert = response
+            .headers()
+            .get("x-ipu-alert")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = response.text().await.context("parse /source")?;
+        let value = parse_wda_value(&body, "GET /source")?;
+        match alert.as_deref() {
+            Some("0") => self.no_alert_at = Some(asked_at),
+            Some("1") => self.no_alert_at = None,
+            _ => {}
+        }
+        Ok(value)
+    }
+
+    /// Wait on the phone until the screen stops changing (`GET /wda/settle`,
+    /// native runner only): small grayscale captures compared every ~50 ms
+    /// there, instead of full screenshots shipped here and compared. `None`
+    /// when the runner lacks the route (remembered until the next session) or
+    /// the call failed; the caller then settles the old way.
+    pub async fn device_settle(
+        &mut self,
+        budget: Duration,
+        quiet: Duration,
+        min_wait: Duration,
+    ) -> Option<DeviceSettle> {
+        if self.device_settle == Some(false) {
+            return None;
+        }
+        let url = format!(
+            "{}/wda/settle?budget_ms={}&quiet_ms={}&min_ms={}",
+            self.base,
+            budget.as_millis(),
+            quiet.as_millis(),
+            min_wait.as_millis()
+        );
+        let response = self
+            .http
+            .get(url)
+            .timeout(budget + min_wait + Duration::from_secs(3))
+            .send_timed()
+            .await;
+        let value = match response {
+            Ok(response) => match ensure_wda_success(response, "GET /wda/settle").await {
+                Ok(value) => value,
+                Err(error) => {
+                    if wda_error_is_not_found(&error)
+                        || format!("{error:#}").contains("unknown command")
+                    {
+                        self.device_settle = Some(false);
+                    } else {
+                        tracing::debug!("on-device settle failed: {error:#}");
+                    }
+                    return None;
+                }
+            },
+            Err(error) => {
+                tracing::debug!("on-device settle failed: {error:#}");
+                return None;
+            }
+        };
+        let stable = value.get("stable").and_then(serde_json::Value::as_bool)?;
+        self.device_settle = Some(true);
+        Some(DeviceSettle {
+            stable,
+            blank: value
+                .get("blank")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            frames: value
+                .get("frames")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        })
     }
 
     /// Find one element. `using` is a WDA locator strategy — "accessibility id"
@@ -2459,6 +2540,18 @@ impl WdaHealth {
 /// `ensure_wda_success` surfaces that as an HTTP-status error.
 pub fn wda_error_is_not_found(error: &anyhow::Error) -> bool {
     format!("{error:#}").contains("404 Not Found")
+}
+
+/// What the runner's on-device settle saw (see [`WdaClient::device_settle`]).
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceSettle {
+    /// The screen stayed unchanged for the quiet window within the budget.
+    pub stable: bool,
+    /// The last capture's content band was one colour: an app that hides its
+    /// screen from capture, whose frames prove nothing about settling.
+    pub blank: bool,
+    /// Captures compared.
+    pub frames: u64,
 }
 
 /// Require both HTTP success and a successful W3C `value` envelope.

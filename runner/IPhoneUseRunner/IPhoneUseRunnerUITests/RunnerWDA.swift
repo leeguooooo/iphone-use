@@ -62,6 +62,7 @@ extension RunnerTests {
       }
       if match(parts, "appium/settings") != nil { return .value(wdaSettings) }
       if match(parts, "wda/locked") != nil { return .value(lockedOnMain()) }
+      if match(parts, "wda/settle") != nil { return settleScreen(request) }
       if match(parts, "wda/apps/list") != nil { return appsList() }
       if match(parts, "wda/activeAppInfo") != nil { return activeAppInfo() }
       if match(parts, "element/active") != nil { return try activeElement() }
@@ -619,10 +620,13 @@ extension RunnerTests {
         start = CGPoint(x: screen.width * 0.2, y: screen.height / 2)
         end = CGPoint(x: screen.width * 0.8, y: screen.height / 2)
       }
-      if let error = IPURBridge.synthesizeDrag(from: start, to: end, duration: 0.4, pid: 0) {
+      // The finger rests before lifting, so the list stops where the drag ended instead of
+      // gliding on: the element's frame is final as soon as the drag returns, and a tap right
+      // after lands (a tap during a glide only stops the glide).
+      if let error = IPURBridge.synthesizeDrag(from: start, to: end, duration: 0.3, holdAtEnd: 0.12, pid: 0) {
         throw RunnerError.failed("scrollTo failed: \(error)")
       }
-      RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
     throw RunnerError.failed("could not scroll element \(id) into view")
   }
@@ -846,6 +850,85 @@ extension RunnerTests {
       throw RunnerError.failed("unlock failed: \(exception)")
     }
     return .value(NSNull())
+  }
+
+  // MARK: - On-device settle
+
+  /// `GET /wda/settle?budget_ms=&quiet_ms=&min_ms=&tolerance_px=` — waits (on the phone) until
+  /// the screen stopped changing for `quiet_ms`, comparing small grayscale captures, and reports
+  /// `{stable, waited_ms, frames, changed_px, blank, capture_ms}`. The daemon then reads the tree
+  /// once instead of shipping screenshots to the Mac and polling trees. `blank` flags a capture
+  /// whose content band is one colour (an app hiding its screen): such frames prove nothing.
+  private func settleScreen(_ request: HTTPRequest) -> HTTPResponse {
+    func query(_ key: String, _ fallback: Double, _ range: ClosedRange<Double>) -> Double {
+      min(range.upperBound, max(range.lowerBound, request.query[key].flatMap(Double.init) ?? fallback))
+    }
+    let budget = query("budget_ms", 2000, 50...15000)
+    let quiet = query("quiet_ms", 150, 0...3000)
+    let minWait = query("min_ms", 0, 0...2000)
+    let tolerance = Int(query("tolerance_px", 6, 0...100_000))
+    let started = Date()
+    func elapsedMs() -> Double { Date().timeIntervalSince(started) * 1000 }
+    if minWait > 0 { RunLoop.current.run(until: started.addingTimeInterval(minWait / 1000)) }
+    var tracker = ScreenSettle.Tracker(quietMs: quiet, tolerance: tolerance)
+    var stable = false
+    var last: (pixels: [UInt8], width: Int, height: Int)?
+    var failure: String?
+    var captureMs = 0.0
+    while elapsedMs() < budget {
+      let before = elapsedMs()
+      guard let frame = captureGrayFrame(&failure) else { break }
+      captureMs = elapsedMs() - before
+      last = frame
+      if tracker.add(frame.pixels, atMs: elapsedMs()) {
+        stable = true
+        break
+      }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+    }
+    var value: [String: Any] = [
+      "stable": stable,
+      "waited_ms": Int(elapsedMs()),
+      "frames": tracker.frames,
+      "changed_px": tracker.lastChanged == Int.max ? -1 : tracker.lastChanged,
+      "capture_ms": Int(captureMs),
+      "budget_ms": Int(budget),
+    ]
+    if let last {
+      value["blank"] = ScreenSettle.isBlank(last.pixels, width: last.width, height: last.height)
+    }
+    if let failure { value["error"] = failure }
+    return .value(value)
+  }
+
+  /// One small grayscale capture, taken off the main thread (the capture reply can be routed
+  /// through main, which keeps spinning here).
+  private func captureGrayFrame(_ failure: inout String?) -> (pixels: [UInt8], width: Int, height: Int)? {
+    var result: (pixels: [UInt8], width: Int, height: Int)?
+    var error: String?
+    var done = false
+    DispatchQueue.global(qos: .userInitiated).async {
+      var width: UInt = 0, height: UInt = 0
+      var message: NSString?
+      let frame: (pixels: [UInt8], width: Int, height: Int)? = autoreleasepool {
+        guard let data = IPURBridge.grayScreen(withMaxSide: 160, width: &width, height: &height, error: &message)
+        else { return nil }
+        return ([UInt8](data), Int(width), Int(height))
+      }
+      let text = message as String?
+      DispatchQueue.main.async {
+        result = frame
+        error = frame == nil ? text ?? "capture failed" : nil
+        done = true
+      }
+    }
+    let deadline = Date().addingTimeInterval(3)
+    while !done && Date() < deadline {
+      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+    }
+    if !done { error = "capture timed out" }
+    if let error { failure = error }
+    return result
   }
 
   // MARK: - Alerts

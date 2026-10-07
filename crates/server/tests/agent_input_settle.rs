@@ -18,7 +18,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use server::http::AppState;
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_wda, mock_native_runner, mock_wda};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 
@@ -1096,5 +1096,156 @@ fn an_observed_action_diffs_against_the_owners_last_read() {
         assert_eq!(observed["baseline"], snapshot, "{observed}");
         assert!(observed["delta"].is_object(), "{observed}");
         assert!(observed.get("elements").is_none(), "{observed}");
+    });
+}
+
+/// A full HTTP response carrying the native runner's `X-IPU-Alert` answer
+/// beside the tree, the way `/source` does.
+fn tree_with_alert_header(tree: &str, alert: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-IPU-Alert: {alert}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{tree}",
+        tree.len()
+    )
+}
+
+fn is_device_settle(request: &str) -> bool {
+    request.contains("/wda/settle")
+}
+
+#[test]
+fn the_native_runner_settles_on_the_phone_and_the_tree_is_read_once() {
+    block(async {
+        let counts = Arc::new([
+            AtomicUsize::new(0), // settle
+            AtomicUsize::new(0), // source
+            AtomicUsize::new(0), // alert
+        ]);
+        let seen = counts.clone();
+        let wda = mock_native_runner(move |request, _| {
+            if is_session(request) {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if is_mutation(request) {
+                return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+            }
+            if is_device_settle(request) {
+                seen[0].fetch_add(1, Ordering::AcqRel);
+                return Some((
+                    Duration::ZERO,
+                    r#"{"value":{"stable":true,"blank":false,"frames":4,"waited_ms":310}}"#
+                        .to_string(),
+                ));
+            }
+            if is_source(request) {
+                seen[1].fetch_add(1, Ordering::AcqRel);
+                return Some((
+                    Duration::ZERO,
+                    tree_with_alert_header(&simple_tree("搜索"), "0"),
+                ));
+            }
+            if request.contains("/alert/") {
+                seen[2].fetch_add(1, Ordering::AcqRel);
+            }
+            None
+        });
+
+        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["settle"]["settled"], true, "{json}");
+        assert_eq!(json["settle"]["reason"], "stable");
+        assert_eq!(
+            json["settle"]["captures"], 1,
+            "one tree read after the phone said still"
+        );
+        assert!(json["snapshot"].is_string());
+        assert_eq!(counts[0].load(Ordering::Acquire), 1);
+        assert_eq!(counts[1].load(Ordering::Acquire), 1);
+        assert_eq!(
+            counts[2].load(Ordering::Acquire),
+            0,
+            "the tree read already said there is no alert"
+        );
+    });
+}
+
+#[test]
+fn a_blank_capture_settles_the_old_way() {
+    block(async {
+        let sources = Arc::new(AtomicUsize::new(0));
+        let seen_sources = sources.clone();
+        let wda = mock_native_runner(move |request, _| {
+            if is_session(request) {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if is_mutation(request) {
+                return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+            }
+            if is_device_settle(request) {
+                return Some((
+                    Duration::ZERO,
+                    r#"{"value":{"stable":true,"blank":true,"frames":3}}"#.to_string(),
+                ));
+            }
+            if is_source(request) {
+                seen_sources.fetch_add(1, Ordering::AcqRel);
+                return Some((Duration::ZERO, simple_tree("付款")));
+            }
+            None
+        });
+
+        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["settle"]["reason"], "stable", "{json}");
+        assert_eq!(
+            json["settle"]["captures"], 2,
+            "blank frames prove nothing: two equal trees decide"
+        );
+        assert_eq!(sources.load(Ordering::Acquire), 2);
+    });
+}
+
+#[test]
+fn a_runner_without_on_device_settle_is_asked_once() {
+    block(async {
+        let settles = Arc::new(AtomicUsize::new(0));
+        let seen_settles = settles.clone();
+        let wda = mock_native_runner(move |request, _| {
+            if is_session(request) {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if is_mutation(request) {
+                return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+            }
+            if is_device_settle(request) {
+                seen_settles.fetch_add(1, Ordering::AcqRel);
+                let body = r#"{"value":{"error":"unknown command","message":"no such route"}}"#;
+                return Some((
+                    Duration::ZERO,
+                    format!(
+                        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                ));
+            }
+            if is_source(request) {
+                return Some((Duration::ZERO, simple_tree("搜索")));
+            }
+            None
+        });
+
+        let state = build_state_with_wda(wda.url());
+        for _ in 0..2 {
+            let (status, json, _) = request_json(
+                &state,
+                "POST",
+                "/agent/input?return=delta",
+                Some(r#"{"type":"home"}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["settle"]["reason"], "stable", "{json}");
+        }
+        assert_eq!(settles.load(Ordering::Acquire), 1, "a 404 is remembered");
     });
 }

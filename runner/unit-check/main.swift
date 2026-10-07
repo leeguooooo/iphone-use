@@ -264,5 +264,34 @@ do {
   }
 }
 
+// ScreenSettle (on-device settle)
+do {
+  let gray = [UInt8](repeating: 120, count: 100)
+  var moved = gray
+  for index in 0..<5 { moved[index] = 200 }
+  check(ScreenSettle.changedPixels(gray, gray) == 0, "identical frames change nothing")
+  check(ScreenSettle.changedPixels(gray, moved) == 5, "five pixels moved")
+  check(ScreenSettle.changedPixels(gray, [UInt8](repeating: 125, count: 100)) == 0, "noise under the threshold is ignored")
+  check(ScreenSettle.changedPixels(gray, [UInt8](repeating: 0, count: 50)) == Int.max, "size change counts as a change")
+
+  var screen = [UInt8](repeating: 250, count: 10 * 20)
+  for index in 0..<10 { screen[index] = 0 }  // status bar row: outside the content band
+  check(ScreenSettle.isBlank(screen, width: 10, height: 20), "flat content band is blank")
+  screen[10 * 10 + 4] = 30
+  check(!ScreenSettle.isBlank(screen, width: 10, height: 20), "one dark pixel in the content band is not blank")
+
+  var tracker = ScreenSettle.Tracker(quietMs: 150, tolerance: 2)
+  check(!tracker.add(gray, atMs: 0), "one frame never settles")
+  check(!tracker.add(moved, atMs: 50), "a moving frame resets the quiet window")
+  check(!tracker.add(moved, atMs: 100), "quiet for 50 ms is not enough")
+  check(tracker.add(moved, atMs: 210), "quiet for 160 ms settles")
+  var caret = ScreenSettle.Tracker(quietMs: 100, tolerance: 6)
+  var blink = gray
+  blink[42] = 0
+  check(!caret.add(gray, atMs: 0), "first frame")
+  check(!caret.add(blink, atMs: 60), "a blinking caret within tolerance")
+  check(caret.add(gray, atMs: 120), "a caret blink alone does not keep the screen unsettled")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)
