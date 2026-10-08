@@ -845,10 +845,21 @@ fn a_point_locator_tap_hits_the_live_frame_centre() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{json}");
-        let seen = seen.lock().unwrap();
-        assert!(!seen.iter().any(|r| r.contains("/click")), "no element click: {seen:?}");
-        let actions = seen.iter().find(|r| r.contains("/actions")).expect("a W3C tap");
-        assert!(actions.contains("\"x\":30") && actions.contains("\"y\":84"), "{actions}");
+        {
+            let seen = seen.lock().unwrap();
+            assert!(
+                !seen.iter().any(|r| r.contains("/click")),
+                "no element click: {seen:?}"
+            );
+            let actions = seen
+                .iter()
+                .find(|r| r.contains("/actions"))
+                .expect("a W3C tap");
+            assert!(
+                actions.contains("\"x\":30") && actions.contains("\"y\":84"),
+                "{actions}"
+            );
+        }
 
         let (bad, json) = post_actions(
             Some(wda.url()),

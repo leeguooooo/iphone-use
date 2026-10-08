@@ -21,6 +21,10 @@
 //! Security headers (v1 parity): `Cache-Control: no-store`, `X-Frame-Options:
 //! DENY`, `Referrer-Policy: no-referrer` on every response.
 
+// Handlers return `Result<_, Response>`: axum's error type is a full
+// `Response` by design, so its size is not worth boxing everywhere.
+#![allow(clippy::result_large_err)]
+
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -778,7 +782,7 @@ impl AppState {
         let owner_age = recover(self.owner.lock())
             .as_ref()
             .map(|owner| owner.last_seen.elapsed());
-        lease_idle_clock(self.idle_for(), owner_age, lease).map_or(true, |idle| idle < window)
+        lease_idle_clock(self.idle_for(), owner_age, lease).is_none_or(|idle| idle < window)
     }
 
     /// Give a Direct control operation priority over background health work.
@@ -4788,6 +4792,7 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
 /// * `{"mode":"human"}` — stop the managed runner so the person holding the
 ///   phone has it to themselves; agent input then answers 409
 ///   `phone_handed_to_human` until `agent` takes it back.
+///
 /// `/agent/mode` (reconnect, hand to a human): the screen the owner's
 /// `no_progress` tracker knew is gone.
 async fn agent_mode(state: State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
@@ -11780,7 +11785,7 @@ async fn agent_elements(
     // tree is then never passed off as `scope=changed`.
     if scope.as_deref() == Some("changed")
         && response.status().is_success()
-        && !json.as_ref().is_some_and(|json| json.get("delta").is_some())
+        && json.as_ref().is_none_or(|json| json.get("delta").is_none())
     {
         return json_response(
             StatusCode::BAD_REQUEST,
@@ -14795,9 +14800,7 @@ mod tests {
                     (lifecycle.clone(), hold_until.clone(), barrier.clone());
                 std::thread::spawn(move || {
                     barrier.wait();
-                    let Some(token) = lifecycle.try_begin_releasing() else {
-                        return None;
-                    };
+                    let token = lifecycle.try_begin_releasing()?;
                     // What the watchdog does right after its CAS: re-check the
                     // hold under the same lock the hold is written under. The
                     // transition stays open until the main thread has joined
@@ -14894,7 +14897,7 @@ mod tests {
         // Travels upward (positive dy → content moves down), stays inside the
         // clipped region and on screen.
         assert!(y2 < y1, "moves up: {y2} < {y1}");
-        assert!(y2 >= 94.0 && y2 <= 954.0, "on screen: {y2}");
+        assert!((94.0..=954.0).contains(&y2), "on screen: {y2}");
         assert_eq!(x2, x1);
         // Negative dy travels downward but never past the screen bottom.
         let (_, _, _, y_down) = element_swipe_endpoints(row, popup_list, Some((440.0, 956.0)), 0.0, -300.0);
@@ -17967,7 +17970,7 @@ mod page_scroll_tests {
         }
         assert!(y1 < 874.0, "starts above Safari's bar: {e:?}");
         // Off the scroll indicator column and out of the back-swipe band.
-        assert!(x1 >= 44.0 && x1 < 407.0, "{e:?}");
+        assert!((44.0..407.0).contains(&x1), "{e:?}");
         assert!(y1 - y2 >= 300.0, "travel survives: {e:?}");
     }
 

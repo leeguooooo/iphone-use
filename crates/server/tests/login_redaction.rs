@@ -27,6 +27,8 @@ const SEARCH_Y: f64 = 60.0;
 const ACCOUNT_Y: f64 = 200.0;
 const PASSWORD_Y: f64 = 260.0;
 const LOGIN_Y: f64 = 380.0;
+/// A second plain field some pages copy input into ("Notes").
+const ECHO_Y: f64 = 440.0;
 const FIELD_H: f64 = 44.0;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -43,6 +45,10 @@ enum Runner {
 #[derive(Default)]
 struct Phone {
     search: String,
+    /// The page also copies whatever reaches the search box into a "Notes"
+    /// field, so a stray value shows in two places.
+    echo: bool,
+    notes: String,
     account: String,
     password: String,
     focus: Option<&'static str>,
@@ -73,6 +79,7 @@ impl Phone {
     fn field(&mut self, name: &str) -> &mut String {
         match name {
             "search" => &mut self.search,
+            "notes" => &mut self.notes,
             "acct" => &mut self.account,
             _ => &mut self.password,
         }
@@ -119,10 +126,19 @@ impl Phone {
               {{"type":"XCUIElementTypeButton","label":"Forgot password",
                 "rect":{{"x":20,"y":320,"width":350,"height":{FIELD_H}}},"isEnabled":true,"children":[]}},
               {{"type":"XCUIElementTypeButton","label":"Log in",
-                "rect":{{"x":20,"y":{LOGIN_Y},"width":350,"height":{FIELD_H}}},"isEnabled":true,"children":[]}}
+                "rect":{{"x":20,"y":{LOGIN_Y},"width":350,"height":{FIELD_H}}},"isEnabled":true,"children":[]}}{notes}
             ]}}}}"#,
             search = value(&self.search),
             account = value(&self.account),
+            notes = if self.echo {
+                format!(
+                    r#",{{"type":"XCUIElementTypeTextField","label":"","placeholderValue":"Notes",{notes}
+                "rect":{{"x":20,"y":{ECHO_Y},"width":350,"height":{FIELD_H}}},"isEnabled":true,"children":[]}}"#,
+                    notes = value(&self.notes),
+                )
+            } else {
+                String::new()
+            },
         )
     }
 }
@@ -171,6 +187,11 @@ fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockWda {
                         r#"{{"value":[{{"ELEMENT":"search-{n}"}},{{"ELEMENT":"acct-{n}"}},{{"ELEMENT":"code-{n}"}}]}}"#
                     ));
                 }
+                if phone.echo {
+                    return reply(format!(
+                        r#"{{"value":[{{"ELEMENT":"search-{n}"}},{{"ELEMENT":"acct-{n}"}},{{"ELEMENT":"notes-{n}"}}]}}"#
+                    ));
+                }
                 return reply(format!(
                     r#"{{"value":[{{"ELEMENT":"search-{n}"}},{{"ELEMENT":"acct-{n}"}}]}}"#
                 ));
@@ -198,6 +219,7 @@ fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockWda {
         }
         for (id, y, placeholder) in [
             ("search", SEARCH_Y, "Search"),
+            ("notes", ECHO_Y, "Notes"),
             ("acct", ACCOUNT_Y, "Email"),
             ("pw", PASSWORD_Y, "Password"),
             ("code", PASSWORD_Y, "Verification code"),
@@ -249,6 +271,9 @@ fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockWda {
                 .unwrap_or_default();
             if let Some(focus) = phone.focus {
                 phone.field(focus).push_str(&text);
+                if focus == "search" && phone.echo {
+                    phone.notes.push_str(&text);
+                }
             }
         }
         if line.contains("/actions") {
@@ -584,6 +609,39 @@ fn a_value_that_lands_in_another_field_is_cleared() {
     assert!(
         !phone.search.contains(USERNAME),
         "the stray value was cleared"
+    );
+    assert!(!phone.logged_in);
+    drop(phone);
+    assert_side_channels_clean();
+}
+
+/// A value that reached TWO other fields is cleared from both before the
+/// login stops (the first cut stopped after clearing one, leaving the other
+/// showing it in clear text).
+#[test]
+fn a_value_that_lands_in_several_fields_is_cleared_from_all() {
+    harness();
+    let phone = Arc::new(Mutex::new(Phone {
+        echo: true,
+        ..Phone::default()
+    }));
+    let wda = scripted_runner(Runner::Stray, phone.clone());
+    let state = build_state_with_wda(wda.url());
+    block(async {
+        let (status, login) = call(&state, "POST", "/agent/login", "{}").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{login}");
+        assert_clean("login response", &login);
+        let json: serde_json::Value = serde_json::from_str(&login).unwrap();
+        assert_eq!(json["error"], "value_landed_elsewhere", "{login}");
+    });
+    let phone = phone.lock().unwrap();
+    assert!(
+        !phone.search.contains(USERNAME),
+        "the search box was cleared"
+    );
+    assert!(
+        !phone.notes.contains(USERNAME),
+        "the echoed field was cleared too"
     );
     assert!(!phone.logged_in);
     drop(phone);

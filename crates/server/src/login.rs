@@ -964,20 +964,28 @@ async fn fill(
     // per lookup, so they cannot be compared).
     let target_now = w.element_rect(&id).await.ok();
     if let Ok(rows) = w.elements().await {
-        for other in rows.iter().filter(|r| {
-            matches!(r.kind.as_str(), "TextField" | "SearchField" | "TextView")
-                && r.value
-                    .as_deref()
-                    .is_some_and(|value| value.contains(secret.expose()))
-                && !target_now.is_some_and(|now| {
-                    now.iter()
-                        .zip(r.rect.iter())
-                        .all(|(a, b)| (a - b).abs() <= 2.0)
-                })
-        }) {
+        let strays: Vec<&ElementRow> = rows
+            .iter()
+            .filter(|r| {
+                matches!(r.kind.as_str(), "TextField" | "SearchField" | "TextView")
+                    && r.value
+                        .as_deref()
+                        .is_some_and(|value| value.contains(secret.expose()))
+                    && !target_now.is_some_and(|now| {
+                        now.iter()
+                            .zip(r.rect.iter())
+                            .all(|(a, b)| (a - b).abs() <= 2.0)
+                    })
+            })
+            .collect();
+        // Clear EVERY field it reached before reporting: stopping at the
+        // first left the rest showing the secret in clear text.
+        for other in &strays {
             if let Ok(stray) = element_for(w, other).await {
                 let _ = w.clear_element(&stray).await;
             }
+        }
+        if !strays.is_empty() {
             return Err(LoginError::new(
                 422,
                 "value_landed_elsewhere",
