@@ -1002,6 +1002,15 @@ impl WdaClient {
     /// changing the screen. Resolve the localized accessibility element and
     /// click it instead, then verify that Spotlight's text field appeared
     /// before reporting success.
+    async fn spotlight_field_shown(&mut self) -> bool {
+        let field = "type == 'XCUIElementTypeTextField' AND (label == 'SpotlightSearchField' \
+                     OR placeholderValue IN {'搜索', 'Search', '検索'})";
+        matches!(
+            tokio::time::timeout(Duration::from_secs(2), self.find_elements("predicate string", field)).await,
+            Ok(Ok(found)) if !found.is_empty()
+        )
+    }
+
     pub async fn open_spotlight(&mut self) -> Result<()> {
         self.press_home().await?;
 
@@ -1015,12 +1024,21 @@ impl WdaClient {
         let left = |deadline: std::time::Instant| {
             deadline.saturating_duration_since(std::time::Instant::now())
         };
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut deadline = std::time::Instant::now() + Duration::from_secs(3);
         let mut list_answered = false;
+        // Spotlight runs as its own process on iOS 26 and can stay listed
+        // after Home (alone, for over 3 s, through a whole call on hardware):
+        // it is no app that could answer for a "搜索" button, so give it
+        // longer, and if it never leaves, it may simply still be open.
+        let mut only_system = false;
+        let mut extended = false;
         loop {
             match tokio::time::timeout(left(deadline), self.active_bundles()).await {
                 Ok(Ok(bundles)) if bundles == ["com.apple.springboard"] => break,
-                Ok(Ok(_)) => list_answered = true,
+                Ok(Ok(bundles)) => {
+                    list_answered = true;
+                    only_system = only_springboard_or_spotlight(&bundles);
+                }
                 Ok(Err(_)) if !list_answered => {
                     tokio::time::sleep(Duration::from_millis(450)).await;
                     break;
@@ -1028,6 +1046,17 @@ impl WdaClient {
                 Ok(Err(_)) | Err(_) => {}
             }
             if std::time::Instant::now() >= deadline {
+                if only_system && !extended {
+                    extended = true;
+                    deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    continue;
+                }
+                if only_system {
+                    if self.spotlight_field_shown().await {
+                        return Ok(());
+                    }
+                    break;
+                }
                 if list_answered {
                     return Err(anyhow!(
                         "the Home Screen did not come to the front, so Spotlight was not opened"
@@ -2723,6 +2752,12 @@ fn force_touch_body(pressure: Option<f64>, duration_s: Option<f64>) -> serde_jso
     })
 }
 
+/// Every listed app is SpringBoard or Spotlight (and at least one is listed).
+fn only_springboard_or_spotlight(bundles: &[String]) -> bool {
+    !bundles.is_empty()
+        && bundles.iter().all(|b| b == "com.apple.springboard" || b == "com.apple.Spotlight")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2886,6 +2921,15 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    #[test]
+    fn only_a_lingering_spotlight_earns_more_time() {
+        let v = |b: &[&str]| b.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(only_springboard_or_spotlight(&v(&["com.apple.Spotlight"])));
+        assert!(only_springboard_or_spotlight(&v(&["com.apple.Spotlight", "com.apple.springboard"])));
+        assert!(!only_springboard_or_spotlight(&v(&["com.apple.shortcuts", "com.apple.springboard"])));
+        assert!(!only_springboard_or_spotlight(&v(&[])));
     }
 
     #[test]
