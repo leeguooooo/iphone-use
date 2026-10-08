@@ -60,10 +60,17 @@ struct Call {
     started: Instant,
     elapsed: Duration,
     bytes: Option<u64>,
+    /// Dropped before it answered: a deadline (or a cancelled request) cut
+    /// it short. Its time was still the runner's.
+    cancelled: bool,
 }
 
 /// Record one WDA call. A no-op outside a timed request.
 pub fn record(route: String, elapsed: Duration, bytes: Option<u64>) {
+    record_call(route, elapsed, bytes, false);
+}
+
+fn record_call(route: String, elapsed: Duration, bytes: Option<u64>, cancelled: bool) {
     let _ = RECORDER.try_with(|recorder| {
         if let Ok(mut recorder) = recorder.lock() {
             let now = Instant::now();
@@ -72,13 +79,39 @@ pub fn record(route: String, elapsed: Duration, bytes: Option<u64>) {
                 started: now.checked_sub(elapsed).unwrap_or(now),
                 elapsed,
                 bytes,
+                cancelled,
             });
         }
     });
 }
 
+/// A WDA call in flight: recorded as cancelled if its future is dropped
+/// before [`InFlight::finish`].
+struct InFlight {
+    route: Option<String>,
+    started: Instant,
+}
+
+impl InFlight {
+    fn finish(mut self, bytes: Option<u64>) {
+        if let Some(route) = self.route.take() {
+            record_call(route, self.started.elapsed(), bytes, false);
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Some(route) = self.route.take() {
+            record_call(route, self.started.elapsed(), None, true);
+        }
+    }
+}
+
 /// `send()` that records the call: method + normalised path, time until the
-/// response headers arrived, and the body size WDA declared.
+/// LAST byte of the body arrived, and the body size. The body is read here
+/// (every caller reads it whole anyway): timed to the headers only, a 1 MB
+/// `/source` or screenshot spent most of its transfer in `daemon_ms`.
 pub trait SendTimed {
     fn send_timed(
         self,
@@ -94,11 +127,33 @@ impl SendTimed for reqwest::RequestBuilder {
             request.method(),
             normalize_route(request.url().path())
         );
-        let started = Instant::now();
-        let result = client.execute(request).await;
-        let bytes = result.as_ref().ok().and_then(|r| r.content_length());
-        record(route, started.elapsed(), bytes);
-        result
+        let call = InFlight {
+            route: Some(route),
+            started: Instant::now(),
+        };
+        let response = match client.execute(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                call.finish(None);
+                return Err(error);
+            }
+        };
+        let status = response.status();
+        let version = response.version();
+        let headers = response.headers().clone();
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                call.finish(None);
+                return Err(error);
+            }
+        };
+        call.finish(Some(body.len() as u64));
+        let mut buffered = axum::http::Response::new(body);
+        *buffered.status_mut() = status;
+        *buffered.version_mut() = version;
+        *buffered.headers_mut() = headers;
+        Ok(reqwest::Response::from(buffered))
     }
 }
 
@@ -346,6 +401,8 @@ struct Summary {
     total_ms: u64,
     wda_ms: u64,
     calls: usize,
+    /// Calls a deadline dropped before they answered.
+    cancelled: usize,
     /// Per route, in first-call order: (route, count, ms, bytes).
     routes: Vec<(String, usize, u64, u64)>,
 }
@@ -370,6 +427,7 @@ impl Summary {
             total_ms: total.as_millis() as u64,
             wda_ms,
             calls: recorder.calls.len(),
+            cancelled: recorder.calls.iter().filter(|call| call.cancelled).count(),
             routes,
         }
     }
@@ -383,14 +441,18 @@ impl Summary {
     }
 
     fn json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut json = serde_json::json!({
             "total_ms": self.total_ms,
             "wda_ms": self.wda_ms,
             "daemon_ms": self.total_ms.saturating_sub(self.wda_ms),
             "wda": self.routes.iter().map(|(route, count, ms, bytes)| serde_json::json!({
                 "call": route, "count": count, "ms": ms, "bytes": bytes,
             })).collect::<Vec<_>>(),
-        })
+        });
+        if self.cancelled > 0 {
+            json["wda_cancelled"] = serde_json::json!(self.cancelled);
+        }
+        json
     }
 
     /// `total;dur=…, wda;dur=…, wda-get-source;dur=…;desc="1x 812345B"`.
@@ -518,18 +580,21 @@ mod tests {
                     started: Instant::now(),
                     elapsed: Duration::from_millis(6000),
                     bytes: Some(800_000),
+                    cancelled: false,
                 },
                 Call {
                     route: "GET /window/size".into(),
                     started: Instant::now(),
                     elapsed: Duration::from_millis(180),
                     bytes: Some(90),
+                    cancelled: false,
                 },
                 Call {
                     route: "GET /source".into(),
                     started: Instant::now(),
                     elapsed: Duration::from_millis(5000),
                     bytes: Some(700_000),
+                    cancelled: false,
                 },
             ],
             ..Recorder::default()
@@ -568,6 +633,75 @@ mod tests {
         assert!(with_timing_field(b"not json", &t).is_none());
     }
 
+    /// A server that sends its headers at once and the body after `delay`.
+    fn slow_body_server(delay: Duration) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    let mut buffer = [0_u8; 4096];
+                    let _ = stream.read(&mut buffer);
+                    let body = r#"{"value":null}"#;
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.flush();
+                    std::thread::sleep(delay);
+                    let _ = stream.write_all(body.as_bytes());
+                });
+            }
+        });
+        base
+    }
+
+    /// A WDA call is timed to the last byte of its body, and one a deadline
+    /// drops is still recorded (as cancelled) instead of vanishing into
+    /// `daemon_ms`.
+    #[test]
+    fn calls_are_timed_to_the_end_of_the_body_and_kept_when_cancelled() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let base = slow_body_server(Duration::from_millis(300));
+                let client = reqwest::Client::new();
+                let recorder = RECORDER
+                    .scope(Mutex::new(Recorder::default()), async {
+                        let response = client
+                            .get(format!("{base}/status"))
+                            .send_timed()
+                            .await
+                            .unwrap();
+                        assert_eq!(response.text().await.unwrap(), r#"{"value":null}"#);
+                        let cut = tokio::time::timeout(
+                            Duration::from_millis(100),
+                            client.get(format!("{base}/source")).send_timed(),
+                        )
+                        .await;
+                        assert!(cut.is_err());
+                        RECORDER.with(|r| std::mem::take(&mut *r.lock().unwrap()))
+                    })
+                    .await;
+                let [whole, cut] = recorder.calls.as_slice() else {
+                    panic!("two calls recorded");
+                };
+                assert_eq!(whole.route, "GET /status");
+                assert!(whole.elapsed >= Duration::from_millis(280), "{:?}", whole.elapsed);
+                assert_eq!(whole.bytes, Some(14));
+                assert!(!whole.cancelled);
+                assert_eq!(cut.route, "GET /source");
+                assert!(cut.cancelled);
+                let summary = Summary::new(&recorder, Duration::from_millis(500));
+                assert_eq!(summary.json()["wda_cancelled"], 1);
+            });
+    }
+
     // A hand-built runtime: `#[tokio::test]` resolves `core::` to this
     // workspace's own `core` crate.
     #[test]
@@ -586,6 +720,7 @@ mod tests {
                     started: Instant::now(),
                     elapsed: Duration::from_millis(5),
                     bytes: None,
+                    cancelled: false,
                 }],
                 ..Recorder::default()
             },
