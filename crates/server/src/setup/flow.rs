@@ -2249,6 +2249,7 @@ impl Setup {
         let mut cycle: u64 = 0;
         let mut failures = 0;
         let mut probes = ProbeCount::default();
+        let mut away = AwayGate::default();
         let mut relay_restarts: Vec<Instant> = Vec::new();
         let mut warned_owner = false;
         // A free Apple ID's runner profile lasts 7 days. Replace the runner
@@ -2304,6 +2305,29 @@ impl Setup {
                 continue;
             }
             let answered = sys::http_ok(&status_url, Duration::from_secs(4));
+            // A pulled cable looks like a dead runner from here. Ask whether
+            // the phone is still attached before counting a miss: an absent
+            // phone is `not_connected`, never a runner failure to rebuild.
+            match away.on_probe(answered, || checks::presence(&self.ctx.udid)) {
+                AwayStep::Away { first } => {
+                    if first {
+                        warn("the iPhone left this Mac while its runner was held; waiting for it to come back (nothing is rebuilt)");
+                        self.phase("waiting", "not_connected", NOT_CONNECTED_MESSAGE);
+                    }
+                    failures = 0;
+                    probes = ProbeCount::default();
+                    proc::sleep(Duration::from_secs(2))?;
+                    continue;
+                }
+                AwayStep::Count { cleared } => {
+                    if cleared {
+                        ok("the iPhone is connected to this Mac again; holding its runner");
+                        self.phase("ready", "", "device runner and launchd supervisor verified");
+                        failures = 0;
+                        probes = ProbeCount::default();
+                    }
+                }
+            }
             // `/status` alone cannot see a runner that answers it but can no
             // longer read the screen. Read lightly every third cycle (~30 s),
             // and every cycle while anything in the window looks wrong.
@@ -2664,6 +2688,40 @@ pub enum Probe {
     ReadFail,
 }
 
+/// Whether the held phone is still attached, consulted only when `/status`
+/// misses. A cable pull stops `/status` as surely as a dead runner does, but
+/// the runner and relays come back on their own when the phone does, so an
+/// absent phone is published as `not_connected` and kept out of the probe
+/// window. Unknown presence counts as attached.
+#[derive(Debug, Default)]
+pub struct AwayGate {
+    away: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AwayStep {
+    /// Count this probe as usual; `cleared` when the phone just came back.
+    Count { cleared: bool },
+    /// The phone is not attached: skip the probe; `first` on the first miss.
+    Away { first: bool },
+}
+
+impl AwayGate {
+    pub fn on_probe(
+        &mut self,
+        answered: bool,
+        presence: impl FnOnce() -> checks::Presence,
+    ) -> AwayStep {
+        if !answered && presence() == checks::Presence::Absent {
+            let first = !self.away;
+            self.away = true;
+            return AwayStep::Away { first };
+        }
+        let cleared = std::mem::take(&mut self.away);
+        AwayStep::Count { cleared }
+    }
+}
+
 impl ProbeCount {
     /// Failures among the last [`Self::WINDOW`] probes that trigger a rebuild.
     pub const MAX: u32 = 3;
@@ -2846,6 +2904,81 @@ mod tests {
             !only_status.half_dead(),
             "status misses alone are not half dead"
         );
+    }
+
+    /// Drive the hold's per-probe decision the way `hold` does: an away probe
+    /// skips the window, a counted one is recorded. Returns (step, rebuild).
+    fn hold_step(
+        gate: &mut AwayGate,
+        probes: &mut ProbeCount,
+        answered: bool,
+        presence: checks::Presence,
+    ) -> (AwayStep, bool) {
+        let step = gate.on_probe(answered, || presence);
+        let rebuild = match step {
+            AwayStep::Away { .. } => {
+                *probes = ProbeCount::default();
+                false
+            }
+            AwayStep::Count { cleared } => {
+                if cleared {
+                    *probes = ProbeCount::default();
+                }
+                probes.observe(answered)
+            }
+        };
+        (step, rebuild)
+    }
+
+    #[test]
+    fn a_pulled_cable_during_the_hold_is_not_connected_and_never_rebuilds() {
+        use checks::Presence::{Absent, Present};
+        let mut gate = AwayGate::default();
+        let mut probes = ProbeCount::default();
+        // The field run: ~54 s unplugged, a miss every probe.
+        let mut steps = Vec::new();
+        for _ in 0..10 {
+            let (step, rebuild) = hold_step(&mut gate, &mut probes, false, Absent);
+            assert!(!rebuild, "an absent phone is never a runner failure");
+            steps.push(step);
+        }
+        assert_eq!(steps[0], AwayStep::Away { first: true }, "published once");
+        assert!(steps[1..]
+            .iter()
+            .all(|s| *s == AwayStep::Away { first: false }));
+        assert!(!probes.suspicious(), "absence leaves the window empty");
+        // Plugged back in: the runner answers again and the blocker clears.
+        let (step, rebuild) = hold_step(&mut gate, &mut probes, true, Present);
+        assert_eq!(step, AwayStep::Count { cleared: true });
+        assert!(!rebuild);
+        let (step, _) = hold_step(&mut gate, &mut probes, true, Present);
+        assert_eq!(
+            step,
+            AwayStep::Count { cleared: false },
+            "cleared only once"
+        );
+    }
+
+    #[test]
+    fn a_runner_failure_with_the_phone_attached_still_counts() {
+        use checks::Presence::{Present, Unknown};
+        let mut gate = AwayGate::default();
+        let mut probes = ProbeCount::default();
+        assert!(!hold_step(&mut gate, &mut probes, false, Present).1);
+        assert!(
+            !hold_step(&mut gate, &mut probes, false, Unknown).1,
+            "unknown presence counts as attached"
+        );
+        let (step, rebuild) = hold_step(&mut gate, &mut probes, false, Present);
+        assert_eq!(step, AwayStep::Count { cleared: false });
+        assert!(rebuild, "three misses with the phone present still rebuild");
+    }
+
+    #[test]
+    fn an_answered_probe_never_asks_for_presence() {
+        let mut gate = AwayGate::default();
+        let step = gate.on_probe(true, || panic!("presence is only checked on a miss"));
+        assert_eq!(step, AwayStep::Count { cleared: false });
     }
 
     /// Serve one canned answer per connection on a free loopback port.
