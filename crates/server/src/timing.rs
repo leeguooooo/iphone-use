@@ -692,7 +692,11 @@ mod tests {
                     panic!("two calls recorded");
                 };
                 assert_eq!(whole.route, "GET /status");
-                assert!(whole.elapsed >= Duration::from_millis(280), "{:?}", whole.elapsed);
+                assert!(
+                    whole.elapsed >= Duration::from_millis(280),
+                    "{:?}",
+                    whole.elapsed
+                );
                 assert_eq!(whole.bytes, Some(14));
                 assert!(!whole.cancelled);
                 assert_eq!(cut.route, "GET /source");
