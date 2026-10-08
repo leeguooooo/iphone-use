@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Observation
 import Security
 import UIKit
@@ -27,6 +28,16 @@ final class RemoteModel {
     var redactedImage: UIImage?
     /// The recorded demo, while someone is trying the app without a Mac.
     var demo: DemoSession?
+    /// Requests go straight to the Mac on the LAN rather than through the
+    /// paired (tunnel) address.
+    var onLAN = false
+    /// The paired address is a public https tunnel, so the route is worth
+    /// showing: 局域网 when direct, 外网 when through the tunnel.
+    var routeLabel: String? {
+        guard let client, phase == .connected else { return nil }
+        if onLAN { return String(localized: "局域网") }
+        return client.publicBase.scheme == "https" ? String(localized: "外网") : nil
+    }
 
     func startDemo() {
         demo = DemoSession()
@@ -55,6 +66,12 @@ final class RemoteModel {
     /// device is started at once, once per foreground, instead of waiting for
     /// a tap on 连接手机. Never for a phone handed back to its holder.
     private var autoWakeTried = false
+    /// Network changes (Wi-Fi joined or left) re-check the LAN route.
+    private var pathMonitor: NWPathMonitor?
+    private var probeTask: Task<Void, Never>?
+    private var lastProbe: Date?
+    /// While on the paired route, look for the LAN again this often.
+    private static let reprobeInterval: TimeInterval = 30
 
     init() {
         #if DEBUG
@@ -90,6 +107,17 @@ final class RemoteModel {
 
     private static func deviceAccount(_ address: String) -> String { "device:" + address }
 
+    /// The daemon's LAN addresses last reported for `address` (`lan_urls`),
+    /// kept for a password login, which does not report them.
+    private static func savedLANCandidates(_ address: String) -> [URL] {
+        (UserDefaults.standard.stringArray(forKey: "lanURLs:" + address) ?? [])
+            .compactMap(DaemonClient.parse(address:))
+    }
+
+    private static func saveLANCandidates(_ urls: [URL], for address: String) {
+        UserDefaults.standard.set(urls.map(\.absoluteString), forKey: "lanURLs:" + address)
+    }
+
     /// Connect with a typed password, or (nil) with what was saved: the
     /// paired device token first, then the password.
     func connect(password: String?) async {
@@ -104,7 +132,7 @@ final class RemoteModel {
             return
         }
         phase = .connecting
-        let client = DaemonClient(base: base)
+        let client = DaemonClient(base: base, lanCandidates: Self.savedLANCandidates(address))
         do {
             if let token {
                 try await client.renew(deviceToken: token)
@@ -163,21 +191,70 @@ final class RemoteModel {
     /// Commit a verified client. With `replacingWith`, the old session is
     /// dropped and the address switched only now that the new one works.
     private func finishConnecting(_ client: DaemonClient, replacingWith newAddress: String? = nil) async throws {
+        // Look for the LAN while the paired address answers the status read,
+        // so connecting off the LAN costs no extra round trip.
+        async let lan = client.probeLAN()
         let status = try await client.status()
+        client.use(await lan)
         if let newAddress {
             disconnect()
             address = newAddress
         }
         UserDefaults.standard.set(address, forKey: "address")
+        Self.saveLANCandidates(client.lanCandidates, for: address)
+        client.onFallback = { [weak self] in
+            Task { @MainActor in self?.routeChanged() }
+        }
         self.client = client
         self.status = status
+        lastProbe = Date()
+        onLAN = client.onLAN
         phase = .connected
         startPolling()
+        startPathMonitor()
         updateStream()
+    }
+
+    // MARK: route
+
+    /// Look for the LAN again (foreground, network change, periodically
+    /// while on the tunnel) and switch routes if the answer changed.
+    func reprobe() {
+        guard let client, probeTask == nil, !client.lanCandidates.isEmpty else { return }
+        probeTask = Task { [weak self] in
+            let hit = await client.probeLAN()
+            guard let self, !Task.isCancelled else { return }
+            self.probeTask = nil
+            self.lastProbe = Date()
+            guard self.client === client else { return }
+            if client.use(hit) { self.routeChanged() }
+        }
+    }
+
+    /// The route moved: requests already follow `client.base`; the stream
+    /// holds its URL, so it reconnects on the new one.
+    private func routeChanged() {
+        guard let client else { return }
+        onLAN = client.onLAN
+        if reader != nil { restartStream() }
+    }
+
+    private func startPathMonitor() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            Task { @MainActor in self?.reprobe() }
+        }
+        monitor.start(queue: .main)
+        pathMonitor = monitor
     }
 
     func disconnect() {
         statusTask?.cancel()
+        probeTask?.cancel()
+        probeTask = nil
+        onLAN = false
         redactedTask?.cancel()
         redactedTask = nil
         redactedImage = nil
@@ -226,6 +303,9 @@ final class RemoteModel {
                 onState: { [weak self] ok, why in
                     self?.videoMessage = why
                     if !ok { self?.videoLive = false }
+                    // A dropped stream on the LAN may mean the LAN is gone:
+                    // check it, and fall back to the paired address if so.
+                    if !ok, self?.onLAN == true { self?.reprobe() }
                     if why?.contains("401") == true {
                         Task { _ = await self?.relogin() }
                     }
@@ -252,6 +332,7 @@ final class RemoteModel {
     /// hand-back made while the app was in the background).
     func becameActive() {
         autoWakeTried = false
+        reprobe()
     }
 
     private func maybeAutoWake(_ status: PhoneStatus) {
@@ -294,6 +375,9 @@ final class RemoteModel {
                     self.updateStream()
                     self.maybeAutoWake(status)
                     self.updateRedactedOverlay()
+                    if !self.onLAN, Date().timeIntervalSince(self.lastProbe ?? .distantPast) > Self.reprobeInterval {
+                        self.reprobe()
+                    }
                 } catch DaemonError.sessionExpired {
                     _ = await self.relogin()
                 } catch {}
@@ -324,6 +408,7 @@ final class RemoteModel {
                 } else if let password {
                     try await client.login(password: password)
                 }
+                Self.saveLANCandidates(client.lanCandidates, for: self.address)
                 // The stream still carries the old cookie: restart it.
                 self.reader?.stop()
                 self.reader = nil

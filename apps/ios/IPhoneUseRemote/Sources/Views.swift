@@ -260,8 +260,9 @@ struct StatusPill: View {
 
     private var label: String {
         guard let status = model.status else { return String(localized: "未连接") }
-        if status.drivable && model.videoLive { return String(localized: "可操作 · H.264") }
-        return status.deviceState
+        let state = status.drivable && model.videoLive ? String(localized: "可操作 · H.264") : status.deviceState
+        guard let route = model.routeLabel else { return state }
+        return state + " · " + route
     }
 }
 
