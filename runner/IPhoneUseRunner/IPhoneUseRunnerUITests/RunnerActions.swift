@@ -154,6 +154,16 @@ enum ScreenSettle {
   }
 }
 
+/// Whether a tap at a point can touch anything on a screen of `size` points. A tap outside it
+/// touches nothing and would still read as success. Hardware, 17 Pro Max: a click on a link below
+/// the visible page of the in-app Safari sheet tapped the link's off-screen centre and answered ok.
+enum TapBounds {
+  static func onScreen(_ point: CGPoint, _ size: CGSize) -> Bool {
+    size.width > 0 && size.height > 0
+      && point.x >= 0 && point.y >= 0 && point.x <= size.width && point.y <= size.height
+  }
+}
+
 /// A scroll drag that leaves no momentum: most of the distance quickly, then a slow tail, so the
 /// release speed (which the list would keep gliding with) is below UIKit's fling threshold.
 /// Hardware, iPhone 17 Pro Max: a constant 380 pt/s glided on; a tail of ~150 pt/s stopped dead.

@@ -6009,14 +6009,26 @@ async fn tap_snapshot_element(
     }
     // A bar over the centre (iOS 26's floating search pill): bring the
     // target clear and click it there, else tap the part it leaves clear.
-    if !allows_occluded(value) && center_covered(&rows, index) {
-        if let Some(clicked) = reveal_and_click(w, row).await {
+    let off_screen = center_off_screen(&rows, index);
+    if off_screen || (!allows_occluded(value) && center_covered(&rows, index)) {
+        if let Some(clicked) = reveal_and_click(w, row, off_screen).await {
             return clicked.map_err(|error| match error {
                 RevealError::Occluded => {
                     SnapshotElementTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
                 }
+                RevealError::OffScreen => {
+                    SnapshotElementTapError::Refused("element_not_visible", ELEMENT_OFF_SCREEN_HINT)
+                }
                 RevealError::Dispatch(error) => SnapshotElementTapError::AfterDispatch(error),
             });
+        }
+        // No unique live element to scroll: an off-screen target cannot be
+        // reached by coordinates either.
+        if off_screen {
+            return Err(SnapshotElementTapError::Refused(
+                "element_not_visible",
+                ELEMENT_OFF_SCREEN_HINT,
+            ));
         }
         if let Some((x, y)) = clear_tap_point(&rows, index) {
             return w
@@ -7024,8 +7036,12 @@ async fn tap_unique_label(
     // moved — falls back to a fresh read, never to an error.
     if let Some(rows) = w.recent_tree(SNAPSHOT_TREE_REUSE) {
         if let Ok((index, x, y)) = label_tap_target(&rows, label, kind, request) {
-            // A covered target goes the fresh way below, which brings it clear.
-            if !center_covered(&rows, index) && reused_row_is_live(w, &rows[index]).await {
+            // A covered or off-screen target goes the fresh way below, which
+            // brings it into view.
+            if !needs_reveal(&rows, index)
+                && point_on_screen(&rows, x, y)
+                && reused_row_is_live(w, &rows[index]).await
+            {
                 return w
                     .tap_point(x, y)
                     .await
@@ -7039,15 +7055,26 @@ async fn tap_unique_label(
         .await
         .map_err(UniqueLabelTapError::BeforeDispatch)?;
     let (index, x, y) = label_tap_target(&rows, label, kind, request)?;
-    if !allows_occluded(request) && center_covered(&rows, index) {
-        if let Some(clicked) = reveal_and_click(w, &rows[index]).await {
+    let off_screen = center_off_screen(&rows, index);
+    if off_screen || (!allows_occluded(request) && center_covered(&rows, index)) {
+        if let Some(clicked) = reveal_and_click(w, &rows[index], off_screen).await {
             return clicked.map_err(|error| match error {
                 RevealError::Occluded => {
                     UniqueLabelTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
                 }
+                RevealError::OffScreen => {
+                    UniqueLabelTapError::Refused("element_not_visible", ELEMENT_OFF_SCREEN_HINT)
+                }
                 RevealError::Dispatch(error) => UniqueLabelTapError::AfterDispatch(error),
             });
         }
+    }
+    // Never a tap outside the screen: it touches nothing and would read as ok.
+    if !point_on_screen(&rows, x, y) {
+        return Err(UniqueLabelTapError::Refused(
+            "element_not_visible",
+            ELEMENT_OFF_SCREEN_HINT,
+        ));
     }
     w.tap_point(x, y)
         .await
@@ -7281,6 +7308,7 @@ fn bar_item(rows: &[crate::wda::ElementRow], index: usize) -> bool {
 fn can_cover(rows: &[crate::wda::ElementRow], index: usize, j: usize) -> bool {
     let row = &rows[j];
     !inline_siblings(rows, index, j)
+        && !larger_sibling(rows, index, j)
         && (!bar_item(rows, index)
             || row.kind == "Keyboard"
             || (BAR_KINDS.contains(&row.kind.as_str()) && row.rect[3] <= MAX_BAR_HEIGHT))
@@ -7303,6 +7331,22 @@ fn inline_siblings(rows: &[crate::wda::ElementRow], index: usize, j: usize) -> b
         && rows[j].kind == "Link"
         && parent_index(rows, index).is_some()
         && parent_index(rows, index) == parent_index(rows, j)
+}
+
+/// A much bigger control under the same parent: a header's bar-wide address
+/// or title button behind the small button at its edge. The small control is
+/// the one drawn on top, so the big one does not cover it. Hardware, 17 Pro
+/// Max, the in-app Safari sheet's TopBrowserBar: 关闭 [16,65,44,44] sits
+/// inside the edge of 地址 [26,65,388,44], and a locator tap on the plainly
+/// visible 关闭 answered `element_occluded` (a coordinate tap worked).
+/// Floating overlays (search pill, bars, keyboard) still cover.
+fn larger_sibling(rows: &[crate::wda::ElementRow], index: usize, j: usize) -> bool {
+    let (target, other) = (&rows[index], &rows[j]);
+    let area = |rect: [f64; 4]| rect[2].max(0.0) * rect[3].max(0.0);
+    !floating_overlay(other)
+        && parent_index(rows, index).is_some()
+        && parent_index(rows, index) == parent_index(rows, j)
+        && area(other.rect) > 2.0 * area(target.rect)
 }
 
 /// Controls drawn over scrolling content whose glass reaches past their
@@ -7445,6 +7489,31 @@ fn center_covered(rows: &[crate::wda::ElementRow], index: usize) -> bool {
     }
 }
 
+/// `(x, y)` lies on the screen the tree describes. No Application frame, no
+/// verdict: the point is taken as on screen.
+fn point_on_screen(rows: &[crate::wda::ElementRow], x: f64, y: f64) -> bool {
+    screen_rect(rows)
+        .is_none_or(|[sx, sy, sw, sh]| x >= sx && x <= sx + sw && y >= sy && y <= sy + sh)
+}
+
+/// The target's centre is outside the screen: a tap there touches nothing.
+/// Hardware, 17 Pro Max, the in-app Safari sheet: a locator tap on a link
+/// below the visible page answered `ok` and nothing happened — the runner
+/// tapped the link's off-screen centre.
+fn center_off_screen(rows: &[crate::wda::ElementRow], index: usize) -> bool {
+    rows.get(index)
+        .and_then(element_center)
+        .is_some_and(|(x, y)| !point_on_screen(rows, x, y))
+}
+
+/// The target must be brought into view before a tap can reach it: its
+/// centre is under another control or off the screen.
+fn needs_reveal(rows: &[crate::wda::ElementRow], index: usize) -> bool {
+    center_covered(rows, index) || center_off_screen(rows, index)
+}
+
+const ELEMENT_OFF_SCREEN_HINT: &str = "nothing was sent: the element is outside the visible screen and scrolling it into view did not bring it on screen, so a tap would touch nothing. Scroll toward it ({\"type\":\"scroll\",\"dy\":…} or {\"type\":\"perform\",\"action\":\"scroll_to_visible\",…}), read /agent/elements again and retry";
+
 /// Scroll `row`'s element to the middle of the screen, clear of floating
 /// bars, and click it there. iOS 26's floating search pill eats touches well
 /// past its frame (hardware, iPhone 13 Settings: taps on the visible top of
@@ -7454,6 +7523,7 @@ fn center_covered(rows: &[crate::wda::ElementRow], index: usize) -> bool {
 async fn reveal_and_click(
     w: &mut crate::wda::WdaClient,
     row: &crate::wda::ElementRow,
+    was_off_screen: bool,
 ) -> Option<Result<(), RevealError>> {
     let (using, value) = snapshot_row_locator(row)
         .as_ref()
@@ -7467,23 +7537,40 @@ async fn reveal_and_click(
     // list): look again before touching. A click on a centre that is still
     // under the floating search pill lands on the pill and scrolls the list
     // (agent-loop A/B, iPhone 13: "tapped 通用", stayed on Settings).
-    if let Ok(rows) = w.elements().await {
-        if let Some(index) = same_row(&rows, row) {
-            if center_covered(&rows, index) {
-                return Some(match clear_tap_point(&rows, index) {
-                    Some((x, y)) => w.tap_point(x, y).await.map_err(RevealError::Dispatch),
-                    None => Err(RevealError::Occluded),
-                });
+    // A target that was off the screen must be proven on screen now; without
+    // that proof the click would touch nothing and still answer ok.
+    match w.elements().await {
+        Ok(rows) => match same_row(&rows, row) {
+            Some(index) => {
+                if center_off_screen(&rows, index) {
+                    return Some(Err(RevealError::OffScreen));
+                }
+                if center_covered(&rows, index) {
+                    return Some(match clear_tap_point(&rows, index) {
+                        Some((x, y)) if point_on_screen(&rows, x, y) => {
+                            w.tap_point(x, y).await.map_err(RevealError::Dispatch)
+                        }
+                        Some(_) => Err(RevealError::OffScreen),
+                        None => Err(RevealError::Occluded),
+                    });
+                }
             }
-        }
+            None if was_off_screen => return Some(Err(RevealError::OffScreen)),
+            None => {}
+        },
+        Err(_) if was_off_screen => return Some(Err(RevealError::OffScreen)),
+        Err(_) => {}
     }
     Some(w.click_element(id).await.map_err(RevealError::Dispatch))
 }
 
-/// Why a covered target was not clicked after revealing it.
+/// Why a covered or off-screen target was not clicked after revealing it.
 enum RevealError {
     /// Still fully covered after the scroll: nothing was sent.
     Occluded,
+    /// Still off the screen (or not provably on it) after the scroll:
+    /// nothing was sent.
+    OffScreen,
     /// The click (or clear-point tap) was sent and failed.
     Dispatch(anyhow::Error),
 }
@@ -7552,12 +7639,16 @@ async fn tap_unique_locator(
         }
     }
     let reused = w.recent_tree(SNAPSHOT_TREE_REUSE).and_then(|rows| {
-        unique_match(&rows, locator)
-            .ok()
-            .map(|index| (rows[index].rect, center_covered(&rows, index)))
+        unique_match(&rows, locator).ok().map(|index| {
+            (
+                rows[index].rect,
+                needs_reveal(&rows, index),
+                center_off_screen(&rows, index),
+            )
+        })
     });
-    let (reused_rect, covered) = match reused {
-        Some((rect, covered)) => (Some(rect), covered),
+    let (reused_rect, covered, off_screen) = match reused {
+        Some((rect, covered, off_screen)) => (Some(rect), covered, off_screen),
         None => {
             w.forget_tree();
             let rows = w
@@ -7565,7 +7656,11 @@ async fn tap_unique_locator(
                 .await
                 .map_err(UniqueLabelTapError::BeforeDispatch)?;
             match unique_match(&rows, locator) {
-                Ok(index) => (None, center_covered(&rows, index)),
+                Ok(index) => (
+                    None,
+                    needs_reveal(&rows, index),
+                    center_off_screen(&rows, index),
+                ),
                 Err(false) => return Err(UniqueLabelTapError::NotFound),
                 Err(true) => return Err(UniqueLabelTapError::Ambiguous(None)),
             }
@@ -7606,22 +7701,40 @@ async fn tap_unique_locator(
     if covered {
         reveal_element(w, element_id).await;
         // Look again, as `reveal_and_click` does: a centre still under the
-        // pill must not be clicked.
-        if let Ok(rows) = w.elements().await {
-            if let Ok(index) = unique_match(&rows, locator) {
-                if center_covered(&rows, index) {
-                    return match clear_tap_point(&rows, index) {
-                        Some((x, y)) => w
-                            .tap_point(x, y)
-                            .await
-                            .map_err(UniqueLabelTapError::AfterDispatch),
-                        None => Err(UniqueLabelTapError::Refused(
-                            "element_occluded",
-                            ELEMENT_OCCLUDED_HINT,
-                        )),
-                    };
+        // pill must not be clicked, and one still off the screen (or not
+        // provably on it) must not be either — the click would touch nothing
+        // and answer ok.
+        let off_screen_refusal = || {
+            Err(UniqueLabelTapError::Refused(
+                "element_not_visible",
+                ELEMENT_OFF_SCREEN_HINT,
+            ))
+        };
+        match w.elements().await {
+            Ok(rows) => match unique_match(&rows, locator) {
+                Ok(index) => {
+                    if center_off_screen(&rows, index) {
+                        return off_screen_refusal();
+                    }
+                    if center_covered(&rows, index) {
+                        return match clear_tap_point(&rows, index) {
+                            Some((x, y)) if point_on_screen(&rows, x, y) => w
+                                .tap_point(x, y)
+                                .await
+                                .map_err(UniqueLabelTapError::AfterDispatch),
+                            Some(_) => off_screen_refusal(),
+                            None => Err(UniqueLabelTapError::Refused(
+                                "element_occluded",
+                                ELEMENT_OCCLUDED_HINT,
+                            )),
+                        };
+                    }
                 }
-            }
+                Err(_) if off_screen => return off_screen_refusal(),
+                Err(_) => {}
+            },
+            Err(_) if off_screen => return off_screen_refusal(),
+            Err(_) => {}
         }
     }
     if via_point {
@@ -7637,8 +7750,17 @@ async fn tap_unique_locator(
         if !(width > 0.0 && height > 0.0) {
             return Err(UniqueLabelTapError::InvalidTarget);
         }
+        let (cx, cy) = (x + width / 2.0, y + height / 2.0);
+        if let Ok((screen_w, screen_h)) = w.window_size().await {
+            if !(0.0..=screen_w).contains(&cx) || !(0.0..=screen_h).contains(&cy) {
+                return Err(UniqueLabelTapError::Refused(
+                    "element_not_visible",
+                    ELEMENT_OFF_SCREEN_HINT,
+                ));
+            }
+        }
         return w
-            .tap_point(x + width / 2.0, y + height / 2.0)
+            .tap_point(cx, cy)
             .await
             .map_err(UniqueLabelTapError::AfterDispatch);
     }
@@ -15609,6 +15731,63 @@ mod tests {
         // A floating search pill still reaches past its frame.
         assert!(center_covered(&rows, 7));
         assert!(floating_overlay(&rows[8]) && !floating_overlay(&rows[6]));
+    }
+
+    #[test]
+    fn a_small_header_button_is_not_covered_by_a_bar_wide_sibling() {
+        let row = |kind: &str, label: &str, rect: [f64; 4], depth: u32| crate::wda::ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            rect,
+            depth,
+            ..Default::default()
+        };
+        // Hardware, 17 Pro Max: the in-app Safari sheet's TopBrowserBar. 关闭
+        // [16,65,44,44] sits inside the left edge of the bar-wide 地址
+        // [26,65,388,44]; 页面菜单 is a child of 地址.
+        let rows = vec![
+            row("Application", "Safari浏览器", [0.0, 0.0, 440.0, 956.0], 0),
+            row("Other", "TopBrowserBar", [0.0, 62.0, 440.0, 54.0], 8),
+            row("Button", "关闭", [16.0, 65.0, 44.0, 44.0], 9),
+            row("Button", "地址", [26.0, 65.0, 388.0, 44.0], 9),
+            row("Other", "地址", [153.0, 74.0, 133.0, 20.0], 10),
+            row("Button", "页面菜单", [380.0, 65.0, 44.0, 44.0], 10),
+            row("Other", "page", [0.0, 116.0, 440.0, 4000.0], 16),
+            row("Button", "Copy", [16.0, 481.0, 150.0, 32.0], 17),
+            row("SearchField", "Find", [16.0, 470.0, 300.0, 40.0], 16),
+        ];
+        assert!(occluding_row(&rows, 2).is_none(), "关闭 under 地址's edge");
+        assert!(!center_covered(&rows, 2));
+        assert!(tap_target_refusal(&rows, 2, &serde_json::json!({})).is_none());
+        assert!(larger_sibling(&rows, 2, 3));
+        // The bigger one is not hidden by the smaller.
+        assert!(!larger_sibling(&rows, 3, 2));
+        // A floating overlay still covers whatever it is over, sibling or not.
+        assert!(center_covered(&rows, 7));
+    }
+
+    #[test]
+    fn an_off_screen_target_needs_a_reveal_and_its_point_is_off_screen() {
+        let row = |kind: &str, label: &str, rect: [f64; 4], depth: u32| crate::wda::ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            rect,
+            depth,
+            ..Default::default()
+        };
+        let rows = vec![
+            row("Application", "Safari浏览器", [0.0, 0.0, 440.0, 956.0], 0),
+            row("Link", "on screen", [20.0, 500.0, 120.0, 20.0], 1),
+            row("Link", "below the page", [20.0, 1500.0, 120.0, 20.0], 1),
+            row("Link", "left of it", [-300.0, 500.0, 120.0, 20.0], 1),
+        ];
+        assert!(!center_off_screen(&rows, 1) && !needs_reveal(&rows, 1));
+        assert!(center_off_screen(&rows, 2) && needs_reveal(&rows, 2));
+        assert!(center_off_screen(&rows, 3));
+        assert!(point_on_screen(&rows, 440.0, 956.0));
+        assert!(!point_on_screen(&rows, 80.0, 1510.0));
+        // No Application frame: no verdict, taken as on screen.
+        assert!(point_on_screen(&rows[1..], 80.0, 1510.0));
     }
 
     #[test]
