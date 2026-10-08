@@ -331,6 +331,28 @@ final class ElementRegistry {
   func node(_ id: String) -> UINode? { entries[id] }
 }
 
+/// Which processes an alert lookup has to look in. A system alert can sit in SpringBoard, in the
+/// target being read, or in another active process: with a web sign-in sheet in front the target
+/// is SafariViewService, while an alert can belong to the app underneath or to another view
+/// service (hardware, 17 Pro Max: the `alert` action answered `no_alert` with an alert on screen,
+/// because only SpringBoard and the sheet were searched).
+enum AlertScan {
+  /// SpringBoard first (system prompts), then the target, then every other active pid; no
+  /// duplicates, no pid 0.
+  static func candidatePIDs(springBoard: Int32?, target: Int32, active: [Int32]) -> [Int32] {
+    var pids: [Int32] = []
+    for pid in [springBoard ?? 0, target] + active where pid > 0 && !pids.contains(pid) {
+      pids.append(pid)
+    }
+    return pids
+  }
+
+  /// The pids still to search after the target's own tree came back without an alert.
+  static func othersThan(target: Int32, in candidates: [Int32]) -> [Int32] {
+    candidates.filter { $0 != target }
+  }
+}
+
 /// System view services that present another process's UI over the app: the in-app Safari sheet
 /// (SFSafariViewController) and the web sign-in sheet (ASWebAuthenticationSession) both run in
 /// SafariViewService. The app underneath only hosts a remote view, so neither its private-AX tree
