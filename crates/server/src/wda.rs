@@ -3224,7 +3224,7 @@ mod tests {
     fn a_no_alert_answer_is_reused_until_something_is_sent() {
         let (base, server) = mock_wda(3, |request| {
             if request.contains("/alert/text") {
-                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 39\r\nConnection: close\r\n\r\n{\"value\":{\"error\":\"no such alert\"}}  ".to_string()
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 37\r\nConnection: close\r\n\r\n{\"value\":{\"error\":\"no such alert\"}}  ".to_string()
             } else {
                 r#"{"value":null}"#.to_string()
             }
