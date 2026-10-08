@@ -950,7 +950,7 @@ extension RunnerTests {
   /// `{stable, waited_ms, frames, changed_px, blank, capture_ms}`. The daemon then reads the tree
   /// once instead of shipping screenshots to the Mac and polling trees. `blank` flags a capture
   /// whose content band is one colour (an app hiding its screen): such frames prove nothing.
-  private func settleScreen(_ request: HTTPRequest) -> HTTPResponse {
+  func settleScreen(_ request: HTTPRequest) -> HTTPResponse {
     func query(_ key: String, _ fallback: Double, _ range: ClosedRange<Double>) -> Double {
       min(range.upperBound, max(range.lowerBound, request.query[key].flatMap(Double.init) ?? fallback))
     }
@@ -960,7 +960,7 @@ extension RunnerTests {
     let tolerance = Int(query("tolerance_px", 6, 0...100_000))
     let started = Date()
     func elapsedMs() -> Double { Date().timeIntervalSince(started) * 1000 }
-    if minWait > 0 { RunLoop.current.run(until: started.addingTimeInterval(minWait / 1000)) }
+    if minWait > 0 { Self.pause(until: started.addingTimeInterval(minWait / 1000)) }
     var tracker = ScreenSettle.Tracker(quietMs: quiet, tolerance: tolerance)
     var stable = false
     var last: (pixels: [UInt8], width: Int, height: Int)?
@@ -975,7 +975,7 @@ extension RunnerTests {
         stable = true
         break
       }
-      RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+      Self.pause(until: Date().addingTimeInterval(0.03))
     }
     var value: [String: Any] = [
       "stable": stable,
@@ -992,11 +992,33 @@ extension RunnerTests {
     return .value(value)
   }
 
+  /// Waits: spins the run loop on main (XCTest replies route through it), sleeps elsewhere.
+  static func pause(until date: Date) {
+    if Thread.isMainThread {
+      RunLoop.current.run(until: date)
+    } else {
+      let seconds = date.timeIntervalSinceNow
+      if seconds > 0 { Thread.sleep(forTimeInterval: seconds) }
+    }
+  }
+
   /// One small grayscale capture, taken off the main thread. The result comes back through a
   /// lock, not the main queue: this handler already runs inside a main-queue block, so a block
   /// queued behind it would only run after it returned. Main keeps spinning its run loop meanwhile
   /// (a capture reply can be routed through it).
   private func captureGrayFrame(_ failure: inout String?) -> (pixels: [UInt8], width: Int, height: Int)? {
+    if !Thread.isMainThread {
+      // The capture lane: nothing to keep spinning, capture inline.
+      var width: UInt = 0, height: UInt = 0
+      var message: NSString?
+      let frame: (pixels: [UInt8], width: Int, height: Int)? = autoreleasepool {
+        guard let data = IPURBridge.grayScreen(withMaxSide: 160, width: &width, height: &height, error: &message)
+        else { return nil }
+        return ([UInt8](data), Int(width), Int(height))
+      }
+      if frame == nil { failure = (message as String?) ?? "capture failed" }
+      return frame
+    }
     final class Box {
       let lock = NSLock()
       var done = false
