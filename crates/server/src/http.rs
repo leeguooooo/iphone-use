@@ -377,6 +377,12 @@ pub struct AppState {
     /// and control events. Direct handlers use it as readiness evidence but
     /// always fail closed when WDA cannot act.
     pub wda_actionable: Arc<std::sync::atomic::AtomicBool>,
+    /// Screen reads failed while the runner still answered `/status` (a
+    /// "half dead" runner). The health poller's actionability probe never
+    /// reads the tree, so without this it would flip such a runner straight
+    /// back to drivable. Set when a read path gives up; cleared only once a
+    /// light tree read succeeds again.
+    pub wda_read_degraded: Arc<std::sync::atomic::AtomicBool>,
     /// Scan-to-connect codes (see [`crate::pairing`]).
     pub pairing: Arc<crate::pairing::Pairing>,
     /// Last completed WDA health probe. Status polling uses this cache whenever
@@ -1827,6 +1833,7 @@ async fn cached_wda_health(state: &AppState) -> crate::wda::WdaHealth {
     let actionable = state.wda_actionable.clone();
     let released = state.released.clone();
     let death = state.wda_death.clone();
+    let read_degraded = state.wda_read_degraded.clone();
     let releasing = state.wda_lifecycle.is_releasing();
     *probe_slot = Some(tokio::spawn(async move {
         let Ok(mut client) = wda.try_lock() else {
@@ -1835,6 +1842,22 @@ async fn cached_wda_health(state: &AppState) -> crate::wda::WdaHealth {
         match tokio::time::timeout(std::time::Duration::from_secs(15), client.probe_health()).await
         {
             Ok(health) => {
+                use std::sync::atomic::Ordering;
+                let degraded = read_degraded.load(Ordering::Acquire);
+                // Only a runner that otherwise looks fine needs the read: if it
+                // is down or not actionable, that already keeps it undrivable.
+                let read_ok = if degraded && health.actionable {
+                    tokio::time::timeout(std::time::Duration::from_secs(10), client.read_probe())
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
+                let (health, still) = gate_on_read_path(health, degraded, read_ok);
+                if degraded && !still {
+                    tracing::info!("screen reads work again; the device runner is drivable");
+                }
+                read_degraded.store(still, Ordering::Release);
                 apply_wda_health_probe_tracked(
                     &health_cache,
                     &actionable,
@@ -2456,7 +2479,16 @@ async fn agent_status(
     } else if reconnecting {
         ("reconnecting", "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying")
     } else if wda && !wda_actionable {
-        if wda_locked == "true" {
+        if state
+            .wda_read_degraded
+            .load(std::sync::atomic::Ordering::Acquire)
+            && wda_locked != "true"
+        {
+            (
+                "read_failing",
+                "the device runner answers /status but cannot read the screen — it is being restarted; wait for drivable=true before retrying",
+            )
+        } else if wda_locked == "true" {
             (
                 "locked",
                 "the device runner is reachable but the iPhone is locked — unlock it and keep it awake",
@@ -2821,6 +2853,10 @@ fn human_next_step(
                 "The device runner stopped answering — choose Connect; if that fails run iphone-use doctor",
             ),
         },
+        "read_failing" => (
+            "设备 runner 还在应答但读不到屏幕，正在自动重启它，稍等片刻",
+            "The device runner answers but cannot read the screen; it is being restarted — wait a moment",
+        ),
         "degraded" => (
             "上一次读取没完成（页面太重或 App 卡住），稍等会自动恢复",
             "The last read did not finish (a heavy page or a stalled app) — it usually clears on its own",
@@ -12214,7 +12250,30 @@ fn mark_wda_read_path_unactionable(state: &AppState) {
     state
         .wda_actionable
         .store(false, std::sync::atomic::Ordering::Release);
+    state
+        .wda_read_degraded
+        .store(true, std::sync::atomic::Ordering::Release);
     recover(state.wda_health.lock()).actionable = false;
+}
+
+/// Keep a runner whose screen reads failed out of `drivable` until a light
+/// read succeeds again. `read_ok` is `None` when no read was attempted.
+/// Returns the health to publish and whether the read path is still degraded.
+fn gate_on_read_path(
+    mut health: crate::wda::WdaHealth,
+    degraded: bool,
+    read_ok: Option<bool>,
+) -> (crate::wda::WdaHealth, bool) {
+    if !degraded {
+        return (health, false);
+    }
+    match read_ok {
+        Some(true) => (health, false),
+        _ => {
+            health.actionable = false;
+            (health, true)
+        }
+    }
 }
 
 /// `GET /agent/screenshot` — current phone screen as a PNG.
@@ -17564,5 +17623,37 @@ mod page_scroll_tests {
         assert!(!ok(serde_json::json!({"type":"scroll","page":true,"x":0.5,"y":0.5,"dy":300})));
         assert!(!ok(serde_json::json!({"type":"scroll","page":false,"dy":300})));
         assert!(!ok(serde_json::json!({"type":"scroll","page":true,"element":3,"snapshot":"a","dy":300})));
+    }
+}
+
+#[cfg(test)]
+mod read_path_gate_tests {
+    use super::gate_on_read_path;
+    use crate::wda::WdaHealth;
+
+    fn up() -> WdaHealth {
+        WdaHealth {
+            up: true,
+            actionable: true,
+            locked: Some(false),
+        }
+    }
+
+    #[test]
+    fn a_runner_whose_reads_failed_stays_undrivable_until_a_read_works() {
+        // Not degraded: the probe's verdict stands.
+        let (health, still) = gate_on_read_path(up(), false, None);
+        assert!(health.actionable && !still);
+        // Degraded and the light read failed or timed out: still not drivable.
+        let (health, still) = gate_on_read_path(up(), true, Some(false));
+        assert!(!health.actionable && still);
+        let (health, still) = gate_on_read_path(up(), true, None);
+        assert!(
+            !health.actionable && still,
+            "no read attempted keeps it degraded"
+        );
+        // A read that works clears it.
+        let (health, still) = gate_on_read_path(up(), true, Some(true));
+        assert!(health.actionable && !still);
     }
 }

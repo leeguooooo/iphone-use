@@ -2228,7 +2228,11 @@ impl Setup {
 
     /// Stay alive while the runner and both relays do; launchd sees the exit
     /// and rebuilds. A single unanswered `/status` cannot tell a busy runner
-    /// from a dead one, so three in a row (~32 s) count; a dead process or a
+    /// from a dead one, so three failures among the last five probes count
+    /// (a window, so a runner answering every other time is still caught). A
+    /// probe also reads the screen lightly every third cycle, and every cycle
+    /// once something failed: a runner that answers `/status` but cannot read
+    /// is replaced even under another session's lease. A dead process or a
     /// vanished listener ends the hold at once.
     pub fn hold(&mut self) -> Step {
         if !self.ctx.keepalive {
@@ -2239,6 +2243,10 @@ impl Setup {
         let wda_port = valid_port(&self.ctx.wda_port).unwrap_or(8100);
         let mjpeg_port = valid_port(&self.ctx.mjpeg_port).unwrap_or(9100);
         let status_url = format!("http://127.0.0.1:{wda_port}/status");
+        let read_url = format!(
+            "http://127.0.0.1:{wda_port}/source?format=json&excluded_attributes=visible,accessible"
+        );
+        let mut cycle: u64 = 0;
         let mut failures = 0;
         let mut probes = ProbeCount::default();
         let mut relay_restarts: Vec<Instant> = Vec::new();
@@ -2296,8 +2304,39 @@ impl Setup {
                 continue;
             }
             let answered = sys::http_ok(&status_url, Duration::from_secs(4));
-            let rebuild = probes.observe(answered);
+            // `/status` alone cannot see a runner that answers it but can no
+            // longer read the screen. Read lightly every third cycle (~30 s),
+            // and every cycle while anything in the window looks wrong.
+            cycle += 1;
+            let probe = if !answered {
+                Probe::StatusMiss
+            } else if (cycle % 3 == 0 || probes.suspicious()) && !runner_reads(&read_url) {
+                Probe::ReadFail
+            } else {
+                Probe::Ok
+            };
+            let rebuild = probes.record(probe);
             failures = probes.failures;
+            if rebuild && probes.half_dead() {
+                // A runner that cannot read the screen is of no use to whoever
+                // holds the phone either, so this replaces it even under
+                // another session's lease (unlike a slow /status below).
+                if let Some(lease) =
+                    owner::foreign(owner::current(&self.ctx), owner::caller().as_deref())
+                {
+                    warn(&format!(
+                        "session \"{}\" holds the phone, but its runner cannot read the screen; replacing it",
+                        lease.owner
+                    ));
+                }
+                break "half_dead";
+            }
+            if probe == Probe::ReadFail {
+                info(&format!(
+                    "the device runner answered /status but a screen read failed ({failures}/{MAX_FAILURES} of the last {} probes); holding",
+                    ProbeCount::WINDOW
+                ));
+            }
             if !answered {
                 if rebuild {
                     // A slow runner under another session's lease is that
@@ -2307,7 +2346,8 @@ impl Setup {
                     {
                         if !warned_owner {
                             warn(&format!(
-                                "the device runner did not answer /status {failures} times in a row, but session \"{}\" holds the phone; not replacing the runner it is using",
+                                "the device runner missed /status {failures} of the last {} probes, but session \"{}\" holds the phone; not replacing the runner it is using",
+                                ProbeCount::WINDOW,
                                 lease.owner
                             ));
                             warned_owner = true;
@@ -2320,7 +2360,8 @@ impl Setup {
                     break "unreachable";
                 }
                 info(&format!(
-                    "the device runner did not answer /status within 4s ({failures}/{MAX_FAILURES}); the runner and relays are alive, so holding"
+                    "the device runner did not answer /status within 4s ({failures}/{MAX_FAILURES} of the last {} probes); the runner and relays are alive, so holding",
+                    ProbeCount::WINDOW
                 ));
             }
             proc::sleep(Duration::from_secs(10))?;
@@ -2348,12 +2389,27 @@ impl Setup {
         match cause {
             "unreachable" => {
                 warn(&format!(
-                    "the device runner did not answer /status {failures} times in a row while the runner and both relays stayed alive — rebuilding"
+                    "the device runner missed /status {failures} of the last {} probes while the runner and both relays stayed alive — rebuilding",
+                    ProbeCount::WINDOW
                 ));
                 self.phase(
                     "building",
                     "",
-                    &format!("the device runner did not answer {failures} consecutive /status probes — rebuilding"),
+                    &format!(
+                        "the device runner missed {failures} of the last {} /status probes — rebuilding",
+                        ProbeCount::WINDOW
+                    ),
+                );
+            }
+            "half_dead" => {
+                warn(&format!(
+                    "the device runner answers /status but {failures} of the last {} probes failed to read the screen — restarting it",
+                    ProbeCount::WINDOW
+                ));
+                self.phase(
+                    "building",
+                    "",
+                    "the device runner answers /status but cannot read the screen — restarting it",
                 );
             }
             "relay" => warn(
@@ -2392,6 +2448,24 @@ impl Setup {
         );
         Err(Exit(1))
     }
+}
+
+/// A light screen read through the runner's relay: 2xx with a tree, not an
+/// error envelope. Heavy screens can take several seconds, hence the budget.
+fn runner_reads(url: &str) -> bool {
+    let Some((status, body)) = sys::http_get(url, Duration::from_secs(15)) else {
+        return false;
+    };
+    status < 400 && read_body_ok(&body)
+}
+
+/// The body of a successful `/source` read: a JSON value that is not WDA's
+/// `{"value":{"error":…}}` envelope.
+fn read_body_ok(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|root| {
+        root.get("value")
+            .is_some_and(|value| value.get("error").is_none() && !value.is_null())
+    })
 }
 
 pub enum RelayTool {
@@ -2575,19 +2649,56 @@ pub fn xcode_too_old_message(sdk: Option<&str>, device: Option<&str>) -> Option<
 #[derive(Debug, Default)]
 pub struct ProbeCount {
     pub failures: u32,
+    recent: std::collections::VecDeque<Probe>,
+}
+
+/// One KeepAlive health observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    /// `/status` answered and, when a read was tried, the read worked.
+    Ok,
+    /// `/status` did not answer in time.
+    StatusMiss,
+    /// `/status` answered but a light screen read failed: the "half dead"
+    /// runner that answers status forever while every agent read errors.
+    ReadFail,
 }
 
 impl ProbeCount {
+    /// Failures among the last [`Self::WINDOW`] probes that trigger a rebuild.
     pub const MAX: u32 = 3;
+    pub const WINDOW: usize = 5;
 
-    /// `true` once the runner has missed [`Self::MAX`] probes in a row.
-    pub fn observe(&mut self, answered: bool) -> bool {
-        if answered {
-            self.failures = 0;
-        } else {
-            self.failures += 1;
+    /// Record one probe; `true` once [`Self::MAX`] of the last
+    /// [`Self::WINDOW`] failed. A window, not a streak: a runner whose
+    /// `/status` answers every other time used to reset a consecutive count
+    /// forever and was never replaced.
+    pub fn record(&mut self, probe: Probe) -> bool {
+        if self.recent.len() == Self::WINDOW {
+            self.recent.pop_front();
         }
+        self.recent.push_back(probe);
+        self.failures = self.recent.iter().filter(|p| **p != Probe::Ok).count() as u32;
         self.failures >= Self::MAX
+    }
+
+    /// `/status`-only form of [`Self::record`].
+    pub fn observe(&mut self, answered: bool) -> bool {
+        self.record(if answered {
+            Probe::Ok
+        } else {
+            Probe::StatusMiss
+        })
+    }
+
+    /// Any failure in the window (so reads are checked every cycle).
+    pub fn suspicious(&self) -> bool {
+        self.failures > 0
+    }
+
+    /// The window holds a failed read while `/status` answered.
+    pub fn half_dead(&self) -> bool {
+        self.recent.contains(&Probe::ReadFail)
     }
 }
 
@@ -2690,14 +2801,94 @@ mod tests {
     }
 
     #[test]
-    fn the_hold_rebuilds_after_three_missed_probes_in_a_row() {
+    fn the_hold_rebuilds_after_three_failures_in_the_last_five_probes() {
         let mut probes = ProbeCount::default();
         assert!(!probes.observe(false));
         assert!(!probes.observe(false));
-        assert!(!probes.observe(true), "an answer resets the count");
-        assert!(!probes.observe(false));
-        assert!(!probes.observe(false));
-        assert!(probes.observe(false));
+        assert!(!probes.observe(true), "two failures are not enough");
+        assert!(
+            probes.observe(false),
+            "an answer no longer resets the count"
+        );
+        let mut healthy = ProbeCount::default();
+        for _ in 0..10 {
+            assert!(!healthy.observe(true), "a healthy runner is never rebuilt");
+        }
+        assert!(!healthy.suspicious());
+    }
+
+    #[test]
+    fn a_flapping_status_is_still_caught() {
+        // The field failure: answers every other probe. A streak counter never
+        // got past 2; three of the last five fail by the fifth probe.
+        let mut probes = ProbeCount::default();
+        let pattern = [false, true, false, true, false];
+        let verdicts: Vec<bool> = pattern.iter().map(|&a| probes.observe(a)).collect();
+        assert_eq!(verdicts, [false, false, false, false, true]);
+    }
+
+    #[test]
+    fn a_runner_that_answers_status_but_cannot_read_is_half_dead() {
+        let mut probes = ProbeCount::default();
+        assert!(!probes.record(Probe::ReadFail));
+        assert!(
+            probes.suspicious(),
+            "a failed read makes the next cycles read too"
+        );
+        assert!(!probes.record(Probe::ReadFail));
+        assert!(probes.record(Probe::ReadFail));
+        assert!(probes.half_dead());
+        let mut only_status = ProbeCount::default();
+        for _ in 0..3 {
+            only_status.observe(false);
+        }
+        assert!(
+            !only_status.half_dead(),
+            "status misses alone are not half dead"
+        );
+    }
+
+    /// Serve one canned answer per connection on a free loopback port.
+    fn canned_runner(status: u16, body: &'static str) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let reply = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_read_probe_sees_a_runner_that_cannot_read() {
+        // The half-dead runner: it answers, but every tree read is an error.
+        let broken = canned_runner(
+            500,
+            r#"{"value":{"error":"unknown error","message":"snapshot failed"}}"#,
+        );
+        assert!(!runner_reads(&format!(
+            "http://127.0.0.1:{broken}/source?format=json"
+        )));
+        let healthy = canned_runner(200, r#"{"value":{"type":"XCUIElementTypeApplication"}}"#);
+        assert!(runner_reads(&format!(
+            "http://127.0.0.1:{healthy}/source?format=json"
+        )));
+    }
+
+    #[test]
+    fn read_bodies() {
+        assert!(read_body_ok(br#"{"value":{"type":"XCUIElementTypeApplication"}}"#));
+        assert!(!read_body_ok(br#"{"value":{"error":"unknown error","message":"x"}}"#));
+        assert!(!read_body_ok(br#"{"value":null}"#));
+        assert!(!read_body_ok(b"<html>"));
     }
 
     #[test]
