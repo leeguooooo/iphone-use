@@ -12668,22 +12668,67 @@ async fn finish_screenshot(
     max_side: Option<u32>,
     source: Option<&'static str>,
 ) -> Response {
-    if !raw {
-        let wireframe = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            redacted_capture_wireframe(wda, &bytes),
-        )
+    // `raw` is WDA's capture untouched, size included.
+    let check = bytes.len() <= REDACTION_CHECK_MAX_PNG_BYTES;
+    if raw || (!check && max_side.is_none()) {
+        return png_response(bytes, source, false);
+    }
+    // One decode serves the hidden-screen check, the wireframe and the
+    // shrink; each used to decode the capture (and the wireframe its own
+    // re-encoded PNG) again.
+    let bytes = Arc::new(bytes);
+    let png = Arc::clone(&bytes);
+    let decoded = tokio::task::spawn_blocking(move || crate::redaction::decode_png(&png))
         .await
         .ok()
         .flatten();
-        if let Some(wireframe) = wireframe {
-            let wireframe = fit_png(wireframe, max_side).await;
-            return png_response(wireframe, Some("accessibility-wireframe"), true);
+    let bytes = Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone());
+    let Some(image) = decoded else {
+        return png_response(bytes, source, false);
+    };
+    let image = if check {
+        let checked = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            redacted_capture_wireframe(wda, image),
+        )
+        .await;
+        match checked {
+            Ok(Some(Ok(wireframe))) => {
+                let fitted = tokio::task::spawn_blocking(move || {
+                    let image = match max_side {
+                        Some(max_side) => crate::redaction::fit_within(wireframe, max_side),
+                        None => wireframe,
+                    };
+                    crate::redaction::encode_png(&image)
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(png) = fitted {
+                    return png_response(png, Some("accessibility-wireframe"), true);
+                }
+                return png_response(bytes, source, false);
+            }
+            Ok(Some(Err(image))) => image,
+            // The check outlived its budget (or lost its worker) and took
+            // the image with it.
+            Ok(None) | Err(_) => {
+                return png_response(fit_png(bytes, max_side).await, source, false)
+            }
         }
-    }
-    // `raw` is WDA's capture untouched, size included.
-    let max_side = if raw { None } else { max_side };
-    png_response(fit_png(bytes, max_side).await, source, false)
+    } else {
+        image
+    };
+    let Some(max_side) = max_side.filter(|&side| image.width.max(image.height) > side) else {
+        return png_response(bytes, source, false);
+    };
+    let fitted = tokio::task::spawn_blocking(move || {
+        crate::redaction::encode_png(&crate::redaction::fit_within(image, max_side))
+    })
+    .await
+    .ok()
+    .flatten();
+    png_response(fitted.unwrap_or(bytes), source, false)
 }
 
 /// Shrink a PNG to `max_side` off the async runtime; the original when it
@@ -12766,42 +12811,43 @@ fn refresh_capture_verdict(state: &Arc<AppState>, hub: &Arc<crate::video::VideoH
 const REDACTION_CHECK_MAX_PNG_BYTES: usize = 600 * 1024;
 
 /// When the app hid this screen from capture (blank content band, labelled
-/// elements in the tree), the same capture with the tree drawn over it.
+/// elements in the tree), `Ok` with the tree drawn over the capture; `Err`
+/// hands the capture back untouched.
 async fn redacted_capture_wireframe(
     wda: &Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
-    png: &[u8],
-) -> Option<Vec<u8>> {
-    if png.len() > REDACTION_CHECK_MAX_PNG_BYTES {
-        return None;
+    image: crate::redaction::Image,
+) -> Option<Result<crate::redaction::Image, crate::redaction::Image>> {
+    // A sampled pass over the band: cheap enough for the runtime thread.
+    if !crate::redaction::content_band_is_blank(&image) {
+        return Some(Err(image));
     }
-    let png = png.to_vec();
-    let blank = tokio::task::spawn_blocking(move || {
-        let image = crate::redaction::decode_png(&png)?;
-        crate::redaction::content_band_is_blank(&image).then_some(image)
-    })
-    .await
-    .ok()??;
-    let (rows, window) = {
+    let read = {
         let mut w = wda.lock().await;
-        let rows = w.elements().await.ok()?;
-        let window = w.window_size().await.ok()?;
-        (rows, window)
+        match (w.elements().await, w.window_size().await) {
+            (Ok(rows), Ok(window)) => Some((rows, window)),
+            _ => None,
+        }
+    };
+    let Some((rows, window)) = read else {
+        return Some(Err(image));
     };
     if !crate::redaction::tree_has_hidden_content(&rows, window) {
-        return None;
+        return Some(Err(image));
     }
+    // A sparse real page (one card and a spinner) is "blank" too; only a
+    // capture that leaves the tree's labelled rows undrawn is hidden. A
+    // lost join (a panic) loses the image: `None`, and the caller decodes
+    // its bytes again.
     tokio::task::spawn_blocking(move || {
-        // A sparse real page (one card and a spinner) is "blank" too; only
-        // a capture that leaves the tree's labelled rows undrawn is hidden.
-        if crate::redaction::labelled_rows_show_content(&blank, &rows, window) {
-            return None;
+        if crate::redaction::labelled_rows_show_content(&image, &rows, window) {
+            return Err(image);
         }
-        let mut image = blank;
+        let mut image = image;
         crate::redaction::draw_wireframe(&mut image, &rows, window);
-        crate::redaction::encode_png(&image)
+        Ok(image)
     })
     .await
-    .ok()?
+    .ok()
 }
 
 async fn agent_screenshot(
