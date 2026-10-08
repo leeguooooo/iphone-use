@@ -710,6 +710,13 @@ fn main() -> Result<()> {
     // Only the long-running service earns the unattended-relaunch backoff
     // below; a one-shot query must report and exit at once.
     let unattended_service = matches!(command, Command::Serve);
+    // Long-running modes cap the log files launchd/the supervisor gave them.
+    if matches!(
+        command,
+        Command::Serve | Command::Relay { .. } | Command::SetupNative { .. }
+    ) {
+        server::logcap::spawn_own_stdio_cap();
+    }
     let result = match command {
         Command::Serve => serve(),
         Command::Stop => {

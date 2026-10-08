@@ -2268,6 +2268,14 @@ impl Setup {
         const RENEW_CHECK: Duration = Duration::from_secs(30 * 60);
         let mut renew_checked = Instant::now();
         let cause = loop {
+            // xcodebuild appends to the runner log for as long as the runner
+            // lives; it is only truncated at the next launch.
+            crate::logcap::cap_file(
+                &self.ctx.run_log,
+                crate::logcap::CAP_BYTES,
+                crate::logcap::KEEP_TAIL,
+                crate::logcap::KEEP_ROTATED,
+            );
             if renew_checked.elapsed() >= RENEW_CHECK {
                 renew_checked = Instant::now();
                 if self.free_profile_renewal_due() {
