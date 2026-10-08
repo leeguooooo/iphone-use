@@ -54,6 +54,13 @@ jobs:
       # `set -o pipefail` matters in every step below: a `cargo … | grep`
       # reports the grep's status, so a compilation failure can otherwise be
       # reported as a pass.
+      - name: cargo clippy
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --locked -- -D warnings
+
       - name: cargo test -p server
         timeout-minutes: 15
         shell: bash
