@@ -253,7 +253,20 @@ final class RunnerTests: XCTestCase {
   func foreground() -> Foreground {
     var pid: Int32 = 0
     let element = IPURBridge.foregroundApplicationElement(withProbePoint: screenCenter(), pid: &pid)
+    if let sheet = viewServiceOverlay(foregroundPID: pid) { return sheet }
     return Foreground(element: element as AnyObject?, pid: pid)
+  }
+
+  /// A system view service presenting over the foreground app (the in-app Safari or web sign-in
+  /// sheet): reads, finds and taps go to it, since the app beneath only hosts a remote view.
+  func viewServiceOverlay(foregroundPID: Int32) -> Foreground? {
+    let foregroundBundle = IPURBridge.bundleID(forPID: foregroundPID)
+    guard let bundle = ViewService.overlay(foregroundBundle: foregroundBundle, isPresenting: { id in
+      XCUIApplication(bundleIdentifier: id).state == .runningForeground
+    }) else { return nil }
+    let pid = IPURBridge.pid(for: XCUIApplication(bundleIdentifier: bundle))
+    guard pid > 0 else { return nil }
+    return Foreground(element: IPURBridge.activeApplicationElement(forPID: pid) as AnyObject?, pid: pid)
   }
 
   // MARK: - Arguments

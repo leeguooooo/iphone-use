@@ -191,6 +191,15 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
   return pids;
 }
 
++ (nullable id)activeApplicationElementForPID:(int)pid
+{
+  if (pid <= 0) return nil;
+  for (id element in [self activeApplicationElements]) {
+    if ([self pidForAXElement:element] == pid) return element;
+  }
+  return nil;
+}
+
 + (nullable id)systemApplicationElement
 {
   return IPURObject([self axClient], @"systemApplication");

@@ -7257,6 +7257,33 @@ const OCCLUDER_KINDS: &[&str] = &[
     "Keyboard",
 ];
 
+/// Bars whose items sit inside them.
+const BAR_KINDS: &[&str] = &["NavigationBar", "TabBar", "Toolbar"];
+/// Taller than this is a container that happens to be typed as a bar.
+const MAX_BAR_HEIGHT: f64 = 200.0;
+
+/// `rows[index]` is an item of a bar: it sits under a bar-sized
+/// NavigationBar, TabBar or Toolbar in the tree.
+fn bar_item(rows: &[crate::wda::ElementRow], index: usize) -> bool {
+    rows[..index].iter().enumerate().any(|(j, row)| {
+        BAR_KINDS.contains(&row.kind.as_str())
+            && row.rect[3] <= MAX_BAR_HEIGHT
+            && subtree_end(rows, j) > index
+    })
+}
+
+/// `row` can cover `rows[index]`. A bar item sits on top of the scrolling
+/// content, so only what is drawn above bars covers it: the keyboard or
+/// another bar. Hardware, 17 Pro Max, GitHub's home tab: the content's
+/// 开始使用 button scrolled behind the floating tab bar held the centre of the
+/// 主页 tab, and a locator tap on the visible tab answered
+/// `element_occluded` (a coordinate tap at the same spot worked).
+fn can_cover(rows: &[crate::wda::ElementRow], index: usize, row: &crate::wda::ElementRow) -> bool {
+    !bar_item(rows, index)
+        || row.kind == "Keyboard"
+        || (BAR_KINDS.contains(&row.kind.as_str()) && row.rect[3] <= MAX_BAR_HEIGHT)
+}
+
 /// A control that would receive a tap aimed at the centre of `rows[index]`:
 /// visible, of a touchable or bar kind, neither an ancestor nor a descendant
 /// of the target, containing that centre, and not merely a wrapper around
@@ -7284,7 +7311,8 @@ fn occluding_row(rows: &[crate::wda::ElementRow], index: usize) -> Option<&crate
             && row.visible != Some(false)
             && OCCLUDER_KINDS.contains(&row.kind.as_str())
             && contains(row.rect, cx, cy)
-            && !wraps_target(row.rect))
+            && !wraps_target(row.rect)
+            && can_cover(rows, index, row))
         .then_some(row)
     })
 }
@@ -7325,6 +7353,7 @@ fn clear_tap_point(rows: &[crate::wda::ElementRow], index: usize) -> Option<(f64
                 && row.visible != Some(false)
                 && OCCLUDER_KINDS.contains(&row.kind.as_str())
                 && !wraps_target(row.rect)
+                && can_cover(rows, index, row)
         })
         .map(|(_, row)| {
             let [rx, ry, rw, rh] = row.rect;
@@ -15464,6 +15493,41 @@ mod tests {
         assert_eq!(clear_tap_point(&rows, 3), Some((195.0, 685.5)));
         // Partly covered is not a refusal.
         assert_eq!(tap_target_refusal(&rows, 1, &serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn a_tab_bar_never_covers_its_own_items() {
+        let row = |kind: &str, label: &str, rect: [f64; 4], depth: u32| crate::wda::ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            rect,
+            depth,
+            ..Default::default()
+        };
+        // Hardware, 17 Pro Max, GitHub's home tab (iOS 27): the content's
+        // 开始使用 button scrolls behind the floating tab bar and holds 主页's
+        // centre; GitHub also reports a full-screen Toolbar. A locator tap on
+        // 主页 answered element_occluded before.
+        let rows = vec![
+            row("Application", "GitHub", [0.0, 0.0, 440.0, 956.0], 0),
+            row("Cell", "开始使用", [20.0, 789.0, 400.0, 166.0], 12),
+            row("Button", "开始使用", [36.0, 895.0, 368.0, 44.0], 13),
+            row("Toolbar", "工具栏", [0.0, 0.0, 440.0, 956.0], 8),
+            row("TabBar", "标签页栏", [0.0, 873.0, 440.0, 83.0], 7),
+            row("Button", "主页", [25.0, 877.0, 108.0, 54.0], 10),
+            row("Image", "home-fill-24", [67.0, 885.0, 24.0, 24.0], 11),
+            row("Button", "收件箱", [119.0, 877.0, 108.0, 54.0], 10),
+        ];
+        for tab in [5, 7] {
+            assert!(occluding_row(&rows, tab).is_none(), "tab {tab}");
+            assert!(!center_covered(&rows, tab), "tab {tab}");
+        }
+        assert_eq!(clear_tap_point(&rows, 5), Some((79.0, 904.0)));
+        // The content behind the bar is still covered by it.
+        assert!(center_covered(&rows, 2));
+        // Content is no bar item; a full-screen "Toolbar" makes nothing one.
+        assert!(!bar_item(&rows, 2));
+        assert!(bar_item(&rows, 5));
     }
 
     #[test]

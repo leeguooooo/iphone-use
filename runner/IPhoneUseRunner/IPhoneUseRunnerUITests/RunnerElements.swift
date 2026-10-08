@@ -330,3 +330,18 @@ final class ElementRegistry {
 
   func node(_ id: String) -> UINode? { entries[id] }
 }
+
+/// System view services that present another process's UI over the app: the in-app Safari sheet
+/// (SFSafariViewController) and the web sign-in sheet (ASWebAuthenticationSession) both run in
+/// SafariViewService. The app underneath only hosts a remote view, so neither its private-AX tree
+/// nor its XCUI snapshot reaches the form (hardware, 17 Pro Max: GitHub's sign-in sheet showed only
+/// the keyboard's toolbar buttons).
+enum ViewService {
+  static let bundleIDs = ["com.apple.SafariViewService"]
+
+  /// The view service to read and drive instead of the foreground app, if one is presenting:
+  /// the first listed service running in the foreground, unless it already is the foreground app.
+  static func overlay(foregroundBundle: String?, isPresenting: (String) -> Bool) -> String? {
+    bundleIDs.first { $0 != foregroundBundle && isPresenting($0) }
+  }
+}

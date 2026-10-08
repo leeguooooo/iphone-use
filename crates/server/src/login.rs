@@ -817,19 +817,45 @@ const AUTOFILL_SHEET_TITLES: &[&str] = &[
 ];
 const SHEET_CLOSE_LABELS: &[&str] = &["取消", "Cancel", "Close", "关闭", "キャンセル"];
 
+/// Buttons of iOS's password suggestion sheet, the bottom-sheet variant that
+/// offers one saved login ("通过 Bitwarden 中已存 … 密码登录", 关闭 / 填充密码).
+/// Hardware, 17 Pro Max: it opened over GitHub's web sign-in and hid the form.
+const SHEET_FILL_LABELS: &[&str] = &[
+    "填充密码",
+    "填入密碼",
+    "Fill Password",
+    "Use Password",
+    "パスワードを入力",
+];
+
+/// A system password sheet is on screen: the full-screen picker (by its
+/// title) or the suggestion sheet (by its fill button).
+fn autofill_sheet_up(rows: &[ElementRow]) -> bool {
+    rows.iter().any(|r| {
+        (matches!(r.kind.as_str(), "NavigationBar" | "StaticText")
+            && AUTOFILL_SHEET_TITLES.contains(&r.label.trim()))
+            || (r.kind == "Button" && SHEET_FILL_LABELS.contains(&r.label.trim()))
+    })
+}
+
 /// The close button of the system password sheet when one is up.
 fn autofill_sheet_close(rows: &[ElementRow]) -> Option<usize> {
-    let sheet = rows.iter().any(|r| {
-        matches!(r.kind.as_str(), "NavigationBar" | "StaticText")
-            && AUTOFILL_SHEET_TITLES.contains(&r.label.trim())
-    });
-    if !sheet {
+    if !autofill_sheet_up(rows) {
         return None;
     }
-    // The close button sits in the sheet's title bar, at the top.
-    rows.iter().position(|r| {
-        r.kind == "Button" && SHEET_CLOSE_LABELS.contains(&r.label.trim()) && r.rect[1] < 220.0
-    })
+    let is_close =
+        |r: &ElementRow| r.kind == "Button" && SHEET_CLOSE_LABELS.contains(&r.label.trim());
+    // The full-screen picker's close button sits in its title bar, at the top.
+    if let Some(top) = rows.iter().position(|r| is_close(r) && r.rect[1] < 220.0) {
+        return Some(top);
+    }
+    // The suggestion sheet's sits beside its fill button, lower down.
+    let fill_y = rows
+        .iter()
+        .find(|r| r.kind == "Button" && SHEET_FILL_LABELS.contains(&r.label.trim()))?
+        .rect[1];
+    rows.iter()
+        .position(|r| is_close(r) && (r.rect[1] - fill_y).abs() < 160.0)
 }
 
 /// Close the system password sheet if it is up. `Ok(true)` when the screen is
@@ -837,11 +863,7 @@ fn autofill_sheet_close(rows: &[ElementRow]) -> Option<usize> {
 async fn close_autofill_sheet(w: &mut WdaClient) -> Result<bool, LoginError> {
     for _ in 0..2 {
         let rows = w.elements().await.map_err(|_| phone_error("screen read"))?;
-        let sheet_up = rows.iter().any(|r| {
-            matches!(r.kind.as_str(), "NavigationBar" | "StaticText")
-                && AUTOFILL_SHEET_TITLES.contains(&r.label.trim())
-        });
-        if !sheet_up {
+        if !autofill_sheet_up(&rows) {
             return Ok(true);
         }
         let Some(close) = autofill_sheet_close(&rows) else {
@@ -853,8 +875,7 @@ async fn close_autofill_sheet(w: &mut WdaClient) -> Result<bool, LoginError> {
         tokio::time::sleep(Duration::from_millis(600)).await;
     }
     let rows = w.elements().await.map_err(|_| phone_error("screen read"))?;
-    Ok(autofill_sheet_close(&rows).is_none()
-        && !rows.iter().any(|r| AUTOFILL_SHEET_TITLES.contains(&r.label.trim())))
+    Ok(!autofill_sheet_up(&rows))
 }
 
 /// Replace a field's contents with a secret; nothing read is returned.
@@ -1104,6 +1125,16 @@ pub async fn sign_in(
     vault: &Vault,
     request: &LoginRequest,
 ) -> Result<Value, LoginError> {
+    // A password sheet iOS opened over the page hides the form from the tree:
+    // close it before looking for fields, not only before typing (hardware,
+    // 17 Pro Max: GitHub's web sign-in answered no_login_form behind it).
+    if !close_autofill_sheet(w).await? {
+        return Err(LoginError::new(
+            409,
+            "autofill_sheet",
+            "iOS's password picker is over the login form and would not close; nothing was typed. Close it on the phone and try again",
+        ));
+    }
     let mut rows = w.elements().await.map_err(|_| phone_error("screen read"))?;
     let app_name = rows
         .iter()
@@ -1553,6 +1584,23 @@ mod tests {
 
         // A form's own Cancel button is not the sheet's.
         let rows = vec![row("StaticText", "管理员登录", 143.0), row("Button", "取消", 111.0)];
+        assert_eq!(autofill_sheet_close(&rows), None);
+    }
+
+    #[test]
+    fn the_password_suggestion_sheet_is_recognised_lower_down() {
+        // Hardware, 17 Pro Max: over GitHub's web sign-in iOS offered one
+        // saved login in a bottom sheet with 关闭 / 填充密码.
+        let rows = vec![
+            row("StaticText", "通过 Bitwarden 中已存的密码登录", 560.0),
+            row("Button", "关闭", 520.0),
+            row("Button", "填充密码", 640.0),
+        ];
+        assert!(autofill_sheet_up(&rows));
+        assert_eq!(autofill_sheet_close(&rows), Some(1));
+        // Without the fill button a lone 关闭 is the page's own.
+        let rows = vec![row("Button", "关闭", 520.0)];
+        assert!(!autofill_sheet_up(&rows));
         assert_eq!(autofill_sheet_close(&rows), None);
     }
 
