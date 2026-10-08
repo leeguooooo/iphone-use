@@ -61,7 +61,12 @@ extension RunnerTests {
         return .value(["x": 0, "y": 0, "width": size.width, "height": size.height])
       }
       if match(parts, "appium/settings") != nil { return .value(wdaSettings) }
-      if match(parts, "wda/locked") != nil { return .value(lockedOnMain()) }
+      if match(parts, "wda/locked") != nil {
+        guard let locked = lockedOnMain() else {
+          throw RunnerError.failed("the lock state could not be read")
+        }
+        return .value(locked)
+      }
       if match(parts, "wda/settle") != nil { return settleScreen(request) }
       if match(parts, "wda/apps/list") != nil { return appsList() }
       if match(parts, "wda/activeAppInfo") != nil { return activeAppInfo() }
@@ -343,20 +348,60 @@ extension RunnerTests {
   }
 
   /// Makes `id` the keyboard target: taps it unless it already has focus, then waits briefly for
-  /// focus to land.
-  private func focus(_ id: String) throws -> UINode {
+  /// focus to land. `focused` is false when the element never reported focus (web views often
+  /// don't): callers then need a keyboard on screen and a value readback before claiming success.
+  private func focus(_ id: String) throws -> (node: UINode, focused: Bool) {
     var node = try freshNode(id)
-    if node.isFocused { return node }
+    if node.isFocused { return (node, true) }
     try tapPoint(node.center)
     let deadline = Date().addingTimeInterval(1.0)
     while Date() < deadline {
       RunLoop.current.run(until: Date().addingTimeInterval(0.1))
       if let fresh = try? freshNode(id) {
         node = fresh
-        if fresh.isFocused { break }
+        if fresh.isFocused { return (node, true) }
       }
     }
-    return node
+    return (node, false)
+  }
+
+  /// Whether a keyboard is on screen and which element, if any, holds focus. The trees come first
+  /// (cheap); XCTest's keyboard query is the fallback because the keyboard can be hosted outside
+  /// the app's tree (hardware, iOS 27: Settings' search showed a keyboard no tree held).
+  private func keyboardState() -> (shown: Bool, focusedElsewhere: Bool) {
+    var focusedElsewhere = false
+    if let root = try? foregroundTree() {
+      let nodes = root.descendants()
+      focusedElsewhere = nodes.contains { $0.isFocused && $0.type != "XCUIElementTypeApplication" }
+      if nodes.contains(where: { $0.type == "XCUIElementTypeKeyboard" }) { return (true, focusedElsewhere) }
+      if springBoardTreeIfRelevant(foregroundPID: root.pid)?
+        .descendants().contains(where: { $0.type == "XCUIElementTypeKeyboard" }) == true {
+        return (true, focusedElsewhere)
+      }
+    }
+    let application = foreground().application
+    var shown = false
+    IPURBridge.performWithoutQuiescence(application) {
+      _ = IPURBridge.catchException { shown = application.keyboards.firstMatch.exists }
+    }
+    return (shown, focusedElsewhere)
+  }
+
+  /// Focus for typing: refuses (nothing typed) when the element did not take focus and either no
+  /// keyboard is up or another element holds focus — the text would land elsewhere, or nowhere.
+  /// A keyboard with no focused element anywhere is allowed (web views often report no focus);
+  /// the caller then proves the text landed by reading the value back.
+  private func focusForTyping(_ id: String) throws -> (node: UINode, focused: Bool) {
+    let result = try focus(id)
+    if result.focused { return result }
+    let keyboard = keyboardState()
+    if !keyboard.shown {
+      throw RunnerError.failed("element \(id) did not take keyboard focus and no keyboard is shown; nothing was typed")
+    }
+    if keyboard.focusedElsewhere {
+      throw RunnerError.failed("element \(id) did not take keyboard focus; another element holds it; nothing was typed")
+    }
+    return result
   }
 
   /// Types text (with WebDriver private-use key codes mapped) into whatever has focus.
@@ -430,22 +475,36 @@ extension RunnerTests {
     guard let text = textArgument(body, preferText: true) else {
       throw RunnerError.invalidArgument("'value' or 'text' is required")
     }
-    _ = try focus(id)
+    let (before, focused) = try focusForTyping(id)
     let path = try typeIntoFocus(text, frequency: UInt((body["frequency"] as? NSNumber)?.intValue ?? 60))
+    // An element that never reported focus (a web field) must show the text afterwards; otherwise
+    // the keystrokes went to some other field and success would be a lie.
+    if !focused, !text.isEmpty, let after = try? freshNode(id), (after.value ?? "") == (before.value ?? "") {
+      throw RunnerError.failed(
+        "typed into the focused field, but element \(id) did not report focus and its value did not change; the text may have gone to another field")
+    }
     return .value(NSNull(), headers: ["X-IPU-Gesture": path])
   }
 
   private func clearElement(_ id: String) throws -> HTTPResponse {
-    var node = try focus(id)
-    for _ in 0..<3 {
-      let current = node.value ?? ""
-      let count = (current == node.placeholder) ? 0 : current.count
-      if count == 0 { break }
-      _ = try typeIntoFocus(String(repeating: XCUIKeyboardKey.delete.rawValue, count: min(count, 500)), frequency: 120)
+    var node = try focusForTyping(id).node
+    var remaining = Self.clearableCount(node)
+    for _ in 0..<3 where remaining > 0 {
+      _ = try typeIntoFocus(String(repeating: XCUIKeyboardKey.delete.rawValue, count: min(remaining, 500)), frequency: 120)
       guard let fresh = try? freshNode(id) else { break }
       node = fresh
+      remaining = Self.clearableCount(node)
+    }
+    if remaining > 0 {
+      throw RunnerError.failed("could not clear element \(id): \(remaining) characters remain")
     }
     return .value(NSNull())
+  }
+
+  /// Characters still in a field (its placeholder shown as its value counts as empty).
+  static func clearableCount(_ node: UINode) -> Int {
+    let current = node.value ?? ""
+    return current == node.placeholder ? 0 : current.count
   }
 
   /// Resolves a registered node to an XCUIElement (for the few XCUI-only APIs: picker/slider
@@ -697,11 +756,16 @@ extension RunnerTests {
       }
     }
     var used: [String] = []
+    let screen = windowSizePoints()
+    if screen.width > 0, let off = TapBounds.firstOffScreen(paths, screen) {
+      throw RunnerError.invalidArgument(
+        "action point (\(Int(off.x)), \(Int(off.y))) is outside the \(Int(screen.width))x\(Int(screen.height)) screen; nothing was sent")
+    }
     if !paths.isEmpty {
       if let error = IPURBridge.synthesizeTouchPaths(paths, name: "ipu-w3c-actions") {
         // A single tap can still go through the public coordinate API.
         if paths.count == 1, let down = paths[0].first, paths[0].count == 2,
-           let x = down["x"] as? CGFloat, let y = down["y"] as? CGFloat {
+           let x = (down["x"] as? NSNumber)?.doubleValue, let y = (down["y"] as? NSNumber)?.doubleValue {
           try tapPoint(CGPoint(x: x, y: y))
           used.append("xcui-coordinate")
         } else {
@@ -841,20 +905,22 @@ extension RunnerTests {
 
   /// Lock state when SpringBoardServices is unavailable to the inline path: the cover sheet
   /// (lock screen) window present in SpringBoard's tree.
-  private func lockedOnMain() -> Bool {
+  /// nil when neither SpringBoardServices nor SpringBoard's tree can be read — never guess
+  /// "unlocked" (that let wda/unlock report success on a phone it never saw).
+  private func lockedOnMain() -> Bool? {
     var known = ObjCBool(false)
     let locked = IPURBridge.isScreenLocked(&known)
     if known.boolValue { return locked }
-    guard let springBoard = IPURBridge.systemApplicationElement() else { return false }
+    guard let springBoard = IPURBridge.systemApplicationElement() else { return nil }
     let tree = IPURBridge.wdaTree(
       forAXElement: springBoard, maxDepth: 6, maxNodes: 500, extensionCallLimit: 0, rememberKey: nil)
-    guard let root = tree[IPURTreeRootKey] as? [String: Any] else { return false }
+    guard let root = tree[IPURTreeRootKey] as? [String: Any] else { return nil }
     let node = UINode(raw: root, parent: nil, pid: 0)
     return node.descendants().contains { $0.identifier == "SBCoverSheetWindow" && $0.rect.height > 0 }
   }
 
   private func lockScreen() throws -> HTTPResponse {
-    if lockedOnMain() { return .value(NSNull()) }
+    if lockedOnMain() == true { return .value(NSNull()) }
     if let error = IPURBridge.pressLockButton() { throw RunnerError.failed(error) }
     return .value(NSNull())
   }
@@ -862,9 +928,17 @@ extension RunnerTests {
   private func unlockScreen() throws -> HTTPResponse {
     // Without a passcode a Home press wakes and opens the phone; with one it only shows the
     // passcode pad (as with WDA, which cannot type the passcode either).
-    guard lockedOnMain() else { return .value(NSNull()) }
+    switch lockedOnMain() {
+    case false?: return .value(NSNull())
+    case nil: throw RunnerError.failed("the lock state could not be read; nothing was pressed")
+    case true?: break
+    }
     if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(.home) }) {
       throw RunnerError.failed("unlock failed: \(exception)")
+    }
+    RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+    if lockedOnMain() != false {
+      throw RunnerError.failed("pressed Home but the phone is still locked (a passcode is likely required)")
     }
     return .value(NSNull())
   }
@@ -1000,6 +1074,21 @@ extension RunnerTests {
     guard let button else { throw RunnerError.failed("the alert has no buttons") }
     try tapPoint(CGPoint(x: button.rect.midX, y: button.rect.midY))
     alertCache = nil
+    // A tap on an alert button can land without effect; confirm the same alert went away.
+    let deadline = Date().addingTimeInterval(0.6)
+    var stillShown = true
+    while Date() < deadline {
+      RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+      guard let now = findAlert() else { stillShown = false; break }
+      if !AlertMatch.same(now.text, now.buttons.map(\.label), alert.text, alert.buttons.map(\.label)) {
+        stillShown = false
+        break
+      }
+    }
+    alertCache = nil
+    if stillShown {
+      throw RunnerError.failed("tapped '\(button.label)' but the alert is still on screen")
+    }
     return .value(NSNull())
   }
 }

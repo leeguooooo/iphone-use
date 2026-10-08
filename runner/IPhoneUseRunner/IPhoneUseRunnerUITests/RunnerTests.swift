@@ -153,9 +153,16 @@ final class RunnerTests: XCTestCase {
     let bundle = Bundle(for: RunnerTests.self)
     let bundleID = bundle.bundleIdentifier ?? "com.leeguoo.iphone-use.runner"
     let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    // Ready only when the screen can be read: without the AX client every tree read fails, so an
+    // unconditional `ready: true` sent callers into commands that could not work.
+    let axClient = IPURBridge.axClient() != nil
+    let synthesis = IPURBridge.eventSynthesisAvailable()
     var value: [String: Any] = [
-      "ready": true,
-      "message": "iphone-use native runner is ready to accept commands",
+      "ready": axClient,
+      "capabilities": ["axClient": axClient, "eventSynthesis": synthesis],
+      "message": axClient
+        ? "iphone-use native runner is ready to accept commands"
+        : "iphone-use native runner is up but cannot read the screen (accessibility client unavailable)",
       "state": "success",
       "sessionId": Self.sessionID,
       "os": ["name": "iOS", "version": Self.systemVersion, "sdkVersion": Self.systemVersion],

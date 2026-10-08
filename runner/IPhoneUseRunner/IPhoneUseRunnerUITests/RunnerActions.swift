@@ -162,6 +162,28 @@ enum TapBounds {
     size.width > 0 && size.height > 0
       && point.x >= 0 && point.y >= 0 && point.x <= size.width && point.y <= size.height
   }
+
+  /// The first touch point of W3C pointer paths (steps carry `x`/`y` as numbers) that lies off a
+  /// screen of `size` points, or nil when every point is on it.
+  static func firstOffScreen(_ paths: [[[String: Any]]], _ size: CGSize) -> CGPoint? {
+    for path in paths {
+      for step in path {
+        guard let x = (step["x"] as? NSNumber)?.doubleValue,
+              let y = (step["y"] as? NSNumber)?.doubleValue else { continue }
+        let point = CGPoint(x: x, y: y)
+        if !onScreen(point, size) { return point }
+      }
+    }
+    return nil
+  }
+}
+
+/// Whether an alert seen after a button tap is still the one that was tapped: same text and the
+/// same buttons. A follow-up alert (a second confirmation) differs and counts as progress.
+enum AlertMatch {
+  static func same(_ text: String?, _ buttons: [String], _ otherText: String?, _ otherButtons: [String]) -> Bool {
+    (text ?? "") == (otherText ?? "") && buttons == otherButtons
+  }
 }
 
 /// A scroll drag that leaves no momentum: most of the distance quickly, then a slow tail, so the

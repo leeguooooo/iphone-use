@@ -502,7 +502,10 @@ static NSMutableDictionary *IPURSerialize(
   node[@"placeholderValue"] = placeholder ?: (id)NSNull.null;
   node[@"rect"] = IPURRect(snapshot);
   node[@"isEnabled"] = IPURBoolString(snapshot, @"enabled", YES);
-  node[@"isFocused"] = IPURBoolString(snapshot, @"hasFocus", NO);
+  // hasFocus is the focus engine's (tvOS-style) flag; a text field holding the keyboard reports
+  // only hasKeyboardFocus (hardware: Settings' search field, iOS 27).
+  BOOL focused = [IPURKVC(snapshot, @"hasFocus") boolValue] || [IPURKVC(snapshot, @"hasKeyboardFocus") boolValue];
+  node[@"isFocused"] = focused ? @"1" : @"0";
   if (walk->includeElements) {
     id element = IPURKVC(snapshot, @"accessibilityElement");
     if (element != nil) node[IPURNodeAXElementKey] = element;
