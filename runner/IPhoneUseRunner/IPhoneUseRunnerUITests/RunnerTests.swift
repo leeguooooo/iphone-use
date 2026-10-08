@@ -465,13 +465,28 @@ final class RunnerTests: XCTestCase {
       element = IPURBridge.activeApplicationElement(forPID: pid) as AnyObject?
     }
     guard let element else { return nil }
-    let tree = IPURBridge.wdaTree(
-      forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
-      extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
-    guard (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] else {
-      return nil
+    return alertInTree(element, pid: pid)
+  }
+
+  /// The alert in one process's AX tree, read shallow first (AlertScan.shallowDepth); the full
+  /// depth is read only when that read failed or the alert's own subtree reached its cap.
+  /// `.some(nil)`: read, no alert; `nil`: unreadable.
+  func alertInTree(_ element: AnyObject, pid: Int32) -> FoundAlert?? {
+    func read(_ depth: Int) -> [String: Any]? {
+      let tree = IPURBridge.wdaTree(
+        forAXElement: element, maxDepth: depth, maxNodes: Self.defaultMaxNodes,
+        extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
+      guard (tree[IPURTreeOkKey] as? Bool) == true else { return nil }
+      return tree[IPURTreeRootKey] as? [String: Any]
     }
-    return .some(firstNode(in: root, type: "XCUIElementTypeAlert").map { describeAlert($0, pid: pid) })
+    func full() -> FoundAlert?? {
+      guard let root = timed("AlertFullRead", { read(Self.defaultMaxDepth) }) else { return nil }
+      return .some(AlertScan.firstAlert(in: root, maxDepth: Self.defaultMaxDepth).map { describeAlert($0.alert, pid: pid) })
+    }
+    guard let shallow = timed("AlertRead", { read(AlertScan.shallowDepth) }) else { return full() }
+    guard let found = AlertScan.firstAlert(in: shallow, maxDepth: AlertScan.shallowDepth) else { return .some(nil) }
+    if found.maybeCut, let deep = full(), let alert = deep { return .some(alert) }
+    return .some(describeAlert(found.alert, pid: pid))
   }
 
   func treeHeaders(_ tree: [String: Any], backend: String, pid: Int32) -> [String: String] {
@@ -654,14 +669,7 @@ final class RunnerTests: XCTestCase {
       if pid == target.pid, let element = target.element {
         // The target's element is already resolved (a view-service sheet is not always in
         // `activeApplications` under its own pid lookup).
-        let tree = IPURBridge.wdaTree(
-          forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
-          extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
-        if (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] {
-          result = .some(firstNode(in: root, type: "XCUIElementTypeAlert").map { describeAlert($0, pid: pid) })
-        } else {
-          result = nil
-        }
+        result = alertInTree(element, pid: pid)
       } else {
         result = alertInProcess(pid: pid)
       }

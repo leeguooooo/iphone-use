@@ -351,6 +351,30 @@ enum AlertScan {
   static func othersThan(target: Int32, in candidates: [Int32]) -> [Int32] {
     candidates.filter { $0 != target }
   }
+
+  /// Levels read when only looking for an alert: alerts sit a few levels under the window, while
+  /// a full read of an app's content can be thousands of nodes.
+  static let shallowDepth = 12
+
+  /// The first alert in a tree read to `maxDepth` node levels, and whether the depth cap may have
+  /// cut its subtree (a childless node on the deepest level can be one whose children the AX
+  /// server withheld), in which case the caller reads the full depth.
+  static func firstAlert(in root: [String: Any], maxDepth: Int) -> (alert: [String: Any], maybeCut: Bool)? {
+    func find(_ node: [String: Any], _ depth: Int) -> (node: [String: Any], depth: Int)? {
+      if node["type"] as? String == "XCUIElementTypeAlert" { return (node, depth) }
+      for child in node["children"] as? [[String: Any]] ?? [] {
+        if let found = find(child, depth + 1) { return found }
+      }
+      return nil
+    }
+    func reachesCap(_ node: [String: Any], _ depth: Int) -> Bool {
+      let children = node["children"] as? [[String: Any]] ?? []
+      if children.isEmpty { return depth >= maxDepth - 1 }
+      return children.contains { reachesCap($0, depth + 1) }
+    }
+    guard let found = find(root, 0) else { return nil }
+    return (found.node, reachesCap(found.node, found.depth))
+  }
 }
 
 /// System view services that present another process's UI over the app: the in-app Safari sheet
