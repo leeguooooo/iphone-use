@@ -478,6 +478,149 @@ fn a_locator_tap_fully_covered_after_the_reveal_is_refused_unsent() {
     });
 }
 
+/// The in-app Safari sheet on a 17 Pro Max with a link at `link_y`, below
+/// the visible page when `link_y` is past 956, and the sheet's header: 关闭
+/// sits inside the left edge of the bar-wide 地址 button.
+fn safari_sheet_with_link_at(link_y: u32) -> String {
+    format!(
+        r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"Safari浏览器","rect":{{"x":0,"y":0,"width":440,"height":956}},"children":[
+            {{"type":"XCUIElementTypeOther","label":"TopBrowserBar","rect":{{"x":0,"y":62,"width":440,"height":54}},"children":[
+                {{"type":"XCUIElementTypeButton","label":"关闭","rect":{{"x":16,"y":65,"width":44,"height":44}}}},
+                {{"type":"XCUIElementTypeButton","label":"地址","rect":{{"x":26,"y":65,"width":388,"height":44}}}}]}},
+            {{"type":"XCUIElementTypeOther","label":"page","rect":{{"x":0,"y":116,"width":440,"height":4000}},"children":[
+                {{"type":"XCUIElementTypeLink","label":"Acceptable Use","rect":{{"x":20,"y":{link_y},"width":120,"height":20}}}}]}}]}}}}"#
+    )
+}
+
+/// A mock runner serving `tree(scrolled)` for reads and E1's frame from
+/// `rect(scrolled)`, where `scrolled` turns true at the first scrollTo.
+fn sheet_wda(
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    tree: fn(bool) -> String,
+    rect: fn(bool) -> String,
+) -> support::MockWda {
+    let scrolled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    mock_wda(move |request, _| {
+        seen.lock().unwrap().push(request.to_string());
+        if request.starts_with("POST /session ") {
+            return Some((Duration::ZERO, SESSION.to_string()));
+        }
+        if request.contains("/scrollTo") {
+            scrolled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let moved = scrolled.load(std::sync::atomic::Ordering::SeqCst);
+        if request.contains("/source?format=json") {
+            return Some((Duration::ZERO, tree(moved)));
+        }
+        if request.starts_with("POST ") && request.contains("/elements") {
+            return Some((
+                Duration::ZERO,
+                r#"{"value":[{"ELEMENT":"E1","element-6066-11e4-a52e-4f735466cecf":"E1"}]}"#
+                    .to_string(),
+            ));
+        }
+        if request.contains("/element/E1/rect") {
+            return Some((Duration::ZERO, rect(moved)));
+        }
+        Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
+    })
+}
+
+/// A locator tap on a link below the visible page whose reveal scroll does
+/// not bring it on screen is refused, nothing sent — never `ok` for a tap
+/// that touched nothing (hardware, 17 Pro Max in-app Safari sheet).
+#[test]
+fn an_off_screen_locator_tap_the_reveal_cannot_bring_on_screen_is_refused_unsent() {
+    block(async {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let wda = sheet_wda(
+            seen.clone(),
+            |_| safari_sheet_with_link_at(1500),
+            |_| r#"{"value":{"x":20,"y":1500,"width":120,"height":20}}"#.to_string(),
+        );
+        let (_, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"Acceptable Use","kind":"Link"}}}]}"#,
+        )
+        .await;
+        assert_eq!(json["ok"], false, "{json}");
+        assert!(json.to_string().contains("element_not_visible"), "{json}");
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter().any(|r| r.contains("/E1/scrollTo")),
+            "a reveal scroll was tried: {seen:?}"
+        );
+        assert!(!seen.iter().any(|r| r.contains("/E1/click")), "{seen:?}");
+        assert!(
+            !seen
+                .iter()
+                .any(|r| r.starts_with("POST ") && r.contains("/actions")),
+            "no tap sent: {seen:?}"
+        );
+    });
+}
+
+/// The same link once the reveal scroll brings it on screen is clicked.
+#[test]
+fn an_off_screen_locator_tap_is_revealed_then_clicked() {
+    block(async {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let wda = sheet_wda(
+            seen.clone(),
+            |moved| safari_sheet_with_link_at(if moved { 500 } else { 1500 }),
+            |moved| {
+                format!(
+                    r#"{{"value":{{"x":20,"y":{},"width":120,"height":20}}}}"#,
+                    if moved { 500 } else { 1500 }
+                )
+            },
+        );
+        let (status, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"Acceptable Use","kind":"Link"}}}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let seen = seen.lock().unwrap();
+        let scroll = seen
+            .iter()
+            .position(|r| r.contains("/E1/scrollTo"))
+            .expect("a reveal scroll");
+        let click = seen
+            .iter()
+            .position(|r| r.contains("/E1/click"))
+            .expect("an element click");
+        assert!(scroll < click, "reveal before click: {seen:?}");
+    });
+}
+
+/// The sheet's 关闭 button, inside the left edge of the bar-wide 地址 button,
+/// is clicked, not refused as `element_occluded`.
+#[test]
+fn a_sheet_close_button_under_the_address_bar_edge_is_clicked() {
+    block(async {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let wda = sheet_wda(
+            seen.clone(),
+            |_| safari_sheet_with_link_at(500),
+            |_| r#"{"value":{"x":16,"y":65,"width":44,"height":44}}"#.to_string(),
+        );
+        let (status, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"关闭","kind":"Button"}}}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(!json.to_string().contains("element_occluded"), "{json}");
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|r| r.contains("/E1/click")), "{seen:?}");
+        assert!(
+            !seen.iter().any(|r| r.contains("/scrollTo")),
+            "no reveal for a visible header button: {seen:?}"
+        );
+    });
+}
+
 /// A runner whose every screen read errors gets a bounded, backed-off number
 /// of reads and a clear 502 — not a fixed 250 ms retry for the whole 35 s
 /// budget (agent-loop A/B, iPhone 13: 137 /source calls, then a bare 504).

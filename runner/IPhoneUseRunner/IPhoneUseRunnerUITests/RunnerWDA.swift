@@ -313,15 +313,30 @@ extension RunnerTests {
 
   /// Taps a point through synthesis, falling back to XCUICoordinate.
   func tapPoint(_ point: CGPoint) throws {
+    let screen = windowSizePoints()
+    guard screen.width <= 0 || TapBounds.onScreen(point, screen) else {
+      throw RunnerError.invalidArgument(
+        "tap point (\(Int(point.x)), \(Int(point.y))) is outside the \(Int(screen.width))x\(Int(screen.height)) screen; nothing was tapped")
+    }
     _ = try gesture("tap", synthesized: { IPURBridge.synthesizeTap(at: point, pid: 0) }) { app in
       coordinate(app, point).tap()
     }
   }
 
   private func clickElement(_ id: String) throws -> HTTPResponse {
-    let node = try freshNode(id)
+    var node = try freshNode(id)
     guard node.rect.width > 0, node.rect.height > 0 else {
       throw RunnerError.failed("element \(id) has an empty frame and cannot be clicked")
+    }
+    // An element below the visible page (a web sheet's link) is scrolled into view first, like
+    // XCUIElement's own tap does; still off the screen afterwards is a refusal, never a tap.
+    let screen = windowSizePoints()
+    if screen.width > 0, !TapBounds.onScreen(node.center, screen) {
+      try? scrollIntoView(id)
+      node = try freshNode(id)
+      guard TapBounds.onScreen(node.center, screen) else {
+        throw RunnerError.invalidArgument("element \(id) is off the screen and could not be scrolled into view; nothing was tapped")
+      }
     }
     try tapPoint(node.center)
     return .value(NSNull())

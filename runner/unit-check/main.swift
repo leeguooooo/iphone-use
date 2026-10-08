@@ -330,5 +330,16 @@ do {
         "already the foreground: nothing to swap")
 }
 
+// MARK: - Tap bounds (no tap outside the screen)
+
+do {
+  let screen = CGSize(width: 440, height: 956)
+  check(TapBounds.onScreen(CGPoint(x: 38, y: 87), screen), "a header button's centre is on screen")
+  check(!TapBounds.onScreen(CGPoint(x: 220, y: 1500), screen), "a link below the visible page is off screen")
+  check(!TapBounds.onScreen(CGPoint(x: -10, y: 300), screen), "a negative x is off screen")
+  check(TapBounds.onScreen(CGPoint(x: 440, y: 956), screen), "the bottom-right corner itself is on screen")
+  check(!TapBounds.onScreen(CGPoint(x: 10, y: 10), .zero), "no screen size: nothing is on it")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)
