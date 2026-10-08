@@ -127,6 +127,30 @@ pub fn device_key(secret: &[u8], password: Option<&str>) -> Vec<u8> {
     h.finalize().to_vec()
 }
 
+/// The key a paired app checks LAN addresses with (see [`lan_proof`]). It is
+/// handed out only with a session, over the route the app paired on, and is
+/// derived from the device key, so changing the password rotates it.
+pub fn lan_key(device_key: &[u8]) -> Vec<u8> {
+    let mut h = Sha256::new();
+    h.update(b"iphone-use lan probe v1\0");
+    h.update(device_key);
+    h.finalize().to_vec()
+}
+
+/// The answer to a LAN probe's `nonce`: proof that this is the daemon the
+/// app paired with, before the app sends it any credential in cleartext.
+pub fn lan_proof(device_key: &[u8], nonce: &str) -> String {
+    core::auth::sign(&lan_key(device_key), nonce)
+}
+
+/// A probe nonce: base64url or hex, 16–128 characters.
+pub fn probe_nonce_ok(nonce: &str) -> bool {
+    (16..=128).contains(&nonce.len())
+        && nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// This Mac's IPv4 addresses a phone could reach, best first: Wi-Fi/Ethernet
 /// (`en*`) before anything else, VPN tunnels (`utun*`, e.g. WARP or
 /// Tailscale) last. Loopback and link-local addresses are left out.
@@ -263,6 +287,19 @@ mod tests {
         assert!(is_loopback_host("[::1]"));
         assert!(is_loopback_host("LOCALHOST"));
         assert!(!is_loopback_host("192.168.1.11"));
+    }
+
+    #[test]
+    fn lan_proof_depends_on_the_key_and_the_nonce() {
+        let a = device_key(b"secret", Some("a"));
+        let b = device_key(b"secret", Some("b"));
+        let n = "0123456789abcdef0123";
+        assert_eq!(lan_proof(&a, n), lan_proof(&a, n));
+        assert_ne!(lan_proof(&a, n), lan_proof(&b, n));
+        assert_ne!(lan_proof(&a, n), lan_proof(&a, "0123456789abcdef0124"));
+        assert!(probe_nonce_ok(n));
+        assert!(!probe_nonce_ok("short"));
+        assert!(!probe_nonce_ok("0123456789abcdef/123"));
     }
 
     #[test]

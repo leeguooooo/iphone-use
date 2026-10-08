@@ -114,8 +114,19 @@ final class RemoteModel {
             .compactMap(DaemonClient.parse(address:))
     }
 
-    private static func saveLANCandidates(_ urls: [URL], for address: String) {
-        UserDefaults.standard.set(urls.map(\.absoluteString), forKey: "lanURLs:" + address)
+    /// Saves the client's LAN addresses and the key that checks them (a
+    /// secret, so in the Keychain) for `address`.
+    private static func saveLANRoutes(of client: DaemonClient, for address: String) {
+        UserDefaults.standard.set(client.lanCandidates.map(\.absoluteString), forKey: "lanURLs:" + address)
+        if let key = client.lanKey {
+            Keychain.save(password: key.base64URL, for: lanKeyAccount(address))
+        }
+    }
+
+    private static func lanKeyAccount(_ address: String) -> String { "lan:" + address }
+
+    private static func savedLANKey(_ address: String) -> Data? {
+        Keychain.password(for: lanKeyAccount(address)).flatMap(Data.init(base64URL:))
     }
 
     /// Connect with a typed password, or (nil) with what was saved: the
@@ -132,7 +143,8 @@ final class RemoteModel {
             return
         }
         phase = .connecting
-        let client = DaemonClient(base: base, lanCandidates: Self.savedLANCandidates(address))
+        let client = DaemonClient(base: base, lanCandidates: Self.savedLANCandidates(address),
+                                  lanKey: Self.savedLANKey(address))
         do {
             if let token {
                 try await client.renew(deviceToken: token)
@@ -201,7 +213,7 @@ final class RemoteModel {
             address = newAddress
         }
         UserDefaults.standard.set(address, forKey: "address")
-        Self.saveLANCandidates(client.lanCandidates, for: address)
+        Self.saveLANRoutes(of: client, for: address)
         client.onFallback = { [weak self] in
             Task { @MainActor in self?.routeChanged() }
         }
@@ -269,6 +281,7 @@ final class RemoteModel {
     func forget() {
         Keychain.delete(for: address)
         Keychain.delete(for: Self.deviceAccount(address))
+        Keychain.delete(for: Self.lanKeyAccount(address))
         disconnect()
     }
 
@@ -408,7 +421,7 @@ final class RemoteModel {
                 } else if let password {
                     try await client.login(password: password)
                 }
-                Self.saveLANCandidates(client.lanCandidates, for: self.address)
+                Self.saveLANRoutes(of: client, for: self.address)
                 // The stream still carries the old cookie: restart it.
                 self.reader?.stop()
                 self.reader = nil

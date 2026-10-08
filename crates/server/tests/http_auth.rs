@@ -3503,6 +3503,40 @@ fn pairing_answers_carry_the_lan_addresses() {
             "{body}"
         );
         let token = body["device_token"].as_str().unwrap().to_string();
+        let lan_key = body["lan_key"].as_str().expect("lan_key").to_string();
+
+        // A LAN address proves it is this daemon without any credential.
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pair/probe?n={nonce}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let key =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &lan_key)
+                .unwrap();
+        assert_eq!(
+            body_json(resp).await["proof"],
+            server::core_crate::auth::sign(&key, nonce),
+            "the proof is the nonce signed with the lan_key the app got"
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/pair/probe?n=short")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         // A renewal refreshes them too: the Mac's address may have changed.
         let resp = app

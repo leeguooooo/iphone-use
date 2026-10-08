@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os
 
@@ -134,6 +135,7 @@ final class DaemonClient: @unchecked Sendable {
     private struct Routes {
         var active: URL
         var lan: [URL]
+        var lanKey: Data?
     }
     private let routes: OSAllocatedUnfairLock<Routes>
     /// Short-fused session for route probes: a LAN address that does not
@@ -146,10 +148,13 @@ final class DaemonClient: @unchecked Sendable {
     var onLAN: Bool { base != publicBase }
     /// The daemon's LAN addresses (`lan_urls`), best first; empty from older daemons.
     var lanCandidates: [URL] { routes.withLock { $0.lan } }
+    /// The key a LAN address must prove it holds (`lan_key`, from `/pair`)
+    /// before it is sent any credential; nil from older daemons.
+    var lanKey: Data? { routes.withLock { $0.lanKey } }
 
-    init(base: URL, lanCandidates: [URL] = []) {
+    init(base: URL, lanCandidates: [URL] = [], lanKey: Data? = nil) {
         self.publicBase = base
-        routes = OSAllocatedUnfairLock(initialState: Routes(active: base, lan: lanCandidates))
+        routes = OSAllocatedUnfairLock(initialState: Routes(active: base, lan: lanCandidates, lanKey: lanKey))
         let probe = URLSessionConfiguration.ephemeral
         probe.httpShouldSetCookies = false
         probe.httpCookieAcceptPolicy = .never
@@ -232,7 +237,11 @@ final class DaemonClient: @unchecked Sendable {
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let urls = json["lan_urls"] as? [String] {
                 let lan = urls.compactMap(DaemonClient.parse(address:))
-                routes.withLock { $0.lan = lan }
+                let key = (json["lan_key"] as? String).flatMap(Data.init(base64URL:))
+                routes.withLock {
+                    $0.lan = lan
+                    $0.lanKey = key
+                }
             }
             return (data, response)
         case 401:
@@ -326,22 +335,29 @@ final class DaemonClient: @unchecked Sendable {
 
     // MARK: routes
 
-    /// The first LAN address that answers `/agent/status` with this session
-    /// within the probe timeout, or nil. A 200 there also proves it is the
-    /// same daemon: another one would not accept this session.
+    /// The first LAN address that proves, within the probe timeout, that it
+    /// is the daemon this app paired with, or nil. The probe carries no
+    /// credential: whoever else holds that IP on another network learns
+    /// nothing, and is never sent the session.
     func probeLAN() async -> URL? {
         let candidates = lanCandidates.filter { $0 != publicBase }
-        guard !candidates.isEmpty else { return nil }
-        let cookie = self.cookie
+        guard !candidates.isEmpty, let lanKey else { return nil }
         let session = probeSession
         return await withTaskGroup(of: URL?.self) { group in
             for url in candidates {
                 group.addTask {
-                    var request = URLRequest(url: url.appending(path: "agent/status"))
-                    if let cookie { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
-                    guard let answer = try? await session.data(for: request),
-                          (answer.1 as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-                    return url
+                    let nonce = Data((0..<24).map { _ in UInt8.random(in: 0...255) }).base64URL
+                    var components = URLComponents(url: url.appending(path: "pair/probe"),
+                                                   resolvingAgainstBaseURL: false)
+                    components?.queryItems = [URLQueryItem(name: "n", value: nonce)]
+                    guard let probeURL = components?.url,
+                          let answer = try? await session.data(from: probeURL),
+                          (answer.1 as? HTTPURLResponse)?.statusCode == 200,
+                          let json = try? JSONSerialization.jsonObject(with: answer.0) as? [String: Any],
+                          let proof = json["proof"] as? String else { return nil }
+                    let expected = HMAC<SHA256>.authenticationCode(
+                        for: Data(nonce.utf8), using: SymmetricKey(data: lanKey))
+                    return Data(expected).base64URL == proof ? url : nil
                 }
             }
             for await hit in group {
@@ -444,6 +460,22 @@ final class DaemonClient: @unchecked Sendable {
             throw DaemonError.unreachable("not HTTP")
         }
         return (data, http)
+    }
+}
+
+extension Data {
+    /// base64url without padding, as the daemon writes it.
+    init?(base64URL text: String) {
+        var plain = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        plain += String(repeating: "=", count: (4 - plain.count % 4) % 4)
+        self.init(base64Encoded: plain)
+    }
+
+    var base64URL: String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 

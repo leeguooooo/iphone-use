@@ -926,6 +926,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // QR; the phone that scans it gets a session without the password.
         .route("/pair/new", post(pair_new))
         .route("/pair", get(pair_page).post(pair_submit))
+        .route("/pair/probe", get(pair_probe))
         // Browser control: one HTTP request per gesture, each with an explicit
         // ACK, alongside the MJPEG view.
         .route("/control", post(direct_control))
@@ -1586,6 +1587,12 @@ async fn pair_submit(
             .unwrap_or(""),
     );
     body["lan_urls"] = state.pairing.lan_urls(request_port).into();
+    // The app checks a LAN address with this before trusting it (see `pair_probe`).
+    body["lan_key"] = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        crate::pairing::lan_key(&device_key(&state)),
+    )
+    .into();
     if let Some(token) = device_token {
         body["device_token"] = serde_json::Value::String(token);
         body["device_token_ttl_secs"] = crate::pairing::DEVICE_TOKEN_TTL_SECS.into();
@@ -1595,6 +1602,35 @@ async fn pair_submit(
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     resp
+}
+
+#[derive(Default, Deserialize)]
+struct ProbeQuery {
+    n: Option<String>,
+}
+
+/// `GET /pair/probe?n=<nonce>` — unauthenticated, so a paired app can tell
+/// whether a LAN address is really this daemon *before* it sends a session
+/// cookie there in cleartext: the answer is an HMAC of the nonce under the
+/// `lan_key` the app received with its session.
+async fn pair_probe(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProbeQuery>,
+) -> Response {
+    let nonce = query.n.unwrap_or_default();
+    if !crate::pairing::probe_nonce_ok(&nonce) {
+        return pair_json(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "invalid_nonce"}),
+        );
+    }
+    pair_json(
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": true,
+            "proof": crate::pairing::lan_proof(&device_key(&state), &nonce),
+        }),
+    )
 }
 
 /// The landing page posts one field, `c`, whose value is base64url and so

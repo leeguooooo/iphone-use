@@ -16,6 +16,11 @@ fn hmac_b64(secret: &[u8], payload: &str) -> String {
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
+/// base64url-no-pad HMAC-SHA256 of `payload` under `key`.
+pub fn sign(key: &[u8], payload: &str) -> String {
+    hmac_b64(key, payload)
+}
+
 /// Create a session token valid for `ttl_secs` seconds from `now`.
 /// `now` is injected (unix seconds) — no clock call inside.
 pub fn make_token(secret: &[u8], ttl_secs: u64, now: u64) -> String {
