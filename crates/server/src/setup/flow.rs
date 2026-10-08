@@ -21,6 +21,7 @@ use super::runner;
 use super::status;
 use super::sys;
 use super::term::{die, info, ok, warn, Exit, Step, BOLD, RST};
+use super::usbdiag;
 
 const RUNNER_DEVICE_PORT: u16 = 8100;
 const MJPEG_DEVICE_PORT: u16 = 9100;
@@ -624,10 +625,18 @@ impl Setup {
         }
         if !self.ctx.lan() {
             if self.ctx.udid.is_empty() {
+                // usbmuxd lists nothing: ask the USB plane why (a cable that
+                // only charges, or an iPhone this Mac's device support cannot
+                // claim yet, both look like "no device" from here).
+                if let Some(diagnosis) = usbdiag::probe(&[]) {
+                    self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
+                    return die(format!("{}; no build was started.", diagnosis.message()));
+                }
                 self.phase("prereq", "usb", "no USB iPhone is connected");
                 return die("the device layer defaults to USB, but no USB iPhone was found.\n   Plug in and unlock one iPhone, or set WDA_UDID=<USB UDID>; no build was started.");
             }
-            if !checks::on_usb(&self.ctx.udid, &checks::usb_udids()) {
+            let usb = checks::usb_udids();
+            if !checks::on_usb(&self.ctx.udid, &usb) {
                 self.phase(
                     "prereq",
                     "usb",
@@ -637,6 +646,16 @@ impl Setup {
                     "target {} is not currently connected over USB.\n   Plug in that iPhone, or set WDA_UDID to the exact USB-connected device; refusing a slow Wi-Fi fallback.",
                     self.ctx.udid
                 ));
+            }
+            // usbmuxd keys pairing records by its own spelling of the serial.
+            let serial: Vec<String> = usb
+                .into_iter()
+                .filter(|serial| checks::on_usb(&self.ctx.udid, std::slice::from_ref(serial)))
+                .collect();
+            let untrusted = usbdiag::untrusted(&serial);
+            if let Some(diagnosis) = usbdiag::diagnose(&[], &serial, &untrusted) {
+                self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
+                return die(format!("{}; no build was started.", diagnosis.message()));
             }
         } else if self.ctx.udid.is_empty() {
             warn("WDA_ALLOW_LAN=1: no USB target; paired destinations will be enumerated from the runner project");
@@ -849,10 +868,23 @@ impl Setup {
                 return Ok(());
             }
             if tick == 0 {
-                self.phase("prereq", "not_connected", NOT_CONNECTED_MESSAGE);
-                warn(&format!(
-                    "{NOT_CONNECTED_MESSAGE}. Waiting for {udid}; nothing is built or launched until it is back."
-                ));
+                // An iPhone on the bus that no driver claimed is not "not
+                // connected": it needs newer device support, not a cable.
+                match usbdiag::probe(&[]) {
+                    Some(diagnosis @ usbdiag::Diagnosis::NotClaimed { .. }) => {
+                        self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
+                        warn(&format!(
+                            "{}. Waiting for {udid}; nothing is built or launched until usbmuxd lists it.",
+                            diagnosis.message()
+                        ));
+                    }
+                    _ => {
+                        self.phase("prereq", "not_connected", NOT_CONNECTED_MESSAGE);
+                        warn(&format!(
+                            "{NOT_CONNECTED_MESSAGE}. Waiting for {udid}; nothing is built or launched until it is back."
+                        ));
+                    }
+                }
             } else if !self.ctx.keepalive && tick.is_multiple_of(30) {
                 warn("still waiting for the iPhone — plug it in over USB and unlock it ...");
             }

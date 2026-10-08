@@ -7,6 +7,7 @@ use super::checks;
 use super::ctx::Ctx;
 use super::sys;
 use super::term::{info, ok, warn, BOLD, RST};
+use super::usbdiag;
 
 /// Exit 0 when nothing blocks setup, 1 otherwise.
 pub fn run(ctx: &Ctx) -> i32 {
@@ -117,14 +118,25 @@ pub fn run(ctx: &Ctx) -> i32 {
     let absent = !ctx.udid.is_empty()
         && !checks::on_usb(&ctx.udid, &usb)
         && checks::presence(&ctx.udid) == checks::Presence::Absent;
+    // What the USB layer says when usbmuxd cannot give us a usable phone.
+    let diagnosis = usbdiag::probe(&usb);
     if absent {
         warn(&format!(
             "X configured target {} is not connected to this Mac (usbmuxd does not list it; CoreDevice reports it unavailable) — plug it in over USB (or join the same Wi-Fi) and unlock it",
             ctx.udid
         ));
+        if let Some(diagnosis) = &diagnosis {
+            warn(&format!("  USB: {}", diagnosis.message()));
+        }
         fail = true;
     } else if !ctx.lan() && usb.is_empty() {
         warn("X the default device layer requires an iPhone connected over USB");
+        if let Some(diagnosis) = &diagnosis {
+            warn(&format!("  USB: {}", diagnosis.message()));
+        }
+        fail = true;
+    } else if let Some(diagnosis @ usbdiag::Diagnosis::NotTrusted { .. }) = &diagnosis {
+        warn(&format!("X {}", diagnosis.message()));
         fail = true;
     } else if !ctx.lan() && usb.len() > 1 && ctx.udid.is_empty() {
         warn(&format!(

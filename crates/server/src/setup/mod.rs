@@ -24,6 +24,7 @@ pub mod runner;
 pub mod status;
 pub mod sys;
 pub mod term;
+pub mod usbdiag;
 
 /// Commands `setup-native` accepts; the shim asks before handing one over
 /// (`iphone-use setup-native --supports <command>`), so a script newer than
