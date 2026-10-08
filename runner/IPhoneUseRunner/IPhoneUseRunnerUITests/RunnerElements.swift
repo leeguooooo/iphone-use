@@ -311,24 +311,45 @@ struct ClassChain {
 // MARK: - Registry
 
 /// Element ids handed out by the find routes, WDA style. Entries keep the node they were found
-/// as; reads re-snapshot the live element so rects and values are fresh.
+/// as; reads re-snapshot the live element so rects and values are fresh. Each node retains its
+/// whole tree (parents, AX elements), so entries are bounded by count and dropped by age when the
+/// screen may have changed.
 final class ElementRegistry {
-  private var entries: [String: UINode] = [:]
+  private var entries: [String: (node: UINode, at: Date)] = [:]
   private var order: [String] = []
-  private let capacity = 4000
+  let capacity: Int
+  /// Ids older than this are dropped at the next screen-changing request. Callers use an id
+  /// right after finding it; an old one points at a screen that is likely gone.
+  static let maxAgeSeconds = 60.0
 
-  func register(_ node: UINode) -> String {
+  init(capacity: Int = 1000) { self.capacity = capacity }
+
+  var count: Int { entries.count }
+
+  func register(_ node: UINode, now: Date = Date()) -> String {
     let id = UUID().uuidString
-    entries[id] = node
+    entries[id] = (node, now)
     order.append(id)
     if order.count > capacity {
-      for stale in order.prefix(capacity / 4) { entries.removeValue(forKey: stale) }
-      order.removeFirst(capacity / 4)
+      let drop = max(1, capacity / 4)
+      for stale in order.prefix(drop) { entries.removeValue(forKey: stale) }
+      order.removeFirst(drop)
     }
     return id
   }
 
-  func node(_ id: String) -> UINode? { entries[id] }
+  func node(_ id: String) -> UINode? { entries[id]?.node }
+
+  /// Drops ids registered more than `maxAgeSeconds` before `now` (order is registration order).
+  func prune(now: Date = Date()) {
+    var cut = 0
+    while cut < order.count, let entry = entries[order[cut]],
+          now.timeIntervalSince(entry.at) > Self.maxAgeSeconds {
+      entries.removeValue(forKey: order[cut])
+      cut += 1
+    }
+    if cut > 0 { order.removeFirst(cut) }
+  }
 }
 
 /// Which processes an alert lookup has to look in. A system alert can sit in SpringBoard, in the
