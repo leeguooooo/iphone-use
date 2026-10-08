@@ -405,8 +405,8 @@ fn a_hung_mutation_still_reports_an_unknown_outcome() {
 }
 
 /// A session that never establishes is a DIFFERENT failure: no mutation ever
-/// reached the phone. The count proves it (the daemon's own verdict stays
-/// conservative, which is why this is asserted separately from the case above).
+/// reached the phone. The count proves it, and the daemon now says so too:
+/// only lookups ran before the deadline, so the verdict is `not_sent`.
 #[test]
 fn a_hung_session_handshake_sends_no_mutation() {
     block(async {
@@ -423,8 +423,10 @@ fn a_hung_session_handshake_sends_no_mutation() {
             None
         });
 
-        let (status, _json, _) = press_home(wda.url(), "?return=delta").await;
-        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{json}");
+        assert_eq!(json["error"], "not_sent", "{json}");
+        assert_eq!(json["retry_safe"], true, "{json}");
         assert_eq!(
             mutations.load(Ordering::Acquire),
             0,

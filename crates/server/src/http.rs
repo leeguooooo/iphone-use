@@ -8197,6 +8197,23 @@ fn wda_deadline_response(dispatched: bool) -> Response {
     )
 }
 
+/// After a deadline cut a dispatch short, whether anything that can change
+/// the screen went out since `mark` (the client's `last_post()` taken when the
+/// dispatch began). Read-only lookups (find, rect, `/source`) never move
+/// `last_post`, so a timeout spent entirely on them is a safe `not_sent`.
+/// `None` means the dispatch never started. If the client cannot be read back
+/// promptly the answer stays the cautious "maybe sent".
+async fn posted_since(
+    wda: &tokio::sync::Mutex<crate::wda::WdaClient>,
+    mark: Option<Option<std::time::Instant>>,
+) -> bool {
+    let Some(mark) = mark else { return false };
+    match tokio::time::timeout(std::time::Duration::from_millis(500), wda.lock()).await {
+        Ok(client) => client.last_post() != mark,
+        Err(_) => true,
+    }
+}
+
 fn wda_failed_after_dispatch_response() -> Response {
     with_security_headers(
         Response::builder()
@@ -8664,7 +8681,7 @@ async fn direct_control(
         return wda_deadline_response(false);
     }
     let _priority = state.begin_wda_control();
-    let dispatched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatched = Arc::new(std::sync::Mutex::new(None::<Option<std::time::Instant>>));
     let dispatch_marker = dispatched.clone();
     let mut detail: Option<serde_json::Value> = None;
     // One deadline covers BOTH mutex acquisition and the WDA action. Re-check
@@ -8679,7 +8696,7 @@ async fn direct_control(
         {
             return None;
         }
-        dispatch_marker.store(true, std::sync::atomic::Ordering::Release);
+        *recover(dispatch_marker.lock()) = Some(client.last_post());
         Some(wda_control_with_client(&mut client, &state.wda_actionable, &value, &mut detail).await)
     })
     .await;
@@ -8687,7 +8704,8 @@ async fn direct_control(
         Ok(Some(outcome)) => outcome,
         Ok(None) => return wda_deadline_response(false),
         Err(_) => {
-            return wda_deadline_response(dispatched.load(std::sync::atomic::Ordering::Acquire));
+            let mark = *recover(dispatched.lock());
+            return wda_deadline_response(posted_since(wda, mark).await);
         }
     };
     if outcome == WdaControlOutcome::Applied {
@@ -9828,6 +9846,7 @@ async fn agent_actions_inner(
                 // Dispatch exactly once. If the batch deadline wins after this
                 // point, the action outcome is unknown and the whole batch must
                 // not be replayed automatically.
+                let post_mark = w.last_post();
                 let outcome = match tokio::time::timeout_at(
                     batch_deadline,
                     direct_agent_action(&mut w, &state.wda_actionable, action, &mut None),
@@ -9837,14 +9856,27 @@ async fn agent_actions_inner(
                     Ok(outcome) => outcome,
                     Err(_) => {
                         mark_wda_read_path_unactionable(&state);
+                        // Only lookups ran: this step was never sent, so the
+                        // batch may be retried from it.
+                        let (status, error, outcome_name, retry_safe) =
+                            if w.last_post() == post_mark {
+                                (StatusCode::REQUEST_TIMEOUT, "not_sent", "not_sent", true)
+                            } else {
+                                (
+                                    StatusCode::GATEWAY_TIMEOUT,
+                                    "outcome_unknown",
+                                    "unknown",
+                                    false,
+                                )
+                            };
                         return agent_actions_failure(
-                            StatusCode::GATEWAY_TIMEOUT,
+                            status,
                             index,
                             completed,
                             applied_actions,
-                            "outcome_unknown",
-                            "unknown",
-                            false,
+                            error,
+                            outcome_name,
+                            retry_safe,
                             &step_results,
                             None,
                         );
@@ -11017,7 +11049,7 @@ async fn agent_input_inner(
         return wda_deadline_response(false);
     }
     let _priority = state.begin_wda_control();
-    let dispatched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatched = Arc::new(std::sync::Mutex::new(None::<Option<std::time::Instant>>));
     let dispatch_marker = dispatched.clone();
     let want_delta = query.return_mode.as_deref() == Some("delta");
     let settle_budget_ms = query
@@ -11040,7 +11072,7 @@ async fn agent_input_inner(
         {
             return None;
         }
-        dispatch_marker.store(true, std::sync::atomic::Ordering::Release);
+        *recover(dispatch_marker.lock()) = Some(client.last_post());
         let mut detail = None;
         let outcome =
             direct_agent_action(&mut client, &state.wda_actionable, &value, &mut detail).await;
@@ -11051,9 +11083,8 @@ async fn agent_input_inner(
         Ok(Some(dispatched)) => dispatched,
         Ok(None) => return wda_deadline_response(false),
         Err(_) => {
-            return wda_deadline_response(
-                dispatched.load(std::sync::atomic::Ordering::Acquire),
-            );
+            let mark = *recover(dispatched.lock());
+            return wda_deadline_response(posted_since(wda, mark).await);
         }
     };
     // Post-action observation (`?return=delta`), still holding the SAME
