@@ -101,6 +101,8 @@ pub fn exponential_delay(base: u64, cap: u64, attempt: u32) -> u64 {
 }
 
 /// `Ok(None)` when there is no state; `Err` when it exists but is unusable.
+/// The one caller only needs to tell those apart, so the error carries nothing.
+#[allow(clippy::result_unit_err)]
 pub fn read(path: &Path) -> Result<Option<State>, ()> {
     if std::fs::symlink_metadata(path).is_err() {
         return Ok(None);

@@ -76,6 +76,7 @@ final class RunnerTests: XCTestCase {
     let server = try RunnerHTTPServer(
       port: port,
       inlineHandler: { [weak self] request in self?.inlineResponse(request) },
+      captureHandler: { [weak self] request in self?.captureResponse(request) },
       mainHandler: { [weak self] request in
         guard let self else { return .error(503, "unknown error", "runner is shutting down") }
         return self.handleOnMain(request)
@@ -146,6 +147,27 @@ final class RunnerTests: XCTestCase {
     return nil
   }
 
+  /// Answered on the capture queue (see CaptureLane). nil hands the request to main.
+  func captureResponse(_ request: HTTPRequest) -> HTTPResponse? {
+    let started = Date()
+    var response: HTTPResponse
+    switch CaptureLane.route(request.path) {
+    case "/screenshot":
+      var failure: NSString?
+      guard let png = autoreleasepool(invoking: { IPURBridge.requestedPNGScreenshot(error: &failure) }) else {
+        NSLog("ipu-runner: off-main screenshot failed (%@); capturing on main", (failure as String?) ?? "-")
+        return nil
+      }
+      response = .value(png.base64EncodedString())
+    case "/wda/settle":
+      response = settleScreen(request)
+    default:
+      return nil
+    }
+    response.headers["X-IPU-Ms"] = String(Int(Date().timeIntervalSince(started) * 1000))
+    return response
+  }
+
   func statusValue() -> [String: Any] {
     busyLock.lock()
     let busySince = self.busySince
@@ -153,9 +175,16 @@ final class RunnerTests: XCTestCase {
     let bundle = Bundle(for: RunnerTests.self)
     let bundleID = bundle.bundleIdentifier ?? "com.leeguoo.iphone-use.runner"
     let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    // Ready only when the screen can be read: without the AX client every tree read fails, so an
+    // unconditional `ready: true` sent callers into commands that could not work.
+    let axClient = IPURBridge.axClient() != nil
+    let synthesis = IPURBridge.eventSynthesisAvailable()
     var value: [String: Any] = [
-      "ready": true,
-      "message": "iphone-use native runner is ready to accept commands",
+      "ready": axClient,
+      "capabilities": ["axClient": axClient, "eventSynthesis": synthesis],
+      "message": axClient
+        ? "iphone-use native runner is ready to accept commands"
+        : "iphone-use native runner is up but cannot read the screen (accessibility client unavailable)",
       "state": "success",
       "sessionId": Self.sessionID,
       "os": ["name": "iOS", "version": Self.systemVersion, "sdkVersion": Self.systemVersion],
@@ -361,22 +390,58 @@ final class RunnerTests: XCTestCase {
     if let root, let alert = firstNode(in: root, type: "XCUIElementTypeAlert") {
       found = describeAlert(alert, pid: pid)
     } else {
-      guard let springBoard = IPURBridge.systemApplicationElement() else { return nil }
-      let springBoardPid = IPURBridge.pid(forAXElement: springBoard)
-      if springBoardPid != pid {
+      // Every other active process can hold the alert (SpringBoard, the app under a web sheet,
+      // another view service). Answering "0" without looking there would prime `alertCache` with
+      // a wrong "no alert" that the next `/alert/text` reuses.
+      let others = AlertScan.othersThan(target: pid, in: alertCandidatePIDs(target: pid))
+      if !others.isEmpty {
         guard scanSpringBoard else { return nil }
-        let tree = IPURBridge.wdaTree(
-          forAXElement: springBoard, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
-          extensionCallLimit: 0, rememberKey: springBoardPid > 0 ? String(springBoardPid) : nil)
-        guard (tree[IPURTreeOkKey] as? Bool) == true, let springRoot = tree[IPURTreeRootKey] as? [String: Any]
-        else { return nil }
-        if let alert = firstNode(in: springRoot, type: "XCUIElementTypeAlert") {
-          found = describeAlert(alert, pid: springBoardPid)
+        var unreadable = false
+        for other in others {
+          switch alertInProcess(pid: other) {
+          case .some(.some(let alert)):
+            found = alert
+          case .some(.none):
+            continue
+          case .none:
+            unreadable = true
+            continue
+          }
+          break
         }
+        // An unread process can still hold the alert: say "cannot tell", not "no alert".
+        if found == nil && unreadable { return nil }
       }
     }
     alertCache = (Date(), found)
     return found == nil ? "0" : "1"
+  }
+
+  /// SpringBoard, the target, then every other active process, by pid.
+  func alertCandidatePIDs(target: Int32) -> [Int32] {
+    let springBoard = IPURBridge.systemApplicationElement().map { IPURBridge.pid(forAXElement: $0) }
+    return AlertScan.candidatePIDs(
+      springBoard: springBoard, target: target,
+      active: IPURBridge.activeApplicationPIDs().map(\.int32Value))
+  }
+
+  /// The alert in one process's private-AX tree: `.some(alert)` or `.some(nil)` when the tree was
+  /// read, `nil` when it could not be read.
+  func alertInProcess(pid: Int32) -> FoundAlert?? {
+    let element: AnyObject?
+    if let springBoard = IPURBridge.systemApplicationElement(), IPURBridge.pid(forAXElement: springBoard) == pid {
+      element = springBoard as AnyObject
+    } else {
+      element = IPURBridge.activeApplicationElement(forPID: pid) as AnyObject?
+    }
+    guard let element else { return nil }
+    let tree = IPURBridge.wdaTree(
+      forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
+      extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
+    guard (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] else {
+      return nil
+    }
+    return .some(firstNode(in: root, type: "XCUIElementTypeAlert").map { describeAlert($0, pid: pid) })
   }
 
   func treeHeaders(_ tree: [String: Any], backend: String, pid: Int32) -> [String: String] {
@@ -551,26 +616,27 @@ final class RunnerTests: XCTestCase {
   /// foreground app, using the private AX snapshot. Falls back to XCUI queries when the private
   /// client is unavailable.
   func findAlert() -> FoundAlert? {
-    var candidates: [(AnyObject, Int32)] = []
-    if let springBoard = IPURBridge.systemApplicationElement() {
-      candidates.append((springBoard as AnyObject, IPURBridge.pid(forAXElement: springBoard)))
-    }
     let target = foreground()
-    if let element = target.element, !candidates.contains(where: { $0.1 == target.pid }) {
-      candidates.append((element, target.pid))
-    }
     var privateWorked = false
-    for (element, pid) in candidates {
-      let tree = IPURBridge.wdaTree(
-        forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
-        extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
-      guard (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] else {
-        continue
+    for pid in alertCandidatePIDs(target: target.pid) {
+      let result: FoundAlert??
+      if pid == target.pid, let element = target.element {
+        // The target's element is already resolved (a view-service sheet is not always in
+        // `activeApplications` under its own pid lookup).
+        let tree = IPURBridge.wdaTree(
+          forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
+          extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
+        if (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] {
+          result = .some(firstNode(in: root, type: "XCUIElementTypeAlert").map { describeAlert($0, pid: pid) })
+        } else {
+          result = nil
+        }
+      } else {
+        result = alertInProcess(pid: pid)
       }
+      guard let readable = result else { continue }
       privateWorked = true
-      if let alert = firstNode(in: root, type: "XCUIElementTypeAlert") {
-        return describeAlert(alert, pid: pid)
-      }
+      if let alert = readable { return alert }
     }
     if privateWorked { return nil }
     return findAlertWithQueries()

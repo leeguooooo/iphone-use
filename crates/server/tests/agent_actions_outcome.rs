@@ -594,6 +594,42 @@ fn an_off_screen_locator_tap_is_revealed_then_clicked() {
     });
 }
 
+/// A label tap on the same off-screen link — `visible:false` in the lite
+/// read, like every row outside the screen — is revealed and clicked too,
+/// not refused as "not drawn" before any scroll.
+#[test]
+fn an_off_screen_label_tap_is_revealed_then_clicked() {
+    block(async {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let wda = sheet_wda(
+            seen.clone(),
+            |moved| safari_sheet_with_link_at(if moved { 500 } else { 1500 }),
+            |moved| {
+                format!(
+                    r#"{{"value":{{"x":20,"y":{},"width":120,"height":20}}}}"#,
+                    if moved { 500 } else { 1500 }
+                )
+            },
+        );
+        let (status, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap","label":"Acceptable Use"}}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let seen = seen.lock().unwrap();
+        let scroll = seen
+            .iter()
+            .position(|r| r.contains("/E1/scrollTo"))
+            .expect("a reveal scroll");
+        let click = seen
+            .iter()
+            .position(|r| r.contains("/E1/click"))
+            .expect("an element click");
+        assert!(scroll < click, "reveal before click: {seen:?}");
+    });
+}
+
 /// The sheet's 关闭 button, inside the left edge of the bar-wide 地址 button,
 /// is clicked, not refused as `element_occluded`.
 #[test]
@@ -809,10 +845,21 @@ fn a_point_locator_tap_hits_the_live_frame_centre() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{json}");
-        let seen = seen.lock().unwrap();
-        assert!(!seen.iter().any(|r| r.contains("/click")), "no element click: {seen:?}");
-        let actions = seen.iter().find(|r| r.contains("/actions")).expect("a W3C tap");
-        assert!(actions.contains("\"x\":30") && actions.contains("\"y\":84"), "{actions}");
+        {
+            let seen = seen.lock().unwrap();
+            assert!(
+                !seen.iter().any(|r| r.contains("/click")),
+                "no element click: {seen:?}"
+            );
+            let actions = seen
+                .iter()
+                .find(|r| r.contains("/actions"))
+                .expect("a W3C tap");
+            assert!(
+                actions.contains("\"x\":30") && actions.contains("\"y\":84"),
+                "{actions}"
+            );
+        }
 
         let (bad, json) = post_actions(
             Some(wda.url()),

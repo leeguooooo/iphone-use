@@ -135,6 +135,12 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 
 // MARK: - Screen capture
 
+/// The screen as PNG through testmanagerd's screenshot request, which works off the main thread
+/// (XCUIScreen's public screenshot is main-only). nil when that path fails or returns another
+/// format; the caller then captures on main.
++ (nullable NSData *)requestedPNGScreenshotWithError:(NSString *_Nullable *_Nullable)error
+  NS_SWIFT_NAME(requestedPNGScreenshot(error:));
+
 /// One JPEG of the main screen, safe to call off the main thread. Tries, fastest first:
 /// 1. `XCUIDevice.screenDataSource requestScreenshotWithRequest:withReply:` with an
 ///    XCTScreenshotRequest asking testmanagerd for JPEG at `quality` (what WDA's MJPEG server uses);

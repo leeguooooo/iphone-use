@@ -176,6 +176,36 @@ struct RunnerError: Error {
   }
 }
 
+/// Whether a queued command is too stale to run: its client is gone, or a state-changing request
+/// (anything but GET) waited longer than the daemon would have kept waiting for it.
+enum CommandAge {
+  static let maxQueuedMs = 10_000.0
+
+  static func shouldDrop(method: String, waitedMs: Double, connectionGone: Bool) -> Bool {
+    if connectionGone { return true }
+    return method != "GET" && waitedMs > maxQueuedMs
+  }
+}
+
+/// Requests answered on the capture queue instead of main: GET screenshots and on-device settle.
+/// Anything the capture handler declines (a failed off-main capture) falls through to main.
+enum CaptureLane {
+  static func claims(_ request: HTTPRequest) -> Bool {
+    guard request.method == "GET" else { return false }
+    let path = route(request.path)
+    return path == "/screenshot" || path == "/wda/settle"
+  }
+
+  /// The path without a leading `/session/<id>`.
+  static func route(_ path: String) -> String {
+    let parts = path.split(separator: "/", omittingEmptySubsequences: true)
+    if parts.count >= 2, parts[0] == "session" {
+      return "/" + parts.dropFirst(2).joined(separator: "/")
+    }
+    return path
+  }
+}
+
 /// Accepts connections on a background queue, hands each complete request to `mainHandler` on the
 /// main queue (serially — XCTest and the private AX client are main-thread APIs), and answers
 /// requests `inlineHandler` claims directly on the transport queue so liveness probes never wait
@@ -185,14 +215,19 @@ final class RunnerHTTPServer {
 
   private let queue = DispatchQueue(label: "com.leeguoo.iphone-use.runner.transport")
   private let commandQueue = DispatchQueue(label: "com.leeguoo.iphone-use.runner.commands")
+  /// Screen captures (/screenshot, /wda/settle) run here, beside the command queue: they need no
+  /// main-thread API, so a tree read on main no longer delays them and they no longer delay it.
+  private let captureQueue = DispatchQueue(label: "com.leeguoo.iphone-use.runner.capture")
   private let listener: NWListener
   private let inlineHandler: (HTTPRequest) -> HTTPResponse?
+  private let captureHandler: (HTTPRequest) -> HTTPResponse?
   private let mainHandler: (HTTPRequest) -> HTTPResponse
   var onFailure: ((Error) -> Void)?
 
   init(
     port: UInt16,
     inlineHandler: @escaping (HTTPRequest) -> HTTPResponse?,
+    captureHandler: @escaping (HTTPRequest) -> HTTPResponse? = { _ in nil },
     mainHandler: @escaping (HTTPRequest) -> HTTPResponse
   ) throws {
     guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
@@ -202,6 +237,7 @@ final class RunnerHTTPServer {
     parameters.allowLocalEndpointReuse = true
     listener = try NWListener(using: parameters, on: endpointPort)
     self.inlineHandler = inlineHandler
+    self.captureHandler = captureHandler
     self.mainHandler = mainHandler
   }
 
@@ -287,11 +323,46 @@ final class RunnerHTTPServer {
       finish(request, response, started: started, on: connection)
       return
     }
+    if CaptureLane.claims(request) {
+      captureQueue.async { [weak self] in
+        guard let self else { return }
+        if var response = self.captureHandler(request) {
+          response.headers["X-IPU-Lane"] = "capture"
+          self.finish(request, response, started: started, on: connection)
+        } else {
+          self.enqueueCommand(request, started: started, on: connection)
+        }
+      }
+      return
+    }
+    enqueueCommand(request, started: started, on: connection)
+  }
+
+  private func enqueueCommand(_ request: HTTPRequest, started: UInt64, on connection: NWConnection) {
     // One command at a time: the serial command queue blocks on main.sync, so even if XCTest
     // spins the main run loop inside a handler (synthesis, queries) no second request can start.
     commandQueue.async { [weak self] in
       guard let self else { return }
-      let response = DispatchQueue.main.sync { self.mainHandler(request) }
+      let waitedMs = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+      let gone: Bool
+      switch connection.state {
+      case .cancelled, .failed: gone = true
+      default: gone = false
+      }
+      // A command the daemon already gave up on must not run late: a retried tap would land twice.
+      if CommandAge.shouldDrop(method: request.method, waitedMs: waitedMs, connectionGone: gone) {
+        NSLog("ipu-runner: dropped %@ %@ after %.0f ms in the queue (gone=%d)",
+              request.method, request.path, waitedMs, gone ? 1 : 0)
+        var response = HTTPResponse.error(
+          503, "unknown error",
+          String(format: "dropped after %.0f ms waiting behind other commands; nothing was executed", waitedMs))
+        response.headers["X-IPU-Queued-Ms"] = String(format: "%.0f", waitedMs)
+        response.headers["X-IPU-Dropped"] = "1"
+        self.finish(request, response, started: started, on: connection)
+        return
+      }
+      var response = DispatchQueue.main.sync { self.mainHandler(request) }
+      response.headers["X-IPU-Queued-Ms"] = String(format: "%.0f", waitedMs)
       self.finish(request, response, started: started, on: connection)
     }
   }

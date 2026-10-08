@@ -95,8 +95,8 @@ fn read_log(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn any_line(text: &str, mut matches: impl FnMut(&str) -> bool) -> bool {
-    text.lines().any(|line| matches(line))
+fn any_line(text: &str, matches: impl FnMut(&str) -> bool) -> bool {
+    text.lines().any(matches)
 }
 
 fn ordered(line: &str, first: &str, second: &str) -> bool {

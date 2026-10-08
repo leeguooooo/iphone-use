@@ -710,6 +710,13 @@ fn main() -> Result<()> {
     // Only the long-running service earns the unattended-relaunch backoff
     // below; a one-shot query must report and exit at once.
     let unattended_service = matches!(command, Command::Serve);
+    // Long-running modes cap the log files launchd/the supervisor gave them.
+    if matches!(
+        command,
+        Command::Serve | Command::Relay { .. } | Command::SetupNative { .. }
+    ) {
+        server::logcap::spawn_own_stdio_cap();
+    }
     let result = match command {
         Command::Serve => serve(),
         Command::Stop => {
@@ -937,6 +944,7 @@ fn serve() -> Result<()> {
         wda_health: Arc::new(Mutex::new(server::wda::WdaHealth::down())),
         wda_death: Arc::new(Mutex::new(Default::default())),
         wda_health_probe: Arc::new(Mutex::new(None)),
+        settled_frame_prefetch: Arc::new(Mutex::new(None)),
         wda_control_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         // Idle auto-release: start the clock now so a daemon that boots with no
         // one driving releases the phone after the first idle window.

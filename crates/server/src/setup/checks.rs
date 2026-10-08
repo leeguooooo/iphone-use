@@ -59,20 +59,27 @@ pub fn xcode_version() -> String {
         .to_string()
 }
 
-/// [`xcode_version`] cached per selected developer directory: the key is the
-/// directory plus the mtime of its version.plist, so switching or updating
-/// Xcode re-reads it (`xcodebuild -version` costs ~0.4 s per reconnect).
-pub fn xcode_version_cached(state_dir: &Path, xcodebuild: &str) -> String {
+/// Identifies the selected Xcode: its developer directory plus the mtime of
+/// its version.plist, so switching or updating Xcode changes it. Empty when
+/// either cannot be read (callers then skip their cache).
+fn xcode_stamp() -> String {
     use std::os::unix::fs::MetadataExt as _;
     let developer = sys::stdout_of("xcode-select", &["-p"]);
-    let stamp = (!developer.is_empty())
+    (!developer.is_empty())
         .then(|| Path::new(&developer).join("../version.plist"))
         .and_then(|plist| {
             std::fs::metadata(&plist)
                 .ok()
                 .map(|meta| format!("{developer}|{}", meta.mtime()))
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// [`xcode_version`] cached per selected developer directory: the key is the
+/// directory plus the mtime of its version.plist, so switching or updating
+/// Xcode re-reads it (`xcodebuild -version` costs ~0.4 s per reconnect).
+pub fn xcode_version_cached(state_dir: &Path, xcodebuild: &str) -> String {
+    let stamp = xcode_stamp();
     let cache = state_dir.join(".xcode-version.cache");
     let cache_is_link = std::fs::symlink_metadata(&cache).is_ok_and(|m| m.file_type().is_symlink());
     if !stamp.is_empty() && !cache_is_link {
@@ -106,10 +113,30 @@ pub fn xcode_major() -> String {
         .unwrap_or_default()
 }
 
-/// The selected iPhoneOS SDK version, validated.
+/// The selected iPhoneOS SDK version, validated. Cached for the life of the
+/// process per selected Xcode (developer directory + its version.plist mtime):
+/// `xcrun --show-sdk-version` costs ~0.3 s and a round asks more than once.
 pub fn ios_sdk_version() -> Option<String> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(String, String)>> = Mutex::new(None);
+    let stamp = xcode_stamp();
+    if !stamp.is_empty() {
+        if let Some((key, version)) = CACHE.lock().ok().and_then(|cache| cache.clone()) {
+            if key == stamp {
+                return Some(version);
+            }
+        }
+    }
     let version = sys::stdout_of("xcrun", &["--sdk", "iphoneos", "--show-sdk-version"]);
-    valid_os_version(&version).then_some(version)
+    if !valid_os_version(&version) {
+        return None;
+    }
+    if !stamp.is_empty() {
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some((stamp, version.clone()));
+        }
+    }
+    Some(version)
 }
 
 /// Lowest deployment target the selected SDK accepts (its SDKSettings);
@@ -904,11 +931,23 @@ pub fn presence(udid: &str) -> Presence {
         }
         seen.contains(&key)
     };
-    if view == UsbmuxView::Listed || (view == UsbmuxView::NotListed && seen) {
+    if view == UsbmuxView::Listed {
         return presence_from(view, seen, None, udid);
     }
     let json = sys::devicectl_json(10, &["list", "devices"]);
     presence_from(view, seen, json.as_deref(), udid)
+}
+
+/// CoreDevice has a live Wi-Fi tunnel to `udid` right now (the relay can
+/// reach the runner through it; see `crate::tunnel`).
+pub fn wifi_tunnel(udid: &str) -> bool {
+    !udid.is_empty()
+        && sys::devicectl_json(10, &["list", "devices"]).is_some_and(|json| {
+            matches!(
+                crate::tunnel::tunnel_view(&json, udid),
+                crate::tunnel::TunnelView::Connected(_)
+            )
+        })
 }
 
 /// The presence verdict from usbmuxd's view, whether usbmuxd listed the phone
@@ -916,6 +955,8 @@ pub fn presence(udid: &str) -> Presence {
 /// output (`None` when devicectl gave no answer).
 ///
 /// - Listed by usbmuxd: present.
+/// - A live CoreDevice Wi-Fi tunnel: present, even when usbmuxd lost the
+///   phone (the relay reaches the runner through the tunnel).
 /// - Not listed, but listed earlier: absent. CoreDevice's cached state can
 ///   still say `connected` long after the cable is pulled.
 /// - Not listed, and CoreDevice calls it `wired`: absent. A wired phone is
@@ -928,10 +969,19 @@ pub fn presence_from(
     coredevice_json: Option<&str>,
     udid: &str,
 ) -> Presence {
-    match view {
-        UsbmuxView::Listed => return Presence::Present,
-        UsbmuxView::NotListed if seen_in_usbmux => return Presence::Absent,
-        _ => {}
+    if view == UsbmuxView::Listed {
+        return Presence::Present;
+    }
+    if coredevice_json.is_some_and(|json| {
+        matches!(
+            crate::tunnel::tunnel_view(json, udid),
+            crate::tunnel::TunnelView::Connected(_)
+        )
+    }) {
+        return Presence::Present;
+    }
+    if view == UsbmuxView::NotListed && seen_in_usbmux {
+        return Presence::Absent;
     }
     let Some(json) = coredevice_json else {
         return Presence::Unknown;
@@ -1104,8 +1154,7 @@ pub fn doctor_xcode_compat(ctx: &Ctx) -> bool {
             .and_then(|text| {
                 text.lines()
                     .filter_map(|line| line.strip_prefix("IPHONEOS_DEPLOYMENT_TARGET = "))
-                    .filter(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
-                    .last()
+                    .rfind(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
                     .map(str::to_string)
             })
             .unwrap_or_default();
@@ -1312,6 +1361,37 @@ attributes:
         assert_eq!(
             presence_from(Unreadable, false, None, usb_phone),
             Presence::Unknown
+        );
+    }
+
+    #[test]
+    fn a_live_wifi_tunnel_keeps_a_phone_present_after_the_cable_is_pulled() {
+        // guouli on hardware: launched over USB, unplugged, CoreDevice keeps a
+        // Wi-Fi tunnel the relay reaches the runner through.
+        let tunnel = r#"{"result":{"devices":[
+            {"hardwareProperties":{"udid":"00008110-001C18203AD2401E"},
+             "connectionProperties":{"tunnelState":"connected","transportType":"localNetwork",
+                                     "tunnelIPAddress":"fd89:9bfc:f458::1"}}
+        ]}}"#;
+        let phone = "00008110-001C18203AD2401E";
+        use UsbmuxView::{NotListed, Unreadable};
+        assert_eq!(
+            presence_from(NotListed, true, Some(tunnel), phone),
+            Presence::Present
+        );
+        assert_eq!(
+            presence_from(Unreadable, true, Some(tunnel), phone),
+            Presence::Present
+        );
+        // A stale wired record with an address is still not a Wi-Fi tunnel.
+        let stale_wired = r#"{"result":{"devices":[
+            {"hardwareProperties":{"udid":"00008110-001C18203AD2401E"},
+             "connectionProperties":{"tunnelState":"connected","transportType":"wired",
+                                     "tunnelIPAddress":"fd5a:17ea:6b83::1"}}
+        ]}}"#;
+        assert_eq!(
+            presence_from(NotListed, true, Some(stale_wired), phone),
+            Presence::Absent
         );
     }
 

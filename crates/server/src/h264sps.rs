@@ -126,10 +126,9 @@ pub fn low_delay_sps(nal: &[u8]) -> Option<Vec<u8>> {
     let mut w = BitWriter::default();
     let vui_present = r.bits(1)? == 1;
     if vui_present {
-        if r.bits(1)? == 1 {
-            if r.bits(8)? == 255 {
-                r.bits(32)?;
-            }
+        // aspect_ratio_info_present, then Extended_SAR (255) carries 32 bits.
+        if r.bits(1)? == 1 && r.bits(8)? == 255 {
+            r.bits(32)?;
         }
         if r.bits(1)? == 1 {
             r.bits(1)?;
@@ -296,7 +295,7 @@ struct BitWriter {
 impl BitWriter {
     fn put(&mut self, value: u32, count: u32) {
         for index in (0..count).rev() {
-            if self.bit % 8 == 0 {
+            if self.bit.is_multiple_of(8) {
                 self.bytes.push(0);
             }
             if (value >> index) & 1 == 1 {

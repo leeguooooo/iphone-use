@@ -341,5 +341,60 @@ do {
   check(!TapBounds.onScreen(CGPoint(x: 10, y: 10), .zero), "no screen size: nothing is on it")
 }
 
+// MARK: - Alert scan (alerts beside a web sheet)
+
+do {
+  // SpringBoard 30, GitHub 512 under the sheet, SafariViewService 700 (the read target).
+  let pids = AlertScan.candidatePIDs(springBoard: 30, target: 700, active: [30, 512, 700])
+  check(pids == [30, 700, 512], "SpringBoard, then the target, then the app under the sheet")
+  check(AlertScan.othersThan(target: 700, in: pids) == [30, 512],
+        "with a sheet in front, the app underneath is searched too, not only SpringBoard")
+  let single = AlertScan.candidatePIDs(springBoard: 30, target: 512, active: [30, 512])
+  check(AlertScan.othersThan(target: 512, in: single) == [30], "one app in front: only SpringBoard beside it")
+  check(AlertScan.candidatePIDs(springBoard: nil, target: 0, active: [0, 512]) == [512], "pid 0 is skipped")
+  check(AlertScan.othersThan(target: 30, in: AlertScan.candidatePIDs(springBoard: 30, target: 30, active: [30])).isEmpty,
+        "SpringBoard in front with nothing else active: nothing else to search")
+}
+
+// MARK: - Truthful answers (stale commands, off-screen actions, alert taps)
+
+do {
+  check(CommandAge.shouldDrop(method: "POST", waitedMs: 12_000, connectionGone: false),
+        "a tap that waited 12 s behind other commands is dropped, not run late")
+  check(!CommandAge.shouldDrop(method: "POST", waitedMs: 800, connectionGone: false),
+        "a tap that waited under a second still runs")
+  check(!CommandAge.shouldDrop(method: "GET", waitedMs: 12_000, connectionGone: false),
+        "a slow read is still answered")
+  check(CommandAge.shouldDrop(method: "GET", waitedMs: 5, connectionGone: true),
+        "nobody to answer: even a read is skipped")
+
+  let screen = CGSize(width: 440, height: 956)
+  let tap: [[[String: Any]]] = [[["type": "down", "x": 200.0, "y": 300.0], ["type": "up", "x": 200.0, "y": 300.0]]]
+  check(TapBounds.firstOffScreen(tap, screen) == nil, "an on-screen tap passes the bounds check")
+  let swipeOff: [[[String: Any]]] = [[["type": "down", "x": 200.0, "y": 300.0], ["type": "move", "x": 200.0, "y": 1200.0]]]
+  check(TapBounds.firstOffScreen(swipeOff, screen) == CGPoint(x: 200, y: 1200), "a move below the screen is reported")
+  check(TapBounds.firstOffScreen([[["type": "pause"]]], screen) == nil, "steps without coordinates are ignored")
+
+  check(AlertMatch.same("Allow?", ["Don't Allow", "Allow"], "Allow?", ["Don't Allow", "Allow"]),
+        "the same text and buttons: the alert is still there")
+  check(!AlertMatch.same("Allow?", ["Don't Allow", "Allow"], "Are you sure?", ["Cancel", "Delete"]),
+        "a follow-up alert is a different alert")
+}
+
+// MARK: - Capture lane
+
+do {
+  func request(_ method: String, _ path: String) -> HTTPRequest {
+    HTTPRequest(method: method, path: path, query: [:], headers: [:], body: Data())
+  }
+  check(CaptureLane.claims(request("GET", "/screenshot")), "a screenshot skips the command queue")
+  check(CaptureLane.claims(request("GET", "/session/ABC/screenshot")), "so does a session-scoped screenshot")
+  check(CaptureLane.claims(request("GET", "/session/ABC/wda/settle")), "and on-device settle")
+  check(!CaptureLane.claims(request("GET", "/source")), "a tree read stays on main")
+  check(!CaptureLane.claims(request("POST", "/screenshot")), "only reads take the capture lane")
+  check(!CaptureLane.claims(request("GET", "/session/ABC/element/E1/screenshot")),
+        "an element screenshot is not the screen capture")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)

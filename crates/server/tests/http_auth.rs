@@ -1087,6 +1087,55 @@ fn direct_browser_control_timeout_after_dispatch_is_unknown_504() {
 }
 
 #[test]
+fn direct_browser_control_timeout_during_lookups_is_retry_safe_408() {
+    // The deadline fires while the tap is still reading the screen size, a
+    // read-only lookup. Nothing that can change the screen went out, so the
+    // answer is `not_sent` / retry-safe, not `outcome_unknown`.
+    block(async {
+        let action_count = Arc::new(AtomicUsize::new(0));
+        let observed = action_count.clone();
+        let (base, server) = mock_wda(2, move |request, _| {
+            if request.starts_with("POST /session ") {
+                Some((
+                    std::time::Duration::ZERO,
+                    r#"{"value":{"sessionId":"SESSION"}}"#.to_string(),
+                ))
+            } else if request.contains("/window/size") {
+                Some((
+                    std::time::Duration::from_millis(600),
+                    r#"{"value":{"width":390,"height":844}}"#.to_string(),
+                ))
+            } else {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Some((std::time::Duration::ZERO, r#"{"value":null}"#.to_string()))
+            }
+        });
+        let app = http::router(build_state_with_wda(&base));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control")
+                    .header("x-phone-control", "1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"type":"tap","x":1.0,"y":1.0,"ttl_ms":150}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "not_sent", "{json}");
+        assert_eq!(json["retry_safe"], true, "{json}");
+        assert_eq!(action_count.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
 fn agent_elements_surfaces_a_populated_system_alert() {
     block(async {
         // A single button plus a live UIAlertController. The flattened tree
@@ -2090,6 +2139,53 @@ fn externally_managed_released_wda_is_not_bootstrapped_locally() {
         assert!(String::from_utf8_lossy(&body).contains("wda_is_externally_managed"));
         assert!(observed.released.load(std::sync::atomic::Ordering::Acquire));
         assert!(!observed.wda_lifecycle.is_reconnecting());
+    });
+}
+
+/// `/agent/input` and `/agent/actions` pass one readiness check and answer
+/// it the same way: JSON, the same error code, nothing sent.
+#[test]
+fn input_and_actions_refuse_a_released_phone_with_the_same_json() {
+    block(async {
+        let state = build_state(None);
+        state
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+        let app = http::router(state);
+        for (uri, body) in [
+            ("/agent/input", r#"{"type":"tap","x":0.1,"y":0.1}"#),
+            (
+                "/agent/actions",
+                r#"{"steps":[{"kind":"action","action":{"type":"tap","x":0.1,"y":0.1}}]}"#,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("x-phone-control", "1")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+            assert_eq!(
+                resp.headers()[axum::http::header::CONTENT_TYPE],
+                "application/json",
+                "{uri}"
+            );
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["error"], "wda_is_externally_managed", "{uri}: {json}");
+            assert_eq!(json["outcome"], "not_sent", "{uri}: {json}");
+            assert_eq!(json["retry_safe"], true, "{uri}: {json}");
+            if uri == "/agent/actions" {
+                assert_eq!(json["batch_outcome"], "nothing_applied", "{json}");
+            }
+        }
     });
 }
 

@@ -54,6 +54,18 @@ jobs:
       # `set -o pipefail` matters in every step below: a `cargo … | grep`
       # reports the grep's status, so a compilation failure can otherwise be
       # reported as a pass.
+      - name: cargo clippy
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pinned, not stable: every new stable adds lints, and -D warnings
+          # would then fail unrelated PRs on code nobody touched (1.97's
+          # chunks_exact/try_update lints did on the first run).
+          # TODO: bump this with the toolchain, fixing what the new lints find.
+          rustup toolchain install 1.96.0 --profile minimal --component clippy
+          cargo +1.96.0 clippy --workspace --locked -- -D warnings
+
       - name: cargo test -p server
         timeout-minutes: 15
         shell: bash
@@ -181,6 +193,8 @@ jobs:
           bash scripts/test-install-release-transaction.sh
           bash scripts/test-install-cli-link.sh
           bash scripts/test-install-runner-sources.sh
+          bash scripts/test-install-named-swap.sh
+          bash scripts/test-install-adhoc-signing.sh
           bash scripts/test-uninstall-safety.sh
           bash scripts/test-setup-wda-shim.sh
           python3 scripts/test-auto-update.py

@@ -7,6 +7,7 @@ use super::checks;
 use super::ctx::Ctx;
 use super::sys;
 use super::term::{info, ok, warn, BOLD, RST};
+use super::usbdiag;
 
 /// Exit 0 when nothing blocks setup, 1 otherwise.
 pub fn run(ctx: &Ctx) -> i32 {
@@ -117,14 +118,25 @@ pub fn run(ctx: &Ctx) -> i32 {
     let absent = !ctx.udid.is_empty()
         && !checks::on_usb(&ctx.udid, &usb)
         && checks::presence(&ctx.udid) == checks::Presence::Absent;
+    // What the USB layer says when usbmuxd cannot give us a usable phone.
+    let diagnosis = usbdiag::probe(&usb);
     if absent {
         warn(&format!(
             "X configured target {} is not connected to this Mac (usbmuxd does not list it; CoreDevice reports it unavailable) — plug it in over USB (or join the same Wi-Fi) and unlock it",
             ctx.udid
         ));
+        if let Some(diagnosis) = &diagnosis {
+            warn(&format!("  USB: {}", diagnosis.message()));
+        }
         fail = true;
     } else if !ctx.lan() && usb.is_empty() {
         warn("X the default device layer requires an iPhone connected over USB");
+        if let Some(diagnosis) = &diagnosis {
+            warn(&format!("  USB: {}", diagnosis.message()));
+        }
+        fail = true;
+    } else if let Some(diagnosis @ usbdiag::Diagnosis::NotTrusted { .. }) = &diagnosis {
+        warn(&format!("X {}", diagnosis.message()));
         fail = true;
     } else if !ctx.lan() && usb.len() > 1 && ctx.udid.is_empty() {
         warn(&format!(
@@ -202,6 +214,16 @@ pub fn run(ctx: &Ctx) -> i32 {
         warn("X WDA_ALLOW_LAN=1 needs a USB relay or socat");
         fail = true;
     }
+    if relay.is_some()
+        && !ctx.udid.is_empty()
+        && checks::transport(&ctx.udid) != checks::Transport::Usb
+    {
+        if checks::wifi_tunnel(&ctx.udid) {
+            ok("Wi-Fi: the relay reaches this iPhone through its CoreDevice tunnel (encrypted, this Mac only)");
+        } else {
+            println!("  ~ Wi-Fi: no CoreDevice tunnel to this iPhone right now; over Wi-Fi the relay needs one (Xcode or devicectl opens it while the phone is on the same network)");
+        }
+    }
     if let Some(port) = ctx.wda_port_number() {
         // Any complete answer counts here (`curl -s`, not `-f`).
         if sys::http_get(
@@ -217,8 +239,12 @@ pub fn run(ctx: &Ctx) -> i32 {
     }
     // Caveats that matter only when something above goes wrong.
     println!("{BOLD}Notes{RST}");
-    println!("  • The device runner on the iPhone has no password of its own. The Mac relays it on 127.0.0.1 only;");
-    println!("    WDA_ALLOW_LAN=1 (a socat relay over Wi-Fi) is an explicit, unsafe fallback for trusted networks.");
+    println!("  • The device runner on the iPhone has no password of its own. The Mac relays it on 127.0.0.1 only,");
+    println!("    over USB or, off the cable, through CoreDevice's encrypted Wi-Fi tunnel (launch over USB once: iOS asks");
+    println!(
+        "    for the passcode to allow UI automation, and cannot show that prompt over Wi-Fi)."
+    );
+    println!("    WDA_ALLOW_LAN=1 (a socat relay to the phone's LAN address) is an explicit, unsafe last resort.");
     println!("  • Cloudflare WARP or another tunnel VPN can break Xcode's connection to the phone; disconnect it during setup if setup stalls.");
     if fail {
         warn("fix the X items above, then re-run");
