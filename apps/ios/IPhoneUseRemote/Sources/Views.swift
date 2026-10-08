@@ -121,7 +121,7 @@ struct ConnectView: View {
                     .disabled(model.address.isEmpty || password.isEmpty)
                 }
             }
-            .navigationTitle("iPhone Use")
+            .navigationTitle("Phone Use Remote")
             .fullScreenCover(isPresented: $scanning) { ScanSheet(model: model) }
         }
     }

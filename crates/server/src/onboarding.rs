@@ -652,7 +652,7 @@ pub fn run_login(target: &Target, open: bool) -> Result<i32> {
     }
     if let Some(lan_url) = link["lan_url"].as_str() {
         if let Some(qr) = terminal_qr(lan_url) {
-            println!("\nOn the iPhone, scan this with the Camera to control it from Safari or the iPhone Use app ({minutes} min, one use):\n");
+            println!("\nOn the iPhone, scan this with the Camera to control it from Safari or the Phone Use Remote app ({minutes} min, one use):\n");
             println!("{qr}");
         }
     }

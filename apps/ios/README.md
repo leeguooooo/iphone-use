@@ -1,4 +1,4 @@
-# iPhone Use — iOS remote
+# Phone Use Remote — iOS remote
 
 Native iOS app (SwiftUI, iOS 17+) for driving a phone that the iphone-use daemon serves.
 It logs in with the daemon's control password, shows the screen as H.264 from

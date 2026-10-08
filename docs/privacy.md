@@ -1,13 +1,13 @@
-# iPhone Use — Privacy Policy
+# Phone Use Remote — Privacy Policy
 
 Last updated: 2026-10-07 · [中文](privacy.zh-CN.md)
 
-This policy covers the **iPhone Use** iOS app (bundle `com.leeguoo.iphone-use.remote`) and the
+This policy covers the **Phone Use Remote** iOS app (bundle `com.leeguoo.iphone-use.remote`) and the
 open-source [iphone-use](https://github.com/leeguooooo/iphone-use) software it connects to.
 
 ## What the app does
 
-iPhone Use is a remote control for a phone that **your own Mac** drives with the iphone-use daemon.
+Phone Use Remote is a remote control for a phone that **your own Mac** drives with the iphone-use daemon.
 The app shows that phone's screen and sends your taps, swipes and text to it.
 
 ## Data we collect

@@ -1486,8 +1486,8 @@ async fn pair_page(
     let app_link = format!("iphoneuse://pair?u={}&amp;c={code}", percent_encode(&base));
     let body = format!(
         r#"<h1>连接这台 Mac 上的 iPhone</h1>
-<p>装了 iPhone Use App 就用 App 打开，画面更流畅；没装也可以直接在浏览器里控制。</p>
-<a href="{app_link}">在 iPhone Use App 中打开</a>
+<p>装了 Phone Use Remote App 就用 App 打开，画面更流畅；没装也可以直接在浏览器里控制。</p>
+<a href="{app_link}">在 Phone Use Remote App 中打开</a>
 <form method="POST" action="/pair"><input type="hidden" name="c" value="{code}"><button type="submit">在浏览器里控制</button></form>"#
     );
     with_security_headers(Html(render_pair_page(&body)).into_response())
