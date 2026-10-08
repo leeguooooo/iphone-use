@@ -930,6 +930,7 @@ fn serve() -> Result<()> {
             .then(|| server::video::VideoHub::new(mjpeg_url.clone())),
         mjpeg_url: Some(mjpeg_url),
         wda_actionable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        wda_read_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pairing: Arc::new(server::pairing::Pairing::new(
             !server::pairing::is_loopback_host(&cfg.host),
         )),

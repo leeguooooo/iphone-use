@@ -384,6 +384,13 @@ impl WdaClient {
         self.source_excluding(None).await
     }
 
+    /// Can the runner read the screen right now? A light tree read (no
+    /// visibility or accessibility attributes), used to tell a runner that
+    /// only answers `/status` from one that can do its job.
+    pub async fn read_probe(&mut self) -> bool {
+        self.source_excluding(Some("visible,accessible")).await.is_ok()
+    }
+
     /// [`Self::source`] with WDA's `excluded_attributes` (comma-separated
     /// attribute names such as `visible`), which WDA then never computes.
     async fn source_excluding(&mut self, excluded: Option<&str>) -> Result<serde_json::Value> {
