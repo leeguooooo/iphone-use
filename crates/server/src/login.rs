@@ -880,6 +880,26 @@ async fn close_autofill_sheet(w: &mut WdaClient) -> Result<bool, LoginError> {
     Ok(!autofill_sheet_up(&rows))
 }
 
+/// The current frame of `row` in a fresh read: the row of the same kind and
+/// label closest to where it was (a zoom moves every field), when its frame is
+/// usable.
+fn live_frame(rows: &[ElementRow], row: &ElementRow) -> Option<[f64; 4]> {
+    let centre = |r: &[f64; 4]| (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    let (ox, oy) = centre(&row.rect);
+    rows.iter()
+        .filter(|r| {
+            r.kind == row.kind && r.label == row.label && r.rect[2] > 0.0 && r.rect[3] > 0.0
+        })
+        .min_by(|a, b| {
+            let d = |r: &ElementRow| {
+                let (x, y) = centre(&r.rect);
+                (x - ox).powi(2) + (y - oy).powi(2)
+            };
+            d(a).total_cmp(&d(b))
+        })
+        .map(|r| r.rect)
+}
+
 /// Replace a field's contents with a secret; nothing read is returned.
 ///
 /// The direct element write comes first: native fields take it. Web inputs
@@ -903,9 +923,26 @@ async fn fill(
     let _ = w.clear_element(&id).await;
     // Tap the element where it is now, not where the tree read saw it: a page
     // that shifted in between turned a frame tap into a tap on another field.
-    w.click_element(&id)
-        .await
-        .map_err(|_| phone_error(&format!("{what} focus")))?;
+    // A pointer tap at its live frame, not an element click: in a web sign-in
+    // sheet (SafariViewService) the element click acknowledged without moving
+    // focus, so the password was typed into the account field (hardware, 17
+    // Pro Max, GitHub). The element click is only the fallback.
+    // Where the field is now comes from a fresh tree read (same kind and label,
+    // nearest to where it was): in the sheet, element_rect disagreed with the
+    // tree after Safari zoomed, and a tap there focused the other field.
+    let live = match w.elements().await {
+        Ok(rows) => live_frame(&rows, row),
+        Err(_) => None,
+    };
+    let focused = match live {
+        Some([x, y, width, height]) => w.tap_point(x + width / 2.0, y + height / 2.0).await.is_ok(),
+        None => false,
+    };
+    if !focused {
+        w.click_element(&id)
+            .await
+            .map_err(|_| phone_error(&format!("{what} focus")))?;
+    }
     tokio::time::sleep(Duration::from_millis(800)).await;
     // Never type while the system password sheet covers the page: the keys go
     // to whatever field was focused before, in clear text.
@@ -1001,6 +1038,62 @@ fn screen_key(rows: &[ElementRow]) -> Vec<(String, String, [i64; 4])> {
             )
         })
         .collect()
+}
+
+/// Titles of iOS's "save / update this password?" prompt that follows a web
+/// sign-in (hardware, 17 Pro Max, GitHub's sheet: 密码 / Bitwarden / 以后).
+const SAVE_PROMPT_TITLES: &[&str] = &[
+    "保存密码？",
+    "更新密码？",
+    "儲存密碼？",
+    "更新密碼？",
+    "Save Password?",
+    "Update Password?",
+    "パスワードを保存しますか?",
+    "パスワードをアップデートしますか?",
+];
+const LATER_LABELS: &[&str] = &["以后", "稍后", "Not Now", "今はしない", "以後"];
+
+/// The "later" button of a save / update password prompt on screen.
+fn save_prompt_later(rows: &[ElementRow]) -> Option<usize> {
+    let prompt = rows.iter().any(|r| {
+        matches!(r.kind.as_str(), "Alert" | "StaticText")
+            && SAVE_PROMPT_TITLES.contains(&r.label.trim())
+    });
+    if !prompt {
+        return None;
+    }
+    rows.iter()
+        .position(|r| r.kind == "Button" && LATER_LABELS.contains(&r.label.trim()))
+}
+
+/// Decline iOS's offers to save or update the password after a submit. The
+/// vault already holds it, and choosing a password manager there opened its
+/// unlock sheet over the page (hardware: Bitwarden asked for its master
+/// password). Returns the screen after, when a prompt was declined.
+async fn decline_save_password(
+    w: &mut WdaClient,
+    rows: &[ElementRow],
+) -> Result<Option<Vec<ElementRow>>, LoginError> {
+    let mut current = rows.to_vec();
+    let mut declined = false;
+    // Save and update can come one after the other.
+    for _ in 0..2 {
+        let Some(later) = save_prompt_later(&current) else {
+            break;
+        };
+        tap_row(w, &current[later]).await?;
+        declined = true;
+        current = next_screen(w, &current, Duration::from_secs(5)).await;
+    }
+    Ok(declined.then_some(current))
+}
+
+/// Only the app's root row: something the runner cannot read covers the
+/// screen (a password manager's extension, for one), so nothing on it can be
+/// concluded.
+fn unreadable(rows: &[ElementRow]) -> bool {
+    rows.iter().filter(|r| r.kind != "Application").count() == 0
 }
 
 /// Wait for the screen to change after a tap, then for it to hold still.
@@ -1108,9 +1201,11 @@ fn sheet_host(rows: &[ElementRow]) -> Option<String> {
         .filter(|r| r.rect[1] < height * 0.25)
         .flat_map(|r| [Some(r.label.as_str()), r.value.as_deref()])
         .flatten()
-        .map(str::trim)
         .find_map(|text| {
-            let lower = text.to_ascii_lowercase();
+            // Safari's address bar reads "\u{200e}github.com": a bidi mark
+            // that trim() keeps (found on hardware), so strip format marks.
+            let text: String = text.chars().filter(|c| !is_format_mark(*c)).collect();
+            let lower = text.trim().to_ascii_lowercase();
             let looks_like_host = !lower.contains(' ')
                 && lower.contains('.')
                 && lower
@@ -1127,6 +1222,40 @@ fn sheet_host(rows: &[ElementRow]) -> Option<String> {
                     });
             looks_like_host.then(|| uri_host(&lower)).flatten()
         })
+}
+
+/// Invisible bidi and format marks (LRM/RLM, embeddings, isolates, BOM).
+fn is_format_mark(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
+    )
+}
+
+/// Among equally good matches, the entries named after the page host itself
+/// (`github.com` beats an entry that merely lists github.com among its URIs,
+/// e.g. a token entry for another tool). Unchanged when none or all are.
+fn prefer_named_after_host<'a>(
+    found: Vec<&'a VaultEntry>,
+    hosts: &[String],
+) -> Vec<&'a VaultEntry> {
+    if found.len() < 2 || hosts.is_empty() {
+        return found;
+    }
+    let named: Vec<&VaultEntry> = found
+        .iter()
+        .copied()
+        .filter(|e| {
+            let name = e.name.trim().to_ascii_lowercase();
+            let name = name.trim_start_matches("www.");
+            hosts.iter().any(|h| h.trim_start_matches("www.") == name)
+        })
+        .collect();
+    if named.is_empty() {
+        found
+    } else {
+        named
+    }
 }
 
 /// Among equally good matches, entries that hold a username: a site's
@@ -1158,7 +1287,10 @@ fn pick_entry<'a>(
     let matches = match &request.item {
         Some(item) => by_item(entries, item, request.user.as_deref()),
         None => {
-            let found = prefer_with_username(candidates(entries, bundle, app_name, extra_hosts));
+            let found = prefer_with_username(prefer_named_after_host(
+                candidates(entries, bundle, app_name, extra_hosts),
+                extra_hosts,
+            ));
             match &request.user {
                 Some(user) => found
                     .into_iter()
@@ -1353,6 +1485,9 @@ pub async fn sign_in(
             };
             submitted = true;
             rows = next_screen(w, &before, Duration::from_secs(8)).await;
+            if let Some(after) = decline_save_password(w, &rows).await? {
+                rows = after;
+            }
         }
     }
     if filled.is_empty() {
@@ -1429,6 +1564,14 @@ fn done(
     hint: &str,
 ) -> Value {
     let after = read_form(rows);
+    // A screen the runner cannot read proves nothing either way (hardware: a
+    // password manager's sheet hid the form and it read as "gone").
+    let blind = submitted && unreadable(rows);
+    let still: Value = if blind {
+        Value::Null
+    } else {
+        json!(submitted && after.password.is_some())
+    };
     json!({
         "ok": true,
         "entry": entry.name,
@@ -1436,9 +1579,12 @@ fn done(
         "account": entry.user.as_deref().map(mask_account),
         "filled": filled,
         "submitted": submitted,
-        "login_form_still_visible": submitted && after.password.is_some(),
+        "login_form_still_visible": still,
+        "screen_unreadable": blind,
         "needs_code": needs_code.map(|via| json!({ "via": via })),
-        "hint": if submitted && after.password.is_some() {
+        "hint": if blind {
+            "the screen could not be read after the submit (a system or password-manager sheet may cover it): take a screenshot before assuming the login went through"
+        } else if submitted && after.password.is_some() {
             "the login form is still on screen: read it for an error (wrong password, captcha) and tell the user"
         } else {
             hint
@@ -1858,6 +2004,116 @@ mod tests {
             one.id, "a",
             "the presenting app's bundle implies github.com"
         );
+    }
+
+    #[test]
+    fn a_save_password_prompt_is_declined_and_a_blank_screen_proves_nothing() {
+        // Hardware, GitHub's web sheet after Sign in: iOS asks where to update
+        // the password (密码 / Bitwarden / 以后); "later" is the only choice taken.
+        let r = |kind: &str, label: &str| ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            rect: [0.0, 400.0, 300.0, 44.0],
+            ..Default::default()
+        };
+        let prompt = vec![
+            r("Application", "Safari浏览器"),
+            r("Alert", "更新密码？"),
+            r("StaticText", "选取密码的更新位置。"),
+            r("Button", "密码"),
+            r("Button", "Bitwarden"),
+            r("Button", "以后"),
+        ];
+        assert_eq!(save_prompt_later(&prompt), Some(5));
+        let page = vec![r("Application", "Safari浏览器"), r("Button", "以后")];
+        assert_eq!(
+            save_prompt_later(&page),
+            None,
+            "a page's own 以后 is not the prompt"
+        );
+        // A password manager's sheet over the page reads as the root alone.
+        assert!(unreadable(&[r("Application", "Safari浏览器")]));
+        assert!(unreadable(&[]));
+        assert!(!unreadable(&prompt));
+    }
+
+    #[test]
+    fn a_field_is_found_again_where_it_is_now_after_a_zoom() {
+        // Hardware, GitHub's web sheet: Safari zoomed after the account was
+        // typed and every field moved; the password field is the same-kind,
+        // same-label row nearest to where it was.
+        let field = |kind: &str, label: &str, y: f64| ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            rect: [16.0, y, 408.0, 40.0],
+            ..Default::default()
+        };
+        let before = field("SecureTextField", "Password", 480.0);
+        let now = vec![
+            field("TextField", "Username or email address", 249.0),
+            field("SecureTextField", "Password", 330.0),
+            field("SecureTextField", "Password", 900.0),
+        ];
+        assert_eq!(live_frame(&now, &before), Some([16.0, 330.0, 408.0, 40.0]));
+        assert_eq!(live_frame(&now[..1], &before), None);
+    }
+
+    #[test]
+    fn a_real_sheet_address_bar_and_a_second_entry_for_the_same_host() {
+        // Hardware, 17 Pro Max (v0.17.6): the address bar is a Button whose
+        // value starts with an LRM mark, and the vault holds a second entry
+        // with a username for github.com (another tool's token entry).
+        let row = |kind: &str, label: &str, value: Option<&str>, y: f64| ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            value: value.map(str::to_string),
+            rect: [26.0, y, 388.0, 44.0],
+            ..Default::default()
+        };
+        let rows = vec![
+            ElementRow {
+                kind: "Application".into(),
+                label: "Safari浏览器".into(),
+                rect: [0.0, 0.0, 440.0, 956.0],
+                ..Default::default()
+            },
+            row("Button", "地址", Some("\u{200e}github.com"), 78.0),
+            row("StaticText", "Sign in to GitHub", None, 300.0),
+        ];
+        assert_eq!(sheet_host(&rows).as_deref(), Some("github.com"));
+        let entries = vec![
+            entry(
+                "tok",
+                "cookie-use sync",
+                "cookie@x.com",
+                &["https://github.com"],
+            ),
+            entry(
+                "gh",
+                "github.com",
+                "me@x.com",
+                &["https://github.com/login"],
+            ),
+        ];
+        let request = LoginRequest::default();
+        let one = pick_entry(
+            &entries,
+            &request,
+            Some("com.github.stormbreaker.prod"),
+            "",
+            &["github.com".into()],
+        )
+        .unwrap();
+        assert_eq!(one.id, "gh", "the entry named after the page host wins");
+        // Without a page host nothing breaks the tie: still ambiguous.
+        let tied = pick_entry(
+            &entries,
+            &request,
+            Some("com.github.stormbreaker.prod"),
+            "",
+            &[],
+        );
+        assert!(tied.is_err());
     }
 
     #[test]
