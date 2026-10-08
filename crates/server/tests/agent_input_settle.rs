@@ -1375,3 +1375,107 @@ fn a_hung_on_phone_settle_ends_at_the_observation_deadline() {
         );
     });
 }
+
+/// A runner that answers every connection on its own thread, so one slow
+/// reply (a screenshot) does not hold up the others the way the shared
+/// sequential mock does.
+fn concurrent_runner(
+    respond: impl Fn(&str) -> (Duration, String) + Send + Sync + 'static,
+) -> String {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let respond = Arc::new(respond);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let respond = Arc::clone(&respond);
+            std::thread::spawn(move || {
+                stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                let mut buffer = [0_u8; 8192];
+                let Ok(read) = stream.read(&mut buffer) else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let (delay, body) = respond(&request);
+                std::thread::sleep(delay);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    base
+}
+
+/// The background capture of the settled screen holds the runner client for
+/// a whole screenshot; the next action cancels it instead of waiting.
+#[test]
+fn the_next_action_cancels_the_background_capture_of_the_settled_screen() {
+    use base64::Engine as _;
+    block(async {
+        let png = server::redaction::encode_png(&server::redaction::Image {
+            width: 4,
+            height: 8,
+            rgba: vec![90; 4 * 8 * 4],
+        })
+        .unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+        let sources = Arc::new(AtomicUsize::new(0));
+        let seen = sources.clone();
+        let base = concurrent_runner(move |request| {
+            let reply = |body: &str| (Duration::ZERO, body.to_string());
+            if is_session(request) {
+                return reply(SESSION);
+            }
+            if is_source(request) {
+                seen.fetch_add(1, Ordering::AcqRel);
+                return reply(&simple_tree("搜索"));
+            }
+            if request.contains("/screenshot") {
+                // During the settle check: no frame, so the tree decides and
+                // the settled frame is captured afterwards, slowly.
+                if seen.load(Ordering::Acquire) < 2 {
+                    return reply(r#"{"value":{"error":"unable to capture","message":"no"}}"#);
+                }
+                return (
+                    Duration::from_millis(2500),
+                    format!(r#"{{"value":"{encoded}"}}"#),
+                );
+            }
+            if request.contains("/wda/settle") {
+                return reply(r#"{"value":{"error":"unknown command","message":"no"}}"#);
+            }
+            if request.contains("/wda/apps/list") {
+                return reply(r#"{"value":[]}"#);
+            }
+            if request.contains("/alert/") {
+                return reply(r#"{"value":{"error":"no such alert","message":"no alert"}}"#);
+            }
+            reply(r#"{"value":null}"#)
+        });
+        let state = build_state_with_wda(&base);
+
+        let (status, json, _) = request_json(
+            &state,
+            "POST",
+            "/agent/input?return=delta",
+            Some(r#"{"type":"home"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["settle"]["reason"], "stable", "{json}");
+        // Let the background capture take the client.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let (status, json, elapsed) =
+            request_json(&state, "POST", "/agent/input", Some(r#"{"type":"home"}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "the action queued behind the background capture: {elapsed:?}"
+        );
+    });
+}
