@@ -381,5 +381,20 @@ do {
         "a follow-up alert is a different alert")
 }
 
+// MARK: - Capture lane
+
+do {
+  func request(_ method: String, _ path: String) -> HTTPRequest {
+    HTTPRequest(method: method, path: path, query: [:], headers: [:], body: Data())
+  }
+  check(CaptureLane.claims(request("GET", "/screenshot")), "a screenshot skips the command queue")
+  check(CaptureLane.claims(request("GET", "/session/ABC/screenshot")), "so does a session-scoped screenshot")
+  check(CaptureLane.claims(request("GET", "/session/ABC/wda/settle")), "and on-device settle")
+  check(!CaptureLane.claims(request("GET", "/source")), "a tree read stays on main")
+  check(!CaptureLane.claims(request("POST", "/screenshot")), "only reads take the capture lane")
+  check(!CaptureLane.claims(request("GET", "/session/ABC/element/E1/screenshot")),
+        "an element screenshot is not the screen capture")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)
