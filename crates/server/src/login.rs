@@ -407,9 +407,11 @@ pub fn candidates<'a>(
     entries: &'a [VaultEntry],
     bundle: Option<&str>,
     app_name: &str,
+    extra_hosts: &[String],
 ) -> Vec<&'a VaultEntry> {
     let mut tiers: [Vec<&VaultEntry>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    let hosts = bundle.map(bundle_hosts).unwrap_or_default();
+    let mut hosts = bundle.map(bundle_hosts).unwrap_or_default();
+    hosts.extend(extra_hosts.iter().cloned());
     let ios_uri = bundle.map(|b| format!("iosapp://{}", b.to_ascii_lowercase()));
     let app = app_name.trim().to_lowercase();
     for entry in entries {
@@ -1071,16 +1073,92 @@ static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 const SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_CODE_REQUESTS: u8 = 2;
 
+/// System view services that present web pages over an app (the in-app
+/// Safari and web sign-in sheets). While one is in front, the vault entry
+/// belongs to the app presenting it, not to the service.
+const VIEW_SERVICES: &[&str] = &["com.apple.SafariViewService"];
+
+/// The app to match vault entries for, from the active apps in order (the
+/// one in front first), and whether a web sheet is presenting over it.
+/// Hardware, 17 Pro Max: GitHub's web sign-in sheet put
+/// `com.apple.SafariViewService` first and GitHub second.
+fn presenting_app(active: &[String]) -> (Option<String>, bool) {
+    match active.first() {
+        Some(first) if VIEW_SERVICES.contains(&first.as_str()) => (
+            active
+                .iter()
+                .skip(1)
+                .find(|b| !VIEW_SERVICES.contains(&b.as_str()))
+                .cloned(),
+            true,
+        ),
+        first => (first.cloned(), false),
+    }
+}
+
+/// The page host a web sheet shows in its address bar (top quarter of the
+/// screen), e.g. `github.com`: the strongest hint for a web sign-in.
+fn sheet_host(rows: &[ElementRow]) -> Option<String> {
+    let height = rows
+        .iter()
+        .find(|r| r.kind == "Application")
+        .map(|r| r.rect[3])
+        .filter(|h| *h > 0.0)?;
+    rows.iter()
+        .filter(|r| r.rect[1] < height * 0.25)
+        .flat_map(|r| [Some(r.label.as_str()), r.value.as_deref()])
+        .flatten()
+        .map(str::trim)
+        .find_map(|text| {
+            let lower = text.to_ascii_lowercase();
+            let looks_like_host = !lower.contains(' ')
+                && lower.contains('.')
+                && lower
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-/:".contains(c))
+                && lower
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .and_then(|host| host.rsplit('.').next())
+                    .is_some_and(|tld| {
+                        tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
+                    });
+            looks_like_host.then(|| uri_host(&lower)).flatten()
+        })
+}
+
+/// Among equally good matches, entries that hold a username: a site's
+/// second entry often keeps only its one-time code (GitHub: one entry with
+/// the account and TOTP, one with the TOTP alone).
+fn prefer_with_username(found: Vec<&VaultEntry>) -> Vec<&VaultEntry> {
+    if found.len() < 2 {
+        return found;
+    }
+    let with_user: Vec<&VaultEntry> = found
+        .iter()
+        .copied()
+        .filter(|e| e.user.as_deref().is_some_and(|u| !u.trim().is_empty()))
+        .collect();
+    if with_user.is_empty() {
+        found
+    } else {
+        with_user
+    }
+}
+
 fn pick_entry<'a>(
     entries: &'a [VaultEntry],
     request: &LoginRequest,
     bundle: Option<&str>,
     app_name: &str,
+    extra_hosts: &[String],
 ) -> Result<&'a VaultEntry, LoginError> {
     let matches = match &request.item {
         Some(item) => by_item(entries, item, request.user.as_deref()),
         None => {
-            let found = candidates(entries, bundle, app_name);
+            let found = prefer_with_username(candidates(entries, bundle, app_name, extra_hosts));
             match &request.user {
                 Some(user) => found
                     .into_iter()
@@ -1141,7 +1219,10 @@ pub async fn sign_in(
         .find(|r| r.kind == "Application")
         .map(|r| r.label.clone())
         .unwrap_or_default();
-    let bundle = w.active_bundle().await.ok().flatten();
+    let active = w.active_bundles().await.unwrap_or_default();
+    let (bundle, web_sheet) = presenting_app(&active);
+    let page_host = if web_sheet { sheet_host(&rows) } else { None };
+    let matched = matched_app(bundle.as_deref(), web_sheet, page_host.as_deref());
     let mut form = read_form(&rows);
     if form.secure_fields >= 2 {
         return Err(not_a_login_form());
@@ -1163,7 +1244,15 @@ pub async fn sign_in(
     }
 
     let entries = vault.entries().await?;
-    let entry = pick_entry(&entries, request, bundle.as_deref(), &app_name)?.clone();
+    let entry = pick_entry(
+        &entries,
+        request,
+        bundle.as_deref(),
+        &app_name,
+        page_host.as_slice(),
+    )
+    .map_err(|e| e.with("matched_app", matched.clone()))?
+    .clone();
     drop(entries);
     let credentials = vault.credentials(&entry.id).await?;
     let submit = request.submit.unwrap_or(true);
@@ -1209,6 +1298,7 @@ pub async fn sign_in(
         remember_session(&entry);
         return Ok(done(
             &entry,
+            &matched,
             &filled,
             false,
             &rows,
@@ -1221,6 +1311,7 @@ pub async fn sign_in(
         if !submit {
             return Ok(done(
                 &entry,
+                &matched,
                 &filled,
                 false,
                 &rows,
@@ -1231,6 +1322,7 @@ pub async fn sign_in(
         let Some(before) = press(w, LOGIN_VERBS).await? else {
             return Ok(done(
                 &entry,
+                &matched,
                 &filled,
                 false,
                 &rows,
@@ -1297,7 +1389,9 @@ pub async fn sign_in(
         Some(_) => "the app asks for a verification code: call POST /agent/login/code with via sms or mail (and from: the sender) right after it was sent",
         None => "read the screen to confirm the login went through",
     };
-    Ok(done(&entry, &filled, submitted, &rows, needs_code, hint))
+    Ok(done(
+        &entry, &matched, &filled, submitted, &rows, needs_code, hint,
+    ))
 }
 
 const CODE_LOGIN_HINT: &str = "this login uses a one-time code instead of a password: the account is filled and nothing was submitted; send the code with the app's own button (it may sign up a number it does not know — check the screen's wording with the user first), then call POST /agent/login/code";
@@ -1319,8 +1413,15 @@ fn not_a_login_form() -> LoginError {
     )
 }
 
+/// Which app the vault entry was matched for, reported with the result: the
+/// app presenting a web sheet stands in for the sheet's view service.
+fn matched_app(bundle: Option<&str>, web_sheet: bool, sheet_host: Option<&str>) -> Value {
+    json!({ "bundle": bundle, "web_sheet": web_sheet, "sheet_host": sheet_host })
+}
+
 fn done(
     entry: &VaultEntry,
+    matched: &Value,
     filled: &[&str],
     submitted: bool,
     rows: &[ElementRow],
@@ -1331,6 +1432,7 @@ fn done(
     json!({
         "ok": true,
         "entry": entry.name,
+        "matched_app": matched,
         "account": entry.user.as_deref().map(mask_account),
         "filled": filled,
         "submitted": submitted,
@@ -1668,16 +1770,94 @@ mod tests {
             entry("2", "淘宝 old", "c@d.com", &[]),
             entry("3", "Other", "e@f.com", &["iosapp://com.other.app"]),
         ];
-        let found = candidates(&entries, Some("com.taobao.taobao4iphone"), "淘宝");
+        let found = candidates(&entries, Some("com.taobao.taobao4iphone"), "淘宝", &[]);
         assert_eq!(
             found.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
             vec!["1"]
         );
-        let found = candidates(&entries, Some("com.other.app"), "Other");
+        let found = candidates(&entries, Some("com.other.app"), "Other", &[]);
         assert_eq!(found[0].id, "3", "an iosapp:// URI beats a name");
-        let found = candidates(&entries, Some("cn.unknown.app"), "淘宝");
+        let found = candidates(&entries, Some("cn.unknown.app"), "淘宝", &[]);
         assert_eq!(found[0].id, "2", "the display name is the last resort");
-        assert!(candidates(&entries, None, "x").is_empty());
+        assert!(candidates(&entries, None, "x", &[]).is_empty());
+    }
+
+    #[test]
+    fn a_web_sheet_matches_the_app_presenting_it_and_its_page_host() {
+        // Hardware, 17 Pro Max: GitHub's web sign-in sheet put the view
+        // service first in the active apps and GitHub second.
+        let active = vec![
+            "com.apple.SafariViewService".to_string(),
+            "com.github.stormbreaker.prod".to_string(),
+        ];
+        assert_eq!(
+            presenting_app(&active),
+            (Some("com.github.stormbreaker.prod".to_string()), true)
+        );
+        assert_eq!(
+            presenting_app(&["com.apple.Preferences".to_string()]),
+            (Some("com.apple.Preferences".to_string()), false)
+        );
+        assert_eq!(presenting_app(&[]), (None, false));
+        // The address bar holds the page host; page text lower down does not count.
+        let row = |kind: &str, label: &str, value: Option<&str>, y: f64| ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            value: value.map(str::to_string),
+            rect: [0.0, y, 440.0, 30.0],
+            ..Default::default()
+        };
+        let rows = vec![
+            ElementRow {
+                kind: "Application".into(),
+                label: "SafariViewService".into(),
+                rect: [0.0, 0.0, 440.0, 956.0],
+                ..Default::default()
+            },
+            row("Button", "完成", None, 60.0),
+            row("TextField", "地址", Some("github.com"), 60.0),
+            row("StaticText", "Sign in to GitHub", None, 300.0),
+            row("Link", "docs.github.com", None, 700.0),
+        ];
+        assert_eq!(sheet_host(&rows).as_deref(), Some("github.com"));
+        assert_eq!(sheet_host(&rows[..2]), None);
+        // GitHub keeps two vault entries: the account with its TOTP, and the
+        // TOTP alone. The sheet's host finds both; the one with a username wins.
+        let entries = vec![
+            entry("a", "github.com", "me@x.com", &["https://github.com/login"]),
+            VaultEntry {
+                id: "b".into(),
+                name: "github.com".into(),
+                user: None,
+                uris: vec![json!("https://github.com")],
+            },
+            entry("c", "gitlab", "me@x.com", &["https://gitlab.com"]),
+        ];
+        let found = candidates(
+            &entries,
+            Some("com.apple.SafariViewService"),
+            "",
+            &["github.com".into()],
+        );
+        assert_eq!(found.len(), 2);
+        let picked = prefer_with_username(found);
+        assert_eq!(
+            picked.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        let request = LoginRequest::default();
+        let one = pick_entry(
+            &entries,
+            &request,
+            Some("com.github.stormbreaker.prod"),
+            "",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            one.id, "a",
+            "the presenting app's bundle implies github.com"
+        );
     }
 
     #[test]
