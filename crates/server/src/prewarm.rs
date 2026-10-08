@@ -182,7 +182,7 @@ impl Policy {
             }
         }
         if i.trigger.needs_recent_activity()
-            && i.since_activity.map_or(true, |since| since > self.recent)
+            && i.since_activity.is_none_or(|since| since > self.recent)
         {
             return Err(Skip::NoRecentActivity);
         }

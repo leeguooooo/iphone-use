@@ -59,20 +59,27 @@ pub fn xcode_version() -> String {
         .to_string()
 }
 
-/// [`xcode_version`] cached per selected developer directory: the key is the
-/// directory plus the mtime of its version.plist, so switching or updating
-/// Xcode re-reads it (`xcodebuild -version` costs ~0.4 s per reconnect).
-pub fn xcode_version_cached(state_dir: &Path, xcodebuild: &str) -> String {
+/// Identifies the selected Xcode: its developer directory plus the mtime of
+/// its version.plist, so switching or updating Xcode changes it. Empty when
+/// either cannot be read (callers then skip their cache).
+fn xcode_stamp() -> String {
     use std::os::unix::fs::MetadataExt as _;
     let developer = sys::stdout_of("xcode-select", &["-p"]);
-    let stamp = (!developer.is_empty())
+    (!developer.is_empty())
         .then(|| Path::new(&developer).join("../version.plist"))
         .and_then(|plist| {
             std::fs::metadata(&plist)
                 .ok()
                 .map(|meta| format!("{developer}|{}", meta.mtime()))
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// [`xcode_version`] cached per selected developer directory: the key is the
+/// directory plus the mtime of its version.plist, so switching or updating
+/// Xcode re-reads it (`xcodebuild -version` costs ~0.4 s per reconnect).
+pub fn xcode_version_cached(state_dir: &Path, xcodebuild: &str) -> String {
+    let stamp = xcode_stamp();
     let cache = state_dir.join(".xcode-version.cache");
     let cache_is_link = std::fs::symlink_metadata(&cache).is_ok_and(|m| m.file_type().is_symlink());
     if !stamp.is_empty() && !cache_is_link {
@@ -106,10 +113,30 @@ pub fn xcode_major() -> String {
         .unwrap_or_default()
 }
 
-/// The selected iPhoneOS SDK version, validated.
+/// The selected iPhoneOS SDK version, validated. Cached for the life of the
+/// process per selected Xcode (developer directory + its version.plist mtime):
+/// `xcrun --show-sdk-version` costs ~0.3 s and a round asks more than once.
 pub fn ios_sdk_version() -> Option<String> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(String, String)>> = Mutex::new(None);
+    let stamp = xcode_stamp();
+    if !stamp.is_empty() {
+        if let Some((key, version)) = CACHE.lock().ok().and_then(|cache| cache.clone()) {
+            if key == stamp {
+                return Some(version);
+            }
+        }
+    }
     let version = sys::stdout_of("xcrun", &["--sdk", "iphoneos", "--show-sdk-version"]);
-    valid_os_version(&version).then_some(version)
+    if !valid_os_version(&version) {
+        return None;
+    }
+    if !stamp.is_empty() {
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some((stamp, version.clone()));
+        }
+    }
+    Some(version)
 }
 
 /// Lowest deployment target the selected SDK accepts (its SDKSettings);
@@ -1127,8 +1154,7 @@ pub fn doctor_xcode_compat(ctx: &Ctx) -> bool {
             .and_then(|text| {
                 text.lines()
                     .filter_map(|line| line.strip_prefix("IPHONEOS_DEPLOYMENT_TARGET = "))
-                    .filter(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
-                    .last()
+                    .rfind(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
                     .map(str::to_string)
             })
             .unwrap_or_default();

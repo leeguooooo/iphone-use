@@ -502,7 +502,10 @@ static NSMutableDictionary *IPURSerialize(
   node[@"placeholderValue"] = placeholder ?: (id)NSNull.null;
   node[@"rect"] = IPURRect(snapshot);
   node[@"isEnabled"] = IPURBoolString(snapshot, @"enabled", YES);
-  node[@"isFocused"] = IPURBoolString(snapshot, @"hasFocus", NO);
+  // hasFocus is the focus engine's (tvOS-style) flag; a text field holding the keyboard reports
+  // only hasKeyboardFocus (hardware: Settings' search field, iOS 27).
+  BOOL focused = [IPURKVC(snapshot, @"hasFocus") boolValue] || [IPURKVC(snapshot, @"hasKeyboardFocus") boolValue];
+  node[@"isFocused"] = focused ? @"1" : @"0";
   if (walk->includeElements) {
     id element = IPURKVC(snapshot, @"accessibilityElement");
     if (element != nil) node[IPURNodeAXElementKey] = element;
@@ -922,13 +925,18 @@ static NSString *IPURSynthesize(id record, id path)
 
 // MARK: - Screen capture
 
-static id IPURJPEGEncoding(double quality)
+static id IPURImageEncoding(NSString *uti, double quality)
 {
   Class encodingClass = NSClassFromString(@"XCTImageEncoding");
   SEL initSelector = NSSelectorFromString(@"initWithUniformTypeIdentifier:compressionQuality:");
   if (encodingClass == Nil || ![encodingClass instancesRespondToSelector:initSelector]) return nil;
   return ((id (*)(id, SEL, NSString *, double))objc_msgSend)(
-    [encodingClass alloc], initSelector, @"public.jpeg", quality);
+    [encodingClass alloc], initSelector, uti, quality);
+}
+
+static id IPURJPEGEncoding(double quality)
+{
+  return IPURImageEncoding(@"public.jpeg", quality);
 }
 
 /// XCTImage / XCUIScreenshot → its encoded bytes.
@@ -1156,6 +1164,27 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
   }
   if (error) *error = lastError;
   return nil;
+}
+
++ (nullable NSData *)requestedPNGScreenshotWithError:(NSString *_Nullable *_Nullable)error
+{
+  @try {
+    id encoding = IPURImageEncoding(@"public.png", 1.0);
+    if (encoding == nil) {
+      if (error) *error = @"XCTImageEncoding unavailable";
+      return nil;
+    }
+    NSData *data = IPURCaptureViaRequest(encoding, error);
+    static const uint8_t pngMagic[4] = {0x89, 'P', 'N', 'G'};
+    if (data != nil && (data.length < 4 || memcmp(data.bytes, pngMagic, 4) != 0)) {
+      if (error) *error = @"screenshot request did not return PNG";
+      return nil;
+    }
+    return data;
+  } @catch (NSException *exception) {
+    if (error) *error = [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
+    return nil;
+  }
 }
 
 + (nullable CGImageRef)decodeScreenCapture:(NSData *)data scale:(double)scale

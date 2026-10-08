@@ -136,7 +136,11 @@ final class DaemonClient: @unchecked Sendable {
         if text.isEmpty { return nil }
         if !text.contains("://") { text = "http://" + text }
         guard var components = URLComponents(string: text), components.host != nil else { return nil }
-        if components.port == nil { components.port = 44321 }
+        // A bare host means the daemon's own port on the LAN. An https address
+        // is a tunnel (e.g. Cloudflare) that serves on 443, so keep its default.
+        if components.port == nil, components.scheme?.lowercased() != "https" {
+            components.port = 44321
+        }
         components.path = ""
         return components.url
     }

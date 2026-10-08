@@ -308,7 +308,7 @@ impl Store {
             self.schedules.iter().map(|s| s.id.as_str()).collect();
         let mut kept: BTreeMap<String, usize> = BTreeMap::new();
         let mut runs = std::mem::take(&mut self.runs);
-        runs.sort_by(|a, b| b.scheduled_for.cmp(&a.scheduled_for));
+        runs.sort_by_key(|run| std::cmp::Reverse(run.scheduled_for));
         runs.retain(|run| {
             if !ids.contains(run.schedule_id.as_str()) {
                 return false;
@@ -737,7 +737,7 @@ impl Scheduler {
             .iter()
             .filter(|r| schedule_id.is_none_or(|id| r.schedule_id == id))
             .collect();
-        runs.sort_by(|a, b| b.scheduled_for.cmp(&a.scheduled_for));
+        runs.sort_by_key(|run| std::cmp::Reverse(run.scheduled_for));
         Some(serde_json::json!({ "ok": true, "runs": runs }))
     }
 
@@ -1352,6 +1352,8 @@ fn error_response(status: StatusCode, error: &str, message: &str) -> Response {
     )
 }
 
+// axum's error type is a full `Response`; not worth boxing.
+#[allow(clippy::result_large_err)]
 fn scheduler_or_503() -> Result<Arc<Scheduler>, Response> {
     current().ok_or_else(|| {
         error_response(

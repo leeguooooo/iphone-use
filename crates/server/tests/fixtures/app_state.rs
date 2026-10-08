@@ -40,6 +40,7 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
         wda_health: std::sync::Arc::new(std::sync::Mutex::new(srv::wda::WdaHealth::down())),
         wda_death: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         wda_health_probe: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        settled_frame_prefetch: std::sync::Arc::new(std::sync::Mutex::new(None)),
         wda_control_pending: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         last_activity: std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
         released: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

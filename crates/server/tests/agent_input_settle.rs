@@ -1285,3 +1285,197 @@ fn an_on_device_settle_that_compared_no_frames_falls_back() {
         assert_eq!(json["settle"]["captures"], 2);
     });
 }
+
+/// A runner whose settle route answers "still moving" after `delay`, and
+/// records the settle URL it was asked.
+fn moving_screen_runner(
+    delay: Duration,
+    settle_urls: Arc<std::sync::Mutex<Vec<String>>>,
+) -> support::MockWda {
+    mock_native_runner(move |request, _| {
+        if is_session(request) {
+            return Some((Duration::ZERO, SESSION.to_string()));
+        }
+        if is_mutation(request) {
+            return Some((Duration::ZERO, r#"{"value":null}"#.to_string()));
+        }
+        if is_device_settle(request) {
+            settle_urls.lock().unwrap().push(request.to_string());
+            return Some((
+                delay,
+                r#"{"value":{"stable":false,"blank":false,"frames":40}}"#.to_string(),
+            ));
+        }
+        if is_source(request) {
+            return Some((Duration::ZERO, simple_tree("视频")));
+        }
+        None
+    })
+}
+
+/// A screen that never stops moving (a video) holds a DEFAULT call only for
+/// the on-phone cap, not the 15 s tree budget, and says so.
+#[test]
+fn a_moving_screen_stops_the_default_on_phone_settle_at_the_cap() {
+    block(async {
+        let urls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let wda = moving_screen_runner(Duration::ZERO, urls.clone());
+
+        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["settle"]["settled"], false, "{json}");
+        assert_eq!(json["settle"]["reason"], "budget_exhausted");
+        assert_eq!(json["settle"]["capped_ms"], 2500);
+        assert_eq!(json["settle"]["captures"], 1, "the tree is still read once");
+        let urls = urls.lock().unwrap();
+        assert!(urls[0].contains("budget_ms=2500&"), "{urls:?}");
+    });
+}
+
+/// An explicit `settle_ms` is the caller asking to wait: no cap.
+#[test]
+fn an_explicit_settle_ms_lifts_the_on_phone_cap() {
+    block(async {
+        let urls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let wda = moving_screen_runner(Duration::ZERO, urls.clone());
+
+        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=8000").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["settle"]["reason"], "budget_exhausted", "{json}");
+        assert!(json["settle"].get("capped_ms").is_none(), "{json}");
+        let urls = urls.lock().unwrap();
+        let asked: u64 = urls[0]
+            .split("budget_ms=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .and_then(|ms| ms.parse().ok())
+            .expect("a settle budget");
+        assert!(asked > 7000, "{urls:?}");
+    });
+}
+
+/// A settle request the runner never answers ends at the observation's own
+/// deadline, not the HTTP client's longer transport allowance.
+#[test]
+fn a_hung_on_phone_settle_ends_at_the_observation_deadline() {
+    block(async {
+        let urls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let wda = moving_screen_runner(Duration::from_secs(10), urls.clone());
+
+        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=1500").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true, "{json}");
+        assert_eq!(json["settle"]["settled"], false, "{json}");
+        // The alert probe after it has its own 1.5 s cap; the tree
+        // observation is what `waited_ms` times.
+        let waited = json["settle"]["waited_ms"].as_u64().expect("waited_ms");
+        assert!(
+            waited < 1800,
+            "the observation outlived its 1.5 s budget: {waited} ms"
+        );
+    });
+}
+
+/// A runner that answers every connection on its own thread, so one slow
+/// reply (a screenshot) does not hold up the others the way the shared
+/// sequential mock does.
+fn concurrent_runner(
+    respond: impl Fn(&str) -> (Duration, String) + Send + Sync + 'static,
+) -> String {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let respond = Arc::new(respond);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let respond = Arc::clone(&respond);
+            std::thread::spawn(move || {
+                stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                let mut buffer = [0_u8; 8192];
+                let Ok(read) = stream.read(&mut buffer) else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let (delay, body) = respond(&request);
+                std::thread::sleep(delay);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    base
+}
+
+/// The background capture of the settled screen holds the runner client for
+/// a whole screenshot; the next action cancels it instead of waiting.
+#[test]
+fn the_next_action_cancels_the_background_capture_of_the_settled_screen() {
+    use base64::Engine as _;
+    block(async {
+        let png = server::redaction::encode_png(&server::redaction::Image {
+            width: 4,
+            height: 8,
+            rgba: vec![90; 4 * 8 * 4],
+        })
+        .unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+        let sources = Arc::new(AtomicUsize::new(0));
+        let seen = sources.clone();
+        let base = concurrent_runner(move |request| {
+            let reply = |body: &str| (Duration::ZERO, body.to_string());
+            if is_session(request) {
+                return reply(SESSION);
+            }
+            if is_source(request) {
+                seen.fetch_add(1, Ordering::AcqRel);
+                return reply(&simple_tree("搜索"));
+            }
+            if request.contains("/screenshot") {
+                // During the settle check: no frame, so the tree decides and
+                // the settled frame is captured afterwards, slowly.
+                if seen.load(Ordering::Acquire) < 2 {
+                    return reply(r#"{"value":{"error":"unable to capture","message":"no"}}"#);
+                }
+                return (
+                    Duration::from_millis(2500),
+                    format!(r#"{{"value":"{encoded}"}}"#),
+                );
+            }
+            if request.contains("/wda/settle") {
+                return reply(r#"{"value":{"error":"unknown command","message":"no"}}"#);
+            }
+            if request.contains("/wda/apps/list") {
+                return reply(r#"{"value":[]}"#);
+            }
+            if request.contains("/alert/") {
+                return reply(r#"{"value":{"error":"no such alert","message":"no alert"}}"#);
+            }
+            reply(r#"{"value":null}"#)
+        });
+        let state = build_state_with_wda(&base);
+
+        let (status, json, _) = request_json(
+            &state,
+            "POST",
+            "/agent/input?return=delta",
+            Some(r#"{"type":"home"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["settle"]["reason"], "stable", "{json}");
+        // Let the background capture take the client.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let (status, json, elapsed) =
+            request_json(&state, "POST", "/agent/input", Some(r#"{"type":"home"}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "the action queued behind the background capture: {elapsed:?}"
+        );
+    });
+}

@@ -21,12 +21,22 @@ use super::runner;
 use super::status;
 use super::sys;
 use super::term::{die, info, ok, warn, Exit, Step, BOLD, RST};
+use super::usbdiag;
 
 const RUNNER_DEVICE_PORT: u16 = 8100;
 const MJPEG_DEVICE_PORT: u16 = 9100;
 /// Published as `not_connected`; the daemon's hint says the same.
 const NOT_CONNECTED_MESSAGE: &str = "the iPhone isn't connected to this Mac — plug it in over USB (or join the same Wi-Fi) and unlock it";
 const AUTOMATION_MODE_HINT: &str = "enable UI automation on the iPhone: Settings › Developer › Enable UI Automation, then accept any passcode or Allow automation prompt while the phone is unlocked";
+
+/// How often [`Setup::wait_for_developer_services`] re-checks the mount.
+const DDI_POLL: Duration = Duration::from_secs(1);
+/// … whether the phone is still attached at all.
+const DDI_PRESENCE_EVERY: Duration = Duration::from_secs(20);
+/// … repeats its interactive "still waiting" prompt.
+const DDI_REMIND_EVERY: Duration = Duration::from_secs(32);
+/// … gives up on a phone that never mounts the disk image.
+const DDI_GIVE_UP: Duration = Duration::from_secs(180);
 
 /// The state of one setup run that cleanup needs.
 pub struct Setup {
@@ -615,10 +625,18 @@ impl Setup {
         }
         if !self.ctx.lan() {
             if self.ctx.udid.is_empty() {
+                // usbmuxd lists nothing: ask the USB plane why (a cable that
+                // only charges, or an iPhone this Mac's device support cannot
+                // claim yet, both look like "no device" from here).
+                if let Some(diagnosis) = usbdiag::probe(&[]) {
+                    self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
+                    return die(format!("{}; no build was started.", diagnosis.message()));
+                }
                 self.phase("prereq", "usb", "no USB iPhone is connected");
                 return die("the device layer defaults to USB, but no USB iPhone was found.\n   Plug in and unlock one iPhone, or set WDA_UDID=<USB UDID>; no build was started.");
             }
-            if !checks::on_usb(&self.ctx.udid, &checks::usb_udids()) {
+            let usb = checks::usb_udids();
+            if !checks::on_usb(&self.ctx.udid, &usb) {
                 self.phase(
                     "prereq",
                     "usb",
@@ -628,6 +646,16 @@ impl Setup {
                     "target {} is not currently connected over USB.\n   Plug in that iPhone, or set WDA_UDID to the exact USB-connected device; refusing a slow Wi-Fi fallback.",
                     self.ctx.udid
                 ));
+            }
+            // usbmuxd keys pairing records by its own spelling of the serial.
+            let serial: Vec<String> = usb
+                .into_iter()
+                .filter(|serial| checks::on_usb(&self.ctx.udid, std::slice::from_ref(serial)))
+                .collect();
+            let untrusted = usbdiag::untrusted(&serial);
+            if let Some(diagnosis) = usbdiag::diagnose(&[], &serial, &untrusted) {
+                self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
+                return die(format!("{}; no build was started.", diagnosis.message()));
             }
         } else if self.ctx.udid.is_empty() {
             warn("WDA_ALLOW_LAN=1: no USB target; paired destinations will be enumerated from the runner project");
@@ -765,6 +793,9 @@ impl Setup {
                 }
                 (name, true)
             }
+            // Under KeepAlive nobody reads the name, and each devicectl call
+            // here costs 1–8 s of every reconnect.
+            _ if self.ctx.keepalive => (String::new(), false),
             _ => {
                 let text = sys::devicectl(8, &["device", "info", "details", "--device", udid]);
                 let name = text
@@ -786,7 +817,7 @@ impl Setup {
         } else {
             ok(&format!("Device UDID: {udid}  ({name})"));
         }
-        if !over_usb {
+        if !over_usb && !self.ctx.keepalive {
             let count = sys::devicectl(8, &["list", "devices"])
                 .lines()
                 .filter(|line| {
@@ -825,7 +856,7 @@ impl Setup {
         let udid = self.ctx.udid.clone();
         let mut tick: u32 = 0;
         loop {
-            let present = if tick % 5 == 0 {
+            let present = if tick.is_multiple_of(5) {
                 checks::presence(&udid) != checks::Presence::Absent
             } else {
                 checks::usbmux_lists(&udid)
@@ -837,11 +868,24 @@ impl Setup {
                 return Ok(());
             }
             if tick == 0 {
-                self.phase("prereq", "not_connected", NOT_CONNECTED_MESSAGE);
-                warn(&format!(
-                    "{NOT_CONNECTED_MESSAGE}. Waiting for {udid}; nothing is built or launched until it is back."
-                ));
-            } else if !self.ctx.keepalive && tick % 30 == 0 {
+                // An iPhone on the bus that no driver claimed is not "not
+                // connected": it needs newer device support, not a cable.
+                match usbdiag::probe(&[]) {
+                    Some(diagnosis @ usbdiag::Diagnosis::NotClaimed { .. }) => {
+                        self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
+                        warn(&format!(
+                            "{}. Waiting for {udid}; nothing is built or launched until usbmuxd lists it.",
+                            diagnosis.message()
+                        ));
+                    }
+                    _ => {
+                        self.phase("prereq", "not_connected", NOT_CONNECTED_MESSAGE);
+                        warn(&format!(
+                            "{NOT_CONNECTED_MESSAGE}. Waiting for {udid}; nothing is built or launched until it is back."
+                        ));
+                    }
+                }
+            } else if !self.ctx.keepalive && tick.is_multiple_of(30) {
                 warn("still waiting for the iPhone — plug it in over USB and unlock it ...");
             }
             if !self.ctx.keepalive && tick >= INTERACTIVE_LIMIT {
@@ -909,22 +953,32 @@ impl Setup {
                 info("Waiting for developer services (UNLOCK the iPhone, keep it awake, and plug it in via USB)");
             }
         }
+        // Polled every second (it was every 4 s, so a mount was noticed up to
+        // 4 s late on every reconnect). The give-up, presence and reminder
+        // intervals are wall-clock, so a slow `ddi_ready` cannot stretch them.
         let mut tries = 0;
+        let mut waiting_since = Instant::now();
+        let mut presence_checked = Instant::now();
+        let mut reminded: Option<Instant> = None;
         while !self.ddi_ready() {
             proc::check()?;
             tries += 1;
             // Developer services never come up for a phone that left: wait
             // for it to come back instead of counting toward a DDI failure.
-            if tries % 5 == 0 && checks::presence(&self.ctx.udid) == checks::Presence::Absent {
-                self.wait_until_connected()?;
-                tries = 0;
+            if presence_checked.elapsed() >= DDI_PRESENCE_EVERY {
+                presence_checked = Instant::now();
+                if checks::presence(&self.ctx.udid) == checks::Presence::Absent {
+                    self.wait_until_connected()?;
+                    tries = 0;
+                    waiting_since = Instant::now();
+                }
             }
             self.phase(
                 "ddi-wait",
                 &blocker,
                 &format!("waiting for developer services (attempt {tries})"),
             );
-            if tries > 45 {
+            if waiting_since.elapsed() > DDI_GIVE_UP {
                 warn(&format!(
                     "developer services never became available for {}.",
                     self.ctx.udid
@@ -949,7 +1003,8 @@ impl Setup {
                 if tries == 1 && !self.lock_retry {
                     warn("developer services are not ready; KeepAlive will not repeat this prompt on every poll");
                 }
-            } else if tries % 8 == 1 {
+            } else if reminded.is_none_or(|at| at.elapsed() >= DDI_REMIND_EVERY) {
+                reminded = Some(Instant::now());
                 if self.ctx.lan() {
                     warn("still waiting — UNLOCK the phone and keep the screen on ...");
                 } else {
@@ -958,7 +1013,7 @@ impl Setup {
                     );
                 }
             }
-            proc::sleep(Duration::from_secs(4))?;
+            proc::sleep(DDI_POLL)?;
         }
         ok("Developer Disk Image mounted");
         Ok(())
@@ -1836,29 +1891,8 @@ impl Setup {
             }
             return die("the device layer relays over USB by default. Keep this iPhone connected over USB; if it is,\n   the iPhoneUse app is missing or too old to relay — reinstall it or run: iphone-use upgrade.\n   The on-phone runner has no HTTP authentication. A LAN relay is therefore disabled\n   unless WDA_ALLOW_LAN=1 is explicitly set for a trusted, isolated network.");
         };
-        let relay_pid_file = self.ctx.relay_pid_file.clone();
-        let (relay_pid, desc) = self.start_relay(
-            Role::Relay,
-            wda_port,
-            device_port,
-            &phone_ip,
-            &tool,
-            &relay_pid_file,
-            &relay_log,
-        )?;
-        ok(&format!("PID-verified control relay {relay_pid}: {desc}"));
-        let target_url = format!("http://127.0.0.1:{wda_port}");
-        if !sys::http_ok(&format!("{target_url}/status"), Duration::from_secs(5)) {
-            return die(format!(
-                "relay up but the device runner is not answering through it — check {}",
-                relay_log.display()
-            ));
-        }
-        ok(&format!("device runner reachable at {target_url}"));
-        warn("The Mac relay is loopback-only, but the runner on the iPhone has no HTTP authentication.\n   Keep the iPhone on a trusted, isolated network even when the Mac relay uses USB.");
-
-        // Live video: the runner's MJPEG stream on the device's :9100, in the
-        // same XCUITest session as control.
+        // Both relays start before either is checked: the control check and
+        // the video's first frame used to run one after the other.
         if !pid::stop(
             &self.ctx,
             &self.ctx.mjpeg_relay_pid_file,
@@ -1874,6 +1908,19 @@ impl Setup {
                 "TCP {mjpeg_port} must be free before starting the managed video relay"
             ));
         }
+        let relay_pid_file = self.ctx.relay_pid_file.clone();
+        let (relay_pid, desc) = self.start_relay(
+            Role::Relay,
+            wda_port,
+            device_port,
+            &phone_ip,
+            &tool,
+            &relay_pid_file,
+            &relay_log,
+        )?;
+        ok(&format!("PID-verified control relay {relay_pid}: {desc}"));
+        // Live video: the runner's MJPEG stream on the device's :9100, in the
+        // same XCUITest session as control.
         let mjpeg_log = self.rel("wda-mjpeg-relay.log");
         let _ = std::fs::write(&mjpeg_log, b"");
         let mjpeg_pid_file = self.ctx.mjpeg_relay_pid_file.clone();
@@ -1886,21 +1933,23 @@ impl Setup {
             &mjpeg_pid_file,
             &mjpeg_log,
         )?;
-        let first_byte = sys::http_get_prefix(
-            &format!("http://127.0.0.1:{mjpeg_port}"),
-            Duration::from_secs(8),
-            1,
-        )
-        .is_some_and(|(status, body)| status < 400 && !body.is_empty());
-        if !first_byte {
-            return die(format!(
-                "video relay owns 127.0.0.1:{mjpeg_port} but no MJPEG data arrived within 8s.\n   The daemon configuration was not changed; inspect {}.",
-                mjpeg_log.display()
-            ));
-        }
         ok(&format!(
             "PID-verified video relay {mjpeg_pid}: {mjpeg_desc}"
         ));
+        // The first video frame is checked off the critical path: control
+        // works without video, and the daemon now prefers the runner's H.264
+        // stream anyway, so a slow first MJPEG frame is a warning, not a
+        // failed round that relaunches the runner.
+        spawn_video_first_frame_check(mjpeg_port, mjpeg_log.clone());
+        let target_url = format!("http://127.0.0.1:{wda_port}");
+        if !sys::http_ok(&format!("{target_url}/status"), Duration::from_secs(5)) {
+            return die(format!(
+                "relay up but the device runner is not answering through it — check {}",
+                relay_log.display()
+            ));
+        }
+        ok(&format!("device runner reachable at {target_url}"));
+        warn("The Mac relay is loopback-only, but the runner on the iPhone has no HTTP authentication.\n   Keep the iPhone on a trusted, isolated network even when the Mac relay uses USB.");
         Ok(target_url)
     }
 
@@ -2341,7 +2390,6 @@ impl Setup {
                     if cleared {
                         ok("the iPhone is connected to this Mac again; holding its runner");
                         self.phase("ready", "", "device runner and launchd supervisor verified");
-                        failures = 0;
                         probes = ProbeCount::default();
                     }
                 }
@@ -2352,7 +2400,7 @@ impl Setup {
             cycle += 1;
             let probe = if !answered {
                 Probe::StatusMiss
-            } else if (cycle % 3 == 0 || probes.suspicious()) && !runner_reads(&read_url) {
+            } else if (cycle.is_multiple_of(3) || probes.suspicious()) && !runner_reads(&read_url) {
                 Probe::ReadFail
             } else {
                 Probe::Ok
@@ -3565,4 +3613,25 @@ fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// Warn, on a background thread, when the video relay has not delivered its
+/// first byte within 8 s. Never fails setup: control is what agents need.
+fn spawn_video_first_frame_check(mjpeg_port: u16, mjpeg_log: PathBuf) {
+    let _ = std::thread::Builder::new()
+        .name("video-first-frame".into())
+        .spawn(move || {
+            let first_byte = sys::http_get_prefix(
+                &format!("http://127.0.0.1:{mjpeg_port}"),
+                Duration::from_secs(8),
+                1,
+            )
+            .is_some_and(|(status, body)| status < 400 && !body.is_empty());
+            if !first_byte {
+                warn(&format!(
+                    "video relay owns 127.0.0.1:{mjpeg_port} but no video arrived within 8s; control works without it. Inspect {}",
+                    mjpeg_log.display()
+                ));
+            }
+        });
 }

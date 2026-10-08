@@ -734,7 +734,7 @@ fn encoder_loop(
             }
         };
         // A few times a second is plenty to notice a protected screen.
-        if decoded_frames % 10 == 0 {
+        if decoded_frames.is_multiple_of(10) {
             frame_blank.store(
                 crate::redaction::band_is_flat(width, height, &pixels),
                 Ordering::Release,
@@ -1242,8 +1242,6 @@ mod tests {
         hub.finish_verdict(Some(false));
         assert!(!hub.capture_redacted());
     }
-
-    use super::*;
 
     fn part(jpeg: &[u8], with_length: bool) -> Vec<u8> {
         let mut out = b"--BoundaryString\r\nContent-type: image/jpg\r\n".to_vec();

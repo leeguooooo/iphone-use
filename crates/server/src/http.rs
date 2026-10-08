@@ -21,6 +21,10 @@
 //! Security headers (v1 parity): `Cache-Control: no-store`, `X-Frame-Options:
 //! DENY`, `Referrer-Policy: no-referrer` on every response.
 
+// Handlers return `Result<_, Response>`: axum's error type is a full
+// `Response` by design, so its size is not worth boxing everywhere.
+#![allow(clippy::result_large_err)]
+
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -397,6 +401,11 @@ pub struct AppState {
     /// cache immediately; a control request aborts this task before taking the
     /// WDA mutex so a cold/slow probe cannot delay an input action.
     pub wda_health_probe: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// The background capture of the settled screen after an observed action
+    /// (see `capture_settled_frame_later`). It holds the WDA client for a
+    /// whole screenshot, so the next control request cancels it rather than
+    /// queue behind it.
+    pub settled_frame_prefetch: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
     /// Number of Direct control requests currently waiting for or using WDA.
     /// Health polling re-checks this while holding `wda_health_probe`'s mutex,
     /// closing the race where a poll could start a new probe after input asked
@@ -778,7 +787,16 @@ impl AppState {
         let owner_age = recover(self.owner.lock())
             .as_ref()
             .map(|owner| owner.last_seen.elapsed());
-        lease_idle_clock(self.idle_for(), owner_age, lease).map_or(true, |idle| idle < window)
+        lease_idle_clock(self.idle_for(), owner_age, lease).is_none_or(|idle| idle < window)
+    }
+
+    /// Cancel a background capture of the settled screen: the control request
+    /// about to run changes the screen anyway, so the frame would be stale,
+    /// and waiting for it cost up to a whole capture (~0.5–1.5 s).
+    fn cancel_settled_frame_prefetch(&self) {
+        if let Some(prefetch) = recover(self.settled_frame_prefetch.lock()).take() {
+            prefetch.abort();
+        }
     }
 
     /// Give a Direct control operation priority over background health work.
@@ -2145,6 +2163,7 @@ async fn run_wda_readiness_wait(
     token: WdaTransitionToken,
     budget: WdaReadinessBudget,
     setup_status_path: &str,
+    kicked_at: u64,
 ) -> WdaReadinessOutcome {
     // setup-wda.sh allows up to six minutes for xcodebuild to report the
     // on-device server URL, and first startup after an Xcode update can use
@@ -2174,7 +2193,10 @@ async fn run_wda_readiness_wait(
         // unplugged phone look like a slow-but-healthy startup and hid the
         // actionable USB/trust/DDI message from clients. Lifecycle
         // transitions must only trust the current helper's structured status.
-        setup_blocker = read_structured_setup_blocked_on_at(setup_status_path);
+        // A status written before this round's bootstrap is the replaced
+        // helper's: its blocker (a cable since plugged back in) says nothing
+        // about this round and must not end it.
+        setup_blocker = read_structured_setup_blocked_on_at(setup_status_path, kicked_at);
         if !setup_blocker.is_empty() {
             break WdaReadinessOutcome::SetupBlocked;
         }
@@ -2284,6 +2306,7 @@ fn spawn_wda_readiness_wait(state: Arc<AppState>, token: WdaTransitionToken) {
             token,
             WdaReadinessBudget::default(),
             &setup_status_path,
+            setup_kicked_at(),
         )
         .await;
         ownership.resolve(outcome);
@@ -2704,22 +2727,35 @@ struct WdaSetupStatus {
 }
 
 fn read_structured_setup_status() -> Option<WdaSetupStatus> {
-    read_structured_setup_status_at(&crate::instance::Instance::path_str(
-        &crate::instance::current().status_file(),
-    ))
+    read_structured_setup_status_at(
+        &crate::instance::Instance::path_str(&crate::instance::current().status_file()),
+        setup_kicked_at(),
+    )
+}
+
+/// Unix second of the latest bring-up this daemon bootstrapped (0: none yet).
+/// A setup status written before it describes the helper run that bring-up
+/// replaced, not the one now running.
+static SETUP_KICKED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn setup_kicked_at() -> u64 {
+    SETUP_KICKED_AT.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// [`read_structured_setup_status`] against an explicit path, so the readiness
 /// loop can be driven against a fixture instead of the operator's real state
-/// directory.
-fn read_structured_setup_status_at(status_path: &str) -> Option<WdaSetupStatus> {
+/// directory. A status older than `kicked_at` is the previous helper's and
+/// reads as absent: hardware, a `usb` blocker left by an unplugged cable
+/// ended the reconnect started after plugging it back in.
+fn read_structured_setup_status_at(status_path: &str, kicked_at: u64) -> Option<WdaSetupStatus> {
     std::fs::read_to_string(status_path)
         .ok()
         .and_then(|txt| parse_setup_status(&txt, now_secs()))
+        .filter(|status| status.ts >= kicked_at)
 }
 
-fn read_structured_setup_blocked_on_at(status_path: &str) -> String {
-    read_structured_setup_status_at(status_path)
+fn read_structured_setup_blocked_on_at(status_path: &str, kicked_at: u64) -> String {
+    read_structured_setup_status_at(status_path, kicked_at)
         .map(|status| status.blocked_on)
         .unwrap_or_default()
 }
@@ -3483,6 +3519,8 @@ fn write_and_bootstrap_wda_agent(setup_sh: &str, log: &str, udid: &str) -> bool 
     // Both callers mean "bring the phone up now" (the setup endpoint and an
     // explicit reconnect), so neither should inherit a pending backoff.
     clear_wda_retry_backoff(&crate::instance::current().state_dir);
+    // From here on the status file the old helper left is history.
+    SETUP_KICKED_AT.store(now_secs(), std::sync::atomic::Ordering::Release);
     let plist_path = crate::instance::current().wda_plist();
     let Some(parent) = plist_path.parent() else {
         return false;
@@ -4788,6 +4826,7 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
 /// * `{"mode":"human"}` — stop the managed runner so the person holding the
 ///   phone has it to themselves; agent input then answers 409
 ///   `phone_handed_to_human` until `agent` takes it back.
+///
 /// `/agent/mode` (reconnect, hand to a human): the screen the owner's
 /// `no_progress` tracker knew is gone.
 async fn agent_mode(state: State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
@@ -7233,11 +7272,13 @@ async fn reused_row_is_live(w: &mut crate::wda::WdaClient, row: &crate::wda::Ele
 
 const ELEMENT_OCCLUDED_HINT: &str = "nothing was sent: another control (a fixed bar, header, keyboard or floating button) covers the centre of this element, so the tap would land on that instead. Bring it clear first with {\"type\":\"perform\",\"action\":\"scroll_to_visible\",\"element\":N,\"snapshot\":…} or a scroll, read /agent/elements again and retry; send \"allow_occluded\":true only if you mean to tap whatever is on top";
 
-const ELEMENT_NOT_VISIBLE_HINT: &str = "nothing was sent: WDA reports this element as not visible (visible:false) — it is in the tree but not drawn, like Chrome's tab grid kept behind the page — so a tap would land on whatever is on top. Pick a row without visible:false; send \"allow_occluded\":true only if you mean to tap that spot anyway";
+const ELEMENT_NOT_VISIBLE_HINT: &str = "nothing was sent: this element is on the screen but not drawn (visible:false) — it is in the tree but kept behind what is shown, like Chrome's tab grid behind the page — so a tap would land on whatever is on top. Pick a row without visible:false; send \"allow_occluded\":true only if you mean to tap that spot anyway";
 
 /// Why a tap aimed at `rows[index]` would not reach it, if it would not:
-/// the element is not drawn (`visible:false`), or another control covers its
-/// centre. `"allow_occluded":true` waives both.
+/// the element is not drawn (`visible:false` with its centre on the screen),
+/// or another control covers its centre. `"allow_occluded":true` waives both.
+/// A target outside the screen is no refusal here: a lite read marks every
+/// such row `visible:false`, and the caller scrolls it into view first.
 fn tap_target_refusal(
     rows: &[crate::wda::ElementRow],
     index: usize,
@@ -7247,8 +7288,8 @@ fn tap_target_refusal(
         return None;
     }
     let target = rows.get(index)?;
-    if target.visible == Some(false) {
-        tracing::info!("tap refused: row {index} '{}' is not visible", target.label);
+    if target.visible == Some(false) && !center_off_screen(rows, index) {
+        tracing::info!("tap refused: row {index} '{}' is not drawn", target.label);
         return Some(("element_not_visible", ELEMENT_NOT_VISIBLE_HINT));
     }
     let cover = occluding_row(rows, index)?;
@@ -8880,6 +8921,138 @@ fn agent_actions_json(status: StatusCode, value: serde_json::Value) -> Response 
     )
 }
 
+/// A control request refused before anything reached the phone: always JSON,
+/// always `outcome: not_sent`, `retry_safe: true`.
+struct ControlRefusal {
+    status: StatusCode,
+    body: serde_json::Value,
+    /// Worth retrying in a few seconds on its own (a release or reconnect
+    /// under way): sent as `Retry-After: 5`.
+    retry_soon: bool,
+}
+
+impl ControlRefusal {
+    fn new(status: StatusCode, error: &str, retry_soon: bool) -> Self {
+        Self {
+            status,
+            body: serde_json::json!({
+                "ok": false,
+                "error": error,
+                "outcome": "not_sent",
+                "retry_safe": true,
+            }),
+            retry_soon,
+        }
+    }
+
+    fn with(mut self, key: &str, value: serde_json::Value) -> Self {
+        self.body[key] = value;
+        self
+    }
+
+    fn releasing() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "device_release_in_progress",
+            true,
+        )
+        .with("reconnecting", serde_json::Value::Bool(false))
+    }
+
+    fn wda_not_configured() -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "wda_not_configured", false)
+    }
+
+    /// `/agent/actions` also says, per its batch contract, that no step ran.
+    fn for_batch(self) -> Self {
+        self.with("failed_step_outcome", serde_json::json!("not_sent"))
+            .with("batch_outcome", serde_json::json!("nothing_applied"))
+    }
+
+    fn into_response(self) -> Response {
+        let mut builder = Response::builder()
+            .status(self.status)
+            .header(header::CONTENT_TYPE, "application/json");
+        if self.retry_soon {
+            builder = builder.header(header::RETRY_AFTER, "5");
+        }
+        with_security_headers(
+            builder
+                .body(Body::from(self.body.to_string()))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        )
+    }
+}
+
+/// The one readiness check `/agent/input` and `/agent/actions` share: why the
+/// phone cannot take a control request now, if it cannot. An idle-released
+/// managed phone starts coming back here, whichever endpoint asked (the batch
+/// endpoint used to answer `device_not_drivable` and leave it released).
+fn control_readiness_refusal(state: &Arc<AppState>) -> Option<ControlRefusal> {
+    if state.wda_lifecycle.is_releasing() {
+        return Some(ControlRefusal::releasing());
+    }
+    // If the idle watchdog released the phone, one caller starts recovery while
+    // `released` remains true. Only a successful supervisor bootstrap clears it;
+    // failed recovery therefore remains honest and retryable instead of briefly
+    // reporting an active device that never restarted.
+    if state.released.load(std::sync::atomic::Ordering::Acquire) {
+        if !state.managed_wda {
+            return Some(
+                ControlRefusal::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "wda_is_externally_managed",
+                    false,
+                )
+                .with("recovery_owner", serde_json::json!("external"))
+                .with("reconnecting", serde_json::Value::Bool(false))
+                .with(
+                    "hint",
+                    serde_json::json!("restart WDA on the configured endpoint's owning host"),
+                ),
+            );
+        }
+        // A phone handed to a person stays with the person. An agent action
+        // must not silently restart the runner under their fingers; taking it
+        // back is an explicit `POST /agent/mode {"mode":"agent"}`.
+        if human_handoff_active() {
+            return Some(
+                ControlRefusal::new(StatusCode::CONFLICT, "phone_handed_to_human", false)
+                    .with("released", serde_json::Value::Bool(true))
+                    .with("hint", serde_json::json!("the phone was handed to the person holding it; POST /agent/mode {\"mode\":\"agent\"} to take it back before sending input")),
+            );
+        }
+        start_released_recovery(state);
+        if state.wda_lifecycle.is_releasing() {
+            return Some(ControlRefusal::releasing());
+        }
+        return Some(
+            ControlRefusal::new(StatusCode::SERVICE_UNAVAILABLE, "reconnect_in_progress", true)
+                .with("reconnecting", serde_json::Value::Bool(true))
+                .with("hint", serde_json::json!("phone was idle-released to free it for hands-on use; managed WDA is restarting (~30-90s) — retry. If the phone is locked, unlock it once.")),
+        );
+    }
+    if state.managed_wda_pending {
+        return Some(
+            ControlRefusal::new(StatusCode::CONFLICT, "target_not_configured", false).with(
+                "hint",
+                serde_json::json!("run setup-wda.sh to select and persist the canonical iPhone before using Direct control"),
+            ),
+        );
+    }
+    if state.wda_lifecycle.is_reconnecting() {
+        return Some(
+            ControlRefusal::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "reconnect_in_progress",
+                true,
+            )
+            .with("reconnecting", serde_json::Value::Bool(true)),
+        );
+    }
+    None
+}
+
 fn agent_actions_invalid(detail: impl Into<String>) -> Response {
     agent_actions_json(
         StatusCode::BAD_REQUEST,
@@ -9749,42 +9922,18 @@ async fn agent_actions_inner(
     if headers.contains_key(FLOW_RUN_HEADER) {
         recover(state.flow_trail.lock()).flow_ran();
     }
-    if state.managed_wda_pending {
-        return target_not_configured_response();
-    }
-    if state.wda_lifecycle.is_transitioning()
-        || state.released.load(std::sync::atomic::Ordering::Acquire)
-    {
-        return agent_actions_json(
-            StatusCode::SERVICE_UNAVAILABLE,
-            serde_json::json!({
-                "ok": false,
-                "error": "device_not_drivable",
-                // Refused before the first step: zero actions, certainly.
-                "outcome": "not_sent",
-                "failed_step_outcome": "not_sent",
-                "batch_outcome": "nothing_applied",
-                "retry_safe": true,
-                "hint": "check /agent/status, reconnect the canonical Direct target if instructed, then retry only after drivable=true"
-            }),
-        );
+    // Refused before the first step: zero actions, certainly.
+    if let Some(refusal) = control_readiness_refusal(&state) {
+        return refusal.for_batch().into_response();
     }
     let Some(wda) = &state.wda else {
-        return agent_actions_json(
-            StatusCode::SERVICE_UNAVAILABLE,
-            serde_json::json!({
-                "ok": false,
-                "error": "wda_not_configured",
-                // Refused before the first step: zero actions, certainly.
-                "outcome": "not_sent",
-                "failed_step_outcome": "not_sent",
-                "batch_outcome": "nothing_applied",
-                "retry_safe": true
-            }),
-        );
+        return ControlRefusal::wda_not_configured()
+            .for_batch()
+            .into_response();
     };
 
     state.touch_activity();
+    state.cancel_settled_frame_prefetch();
     let focus_block = engage_agent_focus(&state, &mut *wda.lock().await).await;
     if let Some(waiting) = focus_permission_pending(focus_block.as_ref()) {
         return waiting;
@@ -10236,7 +10385,8 @@ async fn agent_actions_inner(
     if request.observe {
         // Observation only: the batch's verdict is already fixed above.
         let budget = std::time::Duration::from_millis(AGENT_INPUT_SETTLE_DEFAULT_MS);
-        let (observed, report) = settle_and_read_elements(&mut w, budget).await;
+        let (observed, report) =
+            settle_and_read_elements(&mut w, budget, DEVICE_SETTLE_DEFAULT_CAP).await;
         if let Some((snapshot, rows)) = observed {
             let rows = Arc::new(rows);
             remember_element_snapshot(&state, &snapshot, &rows);
@@ -10291,6 +10441,14 @@ struct AgentInputQuery {
 const AGENT_INPUT_SETTLE_DEFAULT_MS: u64 = 15_000;
 const AGENT_INPUT_SETTLE_MAX_MS: u64 = 20_000;
 
+/// How long the on-phone settle waits for a still screen unless the caller
+/// passed `settle_ms`. The 15 s budget above exists for slow TREE reads; a
+/// screen that never stops moving (a video, a spinner, a live feed) held
+/// every default call that long on the frame check alone. Past this the
+/// tree is read once and the report says `budget_exhausted` with
+/// `capped_ms`, so the agent can ask for longer.
+const DEVICE_SETTLE_DEFAULT_CAP: std::time::Duration = std::time::Duration::from_millis(2500);
+
 /// A settled tree read is best-effort *observation*, never part of the action
 /// result. `Stable` means two consecutive reads hashed identically over a tree
 /// that actually had content; `BudgetExhausted` means the UI was still moving
@@ -10340,6 +10498,9 @@ struct SettleReport {
     /// (`observation_failed`) or was cut off by the budget
     /// (`budget_exhausted`). Never present alongside `settled: true`.
     stale: bool,
+    /// The on-phone wait stopped at the default cap
+    /// ([`DEVICE_SETTLE_DEFAULT_CAP`]) with the screen still moving.
+    capped_ms: Option<u64>,
     error: Option<String>,
 }
 
@@ -10353,6 +10514,7 @@ impl SettleReport {
             budget_ms,
             sparse: false,
             stale: false,
+            capped_ms: None,
             error: None,
         }
     }
@@ -10370,6 +10532,9 @@ impl SettleReport {
         }
         if self.stale {
             value["stale"] = serde_json::Value::Bool(true);
+        }
+        if let Some(capped_ms) = self.capped_ms {
+            value["capped_ms"] = serde_json::json!(capped_ms);
         }
         if let Some(error) = &self.error {
             value["error"] = serde_json::Value::String(error.clone());
@@ -10466,12 +10631,18 @@ const SETTLED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_sec
 
 /// Capture the settled screen in the background, unless something was sent
 /// in the meantime (`post_mark` is the last POST the observation saw) — then
-/// that screen is gone and there is nothing to keep.
+/// that screen is gone and there is nothing to keep. The next control
+/// request cancels it (see [`AppState::cancel_settled_frame_prefetch`]).
 fn capture_settled_frame_later(
+    state: &AppState,
     wda: Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
     post_mark: Option<std::time::Instant>,
 ) {
-    tokio::spawn(async move {
+    let mut slot = recover(state.settled_frame_prefetch.lock());
+    if let Some(previous) = slot.take() {
+        previous.abort();
+    }
+    let task = tokio::spawn(async move {
         let mut w = wda.lock().await;
         if w.last_post() != post_mark || w.settled_frame(SETTLED_FRAME_MAX_AGE).is_some() {
             return;
@@ -10484,6 +10655,7 @@ fn capture_settled_frame_later(
             }
         }
     });
+    *slot = Some(task.abort_handle());
 }
 
 /// The content band of a PNG frame is one flat colour (see
@@ -10507,6 +10679,7 @@ async fn settle_on_device(
     started: tokio::time::Instant,
     deadline: tokio::time::Instant,
     budget: std::time::Duration,
+    device_cap: std::time::Duration,
 ) -> Option<(Option<(String, Vec<crate::wda::ElementRow>)>, SettleReport)> {
     /// Unchanged this long counts as settled; a push or a sheet animates
     /// continuously, so a quiet gap this long means it ended.
@@ -10517,15 +10690,24 @@ async fn settle_on_device(
     /// Kept for the one tree read after the screen is still.
     const TREE_RESERVE: std::time::Duration = std::time::Duration::from_millis(700);
     let room = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let device_budget = room.checked_sub(TREE_RESERVE + MIN_WAIT)?;
+    let uncapped = room.checked_sub(TREE_RESERVE + MIN_WAIT)?;
+    let device_budget = uncapped.min(device_cap);
     if device_budget < std::time::Duration::from_millis(200) {
         return None;
     }
-    let device = w.device_settle(device_budget, QUIET, MIN_WAIT).await?;
+    // The runner answers within its budget, but the HTTP call allows 3 s
+    // more for transport: never past the observation's own deadline.
+    let device = tokio::time::timeout_at(deadline, w.device_settle(device_budget, QUIET, MIN_WAIT))
+        .await
+        .ok()
+        .flatten()?;
     if device.blank {
         return None;
     }
     let mut report = SettleReport::new(budget.as_millis() as u64);
+    if !device.stable && device_budget < uncapped {
+        report.capped_ms = Some(device_budget.as_millis() as u64);
+    }
     let observed = match read_elements_once(w, deadline).await {
         SettleRead::Read(id, rows) => {
             report.captures = 1;
@@ -10558,6 +10740,7 @@ async fn settle_on_device(
 async fn settle_and_read_elements(
     w: &mut crate::wda::WdaClient,
     budget: std::time::Duration,
+    device_cap: std::time::Duration,
 ) -> (Option<(String, Vec<crate::wda::ElementRow>)>, SettleReport) {
     let started = tokio::time::Instant::now();
     let mut report = SettleReport::new(budget.as_millis() as u64);
@@ -10566,7 +10749,7 @@ async fn settle_and_read_elements(
         return (None, report);
     }
     let deadline = started + budget;
-    if let Some(settled) = settle_on_device(w, started, deadline, budget).await {
+    if let Some(settled) = settle_on_device(w, started, deadline, budget, device_cap).await {
         return settled;
     }
     tokio::time::sleep(std::cmp::min(std::time::Duration::from_millis(150), budget)).await;
@@ -10910,98 +11093,14 @@ async fn agent_input_inner(
             };
         }
     }
-    if state.wda_lifecycle.is_releasing() {
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::RETRY_AFTER, "5")
-                .body(Body::from(
-                    r#"{"ok":false,"error":"device_release_in_progress"}"#,
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
-    }
-    // If the idle watchdog released the phone, one caller starts recovery while
-    // `released` remains true. Only a successful supervisor bootstrap clears it;
-    // failed recovery therefore remains honest and retryable instead of briefly
-    // reporting an active device that never restarted.
-    if state.released.load(std::sync::atomic::Ordering::Acquire) {
-        if !state.managed_wda {
-            return with_security_headers(
-                Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"ok":false,"error":"wda_is_externally_managed","recovery_owner":"external","reconnecting":false,"hint":"restart WDA on the configured endpoint's owning host"}"#,
-                    ))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-            );
-        }
-        // A phone handed to a person stays with the person. An agent action
-        // must not silently restart the runner under their fingers; taking it
-        // back is an explicit `POST /agent/mode {"mode":"agent"}`.
-        if human_handoff_active() {
-            return with_security_headers(
-                Response::builder()
-                    .status(StatusCode::CONFLICT)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"ok":false,"error":"phone_handed_to_human","released":true,"hint":"the phone was handed to the person holding it; POST /agent/mode {\"mode\":\"agent\"} to take it back before sending input"}"#,
-                    ))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-            );
-        }
-        start_released_recovery(&state);
-        if state.wda_lifecycle.is_releasing() {
-            return with_security_headers(
-                Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .header(header::RETRY_AFTER, "5")
-                    .body(Body::from(
-                        r#"{"ok":false,"error":"device_release_in_progress","reconnecting":false}"#,
-                    ))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-            );
-        }
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::RETRY_AFTER, "5")
-                .body(Body::from(
-                    r#"{"ok":false,"reconnecting":true,"hint":"phone was idle-released to free it for hands-on use; managed WDA is restarting (~30-90s) — retry. If the phone is locked, unlock it once."}"#,
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
-    }
-    if state.managed_wda_pending {
-        return target_not_configured_response();
-    }
-    if state.wda_lifecycle.is_reconnecting() {
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::RETRY_AFTER, "5")
-                .body(Body::from(
-                    r#"{"ok":false,"error":"reconnect_in_progress","reconnecting":true}"#,
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
+    if let Some(refusal) = control_readiness_refusal(&state) {
+        return refusal.into_response();
     }
     // Every real driving request resets the idle clock so the watchdog only
     // fires during genuine inactivity.
     state.touch_activity();
     if state.wda_lifecycle.is_releasing() {
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::RETRY_AFTER, "5")
-                .body(Body::from("device release in progress"))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
+        return ControlRefusal::releasing().into_response();
     }
     // Direct is a single at-most-once WDA path. One server deadline covers lock
     // acquisition plus the whole compound action, and no failure is replayed.
@@ -11027,16 +11126,13 @@ async fn agent_input_inner(
         return response;
     }
     let Some(wda) = &state.wda else {
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"ok":false,"error":"wda_not_configured","fallback":"disabled"}"#,
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
+        return ControlRefusal::wda_not_configured()
+            .with("fallback", serde_json::json!("disabled"))
+            .into_response();
     };
+    // A background capture of the last settled screen holds the client for a
+    // whole screenshot; this action makes that frame stale anyway.
+    state.cancel_settled_frame_prefetch();
     // Do Not Disturb before the first action of a session; its time is not
     // charged to the action's own budget.
     let focus_started = tokio::time::Instant::now();
@@ -11106,7 +11202,13 @@ async fn agent_input_inner(
         // budget, and the client's timeout has to cover their sum (see
         // `OBSERVE_TIMEOUT` in the MCP client).
         let budget = std::time::Duration::from_millis(settle_budget_ms);
-        let (observed, report) = settle_and_read_elements(&mut client, budget).await;
+        // An explicit `settle_ms` is the caller asking to wait that long.
+        let device_cap = if query.settle_ms.is_some() {
+            budget
+        } else {
+            DEVICE_SETTLE_DEFAULT_CAP
+        };
+        let (observed, report) = settle_and_read_elements(&mut client, budget, device_cap).await;
         settled = Some((
             observed.map(|(snapshot, rows)| (snapshot, Arc::new(rows))),
             report,
@@ -11126,7 +11228,7 @@ async fn agent_input_inner(
     let post_mark = client.last_post();
     drop(client);
     if frame_needed {
-        capture_settled_frame_later(Arc::clone(wda), post_mark);
+        capture_settled_frame_later(&state, Arc::clone(wda), post_mark);
     }
     match outcome {
         WdaControlOutcome::Applied => {
@@ -11277,9 +11379,15 @@ fn focus_bridge() -> Option<String> {
         .then(|| registry.bridge_name.clone())
 }
 
+/// The most the first action of a session waits for Do Not Disturb, from the
+/// deep link to the app back in front. It sits in front of an action the
+/// agent is timing; past it the action goes ahead.
+const AGENT_FOCUS_ENGAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(6);
+
 /// First control request of a session: ask the phone for Do Not Disturb, then
 /// put the foreground app back (the bridge shortcut opens the Shortcuts app).
-/// Best-effort — any failure leaves the request it precedes untouched.
+/// Best-effort and bounded by [`AGENT_FOCUS_ENGAGE_BUDGET`] — any failure
+/// leaves the request it precedes untouched.
 async fn engage_agent_focus(
     state: &AppState,
     w: &mut crate::wda::WdaClient,
@@ -11290,6 +11398,7 @@ async fn engage_agent_focus(
         return None;
     }
     let bridge = focus_bridge()?;
+    let deadline = tokio::time::Instant::now() + AGENT_FOCUS_ENGAGE_BUDGET;
     let previous = w.active_bundle().await.ok().flatten();
     let link = intent_deep_link(
         &bridge,
@@ -11302,7 +11411,7 @@ async fn engage_agent_focus(
         return None;
     }
     recover(state.agent_focus.lock()).mark_attempted();
-    let run = watch_bridge_run(w, &bridge, true).await;
+    let run = watch_bridge_run(w, &bridge, true, deadline).await;
     // The notice is the evidence focus_on turned DND on. A run held by a
     // prompt counts too: focus_on only prompts inside its "no Focus" branch.
     let ours = run.saw_on_notice || !run.finished;
@@ -11328,11 +11437,10 @@ async fn engage_agent_focus(
     // it instead of the app (hardware: the first tap_locator after DND came
     // back element_not_found). Let it go before the agent's action runs.
     if ours {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
         while tokio::time::Instant::now() < deadline {
             match w.active_bundles().await {
                 Ok(active) if !active.iter().any(|b| b == "com.apple.springboard") => break,
-                Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(400)).await,
+                Ok(_) => sleep_until_or(deadline, std::time::Duration::from_millis(250)).await,
                 Err(_) => break,
             }
         }
@@ -11388,16 +11496,32 @@ struct BridgeRun {
     saw_on_notice: bool,
 }
 
+/// Sleep `step`, or until `deadline` if that comes first.
+async fn sleep_until_or(deadline: tokio::time::Instant, step: std::time::Duration) {
+    tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + step)).await;
+}
+
 async fn watch_bridge_run(
     w: &mut crate::wda::WdaClient,
     bridge: &str,
     look_for_notice: bool,
+    deadline: tokio::time::Instant,
 ) -> BridgeRun {
-    let deadline = tokio::time::Instant::now() + crate::focus::SHORTCUT_RUN_TIMEOUT;
     let mut run = BridgeRun { finished: false, saw_on_notice: false };
-    // Give the deep link a moment to bring the Shortcuts app forward first,
-    // or the library from before the run reads as "already finished".
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    // Wait for the deep link to bring the Shortcuts app forward first, or the
+    // library from before the run reads as "already finished" (and, for
+    // focus_off, the app it left as "Shortcuts already gone"). Polled, not a
+    // fixed 1.2 s: it is usually in front within a few hundred ms.
+    let front_by =
+        deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(1200));
+    while tokio::time::Instant::now() < front_by {
+        if let Ok(active) = w.active_bundles().await {
+            if active.iter().any(|b| b == "com.apple.shortcuts") {
+                break;
+            }
+        }
+        sleep_until_or(front_by, std::time::Duration::from_millis(100)).await;
+    }
     while tokio::time::Instant::now() < deadline {
         // focus_off ends on the Home Screen, where the library never shows;
         // poll only the cheap foreground-app query, never the (large)
@@ -11410,7 +11534,7 @@ async fn watch_bridge_run(
                     return run;
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            sleep_until_or(deadline, std::time::Duration::from_millis(400)).await;
             continue;
         }
         if let Ok(rows) = w.elements().await {
@@ -11423,7 +11547,7 @@ async fn watch_bridge_run(
                 // The notice is SpringBoard's banner, and while it is up the
                 // tree read lands on it rather than the library — so the tile
                 // cannot be watched. Setting DND is the step right after it.
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                sleep_until_or(deadline, std::time::Duration::from_millis(800)).await;
                 run.finished = true;
                 return run;
             }
@@ -11447,7 +11571,7 @@ async fn watch_bridge_run(
                 return run;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        sleep_until_or(deadline, std::time::Duration::from_millis(500)).await;
     }
     run
 }
@@ -11479,7 +11603,12 @@ async fn release_agent_focus(state: &AppState) -> Option<serde_json::Value> {
     let sent = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let mut w = wda.lock().await;
         let opened = w.open_url(&link).await;
-        if opened.is_ok() && !watch_bridge_run(&mut w, &bridge, false).await.finished {
+        let deadline = tokio::time::Instant::now() + crate::focus::SHORTCUT_RUN_TIMEOUT;
+        if opened.is_ok()
+            && !watch_bridge_run(&mut w, &bridge, false, deadline)
+                .await
+                .finished
+        {
             tracing::warn!("agent focus: focus_off did not finish (permission prompt?)");
         }
         opened
@@ -11778,7 +11907,7 @@ async fn agent_elements(
     // tree is then never passed off as `scope=changed`.
     if scope.as_deref() == Some("changed")
         && response.status().is_success()
-        && !json.as_ref().is_some_and(|json| json.get("delta").is_some())
+        && json.as_ref().is_none_or(|json| json.get("delta").is_none())
     {
         return json_response(
             StatusCode::BAD_REQUEST,
@@ -12564,22 +12693,67 @@ async fn finish_screenshot(
     max_side: Option<u32>,
     source: Option<&'static str>,
 ) -> Response {
-    if !raw {
-        let wireframe = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            redacted_capture_wireframe(wda, &bytes),
-        )
+    // `raw` is WDA's capture untouched, size included.
+    let check = bytes.len() <= REDACTION_CHECK_MAX_PNG_BYTES;
+    if raw || (!check && max_side.is_none()) {
+        return png_response(bytes, source, false);
+    }
+    // One decode serves the hidden-screen check, the wireframe and the
+    // shrink; each used to decode the capture (and the wireframe its own
+    // re-encoded PNG) again.
+    let bytes = Arc::new(bytes);
+    let png = Arc::clone(&bytes);
+    let decoded = tokio::task::spawn_blocking(move || crate::redaction::decode_png(&png))
         .await
         .ok()
         .flatten();
-        if let Some(wireframe) = wireframe {
-            let wireframe = fit_png(wireframe, max_side).await;
-            return png_response(wireframe, Some("accessibility-wireframe"), true);
+    let bytes = Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone());
+    let Some(image) = decoded else {
+        return png_response(bytes, source, false);
+    };
+    let image = if check {
+        let checked = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            redacted_capture_wireframe(wda, image),
+        )
+        .await;
+        match checked {
+            Ok(Some(Ok(wireframe))) => {
+                let fitted = tokio::task::spawn_blocking(move || {
+                    let image = match max_side {
+                        Some(max_side) => crate::redaction::fit_within(wireframe, max_side),
+                        None => wireframe,
+                    };
+                    crate::redaction::encode_png(&image)
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(png) = fitted {
+                    return png_response(png, Some("accessibility-wireframe"), true);
+                }
+                return png_response(bytes, source, false);
+            }
+            Ok(Some(Err(image))) => image,
+            // The check outlived its budget (or lost its worker) and took
+            // the image with it.
+            Ok(None) | Err(_) => {
+                return png_response(fit_png(bytes, max_side).await, source, false)
+            }
         }
-    }
-    // `raw` is WDA's capture untouched, size included.
-    let max_side = if raw { None } else { max_side };
-    png_response(fit_png(bytes, max_side).await, source, false)
+    } else {
+        image
+    };
+    let Some(max_side) = max_side.filter(|&side| image.width.max(image.height) > side) else {
+        return png_response(bytes, source, false);
+    };
+    let fitted = tokio::task::spawn_blocking(move || {
+        crate::redaction::encode_png(&crate::redaction::fit_within(image, max_side))
+    })
+    .await
+    .ok()
+    .flatten();
+    png_response(fitted.unwrap_or(bytes), source, false)
 }
 
 /// Shrink a PNG to `max_side` off the async runtime; the original when it
@@ -12662,42 +12836,43 @@ fn refresh_capture_verdict(state: &Arc<AppState>, hub: &Arc<crate::video::VideoH
 const REDACTION_CHECK_MAX_PNG_BYTES: usize = 600 * 1024;
 
 /// When the app hid this screen from capture (blank content band, labelled
-/// elements in the tree), the same capture with the tree drawn over it.
+/// elements in the tree), `Ok` with the tree drawn over the capture; `Err`
+/// hands the capture back untouched.
 async fn redacted_capture_wireframe(
     wda: &Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
-    png: &[u8],
-) -> Option<Vec<u8>> {
-    if png.len() > REDACTION_CHECK_MAX_PNG_BYTES {
-        return None;
+    image: crate::redaction::Image,
+) -> Option<Result<crate::redaction::Image, crate::redaction::Image>> {
+    // A sampled pass over the band: cheap enough for the runtime thread.
+    if !crate::redaction::content_band_is_blank(&image) {
+        return Some(Err(image));
     }
-    let png = png.to_vec();
-    let blank = tokio::task::spawn_blocking(move || {
-        let image = crate::redaction::decode_png(&png)?;
-        crate::redaction::content_band_is_blank(&image).then_some(image)
-    })
-    .await
-    .ok()??;
-    let (rows, window) = {
+    let read = {
         let mut w = wda.lock().await;
-        let rows = w.elements().await.ok()?;
-        let window = w.window_size().await.ok()?;
-        (rows, window)
+        match (w.elements().await, w.window_size().await) {
+            (Ok(rows), Ok(window)) => Some((rows, window)),
+            _ => None,
+        }
+    };
+    let Some((rows, window)) = read else {
+        return Some(Err(image));
     };
     if !crate::redaction::tree_has_hidden_content(&rows, window) {
-        return None;
+        return Some(Err(image));
     }
+    // A sparse real page (one card and a spinner) is "blank" too; only a
+    // capture that leaves the tree's labelled rows undrawn is hidden. A
+    // lost join (a panic) loses the image: `None`, and the caller decodes
+    // its bytes again.
     tokio::task::spawn_blocking(move || {
-        // A sparse real page (one card and a spinner) is "blank" too; only
-        // a capture that leaves the tree's labelled rows undrawn is hidden.
-        if crate::redaction::labelled_rows_show_content(&blank, &rows, window) {
-            return None;
+        if crate::redaction::labelled_rows_show_content(&image, &rows, window) {
+            return Err(image);
         }
-        let mut image = blank;
+        let mut image = image;
         crate::redaction::draw_wireframe(&mut image, &rows, window);
-        crate::redaction::encode_png(&image)
+        Ok(image)
     })
     .await
-    .ok()?
+    .ok()
 }
 
 async fn agent_screenshot(
@@ -14793,9 +14968,7 @@ mod tests {
                     (lifecycle.clone(), hold_until.clone(), barrier.clone());
                 std::thread::spawn(move || {
                     barrier.wait();
-                    let Some(token) = lifecycle.try_begin_releasing() else {
-                        return None;
-                    };
+                    let token = lifecycle.try_begin_releasing()?;
                     // What the watchdog does right after its CAS: re-check the
                     // hold under the same lock the hold is written under. The
                     // transition stays open until the main thread has joined
@@ -14892,7 +15065,7 @@ mod tests {
         // Travels upward (positive dy → content moves down), stays inside the
         // clipped region and on screen.
         assert!(y2 < y1, "moves up: {y2} < {y1}");
-        assert!(y2 >= 94.0 && y2 <= 954.0, "on screen: {y2}");
+        assert!((94.0..=954.0).contains(&y2), "on screen: {y2}");
         assert_eq!(x2, x1);
         // Negative dy travels downward but never past the screen bottom.
         let (_, _, _, y_down) = element_swipe_endpoints(row, popup_list, Some((440.0, 956.0)), 0.0, -300.0);
@@ -15844,15 +16017,33 @@ mod tests {
             depth,
             ..Default::default()
         };
+        let hidden = |row: crate::wda::ElementRow| crate::wda::ElementRow {
+            visible: Some(false),
+            ..row
+        };
         let rows = vec![
             row("Application", "Safari浏览器", [0.0, 0.0, 440.0, 956.0], 0),
             row("Link", "on screen", [20.0, 500.0, 120.0, 20.0], 1),
-            row("Link", "below the page", [20.0, 1500.0, 120.0, 20.0], 1),
-            row("Link", "left of it", [-300.0, 500.0, 120.0, 20.0], 1),
+            // As a lite read shapes them: rows outside the root frame are
+            // `visible:false` (see `mark_rows_outside_root`).
+            hidden(row("Link", "below the page", [20.0, 1500.0, 120.0, 20.0], 1)),
+            hidden(row("Link", "left of it", [-300.0, 500.0, 120.0, 20.0], 1)),
+            // On the screen and still `visible:false`: not drawn.
+            hidden(row("Button", "behind the page", [20.0, 700.0, 120.0, 20.0], 1)),
         ];
         assert!(!center_off_screen(&rows, 1) && !needs_reveal(&rows, 1));
         assert!(center_off_screen(&rows, 2) && needs_reveal(&rows, 2));
         assert!(center_off_screen(&rows, 3));
+        // Off the screen is not "not drawn": no refusal, the tap reveals it.
+        let request = serde_json::json!({});
+        assert_eq!(tap_target_refusal(&rows, 2, &request), None);
+        assert_eq!(tap_target_refusal(&rows, 3, &request), None);
+        assert_eq!(
+            tap_target_refusal(&rows, 4, &request),
+            Some(("element_not_visible", ELEMENT_NOT_VISIBLE_HINT))
+        );
+        assert!(!ELEMENT_NOT_VISIBLE_HINT.contains("WDA"));
+        assert!(!ELEMENT_OFF_SCREEN_HINT.contains("WDA"));
         assert!(point_on_screen(&rows, 440.0, 956.0));
         assert!(!point_on_screen(&rows, 80.0, 1510.0));
         // No Application frame: no verdict, taken as on screen.
@@ -16976,12 +17167,15 @@ mod tests {
         }
 
         fn blocked_on(blocker: &str) -> Self {
+            Self::blocked_on_at(blocker, now_secs())
+        }
+
+        fn blocked_on_at(blocker: &str, ts: u64) -> Self {
             let fixture = Self::absent();
             std::fs::write(
                 &fixture.path,
                 format!(
-                    r#"{{"phase":"lock-backoff","blocked_on":"{blocker}","message":"fixture","ts":{}}}"#,
-                    now_secs()
+                    r#"{{"phase":"lock-backoff","blocked_on":"{blocker}","message":"fixture","ts":{ts}}}"#
                 ),
             )
             .expect("write status fixture");
@@ -16991,6 +17185,74 @@ mod tests {
         fn path(&self) -> &str {
             &self.path
         }
+    }
+
+    /// The bridge's run is watched from the moment Shortcuts is in front, not
+    /// after a fixed 1.2 s sleep, and a run that never finishes is given up at
+    /// the caller's deadline.
+    #[test]
+    fn a_bridge_run_is_watched_from_when_shortcuts_is_in_front_until_the_deadline() {
+        block(async {
+            let library = |finished: bool| {
+                let run = if finished {
+                    r#",{"type":"XCUIElementTypeButton","rawIdentifier":"shortcut.button.run","label":"运行 iU Bridge","rect":{"x":20,"y":200,"width":180,"height":120}}"#
+                } else {
+                    ""
+                };
+                format!(
+                    r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"快捷指令","rect":{{"x":0,"y":0,"width":440,"height":956}},"children":[{{"type":"XCUIElementTypeStaticText","label":"快捷指令","rect":{{"x":20,"y":100,"width":200,"height":40}}}}{run}]}}}}"#
+                )
+            };
+            let respond = move |finished: bool| {
+                move |request: &str| {
+                    if request.starts_with("POST /session ") {
+                        r#"{"value":{"sessionId":"SESSION"}}"#.to_string()
+                    } else if request.contains("/wda/apps/list") {
+                        r#"{"value":[{"bundleId":"com.apple.shortcuts","pid":1}]}"#.to_string()
+                    } else if request.contains("/source") {
+                        library(finished)
+                    } else {
+                        r#"{"value":null}"#.to_string()
+                    }
+                }
+            };
+
+            let mut wda = MockWda::start(respond(true));
+            let mut w = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let started = tokio::time::Instant::now();
+            let run = watch_bridge_run(
+                &mut w,
+                "iU Bridge",
+                true,
+                started + std::time::Duration::from_secs(6),
+            )
+            .await;
+            assert!(run.finished);
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(1000),
+                "waited out a fixed sleep: {:?}",
+                started.elapsed()
+            );
+            wda.shutdown();
+
+            let mut wda = MockWda::start(respond(false));
+            let mut w = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let started = tokio::time::Instant::now();
+            let run = watch_bridge_run(
+                &mut w,
+                "iU Bridge",
+                true,
+                started + std::time::Duration::from_millis(1500),
+            )
+            .await;
+            assert!(!run.finished);
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(2200),
+                "outlived its deadline: {:?}",
+                started.elapsed()
+            );
+            wda.shutdown();
+        });
     }
 
     fn healthy_wda_responder(request: &str) -> String {
@@ -17088,7 +17350,7 @@ mod tests {
             let token = state.wda_lifecycle.try_begin_reconnecting().unwrap();
 
             let outcome =
-                run_wda_readiness_wait(&state, token, short_budget(), status.path()).await;
+                run_wda_readiness_wait(&state, token, short_budget(), status.path(), 0).await;
 
             assert_eq!(outcome, WdaReadinessOutcome::Ready);
             assert!(state
@@ -17116,7 +17378,7 @@ mod tests {
 
             let budget = short_budget();
             let started = std::time::Instant::now();
-            let outcome = run_wda_readiness_wait(&state, token, budget, status.path()).await;
+            let outcome = run_wda_readiness_wait(&state, token, budget, status.path(), 0).await;
 
             assert_eq!(outcome, WdaReadinessOutcome::Locked);
             assert!(
@@ -17128,6 +17390,33 @@ mod tests {
                 Some(true),
                 "the lock state must be published"
             );
+            wda.shutdown();
+        });
+    }
+
+    /// A blocker the replaced helper left before this round's bootstrap (a
+    /// cable since plugged back in) does not end the new round: it reaches
+    /// Ready on the healthy runner. The same file read with no bootstrap
+    /// mark still blocks.
+    #[test]
+    fn readiness_loop_ignores_a_blocker_written_before_the_bootstrap() {
+        block(async {
+            let mut wda = MockWda::start(healthy_wda_responder);
+            let kicked_at = now_secs();
+            let status = SetupStatusFixture::blocked_on_at("usb", kicked_at - 30);
+            assert_eq!(read_structured_setup_blocked_on_at(status.path(), 0), "usb");
+            assert_eq!(
+                read_structured_setup_blocked_on_at(status.path(), kicked_at),
+                ""
+            );
+            let state = readiness_state_with_wda(wda.base());
+            let token = state.wda_lifecycle.try_begin_reconnecting().unwrap();
+
+            let outcome =
+                run_wda_readiness_wait(&state, token, short_budget(), status.path(), kicked_at)
+                    .await;
+
+            assert_eq!(outcome, WdaReadinessOutcome::Ready);
             wda.shutdown();
         });
     }
@@ -17148,7 +17437,7 @@ mod tests {
             let token = state.wda_lifecycle.try_begin_reconnecting().unwrap();
 
             let outcome =
-                run_wda_readiness_wait(&state, token, short_budget(), status.path()).await;
+                run_wda_readiness_wait(&state, token, short_budget(), status.path(), 0).await;
 
             assert_eq!(outcome, WdaReadinessOutcome::SetupBlocked);
             assert_eq!(
@@ -17185,7 +17474,7 @@ mod tests {
             };
 
             let started = std::time::Instant::now();
-            let outcome = run_wda_readiness_wait(&state, token, budget, status.path()).await;
+            let outcome = run_wda_readiness_wait(&state, token, budget, status.path(), 0).await;
             let elapsed = started.elapsed();
 
             assert_eq!(outcome, WdaReadinessOutcome::Deadline);
@@ -17212,7 +17501,7 @@ mod tests {
             let budget = short_budget();
 
             let started = std::time::Instant::now();
-            let outcome = run_wda_readiness_wait(&state, token, budget, status.path()).await;
+            let outcome = run_wda_readiness_wait(&state, token, budget, status.path(), 0).await;
             let elapsed = started.elapsed();
 
             assert_eq!(outcome, WdaReadinessOutcome::Deadline);
@@ -17239,7 +17528,7 @@ mod tests {
             let second = state.wda_lifecycle.try_begin_reconnecting().unwrap();
 
             let outcome =
-                run_wda_readiness_wait(&state, first, short_budget(), status.path()).await;
+                run_wda_readiness_wait(&state, first, short_budget(), status.path(), 0).await;
 
             assert_eq!(outcome, WdaReadinessOutcome::Superseded);
             assert!(
@@ -17260,7 +17549,7 @@ mod tests {
             let token = state.wda_lifecycle.try_begin_reconnecting().unwrap();
             {
                 let _ownership = WdaReadinessOwnership::new(state.wda_lifecycle.clone(), token);
-                let wait = run_wda_readiness_wait(&state, token, short_budget(), status.path());
+                let wait = run_wda_readiness_wait(&state, token, short_budget(), status.path(), 0);
                 tokio::pin!(wait);
                 let _ = tokio::time::timeout(std::time::Duration::from_millis(5), &mut wait).await;
             }
@@ -17947,7 +18236,7 @@ mod page_scroll_tests {
         }
         assert!(y1 < 874.0, "starts above Safari's bar: {e:?}");
         // Off the scroll indicator column and out of the back-swipe band.
-        assert!(x1 >= 44.0 && x1 < 407.0, "{e:?}");
+        assert!((44.0..407.0).contains(&x1), "{e:?}");
         assert!(y1 - y2 >= 300.0, "travel survives: {e:?}");
     }
 

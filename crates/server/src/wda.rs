@@ -3168,9 +3168,11 @@ mod tests {
 
     #[test]
     fn an_app_switch_probes_unless_the_frontmost_app_is_known_small() {
-        let mut memory = ProbeMemory::default();
         // A switch to an app WDA cannot name, or a bundle never read: probe.
-        memory.app_switched = true;
+        let mut memory = ProbeMemory {
+            app_switched: true,
+            ..ProbeMemory::default()
+        };
         assert!(memory.should_probe(1_000, false, false));
         memory.switched_bundle = Some("com.apple.calculator".into());
         assert!(memory.should_probe(1_000, false, false));
@@ -3222,7 +3224,7 @@ mod tests {
     fn a_no_alert_answer_is_reused_until_something_is_sent() {
         let (base, server) = mock_wda(3, |request| {
             if request.contains("/alert/text") {
-                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 39\r\nConnection: close\r\n\r\n{\"value\":{\"error\":\"no such alert\"}}  ".to_string()
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 37\r\nConnection: close\r\n\r\n{\"value\":{\"error\":\"no such alert\"}}  ".to_string()
             } else {
                 r#"{"value":null}"#.to_string()
             }
