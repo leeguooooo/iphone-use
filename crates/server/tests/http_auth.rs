@@ -1087,6 +1087,55 @@ fn direct_browser_control_timeout_after_dispatch_is_unknown_504() {
 }
 
 #[test]
+fn direct_browser_control_timeout_during_lookups_is_retry_safe_408() {
+    // The deadline fires while the tap is still reading the screen size, a
+    // read-only lookup. Nothing that can change the screen went out, so the
+    // answer is `not_sent` / retry-safe, not `outcome_unknown`.
+    block(async {
+        let action_count = Arc::new(AtomicUsize::new(0));
+        let observed = action_count.clone();
+        let (base, server) = mock_wda(2, move |request, _| {
+            if request.starts_with("POST /session ") {
+                Some((
+                    std::time::Duration::ZERO,
+                    r#"{"value":{"sessionId":"SESSION"}}"#.to_string(),
+                ))
+            } else if request.contains("/window/size") {
+                Some((
+                    std::time::Duration::from_millis(600),
+                    r#"{"value":{"width":390,"height":844}}"#.to_string(),
+                ))
+            } else {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Some((std::time::Duration::ZERO, r#"{"value":null}"#.to_string()))
+            }
+        });
+        let app = http::router(build_state_with_wda(&base));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control")
+                    .header("x-phone-control", "1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"type":"tap","x":1.0,"y":1.0,"ttl_ms":150}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "not_sent", "{json}");
+        assert_eq!(json["retry_safe"], true, "{json}");
+        assert_eq!(action_count.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
 fn agent_elements_surfaces_a_populated_system_alert() {
     block(async {
         // A single button plus a live UIAlertController. The flattened tree
