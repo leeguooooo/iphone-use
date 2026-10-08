@@ -11337,9 +11337,15 @@ fn focus_bridge() -> Option<String> {
         .then(|| registry.bridge_name.clone())
 }
 
+/// The most the first action of a session waits for Do Not Disturb, from the
+/// deep link to the app back in front. It sits in front of an action the
+/// agent is timing; past it the action goes ahead.
+const AGENT_FOCUS_ENGAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(6);
+
 /// First control request of a session: ask the phone for Do Not Disturb, then
 /// put the foreground app back (the bridge shortcut opens the Shortcuts app).
-/// Best-effort — any failure leaves the request it precedes untouched.
+/// Best-effort and bounded by [`AGENT_FOCUS_ENGAGE_BUDGET`] — any failure
+/// leaves the request it precedes untouched.
 async fn engage_agent_focus(
     state: &AppState,
     w: &mut crate::wda::WdaClient,
@@ -11350,6 +11356,7 @@ async fn engage_agent_focus(
         return None;
     }
     let bridge = focus_bridge()?;
+    let deadline = tokio::time::Instant::now() + AGENT_FOCUS_ENGAGE_BUDGET;
     let previous = w.active_bundle().await.ok().flatten();
     let link = intent_deep_link(
         &bridge,
@@ -11362,7 +11369,7 @@ async fn engage_agent_focus(
         return None;
     }
     recover(state.agent_focus.lock()).mark_attempted();
-    let run = watch_bridge_run(w, &bridge, true).await;
+    let run = watch_bridge_run(w, &bridge, true, deadline).await;
     // The notice is the evidence focus_on turned DND on. A run held by a
     // prompt counts too: focus_on only prompts inside its "no Focus" branch.
     let ours = run.saw_on_notice || !run.finished;
@@ -11388,11 +11395,10 @@ async fn engage_agent_focus(
     // it instead of the app (hardware: the first tap_locator after DND came
     // back element_not_found). Let it go before the agent's action runs.
     if ours {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
         while tokio::time::Instant::now() < deadline {
             match w.active_bundles().await {
                 Ok(active) if !active.iter().any(|b| b == "com.apple.springboard") => break,
-                Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(400)).await,
+                Ok(_) => sleep_until_or(deadline, std::time::Duration::from_millis(250)).await,
                 Err(_) => break,
             }
         }
@@ -11448,16 +11454,32 @@ struct BridgeRun {
     saw_on_notice: bool,
 }
 
+/// Sleep `step`, or until `deadline` if that comes first.
+async fn sleep_until_or(deadline: tokio::time::Instant, step: std::time::Duration) {
+    tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + step)).await;
+}
+
 async fn watch_bridge_run(
     w: &mut crate::wda::WdaClient,
     bridge: &str,
     look_for_notice: bool,
+    deadline: tokio::time::Instant,
 ) -> BridgeRun {
-    let deadline = tokio::time::Instant::now() + crate::focus::SHORTCUT_RUN_TIMEOUT;
     let mut run = BridgeRun { finished: false, saw_on_notice: false };
-    // Give the deep link a moment to bring the Shortcuts app forward first,
-    // or the library from before the run reads as "already finished".
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    // Wait for the deep link to bring the Shortcuts app forward first, or the
+    // library from before the run reads as "already finished" (and, for
+    // focus_off, the app it left as "Shortcuts already gone"). Polled, not a
+    // fixed 1.2 s: it is usually in front within a few hundred ms.
+    let front_by =
+        deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(1200));
+    while tokio::time::Instant::now() < front_by {
+        if let Ok(active) = w.active_bundles().await {
+            if active.iter().any(|b| b == "com.apple.shortcuts") {
+                break;
+            }
+        }
+        sleep_until_or(front_by, std::time::Duration::from_millis(100)).await;
+    }
     while tokio::time::Instant::now() < deadline {
         // focus_off ends on the Home Screen, where the library never shows;
         // poll only the cheap foreground-app query, never the (large)
@@ -11470,7 +11492,7 @@ async fn watch_bridge_run(
                     return run;
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            sleep_until_or(deadline, std::time::Duration::from_millis(400)).await;
             continue;
         }
         if let Ok(rows) = w.elements().await {
@@ -11483,7 +11505,7 @@ async fn watch_bridge_run(
                 // The notice is SpringBoard's banner, and while it is up the
                 // tree read lands on it rather than the library — so the tile
                 // cannot be watched. Setting DND is the step right after it.
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                sleep_until_or(deadline, std::time::Duration::from_millis(800)).await;
                 run.finished = true;
                 return run;
             }
@@ -11507,7 +11529,7 @@ async fn watch_bridge_run(
                 return run;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        sleep_until_or(deadline, std::time::Duration::from_millis(500)).await;
     }
     run
 }
@@ -11539,7 +11561,12 @@ async fn release_agent_focus(state: &AppState) -> Option<serde_json::Value> {
     let sent = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let mut w = wda.lock().await;
         let opened = w.open_url(&link).await;
-        if opened.is_ok() && !watch_bridge_run(&mut w, &bridge, false).await.finished {
+        let deadline = tokio::time::Instant::now() + crate::focus::SHORTCUT_RUN_TIMEOUT;
+        if opened.is_ok()
+            && !watch_bridge_run(&mut w, &bridge, false, deadline)
+                .await
+                .finished
+        {
             tracing::warn!("agent focus: focus_off did not finish (permission prompt?)");
         }
         opened
@@ -17070,6 +17097,74 @@ mod tests {
         fn path(&self) -> &str {
             &self.path
         }
+    }
+
+    /// The bridge's run is watched from the moment Shortcuts is in front, not
+    /// after a fixed 1.2 s sleep, and a run that never finishes is given up at
+    /// the caller's deadline.
+    #[test]
+    fn a_bridge_run_is_watched_from_when_shortcuts_is_in_front_until_the_deadline() {
+        block(async {
+            let library = |finished: bool| {
+                let run = if finished {
+                    r#",{"type":"XCUIElementTypeButton","rawIdentifier":"shortcut.button.run","label":"运行 iU Bridge","rect":{"x":20,"y":200,"width":180,"height":120}}"#
+                } else {
+                    ""
+                };
+                format!(
+                    r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"快捷指令","rect":{{"x":0,"y":0,"width":440,"height":956}},"children":[{{"type":"XCUIElementTypeStaticText","label":"快捷指令","rect":{{"x":20,"y":100,"width":200,"height":40}}}}{run}]}}}}"#
+                )
+            };
+            let respond = move |finished: bool| {
+                move |request: &str| {
+                    if request.starts_with("POST /session ") {
+                        r#"{"value":{"sessionId":"SESSION"}}"#.to_string()
+                    } else if request.contains("/wda/apps/list") {
+                        r#"{"value":[{"bundleId":"com.apple.shortcuts","pid":1}]}"#.to_string()
+                    } else if request.contains("/source") {
+                        library(finished)
+                    } else {
+                        r#"{"value":null}"#.to_string()
+                    }
+                }
+            };
+
+            let mut wda = MockWda::start(respond(true));
+            let mut w = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let started = tokio::time::Instant::now();
+            let run = watch_bridge_run(
+                &mut w,
+                "iU Bridge",
+                true,
+                started + std::time::Duration::from_secs(6),
+            )
+            .await;
+            assert!(run.finished);
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(1000),
+                "waited out a fixed sleep: {:?}",
+                started.elapsed()
+            );
+            wda.shutdown();
+
+            let mut wda = MockWda::start(respond(false));
+            let mut w = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let started = tokio::time::Instant::now();
+            let run = watch_bridge_run(
+                &mut w,
+                "iU Bridge",
+                true,
+                started + std::time::Duration::from_millis(1500),
+            )
+            .await;
+            assert!(!run.finished);
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(2200),
+                "outlived its deadline: {:?}",
+                started.elapsed()
+            );
+            wda.shutdown();
+        });
     }
 
     fn healthy_wda_responder(request: &str) -> String {
