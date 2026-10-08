@@ -867,18 +867,25 @@ launchd_label_is_disabled() {
              END { exit(found ? 0 : 1) }'
 }
 
-probe_daemon_control_plane() {
-    local target="gui/$UID_NUM/$PLIST_LABEL"
+# wait_label_gone <gui/uid/label>: `bootout` is asynchronous; a bootstrap fired
+# before the old job is gone races its teardown ("Bootstrap failed: 5").
+wait_label_gone() {
+    local i=0
+    while launchctl print "$1" >/dev/null 2>&1 && [ "$i" -lt 50 ]; do
+        sleep 0.2
+        i=$((i + 1))
+    done
+}
+
+# probe_launchd_daemon <gui/uid/label> <binary> <port> <url> [bearer-token]
+# Succeeds only when launchd's job pid runs <binary> as this user, owns the TCP
+# listener on <port>, answers <url> with a 2xx (authenticated when a token is
+# given), and is still the same pid afterwards. Sets PROBED_DAEMON_PID.
+probe_launchd_daemon() {
+    local target="$1" expected_binary="$2" port="$3" url="$4" token="${5:-}"
     local lsof_bin="${IPHONE_USE_LSOF_BIN:-/usr/sbin/lsof}"
     local ps_bin="${IPHONE_USE_PS_BIN:-/bin/ps}"
-    local before
-    local after
-    local pid
-    local pid_after
-    local program
-    local program_after
-    local process_uid
-    local process_command
+    local before after pid pid_after program program_after process_uid process_command
 
     [ -x "$lsof_bin" ] && [ -x "$ps_bin" ] || return 1
     before="$(launchctl print "$target" 2>/dev/null)" || return 1
@@ -890,7 +897,7 @@ probe_daemon_control_plane() {
         | head -1)"
     printf '%s' "$pid" | grep -Eq '^[0-9]+$' || return 1
     [ "$pid" -gt 1 ] 2>/dev/null || return 1
-    [ "$program" = "$BINARY_PATH" ] || return 1
+    [ "$program" = "$expected_binary" ] || return 1
 
     process_uid="$("$ps_bin" -p "$pid" -o uid= 2>/dev/null \
         | tr -d '[:space:]')" || return 1
@@ -898,14 +905,20 @@ probe_daemon_control_plane() {
     process_command="$("$ps_bin" -ww -p "$pid" -o command= 2>/dev/null \
         | sed -E 's/^[[:space:]]*//')" || return 1
     case "$process_command" in
-        "$BINARY_PATH"|"${BINARY_PATH} "*) ;;
+        "$expected_binary"|"${expected_binary} "*) ;;
         *) return 1 ;;
     esac
 
-    "$lsof_bin" -nP -a -p "$pid" -iTCP:"$PORT" -sTCP:LISTEN \
+    "$lsof_bin" -nP -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN \
         >/dev/null 2>&1 || return 1
-    curl -fsS --noproxy '*' -m 2 -o /dev/null "$DAEMON_PROBE_URL" \
-        2>/dev/null || return 1
+    if [ -n "$token" ]; then
+        # The token goes to curl on stdin as config, never in argv.
+        printf 'header = "Authorization: Bearer %s"\n' "$token" \
+            | curl -fsS --noproxy '*' -m 2 -o /dev/null -K - "$url" 2>/dev/null \
+            || return 1
+    else
+        curl -fsS --noproxy '*' -m 2 -o /dev/null "$url" 2>/dev/null || return 1
+    fi
 
     after="$(launchctl print "$target" 2>/dev/null)" || return 1
     pid_after="$(printf '%s\n' "$after" \
@@ -914,9 +927,15 @@ probe_daemon_control_plane() {
     program_after="$(printf '%s\n' "$after" \
         | sed -n 's/^[[:space:]]*program = //p' \
         | head -1)"
-    [ "$pid_after" = "$pid" ] && [ "$program_after" = "$BINARY_PATH" ] \
+    [ "$pid_after" = "$pid" ] && [ "$program_after" = "$expected_binary" ] \
         || return 1
-    DAEMON_PID="$pid"
+    PROBED_DAEMON_PID="$pid"
+}
+
+probe_daemon_control_plane() {
+    probe_launchd_daemon "gui/$UID_NUM/$PLIST_LABEL" "$BINARY_PATH" "$PORT" \
+        "$DAEMON_PROBE_URL" || return 1
+    DAEMON_PID="$PROBED_DAEMON_PID"
 }
 
 is_loopback_wda_url() {
@@ -2265,29 +2284,48 @@ install_named_instance() {
     /usr/bin/plutil -lint "$plist_stage" >/dev/null \
         || { rm -rf "$app_stage" "$plist_stage"; die "Generated instance plist is invalid."; }
 
+    # Defined before anything is touched, so every failure below rolls back
+    # exactly the steps that already happened.
+    app_replaced=0
+    plist_replaced=0
+    named_rollback() {
+        warn "Rolling back instance $INSTANCE_NAME: $1"
+        _restore_runner_sources
+        launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
+        wait_label_gone "gui/$UID_NUM/$label"
+        if [ "$plist_replaced" = 1 ]; then
+            if [ -n "$plist_backup" ]; then mv -f "$plist_backup" "$plist"; else rm -f "$plist"; fi
+        fi
+        if [ "$app_replaced" = 1 ]; then rm -rf "$app_dst"; fi
+        if [ -n "$app_backup" ] && [ -d "$app_backup" ]; then mv "$app_backup" "$app_dst"; fi
+        if [ "$was_loaded" = 1 ] && [ -f "$plist" ]; then
+            launchctl bootstrap "gui/$UID_NUM" "$plist" 2>/dev/null || true
+        fi
+        die "$1"
+    }
+
     if launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1; then
         was_loaded=1
         launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
-        i=0
-        while launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1 && [ "$i" -lt 50 ]; do
-            sleep 0.2; i=$((i + 1))
-        done
+        wait_label_gone "gui/$UID_NUM/$label"
     fi
     if [ -d "$app_dst" ]; then
         app_backup="$runtime/.$APP_NAME.backup.$$"
-        mv "$app_dst" "$app_backup" || die "Could not move the previous instance app aside."
+        mv "$app_dst" "$app_backup" || { app_backup=""; named_rollback "Could not move the previous instance app aside."; }
     fi
-    mv "$app_stage" "$app_dst" || die "Could not install the instance app."
+    mv "$app_stage" "$app_dst" || named_rollback "Could not install the instance app."
+    app_replaced=1
     if [ -f "$plist" ]; then
         plist_backup="$plist_stage.backup"
-        cp -p "$plist" "$plist_backup"
+        cp -p "$plist" "$plist_backup" || named_rollback "Could not back up $plist"
     fi
-    mv -f "$plist_stage" "$plist"
+    mv -f "$plist_stage" "$plist" || named_rollback "Could not install $plist"
+    plist_replaced=1
     for value in setup-wda.sh uninstall.sh; do
         if [ "$value" = setup-wda.sh ]; then key="$setup_src"; else key="$uninstall_src"; fi
         cp -f "$key" "$state_dir/$value.new.$$" && chmod 700 "$state_dir/$value.new.$$" \
             && mv -f "$state_dir/$value.new.$$" "$state_dir/$value" \
-            || die "Could not install $state_dir/$value"
+            || named_rollback "Could not install $state_dir/$value"
     done
     # Every instance builds the device runner from the shared sources.
     if runner_tree_valid "$SCRIPT_DIR/runner"; then
@@ -2296,30 +2334,20 @@ install_named_instance() {
         warn "No device runner sources next to this installer or at $RUNNER_SRC_DST; install the default instance first."
     fi
 
-    named_rollback() {
-        warn "Rolling back instance $INSTANCE_NAME: $1"
-        _restore_runner_sources
-        launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
-        if [ -n "$plist_backup" ]; then mv -f "$plist_backup" "$plist"; else rm -f "$plist"; fi
-        if [ -n "$app_backup" ]; then rm -rf "$app_dst"; mv "$app_backup" "$app_dst"; fi
-        if [ "$was_loaded" = 1 ] && [ -f "$plist" ]; then
-            launchctl bootstrap "gui/$UID_NUM" "$plist" 2>/dev/null || true
-        fi
-        die "$1"
-    }
     launchctl enable "gui/$UID_NUM/$label" 2>/dev/null || true
     launchctl bootstrap "gui/$UID_NUM" "$plist" 2>/dev/null \
         || named_rollback "launchctl refused $plist"
-    code=000
+    # The daemon must be OUR process (launchd pid running this binary, owning
+    # the listener) and answer an authenticated /agent/status with 200 — a
+    # stray process on the port or a crash-looping job must not pass.
     i=0
     while [ "$i" -lt 40 ]; do
-        code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$daemon_port/agent/status" 2>/dev/null || true)"
-        case "$code" in 000|'') ;; *) break ;; esac
+        probe_launchd_daemon "gui/$UID_NUM/$label" "$binary" "$daemon_port" \
+            "http://127.0.0.1:$daemon_port/agent/status" "$token" && break
         sleep 0.5; i=$((i + 1))
     done
-    case "$code" in
-        000|'') named_rollback "the instance daemon did not answer on 127.0.0.1:$daemon_port (see $state_dir/logs/iphone-use.err)" ;;
-    esac
+    [ "$i" -lt 40 ] \
+        || named_rollback "the instance daemon did not prove its PID, listener and a 200 /agent/status on 127.0.0.1:$daemon_port (see $state_dir/logs/iphone-use.err)"
     [ -z "$app_backup" ] || rm -rf "$app_backup"
     [ -z "$plist_backup" ] || rm -f "$plist_backup"
     RUNNER_SRC_COMMITTED=1
@@ -3200,8 +3228,9 @@ if [ "$DAEMON_SHOULD_START" = "1" ]; then
     fi
 
     if [ "$DAEMON_LOADED" = "1" ]; then
-        if launchctl kickstart -k "gui/$UID_NUM/$PLIST_LABEL" 2>/dev/null \
-            && launchctl print "gui/$UID_NUM/$PLIST_LABEL" >/dev/null 2>&1; then
+        # RunAtLoad already started the job; a `kickstart -k` here killed that
+        # fresh daemon mid-startup and restarted the readiness clock.
+        if launchctl print "gui/$UID_NUM/$PLIST_LABEL" >/dev/null 2>&1; then
             ok "LaunchAgent job is loaded"
         else
             DAEMON_LOADED=0
@@ -3225,7 +3254,9 @@ DAEMON_PROBE_URL="http://${DAEMON_PROBE_HOST}:${PORT}/"
 DAEMON_HTTP_READY=0
 DAEMON_PID=""
 if command -v curl >/dev/null 2>&1; then
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    # ~20 s, like the named-instance path: a cold first start (Gatekeeper,
+    # TCC, a slow disk) can take well over 5 s to bind and answer.
+    for _ in $(seq 1 40); do
         if probe_daemon_control_plane; then
             DAEMON_HTTP_READY=1
             break
