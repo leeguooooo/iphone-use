@@ -7233,11 +7233,13 @@ async fn reused_row_is_live(w: &mut crate::wda::WdaClient, row: &crate::wda::Ele
 
 const ELEMENT_OCCLUDED_HINT: &str = "nothing was sent: another control (a fixed bar, header, keyboard or floating button) covers the centre of this element, so the tap would land on that instead. Bring it clear first with {\"type\":\"perform\",\"action\":\"scroll_to_visible\",\"element\":N,\"snapshot\":…} or a scroll, read /agent/elements again and retry; send \"allow_occluded\":true only if you mean to tap whatever is on top";
 
-const ELEMENT_NOT_VISIBLE_HINT: &str = "nothing was sent: WDA reports this element as not visible (visible:false) — it is in the tree but not drawn, like Chrome's tab grid kept behind the page — so a tap would land on whatever is on top. Pick a row without visible:false; send \"allow_occluded\":true only if you mean to tap that spot anyway";
+const ELEMENT_NOT_VISIBLE_HINT: &str = "nothing was sent: this element is on the screen but not drawn (visible:false) — it is in the tree but kept behind what is shown, like Chrome's tab grid behind the page — so a tap would land on whatever is on top. Pick a row without visible:false; send \"allow_occluded\":true only if you mean to tap that spot anyway";
 
 /// Why a tap aimed at `rows[index]` would not reach it, if it would not:
-/// the element is not drawn (`visible:false`), or another control covers its
-/// centre. `"allow_occluded":true` waives both.
+/// the element is not drawn (`visible:false` with its centre on the screen),
+/// or another control covers its centre. `"allow_occluded":true` waives both.
+/// A target outside the screen is no refusal here: a lite read marks every
+/// such row `visible:false`, and the caller scrolls it into view first.
 fn tap_target_refusal(
     rows: &[crate::wda::ElementRow],
     index: usize,
@@ -7247,8 +7249,8 @@ fn tap_target_refusal(
         return None;
     }
     let target = rows.get(index)?;
-    if target.visible == Some(false) {
-        tracing::info!("tap refused: row {index} '{}' is not visible", target.label);
+    if target.visible == Some(false) && !center_off_screen(rows, index) {
+        tracing::info!("tap refused: row {index} '{}' is not drawn", target.label);
         return Some(("element_not_visible", ELEMENT_NOT_VISIBLE_HINT));
     }
     let cover = occluding_row(rows, index)?;
@@ -15844,15 +15846,33 @@ mod tests {
             depth,
             ..Default::default()
         };
+        let hidden = |row: crate::wda::ElementRow| crate::wda::ElementRow {
+            visible: Some(false),
+            ..row
+        };
         let rows = vec![
             row("Application", "Safari浏览器", [0.0, 0.0, 440.0, 956.0], 0),
             row("Link", "on screen", [20.0, 500.0, 120.0, 20.0], 1),
-            row("Link", "below the page", [20.0, 1500.0, 120.0, 20.0], 1),
-            row("Link", "left of it", [-300.0, 500.0, 120.0, 20.0], 1),
+            // As a lite read shapes them: rows outside the root frame are
+            // `visible:false` (see `mark_rows_outside_root`).
+            hidden(row("Link", "below the page", [20.0, 1500.0, 120.0, 20.0], 1)),
+            hidden(row("Link", "left of it", [-300.0, 500.0, 120.0, 20.0], 1)),
+            // On the screen and still `visible:false`: not drawn.
+            hidden(row("Button", "behind the page", [20.0, 700.0, 120.0, 20.0], 1)),
         ];
         assert!(!center_off_screen(&rows, 1) && !needs_reveal(&rows, 1));
         assert!(center_off_screen(&rows, 2) && needs_reveal(&rows, 2));
         assert!(center_off_screen(&rows, 3));
+        // Off the screen is not "not drawn": no refusal, the tap reveals it.
+        let request = serde_json::json!({});
+        assert_eq!(tap_target_refusal(&rows, 2, &request), None);
+        assert_eq!(tap_target_refusal(&rows, 3, &request), None);
+        assert_eq!(
+            tap_target_refusal(&rows, 4, &request),
+            Some(("element_not_visible", ELEMENT_NOT_VISIBLE_HINT))
+        );
+        assert!(!ELEMENT_NOT_VISIBLE_HINT.contains("WDA"));
+        assert!(!ELEMENT_OFF_SCREEN_HINT.contains("WDA"));
         assert!(point_on_screen(&rows, 440.0, 956.0));
         assert!(!point_on_screen(&rows, 80.0, 1510.0));
         // No Application frame: no verdict, taken as on screen.
