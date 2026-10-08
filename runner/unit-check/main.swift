@@ -318,5 +318,17 @@ do {
   check(caret.add(gray, atMs: 120), "a caret blink alone does not keep the screen unsettled")
 }
 
+// MARK: - View services
+
+do {
+  let svs = "com.apple.SafariViewService"
+  check(ViewService.overlay(foregroundBundle: "com.github.stormbreaker.prod", isPresenting: { $0 == svs }) == svs,
+        "a presenting SafariViewService sheet becomes the target")
+  check(ViewService.overlay(foregroundBundle: "com.github.stormbreaker.prod", isPresenting: { _ in false }) == nil,
+        "no sheet: the foreground app stays")
+  check(ViewService.overlay(foregroundBundle: svs, isPresenting: { _ in true }) == nil,
+        "already the foreground: nothing to swap")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)

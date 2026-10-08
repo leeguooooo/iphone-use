@@ -52,6 +52,9 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// Pids of the applications the AX client reports as active.
 + (NSArray<NSNumber *> *)activeApplicationPIDs;
 
+/// The AX element of an active application with this pid, or nil when it is not active.
++ (nullable id)activeApplicationElementForPID:(int)pid;
+
 /// The foreground application's AX element (XCAccessibilityElement), resolved from
 /// `activeApplications`: the only non-SpringBoard active app when there is exactly one, else a
 /// hit-test at `probePoint` (screen points), else the first non-SpringBoard app, else SpringBoard.
