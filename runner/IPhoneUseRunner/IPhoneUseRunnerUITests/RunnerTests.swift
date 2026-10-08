@@ -589,13 +589,11 @@ final class RunnerTests: XCTestCase {
     return .value(png.base64EncodedString())
   }
 
+  /// The screen in points as the UI on it is oriented: the interface orientation, never the
+  /// physical one (a phone lying on its side reads landscape while its UI stays portrait, and
+  /// every tap below y = 390 was refused as off screen).
   func windowSizePoints() -> CGSize {
-    var size = UIScreen.main.bounds.size
-    let landscape = XCUIDevice.shared.orientation.isLandscape
-    if landscape != (size.width > size.height) {
-      size = CGSize(width: size.height, height: size.width)
-    }
-    return size
+    ScreenOrientation.size(natural: UIScreen.main.bounds.size, interfaceOrientation: IPURBridge.interfaceOrientation())
   }
 
   func windowSize() -> HTTPResponse {

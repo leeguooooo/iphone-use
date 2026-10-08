@@ -341,6 +341,40 @@ do {
   check(!TapBounds.onScreen(CGPoint(x: 10, y: 10), .zero), "no screen size: nothing is on it")
 }
 
+// MARK: - Screen orientation (the interface, not the device)
+
+do {
+  // iPhone 13: the runner's UIScreen bounds are 390x844. The device lying on its side reported
+  // landscape while the home screen stayed portrait; the interface orientation is what counts.
+  let natural = CGSize(width: 390, height: 844)
+  let portrait = CGSize(width: 390, height: 844)
+  let landscape = CGSize(width: 844, height: 390)
+  // Device landscape, interface portrait (1): portrait, and a tap at y = 600 is on screen.
+  let held = ScreenOrientation.size(natural: natural, interfaceOrientation: 1)
+  check(held == portrait, "interface portrait on a phone lying sideways stays 390x844")
+  check(TapBounds.onScreen(CGPoint(x: 195, y: 600), held), "y = 600 is on a portrait screen")
+  check(TapBounds.firstOffScreen([[["x": 195, "y": 600], ["x": 195, "y": 800]]], held) == nil,
+        "an action path down to y = 800 is on a portrait screen")
+  // Device face up / face down / unknown never reach here as landscape: an unknown or out of
+  // range interface orientation (0, 5, 6) keeps portrait.
+  for raw in [0, 5, 6, 7, -1] {
+    check(ScreenOrientation.size(natural: natural, interfaceOrientation: raw) == portrait,
+          "orientation \(raw) does not flip the screen")
+  }
+  check(ScreenOrientation.size(natural: natural, interfaceOrientation: 2) == portrait, "upside down stays portrait")
+  // A real landscape interface (3 landscapeRight, 4 landscapeLeft) turns the screen.
+  for raw in [3, 4] {
+    let size = ScreenOrientation.size(natural: natural, interfaceOrientation: raw)
+    check(size == landscape, "interface landscape \(raw) is 844x390")
+    check(!TapBounds.onScreen(CGPoint(x: 195, y: 600), size), "y = 600 is off a landscape screen")
+  }
+  // Bounds already landscape (the runner app itself rotated) normalise the same way.
+  check(ScreenOrientation.size(natural: landscape, interfaceOrientation: 1) == portrait,
+        "landscape bounds with a portrait interface read portrait")
+  check(ScreenOrientation.size(natural: landscape, interfaceOrientation: 3) == landscape,
+        "landscape bounds with a landscape interface stay landscape")
+}
+
 // MARK: - Alert scan (alerts beside a web sheet)
 
 do {

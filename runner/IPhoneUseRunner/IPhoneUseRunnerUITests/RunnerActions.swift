@@ -178,6 +178,23 @@ enum TapBounds {
   }
 }
 
+/// The screen size for an interface orientation (UIInterfaceOrientation raw value): landscape
+/// (3, 4) puts the long side across, anything else (portrait, upside down, unknown) keeps it
+/// upright. Callers pass the interface orientation, never the device's: a phone lying on its side
+/// or face up says nothing about how its UI is drawn.
+enum ScreenOrientation {
+  static func isLandscape(_ interfaceOrientation: Int) -> Bool {
+    interfaceOrientation == 3 || interfaceOrientation == 4
+  }
+
+  static func size(natural: CGSize, interfaceOrientation: Int) -> CGSize {
+    let short = min(natural.width, natural.height)
+    let long = max(natural.width, natural.height)
+    return isLandscape(interfaceOrientation)
+      ? CGSize(width: long, height: short) : CGSize(width: short, height: long)
+  }
+}
+
 /// Whether an alert seen after a button tap is still the one that was tapped: same text and the
 /// same buttons. A follow-up alert (a second confirmation) differs and counts as progress.
 enum AlertMatch {

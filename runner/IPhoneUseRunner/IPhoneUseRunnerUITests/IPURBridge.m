@@ -271,6 +271,36 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
   return [application isKindOfClass:XCUIApplication.class] ? application : nil;
 }
 
++ (NSInteger)interfaceOrientation
+{
+  static XCUIApplication *springBoard;
+  static NSInteger cached;
+  static CFAbsoluteTime cachedAt;
+  static dispatch_once_t once;
+  static NSObject *lock;
+  dispatch_once(&once, ^{
+    springBoard = [[XCUIApplication alloc] initWithBundleIdentifier:IPURSpringBoardBundleID];
+    lock = [NSObject new];
+  });
+  @synchronized(lock) {
+    if (cachedAt > 0 && CFAbsoluteTimeGetCurrent() - cachedAt < 0.25) return cached;
+  }
+  SEL selector = NSSelectorFromString(@"interfaceOrientation");
+  if (![springBoard respondsToSelector:selector]) return 0;
+  NSInteger orientation = 0;
+  @try {
+    orientation = (NSInteger)((IPURMsgSendLongLong)objc_msgSend)(springBoard, selector);
+  } @catch (__unused NSException *exception) {
+    orientation = 0;
+  }
+  if (orientation < 1 || orientation > 4) orientation = 0;
+  @synchronized(lock) {
+    cached = orientation;
+    cachedAt = CFAbsoluteTimeGetCurrent();
+  }
+  return orientation;
+}
+
 + (nullable NSString *)bundleIDForPID:(int)pid
 {
   if (pid <= 0) return nil;
@@ -708,14 +738,14 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
         || [recordClass instancesRespondToSelector:NSSelectorFromString(@"initWithName:interfaceOrientation:")]);
 }
 
-/// UIInterfaceOrientation for the record. UIDeviceOrientation 1…4 share raw values with
-/// UIInterfaceOrientation (device landscapeLeft == interface landscapeRight == 3); face up/down
-/// and unknown fall back to portrait.
+/// UIInterfaceOrientation for the record: the interface orientation on screen, not the physical
+/// device orientation (a phone lying on its side reads landscape while its UI stays portrait);
+/// unknown falls back to portrait.
 static long long IPURInterfaceOrientation(void)
 {
   NSInteger orientation = 1;
   @try {
-    orientation = (NSInteger)XCUIDevice.sharedDevice.orientation;
+    orientation = [IPURBridge interfaceOrientation];
   } @catch (__unused NSException *exception) {
     orientation = 1;
   }

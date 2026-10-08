@@ -74,6 +74,13 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// XCUIApplication for a running pid (applicationMonitor), or nil.
 + (nullable XCUIApplication *)applicationForPID:(int)pid;
 
+/// The interface orientation of what is on screen, as a UIInterfaceOrientation raw value (0 when
+/// unknown): XCUIApplication.interfaceOrientation, which asks testmanagerd for the active
+/// interface orientation whichever app is in front. Not XCUIDevice.orientation, the physical
+/// orientation: a phone lying on its side reads landscape while its UI stays portrait. Reads
+/// within 250 ms share one answer.
++ (NSInteger)interfaceOrientation;
+
 /// Process id of an XCUIApplication (private `processID`), or 0.
 + (int)pidForApplication:(XCUIApplication *)application;
 
