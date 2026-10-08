@@ -7,6 +7,10 @@
 //! when the cable is replugged) and asks usbmuxd to connect to the device
 //! port; after usbmuxd answers `Result 0` the socket is a raw tunnel.
 //!
+//! A phone off the cable is reached through its CoreDevice tunnel instead
+//! (`crate::tunnel`): usbmuxd's own network attachment only reaches
+//! lockdownd, never the runner's port.
+//!
 //! The usbmux plist protocol: a 16-byte little-endian header
 //! (`length` including the header, `version` 1, `message` 8 = plist, `tag`)
 //! followed by an XML property list.
@@ -14,7 +18,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 
 const USBMUXD_SOCKET: &str = "/var/run/usbmuxd";
@@ -44,8 +48,8 @@ pub async fn run_relay(udid: &str, listen: SocketAddr, device_port: u16) -> Resu
     match find_device(&want).await {
         Ok(Some(_)) => tracing::info!("relay {listen} -> {udid}:{device_port} over usbmuxd"),
         Ok(None) => tracing::warn!(
-            "relay {listen} -> {udid}:{device_port}: the iPhone is not attached yet; \
-             connections fail until it is"
+            "relay {listen} -> {udid}:{device_port}: the iPhone is not attached over USB; \
+             connections use its CoreDevice Wi-Fi tunnel when one is up"
         ),
         Err(error) => tracing::warn!("relay {listen}: usbmuxd is not answering yet: {error:#}"),
     }
@@ -69,12 +73,116 @@ pub async fn run_relay(udid: &str, listen: SocketAddr, device_port: u16) -> Resu
 
 async fn forward(mut client: TcpStream, want: &str, device_port: u16) -> Result<()> {
     let _ = client.set_nodelay(true);
-    let device_id = find_device(want)
-        .await?
-        .ok_or_else(|| anyhow!("iPhone {want} is not attached to usbmuxd"))?;
-    let mut device = connect(device_id, device_port).await?;
+    let (mut device, path) = connect_port(want, device_port).await?;
+    note_path(device_port, path);
     tokio::io::copy_bidirectional(&mut client, &mut device).await?;
     Ok(())
+}
+
+/// How one connection reached the phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Path {
+    /// usbmuxd over the cable.
+    Usb,
+    /// The CoreDevice tunnel of a Wi-Fi phone.
+    Tunnel,
+    /// usbmuxd's own network attachment (in practice it reaches lockdownd only).
+    Network,
+}
+
+impl Path {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Path::Usb => "usb",
+            Path::Tunnel => "wifi-tunnel",
+            Path::Network => "network",
+        }
+    }
+}
+
+/// A byte stream to a port on the phone, whichever way it was reached.
+pub trait DeviceIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> DeviceIo for T {}
+
+const TUNNEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Which way to try next, given what usbmuxd lists and whether a tunnel
+/// address is known. Pure, so the order is testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Plan {
+    Usb,
+    Tunnel,
+    Network,
+    Nothing,
+}
+
+/// USB first; a tunnel when CoreDevice has one; usbmuxd's network
+/// attachment last (it rarely reaches anything but lockdownd).
+pub(crate) fn plan(listed: Option<bool>, tunnel_known: bool, tunnel_failed: bool) -> Plan {
+    match listed {
+        Some(true) => Plan::Usb,
+        _ if tunnel_known && !tunnel_failed => Plan::Tunnel,
+        Some(false) => Plan::Network,
+        None => Plan::Nothing,
+    }
+}
+
+/// Connect to `port` on the phone `want` (a normalized UDID): usbmuxd over
+/// USB first, then the CoreDevice tunnel of a Wi-Fi phone (re-resolved once
+/// if the cached address fails), then usbmuxd's network attachment.
+pub async fn connect_port(want: &str, port: u16) -> Result<(Box<dyn DeviceIo>, Path)> {
+    let attached = find_attached(want).await;
+    let listed = match &attached {
+        Ok(Some(found)) => Some(found.usb),
+        _ => None,
+    };
+    if plan(listed, false, false) == Plan::Usb {
+        if let Ok(Some(found)) = &attached {
+            let stream = connect(found.device_id, port).await?;
+            return Ok((Box::new(stream), Path::Usb));
+        }
+    }
+    let mut tunnel_failed = false;
+    for refresh in [false, true] {
+        let Some(address) = crate::tunnel::address(want, refresh).await else {
+            continue;
+        };
+        let target = SocketAddr::from((address, port));
+        match tokio::time::timeout(TUNNEL_CONNECT_TIMEOUT, TcpStream::connect(target)).await {
+            Ok(Ok(stream)) => {
+                let _ = stream.set_nodelay(true);
+                return Ok((Box::new(stream), Path::Tunnel));
+            }
+            Ok(Err(error)) => tracing::debug!("tunnel {target}: {error}"),
+            Err(_) => tracing::debug!("tunnel {target}: connect timed out"),
+        }
+        tunnel_failed = true;
+    }
+    match (plan(listed, false, tunnel_failed), attached) {
+        (Plan::Network, Ok(Some(found))) => {
+            let stream = connect(found.device_id, port).await?;
+            Ok((Box::new(stream), Path::Network))
+        }
+        (_, Err(error)) => {
+            Err(error.context("usbmuxd is not answering and no CoreDevice tunnel is up"))
+        }
+        _ => Err(anyhow!(
+            "iPhone {want} is not attached over USB and has no CoreDevice Wi-Fi tunnel"
+        )),
+    }
+}
+
+/// Log the path once per change, not on every connection.
+fn note_path(port: u16, path: Path) {
+    static LAST: std::sync::Mutex<Option<Path>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if *last != Some(path) {
+        tracing::info!(
+            "relay -> device:{port} now reaches the iPhone over {}",
+            path.as_str()
+        );
+        *last = Some(path);
+    }
 }
 
 /// The usbmux device id for `want` (a normalized UDID), preferring a USB
@@ -461,6 +569,21 @@ fn unescape(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usb_wins_then_the_tunnel_then_usbmuxd_network() {
+        // On the cable: usbmuxd, whatever CoreDevice says.
+        assert_eq!(plan(Some(true), true, false), Plan::Usb);
+        // Off the cable with a tunnel: the tunnel, even though usbmuxd still
+        // lists a network attachment (it only reaches lockdownd).
+        assert_eq!(plan(Some(false), true, false), Plan::Tunnel);
+        assert_eq!(plan(None, true, false), Plan::Tunnel);
+        // The tunnel failed even after a refresh: usbmuxd's network entry.
+        assert_eq!(plan(Some(false), true, true), Plan::Network);
+        // No tunnel and nothing in usbmuxd: nothing to dial.
+        assert_eq!(plan(None, false, false), Plan::Nothing);
+        assert_eq!(plan(None, true, true), Plan::Nothing);
+    }
 
     const LIST_REPLY: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

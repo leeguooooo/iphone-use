@@ -168,7 +168,8 @@ pub struct RunnerStatus {
     pub connection: &'static str,
 }
 
-/// `GET /status` on the runner's device port, straight through usbmuxd.
+/// `GET /status` on the runner's device port, straight through usbmuxd over
+/// USB, or the CoreDevice tunnel of a Wi-Fi phone (`usbmux::connect_port`).
 ///
 /// Setup used to learn that the runner serves from the `ServerURLHere` line
 /// xcodebuild copies into its log, but xcodebuild writes that file through a
@@ -177,8 +178,22 @@ pub struct RunnerStatus {
 /// starting.
 pub async fn runner_status(udid: &str, port: u16) -> Result<RunnerStatus> {
     const STATUS_TIMEOUT: Duration = Duration::from_millis(800);
-    let attached = attached(udid).await?;
-    let mut stream = usbmux::connect(attached.device_id, port).await?;
+    let want = usbmux::normalize_udid(udid);
+    if want.is_empty() {
+        bail!("empty UDID");
+    }
+    let (mut stream, path) = match usbmux::connect_port(&want, port).await {
+        Ok(connected) => connected,
+        Err(error) => {
+            // Keep `NotAttached` for a phone that is nowhere at all.
+            attached(udid).await?;
+            return Err(error);
+        }
+    };
+    let serial = match usbmux::find_attached(&want).await {
+        Ok(Some(found)) => found.serial,
+        _ => udid.to_string(),
+    };
     let body = tokio::time::timeout(STATUS_TIMEOUT, async {
         stream
             .write_all(b"GET /status HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -198,11 +213,11 @@ pub async fn runner_status(udid: &str, port: u16) -> Result<RunnerStatus> {
     .context("the runner did not answer /status in time")??;
     let (session_id, state) = parse_runner_status(&body)?;
     Ok(RunnerStatus {
-        udid: attached.serial.clone(),
+        udid: serial,
         port,
         session_id,
         state,
-        connection: connection(&attached),
+        connection: path.as_str(),
     })
 }
 

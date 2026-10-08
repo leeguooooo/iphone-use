@@ -18,6 +18,7 @@ pub mod schedules;
 pub mod scope;
 pub mod setup;
 pub mod timing;
+pub mod tunnel;
 pub mod update;
 pub mod usbmux;
 pub mod video;

@@ -202,6 +202,16 @@ pub fn run(ctx: &Ctx) -> i32 {
         warn("X WDA_ALLOW_LAN=1 needs a USB relay or socat");
         fail = true;
     }
+    if relay.is_some()
+        && !ctx.udid.is_empty()
+        && checks::transport(&ctx.udid) != checks::Transport::Usb
+    {
+        if checks::wifi_tunnel(&ctx.udid) {
+            ok("Wi-Fi: the relay reaches this iPhone through its CoreDevice tunnel (encrypted, this Mac only)");
+        } else {
+            println!("  ~ Wi-Fi: no CoreDevice tunnel to this iPhone right now; over Wi-Fi the relay needs one (Xcode or devicectl opens it while the phone is on the same network)");
+        }
+    }
     if let Some(port) = ctx.wda_port_number() {
         // Any complete answer counts here (`curl -s`, not `-f`).
         if sys::http_get(
@@ -217,8 +227,12 @@ pub fn run(ctx: &Ctx) -> i32 {
     }
     // Caveats that matter only when something above goes wrong.
     println!("{BOLD}Notes{RST}");
-    println!("  • The device runner on the iPhone has no password of its own. The Mac relays it on 127.0.0.1 only;");
-    println!("    WDA_ALLOW_LAN=1 (a socat relay over Wi-Fi) is an explicit, unsafe fallback for trusted networks.");
+    println!("  • The device runner on the iPhone has no password of its own. The Mac relays it on 127.0.0.1 only,");
+    println!("    over USB or, off the cable, through CoreDevice's encrypted Wi-Fi tunnel (launch over USB once: iOS asks");
+    println!(
+        "    for the passcode to allow UI automation, and cannot show that prompt over Wi-Fi)."
+    );
+    println!("    WDA_ALLOW_LAN=1 (a socat relay to the phone's LAN address) is an explicit, unsafe last resort.");
     println!("  • Cloudflare WARP or another tunnel VPN can break Xcode's connection to the phone; disconnect it during setup if setup stalls.");
     if fail {
         warn("fix the X items above, then re-run");

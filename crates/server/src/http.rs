@@ -2560,7 +2560,13 @@ async fn agent_status(
     // up indefinitely, so `device_state:"ready"` alone says nothing about use.
     let idle_secs = state.idle_for().as_secs();
     let transport = if state.managed_wda {
-        wda_transport(&crate::instance::current().state_dir)
+        let relayed = wda_transport(&crate::instance::current().state_dir);
+        match (relayed, state.device_udid.as_deref()) {
+            ("usb", Some(udid)) if native_relay(&crate::instance::current().state_dir) => {
+                native_relay_transport(udid).await
+            }
+            _ => relayed,
+        }
     } else {
         "external"
     };
@@ -2601,10 +2607,42 @@ fn wda_transport(state_dir: &std::path::Path) -> &'static str {
     }
 }
 
+/// The control relay is `iphone-use relay`, which follows the phone from USB
+/// to its CoreDevice Wi-Fi tunnel (a legacy iproxy cannot).
+fn native_relay(state_dir: &std::path::Path) -> bool {
+    std::fs::read_to_string(state_dir.join("wda-relay.pid"))
+        .is_ok_and(|record| record.contains("/iphone-use relay "))
+}
+
+/// `usb` while usbmuxd lists the phone over USB, else `wifi-tunnel`: the
+/// native relay then reaches it through CoreDevice. Asked at most every 3 s.
+async fn native_relay_transport(udid: &str) -> &'static str {
+    static LAST: std::sync::Mutex<Option<(Instant, &'static str)>> = std::sync::Mutex::new(None);
+    if let Some((at, transport)) = *LAST.lock().unwrap_or_else(|e| e.into_inner()) {
+        if at.elapsed() < std::time::Duration::from_secs(3) {
+            return transport;
+        }
+    }
+    let want = crate::usbmux::normalize_udid(udid);
+    let transport = match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        crate::usbmux::find_attached(&want),
+    )
+    .await
+    {
+        Ok(Ok(Some(found))) if found.usb => "usb",
+        Ok(Ok(_)) => "wifi-tunnel",
+        // usbmuxd did not answer: keep the relay's own claim.
+        _ => "usb",
+    };
+    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), transport));
+    transport
+}
+
 /// Why control is slow, when it is the transport. Every WDA call pays one
 /// round trip, and an action is one to three calls.
 fn transport_hint(transport: &str, rtt_ms: Option<u64>) -> Option<String> {
-    (transport == "wifi").then(|| match rtt_ms {
+    (transport == "wifi" || transport == "wifi-tunnel").then(|| match rtt_ms {
         Some(ms) => format!(
             "WDA traffic goes over Wi-Fi (~{ms} ms per call, paid one to three times per action); connect the iPhone to this Mac with a cable and reconnect for faster control"
         ),
@@ -17224,8 +17262,13 @@ mod tests {
         assert_eq!(wda_transport(dir.path()), "usb");
         std::fs::write(dir.path().join("wda-relay.pid"), "1|now|relay:/opt/homebrew/bin/socat TCP-LISTEN:8100,fork TCP:192.168.0.236:8100").unwrap();
         assert_eq!(wda_transport(dir.path()), "wifi");
+        assert!(!native_relay(dir.path()), "socat is not the native relay");
         assert!(transport_hint("wifi", Some(180)).unwrap().contains("~180 ms"));
         assert!(transport_hint("usb", Some(5)).is_none());
+        // The native relay follows the phone onto its CoreDevice Wi-Fi tunnel.
+        std::fs::write(dir.path().join("wda-relay.pid"), "1|now|relay:/Users/u/Applications/iPhoneUse.app/Contents/MacOS/iphone-use relay --udid X --listen 127.0.0.1:8100 --device-port 8100").unwrap();
+        assert!(native_relay(dir.path()));
+        assert!(transport_hint("wifi-tunnel", Some(40)).unwrap().contains("~40 ms"));
     }
 
     #[test]

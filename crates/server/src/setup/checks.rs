@@ -904,11 +904,23 @@ pub fn presence(udid: &str) -> Presence {
         }
         seen.contains(&key)
     };
-    if view == UsbmuxView::Listed || (view == UsbmuxView::NotListed && seen) {
+    if view == UsbmuxView::Listed {
         return presence_from(view, seen, None, udid);
     }
     let json = sys::devicectl_json(10, &["list", "devices"]);
     presence_from(view, seen, json.as_deref(), udid)
+}
+
+/// CoreDevice has a live Wi-Fi tunnel to `udid` right now (the relay can
+/// reach the runner through it; see `crate::tunnel`).
+pub fn wifi_tunnel(udid: &str) -> bool {
+    !udid.is_empty()
+        && sys::devicectl_json(10, &["list", "devices"]).is_some_and(|json| {
+            matches!(
+                crate::tunnel::tunnel_view(&json, udid),
+                crate::tunnel::TunnelView::Connected(_)
+            )
+        })
 }
 
 /// The presence verdict from usbmuxd's view, whether usbmuxd listed the phone
@@ -916,6 +928,8 @@ pub fn presence(udid: &str) -> Presence {
 /// output (`None` when devicectl gave no answer).
 ///
 /// - Listed by usbmuxd: present.
+/// - A live CoreDevice Wi-Fi tunnel: present, even when usbmuxd lost the
+///   phone (the relay reaches the runner through the tunnel).
 /// - Not listed, but listed earlier: absent. CoreDevice's cached state can
 ///   still say `connected` long after the cable is pulled.
 /// - Not listed, and CoreDevice calls it `wired`: absent. A wired phone is
@@ -928,10 +942,19 @@ pub fn presence_from(
     coredevice_json: Option<&str>,
     udid: &str,
 ) -> Presence {
-    match view {
-        UsbmuxView::Listed => return Presence::Present,
-        UsbmuxView::NotListed if seen_in_usbmux => return Presence::Absent,
-        _ => {}
+    if view == UsbmuxView::Listed {
+        return Presence::Present;
+    }
+    if coredevice_json.is_some_and(|json| {
+        matches!(
+            crate::tunnel::tunnel_view(json, udid),
+            crate::tunnel::TunnelView::Connected(_)
+        )
+    }) {
+        return Presence::Present;
+    }
+    if view == UsbmuxView::NotListed && seen_in_usbmux {
+        return Presence::Absent;
     }
     let Some(json) = coredevice_json else {
         return Presence::Unknown;
@@ -1312,6 +1335,37 @@ attributes:
         assert_eq!(
             presence_from(Unreadable, false, None, usb_phone),
             Presence::Unknown
+        );
+    }
+
+    #[test]
+    fn a_live_wifi_tunnel_keeps_a_phone_present_after_the_cable_is_pulled() {
+        // guouli on hardware: launched over USB, unplugged, CoreDevice keeps a
+        // Wi-Fi tunnel the relay reaches the runner through.
+        let tunnel = r#"{"result":{"devices":[
+            {"hardwareProperties":{"udid":"00008110-001C18203AD2401E"},
+             "connectionProperties":{"tunnelState":"connected","transportType":"localNetwork",
+                                     "tunnelIPAddress":"fd89:9bfc:f458::1"}}
+        ]}}"#;
+        let phone = "00008110-001C18203AD2401E";
+        use UsbmuxView::{NotListed, Unreadable};
+        assert_eq!(
+            presence_from(NotListed, true, Some(tunnel), phone),
+            Presence::Present
+        );
+        assert_eq!(
+            presence_from(Unreadable, true, Some(tunnel), phone),
+            Presence::Present
+        );
+        // A stale wired record with an address is still not a Wi-Fi tunnel.
+        let stale_wired = r#"{"result":{"devices":[
+            {"hardwareProperties":{"udid":"00008110-001C18203AD2401E"},
+             "connectionProperties":{"tunnelState":"connected","transportType":"wired",
+                                     "tunnelIPAddress":"fd5a:17ea:6b83::1"}}
+        ]}}"#;
+        assert_eq!(
+            presence_from(NotListed, true, Some(stale_wired), phone),
+            Presence::Absent
         );
     }
 
