@@ -406,21 +406,32 @@ its daemon requests automatically.
 |---|---|
 | See | `phone_status`, `phone_capabilities` (what this build supports vs what is possible right now; wakes nothing), `phone_screenshot`, `phone_elements` (carries a `registry` block naming installed flows for the app on screen) |
 | Act | `phone_tap`, `phone_tap_element` (snapshot-bound), `phone_tap_label` (unique exact label), `phone_scroll`, `phone_type` (CJK-clean), `phone_key`, `phone_shortcut` (`home`/`spotlight`) — each takes an optional `observe` |
-| Batch | `phone_run_steps` — up to 24 steps incl. `tap_locator`, `launch_app`, `picker`, `alert`, long-press/swipe/drag, `wait_for` |
-| Lifecycle | `phone_reconnect` (restart WDA on the configured phone, never a UDID switch), `phone_hold`, `phone_release_owner` |
-| Flows | `phone_flow_list`, `phone_flow_info`, `phone_flow_run`, `phone_flow_update`, `phone_flow_publish`, `phone_flow_report` |
+| Batch | `phone_run_steps` — up to 24 steps incl. `tap_locator`, `launch_app`, `picker`, `alert`, `perform` (toggle a switch, adjust a slider), long-press/swipe/drag, `wait_for`; `phone_jev_run` — hand a whole goal to the fast on-phone agent |
+| Lifecycle | `phone_reconnect` (restart the device runner on the configured phone, never a UDID switch), `phone_hold`, `phone_release_owner`, `phone_login` (sign an app in from the user's vault, inside the daemon) |
+| Flows | `phone_flow_list`, `phone_flow_info`, `phone_flow_run`, `phone_flow_draft`, `phone_flow_update`, `phone_flow_publish`, `phone_flow_report` |
+| Metrics | `phone_run_start`, `phone_run_end` (count one task's calls exactly) |
 
-For those seven act tools and `phone_capabilities`, the parsed JSON arrives as MCP
-`structuredContent` and the text block is a preview trimmed at 8 KiB — parse the
-structured field. `phone_run_steps` carries its complete batch result in BOTH, so either
-is safe to parse. Every other tool keeps the return it always had: complete JSON as
-text for most (including `phone_flow_run`'s execution result, passed or failed), an
-image for `phone_screenshot`, and explanatory text for errors raised before a call
-reaches the phone. Read `structuredContent` when it is present; otherwise read
-`content` according to the tool. When a result cannot be confirmed,
-`outcome: "unknown"` with `retry_safe: false` says so in a form a program can branch on
-— and branch on the explicit `retry_safe` boolean, never on `outcome`. Full table:
-[`crates/mcp/README.md`](../crates/mcp/README.md).
+Each of these 26 tools answers in two parts.
+
+* **The text block** is compact and written for the model. It holds the settled
+  change after an act tool, one line per element, or a batch's verdict and end
+  screen. For a failed batch it holds the failed step, its error, `retry_safe`
+  and the end screen.
+* **`structuredContent`** is slim by default. It holds the fields a program
+  branches on (`ok`, `outcome`, `retry_safe`, `error`, `failed_step`,
+  `snapshot`, …), with the text as `summary`. `IPHONE_USE_MCP_STRUCTURED=full`
+  sends the daemon's whole JSON instead, and `off` sends none.
+
+Slim is the default because clients differ in what they show the model. Claude
+Code shows it only `structuredContent` on a successful result, and Codex CLI
+shows it both parts.
+
+Three tools differ: `phone_status` and `phone_capabilities` return the JSON
+itself, and `phone_screenshot` returns an image.
+
+When a result cannot be confirmed, `outcome: "unknown"` comes with
+`retry_safe: false`. Branch on the explicit `retry_safe` boolean, never on
+`outcome`. Full table: [`crates/mcp/README.md`](../crates/mcp/README.md).
 
 `observe: true` on a single-step act tool asks the daemon to watch the screen settle and
 return what changed (`settle`, `snapshot`, `delta`) with the result. It is off by default

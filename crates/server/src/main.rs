@@ -145,7 +145,7 @@ fn wda_management_pending(
 // this crate's dependency named `core` shadows the std one.
 #[command(
     name = "iphone-use",
-    about = "Direct iPhone remote-control daemon",
+    about = "Daemon that drives a real iPhone through its device runner",
     version = env!("CARGO_PKG_VERSION")
 )]
 struct Cli {
@@ -160,6 +160,13 @@ enum Command {
     /// Start the daemon and browser/API server.
     Serve,
     /// Stop a running daemon (best-effort; kills the recorded pid).
+    ///
+    /// An installed daemon runs as a launchd KeepAlive job, so launchd starts
+    /// it again at once. To give the phone back and stop its device runner
+    /// from restarting, use `iphone-use setup [--instance NAME] pause`
+    /// (`setup resume` undoes it). To keep the daemon itself down,
+    /// `launchctl bootout gui/$(id -u)/com.leeguoo.iphone-use` (a named
+    /// instance has its own label).
     Stop,
     /// Print which instance this environment would run as, as JSON, and exit.
     ///
@@ -236,12 +243,14 @@ enum Command {
     },
     /// Check the Mac, Xcode and the iPhone, and say how to fix what is missing.
     Doctor {
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
     },
     /// Per-run task metrics: HTTP calls (not model turns), batches, observed
     /// actions, failures and p50/p95.
     Metrics {
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         /// Only this owner's runs.
@@ -252,6 +261,7 @@ enum Command {
     },
     /// Is the iPhone ready for agents? Exit 0 when it is.
     Status {
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         /// The daemon's full status as JSON.
@@ -260,12 +270,14 @@ enum Command {
     },
     /// A harmless first run: open Settings, read the screen, go Home.
     Try {
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
     },
     /// Sign this Mac's browser in with a one-time link and show a QR code
     /// for the iPhone, without typing the password.
     Login {
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         /// Print the link instead of opening the browser.
@@ -282,6 +294,7 @@ enum Command {
     /// flags; they are `iphone-use-mcp test`'s).
     #[command(disable_help_flag = true)]
     Test {
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -291,6 +304,7 @@ enum Command {
     /// disable, rm (`iphone-use-mcp schedule`).
     #[command(disable_help_flag = true)]
     Schedule {
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -589,6 +603,7 @@ enum AuthAction {
         /// Fill the fields but do not tap Log in.
         #[arg(long)]
         no_submit: bool,
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
     },
@@ -604,6 +619,7 @@ enum AuthAction {
         /// Seconds to wait for the code to arrive (at most 25).
         #[arg(long)]
         wait: Option<u64>,
+        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
     },

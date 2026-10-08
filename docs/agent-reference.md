@@ -275,8 +275,9 @@ is no longer cached). The action result and the observation are separate facts:
   `alert` action (MCP: an `alert` step in `phone_run_steps`).
 - **Switches & sliders** (hardware-verified): a coordinate tap on a Switch ACKs
   but does not flip it. Use `{"type":"perform","action":"toggle",…}`; sliders take
-  `increment`/`decrement` (~10%) or `adjust` with `"value"` 0..1. HTTP only — MCP
-  has no `perform`. Verify the new `value` from a fresh read.
+  `increment`/`decrement` (~10%) or `adjust` with `"value"` 0..1. MCP: a
+  `phone_run_steps` step `{"kind":"perform","element":N,"snapshot":"…","action":"toggle"}`.
+  Verify the new `value` from a fresh read.
 - **Element taps** answer `409 element_occluded` (not sent) when something covers
   the centre — scroll it clear (`perform scroll_to_visible`) and re-read;
   `"allow_occluded":true` taps whatever is on top. Rows with `visible:false` are
@@ -344,9 +345,16 @@ push approval on another device needs the user.
 `phone_run_start`, `phone_run_end`, and `phone_flow_list / info / run / draft /
 update / publish / report`.
 
-- Act tools and `phone_capabilities` return JSON in `structuredContent`; the text
-  block is a preview trimmed at 8 KiB. `phone_run_steps`, `phone_elements` and
-  `phone_flow_*` return complete JSON as text; `phone_screenshot` an image.
+- The text block is compact and meant for the model. It carries the settled
+  change, one line per element, or a batch's verdict and end screen; for a
+  failed batch, the failed step, its error, `retry_safe` and the end screen.
+  `phone_flow_list` gives one row per flow (`detail=true` for every field).
+- `structuredContent` is slim by default: the top-level verdict fields plus
+  `summary`. `IPHONE_USE_MCP_STRUCTURED=full` sends the whole JSON; `off`
+  sends none. Claude Code shows the model only `structuredContent` on success;
+  Codex CLI shows both parts.
+- `phone_status` and `phone_capabilities` return the JSON itself;
+  `phone_screenshot` returns an image.
 - Single-step act tools observe by default (= `?return=delta`, baseline = the
   last snapshot this client saw, so only the change comes back); `observe:false`
   skips it. The settled screen is captured in memory, not sent: the next
@@ -356,8 +364,8 @@ update / publish / report`.
 - Decide by `retry_safe`, not `outcome`: `outcome:"unknown"` with
   `retry_safe:false` may have reached the phone. `not_sent` on one step never
   makes a whole batch replayable.
-- Not in MCP: `perform`, `set_value`, `keyboard`, element/page `scroll`,
-  uninstall, intents. `launch_app`, `alert`, `picker`, `swipe`, `drag`,
+- Not in MCP: `set_value`, `keyboard`, element/page `scroll`, uninstall,
+  intents. `launch_app`, `alert`, `picker`, `perform`, `swipe`, `drag`,
   `longpress`, `back` exist only as `phone_run_steps` step kinds.
 
 ## Task metrics, runs and advice

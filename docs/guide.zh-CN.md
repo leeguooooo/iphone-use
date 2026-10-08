@@ -221,11 +221,21 @@ verb 定义在 `~/.iphone-use/intents-registry.json`（从 [`deploy/intents-regi
 |---|---|
 | 看 | `phone_status`、`phone_capabilities`（这个版本支持什么，以及此刻能不能用；不唤醒手机、不占租约）、`phone_screenshot`、`phone_elements`（带 `registry` 块，列出当前屏幕上这个 app 已安装的 flow） |
 | 动 | `phone_tap`、`phone_tap_element`（绑定快照）、`phone_tap_label`（精确标签唯一）、`phone_scroll`、`phone_type`（中文无损）、`phone_key`、`phone_shortcut`（`home` / `spotlight`）——每个都可选传 `observe` |
-| 批 | `phone_run_steps`：最多 24 步，含 `tap_locator`、`launch_app`、`picker`、`alert`、长按 / 滑动 / 拖动、`wait_for` |
-| 生命周期 | `phone_reconnect`（在已配置的手机上重启 WDA，不换 UDID）、`phone_hold`、`phone_release_owner` |
-| Flow | `phone_flow_list`、`phone_flow_info`、`phone_flow_run`、`phone_flow_update`、`phone_flow_publish`、`phone_flow_report` |
+| 批 | `phone_run_steps`：最多 24 步，含 `tap_locator`、`launch_app`、`picker`、`alert`、`perform`（切换开关、调节滑块）、长按 / 滑动 / 拖动、`wait_for`；`phone_jev_run`：把整个目标交给手机上的快速 agent |
+| 生命周期 | `phone_reconnect`（在已配置的手机上重启设备运行器，不换 UDID）、`phone_hold`、`phone_release_owner`、`phone_login`（在 daemon 内用用户自己的密码库登录 app） |
+| Flow | `phone_flow_list`、`phone_flow_info`、`phone_flow_run`、`phone_flow_draft`、`phone_flow_update`、`phone_flow_publish`、`phone_flow_report` |
+| 统计 | `phone_run_start`、`phone_run_end`（精确统计一次任务的调用） |
 
-这七个动作工具加上 `phone_capabilities`，解析后的 JSON 放在 MCP 的 `structuredContent` 里，文本块只是在 8 KiB 处截断的预览——请解析结构化字段。`phone_run_steps` 两边都给完整的批次结果，解析哪一边都安全。其余工具保持它们原来的返回形态：多数把完整 JSON 放在文本里（包括 `phone_flow_run` 的执行结果，无论成败），`phone_screenshot` 返回图片，而在请求到达手机**之前**就失败的那些错误是说明文字。总的规则是：有 `structuredContent` 就读它，没有再按该工具的约定读 `content`。无法确认结果时会给 `outcome: "unknown"` 与 `retry_safe: false`，这是可供程序分支的形式；判断能否重发一律看显式的 `retry_safe` 布尔值，不要看 `outcome`。完整对照表见 [`crates/mcp/README.md`](../crates/mcp/README.md)。
+这 26 个工具的返回都分两部分：
+
+* **文本块**是写给模型看的精简内容：动作工具执行后稳定下来的变化，`phone_elements` 每个元素一行，批次的结论和结束时的屏幕。批次失败时，文本给出失败的那一步、它的错误、`retry_safe` 和结束时的屏幕。
+* **`structuredContent`** 默认是精简版：只保留程序做分支要用的字段（`ok`、`outcome`、`retry_safe`、`error`、`failed_step`、`snapshot` 等），文本放在 `summary` 里。设 `IPHONE_USE_MCP_STRUCTURED=full` 会给出 daemon 的完整 JSON，设 `off` 则不给结构化内容。
+
+默认用精简版，是因为各个客户端交给模型的部分不一样：Claude Code 在调用成功时只把 `structuredContent` 交给模型，Codex CLI 则两部分都交。
+
+有三个工具例外：`phone_status` 和 `phone_capabilities` 直接返回 JSON，`phone_screenshot` 返回图片。
+
+无法确认结果时，返回会带 `outcome: "unknown"` 和 `retry_safe: false`。判断能否重发一律看显式的 `retry_safe` 布尔值，不要看 `outcome`。完整对照表见 [`crates/mcp/README.md`](../crates/mcp/README.md)。
 
 单步动作工具传 `observe: true`，daemon 会在动作之后观察屏幕稳定下来并把变化一起返回（`settle`、`snapshot`、`delta`）。默认关闭，因为这段等待是动作本身不必付的延迟。`settle.reason` 三态：`stable`、`budget_exhausted`（观察预算用尽，动作本身已经发生）、`observation_failed`（读取链路坏了）；`stale: true` 表示返回的树是上一次成功的读取而不是当前屏幕，`sparse: true` 表示空树或纯容器树，这种树两次相同也不算 stable。
 
