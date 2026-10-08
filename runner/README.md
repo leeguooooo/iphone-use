@@ -424,7 +424,10 @@ hardware verification:
   `applicationProcessWithPID:`. SpringBoard is recognised by `XCAXClient_iOS systemApplication`'s
   pid.
 - **Event records** use `initWithName:displayID:interfaceOrientation:` with
-  `XCUIScreen.mainScreen.displayID` and the device orientation. No target pid is set, so events go
+  `XCUIScreen.mainScreen.displayID` and the interface orientation
+  (`XCUIApplication.interfaceOrientation`, read from testmanagerd), which also sizes
+  `/window/size` and the off-screen checks. Never the physical `XCUIDevice.orientation`: a phone
+  lying on its side reads landscape while its UI stays portrait. No target pid is set, so events go
   to whatever is on screen, as with WDA.
 - **Screen capture.** The `XCTScreenshotRequest` is built with `CGRectNull` as the full-screen rect.
   If testmanagerd rejects that, the next capture path takes over.
