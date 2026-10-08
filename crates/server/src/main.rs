@@ -938,9 +938,10 @@ fn serve() -> Result<()> {
         mjpeg_url: Some(mjpeg_url),
         wda_actionable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         wda_read_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        pairing: Arc::new(server::pairing::Pairing::new(
-            !server::pairing::is_loopback_host(&cfg.host),
-        )),
+        pairing: Arc::new(
+            server::pairing::Pairing::new(!server::pairing::is_loopback_host(&cfg.host))
+                .with_port(cfg.port),
+        ),
         wda_health: Arc::new(Mutex::new(server::wda::WdaHealth::down())),
         wda_death: Arc::new(Mutex::new(Default::default())),
         wda_health_probe: Arc::new(Mutex::new(None)),

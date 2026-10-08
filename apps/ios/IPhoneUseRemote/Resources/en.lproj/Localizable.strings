@@ -32,6 +32,8 @@
 "设置" = "Settings";
 "未连接" = "Not connected";
 "可操作 · H.264" = "Ready · H.264";
+"局域网" = "LAN";
+"外网" = "Internet";
 "手机已交还" = "Phone handed back";
 "手机在持有人手里，远程控制已停止。需要远程操作时点「连接手机」。" = "The phone is with its holder and remote control has stopped. Tap Connect phone to drive it again.";
 "正在释放设备" = "Releasing the device";

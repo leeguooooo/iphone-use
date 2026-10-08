@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import os
 
 /// What `/agent/status` says about the phone, reduced to what the remote needs.
 struct PhoneStatus: Decodable, Equatable, Sendable {
@@ -112,15 +114,54 @@ enum DaemonError: LocalizedError {
 
 /// Talks to the iphone-use daemon with the same session cookie a browser gets
 /// from `/login`. The cookie lives in this client's own URLSession storage.
+///
+/// Two routes reach the same daemon: the paired address (often a public
+/// https tunnel) and the Mac's LAN addresses that `/pair` reports. The
+/// session cookie is the daemon's own, so it is valid on both; requests go
+/// to whichever route is active, and a LAN route that stops answering falls
+/// back to the paired address.
 final class DaemonClient: @unchecked Sendable {
-    let base: URL
+    /// The paired address: what credentials are saved under, and the route
+    /// that always works.
+    let publicBase: URL
     let session: URLSession
     /// `phone_session=…` from `/login`, sent by hand on every request (the
     /// video stream included) rather than trusting a cookie store.
     private(set) var cookie: String?
+    /// Called (off the main actor) when a failed LAN request moved the
+    /// client back to the paired address.
+    var onFallback: (@Sendable () -> Void)?
 
-    init(base: URL) {
-        self.base = base
+    private struct Routes {
+        var active: URL
+        var lan: [URL]
+        var lanKey: Data?
+    }
+    private let routes: OSAllocatedUnfairLock<Routes>
+    /// Short-fused session for route probes: a LAN address that does not
+    /// answer within this is not worth using.
+    private let probeSession: URLSession
+
+    /// Where requests go now.
+    var base: URL { routes.withLock { $0.active } }
+    /// True while requests go straight to the Mac on the LAN.
+    var onLAN: Bool { base != publicBase }
+    /// The daemon's LAN addresses (`lan_urls`), best first; empty from older daemons.
+    var lanCandidates: [URL] { routes.withLock { $0.lan } }
+    /// The key a LAN address must prove it holds (`lan_key`, from `/pair`)
+    /// before it is sent any credential; nil from older daemons.
+    var lanKey: Data? { routes.withLock { $0.lanKey } }
+
+    init(base: URL, lanCandidates: [URL] = [], lanKey: Data? = nil) {
+        self.publicBase = base
+        routes = OSAllocatedUnfairLock(initialState: Routes(active: base, lan: lanCandidates, lanKey: lanKey))
+        let probe = URLSessionConfiguration.ephemeral
+        probe.httpShouldSetCookies = false
+        probe.httpCookieAcceptPolicy = .never
+        probe.timeoutIntervalForRequest = 0.6
+        probe.timeoutIntervalForResource = 1
+        probe.waitsForConnectivity = false
+        probeSession = URLSession(configuration: probe)
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
         config.httpCookieAcceptPolicy = .never
@@ -193,6 +234,15 @@ final class DaemonClient: @unchecked Sendable {
         let (data, response) = try await send(request)
         switch response.statusCode {
         case 200:
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let urls = json["lan_urls"] as? [String] {
+                let lan = urls.compactMap(DaemonClient.parse(address:))
+                let key = (json["lan_key"] as? String).flatMap(Data.init(base64URL:))
+                routes.withLock {
+                    $0.lan = lan
+                    $0.lanKey = key
+                }
+            }
             return (data, response)
         case 401:
             throw body["code"] != nil ? DaemonError.pairingCodeInvalid : DaemonError.pairingRevoked
@@ -283,6 +333,67 @@ final class DaemonClient: @unchecked Sendable {
         return (data, response.value(forHTTPHeaderField: "X-Capture-Redacted") == "1")
     }
 
+    // MARK: routes
+
+    /// The first LAN address that proves, within the probe timeout, that it
+    /// is the daemon this app paired with, or nil. The probe carries no
+    /// credential: whoever else holds that IP on another network learns
+    /// nothing, and is never sent the session.
+    func probeLAN() async -> URL? {
+        let candidates = lanCandidates.filter { $0 != publicBase }
+        guard !candidates.isEmpty, let lanKey else { return nil }
+        let session = probeSession
+        return await withTaskGroup(of: URL?.self) { group in
+            for url in candidates {
+                group.addTask {
+                    let nonce = Data((0..<24).map { _ in UInt8.random(in: 0...255) }).base64URL
+                    var components = URLComponents(url: url.appending(path: "pair/probe"),
+                                                   resolvingAgainstBaseURL: false)
+                    components?.queryItems = [URLQueryItem(name: "n", value: nonce)]
+                    guard let probeURL = components?.url,
+                          let answer = try? await session.data(from: probeURL),
+                          (answer.1 as? HTTPURLResponse)?.statusCode == 200,
+                          let json = try? JSONSerialization.jsonObject(with: answer.0) as? [String: Any],
+                          let proof = json["proof"] as? String else { return nil }
+                    let expected = HMAC<SHA256>.authenticationCode(
+                        for: Data(nonce.utf8), using: SymmetricKey(data: lanKey))
+                    return Data(expected).base64URL == proof ? url : nil
+                }
+            }
+            for await hit in group {
+                if let hit {
+                    group.cancelAll()
+                    return hit
+                }
+            }
+            return nil
+        }
+    }
+
+    /// Send requests to `url` (a probed LAN address) or, with nil, to the
+    /// paired address. Returns whether the route changed.
+    @discardableResult
+    func use(_ url: URL?) -> Bool {
+        let target = url ?? publicBase
+        return routes.withLock { routes in
+            guard routes.active != target else { return false }
+            routes.active = target
+            return true
+        }
+    }
+
+    /// `request` aimed at the paired address instead of `from`.
+    private func onPublic(_ request: URLRequest, from: URL) -> URLRequest? {
+        guard let url = request.url, url.absoluteString.hasPrefix(from.absoluteString) else { return nil }
+        var moved = request
+        moved.url = URL(string: publicBase.absoluteString + url.absoluteString.dropFirst(from.absoluteString.count))
+        if moved.value(forHTTPHeaderField: "Origin") != nil {
+            moved.setValue(publicBase.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+                           forHTTPHeaderField: "Origin")
+        }
+        return moved.url == nil ? nil : moved
+    }
+
     /// A request for `path` with the session cookie attached.
     func request(_ path: String) -> URLRequest {
         var request = URLRequest(url: base.appending(path: path))
@@ -299,23 +410,72 @@ final class DaemonClient: @unchecked Sendable {
         return request
     }
 
+    /// Send `request`. When it went to a LAN address and never got an
+    /// answer, the client falls back to the paired address; a request that is
+    /// safe to repeat (anything but a gesture or a mode change) is retried
+    /// there at once, a gesture is not, since it may have landed.
     private func send(_ request: URLRequest, followRedirects: Bool = true) async throws -> (Data, HTTPURLResponse) {
         var request = request
         if let cookie, request.value(forHTTPHeaderField: "Cookie") == nil {
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
         do {
-            let delegate = followRedirects ? nil : NoRedirect()
-            let (data, response) = try await session.data(for: request, delegate: delegate)
-            guard let http = response as? HTTPURLResponse else {
-                throw DaemonError.unreachable("not HTTP")
+            return try await transmit(request, followRedirects: followRedirects)
+        } catch let error as URLError where error.code != .cancelled {
+            let lan = ([base] + lanCandidates).first {
+                $0 != publicBase && request.url?.absoluteString.hasPrefix($0.absoluteString + "/") == true
             }
-            return (data, http)
+            guard let lan, lan != publicBase else {
+                throw DaemonError.unreachable(error.localizedDescription)
+            }
+            if routes.withLock({ routes -> Bool in
+                guard routes.active == lan else { return false }
+                routes.active = publicBase
+                return true
+            }) {
+                onFallback?()
+            }
+            guard request.value(forHTTPHeaderField: "X-Phone-Owner") == nil,
+                  let retry = onPublic(request, from: lan) else {
+                throw DaemonError.unreachable(error.localizedDescription)
+            }
+            do {
+                return try await transmit(retry, followRedirects: followRedirects)
+            } catch let error as DaemonError {
+                throw error
+            } catch {
+                throw DaemonError.unreachable(error.localizedDescription)
+            }
         } catch let error as DaemonError {
             throw error
         } catch {
             throw DaemonError.unreachable(error.localizedDescription)
         }
+    }
+
+    private func transmit(_ request: URLRequest, followRedirects: Bool) async throws -> (Data, HTTPURLResponse) {
+        let delegate = followRedirects ? nil : NoRedirect()
+        let (data, response) = try await session.data(for: request, delegate: delegate)
+        guard let http = response as? HTTPURLResponse else {
+            throw DaemonError.unreachable("not HTTP")
+        }
+        return (data, http)
+    }
+}
+
+extension Data {
+    /// base64url without padding, as the daemon writes it.
+    init?(base64URL text: String) {
+        var plain = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        plain += String(repeating: "=", count: (4 - plain.count % 4) % 4)
+        self.init(base64Encoded: plain)
+    }
+
+    var base64URL: String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 

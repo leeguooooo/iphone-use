@@ -30,6 +30,9 @@ pub struct Pairing {
     /// False when the daemon only listens on loopback: a QR code would point
     /// a phone at an address it cannot reach.
     pub lan_reachable: bool,
+    /// The port the daemon listens on, for the LAN addresses handed to a
+    /// paired app (a request through a tunnel carries no usable port).
+    pub port: Option<u16>,
     codes: Mutex<HashMap<String, Instant>>,
 }
 
@@ -37,8 +40,30 @@ impl Pairing {
     pub fn new(lan_reachable: bool) -> Self {
         Self {
             lan_reachable,
+            port: None,
             codes: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    /// `http://<ip>:<port>` for every LAN address, best first, so a paired
+    /// app that reached us through a public tunnel can go direct when it sits
+    /// on the same network. Empty on a loopback-only daemon or with no port.
+    pub fn lan_urls(&self, fallback_port: Option<u16>) -> Vec<String> {
+        let Some(port) = self.port.or(fallback_port) else {
+            return Vec::new();
+        };
+        if !self.lan_reachable {
+            return Vec::new();
+        }
+        lan_addresses()
+            .into_iter()
+            .map(|(_, ip)| format!("http://{ip}:{port}"))
+            .collect()
     }
 
     /// Mint a fresh single-use code.
@@ -100,6 +125,30 @@ pub fn device_key(secret: &[u8], password: Option<&str>) -> Vec<u8> {
     h.update(b"\0");
     h.update(password.unwrap_or("").as_bytes());
     h.finalize().to_vec()
+}
+
+/// The key a paired app checks LAN addresses with (see [`lan_proof`]). It is
+/// handed out only with a session, over the route the app paired on, and is
+/// derived from the device key, so changing the password rotates it.
+pub fn lan_key(device_key: &[u8]) -> Vec<u8> {
+    let mut h = Sha256::new();
+    h.update(b"iphone-use lan probe v1\0");
+    h.update(device_key);
+    h.finalize().to_vec()
+}
+
+/// The answer to a LAN probe's `nonce`: proof that this is the daemon the
+/// app paired with, before the app sends it any credential in cleartext.
+pub fn lan_proof(device_key: &[u8], nonce: &str) -> String {
+    core::auth::sign(&lan_key(device_key), nonce)
+}
+
+/// A probe nonce: base64url or hex, 16–128 characters.
+pub fn probe_nonce_ok(nonce: &str) -> bool {
+    (16..=128).contains(&nonce.len())
+        && nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// This Mac's IPv4 addresses a phone could reach, best first: Wi-Fi/Ethernet
@@ -238,6 +287,39 @@ mod tests {
         assert!(is_loopback_host("[::1]"));
         assert!(is_loopback_host("LOCALHOST"));
         assert!(!is_loopback_host("192.168.1.11"));
+    }
+
+    #[test]
+    fn lan_proof_depends_on_the_key_and_the_nonce() {
+        let a = device_key(b"secret", Some("a"));
+        let b = device_key(b"secret", Some("b"));
+        let n = "0123456789abcdef0123";
+        assert_eq!(lan_proof(&a, n), lan_proof(&a, n));
+        assert_ne!(lan_proof(&a, n), lan_proof(&b, n));
+        assert_ne!(lan_proof(&a, n), lan_proof(&a, "0123456789abcdef0124"));
+        assert!(probe_nonce_ok(n));
+        assert!(!probe_nonce_ok("short"));
+        assert!(!probe_nonce_ok("0123456789abcdef/123"));
+    }
+
+    #[test]
+    fn lan_urls_carry_the_daemon_port() {
+        let p = Pairing::new(true).with_port(44321);
+        let urls = p.lan_urls(Some(9999));
+        assert_eq!(urls.len(), lan_addresses().len());
+        assert!(urls
+            .iter()
+            .all(|u| u.starts_with("http://") && u.ends_with(":44321")));
+        let p = Pairing::new(true);
+        assert!(p
+            .lan_urls(Some(45432))
+            .iter()
+            .all(|u| u.ends_with(":45432")));
+        assert!(p.lan_urls(None).is_empty(), "no port, no address");
+        assert!(Pairing::new(false)
+            .with_port(44321)
+            .lan_urls(None)
+            .is_empty());
     }
 
     #[test]
