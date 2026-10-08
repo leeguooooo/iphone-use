@@ -59,7 +59,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo clippy --workspace --locked -- -D warnings
+          # Pinned, not stable: every new stable adds lints, and -D warnings
+          # would then fail unrelated PRs on code nobody touched (1.97's
+          # chunks_exact/try_update lints did on the first run).
+          # TODO: bump this with the toolchain, fixing what the new lints find.
+          rustup toolchain install 1.96.0 --profile minimal --component clippy
+          cargo +1.96.0 clippy --workspace --locked -- -D warnings
 
       - name: cargo test -p server
         timeout-minutes: 15
