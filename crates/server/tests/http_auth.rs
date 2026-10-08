@@ -2142,6 +2142,53 @@ fn externally_managed_released_wda_is_not_bootstrapped_locally() {
     });
 }
 
+/// `/agent/input` and `/agent/actions` pass one readiness check and answer
+/// it the same way: JSON, the same error code, nothing sent.
+#[test]
+fn input_and_actions_refuse_a_released_phone_with_the_same_json() {
+    block(async {
+        let state = build_state(None);
+        state
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+        let app = http::router(state);
+        for (uri, body) in [
+            ("/agent/input", r#"{"type":"tap","x":0.1,"y":0.1}"#),
+            (
+                "/agent/actions",
+                r#"{"steps":[{"kind":"action","action":{"type":"tap","x":0.1,"y":0.1}}]}"#,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("x-phone-control", "1")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+            assert_eq!(
+                resp.headers()[axum::http::header::CONTENT_TYPE],
+                "application/json",
+                "{uri}"
+            );
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["error"], "wda_is_externally_managed", "{uri}: {json}");
+            assert_eq!(json["outcome"], "not_sent", "{uri}: {json}");
+            assert_eq!(json["retry_safe"], true, "{uri}: {json}");
+            if uri == "/agent/actions" {
+                assert_eq!(json["batch_outcome"], "nothing_applied", "{json}");
+            }
+        }
+    });
+}
+
 #[test]
 fn agent_elements_reports_unavailable_instead_of_an_empty_success() {
     block(async {

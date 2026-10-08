@@ -8907,6 +8907,138 @@ fn agent_actions_json(status: StatusCode, value: serde_json::Value) -> Response 
     )
 }
 
+/// A control request refused before anything reached the phone: always JSON,
+/// always `outcome: not_sent`, `retry_safe: true`.
+struct ControlRefusal {
+    status: StatusCode,
+    body: serde_json::Value,
+    /// Worth retrying in a few seconds on its own (a release or reconnect
+    /// under way): sent as `Retry-After: 5`.
+    retry_soon: bool,
+}
+
+impl ControlRefusal {
+    fn new(status: StatusCode, error: &str, retry_soon: bool) -> Self {
+        Self {
+            status,
+            body: serde_json::json!({
+                "ok": false,
+                "error": error,
+                "outcome": "not_sent",
+                "retry_safe": true,
+            }),
+            retry_soon,
+        }
+    }
+
+    fn with(mut self, key: &str, value: serde_json::Value) -> Self {
+        self.body[key] = value;
+        self
+    }
+
+    fn releasing() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "device_release_in_progress",
+            true,
+        )
+        .with("reconnecting", serde_json::Value::Bool(false))
+    }
+
+    fn wda_not_configured() -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "wda_not_configured", false)
+    }
+
+    /// `/agent/actions` also says, per its batch contract, that no step ran.
+    fn for_batch(self) -> Self {
+        self.with("failed_step_outcome", serde_json::json!("not_sent"))
+            .with("batch_outcome", serde_json::json!("nothing_applied"))
+    }
+
+    fn into_response(self) -> Response {
+        let mut builder = Response::builder()
+            .status(self.status)
+            .header(header::CONTENT_TYPE, "application/json");
+        if self.retry_soon {
+            builder = builder.header(header::RETRY_AFTER, "5");
+        }
+        with_security_headers(
+            builder
+                .body(Body::from(self.body.to_string()))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        )
+    }
+}
+
+/// The one readiness check `/agent/input` and `/agent/actions` share: why the
+/// phone cannot take a control request now, if it cannot. An idle-released
+/// managed phone starts coming back here, whichever endpoint asked (the batch
+/// endpoint used to answer `device_not_drivable` and leave it released).
+fn control_readiness_refusal(state: &Arc<AppState>) -> Option<ControlRefusal> {
+    if state.wda_lifecycle.is_releasing() {
+        return Some(ControlRefusal::releasing());
+    }
+    // If the idle watchdog released the phone, one caller starts recovery while
+    // `released` remains true. Only a successful supervisor bootstrap clears it;
+    // failed recovery therefore remains honest and retryable instead of briefly
+    // reporting an active device that never restarted.
+    if state.released.load(std::sync::atomic::Ordering::Acquire) {
+        if !state.managed_wda {
+            return Some(
+                ControlRefusal::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "wda_is_externally_managed",
+                    false,
+                )
+                .with("recovery_owner", serde_json::json!("external"))
+                .with("reconnecting", serde_json::Value::Bool(false))
+                .with(
+                    "hint",
+                    serde_json::json!("restart WDA on the configured endpoint's owning host"),
+                ),
+            );
+        }
+        // A phone handed to a person stays with the person. An agent action
+        // must not silently restart the runner under their fingers; taking it
+        // back is an explicit `POST /agent/mode {"mode":"agent"}`.
+        if human_handoff_active() {
+            return Some(
+                ControlRefusal::new(StatusCode::CONFLICT, "phone_handed_to_human", false)
+                    .with("released", serde_json::Value::Bool(true))
+                    .with("hint", serde_json::json!("the phone was handed to the person holding it; POST /agent/mode {\"mode\":\"agent\"} to take it back before sending input")),
+            );
+        }
+        start_released_recovery(state);
+        if state.wda_lifecycle.is_releasing() {
+            return Some(ControlRefusal::releasing());
+        }
+        return Some(
+            ControlRefusal::new(StatusCode::SERVICE_UNAVAILABLE, "reconnect_in_progress", true)
+                .with("reconnecting", serde_json::Value::Bool(true))
+                .with("hint", serde_json::json!("phone was idle-released to free it for hands-on use; managed WDA is restarting (~30-90s) — retry. If the phone is locked, unlock it once.")),
+        );
+    }
+    if state.managed_wda_pending {
+        return Some(
+            ControlRefusal::new(StatusCode::CONFLICT, "target_not_configured", false).with(
+                "hint",
+                serde_json::json!("run setup-wda.sh to select and persist the canonical iPhone before using Direct control"),
+            ),
+        );
+    }
+    if state.wda_lifecycle.is_reconnecting() {
+        return Some(
+            ControlRefusal::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "reconnect_in_progress",
+                true,
+            )
+            .with("reconnecting", serde_json::Value::Bool(true)),
+        );
+    }
+    None
+}
+
 fn agent_actions_invalid(detail: impl Into<String>) -> Response {
     agent_actions_json(
         StatusCode::BAD_REQUEST,
@@ -9776,39 +9908,14 @@ async fn agent_actions_inner(
     if headers.contains_key(FLOW_RUN_HEADER) {
         recover(state.flow_trail.lock()).flow_ran();
     }
-    if state.managed_wda_pending {
-        return target_not_configured_response();
-    }
-    if state.wda_lifecycle.is_transitioning()
-        || state.released.load(std::sync::atomic::Ordering::Acquire)
-    {
-        return agent_actions_json(
-            StatusCode::SERVICE_UNAVAILABLE,
-            serde_json::json!({
-                "ok": false,
-                "error": "device_not_drivable",
-                // Refused before the first step: zero actions, certainly.
-                "outcome": "not_sent",
-                "failed_step_outcome": "not_sent",
-                "batch_outcome": "nothing_applied",
-                "retry_safe": true,
-                "hint": "check /agent/status, reconnect the canonical Direct target if instructed, then retry only after drivable=true"
-            }),
-        );
+    // Refused before the first step: zero actions, certainly.
+    if let Some(refusal) = control_readiness_refusal(&state) {
+        return refusal.for_batch().into_response();
     }
     let Some(wda) = &state.wda else {
-        return agent_actions_json(
-            StatusCode::SERVICE_UNAVAILABLE,
-            serde_json::json!({
-                "ok": false,
-                "error": "wda_not_configured",
-                // Refused before the first step: zero actions, certainly.
-                "outcome": "not_sent",
-                "failed_step_outcome": "not_sent",
-                "batch_outcome": "nothing_applied",
-                "retry_safe": true
-            }),
-        );
+        return ControlRefusal::wda_not_configured()
+            .for_batch()
+            .into_response();
     };
 
     state.touch_activity();
@@ -10964,98 +11071,14 @@ async fn agent_input_inner(
             };
         }
     }
-    if state.wda_lifecycle.is_releasing() {
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::RETRY_AFTER, "5")
-                .body(Body::from(
-                    r#"{"ok":false,"error":"device_release_in_progress"}"#,
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
-    }
-    // If the idle watchdog released the phone, one caller starts recovery while
-    // `released` remains true. Only a successful supervisor bootstrap clears it;
-    // failed recovery therefore remains honest and retryable instead of briefly
-    // reporting an active device that never restarted.
-    if state.released.load(std::sync::atomic::Ordering::Acquire) {
-        if !state.managed_wda {
-            return with_security_headers(
-                Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"ok":false,"error":"wda_is_externally_managed","recovery_owner":"external","reconnecting":false,"hint":"restart WDA on the configured endpoint's owning host"}"#,
-                    ))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-            );
-        }
-        // A phone handed to a person stays with the person. An agent action
-        // must not silently restart the runner under their fingers; taking it
-        // back is an explicit `POST /agent/mode {"mode":"agent"}`.
-        if human_handoff_active() {
-            return with_security_headers(
-                Response::builder()
-                    .status(StatusCode::CONFLICT)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"ok":false,"error":"phone_handed_to_human","released":true,"hint":"the phone was handed to the person holding it; POST /agent/mode {\"mode\":\"agent\"} to take it back before sending input"}"#,
-                    ))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-            );
-        }
-        start_released_recovery(&state);
-        if state.wda_lifecycle.is_releasing() {
-            return with_security_headers(
-                Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .header(header::RETRY_AFTER, "5")
-                    .body(Body::from(
-                        r#"{"ok":false,"error":"device_release_in_progress","reconnecting":false}"#,
-                    ))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-            );
-        }
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::RETRY_AFTER, "5")
-                .body(Body::from(
-                    r#"{"ok":false,"reconnecting":true,"hint":"phone was idle-released to free it for hands-on use; managed WDA is restarting (~30-90s) — retry. If the phone is locked, unlock it once."}"#,
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
-    }
-    if state.managed_wda_pending {
-        return target_not_configured_response();
-    }
-    if state.wda_lifecycle.is_reconnecting() {
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::RETRY_AFTER, "5")
-                .body(Body::from(
-                    r#"{"ok":false,"error":"reconnect_in_progress","reconnecting":true}"#,
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
+    if let Some(refusal) = control_readiness_refusal(&state) {
+        return refusal.into_response();
     }
     // Every real driving request resets the idle clock so the watchdog only
     // fires during genuine inactivity.
     state.touch_activity();
     if state.wda_lifecycle.is_releasing() {
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::RETRY_AFTER, "5")
-                .body(Body::from("device release in progress"))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
+        return ControlRefusal::releasing().into_response();
     }
     // Direct is a single at-most-once WDA path. One server deadline covers lock
     // acquisition plus the whole compound action, and no failure is replayed.
@@ -11081,15 +11104,9 @@ async fn agent_input_inner(
         return response;
     }
     let Some(wda) = &state.wda else {
-        return with_security_headers(
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"ok":false,"error":"wda_not_configured","fallback":"disabled"}"#,
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        );
+        return ControlRefusal::wda_not_configured()
+            .with("fallback", serde_json::json!("disabled"))
+            .into_response();
     };
     // Do Not Disturb before the first action of a session; its time is not
     // charged to the action's own budget.
