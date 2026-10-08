@@ -3477,6 +3477,44 @@ fn app_trades_a_code_once_for_a_session_and_a_device_token() {
 }
 
 #[test]
+fn pairing_answers_carry_the_lan_addresses() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        let cookie = login_cookie(&app, "hunter2").await;
+        let code = code_of(&new_pair_code(&app, &cookie).await);
+        let with_host = |body: serde_json::Value| {
+            let mut req = pair_json_request(body);
+            req.headers_mut()
+                .insert(header::HOST, "192.168.1.11:45432".parse().unwrap());
+            req
+        };
+        let resp = app
+            .clone()
+            .oneshot(with_host(serde_json::json!({"code": code})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let urls = body["lan_urls"].as_array().expect("lan_urls array");
+        assert!(
+            urls.iter().all(|u| u
+                .as_str()
+                .is_some_and(|u| u.starts_with("http://") && u.ends_with(":45432"))),
+            "{body}"
+        );
+        let token = body["device_token"].as_str().unwrap().to_string();
+
+        // A renewal refreshes them too: the Mac's address may have changed.
+        let resp = app
+            .oneshot(with_host(serde_json::json!({"device_token": token})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_json(resp).await["lan_urls"].is_array());
+    });
+}
+
+#[test]
 fn browser_form_trades_a_code_for_a_session() {
     block(async {
         let app = http::router(build_state(Some("hunter2")));

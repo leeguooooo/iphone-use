@@ -1575,6 +1575,17 @@ async fn pair_submit(
     };
     state.auth_limiter.lock().unwrap().record_success();
     let mut body = serde_json::json!({"ok": true, "session_ttl_secs": state.session_ttl_secs});
+    // Direct addresses for an app that paired through a tunnel: it probes
+    // them and drives the phone over the LAN when it can, the paired address
+    // staying its identity and fallback. The session and device token are
+    // the daemon's, so they work on every address.
+    let (_, request_port) = crate::pairing::split_host(
+        headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    );
+    body["lan_urls"] = state.pairing.lan_urls(request_port).into();
     if let Some(token) = device_token {
         body["device_token"] = serde_json::Value::String(token);
         body["device_token_ttl_secs"] = crate::pairing::DEVICE_TOKEN_TTL_SECS.into();

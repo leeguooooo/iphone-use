@@ -30,6 +30,9 @@ pub struct Pairing {
     /// False when the daemon only listens on loopback: a QR code would point
     /// a phone at an address it cannot reach.
     pub lan_reachable: bool,
+    /// The port the daemon listens on, for the LAN addresses handed to a
+    /// paired app (a request through a tunnel carries no usable port).
+    pub port: Option<u16>,
     codes: Mutex<HashMap<String, Instant>>,
 }
 
@@ -37,8 +40,30 @@ impl Pairing {
     pub fn new(lan_reachable: bool) -> Self {
         Self {
             lan_reachable,
+            port: None,
             codes: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    /// `http://<ip>:<port>` for every LAN address, best first, so a paired
+    /// app that reached us through a public tunnel can go direct when it sits
+    /// on the same network. Empty on a loopback-only daemon or with no port.
+    pub fn lan_urls(&self, fallback_port: Option<u16>) -> Vec<String> {
+        let Some(port) = self.port.or(fallback_port) else {
+            return Vec::new();
+        };
+        if !self.lan_reachable {
+            return Vec::new();
+        }
+        lan_addresses()
+            .into_iter()
+            .map(|(_, ip)| format!("http://{ip}:{port}"))
+            .collect()
     }
 
     /// Mint a fresh single-use code.
@@ -238,6 +263,26 @@ mod tests {
         assert!(is_loopback_host("[::1]"));
         assert!(is_loopback_host("LOCALHOST"));
         assert!(!is_loopback_host("192.168.1.11"));
+    }
+
+    #[test]
+    fn lan_urls_carry_the_daemon_port() {
+        let p = Pairing::new(true).with_port(44321);
+        let urls = p.lan_urls(Some(9999));
+        assert_eq!(urls.len(), lan_addresses().len());
+        assert!(urls
+            .iter()
+            .all(|u| u.starts_with("http://") && u.ends_with(":44321")));
+        let p = Pairing::new(true);
+        assert!(p
+            .lan_urls(Some(45432))
+            .iter()
+            .all(|u| u.ends_with(":45432")));
+        assert!(p.lan_urls(None).is_empty(), "no port, no address");
+        assert!(Pairing::new(false)
+            .with_port(44321)
+            .lan_urls(None)
+            .is_empty());
     }
 
     #[test]
