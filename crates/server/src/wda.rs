@@ -996,21 +996,24 @@ impl WdaClient {
         Ok(())
     }
 
+    /// Spotlight's search field is on screen (one lookup, at most 2 s).
+    async fn spotlight_field_shown(&mut self) -> bool {
+        matches!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                self.find_elements("predicate string", SPOTLIGHT_FIELD),
+            )
+            .await,
+            Ok(Ok(found)) if !found.is_empty()
+        )
+    }
+
     /// Open Spotlight from SpringBoard through its accessibility element.
     ///
     /// A coordinate tap on the Search pill can be acknowledged by WDA without
     /// changing the screen. Resolve the localized accessibility element and
     /// click it instead, then verify that Spotlight's text field appeared
     /// before reporting success.
-    async fn spotlight_field_shown(&mut self) -> bool {
-        let field = "type == 'XCUIElementTypeTextField' AND (label == 'SpotlightSearchField' \
-                     OR placeholderValue IN {'搜索', 'Search', '検索'})";
-        matches!(
-            tokio::time::timeout(Duration::from_secs(2), self.find_elements("predicate string", field)).await,
-            Ok(Ok(found)) if !found.is_empty()
-        )
-    }
-
     pub async fn open_spotlight(&mut self) -> Result<()> {
         self.press_home().await?;
 
@@ -1112,13 +1115,11 @@ impl WdaClient {
 
         // Same for the search field: ask for it alone until it shows, then
         // confirm on the full tree only if it never did.
-        let field = "type == 'XCUIElementTypeTextField' AND (label == 'SpotlightSearchField' \
-                     OR placeholderValue IN {'搜索', 'Search', '検索'})";
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             let found = tokio::time::timeout(
                 left(deadline),
-                self.find_elements("predicate string", field),
+                self.find_elements("predicate string", SPOTLIGHT_FIELD),
             )
             .await;
             if matches!(found, Ok(Ok(found)) if !found.is_empty()) {
@@ -2751,6 +2752,10 @@ fn force_touch_body(pressure: Option<f64>, duration_s: Option<f64>) -> serde_jso
         "duration": duration_s.unwrap_or(0.5),
     })
 }
+
+/// Spotlight's search field, on every runner and in each localized UI.
+const SPOTLIGHT_FIELD: &str = "type == 'XCUIElementTypeTextField' AND (label == 'SpotlightSearchField' \
+     OR placeholderValue IN {'搜索', 'Search', '検索'})";
 
 /// Every listed app is SpringBoard or Spotlight (and at least one is listed).
 fn only_springboard_or_spotlight(bundles: &[String]) -> bool {
