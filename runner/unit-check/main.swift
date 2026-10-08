@@ -430,5 +430,17 @@ do {
         "an element screenshot is not the screen capture")
 }
 
+// MARK: - Stream stalls
+
+do {
+  let now = Date()
+  check(!StreamStall.isStuck(sendingSince: nil, now: now), "a client not writing is not stuck")
+  check(!StreamStall.isStuck(sendingSince: now.addingTimeInterval(-1), now: now), "one second into a write is a slow link")
+  check(StreamStall.isStuck(sendingSince: now.addingTimeInterval(-6), now: now), "six seconds into one write: cut off")
+  check(!StreamStall.keyframeAllowed(last: now.addingTimeInterval(-0.3), now: now),
+        "a second stall keyframe within the same second waits")
+  check(StreamStall.keyframeAllowed(last: .distantPast, now: now), "the first stall keyframe goes out")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)

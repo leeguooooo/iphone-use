@@ -35,6 +35,24 @@ import Foundation
 import Network
 import VideoToolbox
 
+/// Viewers that cannot keep up: when one is cut off, and how often stalls may cost a keyframe.
+enum StreamStall {
+  /// A client still writing one frame after this long is gone in all but name; it is dropped so
+  /// it stops costing a keyframe per frame and holding the capture loop alive.
+  static let maxSendingSeconds = 5.0
+  /// At most one stall keyframe a second, however many viewers stall: each is ~25 KiB at full size.
+  static let keyframeMinInterval = 1.0
+
+  static func isStuck(sendingSince: Date?, now: Date) -> Bool {
+    guard let sendingSince else { return false }
+    return now.timeIntervalSince(sendingSince) > maxSendingSeconds
+  }
+
+  static func keyframeAllowed(last: Date, now: Date) -> Bool {
+    now.timeIntervalSince(last) >= keyframeMinInterval
+  }
+}
+
 final class RunnerH264Stream {
   struct Settings: Equatable {
     var fps = 30
@@ -71,6 +89,9 @@ final class RunnerH264Stream {
   private var capturing = false
   private var settings = Settings()
   private var forceKeyframe = true
+  /// A viewer dropped a frame and has caught up; it needs a keyframe (rate-limited).
+  private var stallKeyframeWanted = false
+  private var lastStallKeyframe = Date.distantPast
   private var blank = false
   private var stats = (frames: 0, bytes: 0, since: Date(), fps: 0.0, kbps: 0.0, captureMs: 0.0, encodeMs: 0.0,
                        captures: 0, skipped: 0, skipRatio: 0.0, decodeMs: 0.0)
@@ -80,14 +101,18 @@ final class RunnerH264Stream {
     var capture: Data
     var settings: Settings
     var keyframe: Bool
+    var generation: Int
   }
   private let handoff = NSCondition()
   private var pending: Pending?
   private var encoderRunning = false
+  /// Bumped per capture run (under `handoff`): a capture loop that is exiting must not clear, and
+  /// the encoder must not encode, a capture from another run.
+  private var generation = 0
 
   private final class Client {
     let connection: NWConnection
-    var sending = false
+    var sendingSince: Date?
     var gotKeyframe = false
     init(_ connection: NWConnection) { self.connection = connection }
   }
@@ -216,6 +241,8 @@ final class RunnerH264Stream {
     handoff.lock()
     let startEncoder = !encoderRunning
     encoderRunning = true
+    generation += 1
+    let run = generation
     pending = nil
     handoff.unlock()
     if startEncoder {
@@ -235,8 +262,13 @@ final class RunnerH264Stream {
         break
       }
       let current = settings
-      let keyframe = forceKeyframe
+      var keyframe = forceKeyframe
       forceKeyframe = false
+      if stallKeyframeWanted, StreamStall.keyframeAllowed(last: lastStallKeyframe, now: Date()) {
+        stallKeyframeWanted = false
+        lastStallKeyframe = Date()
+        keyframe = true
+      }
       lock.unlock()
 
       let frameStart = Date()
@@ -266,8 +298,8 @@ final class RunnerH264Stream {
         lastSettings = current
         lastSentAt = frameStart
         handoff.lock()
-        let carried = pending?.keyframe ?? false
-        pending = Pending(capture: capture, settings: current, keyframe: keyframe || carried)
+        let carried = pending?.generation == run && pending?.keyframe == true
+        pending = Pending(capture: capture, settings: current, keyframe: keyframe || carried, generation: run)
         handoff.signal()
         handoff.unlock()
       }
@@ -275,7 +307,7 @@ final class RunnerH264Stream {
       if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
     }
     handoff.lock()
-    pending = nil
+    if pending?.generation == run { pending = nil }
     handoff.broadcast()
     handoff.unlock()
     NSLog("ipu-runner: H.264 capture stopped (no clients)")
@@ -303,7 +335,9 @@ final class RunnerH264Stream {
       }
       let job = pending!
       pending = nil
+      let stale = job.generation != generation
       handoff.unlock()
+      if stale { continue }
 
       let decodeStart = Date()
       let image: CGImage? = autoreleasepool {
@@ -372,21 +406,31 @@ final class RunnerH264Stream {
       stats.since = now
     }
     // A viewer gets nothing until its first keyframe; after that a client still writing the
-    // previous message drops this one and asks for a keyframe, rather than queueing (latency) or
-    // decoding a gap (smear).
+    // previous message drops this one, rather than queueing (latency) or decoding a gap (smear),
+    // and asks for one keyframe once its write completes. A client stuck writing for seconds is
+    // cut off.
     var ready: [Client] = []
+    var stuck: [Client] = []
     for client in clients.values {
+      if StreamStall.isStuck(sendingSince: client.sendingSince, now: now) {
+        stuck.append(client)
+        continue
+      }
       if !client.gotKeyframe && !keyframe { continue }
-      if client.sending {
-        forceKeyframe = true
+      if client.sendingSince != nil {
         client.gotKeyframe = false
         continue
       }
       client.gotKeyframe = true
-      client.sending = true
+      client.sendingSince = now
       ready.append(client)
     }
+    for client in stuck { clients.removeValue(forKey: ObjectIdentifier(client)) }
     lock.unlock()
+    for client in stuck {
+      NSLog("ipu-runner: H.264 client stuck writing for over %.0f s; dropping it", StreamStall.maxSendingSeconds)
+      client.connection.cancel()
+    }
     if ready.isEmpty { return }
 
     var message = Data(capacity: 13 + annexB.count)
@@ -401,7 +445,8 @@ final class RunnerH264Stream {
       client.connection.send(content: message, completion: .contentProcessed { [weak self, weak client] error in
         guard let self, let client else { return }
         self.lock.lock()
-        client.sending = false
+        client.sendingSince = nil
+        if !client.gotKeyframe { self.stallKeyframeWanted = true }
         self.lock.unlock()
         if error != nil { client.connection.cancel() }
       })
