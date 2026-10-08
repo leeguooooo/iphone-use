@@ -2149,6 +2149,7 @@ async fn run_wda_readiness_wait(
     token: WdaTransitionToken,
     budget: WdaReadinessBudget,
     setup_status_path: &str,
+    kicked_at: u64,
 ) -> WdaReadinessOutcome {
     // setup-wda.sh allows up to six minutes for xcodebuild to report the
     // on-device server URL, and first startup after an Xcode update can use
@@ -2178,7 +2179,10 @@ async fn run_wda_readiness_wait(
         // unplugged phone look like a slow-but-healthy startup and hid the
         // actionable USB/trust/DDI message from clients. Lifecycle
         // transitions must only trust the current helper's structured status.
-        setup_blocker = read_structured_setup_blocked_on_at(setup_status_path);
+        // A status written before this round's bootstrap is the replaced
+        // helper's: its blocker (a cable since plugged back in) says nothing
+        // about this round and must not end it.
+        setup_blocker = read_structured_setup_blocked_on_at(setup_status_path, kicked_at);
         if !setup_blocker.is_empty() {
             break WdaReadinessOutcome::SetupBlocked;
         }
@@ -2288,6 +2292,7 @@ fn spawn_wda_readiness_wait(state: Arc<AppState>, token: WdaTransitionToken) {
             token,
             WdaReadinessBudget::default(),
             &setup_status_path,
+            setup_kicked_at(),
         )
         .await;
         ownership.resolve(outcome);
@@ -2708,22 +2713,35 @@ struct WdaSetupStatus {
 }
 
 fn read_structured_setup_status() -> Option<WdaSetupStatus> {
-    read_structured_setup_status_at(&crate::instance::Instance::path_str(
-        &crate::instance::current().status_file(),
-    ))
+    read_structured_setup_status_at(
+        &crate::instance::Instance::path_str(&crate::instance::current().status_file()),
+        setup_kicked_at(),
+    )
+}
+
+/// Unix second of the latest bring-up this daemon bootstrapped (0: none yet).
+/// A setup status written before it describes the helper run that bring-up
+/// replaced, not the one now running.
+static SETUP_KICKED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn setup_kicked_at() -> u64 {
+    SETUP_KICKED_AT.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// [`read_structured_setup_status`] against an explicit path, so the readiness
 /// loop can be driven against a fixture instead of the operator's real state
-/// directory.
-fn read_structured_setup_status_at(status_path: &str) -> Option<WdaSetupStatus> {
+/// directory. A status older than `kicked_at` is the previous helper's and
+/// reads as absent: hardware, a `usb` blocker left by an unplugged cable
+/// ended the reconnect started after plugging it back in.
+fn read_structured_setup_status_at(status_path: &str, kicked_at: u64) -> Option<WdaSetupStatus> {
     std::fs::read_to_string(status_path)
         .ok()
         .and_then(|txt| parse_setup_status(&txt, now_secs()))
+        .filter(|status| status.ts >= kicked_at)
 }
 
-fn read_structured_setup_blocked_on_at(status_path: &str) -> String {
-    read_structured_setup_status_at(status_path)
+fn read_structured_setup_blocked_on_at(status_path: &str, kicked_at: u64) -> String {
+    read_structured_setup_status_at(status_path, kicked_at)
         .map(|status| status.blocked_on)
         .unwrap_or_default()
 }
@@ -3487,6 +3505,8 @@ fn write_and_bootstrap_wda_agent(setup_sh: &str, log: &str, udid: &str) -> bool 
     // Both callers mean "bring the phone up now" (the setup endpoint and an
     // explicit reconnect), so neither should inherit a pending backoff.
     clear_wda_retry_backoff(&crate::instance::current().state_dir);
+    // From here on the status file the old helper left is history.
+    SETUP_KICKED_AT.store(now_secs(), std::sync::atomic::Ordering::Release);
     let plist_path = crate::instance::current().wda_plist();
     let Some(parent) = plist_path.parent() else {
         return false;
@@ -16999,12 +17019,15 @@ mod tests {
         }
 
         fn blocked_on(blocker: &str) -> Self {
+            Self::blocked_on_at(blocker, now_secs())
+        }
+
+        fn blocked_on_at(blocker: &str, ts: u64) -> Self {
             let fixture = Self::absent();
             std::fs::write(
                 &fixture.path,
                 format!(
-                    r#"{{"phase":"lock-backoff","blocked_on":"{blocker}","message":"fixture","ts":{}}}"#,
-                    now_secs()
+                    r#"{{"phase":"lock-backoff","blocked_on":"{blocker}","message":"fixture","ts":{ts}}}"#
                 ),
             )
             .expect("write status fixture");
@@ -17111,7 +17134,7 @@ mod tests {
             let token = state.wda_lifecycle.try_begin_reconnecting().unwrap();
 
             let outcome =
-                run_wda_readiness_wait(&state, token, short_budget(), status.path()).await;
+                run_wda_readiness_wait(&state, token, short_budget(), status.path(), 0).await;
 
             assert_eq!(outcome, WdaReadinessOutcome::Ready);
             assert!(state
@@ -17139,7 +17162,7 @@ mod tests {
 
             let budget = short_budget();
             let started = std::time::Instant::now();
-            let outcome = run_wda_readiness_wait(&state, token, budget, status.path()).await;
+            let outcome = run_wda_readiness_wait(&state, token, budget, status.path(), 0).await;
 
             assert_eq!(outcome, WdaReadinessOutcome::Locked);
             assert!(
@@ -17151,6 +17174,33 @@ mod tests {
                 Some(true),
                 "the lock state must be published"
             );
+            wda.shutdown();
+        });
+    }
+
+    /// A blocker the replaced helper left before this round's bootstrap (a
+    /// cable since plugged back in) does not end the new round: it reaches
+    /// Ready on the healthy runner. The same file read with no bootstrap
+    /// mark still blocks.
+    #[test]
+    fn readiness_loop_ignores_a_blocker_written_before_the_bootstrap() {
+        block(async {
+            let mut wda = MockWda::start(healthy_wda_responder);
+            let kicked_at = now_secs();
+            let status = SetupStatusFixture::blocked_on_at("usb", kicked_at - 30);
+            assert_eq!(read_structured_setup_blocked_on_at(status.path(), 0), "usb");
+            assert_eq!(
+                read_structured_setup_blocked_on_at(status.path(), kicked_at),
+                ""
+            );
+            let state = readiness_state_with_wda(wda.base());
+            let token = state.wda_lifecycle.try_begin_reconnecting().unwrap();
+
+            let outcome =
+                run_wda_readiness_wait(&state, token, short_budget(), status.path(), kicked_at)
+                    .await;
+
+            assert_eq!(outcome, WdaReadinessOutcome::Ready);
             wda.shutdown();
         });
     }
@@ -17171,7 +17221,7 @@ mod tests {
             let token = state.wda_lifecycle.try_begin_reconnecting().unwrap();
 
             let outcome =
-                run_wda_readiness_wait(&state, token, short_budget(), status.path()).await;
+                run_wda_readiness_wait(&state, token, short_budget(), status.path(), 0).await;
 
             assert_eq!(outcome, WdaReadinessOutcome::SetupBlocked);
             assert_eq!(
@@ -17208,7 +17258,7 @@ mod tests {
             };
 
             let started = std::time::Instant::now();
-            let outcome = run_wda_readiness_wait(&state, token, budget, status.path()).await;
+            let outcome = run_wda_readiness_wait(&state, token, budget, status.path(), 0).await;
             let elapsed = started.elapsed();
 
             assert_eq!(outcome, WdaReadinessOutcome::Deadline);
@@ -17235,7 +17285,7 @@ mod tests {
             let budget = short_budget();
 
             let started = std::time::Instant::now();
-            let outcome = run_wda_readiness_wait(&state, token, budget, status.path()).await;
+            let outcome = run_wda_readiness_wait(&state, token, budget, status.path(), 0).await;
             let elapsed = started.elapsed();
 
             assert_eq!(outcome, WdaReadinessOutcome::Deadline);
@@ -17262,7 +17312,7 @@ mod tests {
             let second = state.wda_lifecycle.try_begin_reconnecting().unwrap();
 
             let outcome =
-                run_wda_readiness_wait(&state, first, short_budget(), status.path()).await;
+                run_wda_readiness_wait(&state, first, short_budget(), status.path(), 0).await;
 
             assert_eq!(outcome, WdaReadinessOutcome::Superseded);
             assert!(
@@ -17283,7 +17333,7 @@ mod tests {
             let token = state.wda_lifecycle.try_begin_reconnecting().unwrap();
             {
                 let _ownership = WdaReadinessOwnership::new(state.wda_lifecycle.clone(), token);
-                let wait = run_wda_readiness_wait(&state, token, short_budget(), status.path());
+                let wait = run_wda_readiness_wait(&state, token, short_budget(), status.path(), 0);
                 tokio::pin!(wait);
                 let _ = tokio::time::timeout(std::time::Duration::from_millis(5), &mut wait).await;
             }
