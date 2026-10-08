@@ -837,8 +837,15 @@ impl PhoneHandler {
             // The daemon adds `registry` after a launch_app and a one-shot
             // `flow_suggestion` once a task is long enough to keep.
             let body = with_flow_compat(&self.daemon, response.body().to_string()).await;
+            // The model reads the compact verdict and end screen; the whole
+            // JSON still rides along as structured content for programs.
+            // Without an observed screen the body stays as it was.
+            let text = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|json| crate::compact::batch(&json))
+                .unwrap_or(body);
             return with_structure(
-                CallToolResult::success(vec![Content::text(body)]),
+                CallToolResult::success(vec![Content::text(text)]),
                 &response,
             );
         }

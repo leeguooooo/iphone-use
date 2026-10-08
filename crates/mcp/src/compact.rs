@@ -382,6 +382,52 @@ pub fn observed(json: &Value) -> Option<String> {
     Some(out.join("\n"))
 }
 
+/// A successful observed batch (`POST /agent/actions` with `observe`) as text:
+/// the verdict and step count, one short line for the steps, then the screen
+/// the batch ended on — rendered once, exactly as an observed single action
+/// is. `None` keeps the daemon's JSON: a failure (its evidence is the whole
+/// body), an unobserved batch, or a body without a screen.
+///
+/// Measured on i13 (Settings → 蓝牙): the batch text was the raw JSON, about
+/// 4.3 KB, with the end screen repeated in `structuredContent`. Compact, the
+/// batch costs the model fewer bytes than the single calls it replaces.
+pub fn batch(json: &Value) -> Option<String> {
+    if json.get("ok") != Some(&Value::Bool(true)) || json.get("error").is_some() {
+        return None;
+    }
+    let screen = observed(json)?;
+    let mut lines = screen.lines();
+    let mut head = lines.next()?.to_string();
+    let steps = json.get("steps").and_then(Value::as_array);
+    let total = steps.map_or(0, Vec::len);
+    let completed = text(json, "completed").unwrap_or_else(|| total.to_string());
+    let applied = text(json, "applied_actions").unwrap_or_else(|| "0".to_string());
+    head.push_str(&format!(" · {completed}/{total} steps · {applied} applied"));
+    let mut out = vec![head];
+    if let Some(steps) = steps {
+        let list = steps
+            .iter()
+            .enumerate()
+            .map(|(position, step)| {
+                let index = text(step, "index").unwrap_or_else(|| (position + 1).to_string());
+                let kind = text(step, "kind").unwrap_or_default();
+                let mark = if step.get("ok") == Some(&Value::Bool(false)) {
+                    format!(" FAILED {}", text(step, "error").unwrap_or_default())
+                } else {
+                    String::new()
+                };
+                format!("{index} {kind}{mark}")
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if !list.is_empty() {
+            out.push(format!("steps: {list}"));
+        }
+    }
+    out.extend(lines.map(str::to_string));
+    Some(out.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +514,91 @@ mod tests {
     #[test]
     fn a_bare_ok_is_not_rewritten() {
         assert_eq!(observed(&json!({"ok": true, "transport": "wda"})), None);
+    }
+
+    /// The shape `POST /agent/actions` answers on i13 for Settings → 蓝牙.
+    fn bluetooth_batch() -> Value {
+        json!({
+            "ok": true,
+            "completed": 2,
+            "applied_actions": 1,
+            "snapshot": "S9",
+            "settle": {"reason": "stable", "waited_ms": 812, "captures": 2},
+            "timing": {"total_ms": 1900, "wda_ms": 1500, "wda": [{"call": "GET /source", "count": 2, "ms": 400}]},
+            "steps": [
+                {"index": 1, "kind": "tap_label", "ok": true},
+                {"index": 2, "kind": "wait_for", "ok": true, "attempts": 1, "probe_misses": 1,
+                 "observation": {"present": [{"label": "蓝牙", "kind": "Switch", "matched": 1}]}}
+            ],
+            "elements": [
+                {"kind": "Application", "label": "设置", "rect": [0, 0, 390, 844], "depth": 0},
+                {"kind": "NavigationBar", "label": "蓝牙", "identifier": "_TtGC7SwiftUI32NavigationStackHosting", "rect": [0, 47, 390, 96], "depth": 11},
+                {"kind": "Button", "label": "设置", "rect": [16, 55, 44, 44], "depth": 12},
+                {"kind": "Switch", "label": "蓝牙", "value": "1", "rect": [16, 200, 358, 52], "depth": 14},
+                {"kind": "StaticText", "label": "AirDrop、隔空播放、查找和定位服务使用蓝牙。", "rect": [32, 260, 326, 40], "depth": 14}
+            ],
+            "flow_suggestion": {"steps": 2, "hint": "keep this as a flow?"}
+        })
+    }
+
+    #[test]
+    fn an_observed_batch_reads_as_its_verdict_and_end_screen() {
+        let body = bluetooth_batch();
+        let text = batch(&body).unwrap();
+        let first = text.lines().next().unwrap();
+        assert!(
+            first.starts_with("ok · snapshot S9 · settle stable 812ms"),
+            "{text}"
+        );
+        assert!(first.ends_with("· 2/2 steps · 1 applied"), "{text}");
+        assert!(text.contains("steps: 1 tap_label · 2 wait_for"), "{text}");
+        assert!(text.contains("[Switch] \"蓝牙\" value=1"), "{text}");
+        // What the agent decides from next is kept.
+        assert!(text.contains("flow_suggestion:"), "{text}");
+        // Diagnostics the model does not need stay in the structured copy.
+        assert!(!text.contains("total_ms"), "{text}");
+        assert!(!text.contains("probe_misses"), "{text}");
+        let json_bytes = body.to_string().len();
+        assert!(
+            text.len() * 2 < json_bytes,
+            "compact {} B vs JSON {json_bytes} B:\n{text}",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn a_batch_with_a_delta_reads_as_the_change() {
+        let mut body = bluetooth_batch();
+        body["delta"] = json!({
+            "added": [{"index": 3, "element": {"kind": "Switch", "label": "蓝牙", "value": "1", "depth": 14}}],
+            "changed": [], "removed": [{"index": 9}], "unchanged": 40
+        });
+        let text = batch(&body).unwrap();
+        assert!(text.contains("+ #3 [Switch] \"蓝牙\" value=1"), "{text}");
+        assert!(text.contains("- 1 removed · = 40 unchanged"), "{text}");
+        assert!(
+            !text.contains("AirDrop"),
+            "the delta stands in for the whole tree: {text}"
+        );
+    }
+
+    #[test]
+    fn a_failed_or_unobserved_batch_keeps_its_json() {
+        // A failure's evidence is the whole body (failed_step, applied_actions,
+        // retry_safe, the failed step's own detail): never summarised away.
+        let failure = json!({
+            "ok": false, "error": "expectation_timeout", "failed_step": 2, "completed": 1,
+            "applied_actions": 1, "outcome": "applied", "retry_safe": false,
+            "steps": [{"index": 1, "kind": "tap_label", "ok": true},
+                      {"index": 2, "kind": "wait_for", "ok": false, "error": "expectation_timeout"}],
+            "observation": {"snapshot": "S2", "elements": []}
+        });
+        assert_eq!(batch(&failure), None);
+        // Not observed: no screen to render, the daemon's answer stands.
+        assert_eq!(
+            batch(&json!({"ok": true, "completed": 2, "applied_actions": 1,
+                          "steps": [{"index": 1, "kind": "tap_label", "ok": true}]})),
+            None
+        );
     }
 }
