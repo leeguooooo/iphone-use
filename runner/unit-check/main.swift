@@ -356,5 +356,30 @@ do {
         "SpringBoard in front with nothing else active: nothing else to search")
 }
 
+// MARK: - Truthful answers (stale commands, off-screen actions, alert taps)
+
+do {
+  check(CommandAge.shouldDrop(method: "POST", waitedMs: 12_000, connectionGone: false),
+        "a tap that waited 12 s behind other commands is dropped, not run late")
+  check(!CommandAge.shouldDrop(method: "POST", waitedMs: 800, connectionGone: false),
+        "a tap that waited under a second still runs")
+  check(!CommandAge.shouldDrop(method: "GET", waitedMs: 12_000, connectionGone: false),
+        "a slow read is still answered")
+  check(CommandAge.shouldDrop(method: "GET", waitedMs: 5, connectionGone: true),
+        "nobody to answer: even a read is skipped")
+
+  let screen = CGSize(width: 440, height: 956)
+  let tap: [[[String: Any]]] = [[["type": "down", "x": 200.0, "y": 300.0], ["type": "up", "x": 200.0, "y": 300.0]]]
+  check(TapBounds.firstOffScreen(tap, screen) == nil, "an on-screen tap passes the bounds check")
+  let swipeOff: [[[String: Any]]] = [[["type": "down", "x": 200.0, "y": 300.0], ["type": "move", "x": 200.0, "y": 1200.0]]]
+  check(TapBounds.firstOffScreen(swipeOff, screen) == CGPoint(x: 200, y: 1200), "a move below the screen is reported")
+  check(TapBounds.firstOffScreen([[["type": "pause"]]], screen) == nil, "steps without coordinates are ignored")
+
+  check(AlertMatch.same("Allow?", ["Don't Allow", "Allow"], "Allow?", ["Don't Allow", "Allow"]),
+        "the same text and buttons: the alert is still there")
+  check(!AlertMatch.same("Allow?", ["Don't Allow", "Allow"], "Are you sure?", ["Cancel", "Delete"]),
+        "a follow-up alert is a different alert")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)

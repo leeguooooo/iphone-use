@@ -176,6 +176,17 @@ struct RunnerError: Error {
   }
 }
 
+/// Whether a queued command is too stale to run: its client is gone, or a state-changing request
+/// (anything but GET) waited longer than the daemon would have kept waiting for it.
+enum CommandAge {
+  static let maxQueuedMs = 10_000.0
+
+  static func shouldDrop(method: String, waitedMs: Double, connectionGone: Bool) -> Bool {
+    if connectionGone { return true }
+    return method != "GET" && waitedMs > maxQueuedMs
+  }
+}
+
 /// Accepts connections on a background queue, hands each complete request to `mainHandler` on the
 /// main queue (serially — XCTest and the private AX client are main-thread APIs), and answers
 /// requests `inlineHandler` claims directly on the transport queue so liveness probes never wait
@@ -291,7 +302,26 @@ final class RunnerHTTPServer {
     // spins the main run loop inside a handler (synthesis, queries) no second request can start.
     commandQueue.async { [weak self] in
       guard let self else { return }
-      let response = DispatchQueue.main.sync { self.mainHandler(request) }
+      let waitedMs = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+      let gone: Bool
+      switch connection.state {
+      case .cancelled, .failed: gone = true
+      default: gone = false
+      }
+      // A command the daemon already gave up on must not run late: a retried tap would land twice.
+      if CommandAge.shouldDrop(method: request.method, waitedMs: waitedMs, connectionGone: gone) {
+        NSLog("ipu-runner: dropped %@ %@ after %.0f ms in the queue (gone=%d)",
+              request.method, request.path, waitedMs, gone ? 1 : 0)
+        var response = HTTPResponse.error(
+          503, "unknown error",
+          String(format: "dropped after %.0f ms waiting behind other commands; nothing was executed", waitedMs))
+        response.headers["X-IPU-Queued-Ms"] = String(format: "%.0f", waitedMs)
+        response.headers["X-IPU-Dropped"] = "1"
+        self.finish(request, response, started: started, on: connection)
+        return
+      }
+      var response = DispatchQueue.main.sync { self.mainHandler(request) }
+      response.headers["X-IPU-Queued-Ms"] = String(format: "%.0f", waitedMs)
       self.finish(request, response, started: started, on: connection)
     }
   }
