@@ -269,57 +269,70 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `phone_status` | — | Query backend, canonical target, `drivable`, WDA readiness, lifecycle, and recovery hints |
+| `phone_status` | — | Query backend, canonical target, `drivable`, device-runner readiness, lifecycle, and recovery hints |
 | `phone_capabilities` | — | What this build supports for the configured backend, and whether the phone can be driven now. Read-only: wakes nothing, takes no owner lease |
-| `phone_reconnect` | — | Restart daemon-managed WDA once, then poll `phone_status`; never changes backend or target |
-| `phone_screenshot` | — | Capture current screen → PNG image content |
-| `phone_elements` | — | **(wda)** The UI as a flattened element list — prefer over screenshots for reasoning |
+| `phone_reconnect` | — | Restart the daemon-managed device runner once, then poll `phone_status`; never changes backend or target |
+| `phone_hold` | `secs` | Keep the phone through a bounded human-in-the-loop pause (a PIN, a code): the idle watchdog does not release it for `secs` (0 clears, max 14400) |
+| `phone_release_owner` | — | Release this session's owner lease when the task is done |
+| `phone_login` | `item?`, `user?`, `submit?`, `code_via?`, `code_from?` | Sign the app on screen in from the user's own vault entry (bitwarden-use), inside the daemon; the password never reaches the model |
+| `phone_screenshot` | `max_side?` | Capture current screen → PNG image content |
+| `phone_elements` | — | The UI as a flattened element list — prefer over screenshots for reasoning |
 | `phone_tap` | `x`, `y` (0–1), `observe?` | Single tap at normalized position |
-| `phone_tap_element` | `element`, `snapshot`, `observe?` | **(wda)** Snapshot-bound indexed tap; stale trees are rejected without tapping |
-| `phone_tap_label` | `label`, `observe?` | **(wda)** Exact-label tap; requires one unique match and sends nothing on ambiguity |
+| `phone_tap_element` | `element`, `snapshot`, `observe?` | Snapshot-bound indexed tap; stale trees are rejected without tapping |
+| `phone_tap_label` | `label`, `observe?` | Exact-label tap; requires one unique match and sends nothing on ambiguity |
 | `phone_scroll` | `x`, `y`, `dx`, `dy`, `observe?` | Scroll-wheel gesture; negative `dy` scrolls content up |
-| `phone_type` | `text`, `observe?` | Type text; with `wda:true` any Unicode (incl. CJK) lands cleanly, else US-ASCII keycodes |
+| `phone_type` | `text`, `observe?` | Type text; any Unicode (incl. CJK) lands cleanly |
 | `phone_key` | `name`, `observe?` | Named key: `return`, `escape`, `space`, `tab`, `delete`, `up`, `down`, `left`, `right` |
-| `phone_shortcut` | `name`, `observe?` | Direct/WDA system shortcut: `home` or `spotlight`; App Switcher is unsupported |
-| `phone_run_steps` | `steps` | Run up to 24 guarded action/wait steps in one MCP call; includes long-press/swipe/drag, strict `tap_locator`, bundle-id `launch_app`, full preflight, one WDA lock, and first-failure stop |
-| `phone_flow_list` | `category?`, `app?`, `verified?` | Installed registry flows with risk/verified/compat/inputs — check this before exploring an app step by step |
+| `phone_shortcut` | `name`, `observe?` | iOS system shortcut: `home` or `spotlight`; App Switcher is unsupported |
+| `phone_run_steps` | `steps`, `observe?` | Run up to 24 guarded action/wait steps in one MCP call; includes long-press/swipe/drag, strict `tap_locator`, bundle-id `launch_app`, `alert`, `picker`, `perform` (toggle a switch, adjust a slider), full preflight, one device lock, and first-failure stop |
+| `phone_jev_run` | `goal`, `app?`, `max_steps?` | Hand a whole goal to the fast on-phone agent; returns `done` / `blocked` with its step history |
+| `phone_flow_list` | `category?`, `app?`, `verified?`, `detail?` | Installed registry flows, one row each (id · risk · compat · inputs — description); `detail=true` for every field. Check this before exploring an app step by step |
 | `phone_flow_info` | `id` | One flow's metadata, inputs, and step templates (never runtime values) |
-| `phone_flow_run` | `id`, `inputs?`, `confirm?`, `force?` | Run an installed flow once through Direct/WDA; `side_effect` needs `confirm=true`, `broken`/`incompatible` compat needs `force=true` |
+| `phone_flow_run` | `id`, `inputs?`, `confirm?`, `force?`, `verify?`, `write_fixture?` | Run an installed flow once through the device runner; `side_effect` needs `confirm=true`, `broken`/`incompatible` compat needs `force=true` |
+| `phone_flow_draft` | `save_as?` | Draft a flow from this session's recent actions, with a `todo` list to fix before saving |
 | `phone_flow_update` | — | Mirror the official registry (checksum + strict validation); network only, phone untouched |
 | `phone_flow_publish` | `source`, `id`, `app_name?`, `aliases?`, `note?`, `confirm` | Fork/branch/PR a validated flow into the registry via `gh`; `confirm=true` only after the user agreed |
 | `phone_flow_report` | `id`, `note?`, `confirm` | File a registry issue for a failed flow using the captured last failure (redacted); `confirm=true` only after the user agreed |
 | `phone_run_start` | `run_id`, `complete_trace?` | Mark one task's start for the daemon's task metrics; this session's calls carry the run until `phone_run_end` (optional — runs are otherwise inferred from idle gaps) |
 | `phone_run_end` | `run_id`, `turn_ids?` | Close the task and return its summary: HTTP calls (not model turns), batches, observed and flow calls, stale/unknown, failures, p50/p95; model round trips only for a declared complete trace |
 
-### Reading a result: `structuredContent` vs the text block
+### Reading a result: the text block and `structuredContent`
 
-**Read `structuredContent` first. If it is absent, read `content` according to
-the tool.** That order is the whole rule; the notes below say what `content`
-holds where it matters, and none of them is a promise about every message a
-tool can produce.
+**The text block is written for the model; `structuredContent` is for
+programs.** Both describe the same result.
 
-* **`structuredContent` present** — the seven single-step act tools listed
-  above (`phone_tap`, `phone_tap_element`, `phone_tap_label`, `phone_scroll`,
-  `phone_type`, `phone_key`, `phone_shortcut`), `phone_capabilities`, and
-  `phone_run_steps`. Parse it.
-* **For those first eight, the text block is a preview**, trimmed at 8 KiB on
-  a character boundary — a real observation or a large capability response is
-  cut there. Do not parse it as complete JSON.
-* **`phone_run_steps` also keeps the complete batch result in its text**, so
-  callers written before `structuredContent` existed keep working. Either side
-  is safe to parse.
-* **Everything else keeps the return it always had.** `phone_elements`,
-  `phone_status` and the `phone_flow_*` family answer with complete JSON in
-  the text block — including `phone_flow_run`'s execution result, whether the
-  run passed or failed. `phone_screenshot` answers with an **image** block.
-  Errors raised *before* a call reaches the phone — a bad argument, a refused
-  precondition, a transport failure — are explanatory text rather than JSON
-  (`elements failed (is WDA set up? …): <cause>`).
+* **Text is compact.** An observed act tool returns the settled change, not the
+  JSON. `phone_elements` returns one line per element. A `phone_run_steps`
+  success returns the verdict and the end screen. A failed batch returns
+  `FAILED <error> · step N of M`, the step list, the failed step's own error
+  detail, `retry_safe` (`retry_safe=false: DO NOT replay`) and the end screen.
+  `phone_flow_list` returns one row per flow; `detail=true` returns every field
+  as JSON. `phone_flow_run` returns `ok · flow X · N steps completed`,
+  `FAILED flow X: …` or `UNKNOWN outcome for flow X`, plus outputs, verify and
+  diagnosis. `phone_status` and `phone_capabilities` return the JSON itself
+  (cut at 8 KiB). `phone_screenshot` returns an **image** block.
+* **`structuredContent` is slim by default.** It holds the top-level fields a
+  program branches on (`ok`, `outcome`, `retry_safe`, `error`, `failed_step`,
+  `completed`, `applied_actions`, `snapshot`, …) and `summary`, which is the
+  text block. Set `IPHONE_USE_MCP_STRUCTURED=full` in the server's `env` for
+  the daemon's whole JSON: every step, the observation and the element tree.
+  Set it to `off` to send the text alone. A result whose text is already the
+  JSON (`phone_status`, `phone_capabilities`, `phone_flow_list detail=true`)
+  keeps its full structure in every mode.
+* **Why slim by default.** Clients do not all show the model the same part of
+  a result. Claude Code (2.1.294, measured) gives the model **only
+  `structuredContent`** when a successful result has one, and only the text
+  for an error. Codex CLI (0.161.0, measured) gives it both. A full payload
+  therefore puts the whole element tree or batch in front of the model. Slim
+  keeps that cost down, and the model still gets the compact text, either
+  directly or as `summary`.
+* Errors raised *before* a call reaches the phone (a bad argument, a refused
+  precondition, a transport failure) are explanatory text. Their structure
+  carries either `outcome:"not_sent"` with `retry_safe:true`, or
+  `outcome:"unknown"` with `retry_safe:false`.
 
-So: do not assume a tool's every reply has one encoding. Take
-`structuredContent` when it is there; otherwise try the tool's documented JSON
-and fall back to reading the text, and reach for `phone_status` or
-`phone_capabilities` when what you need is a machine-readable state.
+Branch on the explicit `retry_safe` boolean, never on `outcome`. When you need
+a machine-readable state, use `phone_status` or `phone_capabilities`.
 
 `observe: true` (off by default, because the settle wait is latency an action
 does not otherwise pay) asks the daemon to watch the screen after the action

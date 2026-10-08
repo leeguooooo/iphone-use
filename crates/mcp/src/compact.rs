@@ -428,10 +428,229 @@ pub fn batch(json: &Value) -> Option<String> {
     Some(out.join("\n"))
 }
 
+/// Bounded JSON text for a field a model may need verbatim (outputs, a
+/// diagnosis): whole when small, cut on a char boundary with `…` otherwise.
+fn bounded_json(value: &Value, limit: usize) -> String {
+    let mut rendered = value.to_string();
+    if rendered.len() > limit {
+        let cut = (0..=limit).rev().find(|i| rendered.is_char_boundary(*i)).unwrap_or(0);
+        rendered.truncate(cut);
+        rendered.push('…');
+    }
+    rendered
+}
+
+/// `phone_flow_list`, one row per flow: id, risk, compat verdict, whether it
+/// was ever verified on hardware, its inputs, and a one-line description.
+/// The full entries (steps metadata, verified_on, app versions) stay in the
+/// structured copy and behind `detail=true`.
+pub fn flow_list(json: &Value) -> Option<String> {
+    let flows = json.get("flows")?.as_array()?;
+    let mut out = vec![format!(
+        "{} flows (id · risk · compat · inputs — description); phone_flow_run(id) runs one",
+        flows.len()
+    )];
+    for flow in flows {
+        let id = text(flow, "id").unwrap_or_default();
+        let risk = text(flow, "risk").unwrap_or_default();
+        let compat = flow
+            .get("compat")
+            .and_then(|c| text(c, "compat").or_else(|| c.as_str().map(str::to_string)))
+            .unwrap_or_default();
+        let verified = if flow.get("verified") == Some(&Value::Bool(true)) { "" } else { " (unverified)" };
+        let inputs = flow
+            .get("inputs")
+            .and_then(Value::as_object)
+            .map(|inputs| inputs.keys().cloned().collect::<Vec<_>>().join(","))
+            .filter(|s| !s.is_empty())
+            .map(|s| format!(" · inputs {s}"))
+            .unwrap_or_default();
+        let mut description = text(flow, "description").unwrap_or_default();
+        if description.chars().count() > 80 {
+            description = description.chars().take(79).collect::<String>() + "…";
+        }
+        out.push(format!("{id} · {risk} · {compat}{verified}{inputs} — {description}"));
+    }
+    Some(out.join("\n"))
+}
+
+/// `phone_flow_run`'s summary, compact: verdict, counts, outputs, the
+/// failure's diagnosis when it failed, and the hint. The whole summary (every
+/// step result) stays in the structured copy.
+pub fn flow_run(summary: &Value) -> Option<String> {
+    let result = summary.get("result")?;
+    let flow = text(summary, "flow").unwrap_or_default();
+    let ok = result.get("ok") == Some(&Value::Bool(true));
+    let completed = text(result, "completed").unwrap_or_else(|| "?".to_string());
+    let applied = text(result, "applied_actions").unwrap_or_else(|| "?".to_string());
+    let mut head = if text(result, "outcome").as_deref() == Some("unknown") {
+        // Never a count we do not have: the request left, the answer did not
+        // say what the phone did.
+        let reason = text(result, "reason").unwrap_or_default();
+        format!("UNKNOWN outcome for flow {flow} ({reason}): the phone may have acted")
+    } else if ok {
+        format!("ok · flow {flow} · {completed} steps completed · {applied} applied")
+    } else {
+        let error = text(result, "error").unwrap_or_else(|| "failed".to_string());
+        let failed = text(result, "failed_step").unwrap_or_default();
+        format!("FAILED flow {flow}: {error} · failed step {failed} · {completed} completed · {applied} applied")
+    };
+    match result.get("retry_safe").and_then(Value::as_bool) {
+        Some(false) if !ok => head.push_str(" · retry_safe=false: DO NOT replay"),
+        Some(true) if !ok => head.push_str(" · retry_safe"),
+        _ => {}
+    }
+    if let Some(compat) = summary.get("compat").and_then(|c| text(c, "compat")) {
+        head.push_str(&format!(" · compat {compat}"));
+    }
+    let mut out = vec![head];
+    if let Some(from) = text(result, "fallback_from") {
+        out.push(format!("ran the other-language variant after {from} missed"));
+    }
+    if let Some(outputs) = summary.get("outputs") {
+        out.push(format!("outputs: {}", bounded_json(outputs, 2000)));
+    }
+    if let Some(verify) = summary.get("verify") {
+        out.push(format!("verify: {}", bounded_json(verify, 600)));
+    }
+    if !ok {
+        if let Some(diagnosis) = result.get("diagnosis") {
+            out.push(format!("diagnosis: {}", bounded_json(diagnosis, 1500)));
+        }
+    }
+    if let Some(hint) = text(summary, "hint") {
+        out.push(format!("hint: {hint}"));
+    }
+    Some(out.join("\n"))
+}
+
+/// A failed batch, compact: the verdict line a caller branches on, the step
+/// list with the failure marked, the failed step's own evidence (its large
+/// observation and timing left to the structured copy), and the screen the
+/// batch ended on when the daemon observed one. `None` when the body is not a
+/// failed batch, so the caller keeps the raw JSON.
+pub fn failed_batch(json: &Value) -> Option<String> {
+    if json.get("ok") != Some(&Value::Bool(false)) {
+        return None;
+    }
+    let steps = json.get("steps").and_then(Value::as_array)?;
+    let error = text(json, "error").unwrap_or_else(|| "failed".to_string());
+    let failed = text(json, "failed_step").unwrap_or_default();
+    let completed = text(json, "completed").unwrap_or_default();
+    let applied = text(json, "applied_actions").unwrap_or_else(|| "0".to_string());
+    let outcome = text(json, "batch_outcome")
+        .or_else(|| text(json, "outcome"))
+        .unwrap_or_default();
+    let retry_safe = json.get("retry_safe").and_then(Value::as_bool);
+    let mut head = format!(
+        "FAILED {error} · step {failed} of {} · {completed} completed · {applied} applied · {outcome}",
+        steps.len()
+    );
+    match retry_safe {
+        Some(true) => head.push_str(" · retry_safe"),
+        Some(false) => head.push_str(" · retry_safe=false: DO NOT replay; read the screen first"),
+        None => {}
+    }
+    let mut out = vec![head];
+    let list = steps
+        .iter()
+        .enumerate()
+        .map(|(position, step)| {
+            let index = text(step, "index").unwrap_or_else(|| (position + 1).to_string());
+            let kind = text(step, "kind").unwrap_or_default();
+            if step.get("ok") == Some(&Value::Bool(false)) {
+                format!("{index} {kind} FAILED")
+            } else {
+                format!("{index} {kind}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if !list.is_empty() {
+        out.push(format!("steps: {list}"));
+    }
+    // The failed step's evidence, minus the bulk a model does not need to
+    // decide the next move (its full tree and timing stay structured).
+    let failed_step = steps
+        .iter()
+        .find(|step| step.get("ok") == Some(&Value::Bool(false)))
+        .or_else(|| steps.last());
+    if let Some(Value::Object(step)) = failed_step {
+        let mut detail = serde_json::Map::new();
+        for (key, value) in step {
+            if matches!(
+                key.as_str(),
+                "observation" | "timing" | "elements" | "delta" | "screen" | "ax_stats"
+            ) {
+                continue;
+            }
+            detail.insert(key.clone(), value.clone());
+        }
+        let mut rendered = Value::Object(detail).to_string();
+        if rendered.len() > 1200 {
+            let cut = (0..=1200).rev().find(|i| rendered.is_char_boundary(*i)).unwrap_or(0);
+            rendered.truncate(cut);
+            rendered.push('…');
+        }
+        out.push(format!("failed step: {rendered}"));
+    }
+    // The end screen, when the daemon observed one, rendered like a success.
+    let end = json
+        .get("observation")
+        .or_else(|| failed_step.and_then(|step| step.get("observation")));
+    if let Some(Value::Object(observation)) = end {
+        let mut view = observation.clone();
+        view.insert("ok".to_string(), Value::Bool(true));
+        if let Some(screen) = observed(&Value::Object(view)) {
+            let mut lines = screen.lines();
+            if let Some(first) = lines.next() {
+                out.push(format!("end screen: {}", first.trim_start_matches("ok · ")));
+            }
+            out.extend(lines.map(str::to_string));
+        } else if observation.get("read") == Some(&Value::Bool(false)) {
+            let hint = text(&Value::Object(observation.clone()), "hint").unwrap_or_default();
+            out.push(format!("end screen: unreadable — {hint}"));
+        }
+    }
+    Some(out.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_failed_batch_keeps_the_verdict_and_the_failed_step_but_not_the_bulk() {
+        let body = json!({
+            "ok": false,
+            "error": "wait_for_timeout",
+            "failed_step": 2,
+            "completed": 1,
+            "applied_actions": 1,
+            "outcome": "not_sent",
+            "batch_outcome": "applied_partially",
+            "retry_safe": false,
+            "steps": [
+                {"index": 1, "kind": "tap_label", "ok": true, "timing": {"total_ms": 900}},
+                {"index": 2, "kind": "wait_for", "ok": false, "error": "wait_for_timeout",
+                 "hint": "关于本机 never appeared", "timing": {"total_ms": 8000},
+                 "observation": {"snapshot": "S9", "elements": [{"kind": "Button", "label": "x"}]}}
+            ],
+            "observation": {"snapshot": "S9", "settle": {"reason": "stable", "waited_ms": 600},
+                            "elements": [{"kind": "Application", "label": "设置", "rect": [0,0,390,844], "depth": 0},
+                                         {"kind": "Button", "label": "通用", "rect": [16,300,358,44], "depth": 2}]}
+        });
+        let text = failed_batch(&body).unwrap();
+        assert!(text.starts_with("FAILED wait_for_timeout · step 2 of 2 · 1 completed · 1 applied · applied_partially · retry_safe=false"), "{text}");
+        assert!(text.contains("steps: 1 tap_label · 2 wait_for FAILED"), "{text}");
+        assert!(text.contains("\"hint\":\"关于本机 never appeared\""), "{text}");
+        assert!(!text.contains("total_ms"), "timing stays structured: {text}");
+        assert!(text.contains("end screen: snapshot S9"), "{text}");
+        assert!(text.len() < body.to_string().len(), "{text}");
+        // A success is not a failed batch.
+        assert!(failed_batch(&json!({"ok": true, "steps": []})).is_none());
+    }
 
     #[test]
     fn a_tree_reads_as_one_line_per_row_with_hidden_rows_summarized() {

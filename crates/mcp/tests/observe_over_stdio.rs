@@ -94,9 +94,16 @@ struct McpChild {
 }
 
 impl McpChild {
+    /// These tests check the whole JSON on the wire, so they ask for it;
+    /// [`McpChild::start_with`] runs the default (slim) shape.
     fn start(daemon_url: &str) -> Self {
+        Self::start_with(daemon_url, "full")
+    }
+
+    fn start_with(daemon_url: &str, structured: &str) -> Self {
         let mut child = Command::new(binary())
             .env("PHONE_REMOTE_URL", daemon_url)
+            .env("IPHONE_USE_MCP_STRUCTURED", structured)
             .env_remove("PHONE_REMOTE_TOKEN")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -166,6 +173,57 @@ impl Drop for McpChild {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// By default the structured payload is slim: the verdict a program branches
+/// on and the compact summary, not the 64 KiB tree — Claude Code shows the
+/// model only `structuredContent` on success, so this is what it reads.
+#[test]
+fn the_default_structured_payload_is_the_verdict_and_the_summary() {
+    let filler = "x".repeat(64 * 1024);
+    let body = format!(
+        r#"{{"ok":true,"transport":"wda","tree":"{filler}","snapshot":"snap-1","settle":{{"settled":true,"reason":"stable","captures":2}},"delta":{{"added":["搜索"]}}}}"#
+    );
+    let daemon = ScriptedDaemon::start("200 OK", body.into_bytes());
+    let mut mcp = McpChild::start_with(&daemon.url, "slim");
+
+    let reply = mcp.call_tool(
+        2,
+        "phone_tap",
+        serde_json::json!({ "x": 0.5, "y": 0.5, "observe": true }),
+    );
+
+    let result = &reply["result"];
+    assert_ne!(result["isError"], true, "{reply}");
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["ok"], true, "{reply}");
+    assert_eq!(structured["snapshot"], "snap-1");
+    assert!(structured.get("tree").is_none(), "{reply}");
+    assert!(structured.get("settle").is_none(), "{reply}");
+    let summary = structured["summary"].as_str().expect("summary");
+    assert_eq!(summary, result["content"][0]["text"].as_str().unwrap());
+    assert!(reply.to_string().len() < 8 * 1024, "{}", reply.to_string().len());
+}
+
+/// `IPHONE_USE_MCP_STRUCTURED=off` sends the text alone.
+#[test]
+fn structured_off_sends_the_text_alone() {
+    let body = r#"{"ok":true,"transport":"wda","snapshot":"snap-1","settle":{"settled":true,"reason":"stable","captures":2},"delta":{"added":["a"]}}"#;
+    let daemon = ScriptedDaemon::start("200 OK", body.as_bytes().to_vec());
+    let mut mcp = McpChild::start_with(&daemon.url, "off");
+
+    let reply = mcp.call_tool(
+        2,
+        "phone_tap",
+        serde_json::json!({ "x": 0.5, "y": 0.5, "observe": true }),
+    );
+
+    let result = &reply["result"];
+    assert_ne!(result["isError"], true, "{reply}");
+    assert!(
+        result.get("structuredContent").is_none() || result["structuredContent"].is_null(),
+        "{reply}"
+    );
 }
 
 /// The observation has to reach the client whole. A 64 KiB body is well past

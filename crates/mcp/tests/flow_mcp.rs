@@ -99,6 +99,8 @@ impl McpServer {
             .env("PHONE_REMOTE_TOKEN", "test-token")
             // The scripted daemon answers only the requests each test lists.
             .env("IPHONE_USE_MCP_PREWARM", "0")
+            // These tests read every step of a result from its structure.
+            .env("IPHONE_USE_MCP_STRUCTURED", "full")
             .env("IPHONE_USE_FLOWS_DIR", store)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -197,8 +199,11 @@ fn phone_flow_run_hands_an_agent_the_structured_failure_and_its_diagnosis() {
     let text = result["content"][0]["text"]
         .as_str()
         .expect("the tool returns text content");
-    let summary: serde_json::Value =
-        serde_json::from_str(text).expect("that text is the structured result, not prose");
+    // The model reads a compact verdict; programs read the whole summary.
+    assert!(text.starts_with("FAILED flow test/search: expectation_timeout"), "{text}");
+    assert!(text.contains("retry_safe=false: DO NOT replay"), "{text}");
+    assert!(text.contains("diagnosis:"), "the diagnosis reaches the model: {text}");
+    let summary = result["structuredContent"].clone();
 
     assert_eq!(summary["flow"], "test/search");
     assert_eq!(summary["result"]["error"], "expectation_timeout");
@@ -264,8 +269,9 @@ fn a_lost_answer_reaches_the_agent_as_unknown_and_not_retry_safe() {
     let result = &response["result"];
     assert_eq!(result["isError"], true, "{response}");
     let text = result["content"][0]["text"].as_str().expect("text content");
-    let summary: serde_json::Value =
-        serde_json::from_str(text).expect("structured result, not prose");
+    assert!(text.starts_with("UNKNOWN outcome for flow test/search"), "{text}");
+    assert!(!text.contains(" applied"), "no invented counts: {text}");
+    let summary = result["structuredContent"].clone();
 
     assert_eq!(summary["result"]["outcome"], "unknown", "{summary}");
     assert_eq!(summary["result"]["error"], "outcome_unknown");
@@ -314,8 +320,9 @@ fn a_body_without_a_verdict_reaches_the_agent_as_unknown() {
     let result = &response["result"];
     assert_eq!(result["isError"], true, "{response}");
     let text = result["content"][0]["text"].as_str().expect("text content");
-    let summary: serde_json::Value =
-        serde_json::from_str(text).expect("structured result, not prose");
+    assert!(text.starts_with("UNKNOWN outcome for flow test/search"), "{text}");
+    assert!(!text.contains(" applied"), "no invented counts: {text}");
+    let summary = result["structuredContent"].clone();
 
     assert_eq!(summary["result"]["outcome"], "unknown", "{summary}");
     assert_eq!(summary["result"]["retry_safe"], false);
@@ -375,6 +382,12 @@ fn a_failing_batch_keeps_its_evidence_over_stdio() {
         "the failing step's observation is at the end of a large body: {structured}"
     );
     assert_eq!(structured["steps"].as_array().map(Vec::len), Some(25));
+    // The model reads a compact verdict instead of the whole body.
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.starts_with("FAILED expectation_timeout · step 24 of 25"), "{text}");
+    assert!(text.contains("retry_safe=false"), "{text}");
+    assert!(text.contains("end screen: unreadable — no readable element tree"), "{text}");
+    assert!(text.len() < 2 * 1024, "{} bytes: {text}", text.len());
 
     let sent: Vec<String> = requests.try_iter().collect();
     assert_eq!(

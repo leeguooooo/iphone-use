@@ -35,9 +35,9 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure st
 2. **Look for a saved flow first.** Entering an app — a `launch_app` response,
    or the first `/agent/elements` read in a newly entered app — carries a
    `registry` block listing the saved flows for it. If one does the task, run
-   it: one call instead of dozens, no screenshots. `phone_flow_list` /
-   `iphone-use-mcp flow list --app <bundle>` shows them all. Check `risk` and
-   `compat` before running. → reference: *Flows*
+   it with `phone_flow_run`: one call instead of dozens, no screenshots.
+   `phone_flow_list` / `iphone-use-mcp flow list --app <bundle>` shows them
+   all. Check `risk` and `compat` before running. → reference: *Flows*
 
    ```bash
    "$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp" flow run system/spotlight-search --input query=Health
@@ -55,7 +55,8 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure st
    do as ONE batch (`POST /agent/actions` / `phone_run_steps`, up to 24 steps,
    `wait_for` after each screen change) with `observe:true` (MCP default): the
    reply carries the screen the batch ended on, so you decide the next batch
-   without another read. Single taps (element + snapshot, unique label,
+   without another read. If you will think between batches for more than a
+   minute, `phone_hold` keeps the runner from being released. Single taps (element + snapshot, unique label,
    locator) are for exploring a screen you have not read yet; after three in a
    row the daemon says so (`batch_hint`).
 
@@ -95,7 +96,7 @@ it off again.
 | Scroll | `scroll` `dy` (80 ≈ 15% of a screen, 400 ≈ 75%) | `phone_scroll` | `scroll` |
 | System alert | `alert` `button` / `action` | `phone_run_steps` step | `alert` |
 | App asks you to log in | `POST /agent/login` (`iphone-use auth login --bwu`) | `phone_login` | — |
-| Switch / slider | `perform` `toggle` / `adjust` | — (not in MCP) | — |
+| Switch / slider | `perform` `toggle` / `adjust` | `phone_run_steps` `perform` step (element + snapshot) | — |
 
 All actions, including swipe, drag, picker, set_value and the scroll variants,
 are listed in the reference: *Actions catalogue*.
@@ -120,7 +121,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -H "$OWNER" -X POST "$HOST/agent/actions" -d '
 | One tap per call when the next steps are visible | One `phone_run_steps` / `/agent/actions` batch with `wait_for` |
 | `sleep` a fixed number of seconds | `wait_for` with `present` / `absent` / `application` |
 | Tap a system alert's button | The `alert` action (`button` or `action`) |
-| Tap a switch or slider | `perform` `toggle` / `adjust` (HTTP) |
+| Tap a switch or slider | `perform` `toggle` / `adjust` |
 | Resend after `outcome_unknown` or `retry_safe:false` | Read the screen first; the phone may already have acted |
 | Repeat an action that came back `no_progress` | Re-read the screen, then a different control or a `wait_for` |
 | Reconnect to check health | `phone_status`; reconnect only when the task needs the phone |
@@ -167,7 +168,7 @@ reference: *Flows*.
 3. **Text goes to whatever field has focus.** If a person is mid-chat, your words
    land in their message. Confirm the foreground app and the focused field first.
 4. **System alerts need the `alert` action.** Taps on alert buttons ACK but often
-   do nothing. **Switches** need `perform toggle` (HTTP only). Verify the new
+   do nothing. **Switches** need `perform toggle`. Verify the new
    `value` either way.
 5. **One session per phone.** Send `X-Phone-Owner`. On `409 phone_owned`, wait;
    never take over unless the user says the other session is abandoned. Release

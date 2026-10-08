@@ -58,12 +58,8 @@ pub struct ScrollParams {
     /// Vertical scroll delta. **Positive dy reveals content farther down**;
     /// negative dy reveals content above. ~80 ≈ 15% of a screen, ~400 ≈ 75%.
     pub dy: f64,
-    /// On by default: the result carries what the screen settled to — what
-    /// changed since your last look (`delta`), or the whole tree the first
-    /// time — so you rarely need `phone_elements` afterwards. The settled
-    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
-    /// once if you need to see it. `false` skips both for the fastest bare
-    /// action.
+    /// Default true: return what the screen settled to (as on phone_tap).
+    /// `false` for the fastest bare action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -74,12 +70,8 @@ pub struct TypeParams {
     /// Unicode text to send through the device-side input service. Focus the
     /// intended field and verify it before typing.
     pub text: String,
-    /// On by default: the result carries what the screen settled to — what
-    /// changed since your last look (`delta`), or the whole tree the first
-    /// time — so you rarely need `phone_elements` afterwards. The settled
-    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
-    /// once if you need to see it. `false` skips both for the fastest bare
-    /// action.
+    /// Default true: return what the screen settled to (as on phone_tap).
+    /// `false` for the fastest bare action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -90,12 +82,8 @@ pub struct TapLabelParams {
     /// The element's visible accessibility label, exactly as shown by
     /// `phone_elements` (e.g. "新备忘录", "Connect").
     pub label: String,
-    /// On by default: the result carries what the screen settled to — what
-    /// changed since your last look (`delta`), or the whole tree the first
-    /// time — so you rarely need `phone_elements` afterwards. The settled
-    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
-    /// once if you need to see it. `false` skips both for the fastest bare
-    /// action.
+    /// Default true: return what the screen settled to (as on phone_tap).
+    /// `false` for the fastest bare action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -107,12 +95,8 @@ pub struct TapElementParams {
     pub element: usize,
     /// Snapshot token from the same `phone_elements` response.
     pub snapshot: String,
-    /// On by default: the result carries what the screen settled to — what
-    /// changed since your last look (`delta`), or the whole tree the first
-    /// time — so you rarely need `phone_elements` afterwards. The settled
-    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
-    /// once if you need to see it. `false` skips both for the fastest bare
-    /// action.
+    /// Default true: return what the screen settled to (as on phone_tap).
+    /// `false` for the fastest bare action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -137,12 +121,8 @@ pub struct KeyParams {
     /// Supported names: `return`/`enter`, `escape`, `space`, `tab`,
     /// `delete`/`backspace`, `up`, `down`, `left`, `right`.
     pub name: String,
-    /// On by default: the result carries what the screen settled to — what
-    /// changed since your last look (`delta`), or the whole tree the first
-    /// time — so you rarely need `phone_elements` afterwards. The settled
-    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
-    /// once if you need to see it. `false` skips both for the fastest bare
-    /// action.
+    /// Default true: return what the screen settled to (as on phone_tap).
+    /// `false` for the fastest bare action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -151,14 +131,10 @@ pub struct KeyParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ShortcutParams {
     /// Supported names: `home` (Home Screen) and `spotlight` (search).
-    /// App Switcher is unsupported by the Direct/WDA backend.
+    /// App Switcher is unsupported by the device runner.
     pub name: String,
-    /// On by default: the result carries what the screen settled to — what
-    /// changed since your last look (`delta`), or the whole tree the first
-    /// time — so you rarely need `phone_elements` afterwards. The settled
-    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
-    /// once if you need to see it. `false` skips both for the fastest bare
-    /// action.
+    /// Default true: return what the screen settled to (as on phone_tap).
+    /// `false` for the fastest bare action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -177,7 +153,7 @@ pub struct RunStepsParams {
     pub observe: Option<bool>,
 }
 
-/// One step in a bounded multi-step Direct/WDA sequence.
+/// One step in a bounded multi-step sequence.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PhoneStep {
@@ -281,7 +257,7 @@ pub enum PhoneStep {
         #[serde(default)]
         after_ms: u64,
     },
-    /// Press a button on a system alert (UIAlertController) through WDA's
+    /// Press a button on a system alert (UIAlertController) through the device runner's
     /// native alert route — the only path that actually acts on one; taps on
     /// alert buttons are acknowledged without effect. Give the exact button
     /// text, or `action: accept|dismiss` for the default/cancel button. Fails
@@ -307,7 +283,24 @@ pub enum PhoneStep {
         #[serde(default)]
         after_ms: u64,
     },
-    /// Poll the current WDA element tree until the semantic expectation holds.
+    /// Invoke a named affordance on a snapshot-bound element: toggle a
+    /// switch, increment/decrement or adjust a slider or stepper, and the
+    /// other names in phone_capabilities (`perform_actions`). `element` and
+    /// `snapshot` come from phone_elements. Snapshot-bound, so not for saved
+    /// flows. `value` only with `adjust`; `duration_ms` only with
+    /// `menu`/`force_press`. Verify the new `value` with wait_for.
+    Perform {
+        element: u64,
+        snapshot: String,
+        action: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        #[serde(default)]
+        after_ms: u64,
+    },
+    /// Poll the current element tree until the semantic expectation holds.
     WaitFor {
         expect: PhoneUiExpectation,
         #[serde(default = "default_phone_wait_ms")]
@@ -384,6 +377,10 @@ pub struct FlowListParams {
     /// Only flows with at least one recorded hardware verification.
     #[serde(default)]
     pub verified: bool,
+    /// Return every field of every entry (verified_on, app versions, step
+    /// counts) as JSON text instead of one compact row per flow.
+    #[serde(default)]
+    pub detail: bool,
 }
 
 /// Parameters for [`phone_flow_info`].
@@ -639,17 +636,12 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Capture the current iPhone screen through WDA and return it as \
-        an image/png content block (1200 px on the long side unless max_side says \
-        otherwise). Right after an observed action this is instant: the screen as \
-        it settled was already captured and is returned without a new capture \
-        (header source settled-after-action). Capture only when a current \
-        user-requested task needs phone pixels; do not capture or reconnect for \
-        initialization, health checks, or to keep the phone ready. Idle release is \
-        intentional. If that task cannot proceed because Direct is released/offline, \
-        check phone_status recovery_owner=daemon and hint/setup_blocked_on. Do not \
-        reconnect while releasing/reconnecting or a blocker remains. When appropriate, \
-        call phone_reconnect once, then poll phone_status until drivable=true."
+        description = "Capture the current iPhone screen through the device runner and \
+        return it as an image/png content block (1200 px on the long side unless max_side \
+        says otherwise). Right after an observed action this is instant: the screen as it \
+        settled was already captured. Capture only when a current user-requested task \
+        needs phone pixels, never for health checks. If the phone is released or offline, \
+        follow phone_status's guidance before reconnecting."
     )]
     async fn phone_screenshot(
         &self,
@@ -718,7 +710,7 @@ impl PhoneHandler {
 
     #[tool(
         description = "Type Unicode text into the currently focused iPhone field \
-        through Direct/WDA. Check phone_status.drivable and verify the focused element \
+        through the device runner. Check phone_status.drivable and verify the focused element \
         before typing; text lands in whichever field currently owns keyboard focus."
     )]
     async fn phone_type(
@@ -758,11 +750,11 @@ impl PhoneHandler {
     // phone_shortcut
     // -----------------------------------------------------------------------
 
-    #[tool(description = "Trigger a Direct/WDA-supported iOS system shortcut. \
+    #[tool(description = "Trigger a supported iOS system shortcut. \
         Supported names: \
         'home' — go to the iOS Home Screen; \
         'spotlight' — open Spotlight search. \
-        'switcher' is explicitly unsupported because WDA cannot synthesize the \
+        'switcher' is explicitly unsupported because the device runner cannot synthesize the \
         system App Switcher gesture.")]
     async fn phone_shortcut(
         &self,
@@ -775,7 +767,7 @@ impl PhoneHandler {
                 send_input_observed(&self.daemon, &InputMsg::Shortcut { name }, observe).await
             }
             "switcher" => CallToolResult::error(vec![Content::text(
-                "unsupported shortcut 'switcher': the Direct/WDA backend cannot open \
+                "unsupported shortcut 'switcher': the device runner cannot open \
                  the iOS App Switcher; use home, spotlight, or launch an app by a \
                  supported device action instead",
             )]),
@@ -796,7 +788,8 @@ impl PhoneHandler {
         sequence first, holds one control lock, and stops at the first failure. Use it as soon as a \
         segment is understood; keep single-action tools for exploring an unknown screen. Step kinds: \
         launch_app, tap_locator, tap_label, tap, type, key, shortcut, scroll, swipe, drag, longpress, \
-        back, alert (system alerts; taps on them do not act), picker, wait_for, pause. Guard every \
+        back, alert (system alerts; taps on them do not act), picker, perform (toggle a \
+        switch, adjust a slider: element+snapshot from phone_elements), wait_for, pause. Guard every \
         screen change with wait_for; never batch an irreversible step you have not verified. These \
         step objects are exactly a saved flow's `steps` — when the response carries \
         `flow_suggestion`, ask the user whether to keep the task as a flow (phone_flow_draft). \
@@ -851,12 +844,17 @@ impl PhoneHandler {
         }
 
         if response.explicit_refusal() {
-            // The daemon's own result, whole: status, failed_step, per-step
-            // observations, and its own `retry_safe` judgement.
-            return with_structure(
-                CallToolResult::error(vec![Content::text(response.body().to_string())]),
-                &response,
-            );
+            // The model reads the compact verdict (failed step, its evidence,
+            // retry_safe, end screen); the daemon's whole result — status,
+            // per-step observations, timing — rides along as structured
+            // content. Anything that is not a recognisable batch keeps its body.
+            let body = response.body().to_string();
+            let text = response
+                .json
+                .as_ref()
+                .and_then(crate::compact::failed_batch)
+                .unwrap_or(body);
+            return with_structure(CallToolResult::error(vec![Content::text(text)]), &response);
         }
 
         // Neither a confirmation nor a refusal: the request was answered, but
@@ -878,20 +876,17 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Read Direct/WDA status without taking control. `owner` names the \
+        description = "Read the phone's status without taking control. `owner` names the \
         session currently driving the phone (this session presents PHONE_REMOTE_OWNER, \
         else mcp-<pid>); if it is someone else, do not drive the phone — control calls \
         will be refused with phone_owned. The JSON preserves \
         backend, target_configured, managed_wda, managed_wda_pending, recovery_owner, \
         device_state, screen_state, wda, wda_actionable, locked, drivable, released, \
         hint, setup_blocked_on, setup_phase, and setup_message. Gate actions on drivable=true. \
-        For initialization, status/health checks, or no unfinished \
-        user-requested task needing phone access, report the state and stop; do not \
-        reconnect or hold the phone. Idle release is intentional. Only if a current \
-        user-requested phone operation or screen/UI read cannot proceed because \
-        Direct is released/offline, check recovery_owner=daemon and hint/setup_blocked_on. \
-        Do not reconnect while releasing/reconnecting or a blocker remains. When \
-        appropriate, call phone_reconnect once, then poll until drivable=true."
+        For status/health checks, report the state and stop. Idle release \
+        is intentional: reconnect (phone_reconnect, once) only when a current \
+        user-requested task needs the phone, recovery_owner=daemon, and no blocker or \
+        reconnect is in progress; then poll until drivable=true."
     )]
     async fn phone_status(&self) -> CallToolResult {
         match self.daemon.status().await {
@@ -1059,7 +1054,7 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(description = "Tap an iPhone UI element by an EXACT visible label \
-        (requires Direct/WDA with drivable=true in phone_status). Reads a fresh \
+        (requires drivable=true in phone_status). Reads a fresh \
         phone_elements snapshot, requires exactly one match, then performs a \
         snapshot-bound tap. Zero or multiple matches return an error and send NO \
         action. For duplicate labels, choose by identifier/kind/state from \
@@ -1105,8 +1100,8 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Start/restart on-device automation for the canonical Direct/WDA \
-        target. This occupies the phone and may require the operator to unlock it. \
+        description = "Start/restart on-device automation for the configured phone. \
+        This occupies the phone and may require the operator to unlock it. \
         Use only to continue a current user-requested phone operation or screen/UI \
         read that cannot proceed; never reconnect for initialization, status/health \
         checks, a completed task, or to keep the phone ready. Idle release is intentional. \
@@ -1116,7 +1111,7 @@ impl PhoneHandler {
         then poll phone_status until reconnecting=false and drivable=true; while it is \
         reconnecting, report setup_phase/setup_message and obey setup_blocked_on. This tool \
         never accepts a UDID and cannot switch devices. \
-        External WDA returns an explicit operator-owned recovery error."
+        An externally managed runner returns an operator-owned recovery error."
     )]
     async fn phone_reconnect(&self) -> CallToolResult {
         self.progress_reset();
@@ -1238,10 +1233,11 @@ impl PhoneHandler {
         description = "List installed registry flows: reviewed, deterministic per-app \
         scripts (id like `health/export-all`) that replay a whole task with NO model \
         and NO screenshots. CHECK THIS FIRST before driving an app step by step: if a \
-        flow matches the task, call phone_flow_run instead of exploring. Each entry \
-        reports name, description, risk (read_only|navigation|side_effect|unknown), \
+        flow matches the task, call phone_flow_run instead of exploring. Each row \
+        reports id, description, risk (read_only|navigation|side_effect|unknown), \
         verified (has a recorded hardware run), compat against the app version installed on THIS phone \
-        (verified|untested-newer|incompatible|broken|needs-verification|draft|unknown), inputs, app, and category. Empty store: \
+        (verified|untested-newer|incompatible|broken|needs-verification|draft|unknown), and inputs, \
+        one row per flow (detail=true for every field). Empty store: \
         call phone_flow_update once. Filter with `app` for the app you are about to open."
     )]
     async fn phone_flow_list(
@@ -1250,6 +1246,7 @@ impl PhoneHandler {
             category,
             app,
             verified,
+            detail,
         }): Parameters<FlowListParams>,
     ) -> CallToolResult {
         let filter = crate::registry::ListFilter {
@@ -1259,9 +1256,17 @@ impl PhoneHandler {
         };
         let installed = crate::compat::installed_apps(&self.daemon).await;
         match crate::registry::list(&filter) {
-            Ok((entries, index)) => CallToolResult::success(vec![Content::text(
-                crate::registry::list_json(&entries, &index, installed.as_ref()).to_string(),
-            )]),
+            Ok((entries, index)) => {
+                let json = crate::registry::list_json(&entries, &index, installed.as_ref());
+                let text = if detail {
+                    json.to_string()
+                } else {
+                    crate::compact::flow_list(&json).unwrap_or_else(|| json.to_string())
+                };
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = Some(json);
+                result
+            }
             Err(e) => {
                 CallToolResult::error(vec![Content::text(format!("flow list failed: {e:#}"))])
             }
@@ -1414,7 +1419,7 @@ impl PhoneHandler {
                      phone_flow_publish"
                 );
             }
-            return CallToolResult::success(vec![Content::text(summary.to_string())]);
+            return flow_run_result(summary, false);
         }
 
         // The pre-flight status is already in hand. Asking again costs a
@@ -1440,7 +1445,7 @@ impl PhoneHandler {
                     .to_string(),
             }
         ));
-        CallToolResult::error(vec![Content::text(summary.to_string())])
+        flow_run_result(summary, true)
     }
 
     #[tool(
@@ -1650,8 +1655,162 @@ impl PhoneHandler {
 // We provide get_info() ourselves so the macro skips its default stub.
 // ---------------------------------------------------------------------------
 
+/// Drop the parts of a schemars schema a model never needs: the meta-schema
+/// URI, generated titles (the property name already says it), numeric
+/// `format` tags (`uint`, `double`, …) and `minimum: 0` on unsigned counts.
+/// Every other key — types, descriptions, enums, required lists, ranges with
+/// meaning — is kept. Keys under `properties` are property NAMES, never
+/// schema keywords, so they are never removed (a parameter may be called
+/// `title`).
+fn slim_schema(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("$schema");
+            map.remove("title");
+            if map.get("format").is_some_and(|f| {
+                f.as_str().is_some_and(|f| {
+                    matches!(
+                        f,
+                        "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "int" | "int8"
+                            | "int16" | "int32" | "int64" | "double" | "float"
+                    )
+                })
+            }) {
+                map.remove("format");
+            }
+            if map.get("minimum") == Some(&serde_json::json!(0)) {
+                map.remove("minimum");
+            }
+            for (key, child) in map.iter_mut() {
+                if key == "properties" || key == "$defs" || key == "definitions" {
+                    if let serde_json::Value::Object(props) = child {
+                        for schema in props.values_mut() {
+                            slim_schema(schema);
+                        }
+                    }
+                } else {
+                    slim_schema(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(slim_schema),
+        _ => {}
+    }
+}
+
+/// `tools/list` with every input schema slimmed (see [`slim_schema`]).
+fn slim_tools(tools: Vec<rmcp::model::Tool>) -> Vec<rmcp::model::Tool> {
+    tools
+        .into_iter()
+        .map(|mut tool| {
+            let mut schema = serde_json::Value::Object((*tool.input_schema).clone());
+            slim_schema(&mut schema);
+            if let serde_json::Value::Object(map) = schema {
+                tool.input_schema = std::sync::Arc::new(map);
+            }
+            tool
+        })
+        .collect()
+}
+
+/// How much of a result's JSON goes out as `structuredContent`
+/// (`IPHONE_USE_MCP_STRUCTURED`).
+///
+/// Clients do not show the model what the spec suggests: Claude Code hands
+/// the model ONLY `structuredContent` when a successful result has one (the
+/// text block is dropped), and Codex CLI serialises the whole result, text and
+/// structure both. So the full JSON — an element tree, every step of a batch —
+/// is what those models read, and the compact text is wasted. The default
+/// `slim` keeps the verdict a program branches on (the top-level scalars:
+/// `ok`, `outcome`, `retry_safe`, `error`, `snapshot`, counts) plus the
+/// compact text as `summary`; `full` sends the whole JSON; `off` sends none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuredMode {
+    Slim,
+    Full,
+    Off,
+}
+
+impl StructuredMode {
+    fn from_env() -> Self {
+        match std::env::var("IPHONE_USE_MCP_STRUCTURED").as_deref() {
+            Ok("full") => Self::Full,
+            Ok("off") | Ok("0") => Self::Off,
+            _ => Self::Slim,
+        }
+    }
+}
+
+/// The longest top-level string a slim payload keeps; longer ones are bulk
+/// (a base64 image, a dumped tree) and the summary already covers them.
+const SLIM_STRING_LIMIT: usize = 200;
+
+/// Apply [`StructuredMode`] to a finished tool result. Runs after the tool
+/// (and its progress tracking) has used the full JSON.
+fn shape_structured(mut result: CallToolResult, mode: StructuredMode) -> CallToolResult {
+    match mode {
+        StructuredMode::Full => result,
+        StructuredMode::Off => {
+            result.structured_content = None;
+            result
+        }
+        StructuredMode::Slim => {
+            let Some(serde_json::Value::Object(full)) = result.structured_content.as_ref() else {
+                return result;
+            };
+            let text = result
+                .content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            // A text block that is the body itself (a read's preview) has no
+            // compact form to carry; leave such a result whole.
+            if text.trim_start().starts_with('{') {
+                return result;
+            }
+            let mut slim = serde_json::Map::new();
+            for (key, value) in full {
+                let keep = match value {
+                    serde_json::Value::String(s) => s.len() <= SLIM_STRING_LIMIT,
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => false,
+                    _ => true,
+                };
+                if keep {
+                    slim.insert(key.clone(), value.clone());
+                }
+            }
+            slim.insert("summary".into(), serde_json::Value::String(text));
+            result.structured_content = Some(serde_json::Value::Object(slim));
+            result
+        }
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for PhoneHandler {
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let result = Self::tool_router().call(tcc).await?;
+        Ok(shape_structured(result, StructuredMode::from_env()))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        Ok(rmcp::model::ListToolsResult {
+            tools: slim_tools(Self::tool_router().list_all()),
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
     fn get_info(&self) -> rmcp::model::ServerInfo {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
@@ -2014,6 +2173,54 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                     after_ms,
                 )
             }
+            PhoneStep::Perform {
+                element,
+                snapshot,
+                action,
+                value,
+                duration_ms,
+                after_ms,
+            } => {
+                validate_after(after_ms)?;
+                const NAMES: [&str; 11] = [
+                    "increment", "decrement", "adjust", "toggle", "menu", "double_tap",
+                    "two_finger_tap", "scroll_to_visible", "pinch", "rotate", "force_press",
+                ];
+                if !NAMES.contains(&action.as_str()) {
+                    return Err(format!(
+                        "steps[{index}] perform action {action:?} is not one of {}; no action was sent",
+                        NAMES.join(", ")
+                    ));
+                }
+                if snapshot.trim().is_empty() || snapshot.chars().count() > 200 {
+                    return Err(format!(
+                        "steps[{index}] perform needs the snapshot token from phone_elements; no action was sent"
+                    ));
+                }
+                if value.is_some() != (action == "adjust") {
+                    return Err(format!(
+                        "steps[{index}] perform value is required with adjust and accepted only with adjust; no action was sent"
+                    ));
+                }
+                if duration_ms.is_some() && !matches!(action.as_str(), "menu" | "force_press") {
+                    return Err(format!(
+                        "steps[{index}] perform duration_ms is accepted only with menu or force_press; no action was sent"
+                    ));
+                }
+                let mut request = serde_json::json!({
+                    "type": "perform",
+                    "element": element,
+                    "snapshot": snapshot,
+                    "action": action,
+                });
+                if let Some(value) = value {
+                    request["value"] = serde_json::json!(value);
+                }
+                if let Some(duration) = duration_ms {
+                    request["duration_ms"] = serde_json::json!(duration);
+                }
+                action_step(request, after_ms)
+            }
             PhoneStep::WaitFor {
                 expect,
                 timeout_ms,
@@ -2105,6 +2312,20 @@ fn with_structure(
     {
         result.structured_content = Some(json);
     }
+    result
+}
+
+/// `phone_flow_run`'s answer: a compact verdict for the model (counts,
+/// outputs, the failure's diagnosis, the hint) and the whole summary — every
+/// step result — as structured content for programs.
+fn flow_run_result(summary: serde_json::Value, is_error: bool) -> CallToolResult {
+    let text = crate::compact::flow_run(&summary).unwrap_or_else(|| summary.to_string());
+    let mut result = if is_error {
+        CallToolResult::error(vec![Content::text(text)])
+    } else {
+        CallToolResult::success(vec![Content::text(text)])
+    };
+    result.structured_content = Some(summary);
     result
 }
 
@@ -2903,5 +3124,110 @@ mod tests {
         let error = phone_steps_request(steps).unwrap_err();
         assert!(error.contains("batch maximum of 60000ms"));
         assert!(error.contains("no action was sent"));
+    }
+
+    #[test]
+    fn a_perform_step_reaches_the_daemon_as_a_perform_action() {
+        let steps: Vec<PhoneStep> = serde_json::from_value(serde_json::json!([
+            {"kind": "perform", "element": 7, "snapshot": "S1", "action": "toggle"},
+            {"kind": "perform", "element": 3, "snapshot": "S1", "action": "adjust", "value": "0.5"}
+        ]))
+        .unwrap();
+        let request = phone_steps_request(steps).unwrap();
+        let actions: Vec<_> = request["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["action"].clone())
+            .collect();
+        assert_eq!(
+            actions[0],
+            serde_json::json!({"type": "perform", "element": 7, "snapshot": "S1", "action": "toggle"})
+        );
+        assert_eq!(actions[1]["value"], "0.5");
+
+        for (bad, expect) in [
+            (serde_json::json!({"kind": "perform", "element": 1, "snapshot": "S", "action": "explode"}), "is not one of"),
+            (serde_json::json!({"kind": "perform", "element": 1, "snapshot": "S", "action": "adjust"}), "required with adjust"),
+            (serde_json::json!({"kind": "perform", "element": 1, "snapshot": "S", "action": "toggle", "value": "1"}), "only with adjust"),
+            (serde_json::json!({"kind": "perform", "element": 1, "snapshot": "", "action": "toggle"}), "snapshot token"),
+        ] {
+            let steps: Vec<PhoneStep> = serde_json::from_value(serde_json::json!([bad])).unwrap();
+            let error = phone_steps_request(steps).unwrap_err();
+            assert!(error.contains(expect) && error.contains("no action was sent"), "{error}");
+        }
+    }
+
+    #[test]
+    fn schema_noise_goes_but_meaning_and_property_names_stay() {
+        let mut schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "TapParams",
+            "type": "object",
+            "required": ["x", "title"],
+            "properties": {
+                "x": {"type": "number", "format": "double", "description": "0–1"},
+                "title": {"type": "string", "title": "Title"},
+                "count": {"type": "integer", "format": "uint32", "minimum": 0},
+                "pct": {"type": "integer", "minimum": 1, "maximum": 100}
+            }
+        });
+        slim_schema(&mut schema);
+        assert!(schema.get("$schema").is_none() && schema.get("title").is_none());
+        let props = &schema["properties"];
+        assert!(props.get("title").is_some(), "a property named title survives: {schema}");
+        assert!(props["title"].get("title").is_none());
+        assert!(props["x"].get("format").is_none());
+        assert_eq!(props["x"]["description"], "0–1");
+        assert!(props["count"].get("minimum").is_none());
+        assert_eq!(props["pct"]["minimum"], 1, "a meaningful bound is kept");
+        assert_eq!(schema["required"], serde_json::json!(["x", "title"]));
+    }
+
+    #[test]
+    fn the_listed_tools_are_slimmed() {
+        let tools = slim_tools(PhoneHandler::tool_router().list_all());
+        let text = serde_json::to_string(&tools).unwrap();
+        assert!(!text.contains("\"$schema\""), "no meta-schema URIs left");
+        assert_eq!(tools.len(), PhoneHandler::tool_router().list_all().len());
+    }
+
+    #[test]
+    fn a_slim_structure_keeps_the_verdict_and_the_summary_only() {
+        let mut result = CallToolResult::error(vec![Content::text("FAILED x · step 2 of 2")]);
+        result.structured_content = Some(serde_json::json!({
+            "ok": false,
+            "retry_safe": false,
+            "failed_step": 1,
+            "error": "expectation_timeout",
+            "steps": [{"ok": true}, {"ok": false}],
+            "observation": {"tree": "…"},
+            "blob": "x".repeat(SLIM_STRING_LIMIT + 1),
+        }));
+        let full = shape_structured(result.clone(), StructuredMode::Full);
+        assert_eq!(full.structured_content, result.structured_content);
+        let off = shape_structured(result.clone(), StructuredMode::Off);
+        assert!(off.structured_content.is_none());
+        let slim = shape_structured(result, StructuredMode::Slim)
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            slim,
+            serde_json::json!({
+                "ok": false,
+                "retry_safe": false,
+                "failed_step": 1,
+                "error": "expectation_timeout",
+                "summary": "FAILED x · step 2 of 2",
+            })
+        );
+    }
+
+    #[test]
+    fn a_result_whose_text_is_the_body_keeps_its_structure() {
+        let mut result = CallToolResult::success(vec![Content::text(r#"{"ok":true,"a":{"b":1}}"#)]);
+        result.structured_content = Some(serde_json::json!({"ok": true, "a": {"b": 1}}));
+        let slim = shape_structured(result.clone(), StructuredMode::Slim);
+        assert_eq!(slim.structured_content, result.structured_content);
     }
 }
