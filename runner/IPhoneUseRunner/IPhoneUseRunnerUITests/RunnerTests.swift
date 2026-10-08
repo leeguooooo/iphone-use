@@ -76,6 +76,7 @@ final class RunnerTests: XCTestCase {
     let server = try RunnerHTTPServer(
       port: port,
       inlineHandler: { [weak self] request in self?.inlineResponse(request) },
+      captureHandler: { [weak self] request in self?.captureResponse(request) },
       mainHandler: { [weak self] request in
         guard let self else { return .error(503, "unknown error", "runner is shutting down") }
         return self.handleOnMain(request)
@@ -144,6 +145,27 @@ final class RunnerTests: XCTestCase {
       return nil  // unknown: answered on main (see RunnerWDA.locked)
     }
     return nil
+  }
+
+  /// Answered on the capture queue (see CaptureLane). nil hands the request to main.
+  func captureResponse(_ request: HTTPRequest) -> HTTPResponse? {
+    let started = Date()
+    var response: HTTPResponse
+    switch CaptureLane.route(request.path) {
+    case "/screenshot":
+      var failure: NSString?
+      guard let png = autoreleasepool(invoking: { IPURBridge.requestedPNGScreenshot(error: &failure) }) else {
+        NSLog("ipu-runner: off-main screenshot failed (%@); capturing on main", (failure as String?) ?? "-")
+        return nil
+      }
+      response = .value(png.base64EncodedString())
+    case "/wda/settle":
+      response = settleScreen(request)
+    default:
+      return nil
+    }
+    response.headers["X-IPU-Ms"] = String(Int(Date().timeIntervalSince(started) * 1000))
+    return response
   }
 
   func statusValue() -> [String: Any] {
