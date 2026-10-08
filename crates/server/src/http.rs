@@ -7278,8 +7278,38 @@ fn bar_item(rows: &[crate::wda::ElementRow], index: usize) -> bool {
 /// 开始使用 button scrolled behind the floating tab bar held the centre of the
 /// 主页 tab, and a locator tap on the visible tab answered
 /// `element_occluded` (a coordinate tap at the same spot worked).
-fn can_cover(rows: &[crate::wda::ElementRow], index: usize, row: &crate::wda::ElementRow) -> bool {
-    !bar_item(rows, index)
+fn can_cover(rows: &[crate::wda::ElementRow], index: usize, j: usize) -> bool {
+    let row = &rows[j];
+    !inline_siblings(rows, index, j)
+        && (!bar_item(rows, index)
+            || row.kind == "Keyboard"
+            || (BAR_KINDS.contains(&row.kind.as_str()) && row.rect[3] <= MAX_BAR_HEIGHT))
+}
+
+/// The nearest row above `rows[index]` in the tree.
+fn parent_index(rows: &[crate::wda::ElementRow], index: usize) -> Option<usize> {
+    let depth = rows.get(index)?.depth;
+    rows[..index].iter().rposition(|row| row.depth < depth)
+}
+
+/// Two links laid out in the same run of text. A link that wraps onto a
+/// second line reports a frame spanning both lines, which can hold the
+/// centre of the next link on that line; a touch lands on whichever link's
+/// glyphs are under it, so neither covers the other. Hardware, 17 Pro Max:
+/// inline links of a GitHub README in the in-app Safari sheet refused each
+/// other as `element_occluded`.
+fn inline_siblings(rows: &[crate::wda::ElementRow], index: usize, j: usize) -> bool {
+    rows[index].kind == "Link"
+        && rows[j].kind == "Link"
+        && parent_index(rows, index).is_some()
+        && parent_index(rows, index) == parent_index(rows, j)
+}
+
+/// Controls drawn over scrolling content whose glass reaches past their
+/// frame: iOS 26's floating search pill and bars, and the keyboard. Only
+/// these get [`OCCLUDER_MARGIN`]; any other control covers exactly its frame.
+fn floating_overlay(row: &crate::wda::ElementRow) -> bool {
+    row.kind == "SearchField"
         || row.kind == "Keyboard"
         || (BAR_KINDS.contains(&row.kind.as_str()) && row.rect[3] <= MAX_BAR_HEIGHT)
 }
@@ -7312,7 +7342,7 @@ fn occluding_row(rows: &[crate::wda::ElementRow], index: usize) -> Option<&crate
             && OCCLUDER_KINDS.contains(&row.kind.as_str())
             && contains(row.rect, cx, cy)
             && !wraps_target(row.rect)
-            && can_cover(rows, index, row))
+            && can_cover(rows, index, j))
         .then_some(row)
     })
 }
@@ -7324,7 +7354,7 @@ fn occluding_row(rows: &[crate::wda::ElementRow], index: usize) -> Option<&crate
 const OCCLUDER_MARGIN: f64 = 14.0;
 
 /// Where to tap `rows[index]` so the touch reaches it: its centre when no
-/// other control (grown by [`OCCLUDER_MARGIN`]) is over it, else the middle of
+/// other control (a floating overlay grown by [`OCCLUDER_MARGIN`]) is over it, else the middle of
 /// the tallest horizontal band of the target that no control covers.
 /// `None` when every part of it is covered.
 fn clear_tap_point(rows: &[crate::wda::ElementRow], index: usize) -> Option<(f64, f64)> {
@@ -7353,15 +7383,20 @@ fn clear_tap_point(rows: &[crate::wda::ElementRow], index: usize) -> Option<(f64
                 && row.visible != Some(false)
                 && OCCLUDER_KINDS.contains(&row.kind.as_str())
                 && !wraps_target(row.rect)
-                && can_cover(rows, index, row)
+                && can_cover(rows, index, *j)
         })
         .map(|(_, row)| {
             let [rx, ry, rw, rh] = row.rect;
+            let margin = if floating_overlay(row) {
+                OCCLUDER_MARGIN
+            } else {
+                0.0
+            };
             [
-                rx - OCCLUDER_MARGIN,
-                ry - OCCLUDER_MARGIN,
-                rw + 2.0 * OCCLUDER_MARGIN,
-                rh + 2.0 * OCCLUDER_MARGIN,
+                rx - margin,
+                ry - margin,
+                rw + 2.0 * margin,
+                rh + 2.0 * margin,
             ]
         })
         .filter(|grown| grown[0] <= cx && cx <= grown[0] + grown[2])
@@ -15528,6 +15563,52 @@ mod tests {
         // Content is no bar item; a full-screen "Toolbar" makes nothing one.
         assert!(!bar_item(&rows, 2));
         assert!(bar_item(&rows, 5));
+    }
+
+    #[test]
+    fn inline_links_on_wrapped_lines_never_cover_each_other() {
+        let row = |kind: &str, label: &str, rect: [f64; 4], depth: u32| crate::wda::ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            rect,
+            depth,
+            ..Default::default()
+        };
+        // A README paragraph in the in-app Safari sheet: lines 22 pt apart.
+        // "the setup guide" wraps from line 1 onto line 2, so its frame spans
+        // both lines and holds the centre of "docs" on line 2; "issues" sits
+        // on the line below. With the 14 pt margin on every control the two
+        // refused each other.
+        let rows = vec![
+            row(
+                "Application",
+                "SafariViewService",
+                [0.0, 0.0, 440.0, 956.0],
+                0,
+            ),
+            row("WebView", "", [0.0, 100.0, 440.0, 800.0], 10),
+            row(
+                "StaticText",
+                "Read the setup guide or docs.",
+                [16.0, 400.0, 408.0, 66.0],
+                20,
+            ),
+            row("Link", "the setup guide", [120.0, 400.0, 304.0, 44.0], 21),
+            row("Link", "docs", [380.0, 422.0, 60.0, 22.0], 21),
+            row("Link", "issues", [16.0, 444.0, 80.0, 22.0], 21),
+            row("Button", "Edit", [200.0, 470.0, 60.0, 30.0], 20),
+            row("Link", "footer", [40.0, 862.0, 80.0, 10.0], 20),
+            row("SearchField", "Search", [28.0, 880.0, 384.0, 40.0], 9),
+        ];
+        for link in [3, 4, 5] {
+            assert!(occluding_row(&rows, link).is_none(), "link {link}");
+            assert!(!center_covered(&rows, link), "link {link}");
+        }
+        // "issues" ends 4 pt above the button: no glass margin on a button.
+        assert!(!center_covered(&rows, 6));
+        // A floating search pill still reaches past its frame.
+        assert!(center_covered(&rows, 7));
+        assert!(floating_overlay(&rows[8]) && !floating_overlay(&rows[6]));
     }
 
     #[test]
