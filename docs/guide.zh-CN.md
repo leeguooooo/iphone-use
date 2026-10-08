@@ -328,6 +328,7 @@ daemon 把手机的实时控制放到了网络上，它的 URL 和密码要当�
 
 - 密码 / cookie / bearer 只保护 `44321`。**手机上 runner 自己的 `8100` 和 `9100` 没有鉴权**，USB 中继也不会加，手机所在 Wi-Fi 里的另一台机器能直接连过去。只在可信、隔离的网络里用；走 USB 时关掉手机 Wi-Fi 就没有这层暴露。
 - 真正带鉴权的设备传输属于 Phase 2（companion app 或受控隧道）。在此之前，daemon 的登录保护不到 runner。
+- **Wi-Fi**：usbmuxd 对 Wi-Fi 手机的网络连接只能到 lockdownd，到不了 runner 的端口，所以 `iphone-use relay` 改走 CoreDevice 的隧道（`devicectl list devices` 里 `tunnelState` 为 `connected` 时的 `tunnelIPAddress`）。这条隧道是加密的、只有这台 Mac 能走，比局域网 `socat`（`WDA_ALLOW_LAN=1`）安全。用法：先用 USB 启动 runner（iOS 会要求输一次锁屏密码来允许 UI 自动化），然后拔线，runner 继续运行，转发自动跟到隧道上，状态里 `transport` 显示 `wifi-tunnel`。在 Wi-Fi 下重新启动 runner 仍然需要那个输密码提示，而 iOS 在 Wi-Fi 下弹不出来（`wifi_automation_refused`），所以 runner 需要重启时要再插一次线。
 - 从局域网外访问时，经由带鉴权的 HTTPS 反向代理，或可信的 VPN / 隧道（比如 Tailscale）连到 `44321`，绝不要把 runner 的端口暴露出去。daemon 只提供明文 HTTP，识别 `X-Forwarded-Proto`，session cookie 是 `HttpOnly` + `SameSite=Lax`。
 - owner 租约（`X-Phone-Owner`）是协作会话之间的协调机制，不是安全边界。
 - 开放访问期间不要停在支付、私聊或 2FA 画面。不用时停掉 LaunchAgent。

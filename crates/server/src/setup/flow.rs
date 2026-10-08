@@ -1763,9 +1763,16 @@ impl Setup {
         let relay_log = self.rel("wda-relay.log");
         let _ = std::fs::write(&relay_log, b"");
         let target_is_usb = checks::on_usb(&self.ctx.udid, &checks::usb_udids());
+        // Off the cable, CoreDevice's encrypted Wi-Fi tunnel reaches the
+        // runner from this Mac only; it beats the LAN socat relay, which needs
+        // the phone's LAN address and leaves the runner open to the network.
+        let wifi_tunnel = !target_is_usb && checks::wifi_tunnel(&self.ctx.udid);
+        if wifi_tunnel {
+            ok("the iPhone is off USB; relaying through its CoreDevice Wi-Fi tunnel");
+        }
         // Readiness seen over USB carries no LAN address; only the socat
         // fallback needs one, from the log line once xcodebuild flushes it.
-        if self.from_probe && !target_is_usb {
+        if self.from_probe && !target_is_usb && !wifi_tunnel {
             let mut lan_url = None;
             for _ in 0..50 {
                 lan_url = runner::server_url(&self.ctx.run_log);
@@ -1795,6 +1802,9 @@ impl Setup {
             tool = checks::relay_binary(&self.ctx)
                 .map(RelayTool::Native)
                 .or_else(|| sys::which("iproxy").map(RelayTool::Iproxy));
+        } else if wifi_tunnel {
+            // Only the native relay knows the tunnel; iproxy does not.
+            tool = checks::relay_binary(&self.ctx).map(RelayTool::Native);
         }
         if tool.is_none() && self.ctx.lan() {
             if let Some(socat) = sys::which("socat") {

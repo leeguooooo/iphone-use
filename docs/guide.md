@@ -16,7 +16,9 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
   speaks the same HTTP API), starts it on the phone, and pins two loopback relays
   (`iphone-use relay`, over macOS's own usbmuxd): `8100` for control, `9100` for the MJPEG screen.
   The daemon only ever talks to localhost, so a background process never holds the
-  phone's changing IP. USB is the supported path; Wi-Fi/`socat` is a manual experiment.
+  phone's changing IP. USB is the supported path. Off the cable, the same relays reach the
+  phone through CoreDevice's encrypted Wi-Fi tunnel (see *Wi-Fi* below); a LAN `socat`
+  relay (`WDA_ALLOW_LAN=1`) is only an explicit last resort.
 - The browser gets the live picture from `/agent/mjpeg` (PNG stills as fallback) and
   sends input through `POST /control`, which answers success or failure for every
   command instead of accepting it blindly over a possibly dead channel.
@@ -575,6 +577,16 @@ entirely, with no prompt, about 30 s after the runner starts — `setup_message`
 wait. Connect the phone by USB and enter the passcode when it asks; if Wi-Fi still fails
 afterwards, keep that phone on USB. KeepAlive waits 15 minutes between Wi-Fi attempts (each
 one launches the runner on the phone) and retries at once when the phone is plugged in.
+
+**Wi-Fi.** usbmuxd's network attachment of a Wi-Fi phone only reaches lockdownd, never the
+runner's port, so `iphone-use relay` dials the phone's CoreDevice tunnel instead (the
+`tunnelIPAddress` that `devicectl list devices` reports while `tunnelState` is `connected`).
+That tunnel is encrypted and routed by this Mac only, unlike a LAN `socat` relay. The working
+pattern is: start the runner over USB (iOS asks for the passcode to allow UI automation),
+then unplug — the runner keeps running and the relays follow it onto the tunnel; status then
+reports `transport: "wifi-tunnel"`. Launching a new runner over Wi-Fi still needs that
+passcode prompt, which iOS cannot show there (`wifi_automation_refused`), so plug in again
+when the runner has to restart.
 
 **Who may end a reconnect.** A bring-up is owned by the task that started it, and only
 that owner ends it. Every begin mints a generation, so a late task cannot end the round
