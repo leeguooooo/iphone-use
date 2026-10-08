@@ -401,6 +401,11 @@ pub struct AppState {
     /// cache immediately; a control request aborts this task before taking the
     /// WDA mutex so a cold/slow probe cannot delay an input action.
     pub wda_health_probe: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// The background capture of the settled screen after an observed action
+    /// (see `capture_settled_frame_later`). It holds the WDA client for a
+    /// whole screenshot, so the next control request cancels it rather than
+    /// queue behind it.
+    pub settled_frame_prefetch: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
     /// Number of Direct control requests currently waiting for or using WDA.
     /// Health polling re-checks this while holding `wda_health_probe`'s mutex,
     /// closing the race where a poll could start a new probe after input asked
@@ -783,6 +788,15 @@ impl AppState {
             .as_ref()
             .map(|owner| owner.last_seen.elapsed());
         lease_idle_clock(self.idle_for(), owner_age, lease).is_none_or(|idle| idle < window)
+    }
+
+    /// Cancel a background capture of the settled screen: the control request
+    /// about to run changes the screen anyway, so the frame would be stale,
+    /// and waiting for it cost up to a whole capture (~0.5–1.5 s).
+    fn cancel_settled_frame_prefetch(&self) {
+        if let Some(prefetch) = recover(self.settled_frame_prefetch.lock()).take() {
+            prefetch.abort();
+        }
     }
 
     /// Give a Direct control operation priority over background health work.
@@ -9919,6 +9933,7 @@ async fn agent_actions_inner(
     };
 
     state.touch_activity();
+    state.cancel_settled_frame_prefetch();
     let focus_block = engage_agent_focus(&state, &mut *wda.lock().await).await;
     if let Some(waiting) = focus_permission_pending(focus_block.as_ref()) {
         return waiting;
@@ -10616,12 +10631,18 @@ const SETTLED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_sec
 
 /// Capture the settled screen in the background, unless something was sent
 /// in the meantime (`post_mark` is the last POST the observation saw) — then
-/// that screen is gone and there is nothing to keep.
+/// that screen is gone and there is nothing to keep. The next control
+/// request cancels it (see [`AppState::cancel_settled_frame_prefetch`]).
 fn capture_settled_frame_later(
+    state: &AppState,
     wda: Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
     post_mark: Option<std::time::Instant>,
 ) {
-    tokio::spawn(async move {
+    let mut slot = recover(state.settled_frame_prefetch.lock());
+    if let Some(previous) = slot.take() {
+        previous.abort();
+    }
+    let task = tokio::spawn(async move {
         let mut w = wda.lock().await;
         if w.last_post() != post_mark || w.settled_frame(SETTLED_FRAME_MAX_AGE).is_some() {
             return;
@@ -10634,6 +10655,7 @@ fn capture_settled_frame_later(
             }
         }
     });
+    *slot = Some(task.abort_handle());
 }
 
 /// The content band of a PNG frame is one flat colour (see
@@ -11108,6 +11130,9 @@ async fn agent_input_inner(
             .with("fallback", serde_json::json!("disabled"))
             .into_response();
     };
+    // A background capture of the last settled screen holds the client for a
+    // whole screenshot; this action makes that frame stale anyway.
+    state.cancel_settled_frame_prefetch();
     // Do Not Disturb before the first action of a session; its time is not
     // charged to the action's own budget.
     let focus_started = tokio::time::Instant::now();
@@ -11203,7 +11228,7 @@ async fn agent_input_inner(
     let post_mark = client.last_post();
     drop(client);
     if frame_needed {
-        capture_settled_frame_later(Arc::clone(wda), post_mark);
+        capture_settled_frame_later(&state, Arc::clone(wda), post_mark);
     }
     match outcome {
         WdaControlOutcome::Applied => {
