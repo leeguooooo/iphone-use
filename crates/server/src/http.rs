@@ -10263,7 +10263,8 @@ async fn agent_actions_inner(
     if request.observe {
         // Observation only: the batch's verdict is already fixed above.
         let budget = std::time::Duration::from_millis(AGENT_INPUT_SETTLE_DEFAULT_MS);
-        let (observed, report) = settle_and_read_elements(&mut w, budget).await;
+        let (observed, report) =
+            settle_and_read_elements(&mut w, budget, DEVICE_SETTLE_DEFAULT_CAP).await;
         if let Some((snapshot, rows)) = observed {
             let rows = Arc::new(rows);
             remember_element_snapshot(&state, &snapshot, &rows);
@@ -10318,6 +10319,14 @@ struct AgentInputQuery {
 const AGENT_INPUT_SETTLE_DEFAULT_MS: u64 = 15_000;
 const AGENT_INPUT_SETTLE_MAX_MS: u64 = 20_000;
 
+/// How long the on-phone settle waits for a still screen unless the caller
+/// passed `settle_ms`. The 15 s budget above exists for slow TREE reads; a
+/// screen that never stops moving (a video, a spinner, a live feed) held
+/// every default call that long on the frame check alone. Past this the
+/// tree is read once and the report says `budget_exhausted` with
+/// `capped_ms`, so the agent can ask for longer.
+const DEVICE_SETTLE_DEFAULT_CAP: std::time::Duration = std::time::Duration::from_millis(2500);
+
 /// A settled tree read is best-effort *observation*, never part of the action
 /// result. `Stable` means two consecutive reads hashed identically over a tree
 /// that actually had content; `BudgetExhausted` means the UI was still moving
@@ -10367,6 +10376,9 @@ struct SettleReport {
     /// (`observation_failed`) or was cut off by the budget
     /// (`budget_exhausted`). Never present alongside `settled: true`.
     stale: bool,
+    /// The on-phone wait stopped at the default cap
+    /// ([`DEVICE_SETTLE_DEFAULT_CAP`]) with the screen still moving.
+    capped_ms: Option<u64>,
     error: Option<String>,
 }
 
@@ -10380,6 +10392,7 @@ impl SettleReport {
             budget_ms,
             sparse: false,
             stale: false,
+            capped_ms: None,
             error: None,
         }
     }
@@ -10397,6 +10410,9 @@ impl SettleReport {
         }
         if self.stale {
             value["stale"] = serde_json::Value::Bool(true);
+        }
+        if let Some(capped_ms) = self.capped_ms {
+            value["capped_ms"] = serde_json::json!(capped_ms);
         }
         if let Some(error) = &self.error {
             value["error"] = serde_json::Value::String(error.clone());
@@ -10534,6 +10550,7 @@ async fn settle_on_device(
     started: tokio::time::Instant,
     deadline: tokio::time::Instant,
     budget: std::time::Duration,
+    device_cap: std::time::Duration,
 ) -> Option<(Option<(String, Vec<crate::wda::ElementRow>)>, SettleReport)> {
     /// Unchanged this long counts as settled; a push or a sheet animates
     /// continuously, so a quiet gap this long means it ended.
@@ -10544,15 +10561,24 @@ async fn settle_on_device(
     /// Kept for the one tree read after the screen is still.
     const TREE_RESERVE: std::time::Duration = std::time::Duration::from_millis(700);
     let room = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let device_budget = room.checked_sub(TREE_RESERVE + MIN_WAIT)?;
+    let uncapped = room.checked_sub(TREE_RESERVE + MIN_WAIT)?;
+    let device_budget = uncapped.min(device_cap);
     if device_budget < std::time::Duration::from_millis(200) {
         return None;
     }
-    let device = w.device_settle(device_budget, QUIET, MIN_WAIT).await?;
+    // The runner answers within its budget, but the HTTP call allows 3 s
+    // more for transport: never past the observation's own deadline.
+    let device = tokio::time::timeout_at(deadline, w.device_settle(device_budget, QUIET, MIN_WAIT))
+        .await
+        .ok()
+        .flatten()?;
     if device.blank {
         return None;
     }
     let mut report = SettleReport::new(budget.as_millis() as u64);
+    if !device.stable && device_budget < uncapped {
+        report.capped_ms = Some(device_budget.as_millis() as u64);
+    }
     let observed = match read_elements_once(w, deadline).await {
         SettleRead::Read(id, rows) => {
             report.captures = 1;
@@ -10585,6 +10611,7 @@ async fn settle_on_device(
 async fn settle_and_read_elements(
     w: &mut crate::wda::WdaClient,
     budget: std::time::Duration,
+    device_cap: std::time::Duration,
 ) -> (Option<(String, Vec<crate::wda::ElementRow>)>, SettleReport) {
     let started = tokio::time::Instant::now();
     let mut report = SettleReport::new(budget.as_millis() as u64);
@@ -10593,7 +10620,7 @@ async fn settle_and_read_elements(
         return (None, report);
     }
     let deadline = started + budget;
-    if let Some(settled) = settle_on_device(w, started, deadline, budget).await {
+    if let Some(settled) = settle_on_device(w, started, deadline, budget, device_cap).await {
         return settled;
     }
     tokio::time::sleep(std::cmp::min(std::time::Duration::from_millis(150), budget)).await;
@@ -11133,7 +11160,13 @@ async fn agent_input_inner(
         // budget, and the client's timeout has to cover their sum (see
         // `OBSERVE_TIMEOUT` in the MCP client).
         let budget = std::time::Duration::from_millis(settle_budget_ms);
-        let (observed, report) = settle_and_read_elements(&mut client, budget).await;
+        // An explicit `settle_ms` is the caller asking to wait that long.
+        let device_cap = if query.settle_ms.is_some() {
+            budget
+        } else {
+            DEVICE_SETTLE_DEFAULT_CAP
+        };
+        let (observed, report) = settle_and_read_elements(&mut client, budget, device_cap).await;
         settled = Some((
             observed.map(|(snapshot, rows)| (snapshot, Arc::new(rows))),
             report,
