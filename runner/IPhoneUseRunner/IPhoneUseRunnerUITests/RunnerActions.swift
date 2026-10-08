@@ -11,9 +11,15 @@ enum W3CActions {
     return nil
   }
 
+  /// How long a down…up with no time between them is held. XCTest's own tap holds 50 ms.
+  static let tapHold = 0.05
+  /// The shortest hold an explicit pause between down and up gets.
+  static let minimumHold = 0.01
+
   /// Turns one W3C pointer source's `actions` into touch paths (one per down…up). Moves while the
   /// pointer is down are sampled every ~16 ms; a down…up with no time between them is held for
-  /// 50 ms so iOS sees a tap. Each step is `{"type": "down"|"move"|"up", "x", "y", "t" (s)}`.
+  /// `tapHold` so iOS sees a tap, and one with time between them for at least `minimumHold`.
+  /// Each step is `{"type": "down"|"move"|"up", "x", "y", "t" (s)}`.
   /// `elementCenter` resolves an element-origin pointerMove.
   static func pointerPaths(
     _ actions: [[String: Any]], elementCenter: (String) throws -> CGPoint
@@ -60,7 +66,7 @@ enum W3CActions {
         }
       case "pointerUp", "pointerCancel":
         if let down = downAt {
-          t = max(t, down + 0.05)
+          t = max(t, down + (t > down ? minimumHold : tapHold))
           current.append(step("up", position, t))
           paths.append(current)
           current = []
@@ -71,7 +77,7 @@ enum W3CActions {
       }
     }
     if let down = downAt {
-      current.append(step("up", position, max(t, down + 0.05)))
+      current.append(step("up", position, max(t, down + (t > down ? minimumHold : tapHold))))
       paths.append(current)
     }
     return paths

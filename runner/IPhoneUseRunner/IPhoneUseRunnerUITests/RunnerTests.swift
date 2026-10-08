@@ -251,6 +251,11 @@ final class RunnerTests: XCTestCase {
     if !recordedIssues.isEmpty {
       response.headers["X-IPU-XCTest-Issues"] = String(recordedIssues.count)
     }
+    // Where synthesized touches spent their time: X-IPU-Synth-{Orientation,Build,Wait,Hold}-Ms.
+    for (part, value) in IPURBridge.takeSynthesisTiming() {
+      response.headers[part == "Calls" ? "X-IPU-Synth-Calls" : "X-IPU-Synth-\(part)-Ms"] =
+        part == "Calls" ? value.stringValue : String(format: "%.1f", value.doubleValue)
+    }
     response.headers["X-IPU-Ms"] = String(Int(Date().timeIntervalSince(started) * 1000))
     for (name, entry) in requestTiming {
       response.headers["X-IPU-\(name)-Ms"] = String(format: "%.1f", entry.ms)

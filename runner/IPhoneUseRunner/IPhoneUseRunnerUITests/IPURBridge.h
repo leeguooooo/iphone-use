@@ -143,6 +143,11 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// timeline (offsets are absolute), so sequential touches simply use later offsets.
 + (nullable NSString *)synthesizeTouchPaths:(NSArray<NSArray<NSDictionary<NSString *, id> *> *> *)paths
                                        name:(NSString *)name;
+/// Where synthesized touches spent their time since the last call, in ms: "Orientation" (the
+/// record's orientation read), "Build" (record construction, including that read), "Wait"
+/// (synthesizeWithError: — testmanagerd plays the events and answers once they were delivered),
+/// "Hold" (the records' scheduled length) and "Calls". Empty when nothing was synthesized. Resets.
++ (NSDictionary<NSString *, NSNumber *> *)takeSynthesisTiming;
 
 /// Types into whatever holds keyboard focus. `charactersPerSecond` 0 → 60.
 + (nullable NSString *)synthesizeText:(NSString *)text
