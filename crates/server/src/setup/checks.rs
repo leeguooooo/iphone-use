@@ -851,30 +851,124 @@ pub fn transport(udid: &str) -> Transport {
     })
 }
 
-/// usbmuxd lists `udid`, over USB or the network. Cheap and cannot hang.
-pub fn usbmux_lists(udid: &str) -> bool {
+/// What usbmuxd says about one phone. `Unreadable` (no socket, timeout, bad
+/// reply) says nothing about the phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsbmuxView {
+    Listed,
+    NotListed,
+    Unreadable,
+}
+
+fn usbmux_view(udid: &str) -> UsbmuxView {
     sys::block_on(async {
-        tokio::time::timeout(
+        match tokio::time::timeout(
             Duration::from_secs(3),
             crate::usbmux::find_attached(&crate::usbmux::normalize_udid(udid)),
         )
         .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten()
-        .is_some()
+        {
+            Ok(Ok(Some(_))) => UsbmuxView::Listed,
+            Ok(Ok(None)) => UsbmuxView::NotListed,
+            _ => UsbmuxView::Unreadable,
+        }
     })
+}
+
+/// usbmuxd lists `udid`, over USB or the network. Cheap and cannot hang.
+pub fn usbmux_lists(udid: &str) -> bool {
+    usbmux_view(udid) == UsbmuxView::Listed
+}
+
+/// Phones usbmuxd has listed during this process. Once a phone has been
+/// reached through usbmuxd, its disappearing from usbmuxd means it left:
+/// CoreDevice keeps reporting a just-unplugged phone as `connected` for
+/// minutes, so it cannot overrule that.
+fn seen_in_usbmux() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
 }
 
 /// usbmuxd first; only when it does not list the phone, ask CoreDevice.
 pub fn presence(udid: &str) -> Presence {
-    if udid.is_empty() || usbmux_lists(udid) {
+    if udid.is_empty() {
         return Presence::Present;
     }
-    match sys::devicectl_json(10, &["list", "devices"]) {
-        Some(json) => coredevice_presence(&json, udid),
-        None => Presence::Unknown,
+    let key = crate::usbmux::normalize_udid(udid);
+    let view = usbmux_view(udid);
+    let seen = {
+        let mut seen = seen_in_usbmux().lock().unwrap_or_else(|e| e.into_inner());
+        if view == UsbmuxView::Listed {
+            seen.insert(key.clone());
+        }
+        seen.contains(&key)
+    };
+    if view == UsbmuxView::Listed || (view == UsbmuxView::NotListed && seen) {
+        return presence_from(view, seen, None, udid);
     }
+    let json = sys::devicectl_json(10, &["list", "devices"]);
+    presence_from(view, seen, json.as_deref(), udid)
+}
+
+/// The presence verdict from usbmuxd's view, whether usbmuxd listed the phone
+/// earlier in this process, and CoreDevice's `devicectl list devices -j`
+/// output (`None` when devicectl gave no answer).
+///
+/// - Listed by usbmuxd: present.
+/// - Not listed, but listed earlier: absent. CoreDevice's cached state can
+///   still say `connected` long after the cable is pulled.
+/// - Not listed, and CoreDevice calls it `wired`: absent. A wired phone is
+///   always in usbmuxd, so CoreDevice's record is stale.
+/// - Otherwise CoreDevice decides (a Wi-Fi phone usbmuxd never lists), and no
+///   readable answer is `Unknown`, which callers never treat as absent.
+pub fn presence_from(
+    view: UsbmuxView,
+    seen_in_usbmux: bool,
+    coredevice_json: Option<&str>,
+    udid: &str,
+) -> Presence {
+    match view {
+        UsbmuxView::Listed => return Presence::Present,
+        UsbmuxView::NotListed if seen_in_usbmux => return Presence::Absent,
+        _ => {}
+    }
+    let Some(json) = coredevice_json else {
+        return Presence::Unknown;
+    };
+    let verdict = coredevice_presence(json, udid);
+    if view == UsbmuxView::NotListed
+        && verdict == Presence::Present
+        && coredevice_transport(json, udid).as_deref() == Some("wired")
+    {
+        return Presence::Absent;
+    }
+    verdict
+}
+
+fn coredevice_device<'a>(
+    value: &'a serde_json::Value,
+    udid: &str,
+) -> Option<Option<&'a serde_json::Value>> {
+    let devices = value
+        .pointer("/result/devices")
+        .and_then(serde_json::Value::as_array)?;
+    let want = crate::usbmux::normalize_udid(udid);
+    Some(devices.iter().find(|device| {
+        device
+            .pointer("/hardwareProperties/udid")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| crate::usbmux::normalize_udid(id) == want)
+    }))
+}
+
+/// CoreDevice's `transportType` for `udid` (`wired`, `localNetwork`), if any.
+fn coredevice_transport(json: &str, udid: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    coredevice_device(&value, udid)??
+        .pointer("/connectionProperties/transportType")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 /// CoreDevice's view of `udid` in `devicectl list devices -j` output. An
@@ -884,19 +978,10 @@ pub fn coredevice_presence(json: &str, udid: &str) -> Presence {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
         return Presence::Unknown;
     };
-    let Some(devices) = value
-        .pointer("/result/devices")
-        .and_then(serde_json::Value::as_array)
-    else {
+    let Some(found) = coredevice_device(&value, udid) else {
         return Presence::Unknown;
     };
-    let want = crate::usbmux::normalize_udid(udid);
-    let Some(device) = devices.iter().find(|device| {
-        device
-            .pointer("/hardwareProperties/udid")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|id| crate::usbmux::normalize_udid(id) == want)
-    }) else {
+    let Some(device) = found else {
         return Presence::Absent;
     };
     let tunnel = device
@@ -1169,6 +1254,63 @@ attributes:
         assert_eq!(coredevice_presence("", "00008150"), Presence::Unknown);
         assert_eq!(
             coredevice_presence(r#"{"error":{}}"#, "00008150"),
+            Presence::Unknown
+        );
+    }
+
+    #[test]
+    fn a_phone_usbmux_no_longer_lists_is_absent_even_when_coredevice_says_connected() {
+        // CoreDevice's cached record minutes after the USB cable was pulled
+        // (seen on hardware: devicectl kept "connected" for ~4 minutes).
+        let stale_wired = r#"{"result":{"devices":[
+            {"hardwareProperties":{"udid":"00008110-0002346211A0401E"},
+             "connectionProperties":{"tunnelState":"connected","transportType":"wired"}}
+        ]}}"#;
+        let wifi = r#"{"result":{"devices":[
+            {"hardwareProperties":{"udid":"00008150-000A60EC1A02401C"},
+             "connectionProperties":{"tunnelState":"connected","transportType":"localNetwork"}}
+        ]}}"#;
+        let usb_phone = "00008110-0002346211A0401E";
+        let wifi_phone = "00008150-000A60EC1A02401C";
+        use UsbmuxView::{Listed, NotListed, Unreadable};
+
+        // USB phone unplugged: usbmuxd lost it, CoreDevice still says wired.
+        assert_eq!(
+            presence_from(NotListed, true, Some(stale_wired), usb_phone),
+            Presence::Absent
+        );
+        assert_eq!(
+            presence_from(NotListed, false, Some(stale_wired), usb_phone),
+            Presence::Absent,
+            "a wired phone missing from usbmuxd is gone even in a fresh process"
+        );
+        // A Wi-Fi phone usbmuxd used to list is gone too, whatever CoreDevice says.
+        assert_eq!(
+            presence_from(NotListed, true, Some(wifi), wifi_phone),
+            Presence::Absent
+        );
+        // A CoreDevice-only Wi-Fi phone usbmuxd never listed: CoreDevice decides.
+        assert_eq!(
+            presence_from(NotListed, false, Some(wifi), wifi_phone),
+            Presence::Present
+        );
+        // Listed by usbmuxd: present without asking CoreDevice.
+        assert_eq!(
+            presence_from(Listed, true, None, usb_phone),
+            Presence::Present
+        );
+        // usbmuxd unreadable: it says nothing, so CoreDevice decides, stale or not.
+        assert_eq!(
+            presence_from(Unreadable, true, Some(stale_wired), usb_phone),
+            Presence::Present
+        );
+        // No readable answer anywhere: unknown, never absent.
+        assert_eq!(
+            presence_from(NotListed, false, None, usb_phone),
+            Presence::Unknown
+        );
+        assert_eq!(
+            presence_from(Unreadable, false, None, usb_phone),
             Presence::Unknown
         );
     }
