@@ -5,12 +5,15 @@
 // callstack/agent-device (MIT License, Copyright (c) 2026 Callstack), RunnerTests+Transport.swift.
 // See runner/README.md for the full attribution and license text.
 
+import CryptoKit
 import Foundation
 import Network
 
 struct HTTPRequest {
   let method: String
   let path: String
+  /// The request target exactly as sent (path plus `?query`): what a signature covers.
+  var target: String = ""
   let query: [String: String]
   let headers: [String: String]
   let body: Data
@@ -31,15 +34,23 @@ struct HTTPRequest {
     case complete(HTTPRequest)
   }
 
-  static func parse(_ data: Data) -> ParseResult {
+  /// The request line and headers, once they are complete (nil while they are not).
+  struct Head {
+    let method: String
+    let target: String
+    let headers: [String: String]
+    let end: Data.Index
+  }
+
+  static func head(_ data: Data) -> Result<Head, ParseFailure>? {
     guard let headerEnd = data.range(of: Data("\r\n\r\n".utf8)) else {
-      return data.count > 64 * 1024 ? .invalid("request header too large") : .incomplete
+      return data.count > 64 * 1024 ? .failure(ParseFailure("request header too large")) : nil
     }
     let head = String(decoding: data.subdata(in: data.startIndex..<headerEnd.lowerBound), as: UTF8.self)
     var lines = head.components(separatedBy: "\r\n")
-    guard !lines.isEmpty else { return .invalid("empty request") }
+    guard !lines.isEmpty else { return .failure(ParseFailure("empty request")) }
     let requestLine = lines.removeFirst().split(separator: " ", omittingEmptySubsequences: true)
-    guard requestLine.count >= 2 else { return .invalid("malformed request line") }
+    guard requestLine.count >= 2 else { return .failure(ParseFailure("malformed request line")) }
     var headers: [String: String] = [:]
     for line in lines {
       guard let colon = line.firstIndex(of: ":") else { continue }
@@ -47,15 +58,32 @@ struct HTTPRequest {
       let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
       headers[name] = value
     }
+    return .success(Head(method: String(requestLine[0]).uppercased(), target: String(requestLine[1]),
+                         headers: headers, end: headerEnd.upperBound))
+  }
+
+  struct ParseFailure: Error {
+    let message: String
+    init(_ message: String) { self.message = message }
+  }
+
+  static func parse(_ data: Data) -> ParseResult {
+    let parsedHead: Head
+    switch head(data) {
+    case nil: return .incomplete
+    case .failure(let failure)?: return .invalid(failure.message)
+    case .success(let value)?: parsedHead = value
+    }
+    let headers = parsedHead.headers
     let contentLength = headers["content-length"].flatMap { Int($0) } ?? 0
     if contentLength < 0 || contentLength > RunnerHTTPServer.maxBodyBytes {
       return .invalid("content-length out of range")
     }
-    let bodyStart = headerEnd.upperBound
+    let bodyStart = parsedHead.end
     if data.count - (bodyStart - data.startIndex) < contentLength { return .incomplete }
     let body = data.subdata(in: bodyStart..<(bodyStart + contentLength))
 
-    let target = String(requestLine[1])
+    let target = parsedHead.target
     var path = target
     var query: [String: String] = [:]
     if let questionMark = target.firstIndex(of: "?") {
@@ -70,7 +98,8 @@ struct HTTPRequest {
     }
     if path.count > 1 && path.hasSuffix("/") { path.removeLast() }
     return .complete(
-      HTTPRequest(method: String(requestLine[0]).uppercased(), path: path, query: query, headers: headers, body: body)
+      HTTPRequest(method: parsedHead.method, path: path, target: target, query: query,
+                  headers: headers, body: body)
     )
   }
 }
@@ -125,6 +154,7 @@ struct HTTPResponse {
     switch status {
     case 200: return "OK"
     case 400: return "Bad Request"
+    case 401: return "Unauthorized"
     case 404: return "Not Found"
     case 405: return "Method Not Allowed"
     case 413: return "Payload Too Large"
@@ -206,6 +236,171 @@ enum CaptureLane {
   }
 }
 
+/// Request authentication for both listeners (8100 commands, 9100 video). They listen on every
+/// interface of the phone, so anything on the same Wi-Fi can connect; only a request signed with
+/// this launch's token gets any work done. The Mac generates the token per launch and passes it as
+/// `IPU_RUNNER_TOKEN` in the test environment; it never travels over the network (a LAN relay is
+/// plain HTTP). Wire format and the signed string: crates/core/src/runner_auth.rs.
+///
+///   Authorization: IPU-HMAC-SHA256 ts=<unix secs>, nonce=<hex>, sig=<hex HMAC-SHA256>
+///
+/// Each nonce is accepted once, and only within `maxSkew` of this phone's clock, so a captured
+/// request can be neither replayed nor altered. With no token in the environment every request
+/// is refused: a runner nobody configured must not be an open door.
+final class RunnerAuth {
+  static let scheme = "IPU-HMAC-SHA256"
+  static let maxSkew: Int64 = 900
+  /// Nonces remembered; past this the oldest half is forgotten and nothing at or before the
+  /// newest forgotten timestamp is accepted any more.
+  static let maxNonces = 50_000
+  static let context = "ipu-runner-v1"
+
+  enum Refusal: Equatable {
+    case notConfigured, missing, malformed, skew, replay, badSignature
+
+    var message: String {
+      switch self {
+      case .notConfigured: return "this runner was started without IPU_RUNNER_TOKEN; restart it with iphone-use setup"
+      case .missing: return "authorization required"
+      case .malformed: return "malformed authorization"
+      case .skew: return "request timestamp too far from the phone's clock"
+      case .replay: return "request already seen"
+      case .badSignature: return "bad signature"
+      }
+    }
+  }
+
+  struct Credentials: Equatable {
+    let ts: Int64
+    let nonce: String
+    let sig: Data
+  }
+
+  private let key: SymmetricKey?
+  private let lock = NSLock()
+  private var seen: [String: Int64] = [:]
+  private var floor = Int64.min
+
+  init(token: String?) {
+    if let token, RunnerAuth.validToken(token) {
+      key = SymmetricKey(data: Data(token.utf8))
+    } else {
+      key = nil
+    }
+  }
+
+  var configured: Bool { key != nil }
+
+  static func validToken(_ token: String) -> Bool {
+    (32...128).contains(token.utf8.count) && token.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+  }
+
+  static func hex<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
+    bytes.map { String(format: "%02x", $0) }.joined()
+  }
+
+  static func unhex(_ text: String) -> Data? {
+    let utf8 = Array(text.utf8)
+    guard utf8.count % 2 == 0 else { return nil }
+    var out = Data(capacity: utf8.count / 2)
+    var index = 0
+    while index < utf8.count {
+      guard let pair = UInt8(String(decoding: utf8[index..<index + 2], as: UTF8.self), radix: 16) else { return nil }
+      out.append(pair)
+      index += 2
+    }
+    return out
+  }
+
+  static func stringToSign(method: String, target: String, ts: Int64, nonce: String, body: Data) -> String {
+    "\(context)\n\(method.uppercased())\n\(target)\n\(ts)\n\(nonce)\n\(hex(SHA256.hash(data: body)))"
+  }
+
+  static func signature(token: String, method: String, target: String, ts: Int64, nonce: String, body: Data) -> Data {
+    let message = Data(stringToSign(method: method, target: target, ts: ts, nonce: nonce, body: body).utf8)
+    return Data(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: Data(token.utf8))))
+  }
+
+  /// `IPU-HMAC-SHA256 ts=…, nonce=…, sig=…`, each part once, any order.
+  static func parse(_ value: String) -> Credentials? {
+    let trimmed = value.trimmingCharacters(in: .whitespaces)
+    guard trimmed.hasPrefix(scheme + " ") else { return nil }
+    var fields: [String: String] = [:]
+    for part in trimmed.dropFirst(scheme.count + 1).split(separator: ",", omittingEmptySubsequences: false) {
+      let pair = part.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1).map(String.init)
+      guard pair.count == 2, ["ts", "nonce", "sig"].contains(pair[0]), fields[pair[0]] == nil else { return nil }
+      fields[pair[0]] = pair[1]
+    }
+    guard let tsText = fields["ts"], let ts = Int64(tsText), let nonce = fields["nonce"], let sigText = fields["sig"],
+          (16...64).contains(nonce.utf8.count), nonce.utf8.allSatisfy({ $0 < 128 && isxdigit(Int32($0)) != 0 }),
+          sigText.utf8.count == 64, let sig = unhex(sigText)
+    else { return nil }
+    return Credentials(ts: ts, nonce: nonce.lowercased(), sig: sig)
+  }
+
+  /// Compares every byte whatever the first difference, so the time taken says nothing about
+  /// how much of a guessed signature was right.
+  static func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
+    guard a.count == b.count else { return false }
+    var difference: UInt8 = 0
+    for (x, y) in zip(a, b) { difference |= x ^ y }
+    return difference == 0
+  }
+
+  /// What can be refused from the headers alone (no token configured, no or a malformed
+  /// Authorization, a stale timestamp), so a request is turned away before its body is read.
+  func precheck(_ headers: [String: String], now: Date = Date()) -> Refusal? {
+    guard key != nil else { return .notConfigured }
+    guard let authorization = headers["authorization"] else { return .missing }
+    guard let credentials = RunnerAuth.parse(authorization) else { return .malformed }
+    if abs(Int64(now.timeIntervalSince1970) - credentials.ts) > RunnerAuth.maxSkew { return .skew }
+    return nil
+  }
+
+  /// nil when `request` may run. Records the nonce, so the same request a second time is refused.
+  func check(_ request: HTTPRequest, now: Date = Date()) -> Refusal? {
+    check(method: request.method, target: request.target, authorization: request.headers["authorization"],
+          body: request.body, now: now)
+  }
+
+  func check(method: String, target: String, authorization: String?, body: Data, now: Date = Date()) -> Refusal? {
+    guard let key else { return .notConfigured }
+    guard let authorization else { return .missing }
+    guard let credentials = RunnerAuth.parse(authorization) else { return .malformed }
+    let nowSecs = Int64(now.timeIntervalSince1970)
+    if abs(nowSecs - credentials.ts) > RunnerAuth.maxSkew { return .skew }
+    let message = Data(RunnerAuth.stringToSign(method: method, target: target, ts: credentials.ts,
+                                               nonce: credentials.nonce, body: body).utf8)
+    let expected = Data(HMAC<SHA256>.authenticationCode(for: message, using: key))
+    guard RunnerAuth.constantTimeEqual(expected, credentials.sig) else { return .badSignature }
+    // Only a valid signature reaches the nonce memory: nobody without the token can fill it.
+    lock.lock()
+    defer { lock.unlock() }
+    if credentials.ts <= floor || seen[credentials.nonce] != nil { return .replay }
+    if seen.count >= RunnerAuth.maxNonces {
+      let cutoff = nowSecs - RunnerAuth.maxSkew
+      seen = seen.filter { $0.value >= cutoff }
+      floor = max(floor, cutoff - 1)
+      if seen.count >= RunnerAuth.maxNonces {
+        let sorted = seen.values.sorted()
+        let newestForgotten = sorted[sorted.count / 2]
+        seen = seen.filter { $0.value > newestForgotten }
+        floor = max(floor, newestForgotten)
+      }
+      if credentials.ts <= floor { return .replay }
+    }
+    seen[credentials.nonce] = credentials.ts
+    return nil
+  }
+
+  /// What an unauthenticated client gets: a 401 that names nothing about the phone.
+  static func refusalResponse(_ refusal: Refusal) -> HTTPResponse {
+    var response = HTTPResponse.error(401, "unauthorized", refusal.message)
+    response.headers["WWW-Authenticate"] = scheme
+    return response
+  }
+}
+
 /// Accepts connections on a background queue, hands each complete request to `mainHandler` on the
 /// main queue (serially — XCTest and the private AX client are main-thread APIs), and answers
 /// requests `inlineHandler` claims directly on the transport queue so liveness probes never wait
@@ -222,10 +417,12 @@ final class RunnerHTTPServer {
   private let inlineHandler: (HTTPRequest) -> HTTPResponse?
   private let captureHandler: (HTTPRequest) -> HTTPResponse?
   private let mainHandler: (HTTPRequest) -> HTTPResponse
+  private let auth: RunnerAuth
   var onFailure: ((Error) -> Void)?
 
   init(
     port: UInt16,
+    auth: RunnerAuth,
     inlineHandler: @escaping (HTTPRequest) -> HTTPResponse?,
     captureHandler: @escaping (HTTPRequest) -> HTTPResponse? = { _ in nil },
     mainHandler: @escaping (HTTPRequest) -> HTTPResponse
@@ -236,6 +433,7 @@ final class RunnerHTTPServer {
     let parameters = NWParameters.tcp
     parameters.allowLocalEndpointReuse = true
     listener = try NWListener(using: parameters, on: endpointPort)
+    self.auth = auth
     self.inlineHandler = inlineHandler
     self.captureHandler = captureHandler
     self.mainHandler = mainHandler
@@ -304,6 +502,14 @@ final class RunnerHTTPServer {
       }
       switch HTTPRequest.parse(buffer) {
       case .incomplete:
+        // Headers in, body still coming: a request with no usable credentials is refused now,
+        // before its body is read.
+        if case .success(let head)? = HTTPRequest.head(buffer), let refusal = self.auth.precheck(head.headers) {
+          NSLog("ipu-runner: refused %@ from %@: %@", head.method, String(describing: connection.endpoint),
+                refusal.message)
+          self.send(RunnerAuth.refusalResponse(refusal), on: connection)
+          return
+        }
         if isComplete || error != nil {
           connection.cancel()
         } else {
@@ -319,6 +525,13 @@ final class RunnerHTTPServer {
 
   private func dispatch(_ request: HTTPRequest, on connection: NWConnection) {
     let started = DispatchTime.now().uptimeNanoseconds
+    // Before anything else: an unauthenticated request does no work at all.
+    if let refusal = auth.check(request) {
+      NSLog("ipu-runner: refused %@ %@ from %@: %@", request.method, request.path,
+            String(describing: connection.endpoint), refusal.message)
+      send(RunnerAuth.refusalResponse(refusal), on: connection)
+      return
+    }
     if let response = inlineHandler(request) {
       finish(request, response, started: started, on: connection)
       return

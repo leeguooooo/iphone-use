@@ -81,8 +81,10 @@ pub struct Ctx {
     pub asc_key_path: String,
     pub asc_key_id: String,
     pub asc_issuer_id: String,
-    /// `0` or `1`: `1` also permits the unauthenticated LAN `socat` relay to
-    /// the phone's network address (unsafe on an untrusted network).
+    /// `0` or `1`: `1` also permits the plain LAN `socat` relay to the
+    /// phone's network address, and the LAN fallback to an iOS 15/16 runner
+    /// that predates request signing (unsafe on an untrusted network). A
+    /// signing runner on iOS 15/16 gets its LAN fallback without it.
     pub allow_lan: String,
     /// `WDA_TRANSPORT`: `auto` (default) sets up and relaunches a phone that
     /// is off the cable through CoreDevice's encrypted Wi-Fi tunnel, USB
@@ -332,6 +334,11 @@ impl Ctx {
 
     pub fn state_dir(&self) -> &Path {
         &self.instance.state_dir
+    }
+
+    /// Signs this instance's requests to the device runner.
+    pub fn runner_auth(&self) -> crate::runner_token::TokenSource {
+        crate::runner_token::TokenSource::at(self.state_dir())
     }
 
     pub fn lan(&self) -> bool {

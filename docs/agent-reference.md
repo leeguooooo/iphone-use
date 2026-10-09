@@ -201,20 +201,28 @@ which has no CoreDevice tunnel: lockdown's TLS session with this Mac's pair reco
 not a plain LAN relay. `WDA_TRANSPORT=usb` turns it off (cable only). Controlling
 the runner off the cable is a separate question: usbmuxd's Wi-Fi attachment does not
 carry the runner's port (measured on an iPhone X, iOS 16.5: runner alive on its LAN
-address, relay dead), so only the plain LAN relay reaches it, and that stays behind
-`WDA_ALLOW_LAN=1` (the runner port has no authentication). `unplug_ok` is true only
-for a Wi-Fi start with that relay; otherwise keep the cable in. Idle release
+address, relay dead), so only a LAN relay reaches it. The runner refuses requests
+not signed with its per-launch token, so setup enables that relay by default once the
+runner has proved it (an unsigned `/status` gets 401); a runner older than request
+signing still needs `WDA_ALLOW_LAN=1`. The LAN path is signed but not encrypted:
+screen contents cross the Wi-Fi in the clear. `unplug_ok` is true for a Wi-Fi start
+with that relay; otherwise keep the cable in. Idle release
 works as usual; the next request starts the runner again in ~8–12 s.
 
 Repeated bootstrap requests hide the real blocker — fix it, then reconnect once.
 
-WDA itself has no authentication. Daemon bearer auth protects `/agent/*`, not
-the phone's own 8100/9100 listeners. The Mac's relays listen on loopback only
+The native runner's 8100/9100 listeners refuse any request not signed with the
+token setup generates at each runner launch (`<state dir>/runner-token`, 0600;
+HMAC-SHA256 over method, target, body, timestamp and a one-time nonce, so a captured
+request cannot be replayed or altered). Daemon bearer auth protects `/agent/*`.
+The Mac's relays listen on loopback only
 and reach the phone over USB or, off the cable, through CoreDevice's encrypted
 Wi-Fi tunnel (`transport: "wifi-tunnel"`, the default `WDA_TRANSPORT=auto`;
-`WDA_TRANSPORT=usb` requires the cable). A plain LAN relay to the phone's address
-(`transport: "wifi"`) exists only behind the explicit `WDA_ALLOW_LAN=1` and is
-unsafe on an untrusted network. Use Direct only on a trusted network.
+`WDA_TRANSPORT=usb` requires the cable). A LAN relay to the phone's address
+(`transport: "wifi"`) is used by default only for an iOS 15/16 runner that enforces
+request signing; anything else (the socat relay, a runner older than request
+signing) needs the explicit `WDA_ALLOW_LAN=1`. The LAN path is unencrypted: use it
+only on a trusted network.
 
 ## HTTP API
 

@@ -2800,8 +2800,9 @@ LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/nu
 # unset counts as auto, so an existing install with WDA_ALLOW_LAN=0 gets the
 # tunnel on upgrade; WDA_TRANSPORT=usb requires the cable). A plain LAN/socat
 # relay to the phone's address is available only through the explicit
-# WDA_ALLOW_LAN=1 escape hatch: the runner has no auth, so that one belongs on a
-# trusted, isolated network only.
+# WDA_ALLOW_LAN=1 escape hatch: it is unencrypted (and an old runner without
+# request signing accepts anyone), so that one belongs on a trusted, isolated
+# network only. An iOS 15/16 phone whose runner signs gets its LAN path anyway.
 WDA_URL="$(env_or_existing PHONE_REMOTE_WDA_URL)"
 WDA_MJPEG_URL="$(env_or_existing PHONE_REMOTE_WDA_MJPEG_URL)"
 if [ -z "$WDA_URL" ] && [ -z "$WDA_MJPEG_URL" ]; then

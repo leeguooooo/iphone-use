@@ -38,8 +38,10 @@
 #   WDA_TRANSPORT=...   auto (default): off USB, set up and relaunch through the
 #                       phone's encrypted CoreDevice Wi-Fi tunnel (USB preferred);
 #                       usb: require the cable
-#   WDA_ALLOW_LAN=1     also permit a plain, unauthenticated LAN socat relay to the
-#                       phone's address (unsafe on untrusted networks; default off)
+#   WDA_ALLOW_LAN=1     also permit a plain, unencrypted LAN socat relay to the
+#                       phone's address, and the LAN path to an iOS 15/16 runner
+#                       older than request signing (unsafe on untrusted networks;
+#                       default off)
 #   WDA_RUNNER_REBUILD=1 ignore the recorded runner product and build again
 #   IPHONE_USE_SETUP_BIN=... the iphone-use binary to hand over to (default: the
 #                       daemon's own, then ~/Applications, then /Applications)

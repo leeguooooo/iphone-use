@@ -13362,7 +13362,7 @@ async fn agent_mjpeg(
     };
     let upstream = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        client.get(&url).send(),
+        crate::runner_token::send(client.get(&url), crate::runner_token::instance_source()),
     )
     .await
     {

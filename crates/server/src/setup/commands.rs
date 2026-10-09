@@ -263,9 +263,10 @@ pub fn status(ctx: &Ctx) -> i32 {
         warn("video relay ownership/bind could not be verified");
         failed = true;
     }
-    if sys::http_ok(
+    if sys::runner_ok(
         &format!("http://127.0.0.1:{wda_port}/status"),
         Duration::from_secs(4),
+        &ctx.runner_auth(),
     ) {
         ok("device runner /status reachable through the loopback relay");
     } else {
@@ -285,10 +286,11 @@ fn sweep_device_runner(ctx: &Ctx) {
         return;
     }
     let udid = ctx.udid.clone();
+    let auth = crate::runner_token::TokenSource::at(ctx.state_dir());
     let serving = sys::block_on(async {
         tokio::time::timeout(
             Duration::from_secs(3),
-            crate::lockdown::runner_status(&udid, 8100),
+            crate::lockdown::runner_status(&udid, 8100, &auth),
         )
         .await
         .ok()

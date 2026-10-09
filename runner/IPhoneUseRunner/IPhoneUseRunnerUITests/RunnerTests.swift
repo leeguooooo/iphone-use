@@ -19,6 +19,8 @@ final class RunnerTests: XCTestCase {
   static let defaultExtensionCalls = 8
 
   var server: RunnerHTTPServer?
+  /// This launch's request authentication (both ports).
+  var auth: RunnerAuth?
   var mjpeg: RunnerMJPEGServer?
   var serveExpectation: XCTestExpectation?
   /// Why the command listener stopped, when it failed rather than being shut down.
@@ -85,11 +87,18 @@ final class RunnerTests: XCTestCase {
 
     let environment = ProcessInfo.processInfo.environment
     let port = environment["IPU_RUNNER_PORT"].flatMap { UInt16($0) } ?? Self.defaultPort
+    // Never logged: only whether there is one.
+    let auth = RunnerAuth(token: environment["IPU_RUNNER_TOKEN"])
+    self.auth = auth
+    NSLog("ipu-runner: request signing %@", auth.configured
+          ? "required (per-launch token)"
+          : "required, but no IPU_RUNNER_TOKEN was given: every request will be refused")
     let expectation = XCTestExpectation(description: "ipu-runner serves until /shutdown")
     serveExpectation = expectation
 
     let server = try RunnerHTTPServer(
       port: port,
+      auth: auth,
       inlineHandler: { [weak self] request in self?.inlineResponse(request) },
       captureHandler: { [weak self] request in self?.captureResponse(request) },
       mainHandler: { [weak self] request in
@@ -111,7 +120,7 @@ final class RunnerTests: XCTestCase {
     let mjpegPort = environment["IPU_RUNNER_MJPEG_PORT"].flatMap { UInt16($0) } ?? Self.defaultMJPEGPort
     if mjpegPort > 0 {
       do {
-        let mjpeg = try RunnerMJPEGServer(port: mjpegPort)
+        let mjpeg = try RunnerMJPEGServer(port: mjpegPort, auth: auth)
         mjpeg.start()
         self.mjpeg = mjpeg
       } catch {
@@ -220,6 +229,9 @@ final class RunnerTests: XCTestCase {
       "bundle": bundleID,
       "version": version,
       "busy": busySince != nil,
+      // Only an authenticated caller ever reads this: setup takes it as proof that the runner
+      // refuses unsigned requests, which is what makes a LAN relay safe to enable.
+      "auth": ["required": true, "scheme": RunnerAuth.scheme],
     ]
     if let mjpeg {
       value["mjpeg"] = mjpeg.statusValue()

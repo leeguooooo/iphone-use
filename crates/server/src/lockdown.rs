@@ -262,7 +262,14 @@ pub struct RunnerStatus {
 /// block buffer: on an iPhone 13 the line landed ~4 s after the runner
 /// printed it. Asking the port answers within milliseconds of the server
 /// starting.
-pub async fn runner_status(udid: &str, port: u16) -> Result<RunnerStatus> {
+///
+/// `auth` signs the request: a runner that requires signing answers an
+/// unsigned `/status` with 401.
+pub async fn runner_status(
+    udid: &str,
+    port: u16,
+    auth: &crate::runner_token::TokenSource,
+) -> Result<RunnerStatus> {
     const STATUS_TIMEOUT: Duration = Duration::from_millis(800);
     let want = usbmux::normalize_udid(udid);
     if want.is_empty() {
@@ -282,7 +289,13 @@ pub async fn runner_status(udid: &str, port: u16) -> Result<RunnerStatus> {
     };
     let body = tokio::time::timeout(STATUS_TIMEOUT, async {
         stream
-            .write_all(b"GET /status HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .write_all(
+                format!(
+                    "GET /status HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n{}\r\n",
+                    crate::runner_token::header_line(auth, "GET", "/status", b"")
+                )
+                .as_bytes(),
+            )
             .await?;
         let mut response = Vec::new();
         let mut chunk = [0u8; 8192];

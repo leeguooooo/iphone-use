@@ -174,22 +174,51 @@ pub fn pid_exists(pid: u32) -> bool {
 /// nothing answered. Like `curl -fsS`, a status of 400 or more counts as
 /// failure in [`http_ok`].
 pub fn http_get(url: &str, limit: Duration) -> Option<(u16, Vec<u8>)> {
-    http_request(url, limit, None, None)
+    http_request(url, limit, Auth::None, None)
 }
 
 pub fn http_get_auth(url: &str, limit: Duration, bearer: &str) -> Option<(u16, Vec<u8>)> {
-    http_request(url, limit, Some(bearer), None)
+    http_request(url, limit, Auth::Bearer(bearer), None)
 }
 
-/// Read at most `max_body` bytes of the body (an MJPEG stream never ends).
-pub fn http_get_prefix(url: &str, limit: Duration, max_body: usize) -> Option<(u16, Vec<u8>)> {
-    http_request(url, limit, None, Some(max_body))
+/// A GET to the device runner, signed with its per-launch token (see
+/// [`crate::runner_token`]). Unsigned when there is no token, which only an
+/// older runner (no request signing) still answers.
+pub fn runner_get(
+    url: &str,
+    limit: Duration,
+    auth: &crate::runner_token::TokenSource,
+) -> Option<(u16, Vec<u8>)> {
+    http_request(url, limit, Auth::Runner(auth), None)
+}
+
+/// [`runner_get`] answered below 400.
+pub fn runner_ok(url: &str, limit: Duration, auth: &crate::runner_token::TokenSource) -> bool {
+    runner_get(url, limit, auth).is_some_and(|(status, _)| status < 400)
+}
+
+/// Read at most `max_body` bytes of the runner's body (an MJPEG stream never
+/// ends).
+pub fn runner_get_prefix(
+    url: &str,
+    limit: Duration,
+    max_body: usize,
+    auth: &crate::runner_token::TokenSource,
+) -> Option<(u16, Vec<u8>)> {
+    http_request(url, limit, Auth::Runner(auth), Some(max_body))
+}
+
+#[derive(Clone, Copy)]
+enum Auth<'a> {
+    None,
+    Bearer(&'a str),
+    Runner(&'a crate::runner_token::TokenSource),
 }
 
 fn http_request(
     url: &str,
     limit: Duration,
-    bearer: Option<&str>,
+    auth: Auth<'_>,
     max_body: Option<usize>,
 ) -> Option<(u16, Vec<u8>)> {
     let rest = url.strip_prefix("http://")?;
@@ -211,8 +240,12 @@ fn http_request(
     let mut request = format!(
         "GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: */*\r\nConnection: close\r\nUser-Agent: iphone-use-setup\r\n"
     );
-    if let Some(token) = bearer {
-        request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    match auth {
+        Auth::None => {}
+        Auth::Bearer(token) => request.push_str(&format!("Authorization: Bearer {token}\r\n")),
+        Auth::Runner(source) => {
+            request.push_str(&crate::runner_token::header_line(source, "GET", path, b""))
+        }
     }
     request.push_str("\r\n");
     stream.write_all(request.as_bytes()).ok()?;

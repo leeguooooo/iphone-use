@@ -464,9 +464,15 @@ impl VideoHub {
         };
         let _ = stream.set_nodelay(true);
         let mode = self.effective_mode();
+        let target = format!("/h264?{}", mode.runner_query(self.bitrate / 1000));
         let request = format!(
-            "GET /h264?{} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n",
-            mode.runner_query(self.bitrate / 1000)
+            "GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\n{}\r\n",
+            crate::runner_token::header_line(
+                crate::runner_token::instance_source(),
+                "GET",
+                &target,
+                b""
+            )
         );
         if stream.write_all(request.as_bytes()).await.is_err() {
             return Passthrough::Lost;
@@ -573,9 +579,14 @@ impl VideoHub {
             }
             // A relay that accepts the connection but never answers must not
             // hold the pipeline past its last viewer.
-            let sent =
-                tokio::time::timeout(Duration::from_secs(5), client.get(&self.mjpeg_url).send())
-                    .await;
+            let sent = tokio::time::timeout(
+                Duration::from_secs(5),
+                crate::runner_token::send(
+                    client.get(&self.mjpeg_url),
+                    crate::runner_token::instance_source(),
+                ),
+            )
+            .await;
             let response = match sent {
                 Ok(Ok(response)) if response.status().is_success() => response,
                 outcome => {

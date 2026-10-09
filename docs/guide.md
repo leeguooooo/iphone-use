@@ -20,10 +20,11 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
   relaunch and the same relays reach the phone through CoreDevice's encrypted Wi-Fi tunnel
   with no flag (`WDA_TRANSPORT=auto`, the default; `WDA_TRANSPORT=usb` requires the cable;
   see *Wi-Fi* below). An iOS 15/16 phone has no such tunnel: `auto` starts its runner over
-  lockdown's TLS session on Wi-Fi instead, and driving it off the cable needs the plain LAN
-  relay (see the iOS 15/16 section). A plain LAN `socat` relay to the phone's address (`WDA_ALLOW_LAN=1`)
-  is only an explicit last resort: the runner has no authentication, so it is unsafe on
-  an untrusted network.
+  lockdown's TLS session on Wi-Fi instead, and driving it off the cable goes over a LAN
+  relay that setup turns on by default once the runner proves it enforces request signing
+  (see the iOS 15/16 section). Otherwise a plain LAN `socat` relay to the phone's address
+  (`WDA_ALLOW_LAN=1`, also what a runner older than request signing needs) is only an
+  explicit last resort: it is unencrypted, so it is unsafe on an untrusted network.
 - The browser gets the live picture from `/agent/mjpeg` (PNG stills as fallback) and
   sends input through `POST /control`, which answers success or failure for every
   command instead of accepting it blindly over a possibly dead channel.
@@ -383,7 +384,7 @@ intents are off until you choose one of:
 | USB reverse tunnel | Forward a phone-side port back to the Mac loopback listener | No LAN exposure; more moving parts. |
 
 Fire-and-forget verbs work on plain loopback. Never bind `0.0.0.0` on an untrusted
-network: WDA's own `8100`/`9100` have no authentication.
+network. (The runner's own `8100`/`9100` refuse unsigned requests; see *Security*.)
 
 ## MCP server
 
@@ -602,12 +603,14 @@ restarts (idle release, a crash) go over Wi-Fi too. Otherwise it starts over USB
 when the cable is pulled. Setup also answers the phone's local-network / "wireless data"
 prompt so the runner is reachable on the network. Starting over Wi-Fi is the
 `WDA_TRANSPORT=auto` default for these phones (`usb` keeps them on the cable). Driving
-the runner off the cable needs `WDA_ALLOW_LAN=1`, though: an iOS 15/16 phone has no
-CoreDevice tunnel, and usbmuxd's Wi-Fi attachment does not carry the runner's port
-(measured: the runner kept answering on its LAN address while the relay could not
-reach it), so only the plain LAN relay does, and that stays opt-in because the runner
-port has no authentication. `legacy_ios.unplug_ok` in `/agent/status` says whether
-the cable can be pulled.
+the runner off the cable goes over the LAN: an iOS 15/16 phone has no CoreDevice
+tunnel, and usbmuxd's Wi-Fi attachment does not carry the runner's port (measured: the
+runner kept answering on its LAN address while the relay could not reach it). Setup
+turns that LAN relay on by default once the runner proves it refuses unsigned requests;
+a runner older than request signing still needs `WDA_ALLOW_LAN=1`. The LAN path is
+signed, not encrypted: someone watching the Wi-Fi can see the screen, but cannot drive
+the phone. `legacy_ios.unplug_ok` in `/agent/status` says whether the cable can be
+pulled.
 On an iPhone X (iOS 16.5) a setup that rebuilt the runner took 141 s (80 s of it the
 build; DDI check 3.7 s, install 12.9 s and launch 7.5 s, all over Wi-Fi); a warm restart
 of an iPhone 12 mini (iOS 15.4.1) takes about 12 s.
@@ -650,7 +653,7 @@ setup takes the one phone with a live tunnel and refuses to guess among several)
 still wins whenever the phone is plugged in; a tap costs about 330–380 ms over the tunnel
 against about 280 ms over USB. Status then reports `transport: "wifi-tunnel"`.
 `WDA_TRANSPORT=usb` restores the old rule that setup needs the cable. `WDA_ALLOW_LAN=1`
-is a separate, unsafe opt-in for the plain LAN relay (`transport: "wifi"`); upgrading an
+is a separate, unsafe opt-in for the plain (unencrypted) LAN relay (`transport: "wifi"`); upgrading an
 install whose plists say `WDA_ALLOW_LAN=0` turns on the tunnel without opening the LAN
 relay. Many phones start a new runner over Wi-Fi (an iOS 27.0 iPhone 17 Pro Max does, in
 a few seconds; an iOS 27.0 iPhone 13 came up drivable in about 45 s with no cable); a phone
@@ -716,12 +719,17 @@ signature could invalidate.
 The daemon exposes live phone control over the network; treat its URL and password as
 credentials.
 
-- The password / cookie / bearer protects port `44321` only. **The runner's own `8100`
-  and `9100` on the phone have no authentication**, and the USB relay does not add
-  any — another host on the phone's Wi-Fi can reach them directly. Use it only on a
-  trusted, isolated network; turning off iPhone Wi-Fi while on USB removes that exposure.
-- A real authenticated device transport is Phase 2 (a companion app or a controlled
-  tunnel). Until then, daemon login does not protect the runner.
+- The password / cookie / bearer protects port `44321`. The runner's own `8100` and
+  `9100` on the phone listen on every interface, but refuse (401, no work done) any
+  request not signed with the token setup generates at each runner launch: HMAC-SHA256
+  over the method, target, body, a timestamp and a one-time nonce. The token stays on
+  the Mac (`<state dir>/runner-token`, 0600) and in the runner's test environment; it is
+  never sent, so a captured request can be neither replayed nor altered. A runner
+  launched without a token refuses everything.
+- What signing does not do: encrypt. USB and the CoreDevice tunnel are private to this
+  Mac; the iOS 15/16 LAN relay and `WDA_ALLOW_LAN=1` are plain HTTP, so screenshots,
+  element trees and video are readable by anyone who can see that Wi-Fi traffic. Anyone
+  who can read your user's files on the Mac can read the token.
 - From outside the LAN, reach `44321` through an authenticated HTTPS reverse proxy or a
   trusted VPN/tunnel (Tailscale, for example) — never by exposing the runner's ports. The daemon
   serves plain HTTP, honours `X-Forwarded-Proto`, and sets an `HttpOnly` +

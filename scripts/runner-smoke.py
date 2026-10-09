@@ -22,6 +22,8 @@ import time
 import urllib.error
 import urllib.request
 
+import runner_auth  # signs requests with the runner's per-launch token
+
 
 def call(base, method, path, body=None, timeout=60.0):
     """Returns (status, json_or_None, headers, elapsed_ms)."""
@@ -29,6 +31,7 @@ def call(base, method, path, body=None, timeout=60.0):
     request = urllib.request.Request(base + path, data=data, method=method)
     if data is not None:
         request.add_header("Content-Type", "application/json")
+    runner_auth.sign(request)
     started = time.perf_counter()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:

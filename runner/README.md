@@ -62,6 +62,16 @@ It is the process that serves both ports. When the ready listener comes up it lo
 
 ## Protocol
 
+- **Every request is signed** (port 8100 and the 9100 video stream alike). Both listen on every
+  interface of the phone, so the runner refuses, with 401 and no work done, anything without
+  `Authorization: IPU-HMAC-SHA256 ts=<unix secs>, nonce=<hex>, sig=<hex>`, where `sig` is the
+  HMAC-SHA256, keyed with this launch's token, of
+  `ipu-runner-v1\nMETHOD\nTARGET\nts\nnonce\nhex(sha256(body))` (TARGET = the request target
+  as sent, path plus `?query`). A nonce is accepted once, and only within 15 minutes of the
+  phone's clock. The token comes from `IPU_RUNNER_TOKEN` in the test environment; setup generates
+  a new one at every launch and keeps it in `<state dir>/runner-token` (0600). A runner started
+  without one refuses everything. Reference implementations: `RunnerAuth` (RunnerHTTP.swift),
+  `crates/core/src/runner_auth.rs`, `scripts/runner_auth.py`.
 - HTTP/1.1, one request per connection (`Connection: close`). Request bodies are JSON objects.
 - Commands are handled one at a time on the main thread. A serial command queue hands each one to
   main with `main.sync`, so no second command can start while one runs.
@@ -368,6 +378,8 @@ This is how every install runs the runner; the manual steps below are for develo
 
 ```bash
 XCTESTRUN="$(runner/build.sh --device <udid> | tail -1)"
+export IPU_RUNNER_TOKEN="$(openssl rand -hex 32)"   # the scripts sign with it
+TEST_RUNNER_IPU_RUNNER_TOKEN="$IPU_RUNNER_TOKEN" \
 xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "id=<udid>" \
   -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe
 iproxy 8100 8100 & iproxy 9100 9100 &      # host → device; or the existing WDA relays

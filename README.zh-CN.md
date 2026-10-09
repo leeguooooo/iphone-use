@@ -125,7 +125,7 @@ WebDriverAgent 的版本是 4.2 秒。实时画面 27–28 fps。每台手机有
 
 - [完整指南](docs/guide.zh-CN.md)：网页和 iOS App、flow 与官方 flow 源、生命周期、配置、安全、开发。
 - [Agent API 参考](docs/agent-api.html) · [MCP 工具](crates/mcp/README.md) · [架构](docs/direct-device-architecture.html) · [设备设置常见坑](docs/wda-setup.html) · [设备 runner](runner/README.md)
-- 安全只说一句：密码只保护 44321 端口，手机上 runner 自己的端口没有鉴权，只在可信网络里用（[详情](docs/guide.zh-CN.md#安全)）。
+- 安全只说一句：密码保护 44321 端口；手机上 runner 自己的端口只接受用每次启动的令牌签名的请求，但 iOS 15/16 的局域网路径不加密（[详情](docs/guide.zh-CN.md#安全)）。
 - 问题和建议：[GitHub issues](https://github.com/leeguooooo/iphone-use/issues)。
 
 ## 许可证
