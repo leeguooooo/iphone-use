@@ -4136,6 +4136,15 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 if release_backoff_until.is_some_and(|until| std::time::Instant::now() < until) {
                     continue;
                 }
+                // A probe that timed out over Wi-Fi is not proof the runner is
+                // gone; on a phone that cannot start one over Wi-Fi, stopping
+                // the supervisor here could kill a live runner, and a dead one
+                // is retried by the supervisor as soon as the cable is back.
+                if wifi_start_refused(&crate::instance::current().state_dir)
+                    && idle_release_keeps_wifi_runner(true, managed_transport(&state).await)
+                {
+                    continue;
+                }
                 // Own the release like the up path does. Without the CAS an
                 // explicit reconnect could win `try_begin_reconnecting` while
                 // we were awaiting above, and this stop would bootout the
