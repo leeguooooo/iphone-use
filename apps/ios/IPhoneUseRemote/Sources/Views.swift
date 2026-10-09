@@ -179,7 +179,7 @@ struct ConnectView: View {
                 } footer: {
                     AddressHint(text: address)
                 }
-                if let problem {
+                if let problem = problem ?? app.addError {
                     Section {
                         Label(problem, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)

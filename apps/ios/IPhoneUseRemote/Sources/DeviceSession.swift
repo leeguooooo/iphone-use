@@ -437,7 +437,7 @@ final class DeviceSession: Identifiable {
             !$0.released && !$0.releasing && !$0.reconnecting
                 && $0.deviceState != "offline" && $0.deviceState != "blocked"
         } ?? false
-        let wanted = client != nil && video != nil && !suspended && showable
+        let wanted = client != nil && video != nil && !suspended && showable && !Self.observeOnly
         if wanted, reader == nil, let client {
             let quality = wantedQuality
             let reader = H264StreamReader(
@@ -483,8 +483,16 @@ final class DeviceSession: Identifiable {
         reprobe()
     }
 
+    #if DEBUG
+    /// `-observeOnly YES`: never wake the phone or open its video (UI checks
+    /// against a daemon whose phone someone else is using).
+    static let observeOnly = UserDefaults.standard.bool(forKey: "observeOnly")
+    #else
+    static let observeOnly = false
+    #endif
+
     private func maybeAutoWake(_ status: PhoneStatus) {
-        guard autoWakeAllowed, !autoWakeTried, !busy, status.released, !status.releasing,
+        guard autoWakeAllowed, !Self.observeOnly, !autoWakeTried, !busy, status.released, !status.releasing,
               !status.humanHandoff, status.recoveryOwner.isEmpty || status.recoveryOwner == "daemon"
         else { return }
         autoWakeTried = true
