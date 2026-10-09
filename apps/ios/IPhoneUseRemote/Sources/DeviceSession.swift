@@ -46,6 +46,10 @@ final class DeviceSession: Identifiable {
     /// The next automatic connection attempt, while one is scheduled.
     private(set) var nextRetryAt: Date?
     private var retryAttempt = 0
+    /// Bumped by every connection attempt; an attempt that finds it changed
+    /// when it finishes was overtaken (a typed password, a disconnect) and
+    /// leaves the session alone.
+    private var generation = 0
     /// Why the last attempt failed; cleared once connected.
     private(set) var lastProblem: ConnectProblem?
     private var retryTask: Task<Void, Never>?
@@ -222,6 +226,8 @@ final class DeviceSession: Identifiable {
         if typed == nil, phase == .connecting { return }
         cancelRetry()
         if typed != nil { lastProblem = nil }
+        generation += 1
+        let mine = generation
         guard let base = DaemonClient.parse(address: address) else {
             phase = .failed(.badAddress)
             return
@@ -246,15 +252,19 @@ final class DeviceSession: Identifiable {
                 pendingPair = nil
             } else if let password {
                 try await client.login(password: password)
+                guard mine == generation else { return }
                 Keychain.save(password: password, for: address)
             }
-            try await adopt(client)
+            guard mine == generation else { return }
+            try await adopt(client, generation: mine)
         } catch DaemonError.pairingRevoked where Keychain.password(for: address) != nil {
+            guard mine == generation else { return }
             // The pairing died (password changed?); fall back to the password.
             Keychain.delete(for: Self.deviceAccount(address))
             phase = .idle
             await connect(password: nil)
         } catch {
+            guard mine == generation else { return }
             fail(ConnectProblem(error))
         }
     }
@@ -311,12 +321,14 @@ final class DeviceSession: Identifiable {
     /// Commit a client that has a session (a login, a renewal or a fresh
     /// pairing). An existing connection is dropped only once the new one has
     /// answered a status read.
-    func adopt(_ client: DaemonClient) async throws {
+    func adopt(_ client: DaemonClient, generation expected: Int? = nil) async throws {
         // Look for the LAN while the paired address answers the status read,
         // so connecting off the LAN costs no extra round trip.
         async let lan = client.probeLAN()
         let status = try await client.status()
         client.use(await lan)
+        if let expected, expected != generation { return }
+        generation += 1
         if self.client != nil { teardown() }
         Self.saveLANRoutes(of: client, for: address)
         client.onFallback = { [weak self] in
@@ -388,6 +400,7 @@ final class DeviceSession: Identifiable {
     }
 
     func disconnect() {
+        generation += 1
         cancelRetry()
         teardown()
         pathMonitor?.cancel()
@@ -579,7 +592,9 @@ final class DeviceSession: Identifiable {
     private func linkFailed(_ problem: ConnectProblem) {
         pollFailures += 1
         linkProblem = problem
-        if problem == .notIphoneUse || problem.needsLogin {
+        // A 404 or an odd body from a session that worked is a hiccup (a
+        // proxy, a restarting daemon), not proof the address is wrong.
+        if problem.needsLogin {
             fail(problem)
             teardown()
             return

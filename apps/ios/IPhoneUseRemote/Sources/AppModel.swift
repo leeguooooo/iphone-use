@@ -294,6 +294,8 @@ final class AppModel {
             await session.connect(password: password)
             let problem = Self.problem(of: session)
             if session.phase != .connected, problem == .wrongPassword {
+                // Keep what worked before: reconnect with the saved credentials.
+                await session.connect(password: nil)
                 return .rejected(problem.sentence, canSaveAnyway: false)
             }
             if session.phase != .connected {

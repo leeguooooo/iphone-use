@@ -300,6 +300,7 @@ struct DeviceEditForm: View {
     @State private var password = ""
     @State private var problem: String?
     @State private var loaded = false
+    @State private var scanning = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -341,8 +342,7 @@ struct DeviceEditForm: View {
                 }
                 .disabled(app.adding || DaemonClient.parse(address: address) == nil)
                 Button {
-                    if closesSheet { dismiss() }
-                    app.scanning = true
+                    scanning = true
                 } label: {
                     Label("在 Mac 上重新扫码", systemImage: "qrcode.viewfinder")
                 }
@@ -365,6 +365,15 @@ struct DeviceEditForm: View {
         }
         .onChange(of: address) { problem = nil }
         .onChange(of: password) { problem = nil }
+        // Presented from here: this form may itself sit in a sheet, where the
+        // root's scanner cannot appear.
+        .fullScreenCover(isPresented: $scanning) {
+            ScanSheet(onFound: { link in
+                Task {
+                    if case .connected = await app.pair(link) { dismiss() }
+                }
+            })
+        }
     }
 
     private var hasPassword: Bool {
