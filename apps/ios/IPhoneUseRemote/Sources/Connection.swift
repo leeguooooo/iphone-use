@@ -351,8 +351,10 @@ struct ConnectionPresentation: Equatable {
 
         if s.ownedByOther {
             let who = s.owner ?? "?"
+            let wait = Duration.seconds(max(1, s.ownerLeaseRemainingSecs))
+                .formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated, maximumUnitCount: 1))
             return .init(title: String(localized: "正被「\(who)」使用"),
-                         detail: String(localized: "另一个会话（AI 助手、网页或定时任务）正在操作这台手机。可以看画面，它停手 \(s.ownerLeaseRemainingSecs) 秒后就能操作。"),
+                         detail: String(localized: "另一个会话（AI 助手、网页或定时任务）正在操作这台手机。可以看画面；它停手后最多 \(wait) 就能操作。"),
                          short: String(localized: "被「\(who)」占用"), symbol: "person.badge.key", tone: .attention,
                          placement: .banner)
         }

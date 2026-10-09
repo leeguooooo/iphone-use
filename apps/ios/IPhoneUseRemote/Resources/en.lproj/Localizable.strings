@@ -195,7 +195,7 @@
 "正在自动重连…" = "Reconnecting…";
 "重连中" = "Reconnecting";
 "正被「%@」使用" = "In use by “%@”";
-"另一个会话（AI 助手、网页或定时任务）正在操作这台手机。可以看画面，它停手 %lld 秒后就能操作。" = "Another session (an AI agent, the web page or a schedule) is driving this phone. You can watch; you can drive it %lld s after it stops.";
+"另一个会话（AI 助手、网页或定时任务）正在操作这台手机。可以看画面；它停手后最多 %@ 就能操作。" = "Another session (an AI agent, the web page or a schedule) is driving this phone. You can watch; you can drive it at most %@ after it stops.";
 "正在释放设备…" = "Releasing the phone…";
 "一会儿就好，之后可以再连接。" = "One moment; you can connect again afterwards.";
 "释放中" = "Releasing";
