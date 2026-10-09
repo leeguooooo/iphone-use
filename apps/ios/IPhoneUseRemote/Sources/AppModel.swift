@@ -378,17 +378,17 @@ final class AppModel {
     /// Pull to refresh: every waiting device tries again now, every
     /// connected one reads its status.
     func refreshAll() async {
-        await withTaskGroup(of: Void.self) { group in
-            for session in sessions.values {
-                group.addTask { @MainActor in
-                    if session.phase == .connected {
-                        await session.refreshStatus()
-                    } else {
-                        await session.retryIfWaiting()
-                    }
+        // All at once (one slow Mac must not hold up the others).
+        let tasks = sessions.values.map { session in
+            Task { @MainActor in
+                if session.phase == .connected {
+                    await session.refreshStatus()
+                } else {
+                    await session.retryIfWaiting()
                 }
             }
         }
+        for task in tasks { await task.value }
     }
 
     /// The network came back (or changed): devices waiting on it retry at once.
