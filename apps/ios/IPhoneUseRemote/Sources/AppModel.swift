@@ -130,10 +130,15 @@ final class AppModel {
     @discardableResult
     private func makeSession(_ record: DeviceRecord) -> DeviceSession {
         let session = DeviceSession(record: record)
-        session.preferQuality = videoQuality
-        session.onIdentity = { [weak self] id, phone in self?.notePhone(phone, for: id) }
+        prepare(session)
         sessions[record.id] = session
         return session
+    }
+
+    /// Settings every session gets, however it was created.
+    private func prepare(_ session: DeviceSession) {
+        session.preferQuality = videoQuality
+        session.onIdentity = { [weak self] id, phone in self?.notePhone(phone, for: id) }
     }
 
     /// Remember what the phone calls itself, so the list names it offline too.
@@ -165,7 +170,7 @@ final class AppModel {
         let (list, record) = DeviceStore.upsert(address, into: devices)
         let existing = sessions[record.id]
         let session = existing ?? DeviceSession(record: record)
-        session.preferQuality = videoQuality
+        prepare(session)
         if existing == nil {
             devices = list
             sessions[record.id] = session
@@ -222,10 +227,12 @@ final class AppModel {
         let (list, record) = DeviceStore.upsert(base.absoluteString, into: devices)
         let existing = sessions[record.id]
         let session = existing ?? DeviceSession(record: record)
-        session.preferQuality = videoQuality
+        prepare(session)
         let keep = {
             if existing == nil {
-                self.devices = list
+                // The phone may have named itself while connecting, before
+                // the record was in the list.
+                self.devices = list.map { $0.id == record.id ? session.record : $0 }
                 self.sessions[record.id] = session
                 self.persist()
             }

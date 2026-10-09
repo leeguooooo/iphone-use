@@ -142,7 +142,8 @@ pub fn marketing_name(product_type: &str) -> Option<&'static str> {
 }
 
 static IDENTITY: Mutex<Option<Identity>> = Mutex::new(None);
-static STATE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// The state file, and the UDID of the phone it describes.
+static STATE_PATH: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
 
 fn current() -> Identity {
     IDENTITY
@@ -157,16 +158,27 @@ pub fn current_json() -> Value {
     current().to_json()
 }
 
-fn save(path: &Path, identity: &Identity) {
+/// Write `identity` for the phone `udid`.
+fn save(path: &Path, udid: &str, identity: &Identity) {
+    let mut value = identity.to_json();
+    if let Some(object) = value.as_object_mut() {
+        object.insert("udid".into(), json!(udid));
+    }
     let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, identity.to_json().to_string()).is_ok() {
+    if std::fs::write(&tmp, value.to_string()).is_ok() {
         let _ = std::fs::rename(&tmp, path);
     }
 }
 
-fn load(path: &Path) -> Option<Identity> {
+/// The saved identity, if it describes the phone `udid`: an instance pointed
+/// at another phone must not name it after the old one.
+fn load(path: &Path, udid: &str) -> Option<Identity> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
+    let saved = value.get("udid").and_then(Value::as_str)?;
+    if crate::usbmux::normalize_udid(saved) != crate::usbmux::normalize_udid(udid) {
+        return None;
+    }
     let identity = Identity::from_json(&value);
     (!identity.is_empty()).then_some(identity)
 }
@@ -198,8 +210,8 @@ fn update(reading: Identity) -> bool {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if let Some(path) = path {
-            save(&path, &snapshot);
+        if let Some((path, udid)) = path {
+            save(&path, &udid, &snapshot);
         }
     }
     changed
@@ -209,12 +221,15 @@ fn update(reading: Identity) -> bool {
 async fn refresh(udid: &str) -> bool {
     match tokio::time::timeout(LOCKDOWN_TIMEOUT, crate::lockdown::device_info(udid)).await {
         Ok(Ok(info)) => {
-            update(Identity {
+            let reading = Identity {
                 name: info.name.filter(|name| !name.trim().is_empty()),
                 product_type: info.product_type,
                 ios: info.product_version,
-            });
-            true
+            };
+            // lockdown may answer without any of the values: retry that.
+            let landed = !reading.is_empty();
+            update(reading);
+            landed
         }
         Ok(Err(error)) => {
             tracing::debug!("device: lockdown read: {error:#}");
@@ -250,18 +265,19 @@ fn runner_up(state: &AppState) -> bool {
 
 /// Load the cache and start the refresh loop.
 pub fn spawn(state: Arc<AppState>) {
+    // Without a target phone there is nothing to name.
+    let Some(udid) = state.device_udid.clone() else {
+        return;
+    };
     let path = crate::instance::current().state_dir.join(STATE_FILE);
-    if let Some(saved) = load(&path) {
+    if let Some(saved) = load(&path, &udid) {
         *IDENTITY
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(saved);
     }
     *STATE_PATH
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
-    let Some(udid) = state.device_udid.clone() else {
-        return;
-    };
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((path, udid.clone()));
     tokio::spawn(async move {
         let mut last: Option<tokio::time::Instant> = None;
         let mut last_ok = false;
@@ -346,12 +362,17 @@ mod tests {
             product_type: Some("iPhone10,3".into()),
             ios: Some("16.5".into()),
         };
-        save(&path, &identity);
-        assert_eq!(load(&path), Some(identity));
+        save(&path, "00008030-001A", &identity);
+        assert_eq!(load(&path, "00008030-001A"), Some(identity.clone()));
+        assert_eq!(load(&path, "00008030001a"), Some(identity));
+        // Another phone on this instance: the old name is not used.
+        assert_eq!(load(&path, "63f53bbb05918cbf"), None);
+        std::fs::write(&path, r#"{"name":"x"}"#).unwrap();
+        assert_eq!(load(&path, "00008030-001A"), None);
         std::fs::write(&path, "{}").unwrap();
-        assert_eq!(load(&path), None);
+        assert_eq!(load(&path, "00008030-001A"), None);
         std::fs::write(&path, "not json").unwrap();
-        assert_eq!(load(&path), None);
+        assert_eq!(load(&path, "00008030-001A"), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

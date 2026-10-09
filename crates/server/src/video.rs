@@ -560,6 +560,7 @@ impl VideoHub {
         if stream.write_all(request.as_bytes()).await.is_err() {
             return Passthrough::Lost;
         }
+        let connected_at = std::time::Instant::now();
 
         // Response head: the runner marks its H.264 stream; anything else
         // (an MJPEG multipart answer) means this upstream cannot do it.
@@ -574,6 +575,8 @@ impl VideoHub {
             let mut chunk = [0u8; 4096];
             match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk)).await {
                 Ok(Ok(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+                // Accepted and silent for seconds: as good as no frame.
+                Err(_) => return self.no_frames(mode),
                 _ => return Passthrough::Lost,
             }
         };
@@ -592,7 +595,6 @@ impl VideoHub {
         *self.latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         let mut chunk = vec![0u8; 64 * 1024];
-        let connected_at = std::time::Instant::now();
         let mut streamed = false;
         loop {
             while let Some((frame, blank)) = take_message(&mut buf) {
@@ -610,21 +612,7 @@ impl VideoHub {
                 return Passthrough::Stopped;
             }
             if !streamed && connected_at.elapsed() >= FIRST_FRAME_TIMEOUT {
-                let now = std::time::Instant::now();
-                let (fresh, next) = {
-                    let mut failures = self.mode_failures.lock().unwrap_or_else(|e| e.into_inner());
-                    let fresh = failures.mark_failed(mode, now);
-                    (fresh, failures.resolve(self.wanted_mode(), now))
-                };
-                if fresh {
-                    tracing::warn!(
-                        "h264: the runner sent no {} frame in {} s; streaming {} instead",
-                        mode.as_str(),
-                        FIRST_FRAME_TIMEOUT.as_secs(),
-                        next.as_str()
-                    );
-                }
-                return Passthrough::NoFrames;
+                return self.no_frames(mode);
             }
             if self.effective_mode() != mode {
                 // The new connection starts with a keyframe for everyone.
@@ -642,6 +630,13 @@ impl VideoHub {
                 () = self.wake.notified() => continue,
             };
             match read {
+                // Closed without ever sending a frame, after the grace: the
+                // mode does not work here. Sooner, it is a restart.
+                Ok(Ok(0)) | Ok(Err(_))
+                    if !streamed && connected_at.elapsed() >= FIRST_FRAME_TIMEOUT =>
+                {
+                    return self.no_frames(mode)
+                }
                 Ok(Ok(0)) | Ok(Err(_)) => return Passthrough::Lost,
                 Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
                 Err(_) => {} // a still screen sends little; check viewers again
@@ -650,6 +645,26 @@ impl VideoHub {
                 return Passthrough::Lost;
             }
         }
+    }
+
+    /// `mode` produced no frame on this upstream: mark it failed (logging
+    /// once) so the next connection uses the other mode.
+    fn no_frames(&self, mode: VideoMode) -> Passthrough {
+        let now = std::time::Instant::now();
+        let (fresh, next) = {
+            let mut failures = self.mode_failures.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = failures.mark_failed(mode, now);
+            (fresh, failures.resolve(self.wanted_mode(), now))
+        };
+        if fresh {
+            tracing::warn!(
+                "h264: the runner sent no {} frame in {} s; streaming {} instead",
+                mode.as_str(),
+                FIRST_FRAME_TIMEOUT.as_secs(),
+                next.as_str()
+            );
+        }
+        Passthrough::NoFrames
     }
 
     /// The MJPEG → H.264 path: decode each upstream JPEG and encode it on the

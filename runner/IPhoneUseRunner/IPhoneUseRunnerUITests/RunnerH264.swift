@@ -377,6 +377,9 @@ final class RunnerH264Stream {
     var encoder: Encoder?
     var frameIndex = 0
     var lastBlankCheck = Date.distantPast
+    /// The current encoder's failure was reported already (at the lowest level there is nothing
+    /// to step down to; it is said once, not per frame).
+    var failureReported = false
     let started = Date()
     while true {
       handoff.lock()
@@ -421,6 +424,7 @@ final class RunnerH264Stream {
           self?.broadcast(data, keyframe: isKey, pts: pts)
         }
         rebuilt = true
+        failureReported = false
         if encoder == nil {
           NSLog("ipu-runner: H.264 encoder could not start (%dx%d, %@ level %d)",
                 width, height, job.settings.mode.rawValue, level)
@@ -459,8 +463,10 @@ final class RunnerH264Stream {
       // An encoder that takes frames and never emits one (the iPhone X at full size) is replaced
       // by a cheaper one; viewers would otherwise wait on a black screen forever.
       let health = encoder.health()
-      if EncodeLimit.failed(submitted: health.submitted, outputs: health.outputs, errors: health.errors,
+      if !failureReported,
+         EncodeLimit.failed(submitted: health.submitted, outputs: health.outputs, errors: health.errors,
                             age: health.age) {
+        failureReported = true
         NSLog("ipu-runner: H.264 encoder %dx%d produced no frame (%d in, %d errors, last status %d)",
               encoder.width, encoder.height, health.submitted, health.errors, Int(health.lastStatus))
         if stepDown(job.settings.mode, from: level) {
