@@ -677,8 +677,10 @@ impl Setup {
                     "multiple iPhones are connected over USB ({}). Set WDA_UDID=<one>; refusing to guess.",
                     usb.join(" ")
                 ));
-            } else if !self.ctx.lan() && self.ctx.wifi_tunnel_allowed() {
-                // No cable: the one phone with a live encrypted Wi-Fi tunnel.
+            } else if self.ctx.wifi_tunnel_allowed() {
+                // No cable: the one phone with a live encrypted Wi-Fi tunnel
+                // (WDA_ALLOW_LAN only adds the plain LAN relay, it does not
+                // change which phone is picked).
                 // Guessing among several could drive the wrong phone.
                 let tunneled = checks::wifi_tunnel_udids();
                 if tunneled.len() == 1 {
@@ -698,7 +700,9 @@ impl Setup {
         if !self.ctx.udid.is_empty() {
             self.wait_until_connected()?;
         }
-        if !self.ctx.lan() {
+        // WDA_TRANSPORT=usb requires the cable even with WDA_ALLOW_LAN=1: that
+        // flag only adds the plain LAN relay, it is not a transport choice.
+        if !self.ctx.lan() || !self.ctx.wifi_tunnel_allowed() {
             if self.ctx.udid.is_empty() {
                 // usbmuxd lists nothing: ask the USB plane why (a cable that
                 // only charges, or an iPhone this Mac's device support cannot
@@ -3573,7 +3577,9 @@ impl Setup {
                 && if ctx.udid.is_empty() {
                     checks::wifi_tunnel_udids().len() == 1
                 } else {
-                    checks::wifi_tunnel(&ctx.udid)
+                    // A configured phone's tunnel may only need waking, and an
+                    // iOS 15/16 phone starts over its lockdown on Wi-Fi.
+                    checks::wifi_tunnel_or_wake(&ctx.udid) || legacy_reachable_over_wifi(ctx)
                 };
             if tunneled {
                 checklist_line(

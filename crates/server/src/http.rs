@@ -2977,8 +2977,8 @@ fn human_next_step(
                 "The iPhone isn't connected to this Mac: plug it in over USB (or join the same Wi-Fi) and unlock it — it reconnects on its own once the phone is back",
             ),
             "usb" => (
-                "用 USB 连接这台 iPhone（或让它和这台 Mac 在同一个 Wi-Fi 下），解锁并保持亮屏，连接会自动恢复",
-                "Plug this iPhone in over USB (or keep it on this Mac's Wi-Fi), unlock it and keep it awake — connecting resumes on its own",
+                "用 USB 连接这台 iPhone（或让它和这台 Mac 在同一个 Wi-Fi 下；设了 WDA_TRANSPORT=usb 时只能插线），解锁并保持亮屏，连接会自动恢复",
+                "Plug this iPhone in over USB (or keep it on this Mac's Wi-Fi; with WDA_TRANSPORT=usb only the cable works), unlock it and keep it awake — connecting resumes on its own",
             ),
             "trust" => (
                 "在 iPhone 上解锁并点「信任」，保持亮屏，连接会自动恢复",
@@ -3152,7 +3152,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iPhone isn't connected to this Mac — plug it in over USB (or join the same Wi-Fi) and unlock it; usbmuxd and CoreDevice both report it absent, so nothing is rebuilt or relaunched until it is back, and the managed service reconnects on its own — the relays are not the problem, so do not send another reconnect request",
         ),
         "usb" => Some(
-            "the configured iPhone is not available over USB or its encrypted CoreDevice Wi-Fi tunnel (or WDA_TRANSPORT=usb requires the cable) — connect that phone or keep it unlocked on this Mac's network, and keep it awake while the managed service retries",
+            "the configured iPhone is not available over USB or its encrypted CoreDevice Wi-Fi tunnel — connect that phone, or (unless WDA_TRANSPORT=usb, which allows only the cable; setup_message says when) keep it unlocked on this Mac's network; keep it awake while the managed service retries",
         ),
         "trust" => Some(
             "the configured iPhone needs trust or developer-signing approval — unlock the phone, accept the prompt, then keep it awake while the managed service retries",

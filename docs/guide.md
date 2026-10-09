@@ -19,7 +19,9 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
   phone's changing IP. USB is preferred when the phone is plugged in. Off the cable, setup,
   relaunch and the same relays reach the phone through CoreDevice's encrypted Wi-Fi tunnel
   with no flag (`WDA_TRANSPORT=auto`, the default; `WDA_TRANSPORT=usb` requires the cable;
-  see *Wi-Fi* below). A plain LAN `socat` relay to the phone's address (`WDA_ALLOW_LAN=1`)
+  see *Wi-Fi* below). An iOS 15/16 phone has no such tunnel: `auto` starts its runner over
+  lockdown's TLS session on Wi-Fi instead, and driving it off the cable needs the plain LAN
+  relay (see the iOS 15/16 section). A plain LAN `socat` relay to the phone's address (`WDA_ALLOW_LAN=1`)
   is only an explicit last resort: the runner has no authentication, so it is unsafe on
   an untrusted network.
 - The browser gets the live picture from `/agent/mjpeg` (PNG stills as fallback) and
