@@ -27,6 +27,21 @@ pub const XCODE_APP_STORE_URL: &str = "https://apps.apple.com/app/xcode/id497799
 pub const XCODE_CHOICE_FILE: &str = "xcode-developer-dir";
 pub const SUPERVISOR_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin";
 
+/// `WDA_TRANSPORT` default: USB when the phone is on the cable, otherwise its
+/// encrypted CoreDevice Wi-Fi tunnel.
+pub const TRANSPORT_AUTO: &str = "auto";
+/// `WDA_TRANSPORT=usb`: setup and relaunch require the cable.
+pub const TRANSPORT_USB: &str = "usb";
+
+/// `WDA_TRANSPORT` as configured (unset or empty = `auto`).
+pub fn resolve_transport(raw: &str) -> Result<&'static str, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | TRANSPORT_AUTO => Ok(TRANSPORT_AUTO),
+        TRANSPORT_USB => Ok(TRANSPORT_USB),
+        other => Err(format!("WDA_TRANSPORT must be auto or usb (got '{other}')")),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Ctx {
     pub instance: Instance,
@@ -66,8 +81,13 @@ pub struct Ctx {
     pub asc_key_path: String,
     pub asc_key_id: String,
     pub asc_issuer_id: String,
-    /// `0` or `1`.
+    /// `0` or `1`: `1` also permits the unauthenticated LAN `socat` relay to
+    /// the phone's network address (unsafe on an untrusted network).
     pub allow_lan: String,
+    /// `WDA_TRANSPORT`: `auto` (default) sets up and relaunches a phone that
+    /// is off the cable through CoreDevice's encrypted Wi-Fi tunnel, USB
+    /// preferred when both are there; `usb` requires the cable for that.
+    pub transport: String,
     pub udid: String,
     /// `WDA_KEEPALIVE=1`: the launchd supervisor's run.
     pub keepalive: bool,
@@ -135,6 +155,7 @@ impl Ctx {
             asc_key_id: String::new(),
             asc_issuer_id: String::new(),
             allow_lan: "0".into(),
+            transport: TRANSPORT_AUTO.into(),
             udid: String::new(),
             keepalive: false,
             developer_dir: None,
@@ -236,6 +257,7 @@ impl Ctx {
             asc_issuer = wda_env("WDA_ASC_ISSUER_ID");
         }
         let mut allow_lan = env("WDA_ALLOW_LAN").unwrap_or_default();
+        let mut transport = env("WDA_TRANSPORT").unwrap_or_default();
         // A named instance's first setup has no supervisor yet: its signing
         // policy is what `install.sh --instance` persisted in the daemon plist.
         if !ctx.instance.is_default() {
@@ -247,6 +269,9 @@ impl Ctx {
             }
             if allow_lan.is_empty() {
                 allow_lan = daemon_env("WDA_ALLOW_LAN");
+            }
+            if transport.is_empty() {
+                transport = daemon_env("WDA_TRANSPORT");
             }
             if asc_path.is_empty() && asc_id.is_empty() && asc_issuer.is_empty() {
                 asc_path = daemon_env("WDA_ASC_KEY_PATH");
@@ -263,6 +288,12 @@ impl Ctx {
         if allow_lan != "0" && allow_lan != "1" {
             return Err(("WDA_ALLOW_LAN must be 0 or 1".into(), 1));
         }
+        if transport.is_empty() {
+            transport = wda_env("WDA_TRANSPORT");
+        }
+        let transport = resolve_transport(&transport)
+            .map_err(|message| (message, 1))?
+            .to_string();
         let mut udid = env("WDA_UDID")
             .or_else(|| env("PHONE_REMOTE_UDID"))
             .unwrap_or_default();
@@ -294,6 +325,7 @@ impl Ctx {
         ctx.asc_key_id = asc_id;
         ctx.asc_issuer_id = asc_issuer;
         ctx.allow_lan = allow_lan;
+        ctx.transport = transport;
         ctx.udid = udid;
         Ok(ctx)
     }
@@ -304,6 +336,13 @@ impl Ctx {
 
     pub fn lan(&self) -> bool {
         self.allow_lan == "1"
+    }
+
+    /// A phone that is off USB may be set up or relaunched through its
+    /// CoreDevice Wi-Fi tunnel (encrypted, reachable from this Mac only).
+    /// Independent of `lan()`, which only adds the plain LAN relay.
+    pub fn wifi_tunnel_allowed(&self) -> bool {
+        self.transport == TRANSPORT_AUTO
     }
 
     pub fn asc_signing_enabled(&self) -> bool {
@@ -719,6 +758,19 @@ pub mod tests_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_defaults_to_auto_and_only_usb_opts_out_of_the_tunnel() {
+        assert_eq!(resolve_transport(""), Ok(TRANSPORT_AUTO));
+        assert_eq!(resolve_transport("auto"), Ok(TRANSPORT_AUTO));
+        assert_eq!(resolve_transport(" USB "), Ok(TRANSPORT_USB));
+        assert!(resolve_transport("lan").is_err());
+        let mut ctx = tests_support::ctx();
+        assert!(ctx.wifi_tunnel_allowed(), "the default allows the tunnel");
+        assert!(!ctx.lan(), "the default never opens the plain LAN relay");
+        ctx.transport = TRANSPORT_USB.into();
+        assert!(!ctx.wifi_tunnel_allowed());
+    }
 
     #[test]
     fn cksum_matches_the_posix_tool() {

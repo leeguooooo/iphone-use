@@ -16,9 +16,12 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
   speaks the same HTTP API), starts it on the phone, and pins two loopback relays
   (`iphone-use relay`, over macOS's own usbmuxd): `8100` for control, `9100` for the MJPEG screen.
   The daemon only ever talks to localhost, so a background process never holds the
-  phone's changing IP. USB is the supported path. Off the cable, the same relays reach the
-  phone through CoreDevice's encrypted Wi-Fi tunnel (see *Wi-Fi* below); a LAN `socat`
-  relay (`WDA_ALLOW_LAN=1`) is only an explicit last resort.
+  phone's changing IP. USB is preferred when the phone is plugged in. Off the cable, setup,
+  relaunch and the same relays reach the phone through CoreDevice's encrypted Wi-Fi tunnel
+  with no flag (`WDA_TRANSPORT=auto`, the default; `WDA_TRANSPORT=usb` requires the cable;
+  see *Wi-Fi* below). A plain LAN `socat` relay to the phone's address (`WDA_ALLOW_LAN=1`)
+  is only an explicit last resort: the runner has no authentication, so it is unsafe on
+  an untrusted network.
 - The browser gets the live picture from `/agent/mjpeg` (PNG stills as fallback) and
   sends input through `POST /control`, which answers success or failure for every
   command instead of accepting it blindly over a possibly dead channel.
@@ -633,12 +636,19 @@ plugged in.
 **Wi-Fi.** usbmuxd's network attachment of a Wi-Fi phone only reaches lockdownd, never the
 runner's port, so `iphone-use relay` dials the phone's CoreDevice tunnel instead (the
 `tunnelIPAddress` that `devicectl list devices` reports while `tunnelState` is `connected`).
-That tunnel is encrypted and routed by this Mac only, unlike a LAN `socat` relay. The working
-pattern is: start the runner over USB, then unplug — the runner keeps running and the
-relays follow it onto the tunnel; status then reports `transport: "wifi-tunnel"`. Many
-phones also start a new runner over Wi-Fi (an iOS 27.0 iPhone 17 Pro Max does, in a few
-seconds); a phone whose iOS refuses that (`wifi_automation_refused`) needs the cable again
-whenever its runner has to restart, so idle release leaves its Wi-Fi runner up.
+That tunnel is encrypted and routed by this Mac only, unlike a LAN `socat` relay, so it
+needs no opt-in: a paired phone that is off USB but has a live tunnel is set up and
+relaunched over it (`WDA_TRANSPORT=auto`, the default; with no `WDA_UDID` and no cable,
+setup takes the one phone with a live tunnel and refuses to guess among several). USB
+still wins whenever the phone is plugged in; a tap costs about 330–380 ms over the tunnel
+against about 280 ms over USB. Status then reports `transport: "wifi-tunnel"`.
+`WDA_TRANSPORT=usb` restores the old rule that setup needs the cable. `WDA_ALLOW_LAN=1`
+is a separate, unsafe opt-in for the plain LAN relay (`transport: "wifi"`); upgrading an
+install whose plists say `WDA_ALLOW_LAN=0` turns on the tunnel without opening the LAN
+relay. Many phones start a new runner over Wi-Fi (an iOS 27.0 iPhone 17 Pro Max does, in
+a few seconds; an iOS 27.0 iPhone 13 came up drivable in about 45 s with no cable); a phone
+whose iOS refuses that (`wifi_automation_refused`) needs the cable again whenever its
+runner has to restart, so idle release leaves its Wi-Fi runner up.
 
 **Who may end a reconnect.** A bring-up is owned by the task that started it, and only
 that owner ends it. Every begin mints a generation, so a late task cannot end the round

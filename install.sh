@@ -2227,7 +2227,7 @@ install_named_instance() {
     for key in PHONE_REMOTE_IDLE_RELEASE_SECS PHONE_REMOTE_PASSWORD PHONE_REMOTE_NO_UPDATE_CHECK; do
         add_env "$key" "$(pick "$key")"
     done
-    for key in WDA_TEAM_ID WDA_BUNDLE_ID WDA_ALLOW_LAN IPU_RUNNER_SRC; do
+    for key in WDA_TEAM_ID WDA_BUNDLE_ID WDA_ALLOW_LAN WDA_TRANSPORT IPU_RUNNER_SRC; do
         add_env "$key" "$(pick "$key" inherit)"
     done
     if [ -n "${WDA_ASC_KEY_PATH:-}${WDA_ASC_KEY_ID:-}${WDA_ASC_ISSUER_ID:-}" ]; then
@@ -2795,9 +2795,13 @@ LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/nu
 [ -n "$LAN_IP" ] || LAN_IP="<this-mac-LAN-ip>"
 
 # Direct mode defaults to deterministic localhost endpoints. setup-wda.sh owns
-# the USB relays (`iphone-use relay` over usbmuxd) behind these URLs; a LAN/socat relay is available only
-# through the explicit WDA_ALLOW_LAN=1 escape hatch. WDA itself has no auth, so
-# the Mac and phone still belong on a trusted or isolated network.
+# the relays (`iphone-use relay`) behind these URLs: over USB, or off the cable
+# through CoreDevice's encrypted Wi-Fi tunnel (WDA_TRANSPORT=auto, the default;
+# unset counts as auto, so an existing install with WDA_ALLOW_LAN=0 gets the
+# tunnel on upgrade; WDA_TRANSPORT=usb requires the cable). A plain LAN/socat
+# relay to the phone's address is available only through the explicit
+# WDA_ALLOW_LAN=1 escape hatch: the runner has no auth, so that one belongs on a
+# trusted, isolated network only.
 WDA_URL="$(env_or_existing PHONE_REMOTE_WDA_URL)"
 WDA_MJPEG_URL="$(env_or_existing PHONE_REMOTE_WDA_MJPEG_URL)"
 if [ -z "$WDA_URL" ] && [ -z "$WDA_MJPEG_URL" ]; then
@@ -3004,7 +3008,8 @@ for ENV_KEY in \
     IPU_RUNNER_SRC \
     WDA_PORT \
     MJPEG_PORT \
-    WDA_ALLOW_LAN
+    WDA_ALLOW_LAN \
+    WDA_TRANSPORT
 do
     append_plist_env "$ENV_KEY" "$(wda_env_or_existing "$ENV_KEY")"
 done
