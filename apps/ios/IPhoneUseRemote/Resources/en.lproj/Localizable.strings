@@ -102,3 +102,56 @@
 "演示里只能点按和从左边缘右滑返回" = "In the demo you can tap, and swipe right from the left edge to go back";
 "连上自己的 Mac 后，可以在这里给手机输入文字" = "Once your own Mac is connected, you can type text into the phone here";
 "演示内容缺失，请重新安装 App" = "The demo content is missing. Reinstall the app";
+
+/* Several phones */
+"我的手机" = "My phones";
+"设备" = "Devices";
+"全部手机" = "All phones";
+"添加手机" = "Add phone";
+"扫码添加" = "Scan to add";
+"手动添加" = "Add manually";
+"每台手机在 Mac 上各有一个 iphone-use 页面（不同端口），各扫一次它自己的二维码。" = "Each phone has its own iphone-use page on the Mac (on its own port). Scan each one's own code.";
+"没有显示的手机" = "No phones shown";
+"在「设备」里打开「显示在总览」。" = "Turn on Show in overview in Devices.";
+"显示在总览" = "Show in overview";
+"在总览显示 %@" = "Show %@ in the overview";
+"从总览隐藏" = "Hide from overview";
+"一台手机对应 Mac 上的一个 iphone-use 实例（各自的端口和二维码）。隐藏的手机不占画面，空闲时会自动释放。" = "Each phone is one iphone-use instance on a Mac, with its own port and code. A hidden phone streams nothing and is released when idle.";
+"打开全屏操作" = "Opens it full screen";
+"点按重命名" = "Tap to rename";
+"重命名" = "Rename";
+"名称" = "Name";
+"忘记这台手机" = "Forget this phone";
+"忘记这台手机？" = "Forget this phone?";
+"忘记" = "Forget";
+"会删掉这台手机的配对，之后要重新扫码才能连接。" = "This removes the pairing for this phone. You will need to scan its code again to connect.";
+"重新连接" = "Reconnect";
+"连接失败" = "Connection failed";
+"这台设备没有保存的配对，请重新扫码" = "No saved pairing for this device. Scan its code again";
+"可操作" = "Ready";
+"已交还" = "Handed back";
+"空闲" = "Idle";
+"锁屏" = "Locked";
+"被「%@」占用" = "In use by “%@”";
+
+/* Sync */
+"同步" = "Sync";
+"同步操作" = "Sync control";
+"选择手机（至少两台）" = "Choose phones (at least two)";
+"在主控手机上的每个手势和输入的文字，会按相同的相对位置同时发到所有选中的手机，各自显示送达结果。没送达的不会自动重发，结果未知的也不会。被其它会话占用的手机会被跳过。长按或右滑可以换主控。" = "Every gesture and every text you send on the lead phone goes to all the chosen phones at once, at the same relative position, and each shows whether it arrived. Nothing is resent automatically, including when the result is unknown. Phones another session is driving are skipped. Long-press or swipe right to change the lead.";
+"主控" = "Lead";
+"设为主控" = "Make lead";
+"开始" = "Start";
+"同步 · %lld 台" = "Sync · %lld phones";
+"同步中：会输入到全部 %lld 台手机" = "Sync is on: this goes to all %lld phones";
+"全部连接" = "Connect all";
+"退出同步" = "Exit sync";
+"已送达" = "Delivered";
+"未发送" = "Not sent";
+"被占用" = "In use";
+"结果未知" = "Unknown";
+"失败" = "Failed";
+"没有发出（%@），可以再操作一次" = "Not sent (%@). You can do it again";
+"手机正被「%@」控制，已跳过" = "“%@” is driving this phone; skipped";
+"不确定是否送达，请先看画面再决定要不要重做" = "It may or may not have arrived. Check the screen before doing it again";
+"连不上服务" = "Cannot reach the server";

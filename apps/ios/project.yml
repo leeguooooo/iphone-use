@@ -23,7 +23,31 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.remote
         PRODUCT_NAME: Phone Use Remote
+        PRODUCT_MODULE_NAME: IPhoneUseRemote
         INFOPLIST_FILE: IPhoneUseRemote/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_STRICT_CONCURRENCY: complete
+  IPhoneUseRemoteTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - IPhoneUseRemoteTests
+    dependencies:
+      - target: IPhoneUseRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.remote.tests
+        GENERATE_INFOPLIST_FILE: YES
+        # The app's product name has spaces; xcodegen's default host path uses the target name.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Phone Use Remote.app/Phone Use Remote"
+        SWIFT_STRICT_CONCURRENCY: complete
+schemes:
+  IPhoneUseRemote:
+    build:
+      targets:
+        IPhoneUseRemote: all
+        IPhoneUseRemoteTests: [test]
+    test:
+      targets:
+        - IPhoneUseRemoteTests

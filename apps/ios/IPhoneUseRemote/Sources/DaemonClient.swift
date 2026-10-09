@@ -21,6 +21,16 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
     /// The app on screen hides it from capture; the picture is blank and
     /// `/agent/screenshot` answers with a wireframe of its accessibility tree.
     var captureRedacted: Bool
+    /// Who holds the owner lease (`X-Phone-Owner`), while it is live.
+    var owner: String?
+    var ownerLeaseRemainingSecs: Int
+
+    /// Another session (an agent, the web page, a schedule) holds this
+    /// phone's lease: a gesture from here would be refused with 409.
+    var ownedByOther: Bool {
+        guard let owner, !owner.isEmpty, ownerLeaseRemainingSecs > 0 else { return false }
+        return owner != DaemonClient.ownerName
+    }
 
     enum CodingKeys: String, CodingKey {
         case deviceState = "device_state"
@@ -33,6 +43,8 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         case recoveryOwner = "recovery_owner"
         case version
         case captureRedacted = "capture_redacted"
+        case owner
+        case ownerLeaseRemainingSecs = "owner_lease_remaining_secs"
     }
 
     init(from decoder: Decoder) throws {
@@ -52,6 +64,8 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         recoveryOwner = try c.decodeIfPresent(String.self, forKey: .recoveryOwner) ?? ""
         version = try c.decodeIfPresent(String.self, forKey: .version) ?? ""
         captureRedacted = try c.decodeIfPresent(Bool.self, forKey: .captureRedacted) ?? false
+        owner = try c.decodeIfPresent(String.self, forKey: .owner)
+        ownerLeaseRemainingSecs = try c.decodeIfPresent(Int.self, forKey: .ownerLeaseRemainingSecs) ?? 0
     }
 
     /// The line to show a person: the daemon's `next_step`, else (older
@@ -97,6 +111,9 @@ enum DaemonError: LocalizedError {
     case lockedOut
     case http(Int, String)
     case unreachable(String)
+    /// A transport error, with its code: whether a gesture may have left
+    /// this device depends on it (see `DeliveryOutcome.classify(transport:)`).
+    case transport(URLError.Code, String)
 
     var errorDescription: String? {
         switch self {
@@ -107,7 +124,7 @@ enum DaemonError: LocalizedError {
         case .pairingRevoked: return String(localized: "配对已失效（可能改过控制密码），请重新扫码")
         case .lockedOut: return String(localized: "密码错误次数太多，30 秒后再试")
         case let .http(code, body): return String(localized: "服务返回 \(code)：\(String(body.prefix(160)))")
-        case let .unreachable(why): return String(localized: "连不上服务：\(why)")
+        case let .unreachable(why), let .transport(_, why): return String(localized: "连不上服务：\(why)")
         }
     }
 }
@@ -121,6 +138,10 @@ enum DaemonError: LocalizedError {
 /// to whichever route is active, and a LAN route that stops answering falls
 /// back to the paired address.
 final class DaemonClient: @unchecked Sendable {
+    /// The owner lease this app takes on every daemon it drives. Each daemon
+    /// keeps its own lease, so driving several phones holds one per phone.
+    static let ownerName = "ios-remote"
+
     /// The paired address: what credentials are saved under, and the route
     /// that always works.
     let publicBase: URL
@@ -275,8 +296,11 @@ final class DaemonClient: @unchecked Sendable {
 
     /// Send one action. The daemon drops it if it cannot start within the TTL,
     /// so a gesture never lands seconds late on a screen that moved on.
-    @discardableResult
-    func control(_ action: PhoneAction) async throws -> [String: Any] {
+    ///
+    /// Answers what became of it instead of throwing, so a caller driving
+    /// several phones can report each one. Never retried here: a gesture
+    /// that failed on the LAN is not resent on the paired route either.
+    func deliver(_ action: PhoneAction) async -> DeliveryOutcome {
         var body = action.json
         body["issued_at_ms"] = Int(Date().timeIntervalSince1970 * 1000)
         body["ttl_ms"] = 2500
@@ -284,16 +308,20 @@ final class DaemonClient: @unchecked Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("1", forHTTPHeaderField: "X-Phone-Control")
-        request.setValue("ios-remote", forHTTPHeaderField: "X-Phone-Owner")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = 15
-        let (data, response) = try await send(request)
-        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        if response.statusCode == 401 { throw DaemonError.sessionExpired }
-        guard (200..<300).contains(response.statusCode) else {
-            throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
+        request.setValue(Self.ownerName, forHTTPHeaderField: "X-Phone-Owner")
+        guard let encoded = try? JSONSerialization.data(withJSONObject: body) else {
+            return .notSent(reason: "invalid_action")
         }
-        return json
+        request.httpBody = encoded
+        request.timeoutInterval = 15
+        do {
+            let (data, response) = try await send(request)
+            return DeliveryOutcome.classify(status: response.statusCode, body: data)
+        } catch DaemonError.transport(let code, _) {
+            return DeliveryOutcome.classify(transport: code)
+        } catch {
+            return .outcomeUnknown
+        }
     }
 
     /// Ask the live stream for a keyframe (the decoder lost its place).
@@ -312,7 +340,7 @@ final class DaemonClient: @unchecked Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("1", forHTTPHeaderField: "X-Phone-Control")
-        request.setValue("ios-remote", forHTTPHeaderField: "X-Phone-Owner")
+        request.setValue(Self.ownerName, forHTTPHeaderField: "X-Phone-Owner")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["mode": mode])
         request.timeoutInterval = 60
         let (data, response) = try await send(request)
@@ -426,7 +454,7 @@ final class DaemonClient: @unchecked Sendable {
                 $0 != publicBase && request.url?.absoluteString.hasPrefix($0.absoluteString + "/") == true
             }
             guard let lan, lan != publicBase else {
-                throw DaemonError.unreachable(error.localizedDescription)
+                throw DaemonError.transport(error.code, error.localizedDescription)
             }
             if routes.withLock({ routes -> Bool in
                 guard routes.active == lan else { return false }
@@ -437,12 +465,14 @@ final class DaemonClient: @unchecked Sendable {
             }
             guard request.value(forHTTPHeaderField: "X-Phone-Owner") == nil,
                   let retry = onPublic(request, from: lan) else {
-                throw DaemonError.unreachable(error.localizedDescription)
+                throw DaemonError.transport(error.code, error.localizedDescription)
             }
             do {
                 return try await transmit(retry, followRedirects: followRedirects)
             } catch let error as DaemonError {
                 throw error
+            } catch let error as URLError {
+                throw DaemonError.transport(error.code, error.localizedDescription)
             } catch {
                 throw DaemonError.unreachable(error.localizedDescription)
             }

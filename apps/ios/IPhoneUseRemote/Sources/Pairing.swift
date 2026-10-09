@@ -141,7 +141,8 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
 
 /// The scanner sheet: camera, a framing hint and a cancel button.
 struct ScanSheet: View {
-    let model: RemoteModel
+    /// Called with the scanned link once the camera has closed.
+    let onFound: (PairLink) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var failure: String?
 
@@ -165,7 +166,7 @@ struct ScanSheet: View {
                 QRScannerView(
                     onFound: { link in
                         dismiss()
-                        Task { await model.pair(link) }
+                        onFound(link)
                     },
                     onFailure: { failure = $0 })
                 .ignoresSafeArea()

@@ -4,19 +4,29 @@ import Observation
 import Security
 import UIKit
 
-/// App state: the saved connection, the session with the daemon, the phone's
-/// status, and the live video stream.
+/// One paired daemon (one phone): its session, the phone's status, the live
+/// video stream and the gestures sent to it. `AppModel` holds one per saved
+/// device.
 @MainActor
 @Observable
-final class RemoteModel {
+final class DeviceSession: Identifiable {
     enum Phase: Equatable {
-        case setup            // no saved connection yet
+        case setup            // no usable credentials, or disconnected
         case connecting
         case connected
         case failed(String)
     }
 
-    var address: String = UserDefaults.standard.string(forKey: "address") ?? ""
+    /// Who is showing this phone's video. The focused screen asks for the
+    /// person's chosen quality; a tile always streams in performance mode
+    /// (half size, low bit rate), which keeps several decoders cheap.
+    enum ViewerRole { case tile, full }
+
+    var record: DeviceRecord
+    nonisolated let id: UUID
+    var address: String { record.address }
+    var name: String { record.name }
+
     var phase: Phase = .setup
     var status: PhoneStatus?
     var videoLive = false
@@ -26,11 +36,17 @@ final class RemoteModel {
     var lastFrameAt: Date?
     /// Wireframe shown over a picture the app blanked (see `captureRedacted`).
     var redactedImage: UIImage?
-    /// The recorded demo, while someone is trying the app without a Mac.
-    var demo: DemoSession?
     /// Requests go straight to the Mac on the LAN rather than through the
     /// paired (tunnel) address.
     var onLAN = false
+    /// The last gesture's result while sync is on, shown briefly on its tile.
+    var delivery: DeliveryNote?
+
+    struct DeliveryNote: Equatable {
+        let outcome: DeliveryOutcome
+        let seq: Int
+    }
+
     /// The paired address is a public https tunnel, so the route is worth
     /// showing: 局域网 when direct, 外网 when through the tunnel.
     var routeLabel: String? {
@@ -39,33 +55,41 @@ final class RemoteModel {
         return client.publicBase.scheme == "https" ? String(localized: "外网") : nil
     }
 
-    func startDemo() {
-        demo = DemoSession()
-        if demo == nil { phase = .failed(String(localized: "演示内容缺失，请重新安装 App")) }
-    }
-
-    /// Viewing mode, remembered on this device: performance (half size, low
-    /// bandwidth) or quality (native resolution, high frame rate). Switching
-    /// reconnects the stream, which starts on a fresh keyframe.
-    var videoQuality: Bool = UserDefaults.standard.bool(forKey: "videoQuality") {
+    /// The person's viewing choice for the focused screen (quality: native
+    /// resolution, high frame rate). Tiles ignore it. A change that alters
+    /// the running stream reconnects it, starting on a fresh keyframe.
+    var preferQuality: Bool = false {
         didSet {
-            guard videoQuality != oldValue else { return }
-            UserDefaults.standard.set(videoQuality, forKey: "videoQuality")
+            guard preferQuality != oldValue, reader != nil, streamQuality != wantedQuality else { return }
             restartStream()
         }
     }
-    private var redactedTask: Task<Void, Never>?
 
-    private var client: DaemonClient?
+    /// The app is in the background: hold no stream, so the daemon sees no
+    /// viewer and its idle release works as if the app were closed.
+    var suspended = false {
+        didSet { if suspended != oldValue { updateStream() } }
+    }
+
+    /// Opening a device is the request to drive it: an idle-released phone
+    /// is started at once, once per foreground. `AppModel` allows it only
+    /// for the device on screen (and sync members), never for every tile,
+    /// so phones nobody looks at keep their idle release.
+    var autoWakeAllowed = false {
+        didSet { if autoWakeAllowed && !oldValue { autoWakeTried = false } }
+    }
+
+    private var redactedTask: Task<Void, Never>?
+    private(set) var client: DaemonClient?
     private var reader: H264StreamReader?
+    /// The mode the running reader asked for.
+    private var streamQuality = false
     private weak var video: VideoDisplayView?
+    private var role: ViewerRole = .tile
     private var statusTask: Task<Void, Never>?
-    private var pendingActions = 0
     private var reloginTask: Task<Bool, Never>?
-    /// Opening the app is the request to drive the phone: an idle-released
-    /// device is started at once, once per foreground, instead of waiting for
-    /// a tap on 连接手机. Never for a phone handed back to its holder.
     private var autoWakeTried = false
+    private var deliverySeq = 0
     /// Network changes (Wi-Fi joined or left) re-check the LAN route.
     private var pathMonitor: NWPathMonitor?
     private var probeTask: Task<Void, Never>?
@@ -73,51 +97,35 @@ final class RemoteModel {
     /// While on the paired route, look for the LAN again this often.
     private static let reprobeInterval: TimeInterval = 30
 
-    init() {
-        #if DEBUG
-        // UI checks on the simulator: `-address <url> -password <pw>`, or
-        // `-pair <QR text>` standing in for a scan (the simulator has no camera).
-        let defaults = UserDefaults.standard
-        // Screenshots: `-demo YES [-demoScreen <id>]` opens the demo directly.
-        if defaults.bool(forKey: "demo") {
-            demo = DemoSession(startingAt: defaults.string(forKey: "demoScreen"))
-            return
-        }
-        if let scanned = defaults.string(forKey: "pair"), let link = PairLink.parse(scanned) {
-            phase = .connecting
-            Task { await pair(link) }
-            return
-        }
-        if let address = defaults.string(forKey: "address"),
-           let password = defaults.string(forKey: "password"), !password.isEmpty {
-            self.address = address
-            phase = .connecting
-            Task { await connect(password: password) }
-            return
-        }
-        #endif
-        if !address.isEmpty, deviceToken != nil || Keychain.password(for: address) != nil {
-            phase = .connecting
-            Task { await connect(password: nil) }
-        }
+    init(record: DeviceRecord) {
+        self.record = record
+        self.id = record.id
     }
 
-    /// A scanned pairing's token for the saved address, if any.
+    /// Saved credentials exist for this address: a paired device token or a
+    /// password.
+    static func hasCredentials(_ address: String) -> Bool {
+        Keychain.password(for: deviceAccount(address)) != nil || Keychain.password(for: address) != nil
+    }
+
+    /// A scanned pairing's token for this address, if any.
     private var deviceToken: String? { Keychain.password(for: Self.deviceAccount(address)) }
 
-    private static func deviceAccount(_ address: String) -> String { "device:" + address }
+    static func deviceAccount(_ address: String) -> String { "device:" + address }
 
     /// The daemon's LAN addresses last reported for `address` (`lan_urls`),
     /// kept for a password login, which does not report them.
     private static func savedLANCandidates(_ address: String) -> [URL] {
-        (UserDefaults.standard.stringArray(forKey: "lanURLs:" + address) ?? [])
+        (UserDefaults.standard.stringArray(forKey: lanURLsKey(address)) ?? [])
             .compactMap(DaemonClient.parse(address:))
     }
+
+    private static func lanURLsKey(_ address: String) -> String { "lanURLs:" + address }
 
     /// Saves the client's LAN addresses and the key that checks them (a
     /// secret, so in the Keychain) for `address`.
     private static func saveLANRoutes(of client: DaemonClient, for address: String) {
-        UserDefaults.standard.set(client.lanCandidates.map(\.absoluteString), forKey: "lanURLs:" + address)
+        UserDefaults.standard.set(client.lanCandidates.map(\.absoluteString), forKey: lanURLsKey(address))
         if let key = client.lanKey {
             Keychain.save(password: key.base64URL, for: lanKeyAccount(address))
         }
@@ -139,7 +147,7 @@ final class RemoteModel {
         let token = password == nil ? deviceToken : nil
         let password = password ?? Keychain.password(for: address)
         guard token != nil || password?.isEmpty == false else {
-            phase = .setup
+            phase = .failed(String(localized: "这台设备没有保存的配对，请重新扫码"))
             return
         }
         phase = .connecting
@@ -152,7 +160,7 @@ final class RemoteModel {
                 try await client.login(password: password)
                 Keychain.save(password: password, for: address)
             }
-            try await finishConnecting(client)
+            try await adopt(client)
         } catch DaemonError.pairingRevoked where Keychain.password(for: address) != nil {
             // The pairing died (password changed?); fall back to the password.
             Keychain.delete(for: Self.deviceAccount(address))
@@ -163,56 +171,16 @@ final class RemoteModel {
         }
     }
 
-    /// Connect from a scanned QR code: no address or password to type.
-    /// The current connection, address and saved credentials stay untouched
-    /// until the new daemon has accepted the code and answered a status read.
-    func pair(_ link: PairLink) async {
-        let wasConnected = phase == .connected
-        if !wasConnected { phase = .connecting }
-        let client = DaemonClient(base: link.base)
-        do {
-            let token = try await client.pair(code: link.code)
-            let newAddress = link.base.absoluteString
-            try await finishConnecting(client, replacingWith: newAddress)
-            Keychain.save(password: token, for: Self.deviceAccount(newAddress))
-        } catch {
-            if wasConnected {
-                show(String(localized: "扫码连接失败：\(error.localizedDescription)"))
-            } else {
-                phase = .failed(error.localizedDescription)
-            }
-        }
-    }
-
-    /// A pairing link opened from outside the app (the camera's landing page,
-    /// or any other app). It waits for the person to confirm, so a stray link
-    /// cannot silently move the app to another server.
-    var pendingLink: PairLink?
-
-    func handle(url: URL) {
-        guard let link = PairLink.parse(url.absoluteString) else { return }
-        pendingLink = link
-    }
-
-    func confirmPendingLink() {
-        guard let link = pendingLink else { return }
-        pendingLink = nil
-        Task { await pair(link) }
-    }
-
-    /// Commit a verified client. With `replacingWith`, the old session is
-    /// dropped and the address switched only now that the new one works.
-    private func finishConnecting(_ client: DaemonClient, replacingWith newAddress: String? = nil) async throws {
+    /// Commit a client that has a session (a login, a renewal or a fresh
+    /// pairing). An existing connection is dropped only once the new one has
+    /// answered a status read.
+    func adopt(_ client: DaemonClient) async throws {
         // Look for the LAN while the paired address answers the status read,
         // so connecting off the LAN costs no extra round trip.
         async let lan = client.probeLAN()
         let status = try await client.status()
         client.use(await lan)
-        if let newAddress {
-            disconnect()
-            address = newAddress
-        }
-        UserDefaults.standard.set(address, forKey: "address")
+        if self.client != nil { teardown() }
         Self.saveLANRoutes(of: client, for: address)
         client.onFallback = { [weak self] in
             Task { @MainActor in self?.routeChanged() }
@@ -262,8 +230,9 @@ final class RemoteModel {
         pathMonitor = monitor
     }
 
-    func disconnect() {
+    private func teardown() {
         statusTask?.cancel()
+        statusTask = nil
         probeTask?.cancel()
         probeTask = nil
         onLAN = false
@@ -275,22 +244,53 @@ final class RemoteModel {
         client = nil
         status = nil
         videoLive = false
+    }
+
+    func disconnect() {
+        teardown()
+        pathMonitor?.cancel()
+        pathMonitor = nil
         phase = .setup
     }
 
+    /// Drop every saved credential for this device.
     func forget() {
         Keychain.delete(for: address)
         Keychain.delete(for: Self.deviceAccount(address))
         Keychain.delete(for: Self.lanKeyAccount(address))
+        UserDefaults.standard.removeObject(forKey: Self.lanURLsKey(address))
         disconnect()
     }
 
     // MARK: video
 
-    func attach(video: VideoDisplayView) {
+    /// Show the stream in `video`. One view at a time: the newest attached
+    /// one gets the frames (focusing a tile hands its stream to the full
+    /// screen, or reconnects it when the quality differs).
+    func attach(video: VideoDisplayView, role: ViewerRole) {
+        let moved = self.video !== video
         self.video = video
+        self.role = role
+        if reader != nil, streamQuality != wantedQuality {
+            restartStream()
+            return
+        }
+        if moved, reader != nil {
+            video.reset()
+            requestKeyframe()
+        }
         updateStream()
     }
+
+    /// `video` is gone (tile scrolled away, screen closed). With no view left
+    /// the stream stops: the daemon no longer counts this app as a viewer.
+    func detach(video: VideoDisplayView) {
+        guard self.video === video else { return }
+        self.video = nil
+        updateStream()
+    }
+
+    private var wantedQuality: Bool { role == .full && preferQuality }
 
     func requestKeyframe() {
         guard let client else { return }
@@ -302,16 +302,20 @@ final class RemoteModel {
         if !videoLive { videoLive = true }
     }
 
-    /// Stream only while the phone can show a picture; a parked phone has none.
+    /// Stream only while someone shows the picture and the phone can show
+    /// one; a parked phone has none.
     private func updateStream() {
-        guard let client, let status, video != nil else { return }
-        let wanted = !status.released && !status.releasing && !status.reconnecting
-            && status.deviceState != "offline" && status.deviceState != "blocked"
-        if wanted, reader == nil {
+        let showable = status.map {
+            !$0.released && !$0.releasing && !$0.reconnecting
+                && $0.deviceState != "offline" && $0.deviceState != "blocked"
+        } ?? false
+        let wanted = client != nil && video != nil && !suspended && showable
+        if wanted, reader == nil, let client {
+            let quality = wantedQuality
             let reader = H264StreamReader(
                 request: client.request(
                     "agent/h264",
-                    query: [URLQueryItem(name: "mode", value: videoQuality ? "quality" : "performance")]),
+                    query: [URLQueryItem(name: "mode", value: quality ? "quality" : "performance")]),
                 onMessage: { [weak self] message in self?.video?.enqueue(message) },
                 onState: { [weak self] ok, why in
                     self?.videoMessage = why
@@ -324,6 +328,7 @@ final class RemoteModel {
                     }
                 })
             self.reader = reader
+            streamQuality = quality
             video?.reset()
             reader.start()
         } else if !wanted, let reader {
@@ -349,7 +354,7 @@ final class RemoteModel {
     }
 
     private func maybeAutoWake(_ status: PhoneStatus) {
-        guard !autoWakeTried, !busy, status.released, !status.releasing,
+        guard autoWakeAllowed, !autoWakeTried, !busy, status.released, !status.releasing,
               !status.humanHandoff, status.recoveryOwner.isEmpty || status.recoveryOwner == "daemon"
         else { return }
         autoWakeTried = true
@@ -357,9 +362,10 @@ final class RemoteModel {
     }
 
     /// While the app on screen hides it from capture, refresh the wireframe
-    /// every 1.5 s; drop it as soon as the picture is real again.
+    /// every 1.5 s; drop it as soon as the picture is real again. Only for
+    /// the full screen: a tile shows the blank picture and its pill says why.
     private func updateRedactedOverlay() {
-        let wanted = status?.captureRedacted == true && client != nil
+        let wanted = status?.captureRedacted == true && client != nil && role == .full && video != nil
         if wanted, redactedTask == nil {
             redactedTask = Task { [weak self] in
                 while !Task.isCancelled {
@@ -384,6 +390,7 @@ final class RemoteModel {
                 guard let self, let client = self.client else { return }
                 do {
                     let status = try await client.status()
+                    guard self.client === client else { return }
                     self.status = status
                     self.updateStream()
                     self.maybeAutoWake(status)
@@ -402,7 +409,7 @@ final class RemoteModel {
     /// The daemon's session cookie expires (8 h by default). Renew it with
     /// the paired device token, or log in again with the saved password;
     /// every caller shares one attempt.
-    private func relogin() async -> Bool {
+    func relogin() async -> Bool {
         if let running = reloginTask { return await running.value }
         let task = Task { @MainActor [weak self] () -> Bool in
             guard let self, let client = self.client else { return false }
@@ -446,31 +453,61 @@ final class RemoteModel {
 
     // MARK: control
 
+    /// Drive this phone alone: one gesture, its result as a toast on failure.
     func send(_ action: PhoneAction) {
-        guard let client else { return }
-        guard status?.drivable == true else {
-            show(hintForUndrivable())
+        if let refusal = preflight() {
+            if case .owned = refusal { show(refusal.sentence) } else { show(hintForUndrivable()) }
             return
         }
-        pendingActions += 1
+        guard let client else { return }
         Task {
-            defer { pendingActions -= 1 }
-            do {
-                try await client.control(action)
-            } catch DaemonError.sessionExpired {
-                // Do not replay the gesture: the screen may have moved on.
-                if await relogin() { show(String(localized: "登录已刷新，请再操作一次")) }
-            } catch {
-                show(String(localized: "没有送达：\(error.localizedDescription)"))
-                if let status = try? await client.status() {
-                    self.status = status
-                    updateStream()
-                }
-            }
+            let outcome = await client.deliver(action)
+            await settle(outcome, announce: true)
         }
     }
 
-    /// Bring WDA up so the phone can be driven again.
+    /// Why a gesture cannot go to this phone right now, decided locally
+    /// before anything is sent; nil when it can.
+    func preflight() -> DeliveryOutcome? {
+        guard client != nil, phase == .connected, let status else { return .notSent(reason: "not_connected") }
+        if status.ownedByOther { return .owned(by: status.owner) }
+        if !status.drivable { return .notSent(reason: "not_drivable") }
+        return nil
+    }
+
+    /// Follow up on a gesture's outcome. Nothing is replayed: an expired
+    /// session is renewed for the next gesture; any other failure refreshes
+    /// the status so the screen shows why.
+    func settle(_ outcome: DeliveryOutcome, announce: Bool) async {
+        switch outcome {
+        case .ok:
+            return
+        case .notSent(reason: "unauthorized"):
+            if await relogin(), announce { show(String(localized: "登录已刷新，请再操作一次")) }
+        default:
+            if announce { show(outcome.sentence) }
+            await refreshStatus()
+        }
+    }
+
+    /// Show a gesture's result on this device's tile for a moment.
+    func note(_ outcome: DeliveryOutcome) {
+        deliverySeq += 1
+        let note = DeliveryNote(outcome: outcome, seq: deliverySeq)
+        delivery = note
+        Task {
+            try? await Task.sleep(for: .seconds(outcome == .ok ? 1.5 : 4))
+            if delivery == note { delivery = nil }
+        }
+    }
+
+    private func refreshStatus() async {
+        guard let client, let status = try? await client.status(), self.client === client else { return }
+        self.status = status
+        updateStream()
+    }
+
+    /// Bring the device runner up so the phone can be driven again.
     func connectPhone() {
         setMode("agent", success: String(localized: "正在连接手机…手机锁着的话请解锁一次"))
     }
@@ -488,10 +525,7 @@ final class RemoteModel {
             do {
                 try await client.setMode(mode)
                 show(success)
-                if let status = try? await client.status() {
-                    self.status = status
-                    updateStream()
-                }
+                await refreshStatus()
             } catch {
                 show(error.localizedDescription)
             }
@@ -506,7 +540,7 @@ final class RemoteModel {
         }
     }
 
-    private func hintForUndrivable() -> String {
+    func hintForUndrivable() -> String {
         guard let status else { return String(localized: "还没连上服务") }
         if status.humanHandoff { return String(localized: "手机已交还，先点「连接手机」") }
         if status.released { return String(localized: "设备空闲中，先点「连接手机」") }
@@ -514,6 +548,37 @@ final class RemoteModel {
         if status.locked == true || status.deviceState == "locked" { return String(localized: "手机锁屏了，请在手机上解锁") }
         return status.personHint.isEmpty ? String(localized: "手机暂时不能操作") : status.personHint
     }
+
+    /// One short state for a pill: what the person would want to know first.
+    var shortState: String {
+        switch phase {
+        case .setup: return String(localized: "未连接")
+        case .connecting: return String(localized: "正在连接…")
+        case .failed: return String(localized: "连接失败")
+        case .connected: break
+        }
+        guard let status else { return String(localized: "未连接") }
+        if status.ownedByOther { return String(localized: "被「\(status.owner ?? "?")」占用") }
+        if status.humanHandoff { return String(localized: "已交还") }
+        if status.released { return String(localized: "空闲") }
+        if status.reconnecting { return String(localized: "正在连接手机") }
+        if status.locked == true || status.deviceState == "locked" { return String(localized: "锁屏") }
+        if status.drivable && videoLive { return String(localized: "可操作 · H.264") }
+        if status.drivable { return String(localized: "可操作") }
+        return status.deviceState
+    }
+
+    /// Green when drivable (and the picture is live), yellow while
+    /// connecting, red otherwise.
+    var health: Health {
+        guard phase == .connected, let status else { return phase == .connecting ? .busy : .down }
+        if status.ownedByOther { return .down }
+        if status.drivable && (videoLive || video == nil) { return .ok }
+        if status.reconnecting || status.drivable { return .busy }
+        return .down
+    }
+
+    enum Health { case ok, busy, down }
 }
 
 /// The control password lives in the Keychain, keyed by server address; a
