@@ -194,6 +194,9 @@ pub fn runner_signature_valid(signature: &str) -> bool {
     if !safe_expected(signature) {
         return false;
     }
+    if go_ios_runtest_valid(signature) {
+        return true;
+    }
     let Some(rest) = strip_xcodebuild(signature) else {
         return false;
     };
@@ -256,6 +259,30 @@ pub fn runner_signature_valid(signature: &str) -> bool {
     false
 }
 
+/// The legacy (iOS 15/16) runner: go-ios `runtest` of the runner's test
+/// (`super::legacy_ios::runtest_argv`), from an absolute go-ios path.
+fn go_ios_runtest_valid(signature: &str) -> bool {
+    let tokens: Vec<&str> = signature.split(' ').collect();
+    let bundle_ok = |value: &str| {
+        value.ends_with(".xctrunner")
+            && value
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-')
+    };
+    match tokens.as_slice() {
+        [program, "runtest", udid, bundle, runner, "--xctest-config=iPhoneUse.xctest", "--test-to-run=RunnerTests/testServe"] =>
+        {
+            let bundle = bundle.strip_prefix("--bundle-id=");
+            program.starts_with('/')
+                && program.ends_with("/ios")
+                && udid.strip_prefix("--udid=").is_some_and(hex_udid)
+                && bundle.is_some_and(bundle_ok)
+                && runner.strip_prefix("--test-runner-bundle-id=") == bundle
+        }
+        _ => false,
+    }
+}
+
 fn relay_signature_valid(signature: &str) -> bool {
     let tokens: Vec<&str> = signature.split(' ').collect();
     match tokens.as_slice() {
@@ -266,6 +293,15 @@ fn relay_signature_valid(signature: &str) -> bool {
                 && hex_udid(udid)
                 && listen.strip_prefix("127.0.0.1:").is_some_and(digits)
                 && digits(port)
+        }
+        [program, "relay", "--udid", udid, "--listen", listen, "--device-port", port, "--lan-host", host] => {
+            program.starts_with('/')
+                && program.ends_with("/iphone-use")
+                && program.len() > "/iphone-use".len() + 1
+                && hex_udid(udid)
+                && listen.strip_prefix("127.0.0.1:").is_some_and(digits)
+                && digits(port)
+                && host.parse::<std::net::Ipv4Addr>().is_ok()
         }
         [program, "-s", "127.0.0.1", ports, "-u", udid] => {
             (*program == "iproxy" || (program.starts_with('/') && program.ends_with("/iproxy")))
@@ -721,6 +757,31 @@ mod tests {
         ));
         let wda_run = "/usr/bin/xcodebuild -destination platform=iOS,id=0000 test-without-building -xctestrun /tmp/d/WebDriverAgentRunner_iphoneos17.0-arm64.xctestrun";
         assert!(runner_signature_valid(wda_run));
+    }
+
+    #[test]
+    fn go_ios_runtest_is_a_runner_and_a_lan_relay_is_a_relay() {
+        let runtest = "/Users/leo/.iphone-use/tools/go-ios-v1.3.2/ios runtest --udid=00008101-000409443404001E --bundle-id=com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner --test-runner-bundle-id=com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner --xctest-config=iPhoneUse.xctest --test-to-run=RunnerTests/testServe";
+        assert!(runner_signature_valid(runtest));
+        assert!(command_matches(runtest, &format!("runner:{runtest}")));
+        assert!(!runner_signature_valid(
+            &runtest.replace("ios runtest", "ios kill")
+        ));
+        assert!(!runner_signature_valid(&runtest.replace(
+            "--test-runner-bundle-id=com.leeguoo",
+            "--test-runner-bundle-id=org.other"
+        )));
+        assert!(!runner_signature_valid(&runtest.replace(
+            "/Users/leo/.iphone-use/tools/go-ios-v1.3.2/ios",
+            "ios"
+        )));
+        assert!(!runner_signature_valid(&format!("{runtest} --env=X=1")));
+        let lan = "/Users/leo/.iphone-use/instances/i12/runtime/iPhoneUse.app/Contents/MacOS/iphone-use relay --udid 00008101-000409443404001E --listen 127.0.0.1:8410 --device-port 8100 --lan-host 192.168.0.59";
+        assert!(command_matches(lan, &format!("relay:{lan}")));
+        assert!(!command_matches(
+            &lan.replace("192.168.0.59", "evil;host"),
+            &format!("relay:{}", lan.replace("192.168.0.59", "evil;host"))
+        ));
     }
 
     #[test]

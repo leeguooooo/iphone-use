@@ -1209,7 +1209,11 @@ function setupBlockerCopy(blockedOn) {
     case 'wifi_automation_refused':
       return ['Wi-Fi 下无法授权 UI 自动化', '通过 Wi-Fi 时手机弹不出输密码的提示（有些 iOS 版本干脆拒绝）；请用 USB 连接这台 iPhone，并在它要求时输入密码。插上 USB 后会立刻重试；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB'];
     case 'ios_too_old':
-      return ['iPhone 系统版本太旧', '所选 Xcode 只能在 iOS 17 及以上的 iPhone 上运行设备 runner；请在 iPhone 上 设置 › 通用 › 软件更新 升级系统，或运行 iphone-use setup --xcode <旧版 Xcode.app> 让这台手机用旧版 Xcode；换线、重试和重连都解决不了'];
+      return ['这台 Mac 还驱动不了这台 iPhone 的系统', 'iOS 15 和 16 不用升级，但需要付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），配好后重新运行 iphone-use setup；iOS 14 及更早的系统只能升级手机；换线、重试和重连都解决不了'];
+    case 'ddi_needs_reboot':
+      return ['请重启一次 iPhone', 'iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来；重启手机、解锁并保持插线后会自动接着连接'];
+    case 'legacy_needs_usb':
+      return ['请用数据线连接 iPhone', '这台 iPhone 是 iOS 15/16，设备服务目前只能通过数据线运行；插上并保持解锁，大约 20 秒连上'];
     case 'xcode_too_old':
       return ['Xcode 版本太旧', 'iPhone 的 iOS 比这台 Mac 上的 Xcode 新；请安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），再运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它；重试和重连都解决不了'];
     case 'wda':
@@ -1228,7 +1232,7 @@ function setupBlockerCopy(blockedOn) {
    managedSetupWillRetry for the same reason, and neither is
    `wifi_automation_refused`: retrying over Wi-Fi cannot fix it, only USB. */
 const ACTIONABLE_SETUP_BLOCKERS = new Set(
-  ['locked', 'trust', 'automation_mode_disabled', 'automation_not_allowed', 'wifi_automation_refused', 'not_connected', 'usb', 'ddi', 'warp', 'proxy', 'xcode_too_old', 'ios_too_old'],
+  ['locked', 'trust', 'automation_mode_disabled', 'automation_not_allowed', 'wifi_automation_refused', 'not_connected', 'usb', 'ddi', 'warp', 'proxy', 'xcode_too_old', 'ios_too_old', 'ddi_needs_reboot', 'legacy_needs_usb'],
 );
 /* The managed retry loop alternates between building and its backoff, and it
    publishes the blocker only during the backoff. Reading each poll on its own

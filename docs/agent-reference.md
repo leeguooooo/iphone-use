@@ -79,7 +79,8 @@ for it explicitly; the answer is `started` or `skipped` with a reason
 ## Setup blockers
 
 `setup_blocked_on` is one of `warp | proxy | not_connected | usb | trust | ddi | account |
-automation_mode_disabled | automation_not_allowed | wifi_automation_refused | xcode_too_old | ios_too_old | locked | wda` (empty = known prerequisites passed;
+automation_mode_disabled | automation_not_allowed | wifi_automation_refused | xcode_too_old | ios_too_old |
+ddi_needs_reboot | legacy_needs_usb | locked | wda` (empty = known prerequisites passed;
 KeepAlive keeps the last concrete blocker while it re-checks).
 
 - **`warp`** (the #1 blocker): Cloudflare WARP or another VPN wedges the
@@ -108,17 +109,21 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   that iOS (a beta Xcode for a beta iOS) fixes it; a person can give just this
   phone that Xcode with `iphone-use setup --xcode <Xcode.app>`. KeepAlive waits
   15 minutes between attempts; do not reconnect.
-- **`ios_too_old`**: the phone runs an iOS older than the selected Xcode can
-  run the device runner on. From Xcode 26 on, device testing goes through
-  CoreDevice only, which needs iOS 17 or later: an iOS 15/16 phone is attached
-  and paired (lockdownd answers over USB) but `devicectl` and `xctrace` never
-  list it. Setup checks this before waiting for developer services, so it
-  fails in seconds with both versions in `setup_message` (e.g. "This iPhone runs
-  iOS 15.4.1; Xcode 27.0 can only run the device runner on iOS 17 or later").
-  Ask a person to update the iPhone (Settings › General › Software Update) or
-  give this phone an older Xcode with `iphone-use setup --xcode <Xcode.app>`. A
-  cable, WARP or a retry does not help; KeepAlive waits 15 minutes between
-  attempts; do not reconnect.
+- **`ios_too_old`**: this Mac cannot drive the phone's iOS yet. iOS 15 and 16
+  are driven without an iOS update through the legacy path (below), which
+  needs App Store Connect API-key signing (`WDA_ASC_KEY_PATH`, `WDA_ASC_KEY_ID`,
+  `WDA_ASC_ISSUER_ID` of a paid developer account): the selected Xcode cannot
+  see the phone, so only the API can register it and provision the runner.
+  iOS 14 and older are below the runner's floor and need an iOS update.
+  `setup_message` says which case it is. A cable, WARP or a retry does not
+  help; KeepAlive waits 15 minutes between attempts; do not reconnect.
+- **`ddi_needs_reboot`** (iOS 15/16): a stale Developer Disk Image is mounted;
+  lockdownd answers every developer service with `InvalidService` even after
+  setup remounted the right image. Ask a person to restart the iPhone once and
+  keep it plugged in and unlocked; KeepAlive re-checks every few minutes.
+- **`legacy_needs_usb`** (iOS 15/16): the runner of such a phone runs over USB
+  only (see the legacy path below); ask a person to plug it in, unlocked. The
+  managed service starts it as soon as usbmuxd lists the phone on USB.
 - **`automation_not_allowed`**: the same code-74 refusal, but this Xcode supports
   the phone's iOS (over USB): the phone did not authorize the UI-automation
   session. A passcode / "Allow" prompt appears on the phone while the runner
@@ -136,6 +141,29 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   started again without the cable. KeepAlive waits 15 minutes between Wi-Fi
   attempts and retries at once on USB; do not reconnect.
 - **`locked`**: unlock the phone. **`usb` / `ddi` / `account` / `wda`**: follow `hint`.
+
+### iOS 15 and 16 (the legacy path)
+
+Xcode 26 and later cannot see an iOS 15/16 phone at all, so setup drives it
+without Xcode's device support: it builds the runner for `generic/platform=iOS`,
+swaps Xcode's iOS 17-only test host for a small host of its own
+(`runner/IPhoneUseRunner/LegacyHost/main.m`), registers the phone and creates a
+development profile through the App Store Connect API, downloads the pinned
+Developer Disk Image for that iOS (doronz88/DeveloperDiskImage, sha256-checked,
+cached in `~/.iphone-use/ddi/`), mounts it and checks testmanagerd starts, and
+installs and starts the runner with go-ios (MIT, a pinned release downloaded into
+`~/.iphone-use/tools/`). From there it is the usual runner on the usual ports and
+relays. `GET /agent/status` adds `legacy_ios`: `{ios, wifi_ready, lan_ip,
+start_needs_usb}` (else `null`).
+
+Limits today: the runner lives only as long as the USB connection that started it
+(pulling the cable ends it within seconds; iPhone 12 mini, iOS 15.4.1), and it cannot
+be started over the network yet, so these phones are USB-only. Idle release works
+as on any USB phone (the next request starts the runner again in ~12 s). With
+`WDA_ALLOW_LAN=1` setup also lets the runner onto the phone's network (it brings the
+runner's app to the front and answers iOS's local-network / "wireless data" prompt)
+and gives the relays the phone's LAN address as a fallback; the runner port has no
+authentication, which is why that stays opt-in.
 
 Repeated bootstrap requests hide the real blocker — fix it, then reconnect once.
 

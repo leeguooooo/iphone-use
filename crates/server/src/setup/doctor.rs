@@ -198,7 +198,22 @@ pub fn run(ctx: &Ctx) -> i32 {
         let legacy = checks::min_device_ios(&xcode)
             .is_some_and(|floor| checks::version_lt(device, floor))
             && checks::legacy_device_support(device);
-        if let Some(message) = super::flow::ios_too_old_message(&xcode, Some(device), legacy) {
+        let below =
+            checks::min_device_ios(&xcode).is_some_and(|floor| checks::version_lt(device, floor));
+        if below && !legacy && super::legacy_ios::applies(device) {
+            if ctx.asc_signing_enabled() {
+                ok(&format!(
+                    "iOS {device}: setup takes the legacy device path (go-ios, a downloaded Developer Disk Image, App Store Connect signing)"
+                ));
+            } else {
+                warn(&format!(
+                    "X {}",
+                    super::flow::legacy_needs_asc_message(device)
+                ));
+                fail = true;
+            }
+        } else if let Some(message) = super::flow::ios_too_old_message(&xcode, Some(device), legacy)
+        {
             warn(&format!("X {message}"));
             fail = true;
         }

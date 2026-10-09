@@ -190,6 +190,10 @@ enum Command {
         /// Port on the iPhone to connect each client to.
         #[arg(long)]
         device_port: u16,
+        /// The iPhone's LAN address, for a phone off the cable (iOS 15/16
+        /// has no CoreDevice tunnel): connections go straight to it there.
+        #[arg(long)]
+        lan_host: Option<std::net::Ipv4Addr>,
     },
     /// Read device facts from the iPhone's lockdownd over usbmuxd, as one JSON
     /// line: `info` (name, iOS version, model, build) or `ddi` (whether the
@@ -748,11 +752,17 @@ fn main() -> Result<()> {
             udid,
             listen,
             device_port,
+            lan_host,
         } => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("start the relay runtime")?
-            .block_on(server::usbmux::run_relay(&udid, listen, device_port)),
+            .block_on(server::usbmux::run_relay(
+                &udid,
+                listen,
+                device_port,
+                lan_host,
+            )),
         Command::Device { query } => std::process::exit(device_query(query)),
         Command::Upgrade { check, json } => std::process::exit(upgrade(check || json, json)),
         Command::Setup { instance, args } => {

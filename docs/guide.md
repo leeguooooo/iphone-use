@@ -561,7 +561,7 @@ Measured on an iPhone 17 Pro Max (iOS 27): an unlocked cold connect is drivable 
 13–22 s; a locked one shows "unlock" in ~4 s and is drivable ~14 s after the unlock; a
 snapshot-bound tap with `?return=delta` (tap, then the settled tree) takes ~4 s. `POST /agent/mode {"mode":"agent"}` (or MCP `phone_reconnect`) restarts the
 configured target once — do not loop it; read `hint` and `setup_blocked_on`
-(`warp|proxy|not_connected|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|wifi_automation_refused|xcode_too_old|ios_too_old|locked`) first.
+(`warp|proxy|not_connected|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|wifi_automation_refused|xcode_too_old|ios_too_old|ddi_needs_reboot|legacy_needs_usb|locked`) first.
 `not_connected` means the iPhone is not connected to this Mac at all: plug it in over USB
 (or join the same Wi-Fi) and unlock it. Nothing is rebuilt while it is away, and the
 connection comes back on its own when the phone does.
@@ -577,13 +577,29 @@ fails still leaves every later reconnect on that Xcode.
 KeepAlive then retries only every 15 minutes, since each attempt launches the runner on
 the phone; `iphone-use doctor` prints the phone's iOS next to the Xcode SDK and which Xcode
 the phone uses.
-`ios_too_old` is the opposite gap: the phone runs an iOS older than the selected Xcode can
-drive. From Xcode 26 on, device testing needs iOS 17 or later (CoreDevice only), so an
-iOS 15/16 phone is on the cable and paired but Xcode never lists it. Setup reads the
-phone's iOS from lockdownd and stops in seconds instead of waiting for developer
-services: update the iPhone (Settings › General › Software Update), or give this phone
-an older Xcode with `iphone-use setup --xcode <Xcode.app>`. A different cable or WARP
-setting does not help.
+iOS 15 and 16 need no update. From Xcode 26 on, Xcode cannot see such a phone at all
+(CoreDevice needs iOS 17), so setup takes its own **legacy path** for it: it builds the
+runner for a generic iOS device, gives it a small test host of its own (Xcode's needs
+iOS 17), registers the phone and creates the runner's development profile through the
+App Store Connect API, downloads the pinned Developer Disk Image for that iOS
+(github.com/doronz88/DeveloperDiskImage, sha256-checked, cached in `~/.iphone-use/ddi/`),
+mounts it, checks that testmanagerd starts, and installs and starts the runner with
+[go-ios](https://github.com/danielpaulus/go-ios) (MIT licence; a pinned release is
+downloaded into `~/.iphone-use/tools/` on first use, not shipped with iphone-use; the disk
+images are Apple's files and are likewise only downloaded, never redistributed —
+`IPHONE_USE_DDI_BASE_URL` points at another mirror, and the pinned sha256 still applies). On an
+iPhone X (iOS 16.5) a first setup took about 100 s (70 s of it the runner build); a warm
+reconnect of an iPhone 12 mini (iOS 15.4.1) takes about 12 s.
+This needs a paid developer account's App Store Connect API key (`WDA_ASC_KEY_PATH`,
+`WDA_ASC_KEY_ID`, `WDA_ASC_ISSUER_ID`); without one setup stops with `ios_too_old` and
+says so, and iOS 14 or older stops there too (below the runner's floor). These phones
+are **USB-only for now**: the runner lives only as long as the USB connection that
+started it, and go-ios cannot start it over Wi-Fi yet. With `WDA_ALLOW_LAN=1` setup also
+answers the phone's local-network / "wireless data" prompt so the runner answers on the
+LAN while cabled (opt-in: the runner port has no authentication).
+`ddi_needs_reboot` means a stale Developer Disk Image is stuck on such a phone (every
+developer service answers `InvalidService` even after a remount): restart the iPhone
+once. `legacy_needs_usb` means it is off the cable: plug it in, unlocked.
 `automation_not_allowed` is the same code-74 refusal with an Xcode that does support the
 phone's iOS, over USB: the phone did not authorize the UI-automation session. A passcode or
 Allow prompt appears on the iPhone while the runner starts and times out after about 30 s,

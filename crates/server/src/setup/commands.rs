@@ -298,6 +298,20 @@ fn sweep_device_runner(ctx: &Ctx) {
     if !serving {
         return;
     }
+    // iOS 15/16: CoreDevice cannot see the phone; go-ios ends the runner.
+    if let Some(record) = super::legacy_ios::read_record(ctx.state_dir()).filter(|r| {
+        crate::usbmux::normalize_udid(&r.udid) == crate::usbmux::normalize_udid(&ctx.udid)
+    }) {
+        let go_ios = std::path::PathBuf::from(&record.go_ios);
+        if sys::is_executable(&go_ios)
+            && super::legacy_ios::kill_runner(&go_ios, &ctx.udid, &record.bundle)
+        {
+            ok("ended the iOS 15/16 runner on the phone");
+        } else {
+            warn("the iOS 15/16 runner still answers on the phone, but go-ios could not end it (is the cable in?)");
+        }
+        return;
+    }
     let pids = sys::devicectl_json(15, &["device", "info", "processes", "--device", &ctx.udid])
         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
         .map(|value| runner_pids(&value))

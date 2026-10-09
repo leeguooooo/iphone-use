@@ -27,6 +27,9 @@ pub enum Kind {
     /// The phone is not connected to this Mac at all. The next attempt
     /// waits in place for it, so this only spaces out supervisor restarts.
     NotConnected,
+    /// An iOS 15/16 phone's developer services stay unusable after a fresh
+    /// disk-image mount: only restarting the iPhone clears it.
+    NeedsReboot,
 }
 
 impl Kind {
@@ -40,6 +43,7 @@ impl Kind {
             Kind::Automation => "automation",
             Kind::WifiAutomation => "wifi_automation",
             Kind::NotConnected => "not_connected",
+            Kind::NeedsReboot => "needs_reboot",
         }
     }
 
@@ -53,6 +57,7 @@ impl Kind {
             "automation" => Some(Kind::Automation),
             "wifi_automation" => Some(Kind::WifiAutomation),
             "not_connected" => Some(Kind::NotConnected),
+            "needs_reboot" => Some(Kind::NeedsReboot),
             _ => None,
         }
     }
@@ -75,6 +80,8 @@ impl Kind {
             // this short as soon as the phone is plugged in.
             Kind::WifiAutomation => (900, 900),
             Kind::NotConnected => (3, 10),
+            // A person restarts the phone; check again every few minutes.
+            Kind::NeedsReboot => (60, 300),
             Kind::Generic => (5, 300),
         }
     }

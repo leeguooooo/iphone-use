@@ -2645,6 +2645,7 @@ async fn agent_status(
     let transport = managed_transport(&state).await;
     let wifi_start_refused =
         state.managed_wda && wifi_start_refused(&crate::instance::current().state_dir);
+    let legacy_ios = legacy_ios_json(state.managed_wda, &crate::instance::current().state_dir);
     let rtt = crate::wda::wda_rtt_ms();
     let rtt_json = rtt.map_or("null".to_string(), |ms| ms.to_string());
     let transport_hint = serde_json::to_string(&transport_hint(transport, rtt))
@@ -2652,7 +2653,7 @@ async fn agent_status(
     // A reconnect a pre-warm started (see `crate::prewarm`).
     let warming = crate::prewarm::warming() && reconnecting;
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"legacy_ios":{legacy_ios}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -2685,6 +2686,25 @@ async fn managed_transport(state: &AppState) -> &'static str {
     }
 }
 
+/// `legacy_ios` in `/agent/status`: an iOS 15/16 phone on the legacy path
+/// (its iOS, whether the runner also answers on its LAN address, and that
+/// starting the runner needs the cable), else `null`.
+fn legacy_ios_json(managed: bool, state_dir: &std::path::Path) -> String {
+    let record = managed
+        .then(|| crate::setup::legacy_ios::read_record(state_dir))
+        .flatten();
+    match record {
+        Some(record) => serde_json::json!({
+            "ios": record.ios,
+            "wifi_ready": record.wifi_ready,
+            "lan_ip": record.lan_ip,
+            "start_needs_usb": true,
+        })
+        .to_string(),
+        None => "null".to_string(),
+    }
+}
+
 /// Setup recorded that this phone refused to start the runner over Wi-Fi
 /// (`wifi_automation_refused`; cleared once a Wi-Fi start succeeds).
 fn wifi_start_refused(state_dir: &std::path::Path) -> bool {
@@ -2698,7 +2718,7 @@ fn wifi_start_refused(state_dir: &std::path::Path) -> bool {
 /// unreachable until someone plugs in a cable. Over USB, or on a phone that
 /// starts over Wi-Fi, idle release works as usual.
 fn idle_release_keeps_wifi_runner(start_refused: bool, transport: &str) -> bool {
-    start_refused && transport == "wifi-tunnel"
+    start_refused && matches!(transport, "wifi-tunnel" | "wifi")
 }
 
 /// How control traffic reaches WDA, from the relay setup-wda.sh recorded:
@@ -2719,6 +2739,13 @@ fn native_relay(state_dir: &std::path::Path) -> bool {
         .is_ok_and(|record| record.contains("/iphone-use relay "))
 }
 
+/// The control relay falls back to the phone's LAN address (`--lan-host`, an
+/// iOS 15/16 phone).
+fn lan_relay(state_dir: &std::path::Path) -> bool {
+    std::fs::read_to_string(state_dir.join("wda-relay.pid"))
+        .is_ok_and(|record| record.contains(" --lan-host "))
+}
+
 /// `usb` while usbmuxd lists the phone over USB, else `wifi-tunnel`: the
 /// native relay then reaches it through CoreDevice. Asked at most every 3 s.
 async fn native_relay_transport(udid: &str) -> &'static str {
@@ -2736,6 +2763,8 @@ async fn native_relay_transport(udid: &str) -> &'static str {
     .await
     {
         Ok(Ok(Some(found))) if found.usb => "usb",
+        // An iOS 15/16 relay goes straight to the phone's LAN address.
+        Ok(Ok(_)) if lan_relay(&crate::instance::current().state_dir) => "wifi",
         Ok(Ok(_)) => "wifi-tunnel",
         // usbmuxd did not answer: keep the relay's own claim.
         _ => "usb",
@@ -2960,8 +2989,16 @@ fn human_next_step(
                 "The iPhone runs a newer iOS than this Mac's Xcode supports: install an Xcode that supports it (a beta Xcode for a beta iOS), then run iphone-use setup --xcode <that Xcode.app> for this phone — retrying or reconnecting will not help",
             ),
             "ios_too_old" => (
-                "这台 iPhone 的 iOS 太旧，所选的 Xcode 驱动不了（Xcode 26 起只支持 iOS 17 及以上的真机测试）：在 iPhone 上 设置 › 通用 › 软件更新 升级系统，或运行 iphone-use setup --xcode <旧版 Xcode.app> 让这台手机用旧版 Xcode；重试、重连和换线都解决不了",
-                "This iPhone's iOS is too old for the selected Xcode (from Xcode 26 on, device testing needs iOS 17 or later): update the iPhone in Settings › General › Software Update, or run iphone-use setup --xcode <an older Xcode.app> for this phone — retrying, reconnecting or another cable will not help",
+                "这台 iPhone 的 iOS 这台 Mac 现在驱动不了：iOS 15 和 16 不用升级，但需要付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），配好后重新运行 iphone-use setup；iOS 14 及更早的系统 runner 本身不支持，只能升级手机；重试、重连和换线都解决不了",
+                "This Mac cannot drive this iPhone's iOS yet: iOS 15 and 16 work without updating the phone, but need a paid Apple Developer account's App Store Connect API key (WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID) — configure it and run iphone-use setup again; iOS 14 and older are below what the runner supports and need an iOS update — retrying, reconnecting or another cable will not help",
+            ),
+            "ddi_needs_reboot" => (
+                "iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来：请把 iPhone 重启一次，解锁后保持插线，会自动接着连接",
+                "An old developer disk image is stuck on the iPhone and its developer services will not start: restart the iPhone once, unlock it and keep it plugged in — connecting continues on its own",
+            ),
+            "legacy_needs_usb" => (
+                "这台 iPhone 是 iOS 15/16，设备服务目前只能通过数据线运行：用数据线连到这台 Mac 并保持解锁，大约 20 秒连上；拔线后服务会停，再插上会自动恢复",
+                "This iPhone runs iOS 15/16, whose device service runs over the cable for now: plug it into this Mac and keep it unlocked — it connects in about 20 s; unplugging stops the service, and plugging back in resumes it",
             ),
             "automation_not_allowed" => (
                 "iPhone 没有授权这次 UI 自动化：runner 启动时手机上会弹出密码或「允许」提示，约 30 秒不处理就会失败；请解锁手机、确认 设置 › 开发者 › 启用 UI 自动化 已打开，下次重试时完成这个提示；会自动重试",
@@ -3120,7 +3157,13 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iPhone runs a newer iOS than the selected Xcode supports (setup_message names both versions) — install an Xcode that supports that iOS (a beta Xcode for a beta iOS) and point this phone at it with iphone-use setup --xcode /Applications/Xcode-beta.app (other phones keep theirs), or select it for the whole Mac with xcode-select; retrying or reconnecting cannot fix this, so do not send another reconnect request",
         ),
         "ios_too_old" => Some(
-            "the iPhone runs an iOS older than the selected Xcode can run the device runner on (from Xcode 26 on that floor is iOS 17; setup_message names both versions) — the phone is attached and paired, but CoreDevice cannot drive it; have a person update the iPhone (Settings › General › Software Update), or point this phone at an older Xcode with iphone-use setup --xcode /Applications/Xcode-16.app; retrying, reconnecting or replugging cannot fix this, so do not send another reconnect request",
+            "the iPhone runs an iOS this Mac cannot drive yet (setup_message says which case) — iOS 15/16 is driven without an iOS update through the legacy path, which needs App Store Connect API-key signing (WDA_ASC_KEY_PATH, WDA_ASC_KEY_ID, WDA_ASC_ISSUER_ID of a paid developer account) because the selected Xcode cannot see the phone; iOS 14 and older are below the runner's floor and need an iOS update; retrying, reconnecting or replugging cannot fix this, so do not send another reconnect request",
+        ),
+        "ddi_needs_reboot" => Some(
+            "the iOS 15/16 phone has a stale developer disk image mounted: lockdownd answers every developer service (testmanagerd) with InvalidService even after setup remounted the right image — have a person restart the iPhone once and keep it plugged in and unlocked; the managed service re-checks every few minutes, so do not send another reconnect request",
+        ),
+        "legacy_needs_usb" => Some(
+            "the phone runs iOS 15/16, whose device runner runs only over USB for now (it ends when the cable is pulled, and cannot be started over the network yet) — have a person plug it into this Mac, unlocked; the managed service starts it as soon as usbmuxd lists the phone on USB, so do not send another reconnect request",
         ),
         "automation_not_allowed" => Some(
             "the iPhone did not authorize the device runner's UI-automation session although this Xcode supports its iOS (the runner exited with code 74, testmanagerd refused the IDE channel) — a passcode or Allow prompt appears on the iPhone while the runner starts and times out after about 30 s; unlock the iPhone, check Settings › Developer › Enable UI Automation, and have a person answer that prompt on the next attempt; the managed service retries quietly every 5 s to 1 min, so do not send another reconnect request",
@@ -3149,7 +3192,11 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
     // that wait and the next attempt instead of letting it age out at 300 s.
     let max_age = if matches!(
         status.blocked_on.as_str(),
-        "xcode_too_old" | "ios_too_old" | "wifi_automation_refused"
+        "xcode_too_old"
+            | "ios_too_old"
+            | "wifi_automation_refused"
+            | "ddi_needs_reboot"
+            | "legacy_needs_usb"
     ) {
         1200
     } else {
@@ -3171,6 +3218,8 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
             | "ios_too_old"
             | "automation_not_allowed"
             | "wifi_automation_refused"
+            | "ddi_needs_reboot"
+            | "legacy_needs_usb"
             | "not_connected"
             | "locked"
             | "wda"
@@ -16341,6 +16390,10 @@ mod tests {
             "not_connected",
             "xcode_too_old",
             "ios_too_old",
+            "ddi_needs_reboot",
+            "legacy_needs_usb",
+            "ddi_needs_reboot",
+            "legacy_needs_usb",
             "locked",
             "wda",
         ] {
@@ -16509,6 +16562,54 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_phone_reports_itself_and_its_blockers() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(legacy_ios_json(true, dir.path()), "null");
+        assert!(!wifi_start_refused(dir.path()));
+        crate::setup::legacy_ios::write_record(
+            dir.path(),
+            &crate::setup::legacy_ios::Record {
+                ios: "16.5".into(),
+                udid: "63f53bbb05918cbf4154ba9d1d1f95b28e532597".into(),
+                bundle: "com.example.wda".into(),
+                go_ios: "/x/ios".into(),
+                lan_ip: Some("192.168.0.149".into()),
+                wifi_ready: true,
+            },
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&legacy_ios_json(true, dir.path())).unwrap();
+        assert_eq!(json["ios"], "16.5");
+        assert_eq!(json["wifi_ready"], true);
+        assert_eq!(json["start_needs_usb"], true);
+        assert_eq!(legacy_ios_json(false, dir.path()), "null");
+        for blocker in ["ddi_needs_reboot", "legacy_needs_usb"] {
+            let payload =
+                format!(r#"{{"phase":"prereq","blocked_on":"{blocker}","message":"m","ts":1000}}"#);
+            assert_eq!(
+                parse_setup_blocked_on(&payload, 2000),
+                blocker,
+                "outlives the backoff"
+            );
+            let hint = setup_blocker_hint(blocker).unwrap();
+            assert!(
+                hint.contains("do not send another reconnect request"),
+                "{hint}"
+            );
+        }
+        let (zh, en) = human_next_step("blocker", "ddi_needs_reboot", "").unwrap();
+        assert!(
+            zh.contains("重启") && en.contains("restart the iPhone"),
+            "{en}"
+        );
+        let (zh, en) = human_next_step("blocker", "ios_too_old", "").unwrap();
+        assert!(
+            zh.contains("不用升级") && en.contains("App Store Connect API key"),
+            "{en}"
+        );
+    }
+
+    #[test]
     fn idle_release_keeps_a_wifi_runner_that_cannot_be_restarted_over_wifi() {
         assert!(idle_release_keeps_wifi_runner(true, "wifi-tunnel"));
         assert!(
@@ -16520,6 +16621,10 @@ mod tests {
             "a phone that starts over Wi-Fi is released as usual"
         );
         assert!(!idle_release_keeps_wifi_runner(true, "unknown"));
+        assert!(
+            idle_release_keeps_wifi_runner(true, "wifi"),
+            "an iOS 15/16 runner reached on its LAN address"
+        );
         let dir = tempfile::tempdir().unwrap();
         assert!(!wifi_start_refused(dir.path()));
         std::fs::write(
@@ -16574,8 +16679,9 @@ mod tests {
         assert_eq!(parse_setup_blocked_on(payload, 1000 + 1000), "ios_too_old");
         assert_eq!(parse_setup_blocked_on(payload, 1000 + 1300), "");
         let hint = setup_blocker_hint("ios_too_old").unwrap();
-        assert!(hint.contains("Software Update"), "{hint}");
-        assert!(hint.contains("--xcode"), "{hint}");
+        // iOS 15/16 needs no update: the legacy path wants an ASC key.
+        assert!(hint.contains("WDA_ASC_KEY_PATH"), "{hint}");
+        assert!(hint.contains("iOS 14 and older"), "{hint}");
         assert!(
             hint.contains("do not send another reconnect request"),
             "{hint}"
@@ -16584,7 +16690,7 @@ mod tests {
         assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
         let (zh, en) = human_next_step("blocker", "ios_too_old", "").unwrap();
         assert!(
-            zh.contains("软件更新") && en.contains("Software Update"),
+            zh.contains("不用升级") && en.contains("without updating"),
             "{en}"
         );
     }
