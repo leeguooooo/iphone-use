@@ -52,7 +52,9 @@ stuck at the lock screen:
 ```
 
 - `passcode_protected`: whether a passcode is set (lockdown `PasswordProtected`
-  over USB or a Wi-Fi attachment, or the runner while it is up); `null` until read.
+  over USB or a Wi-Fi attachment, or the runner while it is up). Both sources
+  only say "required right now", so `false` is recorded only from a locked
+  phone; `null` until then (a phone that never locks may stay `null`).
 - `auto_lock_secs`: the Auto-Lock setting in seconds, `"never"`, or `null`. The
   device runner reads it (no lockdown value carries it), so it is known once a
   runner from this release ran on the phone.

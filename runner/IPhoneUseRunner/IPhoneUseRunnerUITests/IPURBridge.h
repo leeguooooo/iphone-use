@@ -207,7 +207,8 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// `-[XCUIDevice pressLockButton]`; returns an error string when unavailable.
 + (nullable NSString *)pressLockButton;
 
-/// Screen lock state and whether a passcode is set, both from SBGetScreenLockStatus. nil when
+/// Screen lock state and whether a passcode is required now (false on an unlocked phone even
+/// with a passcode set, seen on iOS 15), both from SBGetScreenLockStatus. nil when
 /// SpringBoardServices is unavailable. Keys: "locked", "passcodeEnabled" (NSNumber BOOL).
 + (nullable NSDictionary<NSString *, NSNumber *> *)screenLockStatus;
 

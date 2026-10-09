@@ -6,7 +6,9 @@
 //!
 //! - whether a passcode is set: lockdown `PasswordProtected` over usbmux (USB
 //!   or a Wi-Fi attachment; [`crate::lockdown::passcode_protected`]), or the
-//!   runner's `SBGetScreenLockStatus` while it is up;
+//!   runner's `SBGetScreenLockStatus` while it is up. Both say whether a
+//!   passcode is required *now*, so a `false` counts only on a locked phone
+//!   ([`merge_passcode`]);
 //! - the Auto-Lock setting: the device runner reads ManagedConfiguration's
 //!   `maxInactivity` in-process and reports it on `GET /wda/keepawake`. No
 //!   lockdown domain carries it, so it is known only once a runner that has
@@ -255,8 +257,31 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Fold a passcode reading into what is known.
+///
+/// Both sources answer "is a passcode required right now" rather than "is
+/// one set": on a 12 mini (iOS 15.4.1) with a passcode, lockdown
+/// `PasswordProtected` read `true` while the phone was locked and `false`
+/// while it was unlocked, and the runner's `SBGetScreenLockStatus` reported
+/// `passcodeEnabled:false` on the unlocked phone while `/wda/unlock` on the
+/// locked one answered `passcode_required`. So a `true` always counts, and a
+/// `false` only when the phone was known to be locked when it was read; an
+/// unlocked `false` keeps what was known.
+pub fn merge_passcode(
+    known: Option<bool>,
+    reading: Option<bool>,
+    locked: Option<bool>,
+) -> Option<bool> {
+    match (reading, locked) {
+        (Some(true), _) => Some(true),
+        (Some(false), Some(true)) => Some(false),
+        _ => known,
+    }
+}
+
 /// Merge a reading into the cache; a `None` keeps what was known.
-fn update(passcode: Option<bool>, auto_lock: Option<AutoLock>) {
+/// `locked` is the lock state when `passcode` was read (see [`merge_passcode`]).
+fn update(passcode: Option<bool>, locked: Option<bool>, auto_lock: Option<AutoLock>) {
     if passcode.is_none() && auto_lock.is_none() {
         return;
     }
@@ -265,9 +290,7 @@ fn update(passcode: Option<bool>, auto_lock: Option<AutoLock>) {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let before = *facts;
-        if passcode.is_some() {
-            facts.passcode = passcode;
-        }
+        facts.passcode = merge_passcode(facts.passcode, passcode, locked);
         if auto_lock.is_some() {
             facts.auto_lock = auto_lock;
         }
@@ -310,7 +333,7 @@ fn load(path: &Path) -> Option<Facts> {
 
 /// A keep-awake renewal or read told us about the phone.
 pub fn note_runner_report(report: &KeepAwakeReport) {
-    update(report.passcode, report.auto_lock);
+    update(report.passcode, report.locked, report.auto_lock);
 }
 
 /// The `lock_readiness` object of `/agent/status`.
@@ -341,7 +364,7 @@ async fn refresh(state: &AppState) {
         match tokio::time::timeout(LOCKDOWN_TIMEOUT, crate::lockdown::passcode_protected(udid))
             .await
         {
-            Ok(Ok(passcode)) => update(Some(passcode), None),
+            Ok(Ok(passcode)) => update(Some(passcode), known_lock_state(state), None),
             Ok(Err(error)) => tracing::debug!("lock readiness: lockdown passcode read: {error:#}"),
             Err(_) => tracing::debug!("lock readiness: lockdown passcode read timed out"),
         }
@@ -363,6 +386,18 @@ async fn refresh(state: &AppState) {
             tracing::debug!("lock readiness: runner read: {error:#}")
         }
     }
+}
+
+/// The lock state the runner last reported, if it is up.
+fn known_lock_state(state: &AppState) -> Option<bool> {
+    if !runner_readable(state) {
+        return None;
+    }
+    state
+        .wda_health
+        .lock()
+        .ok()
+        .and_then(|health| health.locked)
 }
 
 /// Only ask a runner that is up and not being started, stopped or handed over.
@@ -569,6 +604,30 @@ mod tests {
         save(&path, facts);
         assert_eq!(load(&path), Some(facts));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unlocked_false_does_not_hide_a_passcode() {
+        // Locked phone, passcode required: set.
+        assert_eq!(merge_passcode(None, Some(true), Some(true)), Some(true));
+        assert_eq!(merge_passcode(Some(false), Some(true), None), Some(true));
+        // The 12 mini case: unlocked, both sources say false — keep `true`.
+        assert_eq!(
+            merge_passcode(Some(true), Some(false), Some(false)),
+            Some(true)
+        );
+        assert_eq!(merge_passcode(Some(true), Some(false), None), Some(true));
+        // Nothing known yet: an unlocked or unknown-state false proves nothing.
+        assert_eq!(merge_passcode(None, Some(false), Some(false)), None);
+        assert_eq!(merge_passcode(None, Some(false), None), None);
+        // Locked and no passcode required: there is none (also after removal).
+        assert_eq!(merge_passcode(None, Some(false), Some(true)), Some(false));
+        assert_eq!(
+            merge_passcode(Some(true), Some(false), Some(true)),
+            Some(false)
+        );
+        // No reading keeps what was known.
+        assert_eq!(merge_passcode(Some(true), None, Some(true)), Some(true));
     }
 
     #[test]

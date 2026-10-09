@@ -10,13 +10,15 @@
 //!   which lockdownd answers for these keys without pairing.
 //! - [`ddi_status`]: whether the Developer Disk Image is mounted, from the
 //!   `com.apple.mobile.mobile_image_mounter` service (needs a paired session).
-//! - [`passcode_protected`]: whether a passcode is set (`PasswordProtected`,
-//!   which lockdownd only answers inside a paired session).
+//! - [`passcode_protected`]: `PasswordProtected`, which lockdownd only
+//!   answers inside a paired session.
 //!
-//! Lockdown cannot tell whether the phone is locked right now: its
-//! `PasswordProtected` value says whether a passcode is *set*, not whether one
-//! is required. Setup keeps `devicectl device info lockState` for that. Nor
-//! does any lockdown domain carry the Auto-Lock setting; the device runner
+//! `PasswordProtected` is not "a passcode is set": on a 12 mini (iOS 15.4.1)
+//! with a passcode it read `true` while the phone was locked and `false` while
+//! it was unlocked. Only a `false` read on a locked phone means there is no
+//! passcode (see `crate::lock_readiness::merge_passcode`). Nor does it tell
+//! the lock state itself; setup keeps `devicectl device info lockState` for
+//! that. No lockdown domain carries the Auto-Lock setting; the device runner
 //! reads that one (see `crate::lock_readiness`).
 //!
 //! Framing: a 4-byte big-endian length, then an XML property list. The TLS
@@ -199,9 +201,10 @@ pub async fn start_developer_service(udid: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether a passcode is set on the phone (`PasswordProtected`). lockdownd
-/// refuses this key without a session (`GetProhibited`), so this pairs the
-/// same way [`ddi_status`] does; over USB or a Wi-Fi attachment alike.
+/// `PasswordProtected`: a passcode is required right now (see the module
+/// notes: `false` on an unlocked phone proves nothing). lockdownd refuses
+/// this key without a session (`GetProhibited`), so this pairs the same way
+/// [`ddi_status`] does; over USB or a Wi-Fi attachment alike.
 pub async fn passcode_protected(udid: &str) -> Result<bool> {
     let attached = attached(udid).await?;
     let pair = PairRecord::parse(&usbmux::read_pair_record(&attached.serial).await?)?;
