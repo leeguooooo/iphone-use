@@ -34,6 +34,8 @@ const UNATTACHED_LOCK_BUDGET: Duration = Duration::from_secs(3);
 pub struct WdaClient {
     base: String, // e.g. "http://192.168.0.190:8100"
     http: reqwest::Client,
+    /// Signs every request with the device runner's per-launch token.
+    auth: std::sync::Arc<crate::runner_token::TokenSource>,
     session: Option<String>,
     /// Last `GET /window/size` answer and when it was read. Every coordinate
     /// gesture needs the size to map normalized points, and the read costs
@@ -109,6 +111,7 @@ impl WdaClient {
         Ok(Self {
             base: base_url.into().trim_end_matches('/').to_string(),
             http,
+            auth: std::sync::Arc::new(crate::runner_token::TokenSource::instance()),
             session: None,
             window: None,
             posted_at: None,
@@ -124,6 +127,13 @@ impl WdaClient {
         })
     }
 
+    /// Sign requests with the token in `source` instead of this instance's
+    /// (tests, tools pointed at another state dir).
+    pub fn with_runner_auth(mut self, source: crate::runner_token::TokenSource) -> Self {
+        self.auth = std::sync::Arc::new(source);
+        self
+    }
+
     /// `GET /status` — health/liveness probe (no session required).
     /// Returns true when WDA answers with a ready state. Each answer also
     /// feeds [`wda_rtt_ms`]: `/status` does no work on the phone, so its time
@@ -133,7 +143,7 @@ impl WdaClient {
         match self
             .http
             .get(format!("{}/status", self.base))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
         {
             Ok(r) => {
@@ -152,7 +162,7 @@ impl WdaClient {
         let body = self
             .http
             .get(format!("{}/session/{}/wda/locked", self.base, sid))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET /wda/locked")?
             .error_for_status()
@@ -174,7 +184,7 @@ impl WdaClient {
         let body = self
             .http
             .get(format!("{}/wda/locked", self.base))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET /wda/locked (unattached)")?
             .error_for_status()
@@ -196,7 +206,7 @@ impl WdaClient {
         let response = self
             .post_req(format!("{}/wda/unlock", self.base))
             .json(&serde_json::json!({}))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /wda/unlock")?;
         ensure_wda_success(response, "POST /wda/unlock").await?;
@@ -209,6 +219,7 @@ impl WdaClient {
         KeepAwakeEndpoint {
             base: self.base.clone(),
             http: self.http.clone(),
+            auth: self.auth.clone(),
         }
     }
 
@@ -282,7 +293,7 @@ impl WdaClient {
         let active_apps_actionable = match self
             .http
             .get(format!("{}/session/{}/wda/apps/list", self.base, sid))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
         {
             Ok(response) => ensure_wda_success(response, "GET /wda/apps/list")
@@ -325,7 +336,7 @@ impl WdaClient {
             let text = self
                 .post_req(format!("{}/session", self.base))
                 .json(&body)
-                .send_timed()
+                .send_signed(&self.auth)
                 .await
                 .context("POST /session")?
                 .error_for_status()
@@ -347,7 +358,7 @@ impl WdaClient {
                     }}))
                     // A runner slow to answer must not hold session setup.
                     .timeout(Duration::from_secs(2))
-                    .send_timed()
+                    .send_signed(&self.auth)
                     .await;
                 // Best effort: an older runner without these settings still
                 // works, just slower.
@@ -378,7 +389,7 @@ impl WdaClient {
                 let result = self
                     .post_req(format!("{}/session/{}/appium/settings", self.base, sid))
                     .json(&serde_json::json!({ "settings": settings }))
-                    .send_timed()
+                    .send_signed(&self.auth)
                     .await;
                 match result {
                     Ok(response) => {
@@ -432,7 +443,7 @@ impl WdaClient {
         let response = self
             .http
             .get(url)
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET /source")?
             .error_for_status()
@@ -479,7 +490,7 @@ impl WdaClient {
             .http
             .get(url)
             .timeout(budget + min_wait + Duration::from_secs(3))
-            .send_timed()
+            .send_signed(&self.auth)
             .await;
         let value = match response {
             Ok(response) => match ensure_wda_success(response, "GET /wda/settle").await {
@@ -533,7 +544,7 @@ impl WdaClient {
         let text = self
             .post_req(format!("{}/session/{}/element", self.base, sid))
             .json(&serde_json::json!({ "using": using, "value": value }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /element")?
             .error_for_status()
@@ -553,7 +564,7 @@ impl WdaClient {
         let response = self
             .post_req(format!("{}/session/{}/elements", self.base, sid))
             .json(&serde_json::json!({ "using": using, "value": value }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /elements")?;
         let value = ensure_wda_success(response, "POST /elements").await?;
@@ -597,7 +608,7 @@ impl WdaClient {
                 self.base, sid, id
             ))
             .json(&serde_json::json!({ "value": [value] }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST pickerwheel value")?;
         ensure_wda_success(response, "POST pickerwheel value").await?;
@@ -614,7 +625,7 @@ impl WdaClient {
                 self.base, sid, element_id
             ))
             .json(&serde_json::json!({}))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST element/click")?;
         ensure_wda_success(response, "POST element/click").await?;
@@ -633,7 +644,7 @@ impl WdaClient {
             ))
             // WDA accepts both `value: [chars]` (W3C) and `text: "..."`; send text.
             .json(&serde_json::json!({ "value": [text], "text": text }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST element/value")?;
         ensure_wda_success(response, "POST element/value").await?;
@@ -655,7 +666,7 @@ impl WdaClient {
             // (hardware-hit on 9.15.3 during the set_value("") validation);
             // send the same empty JSON object every other element POST sends.
             .json(&serde_json::json!({}))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST element/clear")?;
         ensure_wda_success(response, "POST element/clear").await?;
@@ -679,7 +690,7 @@ impl WdaClient {
                 self.base, sid, element_id
             ))
             .json(&serde_json::json!({ "using": using, "value": value }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST element/elements")?;
         let value = ensure_wda_success(response, "POST element/elements").await?;
@@ -714,7 +725,7 @@ impl WdaClient {
                 self.base, sid, element_id, command
             ))
             .json(&body)
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .with_context(|| operation.clone())?;
         if response.status().is_client_error() {
@@ -834,7 +845,7 @@ impl WdaClient {
                 self.base, sid, element_id
             ))
             .json(&serde_json::json!({ "order": order, "offset": offset }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST wda/pickerwheel/select")?;
         ensure_wda_success(response, "POST wda/pickerwheel/select").await?;
@@ -853,7 +864,7 @@ impl WdaClient {
                 self.base, sid, element_id
             ))
             .json(&serde_json::json!({ "value": [value] }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST element/value (adjust)")?;
         ensure_wda_success(response, "POST element/value (adjust)").await?;
@@ -886,7 +897,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /actions")?;
         ensure_wda_success(response, "POST /actions").await?;
@@ -915,7 +926,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /actions (long press)")?;
         ensure_wda_success(response, "POST /actions (long press)").await?;
@@ -954,7 +965,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /actions (drag)")?;
         ensure_wda_success(response, "POST /actions (drag)").await?;
@@ -998,7 +1009,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /actions (swipe)")?;
         ensure_wda_success(response, "POST /actions (swipe)").await?;
@@ -1012,7 +1023,7 @@ impl WdaClient {
         let response = self
             .post_req(format!("{}/session/{}/wda/pressButton", self.base, sid))
             .json(&serde_json::json!({ "name": "home" }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /wda/pressButton home")?;
         ensure_wda_success(response, "POST /wda/pressButton home").await?;
@@ -1188,7 +1199,7 @@ impl WdaClient {
         let body = self
             .http
             .get(format!("{}/session/{}/element/active", self.base, sid))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET /element/active")?
             .error_for_status()
@@ -1204,7 +1215,7 @@ impl WdaClient {
             ))
             // Same bodyless-POST 400 as clear_element on current WDA builds.
             .json(&serde_json::json!({}))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /element/clear")?;
         ensure_wda_success(response, "POST /element/clear").await?;
@@ -1230,7 +1241,7 @@ impl WdaClient {
                 "mjpegScalingFactor": scaling,
                 "mjpegServerScreenshotQuality": quality,
             }}))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /appium/settings (mjpeg)")?;
         ensure_wda_success(response, "POST /appium/settings (mjpeg)").await?;
@@ -1260,7 +1271,7 @@ impl WdaClient {
         let response = self
             .http
             .get(format!("{}/session/{}/window/size", self.base, sid))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET /window/size")?;
         let value = ensure_wda_success(response, "GET /window/size").await?;
@@ -1283,7 +1294,7 @@ impl WdaClient {
         let response = self
             .post_req(format!("{}/session/{}/wda/apps/launch", self.base, sid))
             .json(&serde_json::json!({ "bundleId": bundle_id }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /wda/apps/launch")?;
         ensure_wda_success(response, "POST /wda/apps/launch").await?;
@@ -1304,7 +1315,7 @@ impl WdaClient {
         let response = self
             .http
             .get(format!("{}/session/{}/wda/apps/list", self.base, sid))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET /wda/apps/list")?;
         // ensure_wda_success already unwraps the W3C `value`.
@@ -1339,7 +1350,7 @@ impl WdaClient {
         let response = self
             .post_req(format!("{}/session/{}/url", self.base, sid))
             .json(&serde_json::json!({ "url": url }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /session/:sid/url")?;
         ensure_wda_success(response, "POST /session/:sid/url").await?;
@@ -1354,7 +1365,7 @@ impl WdaClient {
         let response = self
             .post_req(format!("{}/session/{}/wda/keys", self.base, sid))
             .json(&serde_json::json!({ "value": [text] }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /wda/keys")?;
         ensure_wda_success(response, "POST /wda/keys").await?;
@@ -1407,7 +1418,7 @@ impl WdaClient {
                     ]
                 }]
             }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /actions (key)")?;
         ensure_wda_success(response, "POST /actions").await?;
@@ -1467,7 +1478,7 @@ impl WdaClient {
                 self.base, sid
             ))
             .json(&serde_json::json!({ "keyNames": ["Done", "完了", "return", "前往", "search"] }))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /wda/keyboard/dismiss")?;
         ensure_wda_success(response, "POST /wda/keyboard/dismiss").await?;
@@ -1481,7 +1492,7 @@ impl WdaClient {
         let response = self
             .http
             .get(format!("{}/screenshot", self.base))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET /screenshot")?;
         let value = ensure_wda_success(response, "GET /screenshot").await?;
@@ -1728,7 +1739,7 @@ impl WdaClient {
                 "{}/session/{}/element/{}/rect",
                 self.base, sid, element_id
             ))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET element/rect")?;
         let value = ensure_wda_success(response, "GET element/rect").await?;
@@ -1750,7 +1761,7 @@ impl WdaClient {
                 "{}/session/{}/element/{}/attribute/value",
                 self.base, sid, element_id
             ))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET element/attribute/value")?;
         let value = ensure_wda_success(response, "GET element/attribute/value").await?;
@@ -1787,7 +1798,7 @@ impl WdaClient {
         let response = self
             .http
             .get(format!("{}/session/{}/alert/text", self.base, sid))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET /alert/text")?;
         let text = match ensure_wda_success(response, "GET /alert/text").await {
@@ -1802,7 +1813,7 @@ impl WdaClient {
         let response = self
             .http
             .get(format!("{}/session/{}/wda/alert/buttons", self.base, sid))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("GET /wda/alert/buttons")?;
         let buttons = match ensure_wda_success(response, "GET /wda/alert/buttons").await {
@@ -1831,7 +1842,7 @@ impl WdaClient {
         let response = self
             .post_req(format!("{}/session/{}/alert/accept", self.base, sid))
             .json(&body)
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /alert/accept")?;
         ensure_wda_success(response, "POST /alert/accept").await?;
@@ -1845,7 +1856,7 @@ impl WdaClient {
         let response = self
             .post_req(format!("{}/session/{}/alert/dismiss", self.base, sid))
             .json(&serde_json::json!({}))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST /alert/dismiss")?;
         ensure_wda_success(response, "POST /alert/dismiss").await?;
@@ -1870,7 +1881,7 @@ impl WdaClient {
         let response = self
             .post_req(format!("{}/session/{}/wda/lock", self.base, sid))
             .json(&serde_json::json!({}))
-            .send_timed()
+            .send_signed(&self.auth)
             .await
             .context("POST wda/lock")?;
         ensure_wda_success(response, "POST wda/lock").await?;
@@ -2618,6 +2629,7 @@ pub const SECURE_VALUE_MASK: &str = "••••••••";
 pub struct KeepAwakeEndpoint {
     base: String,
     http: reqwest::Client,
+    auth: std::sync::Arc<crate::runner_token::TokenSource>,
 }
 
 /// What a keep-awake renewal reported about the phone.
@@ -2644,12 +2656,12 @@ impl KeepAwakeEndpoint {
     /// The runner never acts on a locked phone; the deadline lives on the
     /// phone, so a daemon that stops renewing lets Auto-Lock take over again.
     pub async fn renew(&self, secs: u64) -> std::result::Result<KeepAwakeReport, KeepAwakeError> {
-        let response = self
+        let request = self
             .http
             .post(format!("{}/wda/keepawake", self.base))
             .json(&serde_json::json!({ "secs": secs }))
-            .timeout(Duration::from_secs(3))
-            .send()
+            .timeout(Duration::from_secs(3));
+        let response = crate::runner_token::send(request, &self.auth)
             .await
             .map_err(|error| KeepAwakeError::Failed(anyhow!(error).context("POST /wda/keepawake")))?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -2663,11 +2675,11 @@ impl KeepAwakeEndpoint {
 
     /// `GET /wda/keepawake`: the same report without touching the lease.
     pub async fn read(&self) -> std::result::Result<KeepAwakeReport, KeepAwakeError> {
-        let response = self
+        let request = self
             .http
             .get(format!("{}/wda/keepawake", self.base))
-            .timeout(Duration::from_secs(3))
-            .send()
+            .timeout(Duration::from_secs(3));
+        let response = crate::runner_token::send(request, &self.auth)
             .await
             .map_err(|error| {
                 KeepAwakeError::Failed(anyhow!(error).context("GET /wda/keepawake"))
@@ -3031,6 +3043,144 @@ mod tests {
             }
         });
         (format!("http://{address}"), task)
+    }
+
+    /// A runner that signs-checks like the real one (RunnerAuth): every
+    /// request must carry a valid signature over its method, target and body,
+    /// and each nonce works once; anything else is a 401 and does nothing.
+    /// Returns the base URL, the count of requests it acted on, and its thread.
+    fn signing_runner(
+        token: &str,
+        requests: usize,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let acted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&acted);
+        let token = token.to_string();
+        let task = std::thread::spawn(move || {
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut raw = Vec::new();
+                let mut chunk = [0_u8; 8_192];
+                let (head, body) = loop {
+                    let read = stream.read(&mut chunk).unwrap_or(0);
+                    if read == 0 {
+                        break (String::new(), Vec::new());
+                    }
+                    raw.extend_from_slice(&chunk[..read]);
+                    let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&raw[..end]).to_string();
+                    let length = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if raw.len() >= end + 4 + length {
+                        break (head, raw[end + 4..end + 4 + length].to_vec());
+                    }
+                };
+                let mut line = head.lines().next().unwrap_or_default().split(' ');
+                let (method, target) = (
+                    line.next().unwrap_or_default(),
+                    line.next().unwrap_or_default(),
+                );
+                let authorization = head.lines().find_map(|l| {
+                    l.split_once(':')
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                        .map(|(_, value)| value.trim().to_string())
+                });
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                let verdict = core::runner_auth::verify(
+                    &token,
+                    method,
+                    target,
+                    &body,
+                    authorization.as_deref(),
+                    now,
+                )
+                .ok()
+                .filter(|credentials| seen.insert(credentials.nonce.clone()));
+                let response = match verdict {
+                    Some(_) => {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let body = r#"{"value":{"ready":true}}"#;
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    }
+                    None => {
+                        let body = r#"{"value":{"error":"unauthorized","message":"authorization required"}}"#;
+                        format!("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    }
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{address}"), acted, task)
+    }
+
+    #[test]
+    fn a_signing_runner_refuses_unsigned_and_foreign_requests_and_accepts_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = crate::runner_token::rotate(dir.path()).unwrap();
+        let (base, acted, task) = signing_runner(&token, 7);
+
+        // No token (an unconfigured client): refused, nothing done.
+        let unsigned = WdaClient::new(base.clone())
+            .unwrap()
+            .with_runner_auth(crate::runner_token::TokenSource::none());
+        assert!(!block(unsigned.is_up()));
+        // Another launch's token: refused.
+        let other = tempfile::tempdir().unwrap();
+        crate::runner_token::rotate(other.path()).unwrap();
+        let stale = WdaClient::new(base.clone())
+            .unwrap()
+            .with_runner_auth(crate::runner_token::TokenSource::at(other.path()));
+        assert!(!block(stale.is_up()));
+        assert_eq!(acted.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // This launch's token: GET and a POST with a body both verify, and so
+        // does the keep-awake lease (its own request path).
+        let mut ours = WdaClient::new(base.clone())
+            .unwrap()
+            .with_runner_auth(crate::runner_token::TokenSource::at(dir.path()));
+        assert!(block(ours.is_up()));
+        block(ours.unlock()).unwrap();
+        assert!(block(ours.keep_awake_endpoint().renew(30)).is_ok());
+
+        // A captured request replayed byte for byte is refused.
+        let replay = {
+            let target = "/status";
+            let value = core::runner_auth::authorization(&token, "GET", target, b"");
+            let mut stream =
+                std::net::TcpStream::connect(base.trim_start_matches("http://")).unwrap();
+            let request =
+                format!("GET {target} HTTP/1.1\r\nHost: x\r\nAuthorization: {value}\r\n\r\n");
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut first = String::new();
+            let _ = stream.read_to_string(&mut first);
+            assert!(first.starts_with("HTTP/1.1 200"), "{first}");
+            request
+        };
+        let mut stream = std::net::TcpStream::connect(base.trim_start_matches("http://")).unwrap();
+        stream.write_all(replay.as_bytes()).unwrap();
+        let mut second = String::new();
+        let _ = stream.read_to_string(&mut second);
+        assert!(second.starts_with("HTTP/1.1 401"), "{second}");
+        task.join().unwrap();
+        assert_eq!(acted.load(std::sync::atomic::Ordering::SeqCst), 4);
     }
 
     fn block<F: std::future::Future>(future: F) -> F::Output {

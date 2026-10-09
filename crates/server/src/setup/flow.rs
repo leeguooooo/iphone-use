@@ -87,6 +87,9 @@ struct LegacyRun {
     lan_ip: Option<String>,
     wifi_mac: Option<String>,
     wifi_ready: bool,
+    /// The runner proved it refuses unsigned requests (see
+    /// [`runner_enforces_auth`]): its LAN port is then safe to relay to.
+    auth_enforced: bool,
 }
 
 /// The interactive lock wait's notice schedule.
@@ -1618,10 +1621,11 @@ impl Setup {
 
     fn runner_session(&self) -> Option<String> {
         let udid = &self.ctx.udid;
+        let auth = crate::runner_token::TokenSource::at(self.ctx.state_dir());
         sys::block_on(async {
             tokio::time::timeout(
                 Duration::from_secs(2),
-                crate::lockdown::runner_status(udid, RUNNER_DEVICE_PORT),
+                crate::lockdown::runner_status(udid, RUNNER_DEVICE_PORT, &auth),
             )
             .await
             .ok()
@@ -1642,12 +1646,18 @@ impl Setup {
         };
         let command = format!("{} {}", xcodebuild.display(), argv.join(" "));
         let expected = format!("runner:{command}");
-        let Ok(spawned) = proc::spawn_detached(
+        // A fresh token for this launch; the runner refuses unsigned requests.
+        // xcodebuild hands TEST_RUNNER_<NAME> to the runner as <NAME>.
+        let Ok(token) = crate::runner_token::rotate(self.ctx.state_dir()) else {
+            return die("could not store the device runner's launch token in the state dir");
+        };
+        let Ok(spawned) = proc::spawn_detached_env(
             xcodebuild,
             &argv,
             Some(self.ctx.state_dir()),
             &self.ctx.run_log,
             Some(&self.xcconfig),
+            &[(crate::runner_token::XCODEBUILD_TOKEN_ENV, token.as_str())],
         ) else {
             return die(format!(
                 "xcodebuild did not become the exact expected runner process; no unverified PID was signalled.\n   Inspect {} and any listener before retrying.",
@@ -1931,7 +1941,12 @@ impl Setup {
                 ];
                 let mut desc = format!("USB relay (usbmuxd) on 127.0.0.1:{local}");
                 if let Some(ip) = self.legacy_lan_host() {
-                    desc.push_str(&format!(", LAN fallback {ip}:{device_port} (WDA_ALLOW_LAN=1)"));
+                    let why = if self.legacy_ios.as_ref().is_some_and(|l| l.auth_enforced) {
+                        "signed requests only"
+                    } else {
+                        "WDA_ALLOW_LAN=1, unauthenticated runner"
+                    };
+                    desc.push_str(&format!(", LAN fallback {ip}:{device_port} ({why})"));
                     args.extend(["--lan-host".into(), ip]);
                 }
                 (bin.clone(), args, desc)
@@ -1992,8 +2007,10 @@ impl Setup {
 
     /// Relay the runner's control and video ports to loopback. The daemon is
     /// a background LaunchAgent that macOS Local Network privacy keeps off the
-    /// LAN, and the runner has no authentication: a USB relay is the default,
-    /// a LAN socat relay only behind WDA_ALLOW_LAN=1. Returns the control URL.
+    /// LAN: a USB relay is the default, then the encrypted CoreDevice tunnel;
+    /// an iOS 15/16 phone falls back to its LAN address once its runner
+    /// proved it refuses unsigned requests; a LAN socat relay only behind
+    /// WDA_ALLOW_LAN=1. Returns the control URL.
     fn relays(&mut self, url: &str) -> Step<String> {
         let wda_port = valid_port(&self.ctx.wda_port).unwrap_or(8100);
         let mjpeg_port = valid_port(&self.ctx.mjpeg_port).unwrap_or(9100);
@@ -2073,7 +2090,7 @@ impl Setup {
         }
         if tool.is_none() && self.ctx.lan() {
             if let Some(socat) = sys::which("socat") {
-                warn("WDA_ALLOW_LAN=1: the device runner has no authentication; use only on a trusted, isolated LAN");
+                warn("WDA_ALLOW_LAN=1: a plain LAN relay is unencrypted (screen contents cross the network in the clear), and a runner older than request signing accepts anyone; use only on a trusted, isolated LAN");
                 if phone_ip.is_empty()
                     || !phone_ip
                         .bytes()
@@ -2099,7 +2116,7 @@ impl Setup {
                     "no permitted control relay tool is available",
                 );
             }
-            return die("the device layer relays over USB, or off the cable through the phone's encrypted CoreDevice Wi-Fi tunnel.\n   Neither is available: plug the iPhone in over USB (or keep it on the same network as this Mac so its tunnel\n   comes up); if it is connected, the iPhoneUse app is missing or too old to relay — reinstall it or run:\n   iphone-use upgrade. The on-phone runner has no HTTP authentication, so a plain LAN relay to the phone's\n   address stays disabled unless WDA_ALLOW_LAN=1 is explicitly set for a trusted, isolated network.");
+            return die("the device layer relays over USB, or off the cable through the phone's encrypted CoreDevice Wi-Fi tunnel.\n   Neither is available: plug the iPhone in over USB (or keep it on the same network as this Mac so its tunnel\n   comes up); if it is connected, the iPhoneUse app is missing or too old to relay — reinstall it or run:\n   iphone-use upgrade. A plain LAN relay to the phone's address is unencrypted, so it stays disabled\n   unless WDA_ALLOW_LAN=1 is explicitly set for a trusted, isolated network.");
         };
         // Both relays start before either is checked: the control check and
         // the video's first frame used to run one after the other.
@@ -2150,16 +2167,19 @@ impl Setup {
         // works without video, and the daemon now prefers the runner's H.264
         // stream anyway, so a slow first MJPEG frame is a warning, not a
         // failed round that relaunches the runner.
-        spawn_video_first_frame_check(mjpeg_port, mjpeg_log.clone());
+        spawn_video_first_frame_check(mjpeg_port, mjpeg_log.clone(), self.ctx.runner_auth());
         let target_url = format!("http://127.0.0.1:{wda_port}");
-        if !sys::http_ok(&format!("{target_url}/status"), Duration::from_secs(5)) {
+        if !sys::runner_ok(
+            &format!("{target_url}/status"),
+            Duration::from_secs(5),
+            &self.ctx.runner_auth(),
+        ) {
             return die(format!(
                 "relay up but the device runner is not answering through it — check {}",
                 relay_log.display()
             ));
         }
         ok(&format!("device runner reachable at {target_url}"));
-        warn("The Mac relay is loopback-only, but the runner on the iPhone has no HTTP authentication.\n   Keep the iPhone on a trusted, isolated network even when the Mac relay uses USB.");
         Ok(target_url)
     }
 
@@ -2353,7 +2373,11 @@ impl Setup {
                 Role::Mjpeg,
                 mjpeg_port,
             )
-            && sys::http_ok(&format!("{target_url}/status"), Duration::from_secs(4));
+            && sys::runner_ok(
+                &format!("{target_url}/status"),
+                Duration::from_secs(4),
+                &self.ctx.runner_auth(),
+            );
         if !verified {
             self.phase(
                 "supervisor-fail",
@@ -2479,9 +2503,10 @@ impl Setup {
     // ── KeepAlive: hold while healthy ───────────────────────────────────────
 
     fn endpoint_locked(&self) -> bool {
-        sys::http_get(
+        sys::runner_get(
             &format!("http://127.0.0.1:{}/wda/locked", self.ctx.wda_port),
             Duration::from_secs(3),
+            &self.ctx.runner_auth(),
         )
         .filter(|(status, _)| *status < 400)
         .and_then(|(_, body)| serde_json::from_slice::<serde_json::Value>(&body).ok())
@@ -2587,7 +2612,8 @@ impl Setup {
                 probes = ProbeCount::default();
                 continue;
             }
-            let answered = sys::http_ok(&status_url, Duration::from_secs(4));
+            let answered =
+                sys::runner_ok(&status_url, Duration::from_secs(4), &self.ctx.runner_auth());
             // A pulled cable looks like a dead runner from here. Ask whether
             // the phone is still attached before counting a miss: an absent
             // phone is `not_connected`, never a runner failure to rebuild.
@@ -2630,7 +2656,9 @@ impl Setup {
             cycle += 1;
             let probe = if !answered {
                 Probe::StatusMiss
-            } else if (cycle.is_multiple_of(3) || probes.suspicious()) && !runner_reads(&read_url) {
+            } else if (cycle.is_multiple_of(3) || probes.suspicious())
+                && !runner_reads(&read_url, &self.ctx.runner_auth())
+            {
                 Probe::ReadFail
             } else {
                 Probe::Ok
@@ -2777,11 +2805,26 @@ impl Setup {
 
 /// A light screen read through the runner's relay: 2xx with a tree, not an
 /// error envelope. Heavy screens can take several seconds, hence the budget.
-fn runner_reads(url: &str) -> bool {
-    let Some((status, body)) = sys::http_get(url, Duration::from_secs(15)) else {
+fn runner_reads(url: &str, auth: &crate::runner_token::TokenSource) -> bool {
+    let Some((status, body)) = sys::runner_get(url, Duration::from_secs(15), auth) else {
         return false;
     };
     status < 400 && read_body_ok(&body)
+}
+
+/// The runner at `status_url` refuses unsigned requests: an unsigned
+/// `/status` gets 401, and the signed one reports `auth.required`. Only then
+/// is a plain LAN relay to it safe by default. An older runner answers both
+/// with 200 and no `auth`.
+fn runner_enforces_auth(status_url: &str, auth: &crate::runner_token::TokenSource) -> bool {
+    let unsigned = sys::http_get(status_url, Duration::from_secs(3));
+    if !unsigned.is_some_and(|(status, _)| status == 401) {
+        return false;
+    }
+    sys::runner_get(status_url, Duration::from_secs(3), auth)
+        .filter(|(status, _)| *status == 200)
+        .and_then(|(_, body)| serde_json::from_slice::<serde_json::Value>(&body).ok())
+        .is_some_and(|v| v.pointer("/value/auth/required") == Some(&serde_json::Value::Bool(true)))
 }
 
 /// The body of a successful `/source` read: a JSON value that is not WDA's
@@ -3397,13 +3440,16 @@ mod tests {
             500,
             r#"{"value":{"error":"unknown error","message":"snapshot failed"}}"#,
         );
-        assert!(!runner_reads(&format!(
-            "http://127.0.0.1:{broken}/source?format=json"
-        )));
+        let none = crate::runner_token::TokenSource::none();
+        assert!(!runner_reads(
+            &format!("http://127.0.0.1:{broken}/source?format=json"),
+            &none
+        ));
         let healthy = canned_runner(200, r#"{"value":{"type":"XCUIElementTypeApplication"}}"#);
-        assert!(runner_reads(&format!(
-            "http://127.0.0.1:{healthy}/source?format=json"
-        )));
+        assert!(runner_reads(
+            &format!("http://127.0.0.1:{healthy}/source?format=json"),
+            &none
+        ));
     }
 
     #[test]
@@ -3841,7 +3887,11 @@ impl Setup {
                     mjpeg_port,
                 )
                 && status::phase_is(&ctx.status_file, "ready")
-                && sys::http_ok(&format!("{target_url}/status"), Duration::from_secs(4))
+                && sys::runner_ok(
+                    &format!("{target_url}/status"),
+                    Duration::from_secs(4),
+                    &self.ctx.runner_auth(),
+                )
             {
                 ok("launchd replacement verified: runner identity, both loopback relays, and runner /status");
                 return Ok(());
@@ -3957,14 +4007,19 @@ fn xml_escape(text: &str) -> String {
 
 /// Warn, on a background thread, when the video relay has not delivered its
 /// first byte within 8 s. Never fails setup: control is what agents need.
-fn spawn_video_first_frame_check(mjpeg_port: u16, mjpeg_log: PathBuf) {
+fn spawn_video_first_frame_check(
+    mjpeg_port: u16,
+    mjpeg_log: PathBuf,
+    auth: crate::runner_token::TokenSource,
+) {
     let _ = std::thread::Builder::new()
         .name("video-first-frame".into())
         .spawn(move || {
-            let first_byte = sys::http_get_prefix(
+            let first_byte = sys::runner_get_prefix(
                 &format!("http://127.0.0.1:{mjpeg_port}"),
                 Duration::from_secs(8),
                 1,
+                &auth,
             )
             .is_some_and(|(status, body)| status < 400 && !body.is_empty());
             if !first_byte {
@@ -4014,14 +4069,16 @@ pub fn legacy_reachable_over_wifi(ctx: &Ctx) -> bool {
 }
 
 impl Setup {
-    /// The LAN address the relays may fall back to off the cable: only behind
-    /// WDA_ALLOW_LAN=1 (the runner has no authentication). Without it, off
-    /// the cable the relays use usbmuxd's own Wi-Fi attachment.
+    /// The LAN address the relays may fall back to off the cable. By default
+    /// only when the runner proved it refuses unsigned requests (an iOS 15/16
+    /// phone has no CoreDevice tunnel, so this is its only path off the
+    /// cable); an older runner with no request signing only behind
+    /// WDA_ALLOW_LAN=1.
     fn legacy_lan_host(&self) -> Option<String> {
-        if !self.ctx.lan() {
+        let legacy = self.legacy_ios.as_ref()?;
+        if !legacy.auth_enforced && !self.ctx.lan() {
             return None;
         }
-        let legacy = self.legacy_ios.as_ref()?;
         legacy.wifi_ready.then(|| legacy.lan_ip.clone()).flatten()
     }
 
@@ -4037,7 +4094,7 @@ impl Setup {
                 legacy.host.as_deref().unwrap_or("?"),
             ),
             Some(legacy) if legacy.host.is_some() => format!(
-                "device runner ready (iOS {}, started over Wi-Fi): it would survive the cable being pulled, but this Mac reaches it off the cable only through the plain LAN relay (WDA_ALLOW_LAN=1; the runner port has no authentication), so keep the cable in or opt in",
+                "device runner ready (iOS {}, started over Wi-Fi): it would survive the cable being pulled, but this Mac reaches it off the cable only over the LAN, and this runner predates request signing (or does not answer on the LAN) — rerun setup to update it, or opt in with WDA_ALLOW_LAN=1 on a trusted network; keep the cable in meanwhile",
                 legacy.ios
             ),
             Some(legacy) => format!(
@@ -4391,12 +4448,20 @@ impl Setup {
         let started = 'launch: {
             'attempts: for attempt in 0..2 {
                 let _ = std::fs::write(&self.ctx.run_log, b"");
-                let Ok(spawned) = proc::spawn_detached(
+                // A fresh token per launch; the launcher puts it in the
+                // runner's test environment (never on its command line).
+                let Ok(token) = crate::runner_token::rotate(self.ctx.state_dir()) else {
+                    return die(
+                        "could not store the device runner's launch token in the state dir",
+                    );
+                };
+                let Ok(spawned) = proc::spawn_detached_env(
                     &launcher,
                     &argv,
                     Some(self.ctx.state_dir()),
                     &self.ctx.run_log,
                     None,
+                    &[(crate::runner_token::TOKEN_ENV, token.as_str())],
                 ) else {
                     return die("could not start the iOS 15/16 launcher");
                 };
@@ -4422,9 +4487,9 @@ impl Setup {
                 loop {
                     proc::check()?;
                     if (on_usb && self.runner_session().is_some())
-                        || lan_status
-                            .as_deref()
-                            .is_some_and(|url| sys::http_ok(url, Duration::from_millis(800)))
+                        || lan_status.as_deref().is_some_and(|url| {
+                            sys::runner_ok(url, Duration::from_millis(800), &self.ctx.runner_auth())
+                        })
                     {
                         break 'launch started;
                     }
@@ -4485,9 +4550,12 @@ impl Setup {
         if host.is_some() {
             // Readiness seen on the LAN address: iOS already lets it there.
             if let Some(legacy) = self.legacy_ios.as_mut() {
-                legacy.wifi_ready = lan_status
+                legacy.wifi_ready = lan_status.as_deref().is_some_and(|url| {
+                    sys::runner_ok(url, Duration::from_secs(2), &self.ctx.runner_auth())
+                });
+                legacy.auth_enforced = lan_status
                     .as_deref()
-                    .is_some_and(|url| sys::http_ok(url, Duration::from_secs(2)));
+                    .is_some_and(|url| runner_enforces_auth(url, &self.ctx.runner_auth()));
             }
         }
         self.write_legacy_record();
@@ -4502,8 +4570,12 @@ impl Setup {
     /// Setup brings the runner's app to the front, answers the prompt and
     /// goes back to the Home Screen. Never fails setup.
     fn legacy_wifi(&mut self, url: &str, target_url: &str) -> Step<String> {
-        let ip = sys::http_get(&format!("{target_url}/status"), Duration::from_secs(4))
-            .and_then(|(_, body)| legacy_ios::status_ip(&body));
+        let ip = sys::runner_get(
+            &format!("{target_url}/status"),
+            Duration::from_secs(4),
+            &self.ctx.runner_auth(),
+        )
+        .and_then(|(_, body)| legacy_ios::status_ip(&body));
         let Some(ip) = ip else {
             warn("the runner reported no Wi-Fi address (is the iPhone on Wi-Fi?); it works over USB only");
             self.write_legacy_record();
@@ -4516,13 +4588,16 @@ impl Setup {
         // to answer before they started.
         let relays_have_lan = self.legacy_lan_host().is_some();
         let lan_status = format!("http://{ip}:{RUNNER_DEVICE_PORT}/status");
-        let mut ready = sys::http_ok(&lan_status, Duration::from_secs(3));
+        let mut ready =
+            sys::runner_ok(&lan_status, Duration::from_secs(3), &self.ctx.runner_auth());
         if !ready {
             info("Allowing the runner onto the iPhone's network (answering the iOS prompt)");
             ready = self.grant_network(target_url, &lan_status);
         }
+        let auth_enforced = ready && runner_enforces_auth(&lan_status, &self.ctx.runner_auth());
         if let Some(legacy) = self.legacy_ios.as_mut() {
             legacy.wifi_ready = ready;
+            legacy.auth_enforced = auth_enforced;
         }
         self.write_legacy_record();
         if !ready {
@@ -4549,20 +4624,26 @@ impl Setup {
             &format!("{target_url}/wda/apps/launch"),
             &serde_json::json!({ "bundleId": runner }),
             Duration::from_secs(20),
+            &self.ctx.runner_auth(),
         );
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut answered = false;
         while Instant::now() < deadline && !answered {
-            if sys::http_ok(lan_status, Duration::from_secs(1)) {
+            if sys::runner_ok(lan_status, Duration::from_secs(1), &self.ctx.runner_auth()) {
                 break;
             }
-            let text = sys::http_get(&format!("{target_url}/alert/text"), Duration::from_secs(5))
-                .and_then(|(_, body)| serde_json::from_slice::<serde_json::Value>(&body).ok())
-                .and_then(|v| v.get("value").and_then(|v| v.as_str()).map(str::to_string));
+            let text = sys::runner_get(
+                &format!("{target_url}/alert/text"),
+                Duration::from_secs(5),
+                &self.ctx.runner_auth(),
+            )
+            .and_then(|(_, body)| serde_json::from_slice::<serde_json::Value>(&body).ok())
+            .and_then(|v| v.get("value").and_then(|v| v.as_str()).map(str::to_string));
             if text.is_some_and(|t| legacy_ios::is_network_prompt(&t)) {
-                let buttons: Vec<String> = sys::http_get(
+                let buttons: Vec<String> = sys::runner_get(
                     &format!("{target_url}/wda/alert/buttons"),
                     Duration::from_secs(5),
+                    &self.ctx.runner_auth(),
                 )
                 .and_then(|(_, body)| serde_json::from_slice::<serde_json::Value>(&body).ok())
                 .and_then(|v| v.get("value").cloned())
@@ -4573,6 +4654,7 @@ impl Setup {
                         &format!("{target_url}/alert"),
                         &serde_json::json!({ "name": button }),
                         Duration::from_secs(10),
+                        &self.ctx.runner_auth(),
                     );
                     ok(&format!("answered the iPhone's network prompt: {button}"));
                     answered = true;
@@ -4584,10 +4666,11 @@ impl Setup {
             &format!("{target_url}/wda/homescreen"),
             &serde_json::json!({}),
             Duration::from_secs(10),
+            &self.ctx.runner_auth(),
         );
         let deadline = Instant::now() + Duration::from_secs(8);
         while Instant::now() < deadline {
-            if sys::http_ok(lan_status, Duration::from_secs(2)) {
+            if sys::runner_ok(lan_status, Duration::from_secs(2), &self.ctx.runner_auth()) {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(500));

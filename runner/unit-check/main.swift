@@ -518,5 +518,103 @@ do {
   check(registry.count <= 8, "the registry never holds more than its capacity")
 }
 
+// MARK: - Request signing (RunnerAuth)
+
+do {
+  let token = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+  let nonce = "0123456789abcdef0123456789abcdef"
+  // The known answer shared with crates/core/src/runner_auth.rs and scripts/runner_auth.py.
+  let kat = RunnerAuth.signature(token: token, method: "post", target: "/session/S/actions?x=1", ts: 1_700_000_000,
+                                 nonce: nonce, body: Data(#"{"a":1}"#.utf8))
+  check(RunnerAuth.hex(kat) == "d45cade8fef49833329384ea5669106fce22a98fcc182db1ff3dc0eb946e6e11",
+        "the signature matches the Mac side's known answer")
+
+  func header(_ method: String, _ target: String, _ body: Data, ts: Int64, nonce: String, token: String = token) -> String {
+    let sig = RunnerAuth.signature(token: token, method: method, target: target, ts: ts, nonce: nonce, body: body)
+    return "IPU-HMAC-SHA256 ts=\(ts), nonce=\(nonce), sig=\(RunnerAuth.hex(sig))"
+  }
+  func signed(_ method: String, _ target: String, _ body: Data = Data(), _ authorization: String?) -> HTTPRequest? {
+    var head = "\(method) \(target) HTTP/1.1\r\nHost: phone\r\nContent-Length: \(body.count)\r\n"
+    if let authorization { head += "Authorization: \(authorization)\r\n" }
+    var raw = Data((head + "\r\n").utf8)
+    raw.append(body)
+    if case .complete(let request) = HTTPRequest.parse(raw) { return request }
+    return nil
+  }
+
+  let now = Date(timeIntervalSince1970: 1_700_000_000)
+  let ts: Int64 = 1_700_000_000
+  let auth = RunnerAuth(token: token)
+  check(auth.configured, "a valid token configures signing")
+  let body = Data(#"{"x":1}"#.utf8)
+  let good = signed("POST", "/wda/tap?a=b", body, header("POST", "/wda/tap?a=b", body, ts: ts, nonce: nonce))!
+  check(good.target == "/wda/tap?a=b" && good.path == "/wda/tap", "the raw target is kept for the signature")
+  check(auth.check(good, now: now) == nil, "a signed request passes")
+  check(auth.check(good, now: now) == .replay, "the same request a second time is a replay")
+
+  let n2 = "11111111111111111111111111111111"
+  let tampered = signed("POST", "/wda/tap?a=b", Data(#"{"x":2}"#.utf8), header("POST", "/wda/tap?a=b", body, ts: ts, nonce: n2))!
+  check(auth.check(tampered, now: now) == .badSignature, "a changed body breaks the signature")
+  let retargeted = signed("POST", "/wda/tap?a=c", body, header("POST", "/wda/tap?a=b", body, ts: ts, nonce: n2))!
+  check(auth.check(retargeted, now: now) == .badSignature, "a changed query breaks the signature")
+  let wrongMethod = signed("DELETE", "/wda/tap?a=b", body, header("POST", "/wda/tap?a=b", body, ts: ts, nonce: n2))!
+  check(auth.check(wrongMethod, now: now) == .badSignature, "a changed method breaks the signature")
+  let otherKey = signed("POST", "/wda/tap?a=b", body,
+                        header("POST", "/wda/tap?a=b", body, ts: ts, nonce: n2, token: String(repeating: "f", count: 64)))!
+  check(auth.check(otherKey, now: now) == .badSignature, "another launch's token is refused")
+  check(auth.check(signed("GET", "/status", Data(), nil)!, now: now) == .missing, "no Authorization: refused")
+  check(auth.check(signed("GET", "/status", Data(), "Bearer \(token)")!, now: now) == .malformed,
+        "a bearer token is not accepted: the token never travels")
+  let stale = signed("GET", "/status", Data(), header("GET", "/status", Data(), ts: ts - 901, nonce: n2))!
+  check(auth.check(stale, now: now) == .skew, "a timestamp outside the window is refused")
+  check(auth.precheck(stale.headers, now: now) == .skew, "a stale request is refused from its headers alone")
+  check(auth.precheck(signed("GET", "/status", Data(), nil)!.headers, now: now) == .missing,
+        "an unsigned request is refused before its body is read")
+  let n3 = "22222222222222222222222222222222"
+  let fresh = signed("GET", "/status", Data(), header("GET", "/status", Data(), ts: ts + 30, nonce: n3))!
+  check(auth.check(fresh, now: now) == nil, "a little clock skew is fine")
+
+  let unconfigured = RunnerAuth(token: nil)
+  check(!unconfigured.configured && unconfigured.check(fresh, now: now) == .notConfigured,
+        "with no token every request is refused")
+  check(!RunnerAuth(token: "short").configured, "a malformed token configures nothing")
+  check(!RunnerAuth(token: String(repeating: "A", count: 64)).configured, "upper-case hex is not a setup token")
+
+  check(RunnerAuth.parse("IPU-HMAC-SHA256 sig=\(String(repeating: "ab", count: 32)),nonce=0123456789abcdef,ts=5")?.ts == 5,
+        "fields parse in any order")
+  check(RunnerAuth.parse("IPU-HMAC-SHA256 ts=1, ts=2, nonce=0123456789abcdef, sig=\(String(repeating: "ab", count: 32))") == nil,
+        "a repeated field is malformed")
+  check(RunnerAuth.parse("IPU-HMAC-SHA256 ts=1, nonce=0123456789abcdef, sig=abcd") == nil, "a short signature is malformed")
+  check(RunnerAuth.parse("IPU-HMAC-SHA256 ts=1, nonce=zz23456789abcdef, sig=\(String(repeating: "ab", count: 32))") == nil,
+        "a non-hex nonce is malformed")
+  check(RunnerAuth.parse("IPU-HMAC-SHA256ts=1, nonce=0123456789abcdef, sig=\(String(repeating: "ab", count: 32))") == nil,
+        "the scheme needs its space")
+
+  check(RunnerAuth.constantTimeEqual(Data([1, 2, 3]), Data([1, 2, 3])), "equal bytes compare equal")
+  check(!RunnerAuth.constantTimeEqual(Data([1, 2, 3]), Data([1, 2, 4])), "a last-byte difference is found")
+  check(!RunnerAuth.constantTimeEqual(Data([9, 2, 3]), Data([1, 2, 3])), "a first-byte difference is found")
+  check(!RunnerAuth.constantTimeEqual(Data([1, 2]), Data([1, 2, 3])), "different lengths never match")
+
+  let refused = RunnerAuth.refusalResponse(.missing)
+  let refusedBody = (try? JSONSerialization.jsonObject(with: refused.body)) as? [String: Any]
+  check(refused.status == 401 && (refusedBody?["value"] as? [String: Any])?["error"] as? String == "unauthorized",
+        "a refusal is a 401 in the WDA error envelope")
+  check(String(decoding: refused.serialized().prefix(25), as: UTF8.self) == "HTTP/1.1 401 Unauthorized",
+        "with the right status line")
+  check(!String(decoding: refused.serialized(), as: UTF8.self).contains(token), "and never echoes a token")
+
+  // Bounded nonce memory: past the cap, old timestamps are refused rather than forgotten.
+  let small = RunnerAuth(token: token)
+  var accepted = 0
+  for i in 0..<(RunnerAuth.maxNonces + 10) {
+    let n = String(format: "%032x", i)
+    let r = signed("GET", "/status", Data(), header("GET", "/status", Data(), ts: ts - 600 + Int64(i % 600), nonce: n))!
+    if small.check(r, now: now) == nil { accepted += 1 }
+  }
+  check(accepted >= RunnerAuth.maxNonces, "distinct nonces are accepted up to the cap and beyond")
+  let replayOld = signed("GET", "/status", Data(), header("GET", "/status", Data(), ts: ts - 600, nonce: String(format: "%032x", 0)))!
+  check(small.check(replayOld, now: now) == .replay, "a forgotten nonce's timestamp is below the floor: still a replay")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)

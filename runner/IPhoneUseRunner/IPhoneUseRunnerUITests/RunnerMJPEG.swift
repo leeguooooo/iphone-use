@@ -19,6 +19,7 @@ final class RunnerMJPEGServer {
   }
 
   private let listener: NWListener
+  private let auth: RunnerAuth
   private let queue = DispatchQueue(label: "com.leeguoo.iphone-use.runner.mjpeg")
   private let lock = NSLock()
   private var settings = Settings()
@@ -34,7 +35,8 @@ final class RunnerMJPEGServer {
     init(_ connection: NWConnection) { self.connection = connection }
   }
 
-  init(port: UInt16) throws {
+  init(port: UInt16, auth: RunnerAuth) throws {
+    self.auth = auth
     guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
       throw RunnerError.invalidArgument("invalid MJPEG port \(port)")
     }
@@ -101,13 +103,23 @@ final class RunnerMJPEGServer {
       }
     }
     connection.start(queue: queue)
-    // Like WDA: wait for the request (any bytes), then answer with the stream headers.
-    connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, _, error in
-      guard let self, error == nil, let data else {
+    // Read the whole request head, check its signature, then answer with the stream headers.
+    readHead(connection, buffer: Data()) { [weak self] requestHead, raw in
+      guard let self else {
         connection.cancel()
         return
       }
-      let request = String(decoding: data, as: UTF8.self)
+      if let refusal = self.auth.check(method: requestHead.method, target: requestHead.target,
+                                       authorization: requestHead.headers["authorization"], body: Data()) {
+        NSLog("ipu-runner: refused video %@ %@ from %@: %@", requestHead.method,
+              requestHead.target.components(separatedBy: "?")[0],
+              String(describing: connection.endpoint), refusal.message)
+        connection.stateUpdateHandler = nil
+        connection.send(content: RunnerAuth.refusalResponse(refusal).serialized(), isComplete: true,
+                        completion: .contentProcessed { _ in connection.cancel() })
+        return
+      }
+      let request = raw
       if request.hasPrefix("GET /h264") {
         connection.stateUpdateHandler = nil
         self.h264.attach(connection, head: request)
@@ -133,6 +145,32 @@ final class RunnerMJPEGServer {
         self.add(client)
       })
       self.drain(connection)
+    }
+  }
+
+  /// Collects bytes until the request head is complete (at most 16 KiB, 5 s), then calls `done`
+  /// with it and the head as text. Anything else closes the connection.
+  private func readHead(_ connection: NWConnection, buffer: Data, started: Date = Date(),
+                        done: @escaping (HTTPRequest.Head, String) -> Void) {
+    connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, isComplete, error in
+      guard self != nil, error == nil else {
+        connection.cancel()
+        return
+      }
+      var buffer = buffer
+      if let data { buffer.append(data) }
+      switch HTTPRequest.head(buffer) {
+      case .success(let head)?:
+        done(head, String(decoding: buffer.prefix(upTo: head.end), as: UTF8.self))
+      case .failure?:
+        connection.cancel()
+      case nil:
+        if isComplete || buffer.count > 16 * 1024 || Date().timeIntervalSince(started) > 5 {
+          connection.cancel()
+        } else {
+          self?.readHead(connection, buffer: buffer, started: started, done: done)
+        }
+      }
     }
   }
 

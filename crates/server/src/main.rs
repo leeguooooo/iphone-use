@@ -678,11 +678,13 @@ fn device_query(query: DeviceQuery) -> i32 {
             DeviceQuery::Ddi { udid } => server::lockdown::ddi_status(&udid)
                 .await
                 .and_then(|status| Ok(serde_json::to_value(status)?)),
-            DeviceQuery::RunnerStatus { udid, port } => {
-                server::lockdown::runner_status(&udid, port)
-                    .await
-                    .and_then(|status| Ok(serde_json::to_value(status)?))
-            }
+            DeviceQuery::RunnerStatus { udid, port } => server::lockdown::runner_status(
+                &udid,
+                port,
+                server::runner_token::instance_source(),
+            )
+            .await
+            .and_then(|status| Ok(serde_json::to_value(status)?)),
         }
     });
     match result {

@@ -10,7 +10,10 @@
 //!
 //! `--host` selects Wi-Fi: lockdown at <IP>:62078, nothing through usbmuxd.
 //! Without `--pair-record`, the pair record is read from usbmuxd by UDID.
-//! `RUST_LOG=debug` prints the protocol traffic.
+//! `RUST_LOG=debug` prints the protocol traffic (including the runner env:
+//! never set it while `IPU_RUNNER_TOKEN` is in the environment you share).
+//! `IPU_RUNNER_TOKEN` in this process's environment goes to the runner as its
+//! request-signing token and signs the readiness probe.
 
 use legacy_launch::{LaunchOptions, Target};
 use plist::Value;

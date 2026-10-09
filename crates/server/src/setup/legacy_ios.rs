@@ -729,10 +729,13 @@ pub fn http_post_json(
     url: &str,
     body: &serde_json::Value,
     limit: Duration,
+    auth: &crate::runner_token::TokenSource,
 ) -> Option<(u16, Vec<u8>)> {
     sys::block_on(async {
         let client = reqwest::Client::builder().timeout(limit).build().ok()?;
-        let response = client.post(url).json(body).send().await.ok()?;
+        let response = crate::runner_token::send(client.post(url).json(body), auth)
+            .await
+            .ok()?;
         let status = response.status().as_u16();
         let bytes = response.bytes().await.ok()?;
         Some((status, bytes.to_vec()))

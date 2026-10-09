@@ -153,8 +153,9 @@ the same time run as fast as either one alone.
 - [Agent API reference](docs/agent-api.html) · [MCP tools](crates/mcp/README.md) ·
   [Architecture](docs/direct-device-architecture.html) · [Device setup pitfalls](docs/wda-setup.html) ·
   [Device runner](runner/README.md)
-- Security in one line: the password protects port 44321 only; the runner's own ports on
-  the phone are unauthenticated, so use a trusted network ([details](docs/guide.md#security)).
+- Security in one line: the password protects port 44321; the runner's own ports on the
+  phone accept only requests signed with a per-launch token, but the iOS 15/16 LAN path is
+  unencrypted ([details](docs/guide.md#security)).
 - Issues and ideas: [GitHub issues](https://github.com/leeguooooo/iphone-use/issues).
 
 ## License

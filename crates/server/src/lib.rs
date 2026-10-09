@@ -16,6 +16,7 @@ pub mod pairing;
 pub mod prewarm;
 pub mod protocol;
 pub mod redaction;
+pub mod runner_token;
 pub mod runtime_dir;
 pub mod schedules;
 pub mod scope;

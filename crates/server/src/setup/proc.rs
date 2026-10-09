@@ -122,9 +122,26 @@ pub fn spawn_detached(
     log: &Path,
     xcconfig: Option<&XcconfigEnv>,
 ) -> std::io::Result<u32> {
+    spawn_detached_env(program, args, cwd, log, xcconfig, &[])
+}
+
+/// [`spawn_detached`] with extra environment variables. The environment,
+/// unlike argv, is not readable by other users' processes: secrets (the
+/// runner token) go here, never on the command line.
+pub fn spawn_detached_env(
+    program: &Path,
+    args: &[String],
+    cwd: Option<&Path>,
+    log: &Path,
+    xcconfig: Option<&XcconfigEnv>,
+    env: &[(&str, &str)],
+) -> std::io::Result<u32> {
     let mut command = prepare(program, args, cwd, log, false)?;
     if let Some(xcconfig) = xcconfig {
         xcconfig.apply(&mut command);
+    }
+    for (key, value) in env {
+        command.env(key, value);
     }
     let mut child: Child = command.spawn()?;
     let pid = child.id();

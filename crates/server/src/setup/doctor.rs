@@ -282,9 +282,10 @@ pub fn run(ctx: &Ctx) -> i32 {
     }
     if let Some(port) = ctx.wda_port_number() {
         // Any complete answer counts here (`curl -s`, not `-f`).
-        if sys::http_get(
+        if sys::runner_get(
             &format!("http://127.0.0.1:{port}/status"),
             Duration::from_secs(4),
+            &ctx.runner_auth(),
         )
         .is_some()
         {
@@ -295,14 +296,16 @@ pub fn run(ctx: &Ctx) -> i32 {
     }
     // Caveats that matter only when something above goes wrong.
     println!("{BOLD}Notes{RST}");
-    println!("  • The device runner on the iPhone has no password of its own. The Mac relays it on 127.0.0.1 only,");
+    println!("  • The device runner on the iPhone refuses any request not signed with its per-launch token (state dir:");
+    println!("    runner-token, 0600). The Mac relays it on 127.0.0.1 only,");
     println!("    over USB or, off the cable, through CoreDevice's encrypted Wi-Fi tunnel (launch over USB once: iOS asks");
     println!(
         "    for the passcode to allow UI automation, and cannot show that prompt over Wi-Fi)."
     );
     println!("    Setup and relaunch use the tunnel on their own when the cable is out (WDA_TRANSPORT=usb turns that off).");
-    println!("    WDA_ALLOW_LAN=1 (a plain socat relay to the phone's LAN address, unauthenticated) is an explicit,");
-    println!("    unsafe last resort for a trusted, isolated network only.");
+    println!("    An iOS 15/16 phone (no tunnel) is relayed to its LAN address off the cable, signed but unencrypted.");
+    println!("    WDA_ALLOW_LAN=1 (a plain socat relay to the phone's LAN address; also the LAN fallback for a runner");
+    println!("    older than request signing) is an explicit, unsafe last resort for a trusted, isolated network only.");
     println!("  • Cloudflare WARP or another tunnel VPN can break Xcode's connection to the phone; disconnect it during setup if setup stalls.");
     if fail {
         warn("fix the X items above, then re-run");

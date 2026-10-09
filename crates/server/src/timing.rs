@@ -116,45 +116,67 @@ pub trait SendTimed {
     fn send_timed(
         self,
     ) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> + Send;
+    /// [`Self::send_timed`] for the device runner: the request is signed with
+    /// the runner's per-launch token first (see [`crate::runner_token`]).
+    fn send_signed(
+        self,
+        auth: &crate::runner_token::TokenSource,
+    ) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> + Send;
 }
 
 impl SendTimed for reqwest::RequestBuilder {
     async fn send_timed(self) -> reqwest::Result<reqwest::Response> {
         let (client, request) = self.build_split();
-        let request = request?;
-        let route = format!(
-            "{} {}",
-            request.method(),
-            normalize_route(request.url().path())
-        );
-        let call = InFlight {
-            route: Some(route),
-            started: Instant::now(),
-        };
-        let response = match client.execute(request).await {
-            Ok(response) => response,
-            Err(error) => {
-                call.finish(None);
-                return Err(error);
-            }
-        };
-        let status = response.status();
-        let version = response.version();
-        let headers = response.headers().clone();
-        let body = match response.bytes().await {
-            Ok(body) => body,
-            Err(error) => {
-                call.finish(None);
-                return Err(error);
-            }
-        };
-        call.finish(Some(body.len() as u64));
-        let mut buffered = axum::http::Response::new(body);
-        *buffered.status_mut() = status;
-        *buffered.version_mut() = version;
-        *buffered.headers_mut() = headers;
-        Ok(reqwest::Response::from(buffered))
+        execute_timed(client, request?).await
     }
+
+    async fn send_signed(
+        self,
+        auth: &crate::runner_token::TokenSource,
+    ) -> reqwest::Result<reqwest::Response> {
+        let (client, request) = self.build_split();
+        let mut request = request?;
+        crate::runner_token::sign_request(auth, &mut request);
+        execute_timed(client, request).await
+    }
+}
+
+async fn execute_timed(
+    client: reqwest::Client,
+    request: reqwest::Request,
+) -> reqwest::Result<reqwest::Response> {
+    let route = format!(
+        "{} {}",
+        request.method(),
+        normalize_route(request.url().path())
+    );
+    let call = InFlight {
+        route: Some(route),
+        started: Instant::now(),
+    };
+    let response = match client.execute(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            call.finish(None);
+            return Err(error);
+        }
+    };
+    let status = response.status();
+    let version = response.version();
+    let headers = response.headers().clone();
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(error) => {
+            call.finish(None);
+            return Err(error);
+        }
+    };
+    call.finish(Some(body.len() as u64));
+    let mut buffered = axum::http::Response::new(body);
+    *buffered.status_mut() = status;
+    *buffered.version_mut() = version;
+    *buffered.headers_mut() = headers;
+    Ok(reqwest::Response::from(buffered))
 }
 
 /// `/session/<id>/element/<id>/rect` → `/element/:id/rect`: one bucket per

@@ -28,6 +28,8 @@ import time
 import urllib.error
 import urllib.request
 
+import runner_auth  # signs requests with the runner's per-launch token
+
 W3C_KEY = "element-6066-11e4-a52e-4f735466cecf"
 
 
@@ -42,6 +44,7 @@ class Checker:
         request = urllib.request.Request(self.base + path, data=data, method=method)
         if data is not None:
             request.add_header("Content-Type", "application/json")
+        runner_auth.sign(request)
         started = time.perf_counter()
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -126,7 +129,7 @@ def count(node):
 
 def check_mjpeg(url, seconds):
     """Reads the stream for `seconds`; returns (frames, bytes per frame, header ok, first error)."""
-    request = urllib.request.Request(url.rstrip("/") + "/")
+    request = runner_auth.sign(urllib.request.Request(url.rstrip("/") + "/"))
     frames, sizes = 0, []
     started = time.perf_counter()
     try:

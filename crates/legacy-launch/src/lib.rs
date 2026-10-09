@@ -382,12 +382,20 @@ impl XCUITestListener for Events {
 }
 
 /// True when `GET /status` on the runner answers 200 directly over the LAN.
-pub async fn probe_status(ip: IpAddr, port: u16) -> bool {
+/// `token` signs the request (a runner with a token refuses unsigned ones).
+pub async fn probe_status(ip: IpAddr, port: u16, token: Option<&str>) -> bool {
+    let auth = token
+        .map(|t| {
+            format!(
+                "Authorization: {}\r\n",
+                ipu_core::runner_auth::authorization(t, "GET", "/status", b"")
+            )
+        })
+        .unwrap_or_default();
+    let request = format!("GET /status HTTP/1.0\r\nHost: phone\r\n{auth}\r\n");
     let fut = async {
         let mut s = tokio::net::TcpStream::connect((ip, port)).await.ok()?;
-        s.write_all(b"GET /status HTTP/1.0\r\nHost: phone\r\n\r\n")
-            .await
-            .ok()?;
+        s.write_all(request.as_bytes()).await.ok()?;
         let mut buf = [0u8; 16];
         let n = s.read(&mut buf).await.ok()?;
         Some(is_http_200(&buf[..n]))
@@ -428,8 +436,21 @@ pub async fn launch(t: &Target, o: &LaunchOptions) -> Result<(), String> {
         .await
         .map_err(|e| format!("runner {}: {e}", o.bundle_id))?;
     drop(ip);
-    if !o.env.is_empty() {
-        cfg.runner_env = Some(o.env.clone());
+    // The per-launch token comes from this process's environment (setup
+    // sets it; argv would show it to every user on the Mac) and goes to the
+    // runner's test environment.
+    let token = std::env::var(ipu_core::runner_auth::TOKEN_ENV)
+        .ok()
+        .filter(|t| ipu_core::runner_auth::valid_token(t));
+    let mut env = o.env.clone();
+    if let Some(token) = &token {
+        env.insert(
+            ipu_core::runner_auth::TOKEN_ENV.into(),
+            plist::Value::String(token.clone()),
+        );
+    }
+    if !env.is_empty() {
+        cfg.runner_env = Some(env);
     }
     println!("{} runner app {}", elapsed(t0), cfg.runner_app_path);
     if o.dry_run {
@@ -437,9 +458,10 @@ pub async fn launch(t: &Target, o: &LaunchOptions) -> Result<(), String> {
     }
 
     if let (Some(host), Some(port)) = (t.host, o.probe_port) {
+        let token = token.clone();
         tokio::spawn(async move {
             loop {
-                if probe_status(host, port).await {
+                if probe_status(host, port, token.as_deref()).await {
                     println!(
                         "{} ready: http://{host}:{port}/status answered over Wi-Fi",
                         elapsed(t0)
