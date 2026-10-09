@@ -424,11 +424,13 @@ hardware verification:
   `applicationProcessWithPID:`. SpringBoard is recognised by `XCAXClient_iOS systemApplication`'s
   pid.
 - **Event records** use `initWithName:displayID:interfaceOrientation:` with
-  `XCUIScreen.mainScreen.displayID` and the interface orientation
-  (`XCUIApplication.interfaceOrientation`, read from testmanagerd), which also sizes
-  `/window/size` and the off-screen checks. Never the physical `XCUIDevice.orientation`: a phone
-  lying on its side reads landscape while its UI stays portrait. No target pid is set, so events go
-  to whatever is on screen, as with WDA.
+  `XCUIScreen.mainScreen.displayID`. Their points are read in the portrait screen's coordinates
+  whatever orientation the record names (iPhone 13, iOS 27, Safari in landscape: a landscape
+  record still took portrait points), so the record says portrait and the bridge turns each point
+  from the interface orientation (`XCUIApplication.interfaceOrientation`, read from testmanagerd;
+  `IPURPortraitPoint`). The same orientation sizes `/window/size` and the off-screen checks. Never
+  the physical `XCUIDevice.orientation`: a phone lying on its side reads landscape while its UI
+  stays portrait. No target pid is set, so events go to whatever is on screen, as with WDA.
 - **Screen capture.** The `XCTScreenshotRequest` is built with `CGRectNull` as the full-screen rect.
   If testmanagerd rejects that, the next capture path takes over.
 - **Lock state.** `SBGetScreenLockStatus` / `SBSSpringBoardServerPort` are loaded with

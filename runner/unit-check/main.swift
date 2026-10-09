@@ -387,6 +387,42 @@ do {
         "landscape bounds with a landscape interface stay landscape")
 }
 
+// MARK: - Touch points turned to the portrait screen
+
+do {
+  // iPhone 13 (390x844), Safari in landscape right (3), measured: a point read as portrait
+  // (200, 300) landed at (300, 190) in the 844x390 landscape page. So landscape (300, 190) must be
+  // sent as portrait (200, 300).
+  let natural = CGSize(width: 390, height: 844)
+  func same(_ a: CGPoint, _ b: CGPoint) -> Bool { abs(a.x - b.x) < 0.001 && abs(a.y - b.y) < 0.001 }
+  check(same(IPURPortraitPoint(CGPoint(x: 300, y: 190), 3, natural), CGPoint(x: 200, y: 300)),
+        "landscape right: the measured hardware point maps back")
+  check(same(IPURPortraitPoint(CGPoint(x: 300, y: 190), 3, CGSize(width: 844, height: 390)), CGPoint(x: 200, y: 300)),
+        "landscape bounds give the same portrait point")
+  check(same(IPURPortraitPoint(CGPoint(x: 120, y: 700), 1, natural), CGPoint(x: 120, y: 700)),
+        "portrait points pass through")
+  for raw: Int64 in [0, 5, -1] {
+    check(same(IPURPortraitPoint(CGPoint(x: 120, y: 700), raw, natural), CGPoint(x: 120, y: 700)),
+          "unknown orientation \(raw) counts as portrait")
+  }
+  // Every corner of a landscape screen lands on a corner of the portrait screen, and the two
+  // landscapes turn opposite ways.
+  let landscape = CGSize(width: 844, height: 390)
+  for raw: Int64 in [3, 4] {
+    for corner in [CGPoint(x: 0, y: 0), CGPoint(x: landscape.width, y: 0),
+                   CGPoint(x: 0, y: landscape.height), CGPoint(x: landscape.width, y: landscape.height)] {
+      let p = IPURPortraitPoint(corner, raw, natural)
+      check((p.x == 0 || p.x == 390) && (p.y == 0 || p.y == 844), "landscape \(raw) corner \(corner) stays a corner")
+    }
+  }
+  check(same(IPURPortraitPoint(CGPoint(x: 0, y: 0), 3, natural), CGPoint(x: 390, y: 0)),
+        "landscape right: the top-left corner is the portrait top-right")
+  check(same(IPURPortraitPoint(CGPoint(x: 0, y: 0), 4, natural), CGPoint(x: 0, y: 844)),
+        "landscape left: the top-left corner is the portrait bottom-left")
+  check(same(IPURPortraitPoint(CGPoint(x: 0, y: 0), 2, natural), CGPoint(x: 390, y: 844)),
+        "upside down: corners swap")
+}
+
 // MARK: - Alert scan (alerts beside a web sheet)
 
 do {
