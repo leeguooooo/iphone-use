@@ -164,8 +164,11 @@ The runner lives as long as the launcher's testmanagerd session. Setup launches
 over Wi-Fi (lockdown at the phone's LAN address, heartbeat held) whenever that
 answers, so `unplug_ok: true` means the cable can be pulled and restarts also go
 over Wi-Fi; `launch_transport: "usb"` means pulling the cable ends the runner.
-Off the cable the relays use usbmuxd's Wi-Fi attachment, or the phone's LAN
-address when `WDA_ALLOW_LAN=1` (the runner port has no authentication). Idle release
+This Wi-Fi start is what `WDA_TRANSPORT=auto` (the default) means for iOS 15/16,
+which has no CoreDevice tunnel: lockdown's TLS session with this Mac's pair record,
+not a plain LAN relay. `WDA_TRANSPORT=usb` turns it off (cable only). Off the cable
+the relays use usbmuxd's Wi-Fi attachment, or the phone's LAN address only when
+`WDA_ALLOW_LAN=1` (plain LAN: the runner port has no authentication). Idle release
 works as usual; the next request starts the runner again in ~8–12 s.
 
 Repeated bootstrap requests hide the real blocker — fix it, then reconnect once.

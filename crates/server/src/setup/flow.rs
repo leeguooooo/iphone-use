@@ -4133,7 +4133,10 @@ impl Setup {
         }
         let host = self.legacy_host();
         if host.is_none() && !on_usb {
-            let message = legacy_needs_usb_message(&ios);
+            let mut message = legacy_needs_usb_message(&ios);
+            if !self.ctx.wifi_tunnel_allowed() {
+                message.push_str(" (WDA_TRANSPORT=usb: Wi-Fi starts are turned off for this phone)");
+            }
             self.phase("prereq", "legacy_needs_usb", &message);
             // Retried at once when the cable comes or the phone answers on
             // its LAN address, else every 5 minutes.
