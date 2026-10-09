@@ -33,6 +33,8 @@ final class RunnerTests: XCTestCase {
   static let sessionID = UUID().uuidString
   static let systemVersion = UIDevice.current.systemVersion
   let elements = ElementRegistry()
+  /// Holds off Auto-Lock while the daemon says the phone is in use (`POST /wda/keepawake`).
+  let keepAwake = KeepAwake()
   /// Last alert scan and when it ran; reused for a second while nothing was POSTed (WdaClient asks
   /// /alert/text and /wda/alert/buttons back to back).
   var alertCache: (at: Date, alert: FoundAlert?)?
@@ -144,6 +146,11 @@ final class RunnerTests: XCTestCase {
 
   /// Answered on the transport queue: liveness must not wait behind a slow command on main.
   func inlineResponse(_ request: HTTPRequest) -> HTTPResponse? {
+    // A keep-awake renewal only moves a deadline; it must not wait behind a slow tree read.
+    if request.path == "/wda/keepawake"
+      || (request.path.hasPrefix("/session/") && request.path.hasSuffix("/wda/keepawake")) {
+      return keepAwakeResponse(request)
+    }
     guard request.method == "GET" else { return nil }
     if request.path == "/status" {
       return .value(statusValue(), sessionId: Self.sessionID)
@@ -214,11 +221,15 @@ final class RunnerTests: XCTestCase {
     if let busySince {
       value["busyMs"] = Int(Date().timeIntervalSince(busySince) * 1000)
     }
+    value["keepAwake"] = keepAwake.statusValue()
     return value
   }
 
   func handleOnMain(_ request: HTTPRequest) -> HTTPResponse {
     let started = Date()
+    if request.method == "POST", KeepAwake.isInput(request.path) {
+      keepAwake.noteCommand()
+    }
     busyLock.lock()
     busySince = started
     busyLock.unlock()
@@ -772,5 +783,175 @@ final class RunnerTests: XCTestCase {
       coordinate(app, point).tap()
     }
     return .value(["tapped": button.label])
+  }
+}
+
+// MARK: - Keep awake
+
+extension RunnerTests {
+  /// `POST /wda/keepawake {"secs": N}` keeps the phone from auto-locking for the next N seconds
+  /// (0 stops at once, at most 900); the daemon renews it while someone is driving the phone, so
+  /// a daemon that dies or goes idle lets Auto-Lock take over again on its own.
+  /// `GET /wda/keepawake` reports the state. Both also report the lock state and whether a
+  /// passcode is set, so the daemon knows whether an unlock can work.
+  func keepAwakeResponse(_ request: HTTPRequest) -> HTTPResponse {
+    switch request.method {
+    case "GET":
+      break
+    case "POST":
+      let body: [String: Any]
+      do {
+        body = try request.jsonObject()
+      } catch {
+        return .from(error)
+      }
+      guard let secs = (body["secs"] as? NSNumber)?.doubleValue, secs.isFinite, secs >= 0 else {
+        return .from(RunnerError.invalidArgument("keepawake needs \"secs\": a number of seconds (0 stops)"))
+      }
+      keepAwake.extend(seconds: min(secs, KeepAwake.maxSeconds))
+    default:
+      return .error(404, "unknown command", "\(request.method) \(request.path) is not a runner endpoint")
+    }
+    var value = keepAwake.statusValue()
+    if let lock = IPURBridge.screenLockStatus() {
+      value["locked"] = lock["locked"]
+      value["passcodeEnabled"] = lock["passcodeEnabled"]
+    }
+    return .value(value)
+  }
+}
+
+/// Resets the idle timer every `interval` seconds until a deadline. Never acts on a locked phone
+/// (a phone its owner just locked must stay locked), and skips a beat when a command ran in the
+/// last interval: a tap or a swipe resets the idle timer by itself.
+final class KeepAwake {
+  static let maxSeconds: TimeInterval = 900
+  /// Auto-Lock's shortest setting is 30 s and the screen dims before that; 10 s stays clear of both.
+  static let interval: TimeInterval = 10
+  /// A beat runs on main between commands; one that takes this long would stall them, so beats
+  /// stop for the rest of this runner's life.
+  static let slowBeat: TimeInterval = 2
+
+  private let queue = DispatchQueue(label: "ipu.keepawake", qos: .utility)
+  private let lock = NSLock()
+  private var until: Date?
+  private var timer: DispatchSourceTimer?
+  private var lastCommand = Date.distantPast
+  private var beatQueued = false
+  private var disabled: String?
+  private var beats = 0
+  private var skippedLocked = 0
+  private var lastBeat: Date?
+  private var lastBeatMs: Int?
+  private var lastError: String?
+
+  /// Commands that deliver touches, keys or button presses, which reset the idle timer by
+  /// themselves. A tree read, a screenshot or an app launch does not.
+  static func isInput(_ path: String) -> Bool {
+    let inputSuffixes = [
+      "/tap", "/swipe", "/longpress", "/type", "/home", "/actions", "/click", "/value", "/clear",
+      "/wda/pressButton", "/wda/homescreen", "/wda/keys", "/wda/unlock", "/alert", "/alert/accept",
+      "/alert/dismiss", "/wda/keyboard/dismiss",
+    ]
+    return inputSuffixes.contains { path.hasSuffix($0) } || path.contains("/wda/element/")
+  }
+
+  /// An input command is running: it resets the idle timer itself.
+  func noteCommand() {
+    lock.lock()
+    lastCommand = Date()
+    lock.unlock()
+  }
+
+  func extend(seconds: TimeInterval) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard seconds > 0 else {
+      until = nil
+      timer?.cancel()
+      timer = nil
+      return
+    }
+    until = Date().addingTimeInterval(seconds)
+    guard timer == nil else { return }
+    let timer = DispatchSource.makeTimerSource(queue: queue)
+    timer.schedule(deadline: .now(), repeating: Self.interval, leeway: .seconds(1))
+    timer.setEventHandler { [weak self] in self?.tick() }
+    self.timer = timer
+    timer.resume()
+  }
+
+  private func tick() {
+    lock.lock()
+    guard let until, until > Date(), disabled == nil else {
+      self.until = nil
+      timer?.cancel()
+      timer = nil
+      lock.unlock()
+      return
+    }
+    let recentCommand = Date().timeIntervalSince(lastCommand) < Self.interval
+    let queued = beatQueued
+    lock.unlock()
+    if recentCommand || queued { return }
+    var known = ObjCBool(false)
+    let locked = IPURBridge.isScreenLocked(&known)
+    if !known.boolValue || locked {
+      lock.lock()
+      skippedLocked += 1
+      lock.unlock()
+      return
+    }
+    lock.lock()
+    beatQueued = true
+    lock.unlock()
+    // On main, between commands: the key press shares XCTest's event channel with taps, and
+    // two events at once fail with "only one gesture can be performed at a time".
+    DispatchQueue.main.async { [weak self] in self?.beat() }
+  }
+
+  private func beat() {
+    let started = Date()
+    // Re-check on main: the phone may have locked while this beat waited behind a command.
+    var known = ObjCBool(false)
+    let locked = IPURBridge.isScreenLocked(&known)
+    let error = (!known.boolValue || locked) ? nil : IPURBridge.resetIdleTimer()
+    let took = Date().timeIntervalSince(started)
+    lock.lock()
+    defer { lock.unlock() }
+    beatQueued = false
+    if !known.boolValue || locked {
+      skippedLocked += 1
+      return
+    }
+    lastBeatMs = Int(took * 1000)
+    if let error {
+      lastError = error
+    } else {
+      beats += 1
+      lastBeat = Date()
+    }
+    if took > Self.slowBeat {
+      disabled = String(format: "a keep-awake key press took %.1f s; stopped so it cannot stall commands", took)
+      NSLog("ipu-runner: %@", disabled!)
+    }
+  }
+
+  func statusValue() -> [String: Any] {
+    lock.lock()
+    defer { lock.unlock() }
+    let remaining = until.map { max(0, $0.timeIntervalSinceNow) } ?? 0
+    var value: [String: Any] = [
+      "active": remaining > 0 && disabled == nil,
+      "remainingMs": Int(remaining * 1000),
+      "intervalMs": Int(Self.interval * 1000),
+      "beats": beats,
+      "skippedLocked": skippedLocked,
+    ]
+    if let lastBeat { value["lastBeatAgoMs"] = Int(-lastBeat.timeIntervalSinceNow * 1000) }
+    if let lastBeatMs { value["lastBeatMs"] = lastBeatMs }
+    if let lastError { value["lastError"] = lastError }
+    if let disabled { value["disabled"] = disabled }
+    return value
   }
 }

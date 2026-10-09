@@ -189,6 +189,29 @@ impl WdaClient {
             })
     }
 
+    /// Unlock a phone that has no passcode (`POST /wda/unlock`). The native
+    /// runner presses Home until it opens (a dark Face ID phone needs two
+    /// presses) and refuses without pressing anything when a passcode is set.
+    pub async fn unlock(&mut self) -> Result<()> {
+        let response = self
+            .post_req(format!("{}/wda/unlock", self.base))
+            .json(&serde_json::json!({}))
+            .send_timed()
+            .await
+            .context("POST /wda/unlock")?;
+        ensure_wda_success(response, "POST /wda/unlock").await?;
+        Ok(())
+    }
+
+    /// A handle for the runner's keep-awake lease that does not need this
+    /// client's lock: renewing it must never wait behind a slow tree read.
+    pub fn keep_awake_endpoint(&self) -> KeepAwakeEndpoint {
+        KeepAwakeEndpoint {
+            base: self.base.clone(),
+            http: self.http.clone(),
+        }
+    }
+
     /// Probe WDA at the ACTION level, not just `/status`. `GET /status` lies:
     /// it keeps reporting `ready` even when every UI action fails Code=41 "Not
     /// authorized for performing UI testing actions" — the "zombie ready" state
@@ -2589,6 +2612,66 @@ fn flatten_node(
 
 /// What a non-empty password field reads as in every element row.
 pub const SECURE_VALUE_MASK: &str = "••••••••";
+
+/// The native runner's keep-awake lease (`POST /wda/keepawake`).
+#[derive(Clone)]
+pub struct KeepAwakeEndpoint {
+    base: String,
+    http: reqwest::Client,
+}
+
+/// What a keep-awake renewal reported about the phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeepAwakeReport {
+    pub active: bool,
+    pub locked: Option<bool>,
+    pub passcode: Option<bool>,
+}
+
+/// A keep-awake renewal that did not take.
+#[derive(Debug)]
+pub enum KeepAwakeError {
+    /// The runner does not know the route (WebDriverAgent, or a native runner
+    /// older than this daemon).
+    Unsupported,
+    Failed(anyhow::Error),
+}
+
+impl KeepAwakeEndpoint {
+    /// Keep the phone from auto-locking for `secs` more seconds (0 ends it).
+    /// The runner never acts on a locked phone; the deadline lives on the
+    /// phone, so a daemon that stops renewing lets Auto-Lock take over again.
+    pub async fn renew(&self, secs: u64) -> std::result::Result<KeepAwakeReport, KeepAwakeError> {
+        let response = self
+            .http
+            .post(format!("{}/wda/keepawake", self.base))
+            .json(&serde_json::json!({ "secs": secs }))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|error| KeepAwakeError::Failed(anyhow!(error).context("POST /wda/keepawake")))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(KeepAwakeError::Unsupported);
+        }
+        let value = ensure_wda_success(response, "POST /wda/keepawake")
+            .await
+            .map_err(KeepAwakeError::Failed)?;
+        Ok(parse_keep_awake(&value))
+    }
+}
+
+fn parse_keep_awake(value: &serde_json::Value) -> KeepAwakeReport {
+    KeepAwakeReport {
+        active: value
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        locked: value.get("locked").and_then(serde_json::Value::as_bool),
+        passcode: value
+            .get("passcodeEnabled")
+            .and_then(serde_json::Value::as_bool),
+    }
+}
 
 /// Action-level WDA health (see [`WdaClient::probe_health`]). Distinguishes a
 /// runner that merely answers `/status` from one that can actually act.

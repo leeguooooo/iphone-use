@@ -31,7 +31,7 @@ passcode.
 | `device_state` | Meaning | What to do |
 |---|---|---|
 | `ready` + `drivable:true` | Drivable | Proceed with the task. |
-| `locked` | Phone is locked | Ask the operator to unlock it and keep it awake — only if the task needs the phone. |
+| `locked` | Phone is locked | Without a passcode the next `/agent/input` unlocks it first; with one, ask the operator to unlock it — only if the task needs the phone. While a session drives the phone it is kept from auto-locking (`PHONE_REMOTE_KEEP_AWAKE_SECS`). |
 | `released` / `released:true` | Normal idle | Leave it unless the task needs the phone; then see *Reconnect* below. |
 | `releasing` | Release in progress | Do not reconnect or hold. Wait, then reassess, only if the task still needs it. |
 | reconnecting (`reconnecting:true`) | Bring-up running | If `setup_blocked_on` is set, follow `hint`; else report `setup_phase`/`setup_message` and poll. A first build after an Xcode update can take minutes. |

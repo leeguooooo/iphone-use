@@ -660,6 +660,7 @@ signature could invalidate.
 | `PHONE_REMOTE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the runner supervisor/relay lifecycle. |
 | `PHONE_REMOTE_PREWARM` | on | `0` turns pre-warm off (see Lifecycle). `PHONE_REMOTE_PREWARM_RECENT_SECS` (default `3600`) is how recently an agent must have driven the phone; `PHONE_REMOTE_PREWARM_INTERVAL_SECS` (default `600`) limits each trigger. |
 | `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | Stop the runner and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
+| `PHONE_REMOTE_KEEP_AWAKE_SECS` | `120` | Keep the phone from auto-locking while it is driven and for this many seconds after the last request (a hold, a live view or an owner lease also keep it awake). The runner presses F13, a key iOS ignores, every 10 s and never touches a locked phone. `0` turns it off. |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
 | `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | Device runner sources setup builds (a repo checkout's `scripts/setup-wda.sh` uses its own `runner/`). Persisted only when not the default. |
 | `WDA_RUNNER_REBUILD` | off | `1` makes the next setup ignore the recorded runner product and build again. |

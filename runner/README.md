@@ -114,7 +114,7 @@ has one fixed session id per launch.
 | POST | `/session/:sid/wda/keyboard/dismiss` | `{keyNames}`: taps the first matching key on the keyboard; no keyboard is a no-op |
 | POST | `/session/:sid/url` | `{url}`. iOS 16.4+ uses `XCUIDevice.system.open`; older versions type it into Safari. |
 | GET | `/wda/locked`, `/session/:sid/wda/locked` | `SBGetScreenLockStatus` (as WDA), answered off-main |
-| POST | `/session/:sid/wda/lock`, `/wda/unlock` | lock button / Home press |
+| POST | `/session/:sid/wda/lock`, `/wda/unlock` | lock button / Home presses until open; 409 `passcode_required` (nothing pressed) when a passcode is set |
 | GET | `/session/:sid/alert/text`, `/wda/alert/buttons` | 404 `no such alert` when no alert is open |
 | POST | `/session/:sid/alert/accept`, `/alert/dismiss` | `{name?}`. Without a name, accept presses the last button and dismiss the first. |
 
@@ -181,6 +181,8 @@ has one fixed session id per launch.
 | GET | `/alert` | | `{text, buttons, pid}` or 404 |
 | POST | `/alert` | `{button}` | `{tapped}` |
 | GET | `/window/size` | | `{width, height}` |
+| POST | `/wda/keepawake` | `{secs}` (0 stops, at most 900) | `{active, remainingMs, beats, skippedLocked, locked, passcodeEnabled, …}`, answered off-main |
+| GET | `/wda/keepawake` | | the same, without changing the deadline |
 | POST | `/shutdown` | | ends `testServe` |
 
 ### `/source` node shape
@@ -405,7 +407,14 @@ python3 scripts/runner-smoke.py --runs 5   # timing of the native routes
 - **Picker wheel and slider adjustment** are the only operations that resolve an `XCUIElement`.
   The runner matches by type plus identifier or label, then picks the closest frame. They use
   XCUI's `adjust(toPickerWheelValue:)` and `adjust(toNormalizedSliderPosition:)`.
-- **`/wda/unlock`** presses Home. It cannot enter a passcode, and neither can WDA.
+- **`/wda/unlock`** presses Home, up to three times: a dark Face ID phone without a passcode
+  needs two presses (wake, then open), and it stops as soon as the phone is open. With a passcode
+  set it presses nothing and answers 409 `passcode_required`. It cannot enter a passcode, and
+  neither can WDA.
+- **`/wda/keepawake`** holds off Auto-Lock until the deadline by pressing F13 (HID keyboard page
+  0x07, usage 0x68, which iOS maps to nothing) every 10 s, on main between commands, skipping a
+  beat when an input command ran in the last 10 s. It never presses on a locked phone. Each press
+  takes ~0.25 s; if one takes over 2 s, keep-awake turns itself off for the runner's lifetime.
 - **`/wda/locked` fallback.** It uses SpringBoardServices `SBGetScreenLockStatus`. If that is
   unavailable, the runner looks for SpringBoard's cover-sheet window instead.
 - **`/url` before iOS 16.4** taps Safari's first text field and types the URL.
