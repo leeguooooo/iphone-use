@@ -276,3 +276,5 @@
 "剪贴板里没有配对链接。链接长这样：http://192.168.1.11:44321/pair?c=…" = "There's no pairing link on the clipboard. It looks like http://192.168.1.11:44321/pair?c=…";
 "也可以在 Mac 页面上复制配对链接再粘贴，或者手动输入地址和密码。" = "You can also copy the pairing link on the Mac page and paste it, or type the address and password.";
 "%@：%@" = "%1$@: %2$@";
+"正在重试…" = "Retrying…";
+"重试中" = "Retrying";

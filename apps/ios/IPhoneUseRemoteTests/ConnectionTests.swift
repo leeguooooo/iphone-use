@@ -119,6 +119,12 @@ final class ConnectionPresentationTests: XCTestCase {
         XCTAssertNil(p.primary)
     }
 
+    func testRetryKeepsSayingWhy() {
+        let p = present(.connecting) { $0.lastProblem = .unreachable(.refused) }
+        XCTAssertEqual(p.title, String(localized: "正在重试…"))
+        XCTAssertTrue(p.detail.contains(ConnectProblem.unreachable(.refused).message))
+    }
+
     func testUnreachableOffersRetryAndCountsDown() {
         let p = present(.failed(.unreachable(.timedOut))) { $0.nextRetryAt = self.t0.addingTimeInterval(7.2) }
         XCTAssertEqual(p.primary, .retry)

@@ -242,6 +242,8 @@ struct ConnectionInputs: Equatable {
     var videoWaitSince: Date?
     /// When the next automatic attempt is due.
     var nextRetryAt: Date?
+    /// Why the previous attempt failed, while retrying.
+    var lastProblem: ConnectProblem?
     /// A wake (`/agent/mode agent`) is in flight.
     var waking = false
     var now = Date()
@@ -295,6 +297,12 @@ struct ConnectionPresentation: Equatable {
             return .init(title: String(localized: "已断开"), detail: String(localized: "点下面的按钮重新连上这台 Mac。"),
                          short: String(localized: "已断开"), symbol: "pause.circle", tone: .down,
                          placement: .cover, primary: .retry)
+        case .connecting where i.lastProblem != nil:
+            // An automatic retry: keep saying why it failed, not just "connecting".
+            let waited = seconds(since: i.connectingSince) ?? 0
+            return .init(title: String(localized: "正在重试…"), detail: i.lastProblem!.sentence,
+                         short: String(localized: "重试中"), symbol: "hourglass", tone: .busy,
+                         placement: .cover, progress: true, elapsed: waited >= 2 ? waited : nil)
         case .connecting:
             let waited = seconds(since: i.connectingSince) ?? 0
             return .init(title: String(localized: "正在连接 Mac…"),

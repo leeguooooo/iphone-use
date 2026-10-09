@@ -46,6 +46,8 @@ final class DeviceSession: Identifiable {
     /// The next automatic connection attempt, while one is scheduled.
     private(set) var nextRetryAt: Date?
     private var retryAttempt = 0
+    /// Why the last attempt failed; cleared once connected.
+    private(set) var lastProblem: ConnectProblem?
     private var retryTask: Task<Void, Never>?
     /// A scanned code that could not be traded yet (the Mac was unreachable).
     /// Codes live 5 minutes on the daemon, so it is tried until then.
@@ -201,6 +203,7 @@ final class DeviceSession: Identifiable {
         // One attempt at a time; a typed password always gets its own.
         if typed == nil, phase == .connecting { return }
         cancelRetry()
+        if typed != nil { lastProblem = nil }
         guard let base = DaemonClient.parse(address: address) else {
             phase = .failed(.badAddress)
             return
@@ -245,6 +248,7 @@ final class DeviceSession: Identifiable {
         case .pairCodeExpired: pendingPair = nil
         default: break
         }
+        lastProblem = problem
         phase = .failed(problem)
         if problem.retryable { scheduleRetry(problem) }
     }
@@ -305,6 +309,7 @@ final class DeviceSession: Identifiable {
         lastProbe = Date()
         onLAN = client.onLAN
         retryAttempt = 0
+        lastProblem = nil
         cancelRetry()
         linkUp()
         phase = .connected
@@ -370,6 +375,7 @@ final class DeviceSession: Identifiable {
         pathMonitor?.cancel()
         pathMonitor = nil
         linkUp()
+        lastProblem = nil
         phase = .idle
     }
 
@@ -741,7 +747,8 @@ final class DeviceSession: Identifiable {
         ConnectionInputs(phase: phase, status: status, videoLive: videoLive || video == nil,
                          connectingSince: connectingSince, linkDownSince: linkDownSince,
                          linkProblem: linkProblem, startingSince: startingSince,
-                         videoWaitSince: videoWaitSince, nextRetryAt: nextRetryAt, waking: busy, now: now)
+                         videoWaitSince: videoWaitSince, nextRetryAt: nextRetryAt,
+                         lastProblem: lastProblem, waking: busy, now: now)
     }
 
     /// What every surface says about this device (see `ConnectionPresentation`).
