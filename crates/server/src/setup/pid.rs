@@ -194,7 +194,7 @@ pub fn runner_signature_valid(signature: &str) -> bool {
     if !safe_expected(signature) {
         return false;
     }
-    if go_ios_runtest_valid(signature) {
+    if legacy_launch_valid(signature) {
         return true;
     }
     let Some(rest) = strip_xcodebuild(signature) else {
@@ -259,9 +259,10 @@ pub fn runner_signature_valid(signature: &str) -> bool {
     false
 }
 
-/// The legacy (iOS 15/16) runner: go-ios `runtest` of the runner's test
-/// (`super::legacy_ios::runtest_argv`), from an absolute go-ios path.
-fn go_ios_runtest_valid(signature: &str) -> bool {
+/// The legacy (iOS 15/16) runner: the launcher's `launch` of the runner
+/// (`super::legacy_ios::launch_argv`), over USB or Wi-Fi, from an absolute
+/// path.
+fn legacy_launch_valid(signature: &str) -> bool {
     let tokens: Vec<&str> = signature.split(' ').collect();
     let bundle_ok = |value: &str| {
         value.ends_with(".xctrunner")
@@ -269,15 +270,18 @@ fn go_ios_runtest_valid(signature: &str) -> bool {
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-')
     };
+    let program_ok = |program: &str| {
+        program.starts_with('/') && program.ends_with("/iphone-use-legacy-launch")
+    };
     match tokens.as_slice() {
-        [program, "runtest", udid, bundle, runner, "--xctest-config=iPhoneUse.xctest", "--test-to-run=RunnerTests/testServe"] =>
-        {
-            let bundle = bundle.strip_prefix("--bundle-id=");
-            program.starts_with('/')
-                && program.ends_with("/ios")
-                && udid.strip_prefix("--udid=").is_some_and(hex_udid)
-                && bundle.is_some_and(bundle_ok)
-                && runner.strip_prefix("--test-runner-bundle-id=") == bundle
+        [program, "launch", "--udid", udid, "--bundle-id", bundle] => {
+            program_ok(program) && hex_udid(udid) && bundle_ok(bundle)
+        }
+        [program, "launch", "--udid", udid, "--host", host, "--bundle-id", bundle] => {
+            program_ok(program)
+                && hex_udid(udid)
+                && host.parse::<std::net::IpAddr>().is_ok()
+                && bundle_ok(bundle)
         }
         _ => false,
     }
@@ -760,22 +764,20 @@ mod tests {
     }
 
     #[test]
-    fn go_ios_runtest_is_a_runner_and_a_lan_relay_is_a_relay() {
-        let runtest = "/Users/leo/.iphone-use/tools/go-ios-v1.3.2/ios runtest --udid=00008101-000409443404001E --bundle-id=com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner --test-runner-bundle-id=com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner --xctest-config=iPhoneUse.xctest --test-to-run=RunnerTests/testServe";
-        assert!(runner_signature_valid(runtest));
-        assert!(command_matches(runtest, &format!("runner:{runtest}")));
-        assert!(!runner_signature_valid(
-            &runtest.replace("ios runtest", "ios kill")
-        ));
-        assert!(!runner_signature_valid(&runtest.replace(
-            "--test-runner-bundle-id=com.leeguoo",
-            "--test-runner-bundle-id=org.other"
+    fn the_legacy_launcher_is_a_runner_and_a_lan_relay_is_a_relay() {
+        let usb = "/Users/leo/.iphone-use/instances/i12/runtime/iPhoneUse.app/Contents/MacOS/iphone-use-legacy-launch launch --udid 00008101-000409443404001E --bundle-id com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner";
+        assert!(runner_signature_valid(usb));
+        assert!(command_matches(usb, &format!("runner:{usb}")));
+        let wifi = usb.replace(" --bundle-id", " --host 192.168.0.59 --bundle-id");
+        assert!(runner_signature_valid(&wifi));
+        assert!(!runner_signature_valid(&usb.replace(" launch ", " install ")));
+        assert!(!runner_signature_valid(&wifi.replace("192.168.0.59", "evil;x")));
+        assert!(!runner_signature_valid(&usb.replace(".xctrunner", "")));
+        assert!(!runner_signature_valid(&usb.replace(
+            "/Users/leo/.iphone-use/instances/i12/runtime/iPhoneUse.app/Contents/MacOS/iphone-use-legacy-launch",
+            "iphone-use-legacy-launch"
         )));
-        assert!(!runner_signature_valid(&runtest.replace(
-            "/Users/leo/.iphone-use/tools/go-ios-v1.3.2/ios",
-            "ios"
-        )));
-        assert!(!runner_signature_valid(&format!("{runtest} --env=X=1")));
+        assert!(!runner_signature_valid(&format!("{usb} --env X=1")));
         let lan = "/Users/leo/.iphone-use/instances/i12/runtime/iPhoneUse.app/Contents/MacOS/iphone-use relay --udid 00008101-000409443404001E --listen 127.0.0.1:8410 --device-port 8100 --lan-host 192.168.0.59";
         assert!(command_matches(lan, &format!("relay:{lan}")));
         assert!(!command_matches(

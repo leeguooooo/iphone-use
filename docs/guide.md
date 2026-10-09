@@ -582,24 +582,32 @@ iOS 15 and 16 need no update. From Xcode 26 on, Xcode cannot see such a phone at
 runner for a generic iOS device, gives it a small test host of its own (Xcode's needs
 iOS 17), registers the phone and creates the runner's development profile through the
 App Store Connect API, downloads the pinned Developer Disk Image for that iOS
-(github.com/doronz88/DeveloperDiskImage, sha256-checked, cached in `~/.iphone-use/ddi/`),
-mounts it, checks that testmanagerd starts, and installs and starts the runner with
-[go-ios](https://github.com/danielpaulus/go-ios) (MIT licence; a pinned release is
-downloaded into `~/.iphone-use/tools/` on first use, not shipped with iphone-use; the disk
-images are Apple's files and are likewise only downloaded, never redistributed —
-`IPHONE_USE_DDI_BASE_URL` points at another mirror, and the pinned sha256 still applies). On an
-iPhone X (iOS 16.5) a first setup took about 100 s (70 s of it the runner build); a warm
-reconnect of an iPhone 12 mini (iOS 15.4.1) takes about 12 s.
+(github.com/doronz88/DeveloperDiskImage, sha256-checked, cached in `~/.iphone-use/ddi/`;
+Apple's files, only downloaded, never redistributed; `IPHONE_USE_DDI_BASE_URL` points at
+another mirror and the pinned sha256 still applies), and mounts it, installs the runner
+and starts it with `iphone-use-legacy-launch`, which ships next to `iphone-use` in the
+app (crates/legacy-launch, built on the MIT-licensed
+[idevice](https://github.com/jkcoxson/idevice) crate).
+On iOS 15/16 the runner lives exactly as long as the testmanagerd session that started
+it, which the launcher process holds. Setup therefore starts it **over Wi-Fi** whenever
+the phone's lockdownd answers on its LAN address (it turns on Wi-Fi lockdown over the
+cable the first time, and finds the address from the runner, its last run, or Bonjour's
+`_apple-mobdev2._tcp`): such a runner keeps running with the cable pulled, and later
+restarts (idle release, a crash) go over Wi-Fi too. Otherwise it starts over USB and ends
+when the cable is pulled. Setup also answers the phone's local-network / "wireless data"
+prompt so the runner is reachable on the network. Off the cable the relays reach it
+through usbmuxd's Wi-Fi attachment, or through the phone's LAN address behind
+`WDA_ALLOW_LAN=1` (opt-in: the runner port has no authentication).
+On an iPhone X (iOS 16.5) a setup that rebuilt the runner took 141 s (80 s of it the
+build; DDI check 3.7 s, install 12.9 s and launch 7.5 s, all over Wi-Fi); a warm restart
+of an iPhone 12 mini (iOS 15.4.1) takes about 12 s.
 This needs a paid developer account's App Store Connect API key (`WDA_ASC_KEY_PATH`,
 `WDA_ASC_KEY_ID`, `WDA_ASC_ISSUER_ID`); without one setup stops with `ios_too_old` and
-says so, and iOS 14 or older stops there too (below the runner's floor). These phones
-are **USB-only for now**: the runner lives only as long as the USB connection that
-started it, and go-ios cannot start it over Wi-Fi yet. With `WDA_ALLOW_LAN=1` setup also
-answers the phone's local-network / "wireless data" prompt so the runner answers on the
-LAN while cabled (opt-in: the runner port has no authentication).
+says so, and iOS 14 or older stops there too (below the runner's floor).
 `ddi_needs_reboot` means a stale Developer Disk Image is stuck on such a phone (every
 developer service answers `InvalidService` even after a remount): restart the iPhone
-once. `legacy_needs_usb` means it is off the cable: plug it in, unlocked.
+once. `legacy_needs_usb` means it is neither on the cable nor reachable over Wi-Fi: plug
+it in once, unlocked.
 `automation_not_allowed` is the same code-74 refusal with an Xcode that does support the
 phone's iOS, over USB: the phone did not authorize the UI-automation session. A passcode or
 Allow prompt appears on the iPhone while the runner starts and times out after about 30 s,

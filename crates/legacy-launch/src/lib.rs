@@ -37,6 +37,7 @@ use idevice::{
         heartbeat::HeartbeatClient,
         installation_proxy::InstallationProxyClient,
         lockdown::LockdownClient,
+        mobile_image_mounter::ImageMounter,
     },
     usbmuxd::{UsbmuxdAddr, UsbmuxdConnection},
 };
@@ -202,6 +203,113 @@ pub async fn enable_wifi(t: &Target) -> Result<bool, String> {
         .await
         .map_err(|e| format!("set EnableWifiConnections: {e}"))?;
     Ok(true)
+}
+
+/// The testmanagerd service a usable Developer Disk Image provides.
+pub const TESTMANAGERD: &str = "com.apple.testmanagerd.lockdown.secure";
+
+/// What [`mount`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountOutcome {
+    /// An image was mounted already and testmanagerd starts.
+    AlreadyMounted,
+    /// This call mounted the image and testmanagerd starts.
+    Mounted,
+    /// An image is mounted but lockdown answers testmanagerd with
+    /// `InvalidService` (a stale or mismatched image; restart the phone).
+    ServicesInvalid,
+}
+
+fn invalid_service(e: &IdeviceError) -> bool {
+    matches!(e, IdeviceError::ServiceNotFound) || format!("{e:?} {e}").contains("InvalidService")
+}
+
+/// Starts testmanagerd once through a fresh lockdown session. A mounted
+/// image that does not match the iOS still reads as mounted, but every
+/// developer service then fails with `InvalidService`.
+pub async fn developer_services(p: &dyn IdeviceProvider) -> Result<bool, String> {
+    let mut l = lockdown(p).await?;
+    match l.start_service(TESTMANAGERD).await {
+        Ok(_) => Ok(true),
+        Err(e) if invalid_service(&e) => Ok(false),
+        Err(e) => Err(format!("start {TESTMANAGERD}: {e}")),
+    }
+}
+
+/// Mounts the Developer Disk Image (`image`, `signature`) unless one is
+/// mounted, then proves testmanagerd starts. With `remount`, an image that is
+/// mounted but unusable is unmounted and mounted again once.
+pub async fn mount(
+    t: &Target,
+    image: &std::path::Path,
+    signature: &std::path::Path,
+    remount: bool,
+) -> Result<MountOutcome, String> {
+    let t0 = Instant::now();
+    let p = provider(t).await?;
+    let _hb = if t.host.is_some() {
+        Some(start_heartbeat(p.as_ref(), t0).await?)
+    } else {
+        None
+    };
+    let mut mounted_now = false;
+    for attempt in 0..2 {
+        let mut m = ImageMounter::connect(p.as_ref())
+            .await
+            .map_err(|e| format!("image mounter: {e}"))?;
+        let present = m.lookup_image("Developer").await.is_ok();
+        if !present {
+            let image = tokio::fs::read(image)
+                .await
+                .map_err(|e| format!("read {}: {e}", image.display()))?;
+            let signature = tokio::fs::read(signature)
+                .await
+                .map_err(|e| format!("read {}: {e}", signature.display()))?;
+            m.mount_developer(&image, signature)
+                .await
+                .map_err(|e| format!("mount: {e}"))?;
+            mounted_now = true;
+            println!("{} mounted the Developer Disk Image", elapsed(t0));
+        }
+        drop(m);
+        if developer_services(p.as_ref()).await? {
+            println!("{} testmanagerd starts", elapsed(t0));
+            return Ok(if mounted_now {
+                MountOutcome::Mounted
+            } else {
+                MountOutcome::AlreadyMounted
+            });
+        }
+        println!("{} testmanagerd: InvalidService", elapsed(t0));
+        if !remount || attempt == 1 {
+            break;
+        }
+        let mut m = ImageMounter::connect(p.as_ref())
+            .await
+            .map_err(|e| format!("image mounter: {e}"))?;
+        m.unmount_image("/Developer")
+            .await
+            .map_err(|e| format!("unmount: {e}"))?;
+        println!("{} unmounted the stale image; mounting again", elapsed(t0));
+    }
+    Ok(MountOutcome::ServicesInvalid)
+}
+
+/// Installs (or upgrades) an app bundle directory: AFC upload into
+/// `PublicStaging`, then installation_proxy.
+pub async fn install(t: &Target, app: &std::path::Path) -> Result<(), String> {
+    let t0 = Instant::now();
+    let p = provider(t).await?;
+    let _hb = if t.host.is_some() {
+        Some(start_heartbeat(p.as_ref(), t0).await?)
+    } else {
+        None
+    };
+    idevice::utils::installation::install_package(p.as_ref(), app, None)
+        .await
+        .map_err(|e| format!("install {}: {e}", app.display()))?;
+    println!("{} installed {}", elapsed(t0), app.display());
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

@@ -17,6 +17,8 @@ OUTPUT_DIR="${1:-"$REPO_ROOT"}"
 APP="$OUTPUT_DIR/iPhoneUse.app"
 BINARY="$REPO_ROOT/target/release/iphone-use"
 MCP_BINARY="$REPO_ROOT/target/release/iphone-use-mcp"
+# iOS 15/16 launcher (crates/legacy-launch); optional for local builds.
+LEGACY_LAUNCH_BINARY="$REPO_ROOT/target/release/iphone-use-legacy-launch"
 DEPLOY_DIR="$REPO_ROOT/deploy"
 
 # ── Verify both release-matched binaries were built ───────────────────────────
@@ -53,6 +55,13 @@ cp "$BINARY" "$APP/Contents/MacOS/iphone-use"
 chmod 755 "$APP/Contents/MacOS/iphone-use"
 cp "$MCP_BINARY" "$APP/Contents/MacOS/iphone-use-mcp"
 chmod 755 "$APP/Contents/MacOS/iphone-use-mcp"
+if [ -f "$LEGACY_LAUNCH_BINARY" ]; then
+    cp "$LEGACY_LAUNCH_BINARY" "$APP/Contents/MacOS/iphone-use-legacy-launch"
+    chmod 755 "$APP/Contents/MacOS/iphone-use-legacy-launch"
+else
+    echo "WARNING: $LEGACY_LAUNCH_BINARY not built; iOS 15/16 phones will not set up from this app" >&2
+    echo "         (cargo build --release --bin iphone-use-legacy-launch)" >&2
+fi
 
 # Write Info.plist, substituting version placeholders from template.
 # Uses context-sensitive sed (n command: advance to next line after the key) so

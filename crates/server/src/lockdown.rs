@@ -55,6 +55,8 @@ pub struct DeviceInfo {
     pub product_version: Option<String>,
     pub product_type: Option<String>,
     pub build_version: Option<String>,
+    /// The Wi-Fi MAC address (`WiFiAddress`); finds the phone over Bonjour.
+    pub wifi_address: Option<String>,
     /// `usb` or `network`, as usbmuxd lists the attachment.
     pub connection: &'static str,
 }
@@ -81,6 +83,7 @@ pub async fn device_info(udid: &str) -> Result<DeviceInfo> {
         "ProductVersion",
         "ProductType",
         "BuildVersion",
+        "WiFiAddress",
     ] {
         let body = request(&[("Label", LABEL), ("Request", "GetValue"), ("Key", key)]);
         let reply = exchange(&mut stream, &body).await?;
@@ -104,6 +107,7 @@ pub async fn device_info(udid: &str) -> Result<DeviceInfo> {
         product_version: take("ProductVersion"),
         product_type: take("ProductType"),
         build_version: take("BuildVersion"),
+        wifi_address: take("WiFiAddress"),
         connection: connection(&attached),
     })
 }

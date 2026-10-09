@@ -19,18 +19,16 @@
 //!   with. A free Apple ID has no API key, so it cannot use this path.
 //! - **Device services**: the Developer Disk Image for the phone's iOS comes
 //!   from github.com/doronz88/DeveloperDiskImage (pinned commit, sha256 per
-//!   file, cached under `~/.iphone-use/ddi/`), and install, mount and launch
-//!   go through go-ios (github.com/danielpaulus/go-ios, MIT; a pinned release
-//!   is downloaded once into `~/.iphone-use/tools/`). Neither is shipped with
-//!   iphone-use.
-//! - **Wi-Fi**: none yet without the cable. The runner lives exactly as long
-//!   as the testmanagerd connection that started it: pulling the cable (or
-//!   ending `ios runtest`) ends it within seconds (iPhone 12 mini, iOS
-//!   15.4.1), and go-ios cannot start it over the network (it does not speak
-//!   SSL to network services). While cabled, the runner can also answer on
-//!   the phone's LAN address once iOS allows its network access; setup asks
-//!   for that only behind `WDA_ALLOW_LAN=1`, because the runner port has no
-//!   authentication.
+//!   file, cached under `~/.iphone-use/ddi/`; Apple's files, downloaded, never
+//!   shipped). Mount, install and launch go through `iphone-use-legacy-launch`
+//!   (crates/legacy-launch, on the MIT `idevice` crate), which speaks lockdown
+//!   over usbmuxd or straight to `<phone-ip>:62078` with this Mac's pair record.
+//! - **Wi-Fi**: on iOS 15/16 the runner lives exactly as long as the
+//!   testmanagerd connection that started it, i.e. as long as the launcher
+//!   process. Launched over USB it ends when the cable is pulled (iPhone 12
+//!   mini, iOS 15.4.1); launched over Wi-Fi it keeps running with no cable. So
+//!   setup launches over Wi-Fi whenever the phone's lockdownd answers on its
+//!   LAN address, and over USB otherwise.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -53,11 +51,6 @@ pub fn applies(version: &str) -> bool {
 }
 
 // ── pinned downloads ────────────────────────────────────────────────────────
-
-pub const GO_IOS_VERSION: &str = "v1.3.2";
-const GO_IOS_URL: &str =
-    "https://github.com/danielpaulus/go-ios/releases/download/v1.3.2/go-ios-mac.zip";
-const GO_IOS_ZIP_SHA256: &str = "100f225bfdd039081bcbdaf45029df3e67032673f3e0ca1fa3c050898c230c57";
 
 /// doronz88/DeveloperDiskImage at this commit.
 const DDI_COMMIT: &str = "6eae353ae694bda1c421d4a3eee5459ae59c99a1";
@@ -206,63 +199,6 @@ fn private_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn tools_dir() -> PathBuf {
-    sys::home().join(".iphone-use/tools")
-}
-
-/// The pinned go-ios binary, downloaded and verified on first use.
-pub fn ensure_go_ios() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("IPHONE_USE_GO_IOS").map(PathBuf::from) {
-        if sys::is_executable(&path) {
-            return Ok(path);
-        }
-    }
-    let dir = tools_dir().join(format!("go-ios-{GO_IOS_VERSION}"));
-    let binary = dir.join("ios");
-    let stamp = dir.join("zip.sha256");
-    if sys::is_executable(&binary)
-        && std::fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == GO_IOS_ZIP_SHA256)
-    {
-        return Ok(binary);
-    }
-    private_dir(&dir)?;
-    let zip = download(GO_IOS_URL, Duration::from_secs(300))?;
-    let got = sha256_hex(&zip);
-    if got != GO_IOS_ZIP_SHA256 {
-        return Err(format!(
-            "go-ios {GO_IOS_VERSION} download did not match its pinned sha256 (got {got})"
-        ));
-    }
-    let staging = tempfile::Builder::new()
-        .prefix(".go-ios.")
-        .tempdir_in(&dir)
-        .map_err(|e| e.to_string())?;
-    let zip_path = staging.path().join("go-ios-mac.zip");
-    std::fs::write(&zip_path, &zip).map_err(|e| e.to_string())?;
-    let out = staging.path().join("x");
-    let ok = std::process::Command::new("/usr/bin/ditto")
-        .args(["-x", "-k"])
-        .arg(&zip_path)
-        .arg(&out)
-        .status()
-        .is_ok_and(|s| s.success());
-    let extracted = out.join("ios");
-    if !ok || !extracted.is_file() {
-        return Err("could not unpack the go-ios archive".into());
-    }
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&extracted, std::fs::Permissions::from_mode(0o755));
-    }
-    std::fs::rename(&extracted, &binary).map_err(|e| e.to_string())?;
-    std::fs::write(&stamp, format!("{GO_IOS_ZIP_SHA256}\n")).map_err(|e| e.to_string())?;
-    let _ = std::fs::write(
-        dir.join("SOURCE.txt"),
-        format!("go-ios {GO_IOS_VERSION} (MIT licence) from {GO_IOS_URL}\nhttps://github.com/danielpaulus/go-ios/blob/main/LICENSE\n"),
-    );
-    Ok(binary)
-}
-
 /// The Developer Disk Image (dmg, signature) for iOS `version`, downloaded
 /// and verified on first use.
 pub fn ensure_ddi(version: &str) -> Result<(PathBuf, PathBuf), String> {
@@ -296,11 +232,33 @@ pub fn ensure_ddi(version: &str) -> Result<(PathBuf, PathBuf), String> {
     Ok((dmg, sig))
 }
 
-// ── go-ios ──────────────────────────────────────────────────────────────────
+// ── the launcher ────────────────────────────────────────────────────────────
 
-/// Run go-ios, bounded. (combined output, success).
-pub fn go_ios(binary: &Path, args: &[&str], limit: Duration) -> (String, bool) {
-    sys::run_bounded(&binary.to_string_lossy(), args, limit)
+/// The launcher binary's file name (crates/legacy-launch); it ships next to
+/// `iphone-use` in the app bundle.
+pub const LAUNCHER_NAME: &str = "iphone-use-legacy-launch";
+
+/// The launcher: `IPHONE_USE_LEGACY_LAUNCH`, else next to this binary, else
+/// next to the daemon's binary, else the installed app.
+pub fn launcher(ctx: &Ctx) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path) = std::env::var_os("IPHONE_USE_LEGACY_LAUNCH") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.push(exe.with_file_name(LAUNCHER_NAME));
+    }
+    let daemon = sys::plist_program_argument(&ctx.daemon_plist, 0);
+    if !daemon.is_empty() {
+        candidates.push(Path::new(&daemon).with_file_name(LAUNCHER_NAME));
+    }
+    candidates.push(ctx.home.join("Applications/iPhoneUse.app/Contents/MacOS").join(LAUNCHER_NAME));
+    candidates.push(PathBuf::from("/Applications/iPhoneUse.app/Contents/MacOS").join(LAUNCHER_NAME));
+    candidates.into_iter().find(|path| {
+        path.is_absolute()
+            && sys::is_executable(path)
+            && !path.to_string_lossy().chars().any(char::is_whitespace)
+    })
 }
 
 /// The test runner app's bundle id (Xcode appends `.xctrunner`).
@@ -308,127 +266,174 @@ pub fn runner_bundle(bundle: &str) -> String {
     format!("{bundle}.xctrunner")
 }
 
-/// `ios runtest` argv; also the runner's PID identity.
-pub fn runtest_argv(udid: &str, bundle: &str) -> Vec<String> {
-    let runner = runner_bundle(bundle);
-    vec![
-        "runtest".into(),
-        format!("--udid={udid}"),
-        format!("--bundle-id={runner}"),
-        format!("--test-runner-bundle-id={runner}"),
-        "--xctest-config=iPhoneUse.xctest".into(),
-        "--test-to-run=RunnerTests/testServe".into(),
-    ]
-}
-
-/// Stop the runner on the phone, whether or not this Mac's launcher for it
-/// is still alive (another run, or a crashed setup, may have started it).
-pub fn kill_runner(binary: &Path, udid: &str, bundle: &str) -> bool {
-    let runner = runner_bundle(bundle);
-    let udid_arg = format!("--udid={udid}");
-    let (out, ok) = go_ios(
-        binary,
-        &["kill", &runner, &udid_arg],
-        Duration::from_secs(15),
-    );
-    ok || out.contains("not running") || out.contains("no such")
-}
-
-/// Mount the image unless one is mounted. `ios image mount` skips when the
-/// phone already has one, which is why the caller verifies afterwards.
-pub fn mount(binary: &Path, udid: &str, dmg: &Path) -> Result<(), String> {
-    let path_arg = format!("--path={}", dmg.display());
-    let udid_arg = format!("--udid={udid}");
-    let (out, ok) = go_ios(
-        binary,
-        &["image", "mount", &path_arg, &udid_arg],
-        Duration::from_secs(90),
-    );
-    if ok {
-        Ok(())
-    } else {
-        Err(last_message(&out))
+/// `--udid U [--host IP]`: over Wi-Fi when `host` is set, else USB.
+fn target_args(udid: &str, host: Option<&str>) -> Vec<String> {
+    let mut args = vec!["--udid".to_string(), udid.to_string()];
+    if let Some(host) = host {
+        args.extend(["--host".to_string(), host.to_string()]);
     }
+    args
 }
 
-pub fn unmount(binary: &Path, udid: &str) -> bool {
-    let udid_arg = format!("--udid={udid}");
-    go_ios(
-        binary,
-        &["image", "unmount", &udid_arg],
-        Duration::from_secs(30),
+/// `launch` argv; also the runner's PID identity. The launcher holds the
+/// testmanagerd session the runner lives on, so it stays up as long as the
+/// runner does, and ending it ends the runner.
+pub fn launch_argv(udid: &str, host: Option<&str>, bundle: &str) -> Vec<String> {
+    let mut args = vec!["launch".to_string()];
+    args.extend(target_args(udid, host));
+    args.extend(["--bundle-id".to_string(), runner_bundle(bundle)]);
+    args
+}
+
+/// Run the launcher to completion, bounded: (stdout + stderr, exit code).
+pub fn run_launcher(launcher: &Path, args: &[String], limit: Duration) -> (String, Option<i32>) {
+    let Ok(output_file) = tempfile::NamedTempFile::new() else {
+        return (String::new(), None);
+    };
+    let (Ok(out), Ok(err)) = (output_file.reopen(), output_file.reopen()) else {
+        return (String::new(), None);
+    };
+    let Ok(mut child) = std::process::Command::new(launcher)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .spawn()
+    else {
+        return (String::new(), None);
+    };
+    let deadline = std::time::Instant::now() + limit;
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    (
+        std::fs::read_to_string(output_file.path()).unwrap_or_default(),
+        code,
     )
-    .1
+}
+
+/// How a `mount` ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mount {
+    Ready,
+    /// Mounted, but developer services answer `InvalidService` even after a
+    /// remount: only restarting the phone helps.
+    NeedsReboot,
+    Failed(String),
+}
+
+/// Mount the Developer Disk Image unless one is, and prove testmanagerd
+/// starts (one unmount and remount when it does not).
+pub fn mount(launcher: &Path, udid: &str, host: Option<&str>, dmg: &Path, sig: &Path) -> Mount {
+    let mut args = vec!["mount".to_string()];
+    args.extend(target_args(udid, host));
+    args.extend([
+        "--image".to_string(),
+        dmg.to_string_lossy().into_owned(),
+        "--signature".to_string(),
+        sig.to_string_lossy().into_owned(),
+        "--remount".to_string(),
+    ]);
+    let (out, code) = run_launcher(launcher, &args, Duration::from_secs(120));
+    match code {
+        Some(0) => Mount::Ready,
+        Some(3) => Mount::NeedsReboot,
+        _ => Mount::Failed(last_error(&out)),
+    }
 }
 
 /// Install (or replace) the runner app.
-pub fn install(binary: &Path, udid: &str, app: &Path) -> Result<(), String> {
-    let path_arg = format!("--path={}", app.display());
-    let udid_arg = format!("--udid={udid}");
-    let (out, ok) = go_ios(
-        binary,
-        &["install", &path_arg, &udid_arg],
-        Duration::from_secs(180),
-    );
-    if ok && !out.contains("\"level\":\"ERROR\"") {
+pub fn install(launcher: &Path, udid: &str, host: Option<&str>, app: &Path) -> Result<(), String> {
+    let mut args = vec!["install".to_string()];
+    args.extend(target_args(udid, host));
+    args.extend(["--app".to_string(), app.to_string_lossy().into_owned()]);
+    let (out, code) = run_launcher(launcher, &args, Duration::from_secs(240));
+    if code == Some(0) {
         Ok(())
     } else {
-        Err(last_message(&out))
+        Err(last_error(&out))
     }
 }
 
-/// The last `msg`/`err` go-ios logged (it logs JSON lines).
-pub fn last_message(output: &str) -> String {
+/// The launcher's last `error:` line, else its last line.
+pub fn last_error(output: &str) -> String {
     output
         .lines()
         .rev()
-        .find_map(|line| {
-            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-            let msg = value
-                .get("msg")
-                .and_then(|m| m.as_str())
-                .unwrap_or_default();
-            let err = value
-                .get("err")
-                .or_else(|| value.get("error"))
-                .and_then(|m| m.as_str())
-                .unwrap_or_default();
-            (!msg.is_empty() || !err.is_empty()).then(|| {
-                if err.is_empty() {
-                    msg.to_string()
-                } else {
-                    format!("{msg}: {err}")
-                }
-            })
-        })
-        .unwrap_or_else(|| output.lines().last().unwrap_or_default().trim().to_string())
+        .find_map(|line| line.trim().strip_prefix("error: ").map(str::to_string))
+        .or_else(|| output.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()))
+        .unwrap_or_else(|| "no output".to_string())
 }
 
-/// A go-ios run log says the developer services are unusable (a stale or
-/// mismatched disk image).
+/// A launcher log says the phone is locked (lockdown or the test session).
+pub fn log_shows_locked(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("passwordprotected") || lower.contains("devicelocked") || lower.contains("device is locked")
+}
+
+/// A launcher log says the runner app is not on the phone.
+pub fn log_shows_not_installed(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("not installed") || lower.contains("notfound") || lower.contains("not found")
+}
+
+/// A launcher log says the developer services are unusable.
 pub fn log_shows_invalid_service(text: &str) -> bool {
     text.contains("InvalidService")
 }
 
-/// go-ios itself crashed (a Go panic), e.g. decoding an XCTIssue.
-pub fn log_shows_go_ios_panic(text: &str) -> bool {
-    text.contains("goroutine ") && (text.contains("panic(") || text.contains("nskeyedarchiver"))
+// ── the phone's LAN address ─────────────────────────────────────────────────
+
+/// The phone's IPv4 address from Bonjour: its `_apple-mobdev2._tcp`
+/// instance is `<Wi-Fi MAC>@<fe80 address>`; resolving it names the host,
+/// and the host resolves to IPv4. Only this phone's MAC is resolved, nothing
+/// on the LAN is probed.
+pub fn bonjour_ipv4(wifi_mac: &str) -> Option<String> {
+    let mac = wifi_mac.trim().to_ascii_lowercase();
+    if mac.len() != 17 || !mac.bytes().all(|b| b.is_ascii_hexdigit() || b == b':') {
+        return None;
+    }
+    let browse = dns_sd(&["-B", "_apple-mobdev2._tcp", "local."], Duration::from_secs(3));
+    let instance = browse.lines().find_map(|line| {
+        let start = line.to_ascii_lowercase().find(&format!("{mac}@"))?;
+        Some(line[start..].trim().to_string())
+    })?;
+    let lookup = dns_sd(&["-L", &instance, "_apple-mobdev2._tcp", "local."], Duration::from_secs(3));
+    let host = lookup.lines().find_map(|line| {
+        let rest = line.split("can be reached at ").nth(1)?;
+        let host = rest.split(':').next()?.trim().trim_end_matches('.');
+        (!host.is_empty()).then(|| host.to_string())
+    })?;
+    let addr = dns_sd(&["-G", "v4", &host], Duration::from_secs(3));
+    addr.lines().find_map(|line| {
+        line.split_whitespace()
+            .find_map(|word| word.parse::<std::net::Ipv4Addr>().ok())
+            .filter(|ip| !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified())
+            .map(|ip| ip.to_string())
+    })
 }
 
-/// A go-ios run log says the runner app is not on the phone.
-pub fn log_shows_not_installed(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("not installed")
-        || lower.contains("applicationnotinstalled")
-        || lower.contains("no app with bundle")
+fn dns_sd(args: &[&str], limit: Duration) -> String {
+    sys::run_bounded("/usr/bin/dns-sd", args, limit).0
 }
 
-/// A go-ios run log says the phone was locked.
-pub fn log_shows_locked(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("device is locked")
-        || lower.contains("devicelocked")
-        || lower.contains("passcode")
+/// lockdownd answers on the phone's LAN address (Wi-Fi lockdown is on and
+/// the phone is awake on this network).
+pub fn lockdown_reachable(ip: &str) -> bool {
+    let Ok(ip) = ip.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&std::net::SocketAddr::new(ip, 62078), Duration::from_secs(2)).is_ok()
 }
 
 // ── the legacy runner app ───────────────────────────────────────────────────
@@ -674,13 +679,21 @@ pub struct Record {
     pub ios: String,
     pub udid: String,
     pub bundle: String,
-    pub go_ios: String,
+    /// The launcher binary (`stop` ends the runner by ending it).
+    pub launcher: String,
+    /// How the runner was last started: `wifi` (it survives the cable being
+    /// pulled) or `usb` (it ends with the cable).
+    #[serde(default)]
+    pub launch_transport: String,
     /// The phone's LAN address, once the runner answered on it.
     #[serde(default)]
     pub lan_ip: Option<String>,
     /// The runner is reachable on its LAN address (iOS allowed its network access).
     #[serde(default)]
     pub wifi_ready: bool,
+    /// The phone's Wi-Fi MAC: finds its LAN address again over Bonjour.
+    #[serde(default)]
+    pub wifi_mac: Option<String>,
 }
 
 pub fn read_record(state_dir: &Path) -> Option<Record> {
@@ -801,27 +814,26 @@ mod tests {
     }
 
     #[test]
-    fn runtest_argv_names_the_xctrunner() {
-        let argv = runtest_argv(
-            "00008101-000409443404001E",
-            "com.leeguoo.iphone-use.wda.6zpxg4kvvs",
-        );
-        assert_eq!(argv[0], "runtest");
-        assert!(argv
-            .contains(&"--bundle-id=com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner".to_string()));
-        assert_eq!(argv.last().unwrap(), "--test-to-run=RunnerTests/testServe");
+    fn launch_argv_picks_wifi_with_a_host() {
+        let usb = launch_argv("00008101-000409443404001E", None, "com.leeguoo.iphone-use.wda.6zpxg4kvvs");
+        assert_eq!(usb, ["launch", "--udid", "00008101-000409443404001E", "--bundle-id", "com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner"]);
+        let wifi = launch_argv("U", Some("192.168.0.59"), "b");
+        assert_eq!(wifi, ["launch", "--udid", "U", "--host", "192.168.0.59", "--bundle-id", "b.xctrunner"]);
     }
 
     #[test]
-    fn go_ios_messages_and_classifiers() {
-        let log = "{\"level\":\"INFO\",\"msg\":\"ok\"}\n{\"level\":\"ERROR\",\"msg\":\"failed starting service\",\"err\":\"InvalidService\"}\n";
-        assert_eq!(last_message(log), "failed starting service: InvalidService");
-        assert!(log_shows_invalid_service(log));
-        assert!(!log_shows_locked(log));
-        assert_eq!(last_message("plain text"), "plain text");
-        let panic = "{\"msg\":\"Failed running Xcuitest: Unarchive: interface conversion: interface {} is nil, not uint64\ngoroutine 10 [running]:\nruntime/debug.Stack()\npanic({0x1, 0x2})\ngithub.com/danielpaulus/go-ios/ios/nskeyedarchiver.NewXCTIssue(";
-        assert!(log_shows_go_ios_panic(panic));
-        assert!(!log_shows_go_ios_panic(log));
+    fn launcher_errors_and_classifiers() {
+        assert_eq!(last_error("+0.1s heartbeat up\nerror: lockdown session: PasswordProtected\n"), "lockdown session: PasswordProtected");
+        assert_eq!(last_error("one\ntwo\n"), "two");
+        assert!(log_shows_locked("error: lockdown session: PasswordProtected"));
+        assert!(log_shows_invalid_service("StartService failed: InvalidService"));
+        assert!(!log_shows_locked("ok"));
+    }
+
+    #[test]
+    fn a_bad_mac_never_runs_dns_sd() {
+        assert_eq!(bonjour_ipv4("not-a-mac"), None);
+        assert_eq!(bonjour_ipv4(""), None);
     }
 
     #[test]
@@ -882,7 +894,9 @@ mod tests {
             ios: "16.5".into(),
             udid: "63f53bbb05918cbf4154ba9d1d1f95b28e532597".into(),
             bundle: "com.example.wda".into(),
-            go_ios: "/x/ios".into(),
+            launcher: "/x/iphone-use-legacy-launch".into(),
+            launch_transport: "wifi".into(),
+            wifi_mac: Some("9c:e3:3f:8d:d9:bd".into()),
             lan_ip: Some("192.168.0.149".into()),
             wifi_ready: true,
         };

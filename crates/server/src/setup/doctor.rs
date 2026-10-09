@@ -201,9 +201,15 @@ pub fn run(ctx: &Ctx) -> i32 {
         let below =
             checks::min_device_ios(&xcode).is_some_and(|floor| checks::version_lt(device, floor));
         if below && !legacy && super::legacy_ios::applies(device) {
-            if ctx.asc_signing_enabled() {
+            if super::legacy_ios::launcher(ctx).is_none() {
+                warn(&format!(
+                    "X iOS {device} needs {} next to iphone-use; reinstall or upgrade iphone-use",
+                    super::legacy_ios::LAUNCHER_NAME
+                ));
+                fail = true;
+            } else if ctx.asc_signing_enabled() {
                 ok(&format!(
-                    "iOS {device}: setup takes the legacy device path (go-ios, a downloaded Developer Disk Image, App Store Connect signing)"
+                    "iOS {device}: setup takes the legacy device path (iphone-use-legacy-launch, a downloaded Developer Disk Image, App Store Connect signing)"
                 ));
             } else {
                 warn(&format!(

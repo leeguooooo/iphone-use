@@ -155,7 +155,12 @@ esac
 # the still-unsigned nested helper ("code object is not signed at all / In
 # subcomponent: .../iphone-use-mcp"). The comment above was always right; the
 # order underneath it was not.
-for binary in "$MCP_BINARY" "$DAEMON_BINARY"; do
+# The iOS 15/16 launcher is nested code too, so it also goes before the main
+# executable.
+LEGACY_LAUNCH_BINARY="$APP/Contents/MacOS/iphone-use-legacy-launch"
+NESTED=("$MCP_BINARY")
+[ -f "$LEGACY_LAUNCH_BINARY" ] && NESTED+=("$LEGACY_LAUNCH_BINARY")
+for binary in "${NESTED[@]}" "$DAEMON_BINARY"; do
     echo "Signing binary: $binary ..."
     codesign \
         --force \

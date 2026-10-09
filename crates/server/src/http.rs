@@ -2687,8 +2687,8 @@ async fn managed_transport(state: &AppState) -> &'static str {
 }
 
 /// `legacy_ios` in `/agent/status`: an iOS 15/16 phone on the legacy path
-/// (its iOS, whether the runner also answers on its LAN address, and that
-/// starting the runner needs the cable), else `null`.
+/// (its iOS, whether the runner also answers on its LAN address, and whether
+/// it was started over Wi-Fi, so the cable can be pulled), else `null`.
 fn legacy_ios_json(managed: bool, state_dir: &std::path::Path) -> String {
     let record = managed
         .then(|| crate::setup::legacy_ios::read_record(state_dir))
@@ -2698,7 +2698,10 @@ fn legacy_ios_json(managed: bool, state_dir: &std::path::Path) -> String {
             "ios": record.ios,
             "wifi_ready": record.wifi_ready,
             "lan_ip": record.lan_ip,
-            "start_needs_usb": true,
+            "launch_transport": record.launch_transport,
+            // Started over Wi-Fi, the runner keeps running with the cable
+            // pulled and restarts over Wi-Fi too.
+            "unplug_ok": record.launch_transport == "wifi",
         })
         .to_string(),
         None => "null".to_string(),
@@ -2997,8 +3000,8 @@ fn human_next_step(
                 "An old developer disk image is stuck on the iPhone and its developer services will not start: restart the iPhone once, unlock it and keep it plugged in — connecting continues on its own",
             ),
             "legacy_needs_usb" => (
-                "这台 iPhone 是 iOS 15/16，设备服务目前只能通过数据线运行：用数据线连到这台 Mac 并保持解锁，大约 20 秒连上；拔线后服务会停，再插上会自动恢复",
-                "This iPhone runs iOS 15/16, whose device service runs over the cable for now: plug it into this Mac and keep it unlocked — it connects in about 20 s; unplugging stops the service, and plugging back in resumes it",
+                "这台 iOS 15/16 的 iPhone 现在既没插线、这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，大约 20 秒连上；之后可以拔线，走 Wi-Fi（手机需和这台 Mac 在同一网络）",
+                "This iOS 15/16 iPhone is neither plugged in nor reachable over Wi-Fi from this Mac: plug it in once and keep it unlocked — it connects in about 20 s, and after that it can be unplugged and used over Wi-Fi (on the same network as this Mac)",
             ),
             "automation_not_allowed" => (
                 "iPhone 没有授权这次 UI 自动化：runner 启动时手机上会弹出密码或「允许」提示，约 30 秒不处理就会失败；请解锁手机、确认 设置 › 开发者 › 启用 UI 自动化 已打开，下次重试时完成这个提示；会自动重试",
@@ -3163,7 +3166,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iOS 15/16 phone has a stale developer disk image mounted: lockdownd answers every developer service (testmanagerd) with InvalidService even after setup remounted the right image — have a person restart the iPhone once and keep it plugged in and unlocked; the managed service re-checks every few minutes, so do not send another reconnect request",
         ),
         "legacy_needs_usb" => Some(
-            "the phone runs iOS 15/16, whose device runner runs only over USB for now (it ends when the cable is pulled, and cannot be started over the network yet) — have a person plug it into this Mac, unlocked; the managed service starts it as soon as usbmuxd lists the phone on USB, so do not send another reconnect request",
+            "the phone runs iOS 15/16 and is neither on USB nor reachable over Wi-Fi (its lockdownd does not answer on its LAN address, or that address is not known yet) — have a person plug it into this Mac once, unlocked; after that the runner starts over Wi-Fi and survives the unplug; the managed service starts it as soon as usbmuxd lists the phone on USB, so do not send another reconnect request",
         ),
         "automation_not_allowed" => Some(
             "the iPhone did not authorize the device runner's UI-automation session although this Xcode supports its iOS (the runner exited with code 74, testmanagerd refused the IDE channel) — a passcode or Allow prompt appears on the iPhone while the runner starts and times out after about 30 s; unlock the iPhone, check Settings › Developer › Enable UI Automation, and have a person answer that prompt on the next attempt; the managed service retries quietly every 5 s to 1 min, so do not send another reconnect request",
@@ -16572,7 +16575,9 @@ mod tests {
                 ios: "16.5".into(),
                 udid: "63f53bbb05918cbf4154ba9d1d1f95b28e532597".into(),
                 bundle: "com.example.wda".into(),
-                go_ios: "/x/ios".into(),
+                launcher: "/x/iphone-use-legacy-launch".into(),
+                launch_transport: "wifi".into(),
+                wifi_mac: None,
                 lan_ip: Some("192.168.0.149".into()),
                 wifi_ready: true,
             },
@@ -16581,7 +16586,8 @@ mod tests {
             serde_json::from_str(&legacy_ios_json(true, dir.path())).unwrap();
         assert_eq!(json["ios"], "16.5");
         assert_eq!(json["wifi_ready"], true);
-        assert_eq!(json["start_needs_usb"], true);
+        assert_eq!(json["unplug_ok"], true);
+        assert_eq!(json["launch_transport"], "wifi");
         assert_eq!(legacy_ios_json(false, dir.path()), "null");
         for blocker in ["ddi_needs_reboot", "legacy_needs_usb"] {
             let payload =

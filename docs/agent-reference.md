@@ -150,20 +150,19 @@ swaps Xcode's iOS 17-only test host for a small host of its own
 (`runner/IPhoneUseRunner/LegacyHost/main.m`), registers the phone and creates a
 development profile through the App Store Connect API, downloads the pinned
 Developer Disk Image for that iOS (doronz88/DeveloperDiskImage, sha256-checked,
-cached in `~/.iphone-use/ddi/`), mounts it and checks testmanagerd starts, and
-installs and starts the runner with go-ios (MIT, a pinned release downloaded into
-`~/.iphone-use/tools/`). From there it is the usual runner on the usual ports and
-relays. `GET /agent/status` adds `legacy_ios`: `{ios, wifi_ready, lan_ip,
-start_needs_usb}` (else `null`).
+cached in `~/.iphone-use/ddi/`), and mounts it (proving testmanagerd starts),
+installs and launches the runner with `iphone-use-legacy-launch` (crates/legacy-launch,
+on the MIT `idevice` crate). From there it is the usual runner on the usual ports
+and relays. `GET /agent/status` adds `legacy_ios`: `{ios, wifi_ready, lan_ip,
+launch_transport, unplug_ok}` (else `null`).
 
-Limits today: the runner lives only as long as the USB connection that started it
-(pulling the cable ends it within seconds; iPhone 12 mini, iOS 15.4.1), and it cannot
-be started over the network yet, so these phones are USB-only. Idle release works
-as on any USB phone (the next request starts the runner again in ~12 s). With
-`WDA_ALLOW_LAN=1` setup also lets the runner onto the phone's network (it brings the
-runner's app to the front and answers iOS's local-network / "wireless data" prompt)
-and gives the relays the phone's LAN address as a fallback; the runner port has no
-authentication, which is why that stays opt-in.
+The runner lives as long as the launcher's testmanagerd session. Setup launches
+over Wi-Fi (lockdown at the phone's LAN address, heartbeat held) whenever that
+answers, so `unplug_ok: true` means the cable can be pulled and restarts also go
+over Wi-Fi; `launch_transport: "usb"` means pulling the cable ends the runner.
+Off the cable the relays use usbmuxd's Wi-Fi attachment, or the phone's LAN
+address when `WDA_ALLOW_LAN=1` (the runner port has no authentication). Idle release
+works as usual; the next request starts the runner again in ~8–12 s.
 
 Repeated bootstrap requests hide the real blocker — fix it, then reconnect once.
 

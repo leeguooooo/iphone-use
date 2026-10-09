@@ -3,6 +3,9 @@
 //!   iphone-use-legacy-launch launch --udid U [--host IP] [--pair-record F]
 //!       [--bundle-id B] [--env K=V]... [--probe-port 8100] [--dry-run]
 //!   iphone-use-legacy-launch enable-wifi --udid U
+//!   iphone-use-legacy-launch mount --udid U [--host IP] --image DMG --signature SIG [--remount]
+//!       (exit 3: the image is mounted but developer services are InvalidService)
+//!   iphone-use-legacy-launch install --udid U [--host IP] --app DIR
 //!   iphone-use-legacy-launch info --udid U [--host IP] [--pair-record F]
 //!
 //! `--host` selects Wi-Fi: lockdown at <IP>:62078, nothing through usbmuxd.
@@ -17,6 +20,10 @@ struct Args {
     cmd: String,
     target: Target,
     opts: LaunchOptions,
+    image: Option<String>,
+    signature: Option<String>,
+    app: Option<String>,
+    remount: bool,
 }
 
 fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
@@ -28,6 +35,10 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
         cmd,
         target: Target::default(),
         opts: LaunchOptions::default(),
+        image: None,
+        signature: None,
+        app: None,
+        remount: false,
     };
     while let Some(flag) = it.next() {
         let mut val = || it.next().ok_or(format!("{flag} needs a value"));
@@ -41,6 +52,10 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
             }
             "--no-probe" => a.opts.probe_port = None,
             "--dry-run" => a.opts.dry_run = true,
+            "--image" => a.image = Some(val()?),
+            "--signature" => a.signature = Some(val()?),
+            "--app" => a.app = Some(val()?),
+            "--remount" => a.remount = true,
             "--env" => {
                 let kv = val()?;
                 let (k, v) = kv
@@ -83,6 +98,26 @@ async fn main() {
                 }
             )
         }),
+        "mount" => match (&a.image, &a.signature) {
+            (Some(image), Some(signature)) => legacy_launch::mount(
+                &a.target,
+                std::path::Path::new(image),
+                std::path::Path::new(signature),
+                a.remount,
+            )
+            .await
+            .map(|outcome| {
+                println!("outcome {outcome:?}");
+                if outcome == legacy_launch::MountOutcome::ServicesInvalid {
+                    std::process::exit(3);
+                }
+            }),
+            _ => Err("mount needs --image and --signature".into()),
+        },
+        "install" => match &a.app {
+            Some(app) => legacy_launch::install(&a.target, std::path::Path::new(app)).await,
+            None => Err("install needs --app".into()),
+        },
         c => Err(format!("unknown command {c}")),
     };
     if let Err(e) = r {
@@ -108,6 +143,17 @@ mod tests {
         assert_eq!(a.opts.env.get("B").and_then(|v| v.as_string()), Some("x=y"));
         assert!(a.opts.dry_run);
         assert_eq!(a.opts.probe_port, Some(8100));
+    }
+
+    #[test]
+    fn mount_and_install_args() {
+        let a = args("mount --udid U --image /d/i.dmg --signature /d/i.sig --remount").unwrap();
+        assert_eq!(a.cmd, "mount");
+        assert_eq!(a.image.as_deref(), Some("/d/i.dmg"));
+        assert!(a.remount);
+        let a = args("install --udid U --host 192.168.0.59 --app /x/R.app").unwrap();
+        assert_eq!(a.app.as_deref(), Some("/x/R.app"));
+        assert_eq!(a.target.transport(), "wifi");
     }
 
     #[test]
