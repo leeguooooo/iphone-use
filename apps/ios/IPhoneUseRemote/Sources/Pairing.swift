@@ -44,11 +44,14 @@ struct PairLink: Equatable {
 struct QRScannerView: UIViewControllerRepresentable {
     let onFound: (PairLink) -> Void
     let onFailure: (String) -> Void
+    /// A QR code was seen that is not a pairing code.
+    var onOther: (() -> Void)?
 
     func makeUIViewController(context: Context) -> ScannerController {
         let controller = ScannerController()
         controller.onFound = onFound
         controller.onFailure = onFailure
+        controller.onOther = onOther
         return controller
     }
 
@@ -62,6 +65,7 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
 
     var onFound: ((PairLink) -> Void)?
     var onFailure: ((String) -> Void)?
+    var onOther: (() -> Void)?
 
     private let session = AVCaptureSession()
     private var preview: AVCaptureVideoPreviewLayer?
@@ -125,7 +129,11 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
                                     from connection: AVCaptureConnection) {
         let texts = objects.compactMap { ($0 as? AVMetadataMachineReadableCodeObject)?.stringValue }
         MainActor.assumeIsolated {
-            guard !done, let link = texts.lazy.compactMap(PairLink.parse).first else { return }
+            guard !done else { return }
+            guard let link = texts.lazy.compactMap(PairLink.parse).first else {
+                if !texts.isEmpty { onOther?() }
+                return
+            }
             done = true
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             onFound?(link)
@@ -139,18 +147,26 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
     }
 }
 
-/// The scanner sheet: camera, a framing hint and a cancel button.
+/// The scanner sheet: camera, a framing hint, and ways out when scanning
+/// does not work (no camera, permission denied, the code will not read):
+/// paste the pairing link, or type the address.
 struct ScanSheet: View {
     /// Called with the scanned link once the camera has closed.
     let onFound: (PairLink) -> Void
+    /// "Enter it by hand": called once the camera has closed.
+    var onManual: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @State private var failure: String?
+    @State private var note: String?
+    @State private var noteTask: Task<Void, Never>?
+    @State private var slow = false
 
     var body: some View {
         ZStack {
             if let failure {
                 VStack(spacing: 16) {
                     Image(systemName: "camera.fill").font(.largeTitle).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                     Text(failure).multilineTextAlignment(.center)
                     if failure == ScannerController.noCameraPermission {
                         Button("打开设置") {
@@ -160,6 +176,8 @@ struct ScanSheet: View {
                         }
                         .buttonStyle(.borderedProminent)
                     }
+                    Text("也可以在 Mac 页面上复制配对链接再粘贴，或者手动输入地址和密码。")
+                        .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 }
                 .padding(32)
             } else {
@@ -168,21 +186,46 @@ struct ScanSheet: View {
                         dismiss()
                         onFound(link)
                     },
-                    onFailure: { failure = $0 })
+                    onFailure: { failure = $0 },
+                    onOther: { flash(String(localized: "这不是 iphone-use 的配对二维码。请扫 Mac 上 iphone-use 页面「扫码」按钮弹出的那个。")) })
                 .ignoresSafeArea()
+                .accessibilityLabel(Text("相机取景框"))
                 RoundedRectangle(cornerRadius: 24)
                     .strokeBorder(.white.opacity(0.85), lineWidth: 3)
                     .frame(width: 250, height: 250)
+                    .accessibilityHidden(true)
             }
             VStack {
-                Text("扫描 Mac 上 iphone-use 页面里「扫码」按钮显示的二维码")
+                Text(note ?? (slow
+                    ? String(localized: "扫不出来？二维码 5 分钟内有效，过期了在 Mac 上点「换一个」。也可以粘贴配对链接或手动输入。")
+                    : String(localized: "扫描 Mac 上 iphone-use 页面里「扫码」按钮显示的二维码")))
                     .font(.callout)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    .background(note == nil ? AnyShapeStyle(.ultraThinMaterial) : AnyShapeStyle(Color.orange.opacity(0.9)),
+                                in: RoundedRectangle(cornerRadius: 14))
                     .padding(.top, 24)
                     .padding(.horizontal)
+                    .accessibilityAddTraits(.updatesFrequently)
                 Spacer()
+                HStack(spacing: 12) {
+                    Button {
+                        paste()
+                    } label: {
+                        Label("粘贴链接", systemImage: "doc.on.clipboard")
+                    }
+                    if onManual != nil {
+                        Button {
+                            dismiss()
+                            onManual?()
+                        } label: {
+                            Label("手动输入", systemImage: "keyboard")
+                        }
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.bordered)
+                .padding(.bottom, 8)
                 Button("取消") { dismiss() }
                     .font(.headline)
                     .padding(.horizontal, 28).padding(.vertical, 12)
@@ -191,5 +234,29 @@ struct ScanSheet: View {
             }
         }
         .background(Color.black.ignoresSafeArea())
+        .task {
+            try? await Task.sleep(for: .seconds(20))
+            slow = true
+        }
+    }
+
+    /// A pairing link copied from the Mac page (or the QR's text).
+    private func paste() {
+        guard let text = UIPasteboard.general.string, let link = PairLink.parse(AddressInput.clean(text)) else {
+            flash(String(localized: "剪贴板里没有配对链接。链接长这样：http://192.168.1.11:44321/pair?c=…"))
+            return
+        }
+        dismiss()
+        onFound(link)
+    }
+
+    private func flash(_ text: String) {
+        guard note != text else { return }
+        note = text
+        noteTask?.cancel()
+        noteTask = Task {
+            try? await Task.sleep(for: .seconds(3))
+            if !Task.isCancelled { note = nil }
+        }
     }
 }

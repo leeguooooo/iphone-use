@@ -70,6 +70,25 @@ enum DeviceStore {
         return (list + [record], record)
     }
 
+    /// Where the device last shown full screen is remembered.
+    static let focusedKey = "focused.v1"
+
+    static func loadFocused(from defaults: UserDefaults, in list: [DeviceRecord]) -> UUID? {
+        if list.count == 1 { return list[0].id }
+        guard let text = defaults.string(forKey: focusedKey), let id = UUID(uuidString: text),
+              list.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
+    static func saveFocused(_ id: UUID?, to defaults: UserDefaults) {
+        if let id { defaults.set(id.uuidString, forKey: focusedKey) } else { defaults.removeObject(forKey: focusedKey) }
+    }
+
+    /// The saved device that already uses `address`, other than `except`.
+    static func conflict(_ address: String, in list: [DeviceRecord], except: UUID? = nil) -> DeviceRecord? {
+        list.first { $0.id != except && same($0.address, address) }
+    }
+
     /// Two spellings of one daemon address (trailing slash, case of the host).
     static func same(_ a: String, _ b: String) -> Bool {
         normalize(a) == normalize(b)

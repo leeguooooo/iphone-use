@@ -21,6 +21,9 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
     /// The app on screen hides it from capture; the picture is blank and
     /// `/agent/screenshot` answers with a wireframe of its accessibility tree.
     var captureRedacted: Bool
+    /// The device service is starting because the daemon warmed it up ahead
+    /// of use (`warming`), not because someone asked.
+    var warming: Bool
     /// Who holds the owner lease (`X-Phone-Owner`), while it is live.
     var owner: String?
     var ownerLeaseRemainingSecs: Int
@@ -43,6 +46,7 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         case recoveryOwner = "recovery_owner"
         case version
         case captureRedacted = "capture_redacted"
+        case warming
         case owner
         case ownerLeaseRemainingSecs = "owner_lease_remaining_secs"
     }
@@ -64,6 +68,7 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         recoveryOwner = try c.decodeIfPresent(String.self, forKey: .recoveryOwner) ?? ""
         version = try c.decodeIfPresent(String.self, forKey: .version) ?? ""
         captureRedacted = try c.decodeIfPresent(Bool.self, forKey: .captureRedacted) ?? false
+        warming = try c.decodeIfPresent(Bool.self, forKey: .warming) ?? false
         owner = try c.decodeIfPresent(String.self, forKey: .owner)
         ownerLeaseRemainingSecs = try c.decodeIfPresent(Int.self, forKey: .ownerLeaseRemainingSecs) ?? 0
     }
@@ -109,23 +114,23 @@ enum DaemonError: LocalizedError {
     case pairingCodeInvalid
     case pairingRevoked
     case lockedOut
+    /// Something answered that is not an iphone-use daemon.
+    case notIphoneUse
+    /// The daemon has no `/pair` (it predates scan-to-connect).
+    case daemonTooOld
+    /// iOS blocked the request: Local Network access is off for this app.
+    case localNetworkDenied
+    /// An HTTP error; the body is kept for logs and never shown.
     case http(Int, String)
     case unreachable(String)
     /// A transport error, with its code: whether a gesture may have left
     /// this device depends on it (see `DeliveryOutcome.classify(transport:)`).
     case transport(URLError.Code, String)
 
+    /// One human sentence: what happened and what to do (never a raw body).
     var errorDescription: String? {
-        switch self {
-        case .badAddress: return String(localized: "地址格式不对，应该像 http://192.168.1.11:44321")
-        case .wrongPassword: return String(localized: "密码不对")
-        case .sessionExpired: return String(localized: "登录已过期")
-        case .pairingCodeInvalid: return String(localized: "二维码已用过或已过期，请在 Mac 上点「换一个」再扫")
-        case .pairingRevoked: return String(localized: "配对已失效（可能改过控制密码），请重新扫码")
-        case .lockedOut: return String(localized: "密码错误次数太多，30 秒后再试")
-        case let .http(code, body): return String(localized: "服务返回 \(code)：\(String(body.prefix(160)))")
-        case let .unreachable(why), let .transport(_, why): return String(localized: "连不上服务：\(why)")
-        }
+        let problem = ConnectProblem(self)
+        return problem.sentence
     }
 }
 
@@ -193,17 +198,32 @@ final class DaemonClient: @unchecked Sendable {
         session = URLSession(configuration: config)
     }
 
+    /// The daemon's base URL for whatever a person typed or pasted:
+    /// `192.168.1.11`, `192.168.1.11:44321`, `http://…`, `https://…`, a
+    /// tunnel host, `mac.local`, with or without a path or full-width
+    /// punctuation. A bare LAN host gets the daemon's port 44321; a bare
+    /// public name is a tunnel and gets https on 443.
     static func parse(address: String) -> URL? {
-        var text = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = AddressInput.clean(address)
         if text.isEmpty { return nil }
-        if !text.contains("://") { text = "http://" + text }
-        guard var components = URLComponents(string: text), components.host != nil else { return nil }
-        // A bare host means the daemon's own port on the LAN. An https address
-        // is a tunnel (e.g. Cloudflare) that serves on 443, so keep its default.
-        if components.port == nil, components.scheme?.lowercased() != "https" {
+        let typedScheme = text.range(of: "://") != nil
+        if !typedScheme { text = "http://" + text }
+        guard var components = URLComponents(string: text),
+              let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = components.host, !host.isEmpty else { return nil }
+        components.scheme = scheme
+        components.host = host.lowercased()
+        if !typedScheme, components.port == 443 || (components.port == nil && !AddressInput.isLocal(host: host)) {
+            components.scheme = "https"
+            components.port = nil
+        } else if components.port == nil, scheme == "http" {
             components.port = 44321
         }
         components.path = ""
+        components.query = nil
+        components.fragment = nil
+        components.user = nil
+        components.password = nil
         return components.url
     }
 
@@ -224,6 +244,8 @@ final class DaemonClient: @unchecked Sendable {
             throw DaemonError.wrongPassword
         case 429:
             throw DaemonError.lockedOut
+        case 404, 405:
+            throw DaemonError.notIphoneUse
         default:
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
         }
@@ -236,7 +258,7 @@ final class DaemonClient: @unchecked Sendable {
         try takeSessionCookie(from: response)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let token = json["device_token"] as? String else {
-            throw DaemonError.http(response.statusCode, String(localized: "配对没有返回设备令牌"))
+            throw DaemonError.notIphoneUse
         }
         return token
     }
@@ -270,7 +292,7 @@ final class DaemonClient: @unchecked Sendable {
         case 429:
             throw DaemonError.lockedOut
         case 404:
-            throw DaemonError.http(404, String(localized: "Mac 上的 iphone-use 版本太旧，不支持扫码连接，请先升级"))
+            throw DaemonError.daemonTooOld
         default:
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
         }
@@ -280,7 +302,8 @@ final class DaemonClient: @unchecked Sendable {
         let header = response.value(forHTTPHeaderField: "Set-Cookie") ?? ""
         guard let pair = header.split(separator: ";").first.map(String.init),
               pair.hasPrefix("phone_session=") else {
-            throw DaemonError.http(response.statusCode, String(localized: "登录没有返回会话"))
+            // A 200 without the daemon's cookie: some other web server.
+            throw DaemonError.notIphoneUse
         }
         cookie = pair
     }
@@ -289,9 +312,13 @@ final class DaemonClient: @unchecked Sendable {
         let (data, response) = try await send(URLRequest(url: base.appending(path: "agent/status")))
         guard response.statusCode == 200 else {
             if response.statusCode == 401 { throw DaemonError.sessionExpired }
+            if response.statusCode == 404 { throw DaemonError.notIphoneUse }
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))
         }
-        return try JSONDecoder().decode(PhoneStatus.self, from: data)
+        guard let status = try? JSONDecoder().decode(PhoneStatus.self, from: data) else {
+            throw DaemonError.notIphoneUse
+        }
+        return status
     }
 
     /// Send one action. The daemon drops it if it cannot start within the TTL,
@@ -319,6 +346,8 @@ final class DaemonClient: @unchecked Sendable {
             return DeliveryOutcome.classify(status: response.statusCode, body: data)
         } catch DaemonError.transport(let code, _) {
             return DeliveryOutcome.classify(transport: code)
+        } catch DaemonError.localNetworkDenied {
+            return .notSent(reason: "unreachable")
         } catch {
             return .outcomeUnknown
         }
@@ -454,7 +483,7 @@ final class DaemonClient: @unchecked Sendable {
                 $0 != publicBase && request.url?.absoluteString.hasPrefix($0.absoluteString + "/") == true
             }
             guard let lan, lan != publicBase else {
-                throw DaemonError.transport(error.code, error.localizedDescription)
+                throw Self.wrap(error)
             }
             if routes.withLock({ routes -> Bool in
                 guard routes.active == lan else { return false }
@@ -465,14 +494,14 @@ final class DaemonClient: @unchecked Sendable {
             }
             guard request.value(forHTTPHeaderField: "X-Phone-Owner") == nil,
                   let retry = onPublic(request, from: lan) else {
-                throw DaemonError.transport(error.code, error.localizedDescription)
+                throw Self.wrap(error)
             }
             do {
                 return try await transmit(retry, followRedirects: followRedirects)
             } catch let error as DaemonError {
                 throw error
             } catch let error as URLError {
-                throw DaemonError.transport(error.code, error.localizedDescription)
+                throw Self.wrap(error)
             } catch {
                 throw DaemonError.unreachable(error.localizedDescription)
             }
@@ -481,6 +510,13 @@ final class DaemonClient: @unchecked Sendable {
         } catch {
             throw DaemonError.unreachable(error.localizedDescription)
         }
+    }
+
+    /// A transport failure as a `DaemonError`. iOS reports a refused Local
+    /// Network permission only inside the error's path description.
+    static func wrap(_ error: URLError) -> DaemonError {
+        if "\(error)".contains("Local network prohibited") { return .localNetworkDenied }
+        return .transport(error.code, error.localizedDescription)
     }
 
     private func transmit(_ request: URLRequest, followRedirects: Bool) async throws -> (Data, HTTPURLResponse) {
