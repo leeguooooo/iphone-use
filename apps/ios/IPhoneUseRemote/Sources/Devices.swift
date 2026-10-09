@@ -8,17 +8,23 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
     var id: UUID
     /// The paired base URL, e.g. `http://192.168.1.11:44321`.
     var address: String
-    /// The person's name for it; defaults to `host:port`.
+    /// The person's name for it; `host:port` when they never gave one (see
+    /// `customName`).
     var name: String
     /// Shown as a live tile on the overview. A hidden device keeps no stream
     /// open, so its daemon may idle-release the phone.
     var showInGrid: Bool
+    /// The phone behind the daemon, as its `/agent/status` last named it.
+    /// Kept so the list names the phone while it is offline too.
+    var phone: PhoneIdentity?
 
-    init(id: UUID = UUID(), address: String, name: String? = nil, showInGrid: Bool = true) {
+    init(id: UUID = UUID(), address: String, name: String? = nil, showInGrid: Bool = true,
+         phone: PhoneIdentity? = nil) {
         self.id = id
         self.address = address
         self.name = name ?? DeviceStore.defaultName(for: address)
         self.showInGrid = showInGrid
+        self.phone = phone
     }
 
     init(from decoder: Decoder) throws {
@@ -27,7 +33,67 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         address = try c.decode(String.self, forKey: .address)
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? DeviceStore.defaultName(for: address)
         showInGrid = try c.decodeIfPresent(Bool.self, forKey: .showInGrid) ?? true
+        phone = try? c.decodeIfPresent(PhoneIdentity.self, forKey: .phone)
     }
+
+    /// The name the person typed, or nil when they left the default (the
+    /// address).
+    var customName: String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == DeviceStore.defaultName(for: address) { return nil }
+        return trimmed
+    }
+
+    /// What to call it: the person's name, else the phone's own name and
+    /// model, else (never connected yet) the address.
+    var displayName: String {
+        customName ?? phone?.label ?? DeviceStore.defaultName(for: address)
+    }
+
+    /// The line under the name: the Mac's address, after the phone's own name
+    /// when the person renamed it (so both stay findable).
+    var secondaryText: String {
+        let host = DeviceStore.defaultName(for: address)
+        if customName != nil, let label = phone?.label { return "\(label) · \(host)" }
+        return host
+    }
+
+    /// The placeholder of a name field: what the device is called without one.
+    var defaultDisplayName: String {
+        phone?.label ?? DeviceStore.defaultName(for: address)
+    }
+}
+
+/// Which phone a daemon drives (`device` on `/agent/status`): its own name
+/// (Settings › General › About), model and iOS version.
+struct PhoneIdentity: Codable, Equatable, Sendable {
+    var name: String?
+    var model: String?
+    var productType: String?
+    var ios: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, model, ios
+        case productType = "product_type"
+    }
+
+    /// `Leo's iPhone · iPhone X`; just one of them when the other is missing
+    /// or the same (a phone still called "iPhone X").
+    var label: String? {
+        let name = name?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+        let model = (model ?? productType)?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+        switch (name, model) {
+        case let (name?, model?) where name.caseInsensitiveCompare(model) != .orderedSame:
+            return "\(name) · \(model)"
+        case let (name?, _): return name
+        case let (nil, model?): return model
+        default: return nil
+        }
+    }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }
 
 /// The saved device list, in `UserDefaults` under `devices.v1`.

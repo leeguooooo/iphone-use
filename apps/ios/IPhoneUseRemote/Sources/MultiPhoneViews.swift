@@ -88,6 +88,10 @@ struct DeviceTile: View {
                     HealthDot(health: session.health)
                     Text(session.name).font(.subheadline.weight(.semibold)).lineLimit(1)
                 }
+                Text(session.secondaryName)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Text(session.shortState)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
@@ -100,7 +104,7 @@ struct DeviceTile: View {
         .accessibilityHint(Text("打开全屏操作"))
         .accessibilityAddTraits(.isButton)
         .contextMenu {
-            Button { newName = session.name; renaming = true } label: { Label("重命名", systemImage: "pencil") }
+            Button { newName = session.record.customName ?? ""; renaming = true } label: { Label("重命名", systemImage: "pencil") }
             if session.status?.released == true || session.status?.humanHandoff == true {
                 Button { session.connectPhone() } label: { Label("连接手机", systemImage: "bolt.horizontal") }
             } else if session.phase == .connected {
@@ -114,7 +118,7 @@ struct DeviceTile: View {
             Button(role: .destructive) { confirmForget = true } label: { Label("忘记这台手机", systemImage: "trash") }
         }
         .alert("重命名", isPresented: $renaming) {
-            TextField(DeviceStore.defaultName(for: session.address), text: $newName)
+            TextField(session.record.defaultDisplayName, text: $newName)
             Button("取消", role: .cancel) {}
             Button("完成") { app.rename(session.id, to: newName) }
         }
@@ -299,8 +303,8 @@ struct DevicesSheet: View {
                 HStack(spacing: 10) {
                     if let session { HealthDot(health: session.health) }
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(record.name).font(.body)
-                        Text(record.address).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                        Text(record.displayName).font(.body)
+                        Text(record.secondaryText).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
                         if let session {
                             Text(session.shortState).font(.caption).foregroundStyle(.secondary)
                             if let lock = session.status?.lockBadge {
@@ -316,7 +320,7 @@ struct DevicesSheet: View {
                 set: { app.setShowInGrid(record.id, $0) }))
                 .labelsHidden()
                 .fixedSize()
-                .accessibilityLabel(Text("在总览显示 \(record.name)"))
+                .accessibilityLabel(Text("在总览显示 \(record.displayName)"))
         }
     }
 }
@@ -344,7 +348,7 @@ struct SyncSetupSheet: View {
                                     .foregroundStyle(selected.contains(record.id) ? Color.accentColor : .secondary)
                                 if let session { HealthDot(health: session.health) }
                                 VStack(alignment: .leading) {
-                                    Text(record.name)
+                                    Text(record.displayName)
                                     if let session {
                                         Text(session.shortState).font(.caption).foregroundStyle(.secondary)
                                     }

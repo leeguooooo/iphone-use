@@ -2654,8 +2654,10 @@ async fn agent_status(
     let warming = crate::prewarm::warming() && reconnecting;
     // Will this phone get stuck at the lock screen (cache only, no I/O).
     let lock_readiness = crate::lock_readiness::current_json();
+    // Which phone this is: name, model, iOS (cache only, no I/O).
+    let device = crate::device_identity::current_json();
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -17173,6 +17175,9 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"lockNotice\""));
         assert!(INDEX_HTML.contains("status?.lock_readiness"));
         assert!(INDEX_HTML.contains("syncLockNotice(s);"));
+        // The phone's own name and model, not the Mac's address.
+        assert!(INDEX_HTML.contains("id=\"deviceLabel\""));
+        assert!(INDEX_HTML.contains("syncDeviceIdentity(s);"));
         assert!(INDEX_HTML.contains("aria-label=\"录制并运行自动化流程\""));
         assert!(INDEX_HTML.contains("id=\"flowAvailability\""));
         assert!(INDEX_HTML.contains("id=\"flowSafetyGate\""));
@@ -17687,6 +17692,25 @@ mod tests {
             assert!(readiness["hint"]["zh"].is_string());
             assert!(readiness["hint"]["en"].is_string());
             assert!(readiness["keep_awake"]["enabled"].is_boolean());
+            wda.shutdown();
+        });
+    }
+
+    /// `/agent/status` carries `device` (the phone's name, model and iOS):
+    /// `null` until lockdown has been read, else an object with those keys.
+    #[test]
+    fn status_reports_device_identity() {
+        block(async {
+            let mut wda = MockWda::start(healthy_wda_responder);
+            let state = readiness_state_with_wda(wda.base());
+            let body = status_json(&state).await;
+            let value: serde_json::Value = serde_json::from_str(&body).expect("status is JSON");
+            let device = value.get("device").expect("status has device");
+            if !device.is_null() {
+                for key in ["name", "model", "product_type", "ios"] {
+                    assert!(device.get(key).is_some(), "device lacks {key}: {body}");
+                }
+            }
             wda.shutdown();
         });
     }

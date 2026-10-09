@@ -303,6 +303,11 @@ struct DeviceEditForm: View {
     @State private var scanning = false
     @Environment(\.dismiss) private var dismiss
 
+    /// What it is called with the name left empty: the phone's own name.
+    private var placeholderName: String {
+        app.devices.first { $0.id == id }?.phone?.label ?? DeviceStore.defaultName(for: address)
+    }
+
     var body: some View {
         let session = app.session(id)
         Form {
@@ -315,7 +320,7 @@ struct DeviceEditForm: View {
                 LockReadinessSection(readiness: readiness)
             }
             Section("名称") {
-                TextField(DeviceStore.defaultName(for: address), text: $name)
+                TextField(placeholderName, text: $name)
             }
             Section {
                 TextField("192.168.1.11:44321", text: $address)
@@ -363,7 +368,7 @@ struct DeviceEditForm: View {
         .onAppear {
             guard !loaded, let record = app.devices.first(where: { $0.id == id }) else { return }
             loaded = true
-            name = record.name
+            name = record.customName ?? ""
             address = record.address
         }
         .onChange(of: address) { problem = nil }
@@ -462,7 +467,7 @@ struct RemoteView: View {
         VStack(spacing: 6) {
             HStack(spacing: 8) {
                 BackToGridButton(app: app)
-                StatusPill(session: session, showName: app.devices.count > 1)
+                StatusPill(session: session, showName: true)
             }
             .padding(.horizontal)
             OfflineBanner(online: app.online)
@@ -637,7 +642,15 @@ struct StatusPill: View {
     var body: some View {
         HStack(spacing: 6) {
             HealthDot(health: session.health)
-            Text(label).font(.caption.monospaced()).lineLimit(1)
+            if showName {
+                // The phone first, then where it is served from and its state.
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(session.name).font(.caption.weight(.semibold)).lineLimit(1)
+                    Text(label).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                }
+            } else {
+                Text(label).font(.caption.monospaced()).lineLimit(1)
+            }
             if let note = session.delivery {
                 DeliveryBadge(outcome: note.outcome)
             }
@@ -650,7 +663,7 @@ struct StatusPill: View {
 
     private var label: String {
         var parts = [session.shortState]
-        if showName { parts.insert(session.name, at: 0) }
+        if showName { parts.insert(session.secondaryName, at: 0) }
         if let route = session.routeLabel { parts.append(route) }
         return parts.joined(separator: " · ")
     }
@@ -770,7 +783,7 @@ struct SettingsSheet: View {
                     ConnectionSummary(session: session)
                 }
                 Section("名称") {
-                    TextField(DeviceStore.defaultName(for: session.address), text: $name)
+                    TextField(session.record.defaultDisplayName, text: $name)
                         .onSubmit { app.rename(session.id, to: name) }
                         .submitLabel(.done)
                 }
@@ -782,6 +795,10 @@ struct SettingsSheet: View {
                     }
                     if let route = session.routeLabel {
                         LabeledContent("线路", value: route)
+                    }
+                    if let phone = session.record.phone {
+                        LabeledContent("手机", value: phone.label ?? "—")
+                        if let ios = phone.ios { LabeledContent("iOS", value: ios) }
                     }
                     LabeledContent("服务版本", value: session.status?.version ?? "—")
                     LabeledContent("设备状态", value: session.shortState)
@@ -805,7 +822,7 @@ struct SettingsSheet: View {
                     }
                 }
             }
-            .onAppear { name = session.name }
+            .onAppear { name = session.record.customName ?? "" }
             .confirmationDialog("忘记这台手机？", isPresented: $confirmForget, titleVisibility: .visible) {
                 Button("忘记", role: .destructive) {
                     app.remove(session.id)

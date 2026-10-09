@@ -71,6 +71,18 @@ kept across daemon restarts), so a released phone shows its last reading.
 Report a `will_lock_needs_person` hint to the owner; never ask for, store or
 type a passcode.
 
+**Which phone.** `device` names the phone this daemon drives, read from
+lockdown (USB or a Wi-Fi attachment) and cached in the instance state dir, so
+an unplugged phone keeps its last reading; `null` until a first read:
+
+```json
+"device": {"name": "Leo's iPhone", "model": "iPhone X", "product_type": "iPhone10,3", "ios": "16.5"}
+```
+
+`model` is the marketing name for `product_type`, or `product_type` itself
+when the daemon does not know that identifier. Refreshed when the runner
+comes up and every 30 minutes.
+
 **Reconnect** only when the current task needs the phone, `recovery_owner` is
 `daemon`, blockers are resolved, and no release/reconnect is in progress. Send
 it once, then poll status until `drivable:true`:
@@ -228,7 +240,7 @@ only on a trusted network.
 
 | Call | Purpose |
 |---|---|
-| `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, …}` — gate on `drivable` |
+| `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, device, …}` — gate on `drivable` |
 | `GET /agent/capabilities` | What this build supports + whether the phone is drivable now (`blocked_by`); touches nothing |
 | `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max` |
 | `GET /agent/screenshot` | Device PNG. `?max_side=1200` shrinks it (~0.9k image tokens instead of ~1.5k; MCP's default) and lets a current live frame answer while someone watches. `X-Capture-Redacted: 1` = wireframe of a protected screen ([below](#screens-hidden-from-capture)); `?raw=1` untouched |

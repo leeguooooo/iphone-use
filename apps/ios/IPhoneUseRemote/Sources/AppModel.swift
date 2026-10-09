@@ -131,8 +131,16 @@ final class AppModel {
     private func makeSession(_ record: DeviceRecord) -> DeviceSession {
         let session = DeviceSession(record: record)
         session.preferQuality = videoQuality
+        session.onIdentity = { [weak self] id, phone in self?.notePhone(phone, for: id) }
         sessions[record.id] = session
         return session
+    }
+
+    /// Remember what the phone calls itself, so the list names it offline too.
+    func notePhone(_ phone: PhoneIdentity, for id: UUID) {
+        guard let index = devices.firstIndex(where: { $0.id == id }), devices[index].phone != phone else { return }
+        devices[index].phone = phone
+        persist()
     }
 
     private func persist() {
@@ -272,7 +280,7 @@ final class AppModel {
         }
         let address = base.absoluteString
         if let other = DeviceStore.conflict(address, in: devices, except: id) {
-            return .rejected(String(localized: "这个地址已经保存为「\(other.name)」"), canSaveAnyway: false)
+            return .rejected(String(localized: "这个地址已经保存为「\(other.displayName)」"), canSaveAnyway: false)
         }
         adding = true
         defer { adding = false }
@@ -321,7 +329,7 @@ final class AppModel {
 
     /// The name a pairing link's Mac is already saved under, if it is.
     func savedName(for link: PairLink) -> String? {
-        DeviceStore.conflict(link.base.absoluteString, in: devices)?.name
+        DeviceStore.conflict(link.base.absoluteString, in: devices)?.displayName
     }
 
     func handle(url: URL) {

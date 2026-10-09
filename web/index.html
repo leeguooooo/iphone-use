@@ -141,6 +141,11 @@
     #statusPill .conn-dot.ok  { color: var(--ok); filter: drop-shadow(0 0 4px rgba(74,222,128,.7)); }
     #statusPill .conn-dot.warn{ color: var(--warn); }
     #statusPill .conn-dot.bad { color: var(--danger); }
+    #deviceLabel {
+      font-size: 11px; font-weight: 600; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%;
+    }
+    #deviceLabel:empty { display: none; }
     #statusLine {
       font-family: var(--mono); font-size: 11px; letter-spacing: .02em;
       color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -797,6 +802,7 @@
     <!-- floating status pill -->
     <div id="statusPill" role="status" aria-live="polite">
       <span class="conn-dot">&#9679;</span>
+      <span id="deviceLabel"></span>
       <span id="statusLine">connecting…</span>
     </div>
     <button id="recordingPill" type="button" hidden
@@ -1526,6 +1532,24 @@ function syncLockNotice(status) {
   };
 }
 
+/* ── Which phone ─────────────────────────────────────────────────
+   `device` on /agent/status: the phone's own name and model (from lockdown),
+   so the page names the phone rather than the Mac's address. */
+function deviceLabelFor(status) {
+  const device = status?.device;
+  if (!device || typeof device !== 'object') return '';
+  const name = String(device.name || '').trim();
+  const model = String(device.model || '').trim();
+  if (name && model && name !== model) return `${name} · ${model}`;
+  return name || model;
+}
+function syncDeviceIdentity(status) {
+  const label = deviceLabelFor(status);
+  setTextIfChanged(document.getElementById('deviceLabel'), label);
+  const title = label ? `${label} · iphone-use` : 'iphone-use';
+  if (document.title !== title) document.title = title;
+}
+
 /* ── Device status ───────────────────────────────────────────────
    The phone is served only over WebDriverAgent: H.264 or MJPEG (with
    screenshot stills as fallback) for video and cookie-authenticated POST /control for
@@ -1616,6 +1640,7 @@ async function pollAgentMode() {
     syncHandoffButton();
     syncRedactedOverlay(s);
     syncLockNotice(s);
+    syncDeviceIdentity(s);
 
     updateMjpegActivityFromStatus(s, polledStreamId);
     const directPageVisible = document.visibilityState === 'visible';

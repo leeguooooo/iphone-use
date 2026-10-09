@@ -63,6 +63,7 @@
 /* Settings */
 "服务地址" = "Server address";
 "服务版本" = "Server version";
+"手机" = "Phone";
 "设备状态" = "Device state";
 "断开" = "Disconnect";
 "忘记这台 Mac" = "Forget this Mac";
