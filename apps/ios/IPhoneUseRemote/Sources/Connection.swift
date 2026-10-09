@@ -388,12 +388,12 @@ struct ConnectionPresentation: Equatable {
                          short: String(localized: "空闲"), symbol: "moon.zzz", tone: .attention,
                          placement: .cover, primary: .wakePhone)
         }
-        if s.locked == true || s.deviceState == "locked" {
+        if !s.drivable, s.locked == true || s.deviceState == "locked" {
             return .init(title: String(localized: "手机锁屏了"),
                          detail: String(localized: "锁屏密码不能远程输入，请在手机上解锁。远程操作时可以把「自动锁定」调长一点。"),
                          short: String(localized: "锁屏"), symbol: "lock", tone: .attention, placement: .cover)
         }
-        if s.deviceState == "offline" || s.deviceState == "blocked" {
+        if !s.drivable, s.deviceState == "offline" || s.deviceState == "blocked" {
             let daemonCanFix = s.recoveryOwner.isEmpty || s.recoveryOwner == "daemon"
             return .init(title: String(localized: "连不上手机"),
                          detail: s.personHint.isEmpty ? String(localized: "Mac 上的设备服务没有运行。") : s.personHint,
