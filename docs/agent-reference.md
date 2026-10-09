@@ -125,11 +125,16 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   starts and times out after about 30 s; ask the operator to unlock it, check
   **Settings › Developer › Enable UI Automation**, and answer that prompt on the
   next attempt. KeepAlive retries quietly every 5 s to 1 min; do not loop reconnect.
-- **`wifi_automation_refused`**: that refusal over Wi-Fi. iOS cannot show the
-  passcode prompt over Wi-Fi, and some iOS versions refuse the session there
-  entirely. Ask the operator to connect the phone by USB and enter the passcode
-  when asked (and to keep it on USB if Wi-Fi still fails). KeepAlive waits
-  15 minutes between Wi-Fi attempts and retries at once on USB; do not reconnect.
+- **`wifi_automation_refused`**: that refusal over Wi-Fi. The phone's iOS will
+  not start the runner's UI-automation session over the network (seen on an
+  iOS 27.2 beta with Enable UI Automation on and no prompt; any Xcode). Nothing
+  on the phone fixes it. Ask the operator to plug the phone in by USB once,
+  unlocked: the runner starts in about 20 s, and after the unplug it keeps
+  working over Wi-Fi until it has to start again (phone restart, runner crash).
+  While `wifi_start_refused` is true and `transport` is `wifi-tunnel`, idle
+  release keeps the runner up instead of stopping it, since it could not be
+  started again without the cable. KeepAlive waits 15 minutes between Wi-Fi
+  attempts and retries at once on USB; do not reconnect.
 - **`locked`**: unlock the phone. **`usb` / `ddi` / `account` / `wda`**: follow `hint`.
 
 Repeated bootstrap requests hide the real blocker — fix it, then reconnect once.

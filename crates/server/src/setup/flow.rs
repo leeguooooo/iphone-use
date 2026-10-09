@@ -1444,6 +1444,13 @@ impl Setup {
         match ide_refusal_blocker(transport) {
             "wifi_automation_refused" => {
                 let message = wifi_automation_message(wait);
+                // Remembered past this run: the daemon keeps a runner that is
+                // up over Wi-Fi instead of idle-releasing it (it could not be
+                // started again without the cable).
+                let _ = std::fs::write(
+                    self.rel(WIFI_START_REFUSED_FILE),
+                    b"wifi_automation_refused\n",
+                );
                 self.phase("building-fail", "wifi_automation_refused", &message);
                 self.failure_kind = Kind::WifiAutomation;
                 die(format!(
@@ -1690,6 +1697,12 @@ impl Setup {
                 session.chars().take(8).collect::<String>()
             )),
             None => ok(&format!("device runner serving at {url}")),
+        }
+        // A runner that started over Wi-Fi clears an earlier refusal: this
+        // phone can be idle-released and brought back without the cable.
+        let refused = self.rel(WIFI_START_REFUSED_FILE);
+        if refused.exists() && checks::transport(&self.ctx.udid) == checks::Transport::Network {
+            let _ = std::fs::remove_file(&refused);
         }
         self.phase("serving", "", "device runner serving — starting relay");
         self.from_probe = from_probe_session.is_some();
@@ -2744,8 +2757,17 @@ impl UnlockWait {
 /// #126: only when the SDK's major.minor is older than the phone's does a
 /// code-74 refusal mean the Xcode is too old.
 /// Which blocker an IDE-channel refusal (code 74, supported iOS) is: over
-/// Wi-Fi iOS never shows the authorization prompt, so it is not something a
-/// person can allow on the phone. An unknown transport keeps the USB reading.
+/// Wi-Fi some iOS versions never finish the test session (hardware: iPhone 14
+/// on iOS 27.2 beta, Enable UI Automation on, no prompt, Xcode 27.0 and 27.2
+/// alike), so it is not something a person can allow on the phone. A runner
+/// started over USB keeps working after the unplug. An unknown transport
+/// keeps the USB reading.
+/// State-dir marker: this phone refused to start the device runner over
+/// Wi-Fi (`wifi_automation_refused`). Cleared when a runner next starts over
+/// Wi-Fi. While it exists the daemon does not idle-release a runner that is
+/// up over the Wi-Fi tunnel.
+pub const WIFI_START_REFUSED_FILE: &str = "wifi-start-refused";
+
 pub fn ide_refusal_blocker(transport: checks::Transport) -> &'static str {
     match transport {
         checks::Transport::Network => "wifi_automation_refused",
@@ -2760,7 +2782,7 @@ fn waited(wait: Option<u64>) -> String {
 
 pub fn wifi_automation_message(wait: Option<u64>) -> String {
     format!(
-        "over Wi-Fi the iPhone did not authorize the device runner's UI-automation session (runner exit code 74, IDE channel refused{}) — iOS cannot show the passcode prompt over Wi-Fi, and some iOS versions refuse it entirely. Connect the iPhone by USB and enter the passcode when it asks; if it still fails over Wi-Fi afterwards, keep this phone on USB",
+        "over Wi-Fi the iPhone would not start the device runner's UI-automation session (runner exit code 74: testmanagerd took the Mac's test session but never gave the runner its IDE channel{}). This iPhone's iOS refuses to start UI automation over the network; it is not a passcode prompt or a setting, so nothing on the phone and no Wi-Fi retry fixes it. Plug the iPhone in by USB once, unlocked: the runner starts in about 20 s, and after you unplug it keeps working over Wi-Fi until it has to start again (phone restart, runner crash), which needs the cable once more",
         waited(wait)
     )
 }
@@ -2981,7 +3003,12 @@ mod tests {
         );
         let wifi = wifi_automation_message(Some(30));
         assert!(wifi.contains("over Wi-Fi"), "{wifi}");
-        assert!(wifi.contains("by USB"), "{wifi}");
+        assert!(wifi.contains("by USB once"), "{wifi}");
+        assert!(wifi.contains("after you unplug"), "{wifi}");
+        assert!(
+            !wifi.contains("passcode when"),
+            "no prompt to answer: {wifi}"
+        );
         assert!(wifi.contains("after waiting 30 s"), "{wifi}");
         let usb = automation_message(None);
         assert!(usb.contains("about 30 s"), "{usb}");
