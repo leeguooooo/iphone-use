@@ -4148,7 +4148,12 @@ impl Setup {
         }
         match &host {
             Some(ip) => ok(&format!("iOS {ios}: starting over Wi-Fi ({ip}); the runner keeps running with the cable pulled")),
-            None => ok(&format!("iOS {ios}: starting over USB (lockdownd does not answer over Wi-Fi yet)")),
+            None if !self.ctx.wifi_tunnel_allowed() => {
+                ok(&format!("iOS {ios}: starting over USB (WDA_TRANSPORT=usb)"))
+            }
+            None => ok(&format!(
+                "iOS {ios}: starting over USB (lockdownd does not answer over Wi-Fi yet)"
+            )),
         }
         self.phase(
             "ddi-wait",
