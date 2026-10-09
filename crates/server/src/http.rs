@@ -2924,6 +2924,10 @@ fn human_next_step(
                 "iPhone 的 iOS 比这台 Mac 上的 Xcode 新：安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），再运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它；重试和重连都解决不了",
                 "The iPhone runs a newer iOS than this Mac's Xcode supports: install an Xcode that supports it (a beta Xcode for a beta iOS), then run iphone-use setup --xcode <that Xcode.app> for this phone — retrying or reconnecting will not help",
             ),
+            "ios_too_old" => (
+                "这台 iPhone 的 iOS 太旧，所选的 Xcode 驱动不了（Xcode 26 起只支持 iOS 17 及以上的真机测试）：在 iPhone 上 设置 › 通用 › 软件更新 升级系统，或运行 iphone-use setup --xcode <旧版 Xcode.app> 让这台手机用旧版 Xcode；重试、重连和换线都解决不了",
+                "This iPhone's iOS is too old for the selected Xcode (from Xcode 26 on, device testing needs iOS 17 or later): update the iPhone in Settings › General › Software Update, or run iphone-use setup --xcode <an older Xcode.app> for this phone — retrying, reconnecting or another cable will not help",
+            ),
             "automation_not_allowed" => (
                 "iPhone 没有授权这次 UI 自动化：runner 启动时手机上会弹出密码或「允许」提示，约 30 秒不处理就会失败；请解锁手机、确认 设置 › 开发者 › 启用 UI 自动化 已打开，下次重试时完成这个提示；会自动重试",
                 "The iPhone did not authorize UI automation: a passcode or Allow prompt appears on the iPhone while the runner starts and times out after about 30 s — unlock it, check Settings › Developer › Enable UI Automation, and answer that prompt on the next attempt; it retries on its own",
@@ -3080,6 +3084,9 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
         "xcode_too_old" => Some(
             "the iPhone runs a newer iOS than the selected Xcode supports (setup_message names both versions) — install an Xcode that supports that iOS (a beta Xcode for a beta iOS) and point this phone at it with iphone-use setup --xcode /Applications/Xcode-beta.app (other phones keep theirs), or select it for the whole Mac with xcode-select; retrying or reconnecting cannot fix this, so do not send another reconnect request",
         ),
+        "ios_too_old" => Some(
+            "the iPhone runs an iOS older than the selected Xcode can run the device runner on (from Xcode 26 on that floor is iOS 17; setup_message names both versions) — the phone is attached and paired, but CoreDevice cannot drive it; have a person update the iPhone (Settings › General › Software Update), or point this phone at an older Xcode with iphone-use setup --xcode /Applications/Xcode-16.app; retrying, reconnecting or replugging cannot fix this, so do not send another reconnect request",
+        ),
         "automation_not_allowed" => Some(
             "the iPhone did not authorize the device runner's UI-automation session although this Xcode supports its iOS (the runner exited with code 74, testmanagerd refused the IDE channel) — a passcode or Allow prompt appears on the iPhone while the runner starts and times out after about 30 s; unlock the iPhone, check Settings › Developer › Enable UI Automation, and have a person answer that prompt on the next attempt; the managed service retries quietly every 5 s to 1 min, so do not send another reconnect request",
         ),
@@ -3107,7 +3114,7 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
     // that wait and the next attempt instead of letting it age out at 300 s.
     let max_age = if matches!(
         status.blocked_on.as_str(),
-        "xcode_too_old" | "wifi_automation_refused"
+        "xcode_too_old" | "ios_too_old" | "wifi_automation_refused"
     ) {
         1200
     } else {
@@ -3126,6 +3133,7 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
             | "account"
             | "automation_mode_disabled"
             | "xcode_too_old"
+            | "ios_too_old"
             | "automation_not_allowed"
             | "wifi_automation_refused"
             | "not_connected"
@@ -16111,6 +16119,7 @@ mod tests {
             "wifi_automation_refused",
             "not_connected",
             "xcode_too_old",
+            "ios_too_old",
             "locked",
             "wda",
         ] {
@@ -16218,6 +16227,7 @@ mod tests {
             "wifi_automation_refused",
             "not_connected",
             "xcode_too_old",
+            "ios_too_old",
             "locked",
             "wda",
         ] {
@@ -16412,6 +16422,31 @@ mod tests {
         // The USB reading now says the prompt is time-limited.
         let usb = setup_blocker_hint("automation_not_allowed").unwrap();
         assert!(usb.contains("about 30 s"), "{usb}");
+    }
+
+    #[test]
+    fn ios_too_old_blocker_says_to_update_the_phone_and_outlives_the_backoff() {
+        // Hardware: an iPhone 12 mini on iOS 15.4.1 over USB with Xcode 27.0;
+        // setup used to wait minutes and then blame the cable and WARP.
+        let payload = r#"{"phase":"prereq","blocked_on":"ios_too_old","message":"This iPhone runs iOS 15.4.1; Xcode 27.0 can only run the device runner on iOS 17 or later","ts":1000}"#;
+        let status = parse_setup_status(payload, 1100).expect("fresh status");
+        assert_eq!(status.blocked_on, "ios_too_old");
+        assert_eq!(parse_setup_blocked_on(payload, 1000 + 1000), "ios_too_old");
+        assert_eq!(parse_setup_blocked_on(payload, 1000 + 1300), "");
+        let hint = setup_blocker_hint("ios_too_old").unwrap();
+        assert!(hint.contains("Software Update"), "{hint}");
+        assert!(hint.contains("--xcode"), "{hint}");
+        assert!(
+            hint.contains("do not send another reconnect request"),
+            "{hint}"
+        );
+        assert!(!hint.contains("WARP"), "{hint}");
+        assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
+        let (zh, en) = human_next_step("blocker", "ios_too_old", "").unwrap();
+        assert!(
+            zh.contains("软件更新") && en.contains("Software Update"),
+            "{en}"
+        );
     }
 
     #[test]

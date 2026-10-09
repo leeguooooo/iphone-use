@@ -79,7 +79,7 @@ for it explicitly; the answer is `started` or `skipped` with a reason
 ## Setup blockers
 
 `setup_blocked_on` is one of `warp | proxy | not_connected | usb | trust | ddi | account |
-automation_mode_disabled | automation_not_allowed | wifi_automation_refused | xcode_too_old | locked | wda` (empty = known prerequisites passed;
+automation_mode_disabled | automation_not_allowed | wifi_automation_refused | xcode_too_old | ios_too_old | locked | wda` (empty = known prerequisites passed;
 KeepAlive keeps the last concrete blocker while it re-checks).
 
 - **`warp`** (the #1 blocker): Cloudflare WARP or another VPN wedges the
@@ -108,6 +108,17 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   that iOS (a beta Xcode for a beta iOS) fixes it; a person can give just this
   phone that Xcode with `iphone-use setup --xcode <Xcode.app>`. KeepAlive waits
   15 minutes between attempts; do not reconnect.
+- **`ios_too_old`**: the phone runs an iOS older than the selected Xcode can
+  run the device runner on. From Xcode 26 on, device testing goes through
+  CoreDevice only, which needs iOS 17 or later: an iOS 15/16 phone is attached
+  and paired (lockdownd answers over USB) but `devicectl` and `xctrace` never
+  list it. Setup checks this before waiting for developer services, so it
+  fails in seconds with both versions in `setup_message` (e.g. "This iPhone runs
+  iOS 15.4.1; Xcode 27.0 can only run the device runner on iOS 17 or later").
+  Ask a person to update the iPhone (Settings › General › Software Update) or
+  give this phone an older Xcode with `iphone-use setup --xcode <Xcode.app>`. A
+  cable, WARP or a retry does not help; KeepAlive waits 15 minutes between
+  attempts; do not reconnect.
 - **`automation_not_allowed`**: the same code-74 refusal, but this Xcode supports
   the phone's iOS (over USB): the phone did not authorize the UI-automation
   session. A passcode / "Allow" prompt appears on the phone while the runner
