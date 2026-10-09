@@ -810,6 +810,48 @@ static long long IPURInterfaceOrientation(void)
   return (orientation >= 1 && orientation <= 4) ? orientation : 1;
 }
 
+// Where synthesized touches spent their time since the last takeSynthesisTiming (main thread):
+// the orientation read for the record, building the record, and synthesizeWithError: — the
+// testmanagerd round trip that plays the events in real time (so it covers the scheduled hold) and
+// answers once they were delivered. Hardware, iPhone 13 / iOS 27: Wait = Hold + ~220 ms for every
+// hold tried (20, 50, 100, 200 ms); the orientation read and the build take under 1 ms, and a 10 ms
+// implicit-confirmation interval did not shorten Wait, so the fixed part is testmanagerd's own.
+static double IPURSynthOrientationMs, IPURSynthBuildMs, IPURSynthWaitMs, IPURSynthHoldMs;
+static NSInteger IPURSynthCalls;
+
+static double IPURNowMs(void)
+{
+  return CFAbsoluteTimeGetCurrent() * 1000.0;
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)takeSynthesisTiming
+{
+  NSDictionary *timing = IPURSynthCalls == 0 ? @{} : @{
+    @"Orientation": @(IPURSynthOrientationMs),
+    @"Build": @(IPURSynthBuildMs),
+    @"Wait": @(IPURSynthWaitMs),
+    @"Hold": @(IPURSynthHoldMs),
+    @"Calls": @(IPURSynthCalls),
+  };
+  IPURSynthOrientationMs = IPURSynthBuildMs = IPURSynthWaitMs = IPURSynthHoldMs = 0;
+  IPURSynthCalls = 0;
+  return timing;
+}
+
+/// Runs synthesizeWithError: on a built record, timing it (and the record's last offset).
+static BOOL IPURSynthesizeRecord(id record, NSError **error)
+{
+  SEL maximumOffset = NSSelectorFromString(@"maximumOffset");
+  if ([record respondsToSelector:maximumOffset]) {
+    IPURSynthHoldMs += ((double (*)(id, SEL))objc_msgSend)(record, maximumOffset) * 1000.0;
+  }
+  double started = IPURNowMs();
+  BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(record, NSSelectorFromString(@"synthesizeWithError:"), error);
+  IPURSynthWaitMs += IPURNowMs() - started;
+  IPURSynthCalls += 1;
+  return ok;
+}
+
 static unsigned long long IPURMainDisplayID(void)
 {
   static unsigned long long displayID;
@@ -832,7 +874,9 @@ static NSString *IPURCreateGestureRecord(NSString *name, int pid, id *record)
   Class recordClass = NSClassFromString(@"XCSynthesizedEventRecord");
   SEL displaySelector = NSSelectorFromString(@"initWithName:displayID:interfaceOrientation:");
   SEL orientationSelector = NSSelectorFromString(@"initWithName:interfaceOrientation:");
+  double readStarted = IPURNowMs();
   long long orientation = IPURInterfaceOrientation();
+  IPURSynthOrientationMs += IPURNowMs() - readStarted;
   unsigned long long displayID = IPURMainDisplayID();
   id created = nil;
   if (displayID != 0 && [recordClass instancesRespondToSelector:displaySelector]) {
@@ -876,7 +920,7 @@ static NSString *IPURSynthesize(id record, id path)
   ((IPURMsgSendAddPath)objc_msgSend)(record, NSSelectorFromString(@"addPointerEventPath:"), path);
   NSError *error = nil;
   [IPURBridge invalidateRequestCache];  // a touch can change the foreground app
-  BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(record, NSSelectorFromString(@"synthesizeWithError:"), &error);
+  BOOL ok = IPURSynthesizeRecord(record, &error);
   if (!ok) {
     return [NSString stringWithFormat:@"private XCTest event synthesis failed: %@",
                                       error.localizedDescription ?: @"synthesizeWithError returned NO"];
@@ -971,6 +1015,7 @@ static NSString *IPURSynthesize(id record, id path)
 {
   if (paths.count == 0) return @"no touch paths to synthesize";
   @try {
+    double buildStarted = IPURNowMs();
     id record = nil;
     NSString *error = IPURCreateGestureRecord(name, 0, &record);
     if (error != nil) return error;
@@ -1000,9 +1045,9 @@ static NSString *IPURSynthesize(id record, id path)
       ((IPURMsgSendAddPath)objc_msgSend)(record, NSSelectorFromString(@"addPointerEventPath:"), path);
     }
     NSError *synthesisError = nil;
+    IPURSynthBuildMs += IPURNowMs() - buildStarted;
     [IPURBridge invalidateRequestCache];  // a touch can change the foreground app
-    BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(
-      record, NSSelectorFromString(@"synthesizeWithError:"), &synthesisError);
+    BOOL ok = IPURSynthesizeRecord(record, &synthesisError);
     if (!ok) {
       return [NSString stringWithFormat:@"private XCTest event synthesis failed: %@",
                                         synthesisError.localizedDescription ?: @"synthesizeWithError returned NO"];

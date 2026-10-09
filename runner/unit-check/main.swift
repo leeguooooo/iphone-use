@@ -176,7 +176,19 @@ do {
   ])
   check(tap.count == 1 && tap[0].count == 2, "tap is one down/up path")
   check(tap.first?.first?["x"] as? Double == 50 && tap.first?.last?["type"] as? String == "up", "tap position")
-  check(abs(t(tap[0][1]) - 0.05) < 1e-9, "tap held 50 ms")
+  check(abs(t(tap[0][1]) - W3CActions.tapHold) < 1e-9, "tap held tapHold")
+
+  func held(_ pauseMs: Double) throws -> Double {
+    let path = try pointer([
+      ["type": "pointerMove", "duration": 0, "x": 1, "y": 1],
+      ["type": "pointerDown", "button": 0],
+      ["type": "pause", "duration": pauseMs],
+      ["type": "pointerUp", "button": 0],
+    ])
+    return t(path[0][1]) - t(path[0][0])
+  }
+  check(abs(try held(20) - 0.02) < 1e-9, "an explicit 20 ms pause holds 20 ms")
+  check(abs(try held(3) - W3CActions.minimumHold) < 1e-9, "an explicit pause holds at least minimumHold")
 
   let hold = try pointer([
     ["type": "pointerMove", "duration": 0, "x": 1, "y": 1],
