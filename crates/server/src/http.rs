@@ -2629,17 +2629,9 @@ async fn agent_status(
     // that is merely up from one somebody is driving: since v0.6.3 WDA stays
     // up indefinitely, so `device_state:"ready"` alone says nothing about use.
     let idle_secs = state.idle_for().as_secs();
-    let transport = if state.managed_wda {
-        let relayed = wda_transport(&crate::instance::current().state_dir);
-        match (relayed, state.device_udid.as_deref()) {
-            ("usb", Some(udid)) if native_relay(&crate::instance::current().state_dir) => {
-                native_relay_transport(udid).await
-            }
-            _ => relayed,
-        }
-    } else {
-        "external"
-    };
+    let transport = managed_transport(&state).await;
+    let wifi_start_refused =
+        state.managed_wda && wifi_start_refused(&crate::instance::current().state_dir);
     let rtt = crate::wda::wda_rtt_ms();
     let rtt_json = rtt.map_or("null".to_string(), |ms| ms.to_string());
     let transport_hint = serde_json::to_string(&transport_hint(transport, rtt))
@@ -2647,7 +2639,7 @@ async fn agent_status(
     // A reconnect a pre-warm started (see `crate::prewarm`).
     let warming = crate::prewarm::warming() && reconnecting;
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -2664,6 +2656,36 @@ async fn agent_status(
         .body(Body::from(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     with_security_headers(resp)
+}
+
+/// How control reaches the managed runner right now (`usb`, `wifi-tunnel`,
+/// `wifi`, `unknown`), or `external` for a WDA this daemon does not manage.
+async fn managed_transport(state: &AppState) -> &'static str {
+    if !state.managed_wda {
+        return "external";
+    }
+    let state_dir = &crate::instance::current().state_dir;
+    let relayed = wda_transport(state_dir);
+    match (relayed, state.device_udid.as_deref()) {
+        ("usb", Some(udid)) if native_relay(state_dir) => native_relay_transport(udid).await,
+        _ => relayed,
+    }
+}
+
+/// Setup recorded that this phone refused to start the runner over Wi-Fi
+/// (`wifi_automation_refused`; cleared once a Wi-Fi start succeeds).
+fn wifi_start_refused(state_dir: &std::path::Path) -> bool {
+    state_dir
+        .join(crate::setup::flow::WIFI_START_REFUSED_FILE)
+        .exists()
+}
+
+/// Idle release must keep a runner that is up over the Wi-Fi tunnel on a
+/// phone that cannot start one over Wi-Fi: stopping it would leave the phone
+/// unreachable until someone plugs in a cable. Over USB, or on a phone that
+/// starts over Wi-Fi, idle release works as usual.
+fn idle_release_keeps_wifi_runner(start_refused: bool, transport: &str) -> bool {
+    start_refused && transport == "wifi-tunnel"
 }
 
 /// How control traffic reaches WDA, from the relay setup-wda.sh recorded:
@@ -2933,8 +2955,8 @@ fn human_next_step(
                 "The iPhone did not authorize UI automation: a passcode or Allow prompt appears on the iPhone while the runner starts and times out after about 30 s — unlock it, check Settings › Developer › Enable UI Automation, and answer that prompt on the next attempt; it retries on its own",
             ),
             "wifi_automation_refused" => (
-                "通过 Wi-Fi 时 iPhone 没有授权 UI 自动化（Wi-Fi 下弹不出输密码的提示，有些 iOS 版本干脆拒绝）：请用 USB 连接这台 iPhone，并在它要求时输入密码；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB；重试和重连 Wi-Fi 都解决不了",
-                "Over Wi-Fi the iPhone did not authorize UI automation (iOS cannot show the passcode prompt over Wi-Fi, and some iOS versions refuse it entirely): connect it by USB and enter the passcode when it asks; if Wi-Fi still fails afterwards, keep this phone on USB — retrying or reconnecting over Wi-Fi will not help",
+                "这台 iPhone 的 iOS 不允许通过 Wi-Fi 启动设备服务（和锁屏密码、设置开关都无关，手机上没有可点的选项，重试也没用）：插一次线启动（保持解锁，约 20 秒连上），之后拔掉可以一直用 Wi-Fi，直到设备服务重启（比如手机重启）时再插一次",
+                "This iPhone's iOS will not start the device service over Wi-Fi (not a passcode or a setting, nothing to tap on the phone, and retrying will not help): plug it in by USB once to start it (unlocked, about 20 s), then unplug it and keep using Wi-Fi until the device service restarts (for example after the phone restarts), when it needs the cable once more",
             ),
             "wda" => (
                 "设备 runner 启动失败：在这台 Mac 上运行 iphone-use doctor 查看原因",
@@ -3091,7 +3113,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iPhone did not authorize the device runner's UI-automation session although this Xcode supports its iOS (the runner exited with code 74, testmanagerd refused the IDE channel) — a passcode or Allow prompt appears on the iPhone while the runner starts and times out after about 30 s; unlock the iPhone, check Settings › Developer › Enable UI Automation, and have a person answer that prompt on the next attempt; the managed service retries quietly every 5 s to 1 min, so do not send another reconnect request",
         ),
         "wifi_automation_refused" => Some(
-            "over Wi-Fi the iPhone did not authorize the device runner's UI-automation session (code 74, testmanagerd refused the IDE channel after waiting; setup_message has the wait) — iOS cannot show the passcode prompt over Wi-Fi, and some iOS versions refuse it entirely; connect the iPhone by USB and have a person enter the passcode when it asks, and keep it on USB if Wi-Fi still fails afterwards; retrying over Wi-Fi cannot fix this (the managed service waits 15 minutes between attempts and retries at once when the phone is plugged in), so do not send another reconnect request",
+            "over Wi-Fi the iPhone would not start the device runner's UI-automation session (code 74: testmanagerd took the test session but never gave the runner its IDE channel; setup_message has the wait) — this iPhone's iOS refuses to start UI automation over the network, and no passcode, setting or Wi-Fi retry changes that; have a person plug the iPhone in by USB once, unlocked: the runner starts in about 20 s and keeps working over Wi-Fi after the unplug, until the phone restarts or the runner has to start again; the managed service waits 15 minutes between Wi-Fi attempts and retries at once when the phone is plugged in, so do not send another reconnect request",
         ),
         "wda" => Some(
             "the device runner failed to start — inspect ~/.iphone-use/wda-agent.log and run iphone-use doctor before retrying",
@@ -4048,6 +4070,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
         let mut window = base_window;
         let mut release_backoff_until: Option<std::time::Instant> = None;
         let mut release_failures: u32 = 0;
+        let mut kept_wifi_runner = false;
         loop {
             tokio::time::sleep(POLL).await;
             window = effective_idle_window(base_window);
@@ -4207,6 +4230,18 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
             if release_backoff_until.is_some_and(|until| std::time::Instant::now() < until) {
                 continue; // a recent stop did not take; wait out the backoff
             }
+            if wifi_start_refused(&crate::instance::current().state_dir)
+                && idle_release_keeps_wifi_runner(true, managed_transport(&state).await)
+            {
+                if !kept_wifi_runner {
+                    kept_wifi_runner = true;
+                    tracing::info!(
+                        "idle, but keeping the runner: it is up over Wi-Fi and this iPhone refused to start one over Wi-Fi (wifi_automation_refused), so a release would need the cable to undo"
+                    );
+                }
+                continue;
+            }
+            kept_wifi_runner = false;
             let Some(release_token) = state.wda_lifecycle.try_begin_releasing() else {
                 continue;
             };
@@ -16396,11 +16431,35 @@ mod tests {
     }
 
     #[test]
+    fn idle_release_keeps_a_wifi_runner_that_cannot_be_restarted_over_wifi() {
+        assert!(idle_release_keeps_wifi_runner(true, "wifi-tunnel"));
+        assert!(
+            !idle_release_keeps_wifi_runner(true, "usb"),
+            "over USB the runner restarts on demand"
+        );
+        assert!(
+            !idle_release_keeps_wifi_runner(false, "wifi-tunnel"),
+            "a phone that starts over Wi-Fi is released as usual"
+        );
+        assert!(!idle_release_keeps_wifi_runner(true, "unknown"));
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!wifi_start_refused(dir.path()));
+        std::fs::write(
+            dir.path().join(crate::setup::flow::WIFI_START_REFUSED_FILE),
+            "wifi_automation_refused\n",
+        )
+        .unwrap();
+        assert!(wifi_start_refused(dir.path()));
+    }
+
+    #[test]
     fn wifi_automation_refused_points_to_usb_and_outlives_its_backoff() {
-        // Hardware (iPhone 14, iOS 27.2 beta, Xcode 27.2 beta, versions
-        // matching): over Wi-Fi testmanagerd refused the IDE channel 30 s
-        // after "Running tests" with no prompt on the phone, even right after
-        // a USB passcode authorization; over USB the same phone worked.
+        // Hardware (iPhone 14, iOS 27.2 beta): over Wi-Fi testmanagerd took
+        // the harness session but never handed the runner its IDE channel;
+        // 30 s after "Running tests" the runner exited with code 74. Enable
+        // UI Automation was on, no prompt appeared, Xcode 27.0 and 27.2 beta
+        // failed alike, and a USB relaunch of the same phone needed no
+        // passcode. A runner started over USB kept serving after the unplug.
         let payload = r#"{"phase":"building-fail","blocked_on":"wifi_automation_refused","message":"over Wi-Fi the iPhone did not authorize the device runner's UI-automation session","ts":1000}"#;
         let status = parse_setup_status(payload, 1100).expect("fresh status");
         assert_eq!(status.blocked_on, "wifi_automation_refused");
@@ -16409,7 +16468,8 @@ mod tests {
             "visible across the 900 s Wi-Fi backoff"
         );
         let hint = setup_blocker_hint("wifi_automation_refused").unwrap();
-        assert!(hint.contains("by USB"), "{hint}");
+        assert!(hint.contains("by USB once"), "{hint}");
+        assert!(hint.contains("after the unplug"), "{hint}");
         assert!(hint.contains("Wi-Fi"), "{hint}");
         assert!(
             hint.contains("do not send another reconnect request"),
@@ -16418,7 +16478,9 @@ mod tests {
         assert!(!hint.contains("--"), "no bypass flags: {hint}");
         assert!(!hint.contains('"') && !hint.contains('{') && !hint.contains('}'));
         let (zh, en) = human_next_step("blocker", "wifi_automation_refused", "").unwrap();
-        assert!(zh.contains("USB") && en.contains("by USB"), "{en}");
+        assert!(zh.contains("插一次线") && zh.contains("拔掉"), "{zh}");
+        assert!(en.contains("by USB once") && en.contains("unplug"), "{en}");
+        assert!(!en.contains("enter the passcode"), "{en}");
         // The USB reading now says the prompt is time-limited.
         let usb = setup_blocker_hint("automation_not_allowed").unwrap();
         assert!(usb.contains("about 30 s"), "{usb}");

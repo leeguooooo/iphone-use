@@ -589,22 +589,32 @@ phone's iOS, over USB: the phone did not authorize the UI-automation session. A 
 Allow prompt appears on the iPhone while the runner starts and times out after about 30 s,
 so unlock it, check Settings › Developer › Enable UI Automation, and answer that prompt on the
 next attempt; KeepAlive retries quietly every 5 s to 1 min.
-`wifi_automation_refused` is that refusal over Wi-Fi: iOS cannot show the passcode prompt
-over Wi-Fi, and some iOS versions (seen on an iOS 27.2 beta) refuse the session there
-entirely, with no prompt, about 30 s after the runner starts — `setup_message` records the
-wait. Connect the phone by USB and enter the passcode when it asks; if Wi-Fi still fails
-afterwards, keep that phone on USB. KeepAlive waits 15 minutes between Wi-Fi attempts (each
-one launches the runner on the phone) and retries at once when the phone is plugged in.
+`wifi_automation_refused` is that refusal over Wi-Fi: the phone's iOS will not start the
+runner's UI-automation session over the network. Seen on an iPhone 14 with an iOS 27.2 beta:
+testmanagerd accepts the Mac's test session over the Wi-Fi tunnel but never hands the runner
+its IDE channel, and about 30 s after the runner starts it exits with code 74
+(`setup_message` records the wait). Enable UI Automation was on, no prompt appeared, a USB
+relaunch of the same phone needed no passcode, and Xcode 27.0 and 27.2 beta failed alike,
+while the same Mac starts the runner over Wi-Fi on an iOS 27.0 phone. So nothing on the
+phone fixes it: plug it in by USB once, unlocked; the runner starts in about 20 s, and after
+the unplug it keeps working over Wi-Fi until it has to start again (phone restart, runner
+crash). Setup leaves a `wifi-start-refused` marker in the instance's state directory
+(removed after the next successful Wi-Fi start); while it exists and the phone is on the
+Wi-Fi tunnel, idle release keeps the runner up instead of stopping it, and status reports
+`wifi_start_refused: true`. The cost is iOS's "Automation Running" state staying on while
+idle; over USB the phone is released as usual. KeepAlive waits 15 minutes between Wi-Fi
+attempts (each one launches the runner on the phone) and retries at once when the phone is
+plugged in.
 
 **Wi-Fi.** usbmuxd's network attachment of a Wi-Fi phone only reaches lockdownd, never the
 runner's port, so `iphone-use relay` dials the phone's CoreDevice tunnel instead (the
 `tunnelIPAddress` that `devicectl list devices` reports while `tunnelState` is `connected`).
 That tunnel is encrypted and routed by this Mac only, unlike a LAN `socat` relay. The working
-pattern is: start the runner over USB (iOS asks for the passcode to allow UI automation),
-then unplug — the runner keeps running and the relays follow it onto the tunnel; status then
-reports `transport: "wifi-tunnel"`. Launching a new runner over Wi-Fi still needs that
-passcode prompt, which iOS cannot show there (`wifi_automation_refused`), so plug in again
-when the runner has to restart.
+pattern is: start the runner over USB, then unplug — the runner keeps running and the
+relays follow it onto the tunnel; status then reports `transport: "wifi-tunnel"`. Many
+phones also start a new runner over Wi-Fi (an iOS 27.0 iPhone 17 Pro Max does, in a few
+seconds); a phone whose iOS refuses that (`wifi_automation_refused`) needs the cable again
+whenever its runner has to restart, so idle release leaves its Wi-Fi runner up.
 
 **Who may end a reconnect.** A bring-up is owned by the task that started it, and only
 that owner ends it. Every begin mints a generation, so a late task cannot end the round
