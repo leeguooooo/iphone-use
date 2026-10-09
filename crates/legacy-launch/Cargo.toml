@@ -1,0 +1,23 @@
+[package]
+name = "legacy-launch"
+version = "0.17.11"
+edition = "2024"
+license = "MIT"
+description = "Launches the iphone-use XCTest runner on iOS 15/16 over USB or Wi-Fi and holds it alive"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "iphone-use-legacy-launch"
+path = "src/main.rs"
+
+[dependencies]
+# MIT. Lockdown, pair records, installation_proxy, heartbeat and the iOS < 17
+# testmanagerd/XCTest launch (DTX) all live here; `tcp` is the Wi-Fi path that
+# talks to lockdown on <ip>:62078 without usbmuxd. ring matches the server's
+# rustls backend, so no aws-lc / cmake in the build.
+idevice = { version = "=0.1.68", default-features = false, features = ["ring", "xctest", "tcp", "usbmuxd", "heartbeat"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "signal"] }
+plist = "1.7"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
