@@ -2817,8 +2817,9 @@ fn runner_reads(url: &str, auth: &crate::runner_token::TokenSource) -> bool {
 /// is a plain LAN relay to it safe by default. An older runner answers both
 /// with 200 and no `auth`.
 fn runner_enforces_auth(status_url: &str, auth: &crate::runner_token::TokenSource) -> bool {
-    let unsigned = sys::http_get(status_url, Duration::from_secs(3));
-    if !unsigned.is_some_and(|(status, _)| status == 401) {
+    let refused = sys::http_get(status_url, Duration::from_secs(3))
+        .is_some_and(|(status, _)| status == 401);
+    if !refused {
         return false;
     }
     sys::runner_get(status_url, Duration::from_secs(3), auth)
