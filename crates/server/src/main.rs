@@ -1115,6 +1115,8 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
         if state.managed_wda {
             http::spawn_idle_release_watchdog(state.clone());
         }
+        // Keep-awake asks the runner for a lease, managed or not.
+        server::keep_awake::spawn(state.clone());
 
         let app = http::router(state);
         let serve_result = axum::serve(listener, app)

@@ -1453,4 +1453,52 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
   }
 }
 
++ (nullable NSDictionary<NSString *, NSNumber *> *)screenLockStatus
+{
+  typedef mach_port_t (*IPURServerPort)(void);
+  typedef void (*IPURLockStatus)(mach_port_t, BOOL *, BOOL *);
+  void *handle = dlopen(
+    "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
+  if (handle == NULL) return nil;
+  IPURServerPort serverPort = (IPURServerPort)dlsym(handle, "SBSSpringBoardServerPort");
+  IPURLockStatus lockStatus = (IPURLockStatus)dlsym(handle, "SBGetScreenLockStatus");
+  if (serverPort == NULL || lockStatus == NULL) return nil;
+  BOOL locked = NO;
+  BOOL passcodeEnabled = NO;
+  lockStatus(serverPort(), &locked, &passcodeEnabled);
+  return @{@"locked": @(locked), @"passcodeEnabled": @(passcodeEnabled)};
+}
+
++ (nullable NSString *)resetIdleTimer
+{
+  // Measured on an iPhone 13 / iOS 27 with Auto-Lock at 30 s: F13 every 10 s kept the phone
+  // awake for minutes, did not wake a dark (locked) screen, and left the foreground UI and an
+  // open software keyboard (and the text in its field) untouched. Each press returns in ~0.25 s.
+  // Ruled out on the same phone: IOPMAssertionDeclareUserActivity, a PreventUserIdleDisplaySleep
+  // assertion and UIApplication.idleTimerDisabled in the runner (Auto-Lock fired anyway); a touch
+  // aimed at the runner's own pid (it landed in the foreground app); consumer usage 0 (it holds
+  // off Auto-Lock too, but XCTest waits 5 s for a confirmation it never gets and refuses every
+  // tap meanwhile: "only one gesture can be performed at a time").
+  static const unsigned int kKeyboardPage = 0x07;
+  static const unsigned int kF13 = 0x68;
+  Class eventClass = NSClassFromString(@"XCDeviceEvent");
+  SEL make = NSSelectorFromString(@"deviceEventWithPage:usage:duration:");
+  SEL perform = NSSelectorFromString(@"performDeviceEvent:error:");
+  if (eventClass == Nil || ![eventClass respondsToSelector:make]
+      || ![XCUIDevice.sharedDevice respondsToSelector:perform]) {
+    return @"XCDeviceEvent / XCUIDevice performDeviceEvent:error: is unavailable";
+  }
+  @try {
+    id event = ((id (*)(id, SEL, unsigned int, unsigned int, double))objc_msgSend)(
+      eventClass, make, kKeyboardPage, kF13, 0.005);
+    if (event == nil) return @"XCDeviceEvent could not be created";
+    NSError *error = nil;
+    BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(XCUIDevice.sharedDevice, perform, event, &error);
+    if (ok) return nil;
+    return error.localizedDescription ?: @"performDeviceEvent:error: returned NO";
+  } @catch (NSException *exception) {
+    return [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
+  }
+}
+
 @end

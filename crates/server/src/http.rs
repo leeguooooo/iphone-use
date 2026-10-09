@@ -303,7 +303,7 @@ impl WdaLifecycle {
         self.current() == WdaLifecycleTransition::Reconnecting
     }
 
-    fn is_transitioning(&self) -> bool {
+    pub fn is_transitioning(&self) -> bool {
         self.current() != WdaLifecycleTransition::Active
     }
 }
@@ -788,6 +788,19 @@ impl AppState {
             .as_ref()
             .map(|owner| owner.last_seen.elapsed());
         lease_idle_clock(self.idle_for(), owner_age, lease).is_none_or(|idle| idle < window)
+    }
+
+    /// Whether someone is using the phone remotely right now, for keep-awake
+    /// ([`crate::keep_awake`]): a hold lease, an open live view, a live owner
+    /// lease, or a driving request within `window`.
+    pub fn phone_in_use(&self, window: std::time::Duration) -> bool {
+        if self.held() || self.viewer_busy() || self.idle_for() < window {
+            return true;
+        }
+        let lease = std::time::Duration::from_secs(self.owner_lease_secs);
+        recover(self.owner.lock()).as_ref().is_some_and(|owner| {
+            !lease_remaining(owner.last_seen, Instant::now(), lease).is_zero()
+        })
     }
 
     /// Cancel a background capture of the settled screen: the control request
@@ -9087,6 +9100,61 @@ impl ControlRefusal {
 /// phone cannot take a control request now, if it cannot. An idle-released
 /// managed phone starts coming back here, whichever endpoint asked (the batch
 /// endpoint used to answer `device_not_drivable` and leave it released).
+/// Whether an action should first try to open a locked phone: the last
+/// observation says it is locked, and nothing says a passcode guards it.
+fn should_unlock_before_action(
+    cached_locked: Option<bool>,
+    report: crate::keep_awake::LockReport,
+) -> bool {
+    use crate::keep_awake::LockReport;
+    match report {
+        LockReport::LockedPasscode => false,
+        LockReport::LockedNoPasscode => true,
+        LockReport::Unlocked | LockReport::Unknown => cached_locked == Some(true),
+    }
+}
+
+/// Open a phone that locked between actions, when it has no passcode — the
+/// runner presses Home until it opens and refuses without pressing anything
+/// when a passcode is set. Best effort: on failure the action runs as it
+/// always did and the lock is reported the usual way.
+async fn unlock_before_action(
+    state: &AppState,
+    client: &mut crate::wda::WdaClient,
+    deadline: tokio::time::Instant,
+) {
+    let cached = recover(state.wda_health.lock()).locked;
+    if !should_unlock_before_action(cached, crate::keep_awake::lock_report()) {
+        return;
+    }
+    // Leave the action most of its budget: the unlock takes ~2.5 s.
+    let budget = deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .saturating_sub(std::time::Duration::from_secs(6))
+        .min(std::time::Duration::from_secs(5));
+    if budget.is_zero() {
+        return;
+    }
+    match tokio::time::timeout(budget, client.unlock()).await {
+        Ok(Ok(())) => {
+            tracing::info!("the phone was locked; unlocked it (no passcode) before the action");
+            crate::keep_awake::note_unlocked();
+            apply_wda_health_probe(
+                &state.wda_health,
+                &state.wda_actionable,
+                &state.released,
+                crate::wda::WdaHealth {
+                    up: true,
+                    actionable: true,
+                    locked: Some(false),
+                },
+            );
+        }
+        Ok(Err(error)) => tracing::info!("the phone is locked and could not be unlocked: {error:#}"),
+        Err(_) => tracing::info!("unlocking the phone took longer than {}s", budget.as_secs()),
+    }
+}
+
 fn control_readiness_refusal(state: &Arc<AppState>) -> Option<ControlRefusal> {
     if state.wda_lifecycle.is_releasing() {
         return Some(ControlRefusal::releasing());
@@ -11267,6 +11335,7 @@ async fn agent_input_inner(
         {
             return None;
         }
+        unlock_before_action(&state, &mut client, agent_wda_deadline).await;
         *recover(dispatch_marker.lock()) = Some(client.last_post());
         let mut detail = None;
         let outcome =
@@ -18495,5 +18564,21 @@ mod read_path_gate_tests {
         // A read that works clears it.
         let (health, still) = gate_on_read_path(up(), true, Some(true));
         assert!(health.actionable && !still);
+    }
+}
+
+#[cfg(test)]
+mod unlock_before_action_tests {
+    use super::should_unlock_before_action;
+    use crate::keep_awake::LockReport;
+
+    #[test]
+    fn unlocks_only_a_phone_seen_locked_without_a_passcode() {
+        assert!(should_unlock_before_action(Some(true), LockReport::Unknown));
+        assert!(should_unlock_before_action(None, LockReport::LockedNoPasscode));
+        assert!(should_unlock_before_action(Some(false), LockReport::LockedNoPasscode));
+        assert!(!should_unlock_before_action(Some(true), LockReport::LockedPasscode));
+        assert!(!should_unlock_before_action(Some(false), LockReport::Unknown));
+        assert!(!should_unlock_before_action(None, LockReport::Unlocked));
     }
 }

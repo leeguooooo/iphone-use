@@ -930,22 +930,31 @@ extension RunnerTests {
   }
 
   private func unlockScreen() throws -> HTTPResponse {
-    // Without a passcode a Home press wakes and opens the phone; with one it only shows the
-    // passcode pad (as with WDA, which cannot type the passcode either).
+    // With a passcode a Home press only shows the passcode pad (WDA cannot type it either).
     switch lockedOnMain() {
     case false?: return .value(NSNull())
     case nil: throw RunnerError.failed("the lock state could not be read; nothing was pressed")
     case true?: break
     }
+    // A set passcode cannot be entered from here: say so without pressing anything, so a dark
+    // phone is not lit up just to show its keypad.
+    if IPURBridge.screenLockStatus()?["passcodeEnabled"]?.boolValue == true {
+      throw RunnerError(status: 409, code: "unknown error",
+                        message: "passcode_required: a passcode is set on this iPhone, so it cannot be unlocked remotely; unlock it in hand")
+    }
     defer { IPURBridge.invalidateRequestCache() }
-    if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(.home) }) {
-      throw RunnerError.failed("unlock failed: \(exception)")
+    // Without a passcode a dark phone needs two presses: the first only wakes it to the lock
+    // screen (iPhone 13, iOS 27), the second opens it. Stop as soon as it is open — one press
+    // more would leave the app it was showing for the Home screen.
+    for _ in 0..<3 {
+      if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(.home) }) {
+        throw RunnerError.failed("unlock failed: \(exception)")
+      }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+      IPURBridge.invalidateRequestCache()
+      if lockedOnMain() == false { return .value(NSNull()) }
     }
-    RunLoop.current.run(until: Date().addingTimeInterval(0.6))
-    if lockedOnMain() != false {
-      throw RunnerError.failed("pressed Home but the phone is still locked (a passcode is likely required)")
-    }
-    return .value(NSNull())
+    throw RunnerError.failed("pressed Home three times but the phone is still locked")
   }
 
   // MARK: - On-device settle
