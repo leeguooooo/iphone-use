@@ -4196,7 +4196,15 @@ impl Setup {
         let installed_file = legacy_ios::legacy_dir(&self.ctx).join("installed");
         let installed_key = format!("{udid}|{assembled_key}");
         // Whatever runner is up goes first (the owner check above allowed it).
-        legacy_ios::kill_runner(&go_ios, &udid, &bundle);
+        // Only when one answers: `ios kill` of nothing waits out its timeout.
+        if self.runner_session().is_some() {
+            let started = Instant::now();
+            legacy_ios::kill_runner(&go_ios, &udid, &bundle);
+            ok(&format!(
+                "ended the runner that was up ({:.1}s)",
+                started.elapsed().as_secs_f64()
+            ));
+        }
         if std::fs::read_to_string(&installed_file)
             .map(|k| k.trim().to_string())
             .ok()
