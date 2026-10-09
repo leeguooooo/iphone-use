@@ -622,13 +622,18 @@ struct Toolbar: View {
 
     var body: some View {
         let handedOver = session.status?.humanHandoff == true
+        let connected = session.phase == .connected
         HStack {
             ToolButton(title: "主屏幕", symbol: "house") { session.send(.home) }
+                .disabled(!connected)
             ToolButton(title: "键盘", symbol: "keyboard") { typing = true }
+                .disabled(!connected)
             if handedOver || session.status?.released == true {
                 ToolButton(title: "连接手机", symbol: "bolt.horizontal") { session.connectPhone() }
+                    .disabled(session.busy)
             } else {
                 ToolButton(title: "交还", symbol: "iphone.and.arrow.forward") { session.handBack() }
+                    .disabled(!connected)
             }
             ToolButton(title: app.videoQuality ? "画质" : "性能",
                        symbol: app.videoQuality ? "sparkles.tv" : "bolt.horizontal.circle") {
@@ -656,8 +661,10 @@ struct ToolButton: View {
             }
             .frame(maxWidth: .infinity, minHeight: 44)
         }
-        .foregroundStyle(.primary)
+        .foregroundStyle(isEnabled ? .primary : .tertiary)
     }
+
+    @Environment(\.isEnabled) private var isEnabled
 }
 
 /// Type text into the phone; in sync, into every member (`targets` > 1).

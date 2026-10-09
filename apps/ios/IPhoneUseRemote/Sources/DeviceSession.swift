@@ -50,8 +50,26 @@ final class DeviceSession: Identifiable {
     private(set) var lastProblem: ConnectProblem?
     private var retryTask: Task<Void, Never>?
     /// A scanned code that could not be traded yet (the Mac was unreachable).
-    /// Codes live 5 minutes on the daemon, so it is tried until then.
-    var pendingPair: PendingPair?
+    /// Codes live 5 minutes on the daemon, so it is tried until then, across
+    /// an app relaunch too (kept in the Keychain next to the device token).
+    var pendingPair: PendingPair? {
+        get {
+            guard let text = Keychain.password(for: Self.pairAccount(address)) else { return nil }
+            let parts = text.split(separator: "|", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let at = TimeInterval(parts[0]) else { return nil }
+            return PendingPair(code: parts[1], scannedAt: Date(timeIntervalSince1970: at))
+        }
+        set {
+            if let newValue {
+                Keychain.save(password: "\(newValue.scannedAt.timeIntervalSince1970)|\(newValue.code)",
+                              for: Self.pairAccount(address))
+            } else {
+                Keychain.delete(for: Self.pairAccount(address))
+            }
+        }
+    }
+
+    private static func pairAccount(_ address: String) -> String { "pair:" + address }
 
     struct PendingPair: Equatable {
         let code: String
@@ -170,7 +188,7 @@ final class DeviceSession: Identifiable {
     /// password, pairing and LAN routes over, so nothing has to be re-entered.
     static func moveCredentials(from old: String, to new: String) {
         guard old != new else { return }
-        let accounts: [(String) -> String] = [{ $0 }, deviceAccount, lanKeyAccount]
+        let accounts: [(String) -> String] = [{ $0 }, deviceAccount, lanKeyAccount, pairAccount]
         for account in accounts {
             if let secret = Keychain.password(for: account(old)) {
                 Keychain.save(password: secret, for: account(new))

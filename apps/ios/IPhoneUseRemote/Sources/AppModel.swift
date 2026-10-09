@@ -102,6 +102,8 @@ final class AppModel {
         // UI checks on the simulator: `-address <url> -password <pw>`, or
         // `-pair <QR text>` standing in for a scan (the simulator has no camera).
         if defaults.bool(forKey: "grid") { focusedID = nil }
+        if defaults.bool(forKey: "edit"), let id = focusedID { editing = .init(id: id) }
+        if defaults.bool(forKey: "scan") { scanning = true }
         if let scanned = defaults.string(forKey: "pair"), let link = PairLink.parse(scanned) {
             Task { await pair(link) }
         } else if let address = defaults.string(forKey: "address"),
