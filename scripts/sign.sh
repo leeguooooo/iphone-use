@@ -158,9 +158,8 @@ esac
 # The iOS 15/16 launcher is nested code too, so it also goes before the main
 # executable.
 LEGACY_LAUNCH_BINARY="$APP/Contents/MacOS/iphone-use-legacy-launch"
-NESTED=("$MCP_BINARY")
-[ -f "$LEGACY_LAUNCH_BINARY" ] && NESTED+=("$LEGACY_LAUNCH_BINARY")
-for binary in "${NESTED[@]}" "$DAEMON_BINARY"; do
+[ -f "$LEGACY_LAUNCH_BINARY" ] || LEGACY_LAUNCH_BINARY=""
+for binary in "$MCP_BINARY" ${LEGACY_LAUNCH_BINARY:+"$LEGACY_LAUNCH_BINARY"} "$DAEMON_BINARY"; do
     echo "Signing binary: $binary ..."
     codesign \
         --force \

@@ -68,6 +68,9 @@ EOF
         "$WORK/main.c" 2>/dev/null || return 1
     cc -arch x86_64 -arch arm64 -o "$app/Contents/MacOS/iphone-use-mcp" \
         "$WORK/main.c" 2>/dev/null || return 1
+    # The iOS 15/16 launcher ships in the bundle too: a second nested helper.
+    cc -arch x86_64 -arch arm64 -o "$app/Contents/MacOS/iphone-use-legacy-launch" \
+        "$WORK/main.c" 2>/dev/null || return 1
     cat >"$app/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -129,7 +132,7 @@ else
     ) >/dev/null 2>&1
     SIGN_RC=$?
     if [ "$SIGN_RC" -eq 0 ]; then
-        ok "install.sh _inline_sign signs a two-binary bundle"
+        ok "install.sh _inline_sign signs the bundle (main + MCP + legacy launcher)"
     else
         notok "install.sh _inline_sign FAILED (rc=$SIGN_RC) — nested helper signed too late"
     fi
@@ -152,7 +155,7 @@ LOOP="$(awk '/^for binary in/ { line = $0; body = "" ; next }
         "$REPO/scripts/sign.sh")"
 case "$LOOP" in
     "") notok "could not find sign.sh's signing loop" ;;
-    *MCP_BINARY*DAEMON_BINARY*) ok "sign.sh signs the nested helper before the main executable" ;;
+    *MCP_BINARY*LEGACY_LAUNCH_BINARY*DAEMON_BINARY*) ok "sign.sh signs the nested helper before the main executable" ;;
     *) notok "sign.sh signs the main executable first — same bug: $LOOP" ;;
 esac
 
