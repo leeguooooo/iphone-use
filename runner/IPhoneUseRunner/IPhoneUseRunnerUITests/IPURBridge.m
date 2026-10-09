@@ -8,6 +8,7 @@
 // See runner/README.md for the full attribution and license text.
 
 #import "IPURBridge.h"
+#import "IPURGeometry.h"
 
 #import <ImageIO/ImageIO.h>
 #import <dlfcn.h>
@@ -796,9 +797,9 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
         || [recordClass instancesRespondToSelector:NSSelectorFromString(@"initWithName:interfaceOrientation:")]);
 }
 
-/// UIInterfaceOrientation for the record: the interface orientation on screen, not the physical
-/// device orientation (a phone lying on its side reads landscape while its UI stays portrait);
-/// unknown falls back to portrait.
+/// UIInterfaceOrientation the touch points are given in: the interface orientation on screen, not
+/// the physical device orientation (a phone lying on its side reads landscape while its UI stays
+/// portrait); unknown falls back to portrait.
 static long long IPURInterfaceOrientation(void)
 {
   NSInteger orientation = 1;
@@ -866,6 +867,14 @@ static unsigned long long IPURMainDisplayID(void)
   return displayID;
 }
 
+/// The interface orientation the touch paths being built are turned from (main thread; set per record).
+static long long IPURTouchOrientation = 1;
+
+static CGPoint IPURTouchPoint(CGPoint point)
+{
+  return IPURPortraitPoint(point, IPURTouchOrientation, UIScreen.mainScreen.bounds.size);
+}
+
 static NSString *IPURCreateGestureRecord(NSString *name, int pid, id *record)
 {
   if (![IPURBridge eventSynthesisAvailable]) {
@@ -875,8 +884,11 @@ static NSString *IPURCreateGestureRecord(NSString *name, int pid, id *record)
   SEL displaySelector = NSSelectorFromString(@"initWithName:displayID:interfaceOrientation:");
   SEL orientationSelector = NSSelectorFromString(@"initWithName:interfaceOrientation:");
   double readStarted = IPURNowMs();
-  long long orientation = IPURInterfaceOrientation();
+  IPURTouchOrientation = IPURInterfaceOrientation();
   IPURSynthOrientationMs += IPURNowMs() - readStarted;
+  // The record takes portrait points: its orientation did not turn them on hardware (see
+  // IPURPortraitPoint), so the paths below turn them and the record says portrait.
+  long long orientation = 1;
   unsigned long long displayID = IPURMainDisplayID();
   id created = nil;
   if (displayID != 0 && [recordClass instancesRespondToSelector:displaySelector]) {
@@ -902,12 +914,12 @@ static id IPURNewTouchPath(CGPoint point, double offset)
 {
   Class pathClass = NSClassFromString(@"XCPointerEventPath");
   return ((IPURMsgSendInitPath)objc_msgSend)(
-    [pathClass alloc], NSSelectorFromString(@"initForTouchAtPoint:offset:"), point, offset);
+    [pathClass alloc], NSSelectorFromString(@"initForTouchAtPoint:offset:"), IPURTouchPoint(point), offset);
 }
 
 static void IPURMove(id path, CGPoint point, double offset)
 {
-  ((IPURMsgSendPathMove)objc_msgSend)(path, NSSelectorFromString(@"moveToPoint:atOffset:"), point, offset);
+  ((IPURMsgSendPathMove)objc_msgSend)(path, NSSelectorFromString(@"moveToPoint:atOffset:"), IPURTouchPoint(point), offset);
 }
 
 static void IPURLift(id path, double offset)
