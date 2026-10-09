@@ -230,6 +230,7 @@ final class RunnerTests: XCTestCase {
     defer { IPURBridge.setRequestCacheEnabled(false) }
     if request.method != "GET", Self.mayChangeScreen(request.path) {
       alertCache = nil
+      elements.prune()
     }
     defer {
       busyLock.lock()

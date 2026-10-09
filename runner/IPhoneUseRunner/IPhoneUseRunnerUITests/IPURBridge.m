@@ -613,6 +613,20 @@ static NSMutableArray<IPURFrontier *> *IPURCappedFrontiers(NSArray<IPURFrontier 
   return frontiers;
 }
 
+/// A remembered depth expires: the app may have left the screen that needed it (the key is a pid,
+/// and the same app on a lighter screen accepts the full depth again).
+static const NSTimeInterval IPURRememberedDepthSeconds = 30;
+
+static NSMutableDictionary<NSString *, NSDate *> *IPURAcceptedDepthTimes(void)
+{
+  static NSMutableDictionary<NSString *, NSDate *> *times;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    times = [NSMutableDictionary dictionary];
+  });
+  return times;
+}
+
 static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
 {
   static NSMutableDictionary<NSString *, NSNumber *> *depths;
@@ -654,6 +668,12 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
   if (rememberKey != nil) {
     @synchronized(IPURAcceptedDepths()) {
       remembered = IPURAcceptedDepths()[rememberKey];
+      NSDate *at = IPURAcceptedDepthTimes()[rememberKey];
+      if (remembered != nil && (at == nil || -at.timeIntervalSinceNow > IPURRememberedDepthSeconds)) {
+        [IPURAcceptedDepths() removeObjectForKey:rememberKey];
+        [IPURAcceptedDepthTimes() removeObjectForKey:rememberKey];
+        remembered = nil;
+      }
     }
   }
   if (remembered != nil && remembered.integerValue < maxDepth) {
@@ -682,6 +702,7 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
   if (rememberKey != nil && acceptedDepth < maxDepth) {
     @synchronized(IPURAcceptedDepths()) {
       IPURAcceptedDepths()[rememberKey] = @(acceptedDepth);
+      IPURAcceptedDepthTimes()[rememberKey] = [NSDate date];
     }
   }
 

@@ -456,5 +456,19 @@ do {
         "no alert in the tree: nothing")
 }
 
+// MARK: - Element registry bounds
+
+do {
+  let registry = ElementRegistry(capacity: 8)
+  let start = Date()
+  let old = registry.register(tree, now: start)
+  let fresh = registry.register(tree, now: start.addingTimeInterval(55))
+  registry.prune(now: start.addingTimeInterval(65))
+  check(registry.node(old) == nil, "an id older than a minute is dropped when the screen may change")
+  check(registry.node(fresh) != nil, "a recent id survives the prune")
+  for _ in 0..<20 { _ = registry.register(tree, now: start.addingTimeInterval(66)) }
+  check(registry.count <= 8, "the registry never holds more than its capacity")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)
