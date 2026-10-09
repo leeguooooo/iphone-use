@@ -754,9 +754,7 @@ impl Setup {
             if !self.over_tunnel {
                 let serial: Vec<String> = usb
                     .into_iter()
-                    .filter(|serial| {
-                        checks::on_usb(&self.ctx.udid, std::slice::from_ref(serial))
-                    })
+                    .filter(|serial| checks::on_usb(&self.ctx.udid, std::slice::from_ref(serial)))
                     .collect();
                 let untrusted = usbdiag::untrusted(&serial);
                 if let Some(diagnosis) = usbdiag::diagnose(&[], &serial, &untrusted) {
