@@ -4,4 +4,11 @@ members = [
     "crates/core",
     "crates/server",
     "crates/mcp",
+    "crates/legacy-launch",
 ]
+
+# idevice 0.1.68 opens a plain XCTestManager_IDEInterface channel on iOS < 17,
+# which testmanagerd cancels, so the legacy runner never gets its test plan.
+# Fixed upstream in jkcoxson/idevice#141; drop this once a release carries it.
+[patch.crates-io]
+idevice = { git = "https://github.com/leeguooooo/idevice", rev = "41c388baef0dd55c0ce4924789abbfde889d9b87" }

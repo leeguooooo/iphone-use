@@ -80,6 +80,13 @@ jobs:
           set -euo pipefail
           cargo test -p iphone-use-mcp --locked
 
+      - name: cargo test -p legacy-launch
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p legacy-launch --locked
+
       - name: Build the MCP binary
         shell: bash
         run: |

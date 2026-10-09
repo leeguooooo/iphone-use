@@ -18,7 +18,7 @@ for a in "$@"; do
 done
 [ -n "$V" ] || { echo "usage: scripts/release.sh [--dry-run] <version>" >&2; exit 2; }
 MARKETPLACE=leeguooooo/plugins PLUGIN=iphone-use
-CRATES="crates/core/Cargo.toml crates/server/Cargo.toml crates/mcp/Cargo.toml"
+CRATES="crates/core/Cargo.toml crates/server/Cargo.toml crates/mcp/Cargo.toml crates/legacy-launch/Cargo.toml"
 die() { echo "error: $*" >&2; exit 1; }
 cd "$(dirname "$0")/.."
 
@@ -34,7 +34,7 @@ trap 'git checkout -q -- $CRATES Cargo.lock' EXIT  # undo the bump on --dry-run 
 for f in $CRATES; do
   sed -i.bak "1,/^version = /s/^version = \".*\"/version = \"$V\"/" "$f" && rm "$f.bak"
 done
-for n in core server iphone-use-mcp; do
+for n in core server iphone-use-mcp legacy-launch; do
   sed -i.bak "/^name = \"$n\"\$/{n;s/^version = \".*\"/version = \"$V\"/;}" Cargo.lock && rm Cargo.lock.bak
 done
 cargo metadata --locked -q --format-version 1 >/dev/null || die "Cargo.lock out of sync"
