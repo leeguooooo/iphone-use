@@ -40,6 +40,7 @@ struct IPhoneUseRemoteApp: App {
 
 struct RootView: View {
     @Bindable var app: AppModel
+    @State private var manualAfterScan = false
 
     var body: some View {
         Group {
@@ -63,8 +64,15 @@ struct RootView: View {
                 DeviceEditForm(app: app, id: target.id, closesSheet: true)
             }
         }
-        .fullScreenCover(isPresented: $app.scanning) {
-            ScanSheet(onFound: { link in Task { await app.pair(link) } })
+        .fullScreenCover(isPresented: $app.scanning, onDismiss: {
+            // "Enter by hand" from the scanner: once the camera is gone.
+            if manualAfterScan, let id = app.focusedID {
+                manualAfterScan = false
+                app.editing = .init(id: id)
+            }
+        }) {
+            ScanSheet(onFound: { link in Task { await app.pair(link) } },
+                      onManual: app.focusedID == nil ? nil : { manualAfterScan = true })
         }
     }
 }

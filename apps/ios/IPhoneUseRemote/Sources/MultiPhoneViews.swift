@@ -10,6 +10,7 @@ struct DeviceGridView: View {
     @State private var showSync = false
     @State private var adding = false
     @State private var scanning = false
+    @State private var manualAfterScan = false
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
@@ -55,8 +56,10 @@ struct DeviceGridView: View {
             .sheet(isPresented: $showDevices) { DevicesSheet(app: app) }
             .sheet(isPresented: $showSync) { SyncSetupSheet(app: app) }
             .sheet(isPresented: $adding) { ConnectView(app: app) { adding = false } }
-            .fullScreenCover(isPresented: $scanning) {
-                ScanSheet(onFound: { link in Task { await app.pair(link) } }, onManual: { adding = true })
+            .fullScreenCover(isPresented: $scanning, onDismiss: {
+                if manualAfterScan { manualAfterScan = false; adding = true }
+            }) {
+                ScanSheet(onFound: { link in Task { await app.pair(link) } }, onManual: { manualAfterScan = true })
             }
         }
     }
@@ -203,6 +206,7 @@ struct DevicesSheet: View {
     @Bindable var app: AppModel
     @State private var adding = false
     @State private var scanning = false
+    @State private var manualAfterScan = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -231,13 +235,15 @@ struct DevicesSheet: View {
                 ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
             }
             .sheet(isPresented: $adding) { ConnectView(app: app) { adding = false; dismiss() } }
-            .fullScreenCover(isPresented: $scanning) {
+            .fullScreenCover(isPresented: $scanning, onDismiss: {
+                if manualAfterScan { manualAfterScan = false; adding = true }
+            }) {
                 ScanSheet(onFound: { link in
                     Task {
                         await app.pair(link)
                         dismiss()
                     }
-                }, onManual: { adding = true })
+                }, onManual: { manualAfterScan = true })
             }
         }
     }
