@@ -2701,7 +2701,9 @@ fn legacy_ios_json(managed: bool, state_dir: &std::path::Path) -> String {
             "launch_transport": record.launch_transport,
             // Started over Wi-Fi, the runner keeps running with the cable
             // pulled and restarts over Wi-Fi too.
-            "unplug_ok": record.launch_transport == "wifi",
+            // Off the cable only the plain LAN relay reaches an iOS 15/16
+            // runner (no CoreDevice tunnel), so both are needed.
+            "unplug_ok": record.launch_transport == "wifi" && record.lan_relay,
         })
         .to_string(),
         None => "null".to_string(),
@@ -2768,6 +2770,14 @@ async fn native_relay_transport(udid: &str) -> &'static str {
         Ok(Ok(Some(found))) if found.usb => "usb",
         // An iOS 15/16 relay goes straight to the phone's LAN address.
         Ok(Ok(_)) if lan_relay(&crate::instance::current().state_dir) => "wifi",
+        // An iOS 15/16 phone has no CoreDevice tunnel: off the cable and
+        // without the LAN relay nothing reaches its runner.
+        Ok(Ok(_))
+            if crate::setup::legacy_ios::read_record(&crate::instance::current().state_dir)
+                .is_some() =>
+        {
+            "unknown"
+        }
         Ok(Ok(_)) => "wifi-tunnel",
         // usbmuxd did not answer: keep the relay's own claim.
         _ => "usb",
@@ -16582,6 +16592,7 @@ mod tests {
                 launcher: "/x/iphone-use-legacy-launch".into(),
                 launch_transport: "wifi".into(),
                 wifi_mac: None,
+                lan_relay: true,
                 lan_ip: Some("192.168.0.149".into()),
                 wifi_ready: true,
             },

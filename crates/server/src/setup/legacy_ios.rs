@@ -699,6 +699,12 @@ pub struct Record {
     /// The phone's Wi-Fi MAC: finds its LAN address again over Bonjour.
     #[serde(default)]
     pub wifi_mac: Option<String>,
+    /// The relays fall back to the phone's LAN address off the cable
+    /// (WDA_ALLOW_LAN=1). Without it nothing on this Mac reaches an iOS
+    /// 15/16 runner off the cable: it has no CoreDevice tunnel, and usbmuxd's
+    /// Wi-Fi attachment does not carry the runner's port (iPhone X, iOS 16.5).
+    #[serde(default)]
+    pub lan_relay: bool,
 }
 
 pub fn read_record(state_dir: &Path) -> Option<Record> {
@@ -902,6 +908,7 @@ mod tests {
             launcher: "/x/iphone-use-legacy-launch".into(),
             launch_transport: "wifi".into(),
             wifi_mac: Some("9c:e3:3f:8d:d9:bd".into()),
+            lan_relay: true,
             lan_ip: Some("192.168.0.149".into()),
             wifi_ready: true,
         };

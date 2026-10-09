@@ -166,9 +166,12 @@ answers, so `unplug_ok: true` means the cable can be pulled and restarts also go
 over Wi-Fi; `launch_transport: "usb"` means pulling the cable ends the runner.
 This Wi-Fi start is what `WDA_TRANSPORT=auto` (the default) means for iOS 15/16,
 which has no CoreDevice tunnel: lockdown's TLS session with this Mac's pair record,
-not a plain LAN relay. `WDA_TRANSPORT=usb` turns it off (cable only). Off the cable
-the relays use usbmuxd's Wi-Fi attachment, or the phone's LAN address only when
-`WDA_ALLOW_LAN=1` (plain LAN: the runner port has no authentication). Idle release
+not a plain LAN relay. `WDA_TRANSPORT=usb` turns it off (cable only). Controlling
+the runner off the cable is a separate question: usbmuxd's Wi-Fi attachment does not
+carry the runner's port (measured on an iPhone X, iOS 16.5: runner alive on its LAN
+address, relay dead), so only the plain LAN relay reaches it, and that stays behind
+`WDA_ALLOW_LAN=1` (the runner port has no authentication). `unplug_ok` is true only
+for a Wi-Fi start with that relay; otherwise keep the cable in. Idle release
 works as usual; the next request starts the runner again in ~8–12 s.
 
 Repeated bootstrap requests hide the real blocker — fix it, then reconnect once.

@@ -598,9 +598,14 @@ cable the first time, and finds the address from the runner, its last run, or Bo
 `_apple-mobdev2._tcp`): such a runner keeps running with the cable pulled, and later
 restarts (idle release, a crash) go over Wi-Fi too. Otherwise it starts over USB and ends
 when the cable is pulled. Setup also answers the phone's local-network / "wireless data"
-prompt so the runner is reachable on the network. Off the cable the relays reach it
-through usbmuxd's Wi-Fi attachment, or through the phone's LAN address behind
-`WDA_ALLOW_LAN=1` (opt-in: the runner port has no authentication).
+prompt so the runner is reachable on the network. Starting over Wi-Fi is the
+`WDA_TRANSPORT=auto` default for these phones (`usb` keeps them on the cable). Driving
+the runner off the cable needs `WDA_ALLOW_LAN=1`, though: an iOS 15/16 phone has no
+CoreDevice tunnel, and usbmuxd's Wi-Fi attachment does not carry the runner's port
+(measured: the runner kept answering on its LAN address while the relay could not
+reach it), so only the plain LAN relay does, and that stays opt-in because the runner
+port has no authentication. `legacy_ios.unplug_ok` in `/agent/status` says whether
+the cable can be pulled.
 On an iPhone X (iOS 16.5) a setup that rebuilt the runner took 141 s (80 s of it the
 build; DDI check 3.7 s, install 12.9 s and launch 7.5 s, all over Wi-Fi); a warm restart
 of an iPhone 12 mini (iOS 15.4.1) takes about 12 s.

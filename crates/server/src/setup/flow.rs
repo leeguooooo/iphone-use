@@ -4025,10 +4025,14 @@ impl Setup {
 
     fn ready_message(&self) -> String {
         match &self.legacy_ios {
-            Some(legacy) if legacy.host.is_some() => format!(
+            Some(legacy) if legacy.host.is_some() && self.legacy_lan_host().is_some() => format!(
                 "device runner ready (iOS {}, started over Wi-Fi at {}): you can unplug the cable — it keeps running over Wi-Fi, and restarts over Wi-Fi too while the iPhone stays on this network",
                 legacy.ios,
                 legacy.host.as_deref().unwrap_or("?"),
+            ),
+            Some(legacy) if legacy.host.is_some() => format!(
+                "device runner ready (iOS {}, started over Wi-Fi): it would survive the cable being pulled, but this Mac reaches it off the cable only through the plain LAN relay (WDA_ALLOW_LAN=1; the runner port has no authentication), so keep the cable in or opt in",
+                legacy.ios
             ),
             Some(legacy) => format!(
                 "device runner ready (iOS {}, started over USB because this Mac cannot reach the iPhone's lockdown over Wi-Fi): keep the cable in — the runner stops when it is pulled",
@@ -4053,6 +4057,7 @@ impl Setup {
                 lan_ip: legacy.lan_ip.clone(),
                 wifi_ready: legacy.wifi_ready,
                 wifi_mac: legacy.wifi_mac.clone(),
+                lan_relay: self.legacy_lan_host().is_some(),
             },
         );
     }
