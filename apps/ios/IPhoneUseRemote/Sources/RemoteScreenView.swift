@@ -161,19 +161,79 @@ final class RemoteScreenUIView: UIView {
     }
 }
 
-/// SwiftUI wrapper. The model owns the stream and feeds the video view.
+/// SwiftUI wrapper for the full screen of one phone. The session owns the
+/// stream and feeds the video view; `onAction` decides where a gesture goes
+/// (that phone alone, or every sync member).
 struct RemoteScreen: UIViewRepresentable {
-    let model: RemoteModel
+    let session: DeviceSession
+    let onAction: (PhoneAction) -> Void
+
+    func makeCoordinator() -> VideoAttachment { VideoAttachment() }
 
     func makeUIView(context: Context) -> RemoteScreenUIView {
         let video = VideoDisplayView()
         let view = RemoteScreenUIView(display: video)
-        view.onAction = { action in model.send(action) }
-        video.onFrame = { model.frameArrived() }
-        video.onNeedKeyframe = { model.requestKeyframe() }
-        model.attach(video: video)
+        view.onAction = onAction
+        context.coordinator.attach(video, to: session, role: .full)
         return view
     }
 
-    func updateUIView(_ uiView: RemoteScreenUIView, context: Context) {}
+    func updateUIView(_ uiView: RemoteScreenUIView, context: Context) {
+        uiView.onAction = onAction
+        context.coordinator.attach(nil, to: session, role: .full)
+    }
+
+    static func dismantleUIView(_ uiView: RemoteScreenUIView, coordinator: VideoAttachment) {
+        coordinator.detach()
+    }
+}
+
+/// A live, non-interactive picture of one phone (a grid or sync tile).
+/// Tiles stream in performance mode; a tile on screen counts as a viewer
+/// for the daemon's idle release, one scrolled away or closed does not.
+struct LiveVideo: UIViewRepresentable {
+    let session: DeviceSession
+
+    func makeCoordinator() -> VideoAttachment { VideoAttachment() }
+
+    func makeUIView(context: Context) -> VideoDisplayView {
+        let video = VideoDisplayView()
+        video.isUserInteractionEnabled = false
+        context.coordinator.attach(video, to: session, role: .tile)
+        return video
+    }
+
+    func updateUIView(_ uiView: VideoDisplayView, context: Context) {
+        context.coordinator.attach(nil, to: session, role: .tile)
+    }
+
+    static func dismantleUIView(_ uiView: VideoDisplayView, coordinator: VideoAttachment) {
+        coordinator.detach()
+    }
+}
+
+/// Keeps a video view attached to the session it shows, and detaches it
+/// when the view goes away so the stream stops with it.
+@MainActor
+final class VideoAttachment {
+    private weak var session: DeviceSession?
+    private var video: VideoDisplayView?
+
+    /// Attach `video` (or, with nil, the one already held) to `session`;
+    /// a different session (the view was reused) moves it.
+    func attach(_ newVideo: VideoDisplayView?, to session: DeviceSession, role: DeviceSession.ViewerRole) {
+        if let newVideo { video = newVideo }
+        guard let video else { return }
+        if self.session === session, newVideo == nil { return }
+        if let old = self.session, old !== session { old.detach(video: video) }
+        self.session = session
+        video.onFrame = { [weak session] in session?.frameArrived() }
+        video.onNeedKeyframe = { [weak session] in session?.requestKeyframe() }
+        session.attach(video: video, role: role)
+    }
+
+    func detach() {
+        if let video { session?.detach(video: video) }
+        session = nil
+    }
 }
