@@ -290,6 +290,11 @@
         setup: '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode），运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它，再重新运行设置命令。',
         retry: '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode）；在那之前自动重试也不会成功。',
       },
+      ios_too_old: {
+        title: 'iPhone 系统版本太旧，所选 Xcode 驱动不了',
+        setup: '所选 Xcode 只能在 iOS 17 及以上的 iPhone 上运行设备 runner。请在 iPhone 上 设置 › 通用 › 软件更新 升级系统，或运行 iphone-use setup --xcode <旧版 Xcode.app> 让这台手机用旧版 Xcode，再重新运行设置命令。',
+        retry: '请升级 iPhone 系统，或给这台手机指定旧版 Xcode；在那之前自动重试也不会成功，换线也没用。',
+      },
       wda: {
         title: '设备服务启动失败',
         setup: '保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。',
@@ -314,7 +319,7 @@
     function showBlocker(code, managedRetry = false) {
       const blockerCopy = blockers[code];
       blocker.hidden = !blockerCopy;
-      blocker.className = `callout${blockerCopy ? ((code === 'wda' || code === 'xcode_too_old') ? ' danger' : ' warn') : ''}`;
+      blocker.className = `callout${blockerCopy ? ((code === 'wda' || code === 'xcode_too_old' || code === 'ios_too_old') ? ' danger' : ' warn') : ''}`;
       if (blockerCopy) {
         blockerTitle.textContent = blockerCopy.title;
         blockerDetail.textContent = managedRetry ? blockerCopy.retry : blockerCopy.setup;

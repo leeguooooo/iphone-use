@@ -48,6 +48,55 @@ pub fn os_major_minor(version: &str) -> String {
     )
 }
 
+/// The lowest iOS a CoreDevice-only Xcode can run the device runner on.
+/// From Xcode 26 on, device testing goes through CoreDevice alone, and
+/// CoreDevice needs iOS 17: an iOS 15/16 phone still pairs over usbmuxd and
+/// answers lockdownd, but `devicectl` and `xctrace` do not list it and its
+/// developer services never come up — unless that Xcode carries a legacy
+/// DeviceSupport image for the phone's iOS (see [`legacy_device_support`]).
+pub const COREDEVICE_MIN_IOS: &str = "17.0";
+
+/// The first Xcode major that drives devices through CoreDevice only.
+pub const COREDEVICE_ONLY_XCODE_MAJOR: u64 = 26;
+
+/// The lowest iOS the Xcode named by `xcode` (the first line of `xcodebuild
+/// -version`, "Xcode 27.0") can run the device runner on, when it has one.
+pub fn min_device_ios(xcode: &str) -> Option<&'static str> {
+    let major: u64 = xcode
+        .strip_prefix("Xcode ")?
+        .trim()
+        .split('.')
+        .next()?
+        .parse()
+        .ok()?;
+    (major >= COREDEVICE_ONLY_XCODE_MAJOR).then_some(COREDEVICE_MIN_IOS)
+}
+
+/// A `Platforms/iPhoneOS.platform/DeviceSupport` entry ("15.4", "15.4 (19E258)")
+/// that serves iOS `device`.
+pub fn device_support_matches(entry: &str, device: &str) -> bool {
+    let want = os_major_minor(device);
+    entry == want
+        || entry
+            .strip_prefix(want.as_str())
+            .is_some_and(|rest| rest.starts_with(' '))
+}
+
+/// The selected Xcode carries a legacy DeviceSupport image for iOS `device`,
+/// which lets it drive a phone below [`COREDEVICE_MIN_IOS`].
+pub fn legacy_device_support(device: &str) -> bool {
+    let developer = sys::stdout_of("xcode-select", &["-p"]);
+    if developer.is_empty() {
+        return false;
+    }
+    let dir = Path::new(&developer).join("Platforms/iPhoneOS.platform/DeviceSupport");
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| device_support_matches(&entry.file_name().to_string_lossy(), device))
+    })
+}
+
 // ── Xcode ───────────────────────────────────────────────────────────────────
 
 /// First line of `xcodebuild -version` ("Xcode 27.0"), or empty.
@@ -1012,6 +1061,19 @@ fn coredevice_device<'a>(
     }))
 }
 
+/// Whether CoreDevice lists `udid` at all (`None` when devicectl gave no
+/// readable answer). A phone usbmuxd sees but CoreDevice does not is one the
+/// selected Xcode cannot drive, not a cable or network problem.
+pub fn coredevice_lists(udid: &str) -> Option<bool> {
+    coredevice_lists_in(&sys::devicectl_json(10, &["list", "devices"])?, udid)
+}
+
+/// [`coredevice_lists`] over `devicectl list devices -j` output.
+pub fn coredevice_lists_in(json: &str, udid: &str) -> Option<bool> {
+    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    coredevice_device(&value, udid).map(|found| found.is_some())
+}
+
 /// CoreDevice's `transportType` for `udid` (`wired`, `localNetwork`), if any.
 fn coredevice_transport(json: &str, udid: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
@@ -1049,20 +1111,29 @@ pub fn coredevice_presence(json: &str, udid: &str) -> Presence {
     }
 }
 
-/// The phone's iOS version: lockdownd over usbmuxd, else devicectl's JSON.
-/// Never gates setup on its own.
-pub fn device_ios_version(udid: &str) -> Option<String> {
+/// The phone's iOS version as lockdownd reports it over usbmuxd. Cheap, and
+/// works for a phone CoreDevice cannot see (an iOS older than 17).
+pub fn lockdown_ios_version(udid: &str) -> Option<String> {
     if udid.is_empty() {
         return None;
     }
-    let from_lockdown = sys::block_on(async {
+    sys::block_on(async {
         tokio::time::timeout(Duration::from_secs(5), crate::lockdown::device_info(udid))
             .await
             .ok()
             .and_then(Result::ok)
     })
     .and_then(|info| info.product_version)
-    .filter(|version| valid_os_version(version));
+    .filter(|version| valid_os_version(version))
+}
+
+/// The phone's iOS version: lockdownd over usbmuxd, else devicectl's JSON.
+/// Never gates setup on its own.
+pub fn device_ios_version(udid: &str) -> Option<String> {
+    if udid.is_empty() {
+        return None;
+    }
+    let from_lockdown = lockdown_ios_version(udid);
     if from_lockdown.is_some() {
         return from_lockdown;
     }
@@ -1222,6 +1293,49 @@ pub fn xcode_missing_message() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coredevice_only_xcode_has_an_ios_17_floor() {
+        assert_eq!(min_device_ios("Xcode 27.0"), Some("17.0"));
+        assert_eq!(min_device_ios("Xcode 26.0.1"), Some("17.0"));
+        assert_eq!(min_device_ios("Xcode 16.4"), None);
+        assert_eq!(min_device_ios(""), None);
+        assert_eq!(min_device_ios("garbage"), None);
+        // Hardware: iPhone 12 mini on iOS 15.4.1 that Xcode 27.0 cannot list.
+        assert!(version_lt("15.4.1", COREDEVICE_MIN_IOS));
+        assert!(version_lt("16.7.10", COREDEVICE_MIN_IOS));
+        assert!(!version_lt("17", COREDEVICE_MIN_IOS));
+        assert!(!version_lt("17.0", COREDEVICE_MIN_IOS));
+        assert!(!version_lt("27.2", COREDEVICE_MIN_IOS));
+    }
+
+    #[test]
+    fn device_support_entries_match_by_major_minor() {
+        assert!(device_support_matches("15.4", "15.4.1"));
+        assert!(device_support_matches("15.4 (19E258)", "15.4.1"));
+        assert!(!device_support_matches("15.5", "15.4.1"));
+        assert!(!device_support_matches("15.40", "15.4.1"));
+        assert!(!device_support_matches("16.4", "15.4"));
+    }
+
+    #[test]
+    fn coredevice_lists_tells_a_missing_phone_from_no_answer() {
+        let json = r#"{"result":{"devices":[{"hardwareProperties":{"udid":"00008110-0002346211A0401E"}}]}}"#;
+        assert_eq!(
+            coredevice_lists_in(json, "00008110-0002346211A0401E"),
+            Some(true)
+        );
+        // The iOS 15 phone: usbmuxd lists it, CoreDevice has no UDID row.
+        assert_eq!(
+            coredevice_lists_in(json, "00008101-000409443404001E"),
+            Some(false)
+        );
+        assert_eq!(coredevice_lists_in("", "00008101-000409443404001E"), None);
+        assert_eq!(
+            coredevice_lists_in(r#"{"error":{}}"#, "00008101-000409443404001E"),
+            None
+        );
+    }
 
     // `security find-certificate -a -c "Apple Development"`, trimmed to the
     // attributes read; the subject is the DER of a real development

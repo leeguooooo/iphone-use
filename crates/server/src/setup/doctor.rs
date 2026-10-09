@@ -191,6 +191,18 @@ pub fn run(ctx: &Ctx) -> i32 {
         )),
         _ => {}
     }
+    // Decisive, unlike the SDK comparison: below the CoreDevice floor the
+    // selected Xcode never lists the phone, so setup stops as ios_too_old.
+    if let Some(device) = device.as_deref() {
+        let xcode = checks::xcode_version();
+        let legacy = checks::min_device_ios(&xcode)
+            .is_some_and(|floor| checks::version_lt(device, floor))
+            && checks::legacy_device_support(device);
+        if let Some(message) = super::flow::ios_too_old_message(&xcode, Some(device), legacy) {
+            warn(&format!("X {message}"));
+            fail = true;
+        }
+    }
     if sys::which("lsof").is_some() {
         ok("lsof present for listener ownership checks");
     } else {
