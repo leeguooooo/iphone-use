@@ -175,10 +175,39 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
   return IPURInt(application, @"processID");
 }
 
+// Request-scoped cache (main thread only): the active-application list and SpringBoard element are
+// AX round trips; within one request they are read once until something may have changed them.
+static BOOL IPURRequestCacheEnabled = NO;
+static NSArray *IPURCachedActive = nil;
+static id IPURCachedSystem = nil;
+
++ (void)setRequestCacheEnabled:(BOOL)enabled
+{
+  if (!NSThread.isMainThread) return;
+  IPURRequestCacheEnabled = enabled;
+  IPURCachedActive = nil;
+  IPURCachedSystem = nil;
+}
+
++ (void)invalidateRequestCache
+{
+  if (!NSThread.isMainThread) return;
+  IPURCachedActive = nil;
+  IPURCachedSystem = nil;
+}
+
+static BOOL IPURUseRequestCache(void)
+{
+  return IPURRequestCacheEnabled && NSThread.isMainThread;
+}
+
 + (NSArray *)activeApplicationElements
 {
+  if (IPURUseRequestCache() && IPURCachedActive != nil) return IPURCachedActive;
   id active = IPURObject([self axClient], @"activeApplications");
-  return [active isKindOfClass:NSArray.class] ? active : @[];
+  NSArray *result = [active isKindOfClass:NSArray.class] ? active : @[];
+  if (IPURUseRequestCache()) IPURCachedActive = result;
+  return result;
 }
 
 + (NSArray<NSNumber *> *)activeApplicationPIDs
@@ -202,10 +231,18 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
 
 + (nullable id)systemApplicationElement
 {
-  return IPURObject([self axClient], @"systemApplication");
+  if (IPURUseRequestCache() && IPURCachedSystem != nil) return IPURCachedSystem;
+  id element = IPURObject([self axClient], @"systemApplication");
+  if (IPURUseRequestCache()) IPURCachedSystem = element;
+  return element;
 }
 
 + (nullable id)foregroundApplicationElementWithProbePoint:(CGPoint)probePoint pid:(int *)pid
+{
+  return [self foregroundApplicationElementWithProbe:^CGPoint { return probePoint; } pid:pid];
+}
+
++ (nullable id)foregroundApplicationElementWithProbe:(CGPoint (NS_NOESCAPE ^)(void))probe pid:(int *)pid
 {
   if (pid != NULL) *pid = 0;
   NSArray *active = [self activeApplicationElements];
@@ -236,7 +273,7 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
       NSError *error = nil;
       id hit = nil;
       @try {
-        hit = ((IPURMsgSendElementAtPoint)objc_msgSend)(axClient, hitTest, probePoint, &error);
+        hit = ((IPURMsgSendElementAtPoint)objc_msgSend)(axClient, hitTest, probe(), &error);
       } @catch (__unused NSException *exception) {
         hit = nil;
       }
@@ -817,6 +854,7 @@ static NSString *IPURSynthesize(id record, id path)
 {
   ((IPURMsgSendAddPath)objc_msgSend)(record, NSSelectorFromString(@"addPointerEventPath:"), path);
   NSError *error = nil;
+  [IPURBridge invalidateRequestCache];  // a touch can change the foreground app
   BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(record, NSSelectorFromString(@"synthesizeWithError:"), &error);
   if (!ok) {
     return [NSString stringWithFormat:@"private XCTest event synthesis failed: %@",
@@ -941,6 +979,7 @@ static NSString *IPURSynthesize(id record, id path)
       ((IPURMsgSendAddPath)objc_msgSend)(record, NSSelectorFromString(@"addPointerEventPath:"), path);
     }
     NSError *synthesisError = nil;
+    [IPURBridge invalidateRequestCache];  // a touch can change the foreground app
     BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(
       record, NSSelectorFromString(@"synthesizeWithError:"), &synthesisError);
     if (!ok) {

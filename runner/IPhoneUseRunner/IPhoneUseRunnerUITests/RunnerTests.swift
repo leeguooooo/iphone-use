@@ -36,6 +36,19 @@ final class RunnerTests: XCTestCase {
   /// Last alert scan and when it ran; reused for a second while nothing was POSTed (WdaClient asks
   /// /alert/text and /wda/alert/buttons back to back).
   var alertCache: (at: Date, alert: FoundAlert?)?
+  /// Where a request's time went, by part (ms and call count), sent back as X-IPU-<Part>-Ms and
+  /// X-IPU-<Part>-Calls. Reset per request.
+  var requestTiming: [String: (ms: Double, calls: Int)] = [:]
+
+  /// Times `body` as part `name` of the current request.
+  func timed<T>(_ name: String, _ body: () throws -> T) rethrows -> T {
+    let started = Date()
+    defer {
+      let entry = requestTiming[name] ?? (0, 0)
+      requestTiming[name] = (entry.ms + Date().timeIntervalSince(started) * 1000, entry.calls + 1)
+    }
+    return try body()
+  }
   /// appium/settings values, accepted and echoed (the runner never waits for idle anyway).
   var wdaSettings: [String: Any] = ["waitForIdleTimeout": 0, "animationCoolOffTimeout": 0]
 
@@ -210,6 +223,11 @@ final class RunnerTests: XCTestCase {
     busySince = started
     busyLock.unlock()
     recordedIssues.removeAll()
+    requestTiming.removeAll()
+    // One active-application list and SpringBoard element per request (each list is an AX round
+    // trip of ~15 ms); anything that can change the foreground app drops them.
+    IPURBridge.setRequestCacheEnabled(true)
+    defer { IPURBridge.setRequestCacheEnabled(false) }
     if request.method != "GET", Self.mayChangeScreen(request.path) {
       alertCache = nil
     }
@@ -233,6 +251,10 @@ final class RunnerTests: XCTestCase {
       response.headers["X-IPU-XCTest-Issues"] = String(recordedIssues.count)
     }
     response.headers["X-IPU-Ms"] = String(Int(Date().timeIntervalSince(started) * 1000))
+    for (name, entry) in requestTiming {
+      response.headers["X-IPU-\(name)-Ms"] = String(format: "%.1f", entry.ms)
+      response.headers["X-IPU-\(name)-Calls"] = String(entry.calls)
+    }
     return response
   }
 
@@ -280,9 +302,17 @@ final class RunnerTests: XCTestCase {
   }
 
   func foreground() -> Foreground {
+    timed("Foreground") { resolveForeground() }
+  }
+
+  private func resolveForeground() -> Foreground {
     var pid: Int32 = 0
-    let element = IPURBridge.foregroundApplicationElement(withProbePoint: screenCenter(), pid: &pid)
-    if let sheet = viewServiceOverlay(foregroundPID: pid) { return sheet }
+    // The probe point (screen size, so an orientation read) only matters when several apps are
+    // active; the bridge asks for it then.
+    let element = timed("ActiveApps") {
+      IPURBridge.foregroundApplicationElement(probePoint: { self.timed("Orientation") { self.screenCenter() } }, pid: &pid)
+    }
+    if let sheet = timed("ViewService", { viewServiceOverlay(foregroundPID: pid) }) { return sheet }
     return Foreground(element: element as AnyObject?, pid: pid)
   }
 
@@ -464,13 +494,14 @@ final class RunnerTests: XCTestCase {
     synthesized: () -> String?,
     fallback: (XCUIApplication) -> Void
   ) throws -> HTTPResponse {
-    if let error = synthesized() {
+    if let error = timed("Synthesize", synthesized) {
       NSLog("ipu-runner: %@ synthesis failed, using XCUICoordinate: %@", name, error)
       let application = foreground().application
       let issuesBefore = recordedIssues.count
       var exception: String?
       IPURBridge.performWithoutQuiescence(application) {
         exception = IPURBridge.catchException { fallback(application) }
+        IPURBridge.invalidateRequestCache()
       }
       if let exception {
         throw RunnerError.failed("\(name) failed (synthesis: \(error); coordinate: \(exception))")
@@ -545,6 +576,7 @@ final class RunnerTests: XCTestCase {
   }
 
   func home() throws -> HTTPResponse {
+    defer { IPURBridge.invalidateRequestCache() }
     if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(.home) }) {
       throw RunnerError.failed("home failed: \(exception)")
     }
@@ -559,6 +591,7 @@ final class RunnerTests: XCTestCase {
     var exception: String?
     IPURBridge.performWithoutQuiescence(application) {
       exception = IPURBridge.catchException { application.activate() }
+      IPURBridge.invalidateRequestCache()
     }
     if let failure = exception ?? (recordedIssues.count > issuesBefore ? recordedIssues.last : nil) {
       throw RunnerError.failed("launch \(bundle) failed: \(failure)")

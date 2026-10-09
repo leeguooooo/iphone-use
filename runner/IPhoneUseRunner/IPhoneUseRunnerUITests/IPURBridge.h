@@ -61,6 +61,15 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// Writes its pid into `pid`.
 + (nullable id)foregroundApplicationElementWithProbePoint:(CGPoint)probePoint pid:(int *)pid;
 
+/// Same, with the probe point computed only when the hit-test needs it.
++ (nullable id)foregroundApplicationElementWithProbe:(CGPoint (NS_NOESCAPE ^)(void))probe pid:(int *)pid
+  NS_SWIFT_NAME(foregroundApplicationElement(probePoint:pid:));
+
+/// Per-request cache of the active-application list and SpringBoard element (main thread only).
+/// Enabling or disabling clears it; synthesized touches clear it too.
++ (void)setRequestCacheEnabled:(BOOL)enabled;
++ (void)invalidateRequestCache;
+
 /// The system application (SpringBoard) AX element.
 + (nullable id)systemApplicationElement;
 

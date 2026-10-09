@@ -561,7 +561,7 @@ extension RunnerTests {
   }
 
   private func synthesizePaths(_ paths: [[[String: Any]]], name: String) throws {
-    if let error = IPURBridge.synthesizeTouchPaths(paths, name: name) {
+    if let error = timed("Synthesize", { IPURBridge.synthesizeTouchPaths(paths, name: name) }) {
       throw RunnerError.failed("\(name) failed: \(error)")
     }
   }
@@ -700,7 +700,7 @@ extension RunnerTests {
       // the drag ended, so the element's frame is final at once and a tap right after lands — a
       // tap during a glide only stops the glide.
       let paths = try W3CActions.pointerPaths(ScrollDrag.actions(from: start, to: end)) { _ in .zero }
-      if let error = IPURBridge.synthesizeTouchPaths(paths, name: "ipu-scroll-to") {
+      if let error = timed("Synthesize", { IPURBridge.synthesizeTouchPaths(paths, name: "ipu-scroll-to") }) {
         throw RunnerError.failed("scrollTo failed: \(error)")
       }
     }
@@ -762,7 +762,7 @@ extension RunnerTests {
         "action point (\(Int(off.x)), \(Int(off.y))) is outside the \(Int(screen.width))x\(Int(screen.height)) screen; nothing was sent")
     }
     if !paths.isEmpty {
-      if let error = IPURBridge.synthesizeTouchPaths(paths, name: "ipu-w3c-actions") {
+      if let error = timed("Synthesize", { IPURBridge.synthesizeTouchPaths(paths, name: "ipu-w3c-actions") }) {
         // A single tap can still go through the public coordinate API.
         if paths.count == 1, let down = paths[0].first, paths[0].count == 2,
            let x = (down["x"] as? NSNumber)?.doubleValue, let y = (down["y"] as? NSNumber)?.doubleValue {
@@ -793,6 +793,7 @@ extension RunnerTests {
     case "volumedown": button = .volumeDown
     default: throw RunnerError.invalidArgument("unsupported button '\(name)'; use home, volumeUp or volumeDown")
     }
+    defer { IPURBridge.invalidateRequestCache() }
     if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(button) }) {
       throw RunnerError.failed("pressButton \(name) failed: \(exception)")
     }
@@ -805,6 +806,7 @@ extension RunnerTests {
     var exception: String?
     IPURBridge.performWithoutQuiescence(application) {
       exception = IPURBridge.catchException { application.activate() }
+      IPURBridge.invalidateRequestCache()
     }
     if let failure = exception ?? (recordedIssues.count > issuesBefore ? recordedIssues.last : nil) {
       throw RunnerError.failed("launching \(bundle) failed: \(failure)")
@@ -880,6 +882,7 @@ extension RunnerTests {
       throw RunnerError.invalidArgument("'url' must be a valid URL string")
     }
     if #available(iOS 16.4, *) {
+      defer { IPURBridge.invalidateRequestCache() }
       if let exception = IPURBridge.catchException({ XCUIDevice.shared.system.open(url) }) {
         throw RunnerError.failed("opening \(string) failed: \(exception)")
       }
@@ -892,6 +895,7 @@ extension RunnerTests {
     IPURBridge.performWithoutQuiescence(safari) {
       exception = IPURBridge.catchException {
         safari.activate()
+        IPURBridge.invalidateRequestCache()
         let field = safari.textFields.firstMatch
         field.tap()
         safari.typeText(string + "\n")
@@ -933,6 +937,7 @@ extension RunnerTests {
     case nil: throw RunnerError.failed("the lock state could not be read; nothing was pressed")
     case true?: break
     }
+    defer { IPURBridge.invalidateRequestCache() }
     if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(.home) }) {
       throw RunnerError.failed("unlock failed: \(exception)")
     }
