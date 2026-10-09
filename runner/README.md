@@ -286,6 +286,12 @@ and `skip=0` override the mode's preset.
   serves every client and runs only while one is connected. VideoToolbox writes no VUI
   bitstream restriction, so decoders would buffer up to a DPB of frames; the daemon rewrites each
   SPS to declare zero reordering (`crates/server/src/h264sps.rs`).
+- **Encoder fallback.** Not every encoder takes every size: the iPhone X (A11, iOS 16) accepted a
+  full-size 1124×2436 session and never emitted a frame. An encoder that reports an error, or has
+  taken 3 frames over 1 s and produced none, is replaced by a cheaper one: long side 1920, then
+  Main at 30 fps, then long side 1280. The step a mode needed is kept for the runner's life;
+  `/status` reports it as `h264.encodeLevel` with `encodedWidth`/`encodedHeight`. The daemon
+  also falls back to the other mode when a stream yields no frame in 3 s.
 - **Framing.** An HTTP/1.0 header block with `X-Video-Format: iphone-use-h264-annexb-v1`, then
   `[u32 BE length][u8 flags][u64 BE pts µs][Annex-B access unit]` per frame — the daemon's own
   `/agent/h264` framing. Flags: bit 0 keyframe (SPS + PPS in band), bit 1 the content band is one
@@ -295,7 +301,8 @@ and `skip=0` override the mode's preset.
   connection serves viewers that join later. A new client waits for the next keyframe; a client
   still writing the previous frame drops the current one and gets a fresh keyframe.
 - **`/status`** reports `h264.mode`, `achievedFps`, `achievedKbps`, `captureMs`, `decodeMs`,
-  `encodeMs`, `keyframeSeconds`, `skipUnchanged` and `skippedRatio`.
+  `encodeMs`, `keyframeSeconds`, `skipUnchanged`, `skippedRatio`, `encodeLevel`, `encodedWidth`
+  and `encodedHeight`.
 
 Measured on an iPhone 13 over USB (30 fps, 50 % scale), same runner:
 

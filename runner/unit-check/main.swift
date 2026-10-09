@@ -280,9 +280,29 @@ do {
         ? bytes[i + 4] & 0x1F : nil
     })
     check(nalTypes.isSuperset(of: [7, 8, 5]), "keyframe carries SPS, PPS and an IDR slice")
+    let health = encoder.health()
+    check(health.submitted == 1 && health.outputs == 1 && health.errors == 0, "encoder counts frames in and out")
   } else {
     check(false, "VideoToolbox H.264 encoder starts")
   }
+
+  // The fallback ladder for an encoder that cannot do what was asked (the iPhone X at full size).
+  let full = RunnerH264Stream.Settings.preset(.quality)
+  let asked = EncodeLimit.apply(full, level: 0, width: 1125, height: 2436)
+  check(asked.width == 1124 && asked.height == 2436 && asked.settings == full, "level 0 is as asked, even size")
+  let capped = EncodeLimit.apply(full, level: 1, width: 1125, height: 2436)
+  check(capped.height == 1920 && capped.width == 886 && capped.settings.highProfile && capped.settings.fps == 60,
+        "level 1 caps the long side at 1920")
+  let main = EncodeLimit.apply(full, level: 2, width: 1125, height: 2436)
+  check(main.height == 1920 && !main.settings.highProfile && main.settings.fps == 30, "level 2 is Main at 30 fps")
+  let floor = EncodeLimit.apply(full, level: 3, width: 1125, height: 2436)
+  check(floor.height == 1280 && floor.width % 2 == 0 && floor.width < 600, "level 3 caps at 1280")
+  let small = EncodeLimit.apply(RunnerH264Stream.Settings(), level: 3, width: 562, height: 1218)
+  check(small.width == 562 && small.height == 1218, "a frame under the cap keeps its size")
+  check(!EncodeLimit.failed(submitted: 1, outputs: 0, errors: 0, age: 0.1), "a new encoder gets its grace")
+  check(EncodeLimit.failed(submitted: 3, outputs: 0, errors: 0, age: 1.5), "frames in, none out: failed")
+  check(EncodeLimit.failed(submitted: 1, outputs: 0, errors: 1, age: 0.1), "an encode error: failed")
+  check(!EncodeLimit.failed(submitted: 50, outputs: 1, errors: 3, age: 9), "an encoder that produced is fine")
 }
 
 // ScrollDrag (scrollTo without momentum)
