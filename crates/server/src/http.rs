@@ -2703,7 +2703,9 @@ fn legacy_ios_json(managed: bool, state_dir: &std::path::Path) -> String {
             "launch_transport": record.launch_transport,
             // Started over Wi-Fi, the runner keeps running with the cable
             // pulled and restarts over Wi-Fi too.
-            "unplug_ok": record.launch_transport == "wifi",
+            // Off the cable only the plain LAN relay reaches an iOS 15/16
+            // runner (no CoreDevice tunnel), so both are needed.
+            "unplug_ok": record.launch_transport == "wifi" && record.lan_relay,
         })
         .to_string(),
         None => "null".to_string(),
@@ -2770,6 +2772,14 @@ async fn native_relay_transport(udid: &str) -> &'static str {
         Ok(Ok(Some(found))) if found.usb => "usb",
         // An iOS 15/16 relay goes straight to the phone's LAN address.
         Ok(Ok(_)) if lan_relay(&crate::instance::current().state_dir) => "wifi",
+        // An iOS 15/16 phone has no CoreDevice tunnel: off the cable and
+        // without the LAN relay nothing reaches its runner.
+        Ok(Ok(_))
+            if crate::setup::legacy_ios::read_record(&crate::instance::current().state_dir)
+                .is_some() =>
+        {
+            "unknown"
+        }
         Ok(Ok(_)) => "wifi-tunnel",
         // usbmuxd did not answer: keep the relay's own claim.
         _ => "usb",
@@ -2919,6 +2929,9 @@ fn parse_setup_log_blocked_on(txt: &str) -> String {
     } else if latest_attempt.contains("not currently connected over USB")
         || latest_attempt.contains("no USB iPhone was found")
         || latest_attempt.contains("no USB iPhone is connected")
+        // `WDA_TRANSPORT=auto`: neither on USB nor on its Wi-Fi tunnel
+        || latest_attempt.contains("is not on USB and has no CoreDevice Wi-Fi tunnel")
+        || latest_attempt.contains("no iPhone was found over USB")
     {
         "usb".to_string()
     } else if latest_attempt.contains("has no signed-in Apple account")
@@ -2966,8 +2979,8 @@ fn human_next_step(
                 "The iPhone isn't connected to this Mac: plug it in over USB (or join the same Wi-Fi) and unlock it — it reconnects on its own once the phone is back",
             ),
             "usb" => (
-                "用 USB 连接这台 iPhone，解锁并保持亮屏，连接会自动恢复",
-                "Plug this iPhone in over USB, unlock it and keep it awake — connecting resumes on its own",
+                "用 USB 连接这台 iPhone（或让它和这台 Mac 在同一个 Wi-Fi 下；设了 WDA_TRANSPORT=usb 时只能插线），解锁并保持亮屏，连接会自动恢复",
+                "Plug this iPhone in over USB (or keep it on this Mac's Wi-Fi; with WDA_TRANSPORT=usb only the cable works), unlock it and keep it awake — connecting resumes on its own",
             ),
             "trust" => (
                 "在 iPhone 上解锁并点「信任」，保持亮屏，连接会自动恢复",
@@ -3141,7 +3154,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iPhone isn't connected to this Mac — plug it in over USB (or join the same Wi-Fi) and unlock it; usbmuxd and CoreDevice both report it absent, so nothing is rebuilt or relaunched until it is back, and the managed service reconnects on its own — the relays are not the problem, so do not send another reconnect request",
         ),
         "usb" => Some(
-            "the configured iPhone is not available over USB — connect that phone, unlock it, and keep it awake while the managed service retries",
+            "the configured iPhone is not available over USB or its encrypted CoreDevice Wi-Fi tunnel — connect that phone, or (unless WDA_TRANSPORT=usb, which allows only the cable; setup_message says when) keep it unlocked on this Mac's network; keep it awake while the managed service retries",
         ),
         "trust" => Some(
             "the configured iPhone needs trust or developer-signing approval — unlock the phone, accept the prompt, then keep it awake while the managed service retries",
@@ -3701,6 +3714,7 @@ fn write_and_bootstrap_wda_agent(setup_sh: &str, log: &str, udid: &str) -> bool 
             "WDA_PORT",
             "MJPEG_PORT",
             "WDA_ALLOW_LAN",
+            "WDA_TRANSPORT",
             "WDA_RUNNER_NAME",
             "WDA_RUNNER_ICON",
             "WDA_ASC_KEY_PATH",
@@ -16580,6 +16594,7 @@ mod tests {
                 launcher: "/x/iphone-use-legacy-launch".into(),
                 launch_transport: "wifi".into(),
                 wifi_mac: None,
+                lan_relay: true,
                 lan_ip: Some("192.168.0.149".into()),
                 wifi_ready: true,
             },
@@ -17025,6 +17040,22 @@ mod tests {
             == Resolving target device\n\
             target 00008150-000A60EC1A02401C is not currently connected over USB.";
         assert_eq!(parse_setup_log_blocked_on(unplugged), "usb");
+        let off_tunnel = format!(
+            "== Checking prerequisites\n{}",
+            crate::setup::flow::not_reachable_message("00008150-000A60EC1A02401C", true)
+        );
+        assert_eq!(parse_setup_log_blocked_on(&off_tunnel), "usb");
+        let usb_only = format!(
+            "== Checking prerequisites\n{}",
+            crate::setup::flow::not_reachable_message("00008150-000A60EC1A02401C", false)
+        );
+        assert_eq!(parse_setup_log_blocked_on(&usb_only), "usb");
+        assert_eq!(
+            parse_setup_log_blocked_on(
+                "== Checking prerequisites\nno iPhone was found over USB or on a CoreDevice Wi-Fi tunnel."
+            ),
+            "usb"
+        );
 
         let recovered = "== Checking prerequisites\n\
             target 00008150-000A60EC1A02401C is not currently connected over USB.\n\

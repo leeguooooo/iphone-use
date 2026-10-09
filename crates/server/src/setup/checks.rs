@@ -999,6 +999,32 @@ pub fn wifi_tunnel(udid: &str) -> bool {
         })
 }
 
+/// Like `wifi_tunnel`, but a Wi-Fi phone whose tunnel is down is asked once
+/// to bring it up (`devicectl device info details` opens it), then read
+/// again. Used where setup is about to choose the tunnel over a cable.
+pub fn wifi_tunnel_or_wake(udid: &str) -> bool {
+    if udid.is_empty() {
+        return false;
+    }
+    let view = sys::devicectl_json(10, &["list", "devices"])
+        .map(|json| crate::tunnel::tunnel_view(&json, udid));
+    match view {
+        Some(crate::tunnel::TunnelView::Connected(_)) => true,
+        Some(crate::tunnel::TunnelView::WifiDown) => {
+            let _ = sys::devicectl_json(15, &["device", "info", "details", "--device", udid]);
+            wifi_tunnel(udid)
+        }
+        _ => false,
+    }
+}
+
+/// Phones CoreDevice has a live Wi-Fi tunnel to right now.
+pub fn wifi_tunnel_udids() -> Vec<String> {
+    sys::devicectl_json(10, &["list", "devices"])
+        .map(|json| crate::tunnel::connected_tunnels(&json))
+        .unwrap_or_default()
+}
+
 /// The presence verdict from usbmuxd's view, whether usbmuxd listed the phone
 /// earlier in this process, and CoreDevice's `devicectl list devices -j`
 /// output (`None` when devicectl gave no answer).

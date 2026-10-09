@@ -85,6 +85,30 @@ pub fn tunnel_view(json: &str, udid: &str) -> TunnelView {
     }
 }
 
+/// Every phone in `devicectl list devices -j` output whose Wi-Fi tunnel is
+/// live (`TunnelView::Connected`), by the UDID devicectl spells.
+pub fn connected_tunnels(json: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(devices) = value
+        .pointer("/result/devices")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    devices
+        .iter()
+        .filter_map(|device| {
+            device
+                .pointer("/hardwareProperties/udid")
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|udid| matches!(tunnel_view(json, udid), TunnelView::Connected(_)))
+        .map(str::to_string)
+        .collect()
+}
+
 struct Cached {
     at: Instant,
     address: Option<Ipv6Addr>,
@@ -240,5 +264,14 @@ mod tests {
         let json = r#"{"result":{"devices":[{"hardwareProperties":{"udid":"AA"},
             "connectionProperties":{"transportType":"localNetwork","tunnelState":"connected","tunnelIPAddress":"bogus"}}]}}"#;
         assert_eq!(tunnel_view(json, "AA"), TunnelView::WifiDown);
+    }
+
+    #[test]
+    fn only_live_wifi_tunnels_are_listed() {
+        assert_eq!(
+            connected_tunnels(LIST),
+            vec!["00008110-001C18203AD2401E".to_string()]
+        );
+        assert!(connected_tunnels("not json").is_empty());
     }
 }

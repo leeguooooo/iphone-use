@@ -68,6 +68,9 @@ pub struct Setup {
     icon_source: Option<PathBuf>,
     /// Readiness came straight over USB (no LAN address known yet).
     from_probe: bool,
+    /// The target is off USB and this run reaches it through CoreDevice's
+    /// encrypted Wi-Fi tunnel (`WDA_TRANSPORT=auto`).
+    over_tunnel: bool,
     interactive_lock: Option<InteractiveLock>,
     /// Set when the phone takes the legacy (iOS 15/16) path.
     legacy_ios: Option<LegacyRun>,
@@ -136,6 +139,7 @@ impl Setup {
             phone_url: String::new(),
             icon_source: None,
             from_probe: false,
+            over_tunnel: false,
             interactive_lock: None,
             legacy_ios: None,
         }
@@ -673,12 +677,32 @@ impl Setup {
                     "multiple iPhones are connected over USB ({}). Set WDA_UDID=<one>; refusing to guess.",
                     usb.join(" ")
                 ));
+            } else if self.ctx.wifi_tunnel_allowed() {
+                // No cable: the one phone with a live encrypted Wi-Fi tunnel
+                // (WDA_ALLOW_LAN only adds the plain LAN relay, it does not
+                // change which phone is picked).
+                // Guessing among several could drive the wrong phone.
+                let tunneled = checks::wifi_tunnel_udids();
+                if tunneled.len() == 1 {
+                    self.ctx.udid = tunneled[0].clone();
+                    ok(&format!(
+                        "using the iPhone on its CoreDevice Wi-Fi tunnel: {}",
+                        self.ctx.udid
+                    ));
+                } else if tunneled.len() > 1 {
+                    return die(format!(
+                        "no iPhone is on USB and several have a Wi-Fi tunnel ({}). Set WDA_UDID=<one>; refusing to guess.",
+                        tunneled.join(" ")
+                    ));
+                }
             }
         }
         if !self.ctx.udid.is_empty() {
             self.wait_until_connected()?;
         }
-        if !self.ctx.lan() {
+        // WDA_TRANSPORT=usb requires the cable even with WDA_ALLOW_LAN=1: that
+        // flag only adds the plain LAN relay, it is not a transport choice.
+        if !self.ctx.lan() || !self.ctx.wifi_tunnel_allowed() {
             if self.ctx.udid.is_empty() {
                 // usbmuxd lists nothing: ask the USB plane why (a cable that
                 // only charges, or an iPhone this Mac's device support cannot
@@ -688,28 +712,54 @@ impl Setup {
                     return die(format!("{}; no build was started.", diagnosis.message()));
                 }
                 self.phase("prereq", "usb", "no USB iPhone is connected");
-                return die("the device layer defaults to USB, but no USB iPhone was found.\n   Plug in and unlock one iPhone, or set WDA_UDID=<USB UDID>; no build was started.");
+                if self.ctx.wifi_tunnel_allowed() {
+                    return die("no iPhone was found over USB or on a CoreDevice Wi-Fi tunnel.\n   Plug in and unlock one iPhone (a Wi-Fi phone needs a tunnel: pair it with this Mac over USB once,\n   keep it on the same network), or set WDA_UDID=<UDID>; no build was started.");
+                }
+                return die("WDA_TRANSPORT=usb requires USB, but no USB iPhone was found.\n   Plug in and unlock one iPhone, or set WDA_UDID=<USB UDID>; no build was started.");
             }
             let usb = checks::usb_udids();
-            if !checks::on_usb(&self.ctx.udid, &usb) && legacy_reachable_over_wifi(&self.ctx) {
-                ok("the iOS 15/16 iPhone is off USB but reachable over Wi-Fi; starting it there");
+            if !checks::on_usb(&self.ctx.udid, &usb)
+                && self.ctx.wifi_tunnel_allowed()
+                && legacy_reachable_over_wifi(&self.ctx)
+            {
+                // iOS 15/16 has no CoreDevice tunnel; its auto transport is
+                // the legacy launcher's lockdown TLS session on the LAN.
+                ok("the iOS 15/16 iPhone is off USB but its lockdown answers over Wi-Fi; starting it there");
+                self.over_tunnel = true;
             } else if !checks::on_usb(&self.ctx.udid, &usb) {
-                self.phase(
-                    "prereq",
-                    "usb",
-                    "the configured iPhone is not connected over USB",
-                );
-                return die(format!(
-                    "target {} is not currently connected over USB.\n   Plug in that iPhone, or set WDA_UDID to the exact USB-connected device; refusing a slow Wi-Fi fallback.",
-                    self.ctx.udid
-                ));
+                // Off the cable, CoreDevice's encrypted Wi-Fi tunnel reaches
+                // the phone from this Mac only, so it needs no opt-in; the
+                // plain LAN relay stays behind WDA_ALLOW_LAN=1.
+                if self.ctx.wifi_tunnel_allowed() && checks::wifi_tunnel_or_wake(&self.ctx.udid) {
+                    ok(&format!(
+                        "{} is off USB; setting up through its encrypted CoreDevice Wi-Fi tunnel (USB is used whenever it is plugged in)",
+                        self.ctx.udid
+                    ));
+                    self.over_tunnel = true;
+                } else {
+                    self.phase(
+                        "prereq",
+                        "usb",
+                        if self.ctx.wifi_tunnel_allowed() {
+                            "the configured iPhone is neither on USB nor on a CoreDevice Wi-Fi tunnel"
+                        } else {
+                            "the configured iPhone is not connected over USB (WDA_TRANSPORT=usb)"
+                        },
+                    );
+                    return die(not_reachable_message(
+                        &self.ctx.udid,
+                        self.ctx.wifi_tunnel_allowed(),
+                    ));
+                }
             }
             // usbmuxd keys pairing records by its own spelling of the serial.
-            let serial: Vec<String> = usb
-                .into_iter()
-                .filter(|serial| checks::on_usb(&self.ctx.udid, std::slice::from_ref(serial)))
-                .collect();
-            if !serial.is_empty() {
+            // A tunnel target is not on the bus, so there is nothing to
+            // diagnose there.
+            if !self.over_tunnel {
+                let serial: Vec<String> = usb
+                    .into_iter()
+                    .filter(|serial| checks::on_usb(&self.ctx.udid, std::slice::from_ref(serial)))
+                    .collect();
                 let untrusted = usbdiag::untrusted(&serial);
                 if let Some(diagnosis) = usbdiag::diagnose(&[], &serial, &untrusted) {
                     self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
@@ -1046,7 +1096,10 @@ impl Setup {
 
     fn wait_for_developer_services(&mut self) -> Step {
         let mut blocker = self.build_blocker.clone();
-        if self.ctx.lan() {
+        // Off the cable by choice (the Wi-Fi tunnel, or the LAN opt-in): no
+        // USB reminder.
+        let off_cable = self.ctx.lan() || self.over_tunnel;
+        if off_cable {
             self.phase(
                 "ddi-wait",
                 &self.build_blocker.clone(),
@@ -1133,7 +1186,7 @@ impl Setup {
                 }
             } else if reminded.is_none_or(|at| at.elapsed() >= DDI_REMIND_EVERY) {
                 reminded = Some(Instant::now());
-                if self.ctx.lan() {
+                if off_cable {
                     warn("still waiting — UNLOCK the phone and keep the screen on ...");
                 } else {
                     warn(
@@ -2046,7 +2099,7 @@ impl Setup {
                     "no permitted control relay tool is available",
                 );
             }
-            return die("the device layer relays over USB by default. Keep this iPhone connected over USB; if it is,\n   the iPhoneUse app is missing or too old to relay — reinstall it or run: iphone-use upgrade.\n   The on-phone runner has no HTTP authentication. A LAN relay is therefore disabled\n   unless WDA_ALLOW_LAN=1 is explicitly set for a trusted, isolated network.");
+            return die("the device layer relays over USB, or off the cable through the phone's encrypted CoreDevice Wi-Fi tunnel.\n   Neither is available: plug the iPhone in over USB (or keep it on the same network as this Mac so its tunnel\n   comes up); if it is connected, the iPhoneUse app is missing or too old to relay — reinstall it or run:\n   iphone-use upgrade. The on-phone runner has no HTTP authentication, so a plain LAN relay to the phone's\n   address stays disabled unless WDA_ALLOW_LAN=1 is explicitly set for a trusted, isolated network.");
         };
         // Both relays start before either is checked: the control check and
         // the video's first frame used to run one after the other.
@@ -2188,6 +2241,9 @@ impl Setup {
         if current("WDA_ALLOW_LAN") != ctx.allow_lan {
             changed.push("WDA_ALLOW_LAN");
         }
+        if current("WDA_TRANSPORT") != ctx.transport {
+            changed.push("WDA_TRANSPORT");
+        }
         let config_changed = !changed.is_empty();
         if config_changed {
             for (key, value) in [
@@ -2197,6 +2253,7 @@ impl Setup {
                 ("PHONE_REMOTE_WDA_MJPEG_URL", mjpeg_url.as_str()),
                 ("PHONE_REMOTE_WDA_MANAGED", "true"),
                 ("WDA_ALLOW_LAN", ctx.allow_lan.as_str()),
+                ("WDA_TRANSPORT", ctx.transport.as_str()),
             ] {
                 plist_set_env(&staged, key, value);
             }
@@ -2897,6 +2954,20 @@ fn waited(wait: Option<u64>) -> String {
         .unwrap_or_default()
 }
 
+/// Why setup stops for a configured phone that is not on USB: with the tunnel
+/// allowed, it has no live CoreDevice Wi-Fi tunnel either.
+pub fn not_reachable_message(udid: &str, tunnel_allowed: bool) -> String {
+    if tunnel_allowed {
+        format!(
+            "target {udid} is not on USB and has no CoreDevice Wi-Fi tunnel to this Mac.\n   Plug that iPhone in, or keep it unlocked on the same network as this Mac (it must have been paired over USB once);\n   a plain LAN relay to the phone's address is never used unless WDA_ALLOW_LAN=1."
+        )
+    } else {
+        format!(
+            "target {udid} is not currently connected over USB, and WDA_TRANSPORT=usb rules out its Wi-Fi tunnel.\n   Plug in that iPhone, or unset WDA_TRANSPORT to allow the encrypted CoreDevice Wi-Fi tunnel."
+        )
+    }
+}
+
 pub fn wifi_automation_message(wait: Option<u64>) -> String {
     format!(
         "over Wi-Fi the iPhone would not start the device runner's UI-automation session (runner exit code 74: testmanagerd took the Mac's test session but never gave the runner its IDE channel{}). This iPhone's iOS refuses to start UI automation over the network; it is not a passcode prompt or a setting, so nothing on the phone and no Wi-Fi retry fixes it. Plug the iPhone in by USB once, unlocked: the runner starts in about 20 s, and after you unplug it keeps working over Wi-Fi until it has to start again (phone restart, runner crash), which needs the cable once more",
@@ -3066,6 +3137,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn an_unreachable_target_names_the_tunnel_and_never_offers_the_lan_relay_as_the_fix() {
+        let auto = not_reachable_message("00008110-001C18203AD2401E", true);
+        assert!(auto.contains("no CoreDevice Wi-Fi tunnel"), "{auto}");
+        assert!(auto.contains("unless WDA_ALLOW_LAN=1"), "{auto}");
+        assert!(!auto.contains("slow Wi-Fi"), "{auto}");
+        let usb = not_reachable_message("00008110-001C18203AD2401E", false);
+        assert!(usb.contains("not currently connected over USB"), "{usb}");
+        assert!(usb.contains("WDA_TRANSPORT=usb"), "{usb}");
+    }
 
     #[test]
     fn host_and_port_from_the_runner_url() {
@@ -3490,7 +3572,22 @@ impl Setup {
         missing |= !account;
         if !ctx.lan() {
             let usb = checks::usb_udids();
-            if usb.is_empty() {
+            let tunneled = usb.is_empty()
+                && ctx.wifi_tunnel_allowed()
+                && if ctx.udid.is_empty() {
+                    checks::wifi_tunnel_udids().len() == 1
+                } else {
+                    // A configured phone's tunnel may only need waking, and an
+                    // iOS 15/16 phone starts over its lockdown on Wi-Fi.
+                    checks::wifi_tunnel_or_wake(&ctx.udid) || legacy_reachable_over_wifi(ctx)
+                };
+            if tunneled {
+                checklist_line(
+                    true,
+                    "iPhone reachable over its encrypted Wi-Fi tunnel (a USB cable is faster)",
+                    "",
+                );
+            } else if usb.is_empty() {
                 checklist_line(
                     false,
                     "iPhone connected over USB",
@@ -3589,6 +3686,7 @@ impl Setup {
         pairs.push(("WDA_PORT", ctx.wda_port.clone()));
         pairs.push(("MJPEG_PORT", ctx.mjpeg_port.clone()));
         pairs.push(("WDA_ALLOW_LAN", ctx.allow_lan.clone()));
+        pairs.push(("WDA_TRANSPORT", ctx.transport.clone()));
         if let Ok(icon) = std::env::var("WDA_RUNNER_ICON") {
             if !icon.is_empty() && icon != "auto" {
                 pairs.push(("WDA_RUNNER_ICON", icon));
@@ -3908,7 +4006,9 @@ fn legacy_record_for(ctx: &Ctx) -> Option<legacy_ios::Record> {
 /// This phone has run on the legacy path and its lockdownd answers on its
 /// recorded LAN address: setup can start it over Wi-Fi with no cable.
 pub fn legacy_reachable_over_wifi(ctx: &Ctx) -> bool {
-    legacy_record_for(ctx)
+    // WDA_TRANSPORT=usb: the cable only, for this path too.
+    ctx.wifi_tunnel_allowed()
+        && legacy_record_for(ctx)
         .and_then(|r| r.lan_ip)
         .is_some_and(|ip| legacy_ios::lockdown_reachable(&ip))
 }
@@ -3931,10 +4031,14 @@ impl Setup {
 
     fn ready_message(&self) -> String {
         match &self.legacy_ios {
-            Some(legacy) if legacy.host.is_some() => format!(
+            Some(legacy) if legacy.host.is_some() && self.legacy_lan_host().is_some() => format!(
                 "device runner ready (iOS {}, started over Wi-Fi at {}): you can unplug the cable — it keeps running over Wi-Fi, and restarts over Wi-Fi too while the iPhone stays on this network",
                 legacy.ios,
                 legacy.host.as_deref().unwrap_or("?"),
+            ),
+            Some(legacy) if legacy.host.is_some() => format!(
+                "device runner ready (iOS {}, started over Wi-Fi): it would survive the cable being pulled, but this Mac reaches it off the cable only through the plain LAN relay (WDA_ALLOW_LAN=1; the runner port has no authentication), so keep the cable in or opt in",
+                legacy.ios
             ),
             Some(legacy) => format!(
                 "device runner ready (iOS {}, started over USB because this Mac cannot reach the iPhone's lockdown over Wi-Fi): keep the cable in — the runner stops when it is pulled",
@@ -3959,6 +4063,7 @@ impl Setup {
                 lan_ip: legacy.lan_ip.clone(),
                 wifi_ready: legacy.wifi_ready,
                 wifi_mac: legacy.wifi_mac.clone(),
+                lan_relay: self.legacy_lan_host().is_some(),
             },
         );
     }
@@ -3967,6 +4072,9 @@ impl Setup {
     /// there (a runner started over Wi-Fi survives the cable being pulled),
     /// else USB. The address comes from the last run's record, else Bonjour.
     fn legacy_host(&mut self) -> Option<String> {
+        if !self.ctx.wifi_tunnel_allowed() {
+            return None;
+        }
         let record = legacy_record_for(&self.ctx);
         let mut candidates: Vec<String> = Vec::new();
         if let Some(ip) = self.legacy_ios.as_ref().and_then(|l| l.lan_ip.clone()) {
@@ -4036,7 +4144,10 @@ impl Setup {
         }
         let host = self.legacy_host();
         if host.is_none() && !on_usb {
-            let message = legacy_needs_usb_message(&ios);
+            let mut message = legacy_needs_usb_message(&ios);
+            if !self.ctx.wifi_tunnel_allowed() {
+                message.push_str(" (WDA_TRANSPORT=usb: Wi-Fi starts are turned off for this phone)");
+            }
             self.phase("prereq", "legacy_needs_usb", &message);
             // Retried at once when the cable comes or the phone answers on
             // its LAN address, else every 5 minutes.
@@ -4048,7 +4159,12 @@ impl Setup {
         }
         match &host {
             Some(ip) => ok(&format!("iOS {ios}: starting over Wi-Fi ({ip}); the runner keeps running with the cable pulled")),
-            None => ok(&format!("iOS {ios}: starting over USB (lockdownd does not answer over Wi-Fi yet)")),
+            None if !self.ctx.wifi_tunnel_allowed() => {
+                ok(&format!("iOS {ios}: starting over USB (WDA_TRANSPORT=usb)"))
+            }
+            None => ok(&format!(
+                "iOS {ios}: starting over USB (lockdownd does not answer over Wi-Fi yet)"
+            )),
         }
         self.phase(
             "ddi-wait",

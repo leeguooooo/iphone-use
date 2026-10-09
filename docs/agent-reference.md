@@ -172,7 +172,11 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   release keeps the runner up instead of stopping it, since it could not be
   started again without the cable. KeepAlive waits 15 minutes between Wi-Fi
   attempts and retries at once on USB; do not reconnect.
-- **`locked`**: unlock the phone. **`usb` / `ddi` / `account` / `wda`**: follow `hint`.
+- **`usb`**: the configured iPhone is neither on USB nor on its encrypted
+  CoreDevice Wi-Fi tunnel (or `WDA_TRANSPORT=usb` requires the cable). Off the
+  cable, setup and relaunch go through that tunnel on their own, with no flag;
+  ask the operator to plug the phone in or keep it unlocked on the Mac's network.
+- **`locked`**: unlock the phone. **`ddi` / `account` / `wda`**: follow `hint`.
 
 ### iOS 15 and 16 (the legacy path)
 
@@ -192,15 +196,25 @@ The runner lives as long as the launcher's testmanagerd session. Setup launches
 over Wi-Fi (lockdown at the phone's LAN address, heartbeat held) whenever that
 answers, so `unplug_ok: true` means the cable can be pulled and restarts also go
 over Wi-Fi; `launch_transport: "usb"` means pulling the cable ends the runner.
-Off the cable the relays use usbmuxd's Wi-Fi attachment, or the phone's LAN
-address when `WDA_ALLOW_LAN=1` (the runner port has no authentication). Idle release
+This Wi-Fi start is what `WDA_TRANSPORT=auto` (the default) means for iOS 15/16,
+which has no CoreDevice tunnel: lockdown's TLS session with this Mac's pair record,
+not a plain LAN relay. `WDA_TRANSPORT=usb` turns it off (cable only). Controlling
+the runner off the cable is a separate question: usbmuxd's Wi-Fi attachment does not
+carry the runner's port (measured on an iPhone X, iOS 16.5: runner alive on its LAN
+address, relay dead), so only the plain LAN relay reaches it, and that stays behind
+`WDA_ALLOW_LAN=1` (the runner port has no authentication). `unplug_ok` is true only
+for a Wi-Fi start with that relay; otherwise keep the cable in. Idle release
 works as usual; the next request starts the runner again in ~8–12 s.
 
 Repeated bootstrap requests hide the real blocker — fix it, then reconnect once.
 
 WDA itself has no authentication. Daemon bearer auth protects `/agent/*`, not
-the phone's own 8100/9100 listeners. Use Direct only on a trusted network;
-when practical, turn off iPhone Wi-Fi and keep the relays on USB loopback.
+the phone's own 8100/9100 listeners. The Mac's relays listen on loopback only
+and reach the phone over USB or, off the cable, through CoreDevice's encrypted
+Wi-Fi tunnel (`transport: "wifi-tunnel"`, the default `WDA_TRANSPORT=auto`;
+`WDA_TRANSPORT=usb` requires the cable). A plain LAN relay to the phone's address
+(`transport: "wifi"`) exists only behind the explicit `WDA_ALLOW_LAN=1` and is
+unsafe on an untrusted network. Use Direct only on a trusted network.
 
 ## HTTP API
 

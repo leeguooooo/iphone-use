@@ -120,6 +120,18 @@ pub fn run(ctx: &Ctx) -> i32 {
         && checks::presence(&ctx.udid) == checks::Presence::Absent;
     // What the USB layer says when usbmuxd cannot give us a usable phone.
     let diagnosis = usbdiag::probe(&usb);
+    // Off the cable, the encrypted CoreDevice Wi-Fi tunnel is a supported
+    // transport unless WDA_TRANSPORT=usb (the target, or the one phone that
+    // has a live tunnel when no target is set).
+    let target_off_usb = !ctx.udid.is_empty() && !checks::on_usb(&ctx.udid, &usb);
+    let tunnel = !ctx.lan()
+        && ctx.wifi_tunnel_allowed()
+        && (target_off_usb || (ctx.udid.is_empty() && usb.is_empty()))
+        && if ctx.udid.is_empty() {
+            checks::wifi_tunnel_udids().len() == 1
+        } else {
+            checks::wifi_tunnel(&ctx.udid)
+        };
     if absent {
         warn(&format!(
             "X configured target {} is not connected to this Mac (usbmuxd does not list it; CoreDevice reports it unavailable) — plug it in over USB (or join the same Wi-Fi) and unlock it",
@@ -129,8 +141,14 @@ pub fn run(ctx: &Ctx) -> i32 {
             warn(&format!("  USB: {}", diagnosis.message()));
         }
         fail = true;
+    } else if tunnel {
+        ok("iPhone off USB, reachable through its encrypted CoreDevice Wi-Fi tunnel (setup and relaunch work over it; a cable is faster)");
     } else if !ctx.lan() && usb.is_empty() {
-        warn("X the default device layer requires an iPhone connected over USB");
+        if ctx.wifi_tunnel_allowed() {
+            warn("X no iPhone on USB or on a CoreDevice Wi-Fi tunnel — plug one in, or keep a paired phone unlocked on this Mac's network");
+        } else {
+            warn("X WDA_TRANSPORT=usb requires an iPhone connected over USB");
+        }
         if let Some(diagnosis) = &diagnosis {
             warn(&format!("  USB: {}", diagnosis.message()));
         }
@@ -143,10 +161,15 @@ pub fn run(ctx: &Ctx) -> i32 {
             "X multiple USB iPhones found ({usb_list}); set WDA_UDID=<one exact UDID>"
         ));
         fail = true;
-    } else if !ctx.lan() && !ctx.udid.is_empty() && !checks::on_usb(&ctx.udid, &usb) {
+    } else if !ctx.lan() && target_off_usb {
         warn(&format!(
-            "X configured target {} is not connected over USB",
-            ctx.udid
+            "X configured target {} is not connected over USB{}",
+            ctx.udid,
+            if ctx.wifi_tunnel_allowed() {
+                " and has no CoreDevice Wi-Fi tunnel"
+            } else {
+                " (WDA_TRANSPORT=usb)"
+            }
         ));
         fail = true;
     } else if !usb.is_empty() {
@@ -277,7 +300,9 @@ pub fn run(ctx: &Ctx) -> i32 {
     println!(
         "    for the passcode to allow UI automation, and cannot show that prompt over Wi-Fi)."
     );
-    println!("    WDA_ALLOW_LAN=1 (a socat relay to the phone's LAN address) is an explicit, unsafe last resort.");
+    println!("    Setup and relaunch use the tunnel on their own when the cable is out (WDA_TRANSPORT=usb turns that off).");
+    println!("    WDA_ALLOW_LAN=1 (a plain socat relay to the phone's LAN address, unauthenticated) is an explicit,");
+    println!("    unsafe last resort for a trusted, isolated network only.");
     println!("  • Cloudflare WARP or another tunnel VPN can break Xcode's connection to the phone; disconnect it during setup if setup stalls.");
     if fail {
         warn("fix the X items above, then re-run");
