@@ -311,6 +311,9 @@ struct DeviceEditForm: View {
                     ConnectionSummary(session: session)
                 }
             }
+            if let readiness = session?.status?.lockReadiness {
+                LockReadinessSection(readiness: readiness)
+            }
             Section("名称") {
                 TextField(DeviceStore.defaultName(for: address), text: $name)
             }
@@ -418,6 +421,28 @@ struct ConnectionSummary: View {
                 }
             }
             .accessibilityElement(children: .combine)
+        }
+    }
+}
+
+/// Passcode and Auto-Lock for one phone, with the daemon's advice. Read-only:
+/// the setting is changed on the phone itself (Settings › Display & Brightness).
+struct LockReadinessSection: View {
+    let readiness: LockReadiness
+
+    var body: some View {
+        Section {
+            LabeledContent("锁屏密码", value: readiness.passcodeText)
+            LabeledContent("自动锁定", value: readiness.autoLockText ?? String(localized: "未知"))
+            if let badge = readiness.badge {
+                LockBadgeView(badge: badge, compact: false)
+            }
+        } header: {
+            Text("锁屏设置")
+        } footer: {
+            if !readiness.hint.isEmpty {
+                Text(readiness.hint)
+            }
         }
     }
 }

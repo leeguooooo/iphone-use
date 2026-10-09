@@ -10,10 +10,14 @@
 //!   which lockdownd answers for these keys without pairing.
 //! - [`ddi_status`]: whether the Developer Disk Image is mounted, from the
 //!   `com.apple.mobile.mobile_image_mounter` service (needs a paired session).
+//! - [`passcode_protected`]: whether a passcode is set (`PasswordProtected`,
+//!   which lockdownd only answers inside a paired session).
 //!
 //! Lockdown cannot tell whether the phone is locked right now: its
 //! `PasswordProtected` value says whether a passcode is *set*, not whether one
-//! is required. Setup keeps `devicectl device info lockState` for that.
+//! is required. Setup keeps `devicectl device info lockState` for that. Nor
+//! does any lockdown domain carry the Auto-Lock setting; the device runner
+//! reads that one (see `crate::lock_readiness`).
 //!
 //! Framing: a 4-byte big-endian length, then an XML property list. The TLS
 //! session pins the device certificate from the pairing record and presents
@@ -193,6 +197,47 @@ pub async fn start_developer_service(udid: &str, name: &str) -> Result<()> {
         start_service(&mut plain, name).await?;
     }
     Ok(())
+}
+
+/// Whether a passcode is set on the phone (`PasswordProtected`). lockdownd
+/// refuses this key without a session (`GetProhibited`), so this pairs the
+/// same way [`ddi_status`] does; over USB or a Wi-Fi attachment alike.
+pub async fn passcode_protected(udid: &str) -> Result<bool> {
+    let attached = attached(udid).await?;
+    let pair = PairRecord::parse(&usbmux::read_pair_record(&attached.serial).await?)?;
+    let tls = Arc::new(pair.tls_config()?);
+    let mut plain = usbmux::connect(attached.device_id, LOCKDOWN_PORT)
+        .await
+        .context("connect to lockdownd")?;
+    let reply = exchange(
+        &mut plain,
+        &request(&[
+            ("Label", LABEL),
+            ("Request", "StartSession"),
+            ("HostID", &pair.host_id),
+            ("SystemBUID", &pair.system_buid),
+        ]),
+    )
+    .await?;
+    lockdown_error(&reply, "StartSession")?;
+    let get = request(&[
+        ("Label", LABEL),
+        ("Request", "GetValue"),
+        ("Key", "PasswordProtected"),
+    ]);
+    let reply = if reply.get("EnableSessionSSL").and_then(Value::as_bool) == Some(true) {
+        let mut session = handshake(&tls, plain)
+            .await
+            .context("lockdown TLS session")?;
+        exchange(&mut session, &get).await?
+    } else {
+        exchange(&mut plain, &get).await?
+    };
+    lockdown_error(&reply, "GetValue PasswordProtected")?;
+    reply
+        .get("Value")
+        .and_then(Value::as_bool)
+        .context("PasswordProtected had no boolean value")
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

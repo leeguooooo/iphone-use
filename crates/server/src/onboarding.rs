@@ -500,6 +500,26 @@ fn print_status(target: &Target, status: &Value) {
     if let Some(owner) = status["owner"].as_str() {
         println!("  in use by: {owner}");
     }
+    if let Some(line) = lock_line(status) {
+        println!("  {line}");
+    }
+}
+
+/// The lock-screen line of `iphone-use status`: shown when the phone will
+/// lock on its own (`lock_readiness`), so the owner can change Auto-Lock.
+fn lock_line(status: &Value) -> Option<String> {
+    let readiness = &status["lock_readiness"];
+    let label = match readiness["verdict"].as_str()? {
+        "will_lock_needs_person" => "lock screen: needs a person",
+        "will_lock_auto_unlocks" => "lock screen: unlocks by itself",
+        _ => return None,
+    };
+    let hint = readiness["hint"]["en"].as_str().unwrap_or_default();
+    Some(if hint.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} — {hint}")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +700,22 @@ fn terminal_qr(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_names_a_phone_that_will_lock() {
+        let hint = json!({"en": "Set Auto-Lock to Never."});
+        let status = |verdict: &str| json!({"lock_readiness": {"verdict": verdict, "hint": hint}});
+        assert_eq!(
+            lock_line(&status("will_lock_needs_person")).as_deref(),
+            Some("lock screen: needs a person — Set Auto-Lock to Never.")
+        );
+        assert!(lock_line(&status("will_lock_auto_unlocks"))
+            .unwrap()
+            .starts_with("lock screen: unlocks by itself"));
+        assert_eq!(lock_line(&status("ready")), None);
+        assert_eq!(lock_line(&status("unknown")), None);
+        assert_eq!(lock_line(&json!({})), None);
+    }
 
     #[test]
     fn try_lists_the_visible_controls_once_in_order() {

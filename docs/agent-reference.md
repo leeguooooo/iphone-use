@@ -39,6 +39,36 @@ passcode.
 | `degraded` | WDA answers but the last read/action did not complete (heavy page, stalled app) | **Not** a blocker; `setup_blocked_on` is empty. Wait `retry_after_secs` (3s) and read again; do not restart anything. |
 | `released` + `human_handoff:true` | The operator handed the phone to a person | Input answers `409 phone_handed_to_human`. Ask the operator before sending `{"mode":"agent"}`. |
 
+**Lock readiness.** `lock_readiness` says whether the phone will lock on its
+own while nobody drives it, so an owner with many phones sees which ones get
+stuck at the lock screen:
+
+```json
+"lock_readiness": {"passcode_protected": true, "auto_lock_secs": 30,
+  "keep_awake": {"enabled": true, "supported": true, "active": false},
+  "verdict": "will_lock_needs_person",
+  "hint": {"zh": "这台手机设了锁屏密码，自动锁定 30 秒：…", "en": "This phone has a passcode and Auto-Lock 30 seconds: …"},
+  "checked_at": 1791538375}
+```
+
+- `passcode_protected`: whether a passcode is set (lockdown `PasswordProtected`
+  over USB or a Wi-Fi attachment, or the runner while it is up); `null` until read.
+- `auto_lock_secs`: the Auto-Lock setting in seconds, `"never"`, or `null`. The
+  device runner reads it (no lockdown value carries it), so it is known once a
+  runner from this release ran on the phone.
+- `keep_awake`: whether keep-awake is configured (`enabled`), whether the runner
+  has it (`supported`, `null` until asked) and whether it is holding the phone
+  awake now (`active`).
+- `verdict`: `ready` (Auto-Lock is Never), `will_lock_needs_person` (passcode
+  set: after a pause a person must unlock it), `will_lock_auto_unlocks` (no
+  passcode: the next `/agent/input` unlocks it) or `unknown`.
+- `hint`: one line for a person, `{zh, en}`, naming the fix (Auto-Lock → Never).
+
+The values are cached (refreshed when the runner comes up and every 5 minutes,
+kept across daemon restarts), so a released phone shows its last reading.
+Report a `will_lock_needs_person` hint to the owner; never ask for, store or
+type a passcode.
+
 **Reconnect** only when the current task needs the phone, `recovery_owner` is
 `daemon`, blockers are resolved, and no release/reconnect is in progress. Send
 it once, then poll status until `drivable:true`:
@@ -174,7 +204,7 @@ when practical, turn off iPhone Wi-Fi and keep the relays on USB loopback.
 
 | Call | Purpose |
 |---|---|
-| `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, …}` — gate on `drivable` |
+| `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, …}` — gate on `drivable` |
 | `GET /agent/capabilities` | What this build supports + whether the phone is drivable now (`blocked_by`); touches nothing |
 | `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max` |
 | `GET /agent/screenshot` | Device PNG. `?max_side=1200` shrinks it (~0.9k image tokens instead of ~1.5k; MCP's default) and lets a current live frame answer while someone watches. `X-Capture-Redacted: 1` = wireframe of a protected screen ([below](#screens-hidden-from-capture)); `?raw=1` untouched |

@@ -2652,8 +2652,10 @@ async fn agent_status(
         .unwrap_or_else(|_| "null".into());
     // A reconnect a pre-warm started (see `crate::prewarm`).
     let warming = crate::prewarm::warming() && reconnecting;
+    // Will this phone get stuck at the lock screen (cache only, no I/O).
+    let lock_readiness = crate::lock_readiness::current_json();
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"legacy_ios":{legacy_ios}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -17136,6 +17138,10 @@ mod tests {
         assert!(!INDEX_HTML.contains("turn-creds"));
         assert!(!INDEX_HTML.contains("RTCPeerConnection"));
         assert!(INDEX_HTML.contains("id=\"flowPanel\""));
+        // Lock readiness: the daemon's own hint for phones that will lock.
+        assert!(INDEX_HTML.contains("id=\"lockNotice\""));
+        assert!(INDEX_HTML.contains("status?.lock_readiness"));
+        assert!(INDEX_HTML.contains("syncLockNotice(s);"));
         assert!(INDEX_HTML.contains("aria-label=\"录制并运行自动化流程\""));
         assert!(INDEX_HTML.contains("id=\"flowAvailability\""));
         assert!(INDEX_HTML.contains("id=\"flowSafetyGate\""));
@@ -17617,6 +17623,41 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// `/agent/status` carries `lock_readiness` as a JSON object with the
+    /// keys clients read, and the whole body still parses.
+    #[test]
+    fn status_reports_lock_readiness() {
+        block(async {
+            let mut wda = MockWda::start(healthy_wda_responder);
+            let state = readiness_state_with_wda(wda.base());
+            let body = status_json(&state).await;
+            let value: serde_json::Value = serde_json::from_str(&body).expect("status is JSON");
+            let readiness = &value["lock_readiness"];
+            assert!(readiness.is_object(), "no lock_readiness: {body}");
+            for key in [
+                "passcode_protected",
+                "auto_lock_secs",
+                "keep_awake",
+                "verdict",
+                "hint",
+                "checked_at",
+            ] {
+                assert!(
+                    readiness.get(key).is_some(),
+                    "lock_readiness lacks {key}: {body}"
+                );
+            }
+            assert!(matches!(
+                readiness["verdict"].as_str(),
+                Some("ready" | "will_lock_needs_person" | "will_lock_auto_unlocks" | "unknown")
+            ));
+            assert!(readiness["hint"]["zh"].is_string());
+            assert!(readiness["hint"]["en"].is_string());
+            assert!(readiness["keep_awake"]["enabled"].is_boolean());
+            wda.shutdown();
+        });
     }
 
     /// The regression 5339e34 introduced and this change removes, exercised

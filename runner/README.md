@@ -181,7 +181,7 @@ has one fixed session id per launch.
 | GET | `/alert` | | `{text, buttons, pid}` or 404 |
 | POST | `/alert` | `{button}` | `{tapped}` |
 | GET | `/window/size` | | `{width, height}` |
-| POST | `/wda/keepawake` | `{secs}` (0 stops, at most 900) | `{active, remainingMs, beats, skippedLocked, locked, passcodeEnabled, …}`, answered off-main |
+| POST | `/wda/keepawake` | `{secs}` (0 stops, at most 900) | `{active, remainingMs, beats, skippedLocked, locked, passcodeEnabled, autoLockSecs, autoLockNever, …}`, answered off-main; `autoLockSecs` is the Auto-Lock setting from ManagedConfiguration `maxInactivity` (Never is `2147483647`, with `autoLockNever:true`), absent when it cannot be read |
 | GET | `/wda/keepawake` | | the same, without changing the deadline |
 | POST | `/shutdown` | | ends `testServe` |
 

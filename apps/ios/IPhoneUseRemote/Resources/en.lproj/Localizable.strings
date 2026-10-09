@@ -278,3 +278,18 @@
 "%@：%@" = "%1$@: %2$@";
 "正在重试…" = "Retrying…";
 "重试中" = "Retrying";
+
+/* Lock readiness (passcode + Auto-Lock) */
+"会锁屏" = "Locks";
+"可自动解锁" = "Unlocks itself";
+"闲置时会锁屏，需要有人解锁" = "Locks when idle; a person has to unlock it";
+"闲置时会锁屏，会自动解锁" = "Locks when idle; unlocks by itself";
+"锁屏密码" = "Passcode";
+"自动锁定" = "Auto-Lock";
+"已设置" = "Set";
+"未设置" = "Not set";
+"未知" = "Unknown";
+"永不" = "Never";
+"%lld 分钟" = "%lld min";
+"%lld 秒" = "%lld s";
+"锁屏设置" = "Lock screen";

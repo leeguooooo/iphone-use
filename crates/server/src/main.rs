@@ -1127,6 +1127,8 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
         }
         // Keep-awake asks the runner for a lease, managed or not.
         server::keep_awake::spawn(state.clone());
+        // Passcode + Auto-Lock for `lock_readiness` in /agent/status.
+        server::lock_readiness::spawn(state.clone());
 
         let app = http::router(state);
         let serve_result = axum::serve(listener, app)

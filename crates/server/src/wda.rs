@@ -2626,6 +2626,8 @@ pub struct KeepAwakeReport {
     pub active: bool,
     pub locked: Option<bool>,
     pub passcode: Option<bool>,
+    /// The Auto-Lock setting, when the runner could read it.
+    pub auto_lock: Option<crate::lock_readiness::AutoLock>,
 }
 
 /// A keep-awake renewal that did not take.
@@ -2658,6 +2660,26 @@ impl KeepAwakeEndpoint {
             .map_err(KeepAwakeError::Failed)?;
         Ok(parse_keep_awake(&value))
     }
+
+    /// `GET /wda/keepawake`: the same report without touching the lease.
+    pub async fn read(&self) -> std::result::Result<KeepAwakeReport, KeepAwakeError> {
+        let response = self
+            .http
+            .get(format!("{}/wda/keepawake", self.base))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|error| {
+                KeepAwakeError::Failed(anyhow!(error).context("GET /wda/keepawake"))
+            })?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(KeepAwakeError::Unsupported);
+        }
+        let value = ensure_wda_success(response, "GET /wda/keepawake")
+            .await
+            .map_err(KeepAwakeError::Failed)?;
+        Ok(parse_keep_awake(&value))
+    }
 }
 
 fn parse_keep_awake(value: &serde_json::Value) -> KeepAwakeReport {
@@ -2670,6 +2692,14 @@ fn parse_keep_awake(value: &serde_json::Value) -> KeepAwakeReport {
         passcode: value
             .get("passcodeEnabled")
             .and_then(serde_json::Value::as_bool),
+        auto_lock: crate::lock_readiness::AutoLock::from_runner(
+            value
+                .get("autoLockSecs")
+                .and_then(serde_json::Value::as_i64),
+            value
+                .get("autoLockNever")
+                .and_then(serde_json::Value::as_bool),
+        ),
     }
 }
 
