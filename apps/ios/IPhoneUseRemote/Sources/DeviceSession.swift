@@ -10,12 +10,7 @@ import UIKit
 @MainActor
 @Observable
 final class DeviceSession: Identifiable {
-    enum Phase: Equatable {
-        case setup            // no usable credentials, or disconnected
-        case connecting
-        case connected
-        case failed(String)
-    }
+    typealias Phase = ConnectionInputs.Phase
 
     /// Who is showing this phone's video. The focused screen asks for the
     /// person's chosen quality; a tile always streams in performance mode
@@ -27,8 +22,64 @@ final class DeviceSession: Identifiable {
     var address: String { record.address }
     var name: String { record.name }
 
-    var phase: Phase = .setup
-    var status: PhoneStatus?
+    var phase: Phase = .idle {
+        didSet {
+            if phase == .connecting, oldValue != .connecting { connectingSince = Date() }
+            if phase != .connecting { connectingSince = nil }
+        }
+    }
+    var status: PhoneStatus? {
+        didSet { trackStarting() }
+    }
+    /// When the current connection attempt started.
+    private(set) var connectingSince: Date?
+    /// Status reads have failed since then while connected: the Mac went to
+    /// sleep, the network changed, the tunnel dropped. Polling continues and
+    /// clears it on the first answer.
+    private(set) var linkDownSince: Date?
+    private(set) var linkProblem: ConnectProblem?
+    private var pollFailures = 0
+    /// When the daemon was first seen starting the device service.
+    private(set) var startingSince: Date?
+    /// When the picture was first wanted and missing.
+    private(set) var videoWaitSince: Date?
+    /// The next automatic connection attempt, while one is scheduled.
+    private(set) var nextRetryAt: Date?
+    private var retryAttempt = 0
+    /// Bumped by every connection attempt; an attempt that finds it changed
+    /// when it finishes was overtaken (a typed password, a disconnect) and
+    /// leaves the session alone.
+    private var generation = 0
+    /// Why the last attempt failed; cleared once connected.
+    private(set) var lastProblem: ConnectProblem?
+    private var retryTask: Task<Void, Never>?
+    /// A scanned code that could not be traded yet (the Mac was unreachable).
+    /// Codes live 5 minutes on the daemon, so it is tried until then, across
+    /// an app relaunch too (kept in the Keychain next to the device token).
+    var pendingPair: PendingPair? {
+        get {
+            guard let text = Keychain.password(for: Self.pairAccount(address)) else { return nil }
+            let parts = text.split(separator: "|", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let at = TimeInterval(parts[0]) else { return nil }
+            return PendingPair(code: parts[1], scannedAt: Date(timeIntervalSince1970: at))
+        }
+        set {
+            if let newValue {
+                Keychain.save(password: "\(newValue.scannedAt.timeIntervalSince1970)|\(newValue.code)",
+                              for: Self.pairAccount(address))
+            } else {
+                Keychain.delete(for: Self.pairAccount(address))
+            }
+        }
+    }
+
+    private static func pairAccount(_ address: String) -> String { "pair:" + address }
+
+    struct PendingPair: Equatable {
+        let code: String
+        let scannedAt: Date
+        var fresh: Bool { Date().timeIntervalSince(scannedAt) < 290 }
+    }
     var videoLive = false
     var videoMessage: String?
     var toast: String?
@@ -68,7 +119,11 @@ final class DeviceSession: Identifiable {
     /// The app is in the background: hold no stream, so the daemon sees no
     /// viewer and its idle release works as if the app were closed.
     var suspended = false {
-        didSet { if suspended != oldValue { updateStream() } }
+        didSet {
+            guard suspended != oldValue else { return }
+            if suspended { cancelRetry() }
+            updateStream()
+        }
     }
 
     /// Opening a device is the request to drive it: an idle-released phone
@@ -133,21 +188,56 @@ final class DeviceSession: Identifiable {
 
     private static func lanKeyAccount(_ address: String) -> String { "lan:" + address }
 
+    /// The device moved to a new address (the person edited it): carry its
+    /// password, pairing and LAN routes over, so nothing has to be re-entered.
+    static func moveCredentials(from old: String, to new: String) {
+        guard old != new else { return }
+        let accounts: [(String) -> String] = [{ $0 }, deviceAccount, lanKeyAccount, pairAccount]
+        for account in accounts {
+            if let secret = Keychain.password(for: account(old)) {
+                Keychain.save(password: secret, for: account(new))
+                Keychain.delete(for: account(old))
+            }
+        }
+        let defaults = UserDefaults.standard
+        if let urls = defaults.stringArray(forKey: lanURLsKey(old)) {
+            defaults.set(urls, forKey: lanURLsKey(new))
+            defaults.removeObject(forKey: lanURLsKey(old))
+        }
+    }
+
+    static func savePassword(_ password: String, for address: String) {
+        Keychain.save(password: password, for: address)
+    }
+
     private static func savedLANKey(_ address: String) -> Data? {
         Keychain.password(for: lanKeyAccount(address)).flatMap(Data.init(base64URL:))
     }
 
     /// Connect with a typed password, or (nil) with what was saved: the
     /// paired device token first, then the password.
-    func connect(password: String?) async {
+    ///
+    /// A failure the Mac may recover from on its own (asleep, unreachable,
+    /// lockout) schedules the next attempt with backoff; one only the person
+    /// can fix (wrong password, expired pairing) waits for them. The device
+    /// stays saved either way.
+    func connect(password typed: String?) async {
+        // One attempt at a time; a typed password always gets its own.
+        if typed == nil, phase == .connecting { return }
+        cancelRetry()
+        if typed != nil { lastProblem = nil }
+        generation += 1
+        let mine = generation
         guard let base = DaemonClient.parse(address: address) else {
-            phase = .failed(DaemonError.badAddress.localizedDescription)
+            phase = .failed(.badAddress)
             return
         }
-        let token = password == nil ? deviceToken : nil
-        let password = password ?? Keychain.password(for: address)
-        guard token != nil || password?.isEmpty == false else {
-            phase = .failed(String(localized: "这台设备没有保存的配对，请重新扫码"))
+        let token = typed == nil ? deviceToken : nil
+        let password = typed ?? Keychain.password(for: address)
+        let code = typed == nil && token == nil ? pendingPair.flatMap { $0.fresh ? $0.code : nil } : nil
+        guard token != nil || code != nil || password?.isEmpty == false else {
+            pendingPair = nil
+            phase = .failed(.noCredentials)
             return
         }
         phase = .connecting
@@ -156,30 +246,89 @@ final class DeviceSession: Identifiable {
         do {
             if let token {
                 try await client.renew(deviceToken: token)
+            } else if let code {
+                let token = try await client.pair(code: code)
+                Keychain.save(password: token, for: Self.deviceAccount(address))
+                pendingPair = nil
             } else if let password {
                 try await client.login(password: password)
+                guard mine == generation else { return }
                 Keychain.save(password: password, for: address)
             }
-            try await adopt(client)
+            guard mine == generation else { return }
+            try await adopt(client, generation: mine)
         } catch DaemonError.pairingRevoked where Keychain.password(for: address) != nil {
+            guard mine == generation else { return }
             // The pairing died (password changed?); fall back to the password.
             Keychain.delete(for: Self.deviceAccount(address))
+            phase = .idle
             await connect(password: nil)
         } catch {
-            if case DaemonError.pairingRevoked = error { Keychain.delete(for: Self.deviceAccount(address)) }
-            phase = .failed(error.localizedDescription)
+            guard mine == generation else { return }
+            fail(ConnectProblem(error))
+        }
+    }
+
+    /// Record a failed attempt and decide what happens next.
+    func fail(_ problem: ConnectProblem) {
+        switch problem {
+        case .pairingRevoked: Keychain.delete(for: Self.deviceAccount(address))
+        case .pairCodeExpired: pendingPair = nil
+        default: break
+        }
+        lastProblem = problem
+        phase = .failed(problem)
+        if problem.retryable { scheduleRetry(problem) }
+    }
+
+    /// Try again later, sooner at first. Paused while the app is in the
+    /// background; coming back (or the network returning) retries at once.
+    private func scheduleRetry(_ problem: ConnectProblem) {
+        guard !suspended else { return }
+        let delay = RetryPolicy.delay(attempt: retryAttempt, problem: problem)
+        retryAttempt += 1
+        nextRetryAt = Date().addingTimeInterval(delay)
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            self.retryTask = nil
+            self.nextRetryAt = nil
+            await self.connect(password: nil)
+        }
+    }
+
+    private func cancelRetry() {
+        retryTask?.cancel()
+        retryTask = nil
+        nextRetryAt = nil
+    }
+
+    /// Reconnect now if the device is waiting on something that may have
+    /// changed (foreground, network back, pull to refresh). A device that
+    /// needs a password is left alone.
+    func retryIfWaiting() async {
+        switch phase {
+        case let .failed(problem) where !problem.needsLogin || pendingPair?.fresh == true:
+            retryAttempt = 0
+            await connect(password: nil)
+        case .connected where linkDownSince != nil:
+            await refreshStatus()
+        default:
+            break
         }
     }
 
     /// Commit a client that has a session (a login, a renewal or a fresh
     /// pairing). An existing connection is dropped only once the new one has
     /// answered a status read.
-    func adopt(_ client: DaemonClient) async throws {
+    func adopt(_ client: DaemonClient, generation expected: Int? = nil) async throws {
         // Look for the LAN while the paired address answers the status read,
         // so connecting off the LAN costs no extra round trip.
         async let lan = client.probeLAN()
         let status = try await client.status()
         client.use(await lan)
+        if let expected, expected != generation { return }
+        generation += 1
         if self.client != nil { teardown() }
         Self.saveLANRoutes(of: client, for: address)
         client.onFallback = { [weak self] in
@@ -189,6 +338,10 @@ final class DeviceSession: Identifiable {
         self.status = status
         lastProbe = Date()
         onLAN = client.onLAN
+        retryAttempt = 0
+        lastProblem = nil
+        cancelRetry()
+        linkUp()
         phase = .connected
         startPolling()
         startPathMonitor()
@@ -247,14 +400,19 @@ final class DeviceSession: Identifiable {
     }
 
     func disconnect() {
+        generation += 1
+        cancelRetry()
         teardown()
         pathMonitor?.cancel()
         pathMonitor = nil
-        phase = .setup
+        linkUp()
+        lastProblem = nil
+        phase = .idle
     }
 
     /// Drop every saved credential for this device.
     func forget() {
+        pendingPair = nil
         Keychain.delete(for: address)
         Keychain.delete(for: Self.deviceAccount(address))
         Keychain.delete(for: Self.lanKeyAccount(address))
@@ -300,6 +458,13 @@ final class DeviceSession: Identifiable {
     func frameArrived() {
         lastFrameAt = Date()
         if !videoLive { videoLive = true }
+        videoWaitSince = nil
+    }
+
+    /// Reconnect the picture by hand (it never arrived).
+    func reloadVideo() {
+        videoWaitSince = Date()
+        restartStream()
     }
 
     /// Stream only while someone shows the picture and the phone can show
@@ -309,7 +474,7 @@ final class DeviceSession: Identifiable {
             !$0.released && !$0.releasing && !$0.reconnecting
                 && $0.deviceState != "offline" && $0.deviceState != "blocked"
         } ?? false
-        let wanted = client != nil && video != nil && !suspended && showable
+        let wanted = client != nil && video != nil && !suspended && showable && !Self.observeOnly
         if wanted, reader == nil, let client {
             let quality = wantedQuality
             let reader = H264StreamReader(
@@ -329,12 +494,14 @@ final class DeviceSession: Identifiable {
                 })
             self.reader = reader
             streamQuality = quality
+            if videoWaitSince == nil { videoWaitSince = Date() }
             video?.reset()
             reader.start()
         } else if !wanted, let reader {
             reader.stop()
             self.reader = nil
             videoLive = false
+            videoWaitSince = nil
         }
     }
 
@@ -353,8 +520,16 @@ final class DeviceSession: Identifiable {
         reprobe()
     }
 
+    #if DEBUG
+    /// `-observeOnly YES`: never wake the phone or open its video (UI checks
+    /// against a daemon whose phone someone else is using).
+    static let observeOnly = UserDefaults.standard.bool(forKey: "observeOnly")
+    #else
+    static let observeOnly = false
+    #endif
+
     private func maybeAutoWake(_ status: PhoneStatus) {
-        guard autoWakeAllowed, !autoWakeTried, !busy, status.released, !status.releasing,
+        guard autoWakeAllowed, !Self.observeOnly, !autoWakeTried, !busy, status.released, !status.releasing,
               !status.humanHandoff, status.recoveryOwner.isEmpty || status.recoveryOwner == "daemon"
         else { return }
         autoWakeTried = true
@@ -391,6 +566,7 @@ final class DeviceSession: Identifiable {
                 do {
                     let status = try await client.status()
                     guard self.client === client else { return }
+                    self.linkUp()
                     self.status = status
                     self.updateStream()
                     self.maybeAutoWake(status)
@@ -400,10 +576,47 @@ final class DeviceSession: Identifiable {
                     }
                 } catch DaemonError.sessionExpired {
                     _ = await self.relogin()
-                } catch {}
-                try? await Task.sleep(for: .seconds(self.status?.reconnecting == true ? 1 : 2))
+                } catch {
+                    guard self.client === client else { return }
+                    self.linkFailed(ConnectProblem(error))
+                }
+                let pause: Double = self.linkDownSince != nil ? 3 : (self.status?.reconnecting == true ? 1 : 2)
+                try? await Task.sleep(for: .seconds(pause))
             }
         }
+    }
+
+    /// A status read failed. One miss is noise (a slow tunnel); two in a row
+    /// mean the Mac is gone for now, which the screen says instead of
+    /// showing a frozen picture as if it were live.
+    private func linkFailed(_ problem: ConnectProblem) {
+        pollFailures += 1
+        linkProblem = problem
+        // A 404 or an odd body from a session that worked is a hiccup (a
+        // proxy, a restarting daemon), not proof the address is wrong.
+        if problem.needsLogin {
+            fail(problem)
+            teardown()
+            return
+        }
+        if pollFailures >= 2, linkDownSince == nil {
+            linkDownSince = Date()
+            reprobe()
+        }
+    }
+
+    private func linkUp() {
+        pollFailures = 0
+        linkDownSince = nil
+        linkProblem = nil
+    }
+
+    /// Note when the daemon started bringing the device service up, so the
+    /// wait can be shown in seconds.
+    private func trackStarting() {
+        let starting = status.map { $0.reconnecting || $0.releasing } ?? false
+        if starting, startingSince == nil { startingSince = Date() }
+        if !starting { startingSince = nil }
     }
 
     /// The daemon's session cookie expires (8 h by default). Renew it with
@@ -415,7 +628,11 @@ final class DeviceSession: Identifiable {
             guard let self, let client = self.client else { return false }
             let token = self.deviceToken
             let password = Keychain.password(for: self.address)
-            guard token != nil || password != nil else { return false }
+            guard token != nil || password != nil else {
+                self.fail(.sessionExpired)
+                self.teardown()
+                return false
+            }
             do {
                 if let token {
                     do {
@@ -435,13 +652,15 @@ final class DeviceSession: Identifiable {
                 self.updateStream()
                 return true
             } catch {
-                if case DaemonError.pairingRevoked = error {
-                    Keychain.delete(for: Self.deviceAccount(self.address))
+                let problem = ConnectProblem(error)
+                // Not reaching the Mac is not a login problem: keep the
+                // session and let polling show the link as down.
+                guard problem.needsLogin || problem == .notIphoneUse else {
+                    self.linkFailed(problem)
+                    return false
                 }
-                self.phase = .failed(String(localized: "登录已过期，请重新扫码或输入密码（\(error.localizedDescription)）"))
-                self.statusTask?.cancel()
-                self.reader?.stop()
-                self.reader = nil
+                self.fail(problem)
+                self.teardown()
                 return false
             }
         }
@@ -501,10 +720,20 @@ final class DeviceSession: Identifiable {
         }
     }
 
-    private func refreshStatus() async {
-        guard let client, let status = try? await client.status(), self.client === client else { return }
-        self.status = status
-        updateStream()
+    func refreshStatus() async {
+        guard let client else { return }
+        do {
+            let status = try await client.status()
+            guard self.client === client else { return }
+            linkUp()
+            self.status = status
+            updateStream()
+        } catch DaemonError.sessionExpired {
+            _ = await relogin()
+        } catch {
+            guard self.client === client else { return }
+            linkFailed(ConnectProblem(error))
+        }
     }
 
     /// Bring the device runner up so the phone can be driven again.
@@ -526,8 +755,10 @@ final class DeviceSession: Identifiable {
                 try await client.setMode(mode)
                 show(success)
                 await refreshStatus()
+            } catch DaemonError.sessionExpired {
+                if await relogin() { show(String(localized: "登录已刷新，请再点一次")) }
             } catch {
-                show(error.localizedDescription)
+                show(ConnectProblem(error).title)
             }
         }
     }
@@ -541,44 +772,29 @@ final class DeviceSession: Identifiable {
     }
 
     func hintForUndrivable() -> String {
-        guard let status else { return String(localized: "还没连上服务") }
-        if status.humanHandoff { return String(localized: "手机已交还，先点「连接手机」") }
-        if status.released { return String(localized: "设备空闲中，先点「连接手机」") }
-        if status.reconnecting { return String(localized: "正在连接手机，请稍等") }
-        if status.locked == true || status.deviceState == "locked" { return String(localized: "手机锁屏了，请在手机上解锁") }
-        return status.personHint.isEmpty ? String(localized: "手机暂时不能操作") : status.personHint
+        let p = presentation()
+        return p.detail.isEmpty ? p.title : String(localized: "\(p.title)：\(p.detail)")
     }
 
-    /// One short state for a pill: what the person would want to know first.
-    var shortState: String {
-        switch phase {
-        case .setup: return String(localized: "未连接")
-        case .connecting: return String(localized: "正在连接…")
-        case .failed: return String(localized: "连接失败")
-        case .connected: break
-        }
-        guard let status else { return String(localized: "未连接") }
-        if status.ownedByOther { return String(localized: "被「\(status.owner ?? "?")」占用") }
-        if status.humanHandoff { return String(localized: "已交还") }
-        if status.released { return String(localized: "空闲") }
-        if status.reconnecting { return String(localized: "正在连接手机") }
-        if status.locked == true || status.deviceState == "locked" { return String(localized: "锁屏") }
-        if status.drivable && videoLive { return String(localized: "可操作 · H.264") }
-        if status.drivable { return String(localized: "可操作") }
-        return status.deviceState
+    func inputs(now: Date = Date()) -> ConnectionInputs {
+        ConnectionInputs(phase: phase, status: status, videoLive: videoLive || video == nil,
+                         connectingSince: connectingSince, linkDownSince: linkDownSince,
+                         linkProblem: linkProblem, startingSince: startingSince,
+                         videoWaitSince: videoWaitSince, nextRetryAt: nextRetryAt,
+                         lastProblem: lastProblem, waking: busy, now: now)
     }
 
-    /// Green when drivable (and the picture is live), yellow while
-    /// connecting, red otherwise.
-    var health: Health {
-        guard phase == .connected, let status else { return phase == .connecting ? .busy : .down }
-        if status.ownedByOther { return .down }
-        if status.drivable && (videoLive || video == nil) { return .ok }
-        if status.reconnecting || status.drivable { return .busy }
-        return .down
+    /// What every surface says about this device (see `ConnectionPresentation`).
+    func presentation(now: Date = Date()) -> ConnectionPresentation {
+        ConnectionPresentation.make(inputs(now: now))
     }
 
-    enum Health { case ok, busy, down }
+    /// One short state for a pill or a tile.
+    var shortState: String { presentation().short }
+
+    var health: Health { presentation().tone }
+
+    typealias Health = ConnectionPresentation.Tone
 }
 
 /// The control password lives in the Keychain, keyed by server address; a

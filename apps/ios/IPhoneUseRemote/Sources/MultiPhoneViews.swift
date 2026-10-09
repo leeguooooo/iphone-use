@@ -10,11 +10,13 @@ struct DeviceGridView: View {
     @State private var showSync = false
     @State private var adding = false
     @State private var scanning = false
+    @State private var manualAfterScan = false
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         NavigationStack {
             ScrollView {
+                OfflineBanner(online: app.online)
                 let tiles = app.gridSessions
                 if tiles.isEmpty {
                     ContentUnavailableView("没有显示的手机", systemImage: "rectangle.grid.2x2",
@@ -30,6 +32,8 @@ struct DeviceGridView: View {
                     .padding(.bottom, 24)
                 }
             }
+            // Pull down: every waiting phone tries again now.
+            .refreshable { await app.refreshAll() }
             .background(Color.black.ignoresSafeArea())
             .navigationTitle("我的手机")
             .navigationBarTitleDisplayMode(.inline)
@@ -52,8 +56,10 @@ struct DeviceGridView: View {
             .sheet(isPresented: $showDevices) { DevicesSheet(app: app) }
             .sheet(isPresented: $showSync) { SyncSetupSheet(app: app) }
             .sheet(isPresented: $adding) { ConnectView(app: app) { adding = false } }
-            .fullScreenCover(isPresented: $scanning) {
-                ScanSheet { link in Task { await app.pair(link) } }
+            .fullScreenCover(isPresented: $scanning, onDismiss: {
+                if manualAfterScan { manualAfterScan = false; adding = true }
+            }) {
+                ScanSheet(onFound: { link in Task { await app.pair(link) } }, onManual: { manualAfterScan = true })
             }
         }
     }
@@ -90,7 +96,7 @@ struct DeviceTile: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("\(session.name)，\(session.shortState)"))
+        .accessibilityLabel(Text("\(session.name)，\(session.presentation().title)"))
         .accessibilityHint(Text("打开全屏操作"))
         .accessibilityAddTraits(.isButton)
         .contextMenu {
@@ -100,6 +106,10 @@ struct DeviceTile: View {
             } else if session.phase == .connected {
                 Button { session.handBack() } label: { Label("交还", systemImage: "iphone.and.arrow.forward") }
             }
+            if case .failed = session.phase {
+                Button { Task { await session.connect(password: nil) } } label: { Label("立即重试", systemImage: "arrow.clockwise") }
+            }
+            Button { app.editing = .init(id: session.id) } label: { Label("编辑地址和密码", systemImage: "key") }
             Button { app.setShowInGrid(session.id, false) } label: { Label("从总览隐藏", systemImage: "eye.slash") }
             Button(role: .destructive) { confirmForget = true } label: { Label("忘记这台手机", systemImage: "trash") }
         }
@@ -124,14 +134,21 @@ struct TilePicture: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             LiveVideo(session: session)
-            if !(session.status?.drivable == true && session.videoLive) {
+            let p = session.presentation()
+            // The same state the full screen shows, in a tile's words.
+            if p.placement == .cover || !session.videoLive {
                 VStack(spacing: 6) {
-                    Image(systemName: placeholderSymbol).font(.title2)
-                    Text(session.shortState).font(.caption2).multilineTextAlignment(.center)
+                    if p.progress {
+                        ProgressView()
+                    } else {
+                        Image(systemName: p.symbol).font(.title2)
+                    }
+                    Text(p.short).font(.caption2).multilineTextAlignment(.center)
                 }
                 .foregroundStyle(.secondary)
                 .padding(8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.opacity(p.placement == .cover ? 0.55 : 0))
                 .allowsHitTesting(false)
             }
             if let note = session.delivery {
@@ -144,14 +161,6 @@ struct TilePicture: View {
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.12)))
         .animation(.easeInOut(duration: 0.2), value: session.delivery)
-    }
-
-    private var placeholderSymbol: String {
-        if session.status?.ownedByOther == true { return "person.badge.key" }
-        if session.status?.released == true { return "moon.zzz" }
-        if session.status?.locked == true { return "lock" }
-        if session.phase == .connecting || session.status?.reconnecting == true { return "hourglass" }
-        return "iphone.slash"
     }
 }
 
@@ -195,10 +204,9 @@ struct DeliveryBadge: View {
 /// Manage saved phones: rename, reorder, show or hide in the grid, forget, add.
 struct DevicesSheet: View {
     @Bindable var app: AppModel
-    @State private var renamingID: UUID?
-    @State private var newName = ""
     @State private var adding = false
     @State private var scanning = false
+    @State private var manualAfterScan = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -226,19 +234,16 @@ struct DevicesSheet: View {
                 ToolbarItem(placement: .topBarLeading) { EditButton() }
                 ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
             }
-            .alert("重命名", isPresented: Binding(get: { renamingID != nil }, set: { if !$0 { renamingID = nil } })) {
-                TextField("名称", text: $newName)
-                Button("取消", role: .cancel) {}
-                Button("完成") { if let id = renamingID { app.rename(id, to: newName) } }
-            }
             .sheet(isPresented: $adding) { ConnectView(app: app) { adding = false; dismiss() } }
-            .fullScreenCover(isPresented: $scanning) {
-                ScanSheet { link in
+            .fullScreenCover(isPresented: $scanning, onDismiss: {
+                if manualAfterScan { manualAfterScan = false; adding = true }
+            }) {
+                ScanSheet(onFound: { link in
                     Task {
                         await app.pair(link)
-                        if app.addError == nil { dismiss() }
+                        dismiss()
                     }
-                }
+                }, onManual: { manualAfterScan = true })
             }
         }
     }
@@ -247,27 +252,28 @@ struct DevicesSheet: View {
     private func row(_ record: DeviceRecord) -> some View {
         let session = app.session(record.id)
         HStack(spacing: 10) {
-            if let session { HealthDot(health: session.health) }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(record.name).font(.body)
-                Text(record.address).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
-                if let session {
-                    Text(session.shortState).font(.caption).foregroundStyle(.secondary)
+            NavigationLink {
+                DeviceEditForm(app: app, id: record.id)
+            } label: {
+                HStack(spacing: 10) {
+                    if let session { HealthDot(health: session.health) }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(record.name).font(.body)
+                        Text(record.address).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                        if let session {
+                            Text(session.shortState).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
-            Spacer()
+            .accessibilityHint(Text("编辑名称、地址和密码"))
             Toggle("显示在总览", isOn: Binding(
                 get: { record.showInGrid },
                 set: { app.setShowInGrid(record.id, $0) }))
                 .labelsHidden()
+                .fixedSize()
                 .accessibilityLabel(Text("在总览显示 \(record.name)"))
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            newName = record.name
-            renamingID = record.id
-        }
-        .accessibilityHint(Text("点按重命名"))
     }
 }
 
@@ -426,9 +432,7 @@ struct SyncView: View {
             if let wireframe = lead.redactedImage {
                 Image(uiImage: wireframe).resizable().scaledToFit().allowsHitTesting(false)
             }
-            if let overlay = StatusOverlay.content(for: lead) {
-                StatusOverlay(content: overlay, session: lead)
-            }
+            StatusOverlay(app: app, session: lead)
             ToastLayer(text: lead.toast)
         }
     }
@@ -451,8 +455,8 @@ struct SyncView: View {
 
     private func followerLabel(_ session: DeviceSession) -> String {
         if let note = session.delivery {
-            return "\(session.name)，\(session.shortState)，\(note.outcome.badge)"
+            return "\(session.name)，\(session.presentation().title)，\(note.outcome.badge)"
         }
-        return "\(session.name)，\(session.shortState)"
+        return "\(session.name)，\(session.presentation().title)"
     }
 }
