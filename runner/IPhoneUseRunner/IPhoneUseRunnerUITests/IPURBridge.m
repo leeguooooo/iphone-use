@@ -1101,14 +1101,20 @@ static NSData *IPURCaptureViaRequest(id encoding, NSString **error)
   SEL requestSelector = NSSelectorFromString(@"requestScreenshotWithRequest:withReply:");
   Class requestClass = NSClassFromString(@"XCTScreenshotRequest");
   SEL initSelector = NSSelectorFromString(@"initWithScreenID:rect:encoding:options:");
-  if (dataSource == nil || ![dataSource respondsToSelector:requestSelector] || requestClass == Nil
-      || ![requestClass instancesRespondToSelector:initSelector]) {
+  // iOS 15/16 XCTest has the initializer without `options:`.
+  SEL legacyInitSelector = NSSelectorFromString(@"initWithScreenID:rect:encoding:");
+  BOOL hasOptions = requestClass != Nil && [requestClass instancesRespondToSelector:initSelector];
+  BOOL hasLegacy = requestClass != Nil && [requestClass instancesRespondToSelector:legacyInitSelector];
+  if (dataSource == nil || ![dataSource respondsToSelector:requestSelector] || (!hasOptions && !hasLegacy)) {
     if (error) *error = @"screenshot request API unavailable";
     return nil;
   }
   long long screenID = (long long)IPURMainDisplayID();
-  id request = ((id (*)(id, SEL, long long, CGRect, id, unsigned long long))objc_msgSend)(
-    [requestClass alloc], initSelector, screenID, CGRectNull, encoding, 0ULL);
+  id request = hasOptions
+    ? ((id (*)(id, SEL, long long, CGRect, id, unsigned long long))objc_msgSend)(
+        [requestClass alloc], initSelector, screenID, CGRectNull, encoding, 0ULL)
+    : ((id (*)(id, SEL, long long, CGRect, id))objc_msgSend)(
+        [requestClass alloc], legacyInitSelector, screenID, CGRectNull, encoding);
   if (request == nil) {
     if (error) *error = @"could not build XCTScreenshotRequest";
     return nil;
@@ -1134,11 +1140,17 @@ static NSData *IPURCaptureViaEncoding(id encoding, NSString **error)
 {
   id screen = XCUIScreen.mainScreen;
   SEL selector = NSSelectorFromString(@"screenshotWithEncoding:options:");
-  if (![screen respondsToSelector:selector]) {
-    if (error) *error = @"XCUIScreen screenshotWithEncoding:options: unavailable";
+  // iOS 15/16 XCTest has the variant without `options:`.
+  SEL legacySelector = NSSelectorFromString(@"screenshotWithEncoding:");
+  id screenshot = nil;
+  if ([screen respondsToSelector:selector]) {
+    screenshot = ((id (*)(id, SEL, id, unsigned long long))objc_msgSend)(screen, selector, encoding, 0ULL);
+  } else if ([screen respondsToSelector:legacySelector]) {
+    screenshot = ((id (*)(id, SEL, id))objc_msgSend)(screen, legacySelector, encoding);
+  } else {
+    if (error) *error = @"XCUIScreen screenshotWithEncoding: unavailable";
     return nil;
   }
-  id screenshot = ((id (*)(id, SEL, id, unsigned long long))objc_msgSend)(screen, selector, encoding, 0ULL);
   NSData *data = IPURImageData(IPURObject(screenshot, @"internalImage"));
   if (data == nil && error) *error = @"encoded screenshot carried no data";
   return data;
