@@ -397,6 +397,7 @@ name = "core"
 version = "0.17.12"
 dependencies = [
  "base64 0.22.1",
+ "getrandom 0.3.4",
  "hmac",
  "serde",
  "serde_json",
@@ -1145,6 +1146,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 name = "legacy-launch"
 version = "0.17.12"
 dependencies = [
+ "core",
  "idevice",
  "plist",
  "tokio",
