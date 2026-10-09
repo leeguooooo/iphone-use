@@ -297,7 +297,7 @@ agent 不靠记性去查源，而是被推着走：`phone_elements` 直接列出
 
 `/agent/status` 是唯一事实来源。`recovery_owner` 在托管 loopback WDA 下是 `daemon`，首次接入尚未持久化目标时是 `unconfigured`，不托管的端点是 `external`。启动 WDA 之前，daemon 会先问手机是否锁屏：锁着的手机在连接后几秒内就显示 `setup_blocked_on:"locked"`（以前要等 Xcode 约 70 秒超时），连续两次读到解锁才启动。仍然因锁屏失败的，从 5 秒到 1 分钟安静重试；其他失败从 5 秒退避到 5 分钟；一次成功恢复清零两种退避。交互式 setup 最多等 5 分钟解锁。
 
-在 iPhone 17 Pro Max（iOS 27）上实测：手机解锁时冷连接 13–22 秒可操作；锁着时约 4 秒提示解锁，解锁后约 14 秒可操作；按编号点击并等画面稳定（`?return=delta`）约 4 秒。`POST /agent/mode {"mode":"agent"}`（MCP 里是 `phone_reconnect`）只重启一次已配置的目标，不要循环调；先读 `hint` 和 `setup_blocked_on`（`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|locked`）。`automation_mode_disabled` 表示手机已解锁但 iOS 未开启 UI 自动化：在手机上打开“设置 › 开发者 › 启用 UI 自动化”，并在解锁状态下确认密码或“允许自动化”提示。
+在 iPhone 17 Pro Max（iOS 27）上实测：手机解锁时冷连接 13–22 秒可操作；锁着时约 4 秒提示解锁，解锁后约 14 秒可操作；按编号点击并等画面稳定（`?return=delta`）约 4 秒。`POST /agent/mode {"mode":"agent"}`（MCP 里是 `phone_reconnect`）只重启一次已配置的目标，不要循环调；先读 `hint` 和 `setup_blocked_on`（`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|xcode_too_old|ios_too_old|locked`）。`ios_too_old` 表示手机的 iOS 低于所选 Xcode 能驱动的版本（Xcode 26 起真机测试要求 iOS 17 及以上）：升级 iPhone 系统，或用 `iphone-use setup --xcode <旧版 Xcode.app>` 让这台手机用旧版 Xcode；换线、关 WARP、重试都没用。`automation_mode_disabled` 表示手机已解锁但 iOS 未开启 UI 自动化：在手机上打开“设置 › 开发者 › 启用 UI 自动化”，并在解锁状态下确认密码或“允许自动化”提示。
 
 **谁有权结束一次重连。** 一次启动归发起它的任务所有，只有这个所有者能结束它。每次开始都会生成一个代次，所以迟到的任务无法结束接替它的那一轮；`GET /agent/status` 也永远不会结束重连——读状态会刷新健康缓存，但不移动生命周期。一次等待只以一个原因结束：手机可驱动了、锁屏了、setup 报出了前置阻塞、预算用尽、或被另一轮接管，每种都有日志。整个等待受预算约束：探针由绝对截止时间掐断而不是它自己的上限，超过截止时间才返回的证据一律丢弃，被取消的等待（进程关闭、future 被 drop）会释放自己那一轮而不是把 `reconnecting` 永久留下。启动之前缓存的证据，永远不算作这次启动已完成的证明。
 

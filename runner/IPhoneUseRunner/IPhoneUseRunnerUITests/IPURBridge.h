@@ -61,6 +61,15 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// Writes its pid into `pid`.
 + (nullable id)foregroundApplicationElementWithProbePoint:(CGPoint)probePoint pid:(int *)pid;
 
+/// Same, with the probe point computed only when the hit-test needs it.
++ (nullable id)foregroundApplicationElementWithProbe:(CGPoint (NS_NOESCAPE ^)(void))probe pid:(int *)pid
+  NS_SWIFT_NAME(foregroundApplicationElement(probePoint:pid:));
+
+/// Per-request cache of the active-application list and SpringBoard element (main thread only).
+/// Enabling or disabling clears it; synthesized touches clear it too.
++ (void)setRequestCacheEnabled:(BOOL)enabled;
++ (void)invalidateRequestCache;
+
 /// The system application (SpringBoard) AX element.
 + (nullable id)systemApplicationElement;
 
@@ -134,6 +143,11 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// timeline (offsets are absolute), so sequential touches simply use later offsets.
 + (nullable NSString *)synthesizeTouchPaths:(NSArray<NSArray<NSDictionary<NSString *, id> *> *> *)paths
                                        name:(NSString *)name;
+/// Where synthesized touches spent their time since the last call, in ms: "Orientation" (the
+/// record's orientation read), "Build" (record construction, including that read), "Wait"
+/// (synthesizeWithError: — testmanagerd plays the events and answers once they were delivered),
+/// "Hold" (the records' scheduled length) and "Calls". Empty when nothing was synthesized. Resets.
++ (NSDictionary<NSString *, NSNumber *> *)takeSynthesisTiming;
 
 /// Types into whatever holds keyboard focus. `charactersPerSecond` 0 → 60.
 + (nullable NSString *)synthesizeText:(NSString *)text

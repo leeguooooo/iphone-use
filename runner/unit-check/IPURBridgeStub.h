@@ -2,6 +2,7 @@
 // Objective-C exception catching), so runner/unit-check.sh can test it without a device.
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import "../IPhoneUseRunner/IPhoneUseRunnerUITests/IPURGeometry.h"
 
 NS_ASSUME_NONNULL_BEGIN
 

@@ -30,7 +30,7 @@ final class RunnerMJPEGServer {
 
   private final class Client {
     let connection: NWConnection
-    var sending = false
+    var sendingSince: Date?
     init(_ connection: NWConnection) { self.connection = connection }
   }
 
@@ -231,16 +231,22 @@ final class RunnerMJPEGServer {
       stats.since = now
     }
     // A client still writing the previous frame skips this one instead of queueing it, so a
-    // slow viewer gets fewer frames rather than growing latency.
-    let ready = clients.values.filter { !$0.sending }
-    ready.forEach { $0.sending = true }
+    // slow viewer gets fewer frames rather than growing latency; one stuck for seconds is cut off.
+    let stuck = clients.values.filter { StreamStall.isStuck(sendingSince: $0.sendingSince, now: now) }
+    for client in stuck { clients.removeValue(forKey: ObjectIdentifier(client)) }
+    let ready = clients.values.filter { $0.sendingSince == nil }
+    ready.forEach { $0.sendingSince = now }
     lock.unlock()
+    for client in stuck {
+      NSLog("ipu-runner: MJPEG client stuck writing for over %.0f s; dropping it", StreamStall.maxSendingSeconds)
+      client.connection.cancel()
+    }
 
     for client in ready {
       client.connection.send(content: part, completion: .contentProcessed { [weak self, weak client] error in
         guard let self, let client else { return }
         self.lock.lock()
-        client.sending = false
+        client.sendingSince = nil
         self.lock.unlock()
         if error != nil { client.connection.cancel() }
       })

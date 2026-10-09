@@ -311,24 +311,45 @@ struct ClassChain {
 // MARK: - Registry
 
 /// Element ids handed out by the find routes, WDA style. Entries keep the node they were found
-/// as; reads re-snapshot the live element so rects and values are fresh.
+/// as; reads re-snapshot the live element so rects and values are fresh. Each node retains its
+/// whole tree (parents, AX elements), so entries are bounded by count and dropped by age when the
+/// screen may have changed.
 final class ElementRegistry {
-  private var entries: [String: UINode] = [:]
+  private var entries: [String: (node: UINode, at: Date)] = [:]
   private var order: [String] = []
-  private let capacity = 4000
+  let capacity: Int
+  /// Ids older than this are dropped at the next screen-changing request. Callers use an id
+  /// right after finding it; an old one points at a screen that is likely gone.
+  static let maxAgeSeconds = 60.0
 
-  func register(_ node: UINode) -> String {
+  init(capacity: Int = 1000) { self.capacity = capacity }
+
+  var count: Int { entries.count }
+
+  func register(_ node: UINode, now: Date = Date()) -> String {
     let id = UUID().uuidString
-    entries[id] = node
+    entries[id] = (node, now)
     order.append(id)
     if order.count > capacity {
-      for stale in order.prefix(capacity / 4) { entries.removeValue(forKey: stale) }
-      order.removeFirst(capacity / 4)
+      let drop = max(1, capacity / 4)
+      for stale in order.prefix(drop) { entries.removeValue(forKey: stale) }
+      order.removeFirst(drop)
     }
     return id
   }
 
-  func node(_ id: String) -> UINode? { entries[id] }
+  func node(_ id: String) -> UINode? { entries[id]?.node }
+
+  /// Drops ids registered more than `maxAgeSeconds` before `now` (order is registration order).
+  func prune(now: Date = Date()) {
+    var cut = 0
+    while cut < order.count, let entry = entries[order[cut]],
+          now.timeIntervalSince(entry.at) > Self.maxAgeSeconds {
+      entries.removeValue(forKey: order[cut])
+      cut += 1
+    }
+    if cut > 0 { order.removeFirst(cut) }
+  }
 }
 
 /// Which processes an alert lookup has to look in. A system alert can sit in SpringBoard, in the
@@ -350,6 +371,30 @@ enum AlertScan {
   /// The pids still to search after the target's own tree came back without an alert.
   static func othersThan(target: Int32, in candidates: [Int32]) -> [Int32] {
     candidates.filter { $0 != target }
+  }
+
+  /// Levels read when only looking for an alert: alerts sit a few levels under the window, while
+  /// a full read of an app's content can be thousands of nodes.
+  static let shallowDepth = 12
+
+  /// The first alert in a tree read to `maxDepth` node levels, and whether the depth cap may have
+  /// cut its subtree (a childless node on the deepest level can be one whose children the AX
+  /// server withheld), in which case the caller reads the full depth.
+  static func firstAlert(in root: [String: Any], maxDepth: Int) -> (alert: [String: Any], maybeCut: Bool)? {
+    func find(_ node: [String: Any], _ depth: Int) -> (node: [String: Any], depth: Int)? {
+      if node["type"] as? String == "XCUIElementTypeAlert" { return (node, depth) }
+      for child in node["children"] as? [[String: Any]] ?? [] {
+        if let found = find(child, depth + 1) { return found }
+      }
+      return nil
+    }
+    func reachesCap(_ node: [String: Any], _ depth: Int) -> Bool {
+      let children = node["children"] as? [[String: Any]] ?? []
+      if children.isEmpty { return depth >= maxDepth - 1 }
+      return children.contains { reachesCap($0, depth + 1) }
+    }
+    guard let found = find(root, 0) else { return nil }
+    return (found.node, reachesCap(found.node, found.depth))
   }
 }
 

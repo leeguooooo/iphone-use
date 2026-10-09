@@ -27,6 +27,7 @@ const STICKY_ON_BEGIN: &[&str] = &[
     "ddi",
     "automation_mode_disabled",
     "xcode_too_old",
+    "ios_too_old",
     "automation_not_allowed",
     "wifi_automation_refused",
     "not_connected",

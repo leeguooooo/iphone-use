@@ -8,6 +8,7 @@
 // See runner/README.md for the full attribution and license text.
 
 #import "IPURBridge.h"
+#import "IPURGeometry.h"
 
 #import <ImageIO/ImageIO.h>
 #import <dlfcn.h>
@@ -175,10 +176,39 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
   return IPURInt(application, @"processID");
 }
 
+// Request-scoped cache (main thread only): the active-application list and SpringBoard element are
+// AX round trips; within one request they are read once until something may have changed them.
+static BOOL IPURRequestCacheEnabled = NO;
+static NSArray *IPURCachedActive = nil;
+static id IPURCachedSystem = nil;
+
++ (void)setRequestCacheEnabled:(BOOL)enabled
+{
+  if (!NSThread.isMainThread) return;
+  IPURRequestCacheEnabled = enabled;
+  IPURCachedActive = nil;
+  IPURCachedSystem = nil;
+}
+
++ (void)invalidateRequestCache
+{
+  if (!NSThread.isMainThread) return;
+  IPURCachedActive = nil;
+  IPURCachedSystem = nil;
+}
+
+static BOOL IPURUseRequestCache(void)
+{
+  return IPURRequestCacheEnabled && NSThread.isMainThread;
+}
+
 + (NSArray *)activeApplicationElements
 {
+  if (IPURUseRequestCache() && IPURCachedActive != nil) return IPURCachedActive;
   id active = IPURObject([self axClient], @"activeApplications");
-  return [active isKindOfClass:NSArray.class] ? active : @[];
+  NSArray *result = [active isKindOfClass:NSArray.class] ? active : @[];
+  if (IPURUseRequestCache()) IPURCachedActive = result;
+  return result;
 }
 
 + (NSArray<NSNumber *> *)activeApplicationPIDs
@@ -202,10 +232,18 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
 
 + (nullable id)systemApplicationElement
 {
-  return IPURObject([self axClient], @"systemApplication");
+  if (IPURUseRequestCache() && IPURCachedSystem != nil) return IPURCachedSystem;
+  id element = IPURObject([self axClient], @"systemApplication");
+  if (IPURUseRequestCache()) IPURCachedSystem = element;
+  return element;
 }
 
 + (nullable id)foregroundApplicationElementWithProbePoint:(CGPoint)probePoint pid:(int *)pid
+{
+  return [self foregroundApplicationElementWithProbe:^CGPoint { return probePoint; } pid:pid];
+}
+
++ (nullable id)foregroundApplicationElementWithProbe:(CGPoint (NS_NOESCAPE ^)(void))probe pid:(int *)pid
 {
   if (pid != NULL) *pid = 0;
   NSArray *active = [self activeApplicationElements];
@@ -236,7 +274,7 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
       NSError *error = nil;
       id hit = nil;
       @try {
-        hit = ((IPURMsgSendElementAtPoint)objc_msgSend)(axClient, hitTest, probePoint, &error);
+        hit = ((IPURMsgSendElementAtPoint)objc_msgSend)(axClient, hitTest, probe(), &error);
       } @catch (__unused NSException *exception) {
         hit = nil;
       }
@@ -576,6 +614,20 @@ static NSMutableArray<IPURFrontier *> *IPURCappedFrontiers(NSArray<IPURFrontier 
   return frontiers;
 }
 
+/// A remembered depth expires: the app may have left the screen that needed it (the key is a pid,
+/// and the same app on a lighter screen accepts the full depth again).
+static const NSTimeInterval IPURRememberedDepthSeconds = 30;
+
+static NSMutableDictionary<NSString *, NSDate *> *IPURAcceptedDepthTimes(void)
+{
+  static NSMutableDictionary<NSString *, NSDate *> *times;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    times = [NSMutableDictionary dictionary];
+  });
+  return times;
+}
+
 static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
 {
   static NSMutableDictionary<NSString *, NSNumber *> *depths;
@@ -617,6 +669,12 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
   if (rememberKey != nil) {
     @synchronized(IPURAcceptedDepths()) {
       remembered = IPURAcceptedDepths()[rememberKey];
+      NSDate *at = IPURAcceptedDepthTimes()[rememberKey];
+      if (remembered != nil && (at == nil || -at.timeIntervalSinceNow > IPURRememberedDepthSeconds)) {
+        [IPURAcceptedDepths() removeObjectForKey:rememberKey];
+        [IPURAcceptedDepthTimes() removeObjectForKey:rememberKey];
+        remembered = nil;
+      }
     }
   }
   if (remembered != nil && remembered.integerValue < maxDepth) {
@@ -645,6 +703,7 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
   if (rememberKey != nil && acceptedDepth < maxDepth) {
     @synchronized(IPURAcceptedDepths()) {
       IPURAcceptedDepths()[rememberKey] = @(acceptedDepth);
+      IPURAcceptedDepthTimes()[rememberKey] = [NSDate date];
     }
   }
 
@@ -738,9 +797,9 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
         || [recordClass instancesRespondToSelector:NSSelectorFromString(@"initWithName:interfaceOrientation:")]);
 }
 
-/// UIInterfaceOrientation for the record: the interface orientation on screen, not the physical
-/// device orientation (a phone lying on its side reads landscape while its UI stays portrait);
-/// unknown falls back to portrait.
+/// UIInterfaceOrientation the touch points are given in: the interface orientation on screen, not
+/// the physical device orientation (a phone lying on its side reads landscape while its UI stays
+/// portrait); unknown falls back to portrait.
 static long long IPURInterfaceOrientation(void)
 {
   NSInteger orientation = 1;
@@ -750,6 +809,48 @@ static long long IPURInterfaceOrientation(void)
     orientation = 1;
   }
   return (orientation >= 1 && orientation <= 4) ? orientation : 1;
+}
+
+// Where synthesized touches spent their time since the last takeSynthesisTiming (main thread):
+// the orientation read for the record, building the record, and synthesizeWithError: — the
+// testmanagerd round trip that plays the events in real time (so it covers the scheduled hold) and
+// answers once they were delivered. Hardware, iPhone 13 / iOS 27: Wait = Hold + ~220 ms for every
+// hold tried (20, 50, 100, 200 ms); the orientation read and the build take under 1 ms, and a 10 ms
+// implicit-confirmation interval did not shorten Wait, so the fixed part is testmanagerd's own.
+static double IPURSynthOrientationMs, IPURSynthBuildMs, IPURSynthWaitMs, IPURSynthHoldMs;
+static NSInteger IPURSynthCalls;
+
+static double IPURNowMs(void)
+{
+  return CFAbsoluteTimeGetCurrent() * 1000.0;
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)takeSynthesisTiming
+{
+  NSDictionary *timing = IPURSynthCalls == 0 ? @{} : @{
+    @"Orientation": @(IPURSynthOrientationMs),
+    @"Build": @(IPURSynthBuildMs),
+    @"Wait": @(IPURSynthWaitMs),
+    @"Hold": @(IPURSynthHoldMs),
+    @"Calls": @(IPURSynthCalls),
+  };
+  IPURSynthOrientationMs = IPURSynthBuildMs = IPURSynthWaitMs = IPURSynthHoldMs = 0;
+  IPURSynthCalls = 0;
+  return timing;
+}
+
+/// Runs synthesizeWithError: on a built record, timing it (and the record's last offset).
+static BOOL IPURSynthesizeRecord(id record, NSError **error)
+{
+  SEL maximumOffset = NSSelectorFromString(@"maximumOffset");
+  if ([record respondsToSelector:maximumOffset]) {
+    IPURSynthHoldMs += ((double (*)(id, SEL))objc_msgSend)(record, maximumOffset) * 1000.0;
+  }
+  double started = IPURNowMs();
+  BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(record, NSSelectorFromString(@"synthesizeWithError:"), error);
+  IPURSynthWaitMs += IPURNowMs() - started;
+  IPURSynthCalls += 1;
+  return ok;
 }
 
 static unsigned long long IPURMainDisplayID(void)
@@ -766,6 +867,14 @@ static unsigned long long IPURMainDisplayID(void)
   return displayID;
 }
 
+/// The interface orientation the touch paths being built are turned from (main thread; set per record).
+static long long IPURTouchOrientation = 1;
+
+static CGPoint IPURTouchPoint(CGPoint point)
+{
+  return IPURPortraitPoint(point, IPURTouchOrientation, UIScreen.mainScreen.bounds.size);
+}
+
 static NSString *IPURCreateGestureRecord(NSString *name, int pid, id *record)
 {
   if (![IPURBridge eventSynthesisAvailable]) {
@@ -774,7 +883,12 @@ static NSString *IPURCreateGestureRecord(NSString *name, int pid, id *record)
   Class recordClass = NSClassFromString(@"XCSynthesizedEventRecord");
   SEL displaySelector = NSSelectorFromString(@"initWithName:displayID:interfaceOrientation:");
   SEL orientationSelector = NSSelectorFromString(@"initWithName:interfaceOrientation:");
-  long long orientation = IPURInterfaceOrientation();
+  double readStarted = IPURNowMs();
+  IPURTouchOrientation = IPURInterfaceOrientation();
+  IPURSynthOrientationMs += IPURNowMs() - readStarted;
+  // The record takes portrait points: its orientation did not turn them on hardware (see
+  // IPURPortraitPoint), so the paths below turn them and the record says portrait.
+  long long orientation = 1;
   unsigned long long displayID = IPURMainDisplayID();
   id created = nil;
   if (displayID != 0 && [recordClass instancesRespondToSelector:displaySelector]) {
@@ -800,12 +914,12 @@ static id IPURNewTouchPath(CGPoint point, double offset)
 {
   Class pathClass = NSClassFromString(@"XCPointerEventPath");
   return ((IPURMsgSendInitPath)objc_msgSend)(
-    [pathClass alloc], NSSelectorFromString(@"initForTouchAtPoint:offset:"), point, offset);
+    [pathClass alloc], NSSelectorFromString(@"initForTouchAtPoint:offset:"), IPURTouchPoint(point), offset);
 }
 
 static void IPURMove(id path, CGPoint point, double offset)
 {
-  ((IPURMsgSendPathMove)objc_msgSend)(path, NSSelectorFromString(@"moveToPoint:atOffset:"), point, offset);
+  ((IPURMsgSendPathMove)objc_msgSend)(path, NSSelectorFromString(@"moveToPoint:atOffset:"), IPURTouchPoint(point), offset);
 }
 
 static void IPURLift(id path, double offset)
@@ -817,7 +931,8 @@ static NSString *IPURSynthesize(id record, id path)
 {
   ((IPURMsgSendAddPath)objc_msgSend)(record, NSSelectorFromString(@"addPointerEventPath:"), path);
   NSError *error = nil;
-  BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(record, NSSelectorFromString(@"synthesizeWithError:"), &error);
+  [IPURBridge invalidateRequestCache];  // a touch can change the foreground app
+  BOOL ok = IPURSynthesizeRecord(record, &error);
   if (!ok) {
     return [NSString stringWithFormat:@"private XCTest event synthesis failed: %@",
                                       error.localizedDescription ?: @"synthesizeWithError returned NO"];
@@ -912,6 +1027,7 @@ static NSString *IPURSynthesize(id record, id path)
 {
   if (paths.count == 0) return @"no touch paths to synthesize";
   @try {
+    double buildStarted = IPURNowMs();
     id record = nil;
     NSString *error = IPURCreateGestureRecord(name, 0, &record);
     if (error != nil) return error;
@@ -941,8 +1057,9 @@ static NSString *IPURSynthesize(id record, id path)
       ((IPURMsgSendAddPath)objc_msgSend)(record, NSSelectorFromString(@"addPointerEventPath:"), path);
     }
     NSError *synthesisError = nil;
-    BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(
-      record, NSSelectorFromString(@"synthesizeWithError:"), &synthesisError);
+    IPURSynthBuildMs += IPURNowMs() - buildStarted;
+    [IPURBridge invalidateRequestCache];  // a touch can change the foreground app
+    BOOL ok = IPURSynthesizeRecord(record, &synthesisError);
     if (!ok) {
       return [NSString stringWithFormat:@"private XCTest event synthesis failed: %@",
                                         synthesisError.localizedDescription ?: @"synthesizeWithError returned NO"];

@@ -561,7 +561,7 @@ Measured on an iPhone 17 Pro Max (iOS 27): an unlocked cold connect is drivable 
 13–22 s; a locked one shows "unlock" in ~4 s and is drivable ~14 s after the unlock; a
 snapshot-bound tap with `?return=delta` (tap, then the settled tree) takes ~4 s. `POST /agent/mode {"mode":"agent"}` (or MCP `phone_reconnect`) restarts the
 configured target once — do not loop it; read `hint` and `setup_blocked_on`
-(`warp|proxy|not_connected|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|wifi_automation_refused|xcode_too_old|locked`) first.
+(`warp|proxy|not_connected|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|wifi_automation_refused|xcode_too_old|ios_too_old|locked`) first.
 `not_connected` means the iPhone is not connected to this Mac at all: plug it in over USB
 (or join the same Wi-Fi) and unlock it. Nothing is rebuilt while it is away, and the
 connection comes back on its own when the phone does.
@@ -577,6 +577,13 @@ fails still leaves every later reconnect on that Xcode.
 KeepAlive then retries only every 15 minutes, since each attempt launches the runner on
 the phone; `iphone-use doctor` prints the phone's iOS next to the Xcode SDK and which Xcode
 the phone uses.
+`ios_too_old` is the opposite gap: the phone runs an iOS older than the selected Xcode can
+drive. From Xcode 26 on, device testing needs iOS 17 or later (CoreDevice only), so an
+iOS 15/16 phone is on the cable and paired but Xcode never lists it. Setup reads the
+phone's iOS from lockdownd and stops in seconds instead of waiting for developer
+services: update the iPhone (Settings › General › Software Update), or give this phone
+an older Xcode with `iphone-use setup --xcode <Xcode.app>`. A different cable or WARP
+setting does not help.
 `automation_not_allowed` is the same code-74 refusal with an Xcode that does support the
 phone's iOS, over USB: the phone did not authorize the UI-automation session. A passcode or
 Allow prompt appears on the iPhone while the runner starts and times out after about 30 s,

@@ -307,6 +307,10 @@ impl Setup {
                     if previous != Some(Kind::NotConnected) {
                         warn("the iPhone is not connected to this Mac; waiting for it without rebuilding anything");
                     }
+                } else if self.failure_kind == Kind::IosTooOld {
+                    if previous != Some(Kind::IosTooOld) {
+                        warn("the iPhone's iOS is too old for the selected Xcode; checking again every 15 min (update the iPhone or select an older Xcode with --xcode)");
+                    }
                 } else if self.failure_kind == Kind::Owned {
                     warn(&format!(
                         "another session holds the phone; checking its lease again in {delay}s"
@@ -398,6 +402,7 @@ impl Setup {
         self.destination_fallback()?;
         self.legacy = Legacy::new(&self.ctx, &self.ctx.team_id, &self.ctx.bundle_id);
         self.announce_device();
+        self.ios_supported()?;
         self.wait_for_developer_services()?;
         self.wait_for_unlock()?;
         self.phase(
@@ -833,6 +838,34 @@ impl Setup {
         }
     }
 
+    /// Fails fast when the phone's iOS is below what the selected Xcode can
+    /// run the device runner on. Such a phone is on USB and paired, but
+    /// CoreDevice never lists it, so waiting for developer services would
+    /// only time out minutes later with cable and WARP advice that does not
+    /// apply. Reads the version from lockdownd over usbmuxd; when it cannot be
+    /// read, nothing is decided here.
+    fn ios_supported(&mut self) -> Step {
+        let Some(device) = checks::lockdown_ios_version(&self.ctx.udid) else {
+            return Ok(());
+        };
+        let Some(xcodebuild) = sys::which("xcodebuild") else {
+            return Ok(());
+        };
+        let xcode =
+            checks::xcode_version_cached(self.ctx.state_dir(), &xcodebuild.to_string_lossy());
+        let below =
+            checks::min_device_ios(&xcode).is_some_and(|floor| checks::version_lt(&device, floor));
+        let legacy = below && checks::legacy_device_support(&device);
+        let Some(message) = ios_too_old_message(&xcode, Some(&device), legacy) else {
+            return Ok(());
+        };
+        self.phase("prereq", "ios_too_old", &message);
+        self.failure_kind = Kind::IosTooOld;
+        die(format!(
+            "{message}.\n   Retrying, reconnecting, or a different cable cannot fix this; no build was started."
+        ))
+    }
+
     /// `not_connected` when the phone left this Mac entirely, else `usb`
     /// (it is still reachable, just not over the cable).
     fn disconnected_blocker(&mut self) -> &'static str {
@@ -983,6 +1016,21 @@ impl Setup {
                     "developer services never became available for {}.",
                     self.ctx.udid
                 ));
+                // On the cable but invisible to CoreDevice: the selected
+                // Xcode cannot drive this phone, so cable and WARP advice
+                // would send the person the wrong way.
+                if checks::usbmux_lists(&self.ctx.udid)
+                    && checks::coredevice_lists(&self.ctx.udid) == Some(false)
+                {
+                    let version = checks::lockdown_ios_version(&self.ctx.udid)
+                        .map(|v| format!(" (iOS {v})"))
+                        .unwrap_or_default();
+                    let message = format!(
+                        "the iPhone{version} is attached to this Mac (usbmuxd lists it), but the selected Xcode's CoreDevice does not list it at all — this Xcode most likely cannot run tests on that iOS; update the iPhone (Settings → General → Software Update), or select an Xcode that supports it with --xcode"
+                    );
+                    self.phase("ddi-fail", "ddi", &message);
+                    return die(message);
+                }
                 warn("Most reliable fix: connect this iPhone to the Mac with a USB cable");
                 warn("(Wi-Fi-only often sits in 'connecting' and never mounts the disk image),");
                 warn("keep it unlocked + awake, then re-run. Devices the Mac currently sees:");
@@ -2734,6 +2782,25 @@ pub fn xcode_too_old_message(sdk: Option<&str>, device: Option<&str>) -> Option<
     })
 }
 
+/// The phone's iOS is below the floor of the Xcode named by `xcode` (the
+/// first line of `xcodebuild -version`) and that Xcode has no legacy
+/// DeviceSupport for it. `None` when the versions are unknown or fine.
+pub fn ios_too_old_message(
+    xcode: &str,
+    device: Option<&str>,
+    legacy_support: bool,
+) -> Option<String> {
+    let device = device.filter(|version| checks::valid_os_version(version))?;
+    let floor = checks::min_device_ios(xcode)?;
+    if legacy_support || !checks::version_lt(device, floor) {
+        return None;
+    }
+    let floor_major = floor.split('.').next().unwrap_or(floor);
+    Some(format!(
+        "This iPhone runs iOS {device}; {xcode} can only run the device runner on iOS {floor_major} or later. Update the iPhone (Settings → General → Software Update), or select an older Xcode with --xcode"
+    ))
+}
+
 /// The holding loop's patience: three unanswered `/status` probes in a row
 /// (~32 s) before a rebuild; one answer resets it.
 #[derive(Debug, Default)]
@@ -2828,6 +2895,28 @@ impl ProbeCount {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_ios_below_the_coredevice_floor_is_ios_too_old() {
+        // Hardware: iPhone 12 mini, lockdownd ProductVersion 15.4.1, Xcode
+        // 27.0 (devicectl shows only a bare ECID row, xctrace omits it).
+        let message = super::ios_too_old_message("Xcode 27.0", Some("15.4.1"), false).unwrap();
+        assert_eq!(
+            message,
+            "This iPhone runs iOS 15.4.1; Xcode 27.0 can only run the device runner on iOS 17 or later. Update the iPhone (Settings → General → Software Update), or select an older Xcode with --xcode"
+        );
+        assert!(!message.contains("USB") && !message.contains("WARP"));
+        assert!(super::ios_too_old_message("Xcode 26.1", Some("16.7"), false).is_some());
+        // At or above the floor, an Xcode without one, a legacy DeviceSupport
+        // image, or an unreadable version never blocks.
+        assert!(super::ios_too_old_message("Xcode 27.0", Some("17.0"), false).is_none());
+        assert!(super::ios_too_old_message("Xcode 27.0", Some("27.2"), false).is_none());
+        assert!(super::ios_too_old_message("Xcode 16.4", Some("15.4.1"), false).is_none());
+        assert!(super::ios_too_old_message("Xcode 27.0", Some("15.4.1"), true).is_none());
+        assert!(super::ios_too_old_message("Xcode 27.0", None, false).is_none());
+        assert!(super::ios_too_old_message("Xcode 27.0", Some("garbage"), false).is_none());
+        assert!(super::ios_too_old_message("", Some("15.4.1"), false).is_none());
+    }
+
     use super::*;
 
     #[test]

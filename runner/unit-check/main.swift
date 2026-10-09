@@ -176,7 +176,19 @@ do {
   ])
   check(tap.count == 1 && tap[0].count == 2, "tap is one down/up path")
   check(tap.first?.first?["x"] as? Double == 50 && tap.first?.last?["type"] as? String == "up", "tap position")
-  check(abs(t(tap[0][1]) - 0.05) < 1e-9, "tap held 50 ms")
+  check(abs(t(tap[0][1]) - W3CActions.tapHold) < 1e-9, "tap held tapHold")
+
+  func held(_ pauseMs: Double) throws -> Double {
+    let path = try pointer([
+      ["type": "pointerMove", "duration": 0, "x": 1, "y": 1],
+      ["type": "pointerDown", "button": 0],
+      ["type": "pause", "duration": pauseMs],
+      ["type": "pointerUp", "button": 0],
+    ])
+    return t(path[0][1]) - t(path[0][0])
+  }
+  check(abs(try held(20) - 0.02) < 1e-9, "an explicit 20 ms pause holds 20 ms")
+  check(abs(try held(3) - W3CActions.minimumHold) < 1e-9, "an explicit pause holds at least minimumHold")
 
   let hold = try pointer([
     ["type": "pointerMove", "duration": 0, "x": 1, "y": 1],
@@ -375,6 +387,42 @@ do {
         "landscape bounds with a landscape interface stay landscape")
 }
 
+// MARK: - Touch points turned to the portrait screen
+
+do {
+  // iPhone 13 (390x844), Safari in landscape right (3), measured: a point read as portrait
+  // (200, 300) landed at (300, 190) in the 844x390 landscape page. So landscape (300, 190) must be
+  // sent as portrait (200, 300).
+  let natural = CGSize(width: 390, height: 844)
+  func same(_ a: CGPoint, _ b: CGPoint) -> Bool { abs(a.x - b.x) < 0.001 && abs(a.y - b.y) < 0.001 }
+  check(same(IPURPortraitPoint(CGPoint(x: 300, y: 190), 3, natural), CGPoint(x: 200, y: 300)),
+        "landscape right: the measured hardware point maps back")
+  check(same(IPURPortraitPoint(CGPoint(x: 300, y: 190), 3, CGSize(width: 844, height: 390)), CGPoint(x: 200, y: 300)),
+        "landscape bounds give the same portrait point")
+  check(same(IPURPortraitPoint(CGPoint(x: 120, y: 700), 1, natural), CGPoint(x: 120, y: 700)),
+        "portrait points pass through")
+  for raw: Int64 in [0, 5, -1] {
+    check(same(IPURPortraitPoint(CGPoint(x: 120, y: 700), raw, natural), CGPoint(x: 120, y: 700)),
+          "unknown orientation \(raw) counts as portrait")
+  }
+  // Every corner of a landscape screen lands on a corner of the portrait screen, and the two
+  // landscapes turn opposite ways.
+  let landscape = CGSize(width: 844, height: 390)
+  for raw: Int64 in [3, 4] {
+    for corner in [CGPoint(x: 0, y: 0), CGPoint(x: landscape.width, y: 0),
+                   CGPoint(x: 0, y: landscape.height), CGPoint(x: landscape.width, y: landscape.height)] {
+      let p = IPURPortraitPoint(corner, raw, natural)
+      check((p.x == 0 || p.x == 390) && (p.y == 0 || p.y == 844), "landscape \(raw) corner \(corner) stays a corner")
+    }
+  }
+  check(same(IPURPortraitPoint(CGPoint(x: 0, y: 0), 3, natural), CGPoint(x: 390, y: 0)),
+        "landscape right: the top-left corner is the portrait top-right")
+  check(same(IPURPortraitPoint(CGPoint(x: 0, y: 0), 4, natural), CGPoint(x: 0, y: 844)),
+        "landscape left: the top-left corner is the portrait bottom-left")
+  check(same(IPURPortraitPoint(CGPoint(x: 0, y: 0), 2, natural), CGPoint(x: 390, y: 844)),
+        "upside down: corners swap")
+}
+
 // MARK: - Alert scan (alerts beside a web sheet)
 
 do {
@@ -428,6 +476,46 @@ do {
   check(!CaptureLane.claims(request("POST", "/screenshot")), "only reads take the capture lane")
   check(!CaptureLane.claims(request("GET", "/session/ABC/element/E1/screenshot")),
         "an element screenshot is not the screen capture")
+}
+
+// MARK: - Stream stalls
+
+do {
+  let now = Date()
+  check(!StreamStall.isStuck(sendingSince: nil, now: now), "a client not writing is not stuck")
+  check(!StreamStall.isStuck(sendingSince: now.addingTimeInterval(-1), now: now), "one second into a write is a slow link")
+  check(StreamStall.isStuck(sendingSince: now.addingTimeInterval(-6), now: now), "six seconds into one write: cut off")
+  check(!StreamStall.keyframeAllowed(last: now.addingTimeInterval(-0.3), now: now),
+        "a second stall keyframe within the same second waits")
+  check(StreamStall.keyframeAllowed(last: .distantPast, now: now), "the first stall keyframe goes out")
+}
+
+// MARK: - Shallow alert scan
+
+do {
+  let button: [String: Any] = ["type": "XCUIElementTypeButton", "label": "OK"]
+  let alert: [String: Any] = ["type": "XCUIElementTypeAlert", "children": [["type": "XCUIElementTypeOther", "children": [button]]]]
+  let root: [String: Any] = ["type": "XCUIElementTypeApplication", "children": [["type": "XCUIElementTypeWindow", "children": [alert]]]]
+  let found = AlertScan.firstAlert(in: root, maxDepth: 12)
+  check(found != nil && found?.maybeCut == false, "an alert near the top of a shallow read is complete")
+  check(AlertScan.firstAlert(in: root, maxDepth: 4)?.maybeCut == true,
+        "an alert whose button sits on the last read level may be cut: read the full depth")
+  check(AlertScan.firstAlert(in: ["type": "XCUIElementTypeApplication", "children": [button]], maxDepth: 12) == nil,
+        "no alert in the tree: nothing")
+}
+
+// MARK: - Element registry bounds
+
+do {
+  let registry = ElementRegistry(capacity: 8)
+  let start = Date()
+  let old = registry.register(tree, now: start)
+  let fresh = registry.register(tree, now: start.addingTimeInterval(55))
+  registry.prune(now: start.addingTimeInterval(65))
+  check(registry.node(old) == nil, "an id older than a minute is dropped when the screen may change")
+  check(registry.node(fresh) != nil, "a recent id survives the prune")
+  for _ in 0..<20 { _ = registry.register(tree, now: start.addingTimeInterval(66)) }
+  check(registry.count <= 8, "the registry never holds more than its capacity")
 }
 
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")

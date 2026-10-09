@@ -36,6 +36,19 @@ final class RunnerTests: XCTestCase {
   /// Last alert scan and when it ran; reused for a second while nothing was POSTed (WdaClient asks
   /// /alert/text and /wda/alert/buttons back to back).
   var alertCache: (at: Date, alert: FoundAlert?)?
+  /// Where a request's time went, by part (ms and call count), sent back as X-IPU-<Part>-Ms and
+  /// X-IPU-<Part>-Calls. Reset per request.
+  var requestTiming: [String: (ms: Double, calls: Int)] = [:]
+
+  /// Times `body` as part `name` of the current request.
+  func timed<T>(_ name: String, _ body: () throws -> T) rethrows -> T {
+    let started = Date()
+    defer {
+      let entry = requestTiming[name] ?? (0, 0)
+      requestTiming[name] = (entry.ms + Date().timeIntervalSince(started) * 1000, entry.calls + 1)
+    }
+    return try body()
+  }
   /// appium/settings values, accepted and echoed (the runner never waits for idle anyway).
   var wdaSettings: [String: Any] = ["waitForIdleTimeout": 0, "animationCoolOffTimeout": 0]
 
@@ -210,8 +223,14 @@ final class RunnerTests: XCTestCase {
     busySince = started
     busyLock.unlock()
     recordedIssues.removeAll()
+    requestTiming.removeAll()
+    // One active-application list and SpringBoard element per request (each list is an AX round
+    // trip of ~15 ms); anything that can change the foreground app drops them.
+    IPURBridge.setRequestCacheEnabled(true)
+    defer { IPURBridge.setRequestCacheEnabled(false) }
     if request.method != "GET", Self.mayChangeScreen(request.path) {
       alertCache = nil
+      elements.prune()
     }
     defer {
       busyLock.lock()
@@ -232,7 +251,16 @@ final class RunnerTests: XCTestCase {
     if !recordedIssues.isEmpty {
       response.headers["X-IPU-XCTest-Issues"] = String(recordedIssues.count)
     }
+    // Where synthesized touches spent their time: X-IPU-Synth-{Orientation,Build,Wait,Hold}-Ms.
+    for (part, value) in IPURBridge.takeSynthesisTiming() {
+      response.headers[part == "Calls" ? "X-IPU-Synth-Calls" : "X-IPU-Synth-\(part)-Ms"] =
+        part == "Calls" ? value.stringValue : String(format: "%.1f", value.doubleValue)
+    }
     response.headers["X-IPU-Ms"] = String(Int(Date().timeIntervalSince(started) * 1000))
+    for (name, entry) in requestTiming {
+      response.headers["X-IPU-\(name)-Ms"] = String(format: "%.1f", entry.ms)
+      response.headers["X-IPU-\(name)-Calls"] = String(entry.calls)
+    }
     return response
   }
 
@@ -280,9 +308,17 @@ final class RunnerTests: XCTestCase {
   }
 
   func foreground() -> Foreground {
+    timed("Foreground") { resolveForeground() }
+  }
+
+  private func resolveForeground() -> Foreground {
     var pid: Int32 = 0
-    let element = IPURBridge.foregroundApplicationElement(withProbePoint: screenCenter(), pid: &pid)
-    if let sheet = viewServiceOverlay(foregroundPID: pid) { return sheet }
+    // The probe point (screen size, so an orientation read) only matters when several apps are
+    // active; the bridge asks for it then.
+    let element = timed("ActiveApps") {
+      IPURBridge.foregroundApplicationElement(probePoint: { self.timed("Orientation") { self.screenCenter() } }, pid: &pid)
+    }
+    if let sheet = timed("ViewService", { viewServiceOverlay(foregroundPID: pid) }) { return sheet }
     return Foreground(element: element as AnyObject?, pid: pid)
   }
 
@@ -435,13 +471,28 @@ final class RunnerTests: XCTestCase {
       element = IPURBridge.activeApplicationElement(forPID: pid) as AnyObject?
     }
     guard let element else { return nil }
-    let tree = IPURBridge.wdaTree(
-      forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
-      extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
-    guard (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] else {
-      return nil
+    return alertInTree(element, pid: pid)
+  }
+
+  /// The alert in one process's AX tree, read shallow first (AlertScan.shallowDepth); the full
+  /// depth is read only when that read failed or the alert's own subtree reached its cap.
+  /// `.some(nil)`: read, no alert; `nil`: unreadable.
+  func alertInTree(_ element: AnyObject, pid: Int32) -> FoundAlert?? {
+    func read(_ depth: Int) -> [String: Any]? {
+      let tree = IPURBridge.wdaTree(
+        forAXElement: element, maxDepth: depth, maxNodes: Self.defaultMaxNodes,
+        extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
+      guard (tree[IPURTreeOkKey] as? Bool) == true else { return nil }
+      return tree[IPURTreeRootKey] as? [String: Any]
     }
-    return .some(firstNode(in: root, type: "XCUIElementTypeAlert").map { describeAlert($0, pid: pid) })
+    func full() -> FoundAlert?? {
+      guard let root = timed("AlertFullRead", { read(Self.defaultMaxDepth) }) else { return nil }
+      return .some(AlertScan.firstAlert(in: root, maxDepth: Self.defaultMaxDepth).map { describeAlert($0.alert, pid: pid) })
+    }
+    guard let shallow = timed("AlertRead", { read(AlertScan.shallowDepth) }) else { return full() }
+    guard let found = AlertScan.firstAlert(in: shallow, maxDepth: AlertScan.shallowDepth) else { return .some(nil) }
+    if found.maybeCut, let deep = full(), let alert = deep { return .some(alert) }
+    return .some(describeAlert(found.alert, pid: pid))
   }
 
   func treeHeaders(_ tree: [String: Any], backend: String, pid: Int32) -> [String: String] {
@@ -464,13 +515,14 @@ final class RunnerTests: XCTestCase {
     synthesized: () -> String?,
     fallback: (XCUIApplication) -> Void
   ) throws -> HTTPResponse {
-    if let error = synthesized() {
+    if let error = timed("Synthesize", synthesized) {
       NSLog("ipu-runner: %@ synthesis failed, using XCUICoordinate: %@", name, error)
       let application = foreground().application
       let issuesBefore = recordedIssues.count
       var exception: String?
       IPURBridge.performWithoutQuiescence(application) {
         exception = IPURBridge.catchException { fallback(application) }
+        IPURBridge.invalidateRequestCache()
       }
       if let exception {
         throw RunnerError.failed("\(name) failed (synthesis: \(error); coordinate: \(exception))")
@@ -545,6 +597,7 @@ final class RunnerTests: XCTestCase {
   }
 
   func home() throws -> HTTPResponse {
+    defer { IPURBridge.invalidateRequestCache() }
     if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(.home) }) {
       throw RunnerError.failed("home failed: \(exception)")
     }
@@ -559,6 +612,7 @@ final class RunnerTests: XCTestCase {
     var exception: String?
     IPURBridge.performWithoutQuiescence(application) {
       exception = IPURBridge.catchException { application.activate() }
+      IPURBridge.invalidateRequestCache()
     }
     if let failure = exception ?? (recordedIssues.count > issuesBefore ? recordedIssues.last : nil) {
       throw RunnerError.failed("launch \(bundle) failed: \(failure)")
@@ -621,14 +675,7 @@ final class RunnerTests: XCTestCase {
       if pid == target.pid, let element = target.element {
         // The target's element is already resolved (a view-service sheet is not always in
         // `activeApplications` under its own pid lookup).
-        let tree = IPURBridge.wdaTree(
-          forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
-          extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
-        if (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] {
-          result = .some(firstNode(in: root, type: "XCUIElementTypeAlert").map { describeAlert($0, pid: pid) })
-        } else {
-          result = nil
-        }
+        result = alertInTree(element, pid: pid)
       } else {
         result = alertInProcess(pid: pid)
       }

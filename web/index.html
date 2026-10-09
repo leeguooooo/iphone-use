@@ -1208,6 +1208,8 @@ function setupBlockerCopy(blockedOn) {
       return ['iPhone 没有授权 UI 自动化', 'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败；请解锁 iPhone、确认 设置 › 开发者 › 启用 UI 自动化 已打开，下次重试时完成这个提示；稍候会自动重试'];
     case 'wifi_automation_refused':
       return ['Wi-Fi 下无法授权 UI 自动化', '通过 Wi-Fi 时手机弹不出输密码的提示（有些 iOS 版本干脆拒绝）；请用 USB 连接这台 iPhone，并在它要求时输入密码。插上 USB 后会立刻重试；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB'];
+    case 'ios_too_old':
+      return ['iPhone 系统版本太旧', '所选 Xcode 只能在 iOS 17 及以上的 iPhone 上运行设备 runner；请在 iPhone 上 设置 › 通用 › 软件更新 升级系统，或运行 iphone-use setup --xcode <旧版 Xcode.app> 让这台手机用旧版 Xcode；换线、重试和重连都解决不了'];
     case 'xcode_too_old':
       return ['Xcode 版本太旧', 'iPhone 的 iOS 比这台 Mac 上的 Xcode 新；请安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），再运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它；重试和重连都解决不了'];
     case 'wda':
@@ -1220,12 +1222,13 @@ function setupBlockerCopy(blockedOn) {
 /* Blockers that clear only when a person does something to the phone or the
    Mac. `wda` and `account` are excluded on purpose: they are not a single
    physical gesture, and their copy sends the operator to a log or to Xcode.
-   `xcode_too_old` is included: its one action is installing an Xcode, and a
-   reconnect spinner over it would promise a retry that cannot succeed. It is
-   not in managedSetupWillRetry for the same reason, and neither is
+   `xcode_too_old` and `ios_too_old` are included: their one action is
+   installing an Xcode or updating the iPhone, and a reconnect spinner over
+   them would promise a retry that cannot succeed. They are not in
+   managedSetupWillRetry for the same reason, and neither is
    `wifi_automation_refused`: retrying over Wi-Fi cannot fix it, only USB. */
 const ACTIONABLE_SETUP_BLOCKERS = new Set(
-  ['locked', 'trust', 'automation_mode_disabled', 'automation_not_allowed', 'wifi_automation_refused', 'not_connected', 'usb', 'ddi', 'warp', 'proxy', 'xcode_too_old'],
+  ['locked', 'trust', 'automation_mode_disabled', 'automation_not_allowed', 'wifi_automation_refused', 'not_connected', 'usb', 'ddi', 'warp', 'proxy', 'xcode_too_old', 'ios_too_old'],
 );
 /* The managed retry loop alternates between building and its backoff, and it
    publishes the blocker only during the backoff. Reading each poll on its own
