@@ -214,12 +214,15 @@ Repeated bootstrap requests hide the real blocker — fix it, then reconnect onc
 The native runner's 8100/9100 listeners refuse any request not signed with the
 token setup generates at each runner launch (`<state dir>/runner-token`, 0600;
 HMAC-SHA256 over method, target, body, timestamp and a one-time nonce, so a captured
-request cannot be replayed or altered). Daemon bearer auth protects `/agent/*`. The Mac's relays listen on loopback only
+request cannot be replayed or altered). Daemon bearer auth protects `/agent/*`.
+The Mac's relays listen on loopback only
 and reach the phone over USB or, off the cable, through CoreDevice's encrypted
 Wi-Fi tunnel (`transport: "wifi-tunnel"`, the default `WDA_TRANSPORT=auto`;
-`WDA_TRANSPORT=usb` requires the cable). A plain LAN relay to the phone's address
-(`transport: "wifi"`) exists only behind the explicit `WDA_ALLOW_LAN=1` and is
-unsafe on an untrusted network. Use Direct only on a trusted network.
+`WDA_TRANSPORT=usb` requires the cable). A LAN relay to the phone's address
+(`transport: "wifi"`) is used by default only for an iOS 15/16 runner that enforces
+request signing; anything else (the socat relay, a runner older than request
+signing) needs the explicit `WDA_ALLOW_LAN=1`. The LAN path is unencrypted: use it
+only on a trusted network.
 
 ## HTTP API
 

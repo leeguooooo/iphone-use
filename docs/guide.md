@@ -20,10 +20,11 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
   relaunch and the same relays reach the phone through CoreDevice's encrypted Wi-Fi tunnel
   with no flag (`WDA_TRANSPORT=auto`, the default; `WDA_TRANSPORT=usb` requires the cable;
   see *Wi-Fi* below). An iOS 15/16 phone has no such tunnel: `auto` starts its runner over
-  lockdown's TLS session on Wi-Fi instead, and driving it off the cable needs the plain LAN
-  relay (see the iOS 15/16 section). A plain LAN `socat` relay to the phone's address (`WDA_ALLOW_LAN=1`)
-  is only an explicit last resort: it is unencrypted, so it is unsafe on an untrusted
-  network.
+  lockdown's TLS session on Wi-Fi instead, and driving it off the cable goes over a LAN
+  relay that setup turns on by default once the runner proves it enforces request signing
+  (see the iOS 15/16 section). Otherwise a plain LAN `socat` relay to the phone's address
+  (`WDA_ALLOW_LAN=1`, also what a runner older than request signing needs) is only an
+  explicit last resort: it is unencrypted, so it is unsafe on an untrusted network.
 - The browser gets the live picture from `/agent/mjpeg` (PNG stills as fallback) and
   sends input through `POST /control`, which answers success or failure for every
   command instead of accepting it blindly over a possibly dead channel.
