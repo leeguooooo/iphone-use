@@ -442,5 +442,19 @@ do {
   check(StreamStall.keyframeAllowed(last: .distantPast, now: now), "the first stall keyframe goes out")
 }
 
+// MARK: - Shallow alert scan
+
+do {
+  let button: [String: Any] = ["type": "XCUIElementTypeButton", "label": "OK"]
+  let alert: [String: Any] = ["type": "XCUIElementTypeAlert", "children": [["type": "XCUIElementTypeOther", "children": [button]]]]
+  let root: [String: Any] = ["type": "XCUIElementTypeApplication", "children": [["type": "XCUIElementTypeWindow", "children": [alert]]]]
+  let found = AlertScan.firstAlert(in: root, maxDepth: 12)
+  check(found != nil && found?.maybeCut == false, "an alert near the top of a shallow read is complete")
+  check(AlertScan.firstAlert(in: root, maxDepth: 4)?.maybeCut == true,
+        "an alert whose button sits on the last read level may be cut: read the full depth")
+  check(AlertScan.firstAlert(in: ["type": "XCUIElementTypeApplication", "children": [button]], maxDepth: 12) == nil,
+        "no alert in the tree: nothing")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)
