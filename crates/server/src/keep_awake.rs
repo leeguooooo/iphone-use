@@ -19,7 +19,7 @@
 //! [`lock_report`] hands that to the control path, which unlocks a
 //! passcode-less phone before the next action (see `agent_input`).
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,6 +83,41 @@ pub fn note_unlocked() {
 
 fn record(report: &KeepAwakeReport) {
     LAST_LOCK.store(LockReport::from_report(report) as u8, Ordering::Release);
+    crate::lock_readiness::note_runner_report(report);
+}
+
+/// Keep-awake as `/agent/status` reports it (see [`crate::lock_readiness`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeepAwakeStatus {
+    /// Configured: a device runner is managed and the window is not `0`.
+    pub enabled: bool,
+    /// The runner has the route; `None` until it was asked.
+    pub supported: Option<bool>,
+    /// The phone is being kept awake right now.
+    pub active: bool,
+}
+
+/// 0 = not asked yet, 1 = the runner has the route, 2 = it does not.
+static SUPPORTED: AtomicU8 = AtomicU8::new(0);
+static ENABLED: AtomicBool = AtomicBool::new(false);
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// What keep-awake is doing now.
+pub fn status() -> KeepAwakeStatus {
+    KeepAwakeStatus {
+        enabled: ENABLED.load(Ordering::Acquire),
+        supported: match SUPPORTED.load(Ordering::Acquire) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        },
+        active: ACTIVE.load(Ordering::Acquire),
+    }
+}
+
+/// Whether the runner answered the keep-awake route (a read counts too).
+pub fn note_supported(supported: bool) {
+    SUPPORTED.store(if supported { 1 } else { 2 }, Ordering::Release);
 }
 
 /// The keep-awake window from `PHONE_REMOTE_KEEP_AWAKE_SECS`; `None` when it
@@ -113,6 +148,7 @@ pub fn spawn(state: Arc<AppState>) {
     let Some(wda) = state.wda.clone() else {
         return;
     };
+    ENABLED.store(true, Ordering::Release);
     tracing::info!(
         "keep-awake on: the phone does not auto-lock while it is driven, nor for {}s after the last request",
         window.as_secs()
@@ -138,6 +174,7 @@ pub fn spawn(state: Arc<AppState>) {
             match endpoint.renew(if want { LEASE_SECS } else { 0 }).await {
                 Ok(report) => {
                     record(&report);
+                    note_supported(true);
                     let now_active = want && report.active;
                     if now_active != active {
                         tracing::info!(
@@ -150,11 +187,14 @@ pub fn spawn(state: Arc<AppState>) {
                         );
                     }
                     active = now_active;
+                    ACTIVE.store(active, Ordering::Release);
                 }
                 Err(KeepAwakeError::Unsupported) => {
                     tracing::info!("the device runner has no keep-awake route (WebDriverAgent or an older runner); the phone may auto-lock while it is driven");
                     unsupported_until = Some(tokio::time::Instant::now() + UNSUPPORTED_RETRY);
+                    note_supported(false);
                     active = false;
+                    ACTIVE.store(false, Ordering::Release);
                 }
                 Err(KeepAwakeError::Failed(error)) => {
                     // A runner that is down cannot keep the phone awake, and
@@ -162,6 +202,7 @@ pub fn spawn(state: Arc<AppState>) {
                     tracing::debug!("keep-awake renewal failed: {error:#}");
                     if !want {
                         active = false;
+                        ACTIVE.store(false, Ordering::Release);
                     }
                 }
             }
@@ -205,6 +246,7 @@ mod tests {
             active: true,
             locked,
             passcode,
+            auto_lock: None,
         };
         assert_eq!(
             LockReport::from_report(&report(Some(false), Some(true))),

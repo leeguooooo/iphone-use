@@ -883,6 +883,9 @@ impl PhoneHandler {
         backend, target_configured, managed_wda, managed_wda_pending, recovery_owner, \
         device_state, screen_state, wda, wda_actionable, locked, drivable, released, \
         hint, setup_blocked_on, setup_phase, and setup_message. Gate actions on drivable=true. \
+        `lock_readiness` says whether the phone locks on its own when idle (passcode_protected, \
+        auto_lock_secs, keep_awake, verdict, hint): will_lock_needs_person means a person must \
+        unlock it after a pause; tell the owner the hint instead of retrying. \
         For status/health checks, report the state and stop. Idle release \
         is intentional: reconnect (phone_reconnect, once) only when a current \
         user-requested task needs the phone, recovery_owner=daemon, and no blocker or \

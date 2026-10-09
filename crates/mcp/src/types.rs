@@ -144,6 +144,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn status_keeps_lock_readiness() {
+        let readiness = json!({
+            "passcode_protected": true,
+            "auto_lock_secs": 30,
+            "keep_awake": {"enabled": true, "supported": true, "active": false},
+            "verdict": "will_lock_needs_person",
+            "hint": {"zh": "设了锁屏密码", "en": "has a passcode"},
+            "checked_at": 1_791_000_000u64,
+        });
+        let status: StatusResponse =
+            serde_json::from_value(json!({"ok": true, "lock_readiness": readiness.clone()}))
+                .unwrap();
+        let out = serde_json::to_value(&status).unwrap();
+        assert_eq!(out["lock_readiness"], readiness);
+    }
+
+    #[test]
     fn direct_status_preserves_recovery_fields() {
         let status: StatusResponse = serde_json::from_value(json!({
             "ok": true,

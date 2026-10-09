@@ -609,6 +609,26 @@
       opacity: 1; outline: 2px solid var(--accent); outline-offset: 2px;
     }
 
+    /* ── Lock readiness (will this phone get stuck at the lock screen) ── */
+    #lockNotice {
+      position: absolute; top: 46px; left: 50%; transform: translateX(-50%);
+      display: none; align-items: flex-start; gap: .5rem;
+      width: max-content; max-width: min(92%, 460px);
+      background: rgba(20, 24, 38, .92); border: 1px solid rgba(148,163,184,.4);
+      color: #e2e8f0; font-size: 12px; line-height: 1.45; padding: .4rem .8rem; border-radius: 12px;
+      z-index: 30; backdrop-filter: blur(6px);
+    }
+    #lockNotice.visible { display: flex; }
+    #lockNotice.needs-person { border-color: rgba(251,191,36,.6); color: #fde68a; }
+    #lockNotice .tag { font-weight: 600; white-space: nowrap; }
+    #lockNotice .x {
+      cursor: pointer; opacity: .6; padding: .1rem .25rem;
+      border: 0; border-radius: 4px; background: transparent;
+      color: inherit; font: inherit; line-height: 1;
+    }
+    #lockNotice .x:hover { opacity: 1; }
+    #lockNotice .x:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 2px; }
+
     /* ── Offline / stall overlay ────────────────────────────────── */
     #offlineOverlay {
       position: absolute;
@@ -746,6 +766,14 @@
       <span id="updateText"></span>
       <button class="x" id="updateDismiss" type="button"
               title="本次会话不再提示" aria-label="关闭更新提示">✕</button>
+    </div>
+
+    <!-- lock readiness: passcode + Auto-Lock (populated from /agent/status lock_readiness) -->
+    <div id="lockNotice" role="note" aria-live="polite">
+      <span class="tag" id="lockNoticeTag"></span>
+      <span id="lockNoticeText"></span>
+      <button class="x" id="lockNoticeDismiss" type="button"
+              title="本次会话不再提示" aria-label="关闭锁屏提示">✕</button>
     </div>
 
     <!-- offline / stall overlay (pointer-events:none so taps still reach videoArea) -->
@@ -1463,6 +1491,41 @@ function showOverlay(kind) {
   } catch (_) { /* best-effort */ }
 })();
 
+/* ── Lock readiness ──────────────────────────────────────────────
+   `lock_readiness.verdict` says whether the phone locks on its own while
+   nobody drives it. Only the two "will lock" verdicts are shown; the line is
+   the daemon's own hint, so the page never words it differently. */
+const LOCK_NOTICE_TAGS = {
+  will_lock_needs_person: '会锁屏 · 需有人解锁',
+  will_lock_auto_unlocks: '会锁屏 · 可自动解锁',
+};
+function lockNoticeFor(status) {
+  const readiness = status?.lock_readiness;
+  const verdict = String(readiness?.verdict || '');
+  const tag = LOCK_NOTICE_TAGS[verdict];
+  if (!tag) return null;
+  return { verdict, tag, text: String(readiness?.hint?.zh || '') };
+}
+function syncLockNotice(status) {
+  const notice = document.getElementById('lockNotice');
+  if (!notice) return;
+  const shown = lockNoticeFor(status);
+  let dismissed = '';
+  try { dismissed = sessionStorage.getItem('lockNoticeDismissed') || ''; } catch (_) {}
+  if (!shown || dismissed === shown.verdict) {
+    notice.classList.remove('visible');
+    return;
+  }
+  setTextIfChanged(document.getElementById('lockNoticeTag'), shown.tag);
+  setTextIfChanged(document.getElementById('lockNoticeText'), shown.text);
+  notice.classList.toggle('needs-person', shown.verdict === 'will_lock_needs_person');
+  notice.classList.add('visible');
+  document.getElementById('lockNoticeDismiss').onclick = () => {
+    try { sessionStorage.setItem('lockNoticeDismissed', shown.verdict); } catch (_) {}
+    notice.classList.remove('visible');
+  };
+}
+
 /* ── Device status ───────────────────────────────────────────────
    The phone is served only over WebDriverAgent: H.264 or MJPEG (with
    screenshot stills as fallback) for video and cookie-authenticated POST /control for
@@ -1552,6 +1615,7 @@ async function pollAgentMode() {
     backendStatus = s;
     syncHandoffButton();
     syncRedactedOverlay(s);
+    syncLockNotice(s);
 
     updateMjpegActivityFromStatus(s, polledStreamId);
     const directPageVisible = document.visibilityState === 'visible';

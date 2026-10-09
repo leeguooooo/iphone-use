@@ -207,9 +207,16 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// `-[XCUIDevice pressLockButton]`; returns an error string when unavailable.
 + (nullable NSString *)pressLockButton;
 
-/// Screen lock state and whether a passcode is set, both from SBGetScreenLockStatus. nil when
+/// Screen lock state and whether a passcode is required now (false on an unlocked phone even
+/// with a passcode set, seen on iOS 15), both from SBGetScreenLockStatus. nil when
 /// SpringBoardServices is unavailable. Keys: "locked", "passcodeEnabled" (NSNumber BOOL).
 + (nullable NSDictionary<NSString *, NSNumber *> *)screenLockStatus;
+
+/// The Auto-Lock setting, read from ManagedConfiguration (`MCProfileConnection`
+/// `effectiveValueForSetting:@"maxInactivity"`, the value Settings > Display & Brightness >
+/// Auto-Lock writes). Reads only: nothing on screen changes. nil when the framework or the
+/// value is unavailable. Keys: "secs" (NSNumber, seconds) and "never" (NSNumber BOOL).
++ (nullable NSDictionary<NSString *, id> *)autoLockSetting;
 
 /// Resets SpringBoard's idle (auto-lock) timer the way a key press would, without changing
 /// anything on screen: one press of F13 (keyboard usage page 0x07, usage 0x68), a key iOS maps to

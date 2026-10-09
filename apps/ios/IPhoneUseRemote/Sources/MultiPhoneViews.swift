@@ -96,7 +96,7 @@ struct DeviceTile: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("\(session.name)，\(session.presentation().title)"))
+        .accessibilityLabel(Text(tileLabel))
         .accessibilityHint(Text("打开全屏操作"))
         .accessibilityAddTraits(.isButton)
         .contextMenu {
@@ -126,8 +126,17 @@ struct DeviceTile: View {
     }
 }
 
-/// A tile's picture: the live stream, the reason there is none, and the last
-/// sync result as a badge.
+extension DeviceTile {
+    /// Name, state, and whether it locks on its own, for VoiceOver.
+    var tileLabel: String {
+        let base = "\(session.name)，\(session.presentation().title)"
+        guard let badge = session.status?.lockBadge else { return base }
+        return "\(base)，\(badge.sentence)"
+    }
+}
+
+/// A tile's picture: the live stream, the reason there is none, the last
+/// sync result as a badge, and a lock badge when the phone locks on its own.
 struct TilePicture: View {
     let session: DeviceSession
 
@@ -154,6 +163,12 @@ struct TilePicture: View {
             if let note = session.delivery {
                 DeliveryBadge(outcome: note.outcome).padding(6)
             }
+            if let lock = session.status?.lockBadge {
+                LockBadgeView(badge: lock, compact: true)
+                    .padding(6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .allowsHitTesting(false)
+            }
         }
         .aspectRatio(9.0 / 19.5, contentMode: .fit)
         .frame(maxWidth: .infinity)
@@ -161,6 +176,32 @@ struct TilePicture: View {
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.12)))
         .animation(.easeInOut(duration: 0.2), value: session.delivery)
+    }
+}
+
+/// The phone locks on its own when idle: needs a person (orange) or unlocks by
+/// itself (gray). `compact` is the tile's capsule; the list row says it in words.
+struct LockBadgeView: View {
+    let badge: LockBadge
+    var compact = true
+
+    var body: some View {
+        Group {
+            if compact {
+                Label(badge.title, systemImage: badge.symbol)
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background((badge.urgent ? Color.orange : Color.gray).opacity(0.85), in: Capsule())
+                    .foregroundStyle(.white)
+            } else {
+                Label(badge.sentence, systemImage: badge.symbol)
+                    .font(.caption)
+                    .foregroundStyle(badge.urgent ? Color.orange : Color.secondary)
+            }
+        }
+        .labelStyle(.titleAndIcon)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(badge.sentence))
     }
 }
 
@@ -262,6 +303,9 @@ struct DevicesSheet: View {
                         Text(record.address).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
                         if let session {
                             Text(session.shortState).font(.caption).foregroundStyle(.secondary)
+                            if let lock = session.status?.lockBadge {
+                                LockBadgeView(badge: lock, compact: false)
+                            }
                         }
                     }
                 }

@@ -37,6 +37,11 @@ screen. A tile on screen holds a stream and so counts as a viewer for the daemon
 a tile scrolled away, a hidden device, or the app in the background holds none. Only the device on
 screen (and sync members) is woken automatically.
 
+Lock screen: a phone that locks on its own when idle carries a badge on its tile and in the
+device list — orange "会锁屏" (passcode set: a person has to unlock it) or gray "可自动解锁" (no
+passcode) — and its edit form lists the passcode state, the Auto-Lock setting and the daemon's
+advice (`lock_readiness` in `/agent/status`; set Auto-Lock to Never on automation phones).
+
 Sync (同步): pick a lead and followers; every gesture on the lead, Home and typed text go to all of
 them at once with the same normalized coordinates, each through its own daemon and owner lease
 (`X-Phone-Owner: ios-remote`). Each tile shows its result (delivered / not sent / in use / unknown /

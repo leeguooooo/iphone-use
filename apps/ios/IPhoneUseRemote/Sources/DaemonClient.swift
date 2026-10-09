@@ -27,6 +27,9 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
     /// Who holds the owner lease (`X-Phone-Owner`), while it is live.
     var owner: String?
     var ownerLeaseRemainingSecs: Int
+    /// Passcode + Auto-Lock: whether the phone locks on its own when idle
+    /// (`lock_readiness`); nil from a daemon that predates it.
+    var lockReadiness: LockReadiness?
 
     /// Another session (an agent, the web page, a schedule) holds this
     /// phone's lease: a gesture from here would be refused with 409.
@@ -49,6 +52,7 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         case warming
         case owner
         case ownerLeaseRemainingSecs = "owner_lease_remaining_secs"
+        case lockReadiness = "lock_readiness"
     }
 
     init(from decoder: Decoder) throws {
@@ -71,6 +75,7 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         warming = try c.decodeIfPresent(Bool.self, forKey: .warming) ?? false
         owner = try c.decodeIfPresent(String.self, forKey: .owner)
         ownerLeaseRemainingSecs = try c.decodeIfPresent(Int.self, forKey: .ownerLeaseRemainingSecs) ?? 0
+        lockReadiness = try? c.decodeIfPresent(LockReadiness.self, forKey: .lockReadiness)
     }
 
     /// The line to show a person: the daemon's `next_step`, else (older

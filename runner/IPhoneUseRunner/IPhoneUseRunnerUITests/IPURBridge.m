@@ -1469,6 +1469,32 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
   return @{@"locked": @(locked), @"passcodeEnabled": @(passcodeEnabled)};
 }
 
++ (nullable NSDictionary<NSString *, id> *)autoLockSetting
+{
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    dlopen("/System/Library/PrivateFrameworks/ManagedConfiguration.framework/ManagedConfiguration",
+           RTLD_LAZY);
+  });
+  Class connectionClass = NSClassFromString(@"MCProfileConnection");
+  SEL shared = NSSelectorFromString(@"sharedConnection");
+  SEL effective = NSSelectorFromString(@"effectiveValueForSetting:");
+  if (connectionClass == Nil || ![connectionClass respondsToSelector:shared]) return nil;
+  id value = nil;
+  @try {
+    id connection = ((id (*)(id, SEL))objc_msgSend)(connectionClass, shared);
+    if (![connection respondsToSelector:effective]) return nil;
+    value = ((id (*)(id, SEL, id))objc_msgSend)(connection, effective, @"maxInactivity");
+  } @catch (NSException *exception) {
+    return nil;
+  }
+  if (![value isKindOfClass:[NSNumber class]]) return nil;
+  NSInteger secs = [(NSNumber *)value integerValue];
+  // "Never" is stored as INT_MAX; anything beyond a day is no Auto-Lock a phone offers.
+  BOOL never = secs <= 0 || secs >= 86400;
+  return @{@"secs": @(secs), @"never": @(never)};
+}
+
 + (nullable NSString *)resetIdleTimer
 {
   // Measured on an iPhone 13 / iOS 27 with Auto-Lock at 30 s: F13 every 10 s kept the phone

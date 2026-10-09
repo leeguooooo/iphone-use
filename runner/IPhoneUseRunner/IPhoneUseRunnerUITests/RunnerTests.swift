@@ -799,8 +799,9 @@ extension RunnerTests {
   /// `POST /wda/keepawake {"secs": N}` keeps the phone from auto-locking for the next N seconds
   /// (0 stops at once, at most 900); the daemon renews it while someone is driving the phone, so
   /// a daemon that dies or goes idle lets Auto-Lock take over again on its own.
-  /// `GET /wda/keepawake` reports the state. Both also report the lock state and whether a
-  /// passcode is set, so the daemon knows whether an unlock can work.
+  /// `GET /wda/keepawake` reports the state. Both also report the lock state, whether a passcode
+  /// is set, so the daemon knows whether an unlock can work, and the Auto-Lock setting
+  /// (`autoLockSecs`, `autoLockNever`) when ManagedConfiguration answers.
   func keepAwakeResponse(_ request: HTTPRequest) -> HTTPResponse {
     switch request.method {
     case "GET":
@@ -823,6 +824,10 @@ extension RunnerTests {
     if let lock = IPURBridge.screenLockStatus() {
       value["locked"] = lock["locked"]
       value["passcodeEnabled"] = lock["passcodeEnabled"]
+    }
+    if let autoLock = IPURBridge.autoLockSetting() {
+      value["autoLockSecs"] = autoLock["secs"]
+      value["autoLockNever"] = autoLock["never"]
     }
     return .value(value)
   }
