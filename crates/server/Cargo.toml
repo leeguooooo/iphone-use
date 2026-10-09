@@ -51,6 +51,9 @@ tempfile = "3"
 # WDA (L2 element-tree control): screenshots arrive base64-encoded.
 base64 = "0.22"
 sha2 = "0.10"
+# ES256 tokens for the App Store Connect API (legacy iOS signing) and the
+# SHA-1 codesign takes; already in the tree through rustls.
+ring = "0.17"
 
 # Live video as H.264: WDA's MJPEG frames are decoded (zune-jpeg) and
 # re-encoded on the Mac's hardware encoder (VideoToolbox), cutting a remote

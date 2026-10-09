@@ -30,6 +30,8 @@ const STICKY_ON_BEGIN: &[&str] = &[
     "ios_too_old",
     "automation_not_allowed",
     "wifi_automation_refused",
+    "ddi_needs_reboot",
+    "legacy_needs_usb",
     "not_connected",
     "wda",
 ];

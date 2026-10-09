@@ -43,6 +43,9 @@ umask 077
 _inline_sign() {
     local app="$1"
     codesign --force --sign - "$app/Contents/MacOS/iphone-use-mcp"
+    if [ -f "$app/Contents/MacOS/iphone-use-legacy-launch" ]; then
+        codesign --force --sign - "$app/Contents/MacOS/iphone-use-legacy-launch"
+    fi
     codesign --force --sign - "$app/Contents/MacOS/iphone-use"
     codesign --force --sign - "$app"
     ok "Ad-hoc signed without creating a certificate or changing keychain state"

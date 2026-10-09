@@ -194,6 +194,9 @@ pub fn runner_signature_valid(signature: &str) -> bool {
     if !safe_expected(signature) {
         return false;
     }
+    if legacy_launch_valid(signature) {
+        return true;
+    }
     let Some(rest) = strip_xcodebuild(signature) else {
         return false;
     };
@@ -256,6 +259,34 @@ pub fn runner_signature_valid(signature: &str) -> bool {
     false
 }
 
+/// The legacy (iOS 15/16) runner: the launcher's `launch` of the runner
+/// (`super::legacy_ios::launch_argv`), over USB or Wi-Fi, from an absolute
+/// path.
+fn legacy_launch_valid(signature: &str) -> bool {
+    let tokens: Vec<&str> = signature.split(' ').collect();
+    let bundle_ok = |value: &str| {
+        value.ends_with(".xctrunner")
+            && value
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-')
+    };
+    let program_ok = |program: &str| {
+        program.starts_with('/') && program.ends_with("/iphone-use-legacy-launch")
+    };
+    match tokens.as_slice() {
+        [program, "launch", "--udid", udid, "--bundle-id", bundle] => {
+            program_ok(program) && hex_udid(udid) && bundle_ok(bundle)
+        }
+        [program, "launch", "--udid", udid, "--host", host, "--bundle-id", bundle] => {
+            program_ok(program)
+                && hex_udid(udid)
+                && host.parse::<std::net::IpAddr>().is_ok()
+                && bundle_ok(bundle)
+        }
+        _ => false,
+    }
+}
+
 fn relay_signature_valid(signature: &str) -> bool {
     let tokens: Vec<&str> = signature.split(' ').collect();
     match tokens.as_slice() {
@@ -266,6 +297,15 @@ fn relay_signature_valid(signature: &str) -> bool {
                 && hex_udid(udid)
                 && listen.strip_prefix("127.0.0.1:").is_some_and(digits)
                 && digits(port)
+        }
+        [program, "relay", "--udid", udid, "--listen", listen, "--device-port", port, "--lan-host", host] => {
+            program.starts_with('/')
+                && program.ends_with("/iphone-use")
+                && program.len() > "/iphone-use".len() + 1
+                && hex_udid(udid)
+                && listen.strip_prefix("127.0.0.1:").is_some_and(digits)
+                && digits(port)
+                && host.parse::<std::net::Ipv4Addr>().is_ok()
         }
         [program, "-s", "127.0.0.1", ports, "-u", udid] => {
             (*program == "iproxy" || (program.starts_with('/') && program.ends_with("/iproxy")))
@@ -721,6 +761,29 @@ mod tests {
         ));
         let wda_run = "/usr/bin/xcodebuild -destination platform=iOS,id=0000 test-without-building -xctestrun /tmp/d/WebDriverAgentRunner_iphoneos17.0-arm64.xctestrun";
         assert!(runner_signature_valid(wda_run));
+    }
+
+    #[test]
+    fn the_legacy_launcher_is_a_runner_and_a_lan_relay_is_a_relay() {
+        let usb = "/Users/leo/.iphone-use/instances/i12/runtime/iPhoneUse.app/Contents/MacOS/iphone-use-legacy-launch launch --udid 00008101-000409443404001E --bundle-id com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner";
+        assert!(runner_signature_valid(usb));
+        assert!(command_matches(usb, &format!("runner:{usb}")));
+        let wifi = usb.replace(" --bundle-id", " --host 192.168.0.59 --bundle-id");
+        assert!(runner_signature_valid(&wifi));
+        assert!(!runner_signature_valid(&usb.replace(" launch ", " install ")));
+        assert!(!runner_signature_valid(&wifi.replace("192.168.0.59", "evil;x")));
+        assert!(!runner_signature_valid(&usb.replace(".xctrunner", "")));
+        assert!(!runner_signature_valid(&usb.replace(
+            "/Users/leo/.iphone-use/instances/i12/runtime/iPhoneUse.app/Contents/MacOS/iphone-use-legacy-launch",
+            "iphone-use-legacy-launch"
+        )));
+        assert!(!runner_signature_valid(&format!("{usb} --env X=1")));
+        let lan = "/Users/leo/.iphone-use/instances/i12/runtime/iPhoneUse.app/Contents/MacOS/iphone-use relay --udid 00008101-000409443404001E --listen 127.0.0.1:8410 --device-port 8100 --lan-host 192.168.0.59";
+        assert!(command_matches(lan, &format!("relay:{lan}")));
+        assert!(!command_matches(
+            &lan.replace("192.168.0.59", "evil;host"),
+            &format!("relay:{}", lan.replace("192.168.0.59", "evil;host"))
+        ));
     }
 
     #[test]

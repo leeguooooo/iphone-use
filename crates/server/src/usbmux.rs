@@ -31,7 +31,12 @@ const MUX_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `iphone-use relay`: listen on `listen` (loopback only) and forward every
 /// connection to `device_port` on the iPhone whose UDID is `udid`.
-pub async fn run_relay(udid: &str, listen: SocketAddr, device_port: u16) -> Result<()> {
+pub async fn run_relay(
+    udid: &str,
+    listen: SocketAddr,
+    device_port: u16,
+    lan_host: Option<std::net::Ipv4Addr>,
+) -> Result<()> {
     if !listen.ip().is_loopback() {
         bail!("the relay listens on loopback only; {listen} is not a loopback address");
     }
@@ -64,16 +69,24 @@ pub async fn run_relay(udid: &str, listen: SocketAddr, device_port: u16) -> Resu
         };
         let want = want.clone();
         tokio::spawn(async move {
-            if let Err(error) = forward(client, &want, device_port).await {
+            if let Err(error) = forward(client, &want, device_port, lan_host).await {
                 tracing::warn!("relay {peer} -> device:{device_port}: {error:#}");
             }
         });
     }
 }
 
-async fn forward(mut client: TcpStream, want: &str, device_port: u16) -> Result<()> {
+async fn forward(
+    mut client: TcpStream,
+    want: &str,
+    device_port: u16,
+    lan_host: Option<std::net::Ipv4Addr>,
+) -> Result<()> {
     let _ = client.set_nodelay(true);
-    let (mut device, path) = connect_port(want, device_port).await?;
+    let (mut device, path) = match lan_host {
+        Some(host) => connect_usb_or_lan(want, device_port, host).await?,
+        None => connect_port(want, device_port).await?,
+    };
     note_path(device_port, path);
     tokio::io::copy_bidirectional(&mut client, &mut device).await?;
     Ok(())
@@ -88,6 +101,8 @@ pub enum Path {
     Tunnel,
     /// usbmuxd's own network attachment (in practice it reaches lockdownd only).
     Network,
+    /// Straight to the phone's LAN address (an iOS 15/16 runner off the cable).
+    Lan,
 }
 
 impl Path {
@@ -96,6 +111,7 @@ impl Path {
             Path::Usb => "usb",
             Path::Tunnel => "wifi-tunnel",
             Path::Network => "network",
+            Path::Lan => "wifi",
         }
     }
 }
@@ -170,6 +186,30 @@ pub async fn connect_port(want: &str, port: u16) -> Result<(Box<dyn DeviceIo>, P
             "iPhone {want} is not attached over USB and has no CoreDevice Wi-Fi tunnel"
         )),
     }
+}
+
+/// An iOS 15/16 phone: usbmuxd over USB while it is on the cable, else its
+/// LAN address (it has no CoreDevice tunnel, and asking CoreDevice for one
+/// costs a devicectl call per connection).
+pub async fn connect_usb_or_lan(
+    want: &str,
+    port: u16,
+    host: std::net::Ipv4Addr,
+) -> Result<(Box<dyn DeviceIo>, Path)> {
+    if let Ok(Some(found)) = find_attached(want).await {
+        if found.usb {
+            if let Ok(stream) = connect(found.device_id, port).await {
+                return Ok((Box::new(stream), Path::Usb));
+            }
+        }
+    }
+    let target = SocketAddr::from((host, port));
+    let stream = tokio::time::timeout(TUNNEL_CONNECT_TIMEOUT, TcpStream::connect(target))
+        .await
+        .map_err(|_| anyhow!("{target}: connect timed out"))?
+        .with_context(|| format!("connect {target}"))?;
+    let _ = stream.set_nodelay(true);
+    Ok((Box::new(stream), Path::Lan))
 }
 
 /// Log the path once per change, not on every connection.
@@ -736,6 +776,7 @@ mod tests {
                 "00008110-0002346211A0401E",
                 "0.0.0.0:0".parse().unwrap(),
                 8100,
+                None,
             ))
             .unwrap_err();
         assert!(error.to_string().contains("loopback"), "{error}");

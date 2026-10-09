@@ -298,6 +298,14 @@ fn sweep_device_runner(ctx: &Ctx) {
     if !serving {
         return;
     }
+    // iOS 15/16: the runner lives on its launcher's session, which stop has
+    // just ended; CoreDevice cannot see such a phone anyway.
+    if super::legacy_ios::read_record(ctx.state_dir()).is_some_and(|r| {
+        crate::usbmux::normalize_udid(&r.udid) == crate::usbmux::normalize_udid(&ctx.udid)
+    }) {
+        warn("the iOS 15/16 runner still answered right after its launcher stopped; it ends with that session");
+        return;
+    }
     let pids = sys::devicectl_json(15, &["device", "info", "processes", "--device", &ctx.udid])
         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
         .map(|value| runner_pids(&value))

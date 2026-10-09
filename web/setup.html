@@ -291,9 +291,19 @@
         retry: '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode）；在那之前自动重试也不会成功。',
       },
       ios_too_old: {
-        title: 'iPhone 系统版本太旧，所选 Xcode 驱动不了',
-        setup: '所选 Xcode 只能在 iOS 17 及以上的 iPhone 上运行设备 runner。请在 iPhone 上 设置 › 通用 › 软件更新 升级系统，或运行 iphone-use setup --xcode <旧版 Xcode.app> 让这台手机用旧版 Xcode，再重新运行设置命令。',
-        retry: '请升级 iPhone 系统，或给这台手机指定旧版 Xcode；在那之前自动重试也不会成功，换线也没用。',
+        title: '这台 Mac 还驱动不了这台 iPhone 的系统',
+        setup: 'iOS 15 和 16 不用升级：配置付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），再重新运行设置命令。iOS 14 及更早的系统只能升级手机。',
+        retry: '配置 App Store Connect API 密钥（iOS 15/16），或升级 iPhone（iOS 14 及更早）；在那之前自动重试也不会成功，换线也没用。',
+      },
+      ddi_needs_reboot: {
+        title: '请重启一次 iPhone',
+        setup: 'iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来。重启手机，解锁并保持插线，再重新运行设置命令。',
+        retry: '重启一次 iPhone，解锁并保持插线；服务每隔几分钟会自动再试。',
+      },
+      legacy_needs_usb: {
+        title: '请用数据线连接 iPhone',
+        setup: '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，再重新运行设置命令；之后只要手机和这台 Mac 在同一网络就可以拔线。',
+        retry: '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，服务会立刻接着连接；之后只要手机和这台 Mac 在同一网络就可以拔线。',
       },
       wda: {
         title: '设备服务启动失败',

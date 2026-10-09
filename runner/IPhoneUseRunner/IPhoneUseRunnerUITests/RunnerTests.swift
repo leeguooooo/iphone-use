@@ -188,6 +188,13 @@ final class RunnerTests: XCTestCase {
     return response
   }
 
+  /// The phone's Wi-Fi (en0) IPv4 address, or NSNull off Wi-Fi: setup reads it to reach an
+  /// iOS 15/16 runner directly over the LAN.
+  static func lanAddress() -> Any {
+    let address = RunnerHTTPServer.deviceAddress()
+    return address == "127.0.0.1" ? NSNull() : address
+  }
+
   func statusValue() -> [String: Any] {
     busyLock.lock()
     let busySince = self.busySince
@@ -208,7 +215,7 @@ final class RunnerTests: XCTestCase {
       "state": "success",
       "sessionId": Self.sessionID,
       "os": ["name": "iOS", "version": Self.systemVersion, "sdkVersion": Self.systemVersion],
-      "ios": ["ip": NSNull()],
+      "ios": ["ip": Self.lanAddress() as Any],
       "build": ["productBundleIdentifier": bundleID, "version": version, "runner": "iphone-use-native"],
       "bundle": bundleID,
       "version": version,

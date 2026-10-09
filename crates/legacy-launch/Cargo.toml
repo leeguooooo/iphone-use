@@ -17,7 +17,7 @@ path = "src/main.rs"
 # testmanagerd/XCTest launch (DTX) all live here; `tcp` is the Wi-Fi path that
 # talks to lockdown on <ip>:62078 without usbmuxd. ring matches the server's
 # rustls backend, so no aws-lc / cmake in the build.
-idevice = { version = "=0.1.68", default-features = false, features = ["ring", "xctest", "tcp", "usbmuxd", "heartbeat"] }
+idevice = { version = "=0.1.68", default-features = false, features = ["ring", "xctest", "tcp", "usbmuxd", "heartbeat", "mobile_image_mounter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "signal"] }
 plist = "1.7"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }

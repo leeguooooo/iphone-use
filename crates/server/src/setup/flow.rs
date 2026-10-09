@@ -13,6 +13,7 @@ use super::checks::{self, Signing};
 use super::ctx::{valid_port, Ctx, RUNNER_APP_NAME, XCODE_APP_STORE_URL};
 use super::icon;
 use super::launchd;
+use super::legacy_ios;
 use super::owner;
 use super::pid::{self, Legacy, Role};
 use super::proc::{self, XcconfigEnv};
@@ -68,6 +69,21 @@ pub struct Setup {
     /// Readiness came straight over USB (no LAN address known yet).
     from_probe: bool,
     interactive_lock: Option<InteractiveLock>,
+    /// Set when the phone takes the legacy (iOS 15/16) path.
+    legacy_ios: Option<LegacyRun>,
+}
+
+/// A phone on the legacy (iOS 15/16) path: see `legacy_ios`.
+#[derive(Debug, Clone, Default)]
+struct LegacyRun {
+    ios: String,
+    /// The `iphone-use-legacy-launch` binary.
+    launcher: PathBuf,
+    /// The LAN address this run starts the runner over; `None` = USB.
+    host: Option<String>,
+    lan_ip: Option<String>,
+    wifi_mac: Option<String>,
+    wifi_ready: bool,
 }
 
 /// The interactive lock wait's notice schedule.
@@ -121,6 +137,7 @@ impl Setup {
             icon_source: None,
             from_probe: false,
             interactive_lock: None,
+            legacy_ios: None,
         }
     }
 
@@ -199,6 +216,19 @@ impl Setup {
                 info(&format!(
                     "KeepAlive retry backoff: waiting {wait}s before the next rebuild"
                 ));
+            }
+            if state.kind == Kind::LegacyUnreachable {
+                while retry::now() < state.next_at {
+                    if checks::transport(&self.ctx.udid) == checks::Transport::Usb
+                        || legacy_reachable_over_wifi(&self.ctx)
+                    {
+                        info("the iOS 15/16 iPhone is reachable again; retrying");
+                        break;
+                    }
+                    let left = state.next_at.saturating_sub(retry::now()).clamp(1, 5);
+                    proc::sleep(Duration::from_secs(left))?;
+                }
+                return Ok(());
             }
             if state.kind == Kind::WifiAutomation {
                 // Only USB clears a Wi-Fi refusal: stop waiting the moment
@@ -311,6 +341,14 @@ impl Setup {
                     if previous != Some(Kind::IosTooOld) {
                         warn("the iPhone's iOS is too old for the selected Xcode; checking again every 15 min (update the iPhone or select an older Xcode with --xcode)");
                     }
+                } else if self.failure_kind == Kind::LegacyUnreachable {
+                    if previous != Some(Kind::LegacyUnreachable) {
+                        warn("the iOS 15/16 iPhone is neither on USB nor reachable over Wi-Fi; retrying as soon as it is");
+                    }
+                } else if self.failure_kind == Kind::NeedsReboot {
+                    if previous != Some(Kind::NeedsReboot) {
+                        warn("the iPhone's developer services need a restart of the iPhone; checking again every few minutes");
+                    }
                 } else if self.failure_kind == Kind::Owned {
                     warn(&format!(
                         "another session holds the phone; checking its lease again in {delay}s"
@@ -403,8 +441,13 @@ impl Setup {
         self.legacy = Legacy::new(&self.ctx, &self.ctx.team_id, &self.ctx.bundle_id);
         self.announce_device();
         self.ios_supported()?;
-        self.wait_for_developer_services()?;
-        self.wait_for_unlock()?;
+        if self.legacy_ios.is_some() {
+            self.legacy_prepare()?;
+        } else {
+            legacy_ios::clear_record(self.ctx.state_dir());
+            self.wait_for_developer_services()?;
+            self.wait_for_unlock()?;
+        }
         self.phase(
             "building",
             &self.build_blocker.clone(),
@@ -469,10 +512,17 @@ impl Setup {
             ),
             icon::cache_component(self.icon_source.as_deref())
         );
-        let (_products, xctestrun, from_cache) = self.product(&xcodebuild, &key)?;
-        let url = self.launch(&xcodebuild, &xctestrun, from_cache)?;
+        let (products, xctestrun, from_cache) = self.product(&xcodebuild, &key)?;
+        let url = if self.legacy_ios.is_some() {
+            self.legacy_launch(&products, &key)?
+        } else {
+            self.launch(&xcodebuild, &xctestrun, from_cache)?
+        };
         self.phone_url = url.clone();
-        let target_url = self.relays(&url)?;
+        let mut target_url = self.relays(&url)?;
+        if self.legacy_ios.is_some() {
+            target_url = self.legacy_wifi(&url, &target_url)?;
+        }
         let daemon = self.configure_daemon(&target_url)?;
         if self.ctx.keepalive {
             self.verify_supervision(&target_url)?;
@@ -493,7 +543,7 @@ impl Setup {
         self.daemon.active = false;
         self.sup.active = false;
         self.self_install.replaced = false;
-        self.phase("ready", "", "device runner and launchd supervisor verified");
+        self.phase("ready", "", &self.ready_message());
         self.summary(&url, &target_url, &daemon, &source_hash);
         Ok(())
     }
@@ -641,7 +691,9 @@ impl Setup {
                 return die("the device layer defaults to USB, but no USB iPhone was found.\n   Plug in and unlock one iPhone, or set WDA_UDID=<USB UDID>; no build was started.");
             }
             let usb = checks::usb_udids();
-            if !checks::on_usb(&self.ctx.udid, &usb) {
+            if !checks::on_usb(&self.ctx.udid, &usb) && legacy_reachable_over_wifi(&self.ctx) {
+                ok("the iOS 15/16 iPhone is off USB but reachable over Wi-Fi; starting it there");
+            } else if !checks::on_usb(&self.ctx.udid, &usb) {
                 self.phase(
                     "prereq",
                     "usb",
@@ -657,10 +709,12 @@ impl Setup {
                 .into_iter()
                 .filter(|serial| checks::on_usb(&self.ctx.udid, std::slice::from_ref(serial)))
                 .collect();
-            let untrusted = usbdiag::untrusted(&serial);
-            if let Some(diagnosis) = usbdiag::diagnose(&[], &serial, &untrusted) {
-                self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
-                return die(format!("{}; no build was started.", diagnosis.message()));
+            if !serial.is_empty() {
+                let untrusted = usbdiag::untrusted(&serial);
+                if let Some(diagnosis) = usbdiag::diagnose(&[], &serial, &untrusted) {
+                    self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
+                    return die(format!("{}; no build was started.", diagnosis.message()));
+                }
             }
         } else if self.ctx.udid.is_empty() {
             warn("WDA_ALLOW_LAN=1: no USB target; paired destinations will be enumerated from the runner project");
@@ -845,7 +899,11 @@ impl Setup {
     /// apply. Reads the version from lockdownd over usbmuxd; when it cannot be
     /// read, nothing is decided here.
     fn ios_supported(&mut self) -> Step {
-        let Some(device) = checks::lockdown_ios_version(&self.ctx.udid) else {
+        // Off the cable usbmuxd may not list an iOS 15/16 phone; its last
+        // legacy run recorded the version.
+        let Some(device) = checks::lockdown_ios_version(&self.ctx.udid)
+            .or_else(|| legacy_record_for(&self.ctx).map(|r| r.ios))
+        else {
             return Ok(());
         };
         let Some(xcodebuild) = sys::which("xcodebuild") else {
@@ -856,6 +914,26 @@ impl Setup {
         let below =
             checks::min_device_ios(&xcode).is_some_and(|floor| checks::version_lt(&device, floor));
         let legacy = below && checks::legacy_device_support(&device);
+        if below && !legacy && legacy_ios::applies(&device) {
+            if self.ctx.asc_signing_enabled() {
+                ok(&format!(
+                    "iOS {device}: using the legacy device path ({xcode} cannot drive iOS below 17 itself)"
+                ));
+                let record = legacy_record_for(&self.ctx);
+                self.legacy_ios = Some(LegacyRun {
+                    ios: device,
+                    lan_ip: record.as_ref().and_then(|r| r.lan_ip.clone()),
+                    wifi_mac: record.as_ref().and_then(|r| r.wifi_mac.clone()),
+                    wifi_ready: record.as_ref().is_some_and(|r| r.wifi_ready),
+                    ..LegacyRun::default()
+                });
+                return Ok(());
+            }
+            let message = legacy_needs_asc_message(&device);
+            self.phase("prereq", "ios_too_old", &message);
+            self.failure_kind = Kind::IosTooOld;
+            return die(format!("{message}.\n   No build was started."));
+        }
         let Some(message) = ios_too_old_message(&xcode, Some(&device), legacy) else {
             return Ok(());
         };
@@ -891,6 +969,8 @@ impl Setup {
         loop {
             let present = if tick.is_multiple_of(5) {
                 checks::presence(&udid) != checks::Presence::Absent
+                    // An iOS 15/16 phone off the cable that starts over Wi-Fi.
+                    || legacy_reachable_over_wifi(&self.ctx)
             } else {
                 checks::usbmux_lists(&udid)
             };
@@ -1202,9 +1282,15 @@ impl Setup {
             bundle: self.ctx.bundle_id.clone(),
             derived: false,
         });
+        // Xcode cannot name an iOS 15/16 phone; the generic product runs there.
+        let destination = if self.legacy_ios.is_some() {
+            "generic/platform=iOS".to_string()
+        } else {
+            format!("platform=iOS,id={}", self.ctx.udid)
+        };
         let extra = [
             "-destination".to_string(),
-            format!("platform=iOS,id={}", self.ctx.udid),
+            destination,
             "-allowProvisioningUpdates".into(),
             format!("DEVELOPMENT_TEAM={}", signing.team),
             format!("PRODUCT_BUNDLE_IDENTIFIER={}", signing.bundle),
@@ -1780,9 +1866,8 @@ impl Setup {
     ) -> Step<(u32, String)> {
         let udid = self.ctx.udid.clone();
         let (program, args, desc): (PathBuf, Vec<String>, String) = match tool {
-            RelayTool::Native(bin) => (
-                bin.clone(),
-                vec![
+            RelayTool::Native(bin) => {
+                let mut args = vec![
                     "relay".into(),
                     "--udid".into(),
                     udid.clone(),
@@ -1790,9 +1875,14 @@ impl Setup {
                     format!("127.0.0.1:{local}"),
                     "--device-port".into(),
                     device_port.to_string(),
-                ],
-                format!("USB relay (usbmuxd) on 127.0.0.1:{local}"),
-            ),
+                ];
+                let mut desc = format!("USB relay (usbmuxd) on 127.0.0.1:{local}");
+                if let Some(ip) = self.legacy_lan_host() {
+                    desc.push_str(&format!(", LAN fallback {ip}:{device_port} (WDA_ALLOW_LAN=1)"));
+                    args.extend(["--lan-host".into(), ip]);
+                }
+                (bin.clone(), args, desc)
+            }
             RelayTool::Iproxy(bin) => (
                 bin.clone(),
                 vec![
@@ -1882,13 +1972,17 @@ impl Setup {
         // Off the cable, CoreDevice's encrypted Wi-Fi tunnel reaches the
         // runner from this Mac only; it beats the LAN socat relay, which needs
         // the phone's LAN address and leaves the runner open to the network.
-        let wifi_tunnel = !target_is_usb && checks::wifi_tunnel(&self.ctx.udid);
+        // An iOS 15/16 phone has no CoreDevice tunnel; its relay follows it
+        // from usbmuxd's USB attachment to its Wi-Fi one (or to its LAN
+        // address behind WDA_ALLOW_LAN=1).
+        let legacy = self.legacy_ios.is_some();
+        let wifi_tunnel = !legacy && !target_is_usb && checks::wifi_tunnel(&self.ctx.udid);
         if wifi_tunnel {
             ok("the iPhone is off USB; relaying through its CoreDevice Wi-Fi tunnel");
         }
         // Readiness seen over USB carries no LAN address; only the socat
         // fallback needs one, from the log line once xcodebuild flushes it.
-        if self.from_probe && !target_is_usb && !wifi_tunnel {
+        if self.from_probe && !target_is_usb && !wifi_tunnel && !legacy {
             let mut lan_url = None;
             for _ in 0..50 {
                 lan_url = runner::server_url(&self.ctx.run_log);
@@ -1914,7 +2008,9 @@ impl Setup {
         }
         let device_port: u16 = valid_port(&device_port).unwrap_or(RUNNER_DEVICE_PORT);
         let mut tool = None;
-        if target_is_usb {
+        if legacy {
+            tool = checks::relay_binary(&self.ctx).map(RelayTool::Native);
+        } else if target_is_usb {
             tool = checks::relay_binary(&self.ctx)
                 .map(RelayTool::Native)
                 .or_else(|| sys::which("iproxy").map(RelayTool::Iproxy));
@@ -2401,6 +2497,8 @@ impl Setup {
             )
             .is_none()
             {
+                // An iOS 15/16 runner ends with its launcher (and, started over USB, with
+                // the cable): hardware, iPhone 12 mini on iOS 15.4.1.
                 break "runner";
             }
             if !pid::verify_loopback_listener(
@@ -2436,7 +2534,21 @@ impl Setup {
             // A pulled cable looks like a dead runner from here. Ask whether
             // the phone is still attached before counting a miss: an absent
             // phone is `not_connected`, never a runner failure to rebuild.
-            match away.on_probe(answered, || checks::presence(&self.ctx.udid)) {
+            // An iOS 15/16 phone is only "here" on the cable: CoreDevice never
+            // lists it, and the runner cannot be started again over Wi-Fi.
+            let legacy = self.legacy_ios.is_some();
+            let presence = || {
+                if legacy {
+                    if self.legacy_on_usb() {
+                        checks::Presence::Present
+                    } else {
+                        checks::Presence::Absent
+                    }
+                } else {
+                    checks::presence(&self.ctx.udid)
+                }
+            };
+            match away.on_probe(answered, presence) {
                 AwayStep::Away { first } => {
                     if first {
                         warn("the iPhone left this Mac while its runner was held; waiting for it to come back (nothing is rebuilt)");
@@ -2519,7 +2631,12 @@ impl Setup {
         };
         // An unplugged phone takes its runner down with it. Nothing can be
         // rebuilt until it is back, so say so and wait instead.
-        if checks::presence(&self.ctx.udid) == checks::Presence::Absent {
+        let absent = if self.legacy_ios.is_some() {
+            !self.legacy_on_usb() && !legacy_reachable_over_wifi(&self.ctx)
+        } else {
+            checks::presence(&self.ctx.udid) == checks::Presence::Absent
+        };
+        if absent {
             warn(&format!(
                 "the device runner went away with the iPhone ({cause}); waiting for the phone to come back"
             ));
@@ -2817,6 +2934,11 @@ pub fn ios_too_old_message(
     if legacy_support || !checks::version_lt(device, floor) {
         return None;
     }
+    if checks::version_lt(device, legacy_ios::MIN_IOS) {
+        return Some(format!(
+            "This iPhone runs iOS {device}; the device runner needs iOS 15 or later (iOS 15 and 16 work without an update). Update the iPhone (Settings → General → Software Update)"
+        ));
+    }
     let floor_major = floor.split('.').next().unwrap_or(floor);
     Some(format!(
         "This iPhone runs iOS {device}; {xcode} can only run the device runner on iOS {floor_major} or later. Update the iPhone (Settings → General → Software Update), or select an older Xcode with --xcode"
@@ -2928,6 +3050,10 @@ mod tests {
         );
         assert!(!message.contains("USB") && !message.contains("WARP"));
         assert!(super::ios_too_old_message("Xcode 26.1", Some("16.7"), false).is_some());
+        // Below the runner's own floor no path helps but an update.
+        let ancient = super::ios_too_old_message("Xcode 27.0", Some("14.8"), false).unwrap();
+        assert!(ancient.contains("iOS 15 or later"), "{ancient}");
+        assert!(super::legacy_needs_asc_message("15.4.1").contains("WDA_ASC_KEY_PATH"));
         // At or above the floor, an Xcode without one, a legacy DeviceSupport
         // image, or an unreadable version never blocks.
         assert!(super::ios_too_old_message("Xcode 27.0", Some("17.0"), false).is_none());
@@ -3750,4 +3876,606 @@ fn spawn_video_first_frame_check(mjpeg_port: u16, mjpeg_log: PathBuf) {
                 ));
             }
         });
+}
+
+// ── the legacy (iOS 15/16) path ─────────────────────────────────────────────
+
+/// iOS 15/16 needs App Store Connect API-key signing (`WDA_ASC_*`): Xcode
+/// cannot register such a phone or provision for it, and only the API can.
+pub fn legacy_needs_asc_message(device: &str) -> String {
+    format!(
+        "This iPhone runs iOS {device}. iphone-use drives iOS 15 and 16 without updating the phone, but only with a paid Apple Developer account's App Store Connect API key (WDA_ASC_KEY_PATH, WDA_ASC_KEY_ID, WDA_ASC_ISSUER_ID): this Xcode cannot see the phone, so the key registers it and signs the runner. Configure the key and rerun setup, or update the iPhone to iOS 17 or later"
+    )
+}
+
+/// Published as `legacy_needs_usb`.
+pub fn legacy_needs_usb_message(ios: &str) -> String {
+    format!(
+        "this iPhone runs iOS {ios} and is neither on USB nor reachable over Wi-Fi from this Mac — plug it in once (unlocked); after that it also starts over Wi-Fi"
+    )
+}
+
+/// Published as `ddi_needs_reboot`.
+pub const DDI_NEEDS_REBOOT_MESSAGE: &str = "the iPhone's developer services do not start even with the right Developer Disk Image mounted (an older image is stuck on the phone) — restart the iPhone once, unlock it and keep it plugged in; setup continues on its own";
+
+/// The phone's legacy record for this run's UDID.
+fn legacy_record_for(ctx: &Ctx) -> Option<legacy_ios::Record> {
+    legacy_ios::read_record(ctx.state_dir()).filter(|r| {
+        crate::usbmux::normalize_udid(&r.udid) == crate::usbmux::normalize_udid(&ctx.udid)
+    })
+}
+
+/// This phone has run on the legacy path and its lockdownd answers on its
+/// recorded LAN address: setup can start it over Wi-Fi with no cable.
+pub fn legacy_reachable_over_wifi(ctx: &Ctx) -> bool {
+    legacy_record_for(ctx)
+        .and_then(|r| r.lan_ip)
+        .is_some_and(|ip| legacy_ios::lockdown_reachable(&ip))
+}
+
+impl Setup {
+    /// The LAN address the relays may fall back to off the cable: only behind
+    /// WDA_ALLOW_LAN=1 (the runner has no authentication). Without it, off
+    /// the cable the relays use usbmuxd's own Wi-Fi attachment.
+    fn legacy_lan_host(&self) -> Option<String> {
+        if !self.ctx.lan() {
+            return None;
+        }
+        let legacy = self.legacy_ios.as_ref()?;
+        legacy.wifi_ready.then(|| legacy.lan_ip.clone()).flatten()
+    }
+
+    fn legacy_on_usb(&self) -> bool {
+        checks::on_usb(&self.ctx.udid, &checks::usb_udids())
+    }
+
+    fn ready_message(&self) -> String {
+        match &self.legacy_ios {
+            Some(legacy) if legacy.host.is_some() => format!(
+                "device runner ready (iOS {}, started over Wi-Fi at {}): you can unplug the cable — it keeps running over Wi-Fi, and restarts over Wi-Fi too while the iPhone stays on this network",
+                legacy.ios,
+                legacy.host.as_deref().unwrap_or("?"),
+            ),
+            Some(legacy) => format!(
+                "device runner ready (iOS {}, started over USB because this Mac cannot reach the iPhone's lockdown over Wi-Fi): keep the cable in — the runner stops when it is pulled",
+                legacy.ios
+            ),
+            None => "device runner and launchd supervisor verified".to_string(),
+        }
+    }
+
+    fn write_legacy_record(&self) {
+        let Some(legacy) = &self.legacy_ios else {
+            return;
+        };
+        legacy_ios::write_record(
+            self.ctx.state_dir(),
+            &legacy_ios::Record {
+                ios: legacy.ios.clone(),
+                udid: self.ctx.udid.clone(),
+                bundle: self.ctx.bundle_id.clone(),
+                launcher: legacy.launcher.to_string_lossy().into_owned(),
+                launch_transport: if legacy.host.is_some() { "wifi" } else { "usb" }.into(),
+                lan_ip: legacy.lan_ip.clone(),
+                wifi_ready: legacy.wifi_ready,
+                wifi_mac: legacy.wifi_mac.clone(),
+            },
+        );
+    }
+
+    /// Where to start the runner from: its LAN address when lockdownd answers
+    /// there (a runner started over Wi-Fi survives the cable being pulled),
+    /// else USB. The address comes from the last run's record, else Bonjour.
+    fn legacy_host(&mut self) -> Option<String> {
+        let record = legacy_record_for(&self.ctx);
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(ip) = self.legacy_ios.as_ref().and_then(|l| l.lan_ip.clone()) {
+            candidates.push(ip);
+        }
+        if let Some(ip) = record.as_ref().and_then(|r| r.lan_ip.clone()) {
+            candidates.push(ip);
+        }
+        for ip in &candidates {
+            if legacy_ios::lockdown_reachable(ip) {
+                return Some(ip.clone());
+            }
+        }
+        let mac = self
+            .legacy_ios
+            .as_ref()
+            .and_then(|l| l.wifi_mac.clone())
+            .or_else(|| record.and_then(|r| r.wifi_mac));
+        let ip = legacy_ios::bonjour_ipv4(&mac?)?;
+        legacy_ios::lockdown_reachable(&ip).then(|| {
+            if let Some(legacy) = self.legacy_ios.as_mut() {
+                legacy.lan_ip = Some(ip.clone());
+            }
+            ip
+        })
+    }
+
+    /// Launcher, Wi-Fi or USB, Developer Disk Image, mount, and proof the
+    /// developer services answer.
+    fn legacy_prepare(&mut self) -> Step {
+        let ios = self.legacy_ios.as_ref().map(|l| l.ios.clone()).unwrap_or_default();
+        let Some(launcher) = legacy_ios::launcher(&self.ctx) else {
+            let message = format!(
+                "the iOS 15/16 launcher ({}) is missing next to iphone-use; reinstall or upgrade iphone-use",
+                legacy_ios::LAUNCHER_NAME
+            );
+            self.phase("prereq", "wda", &message);
+            return die(message);
+        };
+        let on_usb = self.legacy_on_usb();
+        if let Some(legacy) = self.legacy_ios.as_mut() {
+            legacy.launcher = launcher.clone();
+        }
+        if on_usb {
+            // Wi-Fi lockdown (Finder's "show this iPhone when on Wi-Fi") is
+            // what lets the next start go over the network; it needs one
+            // trusted connection and survives reboots.
+            let args = ["enable-wifi".to_string(), "--udid".into(), self.ctx.udid.clone()];
+            let (out, code) = legacy_ios::run_launcher(&launcher, &args, Duration::from_secs(20));
+            if code != Some(0) {
+                warn(&format!(
+                    "could not turn on Wi-Fi lockdown for this iPhone ({}); it starts over USB",
+                    legacy_ios::last_error(&out)
+                ));
+            }
+            let udid = self.ctx.udid.clone();
+            let mac = sys::block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), crate::lockdown::device_info(&udid))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            })
+            .and_then(|info| info.wifi_address);
+            if let (Some(legacy), Some(mac)) = (self.legacy_ios.as_mut(), mac) {
+                legacy.wifi_mac = Some(mac);
+            }
+        }
+        let host = self.legacy_host();
+        if host.is_none() && !on_usb {
+            let message = legacy_needs_usb_message(&ios);
+            self.phase("prereq", "legacy_needs_usb", &message);
+            // Retried at once when the cable comes or the phone answers on
+            // its LAN address, else every 5 minutes.
+            self.failure_kind = Kind::LegacyUnreachable;
+            return die(message);
+        }
+        if let Some(legacy) = self.legacy_ios.as_mut() {
+            legacy.host = host.clone();
+        }
+        match &host {
+            Some(ip) => ok(&format!("iOS {ios}: starting over Wi-Fi ({ip}); the runner keeps running with the cable pulled")),
+            None => ok(&format!("iOS {ios}: starting over USB (lockdownd does not answer over Wi-Fi yet)")),
+        }
+        self.phase(
+            "ddi-wait",
+            &self.build_blocker.clone(),
+            &format!("preparing the iOS {ios} Developer Disk Image"),
+        );
+        let (dmg, signature) = match legacy_ios::ensure_ddi(&ios) {
+            Ok(files) => files,
+            Err(error) => {
+                self.phase("ddi-fail", "ddi", &error);
+                return die(format!(
+                    "could not get the Developer Disk Image for iOS {ios}: {error}"
+                ));
+            }
+        };
+        let started = Instant::now();
+        match legacy_ios::mount(&launcher, &self.ctx.udid, host.as_deref(), &dmg, &signature) {
+            legacy_ios::Mount::Ready => {
+                ok(&format!(
+                    "Developer Disk Image mounted; testmanagerd answers ({:.1}s)",
+                    started.elapsed().as_secs_f64()
+                ));
+                Ok(())
+            }
+            legacy_ios::Mount::NeedsReboot => {
+                self.phase("ddi-fail", "ddi_needs_reboot", DDI_NEEDS_REBOOT_MESSAGE);
+                self.failure_kind = Kind::NeedsReboot;
+                die(DDI_NEEDS_REBOOT_MESSAGE)
+            }
+            legacy_ios::Mount::Failed(error) if legacy_ios::log_shows_locked(&error) => {
+                self.phase(
+                    "lock-wait",
+                    "locked",
+                    "the iPhone is locked — unlock it and connecting continues on its own",
+                );
+                if self.ctx.keepalive {
+                    return self.locked_retry();
+                }
+                die("the iPhone is locked, so the Developer Disk Image cannot be mounted. Unlock it, then rerun setup.")
+            }
+            legacy_ios::Mount::Failed(error) => {
+                self.phase("ddi-fail", "ddi", &format!("mounting the Developer Disk Image failed: {error}"));
+                die(format!("mounting the Developer Disk Image failed: {error}"))
+            }
+        }
+    }
+
+    /// The development profile for this phone and the identity Xcode signed
+    /// the build with, from the cache or, when the cache lacks this phone or
+    /// that certificate or is close to expiring, from App Store Connect.
+    fn legacy_signing(&mut self, built: &Path) -> Step<(Vec<u8>, String)> {
+        let Some(cert) = legacy_ios::signing_certificate(&built.join("PlugIns/iPhoneUse.xctest"))
+        else {
+            self.phase(
+                "signing-fail",
+                "account",
+                "could not read the runner's signing certificate",
+            );
+            return die("could not read the certificate Xcode signed the runner with (codesign -d --extract-certificates)");
+        };
+        let identity = legacy_ios::sha1_hex(&cert);
+        let team = self.ctx.team_id.clone();
+        let bundle = self.ctx.bundle_id.clone();
+        let dir = sys::home().join(".iphone-use/legacy-profiles");
+        let _ = std::fs::create_dir_all(&dir);
+        let cached = dir.join(format!("{team}.{bundle}.mobileprovision"));
+        let facts = legacy_ios::profile_facts(&cached, &self.ctx.udid, &cert);
+        let fresh = facts
+            .expiry
+            .is_some_and(|e| e > retry::now() + legacy_ios::PROFILE_MIN_LEFT_SECS);
+        if facts.has_device && facts.has_certificate && fresh {
+            if let Ok(bytes) = std::fs::read(&cached) {
+                ok("Reusing the iOS 15/16 runner profile (it covers this iPhone)");
+                return Ok((bytes, identity));
+            }
+        }
+        info("Registering this iPhone and creating the runner's development profile with the App Store Connect API");
+        self.phase(
+            "building",
+            &self.build_blocker.clone(),
+            "registering the iPhone and creating the runner profile (App Store Connect)",
+        );
+        let ctx = self.ctx.clone();
+        let name = sys::block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                crate::lockdown::device_info(&ctx.udid),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+        })
+        .and_then(|info| info.name)
+        .unwrap_or_else(|| "iPhone".into());
+        let ios = self
+            .legacy_ios
+            .as_ref()
+            .map(|l| l.ios.clone())
+            .unwrap_or_default();
+        let device_name: String = format!("iphone-use {name} (iOS {ios})")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(50)
+            .collect();
+        let runner_bundle = legacy_ios::runner_bundle(&bundle);
+        let profile_name = format!("iphone-use legacy {bundle}");
+        let result: anyhow::Result<(Vec<u8>, bool)> = sys::block_on(async {
+            let asc = super::asc::Asc::new(
+                Path::new(&ctx.asc_key_path),
+                &ctx.asc_key_id,
+                &ctx.asc_issuer_id,
+            )?;
+            let (device_id, registered) = asc.ensure_device(&ctx.udid, &device_name).await?;
+            let certificates = asc.development_certificates().await?;
+            anyhow::ensure!(
+                certificates.iter().any(|(_, der)| *der == cert),
+                "the certificate Xcode signed the runner with is not one of team {}'s development certificates",
+                ctx.team_id
+            );
+            let bundle_id = asc.bundle_id_for(&runner_bundle).await?;
+            let mut devices = asc.ios_devices().await?;
+            if !devices.contains(&device_id) {
+                devices.push(device_id);
+            }
+            let ids: Vec<String> = certificates.into_iter().map(|(id, _)| id).collect();
+            let profile = asc
+                .recreate_profile(&profile_name, &bundle_id, &ids, &devices)
+                .await?;
+            Ok((profile, registered))
+        });
+        match result {
+            Ok((profile, registered)) => {
+                if registered {
+                    ok(&format!("Registered {} with the team", self.ctx.udid));
+                }
+                if sys::write_atomic(&cached, &profile, 0o600).is_err() {
+                    warn("could not cache the runner profile; the next setup creates it again");
+                }
+                ok("Created the iOS 15/16 runner development profile");
+                Ok((profile, identity))
+            }
+            Err(error) => {
+                let message =
+                    format!("App Store Connect signing for the iOS {ios} runner failed: {error:#}");
+                self.phase("signing-fail", "account", &message);
+                die(message)
+            }
+        }
+    }
+
+    /// The signed legacy app, reused while nothing that goes into it changed.
+    fn legacy_app(&mut self, built: &Path, key: &str) -> Step<(PathBuf, String)> {
+        let (profile, identity) = self.legacy_signing(built)?;
+        let assembled_key = legacy_ios::sha256_hex(
+            format!(
+                "{key}|{identity}|{}|{}",
+                legacy_ios::sha256_hex(&profile),
+                legacy_ios::sha256_hex(legacy_ios::host_source(&self.ctx).as_bytes())
+            )
+            .as_bytes(),
+        );
+        let app = legacy_ios::legacy_app(&self.ctx);
+        let key_file = legacy_ios::legacy_dir(&self.ctx).join("assembled.key");
+        if app.is_dir()
+            && std::fs::read_to_string(&key_file).is_ok_and(|k| k.trim() == assembled_key)
+        {
+            ok("Reusing the assembled iOS 15/16 runner");
+            return Ok((app, assembled_key));
+        }
+        let (team, bundle) = (self.ctx.team_id.clone(), self.ctx.bundle_id.clone());
+        match legacy_ios::assemble(&self.ctx, built, &profile, &identity, &team, &bundle) {
+            Ok(app) => {
+                let _ = std::fs::write(&key_file, format!("{assembled_key}\n"));
+                ok("Assembled the iOS 15/16 runner (legacy host, Info.plist, profile, signature)");
+                Ok((app, assembled_key))
+            }
+            Err(error) => {
+                self.phase("building-fail", "wda", &error);
+                die(format!("could not assemble the iOS 15/16 runner: {error}"))
+            }
+        }
+    }
+
+    /// Install (when the phone lacks this build), start with the launcher
+    /// over Wi-Fi or USB, and wait until the runner answers.
+    fn legacy_launch(&mut self, products: &Path, key: &str) -> Step<String> {
+        let built = products.join(RUNNER_APP_NAME);
+        let (app, assembled_key) = self.legacy_app(&built, key)?;
+        let legacy = self.legacy_ios.clone().unwrap_or_default();
+        let launcher = legacy.launcher.clone();
+        let host = legacy.host.clone();
+        let udid = self.ctx.udid.clone();
+        let bundle = self.ctx.bundle_id.clone();
+        let installed_file = legacy_ios::legacy_dir(&self.ctx).join("installed");
+        let installed_key = format!("{udid}|{assembled_key}");
+        if std::fs::read_to_string(&installed_file)
+            .map(|k| k.trim().to_string())
+            .ok()
+            .as_deref()
+            != Some(installed_key.as_str())
+        {
+            info("Installing the runner on the iPhone");
+            let started = Instant::now();
+            if let Err(error) = legacy_ios::install(&launcher, &udid, host.as_deref(), &app) {
+                self.phase(
+                    "building-fail",
+                    "wda",
+                    &format!("installing the runner failed: {error}"),
+                );
+                return die(format!("installing the runner on the iPhone failed: {error}"));
+            }
+            let _ = std::fs::write(&installed_file, format!("{installed_key}\n"));
+            ok(&format!(
+                "Installed the runner ({:.1}s)",
+                started.elapsed().as_secs_f64()
+            ));
+        }
+        let argv = legacy_ios::launch_argv(&udid, host.as_deref(), &bundle);
+        let expected = format!("runner:{} {}", launcher.display(), argv.join(" "));
+        let lan_status = host
+            .as_deref()
+            .map(|ip| format!("http://{ip}:{RUNNER_DEVICE_PORT}/status"));
+        let on_usb = self.legacy_on_usb();
+        let started = 'launch: {
+            'attempts: for attempt in 0..2 {
+                let _ = std::fs::write(&self.ctx.run_log, b"");
+                let Ok(spawned) = proc::spawn_detached(
+                    &launcher,
+                    &argv,
+                    Some(self.ctx.state_dir()),
+                    &self.ctx.run_log,
+                    None,
+                ) else {
+                    return die("could not start the iOS 15/16 launcher");
+                };
+                let Some(runner_pid) = pid::write(
+                    &self.ctx,
+                    &self.ctx.runner_pid_file,
+                    spawned,
+                    &expected,
+                    Role::Runner,
+                ) else {
+                    return die(format!(
+                        "the launcher did not become the exact expected runner process; inspect {}",
+                        self.ctx.run_log.display()
+                    ));
+                };
+                self.started_runner = true;
+                ok(&format!(
+                    "PID-verified runner launcher {runner_pid} (over {}; log: {})",
+                    if host.is_some() { "Wi-Fi" } else { "USB" },
+                    self.ctx.run_log.display()
+                ));
+                let started = Instant::now();
+                loop {
+                    proc::check()?;
+                    if (on_usb && self.runner_session().is_some())
+                        || lan_status
+                            .as_deref()
+                            .is_some_and(|url| sys::http_ok(url, Duration::from_millis(800)))
+                    {
+                        break 'launch started;
+                    }
+                    let log = std::fs::read_to_string(&self.ctx.run_log).unwrap_or_default();
+                    let alive = pid::validate(
+                        &self.ctx,
+                        &self.ctx.runner_pid_file,
+                        &self.legacy.runner,
+                        Role::Runner,
+                        false,
+                    )
+                    .is_some();
+                    if legacy_ios::log_shows_invalid_service(&log) {
+                        self.phase("ddi-fail", "ddi_needs_reboot", DDI_NEEDS_REBOOT_MESSAGE);
+                        self.failure_kind = Kind::NeedsReboot;
+                        return die(DDI_NEEDS_REBOOT_MESSAGE);
+                    }
+                    if !alive || started.elapsed() > Duration::from_secs(60) {
+                        if legacy_ios::log_shows_locked(&log) {
+                            if self.ctx.keepalive {
+                                return self.locked_retry();
+                            }
+                            return die("the iPhone is locked, so the runner cannot start. Unlock it, then rerun setup.");
+                        }
+                        if legacy_ios::log_shows_not_installed(&log) {
+                            let _ = std::fs::remove_file(&installed_file);
+                        }
+                        if attempt == 0 && !alive {
+                            warn(&format!(
+                                "the runner did not start ({}); launching once more",
+                                legacy_ios::last_error(&log)
+                            ));
+                            continue 'attempts;
+                        }
+                        let reason = legacy_ios::last_error(&log);
+                        self.phase(
+                            "building-fail",
+                            "wda",
+                            &format!("the iOS 15/16 runner did not start: {reason}"),
+                        );
+                        return die(format!(
+                            "the runner did not start on the iPhone ({reason}); log: {}",
+                            self.ctx.run_log.display()
+                        ));
+                    }
+                    proc::sleep(Duration::from_millis(250))?;
+                }
+            }
+            return die("the runner did not start on the iPhone");
+        };
+        ok(&format!(
+            "device runner serving on device port {RUNNER_DEVICE_PORT} ({:.1}s after launch, started over {})",
+            started.elapsed().as_secs_f64(),
+            if host.is_some() { "Wi-Fi" } else { "USB" }
+        ));
+        self.phase("serving", "", "device runner serving — starting relay");
+        self.from_probe = true;
+        if host.is_some() {
+            // Readiness seen on the LAN address: iOS already lets it there.
+            if let Some(legacy) = self.legacy_ios.as_mut() {
+                legacy.wifi_ready = lan_status
+                    .as_deref()
+                    .is_some_and(|url| sys::http_ok(url, Duration::from_secs(2)));
+            }
+        }
+        self.write_legacy_record();
+        Ok(format!("http://127.0.0.1:{RUNNER_DEVICE_PORT}"))
+    }
+
+    /// Let the runner onto the phone's network: iOS drops inbound LAN
+    /// connections to an app it has not allowed (China's "wireless data"
+    /// setting, or local network access) and asks only while the app is in
+    /// front. Off the cable every path to the runner (usbmuxd's Wi-Fi
+    /// attachment, or the LAN address behind WDA_ALLOW_LAN=1) needs this.
+    /// Setup brings the runner's app to the front, answers the prompt and
+    /// goes back to the Home Screen. Never fails setup.
+    fn legacy_wifi(&mut self, url: &str, target_url: &str) -> Step<String> {
+        let ip = sys::http_get(&format!("{target_url}/status"), Duration::from_secs(4))
+            .and_then(|(_, body)| legacy_ios::status_ip(&body));
+        let Some(ip) = ip else {
+            warn("the runner reported no Wi-Fi address (is the iPhone on Wi-Fi?); it works over USB only");
+            self.write_legacy_record();
+            return Ok(target_url.to_string());
+        };
+        if let Some(legacy) = self.legacy_ios.as_mut() {
+            legacy.lan_ip = Some(ip.clone());
+        }
+        // The relays already fall back to the LAN address when it was known
+        // to answer before they started.
+        let relays_have_lan = self.legacy_lan_host().is_some();
+        let lan_status = format!("http://{ip}:{RUNNER_DEVICE_PORT}/status");
+        let mut ready = sys::http_ok(&lan_status, Duration::from_secs(3));
+        if !ready {
+            info("Allowing the runner onto the iPhone's network (answering the iOS prompt)");
+            ready = self.grant_network(target_url, &lan_status);
+        }
+        if let Some(legacy) = self.legacy_ios.as_mut() {
+            legacy.wifi_ready = ready;
+        }
+        self.write_legacy_record();
+        if !ready {
+            warn(&format!(
+                "the runner does not answer at {ip} over Wi-Fi; on the iPhone allow iPhoneUse-Runner in Settings › Privacy › Local Network (China models: Settings › Cellular › Apps Using WLAN & Cellular › WLAN & Cellular). USB control works meanwhile"
+            ));
+            return Ok(target_url.to_string());
+        }
+        ok(&format!("the runner also answers over Wi-Fi at {ip}:{RUNNER_DEVICE_PORT}"));
+        if !relays_have_lan && self.legacy_lan_host().is_some() {
+            // Restart the relays with the LAN address as their fallback.
+            return self.relays(url);
+        }
+        Ok(target_url.to_string())
+    }
+
+    fn grant_network(&self, target_url: &str, lan_status: &str) -> bool {
+        if self.endpoint_locked() {
+            warn("the iPhone is locked, so the network prompt cannot be answered; unlock it and rerun setup to allow Wi-Fi");
+            return false;
+        }
+        let runner = legacy_ios::runner_bundle(&self.ctx.bundle_id);
+        let _ = legacy_ios::http_post_json(
+            &format!("{target_url}/wda/apps/launch"),
+            &serde_json::json!({ "bundleId": runner }),
+            Duration::from_secs(20),
+        );
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut answered = false;
+        while Instant::now() < deadline && !answered {
+            if sys::http_ok(lan_status, Duration::from_secs(1)) {
+                break;
+            }
+            let text = sys::http_get(&format!("{target_url}/alert/text"), Duration::from_secs(5))
+                .and_then(|(_, body)| serde_json::from_slice::<serde_json::Value>(&body).ok())
+                .and_then(|v| v.get("value").and_then(|v| v.as_str()).map(str::to_string));
+            if text.is_some_and(|t| legacy_ios::is_network_prompt(&t)) {
+                let buttons: Vec<String> = sys::http_get(
+                    &format!("{target_url}/wda/alert/buttons"),
+                    Duration::from_secs(5),
+                )
+                .and_then(|(_, body)| serde_json::from_slice::<serde_json::Value>(&body).ok())
+                .and_then(|v| v.get("value").cloned())
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
+                if let Some(button) = legacy_ios::grant_button(&buttons) {
+                    let _ = legacy_ios::http_post_json(
+                        &format!("{target_url}/alert"),
+                        &serde_json::json!({ "name": button }),
+                        Duration::from_secs(10),
+                    );
+                    ok(&format!("answered the iPhone's network prompt: {button}"));
+                    answered = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let _ = legacy_ios::http_post_json(
+            &format!("{target_url}/wda/homescreen"),
+            &serde_json::json!({}),
+            Duration::from_secs(10),
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            if sys::http_ok(lan_status, Duration::from_secs(2)) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        false
+    }
 }

@@ -55,6 +55,8 @@ pub struct DeviceInfo {
     pub product_version: Option<String>,
     pub product_type: Option<String>,
     pub build_version: Option<String>,
+    /// The Wi-Fi MAC address (`WiFiAddress`); finds the phone over Bonjour.
+    pub wifi_address: Option<String>,
     /// `usb` or `network`, as usbmuxd lists the attachment.
     pub connection: &'static str,
 }
@@ -81,6 +83,7 @@ pub async fn device_info(udid: &str) -> Result<DeviceInfo> {
         "ProductVersion",
         "ProductType",
         "BuildVersion",
+        "WiFiAddress",
     ] {
         let body = request(&[("Label", LABEL), ("Request", "GetValue"), ("Key", key)]);
         let reply = exchange(&mut stream, &body).await?;
@@ -104,6 +107,7 @@ pub async fn device_info(udid: &str) -> Result<DeviceInfo> {
         product_version: take("ProductVersion"),
         product_type: take("ProductType"),
         build_version: take("BuildVersion"),
+        wifi_address: take("WiFiAddress"),
         connection: connection(&attached),
     })
 }
@@ -133,9 +137,9 @@ pub async fn ddi_status(udid: &str) -> Result<DdiStatus> {
         let mut session = handshake(&tls, plain)
             .await
             .context("lockdown TLS session")?;
-        start_service(&mut session).await?
+        start_service(&mut session, IMAGE_MOUNTER).await?
     } else {
-        start_service(&mut plain).await?
+        start_service(&mut plain, IMAGE_MOUNTER).await?
     };
 
     let raw = usbmux::connect(attached.device_id, service.port)
@@ -155,6 +159,40 @@ pub async fn ddi_status(udid: &str) -> Result<DdiStatus> {
         image_version,
         connection: connection(&attached),
     })
+}
+
+/// Whether lockdownd starts the developer service `name` (for example
+/// `com.apple.testmanagerd.lockdown.secure`) through a paired session. A mounted
+/// Developer Disk Image that does not match the iOS (or a stale one left
+/// mounted) still reads as mounted, but every developer service then fails
+/// with `InvalidService`; this is the check that tells.
+pub async fn start_developer_service(udid: &str, name: &str) -> Result<()> {
+    let attached = attached(udid).await?;
+    let pair = PairRecord::parse(&usbmux::read_pair_record(&attached.serial).await?)?;
+    let tls = Arc::new(pair.tls_config()?);
+    let mut plain = usbmux::connect(attached.device_id, LOCKDOWN_PORT)
+        .await
+        .context("connect to lockdownd")?;
+    let reply = exchange(
+        &mut plain,
+        &request(&[
+            ("Label", LABEL),
+            ("Request", "StartSession"),
+            ("HostID", &pair.host_id),
+            ("SystemBUID", &pair.system_buid),
+        ]),
+    )
+    .await?;
+    lockdown_error(&reply, "StartSession")?;
+    if reply.get("EnableSessionSSL").and_then(Value::as_bool) == Some(true) {
+        let mut session = handshake(&tls, plain)
+            .await
+            .context("lockdown TLS session")?;
+        start_service(&mut session, name).await?;
+    } else {
+        start_service(&mut plain, name).await?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -269,13 +307,16 @@ struct Service {
     ssl: bool,
 }
 
-async fn start_service<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> Result<Service> {
+async fn start_service<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    name: &str,
+) -> Result<Service> {
     let reply = exchange(
         stream,
         &request(&[
             ("Label", LABEL),
             ("Request", "StartService"),
-            ("Service", IMAGE_MOUNTER),
+            ("Service", name),
         ]),
     )
     .await?;

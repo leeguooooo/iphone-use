@@ -102,13 +102,13 @@ jobs:
       - name: Build (arm64)
         run: >-
           cargo build --release --locked
-          --bin iphone-use --bin iphone-use-mcp
+          --bin iphone-use --bin iphone-use-mcp --bin iphone-use-legacy-launch
           --target aarch64-apple-darwin
 
       - name: Build (x86_64)
         run: >-
           cargo build --release --locked
-          --bin iphone-use --bin iphone-use-mcp
+          --bin iphone-use --bin iphone-use-mcp --bin iphone-use-legacy-launch
           --target x86_64-apple-darwin
 
       - name: Create universal binary
@@ -122,12 +122,19 @@ jobs:
             target/aarch64-apple-darwin/release/iphone-use-mcp \
             target/x86_64-apple-darwin/release/iphone-use-mcp \
             -output target/universal-apple-darwin/release/iphone-use-mcp
+          lipo -create \
+            target/aarch64-apple-darwin/release/iphone-use-legacy-launch \
+            target/x86_64-apple-darwin/release/iphone-use-legacy-launch \
+            -output target/universal-apple-darwin/release/iphone-use-legacy-launch
           chmod +x target/universal-apple-darwin/release/iphone-use
           chmod +x target/universal-apple-darwin/release/iphone-use-mcp
+          chmod +x target/universal-apple-darwin/release/iphone-use-legacy-launch
           test "$(lipo -archs target/universal-apple-darwin/release/iphone-use)" = "x86_64 arm64" \
             || test "$(lipo -archs target/universal-apple-darwin/release/iphone-use)" = "arm64 x86_64"
           test "$(lipo -archs target/universal-apple-darwin/release/iphone-use-mcp)" = "x86_64 arm64" \
             || test "$(lipo -archs target/universal-apple-darwin/release/iphone-use-mcp)" = "arm64 x86_64"
+          test "$(lipo -archs target/universal-apple-darwin/release/iphone-use-legacy-launch)" = "x86_64 arm64" \
+            || test "$(lipo -archs target/universal-apple-darwin/release/iphone-use-legacy-launch)" = "arm64 x86_64"
 
       # Expose universal binary where make-app.sh expects it
       - name: Copy universal binary to target/release
@@ -135,10 +142,25 @@ jobs:
           mkdir -p target/release
           cp target/universal-apple-darwin/release/iphone-use target/release/iphone-use
           cp target/universal-apple-darwin/release/iphone-use-mcp target/release/iphone-use-mcp
+          cp target/universal-apple-darwin/release/iphone-use-legacy-launch target/release/iphone-use-legacy-launch
 
       # ── Bundle ────────────────────────────────────────────────────────────────
       - name: Build .app bundle
         run: bash scripts/make-app.sh "$GITHUB_WORKSPACE"
+
+      # Setup runs iOS 15/16 phones through this launcher, found next to
+      # iphone-use; a bundle without it would stop them with a "missing
+      # launcher" error.
+      - name: Verify the bundled iOS 15/16 launcher
+        run: |
+          launcher=iPhoneUse.app/Contents/MacOS/iphone-use-legacy-launch
+          test -x "$launcher"
+          set +e
+          "$launcher" 2>launcher.err
+          code=$?
+          set -e
+          test "$code" = 2
+          grep -q "missing command" launcher.err
 
       - name: Verify bundled MCP protocol and multi-step tool
         shell: bash

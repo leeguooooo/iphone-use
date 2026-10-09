@@ -9,6 +9,7 @@
 //! and `setup` as the launchd supervisor runs it (`WDA_KEEPALIVE=1`), plus
 //! the setup status protocol (`status-watch` is a run's heartbeat watcher).
 
+pub mod asc;
 pub mod checks;
 pub mod commands;
 pub mod ctx;
@@ -16,6 +17,7 @@ pub mod doctor;
 pub mod flow;
 pub mod icon;
 pub mod launchd;
+pub mod legacy_ios;
 pub mod owner;
 pub mod pid;
 pub mod proc;
