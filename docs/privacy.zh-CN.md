@@ -1,13 +1,13 @@
-# iPhone Use 隐私政策
+# Phone Use Remote 隐私政策
 
 更新日期：2026-10-07 · [English](privacy.md)
 
-本政策适用于 **iPhone Use** iOS App（`com.leeguoo.iphone-use.remote`），以及它所连接的开源软件
+本政策适用于 **Phone Use Remote** iOS App（`com.leeguoo.iphone-use.remote`），以及它所连接的开源软件
 [iphone-use](https://github.com/leeguooooo/iphone-use)。
 
 ## App 做什么
 
-iPhone Use 是一个遥控器：**你自己的 Mac** 上运行 iphone-use 服务来驱动一台手机，这个 App 显示那台手机的画面，
+Phone Use Remote 是一个遥控器：**你自己的 Mac** 上运行 iphone-use 服务来驱动一台手机，这个 App 显示那台手机的画面，
 并把你的点按、滑动和输入的文字发过去。
 
 ## 我们收集的数据

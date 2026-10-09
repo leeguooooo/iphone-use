@@ -18,7 +18,7 @@
 /* Scanner */
 "扫描 Mac 上 iphone-use 页面里「扫码」按钮显示的二维码" = "Scan the code that the Scan button shows on the iphone-use page on your Mac";
 "打开设置" = "Open Settings";
-"没有相机权限：请在「设置 › iPhone Use」里打开相机" = "No camera access: turn on Camera in Settings › iPhone Use";
+"没有相机权限：请在「设置 › Phone Use Remote」里打开相机" = "No camera access: turn on Camera in Settings › Phone Use Remote";
 "这台设备没有可用的相机" = "This device has no usable camera";
 "相机无法识别二维码" = "The camera cannot read QR codes";
 

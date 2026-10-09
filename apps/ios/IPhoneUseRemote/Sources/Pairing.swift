@@ -58,7 +58,7 @@ struct QRScannerView: UIViewControllerRepresentable {
 final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     /// The one failure the person can fix in Settings; the sheet offers a
     /// button for it.
-    static let noCameraPermission = String(localized: "没有相机权限：请在「设置 › iPhone Use」里打开相机")
+    static let noCameraPermission = String(localized: "没有相机权限：请在「设置 › Phone Use Remote」里打开相机")
 
     var onFound: ((PairLink) -> Void)?
     var onFailure: ((String) -> Void)?

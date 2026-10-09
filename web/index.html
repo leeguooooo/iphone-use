@@ -840,7 +840,7 @@
 
 <dialog id="pairDialog" aria-labelledby="pairTitle">
   <h2 id="pairTitle">手机扫码连接</h2>
-  <p class="pair-hint">用 iPhone 相机或 iPhone Use App 扫码，不用输地址和密码。二维码只能用一次，5 分钟内有效。</p>
+  <p class="pair-hint">用 iPhone 相机或 Phone Use Remote App 扫码，不用输地址和密码。二维码只能用一次，5 分钟内有效。</p>
   <div id="pairQr" role="img" aria-label="配对二维码"></div>
   <div id="pairStatus" role="status" aria-live="polite"></div>
   <label id="pairHostRow" class="pair-host" hidden>手机连这个地址
@@ -4145,7 +4145,7 @@ if (btnHandoff) btnHandoff.addEventListener('click', async () => {
 });
 
 /* Scan-to-connect: a one-time code from /pair/new, shown as a QR code. The
-   phone that scans it (camera → Safari, or the iPhone Use app) gets its own
+   phone that scans it (camera → Safari, or the Phone Use Remote app) gets its own
    session without typing the address or the password. */
 const pairDialog = document.getElementById('pairDialog');
 const pairQr = document.getElementById('pairQr');
