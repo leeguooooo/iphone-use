@@ -1213,7 +1213,7 @@ function setupBlockerCopy(blockedOn) {
     case 'ddi_needs_reboot':
       return ['请重启一次 iPhone', 'iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来；重启手机、解锁并保持插线后会自动接着连接'];
     case 'legacy_needs_usb':
-      return ['请用数据线连接 iPhone', '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi；插一次线并保持解锁，大约 20 秒连上，之后可以拔线走 Wi-Fi'];
+      return ['请用数据线连接 iPhone', '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi；插一次线并保持解锁，大约 20 秒连上；之后只要手机和这台 Mac 在同一网络就可以拔线（状态里 unplug_ok 为 true 时）'];
     case 'xcode_too_old':
       return ['Xcode 版本太旧', 'iPhone 的 iOS 比这台 Mac 上的 Xcode 新；请安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），再运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它；重试和重连都解决不了'];
     case 'wda':

@@ -217,6 +217,19 @@ impl Setup {
                     "KeepAlive retry backoff: waiting {wait}s before the next rebuild"
                 ));
             }
+            if state.kind == Kind::LegacyUnreachable {
+                while retry::now() < state.next_at {
+                    if checks::transport(&self.ctx.udid) == checks::Transport::Usb
+                        || legacy_reachable_over_wifi(&self.ctx)
+                    {
+                        info("the iOS 15/16 iPhone is reachable again; retrying");
+                        break;
+                    }
+                    let left = state.next_at.saturating_sub(retry::now()).clamp(1, 5);
+                    proc::sleep(Duration::from_secs(left))?;
+                }
+                return Ok(());
+            }
             if state.kind == Kind::WifiAutomation {
                 // Only USB clears a Wi-Fi refusal: stop waiting the moment
                 // the phone is plugged in, checking usbmuxd every few seconds.
@@ -327,6 +340,10 @@ impl Setup {
                 } else if self.failure_kind == Kind::IosTooOld {
                     if previous != Some(Kind::IosTooOld) {
                         warn("the iPhone's iOS is too old for the selected Xcode; checking again every 15 min (update the iPhone or select an older Xcode with --xcode)");
+                    }
+                } else if self.failure_kind == Kind::LegacyUnreachable {
+                    if previous != Some(Kind::LegacyUnreachable) {
+                        warn("the iOS 15/16 iPhone is neither on USB nor reachable over Wi-Fi; retrying as soon as it is");
                     }
                 } else if self.failure_kind == Kind::NeedsReboot {
                     if previous != Some(Kind::NeedsReboot) {
@@ -4021,8 +4038,9 @@ impl Setup {
         if host.is_none() && !on_usb {
             let message = legacy_needs_usb_message(&ios);
             self.phase("prereq", "legacy_needs_usb", &message);
-            // Retried at once when the cable comes, else every 15 minutes.
-            self.failure_kind = Kind::WifiAutomation;
+            // Retried at once when the cable comes or the phone answers on
+            // its LAN address, else every 5 minutes.
+            self.failure_kind = Kind::LegacyUnreachable;
             return die(message);
         }
         if let Some(legacy) = self.legacy_ios.as_mut() {

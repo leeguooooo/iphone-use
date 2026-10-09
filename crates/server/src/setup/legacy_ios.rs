@@ -290,7 +290,12 @@ pub fn run_launcher(launcher: &Path, args: &[String], limit: Duration) -> (Strin
     let Ok(output_file) = tempfile::NamedTempFile::new() else {
         return (String::new(), None);
     };
-    let (Ok(out), Ok(err)) = (output_file.reopen(), output_file.reopen()) else {
+    // One open file description for both streams, so their writes append
+    // to the same offset instead of overwriting each other.
+    let Ok(out) = output_file.reopen() else {
+        return (String::new(), None);
+    };
+    let Ok(err) = out.try_clone() else {
         return (String::new(), None);
     };
     let Ok(mut child) = std::process::Command::new(launcher)

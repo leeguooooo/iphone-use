@@ -30,6 +30,9 @@ pub enum Kind {
     /// An iOS 15/16 phone's developer services stay unusable after a fresh
     /// disk-image mount: only restarting the iPhone clears it.
     NeedsReboot,
+    /// An iOS 15/16 phone neither on USB nor reachable over Wi-Fi: a cable
+    /// (or the phone back on this network) fixes it, not a retry.
+    LegacyUnreachable,
 }
 
 impl Kind {
@@ -44,6 +47,7 @@ impl Kind {
             Kind::WifiAutomation => "wifi_automation",
             Kind::NotConnected => "not_connected",
             Kind::NeedsReboot => "needs_reboot",
+            Kind::LegacyUnreachable => "legacy_unreachable",
         }
     }
 
@@ -58,6 +62,7 @@ impl Kind {
             "wifi_automation" => Some(Kind::WifiAutomation),
             "not_connected" => Some(Kind::NotConnected),
             "needs_reboot" => Some(Kind::NeedsReboot),
+            "legacy_unreachable" => Some(Kind::LegacyUnreachable),
             _ => None,
         }
     }
@@ -82,6 +87,9 @@ impl Kind {
             Kind::NotConnected => (3, 10),
             // A person restarts the phone; check again every few minutes.
             Kind::NeedsReboot => (60, 300),
+            // The supervisor cuts this short when the phone shows up on USB
+            // or answers on its LAN address again.
+            Kind::LegacyUnreachable => (300, 300),
             Kind::Generic => (5, 300),
         }
     }
