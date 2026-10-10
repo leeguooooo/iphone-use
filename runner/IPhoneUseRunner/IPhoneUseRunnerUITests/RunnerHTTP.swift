@@ -113,7 +113,11 @@ struct HTTPResponse {
   static func value(_ value: Any, headers: [String: String] = [:], sessionId: String? = nil) -> HTTPResponse {
     var envelope: [String: Any] = ["value": value]
     if let sessionId { envelope["sessionId"] = sessionId }
-    return HTTPResponse(status: 200, body: encode(envelope), headers: headers)
+    guard let body = encodeIfPossible(envelope) else {
+      // Not a 200: a success status with an error body read as a successful empty answer.
+      return HTTPResponse(status: 500, body: unserializable, headers: headers)
+    }
+    return HTTPResponse(status: 200, body: body, headers: headers)
   }
 
   /// WDA-style error envelope: `{"value": {"error": code, "message": message}}`.
@@ -128,12 +132,23 @@ struct HTTPResponse {
     return .error(500, "unknown error", String(describing: error))
   }
 
+  static let unserializable =
+    Data(#"{"value":{"error":"unknown error","message":"response is not JSON-serializable"}}"#.utf8)
+
   static func encode(_ object: Any) -> Data {
-    do {
-      return try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
-    } catch {
-      return Data(#"{"value":{"error":"unknown error","message":"response is not JSON-serializable"}}"#.utf8)
+    encodeIfPossible(object) ?? unserializable
+  }
+
+  /// JSON for `object`; when that fails, JSON for it with every string made well-formed. iOS
+  /// cuts a long accessibility value at a fixed UTF-16 length, which can leave half of an emoji's
+  /// surrogate pair at the end; such a string has no UTF-8 form, so JSONSerialization refused the
+  /// whole tree and every read of that screen failed until the field changed (#254, hardware:
+  /// Settings' search field holding ~520 characters with emoji).
+  static func encodeIfPossible(_ object: Any) -> Data? {
+    if let data = try? JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes]) {
+      return data
     }
+    return try? JSONSerialization.data(withJSONObject: JSONText.wellFormed(object), options: [.withoutEscapingSlashes])
   }
 
   func serialized() -> Data {
@@ -658,5 +673,26 @@ final class RunnerHTTPServer {
       }
       connection.cancel()
     })
+  }
+}
+
+enum JSONText {
+  /// `object` with every string (values and keys, at any depth) re-decoded from its UTF-16 code
+  /// units, so an unpaired surrogate becomes U+FFFD and everything else stays as it was.
+  static func wellFormed(_ object: Any) -> Any {
+    switch object {
+    case let string as String:
+      return String(decoding: Array(string.utf16), as: UTF16.self)
+    case let dictionary as [String: Any]:
+      var out: [String: Any] = [:]
+      for (key, value) in dictionary {
+        out[String(decoding: Array(key.utf16), as: UTF16.self)] = wellFormed(value)
+      }
+      return out
+    case let array as [Any]:
+      return array.map(wellFormed)
+    default:
+      return object
+    }
   }
 }

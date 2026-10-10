@@ -70,6 +70,28 @@ do {
   check(sessionBody?["sessionId"] as? String == "S", "top-level sessionId")
 }
 
+// MARK: A field value iOS cut inside an emoji still serializes (#254)
+
+do {
+  // iOS cuts a long accessibility value at a fixed UTF-16 length; here the cut lands between the
+  // two halves of 😀, as the serializer's NSString holds it.
+  let units = Array((String(repeating: "验收长文本😀", count: 50) + "验收长文本😀").utf16)
+  let kept = Array(units.prefix(units.count - 1))  // ... + "验收长文本" + the high surrogate only
+  let cutValue = NSString(characters: kept, length: kept.count)
+  let field = NSMutableDictionary(dictionary: ["type": "XCUIElementTypeSearchField", "value": cutValue, "label": "搜索"])
+  let root = NSMutableDictionary(dictionary: ["type": "XCUIElementTypeApplication", "children": NSMutableArray(array: [field])])
+  check((try? JSONSerialization.data(withJSONObject: ["value": root])) == nil,
+        "precondition: a lone surrogate makes JSONSerialization refuse the tree")
+  let response = HTTPResponse.value(root)
+  check(response.status == 200, "the tree is still answered: status \(response.status)")
+  let decoded = (try? JSONSerialization.jsonObject(with: response.body)) as? [String: Any]
+  let children = (decoded?["value"] as? [String: Any])?["children"] as? [[String: Any]]
+  let value = children?.first?["value"] as? String ?? ""
+  check(value.hasPrefix(String(repeating: "验收长文本😀", count: 50) + "验收长文本") && value.hasSuffix("\u{FFFD}"),
+        "the value keeps its text; only the half emoji becomes U+FFFD")
+  check(children?.first?["label"] as? String == "搜索", "other strings are untouched")
+}
+
 // MARK: Tree + locators
 
 func node(_ type: String, label: String? = nil, id: String? = nil, value: String? = nil,
