@@ -544,6 +544,81 @@ fn plist_buddy(plist: &Path, command: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Bumped whenever [`assemble`] changes what it makes, so an app assembled by
+/// an older recipe is assembled again instead of reused (the reuse key in
+/// setup otherwise only covers its inputs).
+///
+/// 2: the build's own copy of XCTest is removed (issue #256).
+pub const ASSEMBLY_RECIPE: u32 = 2;
+
+/// Whether a `Frameworks/` entry belongs to the XCTest stack Xcode can embed
+/// in a test runner: XCTest, XCTestCore, XCUIAutomation, XCTAutomationSupport,
+/// XCUnit, XCTestSupport, Swift Testing and their support dylibs.
+fn is_embedded_xctest(name: &str) -> bool {
+    let stem = name
+        .strip_suffix(".framework")
+        .or_else(|| name.strip_suffix(".dylib"))
+        .unwrap_or("");
+    stem.starts_with("XCT")
+        || stem.starts_with("XCUI")
+        || stem.starts_with("XCUnit")
+        || stem == "Testing"
+        || stem.starts_with("libXCTest")
+        || stem.starts_with("lib_Testing")
+}
+
+/// Remove the XCTest stack an Xcode build embedded in the runner app (and in
+/// its test bundle), returning what was removed as app-relative paths.
+///
+/// iOS 15/16 must run the phone's own XCTest, from the Developer Disk Image
+/// mounted for its iOS. Some Xcode versions (26.6, issue #256) embed their
+/// own XCTest in `Frameworks/`; it is built for iOS 17 (`minos 17.0`) and,
+/// through the host's `@executable_path/Frameworks` rpath, it shadows the
+/// disk image's: every `dlopen` of XCTest then ended in
+/// `Library not loaded: @rpath/lib_TestingInterop.dylib` and the host exited
+/// 70. The runners validated on iOS 15.4.1 and 16.5 carry no `Frameworks/`.
+pub fn strip_embedded_xctest(app: &Path) -> Result<Vec<String>, String> {
+    let mut removed = Vec::new();
+    let mut dirs = vec![app.join("Frameworks")];
+    if let Ok(plugins) = std::fs::read_dir(app.join("PlugIns")) {
+        dirs.extend(plugins.flatten().map(|e| e.path().join("Frameworks")));
+    }
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| is_embedded_xctest(&n.to_string_lossy()))
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+            let result = if meta.is_dir() && !meta.file_type().is_symlink() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            result.map_err(|e| format!("remove {}: {e}", path.display()))?;
+            removed.push(
+                path.strip_prefix(app)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        // An emptied Frameworks/ goes too: the validated runners have none.
+        if std::fs::read_dir(&dir).is_ok_and(|mut e| e.next().is_none()) {
+            let _ = std::fs::remove_dir(&dir);
+        }
+    }
+    Ok(removed)
+}
+
 /// Turn a copy of Xcode's runner app into one iOS 15/16 launches: our host
 /// as the executable, the Info.plist changes, the profile, and a signature.
 pub fn assemble(
@@ -569,6 +644,13 @@ pub fn assemble(
         return Err(format!("could not copy {}", built_app.display()));
     }
     let _ = std::fs::remove_dir_all(app.join("PlugIns/iPhoneUse.xctest.dSYM"));
+    let stripped = strip_embedded_xctest(&app)?;
+    if !stripped.is_empty() {
+        super::term::ok(&format!(
+            "Removed the build's own XCTest from the iOS 15/16 runner (the phone's Developer Disk Image provides it): {}",
+            stripped.join(", ")
+        ));
+    }
     // The host.
     let source = dir.join("ipu-host.m");
     std::fs::write(&source, host_source(ctx)).map_err(|e| e.to_string())?;
@@ -893,6 +975,78 @@ mod tests {
         assert!(facts.has_certificate);
         let other = profile_facts_in(xml, "63f53bbb05918cbf4154ba9d1d1f95b28e532597", &[9], None);
         assert!(!other.has_device && !other.has_certificate);
+    }
+
+    #[test]
+    fn the_xctest_stack_is_recognized_by_name() {
+        for name in [
+            "XCTest.framework",
+            "XCTestCore.framework",
+            "XCUIAutomation.framework",
+            "XCTAutomationSupport.framework",
+            "XCUnit.framework",
+            "XCTestSupport.framework",
+            "Testing.framework",
+            "libXCTestSwiftSupport.dylib",
+            "libXCTestBundleInject.dylib",
+            "lib_TestingInterop.dylib",
+        ] {
+            assert!(is_embedded_xctest(name), "{name}");
+        }
+        for name in [
+            "Alamofire.framework",
+            "libswiftCore.dylib",
+            "XCTest",
+            "Testing.bundle",
+        ] {
+            assert!(!is_embedded_xctest(name), "{name}");
+        }
+    }
+
+    /// The shape Xcode 26.6 builds for a generic iOS device (issue #256): its
+    /// own XCTest in the app's `Frameworks/`, none of which iOS 15/16 can use.
+    #[test]
+    fn the_builds_own_xctest_is_removed_from_the_legacy_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join(RUNNER_APP_NAME);
+        let frameworks = app.join("Frameworks");
+        for framework in ["XCTest", "XCTestCore", "XCUIAutomation", "Testing"] {
+            let bundle = frameworks.join(format!("{framework}.framework"));
+            std::fs::create_dir_all(&bundle).unwrap();
+            std::fs::write(bundle.join(framework), b"macho").unwrap();
+        }
+        std::fs::write(frameworks.join("lib_TestingInterop.dylib"), b"macho").unwrap();
+        std::fs::write(frameworks.join("libXCTestSwiftSupport.dylib"), b"macho").unwrap();
+        let plugin = app.join("PlugIns/iPhoneUse.xctest");
+        std::fs::create_dir_all(plugin.join("Frameworks/XCTestSupport.framework")).unwrap();
+        std::fs::write(plugin.join("iPhoneUse"), b"macho").unwrap();
+        let removed = strip_embedded_xctest(&app).unwrap();
+        assert_eq!(removed.len(), 7, "{removed:?}");
+        assert!(removed.contains(&"Frameworks/lib_TestingInterop.dylib".to_string()));
+        assert!(removed
+            .contains(&"PlugIns/iPhoneUse.xctest/Frameworks/XCTestSupport.framework".to_string()));
+        assert!(!frameworks.exists(), "an emptied Frameworks/ is removed");
+        assert!(!plugin.join("Frameworks").exists());
+        assert!(
+            plugin.join("iPhoneUse").is_file(),
+            "the test bundle itself stays"
+        );
+        // Assembling again (or a build without them) removes nothing.
+        assert!(strip_embedded_xctest(&app).unwrap().is_empty());
+    }
+
+    #[test]
+    fn other_embedded_frameworks_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join(RUNNER_APP_NAME);
+        let frameworks = app.join("Frameworks");
+        std::fs::create_dir_all(frameworks.join("XCTest.framework")).unwrap();
+        std::fs::create_dir_all(frameworks.join("Other.framework")).unwrap();
+        assert_eq!(
+            strip_embedded_xctest(&app).unwrap(),
+            ["Frameworks/XCTest.framework"]
+        );
+        assert!(frameworks.join("Other.framework").is_dir());
     }
 
     #[test]
