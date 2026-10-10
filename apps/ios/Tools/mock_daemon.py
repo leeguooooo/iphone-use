@@ -53,7 +53,17 @@ SCENARIOS = {
     "locked": {"wda_locked": True, "drivable": False, "device_state": "locked",
                "setup_blocked_on": "locked"},
     "handoff": {"human_handoff": True, "drivable": False, "mode": "human"},
+    # A start on a passcode phone with nobody there to enter it.
+    "passcode": {"drivable": False, "device_state": "blocked", "recovery_owner": "daemon",
+                 "setup_blocked_on": "needs_passcode_on_phone",
+                 "next_step": {"zh": "手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。",
+                               "en": "This iPhone has a passcode: this start needs someone at the phone to enter it and allow UI Automation. After that, staying connected means it will not ask again."}},
     "owned": {"owner": "agent-loop", "owner_lease_remaining_secs": 240},
+    # A known phone off usbmuxd since a restart (Before First Unlock).
+    "restart-locked": {"drivable": False, "device_state": "blocked", "recovery_owner": "daemon",
+                       "setup_blocked_on": "locked_after_restart",
+                       "next_step": {"zh": "这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。",
+                                     "en": "This iPhone restarted and has not been unlocked since: someone needs to enter the passcode on the phone once, then it connects on its own."}},
 }
 
 BASE_STATUS = {
@@ -263,7 +273,7 @@ def handler(mock):
             sent = 0
             try:
                 while True:
-                    if mock.scenario in ("released", "starting", "locked", "handoff"):
+                    if mock.scenario in ("released", "starting", "locked", "handoff", "passcode", "restart-locked"):
                         time.sleep(0.2)
                         continue
                     if mock.scenario == "stall":

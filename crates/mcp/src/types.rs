@@ -161,6 +161,20 @@ mod tests {
     }
 
     #[test]
+    fn status_keeps_keep_runner_alive() {
+        let keep = json!({
+            "reason": "relaunch_needs_person",
+            "because": "passcode",
+            "hint": {"zh": "设了锁屏密码", "en": "has a passcode"},
+        });
+        let status: StatusResponse =
+            serde_json::from_value(json!({"ok": true, "keep_runner_alive": keep.clone()}))
+                .unwrap();
+        let out = serde_json::to_value(&status).unwrap();
+        assert_eq!(out["keep_runner_alive"], keep);
+    }
+
+    #[test]
     fn direct_status_preserves_recovery_fields() {
         let status: StatusResponse = serde_json::from_value(json!({
             "ok": true,

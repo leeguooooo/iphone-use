@@ -132,6 +132,22 @@ window; `0` keeps the runner up (v0.6.3–v0.7.3 behaviour). While a session hol
 owner lease the phone is never idle-released; the idle window starts when the lease is
 released or expires.
 
+**Phones whose next start needs a person keep their runner.** On a phone with a passcode
+every runner launch asks for it on the phone; with nobody there the start ends in
+`needs_passcode_on_phone`, and a remote user who let the phone idle could not get it back.
+So when `lock_readiness.passcode_protected` is `true` (or setup recorded such a start in
+the `relaunch-needs-person` marker of the instance's state directory), idle release
+leaves a runner that is **up** running, and `/agent/status` reports
+`keep_runner_alive: {"reason":"relaunch_needs_person","because":"passcode","hint":…}`
+(`because:"wifi_start_refused"` for the Wi-Fi case below). The trade-off: the phone stays
+in automation mode ("Automation Running") between uses. Only the runner process is kept —
+the screen is not kept awake while idle (keep-awake still follows use), so Auto-Lock locks
+the phone as usual; set Auto-Lock to Never if remote users must find it unlocked. A runner
+that is already **down** is still released: stopping the supervisor stops the KeepAlive
+relaunches that would each ask for the passcode, which is why idle release exists.
+`PHONE_REMOTE_IDLE_RELEASE=force` turns this exception off and releases idle runners
+anyway.
+
 Bringing a parked runner back takes ~5 s with the screen on and 10–25 s once iOS has
 turned it off. To hide that wait the daemon **pre-warms**: when an MCP server starts,
 when a model reads status through MCP, or when a session takes the owner lease, it
@@ -577,7 +593,16 @@ Measured on an iPhone 17 Pro Max (iOS 27): an unlocked cold connect is drivable 
 13–22 s; a locked one shows "unlock" in ~4 s and is drivable ~14 s after the unlock; a
 snapshot-bound tap with `?return=delta` (tap, then the settled tree) takes ~4 s. `POST /agent/mode {"mode":"agent"}` (or MCP `phone_reconnect`) restarts the
 configured target once — do not loop it; read `hint` and `setup_blocked_on`
-(`warp|proxy|not_connected|usb|trust|ddi|account|automation_mode_disabled|automation_not_allowed|wifi_automation_refused|xcode_too_old|ios_too_old|ddi_needs_reboot|legacy_needs_usb|locked`) first.
+(`warp|proxy|not_connected|usb|trust|ddi|account|automation_mode_disabled|needs_passcode_on_phone|locked_after_restart|automation_not_allowed|wifi_automation_refused|xcode_too_old|ios_too_old|ddi_needs_reboot|legacy_needs_usb|locked`) first.
+`needs_passcode_on_phone` means a runner start on a phone with a passcode waited for the
+passcode on the phone and nobody entered it (iOS 17+ reports it as an automation-mode
+timeout, the iOS 15/16 path as a runner that never starts): someone has to be at the phone
+for this start; after it, idle release keeps the runner up (`keep_runner_alive`) so it does
+not ask again. `locked_after_restart` means a phone this Mac knows (the configured target,
+or one it holds a pairing record for) is on USB but usbmuxd does not list it: it restarted
+and nobody has unlocked it since, so enter the passcode once and it connects on its own.
+`xcode_too_old` from the USB check needs positive evidence — an iPhone on the bus that no
+driver claimed.
 `not_connected` means the iPhone is not connected to this Mac at all: plug it in over USB
 (or join the same Wi-Fi) and unlock it. Nothing is rebuilt while it is away, and the
 connection comes back on its own when the phone does.
@@ -714,6 +739,7 @@ signature could invalidate.
 | `PHONE_REMOTE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the runner supervisor/relay lifecycle. |
 | `PHONE_REMOTE_PREWARM` | on | `0` turns pre-warm off (see Lifecycle). `PHONE_REMOTE_PREWARM_RECENT_SECS` (default `3600`) is how recently an agent must have driven the phone; `PHONE_REMOTE_PREWARM_INTERVAL_SECS` (default `600`) limits each trigger. |
 | `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | Stop the runner and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
+| `PHONE_REMOTE_IDLE_RELEASE` | *(unset)* | `force` releases idle runners even on a phone whose next start needs a person (a passcode phone, or one that cannot start over Wi-Fi); see `keep_runner_alive` in Lifecycle. |
 | `PHONE_REMOTE_KEEP_AWAKE_SECS` | `120` | Keep the phone from auto-locking while it is driven and for this many seconds after the last request (a hold, a live view or an owner lease also keep it awake). The runner presses F13, a key iOS ignores, every 10 s and never touches a locked phone. `0` turns it off. |
 | `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
 | `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | Device runner sources setup builds (a repo checkout's `scripts/setup-wda.sh` uses its own `runner/`). Persisted only when not the default. |

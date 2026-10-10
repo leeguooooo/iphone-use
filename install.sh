@@ -2270,7 +2270,7 @@ install_named_instance() {
     add_env MJPEG_PORT "$mjpeg_port"
     add_env RUST_LOG "$(pick RUST_LOG)"
     [ -n "$(pick RUST_LOG)" ] || add_env RUST_LOG warn
-    for key in PHONE_REMOTE_IDLE_RELEASE_SECS PHONE_REMOTE_PASSWORD PHONE_REMOTE_NO_UPDATE_CHECK; do
+    for key in PHONE_REMOTE_IDLE_RELEASE_SECS PHONE_REMOTE_IDLE_RELEASE PHONE_REMOTE_PASSWORD PHONE_REMOTE_NO_UPDATE_CHECK; do
         add_env "$key" "$(pick "$key")"
     done
     for key in WDA_TEAM_ID WDA_BUNDLE_ID WDA_ALLOW_LAN WDA_TRANSPORT IPU_RUNNER_SRC; do
@@ -3050,6 +3050,9 @@ done
 # "keep the runner up") is the operator's choice and is carried forward.
 IDLE_RELEASE_SECS="$(env_or_existing PHONE_REMOTE_IDLE_RELEASE_SECS)"
 append_plist_env PHONE_REMOTE_IDLE_RELEASE_SECS "$IDLE_RELEASE_SECS"
+# `force`: release idle runners even on a phone whose next start needs a
+# person (a passcode phone); carried forward like the window.
+append_plist_env PHONE_REMOTE_IDLE_RELEASE "$(env_or_existing PHONE_REMOTE_IDLE_RELEASE)"
 for ENV_KEY in \
     WDA_TEAM_ID \
     WDA_BUNDLE_ID \
