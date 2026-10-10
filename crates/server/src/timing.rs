@@ -807,15 +807,19 @@ mod tests {
         assert_eq!(&body[..], br#"{"ok":true}"#);
     }
 
-    #[tokio::test]
-    async fn notes_ride_on_the_request_they_happened_in() {
+    #[test]
+    fn notes_ride_on_the_request_they_happened_in() {
         note("ignored", serde_json::json!(1)); // outside a request: a no-op
-        let notes = RECORDER
-            .scope(Mutex::new(Recorder::default()), async {
-                note("agent_focus", serde_json::json!({"outcome": "waiting", "reason": "live_viewer"}));
+        let notes = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(RECORDER.scope(Mutex::new(Recorder::default()), async {
+                note(
+                    "agent_focus",
+                    serde_json::json!({"outcome": "waiting", "reason": "live_viewer"}),
+                );
                 RECORDER.with(|r| r.lock().unwrap().notes.clone())
-            })
-            .await;
+            }));
         assert_eq!(notes["agent_focus"]["reason"], "live_viewer");
         assert!(!notes.contains_key("ignored"));
     }
