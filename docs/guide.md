@@ -196,13 +196,15 @@ with WebDriverAgent or an older runner the daemon re-encodes the JPEG frames on 
 instead), otherwise as `/agent/mjpeg` (12–40 Mbit/s, LAN only).
 `PHONE_REMOTE_H264_PASSTHROUGH=0` forces the Mac re-encode.
 
-The toolbar's **性能 / 画质** button picks the viewing mode, remembered per browser (the
-iOS app has the same button); `?mode=performance|quality` on `/agent/h264` and
-`/agent/mjpeg` does the same for other clients:
+The toolbar's **画面** button cycles 自动 → 性能 → 画质, remembered per browser (the
+iOS app has a 性能 / 画质 button); `?mode=performance|quality` on `/agent/h264` and
+`/agent/mjpeg` does the same for other clients. 自动 (the default) watches in quality
+from this Mac or its LAN and in performance from anywhere else, and steps down to
+performance once the browser's decoder keeps falling behind:
 
 | Mode | Picture | Still screen | Scrolling |
 |---|---|---|---|
-| 性能 performance (default) | half size, up to 30 fps | ~0.04 Mbit/s | ~1.5 Mbit/s |
+| 性能 performance | half size, up to 30 fps | ~0.04 Mbit/s | ~1.5 Mbit/s |
 | 画质 quality | native size (1320×2868 on a 17 Pro Max), ~50 fps | ~0.1 Mbit/s | ~6 Mbit/s |
 
 An unchanged screen is not re-encoded: the runner sends a one-second heartbeat instead,
@@ -212,6 +214,14 @@ while any quality viewer watches. It turns your clicks, drags, long-presses,
 scrolls, and typing (Unicode included) into acknowledged `POST /control` commands with a
 bounded `ttl_ms`. Nothing steals Mac focus. The **Controls** panel shows the accessibility
 tree so you can tap by exact label instead of by pixel.
+
+With a mouse: click taps, drag swipes, hold long-presses (hold then drag drags),
+right-click long-presses, and the wheel or trackpad scrolls. After a click on the
+screen the keyboard types into the phone (input methods compose in the browser as
+usual; ⌘V pastes, Esc gives the keyboard back); `?` lists every shortcut. A tab
+in the background, or a window covered by another, pauses the picture and input for up
+to 45 seconds and resumes on the next frame; after that it disconnects so it cannot
+keep the phone from being released.
 
 The **流程** (flow) panel records what you do into a replayable flow file:
 

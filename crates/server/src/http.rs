@@ -1100,31 +1100,41 @@ async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respon
 
 /// The login form HTML (self-contained, no external assets).
 const LOGIN_HTML: &str = r#"<!doctype html><html lang="zh-CN"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>登录 · iphone-use</title>
 <style>
-:root{color-scheme:dark}
-html,body{margin:0;height:100%;background:#08090c;color:#eef2ff;
-  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;
-  display:flex;align-items:center;justify-content:center}
-form{background:#11131a;border:1px solid #272b38;border-radius:16px;padding:28px 24px;
-  width:min(86vw,320px);display:flex;flex-direction:column;gap:12px}
-h1{font-size:17px;margin:0 0 4px;letter-spacing:.02em}
-label{font-size:13px;font-weight:600;color:#dbe6ff}
-.hint{margin:-4px 0 2px;color:#8b93a7;font-size:12px;line-height:1.45}
-input{background:#08090c;color:#eef2ff;border:1px solid #272b38;border-radius:12px;
+:root{color-scheme:light dark;--bg:#eef0f4;--card:#fff;--field:#f4f5f8;--line:#dde1e8;
+  --text:#15181e;--muted:#5b6372;--accent:#2e6ef0;--ring:rgba(46,110,240,.32);
+  --danger:#d4343f;--shadow:0 30px 70px -24px rgba(16,24,40,.35),0 6px 18px rgba(16,24,40,.08)}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0c10;--card:#15171d;--field:#0f1115;--line:#2a2f3b;
+  --text:#eef1f7;--muted:#9aa2b3;--accent:#5b8dff;--ring:rgba(91,141,255,.4);--danger:#ff5d68;
+  --shadow:0 40px 90px -30px rgba(0,0,0,.85)}}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Segoe UI",sans-serif;
+  -webkit-font-smoothing:antialiased}
+body{min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:24px 16px}
+form{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:28px 24px 24px;
+  width:min(100%,340px);display:flex;flex-direction:column;gap:12px;box-shadow:var(--shadow)}
+.mark{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;margin-bottom:2px;
+  background:var(--text);color:var(--bg)}
+.mark svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round}
+h1{font-size:19px;margin:0;letter-spacing:.01em}
+label{font-size:13px;font-weight:600}
+.hint{margin:-4px 0 4px;color:var(--muted);font-size:12.5px;line-height:1.55}
+input{background:var(--field);color:var(--text);border:1px solid var(--line);border-radius:12px;
   padding:12px 14px;font-size:16px;-webkit-appearance:none}
-input:focus{outline:none;border-color:#4f8cff}
-input[aria-invalid="true"]{border-color:#ff5a66}
-input:focus-visible,button:focus-visible{outline:3px solid rgba(79,140,255,.35);
-  outline-offset:2px}
-input[aria-invalid="true"]:focus-visible{outline-color:rgba(255,90,102,.32)}
-button{background:#4f8cff;border:1px solid #4f8cff;color:#fff;border-radius:12px;
-  padding:12px;font-size:15px;font-weight:600;cursor:pointer}
-.err{color:#ff5a66;font-size:13px;line-height:1.4}
+input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)}
+input[aria-invalid="true"]{border-color:var(--danger)}
+button:focus-visible{outline:3px solid var(--ring);outline-offset:2px}
+button{background:var(--accent);border:1px solid var(--accent);color:#fff;border-radius:12px;
+  padding:12px;font-size:15px;font-weight:600;cursor:pointer;margin-top:4px}
+button:hover{filter:brightness(1.06)}
+.err{color:var(--danger);font-size:13px;line-height:1.4}
 .err:empty{display:none}
 </style></head><body>
 <form method="POST" action="/login" novalidate>
+  <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg></div>
   <h1>iphone-use</h1>
   <p class="hint" id="passwordHint">请输入这台 Mac 安装 iphone-use 时生成的控制密码。忘记后，请回到 Mac 重新运行安装程序查看或重设。</p>
   __NEXT_INPUT__
@@ -17204,6 +17214,14 @@ mod tests {
         assert!(!INDEX_HTML.contains("请连接并解锁 iPhone，保持亮屏，然后在手机上点「信任」"));
         assert!(INDEX_HTML
             .contains("a, button, input, textarea, select, summary, [contenteditable=\"true\"]"));
+        // Remote-control polish: a background tab pauses for a grace period
+        // instead of dropping the stream, the keyboard types into the phone,
+        // the wheel scrolls it, and an owner-lease refusal is named.
+        assert!(INDEX_HTML.contains("const BACKGROUND_GRACE_MS"));
+        assert!(INDEX_HTML.contains("id=\"keyCatcher\""));
+        assert!(INDEX_HTML.contains("type: 'scroll'"));
+        assert!(INDEX_HTML.contains("'phone_owned'"));
+        assert!(INDEX_HTML.contains("id=\"device\""));
     }
 
     #[test]
