@@ -40,7 +40,7 @@ Oddity seen while recording the control page: for about two seconds the phone sh
 
 ## Round 8 (overprinted text, 2026-10-11)
 
-- The opening's second stamp ("一步写入 278 字" / "278 characters, one step") started at 2.8 s, inside the first stamp's 0.18 s exit, so for about five frames both lines were printed on top of each other in every cut. The first stamp now leaves at 2.6 s and is gone before the second lands. Found by motion-use 0.7.1's collision check (2.80–2.87 s in all four cuts), after a reviewer noticed it in the embedded footage of another film.
+- The opening's second stamp ("一步写入 278 字" / "278 characters, one step") started at 2.8 s, inside the first stamp's 0.18 s exit, so for about five frames both lines were printed on top of each other in every cut. The first stamp now starts leaving at 2.6 s and is gone by 2.78 s, before the second lands at 2.8 s. Found by motion-use 0.7.1's collision check (2.80–2.87 s in all four cuts), after a reviewer noticed it in the embedded footage of another film.
 - Portrait: the provenance note sat at the foot of the opening terminal, where the three-line subtitle is; it showed through the translucent subtitle plate in the Chinese cut (0.6–4.5 s). It now sits on the terminal's title bar, right of the window dots.
 
 - Do: start the next line only after the previous one's exit has finished. Evidence: a 0.1 s gap inside a 0.18 s exit shipped an overprint to nine platforms. Why: the eye reads the overlap as a glitch even at five frames. When: any stamp, caption or title that hands over in the same spot.
