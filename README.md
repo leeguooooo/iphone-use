@@ -24,9 +24,9 @@ Claude Code, Codex or any MCP client reads the screen as text, taps, types and s
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
-https://github.com/user-attachments/assets/8c8eb86b-6af8-49a3-9d13-f1848ab1caef
+https://github.com/user-attachments/assets/e4abd4a4-f854-4fb8-87ea-4d65d8101143
 
-<sub>1-minute demo, real iPhone recordings · [中文版](https://github.com/user-attachments/assets/242898e6-2c23-40de-a604-7c47f4d4e3b6)</sub>
+<sub>1-minute demo, real iPhone recordings · [中文版](https://github.com/user-attachments/assets/0a2f93eb-267c-4a3f-b4c4-425bc1fa9b30)</sub>
 
 ## Why iphone-use
 

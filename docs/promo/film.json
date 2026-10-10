@@ -169,7 +169,7 @@
       "remote1": "Remote control: click the live picture",
       "remote2": "Pair the iPhone app, control several phones",
       "qr": "Scan to connect",
-      "pairHint": "scan with an iPhone: no address, no password"
+      "pairHint": "no address, no password"
     }
   },
   "shots": [

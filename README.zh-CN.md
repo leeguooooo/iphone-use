@@ -24,9 +24,9 @@ Claude Code、Codex 或任何 MCP 客户端都能用它把屏幕读成文字，�
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
-https://github.com/user-attachments/assets/242898e6-2c23-40de-a604-7c47f4d4e3b6
+https://github.com/user-attachments/assets/0a2f93eb-267c-4a3f-b4c4-425bc1fa9b30
 
-<sub>1 分钟演示，真机录屏 · [English](https://github.com/user-attachments/assets/8c8eb86b-6af8-49a3-9d13-f1848ab1caef)</sub>
+<sub>1 分钟演示，真机录屏 · [English](https://github.com/user-attachments/assets/e4abd4a4-f854-4fb8-87ea-4d65d8101143)</sub>
 
 ## 为什么用 iphone-use
 

@@ -201,7 +201,7 @@ window.drawFrame = function (c, t, film, view, M) {
       // Landscape: name the dialog in the viewer's language (the page itself is Chinese).
       if (!V) {
         const sp = (pt) => [T[0] + (pt[0] - F[0]) * Z, T[1] + (pt[1] - F[1]) * Z];
-        M.callout(c, t, sp(P(1130, 520)), p.qr, { sub: p.pairHint, bg: k.bg, fg: k.ink, at: 42.6, until: 49.2, dx: 190 * u, dy: 70 * u, size: 38 * u });
+        M.callout(c, t, sp(P(1130, 520)), p.qr, { sub: p.pairHint, bg: k.bg, fg: k.ink, at: 42.6, until: 49.2, dx: 150 * u, dy: 70 * u, size: 38 * u });
       }
     }
     // Enter through black instead of a hard cut into the bright page.
