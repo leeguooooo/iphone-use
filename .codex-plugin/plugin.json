@@ -1,6 +1,6 @@
 {
   "name": "iphone-use",
-  "version": "0.17.15",
+  "version": "0.17.16",
   "description": "Drive a real iPhone from your agent: read the screen as text, tap, type, scroll and replay saved per-app flows through the iphone-use daemon on your Mac.",
   "author": {
     "name": "leeguooooo",
