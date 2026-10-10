@@ -4434,3 +4434,62 @@ fn prewarm_is_gated_and_never_takes_the_lease() {
         assert_eq!(json["warming"], false, "{json}");
     });
 }
+
+// While the person signs in on the phone (a private hold), nothing reads its
+// screen: screenshots, the element tree and both live feeds are refused, and
+// clearing the hold lets them through again.
+#[test]
+fn a_private_hold_keeps_the_screen_unread_until_it_is_cleared() {
+    block(async {
+        let state = build_state_with_agent_token(None, Some("tok"));
+        let app = http::router(state.clone());
+        let hold = |body: &'static str| {
+            Request::builder()
+                .method("POST")
+                .uri("/agent/hold")
+                .header("authorization", "Bearer tok")
+                .header("x-phone-control", "1")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let get = |uri: &'static str| {
+            Request::builder()
+                .uri(uri)
+                .header("authorization", "Bearer tok")
+                .body(Body::empty())
+                .unwrap()
+        };
+        const READS: [&str; 4] = [
+            "/agent/screenshot",
+            "/agent/elements",
+            "/agent/mjpeg",
+            "/agent/h264",
+        ];
+
+        let bad = app.clone().oneshot(hold(r#"{"secs":60,"private":"yes"}"#)).await.unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(state.screen_private_secs(), 0, "a refused hold hides nothing");
+
+        let taken = app.clone().oneshot(hold(r#"{"secs":60,"private":true}"#)).await.unwrap();
+        assert_eq!(taken.status(), StatusCode::OK);
+        assert!(body_json(taken).await["screen_private_secs"].as_u64().unwrap() > 0);
+        for uri in READS {
+            let refused = app.clone().oneshot(get(uri)).await.unwrap();
+            assert_eq!(refused.status(), StatusCode::LOCKED, "{uri}");
+            assert_eq!(body_json(refused).await["error"], "screen_private", "{uri}");
+        }
+        let status = body_json(app.clone().oneshot(get("/agent/status")).await.unwrap()).await;
+        assert!(status["screen_private_secs"].as_u64().unwrap() > 0, "{status}");
+
+        // A hold without `private` (here: clearing it) lifts it.
+        let cleared = app.clone().oneshot(hold(r#"{"secs":0}"#)).await.unwrap();
+        assert_eq!(body_json(cleared).await["screen_private_secs"], 0);
+        for uri in READS {
+            let answer = app.clone().oneshot(get(uri)).await.unwrap();
+            assert_ne!(answer.status(), StatusCode::LOCKED, "{uri}");
+        }
+        let status = body_json(app.clone().oneshot(get("/agent/status")).await.unwrap()).await;
+        assert_eq!(status["screen_private_secs"], 0, "{status}");
+    });
+}

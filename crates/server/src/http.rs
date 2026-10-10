@@ -454,6 +454,11 @@ pub struct AppState {
     /// in the loop (typing a password, approving a prompt) otherwise trips the
     /// idle window and pays a 60–120s WDA rebuild every time.
     pub hold_until: Arc<Mutex<Option<Instant>>>,
+    /// A hold taken with `"private":true` (the person is signing in on the
+    /// phone): until then nothing reads the screen — screenshots, live video
+    /// and the element tree are refused and open streams end. Ends with the
+    /// hold. See [`AppState::screen_private_secs`].
+    pub private_until: Arc<Mutex<Option<Instant>>>,
     /// Who is driving the phone right now (issue #72). A client that names
     /// itself with `X-Phone-Owner` takes this lease on its first control
     /// request and refreshes it on every one; other clients' control requests
@@ -766,6 +771,12 @@ impl AppState {
         recover(self.hold_until.lock())
             .map(|until| until.saturating_duration_since(Instant::now()).as_secs())
             .unwrap_or(0)
+    }
+
+    /// Seconds left while the screen is private (0 when it is not). See
+    /// `AppState::private_until`.
+    pub fn screen_private_secs(&self) -> u64 {
+        private_secs_left(&self.private_until)
     }
 
     /// Whether a hold lease is currently keeping the phone.
@@ -2452,6 +2463,7 @@ async fn agent_status(
     let releasing = lifecycle == WdaLifecycleTransition::Releasing;
     let reconnecting = lifecycle == WdaLifecycleTransition::Reconnecting;
     let hold_remaining = state.hold_remaining_secs();
+    let screen_private_secs = state.screen_private_secs();
     let released = state.released.load(std::sync::atomic::Ordering::Relaxed);
     let human_handoff = released && human_handoff_active();
     // L2 health — action-level, not just /status (which lies: it reports
@@ -2723,7 +2735,7 @@ async fn agent_status(
     // its time, so a Shortcuts flash on a recording can be matched to it.
     let agent_focus = recover(state.agent_focus.lock()).status_json();
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -13294,6 +13306,9 @@ async fn agent_elements_inner(
         }
         AgentAuth::Ok => {}
     }
+    if let Some(refused) = screen_private_refusal(&state) {
+        return refused;
+    }
     // Always answer with parseable JSON, while preserving failure in the HTTP
     // status. A 200 empty tree is indistinguishable from a genuinely empty
     // screen and caused MCP clients to continue from false state.
@@ -13600,8 +13615,10 @@ fn attach_alert(body: String, alert: Option<(String, Vec<String>)>) -> String {
 const AGENT_HOLD_MAX_SECS: u64 = 4 * 3600;
 
 /// `POST /agent/hold` `{"secs": N}` — keep the phone for N seconds regardless
-/// of idle time (0 clears). Bearer + mutation header, like every control
-/// endpoint. Returns `{"ok":true,"hold_remaining_secs":N}`.
+/// of idle time (0 clears). `"private": true` also keeps the screen unread
+/// for that time — the person is signing in on the phone (see
+/// `AppState::private_until`). Bearer + mutation header, like every control
+/// endpoint. Returns `{"ok":true,"hold_remaining_secs":N,"screen_private_secs":M}`.
 /// Take (or, with `secs == 0`, clear) the idle-release hold, arbitrated
 /// against the watchdog.
 ///
@@ -13622,6 +13639,60 @@ fn try_take_hold(
     }
     *hold = (secs > 0).then(|| Instant::now() + std::time::Duration::from_secs(secs));
     true
+}
+
+/// Seconds left on a private hold (0 when none or expired).
+fn private_secs_left(private_until: &Mutex<Option<Instant>>) -> u64 {
+    recover(private_until.lock())
+        .map(|until| until.saturating_duration_since(Instant::now()).as_secs())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(0)
+}
+
+fn screen_private_now(private_until: &Mutex<Option<Instant>>) -> bool {
+    recover(private_until.lock()).is_some_and(|until| until > Instant::now())
+}
+
+/// Run `work` unless the screen turns private first (checked every 250 ms),
+/// so an open live feed ends at once when a private hold begins instead of
+/// waiting out its inactivity timeout.
+async fn unless_private<T>(
+    private_until: &Mutex<Option<Instant>>,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(work);
+    loop {
+        if screen_private_now(private_until) {
+            return None;
+        }
+        if let Ok(out) = tokio::time::timeout(std::time::Duration::from_millis(250), &mut work).await {
+            // Finished after the hold began: drop it, never send it.
+            return (!screen_private_now(private_until)).then_some(out);
+        }
+    }
+}
+
+/// Set or lift the private screen together with the hold it belongs to. The
+/// last hold decides: one taken without `private` (or `secs: 0`) lifts it.
+fn set_screen_private(state: &AppState, private: bool, secs: u64) {
+    let until = (private && secs > 0)
+        .then(|| Instant::now() + std::time::Duration::from_secs(secs));
+    *recover(state.private_until.lock()) = until;
+    if let Some(hub) = &state.video {
+        hub.hide_until(until);
+    }
+}
+
+/// 423 for every screen read while the person signs in on the phone.
+fn screen_private_refusal(state: &AppState) -> Option<Response> {
+    let secs = private_secs_left(&state.private_until);
+    (secs > 0).then(|| {
+        json_response(
+            StatusCode::LOCKED,
+            serde_json::json!({"ok": false, "error": "screen_private", "screen_private_secs": secs,
+                "hint": "the person is signing in on the phone, so its screen is not read; wait for them, then clear the hold (phone_hold 0 / POST /agent/hold {\"secs\":0}) and read it again"}),
+        )
+    })
 }
 
 /// The owner who takes a hold keeps the phone for as long as the hold lasts:
@@ -13808,9 +13879,20 @@ async fn agent_hold(
         Ok(true) => prewarm_on_new_lease(&state, &headers),
         Ok(false) => {}
     }
-    let secs = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
+    let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let secs = parsed
+        .as_ref()
         .and_then(|value| value.get("secs").and_then(serde_json::Value::as_u64));
+    let private = match parsed.as_ref().and_then(|value| value.get("private")) {
+        None | Some(serde_json::Value::Null) => Some(false),
+        Some(value) => value.as_bool(),
+    };
+    let Some(private) = private else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "invalid_hold", "hint": "private must be true or false"}),
+        );
+    };
     let Some(secs) = secs.filter(|secs| *secs <= AGENT_HOLD_MAX_SECS) else {
         return with_security_headers(
             Response::builder()
@@ -13848,12 +13930,14 @@ async fn agent_hold(
             std::time::Duration::from_secs(state.owner_lease_secs),
         );
     }
+    set_screen_private(&state, private, secs);
     state.touch_activity();
+    let screen_private_secs = state.screen_private_secs();
     with_security_headers(
         Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(format!(
-                r#"{{"ok":true,"hold_remaining_secs":{secs}}}"#
+                r#"{{"ok":true,"hold_remaining_secs":{secs},"screen_private_secs":{screen_private_secs}}}"#
             )))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
     )
@@ -14242,6 +14326,9 @@ async fn agent_screenshot(
         }
         AgentAuth::Ok => {}
     }
+    if let Some(refused) = screen_private_refusal(&state) {
+        return refused;
+    }
     if state.managed_wda_pending {
         return target_not_configured_response();
     }
@@ -14558,6 +14645,9 @@ async fn agent_mjpeg(
         }
         None => None,
     };
+    if let Some(refused) = screen_private_refusal(&state) {
+        return refused;
+    }
     if state.managed_wda_pending {
         return target_not_configured_response();
     }
@@ -14678,13 +14768,23 @@ async fn agent_mjpeg(
             let activity_guard = stream_id.map(|stream_id| {
                 MjpegActivityGuard::register(state.mjpeg_stream_activity.clone(), stream_id)
             });
+            // A private hold taken while this feed is open ends it: the
+            // person is signing in on the phone.
+            let private_until = state.private_until.clone();
             let timed = futures_util::stream::unfold(
                 (upstream, guard, activity_guard, false),
-                |(mut upstream, guard, activity_guard, done)| async move {
+                move |(mut upstream, guard, activity_guard, done)| {
+                    let private_until = private_until.clone();
+                    async move {
                     if done {
                         return None;
                     }
-                    match tokio::time::timeout(MJPEG_INACTIVITY_TIMEOUT, upstream.next()).await {
+                    let next = unless_private(
+                        &private_until,
+                        tokio::time::timeout(MJPEG_INACTIVITY_TIMEOUT, upstream.next()),
+                    )
+                    .await?;
+                    match next {
                         Ok(Some(Ok(bytes))) => {
                             if let Some(activity) = &activity_guard {
                                 activity.touch();
@@ -14706,6 +14806,7 @@ async fn agent_mjpeg(
                             )),
                             (upstream, guard, activity_guard, true),
                         )),
+                    }
                     }
                 },
             );
@@ -14768,6 +14869,9 @@ async fn agent_h264(
         }
         None => None,
     };
+    if let Some(refused) = screen_private_refusal(&state) {
+        return refused;
+    }
     let Some(hub) = state.video.clone() else {
         return with_security_headers(
             (StatusCode::NOT_IMPLEMENTED, "H.264 video is unavailable on this daemon").into_response(),
@@ -14811,13 +14915,21 @@ async fn agent_h264(
     let activity_guard = stream_id.map(|stream_id| {
         MjpegActivityGuard::register(state.mjpeg_stream_activity.clone(), stream_id)
     });
+    // A private hold taken while this feed is open ends it (the hub stops
+    // capturing too, see `VideoHub::hide_until`).
+    let private_until = state.private_until.clone();
     let frames = futures_util::stream::unfold(
         (subscription, stream_guard, activity_guard, hub),
-        |(mut subscription, guard, activity_guard, hub)| async move {
+        move |(mut subscription, guard, activity_guard, hub)| {
+            let private_until = private_until.clone();
+            async move {
             loop {
-                match tokio::time::timeout(MJPEG_INACTIVITY_TIMEOUT, subscription.frames.recv())
-                    .await
-                {
+                let next = unless_private(
+                    &private_until,
+                    tokio::time::timeout(MJPEG_INACTIVITY_TIMEOUT, subscription.frames.recv()),
+                )
+                .await?;
+                match next {
                     Ok(Ok(frame)) => {
                         if let Some(activity) = &activity_guard {
                             activity.touch();
@@ -14836,6 +14948,7 @@ async fn agent_h264(
                         return None
                     }
                 }
+            }
             }
         },
     );

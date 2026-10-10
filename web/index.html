@@ -375,6 +375,14 @@
       pointer-events: none;
     }
     #stallPill .ol-spinner { display: block; }
+    /* A private hold: the person is signing in, nothing of the screen shows. */
+    #privateCover {
+      position: absolute; inset: 0; z-index: 15; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center;
+      background: #0c0e14; color: #fff; font: 600 var(--fs-s)/1.5 var(--sans);
+    }
+    #privateCover[hidden] { display: none; }
+    #privateCover small { color: rgba(255,255,255,.62); font-weight: 500; }
     #metrics b.warn, #metrics .warn { color: var(--warn); }
     /* keyboard capture: an invisible textarea keeps IME composition native */
     #keyCatcher {
@@ -900,6 +908,10 @@
         </div>
         <textarea id="keyCatcher" aria-label="键盘输入到 iPhone" tabindex="-1"
                   autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        <div id="privateCover" role="status" aria-live="polite" hidden>
+          <span>有人正在手机上验证身份</span>
+          <small>画面已暂停，验证完成、agent 继续后恢复</small>
+        </div>
         <div id="stallPill" role="status" aria-live="polite" hidden>
           <span class="ol-spinner" aria-hidden="true"></span><span>画面卡住 · 正在恢复…</span>
         </div>
@@ -1840,6 +1852,13 @@ function syncRedactedOverlay(s) {
     hideRedactedFrame();
   }
 }
+/* A private hold (someone types a passcode or uses Face ID on the phone): the
+   daemon serves no picture until it ends, so cover the screen instead of
+   showing the last frame or a "reconnecting" state. */
+function syncPrivateCover(s) {
+  const cover = document.getElementById('privateCover');
+  if (cover) cover.hidden = !(Number(s?.screen_private_secs) > 0);
+}
 async function pollAgentMode() {
   // A degraded WDA can take several seconds to answer its action-level probe.
   // Never let the 3s timer stack duplicate probes behind the daemon's single
@@ -1870,6 +1889,7 @@ async function pollAgentMode() {
     backendStatus = s;
     syncHandoffButton();
     syncRedactedOverlay(s);
+    syncPrivateCover(s);
     syncLockNotice(s);
     syncDeviceIdentity(s);
 

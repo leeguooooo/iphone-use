@@ -314,6 +314,8 @@ pub struct VideoHub {
     verdict_running: AtomicBool,
     /// The newest upstream JPEG and when it arrived, while the pipeline runs.
     latest_jpeg: Mutex<Option<(Bytes, std::time::Instant)>>,
+    /// The screen is private until then (see [`VideoHub::hide_until`]).
+    hidden_until: Mutex<Option<std::time::Instant>>,
 }
 
 /// Keeps a subscription counted; dropping it lets the pipeline wind down.
@@ -356,6 +358,7 @@ impl VideoHub {
             verdict_at: Mutex::new(None),
             verdict_running: AtomicBool::new(false),
             latest_jpeg: Mutex::new(None),
+            hidden_until: Mutex::new(None),
         })
     }
 
@@ -765,7 +768,31 @@ impl VideoHub {
     /// under the `running` lock, which `subscribe` takes after counting
     /// itself: a newcomer either keeps this pipeline alive or finds it
     /// stopped and starts its own, never attaches to one that is leaving.
+    /// The person is signing in on the phone until `until` (a private hold):
+    /// stop capturing now rather than after [`IDLE_LINGER`], and drop the
+    /// newest frame so a screenshot taken later cannot be served from it.
+    /// `None` lifts it early.
+    pub fn hide_until(&self, until: Option<std::time::Instant>) {
+        *self.hidden_until.lock().unwrap_or_else(|e| e.into_inner()) = until;
+        if until.is_some() {
+            *self.latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            self.wake.notify_one();
+        }
+    }
+
+    fn hidden(&self) -> bool {
+        self.hidden_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|until| until > std::time::Instant::now())
+    }
+
     fn should_stop(&self, idle_since: &mut Option<std::time::Instant>) -> bool {
+        if self.hidden() {
+            *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            *self.latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return true;
+        }
         if self.subscribers.load(Ordering::Acquire) > 0 {
             *idle_since = None;
             return false;
@@ -1394,6 +1421,27 @@ mod tests {
 
     const JPEG_A: &[u8] = &[0xFF, 0xD8, 1, 2, 3, 0xFF, 0x00, 4, 0xFF, 0xD9];
     const JPEG_B: &[u8] = &[0xFF, 0xD8, 9, 8, 0xFF, 0xD9];
+
+    #[test]
+    fn a_private_screen_stops_capture_at_once_even_with_viewers() {
+        let hub = VideoHub::new("http://127.0.0.1:1".into());
+        *hub.running.lock().unwrap() = true;
+        hub.subscribers.store(1, Ordering::Release);
+        *hub.latest_jpeg.lock().unwrap() = Some((Bytes::from_static(JPEG_A), std::time::Instant::now()));
+
+        hub.hide_until(Some(std::time::Instant::now() + Duration::from_secs(60)));
+        assert!(hub.latest_jpeg.lock().unwrap().is_none(), "no frame outlives the hold");
+        let mut idle = None;
+        assert!(hub.should_stop(&mut idle), "no linger while private");
+        assert!(!*hub.running.lock().unwrap());
+
+        // Lifted (or expired): viewers keep it running again.
+        hub.hide_until(None);
+        *hub.running.lock().unwrap() = true;
+        assert!(!hub.should_stop(&mut idle));
+        hub.hide_until(Some(std::time::Instant::now() - Duration::from_secs(1)));
+        assert!(!hub.should_stop(&mut idle), "an expired private hold no longer stops it");
+    }
 
     #[test]
     fn stopping_is_decided_and_marked_under_the_running_lock() {

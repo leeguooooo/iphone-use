@@ -62,6 +62,7 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
             std::collections::HashMap::new(),
         )),
         hold_until: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        private_until: std::sync::Arc::new(std::sync::Mutex::new(None)),
         owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
         owner_lease_secs: 300,
         // Never launchd: a test that reconnects swaps in its own fake.
