@@ -222,6 +222,8 @@ struct DemoView: View {
             }
         } accessory: { _ in
             EmptyView()
+        } banner: {
+            EmptyView()
         } keys: { axis in
             KeyBar(axis: axis,
                    onBack: { session.handle(.back) },

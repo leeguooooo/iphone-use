@@ -504,6 +504,8 @@ struct RemoteView: View {
             RemoteStage(app: app, session: session, zoom: $zoom, resetZoom: resetZoom) { session.send($0) }
         } accessory: { _ in
             OfflineBanner(online: app.online)
+        } banner: {
+            StatusBanner(app: app, session: session)
         } keys: { axis in
             KeyBar(axis: axis,
                    onBack: { session.send(.back) },

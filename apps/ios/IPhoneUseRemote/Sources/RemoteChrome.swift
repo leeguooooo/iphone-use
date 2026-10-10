@@ -9,13 +9,16 @@ import UIKit
 /// Lays out the remote: portrait stacks bar / picture / keys; landscape
 /// puts the bar and the keys in rails beside the picture; immersive hides
 /// both and gives the picture the whole screen.
-struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Keys: View, Keyboard: View>: View {
+struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Keys: View, Keyboard: View>: View {
     var immersive: Bool
     var typing: Bool
     var onExitImmersive: () -> Void
     @ViewBuilder var top: (Axis) -> Top
     @ViewBuilder var screen: () -> Screen
     @ViewBuilder var accessory: (Axis) -> Accessory
+    /// A one-line state (stalled, reconnecting, in use elsewhere): laid out
+    /// above the picture, never over it.
+    @ViewBuilder var banner: () -> Banner
     @ViewBuilder var keys: (Axis) -> Keys
     @ViewBuilder var keyboard: () -> Keyboard
     @Environment(\.verticalSizeClass) private var verticalSize
@@ -33,6 +36,7 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Keys: View, Keyb
                     }
                     accessory(.vertical)
                     VStack(spacing: 0) {
+                        banner()
                         screen()
                             .padding(immersive ? 0 : Theme.Space.s)
                         if typing { keyboard() }
@@ -53,6 +57,7 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Keys: View, Keyb
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
                     accessory(.horizontal)
+                    banner()
                     screen()
                         .padding(.horizontal, immersive ? 0 : Theme.Space.s)
                         .padding(.vertical, immersive ? 0 : Theme.Space.xs)
@@ -70,12 +75,16 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Keys: View, Keyb
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.stage.ignoresSafeArea())
-        .overlay(alignment: landscape ? .topTrailing : .bottomTrailing) {
+        // In the corner the hidden status bar leaves free (beside the Dynamic
+        // Island; in landscape, in the side inset), never over the picture.
+        .overlay(alignment: .topTrailing) {
             if immersive && !typing {
-                GlassIconButton(symbol: "arrow.down.right.and.arrow.up.left", label: "退出沉浸模式", size: 36,
+                GlassIconButton(symbol: "arrow.down.right.and.arrow.up.left", label: "退出沉浸模式", size: 32,
                                 action: onExitImmersive)
-                    .opacity(0.55)
-                    .padding(Theme.Space.s)
+                    .opacity(0.6)
+                    .padding(.top, landscape ? 12 : 10)
+                    .padding(.trailing, landscape ? 12 : 18)
+                    .ignoresSafeArea()
                     .transition(.opacity)
             }
         }
@@ -554,17 +563,28 @@ struct StatusOverlay: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let p = session.presentation(now: context.date)
-            switch p.placement {
-            case .cover: StatusCard(p: p, busy: session.busy) { perform($0, on: session, app: app) }
-            case .banner:
-                VStack {
-                    StatusStrip(p: p) { perform($0, on: session, app: app) }
-                    Spacer()
-                }
-            case .none: EmptyView()
+            if p.placement == .cover {
+                StatusCard(p: p, busy: session.busy) { perform($0, on: session, app: app) }
             }
         }
         .animation(.snappy(duration: 0.25), value: session.presentation().placement)
+    }
+}
+
+/// The strip form of the state, for the scaffold's banner slot: above the
+/// picture, so it never hides the phone's status bar or its top buttons.
+struct StatusBanner: View {
+    let app: AppModel
+    let session: DeviceSession
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let p = session.presentation(now: context.date)
+            if p.placement == .banner {
+                StatusStrip(p: p) { perform($0, on: session, app: app) }
+            }
+        }
+        .animation(.snappy(duration: 0.25), value: session.presentation().placement == .banner)
     }
 }
 
@@ -661,8 +681,8 @@ struct StatusStrip: View {
         }
         .padding(.leading, 12).padding(.trailing, p.primary == nil ? 14 : 6).padding(.vertical, 7)
         .glassBackground(Capsule())
-        .padding(.top, Theme.Space.s)
         .padding(.horizontal)
+        .padding(.bottom, Theme.Space.xs)
         .accessibilityElement(children: .combine)
         .transition(.move(edge: .top).combined(with: .opacity))
     }

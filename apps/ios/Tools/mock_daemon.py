@@ -83,15 +83,15 @@ def build_stream(video, cache, fps, width):
         cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-vf", f"{scale},fps={fps}",
                *enc, str(cache)]
     else:
-        # Each demo screen for 2 s, then a slow scroll of it so the stream is
-        # never a still picture (fps and stalls show).
+        # Each demo screen for 3 s, whole (never cropped: the app's layout is
+        # checked against the phone's own status bar). The encoder still
+        # sends every frame, so fps and stalls show.
         shots = sorted(DEMO.glob("demo-*.jpg"))
         inputs, parts = [], []
         for i, shot in enumerate(shots):
             inputs += ["-loop", "1", "-t", "3", "-i", str(shot)]
             parts.append(
-                f"[{i}:v]{scale},fps={fps},crop=iw:ih*0.92:0:'(ih*0.08)*abs(sin(t*1.2))',"
-                f"{scale},setsar=1,format=yuv420p[v{i}]")
+                f"[{i}:v]{scale},fps={fps},setsar=1,format=yuv420p[v{i}]")
         chain = "".join(f"[v{i}]" for i in range(len(shots)))
         graph = ";".join(parts) + f";{chain}concat=n={len(shots)}:v=1:a=0[out]"
         cmd = ["ffmpeg", "-y", "-loglevel", "error", *inputs, "-filter_complex", graph,

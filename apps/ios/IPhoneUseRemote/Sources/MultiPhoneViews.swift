@@ -512,6 +512,8 @@ struct SyncView: View {
             RemoteStage(app: app, session: lead, zoom: $zoom, resetZoom: resetZoom) { app.dispatch($0, from: lead) }
         } accessory: { axis in
             if !immersive { followerStrip(axis) }
+        } banner: {
+            StatusBanner(app: app, session: lead)
         } keys: { axis in
             KeyBar(axis: axis,
                    onBack: { app.dispatch(.back, from: lead) },
