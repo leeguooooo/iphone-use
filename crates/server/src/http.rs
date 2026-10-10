@@ -10485,8 +10485,10 @@ async fn agent_actions_inner(
         AgentActionStep::Action { action, .. } => Some(crate::focus::launch_bundle(action)),
         _ => None,
     });
-    engage_agent_focus(&state, wda, first_launch.flatten(), true).await;
+    // Control priority first: a health probe must not hold the runner while
+    // the focus step (or the action after it) waits for it.
     let _priority = state.begin_wda_control();
+    engage_agent_focus(&state, wda, first_launch.flatten(), true).await;
     // Long text steps add their typing time (zero for text up to one chunk).
     let typing_allowance: std::time::Duration = request
         .steps
@@ -12124,6 +12126,9 @@ async fn agent_input_inner(
     state.cancel_settled_frame_prefetch();
     // Do Not Disturb before the first action of a session; its time is not
     // charged to the action's own budget.
+    // Control priority first: a health probe must not hold the runner while
+    // the focus step (or the action after it) waits for it.
+    let _priority = state.begin_wda_control();
     let focus_started = tokio::time::Instant::now();
     engage_agent_focus(&state, wda, crate::focus::launch_bundle(&value), true).await;
     // A long text gets its typing time on top (zero for text up to one chunk),
@@ -12134,7 +12139,6 @@ async fn agent_input_inner(
     if tokio::time::Instant::now() >= agent_wda_deadline {
         return wda_deadline_response(false);
     }
-    let _priority = state.begin_wda_control();
     let dispatched = Arc::new(std::sync::Mutex::new(None::<Option<std::time::Instant>>));
     let dispatch_marker = dispatched.clone();
     let want_delta = query.return_mode.as_deref() == Some("delta");
