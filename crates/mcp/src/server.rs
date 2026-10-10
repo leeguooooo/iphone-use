@@ -1411,7 +1411,8 @@ impl PhoneHandler {
         fetches a code): the idle watchdog will not release it for `secs` seconds \
         (0 clears the hold; max 14400). When the person signs in (passcode, Face ID, \
         a code), pass private=true: the screen is not read or streamed until you clear \
-        the hold. Not for initialization, health checks, or \
+        the hold; pass private=true again when extending it, since a hold without it \
+        lifts the privacy. Not for initialization, health checks, or \
         keeping the phone ready; clear it when the step is done. Fails with \
         device_release_in_progress if the daemon is already releasing, and with \
         phone_owned if another session holds the phone lease."
