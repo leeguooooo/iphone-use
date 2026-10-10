@@ -1,6 +1,6 @@
 [package]
 name = "legacy-launch"
-version = "0.17.14"
+version = "0.17.15"
 edition = "2024"
 license = "MIT"
 description = "Launches the iphone-use XCTest runner on iOS 15/16 over USB or Wi-Fi and holds it alive"
