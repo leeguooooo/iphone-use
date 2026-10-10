@@ -2505,7 +2505,14 @@ async fn agent_status(
         None
     };
     let setup_blocked_on = if state.managed_wda {
-        read_setup_blocked_on()
+        // An automation refusal on a phone known to have a passcode is the
+        // passcode prompt nobody answered: name it (setup does too when it
+        // knows; this covers a passcode the daemon learned first).
+        crate::keep_runner::person_blocker(
+            &read_setup_blocked_on(),
+            crate::lock_readiness::passcode(),
+        )
+        .to_string()
     } else {
         String::new()
     };
@@ -2657,6 +2664,23 @@ async fn agent_status(
     let transport = managed_transport(&state).await;
     let wifi_start_refused =
         state.managed_wda && wifi_start_refused(&crate::instance::current().state_dir);
+    // Why idle release keeps this runner (a start needs a person), or null.
+    // A passcode phone's runner is kept only while it is up (a down one is
+    // released), so report it only then; the Wi-Fi case also keeps a runner
+    // a probe saw down.
+    let keep_runner_alive = crate::keep_runner::status_json(
+        state
+            .managed_wda
+            .then(|| {
+                crate::keep_runner::current(
+                    &crate::instance::current().state_dir,
+                    wifi_start_refused,
+                    transport,
+                )
+            })
+            .flatten()
+            .filter(|because| wda || because.keeps_down_runner()),
+    );
     let legacy_ios = legacy_ios_json(state.managed_wda, &crate::instance::current().state_dir);
     let rtt = crate::wda::wda_rtt_ms();
     let rtt_json = rtt.map_or("null".to_string(), |ms| ms.to_string());
@@ -2669,7 +2693,7 @@ async fn agent_status(
     // Which phone this is: name, model, iOS (cache only, no I/O).
     let device = crate::device_identity::current_json();
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -2734,12 +2758,28 @@ fn wifi_start_refused(state_dir: &std::path::Path) -> bool {
         .exists()
 }
 
+/// Why idle release must keep this daemon's runner (see
+/// [`crate::keep_runner`]), from the markers setup left, the cached passcode
+/// fact and the current transport.
+async fn keep_runner_reason(state: &AppState) -> Option<crate::keep_runner::Because> {
+    let state_dir = &crate::instance::current().state_dir;
+    let refused = wifi_start_refused(state_dir);
+    let transport = managed_transport(state).await;
+    crate::keep_runner::current(state_dir, refused, transport)
+}
+
 /// Idle release must keep a runner that is up over the Wi-Fi tunnel on a
 /// phone that cannot start one over Wi-Fi: stopping it would leave the phone
 /// unreachable until someone plugs in a cable. Over USB, or on a phone that
-/// starts over Wi-Fi, idle release works as usual.
+/// starts over Wi-Fi, idle release works as usual. (The policy lives in
+/// [`crate::keep_runner::reason`]; this pins its Wi-Fi half.)
+#[cfg(test)]
 fn idle_release_keeps_wifi_runner(start_refused: bool, transport: &str) -> bool {
-    start_refused && matches!(transport, "wifi-tunnel" | "wifi")
+    crate::keep_runner::reason(crate::keep_runner::Signals {
+        wifi_start_refused: start_refused,
+        transport,
+        ..Default::default()
+    }) == Some(crate::keep_runner::Because::WifiStartRefused)
 }
 
 /// How control traffic reaches WDA, from the relay setup-wda.sh recorded:
@@ -3008,6 +3048,14 @@ fn human_next_step(
                 "打开 Xcode › 设置 › 账户，点 + 登录 Apple ID（免费账号也行）",
                 "Open Xcode › Settings › Accounts and add your Apple ID (a free one works)",
             ),
+            "locked_after_restart" => (
+                "这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。",
+                "This iPhone restarted and has not been unlocked since: someone needs to enter the passcode on the phone once, then it connects on its own.",
+            ),
+            "needs_passcode_on_phone" => (
+                "手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。",
+                "This iPhone has a passcode: this start needs someone at the phone to enter it and allow UI Automation. After that, staying connected means it will not ask again.",
+            ),
             "automation_mode_disabled" => (
                 "在 iPhone 的 设置 › 开发者 里打开「启用 UI 自动化」，并允许弹出的提示",
                 "On the iPhone, turn on Settings › Developer › Enable UI Automation and allow the prompt",
@@ -3179,6 +3227,12 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
         "account" => Some(
             "Xcode has no usable signed-in Apple account or provisioning profile for the device runner — open Xcode → Settings → Accounts and add an Apple ID (a free one works), then poll status; the managed service retries automatically",
         ),
+        "locked_after_restart" => Some(
+            "the configured iPhone is on USB but usbmuxd does not list it: it restarted and has not been unlocked since (Before First Unlock), and iOS keeps it off usbmuxd until its passcode is entered once — this is not an Xcode problem; have a person enter the passcode on the phone, and the managed service connects on its own after that, so do not send another reconnect request",
+        ),
+        "needs_passcode_on_phone" => Some(
+            "the iPhone has a passcode, and iOS asks for it on the phone every time the device runner starts before it enables UI automation; nobody entered it, so the start timed out — have a person at the phone unlock it and enter the passcode when the runner starts (if no prompt appears, check Settings › Developer › Enable UI Automation). Nothing remote can enter a passcode. After one successful start the daemon keeps the runner up while idle (keep_runner_alive) so it does not ask again; the managed service retries on its own backoff, so do not send another reconnect request",
+        ),
         "automation_mode_disabled" => Some(
             "iOS has not enabled UI automation for the device runner — on the unlocked iPhone turn on Settings › Developer › Enable UI Automation and accept any passcode or Allow automation prompt; the managed service retries on its own backoff, so do not send another reconnect request",
         ),
@@ -3246,6 +3300,8 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<WdaSetupStatus> {
             | "ddi"
             | "account"
             | "automation_mode_disabled"
+            | "needs_passcode_on_phone"
+            | "locked_after_restart"
             | "xcode_too_old"
             | "ios_too_old"
             | "automation_not_allowed"
@@ -4165,7 +4221,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
         let mut window = base_window;
         let mut release_backoff_until: Option<std::time::Instant> = None;
         let mut release_failures: u32 = 0;
-        let mut kept_wifi_runner = false;
+        let mut kept_runner: Option<crate::keep_runner::Because> = None;
         loop {
             tokio::time::sleep(POLL).await;
             window = effective_idle_window(base_window);
@@ -4235,8 +4291,12 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 // gone; on a phone that cannot start one over Wi-Fi, stopping
                 // the supervisor here could kill a live runner, and a dead one
                 // is retried by the supervisor as soon as the cable is back.
-                if wifi_start_refused(&crate::instance::current().state_dir)
-                    && idle_release_keeps_wifi_runner(true, managed_transport(&state).await)
+                // A passcode phone is NOT kept here: its runner is down, and
+                // stopping the supervisor stops the relaunches that would each
+                // ask for the passcode (see `crate::keep_runner`).
+                if keep_runner_reason(&state)
+                    .await
+                    .is_some_and(crate::keep_runner::Because::keeps_down_runner)
                 {
                     continue;
                 }
@@ -4334,18 +4394,21 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
             if release_backoff_until.is_some_and(|until| std::time::Instant::now() < until) {
                 continue; // a recent stop did not take; wait out the backoff
             }
-            if wifi_start_refused(&crate::instance::current().state_dir)
-                && idle_release_keeps_wifi_runner(true, managed_transport(&state).await)
-            {
-                if !kept_wifi_runner {
-                    kept_wifi_runner = true;
-                    tracing::info!(
-                        "idle, but keeping the runner: it is up over Wi-Fi and this iPhone refused to start one over Wi-Fi (wifi_automation_refused), so a release would need the cable to undo"
-                    );
+            if let Some(because) = keep_runner_reason(&state).await {
+                if kept_runner != Some(because) {
+                    kept_runner = Some(because);
+                    match because {
+                        crate::keep_runner::Because::WifiStartRefused => tracing::info!(
+                            "idle, but keeping the runner: it is up over Wi-Fi and this iPhone refused to start one over Wi-Fi (wifi_automation_refused), so a release would need the cable to undo"
+                        ),
+                        crate::keep_runner::Because::Passcode => tracing::info!(
+                            "idle, but keeping the runner: this iPhone has a passcode and every runner start asks for it on the phone, so a release would need a person to undo (PHONE_REMOTE_IDLE_RELEASE=force releases anyway)"
+                        ),
+                    }
                 }
                 continue;
             }
-            kept_wifi_runner = false;
+            kept_runner = None;
             let Some(release_token) = state.wda_lifecycle.try_begin_releasing() else {
                 continue;
             };
@@ -17275,6 +17338,8 @@ mod tests {
             "ddi",
             "account",
             "automation_mode_disabled",
+            "needs_passcode_on_phone",
+            "locked_after_restart",
             "automation_not_allowed",
             "wifi_automation_refused",
             "not_connected",
@@ -17383,6 +17448,8 @@ mod tests {
             "ddi",
             "account",
             "automation_mode_disabled",
+            "needs_passcode_on_phone",
+            "locked_after_restart",
             "automation_not_allowed",
             "wifi_automation_refused",
             "not_connected",
@@ -17608,6 +17675,44 @@ mod tests {
         assert!(
             zh.contains("不用升级") && en.contains("App Store Connect API key"),
             "{en}"
+        );
+    }
+
+    #[test]
+    fn needs_passcode_on_phone_asks_a_person_once() {
+        let payload = r#"{"phase":"building-fail","blocked_on":"needs_passcode_on_phone","message":"m","ts":1000}"#;
+        assert_eq!(
+            parse_setup_blocked_on(payload, 1100),
+            "needs_passcode_on_phone"
+        );
+        let (zh, en) = human_next_step("blocker", "needs_passcode_on_phone", "").unwrap();
+        assert_eq!(
+            zh,
+            "手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。"
+        );
+        assert!(en.contains("enter it") && en.contains("will not ask again"), "{en}");
+        let hint = setup_blocker_hint("needs_passcode_on_phone").unwrap();
+        assert!(hint.contains("keep_runner_alive"), "{hint}");
+        assert!(
+            hint.contains("do not send another reconnect request"),
+            "{hint}"
+        );
+        // A phone off usbmuxd since a restart is a passcode, not an Xcode.
+        let (zh, _) = human_next_step("blocker", "locked_after_restart", "").unwrap();
+        assert_eq!(
+            zh,
+            "这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。"
+        );
+        assert!(!setup_blocker_hint("locked_after_restart")
+            .unwrap()
+            .contains("install"));
+        // The web panel shows it as a blocking card, not a spinner.
+        assert!(INDEX_HTML.contains("case 'needs_passcode_on_phone':"));
+        assert!(INDEX_HTML.contains("['locked', 'needs_passcode_on_phone',"));
+        // The daemon names it too when only it knows about the passcode.
+        assert_eq!(
+            crate::keep_runner::person_blocker("automation_mode_disabled", Some(true)),
+            "needs_passcode_on_phone"
         );
     }
 

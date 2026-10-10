@@ -306,6 +306,16 @@
         setup: '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并在手机上确认密码或“允许自动化”提示，再重新运行设置命令。',
         retry: '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并确认手机上的密码或“允许自动化”提示；服务会自动重试。',
       },
+      locked_after_restart: {
+        title: 'iPhone 重启后还没解锁',
+        setup: '这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。',
+        retry: '这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。',
+      },
+      needs_passcode_on_phone: {
+        title: '需要有人在手机上输入密码',
+        setup: '手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。请站在手机旁重新运行设置命令，手机要求时输入密码。',
+        retry: '手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。',
+      },
       automation_not_allowed: {
         title: 'iPhone 没有授权 UI 自动化',
         setup: 'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败。解锁 iPhone，确认“设置 › 开发者 › 启用 UI 自动化”已打开，重新运行设置命令时盯着手机完成这个提示。',
@@ -342,7 +352,7 @@
         retry: '保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。',
       },
     };
-    const managedRetryBlockers = new Set(['warp', 'proxy', 'not_connected', 'usb', 'trust', 'ddi', 'automation_mode_disabled', 'automation_not_allowed']);
+    const managedRetryBlockers = new Set(['warp', 'proxy', 'not_connected', 'usb', 'trust', 'ddi', 'automation_mode_disabled', 'automation_not_allowed', 'needs_passcode_on_phone', 'locked_after_restart']);
 
     function setState(title, detail, tone = 'warn') {
       stateTitle.textContent = title;

@@ -1003,6 +1003,10 @@ impl PhoneHandler {
         `lock_readiness` says whether the phone locks on its own when idle (passcode_protected, \
         auto_lock_secs, keep_awake, verdict, hint): will_lock_needs_person means a person must \
         unlock it after a pause; tell the owner the hint instead of retrying. \
+        setup_blocked_on=needs_passcode_on_phone means the runner start waits for a person to \
+        enter the passcode on the phone: tell the owner next_step and do not retry. \
+        `keep_runner_alive` (non-null) means idle release keeps the runner up because its next \
+        start would need a person. \
         For status/health checks, report the state and stop. Idle release \
         is intentional: reconnect (phone_reconnect, once) only when a current \
         user-requested task needs the phone, recovery_owner=daemon, and no blocker or \

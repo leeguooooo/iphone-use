@@ -127,7 +127,8 @@ for it explicitly; the answer is `started` or `skipped` with a reason
 ## Setup blockers
 
 `setup_blocked_on` is one of `warp | proxy | not_connected | usb | trust | ddi | account |
-automation_mode_disabled | automation_not_allowed | wifi_automation_refused | xcode_too_old | ios_too_old |
+automation_mode_disabled | needs_passcode_on_phone | locked_after_restart | automation_not_allowed |
+wifi_automation_refused | xcode_too_old | ios_too_old |
 ddi_needs_reboot | legacy_needs_usb | locked | wda` (empty = known prerequisites passed;
 KeepAlive keeps the last concrete blocker while it re-checks).
 
@@ -151,6 +152,14 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   automation (runner log: "Timed out while enabling automation mode"). Ask the
   operator to turn on **Settings › Developer › Enable UI Automation** and accept
   any passcode / "Allow automation" prompt. KeepAlive retries; do not loop reconnect.
+- **`needs_passcode_on_phone`**: the phone has a passcode, and iOS asks for it on
+  the phone every time the runner starts; nobody entered it, so the start timed
+  out. Nothing remote can type a passcode: tell the owner `next_step` ("someone
+  at the phone enters the passcode for this start") and do not reconnect. After
+  one good start idle release keeps the runner up (`keep_runner_alive`).
+- **`locked_after_restart`**: a phone this Mac knows is on USB but usbmuxd does
+  not list it — it restarted and nobody has unlocked it since. A person enters
+  the passcode once; it connects on its own. Not an Xcode problem.
 - **`xcode_too_old`**: the runner exited with code 74 (testmanagerd refused the
   IDE channel) and the phone runs a newer iOS than the selected Xcode SDK;
   `setup_message` names both versions. Only installing an Xcode that supports
@@ -188,6 +197,12 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   release keeps the runner up instead of stopping it, since it could not be
   started again without the cable. KeepAlive waits 15 minutes between Wi-Fi
   attempts and retries at once on USB; do not reconnect.
+
+**`keep_runner_alive`** (in `/agent/status`): `null`, or
+`{"reason":"relaunch_needs_person","because":"passcode"|"wifi_start_refused","hint":{zh,en}}`
+when idle release keeps a runner that is up because starting it again would need a
+person (a passcode phone, or the Wi-Fi case above). The screen still auto-locks; only
+the runner process stays. `PHONE_REMOTE_IDLE_RELEASE=force` on the daemon turns it off.
 - **`usb`**: the configured iPhone is neither on USB nor on its encrypted
   CoreDevice Wi-Fi tunnel (or `WDA_TRANSPORT=usb` requires the cable). Off the
   cable, setup and relaunch go through that tunnel on their own, with no flag;
@@ -244,7 +259,7 @@ only on a trusted network.
 
 | Call | Purpose |
 |---|---|
-| `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, device, …}` — gate on `drivable` |
+| `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, keep_runner_alive, device, …}` — gate on `drivable` |
 | `GET /agent/capabilities` | What this build supports + whether the phone is drivable now (`blocked_by`); touches nothing |
 | `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max` |
 | `GET /agent/screenshot` | Device PNG. `?max_side=1200` shrinks it (~0.9k image tokens instead of ~1.5k; MCP's default) and lets a current live frame answer while someone watches. `X-Capture-Redacted: 1` = wireframe of a protected screen ([below](#screens-hidden-from-capture)); `?raw=1` untouched |

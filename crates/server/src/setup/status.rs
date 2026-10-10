@@ -26,6 +26,8 @@ const STICKY_ON_BEGIN: &[&str] = &[
     "trust",
     "ddi",
     "automation_mode_disabled",
+    "needs_passcode_on_phone",
+    "locked_after_restart",
     "xcode_too_old",
     "ios_too_old",
     "automation_not_allowed",

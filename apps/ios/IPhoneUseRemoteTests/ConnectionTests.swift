@@ -180,6 +180,31 @@ final class ConnectionPresentationTests: XCTestCase {
         XCTAssertEqual(runner.primary, .wakePhone)
     }
 
+    func testPasscodeBlockerIsABlockingCardNotASpinner() {
+        let json = #"{"reconnecting":true,"drivable":false,"device_state":"blocked","recovery_owner":"daemon","setup_blocked_on":"needs_passcode_on_phone","next_step":{"zh":"手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。","en":"This iPhone has a passcode"}}"#
+        let p = present(.connected, json) { $0.startingSince = self.t0.addingTimeInterval(-90) }
+        XCTAssertEqual(p.title, String(localized: "需要有人在手机上输入密码"))
+        XCTAssertEqual(p.placement, .cover)
+        XCTAssertEqual(p.tone, .attention)
+        XCTAssertFalse(p.progress, "a person has to act: no spinner")
+        XCTAssertNil(p.primary, "retrying cannot type the passcode")
+        XCTAssertEqual(p.symbol, "lock.iphone")
+        XCTAssertFalse(p.detail.isEmpty)
+        let older = present(.connected, #"{"setup_blocked_on":"needs_passcode_on_phone"}"#)
+        XCTAssertEqual(older.detail,
+                       String(localized: "手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。"),
+                       "without next_step the app still says what to do")
+    }
+
+    func testPhoneLockedSinceRestartIsNotBlamedOnXcode() {
+        let p = present(.connected, #"{"drivable":false,"device_state":"blocked","setup_blocked_on":"locked_after_restart"}"#)
+        XCTAssertEqual(p.title, String(localized: "iPhone 重启后还没解锁"))
+        XCTAssertNotEqual(p.title, String(localized: "Mac 上的 Xcode 太旧"))
+        XCTAssertEqual(p.detail, String(localized: "这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。"))
+        XCTAssertNil(p.primary)
+        XCTAssertFalse(p.progress)
+    }
+
     func testIdleReleasedOffersWakeAndShowsProgressWhileWaking() {
         let idle = present(.connected, #"{"released":true,"device_state":"released"}"#)
         XCTAssertEqual(idle.primary, .wakePhone)

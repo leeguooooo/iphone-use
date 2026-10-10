@@ -525,6 +525,22 @@ struct ConnectionPresentation: Equatable {
         case "locked":
             title = String(localized: "请解锁手机")
             symbol = "lock"
+        case "locked_after_restart":
+            // Before First Unlock: iOS keeps the phone off usbmuxd until
+            // its passcode is entered once. Not an Xcode problem.
+            title = String(localized: "iPhone 重启后还没解锁")
+            if detail.isEmpty {
+                detail = String(localized: "这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。")
+            }
+            symbol = "lock.iphone"
+        case "needs_passcode_on_phone":
+            // Each start of the device service on a phone with a passcode
+            // asks for it on the phone, and nothing remote can type it.
+            title = String(localized: "需要有人在手机上输入密码")
+            if detail.isEmpty {
+                detail = String(localized: "手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。")
+            }
+            symbol = "lock.iphone"
         case "wifi_automation_refused":
             title = String(localized: "需要插一次线")
             if detail.isEmpty {
@@ -560,7 +576,7 @@ struct ConnectionPresentation: Equatable {
         // attempt. A failed runner start, or a blocker this app does not
         // know, can be retried by hand.
         let daemonCanFix = s.recoveryOwner.isEmpty || s.recoveryOwner == "daemon"
-        let known = ["locked", "wifi_automation_refused", "usb", "not_connected", "trust", "ios_too_old",
+        let known = ["locked", "needs_passcode_on_phone", "locked_after_restart", "wifi_automation_refused", "usb", "not_connected", "trust", "ios_too_old",
                      "xcode_too_old", "warp", "proxy", "account", "automation_mode_disabled",
                      "automation_not_allowed", "ddi"]
         return .init(title: title, detail: detail, short: title, symbol: symbol, tone: .attention,

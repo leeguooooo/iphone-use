@@ -150,7 +150,7 @@
     if (body.released) parts.push("released");
     else if (body.locked) parts.push("locked");
     else if (body.drivable === true) parts.push("drivable");
-    else if (body.drivable === false) parts.push("not drivable" + (body.state ? " (" + body.state + ")" : ""));
+    else if (body.drivable === false) parts.push("not drivable" + (body.blocked_on ? " (" + body.blocked_on + ")" : body.state ? " (" + body.state + ")" : ""));
     if (body.owner) parts.push("owner " + body.owner + (body.mine ? " (this session)" : ""));
     else parts.push("no owner");
     return parts.join(" · ");
@@ -162,7 +162,7 @@
       : body.drivable === true ? "ok" : "warn";
     let text = describe(body);
     if (body.error && !body.frame) text += " — " + body.error;
-    else if (body.drivable === false && body.hint) text += " — " + body.hint;
+    else if (body.drivable === false && (body.next_step || body.hint)) text += " — " + (body.next_step || body.hint);
     setStatus(tone, text);
     const frame = body.frame;
     if (frame && typeof frame.data === "string" && frame.data.length > 0

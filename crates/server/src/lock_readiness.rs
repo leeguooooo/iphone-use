@@ -353,6 +353,17 @@ pub fn status_json(facts: Facts, keep_awake: KeepAwakeStatus) -> Value {
     })
 }
 
+/// The cached `passcode_protected` (no I/O).
+pub fn passcode() -> Option<bool> {
+    facts().passcode
+}
+
+/// `passcode_protected` as the daemon last saved it in `state_dir` — for
+/// setup, which runs in its own process.
+pub fn saved_passcode(state_dir: &Path) -> Option<bool> {
+    load(&state_dir.join(STATE_FILE)).and_then(|facts| facts.passcode)
+}
+
 /// `lock_readiness` for this daemon right now (cache only, no I/O).
 pub fn current_json() -> Value {
     status_json(facts(), crate::keep_awake::status())
@@ -601,8 +612,10 @@ mod tests {
             auto_lock: Some(AutoLock::Never),
             checked_at: Some(7),
         };
+        assert_eq!(saved_passcode(&dir), None, "no file yet");
         save(&path, facts);
         assert_eq!(load(&path), Some(facts));
+        assert_eq!(saved_passcode(&dir), Some(true), "setup reads what the daemon saved");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

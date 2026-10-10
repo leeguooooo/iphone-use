@@ -26,7 +26,9 @@ cookie. Switch what the page sees with
 
 Scenarios: ready (default), connecting (status ready, stream withheld),
 stall (stream freezes after a few seconds), locked, released, handoff,
-reconnecting, usb (setup blocked: cable), offline, unconfigured, owned
+reconnecting, usb (setup blocked: cable), passcode (setup blocked: a
+person must enter the passcode on the phone), restart-locked (a known phone
+off usbmuxd since a restart), offline, unconfigured, owned
 (another session holds the owner lease; /control answers 409), will-lock
 (ready, lock_readiness says a person must unlock), redacted.
 
@@ -165,7 +167,7 @@ def status_json():
         "mjpeg_stream_age_ms": fresh_age,
         "capture_redacted": sc == "redacted", "version": "0.17.10", "latest": None,
         "update_available": False, "transport": "usb", "wda_rtt_ms": STATE["rtt"],
-        "transport_hint": None, "wifi_start_refused": False, "legacy_ios": None,
+        "transport_hint": None, "wifi_start_refused": False, "keep_runner_alive": None, "legacy_ios": None,
         "lock_readiness": {
             "passcode_protected": True, "auto_lock_secs": 0,
             "keep_awake": {"enabled": True, "supported": True, "active": True},
@@ -190,6 +192,16 @@ def status_json():
         s.update(reconnecting=True, drivable=False, device_state="reconnecting")
     elif sc == "usb":
         s.update(reconnecting=True, drivable=False, wda=False, setup_blocked_on="usb")
+    elif sc == "passcode":
+        s.update(reconnecting=True, drivable=False, wda=False, wda_actionable=False,
+                 device_state="blocked", setup_blocked_on="needs_passcode_on_phone",
+                 next_step={"zh": "手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。",
+                            "en": "This iPhone has a passcode: this start needs someone at the phone to enter it."})
+    elif sc == "restart-locked":
+        s.update(reconnecting=True, drivable=False, wda=False, wda_actionable=False,
+                 device_state="blocked", setup_blocked_on="locked_after_restart",
+                 next_step={"zh": "这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。",
+                            "en": "This iPhone restarted and has not been unlocked since: someone needs to enter the passcode on the phone once, then it connects on its own."})
     elif sc == "offline":
         s.update(drivable=False, wda=False, wda_actionable=False, mode="agent", device_state="offline",
                  next_step={"zh": "设备服务没有响应；正在自动重启，若一直这样请在 Mac 上运行 iphone-use doctor", "en": "Device service unreachable."})
@@ -365,7 +377,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # -- streams
     def stream_allowed(self):
         return STATE["scenario"] not in ("connecting", "locked", "released", "handoff",
-                                         "reconnecting", "usb", "offline", "unconfigured")
+                                         "reconnecting", "usb", "passcode", "restart-locked", "offline",
+                                         "unconfigured")
 
     def note_frame(self, sid):
         with LOCK:

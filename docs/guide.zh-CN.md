@@ -73,6 +73,10 @@ runner 运行期间会占着手机。想自己用手机，先暂停它，下次 
 
 daemon 也会自己交还：5 分钟没有 agent 活动（释放后很快又被用到，下次的空闲时长会自动翻倍，最长 1 小时）、也没有人在看画面，它就停掉 runner 并停放 supervisor，注销、重启之后也保持停放。runner 常驻的话，iOS 每杀一次它就被拉起一次，每次拉起 iOS 都要输锁屏密码才能开 UI 自动化，结果没人用的时候手机也整天弹密码。下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 会用缓存的 runner 产物把它拉回来（不重新编译），手机锁了就解一下。网页 `/phone` 上停放中的手机会显示 **连接手机**，手机解锁、亮屏后点它即可。`PHONE_REMOTE_IDLE_RELEASE_SECS` 改空闲时长，`0` 表示常驻（v0.6.3–v0.7.3 的行为）。有会话占着手机（owner 租约）期间不做空闲释放，空闲时长从租约释放或过期时开始算。
 
+**重新启动要有人在场的手机，空闲时保留 runner。** 设了锁屏密码的手机，每次启动 runner 都要在手机上输密码；没人在场时这次启动以 `needs_passcode_on_phone` 结束，远程用户一旦让手机空闲就再也连不回来。所以当 `lock_readiness.passcode_protected` 为 `true`（或 setup 在实例状态目录里留下了 `relaunch-needs-person` 标记）时，空闲释放不停掉**正在运行**的 runner，`/agent/status` 里报 `keep_runner_alive: {"reason":"relaunch_needs_person","because":"passcode",…}`（Wi-Fi 启动被拒的手机是 `because:"wifi_start_refused"`）。代价是手机在两次使用之间一直处在自动化模式（“自动化正在运行”）。只保留 runner 进程，空闲时不保持亮屏（防锁屏仍只在使用时生效），手机照常自动锁定；要让远程用户随时能用，把自动锁定设成“永不”。已经**停掉**的 runner 照常释放：停放 supervisor 才能让 KeepAlive 不再反复拉起、反复弹密码，这正是空闲释放存在的原因。设 `PHONE_REMOTE_IDLE_RELEASE=force` 关掉这个例外，空闲时照常释放。
+
+`needs_passcode_on_phone`：手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。`locked_after_restart`：这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上（这台 Mac 认识的手机插在 USB 上但 usbmuxd 不列出它，不是 Xcode 的问题）。
+
 停放的 runner 拉回来，亮屏时约 5 秒，熄屏后 10–25 秒。为了把这段等待藏起来，daemon 会**预热**：MCP 服务启动、模型通过 MCP 读状态、或者有会话拿到占用权时，就在后台开始拉起（状态里 `warming:true`），等第一个操作到来时手机多半已经就绪。每次拉起 runner 都可能要输锁屏密码，所以预热只在最近一小时内有 agent 用过这台手机时才做（拿占用权不受此限），手机锁着或者读不到锁屏状态时不做，交还给人、有 setup 阻塞原因、或别的会话占着时也不做，同一种触发 10 分钟内最多一次。`PHONE_REMOTE_PREWARM=0` 关闭预热，`IPHONE_USE_MCP_PREWARM=0` 让单个 MCP 服务不发预热请求。
 
 ### 升级

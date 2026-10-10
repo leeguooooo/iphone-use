@@ -119,7 +119,7 @@ pub fn run(ctx: &Ctx) -> i32 {
         && !checks::on_usb(&ctx.udid, &usb)
         && checks::presence(&ctx.udid) == checks::Presence::Absent;
     // What the USB layer says when usbmuxd cannot give us a usable phone.
-    let diagnosis = usbdiag::probe(&usb);
+    let diagnosis = usbdiag::probe(&usb, &ctx.udid);
     // Off the cable, the encrypted CoreDevice Wi-Fi tunnel is a supported
     // transport unless WDA_TRANSPORT=usb (the target, or the one phone that
     // has a live tunnel when no target is set).

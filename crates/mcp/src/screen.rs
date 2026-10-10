@@ -129,6 +129,15 @@ pub fn status_summary(status: &StatusResponse, own_owner: &str) -> Value {
             .map(str::to_string)
     };
     let owner = status.owner.as_deref().filter(|o| !o.is_empty());
+    // The daemon's one line for a person (English here), e.g. "enter the
+    // passcode on the phone" for `needs_passcode_on_phone`.
+    let next_step = status
+        .extra
+        .get("next_step")
+        .and_then(|step| step.get("en"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let blocked_on = status.setup_blocked_on.as_deref().filter(|b| !b.is_empty());
     json!({
         "phone": text("name"),
         "model": text("model"),
@@ -139,6 +148,8 @@ pub fn status_summary(status: &StatusResponse, own_owner: &str) -> Value {
         "owner": owner,
         "mine": owner.map(|o| o == own_owner),
         "hint": status.hint,
+        "blocked_on": blocked_on,
+        "next_step": next_step,
     })
 }
 
@@ -177,6 +188,26 @@ pub fn frame_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blocked_phone_says_what_a_person_has_to_do() {
+        let status: StatusResponse = serde_json::from_value(json!({
+            "ok": true,
+            "drivable": false,
+            "device_state": "blocked",
+            "setup_blocked_on": "needs_passcode_on_phone",
+            "next_step": {"zh": "手机设了锁屏密码", "en": "This iPhone has a passcode"},
+        }))
+        .unwrap();
+        let summary = status_summary(&status, "me");
+        assert_eq!(summary["blocked_on"], "needs_passcode_on_phone");
+        assert_eq!(summary["next_step"], "This iPhone has a passcode");
+        let ready: StatusResponse =
+            serde_json::from_value(json!({"ok": true, "drivable": true, "setup_blocked_on": ""}))
+                .unwrap();
+        let summary = status_summary(&ready, "me");
+        assert!(summary["blocked_on"].is_null() && summary["next_step"].is_null());
+    }
 
     #[test]
     fn the_resource_is_an_mcp_app_page() {

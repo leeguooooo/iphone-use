@@ -10,6 +10,7 @@ pub mod h264sps;
 pub mod http;
 pub mod instance;
 pub mod keep_awake;
+pub mod keep_runner;
 pub mod lock_readiness;
 pub mod lockdown;
 pub mod logcap;

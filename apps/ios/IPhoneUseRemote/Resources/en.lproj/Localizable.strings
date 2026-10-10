@@ -228,6 +228,8 @@
 "代理挡住了连接" = "A proxy is blocking the connection";
 "Xcode 没登录 Apple ID" = "Xcode isn't signed in to an Apple ID";
 "需要允许 UI 自动化" = "UI Automation needs to be allowed";
+"需要有人在手机上输入密码" = "Someone needs to enter the passcode on the phone";
+"手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。" = "This iPhone has a passcode: this start needs someone at the phone to enter it and allow UI Automation. After that, staying connected means it will not ask again.";
 "Mac 正在准备设备" = "The Mac is preparing the device";
 "设备服务启动失败" = "The device service failed to start";
 "按 Mac 上 iphone-use 页面的提示处理，处理好后会自动接着连接。" = "Follow the steps on the Mac's iphone-use page; connecting continues on its own afterwards.";
@@ -373,3 +375,5 @@
 "已经在第一页了" = "Already on the first screen";
 "连上自己的 Mac 后，这个键会打开手机的搜索" = "Connected to your own Mac, this key opens the phone's search";
 "连上自己的 Mac 后，键盘会把文字实时打到手机上" = "Connected to your own Mac, the keyboard types into the phone live";
+"iPhone 重启后还没解锁" = "iPhone not unlocked since restart";
+"这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。" = "This iPhone restarted and has not been unlocked since: someone needs to enter the passcode on the phone once, then it connects on its own.";

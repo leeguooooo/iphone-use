@@ -28,6 +28,9 @@ const RUNNER_DEVICE_PORT: u16 = 8100;
 const MJPEG_DEVICE_PORT: u16 = 9100;
 /// Published as `not_connected`; the daemon's hint says the same.
 const NOT_CONNECTED_MESSAGE: &str = "the iPhone isn't connected to this Mac — plug it in over USB (or join the same Wi-Fi) and unlock it";
+/// Published as `needs_passcode_on_phone`: a start on a phone with a passcode
+/// that nobody unlocked for.
+const NEEDS_PASSCODE_MESSAGE: &str = "the iPhone has a passcode and iOS asks for it on the phone every time the device runner starts; nobody entered it, so UI automation was not enabled — have a person at the phone enter the passcode during the next start (if no prompt appears, check Settings › Developer › Enable UI Automation). After one successful start the daemon keeps the runner up while idle, so it does not ask again";
 const AUTOMATION_MODE_HINT: &str = "enable UI automation on the iPhone: Settings › Developer › Enable UI Automation, then accept any passcode or Allow automation prompt while the phone is unlocked";
 
 /// How often [`Setup::wait_for_developer_services`] re-checks the mount.
@@ -568,6 +571,7 @@ impl Setup {
             previous.as_str(),
             "trust"
                 | "automation_mode_disabled"
+                | "needs_passcode_on_phone"
                 | "xcode_too_old"
                 | "automation_not_allowed"
                 | "wifi_automation_refused"
@@ -710,7 +714,7 @@ impl Setup {
                 // usbmuxd lists nothing: ask the USB plane why (a cable that
                 // only charges, or an iPhone this Mac's device support cannot
                 // claim yet, both look like "no device" from here).
-                if let Some(diagnosis) = usbdiag::probe(&[]) {
+                if let Some(diagnosis) = usbdiag::probe(&[], "") {
                     self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
                     return die(format!("{}; no build was started.", diagnosis.message()));
                 }
@@ -764,7 +768,7 @@ impl Setup {
                     .filter(|serial| checks::on_usb(&self.ctx.udid, std::slice::from_ref(serial)))
                     .collect();
                 let untrusted = usbdiag::untrusted(&serial);
-                if let Some(diagnosis) = usbdiag::diagnose(&[], &serial, &untrusted) {
+                if let Some(diagnosis) = usbdiag::diagnose(&[], &serial, &untrusted, &[]) {
                     self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
                     return die(format!("{}; no build was started.", diagnosis.message()));
                 }
@@ -1036,8 +1040,14 @@ impl Setup {
             if tick == 0 {
                 // An iPhone on the bus that no driver claimed is not "not
                 // connected": it needs newer device support, not a cable.
-                match usbdiag::probe(&[]) {
-                    Some(diagnosis @ usbdiag::Diagnosis::NotClaimed { .. }) => {
+                // This phone on the bus but unlisted is locked since a
+                // restart: a passcode, not an Xcode. Phones usbmuxd does list
+                // (another phone on this Mac) are never the diagnosis.
+                match usbdiag::probe(&checks::usb_udids(), &udid) {
+                    Some(
+                        diagnosis @ (usbdiag::Diagnosis::NotClaimed { .. }
+                        | usbdiag::Diagnosis::LockedAfterRestart { .. }),
+                    ) => {
                         self.phase("prereq", diagnosis.blocker(), &diagnosis.message());
                         warn(&format!(
                             "{}. Waiting for {udid}; nothing is built or launched until usbmuxd lists it.",
@@ -1551,7 +1561,36 @@ impl Setup {
         ))
     }
 
+    /// The phone has a passcode, so a runner start waits for a person to
+    /// enter it on the phone: the daemon's saved lock-readiness reading
+    /// (`lock-readiness.json`), else whether the phone is locked right now.
+    fn passcode_phone(&self) -> bool {
+        match crate::lock_readiness::saved_passcode(self.ctx.state_dir()) {
+            Some(known) => known,
+            None => self.passcode_required() == Some(true),
+        }
+    }
+
+    /// A runner start on a passcode phone ended without UI automation:
+    /// nobody entered the passcode. Publish `needs_passcode_on_phone` and
+    /// leave the marker that keeps the next runner up while idle.
+    fn report_needs_passcode<T>(&self, cause: &str) -> Step<T> {
+        crate::keep_runner::write_passcode_marker(self.ctx.state_dir());
+        self.phase(
+            "building-fail",
+            crate::keep_runner::NEEDS_PASSCODE_BLOCKER,
+            NEEDS_PASSCODE_MESSAGE,
+        );
+        die(format!(
+            "{NEEDS_PASSCODE_MESSAGE} ({cause}). KeepAlive retries on its own. Log: {}",
+            self.ctx.run_log.display()
+        ))
+    }
+
     fn report_automation_disabled<T>(&self) -> Step<T> {
+        if self.passcode_phone() {
+            return self.report_needs_passcode("iOS did not enable UI automation");
+        }
         self.phase(
             "building-fail",
             "automation_mode_disabled",
@@ -1600,9 +1639,15 @@ impl Setup {
                 ))
             }
             _ => {
+                self.failure_kind = Kind::Automation;
+                if self.passcode_phone() {
+                    return self.report_needs_passcode(&format!(
+                        "runner exit code 74, IDE channel refused{}",
+                        waited(wait)
+                    ));
+                }
                 let message = automation_message(wait);
                 self.phase("building-fail", "automation_not_allowed", &message);
-                self.failure_kind = Kind::Automation;
                 die(format!(
                     "{message}. KeepAlive retries quietly every 5 s to 1 min. Log: {log}"
                 ))
@@ -4526,6 +4571,14 @@ impl Setup {
                             continue 'attempts;
                         }
                         let reason = legacy_ios::last_error(&log);
+                        // On a passcode phone the launch waits for the
+                        // passcode on the phone; with nobody there it never
+                        // starts (hardware: iPhone X, iOS 16).
+                        if self.passcode_phone() {
+                            return self.report_needs_passcode(&format!(
+                                "the iOS 15/16 runner did not start: {reason}"
+                            ));
+                        }
                         self.phase(
                             "building-fail",
                             "wda",
