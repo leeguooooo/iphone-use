@@ -8,9 +8,13 @@
   + cookie-authenticated POST /control (one JSON action per gesture, ACKed)
   Touch: Pointer Events → normalized [0,1] content-rect coords
 
-  Mobile UI: the device image is the hero (full-bleed). Chrome is a thumb-zone bottom toolbar +
-  floating status pill + slide-up text panel + immersive collapse. Instrument-panel
-  aesthetic: dark, monospace readouts, accent-glow active states. Safe-area aware.
+  Layout: a top bar (which phone, connection, lock/owner badges, fps/RTT), the
+  phone in a device frame sized to the stream's own aspect ratio, and a labeled
+  side rail with keyboard shortcuts. Narrow screens get a bottom bar whose 更多
+  opens a sheet. Transient states are chips over the picture; a card covers the
+  screen only when the phone cannot be used. Light and dark follow the system.
+  Mouse: click/drag/hold/right-click/wheel; keyboard types into the phone once
+  the screen was clicked (IME composition stays native). Safe-area aware.
 -->
 <html lang="zh-CN">
 <head>
@@ -21,729 +25,812 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="theme-color" content="#08090c" />
+  <meta name="theme-color" content="#eef0f4" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0b0c10" media="(prefers-color-scheme: dark)" />
   <title>iphone-use</title>
   <style>
-    /* ── Design system: instrument-panel dark ────────────────────── */
+    /* ── Design tokens ────────────────────────────────────────────
+       One palette, light and dark. Everything below reads these; the
+       device bezel stays black in both themes, like the real thing. */
     :root {
-      color-scheme: dark;
-      --bg:      #08090c;
-      --panel:   #11131a;
-      --panel-2: #161922;
-      --line:    #272b38;
-      --text:    #eef2ff;
-      --muted:   #8b93a7;
-      --accent:  #4f8cff;
-      --accent-dim: #1a2a4a;
-      --ok:      #4ade80;
-      --warn:    #facc15;
-      --danger:  #ff5a66;
-      --danger-bg:  #2a1116;
-      --danger-border: #5b1b24;
+      color-scheme: light dark;
+      --bg:          #eef0f4;
+      --stage-a:     #f6f7f9;
+      --stage-b:     #e4e7ec;
+      --surface:     #ffffff;
+      --surface-2:   #f4f5f8;
+      --surface-3:   #e9ecf1;
+      --glass:       rgba(255,255,255,.78);
+      --line:        #dde1e8;
+      --line-strong: #c4cad4;
+      --text:        #15181e;
+      --muted:       #5b6372;
+      --subtle:      #8c94a3;
+      --accent:      #2e6ef0;
+      --accent-ink:  #ffffff;
+      --accent-soft: rgba(46,110,240,.11);
+      --accent-line: rgba(46,110,240,.38);
+      --ok:          #1e9a52;
+      --ok-soft:     rgba(30,154,82,.12);
+      --warn:        #b26b00;
+      --warn-ink:    #8a5300;
+      --warn-soft:   rgba(214,140,0,.13);
+      --warn-line:   rgba(214,140,0,.42);
+      --danger:      #d4343f;
+      --danger-ink:  #b4232e;
+      --danger-soft: rgba(212,52,63,.10);
+      --danger-line: rgba(212,52,63,.40);
+      --info-ink:    #1f4fb8;
+      --scrim:       rgba(18,22,30,.42);
+      --bezel:       #0c0d10;
+      --bezel-edge:  #2a2d34;
+      --screen-off:  #15171c;
+      --shadow-s:    0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+      --shadow-m:    0 8px 24px -6px rgba(16,24,40,.18), 0 2px 6px rgba(16,24,40,.08);
+      --shadow-l:    0 40px 90px -24px rgba(16,24,40,.42), 0 12px 32px -8px rgba(16,24,40,.22);
+      --r-s: 8px; --r-m: 11px; --r-l: 15px; --r-xl: 20px;
+      --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-l: 15px; --fs-xl: 17px;
       --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-      --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
-      --tb-h: 64px;                 /* toolbar height (content) */
-      /* Space the video must leave at the bottom so the floating toolbar never
-         covers the phone screen. Immersive mode (toolbar hidden) reclaims it. */
-      --tb-reserve: calc(var(--tb-h) + env(safe-area-inset-bottom) + 14px);
+      --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+      --ease: cubic-bezier(.2,.7,.2,1);
+      --rail-w: 188px;
+      --top-h: 52px;
+      --tb-reserve: 0px;            /* mobile: the toolbar's measured height */
+      --focus: 0 0 0 3px var(--accent-line);
     }
-    /* --tb-reserve is corrected to the toolbar's real measured height by
-       syncToolbarReserve() (and set to 0 in immersive mode); the calc above is
-       just a first-paint fallback. */
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:          #0b0c10;
+        --stage-a:     #14161c;
+        --stage-b:     #07080b;
+        --surface:     #15171d;
+        --surface-2:   #1b1e26;
+        --surface-3:   #232733;
+        --glass:       rgba(21,23,29,.74);
+        --line:        #262a35;
+        --line-strong: #363b49;
+        --text:        #eef1f7;
+        --muted:       #9aa2b3;
+        --subtle:      #6c7486;
+        --accent:      #5b8dff;
+        --accent-ink:  #ffffff;
+        --accent-soft: rgba(91,141,255,.14);
+        --accent-line: rgba(91,141,255,.42);
+        --ok:          #45d483;
+        --ok-soft:     rgba(69,212,131,.13);
+        --warn:        #f5c04a;
+        --warn-ink:    #f3d58c;
+        --warn-soft:   rgba(245,192,74,.12);
+        --warn-line:   rgba(245,192,74,.40);
+        --danger:      #ff5d68;
+        --danger-ink:  #ffb3b9;
+        --danger-soft: rgba(255,93,104,.12);
+        --danger-line: rgba(255,93,104,.45);
+        --info-ink:    #b8cfff;
+        --scrim:       rgba(0,0,0,.55);
+        --bezel-edge:  #30343d;
+        --shadow-s:    0 1px 2px rgba(0,0,0,.4);
+        --shadow-m:    0 10px 30px -8px rgba(0,0,0,.6);
+        --shadow-l:    0 50px 100px -30px rgba(0,0,0,.85), 0 0 0 1px rgba(255,255,255,.04);
+      }
+    }
     *, *::before, *::after { box-sizing: border-box; }
     [hidden] { display: none !important; }
     .visually-hidden {
-      position: absolute !important;
-      width: 1px; height: 1px;
-      padding: 0; margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
+      position: absolute !important; width: 1px; height: 1px;
+      padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0);
+      white-space: nowrap; border: 0;
     }
-
-    /* [iOS-notes §Touch] suppress scroll/zoom/callout on html+body */
     html, body {
-      margin: 0; padding: 0;
-      height: 100%;
-      overflow: hidden;
-      overscroll-behavior: none;
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--sans);
+      margin: 0; padding: 0; height: 100%;
+      overflow: hidden; overscroll-behavior: none;
+      background: var(--bg); color: var(--text);
+      font-family: var(--sans); font-size: var(--fs-m);
       -webkit-font-smoothing: antialiased;
     }
-
-    /* ── App shell: video fills, toolbar floats over the bottom ───── */
-    #app {
-      display: flex;
-      flex-direction: column;
-      height: 100dvh;               /* [iOS-notes] 100dvh not 100vh */
+    button { font-family: inherit; color: inherit; }
+    :where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }
+    kbd {
+      display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px;
+      border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 6px;
+      background: var(--surface); color: var(--muted);
+      font: 600 10px/1 var(--mono); letter-spacing: 0;
     }
 
-    /* ── Video area: full-bleed hero ─────────────────────────────── */
+    /* ── App shell ─────────────────────────────────────────────────
+       Desktop: top bar · stage with the phone · labeled side rail.
+       Narrow: top bar · stage · bottom toolbar that expands to a sheet. */
+    #app {
+      height: 100dvh;
+      display: grid;
+      grid-template-columns: minmax(0,1fr) var(--rail-w);
+      grid-template-rows: var(--top-h) auto minmax(0,1fr);
+      grid-template-areas: "top top" "notices rail" "stage rail";
+    }
+
+    /* ── Top bar ───────────────────────────────────────────────── */
+    #topbar {
+      grid-area: top; z-index: 20;
+      display: flex; align-items: center; gap: 10px;
+      padding: 0 14px 0 calc(env(safe-area-inset-left) + 14px);
+      padding-top: env(safe-area-inset-top);
+      height: calc(var(--top-h) + env(safe-area-inset-top));
+      margin-top: calc(-1 * env(safe-area-inset-top));
+      border-bottom: 1px solid var(--line);
+      background: var(--glass);
+      backdrop-filter: saturate(1.4) blur(18px); -webkit-backdrop-filter: saturate(1.4) blur(18px);
+      min-width: 0;
+    }
+    #statusPill {
+      display: flex; align-items: center; gap: 9px; min-width: 0; flex: 0 1 auto;
+    }
+    #statusPill .conn-dot {
+      flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+      background: var(--warn); font-size: 0; transition: background .3s, box-shadow .3s;
+    }
+    #statusPill .conn-dot.ok   { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+    #statusPill .conn-dot.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); animation: dot-breathe 1.8s ease-in-out infinite; }
+    #statusPill .conn-dot.bad  { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+    @keyframes dot-breathe { 50% { box-shadow: 0 0 0 5px transparent; } }
+    .status-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+    #deviceLabel {
+      font-size: var(--fs-l); font-weight: 650; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #deviceLabel:empty::before { content: "iPhone"; }
+    #statusLine {
+      font-size: var(--fs-xs); color: var(--muted);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .top-badges { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px;
+      border: 1px solid var(--line); border-radius: 999px;
+      background: var(--surface); color: var(--muted);
+      font: 600 var(--fs-xs)/1 var(--sans); white-space: nowrap; cursor: default;
+    }
+    button.badge { cursor: pointer; }
+    button.badge:hover { border-color: var(--line-strong); color: var(--text); }
+    .badge svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .badge.warn   { border-color: var(--warn-line);   background: var(--warn-soft);   color: var(--warn-ink); }
+    .badge.danger { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-ink); }
+    .badge.ok     { color: var(--ok); }
+    #metrics {
+      margin-left: auto; display: flex; align-items: center; gap: 8px;
+      font: 500 var(--fs-xs)/1 var(--mono); color: var(--subtle); white-space: nowrap;
+    }
+    #metrics:empty { display: none; }
+    #metrics b { color: var(--muted); font-weight: 600; }
+    #metrics .sep { opacity: .5; }
+    .icon-btn {
+      flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center;
+      border: 1px solid transparent; border-radius: var(--r-s); background: transparent;
+      color: var(--muted); cursor: pointer;
+    }
+    .icon-btn:hover { background: var(--surface-2); color: var(--text); }
+    .icon-btn svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+    #recordingPill {
+      flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px;
+      height: 30px; padding: 0 12px;
+      border: 1px solid var(--danger-line); border-radius: 999px;
+      background: var(--danger-soft); color: var(--danger-ink);
+      font: 700 var(--fs-xs)/1 var(--sans); cursor: pointer;
+    }
+    #recordingPill::before {
+      content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--danger);
+      animation: rec-blink 1.2s steps(2) infinite;
+    }
+    @keyframes rec-blink { 50% { opacity: .25; } }
+
+    /* ── Notices row (update + lock readiness): in flow, never over the phone ── */
+    #notices {
+      grid-area: notices; display: flex; flex-direction: column; align-items: center;
+      gap: 6px; padding: 0 16px; min-width: 0;
+    }
+    #notices:has(> .visible) { padding-top: 10px; }
+    .notice {
+      display: none; align-items: flex-start; gap: 10px;
+      width: min(100%, 640px); padding: 9px 10px 9px 13px;
+      border: 1px solid var(--line); border-radius: var(--r-m);
+      background: var(--surface); box-shadow: var(--shadow-s);
+      color: var(--text); font-size: var(--fs-s); line-height: 1.5;
+    }
+    .notice.visible { display: flex; }
+    .notice .tag { font-weight: 700; white-space: nowrap; }
+    .notice .grow { flex: 1 1 auto; min-width: 0; }
+    .notice code {
+      font: var(--fs-xs) var(--mono); background: var(--surface-3);
+      padding: 1px 5px; border-radius: 5px; word-break: break-all;
+    }
+    .notice .x {
+      flex: 0 0 auto; width: 24px; height: 24px; display: grid; place-items: center;
+      border: 0; border-radius: 6px; background: transparent; color: var(--muted);
+      cursor: pointer; font: inherit; line-height: 1;
+    }
+    .notice .x:hover { background: var(--surface-3); color: var(--text); }
+    #lockNotice.needs-person { border-color: var(--warn-line); background: var(--warn-soft); }
+    #lockNotice.needs-person .tag { color: var(--warn-ink); }
+    #updateBanner { border-color: var(--accent-line); background: var(--accent-soft); }
+
+    /* ── Stage + device frame ──────────────────────────────────── */
     #videoArea {
-      flex: 1 1 0;
-      position: relative;
-      background:
-        radial-gradient(120% 80% at 50% 0%, #0c0e14 0%, #050608 70%);
+      grid-area: stage; position: relative; min-height: 0; min-width: 0;
+      display: grid; place-items: center;
+      container-type: size;
+      background: radial-gradient(120% 90% at 50% 10%, var(--stage-a) 0%, var(--stage-b) 100%);
       overflow: hidden;
-      /* [iOS-notes §Touch] */
       touch-action: none;
       user-select: none; -webkit-user-select: none;
       -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
     }
-
-    /* subtle device-screen vignette + inset ring so the image reads as "a screen" */
-    #videoArea::after {
-      content: ""; position: absolute;
-      top: 0; left: 0; width: 100%;
-      height: calc(100% - var(--tb-reserve)); pointer-events: none;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,.03),
-                  inset 0 30px 60px -30px rgba(0,0,0,.5);
-      transition: height .28s cubic-bezier(.2,.7,.2,1);
-    }
-
-    #gridCanvas {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%;
-      height: calc(100% - var(--tb-reserve));
-      pointer-events: none; display: none;
-      transition: height .28s cubic-bezier(.2,.7,.2,1);
-    }
-    #gridCanvas.on { display: block; }
-
-    /* Tap dot (v1: 350ms fade) */
-    #tapDot {
-      position: absolute; width: 30px; height: 30px;
-      border: 2px solid #fff; background: rgba(79,140,255,.35);
-      border-radius: 50%; transform: translate(-50%, -50%);
-      pointer-events: none; opacity: 0; transition: opacity .25s; z-index: 5;
-      box-shadow: 0 0 16px 2px rgba(79,140,255,.5);
-    }
-
-    /* ── Floating status pill (top, under notch) ─────────────────── */
-    #statusPill {
-      position: absolute; z-index: 8;
-      top: calc(env(safe-area-inset-top) + 10px);
-      left: calc(env(safe-area-inset-left) + 12px);
-      display: flex; align-items: center; gap: 7px;
-      padding: 6px 11px;
-      background: rgba(10,12,18,.62);
-      border: 1px solid rgba(255,255,255,.07);
-      border-radius: 999px;
-      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-      pointer-events: none;
-      max-width: min(70vw, 320px);
-    }
-    #statusPill .conn-dot { font-size: 9px; line-height: 1; color: var(--warn); transition: color .3s; }
-    #statusPill .conn-dot.ok  { color: var(--ok); filter: drop-shadow(0 0 4px rgba(74,222,128,.7)); }
-    #statusPill .conn-dot.warn{ color: var(--warn); }
-    #statusPill .conn-dot.bad { color: var(--danger); }
-    #deviceLabel {
-      font-size: 11px; font-weight: 600; color: var(--text);
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%;
-    }
-    #deviceLabel:empty { display: none; }
-    #statusLine {
-      font-family: var(--mono); font-size: 11px; letter-spacing: .02em;
-      color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-
-    /* ── Bottom toolbar (thumb zone) ─────────────────────────────── */
-    #toolbar {
-      position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
-      display: flex; gap: 4px; align-items: stretch;
-      padding: 8px calc(env(safe-area-inset-left) + 8px)
-               calc(env(safe-area-inset-bottom) + 8px)
-               calc(env(safe-area-inset-right) + 8px);
-      background: linear-gradient(to top, rgba(8,9,12,.96), rgba(8,9,12,.82));
-      backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
-      border-top: 1px solid var(--line);
-      overflow-x: auto; overflow-y: hidden;
-      scrollbar-width: none; -webkit-overflow-scrolling: touch;
-      transition: transform .28s cubic-bezier(.2,.7,.2,1), opacity .2s;
-    }
-    #toolbar::-webkit-scrollbar { display: none; }
-    body.immersive #toolbar { transform: translateY(120%); opacity: 0; pointer-events: none; }
-
-    .tbtn {
-      flex: 1 0 auto; min-width: 52px;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 3px; padding: 6px 8px; min-height: 48px;
-      background: transparent; border: 1px solid transparent; border-radius: 12px;
-      color: var(--muted); font-family: var(--sans); cursor: pointer;
-      user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
-      transition: background .15s, color .15s, border-color .15s;
-    }
-    .tbtn:active { background: var(--panel-2); }
-    .tbtn:disabled { opacity: .42; cursor: default; }
-    .tbtn svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-    .tbtn .lbl { font-size: 10px; line-height: 1; letter-spacing: .02em; white-space: nowrap; }
-    .tbtn.active {
-      color: var(--accent); background: var(--accent-dim);
-      border-color: rgba(79,140,255,.35);
-      box-shadow: 0 0 14px -4px rgba(79,140,255,.6);
-    }
-    .tbtn.danger { color: #ff8a93; }
-    .tbtn.danger:active { background: var(--danger-bg); }
-    .tbtn.spacer { flex: 1 1 auto; min-width: 4px; pointer-events: none; }
-
-    /* ── Grabber to restore chrome when immersive ────────────────── */
-    #grabber {
-      position: fixed; z-index: 29; left: 50%; transform: translateX(-50%);
-      bottom: calc(env(safe-area-inset-bottom) + 8px);
-      width: 64px; height: 26px; border-radius: 999px;
-      background: rgba(10,12,18,.7); border: 1px solid rgba(255,255,255,.1);
-      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-      display: none; align-items: center; justify-content: center; cursor: pointer;
-      -webkit-tap-highlight-color: transparent;
-    }
-    #grabber::before { content: ""; width: 30px; height: 4px; border-radius: 2px; background: var(--muted); }
-    body.immersive #grabber { display: flex; }
-
-    /* ── Slide-up text panel ─────────────────────────────────────── */
-    #textPanel {
-      position: fixed; left: 0; right: 0; z-index: 40;
-      bottom: calc(var(--tb-h) + env(safe-area-inset-bottom) + 8px);
-      display: flex; gap: 8px; align-items: center;
-      padding: 10px calc(env(safe-area-inset-left) + 12px) 10px calc(env(safe-area-inset-right) + 12px);
-      background: rgba(14,16,22,.98);
-      border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
-      transform: translateY(160%); opacity: 0; pointer-events: none;
-      transition: transform .26s cubic-bezier(.2,.7,.2,1), opacity .2s;
-    }
-    #textPanel.open { transform: translateY(0); opacity: 1; pointer-events: auto; }
-    #textInput {
-      flex: 1 1 auto; min-width: 0;
-      background: var(--bg); color: var(--text);
-      border: 1px solid var(--line); border-radius: 12px;
-      padding: 12px 14px; font-size: 16px;     /* 16px avoids iOS focus-zoom */
-      font-family: var(--sans); -webkit-appearance: none;
-    }
-    #textInput:focus { outline: none; border-color: var(--accent); }
-    #btnSend {
-      flex: 0 0 auto; background: var(--accent); border: 1px solid var(--accent);
-      color: #fff; border-radius: 12px; padding: 12px 16px; font-size: 14px; font-weight: 600;
-      cursor: pointer; -webkit-appearance: none;
-    }
-    #btnTextClose {
-      flex: 0 0 auto; background: transparent; border: 1px solid var(--line);
-      color: var(--muted); border-radius: 12px; padding: 12px 12px; font-size: 14px; cursor: pointer;
-    }
-
-    /* ── Accessible WDA element controls ────────────────────────── */
-    .element-glyph {
-      display: grid; place-items: center;
-      width: 22px; height: 22px; border: 1px solid currentColor;
-      border-radius: 6px; font: 700 9px/1 var(--mono); letter-spacing: -.03em;
-    }
-    #pairDialog {
-      width: min(92vw, 340px); box-sizing: border-box; padding: 20px;
-      background: var(--panel); color: var(--text);
-      border: 1px solid var(--line); border-radius: 16px;
-    }
-    #pairDialog::backdrop { background: rgba(0,0,0,.6); }
-    #pairDialog h2 { margin: 0 0 6px; font-size: 17px; }
-    #pairDialog .pair-hint { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
-    #pairQr { background: #fff; border-radius: 12px; padding: 8px; aspect-ratio: 1; display: grid; place-items: center; }
-    #pairQr svg { width: 100%; height: auto; display: block; }
-    #pairQr.expired { opacity: .25; }
-    #pairStatus { min-height: 18px; margin: 8px 0 4px; font-size: 12px; color: var(--muted); text-align: center; }
-    #pairStatus.err { color: var(--danger); }
-    .pair-host { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-    .pair-host select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 13px; }
-    #pairUrl { display: block; font-size: 11px; color: var(--muted); word-break: break-all; margin-bottom: 14px; }
-    .pair-actions { display: flex; gap: 8px; }
-    .pair-actions button { flex: 1; padding: 10px; border-radius: 10px; font-size: 14px; font-weight: 600;
-      background: transparent; color: var(--text); border: 1px solid var(--line); cursor: pointer; font-family: inherit; }
-    .pair-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-    #elementPanel {
-      position: fixed; left: 0; right: 0; z-index: 42;
-      bottom: calc(var(--tb-h) + env(safe-area-inset-bottom) + 8px);
-      height: min(62dvh, 560px);
-      display: flex; flex-direction: column;
-      background: rgba(14,16,22,.985);
-      border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
-      box-shadow: 0 -18px 48px rgba(0,0,0,.42);
-      transform: translateY(115%); opacity: 0; pointer-events: none;
-      transition: transform .26s cubic-bezier(.2,.7,.2,1), opacity .2s;
-    }
-    #elementPanel.open { transform: translateY(0); opacity: 1; pointer-events: auto; }
-    .element-panel-header {
-      display: flex; align-items: center; gap: 8px;
-      padding: 12px calc(env(safe-area-inset-right) + 12px) 10px
-               calc(env(safe-area-inset-left) + 14px);
-      border-bottom: 1px solid var(--line);
-    }
-    .element-panel-heading { flex: 1 1 auto; min-width: 0; }
-    .element-panel-heading h2 {
-      margin: 0; color: var(--text); font-size: 15px; line-height: 1.3;
-    }
-    .element-panel-heading p {
-      margin: 3px 0 0; color: var(--muted); font-size: 11px; line-height: 1.35;
-    }
-    .element-panel-action {
-      min-height: 42px; padding: 8px 12px; border-radius: 10px;
-      border: 1px solid var(--line); background: transparent;
-      color: var(--text); font: 600 13px var(--sans); cursor: pointer;
-    }
-    .element-panel-action:disabled { opacity: .45; cursor: default; }
-    .element-panel-action:focus-visible,
-    .element-control:focus-visible {
-      outline: 2px solid var(--accent); outline-offset: 2px;
-    }
-    #elementStatus {
-      min-height: 20px; padding: 8px 14px 0;
-      color: var(--muted); font: 11px/1.45 var(--sans);
-    }
-    #elementList {
-      flex: 1 1 auto; min-height: 0; overflow-y: auto;
-      list-style: none; margin: 0; padding: 8px 12px 18px;
-      -webkit-overflow-scrolling: touch;
-    }
-    #elementList li + li { margin-top: 7px; }
-    .element-control {
-      width: 100%; min-height: 48px; padding: 9px 11px;
-      display: grid; grid-template-columns: minmax(0,1fr) auto;
-      gap: 4px 10px; align-items: center; text-align: left;
-      border: 1px solid var(--line); border-radius: 11px;
-      background: var(--panel); color: var(--text);
-      font-family: var(--sans); cursor: pointer;
-    }
-    .element-control:hover { border-color: rgba(79,140,255,.55); }
-    .element-control:active { background: var(--panel-2); }
-    .element-control:disabled { opacity: .5; cursor: default; }
-    .element-label {
-      min-width: 0; overflow: hidden; text-overflow: ellipsis;
-      white-space: nowrap; font-size: 14px; font-weight: 600;
-    }
-    .element-meta {
-      color: var(--muted); font: 10px/1.3 var(--mono); white-space: nowrap;
-    }
-    .element-value {
-      grid-column: 1 / -1; color: var(--muted);
-      font-size: 11px; line-height: 1.35;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-
-    /* ── Multi-step recording and review ───────────────────────── */
-    #recordingPill {
-      position: absolute; z-index: 12;
-      top: calc(env(safe-area-inset-top) + 10px);
-      right: calc(env(safe-area-inset-right) + 12px);
-      min-height: 36px; padding: 7px 12px;
-      border: 1px solid rgba(255,90,102,.58); border-radius: 999px;
-      background: rgba(42,17,22,.9); color: #ffb2b8;
-      font: 700 11px/1 var(--sans); letter-spacing: .02em;
-      cursor: pointer; box-shadow: 0 8px 24px rgba(0,0,0,.28);
-    }
-    #recordingPill:focus-visible,
-    .flow-action:focus-visible,
-    .flow-step-button:focus-visible,
-    #flowName:focus-visible,
-    .flow-runtime-input:focus-visible,
-    #flowSafety:focus-visible + span {
-      outline: 2px solid var(--accent); outline-offset: 2px;
-    }
-    #flowPanel {
-      position: fixed; inset: 0 0 0 auto; z-index: 44;
-      width: min(100vw, 460px);
-      display: flex; flex-direction: column;
-      background: rgba(14,16,22,.99);
-      border-left: 1px solid var(--line);
-      box-shadow: -18px 0 48px rgba(0,0,0,.44);
-      transform: translateX(105%); opacity: 0; pointer-events: none;
-      transition: transform .26s cubic-bezier(.2,.7,.2,1), opacity .2s;
-    }
-    #flowPanel.open { transform: translateX(0); opacity: 1; pointer-events: auto; }
-    .flow-panel-header {
-      display: flex; align-items: flex-start; gap: 10px;
-      padding: calc(env(safe-area-inset-top) + 14px)
-               calc(env(safe-area-inset-right) + 14px) 12px 16px;
-      border-bottom: 1px solid var(--line);
-    }
-    .flow-panel-heading { flex: 1 1 auto; min-width: 0; }
-    .flow-panel-heading h2 {
-      margin: 0; color: var(--text); font-size: 17px; line-height: 1.3;
-    }
-    .flow-panel-heading p {
-      margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45;
-    }
-    .flow-body {
-      flex: 1 1 auto; min-height: 0; overflow-y: auto;
-      padding: 14px 16px 24px;
-      -webkit-overflow-scrolling: touch;
-    }
-    .flow-name-label {
-      display: block; margin-bottom: 7px;
-      color: var(--muted); font-size: 11px; font-weight: 700;
-    }
-    #flowName {
-      width: 100%; min-height: 44px; padding: 10px 12px;
-      border: 1px solid var(--line); border-radius: 11px;
-      background: var(--bg); color: var(--text);
-      font: 15px var(--sans);
-    }
-    .flow-summary {
-      display: flex; align-items: center; gap: 9px;
-      margin: 12px 0; padding: 10px 12px;
-      border: 1px solid var(--line); border-radius: 11px;
-      background: var(--panel);
-    }
-    .flow-summary strong { font-size: 13px; }
-    .flow-summary span {
-      margin-left: auto; color: var(--muted); font: 11px var(--mono);
-    }
-    .flow-availability {
-      margin: 0 0 12px; padding: 10px 12px;
-      border: 1px solid rgba(250,204,21,.3); border-radius: 11px;
-      background: rgba(250,204,21,.07); color: #e6dca7;
-      font-size: 12px; line-height: 1.5;
-    }
-    .flow-file-status {
-      margin: 0 0 12px; padding: 10px 12px;
-      border: 1px solid rgba(79,140,255,.34); border-radius: 11px;
-      background: rgba(79,140,255,.08); color: #b8d0ff;
-      font-size: 12px; line-height: 1.5;
-    }
-    .flow-file-status[data-tone="error"] {
-      border-color: rgba(255,90,102,.42);
-      background: rgba(255,90,102,.08); color: #ffb2b8;
-    }
-    .flow-file-status[data-tone="success"] {
-      border-color: rgba(65,201,127,.36);
-      background: rgba(65,201,127,.08); color: #a9e8c4;
-    }
-    .flow-note {
-      margin: 0 0 12px; padding: 0;
-      border: 1px solid rgba(250,204,21,.26); border-radius: 11px;
-      background: rgba(250,204,21,.06); color: #d9d1a7;
-      font-size: 11px; line-height: 1.55;
-    }
-    .flow-note summary {
-      min-height: 42px; padding: 11px 12px;
-      display: flex; align-items: center; justify-content: space-between; gap: 10px;
-      color: #e6dca7; font-size: 12px; font-weight: 700;
-      cursor: pointer; list-style: none;
-    }
-    .flow-note summary::-webkit-details-marker { display: none; }
-    .flow-note summary::after {
-      content: "展开"; color: var(--muted);
-      font: 10px/1 var(--sans); font-weight: 600;
-    }
-    .flow-note[open] summary::after { content: "收起"; }
-    .flow-note-body {
-      margin: 0; padding: 0 12px 12px;
-    }
-    #flowInputs {
-      margin: 0 0 12px; padding: 11px 12px 12px;
-      border: 1px solid rgba(79,140,255,.35); border-radius: 11px;
-      background: rgba(79,140,255,.07);
-    }
-    .flow-inputs-heading {
-      display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-      margin-bottom: 9px;
-    }
-    .flow-inputs-heading strong { color: var(--text); font-size: 12px; }
-    .flow-inputs-heading span { color: #9eb9ee; font-size: 10px; }
-    .flow-input-row + .flow-input-row { margin-top: 9px; }
-    .flow-input-row label {
-      display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-      margin-bottom: 5px; color: var(--text); font-size: 11px; font-weight: 650;
-    }
-    .flow-input-row label code {
-      color: var(--muted); font: 10px var(--mono); font-weight: 400;
-    }
-    .flow-runtime-input {
-      width: 100%; min-height: 42px; padding: 9px 11px;
-      border: 1px solid var(--line); border-radius: 9px;
-      background: var(--bg); color: var(--text);
-      font: 14px var(--sans);
-    }
-    .flow-runtime-input::placeholder { color: #676d7d; }
-    #flowStepList { list-style: none; margin: 0; padding: 0; }
-    #flowStepList li + li { margin-top: 8px; }
-    .flow-step {
-      display: grid; grid-template-columns: auto minmax(0,1fr) auto;
-      align-items: center; gap: 9px; padding: 10px;
-      border: 1px solid var(--line); border-radius: 11px;
-      background: var(--panel);
-    }
-    .flow-step-number {
-      display: grid; place-items: center;
-      min-width: 28px; height: 28px; padding: 0 6px;
-      border-radius: 8px; background: var(--panel-2);
-      color: var(--muted); font: 700 10px var(--mono);
-    }
-    .flow-step-copy { min-width: 0; }
-    .flow-step-title {
-      display: block; overflow: hidden; text-overflow: ellipsis;
-      color: var(--text); font-size: 13px; font-weight: 650; white-space: nowrap;
-    }
-    .flow-step-meta {
-      display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis;
-      color: var(--muted); font: 10px/1.35 var(--mono); white-space: nowrap;
-    }
-    .flow-step.fragile { border-color: rgba(250,204,21,.32); }
-    .flow-step.checkpoint {
-      border-color: rgba(79,140,255,.42);
-      background: rgba(79,140,255,.07);
-    }
-    .flow-step.checkpoint .flow-step-number {
-      background: rgba(79,140,255,.16); color: #b8d0ff;
-    }
-    .flow-step-button {
-      min-width: 38px; min-height: 38px; padding: 7px 9px;
-      border: 1px solid var(--line); border-radius: 9px;
-      background: transparent; color: var(--muted);
-      font: 600 12px var(--sans); cursor: pointer;
-    }
-    .flow-step-controls { display: flex; gap: 5px; }
-    .flow-step-button:hover { color: var(--text); border-color: #495064; }
-    .flow-step-button:disabled { opacity: .35; cursor: default; }
-    #flowEmpty {
-      margin: 20px 0 0; padding: 20px 16px;
-      border: 1px dashed #34394a; border-radius: 12px;
-      color: var(--muted); font-size: 12px; line-height: 1.55;
-    }
-    .flow-empty-title {
-      display: block; margin-bottom: 12px;
-      color: var(--text); text-align: center; font-size: 14px;
-    }
-    .flow-empty-steps {
-      margin: 0; padding: 0; list-style: none; counter-reset: flow-empty;
-    }
-    .flow-empty-steps li {
-      display: grid; grid-template-columns: 24px minmax(0,1fr);
-      align-items: center; gap: 9px;
-    }
-    .flow-empty-steps li + li { margin-top: 9px; }
-    .flow-empty-steps li::before {
-      counter-increment: flow-empty; content: counter(flow-empty);
-      display: grid; place-items: center;
-      width: 24px; height: 24px; border-radius: 7px;
-      background: rgba(79,140,255,.13); color: #b8d0ff;
-      font: 700 10px/1 var(--mono);
-    }
-    .flow-empty-result {
-      display: block; margin-top: 12px;
-      color: #9eb9ee; text-align: center;
-    }
-    .flow-safety {
-      display: flex; align-items: flex-start; gap: 9px;
-      margin-top: 14px; padding: 11px 12px;
-      border: 1px solid var(--line); border-radius: 11px;
-      color: var(--muted); font-size: 11px; line-height: 1.5;
-      cursor: pointer;
-    }
-    .flow-safety input { margin: 2px 0 0; width: 18px; height: 18px; accent-color: var(--accent); }
-    .flow-footer {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
-      padding: 12px calc(env(safe-area-inset-right) + 14px)
-               calc(env(safe-area-inset-bottom) + 12px) 14px;
-      border-top: 1px solid var(--line); background: var(--panel);
-    }
-    .flow-footer .flow-safety {
-      grid-column: 1 / -1; margin: 0 0 2px;
-      background: rgba(14,16,22,.72);
-    }
-    .flow-action {
-      min-height: 44px; padding: 9px 12px;
-      border: 1px solid var(--line); border-radius: 11px;
-      background: transparent; color: var(--text);
-      font: 700 13px var(--sans); cursor: pointer;
-    }
-    .flow-action.primary {
-      background: var(--accent); border-color: var(--accent); color: white;
-    }
-    .flow-action.recording {
-      background: var(--danger-bg); border-color: var(--danger-border); color: #ffb2b8;
-    }
-    .flow-action:disabled { opacity: .42; cursor: default; }
-    .flow-action.wide { grid-column: 1 / -1; }
-    @media (max-width: 560px) {
-      #flowPanel {
-        inset: auto 0 0;
-        width: 100%;
-        height: min(82dvh, 720px);
-        border-left: 0; border-top: 1px solid var(--line);
-        transform: translateY(105%);
-      }
-      #flowPanel.open { transform: translateY(0); }
-      body.flow-panel-open #toast {
-        bottom: calc(var(--flow-footer-h, 69px) + 14px);
-        max-width: calc(100vw - 28px);
-      }
-    }
-
-    /* ── Direct device image (MJPEG with periodic still fallback) ── */
-    #h264Frame, #mjpegFrame, #stillFrame, #redactedFrame {
-      position: absolute; top: 0; left: 0;
-      width: 100%; height: calc(100% - var(--tb-reserve));
-      object-fit: contain;
-      display: none;
-      pointer-events: none;   /* taps still land on #videoArea */
-      transition: height .28s cubic-bezier(.2,.7,.2,1);
-    }
+    /* The device keeps the stream's own aspect ratio (--ar, set from the first
+       frame) and the largest size that fits the stage. --sh is the screen height. */
+    #device {
+      --ar: 0.4621;
+      --bz: clamp(7px, 1.5cqh, 15px);
+      --gap: 56px;
+      --sh: min(calc(100cqh - var(--gap) - 2 * var(--bz)),
+                calc((100cqw - var(--gap) - 2 * var(--bz)) / var(--ar)));
+      --scr-r: calc(min(var(--sh), var(--sh) * var(--ar)) * .118);
+      position: relative; padding: var(--bz);
+      border-radius: calc(var(--scr-r) + var(--bz));
+      background: var(--bezel);
+      box-shadow: var(--shadow-l), inset 0 0 0 1.5px var(--bezel-edge), inset 0 0 0 3px #000;
+      transition: box-shadow .3s;
+    }
+    /* side buttons: action + volume on the left, side button on the right */
+    #device::before, #device::after {
+      content: ""; position: absolute; width: 3px; border-radius: 2px;
+      background: linear-gradient(90deg, #2b2e35, #121317);
+    }
+    #device::before { left: -3px; top: 17%; height: 13%; box-shadow: 0 calc(var(--sh) * -.075) 0 -0.5px #1d1f24; }
+    #device::after  { right: -3px; top: 23%; height: 10%; }
+    #screen {
+      position: relative; overflow: hidden;
+      height: var(--sh); width: calc(var(--sh) * var(--ar));
+      border-radius: var(--scr-r);
+      background: var(--screen-off);
+      isolation: isolate;
+    }
+    /* no picture yet: a calm shimmer instead of a black hole */
+    #screen::before {
+      content: ""; position: absolute; inset: 0; z-index: 0; opacity: 0; transition: opacity .4s;
+      background:
+        linear-gradient(100deg, transparent 30%, rgba(255,255,255,.06) 50%, transparent 70%) 0 0 / 250% 100%,
+        radial-gradient(80% 50% at 50% 35%, #1f2330 0%, var(--screen-off) 100%);
+      animation: shimmer 2.2s linear infinite;
+    }
+    #screen:not(:has(.frame.active))::before { opacity: 1; }
+    @keyframes shimmer { from { background-position: 150% 0, 0 0; } to { background-position: -100% 0, 0 0; } }
+    #screen .frame {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: contain; display: none; pointer-events: none;
+    }
+    #screen .frame.active { display: block; }
     #h264Frame, #mjpegFrame { z-index: 2; }
     #stillFrame { z-index: 1; }
     /* The app hides this screen from capture: the daemon's wireframe of its
        accessibility tree replaces the blank picture (taps still go through). */
     #redactedFrame { z-index: 3; background: #fff; }
-    #h264Frame.active, #mjpegFrame.active, #stillFrame.active, #redactedFrame.active { display: block; }
+    #gridCanvas {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      pointer-events: none; display: none; z-index: 4;
+    }
+    #gridCanvas.on { display: block; }
+    #screen.live { cursor: none; }
+    #screen.typing { box-shadow: 0 0 0 2px var(--accent); }
+    #device:has(#screen.typing) { box-shadow: var(--shadow-l), inset 0 0 0 1.5px var(--accent), inset 0 0 0 3px #000; }
 
-    /* ── Update banner (new release available) ───────────────────── */
-    #updateBanner {
-      position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
-      display: none; align-items: center; gap: .5rem;
-      background: rgba(20, 24, 38, .92); border: 1px solid rgba(99,102,241,.5);
-      color: #c7d2fe; font-size: 12px; padding: .35rem .8rem; border-radius: 99px;
-      z-index: 30; backdrop-filter: blur(6px); cursor: default;
+    /* touch feedback layer */
+    #touchLayer { position: absolute; inset: 0; z-index: 6; pointer-events: none; overflow: hidden; }
+    #touchCursor {
+      position: absolute; left: 0; top: 0; width: 30px; height: 30px; margin: -15px 0 0 -15px;
+      border-radius: 50%; border: 1.5px solid rgba(255,255,255,.9);
+      background: rgba(120,140,170,.28);
+      box-shadow: 0 0 0 1px rgba(0,0,0,.25), 0 2px 8px rgba(0,0,0,.3);
+      opacity: 0; transition: opacity .15s, transform .12s var(--ease);
     }
-    #updateBanner.visible { display: flex; }
-    #updateBanner code { font-size: 11px; background: rgba(99,102,241,.18); padding: .1em .4em; border-radius: 4px; }
-    #updateBanner .x {
-      cursor: pointer; opacity: .6; padding: .15rem .25rem;
-      border: 0; border-radius: 4px; background: transparent;
-      color: inherit; font: inherit; line-height: 1;
+    #touchCursor.on { opacity: 1; }
+    #touchCursor.down { transform: scale(.82); background: rgba(91,141,255,.45); }
+    .ripple {
+      position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,.95); background: rgba(91,141,255,.30);
+      box-shadow: 0 0 0 1px rgba(0,0,0,.2);
+      animation: ripple .55s var(--ease) forwards;
     }
-    #updateBanner .x:hover { opacity: 1; }
-    #updateBanner .x:focus-visible {
-      opacity: 1; outline: 2px solid var(--accent); outline-offset: 2px;
+    .ripple.pending { animation: ripple-pending .9s ease-in-out infinite; }
+    .ripple.fail { border-color: var(--danger); background: rgba(255,93,104,.30); animation: ripple .7s var(--ease) forwards; }
+    @keyframes ripple { from { transform: scale(.5); opacity: 1; } to { transform: scale(1.5); opacity: 0; } }
+    @keyframes ripple-pending { 0%,100% { transform: scale(.75); opacity: .9; } 50% { transform: scale(.95); opacity: .55; } }
+    .press-ring {
+      position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%;
+      background: conic-gradient(rgba(255,255,255,.95) var(--p, 0%), rgba(255,255,255,.18) 0);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3.5px));
+              mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3.5px));
+      animation: press-fill .38s linear forwards;
     }
+    @property --p { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
+    @keyframes press-fill { to { --p: 100%; } }
+    #trail { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+    #trail line {
+      stroke: rgba(255,255,255,.92); stroke-width: 5; stroke-linecap: round;
+      filter: drop-shadow(0 0 2px rgba(0,0,0,.45));
+    }
+    #trail circle { fill: rgba(255,255,255,.95); }
+    #trail.fade { transition: opacity .45s .1s; opacity: 0; }
 
-    /* ── Lock readiness (will this phone get stuck at the lock screen) ── */
-    #lockNotice {
-      position: absolute; top: 46px; left: 50%; transform: translateX(-50%);
-      display: none; align-items: flex-start; gap: .5rem;
-      width: max-content; max-width: min(92%, 460px);
-      background: rgba(20, 24, 38, .92); border: 1px solid rgba(148,163,184,.4);
-      color: #e2e8f0; font-size: 12px; line-height: 1.45; padding: .4rem .8rem; border-radius: 12px;
-      z-index: 30; backdrop-filter: blur(6px);
+    /* stalled: connected but no new frame for a moment — dim the frozen
+       picture and say so on the screen itself, without blocking input */
+    #screen.stalled .frame { filter: saturate(.35) brightness(.78); transition: filter .3s; }
+    #stallPill {
+      position: absolute; left: 50%; top: 9%; z-index: 14; transform: translateX(-50%);
+      display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+      padding: 7px 13px; border-radius: 999px;
+      background: rgba(12,14,20,.82); color: #fff; border: 1px solid rgba(255,255,255,.14);
+      font: 650 var(--fs-s)/1 var(--sans); box-shadow: var(--shadow-m);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      pointer-events: none;
     }
-    #lockNotice.visible { display: flex; }
-    #lockNotice.needs-person { border-color: rgba(251,191,36,.6); color: #fde68a; }
-    #lockNotice .tag { font-weight: 600; white-space: nowrap; }
-    #lockNotice .x {
-      cursor: pointer; opacity: .6; padding: .1rem .25rem;
-      border: 0; border-radius: 4px; background: transparent;
-      color: inherit; font: inherit; line-height: 1;
+    #stallPill .ol-spinner { display: block; }
+    #metrics b.warn, #metrics .warn { color: var(--warn); }
+    /* keyboard capture: an invisible textarea keeps IME composition native */
+    #keyCatcher {
+      position: absolute; left: 50%; bottom: 18%; width: 2px; height: 24px;
+      opacity: 0; pointer-events: none; resize: none; border: 0; padding: 0;
+      font-size: 16px; color: transparent; background: transparent; caret-color: transparent;
     }
-    #lockNotice .x:hover { opacity: 1; }
-    #lockNotice .x:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 2px; }
+    #typingHint {
+      position: absolute; left: 50%; bottom: 14px; z-index: 7; transform: translateX(-50%);
+      display: none; align-items: center; gap: 7px; white-space: nowrap;
+      padding: 6px 10px; border-radius: 999px;
+      background: rgba(12,14,20,.78); color: #fff;
+      font: 600 var(--fs-xs)/1 var(--sans);
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      pointer-events: none;
+    }
+    #typingHint kbd { background: rgba(255,255,255,.12); color: #fff; border-color: rgba(255,255,255,.3); }
+    #screen.typing #typingHint { display: inline-flex; }
 
-    /* ── Offline / stall overlay ────────────────────────────────── */
+    /* ── State layer: soft chips for transient states, a card only when the
+       phone is truly unusable ──────────────────────────────────── */
     #offlineOverlay {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%;
-      height: calc(100% - var(--tb-reserve));
-      z-index: 15;                /* above the device image and tapDot (z=5) */
+      position: absolute; inset: 0; z-index: 15;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 10px;
-      background: rgba(8,9,12,.72);
-      backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
-      pointer-events: none;       /* only the card's buttons take taps */
-      transition: opacity .3s, height .28s cubic-bezier(.2,.7,.2,1);
+      padding: 16px; overflow: auto;
+      pointer-events: none;
+      transition: opacity .25s, background .25s;
       opacity: 0;
     }
     #offlineOverlay.visible { opacity: 1; }
+    #offlineOverlay.blocking {
+      background: rgba(10,12,16,.62);
+      backdrop-filter: blur(7px) saturate(.8); -webkit-backdrop-filter: blur(7px) saturate(.8);
+    }
     #offlineCard {
-      width: min(calc(100% - 32px), 440px);
-      padding: 24px;
-      display: flex; flex-direction: column; align-items: center; gap: 10px;
-      border: 1px solid rgba(255,255,255,.10); border-radius: 18px;
-      background: rgba(17,19,26,.93);
-      box-shadow: 0 24px 72px rgba(0,0,0,.34);
-      pointer-events: none;
-    }
-    #reconnectBtn {
-      margin-top: 14px; padding: .5rem 1.3rem; border-radius: 99px; cursor: pointer;
-      border: 1px solid rgba(99,102,241,.55); background: rgba(99,102,241,.18);
-      color: #c7d2fe; font-size: 13px; pointer-events: auto; transition: background .15s;
-    }
-    #reconnectBtn:hover { background: rgba(99,102,241,.32); }
-    #reconnectBtn:disabled { opacity: .5; cursor: default; }
-    #overlayActions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-    #setupHelp {
-      margin-top: 8px;
+      width: min(100%, 360px);
+      padding: 22px 20px 20px;
       display: flex; flex-direction: column; align-items: center; gap: 8px;
-      max-width: min(88vw, 420px);
+      border: 1px solid var(--line); border-radius: var(--r-xl);
+      background: var(--surface); color: var(--text);
+      box-shadow: var(--shadow-m);
+      pointer-events: none; text-align: center;
+    }
+    #offlineOverlay .ol-title { font-size: var(--fs-l); font-weight: 680; color: var(--text); outline: none; }
+    #offlineOverlay .ol-sub { font-size: var(--fs-s); color: var(--muted); line-height: 1.55; max-width: 300px; }
+    .ol-icon {
+      width: 42px; height: 42px; display: grid; place-items: center; border-radius: 50%;
+      background: var(--warn-soft); color: var(--warn);
+    }
+    .ol-icon svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+    #offlineOverlay.disconnected .ol-icon { background: var(--danger-soft); color: var(--danger); }
+    #offlineOverlay[data-kind="released"] .ol-icon,
+    #offlineOverlay[data-kind="locked"] .ol-icon { background: var(--accent-soft); color: var(--accent); }
+    .ol-spinner {
+      width: 14px; height: 14px; border-radius: 50%; flex: 0 0 auto;
+      border: 2px solid rgba(255,255,255,.35); border-top-color: #fff;
+      animation: spin .8s linear infinite; display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    /* soft: a chip floating at the top of the screen; the picture stays visible */
+    #offlineOverlay.soft { justify-content: flex-start; padding-top: 12%; }
+    #offlineOverlay.soft #offlineCard {
+      width: auto; max-width: calc(100% - 8px);
+      flex-direction: row; flex-wrap: wrap; justify-content: center; align-items: center;
+      gap: 4px 9px; padding: 8px 14px; border-radius: 999px;
+      background: rgba(12,14,20,.80); border-color: rgba(255,255,255,.12); color: #fff;
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      text-align: left;
+    }
+    #offlineOverlay.soft .ol-icon { display: none; }
+    #offlineOverlay.soft .ol-spinner { display: block; }
+    #offlineOverlay.soft .ol-title { color: #fff; font-size: var(--fs-s); }
+    #offlineOverlay.soft .ol-sub { display: none; }
+    #offlineOverlay.soft #overlayActions { margin: 0; }
+    #offlineOverlay.soft #reconnectBtn { min-height: 26px; padding: 3px 10px; font-size: var(--fs-xs); background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.25); color: #fff; }
+    #overlayActions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
+    #reconnectBtn, #setupGuideLink, #copySetupBtn {
+      min-height: 38px; padding: 8px 18px; border-radius: 999px;
+      border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink);
+      font: 650 var(--fs-m) var(--sans); cursor: pointer; pointer-events: auto;
+      text-decoration: none; display: inline-flex; align-items: center; justify-content: center;
+      transition: filter .15s;
+    }
+    #reconnectBtn:hover, #setupGuideLink:hover { filter: brightness(1.08); }
+    #reconnectBtn:disabled { opacity: .55; cursor: default; }
+    #setupGuideLink:not([hidden]) ~ #overlayActions #reconnectBtn {
+      background: transparent; color: var(--accent);
+    }
+    #setupGuideLink { margin-top: 6px; }
+    #setupHelp {
+      margin-top: 6px; width: 100%;
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
       pointer-events: auto;
     }
-    #setupHelp .setup-label {
-      color: var(--muted); font-size: 11px; line-height: 1.4; text-align: center;
-    }
+    #setupHelp .setup-label { color: var(--muted); font-size: var(--fs-xs); line-height: 1.4; }
     #setupCommand {
-      max-width: 100%; padding: 8px 10px; border-radius: 9px;
-      background: rgba(255,255,255,.05); border: 1px solid var(--line);
-      color: #dbe6ff; font-family: var(--mono); font-size: 11px;
+      max-width: 100%; padding: 8px 10px; border-radius: var(--r-s);
+      background: var(--surface-2); border: 1px solid var(--line);
+      color: var(--text); font: var(--fs-xs) var(--mono);
       overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;
     }
-    #copySetupBtn {
-      min-height: 42px; padding: 8px 16px; border-radius: 999px;
-      border: 1px solid rgba(79,140,255,.6); background: var(--accent-dim);
-      color: #dbe6ff; font: 600 13px var(--sans); cursor: pointer;
-    }
-    #copySetupBtn:focus-visible {
-      outline: 2px solid var(--accent); outline-offset: 3px;
-    }
-    #setupGuideLink {
-      min-height: 44px; margin-top: 10px; padding: 10px 18px;
-      display: inline-flex; align-items: center; justify-content: center;
-      border: 1px solid var(--accent); border-radius: 999px;
-      background: var(--accent); color: #fff; text-decoration: none;
-      font: 650 13px var(--sans); pointer-events: auto;
-    }
-    #setupGuideLink:hover { filter: brightness(1.08); }
-    #setupGuideLink:focus-visible {
-      outline: 3px solid rgba(79,140,255,.42); outline-offset: 3px;
-    }
-    #offlineOverlay .ol-title {
-      font-family: var(--sans); font-size: 16px; font-weight: 600;
-      color: var(--text); letter-spacing: .02em;
-    }
-    #offlineOverlay .ol-sub {
-      font-family: var(--sans); font-size: 12px;
-      color: var(--muted); letter-spacing: .02em;
-      max-width: 260px; text-align: center; line-height: 1.5;
-    }
-    /* Pulsing dot — instrument-panel style */
-    #offlineOverlay .ol-pulse {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: var(--warn);
-      box-shadow: 0 0 0 0 rgba(250,204,21,.5);
-      animation: ol-pulse 2s infinite;
-    }
-    #offlineOverlay.disconnected .ol-pulse {
-      background: var(--danger);
-      box-shadow: 0 0 0 0 rgba(255,90,102,.5);
-      animation: ol-pulse-red 2s infinite;
-    }
-    @keyframes ol-pulse {
-      0%   { box-shadow: 0 0 0 0 rgba(250,204,21,.55); }
-      60%  { box-shadow: 0 0 0 9px rgba(250,204,21,0); }
-      100% { box-shadow: 0 0 0 0 rgba(250,204,21,0); }
-    }
-    @keyframes ol-pulse-red {
-      0%   { box-shadow: 0 0 0 0 rgba(255,90,102,.55); }
-      60%  { box-shadow: 0 0 0 9px rgba(255,90,102,0); }
-      100% { box-shadow: 0 0 0 0 rgba(255,90,102,0); }
-    }
+    #copySetupBtn { background: transparent; color: var(--accent); min-height: 34px; }
 
-    /* ── Toast (v1: 1600ms) ─────────────────────────────────────── */
-    #toast {
-      position: fixed; left: 50%;
-      bottom: calc(var(--tb-h) + env(safe-area-inset-bottom) + 24px);
-      transform: translateX(-50%) translateY(8px);
-      background: rgba(17,24,39,.96); border: 1px solid var(--line);
-      color: var(--text); padding: 9px 15px; border-radius: 12px; font-size: 13px;
-      opacity: 0; transition: opacity .2s, transform .2s; z-index: 99;
-      max-width: 86vw; pointer-events: none; text-align: center;
+    /* ── Side rail (desktop) ───────────────────────────────────── */
+    #toolbar {
+      grid-area: rail; z-index: 10;
+      display: flex; flex-direction: column; gap: 14px;
+      padding: 14px 10px calc(env(safe-area-inset-bottom) + 14px);
+      padding-right: calc(env(safe-area-inset-right) + 10px);
+      border-left: 1px solid var(--line);
+      background: var(--surface);
+      overflow-y: auto; scrollbar-width: thin;
     }
-    #toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .tb-section { display: flex; flex-direction: column; gap: 2px; }
+    .tb-heading {
+      padding: 0 10px 4px; color: var(--subtle);
+      font: 700 10px/1 var(--sans); letter-spacing: .08em; text-transform: uppercase;
+    }
+    .tbtn {
+      display: flex; align-items: center; gap: 10px;
+      min-height: 36px; padding: 6px 8px 6px 10px; width: 100%;
+      border: 1px solid transparent; border-radius: var(--r-s);
+      background: transparent; color: var(--text);
+      font: 500 var(--fs-m)/1.2 var(--sans); text-align: left; cursor: pointer;
+      user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+      transition: background .12s, color .12s, border-color .12s;
+    }
+    .tbtn:hover { background: var(--surface-2); }
+    .tbtn:active { background: var(--surface-3); }
+    .tbtn:disabled { opacity: .4; cursor: default; background: transparent; }
+    .tbtn svg { flex: 0 0 auto; width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); }
+    .tbtn .lbl { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tbtn kbd { flex: 0 0 auto; opacity: .85; }
+    .tbtn.active, .tbtn[aria-pressed="true"], .tbtn[aria-expanded="true"] {
+      background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent);
+    }
+    .tbtn.active svg, .tbtn[aria-pressed="true"] svg, .tbtn[aria-expanded="true"] svg { color: var(--accent); }
+    .tbtn.danger, .tbtn.danger svg { color: var(--danger-ink); }
+    .tbtn.danger:hover { background: var(--danger-soft); }
+    .tb-more, .tb-mobile-only { display: none !important; }
+    .element-glyph {
+      flex: 0 0 auto; display: grid; place-items: center;
+      width: 18px; height: 18px; border: 1.6px solid var(--muted); color: var(--muted);
+      border-radius: 5px; font: 800 8px/1 var(--mono); letter-spacing: -.03em;
+    }
+    .tbtn[aria-expanded="true"] .element-glyph { border-color: var(--accent); color: var(--accent); }
+    .tb-foot { margin-top: auto; padding: 8px 10px 0; color: var(--subtle); font-size: var(--fs-xs); line-height: 1.5; }
+    .tb-foot button { padding: 0; border: 0; background: none; color: var(--accent); cursor: pointer; font: inherit; }
+
+    /* Immersive / fullscreen: chrome slides away; a grabber brings it back */
+    body.immersive #app { grid-template-columns: minmax(0,1fr) 0; grid-template-rows: 0 0 minmax(0,1fr); }
+    body.immersive #topbar, body.immersive #toolbar, body.immersive #notices { visibility: hidden; overflow: hidden; border: 0; padding: 0; }
+    #grabber {
+      position: fixed; z-index: 29; right: calc(env(safe-area-inset-right) + 14px);
+      top: calc(env(safe-area-inset-top) + 12px);
+      height: 34px; padding: 0 12px; border-radius: 999px;
+      background: var(--glass); border: 1px solid var(--line); color: var(--text);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      display: none; align-items: center; gap: 6px; cursor: pointer;
+      font: 600 var(--fs-s) var(--sans); box-shadow: var(--shadow-s);
+    }
+    #grabber svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    body.immersive #grabber { display: inline-flex; }
+
+    /* ── Text panel: floating composer ─────────────────────────── */
+    #textPanel {
+      position: fixed; z-index: 40;
+      left: calc((100vw - var(--rail-w)) / 2); bottom: 24px;
+      width: min(560px, calc(100vw - var(--rail-w) - 32px));
+      display: flex; gap: 8px; align-items: center; padding: 8px;
+      border: 1px solid var(--line); border-radius: var(--r-l);
+      background: var(--surface); box-shadow: var(--shadow-m);
+      transform: translate(-50%, 16px); opacity: 0; pointer-events: none;
+      transition: transform .22s var(--ease), opacity .18s;
+    }
+    #textPanel.open { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
+    #textInput {
+      flex: 1 1 auto; min-width: 0;
+      background: var(--surface-2); color: var(--text);
+      border: 1px solid var(--line); border-radius: var(--r-m);
+      padding: 10px 12px; font-size: 16px; font-family: var(--sans); -webkit-appearance: none;
+    }
+    #textInput:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+    #btnSend, #btnTextClose {
+      flex: 0 0 auto; border-radius: var(--r-m); padding: 10px 14px;
+      font: 600 var(--fs-m) var(--sans); cursor: pointer; -webkit-appearance: none;
+    }
+    #btnSend { background: var(--accent); border: 1px solid var(--accent); color: var(--accent-ink); }
+    #btnSend:disabled { opacity: .5; cursor: default; }
+    #btnTextClose { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+
+    /* ── Dialogs (pair QR, shortcuts) ──────────────────────────── */
+    dialog.card {
+      width: min(92vw, 360px); padding: 20px;
+      background: var(--surface); color: var(--text);
+      border: 1px solid var(--line); border-radius: var(--r-xl); box-shadow: var(--shadow-l);
+    }
+    dialog.card::backdrop { background: var(--scrim); backdrop-filter: blur(2px); }
+    dialog.card h2 { margin: 0 0 6px; font-size: var(--fs-xl); }
+    #pairDialog .pair-hint { margin: 0 0 14px; color: var(--muted); font-size: var(--fs-s); line-height: 1.5; }
+    #pairQr { background: #fff; border-radius: var(--r-m); padding: 10px; aspect-ratio: 1; display: grid; place-items: center; border: 1px solid var(--line); }
+    #pairQr svg { width: 100%; height: auto; display: block; }
+    #pairQr.expired { opacity: .25; }
+    #pairStatus { min-height: 18px; margin: 8px 0 4px; font-size: var(--fs-s); color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
+    #pairStatus.err { color: var(--danger-ink); }
+    .pair-host { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-s); color: var(--muted); margin-bottom: 8px; }
+    .pair-host select { background: var(--surface-2); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-s); padding: 6px 8px; font-size: var(--fs-m); }
+    #pairUrl { display: block; font: var(--fs-xs) var(--mono); color: var(--muted); word-break: break-all; margin-bottom: 14px; }
+    .pair-actions { display: flex; gap: 8px; }
+    .pair-actions button { flex: 1; padding: 10px; border-radius: var(--r-m); font-size: var(--fs-m); font-weight: 600;
+      background: transparent; color: var(--text); border: 1px solid var(--line); cursor: pointer; font-family: inherit; }
+    .pair-actions button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    #helpDialog { width: min(94vw, 460px); }
+    #helpDialog p { margin: 0 0 12px; color: var(--muted); font-size: var(--fs-s); line-height: 1.55; }
+    .keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; margin: 0 0 16px; font-size: var(--fs-m); }
+    .keys dt { display: flex; gap: 4px; justify-content: flex-end; }
+    .keys dd { margin: 0; color: var(--text); align-self: center; }
+    .keys .sub { justify-content: flex-start; grid-column: 1 / -1; margin-top: 6px; color: var(--subtle); font: 700 10px/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; }
+
+    /* ── Accessible element panel ──────────────────────────────── */
+    #elementPanel, #flowPanel {
+      position: fixed; inset: 0 0 0 auto; z-index: 44;
+      width: min(100vw, 420px);
+      display: flex; flex-direction: column;
+      background: var(--surface); color: var(--text);
+      border-left: 1px solid var(--line);
+      box-shadow: -24px 0 60px -20px rgba(0,0,0,.35);
+      transform: translateX(105%); opacity: 0; pointer-events: none;
+      transition: transform .26s var(--ease), opacity .2s;
+    }
+    #flowPanel { width: min(100vw, 460px); }
+    #elementPanel.open, #flowPanel.open { transform: translateX(0); opacity: 1; pointer-events: auto; }
+    .element-panel-header, .flow-panel-header {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: calc(env(safe-area-inset-top) + 14px) calc(env(safe-area-inset-right) + 14px) 12px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .element-panel-heading, .flow-panel-heading { flex: 1 1 auto; min-width: 0; }
+    .element-panel-heading h2, .flow-panel-heading h2 { margin: 0; color: var(--text); font-size: var(--fs-xl); line-height: 1.3; }
+    .element-panel-heading p, .flow-panel-heading p { margin: 4px 0 0; color: var(--muted); font-size: var(--fs-s); line-height: 1.45; }
+    .element-panel-action {
+      min-height: 36px; padding: 7px 12px; border-radius: var(--r-s);
+      border: 1px solid var(--line); background: var(--surface);
+      color: var(--text); font: 600 var(--fs-m) var(--sans); cursor: pointer;
+    }
+    .element-panel-action:hover { background: var(--surface-2); }
+    .element-panel-action:disabled { opacity: .45; cursor: default; }
+    #elementStatus { min-height: 20px; padding: 10px 16px 0; color: var(--muted); font: var(--fs-xs)/1.45 var(--sans); }
+    #elementList {
+      flex: 1 1 auto; min-height: 0; overflow-y: auto;
+      list-style: none; margin: 0; padding: 8px 12px 18px;
+      -webkit-overflow-scrolling: touch;
+    }
+    #elementList li + li { margin-top: 6px; }
+    .element-control {
+      width: 100%; min-height: 46px; padding: 9px 11px;
+      display: grid; grid-template-columns: minmax(0,1fr) auto;
+      gap: 4px 10px; align-items: center; text-align: left;
+      border: 1px solid var(--line); border-radius: var(--r-m);
+      background: var(--surface); color: var(--text);
+      font-family: var(--sans); cursor: pointer;
+    }
+    .element-control:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+    .element-control:disabled { opacity: .5; cursor: default; }
+    .element-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-m); font-weight: 600; }
+    .element-meta { color: var(--subtle); font: 10px/1.3 var(--mono); white-space: nowrap; }
+    .element-value { grid-column: 1 / -1; color: var(--muted); font-size: var(--fs-xs); line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ── Flow recorder panel ───────────────────────────────────── */
+    .flow-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px 16px 24px; -webkit-overflow-scrolling: touch; }
+    .flow-name-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: var(--fs-xs); font-weight: 700; }
+    #flowName, .flow-runtime-input {
+      width: 100%; min-height: 42px; padding: 9px 12px;
+      border: 1px solid var(--line); border-radius: var(--r-m);
+      background: var(--surface-2); color: var(--text); font: 15px var(--sans);
+    }
+    .flow-runtime-input { font-size: 14px; }
+    .flow-runtime-input::placeholder, #flowName::placeholder { color: var(--subtle); }
+    #flowName:focus, .flow-runtime-input:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+    .flow-summary {
+      display: flex; align-items: center; gap: 9px; margin: 12px 0; padding: 10px 12px;
+      border: 1px solid var(--line); border-radius: var(--r-m); background: var(--surface-2);
+    }
+    .flow-summary strong { font-size: var(--fs-m); }
+    .flow-summary span { margin-left: auto; color: var(--muted); font: var(--fs-xs) var(--mono); }
+    .flow-availability, .flow-note, .flow-file-status, #flowInputs {
+      margin: 0 0 12px; padding: 10px 12px; border-radius: var(--r-m); font-size: var(--fs-s); line-height: 1.5;
+    }
+    .flow-availability { border: 1px solid var(--warn-line); background: var(--warn-soft); color: var(--warn-ink); }
+    .flow-file-status { border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--info-ink); }
+    .flow-file-status[data-tone="error"] { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-ink); }
+    .flow-file-status[data-tone="success"] { border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: var(--ok-soft); color: var(--ok); }
+    .flow-note { padding: 0; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); font-size: var(--fs-xs); line-height: 1.55; }
+    .flow-note summary {
+      min-height: 40px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      color: var(--text); font-size: var(--fs-s); font-weight: 700; cursor: pointer; list-style: none;
+    }
+    .flow-note summary::-webkit-details-marker { display: none; }
+    .flow-note summary::after { content: "展开"; color: var(--subtle); font: 600 10px/1 var(--sans); }
+    .flow-note[open] summary::after { content: "收起"; }
+    .flow-note-body { margin: 0; padding: 0 12px 12px; }
+    #flowInputs { border: 1px solid var(--accent-line); background: var(--accent-soft); }
+    .flow-inputs-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+    .flow-inputs-heading strong { color: var(--text); font-size: var(--fs-s); }
+    .flow-inputs-heading span { color: var(--info-ink); font-size: 10px; }
+    .flow-input-row + .flow-input-row { margin-top: 9px; }
+    .flow-input-row label { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 5px; color: var(--text); font-size: var(--fs-xs); font-weight: 650; }
+    .flow-input-row label code { color: var(--muted); font: 10px var(--mono); font-weight: 400; }
+    #flowStepList { list-style: none; margin: 0; padding: 0; }
+    #flowStepList li + li { margin-top: 8px; }
+    .flow-step {
+      display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 9px; padding: 10px;
+      border: 1px solid var(--line); border-radius: var(--r-m); background: var(--surface);
+    }
+    .flow-step-number {
+      display: grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px;
+      border-radius: var(--r-s); background: var(--surface-3); color: var(--muted); font: 700 10px var(--mono);
+    }
+    .flow-step-copy { min-width: 0; }
+    .flow-step-title { display: block; overflow: hidden; text-overflow: ellipsis; color: var(--text); font-size: var(--fs-m); font-weight: 650; white-space: nowrap; }
+    .flow-step-meta { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font: 10px/1.35 var(--mono); white-space: nowrap; }
+    .flow-step.fragile { border-color: var(--warn-line); }
+    .flow-step.checkpoint { border-color: var(--accent-line); background: var(--accent-soft); }
+    .flow-step.checkpoint .flow-step-number { background: var(--accent-soft); color: var(--info-ink); }
+    .flow-step-button {
+      min-width: 36px; min-height: 36px; padding: 6px 9px;
+      border: 1px solid var(--line); border-radius: var(--r-s);
+      background: transparent; color: var(--muted); font: 600 var(--fs-s) var(--sans); cursor: pointer;
+    }
+    .flow-step-controls { display: flex; gap: 5px; }
+    .flow-step-button:hover { color: var(--text); border-color: var(--line-strong); }
+    .flow-step-button:disabled { opacity: .35; cursor: default; }
+    #flowEmpty { margin: 20px 0 0; padding: 20px 16px; border: 1px dashed var(--line-strong); border-radius: var(--r-l); color: var(--muted); font-size: var(--fs-s); line-height: 1.55; }
+    .flow-empty-title { display: block; margin-bottom: 12px; color: var(--text); text-align: center; font-size: 14px; }
+    .flow-empty-steps { margin: 0; padding: 0; list-style: none; counter-reset: flow-empty; }
+    .flow-empty-steps li { display: grid; grid-template-columns: 24px minmax(0,1fr); align-items: center; gap: 9px; }
+    .flow-empty-steps li + li { margin-top: 9px; }
+    .flow-empty-steps li::before {
+      counter-increment: flow-empty; content: counter(flow-empty);
+      display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px;
+      background: var(--accent-soft); color: var(--info-ink); font: 700 10px/1 var(--mono);
+    }
+    .flow-empty-result { display: block; margin-top: 12px; color: var(--info-ink); text-align: center; }
+    .flow-safety {
+      display: flex; align-items: flex-start; gap: 9px; margin-top: 14px; padding: 11px 12px;
+      border: 1px solid var(--line); border-radius: var(--r-m); color: var(--muted); font-size: var(--fs-xs); line-height: 1.5; cursor: pointer;
+    }
+    .flow-safety input { margin: 2px 0 0; width: 18px; height: 18px; accent-color: var(--accent); }
+    .flow-footer {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      padding: 12px calc(env(safe-area-inset-right) + 14px) calc(env(safe-area-inset-bottom) + 12px) 14px;
+      border-top: 1px solid var(--line); background: var(--surface-2);
+    }
+    .flow-footer .flow-safety { grid-column: 1 / -1; margin: 0 0 2px; background: var(--surface); }
+    .flow-action {
+      min-height: 42px; padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--r-m);
+      background: var(--surface); color: var(--text); font: 700 var(--fs-m) var(--sans); cursor: pointer;
+    }
+    .flow-action.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    .flow-action.recording { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger-ink); }
+    .flow-action:disabled { opacity: .42; cursor: default; }
+    .flow-action.wide { grid-column: 1 / -1; }
+    #flowSafety:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* ── Toast ─────────────────────────────────────────────────── */
+    #toast {
+      position: fixed; z-index: 99;
+      left: calc((100vw - var(--rail-w)) / 2);
+      bottom: calc(var(--tb-reserve) + 28px);
+      transform: translate(-50%, 8px);
+      max-width: min(86vw, 520px);
+      padding: 9px 16px; border-radius: 999px;
+      background: rgba(18,20,26,.92); color: #fff; border: 1px solid rgba(255,255,255,.08);
+      box-shadow: var(--shadow-m);
+      font-size: var(--fs-m); text-align: center; line-height: 1.4;
+      opacity: 0; transition: opacity .2s, transform .2s var(--ease); pointer-events: none;
+    }
+    #toast.on { opacity: 1; transform: translate(-50%, 0); }
+    body.flow-panel-open #toast { left: calc((100vw - 460px) / 2); }
+
+    /* ── Narrow screens (phones, small windows) ─────────────────── */
+    @media (max-width: 760px), (max-height: 480px) and (max-width: 1000px) {
+      :root { --top-h: 46px; --rail-w: 0px; }
+      #app {
+        grid-template-columns: minmax(0,1fr);
+        grid-template-rows: var(--top-h) auto minmax(0,1fr) auto;
+        grid-template-areas: "top" "notices" "stage" "rail";
+      }
+      #topbar { padding-right: calc(env(safe-area-inset-right) + 6px); gap: 8px; }
+      #deviceLabel { font-size: var(--fs-m); }
+      #metrics, .top-badges .badge-label, #btnHelp { display: none; }
+      .top-badges { justify-content: flex-end; }
+      #device { --bz: 0px; --gap: 16px; box-shadow: none; background: transparent; }
+      #device::before, #device::after { display: none; }
+      #screen { --scr-r: calc(min(var(--sh), var(--sh) * var(--ar)) * .07); border-radius: var(--scr-r); box-shadow: 0 0 0 1px rgba(255,255,255,.06), var(--shadow-m); }
+      #typingHint { display: none !important; }
+
+      /* bottom toolbar: four primary actions + 更多; 更多 opens a sheet */
+      #toolbar {
+        flex-direction: row; gap: 2px; overflow: visible;
+        padding: 6px calc(env(safe-area-inset-right) + 6px) calc(env(safe-area-inset-bottom) + 6px) calc(env(safe-area-inset-left) + 6px);
+        border-left: 0; border-top: 1px solid var(--line);
+        background: var(--glass);
+        backdrop-filter: saturate(1.4) blur(18px); -webkit-backdrop-filter: saturate(1.4) blur(18px);
+      }
+      .tb-section { display: contents; }
+      .tb-heading, .tbtn kbd, .tb-foot { display: none; }
+      .tbtn {
+        flex: 1 1 0; flex-direction: column; justify-content: center; gap: 4px;
+        min-height: 50px; padding: 5px 2px; text-align: center; border-radius: var(--r-m);
+        font-size: 10.5px; color: var(--muted);
+      }
+      .tbtn svg { width: 22px; height: 22px; }
+      .tbtn .lbl { flex: 0 0 auto; }
+      .element-glyph { width: 21px; height: 21px; }
+      .tbtn:not(.tb-primary) { display: none; }
+      .tb-more { display: flex !important; }
+      #toolbar.expanded {
+        position: fixed; left: 0; right: 0; bottom: 0; z-index: 46;
+        display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 6px;
+        padding-top: 22px; border-radius: var(--r-xl) var(--r-xl) 0 0;
+        background: var(--surface); box-shadow: 0 -20px 60px -10px rgba(0,0,0,.4);
+        animation: sheet-up .24s var(--ease);
+      }
+      #toolbar.expanded::before {
+        content: ""; position: absolute; top: 8px; left: 50%; width: 38px; height: 5px;
+        margin-left: -19px; border-radius: 3px; background: var(--line-strong);
+      }
+      #toolbar.expanded .tbtn { display: flex; min-height: 64px; background: var(--surface-2); }
+      #toolbar.expanded .tbtn.tb-more { grid-column: 1 / -1; min-height: 44px; flex-direction: row; background: transparent; }
+      @keyframes sheet-up { from { transform: translateY(40%); opacity: .4; } }
+      #sheetScrim { position: fixed; inset: 0; z-index: 45; background: var(--scrim); }
+
+      #textPanel {
+        left: 8px; right: 8px; width: auto; bottom: calc(var(--tb-reserve) + 8px);
+        transform: translateY(16px);
+      }
+      #textPanel.open { transform: translateY(0); }
+      #elementPanel, #flowPanel {
+        inset: auto 0 0; width: 100%;
+        height: min(82dvh, 720px);
+        border-left: 0; border-top: 1px solid var(--line);
+        border-radius: var(--r-xl) var(--r-xl) 0 0;
+        transform: translateY(105%);
+      }
+      #elementPanel { height: min(64dvh, 560px); bottom: var(--tb-reserve); box-shadow: 0 -18px 48px rgba(0,0,0,.3); }
+      #elementPanel.open, #flowPanel.open { transform: translateY(0); }
+      #toast, body.flow-panel-open #toast { left: 50%; }
+      body.flow-panel-open #toast {
+        bottom: calc(var(--flow-footer-h, 69px) + 14px);
+        max-width: calc(100vw - 28px);
+      }
+      #grabber { top: auto; right: auto; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom) + 10px); }
+    }
+    #sheetScrim:not(.on) { display: none; }
+
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
         animation-duration: .01ms !important;
@@ -756,123 +843,177 @@
 </head>
 <body>
 <div id="app">
-  <!-- ── Video + interaction surface (hero) ────────────────────── -->
-  <div id="videoArea">
-    <!-- Direct image: keep the last screenshot visible while MJPEG reconnects. -->
-    <img id="stillFrame" alt="iPhone 设备静态画面">
-    <img id="mjpegFrame" alt="iPhone 设备实时画面">
-    <canvas id="h264Frame" aria-label="iPhone 设备实时画面"></canvas>
-    <img id="redactedFrame" alt="这个界面被 App 屏蔽了截屏，显示的是按控件树画的线框图">
-    <canvas id="gridCanvas" aria-hidden="true"></canvas>
-    <div id="tapDot"></div>
-
-    <!-- update-available banner (populated from /agent/status) -->
-    <div id="updateBanner" role="status">
-      <span id="updateText"></span>
-      <button class="x" id="updateDismiss" type="button"
-              title="本次会话不再提示" aria-label="关闭更新提示">✕</button>
-    </div>
-
-    <!-- lock readiness: passcode + Auto-Lock (populated from /agent/status lock_readiness) -->
-    <div id="lockNotice" role="note" aria-live="polite">
-      <span class="tag" id="lockNoticeTag"></span>
-      <span id="lockNoticeText"></span>
-      <button class="x" id="lockNoticeDismiss" type="button"
-              title="本次会话不再提示" aria-label="关闭锁屏提示">✕</button>
-    </div>
-
-    <!-- offline / stall overlay (pointer-events:none so taps still reach videoArea) -->
-    <div id="offlineOverlay" aria-live="polite" aria-atomic="true" hidden inert>
-      <div id="offlineCard">
-        <div class="ol-pulse"></div>
-        <div class="ol-title" id="olTitle" tabindex="-1">画面已停止</div>
-        <div class="ol-sub"  id="olSub">正在检查设备连接状态</div>
-        <div id="setupHelp" hidden inert>
-          <span class="setup-label" id="setupLabel">在这台 Mac 的终端运行</span>
-          <code id="setupCommand"></code>
-          <button id="copySetupBtn" type="button">复制命令</button>
-        </div>
-        <a id="setupGuideLink" href="/setup" hidden>打开连接向导</a>
-        <div id="overlayActions">
-          <button id="reconnectBtn" type="button">重新连接</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- floating status pill -->
+  <!-- ── Top bar: which phone, its state, and what it costs ────────── -->
+  <header id="topbar">
     <div id="statusPill" role="status" aria-live="polite">
-      <span class="conn-dot">&#9679;</span>
-      <span id="deviceLabel"></span>
-      <span id="statusLine">connecting…</span>
+      <span class="conn-dot" aria-hidden="true">&#9679;</span>
+      <span class="status-text">
+        <span id="deviceLabel"></span>
+        <span id="statusLine">connecting…</span>
+      </span>
+    </div>
+    <div class="top-badges">
+      <button id="lockBadge" class="badge" type="button" hidden
+              aria-controls="lockNotice" aria-expanded="false"></button>
+      <span id="ownerBadge" class="badge warn" role="note" hidden></span>
+      <span id="metrics" aria-label="画面指标"></span>
     </div>
     <button id="recordingPill" type="button" hidden
             aria-label="打开自动化流程并审核正在录制的步骤">录制中 · 0 步</button>
+    <button id="btnHelp" class="icon-btn" type="button" aria-haspopup="dialog"
+            aria-controls="helpDialog" aria-keyshortcuts="?" title="键盘快捷键 (?)" aria-label="键盘快捷键">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10"/></svg>
+    </button>
+  </header>
 
+  <!-- ── Notices: in the page flow, so they never cover the phone ─────── -->
+  <div id="notices">
+    <!-- update-available banner (populated from /agent/status) -->
+    <div id="updateBanner" class="notice" role="status">
+      <span class="grow" id="updateText"></span>
+      <button class="x" id="updateDismiss" type="button"
+              title="本次会话不再提示" aria-label="关闭更新提示">✕</button>
+    </div>
+    <!-- lock readiness: passcode + Auto-Lock (populated from /agent/status lock_readiness) -->
+    <div id="lockNotice" class="notice" role="note" aria-live="polite">
+      <span class="tag" id="lockNoticeTag"></span>
+      <span class="grow" id="lockNoticeText"></span>
+      <button class="x" id="lockNoticeDismiss" type="button"
+              title="收起，状态栏里的标记仍可展开" aria-label="收起锁屏提示">✕</button>
+    </div>
   </div>
+
+  <!-- ── Stage: the phone in a device frame; gestures land here ────────── -->
+  <div id="videoArea" role="application"
+       aria-label="iPhone 屏幕：点按、拖动、滚轮操作手机；鼠标点过屏幕后可直接用键盘输入，Esc 退出">
+    <div id="device">
+      <div id="screen">
+        <!-- Direct image: keep the last screenshot visible while the stream reconnects. -->
+        <img id="stillFrame" class="frame" alt="iPhone 设备静态画面">
+        <img id="mjpegFrame" class="frame" alt="iPhone 设备实时画面">
+        <canvas id="h264Frame" class="frame" aria-label="iPhone 设备实时画面"></canvas>
+        <img id="redactedFrame" class="frame" alt="这个界面被 App 屏蔽了截屏，显示的是按控件树画的线框图">
+        <canvas id="gridCanvas" aria-hidden="true"></canvas>
+        <div id="touchLayer" aria-hidden="true">
+          <svg id="trail" hidden></svg>
+          <div id="touchCursor"></div>
+        </div>
+        <textarea id="keyCatcher" aria-label="键盘输入到 iPhone" tabindex="-1"
+                  autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        <div id="stallPill" role="status" aria-live="polite" hidden>
+          <span class="ol-spinner" aria-hidden="true"></span><span>画面卡住 · 正在恢复…</span>
+        </div>
+        <div id="typingHint" aria-hidden="true">键盘直达手机 <kbd>Esc</kbd> 退出</div>
+
+        <!-- state layer: a chip for transient states, a card when the phone is unusable -->
+        <div id="offlineOverlay" aria-live="polite" aria-atomic="true" hidden inert>
+          <div id="offlineCard">
+            <div class="ol-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg>
+            </div>
+            <span class="ol-spinner" aria-hidden="true"></span>
+            <div class="ol-title" id="olTitle" tabindex="-1">画面已停止</div>
+            <div class="ol-sub"  id="olSub">正在检查设备连接状态</div>
+            <div id="setupHelp" hidden inert>
+              <span class="setup-label" id="setupLabel">在这台 Mac 的终端运行</span>
+              <code id="setupCommand"></code>
+              <button id="copySetupBtn" type="button">复制命令</button>
+            </div>
+            <a id="setupGuideLink" href="/setup" hidden>打开连接向导</a>
+            <div id="overlayActions">
+              <button id="reconnectBtn" type="button">重新连接</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Controls: labeled side rail on desktop, bottom bar + sheet on phones ── -->
+  <nav id="toolbar" aria-label="控制栏">
+    <div class="tb-section" role="group" aria-labelledby="tbhPhone">
+      <span class="tb-heading" id="tbhPhone">手机</span>
+      <button id="btnHome" class="tbtn tb-primary" title="回到主屏幕 (H 或 ⌘⇧H)" type="button" aria-keyshortcuts="H Meta+Shift+H Control+Shift+H">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 11 12 4l8.5 7"/><path d="M5.5 9.5V20h13V9.5"/><path d="M10 20v-5h4v5"/></svg>
+        <span class="lbl">Home</span><kbd>H</kbd>
+      </button>
+      <button id="btnSearch" class="tbtn tb-primary" title="Spotlight 搜索 (S 或 ⌘⇧S)" type="button" aria-keyshortcuts="S Meta+Shift+S Control+Shift+S">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>
+        <span class="lbl">搜索</span><kbd>S</kbd>
+      </button>
+    </div>
+    <div class="tb-section" role="group" aria-labelledby="tbhInput">
+      <span class="tb-heading" id="tbhInput">输入</span>
+      <button id="btnKeyboard" class="tbtn tb-primary" title="输入一段文字 (K)" type="button"
+              aria-controls="textPanel" aria-expanded="false" aria-keyshortcuts="K">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10"/></svg>
+        <span class="lbl">键盘</span><kbd>K</kbd>
+      </button>
+      <button id="btnPaste" class="tbtn" title="把剪贴板里的文字输入到手机 (⌘V)" type="button" aria-keyshortcuts="Meta+V Control+V">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5.5" y="4.5" width="13" height="16.5" rx="2"/><path d="M9 4.5V3.5h6v1"/><path d="M9 10h6M9 13.5h6M9 17h3.5"/></svg>
+        <span class="lbl">粘贴</span><kbd>⌘V</kbd>
+      </button>
+    </div>
+    <div class="tb-section" role="group" aria-labelledby="tbhTools">
+      <span class="tb-heading" id="tbhTools">工具</span>
+      <button id="btnElements" class="tbtn tb-primary" title="可访问控件列表 (E)" type="button"
+              aria-controls="elementPanel" aria-expanded="false" aria-keyshortcuts="E">
+        <span class="element-glyph" aria-hidden="true">UI</span>
+        <span class="lbl">控件</span><kbd>E</kbd>
+      </button>
+      <button id="btnFlow" class="tbtn" title="录制并运行自动化流程 (R)" type="button"
+              aria-label="录制并运行自动化流程"
+              aria-controls="flowPanel" aria-expanded="false" aria-keyshortcuts="R">
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="12" r="2.5"/><circle cx="6" cy="18" r="2.5"/>
+          <path d="M8.5 6h2a3 3 0 013 3v0a3 3 0 003 3h-1"/><path d="M8.5 18h2a3 3 0 003-3v0a3 3 0 013-3h2"/>
+        </svg>
+        <span class="lbl">流程</span><kbd>R</kbd>
+      </button>
+      <button id="btnGrid" class="tbtn" title="数字网格覆盖 (G)" type="button" aria-pressed="false" aria-keyshortcuts="G">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><path d="M9.2 3.5v17M14.8 3.5v17M3.5 9.2h17M3.5 14.8h17"/></svg>
+        <span class="lbl">网格</span><kbd>G</kbd>
+      </button>
+    </div>
+    <div class="tb-section" role="group" aria-labelledby="tbhView">
+      <span class="tb-heading" id="tbhView">画面</span>
+      <button id="btnQuality" class="tbtn" type="button" aria-keyshortcuts="Q"
+              title="画面模式 (Q)：自动 → 性能（半分辨率、省流量）→ 画质（原生分辨率、高帧率）">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m7 15 3-4 3 3 2-2 2 3"/></svg>
+        <span class="lbl">画面：<span id="qualityLabel">自动</span></span><kbd>Q</kbd>
+      </button>
+      <button id="btnImmersive" class="tbtn" title="全屏 (F)" type="button" aria-keyshortcuts="F">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3.5H5.5a2 2 0 00-2 2V8M16 3.5h2.5a2 2 0 012 2V8M20.5 16v2.5a2 2 0 01-2 2H16M3.5 16v2.5a2 2 0 002 2H8"/></svg>
+        <span class="lbl">全屏</span><kbd>F</kbd>
+      </button>
+    </div>
+    <div class="tb-section" role="group" aria-labelledby="tbhSession">
+      <span class="tb-heading" id="tbhSession">会话</span>
+      <button id="btnPair" class="tbtn" title="手机扫码连接：用 iPhone 扫码，免输地址和密码" type="button"
+              aria-controls="pairDialog">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1.2"/><rect x="14" y="3.5" width="6.5" height="6.5" rx="1.2"/><rect x="3.5" y="14" width="6.5" height="6.5" rx="1.2"/><path d="M14 14h3v3M20.5 14v.01M14 20.5h3M20.5 17.5v3"/></svg>
+        <span class="lbl">扫码连接</span>
+      </button>
+      <button id="btnHandoff" class="tbtn" title="交还手机给持有人：停止远程控制，手机留给拿着它的人用" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/><path d="M2.5 12h3M18.5 12h3"/></svg>
+        <span class="lbl">交还</span>
+      </button>
+      <button id="btnLogout" class="tbtn danger" title="退出登录" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 012 2v12a2 2 0 01-2 2h-3"/><path d="M10 17l-5-5 5-5"/><path d="M15 12H5"/></svg>
+        <span class="lbl">退出</span>
+      </button>
+    </div>
+    <button id="btnMore" class="tbtn tb-primary tb-more" type="button" aria-expanded="false" aria-controls="toolbar">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18.5" cy="12" r="1.3"/></svg>
+      <span class="lbl">更多</span>
+    </button>
+    <p class="tb-foot">点一下屏幕，键盘就直接输入到手机。<button type="button" id="btnHelpFoot">全部快捷键</button></p>
+  </nav>
 </div><!-- #app -->
 
-<!-- ── Bottom toolbar (thumb zone) ── -->
-<nav id="toolbar" aria-label="控制栏">
-  <button id="btnHome" class="tbtn" title="Home" type="button">
-    <svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
-    <span class="lbl">Home</span>
-  </button>
-  <button id="btnSearch" class="tbtn" title="Spotlight 搜索" type="button">
-    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-    <span class="lbl">搜索</span>
-  </button>
-  <button id="btnGrid" class="tbtn" title="数字网格覆盖" type="button" aria-pressed="false">
-    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/></svg>
-    <span class="lbl">网格</span>
-  </button>
-  <button id="btnElements" class="tbtn" title="可访问控件列表" type="button"
-          aria-controls="elementPanel" aria-expanded="false">
-    <span class="element-glyph" aria-hidden="true">UI</span>
-    <span class="lbl">控件</span>
-  </button>
-  <button id="btnKeyboard" class="tbtn" title="文字输入" type="button"
-          aria-controls="textPanel" aria-expanded="false">
-    <svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h0M10 10h0M14 10h0M18 10h0M6 14h0M18 14h0M9 14h6"/></svg>
-    <span class="lbl">键盘</span>
-  </button>
-  <button id="btnFlow" class="tbtn" title="录制并运行自动化流程" type="button"
-          aria-label="录制并运行自动化流程"
-          aria-controls="flowPanel" aria-expanded="false">
-    <svg aria-hidden="true" viewBox="0 0 24 24">
-      <circle cx="6" cy="6" r="2.5"/>
-      <circle cx="18" cy="12" r="2.5"/>
-      <circle cx="6" cy="18" r="2.5"/>
-      <path d="M8.5 6h2a3 3 0 013 3v0a3 3 0 003 3h-1"/>
-      <path d="M8.5 18h2a3 3 0 003-3v0a3 3 0 013-3h2"/>
-    </svg>
-    <span class="lbl">流程</span>
-  </button>
-  <button id="btnPair" class="tbtn" title="手机扫码连接：用 iPhone 扫码，免输地址和密码" type="button"
-          aria-controls="pairDialog">
-    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 14v0M14 21h3M20 17v4"/></svg>
-    <span class="lbl">扫码</span>
-  </button>
-  <button id="btnHandoff" class="tbtn" title="交还手机给持有人：停止远程控制，手机留给拿着它的人用" type="button">
-    <svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/><path d="M2 12h3M19 12h3"/></svg>
-    <span class="lbl">交还</span>
-  </button>
-  <button id="btnLogout" class="tbtn danger" title="退出" type="button">
-    <svg viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 012 2v12a2 2 0 01-2 2h-3"/><path d="M10 17l-5-5 5-5"/><path d="M15 12H5"/></svg>
-    <span class="lbl">退出</span>
-  </button>
-  <button id="btnQuality" class="tbtn" type="button" aria-pressed="false"
-          title="画面模式：性能（半分辨率、省流量）↔ 画质（原生分辨率、高帧率）">
-    <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15l3-4 3 3 2-2 2 3"/></svg>
-    <span class="lbl" id="qualityLabel">性能</span>
-  </button>
-  <span class="tbtn spacer" aria-hidden="true"></span>
-  <button id="btnImmersive" class="tbtn" title="全屏（收起控制栏）" type="button">
-    <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M21 16v3a2 2 0 01-2 2h-3M3 16v3a2 2 0 002 2h3"/></svg>
-    <span class="lbl">全屏</span>
-  </button>
-</nav>
+<div id="sheetScrim"></div>
 
-<dialog id="pairDialog" aria-labelledby="pairTitle">
+<dialog id="pairDialog" class="card" aria-labelledby="pairTitle">
   <h2 id="pairTitle">手机扫码连接</h2>
   <p class="pair-hint">用 iPhone 相机或 Phone Use Remote App 扫码，不用输地址和密码。二维码只能用一次，5 分钟内有效。</p>
   <div id="pairQr" role="img" aria-label="配对二维码"></div>
@@ -887,10 +1028,39 @@
   </div>
 </dialog>
 
-<!-- restore handle when immersive -->
-<button id="grabber" type="button" aria-label="显示控制栏"></button>
+<dialog id="helpDialog" class="card" aria-labelledby="helpTitle">
+  <h2 id="helpTitle">键盘与鼠标</h2>
+  <p>鼠标点过手机屏幕后，键盘直接输入到手机里当前的输入框（中文输入法照常用）；按 Esc 退出。</p>
+  <dl class="keys">
+    <dt class="sub">鼠标</dt>
+    <dt>单击</dt><dd>点按</dd>
+    <dt>拖动</dt><dd>滑动</dd>
+    <dt>按住不动</dt><dd>长按（按住后再拖 = 拖拽）</dd>
+    <dt>右键</dt><dd>长按</dd>
+    <dt>滚轮 / 触控板</dt><dd>滚动</dd>
+    <dt class="sub">键盘（在屏幕外）</dt>
+    <dt><kbd>H</kbd></dt><dd>回到主屏幕</dd>
+    <dt><kbd>S</kbd></dt><dd>Spotlight 搜索</dd>
+    <dt><kbd>K</kbd></dt><dd>输入一段文字</dd>
+    <dt><kbd>E</kbd> <kbd>R</kbd> <kbd>G</kbd></dt><dd>控件列表 · 流程 · 网格</dd>
+    <dt><kbd>Q</kbd> <kbd>F</kbd></dt><dd>画面模式 · 全屏</dd>
+    <dt class="sub">在屏幕上输入时</dt>
+    <dt><kbd>⌘</kbd><kbd>⇧</kbd><kbd>H</kbd></dt><dd>回到主屏幕</dd>
+    <dt><kbd>⌘</kbd><kbd>⇧</kbd><kbd>S</kbd></dt><dd>Spotlight 搜索</dd>
+    <dt><kbd>⌘</kbd><kbd>V</kbd></dt><dd>粘贴文字到手机</dd>
+    <dt><kbd>⏎</kbd> <kbd>⌫</kbd> <kbd>⇥</kbd> <kbd>←</kbd><kbd>→</kbd></dt><dd>换行/发送 · 删除 · Tab · 方向键</dd>
+    <dt><kbd>Esc</kbd></dt><dd>退出键盘输入</dd>
+  </dl>
+  <div class="pair-actions"><button id="helpClose" class="primary" type="button">好</button></div>
+</dialog>
 
-<!-- slide-up text panel (opened by 键盘) -->
+<!-- restore handle when immersive -->
+<button id="grabber" type="button" aria-label="显示控制栏">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 20.5H5.5a2 2 0 01-2-2V16M16 20.5h2.5a2 2 0 002-2V16M20.5 8V5.5a2 2 0 00-2-2H16M3.5 8V5.5a2 2 0 012-2H8"/></svg>
+  退出全屏
+</button>
+
+<!-- floating composer (opened by 键盘) -->
 <div id="textPanel" role="group" aria-labelledby="textPanelLabel" hidden inert>
   <label id="textPanelLabel" class="visually-hidden" for="textInput">输入到 iPhone</label>
   <input id="textInput" type="text" placeholder="输入到手机…" maxlength="500"
@@ -1000,7 +1170,15 @@ const RECONNECT_COOLDOWN_MS = 3000;
 /* ── DOM refs ─────────────────────────────────────────────────── */
 const videoArea      = document.getElementById('videoArea');
 const gridCanvas     = document.getElementById('gridCanvas');
-const tapDot         = document.getElementById('tapDot');
+const deviceEl       = document.getElementById('device');
+const screenEl       = document.getElementById('screen');
+const touchLayer     = document.getElementById('touchLayer');
+const touchCursor    = document.getElementById('touchCursor');
+const trailSvg       = document.getElementById('trail');
+const keyCatcher     = document.getElementById('keyCatcher');
+const lockBadge      = document.getElementById('lockBadge');
+const ownerBadge     = document.getElementById('ownerBadge');
+const metricsEl      = document.getElementById('metrics');
 const statusLine     = document.getElementById('statusLine');
 const toastEl        = document.getElementById('toast');
 const textInput      = document.getElementById('textInput');
@@ -1053,6 +1231,8 @@ function syncReconnectControl(kind = overlayState) {
   reconnectBtn.hidden =
     recoveryIsExternal ||
     kind === 'releasing' ||
+    kind === 'background' ||
+    kind === 'resuming' ||
     kind === 'connecting' ||
     kind === 'reconnecting' ||
     kind === 'locked' ||
@@ -1377,14 +1557,26 @@ function directUnavailableKind(status) {
 }
 
 /* ── Offline overlay management ──────────────────────────────── */
+/* Transient states are a chip over the (still visible) picture; only a phone
+   that cannot be used without someone doing something gets the blocking card.
+   Input stays paused in both: readiness is decided elsewhere, not here. */
+const SOFT_OVERLAY_KINDS = new Set([
+  'background', 'resuming', 'frame-stale', 'outcome-unknown',
+  'connecting', 'reconnecting', 'releasing',
+]);
 function showOverlay(kind) {
   /* kind: 'offline' | 'unconfigured' | 'external' | 'setup-blocked' |
-     'status-error' | 'background' | 'released' | 'releasing' | 'locked' |
-     'blocked' | 'frame-stale' | 'outcome-unknown' | 'connecting' |
+     'status-error' | 'background' | 'resuming' | 'released' | 'releasing' |
+     'locked' | 'blocked' | 'frame-stale' | 'outcome-unknown' | 'connecting' |
      'reconnecting' */
   overlayState = kind;
   updateSetupHelp(kind);
   offlineOverlay.classList.remove('disconnected');
+  const soft = SOFT_OVERLAY_KINDS.has(kind) &&
+    !(kind === 'reconnecting' && actionableSetupBlocker(backendStatus));
+  offlineOverlay.classList.toggle('soft', soft);
+  offlineOverlay.classList.toggle('blocking', !soft);
+  offlineOverlay.dataset.kind = kind;
   syncReconnectControl(kind);
   if (kind === 'offline') {
     setTextIfChanged(olTitle, '设备未连接');
@@ -1417,9 +1609,15 @@ function showOverlay(kind) {
     setTextIfChanged(olSub, '请检查服务是否正在运行，然后重试');
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'background') {
-    setTextIfChanged(olTitle, '页面在后台');
-    setTextIfChanged(olSub, '后台标签页不连接设备；切到前台后会自动重新连接');
+    const kept = directFeedActive;
+    setTextIfChanged(olTitle, kept ? '页面在后台 · 画面已暂停' : '页面在后台 · 画面已断开');
+    setTextIfChanged(olSub, kept
+      ? '切回这个页面后立即恢复'
+      : '后台超过一段时间，已断开设备画面；切到前台后会自动重新连接');
     offlineOverlay.classList.add('disconnected');
+  } else if (kind === 'resuming') {
+    setTextIfChanged(olTitle, '正在恢复画面');
+    setTextIfChanged(olSub, '页面回到前台，正在取最新一帧');
   } else if (kind === 'released') {
     const handedOver = backendStatus?.human_handoff === true;
     setTextIfChanged(olTitle, handedOver ? '手机已交还' : '设备空闲中');
@@ -1512,23 +1710,52 @@ function lockNoticeFor(status) {
   if (!tag) return null;
   return { verdict, tag, text: String(readiness?.hint?.zh || '') };
 }
+const LOCK_BADGE_TEXT = {
+  will_lock_needs_person: '会锁屏',
+  will_lock_auto_unlocks: '会锁屏 · 自动解锁',
+};
 function syncLockNotice(status) {
   const notice = document.getElementById('lockNotice');
   if (!notice) return;
   const shown = lockNoticeFor(status);
-  let dismissed = '';
-  try { dismissed = sessionStorage.getItem('lockNoticeDismissed') || ''; } catch (_) {}
-  if (!shown || dismissed === shown.verdict) {
+  if (!shown) {
     notice.classList.remove('visible');
+    lockBadge.hidden = true;
     return;
   }
+  let dismissed = '';
+  try { dismissed = sessionStorage.getItem('lockNoticeDismissed') || ''; } catch (_) {}
+  const needsPerson = shown.verdict === 'will_lock_needs_person';
   setTextIfChanged(document.getElementById('lockNoticeTag'), shown.tag);
   setTextIfChanged(document.getElementById('lockNoticeText'), shown.text);
-  notice.classList.toggle('needs-person', shown.verdict === 'will_lock_needs_person');
-  notice.classList.add('visible');
+  notice.classList.toggle('needs-person', needsPerson);
+  // The badge stays; the sentence shows once per verdict and session, then
+  // folds into the badge (a click opens it again).
+  lockBadge.hidden = false;
+  lockBadge.className = 'badge' + (needsPerson ? ' warn' : '');
+  if (lockBadge.dataset.verdict !== shown.verdict) {
+    lockBadge.dataset.verdict = shown.verdict;
+    lockBadge.replaceChildren();
+    lockBadge.insertAdjacentHTML('afterbegin',
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 018 0v3"/></svg>');
+    const label = document.createElement('span');
+    label.className = 'badge-label';
+    label.textContent = LOCK_BADGE_TEXT[shown.verdict] || shown.tag;
+    lockBadge.append(label);
+    lockBadge.title = `${shown.tag}：${shown.text}`;
+    lockBadge.setAttribute('aria-label', `锁屏提示：${shown.tag}`);
+    if (dismissed !== shown.verdict) notice.classList.add('visible');
+  }
+  lockBadge.setAttribute('aria-expanded', String(notice.classList.contains('visible')));
+  lockBadge.onclick = () => {
+    const open = !notice.classList.contains('visible');
+    notice.classList.toggle('visible', open);
+    lockBadge.setAttribute('aria-expanded', String(open));
+  };
   document.getElementById('lockNoticeDismiss').onclick = () => {
     try { sessionStorage.setItem('lockNoticeDismissed', shown.verdict); } catch (_) {}
     notice.classList.remove('visible');
+    lockBadge.setAttribute('aria-expanded', 'false');
   };
 }
 
@@ -1648,14 +1875,16 @@ async function pollAgentMode() {
       directPageVisible &&
         s.releasing !== true && s.reconnecting !== true && s.released !== true &&
         s.mode === 'agent' && s.drivable === true && hasFreshDirectFrame(),
+      { background: !directPageVisible },
     );
     if (!directPageVisible) {
-      // A background/locked browser must not keep an MJPEG viewer alive and
-      // defeat the daemon's idle release. Visible recovery starts with a
-      // fresh status probe instead of silently retaining control readiness.
+      // A background/locked browser must not keep a viewer alive for long and
+      // defeat the daemon's idle release: within the grace period the stream
+      // stays open (paused), after it the feed is dropped. Visible recovery
+      // starts with a fresh status probe instead of retaining readiness.
       // Say so on the page: a capture of a background tab (agents do this)
       // otherwise shows a black frame and a stale pill with no explanation.
-      stopStills();
+      if (!backgroundGraceTimer) stopStills();
       showOverlay('background');
     } else if (s.releasing === true) {
       stopStills();
@@ -1685,10 +1914,13 @@ async function pollAgentMode() {
       if (hasFreshDirectFrame()) hideOverlay();
       else showOverlay(directVisualEvidenceRequiredAfter !== null
         ? 'outcome-unknown'
-        : (directFrameSeen ? 'frame-stale' : 'connecting'));
+        : (resumingFromBackground ? 'resuming'
+          : (directFrameSeen ? 'frame-stale' : 'connecting')));
     }
+    syncOwnerBadge(s);
     updateModeControls();
     updateStatusLine();
+    renderMetrics();
     return s;
   } catch (_) {
     if (generation !== statusPollGeneration) return backendStatus;
@@ -1742,10 +1974,28 @@ let h264Session = null;
 // Viewing mode, per browser: 'performance' (half size, low bandwidth) or 'quality'
 // (native resolution, high frame rate). Storage can be unavailable (private mode).
 const VIDEO_MODE_KEY = 'iphone-use.videoMode';
-let videoMode = (() => {
-  try { return localStorage.getItem(VIDEO_MODE_KEY) === 'quality' ? 'quality' : 'performance'; }
-  catch { return 'performance'; }
+// The stored preference: 'auto' (default), 'performance' or 'quality'.
+// 'auto' picks quality for a viewer on this Mac or its LAN and performance
+// otherwise, and drops to performance when the decoder keeps falling behind.
+let videoPref = (() => {
+  try {
+    const stored = localStorage.getItem(VIDEO_MODE_KEY);
+    return stored === 'quality' || stored === 'performance' ? stored : 'auto';
+  } catch { return 'auto'; }
 })();
+let autoVideoDowngraded = false;
+function viewerIsNearby() {
+  const host = location.hostname.replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '::1' || /^127\./.test(host) ||
+    /^10\./.test(host) || /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^169\.254\./.test(host) ||
+    /^f[cd][0-9a-f]{2}:/i.test(host) || /^fe80:/i.test(host) || /\.local$/i.test(host);
+}
+function effectiveVideoMode() {
+  if (videoPref !== 'auto') return videoPref;
+  return viewerIsNearby() && !autoVideoDowngraded ? 'quality' : 'performance';
+}
+let videoMode = effectiveVideoMode();
 let h264Ctx = null;
 function hasFreshDirectFrame(now = performance.now()) {
   const mjpegFresh = mjpegLive &&
@@ -1782,7 +2032,8 @@ function syncDirectFrameFreshness() {
     else if (directFeedActive) {
       showOverlay(directVisualEvidenceRequiredAfter !== null
         ? 'outcome-unknown'
-        : (directFrameSeen ? 'frame-stale' : 'connecting'));
+        : (resumingFromBackground ? 'resuming'
+          : (directFrameSeen ? 'frame-stale' : 'connecting')));
     }
   }
   updateStatusLine();
@@ -1801,6 +2052,9 @@ function armMjpegFreshnessTimer(generation) {
   );
   mjpegFreshnessTimer = setTimeout(() => {
     mjpegFreshnessTimer = null;
+    // Paused in the background on purpose: not a failed stream. The return
+    // path asks for a keyframe and re-checks freshness from daemon truth.
+    if (document.visibilityState !== 'visible') return;
     if (
       generation === stillsGeneration &&
       directFeedActive &&
@@ -1817,6 +2071,9 @@ function armMjpegFreshnessTimer(generation) {
 function updateMjpegActivityFromStatus(status, polledStreamId) {
   if (
     !mjpegLive ||
+    // Back from the background: the daemon kept sending, but this page has
+    // not drawn any of it yet. Only a decoded frame counts.
+    h264Session?.awaitingResumeFrame === true ||
     !polledStreamId ||
     polledStreamId !== mjpegStreamId ||
     status?.mjpeg_stream_fresh !== true
@@ -1847,7 +2104,7 @@ function armStillFreshnessTimer(generation) {
   }, STILL_FRAME_FRESH_MS + 1);
 }
 async function fetchStill(generation = stillsGeneration) {
-  if (stillsBusy) return;
+  if (stillsBusy || document.visibilityState !== 'visible') return;
   stillsBusy = true;
   const requestEpoch = stillRequestEpoch;
   const controller = new AbortController();
@@ -1876,6 +2133,7 @@ async function fetchStill(generation = stillsGeneration) {
       lastStillFrameAt = performance.now();
       directFrameSeen = true;
       armStillFreshnessTimer(generation);
+      stillFrame.onload = () => setScreenAspect(stillFrame.naturalWidth, stillFrame.naturalHeight);
       stillFrame.src = next;
       if (!mjpegLive) stillFrame.classList.add('active');
       olSub.textContent = '设备实时画面暂不可用 — 每 2.5 秒刷新，仍可点按操作';
@@ -2025,18 +2283,23 @@ function h264RenderFrame(session, frame) {
     if (h264Frame.width !== w || h264Frame.height !== h) {
       h264Frame.width = w;
       h264Frame.height = h;
+      setScreenAspect(w, h);
     }
     if (!h264Ctx) h264Ctx = h264Frame.getContext('2d');
     h264Ctx.drawImage(frame, 0, 0, w, h);
   } finally {
     frame.close();
   }
+  noteRenderedFrame();
+  session.awaitingResumeFrame = false;
   if (!session.live) {
     h264Ready(session);
     return;
   }
   lastMjpegActivityAt = performance.now();
   if (!mjpegFreshnessTimer) armMjpegFreshnessTimer(session.generation);
+  // First frame after a pause/stall: give control back now, not at the next poll.
+  if (!directControlReady || overlayState !== 'hidden') syncDirectFrameFreshness();
 }
 function h264RequestKeyframe(session) {
   const now = performance.now();
@@ -2047,6 +2310,11 @@ function h264RequestKeyframe(session) {
   }).catch(() => {});
 }
 async function h264HandleMessage(session, msg) {
+  if (session.paused) {
+    // Background: keep the connection, skip decoding; resume on a keyframe.
+    session.needKey = true;
+    return;
+  }
   if (msg.keyframe) {
     if (session.keyTimer) { clearTimeout(session.keyTimer); session.keyTimer = null; }
     const sps = h264FindSps(msg.data);
@@ -2086,6 +2354,7 @@ async function h264HandleMessage(session, msg) {
     if (session.decoder.decodeQueueSize > H264_MAX_DECODE_QUEUE) {
       session.needKey = true;
       h264RequestKeyframe(session);
+      noteDecodeBacklog();
       return;
     }
   }
@@ -2151,6 +2420,7 @@ function startH264Attempt(generation, streamId) {
     needKey: true,
     live: false,
     keyTimer: null,
+    paused: document.visibilityState !== 'visible',
   };
   h264Session = session;
   mjpegConnectTimer = setTimeout(() => h264Failed(session, 'connect timeout'), 8000);
@@ -2178,6 +2448,7 @@ function mjpegReady(generation) {
   lastMjpegActivityAt = performance.now();
   armMjpegFreshnessTimer(generation);
   directFrameSeen = true;
+  setScreenAspect(mjpegFrame.naturalWidth, mjpegFrame.naturalHeight);
   mjpegFrame.classList.add('active');
   stillFrame.classList.remove('active');
   stopSnapshotPolling();
@@ -2323,7 +2594,7 @@ function updateStatusLine() {
     setStatus(directFrameSeen ? '设备在线 · 画面停滞' : '设备在线 · 等待画面');
     return;
   }
-  setStatus('设备在线 · Direct');
+  setStatus('已连接 · 可以操作');
 }
 
 /* ── Wake Lock [iOS §Wake Lock] ───────────────────────────────── */
@@ -2336,19 +2607,70 @@ async function acquireWakeLock() {
   } catch (_) {}
 }
 
-/* ── Visibility change: drop the feed in the background ───────── */
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    // Re-establish both readiness and the image feed only from current daemon
-    // truth; never reuse the pre-background control state.
-    cancelStatusPoll();
-    void pollAgentMode();
-  } else {
-    cancelStatusPoll();
-    setDirectControlReady(false);
+/* ── Visibility change: pause in the background, drop after a grace ──
+   macOS reports an occluded window as hidden, so a glance at another window
+   used to tear the stream down. Now input pauses at once (nothing may act on
+   a picture nobody sees), the H.264 stream stays open but undecoded, and only
+   a page left in the background for BACKGROUND_GRACE_MS drops the feed so it
+   cannot hold off the daemon's idle release. Coming back asks for a keyframe:
+   the picture is current again in a frame or two. */
+const BACKGROUND_GRACE_MS = 45_000;
+let backgroundGraceTimer = null;
+let resumingFromBackground = false;
+function pauseForBackground() {
+  cancelStatusPoll();
+  setDirectControlReady(false, { background: true });
+  releaseTyping();
+  if (h264Session) h264Session.paused = true;
+  // Whatever is on screen now is history by the time the page comes back:
+  // control waits for a frame drawn after the return.
+  lastMjpegActivityAt = null;
+  lastStillFrameAt = null;
+  clearMjpegFreshnessTimer();
+  clearStillFreshnessTimer();
+  clearTimeout(backgroundGraceTimer);
+  backgroundGraceTimer = directFeedActive ? setTimeout(() => {
+    backgroundGraceTimer = null;
+    if (document.visibilityState === 'visible') return;
     stopStills();
     showOverlay('background');
+  }, BACKGROUND_GRACE_MS) : null;
+  showOverlay('background');
+}
+async function resumeFromBackground() {
+  const graceHeld = backgroundGraceTimer !== null && directFeedActive;
+  clearTimeout(backgroundGraceTimer);
+  backgroundGraceTimer = null;
+  resumingFromBackground = graceHeld;
+  if (graceHeld && h264Session) {
+    h264Session.paused = false;
+    h264Session.needKey = true;
+    h264Session.awaitingResumeFrame = true;
+    h264RequestKeyframe(h264Session);
   }
+  // Re-establish both readiness and the image feed only from current daemon
+  // truth; never reuse the pre-background control state.
+  cancelStatusPoll();
+  const s = await pollAgentMode();
+  if ((flowRecording || flowStarting) && !directStatusAllowsControl(s)) {
+    stopFlowRecordingForConnectionChange();
+  }
+  setTimeout(() => { resumingFromBackground = false; }, 4000);
+  // The kept stream may have died while nobody looked: if no new frame came
+  // within a moment, reconnect it now rather than after a freshness timeout.
+  if (graceHeld) {
+    const generation = stillsGeneration;
+    setTimeout(() => {
+      if (generation === stillsGeneration && directFeedActive &&
+          document.visibilityState === 'visible' && !hasFreshDirectFrame()) {
+        startMjpegAttempt(generation);
+      }
+    }, 2500);
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') void resumeFromBackground();
+  else pauseForBackground();
 });
 window.addEventListener('pagehide', () => {
   cancelStatusPoll();
@@ -2434,6 +2756,11 @@ function controlFailureText(result, fallback) {
   if (result && result.failure === 'not_sent') {
     return '操作未发送，设备连接未就绪';
   }
+  if (result && result.failure === 'phone_owned') {
+    const owner = lastOwnerRefusal?.owner;
+    const left = Number(lastOwnerRefusal?.owner_lease_remaining_secs);
+    return `手机正被${owner ? ` ${owner} ` : '其他会话'}使用，操作没有发出${Number.isFinite(left) && left > 0 ? `；约 ${left} 秒后可用` : ''}`;
+  }
   return fallback;
 }
 function invalidateDirectControlQueue() {
@@ -2458,19 +2785,24 @@ function enterOutcomeUnknownQuarantine() {
   if (directFeedActive) showOverlay('outcome-unknown');
   updateStatusLine();
 }
-function setDirectControlReady(ready) {
+function stopFlowRecordingForConnectionChange() {
+  if (!(flowRecording || flowStarting)) return;
+  flowRecording = false;
+  flowStarting = false;
+  flowFinalizing = false;
+  flowCheckpointSession++;
+  flowLastObservation = null;
+  renderRecordedFlow();
+  toast('设备连接已变化，流程录制已停止，请先审核现有步骤');
+}
+/* `background: true` — the page only went to the background: input pauses, but
+   a recording survives a quick switch to another window. The return path
+   stops it if the phone is not drivable any more. */
+function setDirectControlReady(ready, { background = false } = {}) {
   const lostReadiness = directControlReady && !ready;
   if (lostReadiness) {
     invalidateDirectControlQueue();
-    if (flowRecording || flowStarting) {
-      flowRecording = false;
-      flowStarting = false;
-      flowFinalizing = false;
-      flowCheckpointSession++;
-      flowLastObservation = null;
-      renderRecordedFlow();
-      toast('设备连接已变化，流程录制已停止，请先审核现有步骤');
-    }
+    if (!background) stopFlowRecordingForConnectionChange();
   }
   directControlReady = ready;
   syncDirectControlAvailability();
@@ -2480,7 +2812,8 @@ function setDirectControlReady(ready) {
     document.activeElement?.disabled === true
   ) {
     requestAnimationFrame(() => {
-      if (!directControlReady && !offlineOverlay.hidden) {
+      if (!directControlReady && !offlineOverlay.hidden &&
+          offlineOverlay.classList.contains('blocking')) {
         olTitle.focus({ preventScroll: true });
       }
     });
@@ -2494,9 +2827,14 @@ function syncDirectControlAvailability() {
   if (unavailable && elementPanel.classList.contains('open')) {
     closeElementPanel({ restoreFocus: false });
   }
-  for (const id of ['btnHome', 'btnSearch', 'btnGrid', 'btnElements', 'btnKeyboard']) {
+  for (const id of ['btnHome', 'btnSearch', 'btnGrid', 'btnElements', 'btnKeyboard', 'btnPaste']) {
     const control = document.getElementById(id);
     if (control) control.disabled = unavailable;
+  }
+  screenEl.classList.toggle('live', !unavailable);
+  if (unavailable) {
+    touchCursor.classList.remove('on');
+    releaseTyping();
   }
   const send = document.getElementById('btnSend');
   if (send) send.disabled = textSendBusy || unavailable;
@@ -2526,6 +2864,7 @@ function sendDirectControl(obj) {
     if (remainingTtlMs <= 0) return controlResult(false, 'not_sent');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), CONTROL_TIMEOUT_MS);
+    const sentAt = performance.now();
     try {
       const r = await fetch('/control', {
         method: 'POST',
@@ -2548,6 +2887,13 @@ function sendDirectControl(obj) {
         return controlResult(false, 'unauthorized');
       }
       const result = await r.json().catch(() => ({}));
+      noteControlRtt(performance.now() - sentAt);
+      if (r.status === 409 && result.error === 'phone_owned') {
+        // Another session holds the owner lease: nothing ran on the phone.
+        invalidateDirectControlQueue();
+        noteOwnerRefusal(result);
+        return controlResult(false, 'phone_owned');
+      }
       if (!r.ok) {
         const failure = result.error === 'stale_element_snapshot'
           ? 'stale_element_snapshot'
@@ -2596,15 +2942,89 @@ async function sendControl(obj) {
   return result;
 }
 
-/* ── Tap dot ──────────────────────────────────────────────────── */
-function showTapDot(clientX, clientY) {
-  const rect = videoArea.getBoundingClientRect();
-  tapDot.style.left = (clientX - rect.left) + 'px';
-  tapDot.style.top  = (clientY - rect.top) + 'px';
-  tapDot.style.opacity = '1';
-  clearTimeout(tapDot._timer);
-  tapDot._timer = setTimeout(() => { tapDot.style.opacity = '0'; }, 350);
+/* ── Local touch feedback ────────────────────────────────────────
+   Everything is drawn in the screen's own coordinates. A tap shows a pending
+   ripple the moment the button comes up, then confirms (or turns red) on the
+   daemon's ACK — the round trip is visible instead of feeling like lag. */
+function screenPoint(clientX, clientY) {
+  const rect = screenEl.getBoundingClientRect();
+  return { x: clientX - rect.left, y: clientY - rect.top, inside:
+    clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom };
 }
+function spawnRipple(clientX, clientY) {
+  const { x, y } = screenPoint(clientX, clientY);
+  const dot = document.createElement('div');
+  dot.className = 'ripple pending';
+  dot.style.left = x + 'px';
+  dot.style.top = y + 'px';
+  touchLayer.append(dot);
+  const settle = (cls) => {
+    dot.className = 'ripple' + (cls ? ' ' + cls : '');
+    dot.addEventListener('animationend', () => dot.remove(), { once: true });
+    setTimeout(() => dot.remove(), 1200);
+  };
+  setTimeout(() => { if (dot.isConnected && dot.classList.contains('pending')) settle('fail'); }, CONTROL_TIMEOUT_MS + 500);
+  return { ok: () => settle(''), fail: () => settle('fail') };
+}
+function showTapDot(clientX, clientY) { spawnRipple(clientX, clientY).ok(); }
+let pressRing = null, pressRingTimer = null;
+function clearPressRing() {
+  clearTimeout(pressRingTimer);
+  pressRingTimer = null;
+  if (pressRing) { pressRing.remove(); pressRing = null; }
+}
+function armPressRing(clientX, clientY) {
+  clearPressRing();
+  const { x, y } = screenPoint(clientX, clientY);
+  // Starts after a short beat so a plain click never flashes it; it fills
+  // exactly when the hold becomes a long press.
+  pressRingTimer = setTimeout(() => {
+    pressRing = document.createElement('div');
+    pressRing.className = 'press-ring';
+    pressRing.style.left = x + 'px';
+    pressRing.style.top = y + 'px';
+    pressRing.style.animationDuration = (LONGPRESS_MS - 120) + 'ms';
+    touchLayer.append(pressRing);
+  }, 120);
+}
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function drawTrail(x1, y1, x2, y2) {
+  const a = screenPoint(x1, y1), b = screenPoint(x2, y2);
+  let line = trailSvg.querySelector('line'), tip = trailSvg.querySelector('circle');
+  if (!line) {
+    line = document.createElementNS(SVG_NS, 'line');
+    tip = document.createElementNS(SVG_NS, 'circle');
+    tip.setAttribute('r', '7');
+    trailSvg.append(line, tip);
+  }
+  line.setAttribute('x1', a.x); line.setAttribute('y1', a.y);
+  line.setAttribute('x2', b.x); line.setAttribute('y2', b.y);
+  tip.setAttribute('cx', b.x); tip.setAttribute('cy', b.y);
+  trailSvg.classList.remove('fade');
+  trailSvg.hidden = false;
+}
+function fadeTrail(failed = false) {
+  if (trailSvg.hidden) return;
+  if (failed) trailSvg.querySelector('line')?.setAttribute('style', 'stroke: var(--danger)');
+  trailSvg.classList.add('fade');
+  clearTimeout(trailSvg._timer);
+  trailSvg._timer = setTimeout(() => {
+    trailSvg.hidden = true;
+    trailSvg.classList.remove('fade');
+    trailSvg.querySelector('line')?.removeAttribute('style');
+  }, 650);
+}
+/* A finger-sized cursor over the live screen (mouse only), like the
+   Simulator: you see where a click will land on the phone. */
+function moveTouchCursor(e) {
+  if (e.pointerType !== 'mouse') return;
+  const p = screenPoint(e.clientX, e.clientY);
+  const show = p.inside && screenEl.classList.contains('live');
+  touchCursor.classList.toggle('on', show);
+  if (show) touchCursor.style.transform = `translate(${p.x}px, ${p.y}px)` + (pointers.size ? ' scale(.82)' : '');
+}
+videoArea.addEventListener('pointermove', moveTouchCursor, { passive: true });
+videoArea.addEventListener('pointerleave', () => touchCursor.classList.remove('on'));
 
 /* ── Pointer Events [iOS §Touch] ──────────────────────────────── */
 const pointers = new Map();
@@ -2622,24 +3042,38 @@ videoArea.addEventListener('gestureend',    e => e.preventDefault(), { passive: 
    - quick tap (no move)              → `tap`
    - swipe (move before hold)         → `swipe`
    - long-press (held, still)         → `longpress`
-   - long-press then drag             → `drag` */
+   - long-press then drag             → `drag`
+   - right-click (mouse)              → `longpress`
+   - wheel / trackpad scroll          → `scroll` (see onWheel) */
 function onPointerDown(e) {
   if (e.target.closest('a, button, input, textarea, select, summary, [contenteditable="true"]')) {
     return;
   }
   e.preventDefault();
+  const mouse = e.pointerType === 'mouse';
+  if (mouse && e.button !== 0 && e.button !== 2) return;
+  const onScreen = screenPoint(e.clientX, e.clientY).inside;
+  // A mouse click on the screen hands the keyboard to the phone; a click on
+  // the stage around it takes it back. Touch never does this: it would raise
+  // the browser's own on-screen keyboard.
+  if (mouse && onScreen) armTyping();
+  else if (mouse) releaseTyping();
   videoArea.setPointerCapture(e.pointerId);
   const pd = {
     startX:e.clientX, startY:e.clientY, startT:performance.now(),
     lastX:e.clientX, lastY:e.clientY,
     longTimer:null, scrolling:false,
     longpressArmed:false, movedAt:null,
+    secondary: mouse && e.button === 2,
     directEpoch:directControlEpoch,
     directReadyAtDown:directControlReady &&
       directStatusAllowsControl() &&
       hasFreshDirectFrame(),
   };
   pointers.set(e.pointerId, pd);
+  touchCursor.classList.add('down');
+  if (pd.directReadyAtDown && onScreen && !pd.secondary) armPressRing(e.clientX, e.clientY);
+  if (pd.secondary) return;
   pd.longTimer = setTimeout(() => {
     const live = pointers.get(e.pointerId); if (!live) return;
     const distance = Math.hypot(
@@ -2665,7 +3099,11 @@ function onPointerMove(e) {
       // finger stays down for a long time afterwards. Only movement after a
       // stationary hold is a drag.
       if (!pd.longpressArmed) clearTimeout(pd.longTimer);
+      if (!pd.longpressArmed) clearPressRing();
     }
+  }
+  if (pd.scrolling && pd.directReadyAtDown && !pd.secondary) {
+    drawTrail(pd.startX, pd.startY, pd.lastX, pd.lastY);
   }
 }
 function classifyDirectGesture(pd, elapsedMs, distancePx) {
@@ -2673,6 +3111,7 @@ function classifyDirectGesture(pd, elapsedMs, distancePx) {
   // into a tap/long-press merely because the finger returned near its origin.
   // That ambiguous loop is cancelled rather than risking an unintended action.
   if (pd.scrolling && distancePx <= TAP_SLOP) return 'cancel';
+  if (pd.secondary) return distancePx > TAP_SLOP ? 'cancel' : 'longpress';
   if (distancePx > TAP_SLOP) {
     return pd.longpressArmed ? 'drag' : 'swipe';
   }
@@ -2689,6 +3128,8 @@ function onPointerUp(e) {
   const pd = pointers.get(e.pointerId); if (!pd) return;
   e.preventDefault();
   clearTimeout(pd.longTimer); pointers.delete(e.pointerId);
+  clearPressRing();
+  touchCursor.classList.remove('down');
   const coords = pointerToNormalized(e.clientX, e.clientY);
   const dt = performance.now() - pd.startT;
   const dist = Math.hypot(e.clientX - pd.startX, e.clientY - pd.startY);
@@ -2696,7 +3137,13 @@ function onPointerUp(e) {
   // A gesture belongs to the exact visible Direct control epoch in which it
   // began. Backgrounding, feed loss, reconnect, or a readiness transition
   // cancels it; a later pointerup must not act on a newly connected screen.
-  if (!directGestureIsCurrent(pd)) return;
+  if (!directGestureIsCurrent(pd)) {
+    fadeTrail(true);
+    if (pd.directReadyAtDown === false && coords && dist <= TAP_SLOP) {
+      toast(overlayState === 'hidden' ? '设备连接未就绪' : setupBlockerToastText());
+    }
+    return;
+  }
   const a = pointerToNormalized(pd.startX, pd.startY);
   const b = coords;
   let action = null, feedback = '';
@@ -2717,28 +3164,197 @@ function onPointerUp(e) {
   } else if (b && gesture === 'longpress') {
     action = {
       type:'longpress', x:b.nx, y:b.ny,
-      duration_ms:Math.max(600, Math.min(10_000, Math.round(dt))),
+      duration_ms: pd.secondary ? 800 : Math.max(600, Math.min(10_000, Math.round(dt))),
     };
     feedback = '长按';
   } else if (b && gesture === 'tap') {
     action = { type:'tap', x:b.nx, y:b.ny };
   }
-  if (action) {
-    void sendControl(action).then(result => {
-      if (!result.ok) {
-        toast(controlFailureText(result, '操作失败，设备未连接'));
-        return;
-      }
-      if (action.type !== 'swipe') showTapDot(e.clientX, e.clientY);
-      if (feedback) toast(feedback);
-    });
-  }
+  if (!action) { fadeTrail(true); return; }
+  const ripple = action.type === 'swipe' || action.type === 'drag'
+    ? null : spawnRipple(e.clientX, e.clientY);
+  void sendControl(action).then(result => {
+    if (!result.ok) {
+      ripple?.fail();
+      fadeTrail(true);
+      toast(controlFailureText(result, '操作失败，设备未连接'));
+      return;
+    }
+    ripple?.ok();
+    fadeTrail(false);
+    if (feedback) toast(feedback);
+  });
 }
 function onPointerCancel(e) {
   const pd = pointers.get(e.pointerId);
   if (pd) clearTimeout(pd.longTimer);
   pointers.delete(e.pointerId);
+  clearPressRing();
+  fadeTrail(true);
+  touchCursor.classList.remove('down');
 }
+function setupBlockerToastText() {
+  return olTitle.textContent || '设备连接未就绪';
+}
+
+/* ── Wheel / trackpad → scroll ───────────────────────────────────
+   Deltas are summed for a short beat and sent as one `scroll` at the pointer,
+   one request in flight at a time; momentum keeps feeding the next one.
+   Positive dy scrolls the content down, the same sense as the wheel. */
+const wheel = { dx: 0, dy: 0, x: 0.5, y: 0.5, timer: null, inflight: false, epoch: 0 };
+videoArea.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (e.ctrlKey) return;                 // pinch on a trackpad: not a scroll
+  const c = pointerToNormalized(e.clientX, e.clientY);
+  if (!c || !directControlReady) return;
+  if (wheel.epoch !== directControlEpoch) {
+    wheel.dx = 0; wheel.dy = 0; wheel.epoch = directControlEpoch;
+  }
+  const unit = e.deltaMode === 1 ? 32 : (e.deltaMode === 2 ? 400 : 1);
+  wheel.dx += e.deltaX * unit;
+  wheel.dy += e.deltaY * unit;
+  wheel.x = c.nx; wheel.y = c.ny;
+  clearTimeout(wheel.timer);
+  wheel.timer = setTimeout(flushWheel, 90);
+}, { passive: false });
+async function flushWheel() {
+  wheel.timer = null;
+  if (wheel.inflight) { wheel.timer = setTimeout(flushWheel, 60); return; }
+  let dx = wheel.dx, dy = wheel.dy;
+  wheel.dx = 0; wheel.dy = 0;
+  // Phone scroll views move along one axis; keep the dominant one.
+  if (Math.abs(dx) > Math.abs(dy) * 1.5) dy = 0; else dx = 0;
+  if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+  if (!directControlReady || wheel.epoch !== directControlEpoch) return;
+  const clamp = v => Math.max(-1000, Math.min(1000, Math.round(v)));
+  const action = {
+    type: 'scroll',
+    x: roundedFlowCoord(wheel.x), y: roundedFlowCoord(wheel.y),
+    dx: clamp(dx), dy: clamp(dy),
+  };
+  wheel.inflight = true;
+  try {
+    const result = await sendControl(action);
+    if (!result.ok) toast(controlFailureText(result, '滚动失败，设备未连接'));
+  } finally {
+    wheel.inflight = false;
+  }
+}
+
+/* ── Keyboard straight to the phone ──────────────────────────────
+   A mouse click on the screen focuses an invisible textarea. Text arrives
+   through `input`/`compositionend`, so IMEs (Pinyin, Japanese…) compose in the
+   browser as usual and only the committed text is sent. Editing keys map to
+   `key` actions. Everything goes through one ordered queue with one request
+   in flight, merging consecutive text, so fast typing is never dropped by the
+   control queue's small bound. Esc gives the keyboard back to the page. */
+let typingComposing = false;
+const typeOps = [];
+let typePumping = false;
+let typeFlushTimer = null;
+function armTyping() {
+  if (!directControlReady) return;
+  if (document.activeElement !== keyCatcher) keyCatcher.focus({ preventScroll: true });
+}
+function releaseTyping() {
+  if (document.activeElement === keyCatcher) keyCatcher.blur();
+}
+keyCatcher.addEventListener('focus', () => screenEl.classList.add('typing'));
+keyCatcher.addEventListener('blur', () => {
+  screenEl.classList.remove('typing');
+  typingComposing = false;
+  keyCatcher.value = '';
+  flushTypeOps();
+});
+function queueTypeOp(op) {
+  const last = typeOps[typeOps.length - 1];
+  if (op.text != null && last && last.text != null && !last.sending) last.text += op.text;
+  else typeOps.push(op);
+  clearTimeout(typeFlushTimer);
+  // Text waits a beat so a burst of keys becomes one request; recording
+  // waits longer, since every text request becomes a flow parameter.
+  const delay = op.text != null ? (flowRecording ? 600 : 160) : 0;
+  typeFlushTimer = setTimeout(flushTypeOps, delay);
+}
+function flushTypeOps() {
+  clearTimeout(typeFlushTimer);
+  typeFlushTimer = null;
+  void pumpTypeOps();
+}
+async function pumpTypeOps() {
+  if (typePumping) return;
+  typePumping = true;
+  try {
+    while (typeOps.length) {
+      const op = typeOps[0];
+      op.sending = true;
+      const text = op.text != null ? op.text.slice(0, 1000) : null;
+      if (text === '') { typeOps.shift(); continue; }
+      const result = await sendControl(text != null
+        ? { type: 'text', text }
+        : { type: 'key', name: op.key });
+      typeOps.shift();
+      if (!result.ok) {
+        typeOps.length = 0;
+        toast(controlFailureText(result, '输入没有送到手机，请点一下手机上的输入框后重试'));
+        break;
+      }
+    }
+  } finally {
+    typePumping = false;
+  }
+}
+const TYPING_KEYS = {
+  Enter: 'return', Backspace: 'backspace', Delete: 'delete', Tab: 'tab',
+  ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+};
+keyCatcher.addEventListener('compositionstart', () => { typingComposing = true; });
+keyCatcher.addEventListener('compositionend', e => {
+  typingComposing = false;
+  if (e.data) queueTypeOp({ text: e.data });
+  keyCatcher.value = '';
+});
+keyCatcher.addEventListener('input', e => {
+  if (typingComposing || e.isComposing) return;
+  if (e.inputType === 'insertText' && e.data) queueTypeOp({ text: e.data });
+  // insertCompositionText is delivered by compositionend; pastes by `paste`.
+  keyCatcher.value = '';
+});
+keyCatcher.addEventListener('keydown', e => {
+  if (e.isComposing || e.keyCode === 229) return;
+  const mod = e.metaKey || e.ctrlKey;
+  if (e.key === 'Escape') { e.preventDefault(); releaseTyping(); return; }
+  if (mod && e.shiftKey && !e.altKey) {
+    const k = e.key.toLowerCase();
+    if (k === 'h') { e.preventDefault(); e.stopPropagation(); document.getElementById('btnHome').click(); return; }
+    if (k === 's') { e.preventDefault(); e.stopPropagation(); document.getElementById('btnSearch').click(); return; }
+  }
+  if (mod || e.altKey) return;           // ⌘V pastes; other browser shortcuts pass
+  const name = TYPING_KEYS[e.key];
+  if (name) {
+    e.preventDefault();
+    e.stopPropagation();
+    queueTypeOp({ key: name });
+    flushTypeOps();
+  } else if (e.key.length === 1) {
+    e.stopPropagation();                 // the page's own single-key shortcuts stay off
+  }
+});
+function sendPastedText(text) {
+  const clean = String(text || '').replace(/\r\n?/g, '\n');
+  if (!clean) { toast('剪贴板里没有文字'); return; }
+  if (!directControlReady) { toast('设备连接未就绪，暂时不能粘贴'); return; }
+  const clipped = clean.slice(0, 1000);
+  queueTypeOp({ text: clipped });
+  flushTypeOps();
+  toast(clipped.length < clean.length
+    ? `已粘贴前 1000 个字（共 ${clean.length} 个）`
+    : `已粘贴 ${clipped.length} 个字`);
+}
+keyCatcher.addEventListener('paste', e => {
+  e.preventDefault();
+  sendPastedText(e.clipboardData?.getData('text/plain'));
+});
 
 function cancelDirectPointers() {
   for (const [pointerId, pd] of pointers) {
@@ -4310,6 +4926,7 @@ const textPanel = document.getElementById('textPanel');
 const btnKeyboard = document.getElementById('btnKeyboard');
 let textPanelCloseTimer = null;
 function openTextPanel() {
+  releaseTyping();
   if (elementPanel.classList.contains('open')) {
     closeElementPanel({ restoreFocus: false });
   }
@@ -4568,37 +5185,254 @@ const btnImmersive = document.getElementById('btnImmersive');
 const grabber = document.getElementById('grabber');
 const toolbar = document.getElementById('toolbar');
 
-/* Reserve exactly the toolbar's real footprint (incl. its safe-area padding) so
-   the video sits right above it — a hardcoded guess was a few px short and left
-   the toolbar overlapping the phone's bottom. Immersive mode reclaims the space. */
+/* On narrow screens the toolbar is a bottom bar: panels and toasts sit above
+   its measured footprint (incl. safe-area padding). The desktop rail is beside
+   the stage, so nothing needs reserving there. */
+const narrowLayout = window.matchMedia('(max-width: 760px), (max-height: 480px) and (max-width: 1000px)');
 function syncToolbarReserve() {
-  const reserve = document.body.classList.contains('immersive') ? 0 : (toolbar.offsetHeight || 78);
+  const reserve = document.body.classList.contains('immersive') || !narrowLayout.matches
+    ? 0
+    : (toolbar.classList.contains('expanded') ? 0 : toolbar.offsetHeight) || 64;
   document.documentElement.style.setProperty('--tb-reserve', reserve + 'px');
-  if (gridOn) drawGrid();
+  if (gridOn) requestAnimationFrame(drawGrid);
 }
+narrowLayout.addEventListener?.('change', () => { setMoreSheet(false); syncToolbarReserve(); });
+/* 全屏: the browser's real fullscreen where it exists (not iPhone Safari),
+   plus the chrome tucked away either way. Leaving fullscreen (Esc) restores it. */
 function setImmersive(on) {
   document.body.classList.toggle('immersive', on);
+  if (on) setMoreSheet(false);
+  const root = document.documentElement;
+  if (on && document.fullscreenEnabled && !document.fullscreenElement) {
+    root.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {});
+  } else if (!on && document.fullscreenElement) {
+    document.exitFullscreen?.().catch(() => {});
+  }
+  btnImmersive.setAttribute('aria-pressed', String(on));
   syncToolbarReserve();
   if (gridOn) requestAnimationFrame(drawGrid);
 }
-btnImmersive.addEventListener('click', () => setImmersive(true));
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && document.body.classList.contains('immersive')) setImmersive(false);
+});
+btnImmersive.addEventListener('click', () => setImmersive(!document.body.classList.contains('immersive')));
 
 const btnQuality = document.getElementById('btnQuality');
 const qualityLabel = document.getElementById('qualityLabel');
+const VIDEO_PREF_LABEL = { auto: '自动', performance: '性能', quality: '画质' };
 function renderVideoMode() {
-  const quality = videoMode === 'quality';
-  qualityLabel.textContent = quality ? '画质' : '性能';
-  btnQuality.setAttribute('aria-pressed', quality ? 'true' : 'false');
+  qualityLabel.textContent = VIDEO_PREF_LABEL[videoPref];
+  const current = videoMode === 'quality' ? '画质' : '性能';
+  const detail = videoPref === 'auto' ? `自动（当前${current}）` : current;
+  btnQuality.setAttribute('aria-label', `画面模式：${detail}`);
+  btnQuality.title = `画面模式：${detail}。点击切换 自动 → 性能 → 画质 (Q)`;
 }
-btnQuality.addEventListener('click', () => {
-  videoMode = videoMode === 'quality' ? 'performance' : 'quality';
-  try { localStorage.setItem(VIDEO_MODE_KEY, videoMode); } catch {}
+function applyVideoMode() {
+  const next = effectiveVideoMode();
+  renderVideoMode();
+  if (next === videoMode) return;
+  videoMode = next;
   renderVideoMode();
   // Reconnect the live feed in the new mode; it starts on a fresh keyframe.
   if (directFeedActive) startMjpegAttempt(stillsGeneration);
+}
+btnQuality.addEventListener('click', () => {
+  videoPref = { auto: 'performance', performance: 'quality', quality: 'auto' }[videoPref];
+  autoVideoDowngraded = false;
+  try {
+    if (videoPref === 'auto') localStorage.removeItem(VIDEO_MODE_KEY);
+    else localStorage.setItem(VIDEO_MODE_KEY, videoPref);
+  } catch {}
+  applyVideoMode();
+  toast(`画面模式：${btnQuality.getAttribute('aria-label').replace('画面模式：', '')}`);
 });
+/* 自动 steps down once when the decoder keeps falling behind. */
+let decodeBacklogTimes = [];
+function noteDecodeBacklog() {
+  const now = performance.now();
+  decodeBacklogTimes = decodeBacklogTimes.filter(t => now - t < 20_000);
+  decodeBacklogTimes.push(now);
+  if (videoPref === 'auto' && videoMode === 'quality' && decodeBacklogTimes.length >= 3) {
+    autoVideoDowngraded = true;
+    decodeBacklogTimes = [];
+    applyVideoMode();
+    toast('画面跟不上，已自动切到性能模式');
+  }
+}
 renderVideoMode();
 grabber.addEventListener('click', () => setImmersive(false));
+
+/* ── Bottom sheet (narrow screens): 更多 shows every control ───────── */
+const btnMore = document.getElementById('btnMore');
+const sheetScrim = document.getElementById('sheetScrim');
+function setMoreSheet(open) {
+  if (!btnMore) return;
+  toolbar.classList.toggle('expanded', open);
+  sheetScrim.classList.toggle('on', open);
+  btnMore.setAttribute('aria-expanded', String(open));
+  setTextIfChanged(btnMore.querySelector('.lbl'), open ? '收起' : '更多');
+  syncToolbarReserve();
+}
+btnMore.addEventListener('click', () => setMoreSheet(!toolbar.classList.contains('expanded')));
+sheetScrim.addEventListener('click', () => setMoreSheet(false));
+toolbar.addEventListener('click', e => {
+  const button = e.target.closest('.tbtn');
+  if (button && button !== btnMore && toolbar.classList.contains('expanded')) setMoreSheet(false);
+});
+toolbar.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && toolbar.classList.contains('expanded')) { e.preventDefault(); setMoreSheet(false); btnMore.focus(); }
+});
+
+/* ── Paste: the async clipboard where the page may read it (https or this
+   Mac), else ⌘V into the screen, which works everywhere ─────────── */
+document.getElementById('btnPaste').addEventListener('click', async () => {
+  if (navigator.clipboard?.readText && window.isSecureContext) {
+    try {
+      sendPastedText(await navigator.clipboard.readText());
+      return;
+    } catch (_) { /* permission refused: fall through to ⌘V */ }
+  }
+  armTyping();
+  toast(/Mac|iPhone|iPad/.test(navigator.platform) ? '按 ⌘V 把剪贴板粘贴到手机' : '按 Ctrl+V 把剪贴板粘贴到手机');
+});
+
+/* ── Shortcut help ─────────────────────────────────────────────── */
+const helpDialog = document.getElementById('helpDialog');
+function openHelp() { if (!helpDialog.open) helpDialog.showModal(); }
+document.getElementById('btnHelp').addEventListener('click', openHelp);
+document.getElementById('btnHelpFoot').addEventListener('click', openHelp);
+document.getElementById('helpClose').addEventListener('click', () => helpDialog.close());
+
+/* ── Page shortcuts: single keys outside text fields; ⌘⇧H / ⌘⇧S anywhere ── */
+const PAGE_SHORTCUTS = {
+  h: 'btnHome', s: 'btnSearch', '/': 'btnSearch', k: 'btnKeyboard', e: 'btnElements',
+  r: 'btnFlow', g: 'btnGrid', q: 'btnQuality', f: 'btnImmersive',
+};
+document.addEventListener('keydown', e => {
+  if (e.defaultPrevented || e.isComposing || e.repeat) return;
+  const target = e.target;
+  const editing = target instanceof Element &&
+    target.closest('input, textarea, select, [contenteditable="true"]');
+  if (document.querySelector('dialog[open]')) return;
+  const mod = e.metaKey || e.ctrlKey;
+  const key = e.key.toLowerCase();
+  if (mod && e.shiftKey && !e.altKey && (key === 'h' || key === 's')) {
+    e.preventDefault();
+    document.getElementById(key === 'h' ? 'btnHome' : 'btnSearch').click();
+    return;
+  }
+  if (editing || mod || e.altKey) return;
+  if (e.key === '?') { e.preventDefault(); openHelp(); return; }
+  if (e.key === 'Escape' && document.body.classList.contains('immersive')) { setImmersive(false); return; }
+  const id = PAGE_SHORTCUTS[key];
+  if (!id) return;
+  const button = document.getElementById(id);
+  if (!button || button.disabled) return;
+  e.preventDefault();
+  button.click();
+});
+
+/* ── Owner lease: another session is driving this phone ─────────── */
+let lastOwnerRefusal = null;
+function noteOwnerRefusal(result) {
+  lastOwnerRefusal = { owner: String(result?.owner || ''), owner_lease_remaining_secs: result?.owner_lease_remaining_secs };
+  syncOwnerBadge({ owner: lastOwnerRefusal.owner, owner_lease_remaining_secs: lastOwnerRefusal.owner_lease_remaining_secs });
+}
+function syncOwnerBadge(status) {
+  const owner = typeof status?.owner === 'string' ? status.owner.trim() : '';
+  ownerBadge.hidden = !owner;
+  if (!owner) return;
+  const left = Number(status.owner_lease_remaining_secs);
+  const suffix = Number.isFinite(left) && left > 0
+    ? ` · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : '';
+  setTextIfChanged(ownerBadge, `${owner} 正在操作${suffix}`);
+  ownerBadge.title = `${owner} 持有这台手机的操作租约；在它松手或租约到期前，这里的点按会被拒绝（不会执行）。`;
+}
+
+/* ── Metrics: what the picture and the controls cost right now ───── */
+let renderedFrames = 0, frameRate = null, frameRateAt = performance.now();
+let lastRenderedAt = null;
+function noteRenderedFrame() {
+  renderedFrames++;
+  lastRenderedAt = performance.now();
+  if (screenEl.classList.contains('stalled')) syncStallIndicator();
+}
+/* A frozen frame must not look live. While the page is connected and showing
+   the H.264 picture, more than STALL_AFTER_MS without a decoded frame dims the
+   picture and puts a pill on the screen; the next frame clears it. Input is
+   not touched here: readiness keeps its own (longer) freshness rule. */
+const STALL_AFTER_MS = 1500;
+let pictureStalled = false;
+function syncStallIndicator() {
+  const now = performance.now();
+  const stalled = overlayState === 'hidden' &&
+    document.visibilityState === 'visible' &&
+    directFeedActive &&
+    h264Frame.classList.contains('active') &&
+    lastRenderedAt !== null &&
+    now - lastRenderedAt > STALL_AFTER_MS;
+  if (stalled === pictureStalled) return;
+  pictureStalled = stalled;
+  screenEl.classList.toggle('stalled', stalled);
+  document.getElementById('stallPill').hidden = !stalled;
+  renderMetrics();
+}
+setInterval(syncStallIndicator, 250);
+let controlRttMs = null;
+function noteControlRtt(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return;
+  controlRttMs = controlRttMs == null ? ms : controlRttMs * 0.7 + ms * 0.3;
+}
+const TRANSPORT_LABEL = { usb: 'USB', wifi: 'Wi-Fi', 'wifi-tunnel': 'Wi-Fi 隧道', external: '外部', lan: '局域网' };
+function renderMetrics() {
+  const now = performance.now();
+  if (now - frameRateAt >= 900) {
+    frameRate = Math.round(renderedFrames * 1000 / (now - frameRateAt));
+    renderedFrames = 0;
+    frameRateAt = now;
+  }
+  const parts = [];
+  const live = overlayState === 'hidden' && document.visibilityState === 'visible';
+  if (h264Frame.classList.contains('active')) {
+    parts.push(['H.264', live && frameRate != null ? `${frameRate} fps` : '', pictureStalled]);
+  } else if (mjpegFrame.classList.contains('active')) {
+    parts.push(['MJPEG', '']);
+  } else if (stillFrame.classList.contains('active')) {
+    parts.push(['截图', '2.5 s']);
+  }
+  if (controlRttMs != null) parts.push(['操作', `${Math.round(controlRttMs)} ms`]);
+  else if (Number.isFinite(backendStatus?.wda_rtt_ms)) parts.push(['设备', `${backendStatus.wda_rtt_ms} ms`]);
+  const transport = TRANSPORT_LABEL[backendStatus?.transport];
+  if (transport) parts.push([transport, '']);
+  const nodes = [];
+  parts.forEach(([strong, rest, warn], i) => {
+    if (i) { const sep = document.createElement('span'); sep.className = 'sep'; sep.textContent = '·'; nodes.push(sep); }
+    const b = document.createElement('b'); b.textContent = strong; nodes.push(b);
+    if (warn) b.className = 'warn';
+    if (rest) {
+      const span = document.createElement('span');
+      span.textContent = ' ' + rest;
+      if (warn) span.className = 'warn';
+      nodes.push(span);
+    }
+  });
+  const text = parts.map(p => p.join(' ')).join(' · ');
+  if (metricsEl.dataset.text !== text) {
+    metricsEl.dataset.text = text;
+    metricsEl.replaceChildren(...nodes);
+    metricsEl.title = '画面编码 · 帧率 · 点按往返时间 · 手机连接方式';
+  }
+}
+setInterval(renderMetrics, 1000);
+
+/* ── Screen geometry follows the stream ─────────────────────────── */
+function setScreenAspect(w, h) {
+  if (!w || !h) return;
+  const ar = (w / h).toFixed(4);
+  if (deviceEl.style.getPropertyValue('--ar') === ar) return;
+  deviceEl.style.setProperty('--ar', ar);
+  if (gridOn) requestAnimationFrame(drawGrid);
+}
 window.addEventListener('resize', syncToolbarReserve);
 window.addEventListener('orientationchange', () => setTimeout(syncToolbarReserve, 200));
 syncToolbarReserve();
