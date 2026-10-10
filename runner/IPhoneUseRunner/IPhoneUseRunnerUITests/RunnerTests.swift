@@ -473,8 +473,8 @@ final class RunnerTests: XCTestCase {
   /// runs only when asked (`alert_scan=1`: the daemon's own "no alert" answer went stale).
   func alertBesideTree(_ root: [String: Any]?, pid: Int32, scanSpringBoard: Bool) -> String? {
     var found: FoundAlert?
-    if let root, let alert = firstNode(in: root, type: "XCUIElementTypeAlert") {
-      found = describeAlert(alert, pid: pid)
+    if let root, let alert = AlertScan.firstAlert(in: root, maxDepth: Int.max) {
+      found = describeAlert(alert.alert, pid: pid)
     } else {
       // Every other active process can hold the alert (SpringBoard, the app under a web sheet,
       // another view service). Answering "0" without looking there would prime `alertCache` with
@@ -746,43 +746,11 @@ final class RunnerTests: XCTestCase {
     return findAlertWithQueries()
   }
 
-  func firstNode(in node: [String: Any], type: String) -> [String: Any]? {
-    if node["type"] as? String == type { return node }
-    for child in node["children"] as? [[String: Any]] ?? [] {
-      if let found = firstNode(in: child, type: type) { return found }
-    }
-    return nil
-  }
-
+  /// An alert node (XCUIElementTypeAlert, or a Safari dialog's container: AlertScan) as text
+  /// and buttons.
   func describeAlert(_ alert: [String: Any], pid: Int32) -> FoundAlert {
-    var texts: [String] = []
-    var buttons: [(String, CGRect)] = []
-    func label(_ node: [String: Any]) -> String? {
-      for key in ["label", "name", "value"] {
-        if let value = node[key] as? String, !value.isEmpty { return value }
-      }
-      return nil
-    }
-    func rect(_ node: [String: Any]) -> CGRect {
-      let r = node["rect"] as? [String: Any] ?? [:]
-      func v(_ key: String) -> CGFloat { CGFloat((r[key] as? NSNumber)?.doubleValue ?? 0) }
-      return CGRect(x: v("x"), y: v("y"), width: v("width"), height: v("height"))
-    }
-    func walk(_ node: [String: Any]) {
-      let type = node["type"] as? String
-      if type == "XCUIElementTypeButton" {
-        if let text = label(node) { buttons.append((text, rect(node))) }
-        return
-      }
-      if type == "XCUIElementTypeStaticText" || type == "XCUIElementTypeTextView",
-         let text = label(node), !texts.contains(text) {
-        texts.append(text)
-      }
-      for child in node["children"] as? [[String: Any]] ?? [] { walk(child) }
-    }
-    for child in alert["children"] as? [[String: Any]] ?? [] { walk(child) }
-    if texts.isEmpty, let title = label(alert) { texts.append(title) }
-    return FoundAlert(node: alert, pid: pid, text: texts.joined(separator: "\n"), buttons: buttons)
+    let described = AlertScan.describe(alert)
+    return FoundAlert(node: alert, pid: pid, text: described.text, buttons: described.buttons)
   }
 
   func findAlertWithQueries() -> FoundAlert? {
