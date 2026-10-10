@@ -79,10 +79,19 @@ window.drawFrame = function (c, t, film, view, M) {
       [2.5, "to", S0, 1],
       [5.1, "to", phoneC, 1.5],
       [6.9, "to", S0, 1],
+      [10.3, "to", phoneC, 1.45],
+      [11.5, "to", S0, 1],
       [12.1, "to", phoneC, 1.55],
       [16.3, "to", S0, 1],
+      [19.4, "push", S0, 0.04],
+      [20.6, "to", S0, 1],
+      [23.0, "to", phoneC, 1.4],
+      [24.0, "to", S0, 1],
       [24.6, "to", phoneC, 1.5],
       [28.3, "to", S0, 1],
+      [29.7, "to", phoneC, 1.45],
+      [30.8, "to", S0, 1],
+      [32.2, "push", S0, 0.05],
       [33.8, "to", phoneC, 1.3],
       [35.6, "to", S0, 1],
     ] : [
@@ -110,7 +119,7 @@ window.drawFrame = function (c, t, film, view, M) {
       } else phone(t >= 21.2 && t < 24.5 ? img("datetime") : screen);
       // Portrait: while the camera is inside the phone, only the phone is on screen; the words
       // arrive with the move to the terminal, so nothing is pushed into the platform's UI bands.
-      const phoneFocus = V && [[0.25, 2.8], [5.05, 7.2], [12.05, 16.6], [24.55, 28.6], [33.75, 35.9]].some(([a, b]) => t >= a && t < b);
+      const phoneFocus = V && [[0.25, 2.8], [5.05, 7.2], [10.25, 11.8], [12.05, 16.6], [22.95, 24.3], [24.55, 28.6], [29.65, 31.1], [33.75, 35.9]].some(([a, b]) => t >= a && t < b);
       if (phoneFocus) return;
       // hook
       M.caption(c, t, p.title1, -1, 4.9, { x: headAt[0] / W, align: "left", y: V ? 0.385 : 0.085, size: (V ? 52 : 62) * u, color: k.ink, weight: 900 });
