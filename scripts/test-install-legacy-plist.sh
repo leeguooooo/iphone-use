@@ -15,7 +15,7 @@ ok_t() { pass=$((pass + 1)); printf 'ok %d - %s\n' "$pass" "$1"; }
 bad()  { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 READERS="$(sed -n '/^plist_env_get_from() {$/,/^}$/p;/^plist_env_get() {$/,/^}$/p;/^env_or_existing() {$/,/^}$/p' "$ROOT/install.sh")"
-DAEMON_ENV="$(sed -n '/^daemon_env() {$/,/^}$/p' "$ROOT/scripts/auto-update.sh")"
+DAEMON_ENV="$(sed -n '/^daemon_env() {/,/^}$/p' "$ROOT/scripts/auto-update.sh")"
 [ -n "$READERS" ] || bad "plist readers not found in install.sh"
 [ -n "$DAEMON_ENV" ] || bad "daemon_env not found in auto-update.sh"
 
