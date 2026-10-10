@@ -108,12 +108,12 @@
       "cTap2": "  tap_label \"日期与时间\"",
       "rTap": "ok · 3 applied · 画面已稳定",
       "honest": "结果说实话",
-      "cH1": "phone_tap_label \"新备忘录\"",
-      "rH1": "FAILED element_occluded · nothing_applied · retry_safe",
-      "nH1": "按钮被遮住：没点，也不假装点了",
-      "cH2": "wait_for \"自动设置\"",
-      "rH2": "partially_applied · retry_safe=false · read the screen first",
-      "nH2": "没等到：说清楚哪些做了、能不能重试",
+      "cH1": "wait_for \"自动设置\"",
+      "rH1": "partially_applied · retry_safe=false · read the screen first",
+      "nH1": "没等到：说清楚哪些做了、能不能重试",
+      "cH2": "phone_run_steps  …  pause 4000",
+      "rH2": "steps[2].ms must be between 1 and 3000 · no action was sent",
+      "nH2": "整批先校验，一个动作都没发出去",
       "flow": "重放 flow",
       "cFlow": "phone_flow_run settings/open",
       "rFlow": "ok · 2 steps · verified",
@@ -127,7 +127,6 @@
       "people": "人也能接手：在浏览器里点画面",
       "real": "真机录屏，终端内容为本次录制的真实调用",
       "install": "一行命令安装",
-      "hidden": "私人画面已遮挡",
       "typed": "一步写入 278 字"
     },
     "en": {
@@ -140,15 +139,15 @@
       "readTime": "about 0.1 s",
       "tap": "Tap by name",
       "cTap1": "phone_run_steps  scroll · scroll",
-      "cTap2": "  tap_label \"日期与时间\"   # Date & Time",
+      "cTap2": "  tap_label \"日期与时间\"  # Date & Time",
       "rTap": "ok · 3 applied · screen settled",
       "honest": "Honest results",
-      "cH1": "phone_tap_label \"新备忘录\"   # New Note",
-      "rH1": "FAILED element_occluded · nothing_applied · retry_safe",
-      "nH1": "Covered button: not tapped, not faked",
-      "cH2": "wait_for \"自动设置\"",
-      "rH2": "partially_applied · retry_safe=false · read the screen first",
-      "nH2": "Says what was done and whether a retry is safe",
+      "cH1": "wait_for \"自动设置\"",
+      "rH1": "partially_applied · retry_safe=false · read the screen first",
+      "nH1": "Says what was done and whether a retry is safe",
+      "cH2": "phone_run_steps  …  pause 4000",
+      "rH2": "steps[2].ms must be between 1 and 3000 · no action was sent",
+      "nH2": "The whole batch is checked before anything is sent",
       "flow": "Replay a flow",
       "cFlow": "phone_flow_run settings/open",
       "rFlow": "ok · 2 steps · verified",
@@ -162,7 +161,6 @@
       "people": "People can take over: click the live picture",
       "real": "Real iPhone recordings; the terminal shows this session's real calls",
       "install": "One command to install",
-      "hidden": "private screen hidden",
       "typed": "278 characters, one step"
     }
   },
@@ -225,7 +223,7 @@
         "en": "honest results"
       },
       "purpose": "Show honest results",
-      "action": "Two real refusals from this session print in the terminal while the phone stays unchanged",
+      "action": "Two real refusals print in the terminal while the recorded Date & Time page stays exactly as it was",
       "narration": {
         "zh": "点不到或没等到，它都直说，还告诉你能不能重试。",
         "en": "When a step does not land, it says so, and whether to retry."
@@ -276,8 +274,8 @@
       "purpose": "Show remote control for people",
       "action": "In the browser control page a person clicks the live picture; the phone opens Date & Time, then goes back",
       "narration": {
-        "zh": "人也能在浏览器里接手，直接点手机画面。",
-        "en": "People can take over from a browser and click the live picture."
+        "zh": "人也能在浏览器里接手：直接点手机画面，打开日期与时间，再点返回。",
+        "en": "People can take over from a browser: click the live picture to open Date and Time, then go back."
       }
     },
     {
