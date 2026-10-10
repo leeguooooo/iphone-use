@@ -28,3 +28,12 @@ Oddity seen while recording the control page: for about two seconds the phone sh
 
 - The opening states the point first: "let AI drive your real iPhone — any app, no API needed", then the 278-character proof.
 - The remote-control beat is about remote control, not about agent/person collisions: click the live picture in a browser (from anywhere), and the sidebar's scan-to-connect (iPhone app) and grid (several phones) controls.
+
+## Round 7 (release polish, 2026-10-10)
+
+- The 网格 callout was wrong: in the web page 网格 is a numbered overlay for tapping by coordinates, not several phones. It is gone. The remote beat now shows the real pairing dialog opened from 扫码连接 (code blurred), and the narration says "多台手机都能控制" (the iPhone app's phone list), not "一起控制".
+- Portrait: the phone is a third of the frame height (was 27 %) and no longer zooms between beats (1.08× while acting, was 1.3×), so it stays one size. Text and terminal moved down to match; the read beat shows three rows so nothing sits under the subtitles.
+- Whips between beats last 0.6 s (0.22 s out, 0.4 s in). Motion is green in all four cuts (portrait 0.083–0.085, landscape 0.077–0.080).
+- Audio checked by transcription (whisper small and large-v3-turbo): every line present and in order. Two TTS misreadings fixed: "AI" as one word came out as "A-A-I" (script now spells "A I", subtitles keep "AI"), and 重试 was read as 重视 (now 再试). Music ducks to 25 % under the voice; −14.2/−14.8 LUFS, true peak ≤ −0.7 dBFS.
+
+- Do: transcribe every narration clip with a second ASR model before release. Evidence: two polyphone/acronym misreadings only ASR caught. Why: nobody listens to every take. When: any TTS voiceover.
