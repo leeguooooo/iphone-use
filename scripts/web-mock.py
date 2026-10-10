@@ -201,7 +201,7 @@ def status_json():
         s.update(reconnecting=True, drivable=False, wda=False, wda_actionable=False,
                  device_state="blocked", setup_blocked_on="locked_after_restart",
                  next_step={"zh": "这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。",
-                            "en": "This iPhone restarted and has not been unlocked since."})
+                            "en": "This iPhone restarted and has not been unlocked since: someone needs to enter the passcode on the phone once, then it connects on its own."})
     elif sc == "offline":
         s.update(drivable=False, wda=False, wda_actionable=False, mode="agent", device_state="offline",
                  next_step={"zh": "设备服务没有响应；正在自动重启，若一直这样请在 Mac 上运行 iphone-use doctor", "en": "Device service unreachable."})

@@ -2665,6 +2665,9 @@ async fn agent_status(
     let wifi_start_refused =
         state.managed_wda && wifi_start_refused(&crate::instance::current().state_dir);
     // Why idle release keeps this runner (a start needs a person), or null.
+    // A passcode phone's runner is kept only while it is up (a down one is
+    // released), so report it only then; the Wi-Fi case also keeps a runner
+    // a probe saw down.
     let keep_runner_alive = crate::keep_runner::status_json(
         state
             .managed_wda
@@ -2675,7 +2678,8 @@ async fn agent_status(
                     transport,
                 )
             })
-            .flatten(),
+            .flatten()
+            .filter(|because| wda || because.keeps_down_runner()),
     );
     let legacy_ios = legacy_ios_json(state.managed_wda, &crate::instance::current().state_dir);
     let rtt = crate::wda::wda_rtt_ms();
