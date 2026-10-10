@@ -38,7 +38,7 @@ https://github.com/user-attachments/assets/f1e6574d-3134-4c23-9092-4b51bc79af2c
 - A USB cable. Plug the iPhone in and unlock it before you install.
 
 The installer then sets the phone up, shows an agent opening Settings and reading it,
-registers the MCP server with Claude Code, and opens the control page in your browser
+registers the MCP server with Claude Code and Codex, and opens the control page in your browser
 with a one-time sign-in — there is no password to copy. If anything is missing it says
 what and how to fix it.
 
@@ -49,6 +49,28 @@ iphone-use setup     # set the phone up again (after a new iPhone or Xcode)
 iphone-use try       # a harmless check: open Settings, read the screen, go Home
 iphone-use login     # sign a browser in again, with a QR code for the iPhone
 iphone-use upgrade   # update everything
+```
+
+### Install by asking your agent
+
+Paste this into Codex or Claude Code on the Mac the iPhone is plugged into:
+
+```text
+Install iphone-use (https://github.com/leeguooooo/iphone-use) on this Mac so you can drive my iPhone.
+1. Run: curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
+2. Run `iphone-use doctor`. Fix what it reports that can be fixed from the terminal, and run
+   `iphone-use setup` when it tells you to.
+3. Some steps only I can do: signing in to an Apple ID in Xcode, tapping Trust on the iPhone,
+   turning on Developer Mode, unlocking the phone. For those, stop, tell me exactly what to do,
+   and wait until I say it is done. Never ask me for a password or a code.
+4. Run `iphone-use doctor` again until nothing is missing, then `iphone-use try`.
+5. If the phone_* tools are not loaded in this chat yet, tell me to start a new chat.
+```
+
+Codex users can also add the plugin (skill + MCP server; it still needs the install above):
+
+```bash
+codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-use@iphone-use
 ```
 
 [Product guide: installation, MCP setup, flows and comparison](https://blog.leeguoo.com/en/posts/iphone-use/)
@@ -68,8 +90,8 @@ Nothing touches the Mac's own screen, cursor or focus.
 
 ## Use it from an agent
 
-The installer installs the agent skill and, when Claude Code is present, registers the
-MCP server. Any other MCP client needs only the command; on this Mac the server finds
+The installer installs the agent skill and, when Claude Code or Codex is present, registers
+the MCP server with it. Any other MCP client needs only the command; on this Mac the server finds
 the daemon and its token by itself:
 
 ```json
