@@ -10394,6 +10394,8 @@ async fn agent_actions_inner(
             }
         }
     }
+    // The flow trail records what was RUN: resolved bundles, never `app`.
+    let recorded_body = resolved_batch_body(&body, &request);
     // A flow run ends the agent's trail whether it passes or fails: what came
     // before was its own task, and the run's steps are already a flow.
     if headers.contains_key(FLOW_RUN_HEADER) {
@@ -10924,7 +10926,7 @@ async fn agent_actions_inner(
             result["alert"] = alert;
         }
     }
-    for (key, block) in flow_after_actions(&state, &headers, &body) {
+    for (key, block) in flow_after_actions(&state, &headers, &recorded_body) {
         result[key] = block;
     }
     if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
@@ -11893,10 +11895,6 @@ async fn agent_input_inner(
     if let Err(refused) = claim_phone_owner(&state, &headers) {
         return refused;
     }
-    // The MCP client waits 30 seconds. Keep the daemon's complete Direct WDA
-    // budget comfortably below that so the authoritative HTTP outcome arrives
-    // before the client can abandon a still-running action.
-    let agent_wda_deadline = tokio::time::Instant::now() + AGENT_INPUT_WDA_DEADLINE;
     // App uninstall via CoreDevice (`devicectl`) — WDA can't remove apps and
     // UI-driven deletion is unreliable to automate, so this is the dependable
     // "Delete App (with data)" primitive (e.g. resetting a wedged app to its
@@ -12042,6 +12040,12 @@ async fn agent_input_inner(
     if let Err(refusal) = resolve_launch_app_action(&state, &mut value).await {
         return refusal;
     }
+    // The MCP client waits 30 seconds. Keep the daemon's complete Direct WDA
+    // budget comfortably below that so the authoritative HTTP outcome arrives
+    // before the client can abandon a still-running action. It starts AFTER
+    // `launch_app {"app": …}` resolution: a cold inventory read must not eat
+    // the device's budget (resolution never holds the device lock).
+    let agent_wda_deadline = tokio::time::Instant::now() + AGENT_INPUT_WDA_DEADLINE;
     let Some(wda) = &state.wda else {
         return ControlRefusal::wda_not_configured()
             .with("fallback", serde_json::json!("disabled"))
@@ -12646,6 +12650,25 @@ fn flow_after_input(
         blocks.push(("batch_hint", hint));
     }
     blocks
+}
+
+/// A batch body with each action replaced by the action that actually ran —
+/// `launch_app {"app": …}` becomes `{"bundle": …}` — so the flow trail, and
+/// every flow drafted from it, holds only fields that released clients read.
+/// Steps keep their order; a body that does not parse is returned as is.
+fn resolved_batch_body(body: &str, request: &AgentActionsRequest) -> String {
+    let Ok(mut raw) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_string();
+    };
+    let Some(steps) = raw.get_mut("steps").and_then(serde_json::Value::as_array_mut) else {
+        return body.to_string();
+    };
+    for (raw_step, step) in steps.iter_mut().zip(&request.steps) {
+        if let AgentActionStep::Action { action, .. } = step {
+            raw_step["action"] = action.clone();
+        }
+    }
+    raw.to_string()
 }
 
 /// The same for a successful `/agent/actions` batch, read from its raw body.
@@ -19720,6 +19743,63 @@ mod tests {
             resolve_launch_app_action(&state, &mut tap).await.unwrap();
             assert_eq!(tap, serde_json::json!({"type":"tap","x":0.5,"y":0.5}));
         });
+    }
+
+    /// A batch that launched by name is recorded with the bundle it ran, so a
+    /// drafted flow never carries the newer `app` field.
+    #[test]
+    fn the_flow_trail_records_the_resolved_bundle_not_the_app_name() {
+        block(async {
+            let state = readiness_test_state();
+            let body = serde_json::json!({"steps":[
+                {"kind":"action","action":{"type":"launch_app","app":"设置"}},
+                {"kind":"pause","ms":100},
+                {"kind":"action","action":{"type":"tap","x":0.5,"y":0.5}}
+            ]})
+            .to_string();
+            let mut request: AgentActionsRequest = serde_json::from_str(&body).unwrap();
+            for step in &mut request.steps {
+                if let AgentActionStep::Action { action, .. } = step {
+                    resolve_launch_app_action(&state, action).await.unwrap();
+                }
+            }
+            let recorded = resolved_batch_body(&body, &request);
+            let parsed: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+            assert_eq!(
+                parsed["steps"][0]["action"],
+                serde_json::json!({"type":"launch_app","bundle":"com.apple.Preferences"})
+            );
+            assert_eq!(parsed["steps"][1], serde_json::json!({"kind":"pause","ms":100}));
+            assert_eq!(parsed["steps"][2]["action"]["type"], "tap");
+
+            flow_after_actions(&state, &HeaderMap::new(), &recorded);
+            let draft = recover(state.flow_trail.lock())
+                .draft()
+                .expect("a draft from the recorded batch");
+            // The flow's own top-level `app` is the old format; a STEP must
+            // never carry the newer launch_app `app` field.
+            let steps = draft["flow"]["steps"].as_array().unwrap();
+            assert_eq!(
+                steps[0],
+                serde_json::json!({"kind":"launch_app","bundle":"com.apple.Preferences"}),
+                "{draft}"
+            );
+            assert!(steps.iter().all(|step| step.get("app").is_none()), "{draft}");
+        });
+    }
+
+    /// `/agent/input` starts its device budget only after a launch name is
+    /// resolved: an inventory read must not be charged to the dispatch.
+    #[test]
+    fn the_input_deadline_starts_after_app_name_resolution() {
+        let source = include_str!("http.rs");
+        let start = source.find("async fn agent_input_inner(").unwrap();
+        let body = &source[start..];
+        let resolve = body.find("resolve_launch_app_action(&state, &mut value)").unwrap();
+        let deadline = body
+            .find("let agent_wda_deadline = tokio::time::Instant::now() + AGENT_INPUT_WDA_DEADLINE;")
+            .unwrap();
+        assert!(resolve < deadline, "the deadline is set before resolution");
     }
 
     #[test]
