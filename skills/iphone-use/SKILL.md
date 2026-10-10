@@ -179,7 +179,8 @@ reference: *Flows*.
    fills the user's own vault entry inside the daemon. Never ask for, type or
    repeat a password or code yourself; never sign up, change a password or pay.
    Face ID, a PIN, a code or a login `phone_login` cannot finish: stop, ask the
-   user with the host's question tool, then re-read the screen. → reference:
+   user with the host's question tool (plain text if there is none or it is
+   unavailable right now) and wait, then re-read the screen. → reference:
    *When the person has to sign in*
 7. **Saving and publishing are the user's call.** Ask before saving a flow, and
    ask again before publishing it or filing an issue. Both use their GitHub

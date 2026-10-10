@@ -459,8 +459,9 @@ confirmation: these belong to the person.
 2. Ask with the host's question tool (for example `AskUserQuestion` in Claude
    Code, `request_user_input` in Codex), not a line in your reply. Name the app, what the screen
    asks for and what you will do next; offer "Done, continue" and "Can't right
-   now". Fall back to plain text only when the host has no such tool, and then
-   wait.
+   now". Fall back to plain text when the host has no such tool, or has one
+   that is unavailable or refused right now (Codex allows `request_user_input`
+   only in some modes); then wait for the person's reply.
 3. Never ask for the password, PIN or code, and never type one with
    `phone_type` or a batch, even when the field is not marked secure.
 4. After "Done": clear the hold, read the screen again (`phone_elements`) and
