@@ -539,9 +539,9 @@ worked example below.
 
 ## MCP specifics
 
-28 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
+30 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
 `phone_release_owner`, `phone_login`, `phone_screenshot`, `phone_elements`, `phone_tap`,
-`phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_type`,
+`phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_scroll_find`, `phone_collect_list`, `phone_type`,
 `phone_key`, `phone_shortcut`, `phone_run_steps`, `phone_jev_run`,
 `phone_run_start`, `phone_run_end`, and `phone_flow_list / info / run / draft /
 update / publish / report`.

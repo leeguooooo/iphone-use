@@ -209,7 +209,7 @@ jobs:
           listing = next(item for item in responses if item.get("id") == 2)
           tools = listing["result"]["tools"]
           names = [tool["name"] for tool in tools]
-          assert len(names) == 28, names
+          assert len(names) == 30, names
           for required in (
               "phone_run_steps",
               "phone_hold",

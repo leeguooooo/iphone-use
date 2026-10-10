@@ -3010,7 +3010,7 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            28,
+            30,
             "tool count changed; update README, the skill, and the CI assertion: {names:?}"
         );
         for required in [
@@ -3450,7 +3450,7 @@ mod tests {
                 assert!(tool.get("_meta").is_none(), "{name} has no _meta: {tool}");
             }
         }
-        assert_eq!(tools.len(), 28, "26 tools before the panel, plus two");
+        assert_eq!(tools.len(), 30, "28 tools plus the list collector and scroll finder");
     }
 
     #[test]
