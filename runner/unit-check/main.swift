@@ -547,6 +547,135 @@ do {
         "no alert in the tree: nothing")
 }
 
+// MARK: - Safari's own dialogs count as alerts (#255)
+
+do {
+  func rect(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> [String: Any] {
+    ["x": x, "y": y, "width": w, "height": h]
+  }
+  // The shape iOS 26 Safari shows for `alert('x')`: an identifier-only StaticText, the message
+  // in a TextView, and the close button, inside a plain container over the page.
+  let marker: [String: Any] = [
+    "type": "XCUIElementTypeStaticText", "rawIdentifier": "SFDialogViewMessageText",
+    "name": "SFDialogViewMessageText", "label": NSNull(), "value": NSNull(),
+  ]
+  let message: [String: Any] = ["type": "XCUIElementTypeTextView", "value": "x", "label": NSNull()]
+  let close: [String: Any] = ["type": "XCUIElementTypeButton", "label": "关闭", "name": "关闭", "rect": rect(40, 500, 320, 44)]
+  let dialog: [String: Any] = [
+    "type": "XCUIElementTypeOther",
+    "children": [["type": "XCUIElementTypeOther", "children": [marker, message]], close],
+  ]
+  let pageButton: [String: Any] = ["type": "XCUIElementTypeButton", "label": "a"]
+  let page: [String: Any] = ["type": "XCUIElementTypeWebView", "children": [pageButton]]
+  let window: [String: Any] = ["type": "XCUIElementTypeWindow", "children": [page, dialog]]
+  let safari: [String: Any] = ["type": "XCUIElementTypeApplication", "label": "Safari浏览器", "children": [window]]
+
+  let found = AlertScan.firstAlert(in: safari, maxDepth: 64)
+  check(found != nil, "a Safari dialog (SFDialogViewMessageText) is reported as an alert")
+  if let found {
+    let described = AlertScan.describe(found.alert)
+    check(described.text == "x", "the dialog's text is the message, not the identifier: \(described.text)")
+    check(described.buttons.map(\.label) == ["关闭"], "the dialog's buttons only, not the page's: \(described.buttons.map(\.label))")
+    check(described.buttons.first?.rect.midY == 522, "the button keeps its frame for the tap")
+    check(found.maybeCut == false, "a dialog read in full is not cut")
+  }
+
+  // Safari's invalid-address dialog: the message is the marker's own label.
+  let invalid: [String: Any] = [
+    "type": "XCUIElementTypeOther",
+    "children": [
+      ["type": "XCUIElementTypeStaticText", "rawIdentifier": "SFDialogViewMessageText",
+       "label": "Safari浏览器打不开该网页，因为网址无效。"],
+      ["type": "XCUIElementTypeButton", "label": "好"],
+    ],
+  ]
+  let invalidTree: [String: Any] = ["type": "XCUIElementTypeApplication", "children": [["type": "XCUIElementTypeWindow", "children": [invalid]]]]
+  let invalidFound = AlertScan.firstAlert(in: invalidTree, maxDepth: 64).map { AlertScan.describe($0.alert) }
+  check(invalidFound?.text == "Safari浏览器打不开该网页，因为网址无效。" && invalidFound?.buttons.map(\.label) == ["好"],
+        "the invalid-address dialog reads as text + 好")
+
+  // A marker with no button in its own container never widens to the window's buttons.
+  let loose: [String: Any] = [
+    "type": "XCUIElementTypeApplication",
+    "children": [["type": "XCUIElementTypeWindow", "children": [marker, pageButton]]],
+  ]
+  check(AlertScan.firstAlert(in: loose, maxDepth: 64) == nil, "a message outside a dialog container is not an alert")
+
+  // A real alert still wins, and its text keeps reading as before.
+  let okButton: [String: Any] = ["type": "XCUIElementTypeButton", "label": "OK"]
+  let real: [String: Any] = [
+    "type": "XCUIElementTypeAlert", "label": "Title",
+    "children": [["type": "XCUIElementTypeStaticText", "label": "Body"], okButton],
+  ]
+  let both: [String: Any] = ["type": "XCUIElementTypeApplication", "children": [dialog, real]]
+  let picked = AlertScan.firstAlert(in: both, maxDepth: 64)
+  check(picked?.alert["type"] as? String == "XCUIElementTypeAlert", "an XCUIElementTypeAlert is preferred")
+  check(picked.map { AlertScan.describe($0.alert).text } == "Body", "an alert's static text reads as before")
+}
+
+// The tree hardware gave for Safari's invalid-address dialog (iPhone 17 Pro Max, iOS 27): the
+// SFDialogView container on level 11, its marker and button on 12, the message below.
+do {
+  let message = "Safari浏览器打不开该网页，因为网址无效。"
+  let dialog: [String: Any] = [
+    "type": "XCUIElementTypeOther", "rawIdentifier": "SFDialogView", "name": "SFDialogView",
+    "children": [
+      ["type": "XCUIElementTypeStaticText", "rawIdentifier": "SFDialogViewMessageText", "name": "SFDialogViewMessageText",
+       "children": [["type": "XCUIElementTypeTextView", "value": message, "children": [
+         ["type": "XCUIElementTypeTextView", "label": message, "name": message],
+         ["type": "XCUIElementTypeOther", "label": "垂直滚动条, 1页", "value": "0%"],
+       ]]]],
+      ["type": "XCUIElementTypeButton", "label": "好", "name": "好",
+       "rect": ["x": 370, "y": 466.7, "width": 30, "height": 29],
+       "children": [["type": "XCUIElementTypeStaticText", "label": "好"]]],
+    ],
+  ]
+  // Levels 0-10 above it: Application, Window, Others, ScrollView, TabDocument, WebView, Other.
+  var tree: [String: Any] = ["type": "XCUIElementTypeOther", "children": [["type": "XCUIElementTypeOther"], dialog]]
+  for type in ["WebView", "Other", "ScrollView", "Other", "Other", "Other", "Other", "Other", "Window", "Application"] {
+    tree = ["type": "XCUIElementType" + type, "children": [tree]]
+  }
+  let full = AlertScan.firstAlert(in: tree, maxDepth: 64)
+  check(full?.alert["rawIdentifier"] as? String == "SFDialogView" && full?.maybeCut == false,
+        "the full read finds the SFDialogView container, complete")
+  let described = full.map { AlertScan.describe($0.alert) }
+  check(described?.text == message, "the invalid-address dialog's text: \(described?.text ?? "nil")")
+  check(described?.buttons.map(\.label) == ["好"], "its one button: 好")
+
+  // The shallow alert scan reads 12 levels (0-11): the container arrives without its children.
+  func cut(_ node: [String: Any], _ depth: Int, _ maxDepth: Int) -> [String: Any] {
+    var node = node
+    if depth >= maxDepth - 1 {
+      node.removeValue(forKey: "children")
+    } else if let children = node["children"] as? [[String: Any]] {
+      node["children"] = children.map { cut($0, depth + 1, maxDepth) }
+    }
+    return node
+  }
+  let shallow = AlertScan.firstAlert(in: cut(tree, 0, AlertScan.shallowDepth), maxDepth: AlertScan.shallowDepth)
+  check(shallow?.alert["rawIdentifier"] as? String == "SFDialogView" && shallow?.maybeCut == true,
+        "a 12-level read sees the dialog's container and asks for the full read")
+
+  // A dialog nested one level deeper: the quick scan misses it, the alert routes' full-depth
+  // fallback (Safari only) finds it.
+  // (one extra Other between the application and its window: the dialog moves to level 12)
+  let deeper: [String: Any] = [
+    "type": "XCUIElementTypeApplication",
+    "children": [["type": "XCUIElementTypeOther", "children": tree["children"] ?? []]],
+  ]
+  check(AlertScan.firstAlert(in: cut(deeper, 0, AlertScan.shallowDepth), maxDepth: AlertScan.shallowDepth) == nil,
+        "the 12-level quick scan cannot see a dialog on level 12")
+  check(AlertScan.mayHoldWebDialog(bundleID: "com.apple.mobilesafari")
+        && AlertScan.mayHoldWebDialog(bundleID: "com.apple.SafariViewService")
+        && !AlertScan.mayHoldWebDialog(bundleID: "com.apple.Preferences")
+        && !AlertScan.mayHoldWebDialog(bundleID: nil),
+        "the full-depth fallback runs only in Safari and its in-app sheet")
+  let fallback = AlertScan.webDialog(in: deeper)
+  check(fallback?.depth == 12 && fallback.map { AlertScan.describe($0.node) }?.text == message
+        && fallback.map { AlertScan.describe($0.node) }?.buttons.map(\.label) == ["好"],
+        "the full-depth fallback finds the deeper dialog with its text and button")
+}
+
 // MARK: - Element registry bounds
 
 do {

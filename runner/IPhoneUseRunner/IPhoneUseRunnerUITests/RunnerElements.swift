@@ -375,7 +375,22 @@ enum AlertScan {
 
   /// Levels read when only looking for an alert: alerts sit a few levels under the window, while
   /// a full read of an app's content can be thousands of nodes.
+  /// Safari's own dialogs sit on level 11 (`webDialogID`, hardware: iOS 27), the last level this
+  /// read returns; the container then arrives without children and `firstAlert` asks for the full
+  /// read. Reading even one level deeper in Safari costs the whole page (iOS 27, a Wikipedia
+  /// article: 54 nodes / ~60 ms at 12 levels, 523 nodes / ~225 ms at 13), so the depth stays;
+  /// the alert routes instead look once at full depth in Safari before answering "no alert"
+  /// (`mayHoldWebDialog`).
   static let shallowDepth = 12
+
+  /// Processes that draw Safari's own dialogs: Safari and the in-app Safari sheet.
+  static let webDialogHosts: Set<String> = ["com.apple.mobilesafari", "com.apple.SafariViewService"]
+
+  /// Whether an alert route that found nothing at `shallowDepth` should read this process's full
+  /// tree for a Safari dialog nested deeper than the shallow read reaches.
+  static func mayHoldWebDialog(bundleID: String?) -> Bool {
+    bundleID.map(webDialogHosts.contains) ?? false
+  }
 
   /// The first alert in a tree read to `maxDepth` node levels, and whether the depth cap may have
   /// cut its subtree (a childless node on the deepest level can be one whose children the AX
@@ -393,8 +408,89 @@ enum AlertScan {
       if children.isEmpty { return depth >= maxDepth - 1 }
       return children.contains { reachesCap($0, depth + 1) }
     }
-    guard let found = find(root, 0) else { return nil }
+    guard let found = find(root, 0) ?? webDialog(in: root) else { return nil }
     return (found.node, reachesCap(found.node, found.depth))
+  }
+
+  /// Identifiers of a dialog Safari draws itself (a page's `alert()` / `confirm()` / `prompt()`,
+  /// "the address is invalid"): its container and its message. Such a dialog blocks the page like
+  /// an alert, but it is not an XCUIElementTypeAlert, so neither XCTest's alert query nor the type
+  /// match above finds it (#255). Hardware, iPhone 17 Pro Max / iOS 27 Safari: `SFDialogView`
+  /// (an Other on level 11, inside the WebView) holds the `SFDialogViewMessageText` StaticText
+  /// (identifier only; the message is in the TextViews below it) and the button.
+  static let webDialogID = "SFDialogView"
+  static let webDialogMessageID = "SFDialogViewMessageText"
+
+  /// A Safari dialog in the tree, with its depth: the `SFDialogView` container, else the closest
+  /// ancestor of its message node that also holds a button (never the window or the app). The
+  /// container matches even when a shallow read cut its children, so `firstAlert` reports it as
+  /// possibly cut and the caller reads the full depth.
+  static func webDialog(in root: [String: Any]) -> (node: [String: Any], depth: Int)? {
+    func isMessage(_ node: [String: Any]) -> Bool {
+      ["rawIdentifier", "name", "label"].contains { node[$0] as? String == webDialogMessageID }
+    }
+    func hasButton(_ node: [String: Any]) -> Bool {
+      if node["type"] as? String == "XCUIElementTypeButton" { return true }
+      return (node["children"] as? [[String: Any]] ?? []).contains(where: hasButton)
+    }
+    // `path` is the chain of ancestors from the root down to `node`'s parent.
+    func find(_ node: [String: Any], _ path: [[String: Any]]) -> (node: [String: Any], depth: Int)? {
+      if node["rawIdentifier"] as? String == webDialogID { return (node, path.count) }
+      if isMessage(node) {
+        for (depth, ancestor) in path.enumerated().reversed() {
+          let type = ancestor["type"] as? String
+          if type == "XCUIElementTypeWindow" || type == "XCUIElementTypeApplication" { return nil }
+          if hasButton(ancestor) { return (ancestor, depth) }
+        }
+        return nil
+      }
+      for child in node["children"] as? [[String: Any]] ?? [] {
+        if let found = find(child, path + [node]) { return found }
+      }
+      return nil
+    }
+    return find(root, [])
+  }
+
+  /// An alert's text (its static texts and text views, in order, without repeats) and buttons.
+  /// A text node named only by its identifier contributes nothing: an identifier such as
+  /// `SFDialogViewMessageText` is not something on screen.
+  static func describe(_ alert: [String: Any]) -> (text: String, buttons: [(label: String, rect: CGRect)]) {
+    var texts: [String] = []
+    var buttons: [(label: String, rect: CGRect)] = []
+    func string(_ node: [String: Any], _ key: String) -> String? {
+      guard let value = node[key] as? String, !value.isEmpty else { return nil }
+      return value
+    }
+    func label(_ node: [String: Any]) -> String? {
+      string(node, "label") ?? string(node, "name") ?? string(node, "value")
+    }
+    func shownText(_ node: [String: Any]) -> String? {
+      if let label = string(node, "label") { return label }
+      if let value = string(node, "value") { return value }
+      if let name = string(node, "name"), name != string(node, "rawIdentifier") { return name }
+      return nil
+    }
+    func rect(_ node: [String: Any]) -> CGRect {
+      let r = node["rect"] as? [String: Any] ?? [:]
+      func v(_ key: String) -> CGFloat { CGFloat((r[key] as? NSNumber)?.doubleValue ?? 0) }
+      return CGRect(x: v("x"), y: v("y"), width: v("width"), height: v("height"))
+    }
+    func walk(_ node: [String: Any]) {
+      let type = node["type"] as? String
+      if type == "XCUIElementTypeButton" {
+        if let text = label(node) { buttons.append((text, rect(node))) }
+        return
+      }
+      if type == "XCUIElementTypeStaticText" || type == "XCUIElementTypeTextView",
+         let text = shownText(node), !texts.contains(text) {
+        texts.append(text)
+      }
+      for child in node["children"] as? [[String: Any]] ?? [] { walk(child) }
+    }
+    for child in alert["children"] as? [[String: Any]] ?? [] { walk(child) }
+    if texts.isEmpty, let title = label(alert) { texts.append(title) }
+    return (texts.joined(separator: "\n"), buttons)
   }
 }
 
