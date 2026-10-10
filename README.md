@@ -4,24 +4,21 @@
 
 <h1 align="center">iphone-use</h1>
 
-<p align="center"><em>Computer-use, but for the iPhone — let AI agents (and your browser) see and drive a real phone.</em></p>
+<p align="center"><strong>Let AI agents use your real iPhone.</strong><br>
+Claude Code, Codex or any MCP client reads the screen as text, taps, types and swipes in any app, including the ones with no API.</p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="Platform: macOS 15+">
+  <img src="https://img.shields.io/badge/iPhone-iOS%2015%2B-black" alt="iPhone: iOS 15+">
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="Built with Rust">
-  <img src="https://img.shields.io/badge/runs%20on-XCTest-success" alt="Runs on XCTest">
+  <img src="https://img.shields.io/badge/MCP-server-success" alt="MCP server">
 </p>
 
 <p align="center">
   <strong>English</strong> ·
   <a href="README.zh-CN.md">简体中文</a>
 </p>
-
-**Current device backend:** our own XCTest runner, replacing WebDriverAgent since v0.14.0. Its API is WDA-compatible; current control does not depend on iPhone Mirroring.
-
-**Let an AI agent use your real iPhone:** it reads the screen as text, taps, swipes and
-types, and is told plainly when an action did not land.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
@@ -31,16 +28,38 @@ https://github.com/user-attachments/assets/f1e6574d-3134-4c23-9092-4b51bc79af2c
 
 <sub>2-minute demo · [中文版](https://github.com/user-attachments/assets/a9947152-6655-4509-ac1e-49953a3cea70)</sub>
 
-**What you need**
+## Why iphone-use
 
-- A Mac (macOS 15+) with Xcode, signed in to an Apple ID — a free one works.
-- An iPhone with Developer Mode on (Settings → Privacy & Security → Developer Mode).
-- A USB cable. Plug the iPhone in and unlock it before you install.
+- **Any app, no API needed.** It works on Health, banking and payment apps (even the ones that black out screen capture), chat apps and your own app under test.
+- **USB or Wi-Fi.** Set the phone up once with a cable; after that it can be driven over Wi-Fi through an encrypted tunnel.
+- **Old iPhones too.** iOS 15 and later, without updating the phone.
+- **Fast.** Its own XCTest device runner reads the screen in about 0.1 s. A tap that returns the settled screen takes about 1.9 s ([numbers](#speed)).
+- **Honest results.** Every action reports whether it was applied, not sent, or unknown, and whether a retry is safe. Taps on covered elements are refused, not passed off as done.
+- **Replayable flows.** A task done once becomes a flow that replays in one call, with no model and no tokens.
+- **Watch it live.** The live screen shows in the agent host's side panel (where MCP Apps is supported), in a browser, or in the iOS app.
+- **Nothing on the Mac moves.** It never touches the Mac's screen, cursor or focus.
 
-The installer then sets the phone up, shows an agent opening Settings and reading it,
-registers the MCP server with Claude Code and Codex, and opens the control page in your browser
-with a one-time sign-in — there is no password to copy. If anything is missing it says
-what and how to fix it.
+## What you can ask
+
+```text
+Open Health and tell me how many steps I walked each day this week.
+Find the newest message from Mom in WeChat and read it to me.
+Collect every transaction on this bank statement page, all the way to the end.
+Write this 2,000-word draft into a new note in Notes.
+Run my app's login test on the real phone and tell me which step fails.
+```
+
+The agent finds an app by its name (`launch_app {"app": "Health"}`) and types long text (up to 20,000 characters) in one step. It can read a list across pages and say whether it reached the end. Logins, passcodes and Face ID go to you: the agent stops and asks, and never asks for the secret.
+
+## Install
+
+**You need**
+
+- A Mac with macOS 15 or later, and Xcode signed in to an Apple ID (a free one works).
+- An iPhone with iOS 15 or later and Developer Mode on (Settings → Privacy & Security → Developer Mode).
+- A USB cable for the first setup. Plug the iPhone in and unlock it before you install.
+
+The installer then sets the phone up and shows an agent opening Settings and reading it. It registers the MCP server with Claude Code and Codex, and opens the control page in your browser with a one-time sign-in, so there is no password to copy. If anything is missing, it says what and how to fix it.
 
 ```bash
 iphone-use status    # is the phone ready for agents?
@@ -51,7 +70,7 @@ iphone-use login     # sign a browser in again, with a QR code for the iPhone
 iphone-use upgrade   # update everything
 ```
 
-### Install by asking your agent
+### Or ask your agent to install it
 
 Paste this into Codex or Claude Code on the Mac the iPhone is plugged into:
 
@@ -67,7 +86,9 @@ Install iphone-use (https://github.com/leeguooooo/iphone-use) on this Mac so you
 5. If the phone_* tools are not loaded in this chat yet, tell me to start a new chat.
 ```
 
-Codex users can also add the plugin (skill + MCP server; it still needs the install above):
+### Codex plugin
+
+Adds the skill and the MCP server; it still needs the install above:
 
 ```bash
 codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-use@iphone-use
@@ -75,24 +96,15 @@ codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-us
 
 [Product guide: installation, MCP setup, flows and comparison](https://blog.leeguoo.com/en/posts/iphone-use/)
 
-## What it is
-
-iphone-use works on apps that have no API, including banking and payment apps that
-hide their screens from capture. A daemon on your Mac runs its own XCTest-based device
-runner on the iPhone (it replaced WebDriverAgent and speaks the same API) and exposes it
-as:
-
-- an HTTP API for agents and scripts (`/agent/*`),
-- an MCP server with 31 tools for Claude Code, Claude Desktop and other MCP clients,
-- a web page and a native iOS app for people (live screen, tap, type).
-
-Nothing touches the Mac's own screen, cursor or focus.
-
 ## Use it from an agent
 
-The installer installs the agent skill and, when Claude Code or Codex is present, registers
-the MCP server with it. Any other MCP client needs only the command; on this Mac the server finds
-the daemon and its token by itself:
+A daemon on your Mac drives the phone and offers the same control in three forms:
+
+- an **MCP server** for Claude Code, Codex, Claude Desktop, Cursor and other MCP clients;
+- an **HTTP API** for agents and scripts (`/agent/*`);
+- a **web page and a native iOS app** for people: live screen, tap, type.
+
+The installer registers the MCP server with Claude Code and Codex when they are present. Any other MCP client needs only the command; on this Mac the server finds the daemon and its token by itself:
 
 ```json
 {
@@ -113,22 +125,13 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
   -d '{"type":"tap","element":7,"snapshot":"…"}'            # tap, then what changed (~2 s)
 ```
 
-Every answer says whether the action was applied, not sent, or unknown, and whether a
-retry is safe. Taps on covered or hidden elements and writes that did not stick are
-refused or reported instead of passing silently.
+See the [MCP tools](crates/mcp/README.md) and the [Agent API reference](docs/agent-api.html).
 
 ## Flows: do a task once, replay it with no model
 
-Tasks you repeat are kept as **flows**: reviewed per-app scripts that replay without a
-model, so they cost no tokens. The official registry is
-**[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**; record a
-flow in the browser's 流程 panel and publish it there with a PR.
+Tasks you repeat are kept as **flows**: reviewed per-app scripts that replay without a model, so they cost no tokens. The official registry is **[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**. Record a flow in the browser's 流程 panel and publish it there with a PR.
 
-Agents find flows on their own: when one enters an app, the response lists that app's flows.
-After an agent does a multi-step task in an app that has none, it asks whether to save the
-task as a flow; the daemon has already recorded the steps as a draft. The daemon keeps the
-registry fresh by itself (`IPHONE_USE_FLOWS_NO_AUTO_UPDATE=1` turns that off,
-`IPHONE_USE_FLOWS_NO_SUGGEST=1` silences the save suggestions).
+Agents find flows on their own: when one enters an app, the response lists that app's flows. After an agent does a multi-step task in an app that has none, it asks whether to save the task as a flow; the daemon has already recorded the steps as a draft. The daemon keeps the registry fresh by itself (`IPHONE_USE_FLOWS_NO_AUTO_UPDATE=1` turns that off, `IPHONE_USE_FLOWS_NO_SUGGEST=1` silences the save suggestions).
 
 ```bash
 MCP=~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp
@@ -138,46 +141,30 @@ $MCP flow run health/export-all-zh-cn       # replay one; failures say which ste
 $MCP flow draft --out my-task.json          # what you just did on the phone, as a draft flow
 ```
 
-Flows also make rerunnable test suites (`$MCP test suite.yaml`, exit code ready for CI) and
-scheduled runs the daemon starts on a cron line (`$MCP schedule add`): see
-[Testing and scheduled runs](docs/testing.md).
+Flows also make rerunnable test suites (`$MCP test suite.yaml`, with an exit code ready for CI) and scheduled runs the daemon starts on a cron line (`$MCP schedule add`): see [Testing and scheduled runs](docs/testing.md).
 
-## The device runner
+## Speed
 
-iphone-use drives the phone through its own XCTest runner ([`runner/`](runner/README.md)).
-It replaced WebDriverAgent in v0.14.0 and speaks the same HTTP API, so it is a drop-in
-backend. It is built for speed:
+iphone-use drives the phone through its own XCTest runner ([`runner/`](runner/README.md)). It speaks the WebDriverAgent HTTP API, and it is built for speed:
 
-- It reads the screen with one accessibility snapshot of a fixed attribute set, instead of
-  walking the element tree attribute by attribute.
-- It synthesizes touches directly and does not wait for the app to go idle before acting;
-  the daemon checks that the screen has settled afterwards.
-- It is one small app with a built-in HTTP server and MJPEG stream; there are no extra
-  dependencies on the phone.
+- It reads the screen with one accessibility snapshot of a fixed attribute set, instead of walking the element tree attribute by attribute.
+- It synthesizes touches directly and does not wait for the app to go idle before acting; the daemon checks afterwards that the screen has settled.
+- It is one small app with a built-in HTTP server and MJPEG stream; there are no extra dependencies on the phone.
 
-Measured on the same iPhone 13 over USB, against
-[agent-device](https://github.com/callstack/agent-device) (October 2026):
+Measured on the same iPhone 13 over USB, against [agent-device](https://github.com/callstack/agent-device) (October 2026):
 
 | | iphone-use runner | agent-device |
 |---|---|---|
 | Read the screen (accessibility tree) | 0.08–0.135 s | ~0.7 s |
 | Tap, then wait for the screen to settle | 1.0 s | 2.8–3.3 s |
 
-Through the full agent API, a tap by label that returns the settled change takes about
-1.9 s on an iPhone 17 Pro Max; the WebDriverAgent-based release took 4.2 s. The live view
-streams at 27–28 fps. Each phone gets its own daemon and runner, so two phones driven at
-the same time run as fast as either one alone.
+Through the full agent API, a tap by label that returns the settled change takes about 1.9 s on an iPhone 17 Pro Max; the WebDriverAgent-based release took 4.2 s. The live view streams at 27–28 fps. Each phone gets its own daemon and runner, so two phones driven at the same time run as fast as either one alone.
 
 ## More
 
-- [Full guide](docs/guide.md): browser and iOS app, flows and the flow registry,
-  lifecycle, configuration, security, development.
-- [Agent API reference](docs/agent-api.html) · [MCP tools](crates/mcp/README.md) ·
-  [Architecture](docs/direct-device-architecture.html) · [Device setup pitfalls](docs/wda-setup.html) ·
-  [Device runner](runner/README.md)
-- Security in one line: the password protects port 44321; the runner's own ports on the
-  phone accept only requests signed with a per-launch token, but the iOS 15/16 LAN path is
-  unencrypted ([details](docs/guide.md#security)).
+- [Full guide](docs/guide.md): browser and iOS app, flows and the flow registry, Wi-Fi and iOS 15/16, lifecycle, configuration, security, development.
+- [Agent API reference](docs/agent-api.html) · [MCP tools](crates/mcp/README.md) · [Architecture](docs/direct-device-architecture.html) · [Device setup pitfalls](docs/wda-setup.html) · [Device runner](runner/README.md) · [Privacy](docs/privacy.md)
+- Security in one line: the password protects port 44321; the runner's own ports on the phone accept only requests signed with a per-launch token, but the iOS 15/16 LAN path is unencrypted ([details](docs/guide.md#security)).
 - Issues and ideas: [GitHub issues](https://github.com/leeguooooo/iphone-use/issues).
 
 ## License
