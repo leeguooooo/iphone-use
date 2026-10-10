@@ -954,6 +954,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/h264", get(agent_h264))
         .route("/agent/h264/keyframe", post(agent_h264_keyframe))
         .route("/agent/elements", get(agent_elements))
+        .route("/agent/collect", post(agent_collect))
+        .route("/agent/scroll_find", post(agent_scroll_find))
         .route("/agent/flow/draft", get(agent_flow_draft))
         .route("/agent/reference", get(agent_reference))
         // Shortcuts RPC return path: the phone POSTs structured results here.
@@ -10653,6 +10655,391 @@ async fn agent_actions_inner(
         result["agent_focus"] = block;
     }
     agent_actions_json(StatusCode::OK, result)
+}
+
+// ---------------------------------------------------------------------------
+// /agent/collect and /agent/scroll_find: read a list across pages, or look
+// for one label, swiping on the agent's behalf (see `crate::collect`).
+// ---------------------------------------------------------------------------
+
+/// The runner as a [`crate::collect::Pager`]: a page is the element tree, a
+/// swipe is the coordinate scroll `/agent/input` sends (`wda_swipe`).
+struct RunnerPager<'a> {
+    w: &'a mut crate::wda::WdaClient,
+    screen: Option<(f64, f64)>,
+}
+
+impl crate::collect::Pager for RunnerPager<'_> {
+    async fn read(&mut self) -> anyhow::Result<crate::collect::Page> {
+        // Source reads are idempotent: one more try on a fresh session, as a
+        // failed read on /agent/elements gets.
+        let rows = match self.w.elements().await {
+            Ok(rows) => rows,
+            Err(_) => {
+                self.w.invalidate_session();
+                self.w.elements().await?
+            }
+        };
+        if self.screen.is_none() {
+            self.screen = self.w.window_size().await.ok();
+        }
+        Ok(crate::collect::Page {
+            rows,
+            screen: self.screen,
+        })
+    }
+
+    async fn swipe(
+        &mut self,
+        region: Option<crate::collect::Region>,
+        direction: crate::collect::Direction,
+    ) -> anyhow::Result<()> {
+        let (_, height) = match self.screen {
+            Some(screen) => screen,
+            None => self.w.window_size().await?,
+        };
+        let region = region.unwrap_or(crate::collect::Region::FULL);
+        let (x, y) = region.center();
+        let dy = crate::collect::page_dy(region.h * height, direction);
+        wda_swipe(self.w, x, y, 0.0, dy).await?;
+        tokio::time::sleep(crate::collect::SWIPE_SETTLE).await;
+        Ok(())
+    }
+}
+
+/// Auth and the control header, before the body is even looked at.
+fn authorize_list_call(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    match agent_auth(state, headers) {
+        AgentAuth::Locked => Err(with_security_headers(
+            (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+        )),
+        AgentAuth::Denied => Err(with_security_headers(
+            (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+        )),
+        AgentAuth::Ok if !has_phone_control_header(headers) => {
+            Err(missing_phone_control_header_response())
+        }
+        AgentAuth::Ok => Ok(()),
+    }
+}
+
+fn invalid_list_request(detail: String) -> Response {
+    json_response(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({"ok": false, "error": "invalid_request", "detail": detail, "retry_safe": true}),
+    )
+}
+
+/// What `/agent/input` checks before it drives the phone — the owner lease,
+/// readiness, Do Not Disturb — then the runner, locked and unlocked.
+async fn begin_list_control<'a>(
+    state: &'a Arc<AppState>,
+    headers: &HeaderMap,
+    wda: &'a tokio::sync::Mutex<crate::wda::WdaClient>,
+    deadline: tokio::time::Instant,
+) -> Result<tokio::sync::MutexGuard<'a, crate::wda::WdaClient>, Response> {
+    claim_phone_owner(state, headers)?;
+    if let Some(refusal) = control_readiness_refusal(state) {
+        return Err(refusal.into_response());
+    }
+    state.touch_activity();
+    state.cancel_settled_frame_prefetch();
+    let focus_block = engage_agent_focus(state, &mut *wda.lock().await).await;
+    if let Some(waiting) = focus_permission_pending(focus_block.as_ref()) {
+        return Err(waiting);
+    }
+    // These calls swipe: whatever screen the owner's tracker held is gone.
+    if let Some(owner) = trusted_bearer_owner(state, headers) {
+        crate::advice::reset(&owner);
+    }
+    let mut w = wda.lock().await;
+    if state.wda_lifecycle.is_transitioning()
+        || state.released.load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err(json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"ok": false, "error": "device_transition_in_progress", "transitioning": true, "retry_safe": true}),
+        ));
+    }
+    unlock_before_action(state, &mut w, deadline).await;
+    Ok(w)
+}
+
+/// Keep a page's tree as a snapshot the caller can act on.
+fn remember_page(
+    state: &AppState,
+    headers: &HeaderMap,
+    rows: Vec<crate::wda::ElementRow>,
+) -> Option<String> {
+    let snapshot = element_snapshot_id(&rows).ok()?;
+    let rows = Arc::new(rows);
+    remember_element_snapshot(state, &snapshot, &rows);
+    note_owner_snapshot(state, headers, &snapshot);
+    Some(snapshot)
+}
+
+fn first_read_failed(state: &AppState, error: &anyhow::Error) -> Response {
+    tracing::warn!("list read failed before any swipe: {error:#}");
+    mark_wda_read_path_unactionable(state);
+    json_response(
+        StatusCode::BAD_GATEWAY,
+        serde_json::json!({
+            "ok": false,
+            "error": "wda_source_failed",
+            "transitioning": true,
+            "retry_safe": true,
+            "swipes": 0,
+            "hint": "the first screen read failed, so nothing was swiped; check /agent/status and read /agent/elements before trying again"
+        }),
+    )
+}
+
+/// `POST /agent/collect` — read rows of one kind across pages:
+/// `{"row_kind":"Cell","region":[x,y,w,h],"max_pages":6,"end_label":"…","direction":"down"}`
+/// (all optional). See [`crate::collect`] for the stop rules; `complete` is
+/// true only when `end_label` was seen.
+async fn agent_collect(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(refused) = authorize_list_call(&state, &headers) {
+        return refused;
+    }
+    let parsed = if body.trim().is_empty() {
+        Ok(serde_json::Value::Null)
+    } else {
+        serde_json::from_str::<serde_json::Value>(&body).map_err(|e| format!("body is not JSON: {e}"))
+    };
+    let request = match parsed.and_then(|value| crate::collect::CollectRequest::from_json(&value)) {
+        Ok(request) => request,
+        Err(detail) => return invalid_list_request(detail),
+    };
+    let Some(wda) = state.wda.clone() else {
+        return ControlRefusal::wda_not_configured().into_response();
+    };
+    let deadline = tokio::time::Instant::now() + crate::collect::COLLECT_DEADLINE;
+    let _priority = state.begin_wda_control();
+    let mut w = match begin_list_control(&state, &headers, &wda, deadline).await {
+        Ok(w) => w,
+        Err(refused) => return refused,
+    };
+    let mut pager = RunnerPager {
+        w: &mut w,
+        screen: None,
+    };
+    let result = crate::collect::collect(&mut pager, &request, deadline).await;
+    drop(w);
+    match result {
+        Err(error) => first_read_failed(&state, &error),
+        Ok(mut collection) => {
+            // After a failed swipe or read the last tree read is no longer
+            // the screen: no snapshot to act on.
+            let current = !matches!(
+                collection.stop,
+                crate::collect::StopReason::ReadFailed | crate::collect::StopReason::SwipeFailed
+            );
+            let rows = std::mem::take(&mut collection.last.rows);
+            let snapshot = current.then(|| remember_page(&state, &headers, rows)).flatten();
+            json_response(
+                StatusCode::OK,
+                crate::collect::collection_json(&collection, snapshot.as_deref()),
+            )
+        }
+    }
+}
+
+/// Where a label stands on one read.
+enum FindVerdict {
+    /// On screen and tappable (`/agent/input`'s label tap would act on it).
+    Found(usize),
+    /// In the tree, outside the screen.
+    OffScreen(usize),
+    NotFound,
+    /// Several on-screen matches: `{"snapshot","matches":[…]}`.
+    Ambiguous(serde_json::Value),
+    /// Covered (`element_occluded`) or not drawn (`element_not_visible`).
+    Blocked(&'static str),
+}
+
+fn find_verdict(rows: &[crate::wda::ElementRow], label: &str, kind: Option<&str>) -> FindVerdict {
+    match label_tap_target(rows, label, kind, &serde_json::json!({})) {
+        Ok((index, _, _)) if center_off_screen(rows, index) || !row_is_on_screen(rows, index) => {
+            FindVerdict::OffScreen(index)
+        }
+        Ok((index, _, _)) => FindVerdict::Found(index),
+        Err(UniqueLabelTapError::Ambiguous(detail)) => {
+            FindVerdict::Ambiguous(detail.unwrap_or(serde_json::Value::Null))
+        }
+        Err(UniqueLabelTapError::Refused(code, _)) => FindVerdict::Blocked(code),
+        Err(_) => FindVerdict::NotFound,
+    }
+}
+
+fn found_row_json(rows: &[crate::wda::ElementRow], index: usize) -> serde_json::Value {
+    let row = &rows[index];
+    serde_json::json!({
+        "index": index,
+        "kind": row.kind,
+        "label": row.label,
+        "identifier": row.identifier,
+        "value": row.value,
+        "rect": row.rect,
+    })
+}
+
+/// On-screen rows whose label contains `label` (case-insensitively), for a
+/// caller whose exact label did not match. Bounded.
+fn near_miss_candidates(rows: &[crate::wda::ElementRow], label: &str) -> Vec<serde_json::Value> {
+    let needle = label.to_lowercase();
+    rows.iter()
+        .enumerate()
+        .filter(|(index, row)| {
+            !row.label.is_empty()
+                && row.label != label
+                && row.label.to_lowercase().contains(&needle)
+                && row_is_on_screen(rows, *index)
+        })
+        .take(5)
+        .map(|(index, _)| found_row_json(rows, index))
+        .collect()
+}
+
+/// `POST /agent/scroll_find` — `{"label":"…","kind":"Button","max_swipes":1,
+/// "direction":"down","region":[x,y,w,h]}`: is the label on screen and
+/// tappable? If not, swipe (at most `max_swipes`, default 1) and look again.
+/// An ambiguous, covered or undrawn match stops at once, before any swipe.
+async fn agent_scroll_find(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(refused) = authorize_list_call(&state, &headers) {
+        return refused;
+    }
+    let request = match serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|e| format!("body is not JSON: {e}"))
+        .and_then(|value| crate::collect::FindRequest::from_json(&value))
+    {
+        Ok(request) => request,
+        Err(detail) => return invalid_list_request(detail),
+    };
+    let Some(wda) = state.wda.clone() else {
+        return ControlRefusal::wda_not_configured().into_response();
+    };
+    let deadline = tokio::time::Instant::now() + crate::collect::COLLECT_DEADLINE;
+    let _priority = state.begin_wda_control();
+    let mut w = match begin_list_control(&state, &headers, &wda, deadline).await {
+        Ok(w) => w,
+        Err(refused) => return refused,
+    };
+    let mut pager = RunnerPager {
+        w: &mut w,
+        screen: None,
+    };
+    use crate::collect::Pager as _;
+    let mut page = match pager.read().await {
+        Ok(page) => page,
+        Err(error) => {
+            drop(w);
+            return first_read_failed(&state, &error);
+        }
+    };
+    let mut swipes = 0u32;
+    let mut stop_error: Option<(&'static str, String)> = None;
+    let verdict = loop {
+        let verdict = find_verdict(&page.rows, &request.label, request.kind.as_deref());
+        let direction = match &verdict {
+            FindVerdict::NotFound => request.direction,
+            // Toward the row: below the screen means reveal what is below.
+            FindVerdict::OffScreen(index) => {
+                let bottom = screen_rect(&page.rows).map(|[_, y, _, h]| y + h);
+                match (element_center(&page.rows[*index]), bottom) {
+                    (Some((_, cy)), Some(bottom)) if cy > bottom => crate::collect::Direction::Down,
+                    (Some((_, cy)), _) if cy < 0.0 => crate::collect::Direction::Up,
+                    _ => request.direction,
+                }
+            }
+            _ => break verdict,
+        };
+        if swipes >= request.max_swipes {
+            break verdict;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            stop_error = Some(("deadline", "the call's time budget ran out".to_string()));
+            break verdict;
+        }
+        if let Err(error) = pager.swipe(request.region, direction).await {
+            stop_error = Some(("swipe_failed", format!("{error:#}")));
+            break verdict;
+        }
+        swipes += 1;
+        match pager.read().await {
+            Ok(next) => page = next,
+            Err(error) => {
+                stop_error = Some(("read_failed", format!("{error:#}")));
+                break verdict;
+            }
+        }
+    };
+    drop(w);
+    let mut body = serde_json::json!({"swipes": swipes, "max_swipes": request.max_swipes});
+    match &verdict {
+        FindVerdict::Found(index) => {
+            body["ok"] = true.into();
+            body["found"] = true.into();
+            body["stop_reason"] = "found".into();
+            body["target"] = found_row_json(&page.rows, *index);
+            body["hint"] = "on screen and tappable: tap it by its index with this snapshot, or by its label".into();
+        }
+        FindVerdict::Ambiguous(detail) => {
+            body["error"] = "ambiguous_element_label".into();
+            body["stop_reason"] = "ambiguous".into();
+            body["candidates"] = detail.get("matches").cloned().unwrap_or_default();
+            body["hint"] = "several on-screen rows carry this label: pick one by index with this snapshot, or narrow with kind; nothing more was swiped".into();
+        }
+        FindVerdict::Blocked(code) => {
+            body["error"] = (*code).into();
+            body["stop_reason"] = if *code == "element_occluded" { "occluded" } else { "not_visible" }.into();
+            if let Some(index) = page.rows.iter().position(|row| {
+                row.label == request.label
+                    && request.kind.as_deref().is_none_or(|kind| row.kind == kind)
+            }) {
+                body["target"] = found_row_json(&page.rows, index);
+                if let Some(cover) = occluding_row(&page.rows, index) {
+                    body["covered_by"] = serde_json::json!({"kind": cover.kind, "label": cover.label});
+                }
+            }
+            body["hint"] = "the label is there but a tap would not reach it (covered or not drawn); nothing more was swiped — bring it clear, then read again".into();
+        }
+        FindVerdict::OffScreen(index) => {
+            body["error"] = "element_not_visible".into();
+            body["stop_reason"] = "off_screen".into();
+            body["target"] = found_row_json(&page.rows, *index);
+            body["hint"] = "the label is in the tree but still outside the screen after the allowed swipes; look at the screen before swiping further".into();
+        }
+        FindVerdict::NotFound => {
+            body["error"] = "element_not_found".into();
+            body["stop_reason"] = "not_found".into();
+            body["candidates"] = near_miss_candidates(&page.rows, &request.label).into();
+            body["hint"] = "no row carries exactly this label after the allowed swipes; candidates are on-screen labels that contain it. Absence is not proof: check the screen before swiping again".into();
+        }
+    }
+    if !matches!(verdict, FindVerdict::Found(_)) {
+        body["ok"] = false.into();
+        body["found"] = false.into();
+    }
+    // After a failed swipe or read the last tree read is no longer the
+    // screen: no snapshot to act on.
+    let current = !matches!(stop_error, Some(("swipe_failed" | "read_failed", _)));
+    if let Some((reason, error)) = stop_error {
+        body["stop_reason"] = reason.into();
+        body["stop_error"] = error.into();
+    }
+    if let Some(snapshot) = current.then(|| remember_page(&state, &headers, page.rows)).flatten() {
+        body["snapshot"] = snapshot.into();
+    }
+    json_response(StatusCode::OK, body)
 }
 
 #[derive(Debug, Default, Deserialize)]

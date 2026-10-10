@@ -7,6 +7,7 @@ Details behind [SKILL.md](SKILL.md). Read the section you need, when you need it
 - [HTTP API](#http-api)
 - [Actions catalogue](#actions-catalogue)
 - [Reading results: settle, delta, wait_for](#reading-results-settle-delta-wait_for)
+- [Long lists: collect and scroll_find](#long-lists-collect-and-scroll_find)
 - [Gestures and controls](#gestures-and-controls)
 - [When the person has to sign in](#when-the-person-has-to-sign-in)
 - [Chat apps: multi-line messages](#chat-apps-multi-line-messages)
@@ -249,6 +250,8 @@ only on a trusted network.
 | `GET /agent/screenshot` | Device PNG. `?max_side=1200` shrinks it (~0.9k image tokens instead of ~1.5k; MCP's default) and lets a current live frame answer while someone watches. `X-Capture-Redacted: 1` = wireframe of a protected screen ([below](#screens-hidden-from-capture)); `?raw=1` untouched |
 | `POST /agent/input` | One action; `?return=delta` adds the settled change |
 | `POST /agent/actions` | `{"steps":[…]}`: up to 24 `action` / `wait_for` / `pause` steps, validated first, stops at the first failure |
+| `POST /agent/collect` | Read a list across pages: rows of `row_kind`, one swipe per page, deduplicated ([below](#long-lists-collect-and-scroll_find)) |
+| `POST /agent/scroll_find` | Is this label on screen and tappable? Swipe at most `max_swipes` (default 1) to find it ([below](#long-lists-collect-and-scroll_find)) |
 | `GET /agent/flow/draft` | The daemon's recorded trail as a flow v1 draft ([below](#saving-a-flow)) |
 | `GET /agent/reference` | This document, as compiled into the running daemon (`text/markdown`) |
 | `GET /agent/apps` | Installed apps `{device, apps:[{bundle,name,version,bundle_version,system,…}]}`; `?bundle=`; cached 10 min (`?refresh=1`). `503 apps_unavailable` = unknown, not "not installed" |
@@ -379,6 +382,51 @@ is no longer cached). The action result and the observation are separate facts:
   scroll, back, pay, send or delete blindly.
 - A non-2xx read or an empty tree with `error` is a failed checkpoint even if
   the last status said `drivable:true`.
+
+## Long lists: collect and scroll_find
+
+`POST /agent/collect` (MCP `phone_collect_list`) reads a scrolling list in one
+call: the rows of one kind on screen, a swipe of about 60% of the list (the
+rest stays as overlap, so no row is skipped), the next read, and so on.
+
+```jsonc
+{"row_kind":"Cell",            // default; StaticText, Button, Link, …
+ "region":[0,0.15,1,0.75],     // optional: rows centred here, swipes here
+ "max_pages":6,                // 1–10
+ "end_label":"没有更多了",       // optional, exact
+ "direction":"down"}           // or "up"
+```
+
+A row without a label (most Cells) is named by its texts, joined with ` · `.
+Rows are deduplicated on `(kind, label, value)`, so identical-looking rows
+collapse into one. `stop_reason`:
+
+| `stop_reason` | Meaning |
+|---|---|
+| `end_label` | The end label was on screen — the only case with `complete:true` |
+| `duplicate_page` | After a swipe the page was the same: the list did not move (its end, or the swipe hit something that does not scroll) |
+| `no_progress` | The list moved but showed nothing new |
+| `max_pages` | Page budget used up; more rows may follow |
+| `deadline` | The 80 s call budget ran out |
+| `read_failed` / `swipe_failed` | Stopped early; rows so far are returned, no snapshot |
+| `no_rows` | No row of that kind on the first page: check `row_kind` or `region` |
+
+`complete` is false in every case but `end_label`; `duplicate_page` and
+`no_progress` are not proof the list ended. `snapshot` is the last page's
+tree; rows from earlier pages are off screen and carry no index.
+
+`POST /agent/scroll_find` (MCP `phone_scroll_find`) looks for one exact label:
+`{"label":"…","kind":"Button","max_swipes":1,"direction":"down","region":[…]}`.
+On screen and tappable: `found:true`, `target` (index, kind, frame) and a
+`snapshot` to tap it by. A label in the tree but below or above the screen is
+swiped toward. It stops AT ONCE, without swiping, when the label is ambiguous
+(`candidates`), covered (`element_occluded`, `covered_by`) or not drawn
+(`element_not_visible`). Not found after the budget: `element_not_found` with
+on-screen labels containing the text as `candidates`. No screenshot is taken;
+look at the screen before swiping further.
+
+Both need `X-Phone-Control: 1`, take the owner lease, and leave the screen
+where they stopped.
 
 ## Gestures and controls
 

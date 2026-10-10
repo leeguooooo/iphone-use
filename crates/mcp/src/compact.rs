@@ -615,10 +615,128 @@ pub fn failed_batch(json: &Value) -> Option<String> {
     Some(out.join("\n"))
 }
 
+/// `phone_collect_list`: the verdict, then one line per collected row.
+pub fn collected_list(json: &Value) -> Option<String> {
+    let rows = json.get("rows")?.as_array()?;
+    let mut out = vec![format!(
+        "collected {} rows over {} pages ({} swipes); stop_reason={} complete={}",
+        rows.len(),
+        json.get("pages").and_then(Value::as_array).map_or(0, Vec::len),
+        text(json, "swipes").unwrap_or_else(|| "0".to_string()),
+        text(json, "stop_reason").unwrap_or_else(|| "?".to_string()),
+        text(json, "complete").unwrap_or_else(|| "false".to_string()),
+    )];
+    if let Some(coverage) = text(json, "coverage") {
+        out.push(format!("coverage: {coverage}"));
+    }
+    if let Some(error) = text(json, "stop_error") {
+        out.push(format!("stopped by: {}", clip(&error)));
+    }
+    for row in rows {
+        let mut line = format!(
+            "p{} {} \"{}\"",
+            text(row, "page").unwrap_or_default(),
+            text(row, "kind").unwrap_or_default(),
+            clip(&text(row, "label").unwrap_or_default())
+        );
+        if let Some(value) = text(row, "value") {
+            line.push_str(&format!(" value=\"{}\"", clip(&value)));
+        }
+        if let Some(identifier) = text(row, "identifier") {
+            line.push_str(&format!(" id={identifier}"));
+        }
+        out.push(line);
+    }
+    if let Some(snapshot) = text(json, "snapshot") {
+        out.push(format!("snapshot (last page): {snapshot}"));
+    }
+    Some(out.join("\n"))
+}
+
+fn found_row(row: &Value) -> String {
+    let rect = row
+        .get("rect")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().map(|v| v.as_f64().map_or("?".to_string(), |v| format!("{v:.0}"))).collect::<Vec<_>>().join(","))
+        .unwrap_or_default();
+    let mut line = format!(
+        "[{}] {} \"{}\" @{rect}",
+        text(row, "index").unwrap_or_else(|| "?".to_string()),
+        text(row, "kind").unwrap_or_default(),
+        clip(&text(row, "label").unwrap_or_default()),
+    );
+    if let Some(value) = text(row, "value") {
+        line.push_str(&format!(" value=\"{}\"", clip(&value)));
+    }
+    line
+}
+
+/// `phone_scroll_find`: found or why not, with the target or candidates.
+pub fn found_label(json: &Value) -> Option<String> {
+    let found = json.get("found")?.as_bool()?;
+    let mut out = vec![format!(
+        "found={found} stop_reason={} swipes={}{}",
+        text(json, "stop_reason").unwrap_or_else(|| "?".to_string()),
+        text(json, "swipes").unwrap_or_else(|| "0".to_string()),
+        text(json, "error").map_or(String::new(), |e| format!(" error={e}")),
+    )];
+    if let Some(target) = json.get("target").filter(|t| t.is_object()) {
+        out.push(format!("target: {}", found_row(target)));
+    }
+    if let Some(cover) = json.get("covered_by").filter(|c| c.is_object()) {
+        out.push(format!(
+            "covered by: {} \"{}\"",
+            text(cover, "kind").unwrap_or_default(),
+            clip(&text(cover, "label").unwrap_or_default())
+        ));
+    }
+    if let Some(candidates) = json.get("candidates").and_then(Value::as_array).filter(|c| !c.is_empty()) {
+        out.push("candidates:".to_string());
+        out.extend(candidates.iter().map(|row| format!("  {}", found_row(row))));
+    }
+    if let Some(hint) = text(json, "hint") {
+        out.push(format!("hint: {hint}"));
+    }
+    if let Some(snapshot) = text(json, "snapshot") {
+        out.push(format!("snapshot: {snapshot}"));
+    }
+    Some(out.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_collected_list_prints_its_verdict_and_one_line_per_row() {
+        let body = json!({
+            "ok": true, "rows": [
+                {"kind": "Cell", "label": "A · 12:00", "page": 1},
+                {"kind": "Cell", "label": "B", "value": "3", "page": 2}
+            ],
+            "pages": [{"page": 1}, {"page": 2}], "swipes": 1,
+            "stop_reason": "duplicate_page", "complete": false,
+            "coverage": "NOT proven complete", "snapshot": "S1"
+        });
+        let text = collected_list(&body).unwrap();
+        assert!(text.starts_with("collected 2 rows over 2 pages (1 swipes); stop_reason=duplicate_page complete=false"), "{text}");
+        assert!(text.contains("p2 Cell \"B\" value=\"3\""), "{text}");
+        assert!(text.contains("coverage: NOT proven complete"));
+        assert!(text.ends_with("snapshot (last page): S1"));
+    }
+
+    #[test]
+    fn a_find_verdict_keeps_its_candidates() {
+        let body = json!({
+            "ok": false, "found": false, "stop_reason": "ambiguous", "swipes": 0,
+            "error": "ambiguous_element_label", "snapshot": "S2",
+            "candidates": [{"index": 3, "kind": "StaticText", "rect": [16.0, 100.0, 300.0, 40.0]}]
+        });
+        let text = found_label(&body).unwrap();
+        assert!(text.starts_with("found=false stop_reason=ambiguous swipes=0 error=ambiguous_element_label"), "{text}");
+        assert!(text.contains("  [3] StaticText \"\" @16,100,300,40"), "{text}");
+    }
 
     #[test]
     fn a_failed_batch_keeps_the_verdict_and_the_failed_step_but_not_the_bulk() {

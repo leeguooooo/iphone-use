@@ -1,5 +1,6 @@
 pub mod advice;
 pub mod apps;
+pub mod collect;
 pub mod config;
 pub mod device_identity;
 pub mod flows;
