@@ -36,7 +36,8 @@ https://github.com/user-attachments/assets/f1e6574d-3134-4c23-9092-4b51bc79af2c
 - **Fast.** Its own XCTest device runner reads the screen in about 0.1 s. A tap that returns the settled screen takes about 1.9 s ([numbers](#speed)).
 - **Honest results.** Every action reports whether it was applied, not sent, or unknown, and whether a retry is safe. Taps on covered elements are refused, not passed off as done.
 - **Replayable flows.** A task done once becomes a flow that replays in one call, with no model and no tokens.
-- **Watch it live.** The live screen shows in the agent host's side panel (where MCP Apps is supported), in a browser, or in the iOS app.
+- **Remote control for people, too.** Drive the phone yourself from a browser or another iPhone, on the LAN or from anywhere: a live H.264 screen, mouse and keyboard, and pairing by QR code. Agents and people share one phone without stepping on each other ([details](#remote-control-for-people)).
+- **Watch the agent live.** The phone's screen shows in the agent host's side panel (where MCP Apps is supported), in a browser, or in the iOS app.
 - **Nothing on the Mac moves.** It never touches the Mac's screen, cursor or focus.
 
 ## What you can ask
@@ -96,13 +97,25 @@ codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-us
 
 [Product guide: installation, MCP setup, flows and comparison](https://blog.leeguoo.com/en/posts/iphone-use/)
 
+## Remote control for people
+
+The same daemon that serves agents lets you drive the phone yourself:
+
+- **From a browser.** The live screen arrives as H.264 encoded on the phone: native resolution at about 50 fps on the LAN, and a lighter mode for slow links. Click to tap, drag to swipe, hold to long-press, scroll with the wheel or trackpad. Type straight into the phone with your input method, and ⌘V pastes. A controls panel lists the screen's elements so you can tap by label, and the 流程 panel records what you do as a replayable flow.
+- **From another iPhone.** The native iOS app (iOS 17+) pairs by scanning a QR code on the Mac's page, with no address or password to type. It plays the screen with the hardware decoder and switches between your phones.
+- **Screens hidden from capture.** Banking and payment apps black out screen capture; there you see a live wireframe of the screen's elements instead of a blank picture, and you can still tap through it.
+- **From anywhere.** Reach the Mac through an authenticated HTTPS reverse proxy or a VPN such as Tailscale, and control the phone from outside your network ([security notes](docs/guide.md#security)).
+- **No collisions.** A phone has one owner at a time. While you are in control, an agent waits or is told who holds the phone, and the reverse is true too.
+
+Nothing on the Mac moves while you do it: no window takes focus and the cursor stays put.
+
 ## Use it from an agent
 
 A daemon on your Mac drives the phone and offers the same control in three forms:
 
 - an **MCP server** for Claude Code, Codex, Claude Desktop, Cursor and other MCP clients;
 - an **HTTP API** for agents and scripts (`/agent/*`);
-- a **web page and a native iOS app** for people: live screen, tap, type.
+- a **web page and a native iOS app** for people ([remote control](#remote-control-for-people)).
 
 The installer registers the MCP server with Claude Code and Codex when they are present. Any other MCP client needs only the command; on this Mac the server finds the daemon and its token by itself:
 
