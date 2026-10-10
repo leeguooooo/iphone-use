@@ -36,7 +36,7 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Ke
         ToastGeometry(stage: frames.stage, picture: frames.picture,
                       keys: !immersive && !typing ? frames.keys : nil,
                       top: !immersive ? frames.top : nil,
-                      immersive: immersive)
+                      immersive: immersive, content: frames.content)
     }
 
     var body: some View {
@@ -94,6 +94,7 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Ke
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .globalFrame { frames.content = $0 }
         .environment(\.pictureFrameSink, PictureFrameSink { frames.picture = $0 })
         .background(Theme.stage.ignoresSafeArea())
         .overlay {
@@ -740,6 +741,8 @@ struct ToastFrames: Equatable {
     var picture: CGRect?
     var keys: CGRect = .zero
     var top: CGRect = .zero
+    /// Everything inside the safe area (the banners included).
+    var content: CGRect = .zero
 }
 
 /// Where a toast of a given size goes: in the room the picture leaves free
@@ -753,7 +756,10 @@ struct ToastGeometry: Equatable {
     /// The top bar or rail, when it shows.
     var top: CGRect?
     var immersive: Bool
-    /// The whole window: in immersive the status bar's band is free too.
+    /// Inside the safe area, banners included: in immersive, what is above
+    /// it (the hidden status bar's band) is free.
+    var content: CGRect = .zero
+    /// The whole window.
     var window: CGRect = .zero
 
     enum Placement: Equatable {
@@ -765,7 +771,7 @@ struct ToastGeometry: Equatable {
 
     static let margin: CGFloat = 8
     /// Keeps a toast in immersive clear of the exit button in the corner.
-    static let cornerButtonRoom: CGFloat = 56
+    static let cornerButtonRoom: CGFloat = 64
 
     /// The free bands around the picture, best first: below it (by the
     /// keys), above it, then beside it.
@@ -774,7 +780,9 @@ struct ToastGeometry: Equatable {
         guard !area.isEmpty else { return [] }
         let p = (picture ?? stage).intersection(area)
         guard !p.isNull else { return [area] }
-        var above = CGRect(x: area.minX, y: area.minY, width: area.width, height: p.minY - area.minY)
+        // In immersive, up to the safe area: a banner may sit over the picture's top.
+        let aboveEnd = immersive && !content.isEmpty ? min(p.minY, content.minY) : p.minY
+        var above = CGRect(x: area.minX, y: area.minY, width: area.width, height: aboveEnd - area.minY)
         if immersive { above = above.insetBy(dx: Self.cornerButtonRoom, dy: 0) }
         let below = CGRect(x: area.minX, y: p.maxY, width: area.width, height: area.maxY - p.maxY)
         // Beside the picture, the lower part: off the corner button, near the keys.
@@ -784,12 +792,18 @@ struct ToastGeometry: Equatable {
         return [below, above, trailing, leading]
     }
 
-    func placement(for size: CGSize) -> Placement? {
-        guard size.width > 0, size.height > 0 else { return nil }
+    func placement(for size: CGSize) -> Placement? { placement(for: [size]) }
+
+    /// `sizes`: the toast laid out at its widest, then narrower (wrapped);
+    /// a band takes the first that fits.
+    func placement(for sizes: [CGSize]) -> Placement? {
+        let sizes = sizes.filter { $0.width > 0 && $0.height > 0 }
+        guard let widest = sizes.first else { return nil }
         let m = Self.margin
         for (index, room) in rooms().enumerated() {
             let inner = room.insetBy(dx: m, dy: m)
-            guard inner.width >= size.width, inner.height >= size.height else { continue }
+            guard let size = sizes.first(where: { inner.width >= $0.width && inner.height >= $0.height })
+            else { continue }
             if index >= 2 {
                 // Beside the picture: at the bottom of the band.
                 return .pill(CGRect(x: inner.midX - size.width / 2, y: inner.maxY - size.height,
@@ -802,7 +816,8 @@ struct ToastGeometry: Equatable {
         if let top, !top.isEmpty { return .bar(top) }
         // Nowhere free (should not happen): the top edge of the window.
         let area = window.isEmpty ? stage : window
-        return .pill(CGRect(x: area.midX - size.width / 2, y: area.minY + m, width: size.width, height: size.height))
+        return .pill(CGRect(x: area.midX - widest.width / 2, y: area.minY + m,
+                            width: widest.width, height: widest.height))
     }
 }
 
@@ -810,11 +825,12 @@ struct ToastGeometry: Equatable {
 struct PlacedToast: View {
     let text: String?
     var geometry: ToastGeometry
-    @State private var size: CGSize = .zero
+    /// The toast at its widest and wrapped narrow.
+    @State private var sizes: [CGFloat: CGSize] = [:]
     @State private var window: CGRect = .zero
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    static let maxWidth: CGFloat = 340
+    static let widths: [CGFloat] = [340, 220, 160]
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -822,15 +838,17 @@ struct PlacedToast: View {
             if let text {
                 // Measures the pill at its natural size, up to the widest
                 // a toast gets, invisibly.
-                Color.clear
-                    .frame(width: Self.maxWidth, height: 1)
-                    .overlay(alignment: .topLeading) {
-                        ToastText(text: text)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
-                    }
-                    .hidden()
-                    .accessibilityHidden(true)
+                ForEach(Self.widths, id: \.self) { width in
+                    Color.clear
+                        .frame(width: width, height: 1)
+                        .overlay(alignment: .topLeading) {
+                            ToastText(text: text, lines: nil)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .onGeometryChange(for: CGSize.self) { $0.size } action: { sizes[width] = $0 }
+                        }
+                }
+                .hidden()
+                .accessibilityHidden(true)
                 if let placement = place() {
                     toast(text, placement)
                         .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.94)))
@@ -848,7 +866,7 @@ struct PlacedToast: View {
     private func place() -> ToastGeometry.Placement? {
         var g = geometry
         g.window = window
-        return g.placement(for: size)
+        return g.placement(for: Self.widths.compactMap { sizes[$0] })
     }
 
     @ViewBuilder
@@ -857,7 +875,7 @@ struct PlacedToast: View {
         switch placement {
         case .pill(let rect):
             let shape = RoundedRectangle(cornerRadius: min(rect.height / 2, 22), style: .continuous)
-            ToastText(text: text)
+            ToastText(text: text, lines: nil)
                 .frame(width: rect.width, height: rect.height)
                 .glassBackground(shape)
                 .background(Theme.stage.opacity(0.6), in: shape)
@@ -867,8 +885,10 @@ struct PlacedToast: View {
         case .bar(let rect):
             // Over the bar, opaque, the same shape: the bar says it for a moment.
             let shape = RoundedRectangle(cornerRadius: min(rect.width, rect.height) < 80 ? 20 : 22, style: .continuous)
-            ToastText(text: text, lines: rect.height < 56 ? 2 : 3)
-                .minimumScaleFactor(0.8)
+            // A rail (landscape, zoomed in) is narrow: smaller type, as many lines as it takes.
+            let rail = rect.width < 120
+            ToastText(text: text, lines: rail ? nil : rect.height < 56 ? 2 : 3, rail: rail)
+                .minimumScaleFactor(rail ? 0.7 : 0.8)
                 .frame(width: rect.width, height: rect.height)
                 .glassBackground(shape)
                 .background(Theme.stage, in: shape)
@@ -880,14 +900,15 @@ struct PlacedToast: View {
 
 private struct ToastText: View {
     let text: String
-    var lines = 3
+    var lines: Int? = 3
+    var rail = false
 
     var body: some View {
         Text(text)
-            .font(.callout)
+            .font(rail ? .caption : .callout)
             .multilineTextAlignment(.center)
             .lineLimit(lines)
-            .padding(.horizontal, 16).padding(.vertical, 10)
+            .padding(.horizontal, rail ? 6 : 16).padding(.vertical, 10)
     }
 }
 

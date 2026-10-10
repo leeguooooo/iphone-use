@@ -59,6 +59,32 @@ final class ToastPlacementTests: XCTestCase {
         XCTAssertLessThan(placed.maxX, window.maxX - ToastGeometry.cornerButtonRoom)
     }
 
+    /// A long toast too wide for the band beside the picture wraps to fit
+    /// it rather than falling back to the narrow key rail.
+    func testLongToastWrapsBesideThePicture() throws {
+        let stage = CGRect(x: 130, y: 60, width: 615, height: 330)
+        let picture = CGRect(x: 367, y: 60, width: 140, height: 330)
+        let keys = CGRect(x: 790, y: 80, width: 56, height: 260)
+        let g = ToastGeometry(stage: stage, picture: picture, keys: keys, top: nil, immersive: false)
+        let wide = CGSize(width: 294, height: 41), wrapped = CGSize(width: 210, height: 62)
+        guard case .pill(let placed) = g.placement(for: [wide, wrapped]) else { return XCTFail("expected a pill") }
+        XCTAssertEqual(placed.size, wrapped)
+        XCTAssertFalse(placed.intersects(picture))
+    }
+
+    /// Immersive with a banner over the picture's top: the toast stays in
+    /// the status bar's band, above the safe area, off the banner.
+    func testImmersiveStaysAboveTheSafeArea() throws {
+        let window = CGRect(x: 0, y: 0, width: 402, height: 874)
+        let content = CGRect(x: 0, y: 62, width: 402, height: 778)
+        let picture = CGRect(x: 38, y: 128, width: 326, height: 712)
+        var g = ToastGeometry(stage: CGRect(x: 0, y: 128, width: 402, height: 712), picture: picture,
+                              keys: nil, top: nil, immersive: true, content: content)
+        g.window = window
+        let placed = try XCTUnwrap(frame(g.placement(for: CGSize(width: 260, height: 41))))
+        XCTAssertLessThanOrEqual(placed.maxY, content.minY)
+    }
+
     /// Room below the picture (iPad, a short picture) is the first choice.
     func testRoomBelowThePictureIsUsedFirst() throws {
         let stage = CGRect(x: 8, y: 80, width: 818, height: 1000)
