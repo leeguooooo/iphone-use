@@ -274,8 +274,8 @@
       "purpose": "Show remote control for people",
       "action": "In the browser control page a person clicks the live picture; the phone opens Date & Time, then goes back",
       "narration": {
-        "zh": "人也能在浏览器里接手：直接点手机画面，打开日期与时间，再点返回。",
-        "en": "People can take over from a browser: click the live picture to open Date and Time, then go back."
+        "zh": "人也能在浏览器里接手：直接点手机画面，打开日期与时间，再点返回。agent 和人共用一台手机，不会互相抢。",
+        "en": "People can take over from a browser: click the live picture to open Date and Time, then go back. Agents and people share one phone without colliding."
       }
     },
     {

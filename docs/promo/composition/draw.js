@@ -87,7 +87,7 @@ window.drawFrame = function (c, t, film, view, M) {
     phoneZ = M.camera(t, [[0.3, "Z"], [2.5, 1], [5.1, "Z"], [6.9, 1], [10.3, "Z"], [11.5, 1], [12.1, "Z"], [16.3, 1], [23.0, "Z"], [24.0, 1], [24.6, "Z"], [28.3, 1], [29.7, "Z"], [30.8, 1], [33.8, "Z"], [35.6, 1]].map(([at, z]) => ({ at, kind: "to", z: z === "Z" ? zMax : z })), { z: 1 }).z;
     // Between beats: a 0.3 s whip — the old beat slides out right, the new one slides in from the
     // left. Text only crosses the frame edge mid-move; at rest everything is inside view.safe.
-    const Cw = V ? S0 : C0,
+    const Cw = C0, // the default camera centre, so the layout rests exactly where it was designed
       whips = [5, 12, 18, 24.5, 31].flatMap((b) => [
         [b - 0.16, "pan", [Cw[0] - W * 0.9, Cw[1]]],
         [b, "cut", [Cw[0] + W * 0.9, Cw[1]], 1],
@@ -121,7 +121,7 @@ window.drawFrame = function (c, t, film, view, M) {
       // read
       head(p.read, 5.1, 12);
       term([["$", p.cRead, 5.4], ...d.rows.slice(0, V ? 4 : 7).map((r, i) => ["=", r, 6.2 + i * 0.12, k.ink])], 5.2, 11.9);
-      M.stamp(c, t, p.readTime, V ? [pane.x + pane.w * 0.62, pane.y + 32 * u] : [pane.x + pane.w - 130 * u, pane.y + 32 * u], { at: 7.6, until: 11.8, size: 38 * u, color: k.accent2, rotate: 0 });
+      M.stamp(c, t, p.readTime, V ? [pane.x + pane.w * 0.62, pane.y + 32 * u] : [pane.x + pane.w - 240 * u, pane.y + 32 * u], { at: 7.6, until: 11.8, size: 38 * u, color: k.accent2, rotate: 0 });
       // tap by name: a ring on the row just before the recording opens it
       head(p.tap, 12.1, 18);
       term([["$", p.cTap1, 12.3], ["$", p.cTap2, 13.4], ["=", p.rTap, 16.1]], 12.2, 17.9);
@@ -137,7 +137,7 @@ window.drawFrame = function (c, t, film, view, M) {
       // Wi-Fi: this session's own status
       head(p.wifi, 31.1, 37);
       term([["$", p.cStatus, 31.3], ["=", p.s1, 32.2], ["=", p.s2, 32.4, k.ink], ["=", p.s3, 32.6, k.ink]], 31.2, 36.9);
-      M.stamp(c, t, p.ios, V ? [W * 0.58, pane.y + pane.h * 0.8] : [pane.x + pane.w * 0.72, pane.y + pane.h * 0.78], { at: 34.0, until: 36.9, size: (V ? 70 : 84) * u, color: k.accent2, rotate: -0.05 });
+      M.stamp(c, t, p.ios, V ? [pane.x + pane.w * 0.7, pane.y + pane.h * 0.72] : [pane.x + pane.w * 0.72, pane.y + pane.h * 0.78], { at: 34.0, until: 36.9, size: (V ? 54 : 84) * u, color: k.accent2, rotate: -0.05 });
       if (t > 32.2 && t < 37) M.ripple(c, t, [home[0], home[1] - (PH / 2) * phoneZ - 30 * u], { at: 32.3, count: 3, gap: 0.4, dur: 1.3, radius: (V ? 70 : 110) * u, color: k.accent, width: 6 * u });
     });
   }
@@ -232,5 +232,5 @@ window.drawFrame = function (c, t, film, view, M) {
   M.caption(c, t, p.real, 0.6, 4.9, { x: V ? 0.46 : 0.5, y: V ? (pane.y + pane.h - 26 * u) / H : 0.968, size: (V ? 22 : 26) * u, color: k.sub, weight: 600, maxWidth: V ? pane.w - 40 * u : W * 0.9 });
   // Landscape subtitles sit low; portrait uses the default, the bottom of view.safe.
   // Portrait subtitles: bottom of view.safe, centred on it (clear of the right action column).
-  M.captions(c, t, undefined, V ? { x: (view.safe.x + view.safe.w / 2) / W } : { y: t < 49.1 ? 0.9 : 0.95 });
+  M.captions(c, t, undefined, V ? { x: (view.safe.x + view.safe.w / 2) / W, lines: 3 } : { y: t < 49.1 ? 0.9 : 0.95 });
 };
