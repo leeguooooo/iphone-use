@@ -13653,6 +13653,25 @@ fn screen_private_now(private_until: &Mutex<Option<Instant>>) -> bool {
     recover(private_until.lock()).is_some_and(|until| until > Instant::now())
 }
 
+/// Run `work` unless the screen turns private first (checked every 250 ms),
+/// so an open live feed ends at once when a private hold begins instead of
+/// waiting out its inactivity timeout.
+async fn unless_private<T>(
+    private_until: &Mutex<Option<Instant>>,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(work);
+    loop {
+        if screen_private_now(private_until) {
+            return None;
+        }
+        if let Ok(out) = tokio::time::timeout(std::time::Duration::from_millis(250), &mut work).await {
+            // Finished after the hold began: drop it, never send it.
+            return (!screen_private_now(private_until)).then_some(out);
+        }
+    }
+}
+
 /// Set or lift the private screen together with the hold it belongs to. The
 /// last hold decides: one taken without `private` (or `secs: 0`) lifts it.
 fn set_screen_private(state: &AppState, private: bool, secs: u64) {
@@ -14757,12 +14776,15 @@ async fn agent_mjpeg(
                 move |(mut upstream, guard, activity_guard, done)| {
                     let private_until = private_until.clone();
                     async move {
-                    if done || screen_private_now(&private_until) {
+                    if done {
                         return None;
                     }
-                    match tokio::time::timeout(MJPEG_INACTIVITY_TIMEOUT, upstream.next()).await {
-                        // Arrived after the hold began: never sent.
-                        Ok(Some(Ok(_))) if screen_private_now(&private_until) => None,
+                    let next = unless_private(
+                        &private_until,
+                        tokio::time::timeout(MJPEG_INACTIVITY_TIMEOUT, upstream.next()),
+                    )
+                    .await?;
+                    match next {
                         Ok(Some(Ok(bytes))) => {
                             if let Some(activity) = &activity_guard {
                                 activity.touch();
@@ -14902,10 +14924,12 @@ async fn agent_h264(
             let private_until = private_until.clone();
             async move {
             loop {
-                match tokio::time::timeout(MJPEG_INACTIVITY_TIMEOUT, subscription.frames.recv())
-                    .await
-                {
-                    Ok(Ok(_)) if screen_private_now(&private_until) => return None,
+                let next = unless_private(
+                    &private_until,
+                    tokio::time::timeout(MJPEG_INACTIVITY_TIMEOUT, subscription.frames.recv()),
+                )
+                .await?;
+                match next {
                     Ok(Ok(frame)) => {
                         if let Some(activity) = &activity_guard {
                             activity.touch();
