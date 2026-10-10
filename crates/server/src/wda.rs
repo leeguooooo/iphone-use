@@ -1372,6 +1372,22 @@ impl WdaClient {
         Ok(())
     }
 
+    /// [`Self::keys`] with its own request timeout, for one chunk of a long
+    /// text: the client's 20 s default is too short for a big chunk and too
+    /// long when the action's deadline is nearly spent.
+    pub async fn keys_with_timeout(&mut self, text: &str, timeout: Duration) -> Result<()> {
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .post_req(format!("{}/session/{}/wda/keys", self.base, sid))
+            .timeout(timeout)
+            .json(&serde_json::json!({ "value": [text] }))
+            .send_signed(&self.auth)
+            .await
+            .context("POST /wda/keys")?;
+        ensure_wda_success(response, "POST /wda/keys").await?;
+        Ok(())
+    }
+
     /// Send one named WebDriver key through WDA.
     ///
     /// WebDriver represents non-text keys with Unicode code points in the

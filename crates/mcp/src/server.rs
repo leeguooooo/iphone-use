@@ -68,12 +68,33 @@ pub struct ScrollParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TypeParams {
     /// Unicode text to send through the device-side input service. Focus the
-    /// intended field and verify it before typing.
+    /// intended field and verify it before typing. Up to 20000 characters;
+    /// text over 200 is typed in chunks (about a minute per 3000 characters),
+    /// and a failure part-way reports `characters_confirmed` and
+    /// `remaining_text` with retry_safe=false — then type only the rest.
     pub text: String,
     /// Default true: return what the screen settled to (as on phone_tap).
     /// `false` for the fastest bare action.
     #[serde(default)]
     pub observe: Option<bool>,
+}
+
+/// Parameters for [`phone_apps`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AppsParams {
+    /// The app's name as a person would say it (微信, WeChat, 招商银行, Settings)
+    /// or a bundle id. 1–100 characters.
+    pub query: String,
+    /// `auto` (default: the phone's own app list, then the bundled catalog,
+    /// then the App Store), `installed`, `catalog` (offline), or `apple`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// App Store storefront for the store search, two letters. Default `cn`.
+    #[serde(default)]
+    pub country: Option<String>,
+    /// 1–30 candidates. Default 10.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// Parameters for [`phone_tap_label`].
@@ -257,9 +278,15 @@ pub enum PhoneStep {
         #[serde(default)]
         after_ms: u64,
     },
-    /// Launch or foreground an installed app by its exact bundle identifier.
+    /// Launch or foreground an installed app: give exactly one of `bundle`
+    /// (its exact bundle identifier) or `app` (its exact name — 微信, WeChat,
+    /// 招商银行, Settings — which the daemon resolves through phone_apps; an
+    /// ambiguous or unknown name is refused with candidates, nothing sent).
     LaunchApp {
-        bundle: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bundle: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app: Option<String>,
         #[serde(default)]
         after_ms: u64,
     },
@@ -680,6 +707,43 @@ impl PhoneHandler {
             Ok(response) => daemon_read_result(&response),
             Err(e) => CallToolResult::error(vec![Content::text(format!(
                 "capabilities failed: {e:#}"
+            ))]),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // phone_apps
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Find an app's bundle id by name instead of guessing it. Read-only: \
+        it never touches the screen and takes no owner lease. Searches the phone's own app \
+        list, then a bundled catalog of popular apps (bundle ids verified against Apple's \
+        lookup API, plus Apple's built-in apps), then the App Store only when neither \
+        matched. Exact name/alias matches hide partial ones. Each candidate carries name, \
+        bundle_id, source (installed|catalog|apple), installed_verified, and publisher when \
+        known; installed_verified=false with installation_checked=false means unknown, not \
+        absent. Pick the candidate whose name and publisher fit, then launch it with \
+        launch_app bundle — or give launch_app `app` the exact name and let the daemon \
+        resolve it (it refuses ambiguous names with candidates instead of guessing)."
+    )]
+    async fn phone_apps(
+        &self,
+        Parameters(AppsParams {
+            query,
+            source,
+            country,
+            limit,
+        }): Parameters<AppsParams>,
+    ) -> CallToolResult {
+        match self
+            .daemon
+            .apps_lookup(&query, source.as_deref(), country.as_deref(), limit)
+            .await
+        {
+            Ok(response) => daemon_read_result(&response),
+            Err(e) => CallToolResult::error(vec![Content::text(format!(
+                "app lookup failed: {e:#}"
             ))]),
         }
     }
@@ -2051,6 +2115,10 @@ fn phone_locator_has_condition(locator: &PhoneElementLocator) -> bool {
         || locator.visible.is_some()
 }
 
+/// Longest text one step (or a whole batch) may type — the daemon's
+/// `text_input::MAX_TEXT_CHARS`, in Unicode scalar values.
+const MAX_TEXT_CHARS: usize = 20_000;
+
 pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::Value, String> {
     const MAX_STEPS: usize = 24;
     const MAX_AFTER_MS: u64 = 3_000;
@@ -2232,9 +2300,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                 after_ms,
             } => {
                 validate_after(after_ms)?;
-                if text.chars().count() > 1_000 {
+                if text.chars().count() > MAX_TEXT_CHARS {
                     return Err(format!(
-                        "steps[{index}].text exceeds 1000 characters; no action was sent"
+                        "steps[{index}].text exceeds {MAX_TEXT_CHARS} characters; no action was sent"
                     ));
                 }
                 action_step(
@@ -2301,7 +2369,42 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                     after_ms,
                 )
             }
-            PhoneStep::LaunchApp { bundle, after_ms } => {
+            PhoneStep::LaunchApp {
+                bundle: None,
+                app: Some(app),
+                after_ms,
+            } => {
+                validate_after(after_ms)?;
+                let count = app.trim().chars().count();
+                if !(1..=100).contains(&count) {
+                    return Err(format!(
+                        "steps[{index}].app must be an app name of 1 to 100 characters; no action was sent"
+                    ));
+                }
+                action_step(
+                    serde_json::json!({"type":"launch_app","app":app}),
+                    after_ms,
+                )
+            }
+            PhoneStep::LaunchApp {
+                bundle: None,
+                app: None,
+                ..
+            }
+            | PhoneStep::LaunchApp {
+                bundle: Some(_),
+                app: Some(_),
+                ..
+            } => {
+                return Err(format!(
+                    "steps[{index}] launch_app needs exactly one of bundle or app; no action was sent"
+                ))
+            }
+            PhoneStep::LaunchApp {
+                bundle: Some(bundle),
+                app: None,
+                after_ms,
+            } => {
                 validate_after(after_ms)?;
                 if bundle.is_empty()
                     || bundle.len() > 200
@@ -3010,10 +3113,11 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            30,
+            31,
             "tool count changed; update README, the skill, and the CI assertion: {names:?}"
         );
         for required in [
+            "phone_apps",
             "phone_screen",
             "phone_screen_frame",
             "phone_login",
@@ -3260,7 +3364,8 @@ mod tests {
     #[test]
     fn multi_step_launch_app_requires_a_valid_bundle_identifier() {
         let request = phone_steps_request(vec![PhoneStep::LaunchApp {
-            bundle: "com.example.SampleApp".to_string(),
+            bundle: Some("com.example.SampleApp".to_string()),
+            app: None,
             after_ms: 500,
         }])
         .unwrap();
@@ -3271,12 +3376,71 @@ mod tests {
         );
 
         let error = phone_steps_request(vec![PhoneStep::LaunchApp {
-            bundle: "not a bundle".to_string(),
+            bundle: Some("not a bundle".to_string()),
+            app: None,
             after_ms: 0,
         }])
         .unwrap_err();
         assert!(error.contains("reverse-DNS"));
         assert!(error.contains("no action was sent"));
+    }
+
+    #[test]
+    fn multi_step_launch_app_by_name_passes_the_name_to_the_daemon() {
+        // Saved flows and phone_run_steps both deserialize this shape.
+        let step: PhoneStep =
+            serde_json::from_value(serde_json::json!({"kind":"launch_app","app":"微信"})).unwrap();
+        let request = phone_steps_request(vec![step]).unwrap();
+        assert_eq!(
+            request["steps"][0]["action"],
+            serde_json::json!({"type":"launch_app","app":"微信"})
+        );
+        // The old shape still parses.
+        let old: PhoneStep = serde_json::from_value(
+            serde_json::json!({"kind":"launch_app","bundle":"com.apple.Health"}),
+        )
+        .unwrap();
+        assert!(phone_steps_request(vec![old]).is_ok());
+
+        for bad in [
+            serde_json::json!({"kind":"launch_app"}),
+            serde_json::json!({"kind":"launch_app","bundle":"com.apple.Health","app":"健康"}),
+            serde_json::json!({"kind":"launch_app","app":"  "}),
+        ] {
+            let step: PhoneStep = serde_json::from_value(bad.clone()).unwrap();
+            let error = phone_steps_request(vec![step]).unwrap_err();
+            assert!(error.contains("no action was sent"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn multi_step_text_accepts_long_text_up_to_the_cap() {
+        let long = |n: usize| PhoneStep::Type {
+            text: "字".repeat(n),
+            clear: false,
+            after_ms: 0,
+        };
+        assert!(phone_steps_request(vec![long(MAX_TEXT_CHARS)]).is_ok());
+        let error = phone_steps_request(vec![long(MAX_TEXT_CHARS + 1)]).unwrap_err();
+        assert!(error.contains("20000"), "{error}");
+    }
+
+    #[test]
+    fn long_text_requests_wait_for_the_daemon_to_finish_typing() {
+        use crate::client::{actions_text_allowance, text_allowance};
+        assert_eq!(text_allowance("short"), std::time::Duration::ZERO);
+        assert_eq!(text_allowance(&"a".repeat(200)), std::time::Duration::ZERO);
+        // Always longer than the daemon's own allowance for the same text.
+        let n = 3000;
+        let daemon = std::time::Duration::from_secs_f64(n as f64 / 60.0 * 1.5)
+            + std::time::Duration::from_secs((n / 200) as u64);
+        assert!(text_allowance(&"a".repeat(n)) > daemon);
+        let body = serde_json::json!({"steps":[
+            {"action":{"type":"text","text":"a".repeat(n)}},
+            {"action":{"type":"tap","x":0.5,"y":0.5}},
+            {"wait_for":{}}
+        ]});
+        assert_eq!(actions_text_allowance(&body), text_allowance(&"a".repeat(n)));
     }
 
     #[test]
@@ -3450,7 +3614,7 @@ mod tests {
                 assert!(tool.get("_meta").is_none(), "{name} has no _meta: {tool}");
             }
         }
-        assert_eq!(tools.len(), 30, "28 tools plus the list collector and scroll finder");
+        assert_eq!(tools.len(), 31, "30 tools plus app lookup");
     }
 
     #[test]

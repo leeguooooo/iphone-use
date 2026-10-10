@@ -5650,6 +5650,11 @@ enum WdaControlOutcome {
     /// `scroll` with `page:true` found no page scroller, or no free spot in it
     /// to start the drag. Nothing was sent.
     NoPageScroller(&'static str),
+    /// A long text stopped part-way: `confirmed` characters (Unicode scalar
+    /// values from the start) were acknowledged; the following `uncertain`
+    /// ones were sent without an acknowledgement and may be partly typed.
+    /// Never replayed — the caller appends only the rest.
+    TextPartial { confirmed: usize, uncertain: usize },
     Failed,
 }
 
@@ -8396,7 +8401,9 @@ async fn wda_control_with_client(
 /// client must not show success unless it receives `{"ok":true}`.
 const DIRECT_CONTROL_MAX_TTL_MS: u64 = 2500;
 const AGENT_INPUT_WDA_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
-const AGENT_ACTIONS_MAX_BODY_BYTES: usize = 64 * 1024;
+/// Room for a 20 000-character text step (up to 80 KB of UTF-8) and the rest
+/// of a batch.
+const AGENT_ACTIONS_MAX_BODY_BYTES: usize = 256 * 1024;
 const AGENT_ACTIONS_MAX_STEPS: usize = 24;
 /// Longest a single `wait_for` may be given.
 ///
@@ -8644,6 +8651,126 @@ fn reject_unknown_single_step_action(value: &serde_json::Value) -> Result<(), Re
     ))
 }
 
+/// Room left between the last chunk's timeout and the action's deadline, so
+/// the chunk loop always reports how far it got before the outer deadline
+/// could turn the answer into `outcome_unknown`.
+const TEXT_CHUNK_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Type a long text in grapheme-safe chunks, each its own runner request with
+/// a timeout scaled to its length and clamped to what is left of `deadline`.
+///
+/// At most once, like every action: a chunk that fails is never resent. The
+/// outcome is `Applied` when every chunk was acknowledged, otherwise
+/// [`WdaControlOutcome::TextPartial`] with the acknowledged count — or
+/// `NotSent` when nothing at all reached the phone (no clear, no chunk).
+async fn type_text_chunked(
+    w: &mut crate::wda::WdaClient,
+    actionable: &std::sync::atomic::AtomicBool,
+    text: &str,
+    clear: bool,
+    deadline: tokio::time::Instant,
+) -> WdaControlOutcome {
+    use crate::text_input::{char_count, chunk_timeout, split, typing_time, CHUNK_CHARS};
+    use std::sync::atomic::Ordering;
+    let deadline = deadline
+        .checked_sub(TEXT_CHUNK_DEADLINE_MARGIN)
+        .unwrap_or(deadline);
+    if clear {
+        // As for short text: the clear is best-effort, the text is sent once.
+        if let Err(error) = w.clear_active().await {
+            tracing::warn!("wda clear_active before chunked text: {error:#}");
+        }
+    }
+    let mut confirmed = 0;
+    for piece in split(text, CHUNK_CHARS) {
+        let n = char_count(piece);
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left < typing_time(n) + std::time::Duration::from_millis(500) {
+            // Not enough time to type this chunk: stop before sending it.
+            tracing::warn!("chunked text stopped at the deadline after {confirmed} characters");
+            if confirmed == 0 && !clear {
+                return WdaControlOutcome::NotSent;
+            }
+            return WdaControlOutcome::TextPartial {
+                confirmed,
+                uncertain: 0,
+            };
+        }
+        if let Err(error) = w.keys_with_timeout(piece, chunk_timeout(n).min(left)).await {
+            actionable.store(false, Ordering::Release);
+            w.invalidate_session();
+            tracing::warn!("chunked text failed after {confirmed} characters: {error:#}");
+            return WdaControlOutcome::TextPartial {
+                confirmed,
+                uncertain: n,
+            };
+        }
+        confirmed += n;
+    }
+    actionable.store(true, Ordering::Release);
+    WdaControlOutcome::Applied
+}
+
+/// The body that tells an agent how far a long text got and how to finish it:
+/// append `remaining_text` with `clear:false` after reading the field.
+fn text_partial_body(
+    action: &serde_json::Value,
+    confirmed: usize,
+    uncertain: usize,
+) -> serde_json::Value {
+    let text = action
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let remaining: String = text.chars().skip(confirmed).collect();
+    serde_json::json!({
+        "ok": false,
+        "error": "text_partially_typed",
+        "outcome": "partial",
+        "retry_safe": false,
+        "characters_confirmed": confirmed,
+        "characters_uncertain": uncertain,
+        "characters_total": crate::text_input::char_count(text),
+        "remaining_text": remaining,
+        "hint": if uncertain == 0 {
+            "the deadline stopped typing between chunks: the first characters_confirmed characters are typed, nothing after them was sent. Send remaining_text as a new text action with clear=false; never resend the whole text"
+        } else {
+            "typing failed part-way: the first characters_confirmed characters are typed; the next characters_uncertain may be partly on screen. Read the field's value, then send only what is missing (from remaining_text) with clear=false; never resend the whole text"
+        },
+    })
+}
+
+/// A `text` action longer than the daemon types, refused before anything is
+/// sent.
+fn reject_oversized_text(value: &serde_json::Value) -> Result<(), Response> {
+    let too_long = value.get("type").and_then(serde_json::Value::as_str) == Some("text")
+        && value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| {
+                crate::text_input::char_count(text) > crate::text_input::MAX_TEXT_CHARS
+            });
+    if !too_long {
+        return Ok(());
+    }
+    Err(with_security_headers(
+        (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error": "invalid_value",
+                "detail": format!(
+                    "text exceeds {} characters; split it into several text actions with clear=false",
+                    crate::text_input::MAX_TEXT_CHARS
+                ),
+                "outcome": "not_sent",
+                "retry_safe": true,
+            })),
+        )
+            .into_response(),
+    ))
+}
+
 /// Execute one Direct agent action exactly once.
 ///
 /// Locator and geometry reads may precede the mutation, but once a mutating WDA
@@ -8655,6 +8782,7 @@ async fn direct_agent_action(
     actionable: &std::sync::atomic::AtomicBool,
     value: &serde_json::Value,
     detail: &mut Option<serde_json::Value>,
+    deadline: tokio::time::Instant,
 ) -> WdaControlOutcome {
     use std::sync::atomic::Ordering;
 
@@ -8761,6 +8889,26 @@ async fn direct_agent_action(
                 .and_then(|column| usize::try_from(column).ok())
                 .unwrap_or(0);
             Some(w.set_picker(column, target).await)
+        }
+        // Long text goes out in chunks so a failure can say how much landed.
+        // Text up to one chunk takes the paths below, unchanged.
+        "text"
+            if value
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| {
+                    crate::text_input::char_count(text) > crate::text_input::CHUNK_CHARS
+                }) =>
+        {
+            let text = value
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let clear = value
+                .get("clear")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            return type_text_chunked(w, actionable, text, clear, deadline).await;
         }
         "text"
             if value
@@ -9494,13 +9642,15 @@ fn validate_agent_action_value(
             if action
                 .get("text")
                 .and_then(serde_json::Value::as_str)
-                .is_none_or(|text| text.chars().count() > 1_000)
+                .is_none_or(|text| {
+                    crate::text_input::char_count(text) > crate::text_input::MAX_TEXT_CHARS
+                })
                 || action
                     .get("clear")
                     .is_some_and(|clear| clear.as_bool().is_none())
             {
                 return invalid(
-                    "text needs a string up to 1000 characters and optional bool clear",
+                    "text needs a string up to 20000 characters and optional bool clear",
                 );
             }
         }
@@ -9557,6 +9707,19 @@ fn validate_agent_action_value(
         "launch_app" => {
             let has_bundle = action.contains_key("bundle");
             let has_name = action.contains_key("name");
+            // `app`: any app's exact name, resolved to one bundle before the
+            // action is sent (see `resolve_launch_app_action`).
+            if let Some(app) = action.get("app") {
+                let valid_app = app
+                    .as_str()
+                    .is_some_and(|app| (1..=100).contains(&app.trim().chars().count()));
+                if has_bundle || has_name || !valid_app {
+                    return invalid(
+                        "launch_app needs exactly one of bundle, name, or app (an app name of 1 to 100 characters)",
+                    );
+                }
+                return Ok(());
+            }
             let valid_bundle = action
                 .get("bundle")
                 .and_then(serde_json::Value::as_str)
@@ -9727,6 +9890,7 @@ fn validate_agent_actions(request: &AgentActionsRequest) -> Result<(), String> {
     }
 
     let mut declared_wait_ms = 0_u64;
+    let mut text_chars = 0_usize;
     for (index, step) in request.steps.iter().enumerate() {
         match step {
             AgentActionStep::Action { action, after_ms } => {
@@ -9734,6 +9898,20 @@ fn validate_agent_actions(request: &AgentActionsRequest) -> Result<(), String> {
                     return Err(format!("steps[{index}].action must be an object"));
                 };
                 validate_agent_action_value(action, index)?;
+                // One batch types at most one maximal text: its deadline grows
+                // with the text, and that growth has to stay bounded.
+                if action.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+                    text_chars += action
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or(0, crate::text_input::char_count);
+                    if text_chars > crate::text_input::MAX_TEXT_CHARS {
+                        return Err(format!(
+                            "steps[{index}]: the batch's text steps exceed {} characters in total",
+                            crate::text_input::MAX_TEXT_CHARS
+                        ));
+                    }
+                }
                 if *after_ms > AGENT_ACTIONS_MAX_PAUSE_MS {
                     return Err(format!(
                         "steps[{index}].after_ms exceeds {AGENT_ACTIONS_MAX_PAUSE_MS}"
@@ -10066,6 +10244,8 @@ fn batch_outcome_for(failed_step_outcome: &str, applied_actions: usize) -> &'sta
         "applied" if applied_actions == 0 => "unknown",
         "not_sent" | "applied" | "no_effect" if applied_actions == 0 => "nothing_applied",
         "not_sent" | "applied" | "no_effect" => "partially_applied",
+        // A long text that stopped part-way: some of it is on the phone.
+        "partial" => "partially_applied",
         _ => "unknown",
     }
 }
@@ -10084,6 +10264,33 @@ fn agent_actions_failure(
     steps: &[serde_json::Value],
     observation: Option<serde_json::Value>,
 ) -> Response {
+    agent_actions_json(
+        status,
+        agent_actions_failure_body(
+            failed_step,
+            completed,
+            applied_actions,
+            error,
+            outcome,
+            retry_safe,
+            steps,
+            observation,
+        ),
+    )
+}
+
+/// The body of [`agent_actions_failure`], for a failure that adds fields.
+#[allow(clippy::too_many_arguments)]
+fn agent_actions_failure_body(
+    failed_step: usize,
+    completed: usize,
+    applied_actions: usize,
+    error: &str,
+    outcome: &str,
+    retry_safe: bool,
+    steps: &[serde_json::Value],
+    observation: Option<serde_json::Value>,
+) -> serde_json::Value {
     let mut body = serde_json::json!({
         "ok": false,
         "error": error,
@@ -10102,7 +10309,7 @@ fn agent_actions_failure(
     if let (Some(object), Some(observation)) = (body.as_object_mut(), observation) {
         object.insert("observation".to_string(), observation);
     }
-    agent_actions_json(status, body)
+    body
 }
 
 /// `POST /agent/actions` — execute a bounded, fail-closed Direct/WDA sequence.
@@ -10159,12 +10366,21 @@ async fn agent_actions_inner(
             "request body exceeds {AGENT_ACTIONS_MAX_BODY_BYTES} bytes"
         ));
     }
-    let request: AgentActionsRequest = match serde_json::from_str(&body) {
+    let mut request: AgentActionsRequest = match serde_json::from_str(&body) {
         Ok(request) => request,
         Err(error) => return agent_actions_invalid(format!("invalid JSON shape: {error}")),
     };
     if let Err(error) = validate_agent_actions(&request) {
         return agent_actions_invalid(error);
+    }
+    // `launch_app {"app": …}` becomes a bundle before the first step runs, so
+    // a name that does not resolve refuses the whole batch with nothing sent.
+    for step in &mut request.steps {
+        if let AgentActionStep::Action { action, .. } = step {
+            if let Err(refusal) = resolve_launch_app_action(&state, action).await {
+                return refusal;
+            }
+        }
     }
     // A flow run ends the agent's trail whether it passes or fails: what came
     // before was its own task, and the run's steps are already a flow.
@@ -10188,7 +10404,16 @@ async fn agent_actions_inner(
         return waiting;
     }
     let _priority = state.begin_wda_control();
-    let batch_deadline = tokio::time::Instant::now() + AGENT_ACTIONS_DEADLINE;
+    // Long text steps add their typing time (zero for text up to one chunk).
+    let typing_allowance: std::time::Duration = request
+        .steps
+        .iter()
+        .map(|step| match step {
+            AgentActionStep::Action { action, .. } => crate::text_input::action_allowance(action),
+            _ => std::time::Duration::ZERO,
+        })
+        .sum();
+    let batch_deadline = tokio::time::Instant::now() + AGENT_ACTIONS_DEADLINE + typing_allowance;
     let mut w = match tokio::time::timeout_at(batch_deadline, wda.lock()).await {
         Ok(client) => client,
         Err(_) => {
@@ -10247,7 +10472,13 @@ async fn agent_actions_inner(
                 let post_mark = w.last_post();
                 let outcome = match tokio::time::timeout_at(
                     batch_deadline,
-                    direct_agent_action(&mut w, &state.wda_actionable, action, &mut None),
+                    direct_agent_action(
+                        &mut w,
+                        &state.wda_actionable,
+                        action,
+                        &mut None,
+                        batch_deadline,
+                    ),
                 )
                 .await
                 {
@@ -10293,6 +10524,36 @@ async fn agent_actions_inner(
                     }));
                     completed += 1;
                     continue;
+                }
+                if let WdaControlOutcome::TextPartial {
+                    confirmed,
+                    uncertain,
+                } = outcome
+                {
+                    if uncertain > 0 {
+                        mark_wda_read_path_unactionable(&state);
+                    }
+                    let partial = text_partial_body(action, confirmed, uncertain);
+                    let mut body = agent_actions_failure_body(
+                        index,
+                        completed,
+                        applied_actions,
+                        "text_partially_typed",
+                        "partial",
+                        false,
+                        &step_results,
+                        None,
+                    );
+                    for key in [
+                        "characters_confirmed",
+                        "characters_uncertain",
+                        "characters_total",
+                        "remaining_text",
+                        "hint",
+                    ] {
+                        body[key] = partial[key].clone();
+                    }
+                    return agent_actions_json(StatusCode::BAD_GATEWAY, body);
                 }
                 if outcome != WdaControlOutcome::Applied {
                     let (status, error, outcome_name, current_retry_safe) = match outcome {
@@ -10377,7 +10638,9 @@ async fn agent_actions_inner(
                         WdaControlOutcome::Failed => {
                             (StatusCode::BAD_GATEWAY, "outcome_unknown", "unknown", false)
                         }
-                        WdaControlOutcome::Applied => unreachable!(),
+                        WdaControlOutcome::Applied | WdaControlOutcome::TextPartial { .. } => {
+                            unreachable!()
+                        }
                     };
                     if matches!(
                         outcome,
@@ -11759,6 +12022,13 @@ async fn agent_input_inner(
     if let Err(response) = reject_unknown_single_step_action(&value) {
         return response;
     }
+    if let Err(response) = reject_oversized_text(&value) {
+        return response;
+    }
+    let mut value = value;
+    if let Err(refusal) = resolve_launch_app_action(&state, &mut value).await {
+        return refusal;
+    }
     let Some(wda) = &state.wda else {
         return ControlRefusal::wda_not_configured()
             .with("fallback", serde_json::json!("disabled"))
@@ -11774,7 +12044,11 @@ async fn agent_input_inner(
     if let Some(waiting) = focus_permission_pending(focus_block.as_ref()) {
         return waiting;
     }
-    let agent_wda_deadline = agent_wda_deadline + focus_started.elapsed();
+    // A long text gets its typing time on top (zero for text up to one chunk),
+    // so the per-chunk timeouts, not this deadline, decide how it ends.
+    let agent_wda_deadline = agent_wda_deadline
+        + focus_started.elapsed()
+        + crate::text_input::action_allowance(&value);
     if tokio::time::Instant::now() >= agent_wda_deadline {
         return wda_deadline_response(false);
     }
@@ -11805,8 +12079,14 @@ async fn agent_input_inner(
         unlock_before_action(&state, &mut client, agent_wda_deadline).await;
         *recover(dispatch_marker.lock()) = Some(client.last_post());
         let mut detail = None;
-        let outcome =
-            direct_agent_action(&mut client, &state.wda_actionable, &value, &mut detail).await;
+        let outcome = direct_agent_action(
+            &mut client,
+            &state.wda_actionable,
+            &value,
+            &mut detail,
+            agent_wda_deadline,
+        )
+        .await;
         Some((client, outcome, detail))
     })
     .await;
@@ -11990,6 +12270,21 @@ async fn agent_input_inner(
         WdaControlOutcome::NoAlert => no_alert_response(),
         WdaControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
         WdaControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
+        WdaControlOutcome::TextPartial {
+            confirmed,
+            uncertain,
+        } => {
+            if uncertain > 0 {
+                mark_wda_read_path_unactionable(&state);
+            }
+            with_security_headers(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    axum::Json(text_partial_body(&value, confirmed, uncertain)),
+                )
+                    .into_response(),
+            )
+        }
         WdaControlOutcome::Failed => wda_failed_after_dispatch_response(),
     }
 }
@@ -14014,28 +14309,8 @@ fn is_valid_png(bytes: &[u8]) -> bool {
 /// — the caller can always pass an explicit `bundle`. Covers the stock apps an
 /// agent most often needs to reach.
 fn system_app_bundle(name: &str) -> Option<&'static str> {
-    Some(match name.trim() {
-        "设置" | "设定" | "Settings" | "settings" => "com.apple.Preferences",
-        "照片" | "Photos" | "photos" => "com.apple.mobileslideshow",
-        "相机" | "Camera" | "camera" => "com.apple.camera",
-        "时钟" | "Clock" | "clock" => "com.apple.mobiletimer",
-        "备忘录" | "Notes" | "notes" => "com.apple.mobilenotes",
-        "提醒事项" | "Reminders" | "reminders" => "com.apple.reminders",
-        "日历" | "Calendar" | "calendar" => "com.apple.mobilecal",
-        "Safari" | "safari" | "浏览器" => "com.apple.mobilesafari",
-        "信息" | "Messages" | "messages" => "com.apple.MobileSMS",
-        "电话" | "Phone" | "phone" => "com.apple.mobilephone",
-        "邮件" | "Mail" | "mail" => "com.apple.mobilemail",
-        "地图" | "Maps" | "maps" => "com.apple.Maps",
-        "App Store" | "app store" | "appstore" | "应用商店" => "com.apple.AppStore",
-        "钱包" | "Wallet" | "wallet" => "com.apple.Passbook",
-        "健康" | "Health" | "health" => "com.apple.Health",
-        "文件" | "Files" | "files" => "com.apple.DocumentsApp",
-        "快捷指令" | "Shortcuts" | "shortcuts" => "com.apple.shortcuts",
-        "音乐" | "Music" | "music" => "com.apple.Music",
-        "Find My" | "查找" => "com.apple.findmy",
-        _ => return None,
-    })
+    // The table lives with app lookup by name, which searches the same apps.
+    crate::app_lookup::system_app_bundle(name)
 }
 
 /// `POST /agent/inbox` — the phone (an iOS Shortcut) delivers a structured result.
@@ -14537,6 +14812,319 @@ fn intent_error_response(error: &IntentError) -> Response {
 struct AgentAppsQuery {
     bundle: Option<String>,
     refresh: Option<String>,
+    /// App lookup by name: present → the answer is a ranked candidate list
+    /// instead of the inventory (see [`agent_apps_lookup`]).
+    query: Option<String>,
+    /// `auto` (default), `installed`, `catalog`, or `apple`.
+    source: Option<String>,
+    /// App Store storefront for `apple`, two letters. Default `cn`.
+    country: Option<String>,
+    /// 1–30 candidates. Default 10.
+    limit: Option<usize>,
+}
+
+/// How long app lookup by name trusts a cached inventory. Shorter than the
+/// version-matching cache: an app installed a few minutes ago should be found.
+const APP_LOOKUP_INVENTORY_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Why the installed-app inventory could not be read.
+enum InventoryFailure {
+    /// Several phones are connected and none is configured.
+    TargetRequired(usize),
+    Unavailable(String),
+}
+
+impl InventoryFailure {
+    fn reason(&self) -> String {
+        match self {
+            Self::TargetRequired(count) => format!(
+                "devicectl inventory needs an explicit target ({count} connected candidates); configure PHONE_REMOTE_UDID"
+            ),
+            Self::Unavailable(reason) => reason.clone(),
+        }
+    }
+
+    /// The `/agent/apps` error body, unchanged since issue #76.
+    fn into_response(self) -> Response {
+        match self {
+            Self::TargetRequired(count) => agent_apps_json(
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "ok": false,
+                    "error": "target_required",
+                    "connected_candidates": count,
+                    "hint": "configure PHONE_REMOTE_UDID (run setup-wda.sh) so the daemon knows which phone to ask",
+                }),
+            ),
+            Self::Unavailable(reason) => agent_apps_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "ok": false,
+                    "error": "apps_unavailable",
+                    "reason": reason,
+                    "hint": "the inventory comes from `xcrun devicectl` on the daemon's Mac: keep the iPhone paired and reachable (USB is most reliable), then retry with ?refresh=1",
+                }),
+            ),
+        }
+    }
+}
+
+/// The installed-app inventory body (`/agent/apps` contract), from the
+/// per-target cache when it is younger than `max_age`, else from CoreDevice.
+async fn installed_inventory(
+    state: &AppState,
+    refresh: bool,
+    max_age: std::time::Duration,
+) -> Result<serde_json::Value, InventoryFailure> {
+    // With a configured target the cache can answer before any CoreDevice
+    // call; without one, the target is only known after detection.
+    if let (Some(udid), false) = (state.device_udid.as_deref(), refresh) {
+        if let Some(body) = crate::apps::cache_get_within(udid, max_age) {
+            return Ok(body);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let result = {
+        let udid = state.device_udid.clone();
+        tokio::task::spawn_blocking(move || devicectl_installed_apps(udid.as_deref()))
+            .await
+            .unwrap_or_else(|e| Err(DevicectlError::Failed(format!("join error: {e}"))))
+    };
+    #[cfg(not(target_os = "macos"))]
+    let result: Result<(String, serde_json::Value), &str> =
+        Err("devicectl is only available on macOS");
+
+    let reason = match result {
+        Ok((target, body)) => {
+            crate::apps::cache_put(&target, &body);
+            return Ok(body);
+        }
+        #[cfg(target_os = "macos")]
+        Err(DevicectlError::TargetRequired(count)) => {
+            return Err(InventoryFailure::TargetRequired(count))
+        }
+        #[cfg(target_os = "macos")]
+        Err(DevicectlError::Timeout) => "devicectl timed out and was terminated".to_string(),
+        #[cfg(target_os = "macos")]
+        Err(DevicectlError::Failed(reason)) => reason,
+        #[cfg(not(target_os = "macos"))]
+        Err(reason) => reason.to_string(),
+    };
+    tracing::warn!("installed-app inventory unavailable: {reason}");
+    Err(InventoryFailure::Unavailable(reason))
+}
+
+/// Validated `?query=` lookup parameters.
+#[derive(Debug, PartialEq)]
+struct AppLookupParams {
+    query: String,
+    source: &'static str,
+    country: String,
+    limit: usize,
+}
+
+fn app_lookup_params(query: &AgentAppsQuery) -> Result<AppLookupParams, String> {
+    let text = query.query.as_deref().unwrap_or("").trim().to_string();
+    let count = text.chars().count();
+    if !(1..=100).contains(&count) {
+        return Err("query needs 1 to 100 characters".to_string());
+    }
+    let source = match query.source.as_deref().unwrap_or("auto") {
+        "auto" => "auto",
+        "installed" => "installed",
+        "catalog" => "catalog",
+        "apple" => "apple",
+        _ => return Err("source must be auto, installed, catalog or apple".to_string()),
+    };
+    let country = query.country.as_deref().unwrap_or("cn").to_ascii_lowercase();
+    if country.len() != 2 || !country.chars().all(|c| c.is_ascii_lowercase()) {
+        return Err("country must be a two-letter App Store storefront such as cn, us, hk, jp".to_string());
+    }
+    let limit = query.limit.unwrap_or(10);
+    if !(1..=30).contains(&limit) {
+        return Err("limit must be 1 to 30".to_string());
+    }
+    Ok(AppLookupParams {
+        query: text,
+        source,
+        country,
+        limit,
+    })
+}
+
+/// `GET /agent/apps?query=<name>` — which bundle id is this app?
+///
+/// `source=auto` reads the phone's inventory, then the bundled catalog (popular
+/// apps verified against Apple's lookup API, plus Apple's built-in apps), and
+/// asks Apple's store search only when neither has a match. Exact name/alias
+/// matches hide partial ones. Each candidate says where it came from and
+/// whether the phone's inventory confirmed it (`installed_verified`). A failed
+/// inventory read does not fail `auto` — it becomes a warning and
+/// `installation_checked:false`; only `source=installed` fails on it.
+async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response {
+    let params = match app_lookup_params(query) {
+        Ok(params) => params,
+        Err(error) => {
+            return agent_apps_json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": "invalid_query", "detail": error}),
+            )
+        }
+    };
+    let refresh = matches!(query.refresh.as_deref(), Some("1" | "true"));
+    let mut warnings: Vec<String> = Vec::new();
+    let mut searched: Vec<&str> = Vec::new();
+    let mut installed: Option<Vec<crate::app_lookup::Candidate>> = None;
+    if matches!(params.source, "auto" | "installed") {
+        searched.push("installed");
+        match installed_inventory(state, refresh, APP_LOOKUP_INVENTORY_MAX_AGE).await {
+            Ok(body) => installed = Some(crate::app_lookup::installed_from_inventory(&body)),
+            Err(failure) if params.source == "installed" => return failure.into_response(),
+            Err(failure) => warnings.push(format!(
+                "the phone's app list could not be read ({}); candidates are not proof of installation",
+                failure.reason()
+            )),
+        }
+    }
+    let catalog: &[crate::app_lookup::Candidate] = if matches!(params.source, "auto" | "catalog")
+    {
+        searched.push("catalog");
+        crate::app_lookup::catalog()
+    } else {
+        &[]
+    };
+    let local = crate::app_lookup::rank(&params.query, installed.as_deref(), catalog, &[]);
+    let mut apple = Vec::new();
+    let mut apple_error = None;
+    if params.source == "apple" || (params.source == "auto" && local.is_empty()) {
+        searched.push("apple");
+        match crate::app_lookup::search_apple(&params.query, &params.country, params.limit).await {
+            Ok(rows) => apple = rows,
+            Err(error) => {
+                warnings.push(error.clone());
+                apple_error = Some(error);
+            }
+        }
+    }
+    if params.source == "apple" {
+        if let Some(error) = apple_error {
+            return agent_apps_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "ok": false,
+                    "error": "apple_search_unavailable",
+                    "reason": error,
+                    "hint": "try source=catalog or source=installed; do not guess bundle ids",
+                }),
+            );
+        }
+    }
+    let ranked = if apple.is_empty() {
+        local
+    } else {
+        crate::app_lookup::rank(&params.query, installed.as_deref(), catalog, &apple)
+    };
+    let total = ranked.len();
+    let candidates: Vec<serde_json::Value> = ranked
+        .iter()
+        .take(params.limit)
+        .map(crate::app_lookup::Ranked::to_json)
+        .collect();
+    agent_apps_json(
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": true,
+            "query": params.query,
+            "source": params.source,
+            "country": params.country,
+            "candidates": candidates,
+            "total_matches": total,
+            "searched": searched,
+            "installation_checked": installed.is_some(),
+            "warnings": warnings,
+            "hint": "pick the candidate whose name and publisher match, then launch_app with its bundle_id (or pass the exact name as launch_app {\"app\": …}); a catalog or apple row alone does not prove the app is installed",
+        }),
+    )
+}
+
+/// What `launch_app {"app": …}` resolved to, or the refusal to send instead.
+async fn resolve_launch_app_name(
+    state: &AppState,
+    name: &str,
+) -> Result<crate::app_lookup::Ranked, Response> {
+    use crate::app_lookup::ResolveError;
+    // Apple's own apps have the same bundle on every phone: no inventory read.
+    if let Some(system) = crate::app_lookup::resolve_system(name) {
+        return Ok(system);
+    }
+    let installed = installed_inventory(state, false, APP_LOOKUP_INVENTORY_MAX_AGE)
+        .await
+        .ok()
+        .map(|body| crate::app_lookup::installed_from_inventory(&body));
+    let refusal = |status: StatusCode, error: &str, rows: &[crate::app_lookup::Ranked], hint: &str| {
+        with_security_headers(
+            (
+                status,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "error": error,
+                    "app": name,
+                    "candidates": rows.iter().map(crate::app_lookup::Ranked::to_json).collect::<Vec<_>>(),
+                    "installation_checked": installed.is_some(),
+                    "outcome": "not_sent",
+                    "retry_safe": true,
+                    "hint": hint,
+                })),
+            )
+                .into_response(),
+        )
+    };
+    match crate::app_lookup::resolve_for_launch(name, installed.as_deref()) {
+        Ok(found) => Ok(found),
+        Err(ResolveError::Ambiguous { candidates }) => Err(refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "ambiguous_app",
+            &candidates,
+            "several apps carry that name; nothing was launched — pass the chosen candidate's bundle_id as `bundle`",
+        )),
+        Err(ResolveError::NotInstalled { candidates }) => Err(refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "app_not_installed",
+            &candidates,
+            "the phone's app list does not include it; nothing was launched — install it, or pass `bundle` if you know better",
+        )),
+        Err(ResolveError::NotFound { suggestions }) => Err(refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "app_not_found",
+            &suggestions,
+            "no app has exactly that name; nothing was launched — look it up with GET /agent/apps?query=<name> and pass `bundle`",
+        )),
+    }
+}
+
+/// Rewrite a `launch_app {"app": …}` action to the bundle it names, before
+/// any device lock is taken (a cold inventory read can take seconds). Other
+/// actions pass through untouched.
+async fn resolve_launch_app_action(
+    state: &AppState,
+    action: &mut serde_json::Value,
+) -> Result<(), Response> {
+    if action.get("type").and_then(serde_json::Value::as_str) != Some("launch_app") {
+        return Ok(());
+    }
+    let Some(name) = action.get("app").and_then(serde_json::Value::as_str).map(str::to_string)
+    else {
+        return Ok(());
+    };
+    let found = resolve_launch_app_name(state, &name).await?;
+    if let Some(object) = action.as_object_mut() {
+        object.remove("app");
+        object.insert(
+            "bundle".to_string(),
+            serde_json::Value::String(found.candidate.bundle_id.clone()),
+        );
+    }
+    Ok(())
 }
 
 fn agent_apps_json(status: StatusCode, body: serde_json::Value) -> Response {
@@ -14555,7 +15143,8 @@ fn agent_apps_json(status: StatusCode, body: serde_json::Value) -> Response {
 /// the configured target (or the single connected device), cached for ten
 /// minutes per target. `?bundle=<id>` filters to one entry; `?refresh=1`
 /// bypasses the cache. A failure is `503 apps_unavailable`, never an empty
-/// list that would read as "nothing installed".
+/// list that would read as "nothing installed". With `?query=<name>` it is
+/// app lookup by name instead ([`agent_apps_lookup`]).
 async fn agent_apps(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -14574,66 +15163,20 @@ async fn agent_apps(
         }
         AgentAuth::Ok => {}
     }
-    let refresh = matches!(query.refresh.as_deref(), Some("1" | "true"));
-    let finish = |body: serde_json::Value| {
-        let body = match query.bundle.as_deref() {
-            Some(bundle) => crate::apps::filter_bundle(body, bundle),
-            None => body,
-        };
-        agent_apps_json(StatusCode::OK, body)
-    };
-    // With a configured target the cache can answer before any CoreDevice
-    // call; without one, the target is only known after detection.
-    if let (Some(udid), false) = (state.device_udid.as_deref(), refresh) {
-        if let Some(body) = crate::apps::cache_get(udid) {
-            return finish(body);
-        }
+    if query.query.is_some() {
+        return agent_apps_lookup(&state, &query).await;
     }
-    #[cfg(target_os = "macos")]
-    let result = {
-        let udid = state.device_udid.clone();
-        tokio::task::spawn_blocking(move || devicectl_installed_apps(udid.as_deref()))
-            .await
-            .unwrap_or_else(|e| Err(DevicectlError::Failed(format!("join error: {e}"))))
-    };
-    #[cfg(not(target_os = "macos"))]
-    let result: Result<(String, serde_json::Value), &str> =
-        Err("devicectl is only available on macOS");
-
-    let reason = match result {
-        Ok((target, body)) => {
-            crate::apps::cache_put(&target, &body);
-            return finish(body);
+    let refresh = matches!(query.refresh.as_deref(), Some("1" | "true"));
+    match installed_inventory(&state, refresh, crate::apps::CACHE_TTL).await {
+        Ok(body) => {
+            let body = match query.bundle.as_deref() {
+                Some(bundle) => crate::apps::filter_bundle(body, bundle),
+                None => body,
+            };
+            agent_apps_json(StatusCode::OK, body)
         }
-        #[cfg(target_os = "macos")]
-        Err(DevicectlError::TargetRequired(count)) => {
-            return agent_apps_json(
-                StatusCode::CONFLICT,
-                serde_json::json!({
-                    "ok": false,
-                    "error": "target_required",
-                    "connected_candidates": count,
-                    "hint": "configure PHONE_REMOTE_UDID (run setup-wda.sh) so the daemon knows which phone to ask",
-                }),
-            );
-        }
-        #[cfg(target_os = "macos")]
-        Err(DevicectlError::Timeout) => "devicectl timed out and was terminated".to_string(),
-        #[cfg(target_os = "macos")]
-        Err(DevicectlError::Failed(reason)) => reason,
-        #[cfg(not(target_os = "macos"))]
-        Err(reason) => reason.to_string(),
-    };
-    tracing::warn!("installed-app inventory unavailable: {reason}");
-    agent_apps_json(
-        StatusCode::SERVICE_UNAVAILABLE,
-        serde_json::json!({
-            "ok": false,
-            "error": "apps_unavailable",
-            "reason": reason,
-            "hint": "the inventory comes from `xcrun devicectl` on the daemon's Mac: keep the iPhone paired and reachable (USB is most reliable), then retry with ?refresh=1",
-        }),
-    )
+        Err(failure) => failure.into_response(),
+    }
 }
 
 /// `GET /agent/intents` — the curated semantic-intent registry, read from
@@ -18975,6 +19518,262 @@ mod tests {
         );
         assert!(matches!(result, Err(DevicectlError::Timeout)));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    // -- long text ----------------------------------------------------------
+
+    /// A mock runner that counts `/wda/keys` requests and fails the
+    /// `fail_at`-th one (1-based; 0 = never).
+    fn counting_keys_wda(
+        fail_at: usize,
+    ) -> (MockWda, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicUsize>) {
+        let keys = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let clears = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (seen_keys, seen_clears) = (keys.clone(), clears.clone());
+        let wda = MockWda::start(move |request| {
+            if request.contains("/wda/keys") {
+                let n = seen_keys.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if n == fail_at {
+                    return r#"{"value":{"error":"unknown error","message":"typing failed"}}"#
+                        .to_string();
+                }
+                return r#"{"value":null}"#.to_string();
+            }
+            if request.contains("/clear") || request.contains("/element/active") {
+                seen_clears.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            healthy_wda_responder(request)
+        });
+        (wda, keys, clears)
+    }
+
+    fn far_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + std::time::Duration::from_secs(60)
+    }
+
+    #[test]
+    fn short_text_is_still_one_runner_request() {
+        block(async {
+            let (mut wda, keys, _) = counting_keys_wda(0);
+            let mut client = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(false);
+            let text = "字".repeat(crate::text_input::CHUNK_CHARS);
+            let outcome = direct_agent_action(
+                &mut client,
+                &actionable,
+                &serde_json::json!({"type":"text","text":text}),
+                &mut None,
+                far_deadline(),
+            )
+            .await;
+            assert_eq!(outcome, WdaControlOutcome::Applied);
+            assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), 1);
+            wda.shutdown();
+        });
+    }
+
+    #[test]
+    fn long_text_is_typed_in_chunks() {
+        block(async {
+            let (mut wda, keys, _) = counting_keys_wda(0);
+            let mut client = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(false);
+            let text = "Hello 世界 👨‍👩‍👧 ".repeat(60); // 900+ characters
+            let chunks = crate::text_input::split(&text, crate::text_input::CHUNK_CHARS).len();
+            assert!(chunks >= 5);
+            let outcome = direct_agent_action(
+                &mut client,
+                &actionable,
+                &serde_json::json!({"type":"text","text":text}),
+                &mut None,
+                far_deadline(),
+            )
+            .await;
+            assert_eq!(outcome, WdaControlOutcome::Applied);
+            assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), chunks);
+            assert!(actionable.load(std::sync::atomic::Ordering::SeqCst));
+            wda.shutdown();
+        });
+    }
+
+    #[test]
+    fn a_chunk_failure_reports_what_was_confirmed_and_is_never_resent() {
+        block(async {
+            let (mut wda, keys, _) = counting_keys_wda(3);
+            let mut client = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(true);
+            let text = "a".repeat(1000);
+            let action = serde_json::json!({"type":"text","text":text});
+            let outcome =
+                direct_agent_action(&mut client, &actionable, &action, &mut None, far_deadline())
+                    .await;
+            assert_eq!(
+                outcome,
+                WdaControlOutcome::TextPartial {
+                    confirmed: 400,
+                    uncertain: 200
+                }
+            );
+            // Stopped at the failure: chunks 4 and 5 were never sent.
+            assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), 3);
+            assert!(!actionable.load(std::sync::atomic::Ordering::SeqCst));
+
+            let body = text_partial_body(&action, 400, 200);
+            assert_eq!(body["error"], "text_partially_typed");
+            assert_eq!(body["retry_safe"], false);
+            assert_eq!(body["characters_confirmed"], 400);
+            assert_eq!(body["characters_total"], 1000);
+            assert_eq!(body["remaining_text"].as_str().unwrap().len(), 600);
+            wda.shutdown();
+        });
+    }
+
+    #[test]
+    fn a_deadline_stops_typing_between_chunks() {
+        block(async {
+            let (mut wda, keys, _) = counting_keys_wda(0);
+            let mut client = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(false);
+            // Too little time for even the first chunk: nothing is sent.
+            let soon = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            let outcome = direct_agent_action(
+                &mut client,
+                &actionable,
+                &serde_json::json!({"type":"text","text":"a".repeat(600)}),
+                &mut None,
+                soon,
+            )
+            .await;
+            assert_eq!(outcome, WdaControlOutcome::NotSent);
+            assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), 0);
+            wda.shutdown();
+        });
+    }
+
+    #[test]
+    fn partial_text_body_counts_unicode_scalars() {
+        let action = serde_json::json!({"type":"text","text":"你好👋🏻世界"});
+        let body = text_partial_body(&action, 2, 0);
+        assert_eq!(body["characters_total"], 6);
+        assert_eq!(body["remaining_text"], "👋🏻世界");
+        assert_eq!(body["outcome"], "partial");
+        assert_eq!(batch_outcome_for("partial", 1), "partially_applied");
+    }
+
+    #[test]
+    fn text_caps_are_20000_per_action_and_per_batch() {
+        let ok = |v: serde_json::Value| validate_agent_action_value(v.as_object().unwrap(), 0).is_ok();
+        assert!(ok(serde_json::json!({"type":"text","text":"a".repeat(20_000)})));
+        assert!(!ok(serde_json::json!({"type":"text","text":"a".repeat(20_001)})));
+        assert!(reject_oversized_text(&serde_json::json!({"type":"text","text":"a".repeat(20_000)})).is_ok());
+        assert!(reject_oversized_text(&serde_json::json!({"type":"text","text":"a".repeat(20_001)})).is_err());
+
+        let batch: AgentActionsRequest = serde_json::from_value(serde_json::json!({"steps":[
+            {"kind":"action","action":{"type":"text","text":"a".repeat(15_000)}},
+            {"kind":"action","action":{"type":"text","text":"a".repeat(6_000)}}
+        ]}))
+        .unwrap();
+        assert!(validate_agent_actions(&batch).unwrap_err().contains("in total"));
+    }
+
+    // -- app lookup -----------------------------------------------------------
+
+    #[test]
+    fn launch_app_accepts_exactly_one_of_bundle_name_or_app() {
+        let ok = |v: serde_json::Value| validate_agent_action_value(v.as_object().unwrap(), 0).is_ok();
+        assert!(ok(serde_json::json!({"type":"launch_app","bundle":"com.tencent.xin"})));
+        assert!(ok(serde_json::json!({"type":"launch_app","name":"健康"})));
+        assert!(ok(serde_json::json!({"type":"launch_app","app":"微信"})));
+        assert!(!ok(serde_json::json!({"type":"launch_app","app":"微信","bundle":"com.tencent.xin"})));
+        assert!(!ok(serde_json::json!({"type":"launch_app","app":""})));
+        assert!(!ok(serde_json::json!({"type":"launch_app","app":42})));
+        // The bundle check is as strict as before.
+        assert!(!ok(serde_json::json!({"type":"launch_app","bundle":"not a bundle"})));
+    }
+
+    #[test]
+    fn a_system_app_name_resolves_without_reading_the_phone() {
+        block(async {
+            let state = readiness_test_state();
+            let mut action = serde_json::json!({"type":"launch_app","app":"设置"});
+            resolve_launch_app_action(&state, &mut action).await.unwrap();
+            assert_eq!(
+                action,
+                serde_json::json!({"type":"launch_app","bundle":"com.apple.Preferences"})
+            );
+            // Anything else passes through untouched.
+            let mut tap = serde_json::json!({"type":"tap","x":0.5,"y":0.5});
+            resolve_launch_app_action(&state, &mut tap).await.unwrap();
+            assert_eq!(tap, serde_json::json!({"type":"tap","x":0.5,"y":0.5}));
+        });
+    }
+
+    #[test]
+    fn lookup_parameters_are_validated() {
+        let q = |query: &str, source: Option<&str>, country: Option<&str>, limit: Option<usize>| {
+            app_lookup_params(&AgentAppsQuery {
+                query: Some(query.to_string()),
+                source: source.map(str::to_string),
+                country: country.map(str::to_string),
+                limit,
+                ..AgentAppsQuery::default()
+            })
+        };
+        let params = q(" 微信 ", None, None, None).unwrap();
+        assert_eq!(
+            params,
+            AppLookupParams {
+                query: "微信".to_string(),
+                source: "auto",
+                country: "cn".to_string(),
+                limit: 10
+            }
+        );
+        assert_eq!(q("x", Some("apple"), Some("US"), Some(30)).unwrap().country, "us");
+        assert!(q("", None, None, None).is_err());
+        assert!(q(&"a".repeat(101), None, None, None).is_err());
+        assert!(q("x", Some("web"), None, None).is_err());
+        assert!(q("x", None, Some("usa"), None).is_err());
+        assert!(q("x", None, Some("c1"), None).is_err());
+        assert!(q("x", None, None, Some(0)).is_err());
+        assert!(q("x", None, None, Some(31)).is_err());
+    }
+
+    #[test]
+    fn catalog_lookup_through_the_router() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        block(async {
+            let state = readiness_test_state();
+            let get = |uri: String| {
+                let state = state.clone();
+                async move {
+                    let response = router(state)
+                        .oneshot(axum::http::Request::builder().uri(uri).body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                    (status, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+                }
+            };
+            let (status, body) =
+                get("/agent/apps?query=%E5%BE%AE%E4%BF%A1&source=catalog".to_string()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["installation_checked"], false);
+            assert_eq!(body["searched"], serde_json::json!(["catalog"]));
+            let first = &body["candidates"][0];
+            assert_eq!(first["bundle_id"], "com.tencent.xin");
+            assert_eq!(first["source"], "catalog");
+            assert_eq!(first["installed_verified"], false);
+            assert_eq!(first["match"], "exact");
+
+            let (status, body) = get("/agent/apps?query=x&source=nope".to_string()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "invalid_query");
+        });
     }
 }
 

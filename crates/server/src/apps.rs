@@ -21,9 +21,16 @@ pub const CACHE_TTL: Duration = Duration::from_secs(600);
 static CACHE: Mutex<Option<HashMap<String, (Instant, Value)>>> = Mutex::new(None);
 
 pub fn cache_get(target: &str) -> Option<Value> {
+    cache_get_within(target, CACHE_TTL)
+}
+
+/// A cached inventory no older than `max_age` (never older than [`CACHE_TTL`]).
+/// App lookup by name wants a fresher list than version matching does: an
+/// app installed a minute ago should be found.
+pub fn cache_get_within(target: &str, max_age: Duration) -> Option<Value> {
     let guard = CACHE.lock().ok()?;
     let (at, body) = guard.as_ref()?.get(target)?;
-    (at.elapsed() < CACHE_TTL).then(|| body.clone())
+    (at.elapsed() < max_age.min(CACHE_TTL)).then(|| body.clone())
 }
 
 pub fn cache_put(target: &str, body: &Value) {

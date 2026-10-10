@@ -92,7 +92,43 @@ const RECONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 /// One live-panel frame: a WDA capture takes 0.5–1.5 s, the cached paths
 /// milliseconds; anything slower is skipped and the next poll tries again.
 const SCREEN_FRAME_TIMEOUT: Duration = Duration::from_secs(6);
+/// App lookup by name may read the phone's inventory cold: two devicectl
+/// calls with 30 s deadlines each, then (rarely) a 5 s store search.
+const APPS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(75);
 const MAX_ERROR_BODY_CHARS: usize = 2_048;
+
+/// Characters the daemon types in one runner request; longer text is chunked.
+/// Mirrors `server::text_input::CHUNK_CHARS`.
+const TEXT_CHUNK_CHARS: usize = 200;
+
+/// The extra time the daemon gives a long text on top of an action's
+/// ordinary deadline — `server::text_input::typing_allowance`, mirrored so
+/// this client never gives up on a request the daemon is still typing. Zero
+/// for text up to one chunk: short text keeps its old timeout exactly.
+pub(crate) fn text_allowance(text: &str) -> Duration {
+    let chars = text.chars().count();
+    if chars <= TEXT_CHUNK_CHARS {
+        return Duration::ZERO;
+    }
+    let chunks = chars.div_ceil(TEXT_CHUNK_CHARS) as u32;
+    // 60 characters a second, 1.5× margin, plus a second per chunk — and a
+    // few seconds more so the daemon's own answer always arrives first.
+    Duration::from_secs_f64(chars as f64 / 60.0 * 1.5)
+        + Duration::from_secs(1) * chunks
+        + Duration::from_secs(5)
+}
+
+/// [`text_allowance`] summed over a batch's `text` steps.
+pub(crate) fn actions_text_allowance(body: &serde_json::Value) -> Duration {
+    body["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|step| step["action"]["type"] == "text")
+        .filter_map(|step| step["action"]["text"].as_str())
+        .map(text_allowance)
+        .sum()
+}
 
 /// Thin async wrapper over the daemon's `GET /agent/*` and
 /// `POST /agent/input` endpoints.
@@ -437,6 +473,32 @@ impl DaemonClient {
         Ok(resp.text().await?)
     }
 
+    /// `GET /agent/apps?query=…` — app lookup by name, keeping the daemon's
+    /// structured answer (errors included). Read-only: no control header.
+    pub async fn apps_lookup(
+        &self,
+        query: &str,
+        source: Option<&str>,
+        country: Option<&str>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<DaemonResponse> {
+        let mut params: Vec<(&str, String)> = vec![("query", query.to_string())];
+        if let Some(source) = source {
+            params.push(("source", source.to_string()));
+        }
+        if let Some(country) = country {
+            params.push(("country", country.to_string()));
+        }
+        if let Some(limit) = limit {
+            params.push(("limit", limit.to_string()));
+        }
+        let req = self
+            .auth(self.client.get(self.url("/agent/apps")))
+            .query(&params)
+            .timeout(APPS_LOOKUP_TIMEOUT);
+        read_response(req.send().await?).await
+    }
+
     pub async fn status(&self) -> anyhow::Result<StatusResponse> {
         let req = self.auth(self.client.get(self.url("/agent/status")));
         let resp = req.send().await?;
@@ -474,8 +536,14 @@ impl DaemonClient {
             .header("x-phone-control", "1")
             .header(header::CONTENT_TYPE, "application/json")
             .body(msg.to_json());
+        let typing = match msg {
+            InputMsg::Text { text } => text_allowance(text),
+            _ => Duration::ZERO,
+        };
         if observe {
-            req = req.timeout(OBSERVE_TIMEOUT);
+            req = req.timeout(OBSERVE_TIMEOUT + typing);
+        } else if !typing.is_zero() {
+            req = req.timeout(REQUEST_TIMEOUT + typing);
         }
         let response = read_response(req.send().await?).await?;
         self.remember_snapshot(response.json.as_ref());
@@ -524,7 +592,7 @@ impl DaemonClient {
     ) -> anyhow::Result<DaemonResponse> {
         let mut req = self
             .auth(self.client.post(self.url("/agent/actions")))
-            .timeout(ACTIONS_TIMEOUT)
+            .timeout(ACTIONS_TIMEOUT + actions_text_allowance(body))
             .header("x-phone-control", "1")
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
