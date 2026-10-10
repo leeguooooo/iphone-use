@@ -591,6 +591,50 @@ do {
   check(picked.map { AlertScan.describe($0.alert).text } == "Body", "an alert's static text reads as before")
 }
 
+// The tree hardware gave for Safari's invalid-address dialog (iPhone 17 Pro Max, iOS 27): the
+// SFDialogView container on level 11, its marker and button on 12, the message below.
+do {
+  let message = "Safari浏览器打不开该网页，因为网址无效。"
+  let dialog: [String: Any] = [
+    "type": "XCUIElementTypeOther", "rawIdentifier": "SFDialogView", "name": "SFDialogView",
+    "children": [
+      ["type": "XCUIElementTypeStaticText", "rawIdentifier": "SFDialogViewMessageText", "name": "SFDialogViewMessageText",
+       "children": [["type": "XCUIElementTypeTextView", "value": message, "children": [
+         ["type": "XCUIElementTypeTextView", "label": message, "name": message],
+         ["type": "XCUIElementTypeOther", "label": "垂直滚动条, 1页", "value": "0%"],
+       ]]]],
+      ["type": "XCUIElementTypeButton", "label": "好", "name": "好",
+       "rect": ["x": 370, "y": 466.7, "width": 30, "height": 29],
+       "children": [["type": "XCUIElementTypeStaticText", "label": "好"]]],
+    ],
+  ]
+  // Levels 0-10 above it: Application, Window, Others, ScrollView, TabDocument, WebView, Other.
+  var tree: [String: Any] = ["type": "XCUIElementTypeOther", "children": [["type": "XCUIElementTypeOther"], dialog]]
+  for type in ["WebView", "Other", "ScrollView", "Other", "Other", "Other", "Other", "Other", "Window", "Application"] {
+    tree = ["type": "XCUIElementType" + type, "children": [tree]]
+  }
+  let full = AlertScan.firstAlert(in: tree, maxDepth: 64)
+  check(full?.alert["rawIdentifier"] as? String == "SFDialogView" && full?.maybeCut == false,
+        "the full read finds the SFDialogView container, complete")
+  let described = full.map { AlertScan.describe($0.alert) }
+  check(described?.text == message, "the invalid-address dialog's text: \(described?.text ?? "nil")")
+  check(described?.buttons.map(\.label) == ["好"], "its one button: 好")
+
+  // The shallow alert scan reads 12 levels (0-11): the container arrives without its children.
+  func cut(_ node: [String: Any], _ depth: Int, _ maxDepth: Int) -> [String: Any] {
+    var node = node
+    if depth >= maxDepth - 1 {
+      node.removeValue(forKey: "children")
+    } else if let children = node["children"] as? [[String: Any]] {
+      node["children"] = children.map { cut($0, depth + 1, maxDepth) }
+    }
+    return node
+  }
+  let shallow = AlertScan.firstAlert(in: cut(tree, 0, AlertScan.shallowDepth), maxDepth: AlertScan.shallowDepth)
+  check(shallow?.alert["rawIdentifier"] as? String == "SFDialogView" && shallow?.maybeCut == true,
+        "a 12-level read sees the dialog's container and asks for the full read")
+}
+
 // MARK: - Element registry bounds
 
 do {

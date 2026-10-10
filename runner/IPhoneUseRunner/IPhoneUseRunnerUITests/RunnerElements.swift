@@ -375,6 +375,10 @@ enum AlertScan {
 
   /// Levels read when only looking for an alert: alerts sit a few levels under the window, while
   /// a full read of an app's content can be thousands of nodes.
+  /// Safari's own dialogs sit on level 11 (`webDialogID`, hardware: iOS 27), the last level this
+  /// read returns; the container then arrives without children and `firstAlert` asks for the full
+  /// read. Reading even one level deeper in Safari costs the whole page (iOS 27, a Wikipedia
+  /// article: 54 nodes / ~60 ms at 12 levels, 523 nodes / ~225 ms at 13), so the depth stays.
   static let shallowDepth = 12
 
   /// The first alert in a tree read to `maxDepth` node levels, and whether the depth cap may have
@@ -397,14 +401,19 @@ enum AlertScan {
     return (found.node, reachesCap(found.node, found.depth))
   }
 
-  /// Identifier of the message in a dialog Safari draws itself (`SFDialogView…`: a page's
-  /// `alert()` / `confirm()` / `prompt()`, "the address is invalid"). Such a dialog blocks the page
-  /// like an alert, but it is not an XCUIElementTypeAlert, so neither XCTest's alert query nor the
-  /// type match above finds it (#255, iOS 26 Safari).
+  /// Identifiers of a dialog Safari draws itself (a page's `alert()` / `confirm()` / `prompt()`,
+  /// "the address is invalid"): its container and its message. Such a dialog blocks the page like
+  /// an alert, but it is not an XCUIElementTypeAlert, so neither XCTest's alert query nor the type
+  /// match above finds it (#255). Hardware, iPhone 17 Pro Max / iOS 27 Safari: `SFDialogView`
+  /// (an Other on level 11, inside the WebView) holds the `SFDialogViewMessageText` StaticText
+  /// (identifier only; the message is in the TextViews below it) and the button.
+  static let webDialogID = "SFDialogView"
   static let webDialogMessageID = "SFDialogViewMessageText"
 
-  /// A Safari dialog in the tree: the closest ancestor of its message node that also holds a
-  /// button (the dialog's own container, never the window or the app), with its depth.
+  /// A Safari dialog in the tree, with its depth: the `SFDialogView` container, else the closest
+  /// ancestor of its message node that also holds a button (never the window or the app). The
+  /// container matches even when a shallow read cut its children, so `firstAlert` reports it as
+  /// possibly cut and the caller reads the full depth.
   static func webDialog(in root: [String: Any]) -> (node: [String: Any], depth: Int)? {
     func isMessage(_ node: [String: Any]) -> Bool {
       ["rawIdentifier", "name", "label"].contains { node[$0] as? String == webDialogMessageID }
@@ -415,6 +424,7 @@ enum AlertScan {
     }
     // `path` is the chain of ancestors from the root down to `node`'s parent.
     func find(_ node: [String: Any], _ path: [[String: Any]]) -> (node: [String: Any], depth: Int)? {
+      if node["rawIdentifier"] as? String == webDialogID { return (node, path.count) }
       if isMessage(node) {
         for (depth, ancestor) in path.enumerated().reversed() {
           let type = ancestor["type"] as? String
