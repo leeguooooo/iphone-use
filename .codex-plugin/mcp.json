@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "iphone-use": {
+      "type": "stdio",
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "mcp=\"$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp\"; [ -x \"$mcp\" ] || { echo 'iphone-use is not installed on this Mac. Install it with: curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh' >&2; exit 1; }; exec \"$mcp\""
+      ]
+    }
+  }
+}

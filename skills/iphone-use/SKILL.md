@@ -167,6 +167,8 @@ reference: *Flows*.
    payment or 2FA screens unattended.
 3. **Text goes to whatever field has focus.** If a person is mid-chat, your words
    land in their message. Confirm the foreground app and the focused field first.
+   In chat apps Return sends, and a `\n` in typed text is Return: send one line
+   unless the user wants breaks. → reference: *Chat apps: multi-line messages*
 4. **System alerts need the `alert` action.** Taps on alert buttons ACK but often
    do nothing. **Switches** need `perform toggle`. Verify the new
    `value` either way.
@@ -176,9 +178,16 @@ reference: *Flows*.
 6. **Log in only through `phone_login` / `iphone-use auth login --bwu`.** It
    fills the user's own vault entry inside the daemon. Never ask for, type or
    repeat a password or code yourself; never sign up, change a password or pay.
+   Face ID, a PIN, a code or a login `phone_login` cannot finish: stop, ask the
+   user with the host's question tool (plain text if there is none or it is
+   unavailable right now) and wait, then re-read the screen. → reference:
+   *When the person has to sign in*
 7. **Saving and publishing are the user's call.** Ask before saving a flow, and
    ask again before publishing it or filing an issue. Both use their GitHub
    account.
+
+A file the task needs on the Mac comes over by AirDrop and lands in
+`~/Downloads` (reference: *Getting files from the phone to the Mac*).
 
 If the screen changes under you (`app_changed`, a banner, a person using the
 phone), stop and re-read before continuing the old plan. If the skill

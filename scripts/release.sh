@@ -19,6 +19,7 @@ done
 [ -n "$V" ] || { echo "usage: scripts/release.sh [--dry-run] <version>" >&2; exit 2; }
 MARKETPLACE=leeguooooo/plugins PLUGIN=iphone-use
 CRATES="crates/core/Cargo.toml crates/server/Cargo.toml crates/mcp/Cargo.toml crates/legacy-launch/Cargo.toml"
+CODEX_PLUGIN=.codex-plugin/plugin.json  # the Codex plugin manifest carries the same version
 die() { echo "error: $*" >&2; exit 1; }
 cd "$(dirname "$0")/.."
 
@@ -29,7 +30,7 @@ git fetch -q origin main --tags
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "main is not in sync with origin/main"
 git rev-parse -q --verify "refs/tags/v$V" >/dev/null && die "v$V already exists"
 
-trap 'git checkout -q -- $CRATES Cargo.lock' EXIT  # undo the bump on --dry-run or a failed check
+trap 'git checkout -q -- $CRATES $CODEX_PLUGIN Cargo.lock' EXIT  # undo the bump on --dry-run or a failed check
 # Same version in all three crates (the release gate checks they match the tag) and in Cargo.lock.
 for f in $CRATES; do
   sed -i.bak "1,/^version = /s/^version = \".*\"/version = \"$V\"/" "$f" && rm "$f.bak"
@@ -38,6 +39,8 @@ for n in core server iphone-use-mcp legacy-launch; do
   sed -i.bak "/^name = \"$n\"\$/{n;s/^version = \".*\"/version = \"$V\"/;}" Cargo.lock && rm Cargo.lock.bak
 done
 cargo metadata --locked -q --format-version 1 >/dev/null || die "Cargo.lock out of sync"
+sed -i.bak "s/^  \"version\": \".*\",\$/  \"version\": \"$V\",/" $CODEX_PLUGIN && rm $CODEX_PLUGIN.bak
+grep -qF "  \"version\": \"$V\"," $CODEX_PLUGIN || die "$CODEX_PLUGIN version not bumped"
 
 # The release gate's helper tests (release-binaries.yml "Validate installer and release coherence").
 t() { "$@" >/dev/null 2>&1 || die "$* failed"; }
@@ -51,12 +54,12 @@ echo "checks passed"
 
 if [ "$DRY" = 1 ]; then
   git --no-pager diff --stat
-  git --no-pager diff -U0 -- $CRATES
+  git --no-pager diff -U0 -- $CRATES $CODEX_PLUGIN
   echo "dry run: would commit \"chore(release): v$V\", push main + v$V, wait for release-binaries.yml, sync $MARKETPLACE"
   exit 0
 fi
 
-git diff --quiet || git commit -qm "chore(release): v$V" -- $CRATES Cargo.lock
+git diff --quiet || git commit -qm "chore(release): v$V" -- $CRATES $CODEX_PLUGIN Cargo.lock
 trap - EXIT
 git tag "v$V"
 git push -q origin main "v$V"

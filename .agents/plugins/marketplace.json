@@ -1,0 +1,20 @@
+{
+  "name": "iphone-use",
+  "interface": {
+    "displayName": "iPhone Use"
+  },
+  "plugins": [
+    {
+      "name": "iphone-use",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -838,6 +838,52 @@ register_claude_mcp() {
     fi
 }
 
+# register_codex_mcp <mcp-binary> <server-name> [instance]
+# Same for the Codex CLI (~/.codex/config.toml). The name matches the one the
+# Codex plugin ships, so a plugin install and this entry stay one tool set.
+register_codex_mcp() {
+    local mcp="$1" name="$2" instance="${3:-}" existing current
+    command -v codex >/dev/null 2>&1 || return 0
+    if existing="$(codex mcp get "$name" --json 2>/dev/null)"; then
+        # "<command>\t<PHONE_REMOTE_INSTANCE or empty>" of the existing entry.
+        current="$(printf '%s' "$existing" | python3 -c '
+import json, sys
+t = json.load(sys.stdin).get("transport") or {}
+print("%s\t%s" % (t.get("command") or "", (t.get("env") or {}).get("PHONE_REMOTE_INSTANCE") or ""))
+' 2>/dev/null)" || current=""
+        if [ "$current" = "$mcp	$instance" ]; then
+            ok "Codex already has the $name MCP server."
+            return 0
+        fi
+        if [ -z "$instance" ] \
+            && printf '%s' "$existing" | grep -qF "\$HOME/Applications/$APP_NAME/$MCP_BINARY_INSIDE_APP"; then
+            # The plugin's launcher: the default daemon, which is this install.
+            ok "Codex already has the $name MCP server (from the iPhone Use plugin)."
+            return 0
+        fi
+        if [ "${current%%	*}" != "$mcp" ]; then
+            warn "Codex already has an MCP server named $name with another command; left it unchanged."
+            return 0
+        fi
+        # Our binary aimed at the wrong phone (instance env missing or
+        # different): replace it so $name drives this instance.
+        if ! codex mcp remove "$name" >/dev/null 2>&1; then
+            warn "Codex's $name MCP server does not target instance ${instance:-default}; fix it by hand: codex mcp remove $name"
+            return 0
+        fi
+    fi
+    if [ -n "$instance" ]; then
+        set -- codex mcp add "$name" --env "PHONE_REMOTE_INSTANCE=$instance" -- "$mcp"
+    else
+        set -- codex mcp add "$name" -- "$mcp"
+    fi
+    if "$@" >/dev/null 2>&1; then
+        ok "Codex can now use the iPhone (MCP server \"$name\"). Undo: codex mcp remove $name"
+    else
+        warn "Could not register the MCP server with Codex; add it by hand: $*"
+    fi
+}
+
 # first_run_login <cli> [--instance NAME]: one-time browser sign-in + phone QR.
 first_run_login() {
     local cli="$1"
@@ -2374,6 +2420,7 @@ install_named_instance() {
         echo ""
         printf '%b━━━ Agents ━━━%b\n' "$BOLD" "$RESET"
         register_claude_mcp "$app_dst/$MCP_BINARY_INSIDE_APP" "iphone-use-$INSTANCE_NAME" "$INSTANCE_NAME"
+        register_codex_mcp "$app_dst/$MCP_BINARY_INSIDE_APP" "iphone-use-$INSTANCE_NAME" "$INSTANCE_NAME"
     else
         echo ""
         info "Set up or repair this phone with: iphone-use setup --instance $INSTANCE_NAME"
@@ -3388,6 +3435,7 @@ fi
 echo ""
 printf '%b━━━ Agents ━━━%b\n' "$BOLD" "$RESET"
 register_claude_mcp "$DEST/$MCP_BINARY_INSIDE_APP" "iphone-use"
+register_codex_mcp "$DEST/$MCP_BINARY_INSIDE_APP" "iphone-use"
 info "Other MCP clients: command $DEST/$MCP_BINARY_INSIDE_APP (no env needed on this Mac)."
 
 echo ""

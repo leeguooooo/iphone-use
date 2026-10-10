@@ -36,7 +36,7 @@ https://github.com/user-attachments/assets/a9947152-6655-4509-ac1e-49953a3cea70
 - iPhone 打开开发者模式（设置 → 隐私与安全性 → 开发者模式）。
 - 一根数据线。安装前把 iPhone 插上并解锁。
 
-安装脚本接着会把手机配好，让 agent 打开「设置」读一遍屏幕给你看，在 Claude Code 里注册好 MCP server，再用一次性链接在浏览器里打开控制页，不用抄密码。缺什么会直接告诉你缺什么、怎么补。
+安装脚本接着会把手机配好，让 agent 打开「设置」读一遍屏幕给你看，在 Claude Code 和 Codex 里注册好 MCP server，再用一次性链接在浏览器里打开控制页，不用抄密码。缺什么会直接告诉你缺什么、怎么补。
 
 ```bash
 iphone-use status    # 手机现在能不能给 agent 用
@@ -45,6 +45,26 @@ iphone-use setup     # 重新配置手机（换了 iPhone 或 Xcode 之后）
 iphone-use try       # 无害的检查：打开设置、读屏、回桌面
 iphone-use login     # 重新登录浏览器，附手机扫码用的二维码
 iphone-use upgrade   # 升级全部组件
+```
+
+### 让 agent 帮你装
+
+在插着 iPhone 的那台 Mac 上，把下面这段贴给 Codex 或 Claude Code：
+
+```text
+在这台 Mac 上安装 iphone-use（https://github.com/leeguooooo/iphone-use），让你能操作我的 iPhone。
+1. 运行：curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
+2. 运行 `iphone-use doctor`。终端里能修的直接修；它让你运行 `iphone-use setup` 时就运行。
+3. 有几步只能我自己做：在 Xcode 里登录 Apple ID、在 iPhone 上点「信任」、打开开发者模式、
+   解锁手机。遇到这些就停下，告诉我具体怎么做，等我说做完了再继续。不要向我要密码或验证码。
+4. 再跑 `iphone-use doctor`，直到什么都不缺，然后运行 `iphone-use try`。
+5. 如果这个对话里还没有 phone_* 工具，告诉我新开一个对话。
+```
+
+用 Codex 的话也可以装插件（带 skill 和 MCP server，仍需先完成上面的安装）：
+
+```bash
+codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-use@iphone-use
 ```
 
 [产品指南：安装、MCP 接入、流程和选型](https://blog.leeguoo.com/zh/posts/iphone-use/)
@@ -61,7 +81,7 @@ iphone-use upgrade   # 升级全部组件
 
 ## 接到 agent 上
 
-安装时会装好 agent 的 skill；装了 Claude Code 的话，还会自动注册 MCP server。其他 MCP 客户端只要填命令，在这台 Mac 上 server 会自己找到守护进程和令牌：
+安装时会装好 agent 的 skill；装了 Claude Code 或 Codex 的话，还会自动给它注册 MCP server。其他 MCP 客户端只要填命令，在这台 Mac 上 server 会自己找到守护进程和令牌：
 
 ```json
 {

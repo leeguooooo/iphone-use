@@ -8,6 +8,9 @@ Details behind [SKILL.md](SKILL.md). Read the section you need, when you need it
 - [Actions catalogue](#actions-catalogue)
 - [Reading results: settle, delta, wait_for](#reading-results-settle-delta-wait_for)
 - [Gestures and controls](#gestures-and-controls)
+- [When the person has to sign in](#when-the-person-has-to-sign-in)
+- [Chat apps: multi-line messages](#chat-apps-multi-line-messages)
+- [Getting files from the phone to the Mac](#getting-files-from-the-phone-to-the-mac)
 - [MCP specifics](#mcp-specifics)
 - [Task metrics, runs and advice](#task-metrics-runs-and-advice)
 - [Flows: format, compat, saving, fixing](#flows-format-compat-saving-fixing)
@@ -444,6 +447,47 @@ always read `••••••••`.
 
 Existing-account login only: never sign-up, password changes or payment, and a
 push approval on another device needs the user.
+
+## When the person has to sign in
+
+Face ID / Touch ID, an app passcode or PIN, a one-time code with no source
+`phone_login` can read, a login `phone_login` could not finish, or a payment
+confirmation: these belong to the person.
+
+1. Stop sending input. Take `phone_hold(secs)` so the phone stays ready while
+   they act.
+2. Ask with the host's question tool (for example `AskUserQuestion` in Claude
+   Code, `request_user_input` in Codex), not a line in your reply. Name the app, what the screen
+   asks for and what you will do next; offer "Done, continue" and "Can't right
+   now". Fall back to plain text when the host has no such tool, or has one
+   that is unavailable or refused right now (Codex allows `request_user_input`
+   only in some modes); then wait for the person's reply.
+3. Never ask for the password, PIN or code, and never type one with
+   `phone_type` or a batch, even when the field is not marked secure.
+4. After "Done": clear the hold, read the screen again (`phone_elements`) and
+   plan from what is there. The person may have moved on; old snapshots,
+   element ids and coordinates are stale. If something was submitted during
+   the hand-off, read the result before resending anything.
+
+## Chat apps: multi-line messages
+
+In WeChat and most chat apps Return sends. A `\n` inside `type` text is typed
+as Return, so each line goes out as its own message. Default to one line: join
+the lines with spaces or ` / `. When the user really wants line breaks, type
+the first line, tap inside the input box to bring up the edit menu and pick
+换行 / New Line where the app offers it, type the next line, repeat; read the
+whole draft back, then send once. No such menu item: stop and ask whether one
+line is acceptable. Never press Return to get a line break.
+
+## Getting files from the phone to the Mac
+
+AirDrop is the shortest path for a photo, video or document the task needs
+on the Mac: in the app, Share → AirDrop → this Mac (its name:
+`scutil --get ComputerName`). Accept the prompt on the Mac if one appears
+(that is the person's screen; ask them). The file lands in `~/Downloads`; pick
+the newest match (`ls -t ~/Downloads | head`) and use its absolute path. For
+large exports (Health), Save to Files → iCloud Drive also works; see the
+worked example below.
 
 ## MCP specifics
 
