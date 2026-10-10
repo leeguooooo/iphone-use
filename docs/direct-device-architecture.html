@@ -864,19 +864,19 @@
               </tr>
               <tr>
                 <td>Agent 鉴权</td>
-                <td>配置 <code>PHONE_REMOTE_AGENT_TOKEN</code> 时，机器调用只接受专用 bearer；否则沿用密码。</td>
+                <td>配置 <code>IPHONE_USE_AGENT_TOKEN</code> 时，机器调用只接受专用 bearer；否则沿用密码。</td>
                 <td>不要把 token、密码或 live cookie 写进日志和验收附件。</td>
               </tr>
               <tr>
                 <td>空闲释放</td>
-                <td>默认空闲 600 秒后停止 WDA，把手机交还用户（<code>PHONE_REMOTE_IDLE_RELEASE_SECS</code>，0 表示一直保持）；有 live stream 时不释放。下一个 agent 请求会重新拉起 WDA。</td>
+                <td>默认空闲 600 秒后停止 WDA，把手机交还用户（<code>IPHONE_USE_IDLE_RELEASE_SECS</code>，0 表示一直保持）；有 live stream 时不释放。下一个 agent 请求会重新拉起 WDA。</td>
                 <td>released 状态下控制必须 503，不能在后台悄悄重启或注入。</td>
               </tr>
               <tr>
                 <td>WDA 所有权</td>
                 <td>
                   只有 installer 管理的 loopback supervisor 可设置
-                  <code>PHONE_REMOTE_WDA_MANAGED=true</code>。自定义或远程 WDA 是 external。
+                  <code>IPHONE_USE_WDA_MANAGED=true</code>。自定义或远程 WDA 是 external。
                 </td>
                 <td>external endpoint 不得触发本机 stop、idle release 或 bootstrap；状态要明确由操作者恢复。</td>
               </tr>
@@ -1131,10 +1131,10 @@
         <h3>1. 后端、设备与 WDA</h3>
         <pre><code>DAEMON_PLIST="$HOME/Library/LaunchAgents/com.leeguoo.iphone-use.plist"
 TOKEN="$(/usr/libexec/PlistBuddy \
-  -c 'Print :EnvironmentVariables:PHONE_REMOTE_AGENT_TOKEN' \
+  -c 'Print :EnvironmentVariables:IPHONE_USE_AGENT_TOKEN' \
   "$DAEMON_PLIST" 2&gt;/dev/null || true)"
 [ -n "$TOKEN" ] || TOKEN="$(/usr/libexec/PlistBuddy \
-  -c 'Print :EnvironmentVariables:PHONE_REMOTE_PASSWORD' \
+  -c 'Print :EnvironmentVariables:IPHONE_USE_PASSWORD' \
   "$DAEMON_PLIST")"
 
 curl -fsS -H "Authorization: Bearer $TOKEN" \
@@ -1149,7 +1149,7 @@ launchctl print "gui/$(id -u)/com.leeguoo.iphone-use.wda"</code></pre>
         <h3>2. 浏览器 cookie 与控制 ACK</h3>
         <pre><code>COOKIE_JAR="$(mktemp)"
 PASSWORD="$(/usr/libexec/PlistBuddy \
-  -c 'Print :EnvironmentVariables:PHONE_REMOTE_PASSWORD' \
+  -c 'Print :EnvironmentVariables:IPHONE_USE_PASSWORD' \
   "$DAEMON_PLIST")"
 
 curl -sS -c "$COOKIE_JAR" \

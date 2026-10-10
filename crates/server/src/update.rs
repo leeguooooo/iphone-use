@@ -49,14 +49,9 @@ pub const NOTICE_TIMEOUT: Duration = Duration::from_secs(2);
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Any of these set (non-empty, not `0`/`false`) disables both the daemon's
-/// check and the CLI notice. `PHONE_REMOTE_NO_UPDATE_CHECK` predates the
-/// family convention and keeps working.
-pub const OPT_OUT_VARS: [&str; 4] = [
-    "CI",
-    "IPHONE_USE_NO_UPDATE_CHECK",
-    "USE_NO_UPDATE_CHECK",
-    "PHONE_REMOTE_NO_UPDATE_CHECK",
-];
+/// check and the CLI notice. (The older `PHONE_REMOTE_` spelling reaches
+/// here as `IPHONE_USE_` through `core::env::adopt_legacy_names`.)
+pub const OPT_OUT_VARS: [&str; 3] = ["CI", "IPHONE_USE_NO_UPDATE_CHECK", "USE_NO_UPDATE_CHECK"];
 
 // ---------------------------------------------------------------------------
 // versions

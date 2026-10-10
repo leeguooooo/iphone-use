@@ -1,7 +1,7 @@
 //! Per-user runtime directory for pid/log/secret files.
 //!
-//! The directory lives at `$TMPDIR/hermes-phone-remote-$UID` (falling back to
-//! `/tmp/hermes-phone-remote-$UID` when `$TMPDIR` is unset).  It is created
+//! The directory lives at `$TMPDIR/iphone-use-$UID` (falling back to
+//! `/tmp/iphone-use-$UID` when `$TMPDIR` is unset).  It is created
 //! with mode `0700`; every access validates ownership and permissions so that
 //! an adversary who controls other paths under `/tmp` cannot trick the process
 //! into reading or writing their files.
@@ -17,9 +17,11 @@ use std::path::{Path, PathBuf};
 
 /// Return (and, if necessary, create) the per-user runtime directory.
 ///
-/// The path is `$TMPDIR/hermes-phone-remote-$UID` (`-<instance>` appended for
-/// a named instance), falling back to
-/// `/tmp/hermes-phone-remote-$UID` when `$TMPDIR` is unset or empty.
+/// The path is `$TMPDIR/iphone-use-$UID` (`-<instance>` appended for a named
+/// instance), falling back to `/tmp/iphone-use-$UID` when `$TMPDIR` is unset
+/// or empty. The session secret of a directory left under the pre-rename
+/// name is copied in, so every paired device and browser session carries over
+/// (and the old directory stays usable by an older release).
 ///
 /// If the directory already exists its owner and mode are validated; an
 /// `io::Error` with kind `PermissionDenied` is returned if either check fails.
@@ -29,19 +31,59 @@ pub fn runtime_dir() -> io::Result<PathBuf> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/tmp".to_owned());
-    let dir = PathBuf::from(base).join(dir_name(uid, crate::instance::current()));
+    let instance = crate::instance::current();
+    let dir = PathBuf::from(&base).join(dir_name(uid, instance));
     ensure_dir(&dir)?;
+    adopt_legacy_secret(&PathBuf::from(&base).join(legacy_dir_name(uid, instance)), &dir);
     Ok(dir)
+}
+
+/// The pre-rename runtime directory, when it exists and passes the owner and
+/// mode checks: `stop` looks there for a daemon started before the rename.
+pub fn legacy_runtime_dir() -> Option<PathBuf> {
+    let base = std::env::var("TMPDIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/tmp".to_owned());
+    let dir = PathBuf::from(base).join(legacy_dir_name(current_uid(), crate::instance::current()));
+    validate_dir(&dir).ok().map(|()| dir)
+}
+
+/// The session-cookie key's file name inside the runtime directory.
+pub const SECRET_FILE: &str = "secret";
+
+/// Copy the session secret from the pre-rename directory into `dir` when
+/// `dir` has none. The old file goes through the same checks as any read.
+/// Best effort: on failure the daemon generates a new secret, as on a first
+/// start.
+fn adopt_legacy_secret(legacy: &Path, dir: &Path) {
+    if dir.join(SECRET_FILE).symlink_metadata().is_ok() || validate_dir(legacy).is_err() {
+        return;
+    }
+    if let Ok(secret) = read_secret_in(legacy, SECRET_FILE) {
+        if !secret.is_empty() {
+            let _ = write_secret_in(dir, SECRET_FILE, &secret);
+        }
+    }
 }
 
 /// The pid record and session secret are per daemon: a named instance (#67)
 /// gets its own directory so the default daemon's live pid record does not
 /// read as "already running" to it.
 fn dir_name(uid: u32, instance: &crate::instance::Instance) -> String {
+    named(&format!("iphone-use-{uid}"), instance)
+}
+
+/// The name before the rename.
+fn legacy_dir_name(uid: u32, instance: &crate::instance::Instance) -> String {
+    named(&format!("hermes-phone-remote-{uid}"), instance)
+}
+
+fn named(base: &str, instance: &crate::instance::Instance) -> String {
     if instance.is_default() {
-        format!("hermes-phone-remote-{uid}")
+        base.to_string()
     } else {
-        format!("hermes-phone-remote-{uid}-{}", instance.name)
+        format!("{base}-{}", instance.name)
     }
 }
 
@@ -197,8 +239,9 @@ mod tests {
     fn a_named_instance_gets_its_own_runtime_dir() {
         let default = crate::instance::Instance::derive("", "/Users/x", None).unwrap();
         let lab = crate::instance::Instance::derive("lab", "/Users/x", None).unwrap();
-        assert_eq!(dir_name(501, &default), "hermes-phone-remote-501");
-        assert_eq!(dir_name(501, &lab), "hermes-phone-remote-501-lab");
+        assert_eq!(dir_name(501, &default), "iphone-use-501");
+        assert_eq!(dir_name(501, &lab), "iphone-use-501-lab");
+        assert_eq!(legacy_dir_name(501, &lab), "hermes-phone-remote-501-lab");
     }
 
     // Helper: create a fresh 0700 tempdir.
@@ -258,6 +301,40 @@ mod tests {
         fs::set_permissions(td.path(), fs::Permissions::from_mode(0o755)).unwrap();
         let err = validate_dir(td.path()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn the_pre_rename_secret_is_copied_and_the_old_directory_kept() {
+        let base = tmp700();
+        let legacy = base.path().join("hermes-phone-remote-501");
+        let dir = base.path().join("iphone-use-501");
+        ensure_dir(&legacy).unwrap();
+        ensure_dir(&dir).unwrap();
+        write_secret(&legacy, SECRET_FILE, b"0123456789abcdef0123456789abcdef").unwrap();
+
+        adopt_legacy_secret(&legacy, &dir);
+        assert_eq!(read_secret(&dir, SECRET_FILE).unwrap(), b"0123456789abcdef0123456789abcdef");
+        assert!(legacy.join(SECRET_FILE).exists(), "an older release can still use it");
+
+        // A secret already here is never replaced.
+        let other = base.path().join("iphone-use-502");
+        ensure_dir(&other).unwrap();
+        write_secret(&other, SECRET_FILE, b"ffffffffffffffffffffffffffffffff").unwrap();
+        adopt_legacy_secret(&legacy, &other);
+        assert_eq!(read_secret(&other, SECRET_FILE).unwrap(), b"ffffffffffffffffffffffffffffffff");
+    }
+
+    #[test]
+    fn a_loose_pre_rename_directory_is_not_trusted() {
+        let base = tmp700();
+        let legacy = base.path().join("hermes-phone-remote-501");
+        let dir = base.path().join("iphone-use-501");
+        ensure_dir(&legacy).unwrap();
+        write_secret(&legacy, SECRET_FILE, b"0123456789abcdef0123456789abcdef").unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_dir(&dir).unwrap();
+        adopt_legacy_secret(&legacy, &dir);
+        assert!(!dir.join(SECRET_FILE).exists());
     }
 
     #[test]

@@ -27,7 +27,7 @@ if [ "$1 $2" = "setup-native --supports" ]; then
 fi
 {
     echo "args=$*"
-    echo "instance=${PHONE_REMOTE_INSTANCE:-}"
+    echo "instance=${IPHONE_USE_INSTANCE:-}"
     echo "script=${IPHONE_USE_SETUP_SCRIPT:-}"
     echo "udid=${WDA_UDID:-}"
 } > "$FAKE_LOG"
@@ -51,8 +51,8 @@ check "the environment and the script path travel with it" \
     "grep -qx 'udid=0000AB' '$TMP/log' && grep -qx 'script=$SETUP' '$TMP/log' && grep -qx 'instance=default' '$TMP/log'"
 
 rm -f "$TMP/log"
-run IPHONE_USE_SETUP_BIN="$FAKE" PHONE_REMOTE_INSTANCE=lab /bin/bash "$SETUP" status
-check "PHONE_REMOTE_INSTANCE is passed through" "grep -qx 'instance=lab' '$TMP/log'"
+run IPHONE_USE_SETUP_BIN="$FAKE" IPHONE_USE_INSTANCE=lab /bin/bash "$SETUP" status
+check "IPHONE_USE_INSTANCE is passed through" "grep -qx 'instance=lab' '$TMP/log'"
 
 # An installed copy belongs to its instance.
 COPY="$HOME_DIR/.iphone-use/instances/lab/setup-wda.sh"
@@ -60,7 +60,7 @@ mkdir -p "$(dirname "$COPY")"; cp "$SETUP" "$COPY"
 rm -f "$TMP/log"
 run IPHONE_USE_SETUP_BIN="$FAKE" /bin/bash "$COPY" status
 check "an instance's copy runs as that instance" "grep -qx 'instance=lab' '$TMP/log'"
-out="$(run IPHONE_USE_SETUP_BIN="$FAKE" PHONE_REMOTE_INSTANCE=other /bin/bash "$COPY" status 2>&1)"
+out="$(run IPHONE_USE_SETUP_BIN="$FAKE" IPHONE_USE_INSTANCE=other /bin/bash "$COPY" status 2>&1)"
 code=$?
 check "an instance's copy refuses another instance (exit 2)" \
     "[ $code = 2 ] && printf '%s' \"\$out\" | grep -q 'belongs to instance \"lab\"'"

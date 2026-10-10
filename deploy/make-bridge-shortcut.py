@@ -10,7 +10,7 @@ the dispatch id.
 
 Usage (see --help):
 
-    python3 deploy/make-bridge-shortcut.py --token "$PHONE_REMOTE_AGENT_TOKEN"
+    python3 deploy/make-bridge-shortcut.py --token "$IPHONE_USE_AGENT_TOKEN"
     open "iU Bridge.shortcut"        # accept the import dialog on the Mac
 
 The imported shortcut's name is the file stem, and it MUST equal the registry's
@@ -406,7 +406,7 @@ def main() -> int:
                         help="verify variable slots, response JSON, and branch balance; "
                              "no files written, no token needed")
     parser.add_argument("--token", required="--self-test" not in sys.argv,
-                        help="daemon bearer token (PHONE_REMOTE_AGENT_TOKEN); stored inside "
+                        help="daemon bearer token (IPHONE_USE_AGENT_TOKEN); stored inside "
                              "the shortcut's headers, never in the deep link")
     parser.add_argument("--daemon-url", default=None,
                         help="daemon base URL reachable FROM THE PHONE "

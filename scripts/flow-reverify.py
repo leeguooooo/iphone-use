@@ -23,12 +23,18 @@ Usage:
   flow-reverify.py run [--dry-run] [--only id,id] [--device NAME]
   flow-reverify.py enable|disable|status        # launchd job, daily 03:30
 
-Env: PHONE_REMOTE_URL, PHONE_REMOTE_TOKEN (required for run), IPHONE_USE_MCP (binary),
+Env: IPHONE_USE_URL, IPHONE_USE_TOKEN (required for run), IPHONE_USE_MCP (binary),
      IPHONE_USE_FLOWS_REPO (owner/name, default leeguooooo/iphone-use-flows),
      FLOW_REVERIFY_OWNER (owner lease name, default flow-reverify),
      FLOW_REVERIFY_BRING_UP=1 (bring a parked phone up instead of skipping).
 """
 import argparse, datetime, json, os, plistlib, shutil, subprocess, sys, tempfile, time, urllib.request
+
+# Installs made before the rename set PHONE_REMOTE_*; read them as IPHONE_USE_*
+# (the new name wins).
+for _key, _value in list(os.environ.items()):
+    if _key.startswith("PHONE_REMOTE_") and len(_key) > len("PHONE_REMOTE_"):
+        os.environ.setdefault("IPHONE_USE_" + _key[len("PHONE_REMOTE_"):], _value)
 
 LABEL = "com.leeguoo.iphone-use.flow-reverify"
 LOG_DIR = os.path.expanduser("~/Library/Logs/iPhoneUse")
@@ -36,8 +42,8 @@ LOG = os.path.join(LOG_DIR, "flow-reverify.log")
 REPO = os.environ.get("IPHONE_USE_FLOWS_REPO", "leeguooooo/iphone-use-flows")
 OWNER = os.environ.get("FLOW_REVERIFY_OWNER", "flow-reverify")
 MCP = os.environ.get("IPHONE_USE_MCP") or os.path.expanduser("~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp")
-HOST = os.environ.get("PHONE_REMOTE_URL", "http://127.0.0.1:44321").rstrip("/")
-TOKEN = os.environ.get("PHONE_REMOTE_TOKEN", "")
+HOST = os.environ.get("IPHONE_USE_URL", "http://127.0.0.1:44321").rstrip("/")
+TOKEN = os.environ.get("IPHONE_USE_TOKEN", "")
 BRING_UP = os.environ.get("FLOW_REVERIFY_BRING_UP", "") == "1"
 
 
@@ -69,7 +75,7 @@ def http(method, path, body=None, control=False, timeout=60):
 
 
 def mcp(*args, env_extra=None, timeout=300):
-    env = dict(os.environ, PHONE_REMOTE_OWNER=OWNER)
+    env = dict(os.environ, IPHONE_USE_OWNER=OWNER)
     env.update(env_extra or {})
     p = subprocess.run([MCP, *args], capture_output=True, text=True, env=env, timeout=timeout)
     return p.returncode, p.stdout.strip(), p.stderr.strip()
@@ -376,7 +382,7 @@ def main():
 
 def run(a):
     if not TOKEN:
-        log("PHONE_REMOTE_TOKEN not set; nothing to do"); return 0
+        log("IPHONE_USE_TOKEN not set; nothing to do"); return 0
     if not os.path.exists(MCP):
         log(f"iphone-use-mcp not found at {MCP}"); return 0
     st, why = preflight()
@@ -525,10 +531,10 @@ def launchd(cmd):
         if os.path.exists(plist):
             os.remove(plist)
         print("disabled"); return 0
-    env = {k: os.environ[k] for k in ("PHONE_REMOTE_URL", "PHONE_REMOTE_TOKEN", "IPHONE_USE_MCP", "IPHONE_USE_FLOWS_REPO", "FLOW_REVERIFY_OWNER") if os.environ.get(k)}
+    env = {k: os.environ[k] for k in ("IPHONE_USE_URL", "IPHONE_USE_TOKEN", "IPHONE_USE_MCP", "IPHONE_USE_FLOWS_REPO", "FLOW_REVERIFY_OWNER") if os.environ.get(k)}
     env.setdefault("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
-    if "PHONE_REMOTE_TOKEN" not in env:
-        print("set PHONE_REMOTE_TOKEN (and PHONE_REMOTE_URL) in the environment when enabling", file=sys.stderr); return 2
+    if "IPHONE_USE_TOKEN" not in env:
+        print("set IPHONE_USE_TOKEN (and IPHONE_USE_URL) in the environment when enabling", file=sys.stderr); return 2
     data = {"Label": LABEL, "ProgramArguments": ["/usr/bin/python3", os.path.abspath(__file__), "run"],
             "StartCalendarInterval": {"Hour": 3, "Minute": 30}, "EnvironmentVariables": env,
             "StandardOutPath": LOG, "StandardErrorPath": LOG, "RunAtLoad": False}

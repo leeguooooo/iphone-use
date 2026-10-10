@@ -10,7 +10,7 @@
 //! [`LEASE_SECS`]. The runner never acts on a locked phone, so a phone its
 //! owner locks by hand stays locked.
 //!
-//! `PHONE_REMOTE_KEEP_AWAKE_SECS` is how long after the last driving request
+//! `IPHONE_USE_KEEP_AWAKE_SECS` is how long after the last driving request
 //! the phone is kept awake (default [`DEFAULT_WINDOW_SECS`]); `0` turns the
 //! feature off. A hold lease, an open live view or a live owner lease keep it
 //! awake for as long as they last.
@@ -120,7 +120,7 @@ pub fn note_supported(supported: bool) {
     SUPPORTED.store(if supported { 1 } else { 2 }, Ordering::Release);
 }
 
-/// The keep-awake window from `PHONE_REMOTE_KEEP_AWAKE_SECS`; `None` when it
+/// The keep-awake window from `IPHONE_USE_KEEP_AWAKE_SECS`; `None` when it
 /// is `0` (off). Unset or unparsable means the default.
 pub fn window_from_env(value: Option<&str>) -> Option<Duration> {
     let secs = value
@@ -138,11 +138,11 @@ pub fn wanted(in_use: bool, released: bool, transitioning: bool, handed_off: boo
 /// Start the renewal loop. No-op without a device runner or when switched off.
 pub fn spawn(state: Arc<AppState>) {
     let Some(window) = window_from_env(
-        std::env::var("PHONE_REMOTE_KEEP_AWAKE_SECS")
+        std::env::var("IPHONE_USE_KEEP_AWAKE_SECS")
             .ok()
             .as_deref(),
     ) else {
-        tracing::info!("keep-awake off (PHONE_REMOTE_KEEP_AWAKE_SECS=0): Auto-Lock applies while the phone is driven");
+        tracing::info!("keep-awake off (IPHONE_USE_KEEP_AWAKE_SECS=0): Auto-Lock applies while the phone is driven");
         return;
     };
     let Some(wda) = state.wda.clone() else {

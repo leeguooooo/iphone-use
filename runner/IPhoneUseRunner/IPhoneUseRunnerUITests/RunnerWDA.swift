@@ -1,5 +1,5 @@
 // WebDriverAgent-compatible routes, so the iphone-use daemon's WdaClient (crates/server/src/wda.rs)
-// can point PHONE_REMOTE_WDA_URL at this runner unchanged. Request and response shapes follow
+// can point IPHONE_USE_WDA_URL at this runner unchanged. Request and response shapes follow
 // what WdaClient sends and parses; element finds run over the private AX tree (RunnerElements.swift).
 
 import Foundation

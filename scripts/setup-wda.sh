@@ -34,7 +34,7 @@
 #   IPHONE_USE_XCODE=... this phone's own Xcode (`iphone-use setup --xcode`)
 #   WDA_PORT=...        control relay port (default: 8100; named instances: derived)
 #   MJPEG_PORT=...      video relay port (default: 9100; named instances: derived)
-#   PHONE_REMOTE_INSTANCE=... which daemon/phone pair (default: default)
+#   IPHONE_USE_INSTANCE=... which daemon/phone pair (default: default)
 #   WDA_TRANSPORT=...   auto (default): off USB, set up and relaunch through the
 #                       phone's encrypted CoreDevice Wi-Fi tunnel (USB preferred);
 #                       usb: require the cable
@@ -75,20 +75,26 @@ case "$SELF" in
         ;;
     "$HOME/.iphone-use/setup-wda.sh") INSTALLED=default ;;
 esac
-REQUESTED="${PHONE_REMOTE_INSTANCE-}"
+# Installs made before the rename set PHONE_REMOTE_*; read them as IPHONE_USE_*
+# (the new name wins). Names are [A-Z0-9_], so the eval is safe.
+for _legacy in $(env | sed -n 's/^PHONE_REMOTE_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p'); do
+    eval "[ -n \"\${IPHONE_USE_${_legacy}+x}\" ] || export IPHONE_USE_${_legacy}=\"\$PHONE_REMOTE_${_legacy}\""
+done
+unset _legacy
+REQUESTED="${IPHONE_USE_INSTANCE-}"
 [ -n "$REQUESTED" ] || REQUESTED="${INSTALLED:-default}"
 if [ -n "$INSTALLED" ] && [ "$INSTALLED" != "$REQUESTED" ] \
-    && [ -z "${PHONE_REMOTE_STATE_DIR:-}" ]; then
+    && [ -z "${IPHONE_USE_STATE_DIR:-}" ]; then
     if [ "$REQUESTED" = default ]; then
         OTHER="$HOME/.iphone-use/setup-wda.sh"
     else
         OTHER="$HOME/.iphone-use/instances/$REQUESTED/setup-wda.sh"
     fi
-    printf 'this setup-wda.sh belongs to instance "%s" but PHONE_REMOTE_INSTANCE is "%s"; run %s instead\n' \
+    printf 'this setup-wda.sh belongs to instance "%s" but IPHONE_USE_INSTANCE is "%s"; run %s instead\n' \
         "$INSTALLED" "$REQUESTED" "$OTHER" >&2
     exit 2
 fi
-export PHONE_REMOTE_INSTANCE="$REQUESTED"
+export IPHONE_USE_INSTANCE="$REQUESTED"
 
 # The binary: the daemon this instance runs (a named instance has its own
 # runtime copy), then the standard app locations. It must implement the

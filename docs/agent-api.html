@@ -90,16 +90,16 @@
   <tr><th>Mode</th><th>When</th><th>Token to use</th></tr>
   <tr>
     <td><strong>Dedicated token</strong></td>
-    <td><code>PHONE_REMOTE_AGENT_TOKEN</code> is set on the daemon</td>
+    <td><code>IPHONE_USE_AGENT_TOKEN</code> is set on the daemon</td>
     <td>That token — the password is no longer accepted as a bearer</td>
   </tr>
   <tr>
     <td><strong>Password fallback</strong> (legacy)</td>
-    <td><code>PHONE_REMOTE_AGENT_TOKEN</code> is unset</td>
-    <td><code>PHONE_REMOTE_PASSWORD</code></td>
+    <td><code>IPHONE_USE_AGENT_TOKEN</code> is unset</td>
+    <td><code>IPHONE_USE_PASSWORD</code></td>
   </tr>
 </table>
-<pre><code>Authorization: Bearer &lt;PHONE_REMOTE_AGENT_TOKEN or PHONE_REMOTE_PASSWORD&gt;</code></pre>
+<pre><code>Authorization: Bearer &lt;IPHONE_USE_AGENT_TOKEN or IPHONE_USE_PASSWORD&gt;</code></pre>
 <p class="muted">
   When the daemon runs with no password and no agent token (open LAN-dev mode) the agent
   API is open too — the same policy as the browser cookie gate. The bearer is compared in
@@ -175,7 +175,7 @@
 <table>
   <tr><th>Field</th><th>Meaning</th></tr>
   <tr><td><code>backend</code></td><td>Always <code>direct</code> (the phone is driven over WDA). Kept for client compatibility.</td></tr>
-  <tr><td><code>target_configured</code></td><td>Whether a persistent <code>PHONE_REMOTE_UDID</code> is configured.</td></tr>
+  <tr><td><code>target_configured</code></td><td>Whether a persistent <code>IPHONE_USE_UDID</code> is configured.</td></tr>
   <tr><td><code>managed_wda</code></td><td><code>true</code> when this daemon owns the local loopback WDA supervisor and relay lifecycle; remote endpoints are externally managed.</td></tr>
   <tr><td><code>managed_wda_pending</code></td><td><code>true</code> during first-run local setup when managed Direct was requested but no canonical device target has been persisted yet. In this state the daemon will not stop or bootstrap WDA.</td></tr>
   <tr><td><code>recovery_owner</code></td><td><code>daemon</code> for managed Direct, <code>unconfigured</code> while first-run local management is waiting for a persistent target, and <code>external</code> for a remote or explicitly unmanaged WDA endpoint.</td></tr>
@@ -187,7 +187,7 @@
   <tr><td><code>screen_state</code></td><td>Coarse transport lifecycle (<code>waiting</code>/<code>offline</code>); it is not a frame-level MJPEG health check.</td></tr>
   <tr><td><code>releasing</code></td><td>The managed local WDA service is being stopped after idle timeout.</td></tr>
   <tr><td><code>reconnecting</code></td><td>The daemon is bootstrapping its managed WDA supervisor. If <code>setup_blocked_on</code> is non-empty, follow <code>hint</code> first; otherwise wait for this to clear. In every case, require <code>wda_actionable</code> and <code>drivable</code> before acting.</td></tr>
-  <tr><td><code>released</code></td><td>WDA was intentionally stopped — after the idle period (<code>PHONE_REMOTE_IDLE_RELEASE_SECS</code>, default 600, <code>0</code> keeps it up) or by a human hand-off. The parked state survives daemon restarts and logins; the next agent request brings WDA back up. A completed health probe that finds a replacement/self-healed runner clears this guard; clients do not need a redundant reconnect.</td></tr>
+  <tr><td><code>released</code></td><td>WDA was intentionally stopped — after the idle period (<code>IPHONE_USE_IDLE_RELEASE_SECS</code>, default 600, <code>0</code> keeps it up) or by a human hand-off. The parked state survives daemon restarts and logins; the next agent request brings WDA back up. A completed health probe that finds a replacement/self-healed runner clears this guard; clients do not need a redundant reconnect.</td></tr>
   <tr><td><code>human_handoff</code></td><td><code>true</code> while the phone has been handed back to its holder with <code>{"mode":"human"}</code>. Agent input answers <code>409 phone_handed_to_human</code> until <code>{"mode":"agent"}</code> takes it back.</td></tr>
   <tr><td><code>viewer_count</code></td><td>Open live <code>/agent/mjpeg</code> streams (same number as <code>mjpeg_viewer_count</code>; kept for older clients).</td></tr>
   <tr><td><code>mjpeg_viewer_count</code></td><td>Open live <code>/agent/mjpeg</code> streams.</td></tr>
@@ -208,7 +208,7 @@
   <code>offline</code> otherwise.
   <code>version</code> is the running daemon; <code>latest</code> is the newest GitHub
   release tag (refreshed daily; <code>null</code> until first fetch / offline;
-  disable with <code>PHONE_REMOTE_NO_UPDATE_CHECK=1</code>). When
+  disable with <code>IPHONE_USE_NO_UPDATE_CHECK=1</code>). When
   <code>update_available</code> is true, upgrade with the install one-liner —
   the web client shows the same hint as a banner.
 </p>
@@ -300,7 +300,7 @@
   <code>{"mode":"agent"}</code> takes it back. Any other value returns <code>400</code>;
   <code>{"mode":"mirror"}</code> returns <code>410 {"error":"mirror_removed"}</code>.
   The canonical classic UDID must already be persisted as
-  <code>PHONE_REMOTE_UDID</code>; a request cannot establish or temporarily change it:
+  <code>IPHONE_USE_UDID</code>; a request cannot establish or temporarily change it:
 </p>
 <pre><code>MUTATION="X-Phone-Control: 1"
 # first require target_configured:true in /agent/status
@@ -433,7 +433,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   <strong>Destructive operation:</strong>
   <code>{"type":"uninstall","bundle":"com.example.app"}</code> removes that app and its
   data through <code>devicectl</code>. It is bearer-gated but irreversible at the API
-  level. Configure <code>PHONE_REMOTE_UDID</code> before starting the daemon on a
+  level. Configure <code>IPHONE_USE_UDID</code> before starting the daemon on a
   multi-device Mac; if a request includes <code>udid</code>, it must match that canonical
   target.
 </aside>
@@ -623,7 +623,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 <h3><span class="method get">GET</span> <span class="ep">/agent/mjpeg</span></h3>
 <p>
   Proxies WDA's on-device MJPEG service
-  (<code>PHONE_REMOTE_WDA_MJPEG_URL</code>, normally
+  (<code>IPHONE_USE_WDA_MJPEG_URL</code>, normally
   <code>http://127.0.0.1:9100</code>) as
   <code>multipart/x-mixed-replace</code>. It accepts either the agent bearer or a valid
   browser session cookie. An open stream counts as activity so idle release does not stop
@@ -640,7 +640,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 <p>
   The live screen as H.264. One upstream MJPEG connection per daemon is decoded and
   re-encoded on the Mac's hardware encoder (VideoToolbox, Main profile, no B-frames,
-  <code>PHONE_REMOTE_H264_KBPS</code> average bitrate, default 2500); every subscriber gets
+  <code>IPHONE_USE_H264_KBPS</code> average bitrate, default 2500); every subscriber gets
   the same encoded stream, and a new subscriber triggers an IDR. Auth, lifecycle refusals,
   the four-viewer limit and <code>?stream_id=</code> freshness tracking are the same as
   <code>/agent/mjpeg</code>; a daemon that cannot encode answers <code>501</code>.

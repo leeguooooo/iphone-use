@@ -33,7 +33,7 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
 - The daemon owns the runner lifecycle: it releases the phone after idle time, rebuilds
   the runner with backoff, and reports every state in `/agent/status`.
 - "WDA" below, in status fields (`wda`, `wda_actionable`, …) and in environment
-  variables (`WDA_*`, `PHONE_REMOTE_WDA_*`) is the historical name and now means this
+  variables (`WDA_*`, `IPHONE_USE_WDA_*`) is the historical name and now means this
   device runner.
 
 Design, lifecycle, failure states, and security boundaries:
@@ -98,9 +98,9 @@ your VPN or running setup for you.
 More than one iPhone paired? Pin the same classic UDID in both places:
 
 ```bash
-export PHONE_REMOTE_UDID=00008…
+export IPHONE_USE_UDID=00008…
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-WDA_UDID="$PHONE_REMOTE_UDID" ~/.iphone-use/setup-wda.sh
+WDA_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-wda.sh
 ```
 
 ### Hand the phone back to yourself
@@ -127,7 +127,7 @@ iOS kills it, and each launch asks for the passcode to enable UI automation — 
 phone prompted all day while nobody was using it. The next agent request, or
 `POST /agent/mode {"mode":"agent"}`, brings the runner back from its cached product (no
 rebuild) — unlock the phone if asked. On `/phone` a parked phone shows **连接手机**
-(connect phone); press it with the phone unlocked and awake. `PHONE_REMOTE_IDLE_RELEASE_SECS` changes the
+(connect phone); press it with the phone unlocked and awake. `IPHONE_USE_IDLE_RELEASE_SECS` changes the
 window; `0` keeps the runner up (v0.6.3–v0.7.3 behaviour). While a session holds the
 owner lease the phone is never idle-released; the idle window starts when the lease is
 released or expires.
@@ -145,7 +145,7 @@ the screen is not kept awake while idle (keep-awake still follows use), so Auto-
 the phone as usual; set Auto-Lock to Never if remote users must find it unlocked. A runner
 that is already **down** is still released: stopping the supervisor stops the KeepAlive
 relaunches that would each ask for the passcode, which is why idle release exists.
-`PHONE_REMOTE_IDLE_RELEASE=force` turns this exception off and releases idle runners
+`IPHONE_USE_IDLE_RELEASE=force` turns this exception off and releases idle runners
 anyway.
 
 Bringing a parked runner back takes ~5 s with the screen on and 10–25 s once iOS has
@@ -156,13 +156,13 @@ finds the phone ready. Because every runner launch can ask for the passcode, a
 pre-warm only happens for a phone an agent drove within the last hour (a lease is
 exempt), never on a locked phone or one whose lock state CoreDevice cannot report,
 never against a hand-off, a setup blocker or another session, and at most once per
-10 minutes per trigger. `PHONE_REMOTE_PREWARM=0` turns it off;
+10 minutes per trigger. `IPHONE_USE_PREWARM=0` turns it off;
 `IPHONE_USE_MCP_PREWARM=0` stops one MCP server from asking.
 
 ### Upgrade
 
 > v0.9 removed the iPhone Mirroring backend; installs that had
-> `PHONE_REMOTE_BACKEND=mirror` are served over WDA after upgrading.
+> `IPHONE_USE_BACKEND=mirror` are served over WDA after upgrading.
 
 ```bash
 iphone-use upgrade            # install the latest release (daemon + skill), then refresh other skill copies
@@ -183,8 +183,8 @@ The daemon checks GitHub daily and reports `version` / `latest` / `update_availa
 `/agent/status`; the web client shows a banner. One-shot commands (`iphone-use stop`) print
 `iphone-use X is available (you have Y). Upgrade: iphone-use upgrade` on stderr at most
 once a day (cached in `${XDG_CACHE_HOME:-~/.cache}/iphone-use/update-check.json`, 2 s
-timeout). `CI`, `IPHONE_USE_NO_UPDATE_CHECK`, `USE_NO_UPDATE_CHECK` or the older
-`PHONE_REMOTE_NO_UPDATE_CHECK` turn off both the daily check and the notice. Details of
+timeout). `CI`, `IPHONE_USE_NO_UPDATE_CHECK` or `USE_NO_UPDATE_CHECK`
+turn off both the daily check and the notice. Details of
 what the installer verifies are under [Operations → Upgrades](#upgrades).
 
 **Unattended upgrades** are opt-in and gated on the phone being idle:
@@ -210,7 +210,7 @@ own installed copy from the new release. `run --force` skips the idle gate;
 WebCodecs (the device runner encodes it on the phone and the daemon passes it through;
 with WebDriverAgent or an older runner the daemon re-encodes the JPEG frames on the Mac
 instead), otherwise as `/agent/mjpeg` (12–40 Mbit/s, LAN only).
-`PHONE_REMOTE_H264_PASSTHROUGH=0` forces the Mac re-encode.
+`IPHONE_USE_H264_PASSTHROUGH=0` forces the Mac re-encode.
 
 The toolbar's **画面** button cycles 自动 → 性能 → 画质, remembered per browser (the
 iOS app has a 性能 / 画质 button); `?mode=performance|quality` on `/agent/h264` and
@@ -281,9 +281,9 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
 
 | Header | When | Meaning |
 |---|---|---|
-| `Authorization: Bearer <token>` | every `/agent/*` call | `PHONE_REMOTE_AGENT_TOKEN` if set; otherwise the daemon password (legacy fallback). |
+| `Authorization: Bearer <token>` | every `/agent/*` call | `IPHONE_USE_AGENT_TOKEN` if set; otherwise the daemon password (legacy fallback). |
 | `X-Phone-Control: 1` | every state-changing POST | CSRF/intent guard on top of auth, not a replacement. Required by `/control`, `/agent/input`, `/agent/actions`, `/agent/mode`, `/agent/hold`, `/agent/owner`, and the POST forms of `/agent/inbox`. The web and MCP clients add it. |
-| `X-Phone-Owner: <session>` | control requests | Claims the phone for this session (issue #72). While the lease is live (refreshed per request, `PHONE_REMOTE_OWNER_LEASE_SECS` default 300) other sessions — and header-less clients — get `409 phone_owned` with the owner and seconds left. Read-only calls are unaffected. `X-Phone-Owner-Takeover: 1` replaces a live lease and is logged. |
+| `X-Phone-Owner: <session>` | control requests | Claims the phone for this session (issue #72). While the lease is live (refreshed per request, `IPHONE_USE_OWNER_LEASE_SECS` default 300) other sessions — and header-less clients — get `409 phone_owned` with the owner and seconds left. Read-only calls are unaffected. `X-Phone-Owner-Takeover: 1` replaces a live lease and is logged. |
 
 ### Endpoints
 
@@ -331,7 +331,7 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
   of inputs, buttons, nested scrollers and bars (`422 no_page_scroller` when there is
   none). Rows of a system layer over the app carry `overlay` (`notification`,
   `dynamic_island`, `cover_sheet`). With
-  `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` the tree advertises which actions each row
+  `IPHONE_USE_ELEMENTS_AFFORDANCES=1` the tree advertises which actions each row
   supports.
 - **Taps that would land elsewhere are refused.** An element tap whose centre is covered
   by another control (a fixed header, the keyboard, a floating button) answers
@@ -378,7 +378,7 @@ shortcut. The daemon opens `shortcuts://run-shortcut` on the phone via WDA — n
 or clipboard — and the shortcut posts its result back to `/agent/inbox`.
 
 ```bash
-python3 deploy/make-bridge-shortcut.py --token "$PHONE_REMOTE_AGENT_TOKEN" \
+python3 deploy/make-bridge-shortcut.py --token "$IPHONE_USE_AGENT_TOKEN" \
   --verb ping --verb battery --verb focus_on --verb focus_off
 cp "iU Bridge.shortcut" ~/Library/Mobile\ Documents/com~apple~CloudDocs/
 ```
@@ -396,7 +396,7 @@ agent launches an app or the phone is on the Home Screen. The phone shows a noti
 times; the first run asks once to allow the bridge's notifications (the agent is told, as
 `agent_focus: needs_permission`: open Shortcuts and tap Always Allow).
 Fire-and-forget, so it works with the return path below left closed.
-`PHONE_REMOTE_AUTO_FOCUS=0` turns it off.
+`IPHONE_USE_AUTO_FOCUS=0` turns it off.
 
 Verbs live in `~/.iphone-use/intents-registry.json` (start from
 [`deploy/intents-registry.example.json`](../deploy/intents-registry.example.json)); the
@@ -406,12 +406,12 @@ silently. Each verb needs one interactive permission grant on first use, and Sho
 foregrounds during a call.
 
 **The return path needs the phone to reach the daemon** (issue #59). The hardened
-default `PHONE_REMOTE_HOST=127.0.0.1` can dispatch a verb but never hear the answer, so
+default `IPHONE_USE_HOST=127.0.0.1` can dispatch a verb but never hear the answer, so
 intents are off until you choose one of:
 
 | Return path | How | Trade-off |
 |---|---|---|
-| LAN bind | `PHONE_REMOTE_HOST=0.0.0.0` with the password **and** `PHONE_REMOTE_AGENT_TOKEN` set | Simplest; exposes the daemon's authenticated surface to your whole LAN. |
+| LAN bind | `IPHONE_USE_HOST=0.0.0.0` with the password **and** `IPHONE_USE_AGENT_TOKEN` set | Simplest; exposes the daemon's authenticated surface to your whole LAN. |
 | USB reverse tunnel | Forward a phone-side port back to the Mac loopback listener | No LAN exposure; more moving parts. |
 
 Fire-and-forget verbs work on plain loopback. Never bind `0.0.0.0` on an untrusted
@@ -422,7 +422,7 @@ network. (The runner's own `8100`/`9100` refuse unsigned requests; see *Security
 [`iphone-use-mcp`](../crates/mcp/README.md) ships inside the installed app
 (`~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp`) and as a checksummed
 standalone archive on every release. It speaks MCP over stdio and adds
-`X-Phone-Control` and `X-Phone-Owner` (`PHONE_REMOTE_OWNER`, default `mcp-<pid>`) to
+`X-Phone-Control` and `X-Phone-Owner` (`IPHONE_USE_OWNER`, default `mcp-<pid>`) to
 its daemon requests automatically.
 
 ```json
@@ -431,8 +431,8 @@ its daemon requests automatically.
     "iphone-use": {
       "command": "/Users/YOUR_ACCOUNT/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp",
       "env": {
-        "PHONE_REMOTE_URL": "http://127.0.0.1:44321",
-        "PHONE_REMOTE_TOKEN": "<your-agent-token>"
+        "IPHONE_USE_URL": "http://127.0.0.1:44321",
+        "IPHONE_USE_TOKEN": "<your-agent-token>"
       }
     }
   }
@@ -490,7 +490,7 @@ runs one without any model in the loop:
 ```bash
 MCP="$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
 "$MCP" flow validate examples/flows/search-spotlight.json          # offline
-PHONE_REMOTE_TOKEN=… "$MCP" flow run examples/flows/search-spotlight.json --input 'query=coffee'
+IPHONE_USE_TOKEN=… "$MCP" flow run examples/flows/search-spotlight.json --input 'query=coffee'
 ```
 
 The **official registry** — [`leeguooooo/iphone-use-flows`](https://github.com/leeguooooo/iphone-use-flows),
@@ -501,8 +501,8 @@ flows, the way chrome-use ships site packs:
 "$MCP" flow update                        # mirror into ~/.iphone-use/flows: sha256 + strict validation, 0600
 "$MCP" flow list --category health        # id · risk · verified · inputs · name
 "$MCP" flow info health/export-all-zh-cn  # metadata and step templates
-PHONE_REMOTE_TOKEN=… "$MCP" flow run health/export-all-zh-cn
-PHONE_REMOTE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./runs   # record the run (0700 dir, 0600 files)
+IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn
+IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./runs   # record the run (0700 dir, 0600 files)
 "$MCP" flow add my.json --as myapp/daily  # your own flow; survives update
 "$MCP" flow publish my.json --as myapp/daily --alias MyApp --note "iPhone 17 Pro Max, iOS 26"   # opens the PR via gh
 "$MCP" flow report health/export-all --result @run.json --note "profile button renamed"           # files a flow-broken issue
@@ -574,12 +574,12 @@ The instance gets its own copy of the app, state directory
 `runner-build/`; the sources at `~/.iphone-use/runner` are shared), launchd labels (`com.leeguoo.iphone-use.lab`,
 `com.leeguoo.iphone-use.wda.lab`), loopback-only daemon, agent token and ports. Ports
 are derived from the name and persisted. The installer prints them, and
-`PHONE_REMOTE_INSTANCE=lab setup-wda.sh instance-context` shows them later. Signing
+`IPHONE_USE_INSTANCE=lab setup-wda.sh instance-context` shows them later. Signing
 (team, bundle ID, App Store Connect key) is inherited from the default instance's runner
 supervisor unless set explicitly. A phone that another instance already drives, or a port
 another instance owns, is refused before anything changes. Agents target the instance
-with `PHONE_REMOTE_URL=http://127.0.0.1:<port>` and that instance's
-`PHONE_REMOTE_AGENT_TOKEN` (in `~/Library/LaunchAgents/com.leeguoo.iphone-use.lab.plist`).
+with `IPHONE_USE_URL=http://127.0.0.1:<port>` and that instance's
+`IPHONE_USE_AGENT_TOKEN` (in `~/Library/LaunchAgents/com.leeguoo.iphone-use.lab.plist`).
 Remove only that instance with `uninstall.sh --instance lab`. The default uninstall
 refuses while named instances remain.
 
@@ -725,8 +725,8 @@ byte-verifies the skill at `~/.agents/skills/iphone-use` plus its Claude Code di
 link, and only then replaces the daemon. A skill failure aborts the upgrade; a later
 daemon failure restores the previous skill. `IPHONE_USE_SKIP_SKILL=1` leaves the skill
 untouched (a degraded install with no compatibility claim). Existing settings
-(`PHONE_REMOTE_WDA_URL`, password, token, UDID) carry over.
-`PHONE_REMOTE_NO_UPDATE_CHECK=1` (or `IPHONE_USE_NO_UPDATE_CHECK=1` / `USE_NO_UPDATE_CHECK=1`) disables the daily check.
+(`IPHONE_USE_WDA_URL`, password, token, UDID) carry over.
+`IPHONE_USE_NO_UPDATE_CHECK=1` (or `USE_NO_UPDATE_CHECK=1`) disables the daily check.
 
 On install the app keeps a valid existing signature and repairs an invalid one with
 keychain-free ad-hoc signing; the daemon holds no macOS permission grant that a new
@@ -734,26 +734,30 @@ signature could invalidate.
 
 ### Configuration
 
+Earlier releases named these `PHONE_REMOTE_*`. Those names still work, in the
+environment and in an existing LaunchAgent plist; when both are set,
+`IPHONE_USE_*` wins, and the next `install.sh` run writes the new names.
+
 | Variable | Default | Purpose |
 |---|---|---|
-| `PHONE_REMOTE_HOST` / `PHONE_REMOTE_PORT` | `127.0.0.1` / `44321` | Listen address and port (`0.0.0.0` for LAN; a password is then mandatory). |
-| `PHONE_REMOTE_PASSWORD` | *(none)* | Browser login; doubles as the agent bearer only when no agent token is set. |
-| `PHONE_REMOTE_AGENT_TOKEN` | *(none)* | Dedicated agent bearer. When set, it is the **only** accepted bearer. |
-| `PHONE_REMOTE_UDID` | detected and persisted by the installer | Canonical iPhone for the managed runner and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `WDA_UDID` to setup. |
-| `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | Runner control and MJPEG loopbacks (any WebDriverAgent-compatible endpoint works). Control fails closed when unreachable. |
-| `PHONE_REMOTE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the runner supervisor/relay lifecycle. |
-| `PHONE_REMOTE_PREWARM` | on | `0` turns pre-warm off (see Lifecycle). `PHONE_REMOTE_PREWARM_RECENT_SECS` (default `3600`) is how recently an agent must have driven the phone; `PHONE_REMOTE_PREWARM_INTERVAL_SECS` (default `600`) limits each trigger. |
-| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | Stop the runner and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
-| `PHONE_REMOTE_IDLE_RELEASE` | *(unset)* | `force` releases idle runners even on a phone whose next start needs a person (a passcode phone, or one that cannot start over Wi-Fi); see `keep_runner_alive` in Lifecycle. |
-| `PHONE_REMOTE_KEEP_AWAKE_SECS` | `120` | Keep the phone from auto-locking while it is driven and for this many seconds after the last request (a hold, a live view or an owner lease also keep it awake). The runner presses F13, a key iOS ignores, every 10 s and never touches a locked phone. `0` turns it off. |
-| `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
+| `IPHONE_USE_HOST` / `IPHONE_USE_PORT` | `127.0.0.1` / `44321` | Listen address and port (`0.0.0.0` for LAN; a password is then mandatory). |
+| `IPHONE_USE_PASSWORD` | *(none)* | Browser login; doubles as the agent bearer only when no agent token is set. |
+| `IPHONE_USE_AGENT_TOKEN` | *(none)* | Dedicated agent bearer. When set, it is the **only** accepted bearer. |
+| `IPHONE_USE_UDID` | detected and persisted by the installer | Canonical iPhone for the managed runner and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `WDA_UDID` to setup. |
+| `IPHONE_USE_WDA_URL` / `IPHONE_USE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | Runner control and MJPEG loopbacks (any WebDriverAgent-compatible endpoint works). Control fails closed when unreachable. |
+| `IPHONE_USE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the runner supervisor/relay lifecycle. |
+| `IPHONE_USE_PREWARM` | on | `0` turns pre-warm off (see Lifecycle). `IPHONE_USE_PREWARM_RECENT_SECS` (default `3600`) is how recently an agent must have driven the phone; `IPHONE_USE_PREWARM_INTERVAL_SECS` (default `600`) limits each trigger. |
+| `IPHONE_USE_IDLE_RELEASE_SECS` | `300` | Stop the runner and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
+| `IPHONE_USE_IDLE_RELEASE` | *(unset)* | `force` releases idle runners even on a phone whose next start needs a person (a passcode phone, or one that cannot start over Wi-Fi); see `keep_runner_alive` in Lifecycle. |
+| `IPHONE_USE_KEEP_AWAKE_SECS` | `120` | Keep the phone from auto-locking while it is driven and for this many seconds after the last request (a hold, a live view or an owner lease also keep it awake). The runner presses F13, a key iOS ignores, every 10 s and never touches a locked phone. `0` turns it off. |
+| `IPHONE_USE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
 | `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | Device runner sources setup builds (a repo checkout's `scripts/setup-wda.sh` uses its own `runner/`). Persisted only when not the default. |
 | `WDA_RUNNER_REBUILD` | off | `1` makes the next setup ignore the recorded runner product and build again. |
-| `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | runner default 64 | Applies to an external WebDriverAgent only; the device runner bounds its own tree reads (depth ladder, 5000 nodes). |
-| `PHONE_REMOTE_WDA_SNAPSHOT_TIMEOUT_S` | — | Same: WebDriverAgent only. |
-| `PHONE_REMOTE_ELEMENTS_AFFORDANCES` | off | `1` adds sparse `actions`, `selected`, `min`/`max` to `/agent/elements` rows. |
-| `PHONE_REMOTE_ELEMENTS_TRAITS` | off | `1` also emits raw accessibility trait names. |
-| `PHONE_REMOTE_NO_UPDATE_CHECK` | off | Skip the daily release check. |
+| `IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH` | runner default 64 | Applies to an external WebDriverAgent only; the device runner bounds its own tree reads (depth ladder, 5000 nodes). |
+| `IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S` | — | Same: WebDriverAgent only. |
+| `IPHONE_USE_ELEMENTS_AFFORDANCES` | off | `1` adds sparse `actions`, `selected`, `min`/`max` to `/agent/elements` rows. |
+| `IPHONE_USE_ELEMENTS_TRAITS` | off | `1` also emits raw accessibility trait names. |
+| `IPHONE_USE_NO_UPDATE_CHECK` | off | Skip the daily release check. |
 
 ## Security
 
@@ -795,9 +799,9 @@ cargo build --release --bin iphone-use --bin iphone-use-mcp
 ./install.sh ./iPhoneUse.app           # sign, install, write the LaunchAgent (uses the worktree skill)
 
 # or run the daemon without installing
-PHONE_REMOTE_WDA_URL=http://127.0.0.1:8100 \
-PHONE_REMOTE_WDA_MJPEG_URL=http://127.0.0.1:9100 \
-PHONE_REMOTE_HOST=0.0.0.0 PHONE_REMOTE_PASSWORD=secret ./target/release/iphone-use serve
+IPHONE_USE_WDA_URL=http://127.0.0.1:8100 \
+IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9100 \
+IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use serve
 ```
 
 Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's tests, pushes the tag, waits for the release build and syncs the plugin marketplace (`--dry-run` to preview).

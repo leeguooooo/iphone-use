@@ -76,8 +76,8 @@ fn flow_run(url: &str, flow: &Path, store: &Path, artifacts: Option<&Path>) -> R
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", store)
-        .env("PHONE_REMOTE_URL", url)
-        .env("PHONE_REMOTE_TOKEN", "test-token")
+        .env("IPHONE_USE_URL", url)
+        .env("IPHONE_USE_TOKEN", "test-token")
         .env("IPHONE_USE_FLOWS_DIR", store)
         .args(["flow", "run", flow.to_str().unwrap(), "--force"]);
     if let Some(artifacts) = artifacts {

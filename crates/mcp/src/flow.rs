@@ -2260,7 +2260,7 @@ mod tests {
         ]);
         let store = tempfile::tempdir().unwrap();
         let _env = crate::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("PHONE_REMOTE_URL", &url);
+        std::env::set_var("IPHONE_USE_URL", &url);
         std::env::set_var(registry::STORE_ENV, store.path());
 
         let error = run_command(
@@ -2274,7 +2274,7 @@ mod tests {
         .await
         .expect_err("a failed flow must still exit non-zero");
         task.join().unwrap();
-        std::env::remove_var("PHONE_REMOTE_URL");
+        std::env::remove_var("IPHONE_USE_URL");
         std::env::remove_var(registry::STORE_ENV);
 
         assert!(error.to_string().contains("did not succeed (HTTP 409)"), "{error:#}");

@@ -31,7 +31,7 @@ mod onboarding;
 /// PID file name inside the runtime dir.
 const PID_FILE: &str = "iphone-use.pid";
 /// Secret file name inside the runtime dir.
-const SECRET_FILE: &str = "secret";
+const SECRET_FILE: &str = server::runtime_dir::SECRET_FILE;
 const PID_RECORD_VERSION: u8 = 1;
 const STOP_WAIT_SECS: u64 = 5;
 /// Seconds to sleep before exiting on an unattended startup failure, so a
@@ -120,7 +120,7 @@ fn resolve_managed_wda(
     }
     if !endpoints_are_local {
         anyhow::bail!(
-            "PHONE_REMOTE_WDA_MANAGED=true requires loopback WDA and MJPEG endpoints; \
+            "IPHONE_USE_WDA_MANAGED=true requires loopback WDA and MJPEG endpoints; \
              remote device services are externally managed"
         );
     }
@@ -170,8 +170,8 @@ enum Command {
     Stop,
     /// Print which instance this environment would run as, as JSON, and exit.
     ///
-    /// Read-only: derives the instance from PHONE_REMOTE_INSTANCE / HOME /
-    /// PHONE_REMOTE_STATE_DIR (+ PHONE_REMOTE_UDID) without opening a socket,
+    /// Read-only: derives the instance from IPHONE_USE_INSTANCE / HOME /
+    /// IPHONE_USE_STATE_DIR (+ IPHONE_USE_UDID) without opening a socket,
     /// touching launchd, or starting WDA. Installers run this on a staged
     /// binary before switching services over: a binary that predates
     /// instances rejects the subcommand outright, so it can never be started
@@ -239,7 +239,7 @@ enum Command {
     /// other phones and the Mac's xcode-select choice are untouched.
     /// `--xcode system` goes back to the Mac's choice.
     Setup {
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -247,14 +247,14 @@ enum Command {
     },
     /// Check the Mac, Xcode and the iPhone, and say how to fix what is missing.
     Doctor {
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
     },
     /// Per-run task metrics: HTTP calls (not model turns), batches, observed
     /// actions, failures and p50/p95.
     Metrics {
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         /// Only this owner's runs.
@@ -265,7 +265,7 @@ enum Command {
     },
     /// Is the iPhone ready for agents? Exit 0 when it is.
     Status {
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         /// The daemon's full status as JSON.
@@ -274,14 +274,14 @@ enum Command {
     },
     /// A harmless first run: open Settings, read the screen, go Home.
     Try {
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
     },
     /// Sign this Mac's browser in with a one-time link and show a QR code
     /// for the iPhone, without typing the password.
     Login {
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         /// Print the link instead of opening the browser.
@@ -298,7 +298,7 @@ enum Command {
     /// flags; they are `iphone-use-mcp test`'s).
     #[command(disable_help_flag = true)]
     Test {
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -308,7 +308,7 @@ enum Command {
     /// disable, rm (`iphone-use-mcp schedule`).
     #[command(disable_help_flag = true)]
     Schedule {
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -499,7 +499,7 @@ fn upgrade(check_only: bool, json: bool) -> i32 {
 /// `iphone-use instance-context`: the derived instance as one JSON object.
 fn instance_context() -> Result<()> {
     let instance = server::instance::Instance::from_env().map_err(|error| anyhow::anyhow!(error))?;
-    let udid = std::env::var("PHONE_REMOTE_UDID")
+    let udid = std::env::var("IPHONE_USE_UDID")
         .ok()
         .filter(|value| !value.trim().is_empty());
     let state_dir_ok = instance.verify_on_disk().map_err(|error| error.to_string());
@@ -522,9 +522,9 @@ fn instance_context() -> Result<()> {
 /// first asking launchd to start the service if it is not answering.
 fn open_console() -> Result<()> {
     const LABEL: &str = "com.leeguoo.iphone-use";
-    let port = std::env::var("PHONE_REMOTE_PORT")
+    let port = std::env::var("IPHONE_USE_PORT")
         .ok()
-        .or_else(|| launch_agent_env(LABEL, "PHONE_REMOTE_PORT"))
+        .or_else(|| launch_agent_env(LABEL, "IPHONE_USE_PORT"))
         .and_then(|p| p.trim().parse::<u16>().ok())
         .unwrap_or(44321);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -567,6 +567,13 @@ fn open_console() -> Result<()> {
 /// One value from the installed LaunchAgent's EnvironmentVariables, which a
 /// Finder launch does not inherit.
 fn launch_agent_env(label: &str, key: &str) -> Option<String> {
+    // A plist written before the rename spells the key PHONE_REMOTE_*.
+    launch_agent_env_as(label, key).or_else(|| {
+        core::env::legacy_name(key).and_then(|old| launch_agent_env_as(label, &old))
+    })
+}
+
+fn launch_agent_env_as(label: &str, key: &str) -> Option<String> {
     let plist = dirs_home()?.join(format!("Library/LaunchAgents/{label}.plist"));
     let out = std::process::Command::new("/usr/bin/plutil")
         .args([
@@ -607,7 +614,7 @@ enum AuthAction {
         /// Fill the fields but do not tap Log in.
         #[arg(long)]
         no_submit: bool,
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
     },
@@ -623,7 +630,7 @@ enum AuthAction {
         /// Seconds to wait for the code to arrive (at most 25).
         #[arg(long)]
         wait: Option<u64>,
-        /// A named instance (a second phone); default: PHONE_REMOTE_INSTANCE.
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
         instance: Option<String>,
     },
@@ -717,6 +724,8 @@ fn device_query(query: DeviceQuery) -> i32 {
 }
 
 fn main() -> Result<()> {
+    // Before anything reads a setting (see `core::env`).
+    core::env::adopt_legacy_names();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -885,11 +894,11 @@ fn serve() -> Result<()> {
 
     // The iPhone Mirroring backend was removed in v0.9. An old plist may still
     // ask for it; say so once and serve the phone over WDA as usual.
-    if std::env::var("PHONE_REMOTE_BACKEND")
+    if std::env::var("IPHONE_USE_BACKEND")
         .is_ok_and(|v| matches!(v.trim(), "mirror" | "legacy-mirror"))
     {
         tracing::warn!(
-            "PHONE_REMOTE_BACKEND=mirror is no longer supported (iPhone Mirroring was removed in v0.9); serving over WDA"
+            "IPHONE_USE_BACKEND=mirror is no longer supported (iPhone Mirroring was removed in v0.9); serving over WDA"
         );
     }
 
@@ -902,16 +911,16 @@ fn serve() -> Result<()> {
     // Direct mode has stable localhost relay defaults. The setup script creates
     // these relays; keeping the client configured while WDA is down lets the web
     // UI report setup/recovery state instead of crash-looping the daemon.
-    let configured_wda_url = std::env::var("PHONE_REMOTE_WDA_URL")
+    let configured_wda_url = std::env::var("IPHONE_USE_WDA_URL")
         .ok()
         .filter(|s| !s.trim().is_empty());
     let wda_url = configured_wda_url.unwrap_or_else(|| "http://127.0.0.1:8100".to_string());
-    let mjpeg_url = std::env::var("PHONE_REMOTE_WDA_MJPEG_URL")
+    let mjpeg_url = std::env::var("IPHONE_USE_WDA_MJPEG_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "http://127.0.0.1:9100".to_string());
     let endpoints_are_local = endpoint_is_loopback(&wda_url) && endpoint_is_loopback(&mjpeg_url);
-    let managed_setting = optional_env_bool("PHONE_REMOTE_WDA_MANAGED")?;
+    let managed_setting = optional_env_bool("IPHONE_USE_WDA_MANAGED")?;
     let managed_wda_pending = wda_management_pending(
         endpoints_are_local,
         cfg.device_udid.as_deref(),
@@ -952,7 +961,7 @@ fn serve() -> Result<()> {
                 Some(Arc::new(tokio::sync::Mutex::new(c)))
             }
             Err(e) => {
-                tracing::warn!("PHONE_REMOTE_WDA_URL set but client failed: {e:#}");
+                tracing::warn!("IPHONE_USE_WDA_URL set but client failed: {e:#}");
                 None
             }
         },
@@ -960,7 +969,7 @@ fn serve() -> Result<()> {
         managed_wda_pending,
         latest_release: Arc::new(Mutex::new(None)),
         // WDA's MJPEG stream (see /agent/mjpeg); the relay forwards it to
-        // 127.0.0.1:9100 (override with PHONE_REMOTE_WDA_MJPEG_URL).
+        // 127.0.0.1:9100 (override with IPHONE_USE_WDA_MJPEG_URL).
         video: server::video::VideoHub::supported()
             .then(|| server::video::VideoHub::new(mjpeg_url.clone())),
         mjpeg_url: Some(mjpeg_url),
@@ -1049,8 +1058,8 @@ fn spawn_flow_registry_refresh() {
 /// Same lookup as `iphone-use upgrade` (`server::update`): the GitHub API
 /// (honouring `GITHUB_TOKEN`), falling back to the `releases/latest` redirect,
 /// which has no anonymous rate limit. Each result also refreshes the CLI's
-/// notice cache. Disabled by `PHONE_REMOTE_NO_UPDATE_CHECK`,
-/// `IPHONE_USE_NO_UPDATE_CHECK`, `USE_NO_UPDATE_CHECK` or `CI`.
+/// notice cache. Disabled by `IPHONE_USE_NO_UPDATE_CHECK`,
+/// `USE_NO_UPDATE_CHECK` or `CI`.
 fn spawn_update_check(state: Arc<AppState>) {
     use server::update;
     if update::update_check_disabled(&update::process_env) {
@@ -1160,15 +1169,15 @@ fn print_startup_banner(cfg: &Config) {
     eprintln!(" iphone-use serving");
     eprintln!("   url:      {url}");
     match &cfg.password {
-        Some(_) => eprintln!("   password: (set via PHONE_REMOTE_PASSWORD)"),
+        Some(_) => eprintln!("   password: (set via IPHONE_USE_PASSWORD)"),
         None => eprintln!("   password: (none — open LAN mode)"),
     }
     match &cfg.agent_token {
-        Some(_) => eprintln!("   agent:    (dedicated token set via PHONE_REMOTE_AGENT_TOKEN)"),
+        Some(_) => eprintln!("   agent:    (dedicated token set via IPHONE_USE_AGENT_TOKEN)"),
         None => eprintln!("   agent:    (no dedicated token — uses password for bearer auth)"),
     }
     if cfg.host == "127.0.0.1" {
-        eprintln!("   note:     bound to 127.0.0.1; set PHONE_REMOTE_HOST=0.0.0.0 for LAN access");
+        eprintln!("   note:     bound to 127.0.0.1; set IPHONE_USE_HOST=0.0.0.0 for LAN access");
     }
     eprintln!("──────────────────────────────────────────────");
 }
@@ -1187,7 +1196,7 @@ async fn shutdown_signal() {
 // ---------------------------------------------------------------------------
 
 /// Load the signing secret, preferring (in order): the configured
-/// `PHONE_REMOTE_SECRET`, an existing secret file, or a freshly generated one.
+/// `IPHONE_USE_SECRET`, an existing secret file, or a freshly generated one.
 fn load_or_make_secret(dir: &std::path::Path, cfg: &Config) -> Result<Vec<u8>> {
     if let Some(s) = &cfg.secret {
         return Ok(s.clone().into_bytes());
@@ -1552,7 +1561,16 @@ fn write_pid(dir: &std::path::Path) -> Result<Vec<u8>> {
 
 fn stop() -> Result<()> {
     let dir = server::runtime_dir::runtime_dir().context("locate runtime dir")?;
-    let path = dir.join(PID_FILE);
+    let mut path = dir.join(PID_FILE);
+    // A daemon started before the runtime directory was renamed keeps its pid
+    // record in the old one.
+    if path.symlink_metadata().is_err() {
+        if let Some(legacy) = server::runtime_dir::legacy_runtime_dir() {
+            if legacy.join(PID_FILE).symlink_metadata().is_ok() {
+                path = legacy.join(PID_FILE);
+            }
+        }
+    }
     let contents = match read_pid_file(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

@@ -20,7 +20,7 @@ fn daemon_target(
     env: impl Fn(&str) -> Option<String>,
     plist: impl Fn(&str, &str) -> Option<String>,
 ) -> (String, Option<String>) {
-    let label = match env("PHONE_REMOTE_INSTANCE") {
+    let label = match env("IPHONE_USE_INSTANCE") {
         Some(name)
             if name != "default"
                 && name
@@ -31,20 +31,20 @@ fn daemon_target(
         }
         _ => DAEMON_LABEL.to_string(),
     };
-    let base_url = env("PHONE_REMOTE_URL").unwrap_or_else(|| {
-        plist(&label, "PHONE_REMOTE_PORT")
+    let base_url = env("IPHONE_USE_URL").unwrap_or_else(|| {
+        plist(&label, "IPHONE_USE_PORT")
             .and_then(|port| port.trim().parse::<u16>().ok())
             .map(|port| format!("http://127.0.0.1:{port}"))
             .unwrap_or_else(|| DEFAULT_URL.to_string())
     });
-    let token = env("PHONE_REMOTE_TOKEN").or_else(|| {
+    let token = env("IPHONE_USE_TOKEN").or_else(|| {
         // Only a daemon on this Mac can be the one the plist describes.
         let local =
             base_url.starts_with("http://127.0.0.1:") || base_url.starts_with("http://localhost:");
         local
             .then(|| {
-                plist(&label, "PHONE_REMOTE_AGENT_TOKEN")
-                    .or_else(|| plist(&label, "PHONE_REMOTE_PASSWORD"))
+                plist(&label, "IPHONE_USE_AGENT_TOKEN")
+                    .or_else(|| plist(&label, "IPHONE_USE_PASSWORD"))
             })
             .flatten()
     });
@@ -53,6 +53,13 @@ fn daemon_target(
 
 /// One `EnvironmentVariables` value from `~/Library/LaunchAgents/<label>.plist`.
 fn launch_agent_env(label: &str, key: &str) -> Option<String> {
+    // A plist written before the rename spells the key PHONE_REMOTE_*.
+    launch_agent_env_as(label, key).or_else(|| {
+        iu_core::env::legacy_name(key).and_then(|old| launch_agent_env_as(label, &old))
+    })
+}
+
+fn launch_agent_env_as(label: &str, key: &str) -> Option<String> {
     let home = std::env::var_os("HOME")?;
     let plist = std::path::Path::new(&home).join(format!("Library/LaunchAgents/{label}.plist"));
     if !plist.is_file() {
@@ -252,12 +259,12 @@ fn unique_label_target(body: &str, label: &str) -> anyhow::Result<(usize, String
 impl DaemonClient {
     /// Build a client from the two environment variables:
     ///
-    /// * `PHONE_REMOTE_URL`   — daemon base URL (default `http://127.0.0.1:44321`)
-    /// * `PHONE_REMOTE_TOKEN` — bearer token / password (optional; omit for
+    /// * `IPHONE_USE_URL`   — daemon base URL (default `http://127.0.0.1:44321`)
+    /// * `IPHONE_USE_TOKEN` — bearer token / password (optional; omit for
     ///   open-mode daemons running on localhost)
     ///
     /// Either one left unset is read from the installed daemon's LaunchAgent
-    /// (`PHONE_REMOTE_INSTANCE` picks a named one), so an MCP client config
+    /// (`IPHONE_USE_INSTANCE` picks a named one), so an MCP client config
     /// needs no secret: the installer registers the bare command.
     pub fn from_env() -> Self {
         let env = |key: &str| {
@@ -289,7 +296,7 @@ impl DaemonClient {
             client,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token,
-            owner: std::env::var("PHONE_REMOTE_OWNER")
+            owner: std::env::var("IPHONE_USE_OWNER")
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
@@ -944,7 +951,7 @@ impl DaemonResponse {
     pub fn failure_summary(&self) -> String {
         let mut parts = vec![format!("HTTP {}", self.status)];
         if self.status == reqwest::StatusCode::UNAUTHORIZED {
-            parts.push("check PHONE_REMOTE_TOKEN".to_string());
+            parts.push("check IPHONE_USE_TOKEN".to_string());
         }
         if let Some(code) = self.error_code() {
             parts.push(format!("error={code}"));
@@ -1038,7 +1045,7 @@ async fn check_status(resp: reqwest::Response) -> anyhow::Result<reqwest::Respon
         &body
     };
     let auth_hint = if status == reqwest::StatusCode::UNAUTHORIZED {
-        " — check PHONE_REMOTE_TOKEN"
+        " — check IPHONE_USE_TOKEN"
     } else {
         ""
     };
@@ -1421,11 +1428,11 @@ mod tests {
     #[test]
     fn an_unset_target_is_read_from_the_installed_launch_agent() {
         let plist = |label: &str, key: &str| match (label, key) {
-            ("com.leeguoo.iphone-use", "PHONE_REMOTE_PORT") => Some("45432".to_string()),
-            ("com.leeguoo.iphone-use", "PHONE_REMOTE_AGENT_TOKEN") => Some("agent".to_string()),
-            ("com.leeguoo.iphone-use", "PHONE_REMOTE_PASSWORD") => Some("pw".to_string()),
-            ("com.leeguoo.iphone-use.i13", "PHONE_REMOTE_PORT") => Some("45838".to_string()),
-            ("com.leeguoo.iphone-use.i13", "PHONE_REMOTE_PASSWORD") => Some("pw13".to_string()),
+            ("com.leeguoo.iphone-use", "IPHONE_USE_PORT") => Some("45432".to_string()),
+            ("com.leeguoo.iphone-use", "IPHONE_USE_AGENT_TOKEN") => Some("agent".to_string()),
+            ("com.leeguoo.iphone-use", "IPHONE_USE_PASSWORD") => Some("pw".to_string()),
+            ("com.leeguoo.iphone-use.i13", "IPHONE_USE_PORT") => Some("45838".to_string()),
+            ("com.leeguoo.iphone-use.i13", "IPHONE_USE_PASSWORD") => Some("pw13".to_string()),
             _ => None,
         };
         let none = |_: &str| None;
@@ -1436,7 +1443,7 @@ mod tests {
                 Some("agent".to_string())
             )
         );
-        let i13 = |key: &str| (key == "PHONE_REMOTE_INSTANCE").then(|| "i13".to_string());
+        let i13 = |key: &str| (key == "IPHONE_USE_INSTANCE").then(|| "i13".to_string());
         assert_eq!(
             daemon_target(i13, plist),
             (
@@ -1446,7 +1453,7 @@ mod tests {
         );
         // Explicit settings win, and a remote URL never borrows a local secret.
         let remote =
-            |key: &str| (key == "PHONE_REMOTE_URL").then(|| "http://10.0.0.5:44321".to_string());
+            |key: &str| (key == "IPHONE_USE_URL").then(|| "http://10.0.0.5:44321".to_string());
         assert_eq!(
             daemon_target(remote, plist),
             ("http://10.0.0.5:44321".to_string(), None)
@@ -1460,11 +1467,11 @@ mod tests {
 
     #[test]
     fn from_env_falls_back_to_default() {
-        // Make sure PHONE_REMOTE_URL is not set for this sub-test.
+        // Make sure IPHONE_USE_URL is not set for this sub-test.
         // (We can't unset env in a safe way without unsafe, so we just construct
         //  directly and confirm the default string.)
         let c = DaemonClient::new(
-            std::env::var("PHONE_REMOTE_URL")
+            std::env::var("IPHONE_USE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:44321".to_string()),
             None,
         );

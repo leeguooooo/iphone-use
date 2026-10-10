@@ -33,8 +33,8 @@ fn run(root: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
         // CI runners set CI=true; each test opts out explicitly instead.
         .env_remove("CI")
         .env_remove("IPHONE_USE_NO_UPDATE_CHECK")
-        .env_remove("USE_NO_UPDATE_CHECK")
         .env_remove("PHONE_REMOTE_NO_UPDATE_CHECK")
+        .env_remove("USE_NO_UPDATE_CHECK")
         .env("RUST_LOG", "off");
     for (key, value) in extra_env {
         command.env(key, value);

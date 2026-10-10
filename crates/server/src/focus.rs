@@ -24,13 +24,13 @@
 //! covers the Shortcuts app). Otherwise it waits for a later action.
 //!
 //! Active when the intents registry lists both verbs; opt out with
-//! `PHONE_REMOTE_AUTO_FOCUS=0`.
+//! `IPHONE_USE_AUTO_FOCUS=0`.
 
 use std::path::{Path, PathBuf};
 
 pub const FOCUS_ON_VERB: &str = "focus_on";
 pub const FOCUS_OFF_VERB: &str = "focus_off";
-pub const OPT_OUT_ENV: &str = "PHONE_REMOTE_AUTO_FOCUS";
+pub const OPT_OUT_ENV: &str = "IPHONE_USE_AUTO_FOCUS";
 
 /// Substring of focus_on's notice (`FOCUS_ON_TEXT` in the bridge generator)
 /// — the daemon's evidence that this session turned DND on.

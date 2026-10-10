@@ -35,8 +35,8 @@ cargo build --release -p iphone-use-mcp
 
 | Env var | Default | Description |
 |---|---|---|
-| `PHONE_REMOTE_URL` | `http://127.0.0.1:44321` | Base URL of the daemon |
-| `PHONE_REMOTE_TOKEN` | _(none)_ | Bearer token / password (omit for open-mode daemons) |
+| `IPHONE_USE_URL` | `http://127.0.0.1:44321` | Base URL of the daemon |
+| `IPHONE_USE_TOKEN` | _(none)_ | Bearer token / password (omit for open-mode daemons) |
 
 ## MCP client config
 
@@ -48,8 +48,8 @@ cargo build --release -p iphone-use-mcp
     "iphone-use": {
       "command": "/Users/YOUR_ACCOUNT/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp",
       "env": {
-        "PHONE_REMOTE_URL": "http://127.0.0.1:44321",
-        "PHONE_REMOTE_TOKEN": "your-password"
+        "IPHONE_USE_URL": "http://127.0.0.1:44321",
+        "IPHONE_USE_TOKEN": "your-password"
       }
     }
   }
@@ -70,8 +70,8 @@ attributable to its session or project.
     "iphone-use": {
       "command": "/Users/YOUR_ACCOUNT/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp",
       "env": {
-        "PHONE_REMOTE_URL": "http://127.0.0.1:44321",
-        "PHONE_REMOTE_TOKEN": "your-password"
+        "IPHONE_USE_URL": "http://127.0.0.1:44321",
+        "IPHONE_USE_TOKEN": "your-password"
       }
     }
   }
@@ -86,8 +86,8 @@ Remote Mac (daemon on a different machine on the LAN):
     "iphone-use": {
       "command": "/Users/YOUR_ACCOUNT/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp",
       "env": {
-        "PHONE_REMOTE_URL": "http://192.168.1.50:44321",
-        "PHONE_REMOTE_TOKEN": "your-password"
+        "IPHONE_USE_URL": "http://192.168.1.50:44321",
+        "IPHONE_USE_TOKEN": "your-password"
       }
     }
   }
@@ -103,8 +103,8 @@ flow CLI:
 ```bash
 MCP="$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
 "$MCP" flow validate examples/flows/open-spotlight.json
-PHONE_REMOTE_TOKEN="$TOKEN" "$MCP" flow run examples/flows/open-spotlight.json
-PHONE_REMOTE_TOKEN="$TOKEN" "$MCP" flow run \
+IPHONE_USE_TOKEN="$TOKEN" "$MCP" flow run examples/flows/open-spotlight.json
+IPHONE_USE_TOKEN="$TOKEN" "$MCP" flow run \
   examples/flows/search-spotlight.json --input 'query=咖啡'
 ```
 
@@ -183,7 +183,7 @@ store and runs flows by id:
 "$MCP" flow update                      # fetch index.json + every flow, verify sha256, validate, write 0600
 "$MCP" flow list [--category C] [--app A] [--verified] [--json]
 "$MCP" flow info <app>/<flow>           # metadata, inputs, step templates, source, sha256
-PHONE_REMOTE_TOKEN="$TOKEN" "$MCP" flow run <app>/<flow> [--input K=V]... [--confirm]
+IPHONE_USE_TOKEN="$TOKEN" "$MCP" flow run <app>/<flow> [--input K=V]... [--confirm]
 "$MCP" flow add <file> --as <app>/<flow> # install your own; kept across updates
 "$MCP" flow remove <app>/<flow>
 "$MCP" flow sources                     # official URL, override, store path

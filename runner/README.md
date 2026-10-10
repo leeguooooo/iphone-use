@@ -7,7 +7,7 @@ runner that runs as one long-lived XCTest method (`RunnerTests.testServe`) and s
 on the phone:
 
 - **port 8100**: an HTTP/1.1 API. It answers every WebDriverAgent route the daemon's `WdaClient`
-  (`crates/server/src/wda.rs`) uses, with the same shapes, so `PHONE_REMOTE_WDA_URL` can point at
+  (`crates/server/src/wda.rs`) uses, with the same shapes, so `IPHONE_USE_WDA_URL` can point at
   it unchanged. It also has a few native routes.
 - **port 9100**: an MJPEG screen stream in WDA's wire format, read by the daemon's `MjpegSplitter`.
 
@@ -395,7 +395,7 @@ python3 scripts/runner-compat.py           # every WdaClient route + MJPEG; read
 python3 scripts/runner-smoke.py --runs 5   # timing of the native routes
 ```
 
-- **Pointing the daemon at it.** Set `PHONE_REMOTE_WDA_URL=http://127.0.0.1:8100`. The MJPEG URL
+- **Pointing the daemon at it.** Set `IPHONE_USE_WDA_URL=http://127.0.0.1:8100`. The MJPEG URL
   stays `:9100`.
 - **Other ports.** Set `TEST_RUNNER_IPU_RUNNER_PORT=…` and `TEST_RUNNER_IPU_RUNNER_MJPEG_PORT=…` on
   the `xcodebuild` command. xcodebuild strips the `TEST_RUNNER_` prefix. MJPEG port `0` turns the

@@ -14,7 +14,7 @@ Agent  ── /agent/* ──────────> iphone-use daemon ── 
 - 浏览器从 `/agent/mjpeg` 拿实时画面（失败时退回 PNG 静帧），通过 `POST /control` 发输入，每条命令都返回成功或失败，不会把一个可能已经断掉的通道当成功。
 - agent 用 `/agent/elements` 读文本形式的辅助功能树，用 `/agent/screenshot` 拿 PNG，用 `/agent/input` 做单步动作，或用 `/agent/actions` 跑一批带检查点的步骤。
 - daemon 负责 runner 的生命周期：空闲后释放手机、带退避地重建 runner、把每个状态写进 `/agent/status`。
-- 下文、状态字段（`wda`、`wda_actionable` 等）和环境变量（`WDA_*`、`PHONE_REMOTE_WDA_*`）里的 “WDA” 沿用旧名，指的就是这个设备 runner。
+- 下文、状态字段（`wda`、`wda_actionable` 等）和环境变量（`WDA_*`、`IPHONE_USE_WDA_*`）里的 “WDA” 沿用旧名，指的就是这个设备 runner。
 
 设计、生命周期、失败状态和安全边界见 **[`docs/direct-device-architecture.html`](direct-device-architecture.html)**。
 
@@ -55,9 +55,9 @@ iphone-use login     # 新的一次性浏览器登录链接和手机二维码
 配对了多台 iPhone？两处固定同一个 classic UDID：
 
 ```bash
-export PHONE_REMOTE_UDID=00008…
+export IPHONE_USE_UDID=00008…
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-WDA_UDID="$PHONE_REMOTE_UDID" ~/.iphone-use/setup-wda.sh
+WDA_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-wda.sh
 ```
 
 ### 把手机还给自己
@@ -71,17 +71,17 @@ runner 运行期间会占着手机。想自己用手机，先暂停它，下次 
 
 更省事的是网页控制栏里的 **交还** 按钮（或 `POST /agent/mode {"mode":"human"}`）：daemon 停掉 runner，手机归拿着它的人用，状态里 `human_handoff:true`。这期间 agent 的输入请求一律 409 `phone_handed_to_human`，不会在你用着的时候把手机抢回去。交还之后同一个按钮变成 **交给 agent**，点它（或 `{"mode":"agent"}`）手机重新交给远程控制。
 
-daemon 也会自己交还：5 分钟没有 agent 活动（释放后很快又被用到，下次的空闲时长会自动翻倍，最长 1 小时）、也没有人在看画面，它就停掉 runner 并停放 supervisor，注销、重启之后也保持停放。runner 常驻的话，iOS 每杀一次它就被拉起一次，每次拉起 iOS 都要输锁屏密码才能开 UI 自动化，结果没人用的时候手机也整天弹密码。下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 会用缓存的 runner 产物把它拉回来（不重新编译），手机锁了就解一下。网页 `/phone` 上停放中的手机会显示 **连接手机**，手机解锁、亮屏后点它即可。`PHONE_REMOTE_IDLE_RELEASE_SECS` 改空闲时长，`0` 表示常驻（v0.6.3–v0.7.3 的行为）。有会话占着手机（owner 租约）期间不做空闲释放，空闲时长从租约释放或过期时开始算。
+daemon 也会自己交还：5 分钟没有 agent 活动（释放后很快又被用到，下次的空闲时长会自动翻倍，最长 1 小时）、也没有人在看画面，它就停掉 runner 并停放 supervisor，注销、重启之后也保持停放。runner 常驻的话，iOS 每杀一次它就被拉起一次，每次拉起 iOS 都要输锁屏密码才能开 UI 自动化，结果没人用的时候手机也整天弹密码。下一次 agent 请求或 `POST /agent/mode {"mode":"agent"}` 会用缓存的 runner 产物把它拉回来（不重新编译），手机锁了就解一下。网页 `/phone` 上停放中的手机会显示 **连接手机**，手机解锁、亮屏后点它即可。`IPHONE_USE_IDLE_RELEASE_SECS` 改空闲时长，`0` 表示常驻（v0.6.3–v0.7.3 的行为）。有会话占着手机（owner 租约）期间不做空闲释放，空闲时长从租约释放或过期时开始算。
 
-**重新启动要有人在场的手机，空闲时保留 runner。** 设了锁屏密码的手机，每次启动 runner 都要在手机上输密码；没人在场时这次启动以 `needs_passcode_on_phone` 结束，远程用户一旦让手机空闲就再也连不回来。所以当 `lock_readiness.passcode_protected` 为 `true`（或 setup 在实例状态目录里留下了 `relaunch-needs-person` 标记）时，空闲释放不停掉**正在运行**的 runner，`/agent/status` 里报 `keep_runner_alive: {"reason":"relaunch_needs_person","because":"passcode",…}`（Wi-Fi 启动被拒的手机是 `because:"wifi_start_refused"`）。代价是手机在两次使用之间一直处在自动化模式（“自动化正在运行”）。只保留 runner 进程，空闲时不保持亮屏（防锁屏仍只在使用时生效），手机照常自动锁定；要让远程用户随时能用，把自动锁定设成“永不”。已经**停掉**的 runner 照常释放：停放 supervisor 才能让 KeepAlive 不再反复拉起、反复弹密码，这正是空闲释放存在的原因。设 `PHONE_REMOTE_IDLE_RELEASE=force` 关掉这个例外，空闲时照常释放。
+**重新启动要有人在场的手机，空闲时保留 runner。** 设了锁屏密码的手机，每次启动 runner 都要在手机上输密码；没人在场时这次启动以 `needs_passcode_on_phone` 结束，远程用户一旦让手机空闲就再也连不回来。所以当 `lock_readiness.passcode_protected` 为 `true`（或 setup 在实例状态目录里留下了 `relaunch-needs-person` 标记）时，空闲释放不停掉**正在运行**的 runner，`/agent/status` 里报 `keep_runner_alive: {"reason":"relaunch_needs_person","because":"passcode",…}`（Wi-Fi 启动被拒的手机是 `because:"wifi_start_refused"`）。代价是手机在两次使用之间一直处在自动化模式（“自动化正在运行”）。只保留 runner 进程，空闲时不保持亮屏（防锁屏仍只在使用时生效），手机照常自动锁定；要让远程用户随时能用，把自动锁定设成“永不”。已经**停掉**的 runner 照常释放：停放 supervisor 才能让 KeepAlive 不再反复拉起、反复弹密码，这正是空闲释放存在的原因。设 `IPHONE_USE_IDLE_RELEASE=force` 关掉这个例外，空闲时照常释放。
 
 `needs_passcode_on_phone`：手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。`locked_after_restart`：这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上（这台 Mac 认识的手机插在 USB 上但 usbmuxd 不列出它，不是 Xcode 的问题）。
 
-停放的 runner 拉回来，亮屏时约 5 秒，熄屏后 10–25 秒。为了把这段等待藏起来，daemon 会**预热**：MCP 服务启动、模型通过 MCP 读状态、或者有会话拿到占用权时，就在后台开始拉起（状态里 `warming:true`），等第一个操作到来时手机多半已经就绪。每次拉起 runner 都可能要输锁屏密码，所以预热只在最近一小时内有 agent 用过这台手机时才做（拿占用权不受此限），手机锁着或者读不到锁屏状态时不做，交还给人、有 setup 阻塞原因、或别的会话占着时也不做，同一种触发 10 分钟内最多一次。`PHONE_REMOTE_PREWARM=0` 关闭预热，`IPHONE_USE_MCP_PREWARM=0` 让单个 MCP 服务不发预热请求。
+停放的 runner 拉回来，亮屏时约 5 秒，熄屏后 10–25 秒。为了把这段等待藏起来，daemon 会**预热**：MCP 服务启动、模型通过 MCP 读状态、或者有会话拿到占用权时，就在后台开始拉起（状态里 `warming:true`），等第一个操作到来时手机多半已经就绪。每次拉起 runner 都可能要输锁屏密码，所以预热只在最近一小时内有 agent 用过这台手机时才做（拿占用权不受此限），手机锁着或者读不到锁屏状态时不做，交还给人、有 setup 阻塞原因、或别的会话占着时也不做，同一种触发 10 分钟内最多一次。`IPHONE_USE_PREWARM=0` 关闭预热，`IPHONE_USE_MCP_PREWARM=0` 让单个 MCP 服务不发预热请求。
 
 ### 升级
 
-> v0.9 移除了 iPhone 镜像后端；原来设了 `PHONE_REMOTE_BACKEND=mirror` 的安装，升级后一律走 WDA。
+> v0.9 移除了 iPhone 镜像后端；原来设了 `IPHONE_USE_BACKEND=mirror` 的安装，升级后一律走 WDA。
 
 ```bash
 iphone-use upgrade            # 装最新 release（daemon + skill），再刷新其他地方的 skill
@@ -91,11 +91,11 @@ iphone-use upgrade --json     # 同上，JSON：name、current、latest、update
 
 安装器会把 `~/.local/bin/iphone-use` 链到 app 里的可执行文件，`~/.local/bin` 在 PATH 上就能直接用。`upgrade` 跑的就是安装那行 `install.sh`（顺带刷新安装器管理的 skill），之后对插件装的 skill 跑 `claude plugin update iphone-use@leeguooooo-plugins`，对 git checkout 跑 `git pull --ff-only`，其他复制来的 skill 会被标为非 release 匹配，提示换成安装器装的那份。退出码 `0` = 升级了 / 已是最新 / 检查成功，`2` = 检查或下载失败。`cargo build` 出来的二进制不会被替换，`upgrade` 只打印安装命令。
 
-daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `latest` / `update_available`，网页会挂横幅。一次性命令（`iphone-use stop`）每天最多在 stderr 打一行 `iphone-use X is available (you have Y). Upgrade: iphone-use upgrade`（缓存在 `${XDG_CACHE_HOME:-~/.cache}/iphone-use/update-check.json`，超时 2 秒）。设了 `CI`、`IPHONE_USE_NO_UPDATE_CHECK`、`USE_NO_UPDATE_CHECK` 或原来的 `PHONE_REMOTE_NO_UPDATE_CHECK`，每日检查和提示都关掉。安装器具体校验什么见[运维 → 升级](#升级-1)。
+daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `latest` / `update_available`，网页会挂横幅。一次性命令（`iphone-use stop`）每天最多在 stderr 打一行 `iphone-use X is available (you have Y). Upgrade: iphone-use upgrade`（缓存在 `${XDG_CACHE_HOME:-~/.cache}/iphone-use/update-check.json`，超时 2 秒）。设了 `CI`、`IPHONE_USE_NO_UPDATE_CHECK` 或 `USE_NO_UPDATE_CHECK`，每日检查和提示都关掉。安装器具体校验什么见[运维 → 升级](#升级-1)。
 
 ## 在浏览器里操作手机
 
-`/phone` 显示手机实时画面：浏览器支持 WebCodecs 时走 `/agent/h264`（device runner 在手机上直接编码 H.264，daemon 原样转发；用 WebDriverAgent 或旧版 runner 时，daemon 退回到在 Mac 上把 JPEG 帧重新编码），否则退回 `/agent/mjpeg`（12–40 Mbit/s，只适合局域网）。设 `PHONE_REMOTE_H264_PASSTHROUGH=0` 可强制在 Mac 上重新编码。
+`/phone` 显示手机实时画面：浏览器支持 WebCodecs 时走 `/agent/h264`（device runner 在手机上直接编码 H.264，daemon 原样转发；用 WebDriverAgent 或旧版 runner 时，daemon 退回到在 Mac 上把 JPEG 帧重新编码），否则退回 `/agent/mjpeg`（12–40 Mbit/s，只适合局域网）。设 `IPHONE_USE_H264_PASSTHROUGH=0` 可强制在 Mac 上重新编码。
 
 工具栏的 **画面** 按钮在 自动 → 性能 → 画质 之间切换，每个浏览器各自记住（iOS App 里是 性能 / 画质 按钮）；其他客户端在 `/agent/h264`、`/agent/mjpeg` 上加 `?mode=performance|quality` 即可。默认的「自动」在这台 Mac 或同一局域网里看时用画质，从别处看时用性能；浏览器解码一直跟不上时自动降到性能：
 
@@ -130,9 +130,9 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 | 请求头 | 何时 | 含义 |
 |---|---|---|
-| `Authorization: Bearer <token>` | 每个 `/agent/*` 调用 | 设了 `PHONE_REMOTE_AGENT_TOKEN` 就用它；否则回退到 daemon 密码。 |
+| `Authorization: Bearer <token>` | 每个 `/agent/*` 调用 | 设了 `IPHONE_USE_AGENT_TOKEN` 就用它；否则回退到 daemon 密码。 |
 | `X-Phone-Control: 1` | 每个改状态的 POST | 鉴权之上的 CSRF / 意图保护，不能代替鉴权。`/control`、`/agent/input`、`/agent/actions`、`/agent/mode`、`/agent/hold`、`/agent/owner` 和 `/agent/inbox` 的 POST 都要。网页和 MCP 客户端会自动加。 |
-| `X-Phone-Owner: <会话名>` | 控制请求 | 为本会话认领手机（issue #72）。租约存活期间（每次请求刷新，`PHONE_REMOTE_OWNER_LEASE_SECS` 默认 300）其他会话和不带头的客户端收到 `409 phone_owned`，附 owner 名和剩余秒数。只读调用不受影响。`X-Phone-Owner-Takeover: 1` 强行接管并记日志。 |
+| `X-Phone-Owner: <会话名>` | 控制请求 | 为本会话认领手机（issue #72）。租约存活期间（每次请求刷新，`IPHONE_USE_OWNER_LEASE_SECS` 默认 300）其他会话和不带头的客户端收到 `409 phone_owned`，附 owner 名和剩余秒数。只读调用不受影响。`X-Phone-Owner-Takeover: 1` 强行接管并记日志。 |
 
 ### 端点
 
@@ -160,7 +160,7 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 - **只看 `drivable:true`**（以及 `wda_actionable:true`）。`device_state` 取值：`ready`、`locked`、`blocked`、`offline`、`releasing`、`released`、`reconnecting`；`mode` 是 `agent` 或 `offline`。
 - **至多送达一次。** 派发前过期返回 `408 not_sent`，`retry_safe:true`。派发后传输失败 `502`，派发后超时 `504`，两者都是 `outcome_unknown`、`retry_safe:false`：先看屏幕，再决定要不要再来一次。设备 runner 在触屏前就拒绝的动作返回 `422 runner_rejected`（`not_sent`，`retry_safe:true`）；`runner_error` 带着 runner 自己给的原因。
 - **目标绑定快照。** 元素索引只在同一次 `/agent/elements` 返回的 `snapshot` 下有效，树变了就 `409 stale_element_snapshot`。精确标签点按在零匹配或多匹配时都不动作。脚本里存标签、identifier、locator，不存索引和快照令牌。
-- **元素级动作。** `set_value` 直接写字段（先清再填），带 `element` 的 `scroll` 把手势限制在该元素内，`perform` 调用命名能力（`increment`、`decrement`、`adjust`、`toggle`、`menu`、`double_tap`、`two_finger_tap`、`scroll_to_visible`、`pinch`、`rotate`、`force_press`）。`force_press` 需要 3D Touch：iPhone XR / 11 之后的机型上 WDA 在触屏前就拒绝，daemon 返回 `422 force_press_unsupported`（`not_sent`，`retry_safe:true`），改用 `menu`（长按）。`{"type":"scroll","page":true,"dy":N}` 滚动页面本身：daemon 找到页面的滚动视图，从避开输入框、按钮、内层滚动区和工具栏的位置起手（找不到时返回 `422 no_page_scroller`）。盖在 app 上的系统层（通知横幅、灵动岛、锁屏）里的行带 `overlay` 字段（`notification`、`dynamic_island`、`cover_sheet`）。`PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` 让树上标出每行支持哪些动作。
+- **元素级动作。** `set_value` 直接写字段（先清再填），带 `element` 的 `scroll` 把手势限制在该元素内，`perform` 调用命名能力（`increment`、`decrement`、`adjust`、`toggle`、`menu`、`double_tap`、`two_finger_tap`、`scroll_to_visible`、`pinch`、`rotate`、`force_press`）。`force_press` 需要 3D Touch：iPhone XR / 11 之后的机型上 WDA 在触屏前就拒绝，daemon 返回 `422 force_press_unsupported`（`not_sent`，`retry_safe:true`），改用 `menu`（长按）。`{"type":"scroll","page":true,"dy":N}` 滚动页面本身：daemon 找到页面的滚动视图，从避开输入框、按钮、内层滚动区和工具栏的位置起手（找不到时返回 `422 no_page_scroller`）。盖在 app 上的系统层（通知横幅、灵动岛、锁屏）里的行带 `overlay` 字段（`notification`、`dynamic_island`、`cover_sheet`）。`IPHONE_USE_ELEMENTS_AFFORDANCES=1` 让树上标出每行支持哪些动作。
 - **会点歪的点击直接拒绝。** 要点的元素中心被别的控件盖住（固定标题栏、键盘、悬浮按钮）时，返回 `409 element_occluded`、`not_sent`：先用 `perform` 的 `scroll_to_visible` 把它滚出来，重新读一次再点；目标被 WDA 标成 `visible:false`（在树里但没画出来，比如 Chrome 压在网页后面的标签页网格）时返回 `409 element_not_visible`。确实要点那个位置就加 `"allow_occluded":true`。按文字点击可以加 `"kind":"Button"` 限定类型，屏幕外的行不会和屏幕上的同名行抢匹配。
 - **`set_value` 写完会读回核对。** 字段没变（网页输入框常常不认直接写入）就返回 `409 value_not_applied`、`outcome:"no_effect"`，改成先点输入框再用 `text` 输入。输入框自己加的格式（分隔符、空格）算写入成功。
 - **禁止截屏的界面**（PayPay、银行、钱包）从 `/agent/screenshot` 拿到的是线框图，响应头带 `X-Capture-Redacted: 1`。在这类界面上按元素操作，不要对着空白截图做视觉识别。
@@ -185,29 +185,29 @@ curl -s -H "$AUTH" -H "$MUTATION" -H "$OWNER" -X POST "$HOST/agent/actions" \
 界面够不着、或点起来太慢的事（电量、健康样本、带原生确认的发消息），走一组精选的 **verb**，由一个桥接快捷指令执行。daemon 通过 WDA 在手机上打开 `shortcuts://run-shortcut`，不经过 Spotlight 和剪贴板；快捷指令把结果 POST 回 `/agent/inbox`。
 
 ```bash
-python3 deploy/make-bridge-shortcut.py --token "$PHONE_REMOTE_AGENT_TOKEN" \
+python3 deploy/make-bridge-shortcut.py --token "$IPHONE_USE_AGENT_TOKEN" \
   --verb ping --verb battery --verb focus_on --verb focus_off
 open "iU Bridge.shortcut"     # 接受导入；iCloud 会同步到手机
 ```
 
 装到手机上可以交给 AI：把生成的文件放进 iCloud 云盘，在手机「文件」里搜 `iU Bridge`，点开后选「添加快捷指令」，不用在 Mac 上点导入框。
 
-**AI 操作时自动勿扰。** 桥接快捷指令和注册表里有 `focus_on` / `focus_off` 时，AI 会话期间守护进程会开勿扰（你本来就开着专注模式时不动），交还手机、空闲释放或交给人工时再关掉。运行时快捷指令 App 会在前台闪一下，所以它只挑没人注意的时机：你自己在遥控或有人开着实时画面时不跑，只在 AI 打开某个 App 或手机停在主屏幕时跑。开、关时手机上都会弹提醒。第一次运行会问一次是否允许桥接快捷指令发通知，AI 会收到 `agent_focus: needs_permission`，请到快捷指令里点「始终允许」。只发不收，不需要打开下面的回传通道。设 `PHONE_REMOTE_AUTO_FOCUS=0` 可以关掉。
+**AI 操作时自动勿扰。** 桥接快捷指令和注册表里有 `focus_on` / `focus_off` 时，AI 会话期间守护进程会开勿扰（你本来就开着专注模式时不动），交还手机、空闲释放或交给人工时再关掉。运行时快捷指令 App 会在前台闪一下，所以它只挑没人注意的时机：你自己在遥控或有人开着实时画面时不跑，只在 AI 打开某个 App 或手机停在主屏幕时跑。开、关时手机上都会弹提醒。第一次运行会问一次是否允许桥接快捷指令发通知，AI 会收到 `agent_focus: needs_permission`，请到快捷指令里点「始终允许」。只发不收，不需要打开下面的回传通道。设 `IPHONE_USE_AUTO_FOCUS=0` 可以关掉。
 
 verb 定义在 `~/.iphone-use/intents-registry.json`（从 [`deploy/intents-registry.example.json`](../deploy/intents-registry.example.json) 起步）。快捷指令名必须等于注册表的 `bridge.name`，bearer token 放在快捷指令自己的请求头里。`--self-test` 检查 plist 里那些会静默失败的部分。每个 verb 首次使用要在手机上点一次授权，调用期间快捷指令会到前台。
 
-**回传路径要求手机能连到 daemon**（issue #59）。默认的 `PHONE_REMOTE_HOST=127.0.0.1` 能派发 verb 但收不到回答，所以意图通道默认是关着的，要用得先从下面选一个回传路径：
+**回传路径要求手机能连到 daemon**（issue #59）。默认的 `IPHONE_USE_HOST=127.0.0.1` 能派发 verb 但收不到回答，所以意图通道默认是关着的，要用得先从下面选一个回传路径：
 
 | 回传路径 | 做法 | 代价 |
 |---|---|---|
-| 绑局域网 | `PHONE_REMOTE_HOST=0.0.0.0`，同时设密码**和** `PHONE_REMOTE_AGENT_TOKEN` | 最简单；daemon 的鉴权面暴露给整个局域网。 |
+| 绑局域网 | `IPHONE_USE_HOST=0.0.0.0`，同时设密码**和** `IPHONE_USE_AGENT_TOKEN` | 最简单；daemon 的鉴权面暴露给整个局域网。 |
 | USB 反向隧道 | 把手机侧端口转回 Mac 的 loopback 监听 | 不暴露局域网；多几样要维护的东西。 |
 
 只发不收的 verb 在纯 loopback 下能用。不可信网络上别绑 `0.0.0.0`。（runner 自己的 `8100` / `9100` 只接受签名请求，见“安全”。）
 
 ## MCP server
 
-[`iphone-use-mcp`](../crates/mcp/README.md) 随安装的 app 一起交付（`~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp`），每个 release 也单独发一份带校验的压缩包。它通过 stdio 说 MCP，并自动给 daemon 请求加 `X-Phone-Control` 和 `X-Phone-Owner`（`PHONE_REMOTE_OWNER`，默认 `mcp-<pid>`）。
+[`iphone-use-mcp`](../crates/mcp/README.md) 随安装的 app 一起交付（`~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp`），每个 release 也单独发一份带校验的压缩包。它通过 stdio 说 MCP，并自动给 daemon 请求加 `X-Phone-Control` 和 `X-Phone-Owner`（`IPHONE_USE_OWNER`，默认 `mcp-<pid>`）。
 
 ```json
 {
@@ -215,8 +215,8 @@ verb 定义在 `~/.iphone-use/intents-registry.json`（从 [`deploy/intents-regi
     "iphone-use": {
       "command": "/Users/YOUR_ACCOUNT/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp",
       "env": {
-        "PHONE_REMOTE_URL": "http://127.0.0.1:44321",
-        "PHONE_REMOTE_TOKEN": "<agent-token>"
+        "IPHONE_USE_URL": "http://127.0.0.1:44321",
+        "IPHONE_USE_TOKEN": "<agent-token>"
       }
     }
   }
@@ -254,7 +254,7 @@ verb 定义在 `~/.iphone-use/intents-registry.json`（从 [`deploy/intents-regi
 ```bash
 MCP="$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
 "$MCP" flow validate examples/flows/search-spotlight.json          # 离线
-PHONE_REMOTE_TOKEN=… "$MCP" flow run examples/flows/search-spotlight.json --input 'query=咖啡'
+IPHONE_USE_TOKEN=… "$MCP" flow run examples/flows/search-spotlight.json --input 'query=咖啡'
 ```
 
 **官方源** [`leeguooooo/iphone-use-flows`](https://github.com/leeguooooo/iphone-use-flows) 是唯一支持的源，把 flow 做成可安装的目录，按 app 分组、经过审阅，和 chrome-use 分发 site 包一个思路：
@@ -263,8 +263,8 @@ PHONE_REMOTE_TOKEN=… "$MCP" flow run examples/flows/search-spotlight.json --in
 "$MCP" flow update                        # 同步到 ~/.iphone-use/flows：sha256 + 严格校验，0600
 "$MCP" flow list --category health        # id · risk · verified · inputs · name
 "$MCP" flow info health/export-all-zh-cn  # 元数据和步骤模板
-PHONE_REMOTE_TOKEN=… "$MCP" flow run health/export-all-zh-cn
-PHONE_REMOTE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./runs   # 记录本次执行（文件 0600）
+IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn
+IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./runs   # 记录本次执行（文件 0600）
 "$MCP" flow add my.json --as myapp/daily  # 自己的 flow，update 不会删
 "$MCP" flow publish my.json --as myapp/daily --alias 某App --note "iPhone 17 Pro Max, iOS 26"   # 用 gh 开 PR
 "$MCP" flow report health/export-all --result @run.json --note "资料按钮改名了"                  # 提 flow-broken issue
@@ -313,31 +313,33 @@ agent 不靠记性去查源，而是被推着走：`phone_elements` 直接列出
 iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
-安装器把 release tag 解析成一个确定的 commit，helper 和 skill 都钉在上面；daemon app 取对应 Release asset 并校验 SHA-256；先把 skill 安装到 `~/.agents/skills/iphone-use`、逐字节校验落盘内容和 Claude Code 发现链接，再替换 daemon。skill 失败中止升级；之后 daemon 失败则恢复旧 skill。`IPHONE_USE_SKIP_SKILL=1` 保留现有 skill，这是降级安装，安装器不保证新 daemon 和旧 skill 兼容。已有的配置（`PHONE_REMOTE_WDA_URL`、密码、token、UDID）原样保留。`PHONE_REMOTE_NO_UPDATE_CHECK=1`（或 `IPHONE_USE_NO_UPDATE_CHECK=1` / `USE_NO_UPDATE_CHECK=1`）关掉每日检查。
+安装器把 release tag 解析成一个确定的 commit，helper 和 skill 都钉在上面；daemon app 取对应 Release asset 并校验 SHA-256；先把 skill 安装到 `~/.agents/skills/iphone-use`、逐字节校验落盘内容和 Claude Code 发现链接，再替换 daemon。skill 失败中止升级；之后 daemon 失败则恢复旧 skill。`IPHONE_USE_SKIP_SKILL=1` 保留现有 skill，这是降级安装，安装器不保证新 daemon 和旧 skill 兼容。已有的配置（`IPHONE_USE_WDA_URL`、密码、token、UDID）原样保留。`IPHONE_USE_NO_UPDATE_CHECK=1`（或 `IPHONE_USE_NO_UPDATE_CHECK=1` / `USE_NO_UPDATE_CHECK=1`）关掉每日检查。
 
 安装时保留有效的现有签名，签名无效就用不动 keychain 的 ad-hoc 签名补上；daemon 不持有任何 macOS 授权，换签名不会让什么失效。
 
 ### 配置
 
+早期版本把这些变量叫 `PHONE_REMOTE_*`。旧名字仍然有效，环境变量和已安装的 LaunchAgent plist 里都认；两个都设了以 `IPHONE_USE_*` 为准，下一次运行 `install.sh` 会改写成新名字。
+
 | 环境变量 | 默认 | 用途 |
 |---|---|---|
-| `PHONE_REMOTE_HOST` / `PHONE_REMOTE_PORT` | `127.0.0.1` / `44321` | 监听地址和端口（局域网用 `0.0.0.0`，此时必须设密码）。 |
-| `PHONE_REMOTE_PASSWORD` | 无 | 浏览器登录密码；没设 agent token 时兼作 bearer。 |
-| `PHONE_REMOTE_AGENT_TOKEN` | 无 | 专用 agent bearer。设了以后是**唯一**接受的 bearer。 |
-| `PHONE_REMOTE_UDID` | 安装器识别并持久化 | 托管 WDA 和破坏性命令使用的 canonical iPhone。请求不能临时换机，要改就改部署并重启。setup 时传同值 `WDA_UDID`。 |
-| `PHONE_REMOTE_WDA_URL` / `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA 控制和 MJPEG 的 loopback。不可达时控制请求直接失败。 |
-| `PHONE_REMOTE_WDA_MANAGED` | loopback 端点默认开 | daemon 是否负责 WDA supervisor / 中继的生命周期。 |
-| `PHONE_REMOTE_PREWARM` | 开 | `0` 关闭预热。`PHONE_REMOTE_PREWARM_RECENT_SECS`（默认 `3600`）是多久内用过才预热，`PHONE_REMOTE_PREWARM_INTERVAL_SECS`（默认 `600`）限制每种触发的频率。 |
-| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | 空闲多少秒后停 runner 并停放 supervisor，下一次 agent 请求再拉起；`0` 表示常驻，代价是 iOS 每杀一次 runner 就弹一次密码。 |
-| `PHONE_REMOTE_KEEP_AWAKE_SECS` | `120` | 有人在操作手机时、以及最后一次请求之后这么多秒内，不让手机自动锁屏（hold、实时画面、owner 租约期间也一样）。runner 每 10 秒按一下 iOS 不响应的 F13 键，已锁屏的手机不碰。`0` 关闭。 |
-| `PHONE_REMOTE_OWNER_LEASE_SECS` | `300` | `X-Phone-Owner` 租约在没有请求刷新时的存活时间。 |
+| `IPHONE_USE_HOST` / `IPHONE_USE_PORT` | `127.0.0.1` / `44321` | 监听地址和端口（局域网用 `0.0.0.0`，此时必须设密码）。 |
+| `IPHONE_USE_PASSWORD` | 无 | 浏览器登录密码；没设 agent token 时兼作 bearer。 |
+| `IPHONE_USE_AGENT_TOKEN` | 无 | 专用 agent bearer。设了以后是**唯一**接受的 bearer。 |
+| `IPHONE_USE_UDID` | 安装器识别并持久化 | 托管 WDA 和破坏性命令使用的 canonical iPhone。请求不能临时换机，要改就改部署并重启。setup 时传同值 `WDA_UDID`。 |
+| `IPHONE_USE_WDA_URL` / `IPHONE_USE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA 控制和 MJPEG 的 loopback。不可达时控制请求直接失败。 |
+| `IPHONE_USE_WDA_MANAGED` | loopback 端点默认开 | daemon 是否负责 WDA supervisor / 中继的生命周期。 |
+| `IPHONE_USE_PREWARM` | 开 | `0` 关闭预热。`IPHONE_USE_PREWARM_RECENT_SECS`（默认 `3600`）是多久内用过才预热，`IPHONE_USE_PREWARM_INTERVAL_SECS`（默认 `600`）限制每种触发的频率。 |
+| `IPHONE_USE_IDLE_RELEASE_SECS` | `300` | 空闲多少秒后停 runner 并停放 supervisor，下一次 agent 请求再拉起；`0` 表示常驻，代价是 iOS 每杀一次 runner 就弹一次密码。 |
+| `IPHONE_USE_KEEP_AWAKE_SECS` | `120` | 有人在操作手机时、以及最后一次请求之后这么多秒内，不让手机自动锁屏（hold、实时画面、owner 租约期间也一样）。runner 每 10 秒按一下 iOS 不响应的 F13 键，已锁屏的手机不碰。`0` 关闭。 |
+| `IPHONE_USE_OWNER_LEASE_SECS` | `300` | `X-Phone-Owner` 租约在没有请求刷新时的存活时间。 |
 | `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | setup 编译的设备 runner 源码（仓库里的 `scripts/setup-wda.sh` 用仓库自己的 `runner/`）。只有不是默认值时才持久化。 |
 | `WDA_RUNNER_REBUILD` | 关 | `1` 让下一次 setup 忽略记录的 runner 产物、重新编译。 |
-| `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` | runner 默认 64 | 只对外部 WebDriverAgent 生效；设备 runner 自己限制读树（深度阶梯、5000 个节点）。 |
-| `PHONE_REMOTE_WDA_SNAPSHOT_TIMEOUT_S` | — | 同上，只对 WebDriverAgent 生效。 |
-| `PHONE_REMOTE_ELEMENTS_AFFORDANCES` | 关 | `1` 给 `/agent/elements` 的行加稀疏的 `actions`、`selected`、`min` / `max`。 |
-| `PHONE_REMOTE_ELEMENTS_TRAITS` | 关 | `1` 再输出原始的辅助功能 trait 名。 |
-| `PHONE_REMOTE_NO_UPDATE_CHECK` | 关 | 跳过每日 release 检查。 |
+| `IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH` | runner 默认 64 | 只对外部 WebDriverAgent 生效；设备 runner 自己限制读树（深度阶梯、5000 个节点）。 |
+| `IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S` | — | 同上，只对 WebDriverAgent 生效。 |
+| `IPHONE_USE_ELEMENTS_AFFORDANCES` | 关 | `1` 给 `/agent/elements` 的行加稀疏的 `actions`、`selected`、`min` / `max`。 |
+| `IPHONE_USE_ELEMENTS_TRAITS` | 关 | `1` 再输出原始的辅助功能 trait 名。 |
+| `IPHONE_USE_NO_UPDATE_CHECK` | 关 | 跳过每日 release 检查。 |
 
 ## 安全
 
@@ -362,9 +364,9 @@ cargo build --release --bin iphone-use --bin iphone-use-mcp
 ./install.sh ./iPhoneUse.app           # 签名、安装、写 LaunchAgent（使用工作树里的 skill）
 
 # 或者不安装直接跑 daemon
-PHONE_REMOTE_WDA_URL=http://127.0.0.1:8100 \
-PHONE_REMOTE_WDA_MJPEG_URL=http://127.0.0.1:9100 \
-PHONE_REMOTE_HOST=0.0.0.0 PHONE_REMOTE_PASSWORD=secret ./target/release/iphone-use serve
+IPHONE_USE_WDA_URL=http://127.0.0.1:8100 \
+IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9100 \
+IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use serve
 ```
 
 发版：`scripts/release.sh 0.6.8` 升 crate 版本、跑发版门禁测试、推 tag、等 release 构建完成后同步插件市场（`--dry-run` 只预演）。

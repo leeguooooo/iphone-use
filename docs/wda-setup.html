@@ -98,7 +98,7 @@ MJPEG 服务。WDA 不可达时请求会明确失败，没有别的路径可以�
   <li>中继工具：普通路径使用 USB <code>iproxy</code>，安装命令为
   <code>brew install libimobiledevice</code>。脚本不会在 USB 不可用时自动切到 Wi-Fi/
   <code>socat</code>；后者只属于操作者明确配置的手动实验。</li>
-  <li>多设备 Mac：daemon 固定 <code>PHONE_REMOTE_UDID</code>，运行 setup 时把同一个 classic UDID 传为
+  <li>多设备 Mac：daemon 固定 <code>IPHONE_USE_UDID</code>，运行 setup 时把同一个 classic UDID 传为
   <code>WDA_UDID</code>，避免恢复时换错手机。</li>
 </ul>
 
@@ -115,8 +115,8 @@ xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
 
 <h2>API：同一条手机端链路</h2>
 <p>安装时默认配置
-<code>PHONE_REMOTE_WDA_URL=http://127.0.0.1:8100</code> 和
-<code>PHONE_REMOTE_WDA_MJPEG_URL=http://127.0.0.1:9100</code>。
+<code>IPHONE_USE_WDA_URL=http://127.0.0.1:8100</code> 和
+<code>IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9100</code>。
 两者都由 setup 脚本建立本地中继；控制失败直接报错。</p>
 <table>
   <tr><th>调用</th><th>路由</th><th>说明</th></tr>

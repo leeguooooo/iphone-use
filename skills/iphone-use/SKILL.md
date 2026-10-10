@@ -16,8 +16,8 @@ loop is the same. Details live in the reference: `curl -s -H "$AUTH"
 [docs/agent-reference.md](https://github.com/leeguooooo/iphone-use/blob/main/docs/agent-reference.md)).
 
 ```bash
-HOST="${PHONE_REMOTE_URL:-http://127.0.0.1:44321}"
-AUTH="Authorization: Bearer $PHONE_REMOTE_TOKEN"   # daemon password or PHONE_REMOTE_AGENT_TOKEN
+HOST="${IPHONE_USE_URL:-http://127.0.0.1:44321}"
+AUTH="Authorization: Bearer $IPHONE_USE_TOKEN"   # daemon password or IPHONE_USE_AGENT_TOKEN
 MUTATION="X-Phone-Control: 1"                      # required on every state-changing POST
 OWNER="X-Phone-Owner: <your-session-name>"          # MCP sends this for you
 curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure stop and report

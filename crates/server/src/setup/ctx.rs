@@ -202,11 +202,11 @@ impl Ctx {
         let port_from_url = |key: &str| port_from_loopback_url(&daemon_env(key));
         let mut wda_port = env("WDA_PORT").unwrap_or_else(|| wda_env("WDA_PORT"));
         if wda_port.is_empty() {
-            wda_port = port_from_url("PHONE_REMOTE_WDA_URL");
+            wda_port = port_from_url("IPHONE_USE_WDA_URL");
         }
         let mut mjpeg_port = env("MJPEG_PORT").unwrap_or_else(|| wda_env("MJPEG_PORT"));
         if mjpeg_port.is_empty() {
-            mjpeg_port = port_from_url("PHONE_REMOTE_WDA_MJPEG_URL");
+            mjpeg_port = port_from_url("IPHONE_USE_WDA_MJPEG_URL");
         }
         if ctx.instance.is_default() {
             if wda_port.is_empty() {
@@ -297,10 +297,10 @@ impl Ctx {
             .map_err(|message| (message, 1))?
             .to_string();
         let mut udid = env("WDA_UDID")
-            .or_else(|| env("PHONE_REMOTE_UDID"))
+            .or_else(|| env("IPHONE_USE_UDID"))
             .unwrap_or_default();
         if udid.is_empty() {
-            udid = daemon_env("PHONE_REMOTE_UDID");
+            udid = daemon_env("IPHONE_USE_UDID");
         }
         if udid.is_empty() {
             udid = wda_env("WDA_UDID");
@@ -565,11 +565,11 @@ pub fn claimed_ports(ctx: &Ctx) -> Vec<u32> {
     }
     for (_, plist) in other_instance_plists(ctx) {
         for key in [
-            "PHONE_REMOTE_PORT",
+            "IPHONE_USE_PORT",
             "WDA_PORT",
             "MJPEG_PORT",
-            "PHONE_REMOTE_WDA_URL",
-            "PHONE_REMOTE_WDA_MJPEG_URL",
+            "IPHONE_USE_WDA_URL",
+            "IPHONE_USE_WDA_MJPEG_URL",
         ] {
             let value = sys::plist_env(&plist, key);
             let port = if value.bytes().all(|b| b.is_ascii_digit()) {
@@ -592,7 +592,7 @@ pub fn udid_owner(ctx: &Ctx, udid: &str) -> Option<String> {
         return None;
     }
     for (name, plist) in other_instance_plists(ctx) {
-        for key in ["PHONE_REMOTE_UDID", "WDA_UDID"] {
+        for key in ["IPHONE_USE_UDID", "WDA_UDID"] {
             let value = sys::plist_env(&plist, key).to_ascii_uppercase();
             if !value.is_empty() && value == wanted {
                 return Some(name);

@@ -8,7 +8,7 @@
 //! under someone else's lease (recovering a dead one is fine: nobody can be
 //! using it).
 //!
-//! The caller is "that owner" when `PHONE_REMOTE_OWNER` names the lease
+//! The caller is "that owner" when `IPHONE_USE_OWNER` names the lease
 //! holder; `--force` (`IPHONE_USE_SETUP_FORCE=1`) overrides on purpose. The
 //! refusal never names either: a model reading it would copy the switch
 //! instead of waiting (chrome-use #433). They are documented in --help only.
@@ -31,12 +31,12 @@ pub fn current(ctx: &Ctx) -> Option<Lease> {
     if !ctx.daemon_plist.is_file() {
         return None;
     }
-    let port = Some(sys::plist_env(&ctx.daemon_plist, "PHONE_REMOTE_PORT"))
+    let port = Some(sys::plist_env(&ctx.daemon_plist, "IPHONE_USE_PORT"))
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| "44321".into());
-    let mut token = sys::plist_env(&ctx.daemon_plist, "PHONE_REMOTE_AGENT_TOKEN");
+    let mut token = sys::plist_env(&ctx.daemon_plist, "IPHONE_USE_AGENT_TOKEN");
     if token.is_empty() {
-        token = sys::plist_env(&ctx.daemon_plist, "PHONE_REMOTE_PASSWORD");
+        token = sys::plist_env(&ctx.daemon_plist, "IPHONE_USE_PASSWORD");
     }
     let url = format!("http://127.0.0.1:{port}/agent/status");
     let reply = if token.is_empty() {
@@ -63,9 +63,9 @@ pub fn lease_in(status: &serde_json::Value) -> Option<Lease> {
     })
 }
 
-/// Who is asking (`PHONE_REMOTE_OWNER`), if anyone said.
+/// Who is asking (`IPHONE_USE_OWNER`), if anyone said.
 pub fn caller() -> Option<String> {
-    std::env::var("PHONE_REMOTE_OWNER")
+    std::env::var("IPHONE_USE_OWNER")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
@@ -202,7 +202,7 @@ mod tests {
         assert!(text.contains("120s left"), "{text}");
         assert!(text.contains("release"), "{text}");
         // No bypass in the refusal: a model would copy it instead of waiting.
-        for bypass in ["--force", "PHONE_REMOTE_OWNER", "IPHONE_USE_SETUP_FORCE"] {
+        for bypass in ["--force", "IPHONE_USE_OWNER", "IPHONE_USE_SETUP_FORCE"] {
             assert!(!text.contains(bypass), "{text}");
         }
     }

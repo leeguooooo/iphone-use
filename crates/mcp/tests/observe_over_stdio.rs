@@ -102,9 +102,9 @@ impl McpChild {
 
     fn start_with(daemon_url: &str, structured: &str) -> Self {
         let mut child = Command::new(binary())
-            .env("PHONE_REMOTE_URL", daemon_url)
+            .env("IPHONE_USE_URL", daemon_url)
             .env("IPHONE_USE_MCP_STRUCTURED", structured)
-            .env_remove("PHONE_REMOTE_TOKEN")
+            .env_remove("IPHONE_USE_TOKEN")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

@@ -109,7 +109,7 @@ impl VideoMode {
     }
 
     /// The runner's `/h264` query. `performance_kbps` is the configured
-    /// performance bitrate (`PHONE_REMOTE_H264_KBPS`); quality keeps the
+    /// performance bitrate (`IPHONE_USE_H264_KBPS`); quality keeps the
     /// runner's own preset.
     pub fn runner_query(self, performance_kbps: u32) -> String {
         match self {
@@ -336,7 +336,7 @@ impl Drop for Subscription {
 
 impl VideoHub {
     pub fn new(mjpeg_url: String) -> Arc<Self> {
-        let bitrate = std::env::var("PHONE_REMOTE_H264_KBPS")
+        let bitrate = std::env::var("IPHONE_USE_H264_KBPS")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
             .filter(|kbps| (300..=20_000).contains(kbps))
@@ -829,9 +829,9 @@ enum Passthrough {
 /// Runner flag: the frame's content band is one flat colour.
 const FLAG_BLANK: u8 = 0x02;
 
-/// `PHONE_REMOTE_H264_PASSTHROUGH=0` always re-encodes on the Mac.
+/// `IPHONE_USE_H264_PASSTHROUGH=0` always re-encodes on the Mac.
 fn passthrough_enabled() -> bool {
-    std::env::var("PHONE_REMOTE_H264_PASSTHROUGH").map_or(true, |value| value.trim() != "0")
+    std::env::var("IPHONE_USE_H264_PASSTHROUGH").map_or(true, |value| value.trim() != "0")
 }
 
 /// One complete runner message off the front of `buf`: the frame and its

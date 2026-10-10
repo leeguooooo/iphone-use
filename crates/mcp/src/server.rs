@@ -1023,7 +1023,7 @@ impl PhoneHandler {
 
     #[tool(
         description = "Read the phone's status without taking control. `owner` names the \
-        session currently driving the phone (this session presents PHONE_REMOTE_OWNER, \
+        session currently driving the phone (this session presents IPHONE_USE_OWNER, \
         else mcp-<pid>); if it is someone else, do not drive the phone — control calls \
         will be refused with phone_owned. The JSON preserves \
         backend, target_configured, managed_wda, managed_wda_pending, recovery_owner, \

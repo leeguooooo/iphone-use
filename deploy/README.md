@@ -2,11 +2,11 @@
 
 ## Default deployment: direct WDA
 
-`PHONE_REMOTE_BACKEND=direct` is the product default. The daemon talks to services on the
+`IPHONE_USE_BACKEND=direct` is the product default. The daemon talks to services on the
 iPhone through localhost relays:
 
-- WDA control: `PHONE_REMOTE_WDA_URL=http://127.0.0.1:8100`
-- WDA video: `PHONE_REMOTE_WDA_MJPEG_URL=http://127.0.0.1:9100`
+- WDA control: `IPHONE_USE_WDA_URL=http://127.0.0.1:8100`
+- WDA video: `IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9100`
 - browser video: authenticated `GET /agent/mjpeg`
 - browser input: cookie-authenticated `POST /control`
 - agent input: bearer-authenticated `POST /agent/input`
@@ -30,7 +30,7 @@ Before treating a host as ready:
    setup. Install `libimobiledevice` (`iproxy`); the supported path binds both Mac-side
    relays to `127.0.0.1`. There is no automatic Wi-Fi/`socat` fallback.
 5. Keep the target iPhone unlocked, awake, and connected while WDA builds and starts.
-6. On multi-device Macs, set `PHONE_REMOTE_UDID` for the daemon and the same classic UDID
+6. On multi-device Macs, set `IPHONE_USE_UDID` for the daemon and the same classic UDID
    as `WDA_UDID` when running the setup helper.
 
 WDA cannot unlock a phone or bypass Face ID/passcode. A free Personal Team profile may
@@ -48,7 +48,7 @@ Without auto-login, the LaunchAgent never loads after a reboot.
 
 ## Legacy mirror backend
 
-Select `PHONE_REMOTE_BACKEND=mirror` only for compatibility with the old
+Select `IPHONE_USE_BACKEND=mirror` only for compatibility with the old
 ScreenCaptureKit + WebRTC + CGEvent design. That mode requires iPhone Mirroring plus
 Screen Recording and Accessibility grants in an Aqua session. An SSH-spawned process or
 session-0 LaunchDaemon cannot satisfy those UI/TCC requirements.
@@ -85,9 +85,9 @@ For multiple paired iPhones, persist a target before installing and pass the sam
 to setup:
 
 ```sh
-export PHONE_REMOTE_UDID=00008…
+export IPHONE_USE_UDID=00008…
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-WDA_UDID="$PHONE_REMOTE_UDID" ~/.iphone-use/setup-wda.sh
+WDA_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-wda.sh
 ```
 
 Only a deliberate mirror deployment should grant Screen Recording and Accessibility.
@@ -96,12 +96,12 @@ Only a deliberate mirror deployment should grant Screen Recording and Accessibil
 
 | Variable | Direct default | Operator responsibility |
 |---|---:|---|
-| `PHONE_REMOTE_BACKEND` | `direct` | Use `mirror` only for explicit legacy compatibility. |
-| `PHONE_REMOTE_UDID` | auto-detect | Pin the classic UDID on multi-device hosts; keep it aligned with setup's `WDA_UDID`. |
-| `PHONE_REMOTE_WDA_URL` | `http://127.0.0.1:8100` | The control relay must answer `/status`. |
-| `PHONE_REMOTE_WDA_MJPEG_URL` | `http://127.0.0.1:9100` | The MJPEG relay must remain reachable for live browser video. |
-| `PHONE_REMOTE_WDA_MANAGED` | `true` for installer-owned loopback WDA | Keep `false` for external/custom WDA; the daemon must not stop or rebootstrap a service it does not own. |
-| `PHONE_REMOTE_IDLE_RELEASE_SECS` | `300` | `0` disables release; otherwise ensure reconnect can restart WDA with the phone unlocked. |
+| `IPHONE_USE_BACKEND` | `direct` | Use `mirror` only for explicit legacy compatibility. |
+| `IPHONE_USE_UDID` | auto-detect | Pin the classic UDID on multi-device hosts; keep it aligned with setup's `WDA_UDID`. |
+| `IPHONE_USE_WDA_URL` | `http://127.0.0.1:8100` | The control relay must answer `/status`. |
+| `IPHONE_USE_WDA_MJPEG_URL` | `http://127.0.0.1:9100` | The MJPEG relay must remain reachable for live browser video. |
+| `IPHONE_USE_WDA_MANAGED` | `true` for installer-owned loopback WDA | Keep `false` for external/custom WDA; the daemon must not stop or rebootstrap a service it does not own. |
+| `IPHONE_USE_IDLE_RELEASE_SECS` | `300` | `0` disables release; otherwise ensure reconnect can restart WDA with the phone unlocked. |
 
 WDA itself does not authenticate `8100/9100`. Loopback-bound `iproxy` prevents exposing
 the Mac relays, but it does not firewall the WDA listener on the iPhone. Use this Phase 1

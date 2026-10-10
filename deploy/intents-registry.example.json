@@ -49,7 +49,7 @@
       "status": "experiment"
     },
     {
-      "$comment": "Fire-and-forget (no reply; works with the return path off, #59). The daemon dispatches it itself before an agent session's first action unless PHONE_REMOTE_AUTO_FOCUS=0. Turns Do Not Disturb on only when no Focus is active and posts a notice, which the daemon reads off the screen as its evidence that DND is its own to turn off. First run asks once to allow notifications.",
+      "$comment": "Fire-and-forget (no reply; works with the return path off, #59). The daemon dispatches it itself before an agent session's first action unless IPHONE_USE_AUTO_FOCUS=0. Turns Do Not Disturb on only when no Focus is active and posts a notice, which the daemon reads off the screen as its evidence that DND is its own to turn off. First run asks once to allow notifications.",
       "name": "focus_on",
       "summary": "Do Not Disturb on for an agent session (only if no Focus is active)",
       "side_effect": "write",

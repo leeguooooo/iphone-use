@@ -24,7 +24,7 @@ class StatusServer:
     def close(self): self.httpd.shutdown()
 
 def run(status, latest, *args, marker=None, home=None, extra_env=None):
-    env = dict(os.environ, HOME=home, PHONE_REMOTE_STATE_DIR=str(Path(home) / "state"),
+    env = dict(os.environ, HOME=home, IPHONE_USE_STATE_DIR=str(Path(home) / "state"),
                AUTO_UPDATE_STATUS_URL=status.url, AUTO_UPDATE_TOKEN="t", AUTO_UPDATE_LATEST_TAG=latest,
                AUTO_UPDATE_INSTALLER_CMD=f"touch '{marker}'",
                AUTO_UPDATE_SELF_URL=f"file://{Path(home) / 'nonexistent.sh'}")

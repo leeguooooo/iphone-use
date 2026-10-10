@@ -4,7 +4,7 @@ The runner refuses any request not signed with its per-launch token (wire format
 crates/core/src/runner_auth.rs). The token is read from, in order:
   IPU_RUNNER_TOKEN, the file named by IPU_RUNNER_TOKEN_FILE, or the instance state dir's
   runner-token (~/.iphone-use/runner-token; ~/.iphone-use/instances/<name>/runner-token when
-  PHONE_REMOTE_INSTANCE is set; PHONE_REMOTE_STATE_DIR overrides).
+  IPHONE_USE_INSTANCE is set; IPHONE_USE_STATE_DIR overrides).
 Without one, requests go out unsigned (only a runner older than request signing answers them).
 """
 
@@ -16,6 +16,12 @@ import secrets
 import time
 import urllib.parse
 
+# Installs made before the rename set PHONE_REMOTE_*; read them as IPHONE_USE_*
+# (the new name wins).
+for _key, _value in list(os.environ.items()):
+    if _key.startswith("PHONE_REMOTE_") and len(_key) > len("PHONE_REMOTE_"):
+        os.environ.setdefault("IPHONE_USE_" + _key[len("PHONE_REMOTE_"):], _value)
+
 SCHEME = "IPU-HMAC-SHA256"
 _TOKEN = re.compile(r"^[0-9a-f]{32,128}$")
 
@@ -23,10 +29,10 @@ _TOKEN = re.compile(r"^[0-9a-f]{32,128}$")
 def _token_file():
     if os.environ.get("IPU_RUNNER_TOKEN_FILE"):
         return os.environ["IPU_RUNNER_TOKEN_FILE"]
-    state = os.environ.get("PHONE_REMOTE_STATE_DIR")
+    state = os.environ.get("IPHONE_USE_STATE_DIR")
     if not state:
         state = os.path.expanduser("~/.iphone-use")
-        name = os.environ.get("PHONE_REMOTE_INSTANCE", "")
+        name = os.environ.get("IPHONE_USE_INSTANCE", "")
         if name and name != "default":
             state = os.path.join(state, "instances", name)
     return os.path.join(state, "runner-token")

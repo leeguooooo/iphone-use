@@ -44,7 +44,7 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The instance state dir: a temp dir pinned through `PHONE_REMOTE_STATE_DIR`
+/// The instance state dir: a temp dir pinned through `IPHONE_USE_STATE_DIR`
 /// before anything resolves the instance, holding the `setup-wda.sh` the
 /// reconnect handler insists on (never run: the bootstrap is faked).
 fn state_dir() -> &'static std::path::Path {
@@ -52,8 +52,8 @@ fn state_dir() -> &'static std::path::Path {
     DIR.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("setup-wda.sh"), "#!/bin/bash\nexit 0\n").unwrap();
-        std::env::set_var("PHONE_REMOTE_STATE_DIR", dir.path());
-        std::env::remove_var("PHONE_REMOTE_INSTANCE");
+        std::env::set_var("IPHONE_USE_STATE_DIR", dir.path());
+        std::env::remove_var("IPHONE_USE_INSTANCE");
         assert_eq!(server::instance::current().state_dir, dir.path());
         dir
     })
