@@ -13,11 +13,13 @@ window.drawFrame = function (c, t, film, view, M) {
 
   // Layout: phone on the left and terminal on the right; portrait stacks them.
   // Portrait keeps everything inside view.safe (platform UI covers the top, bottom and right).
-  const PH = V ? H * 0.27 : H * 0.74,
+  // Portrait gives the phone a third of the height: it is the subject, and it no longer has to
+  // zoom between beats to be legible, so it stays one size.
+  const PH = V ? H * 0.32 : H * 0.74,
     PW = PH * 0.46,
-    home = V ? [W * 0.46, H * 0.255] : [W * 0.245, H * 0.45];
-  const pane = V ? { x: W * 0.06, y: H * 0.5, w: W * 0.8, h: H * 0.205 } : { x: W * 0.43, y: H * 0.25, w: W * 0.52, h: H * 0.56 };
-  const headAt = V ? [pane.x, H * 0.463] : [pane.x, H * 0.165];
+    home = V ? [W * 0.46, H * 0.27] : [W * 0.245, H * 0.45];
+  const pane = V ? { x: W * 0.06, y: H * 0.533, w: W * 0.8, h: H * 0.17 } : { x: W * 0.43, y: H * 0.25, w: W * 0.52, h: H * 0.56 };
+  const headAt = V ? [pane.x, H * 0.496] : [pane.x, H * 0.165];
   const fs = (V ? 25 : 29) * u,
     lh = fs * 1.6;
 
@@ -79,19 +81,18 @@ window.drawFrame = function (c, t, film, view, M) {
     const S0 = [W * 0.46, H * 0.43],
       phoneC = home,
       paneC = [W * 0.46, pane.y + pane.h / 2];
-    // Portrait: into the phone while it acts, a fast move to the terminal for the result.
     // Portrait: the camera moves only the phone (it grows in place while it acts); headings and
     // the terminal stay put inside view.safe, so the agent is on screen the whole time.
-    // The phone grows in place while it acts (portrait 1.3×, landscape 1.12×), then settles.
-    const zMax = V ? 1.3 : 1.12;
-    phoneZ = M.camera(t, [[0.3, "Z"], [2.5, 1], [5.1, "Z"], [6.9, 1], [10.3, "Z"], [11.5, 1], [12.1, "Z"], [16.3, 1], [23.0, "Z"], [24.0, 1], [24.6, "Z"], [28.3, 1], [29.7, "Z"], [30.8, 1], [33.8, "Z"], [35.6, 1]].map(([at, z]) => ({ at, kind: "to", z: z === "Z" ? (at < 1 && V ? 1.12 : zMax) : z, dur: 0.45, ease: "cubicInOut" })), { z: 1 }).z; // the opening zoom stays clear of the headline
-    // Between beats: a 0.3 s whip — the old beat slides out right, the new one slides in from the
+    // The phone grows in place while it acts (portrait 1.08×, landscape 1.12×), then settles.
+    const zMax = V ? 1.08 : 1.12;
+    phoneZ = M.camera(t, [[0.3, "Z"], [2.5, 1], [5.1, "Z"], [6.9, 1], [10.3, "Z"], [11.5, 1], [12.1, "Z"], [16.3, 1], [23.0, "Z"], [24.0, 1], [24.6, "Z"], [28.3, 1], [29.7, "Z"], [30.8, 1], [33.8, "Z"], [35.6, 1]].map(([at, z]) => ({ at, kind: "to", z: z === "Z" ? (at < 1 && V ? 1.04 : zMax) : z, dur: 0.45, ease: "cubicInOut" })), { z: 1 }).z; // the opening zoom stays clear of the headline
+    // Between beats: a 0.6 s whip — the old beat slides out right, the new one slides in from the
     // left. Text only crosses the frame edge mid-move; at rest everything is inside view.safe.
     const Cw = C0, // the default camera centre, so the layout rests exactly where it was designed
       whips = [5, 12, 18, 24.5, 31].flatMap((b) => [
-        [b - 0.16, "pan", [Cw[0] - W * 0.9, Cw[1]]],
+        { at: b - 0.22, kind: "pan", x: Cw[0] - W * 0.9, y: Cw[1], dur: 0.22, ease: "cubicIn" },
         [b, "cut", [Cw[0] + W * 0.9, Cw[1]], 1],
-        [b + 0.01, "pan", Cw],
+        { at: b + 0.01, kind: "pan", x: Cw[0], y: Cw[1], dur: 0.4, ease: "cubicOut" },
       ]);
     M.shoot(c, t, V ? whips : [...whips, 
       [0.3, "push", toPhone, 0.04],
@@ -113,17 +114,17 @@ window.drawFrame = function (c, t, film, view, M) {
       // Honest results: both refusals left the Date & Time page exactly as it was.
       phone(t >= 18.3 && t < 24.5 ? img("datetime") : screen);
       // hook
-      M.caption(c, t, p.title1, -1, 4.9, { x: headAt[0] / W, align: "left", y: V ? 0.43 : 0.085, size: (V ? 52 : 62) * u, color: k.ink, weight: 900 });
-      M.caption(c, t, p.title2, -1, 4.9, { x: headAt[0] / W, align: "left", y: V ? 0.473 : 0.175, size: (V ? 66 : 90) * u, color: k.accent, weight: 900, maxWidth: V ? W * 0.8 : pane.w });
+      M.caption(c, t, p.title1, -1, 4.9, { x: headAt[0] / W, align: "left", y: V ? 0.463 : 0.085, size: (V ? 52 : 62) * u, color: k.ink, weight: 900 });
+      M.caption(c, t, p.title2, -1, 4.9, { x: headAt[0] / W, align: "left", y: V ? 0.506 : 0.175, size: (V ? 66 : 90) * u, color: k.accent, weight: 900, maxWidth: V ? W * 0.8 : pane.w });
       // Frame 0 is the cover: the title and the command are already in place.
       if (t < 5) term([["$", p.cType, -2], ["=", p.rType, 2.6]], -1, 4.9);
       // The claim in words, once the note has filled: long text goes in with one call.
-      const proof = V ? [W * 0.46, pane.y + pane.h * 0.66] : [pane.x + pane.w / 2, pane.y + pane.h * 0.6];
+      const proof = V ? [W * 0.46, pane.y + pane.h * 0.5] : [pane.x + pane.w / 2, pane.y + pane.h * 0.6];
       M.stamp(c, t, p.key, proof, { at: 0.5, until: 2.7, size: (V ? 52 : 64) * u, color: k.ink, rotate: 0, box: false });
       M.stamp(c, t, p.typed, proof, { at: 2.8, until: 4.9, size: (V ? 52 : 64) * u, color: k.accent2, rotate: 0, box: false });
       // read
       head(p.read, 5.1, 12);
-      term([["$", p.cRead, 5.4], ...d.rows.slice(0, V ? 4 : 7).map((r, i) => ["=", r, 6.2 + i * 0.12, k.ink])], 5.2, 11.9);
+      term([["$", p.cRead, 5.4], ...d.rows.slice(0, V ? 3 : 7).map((r, i) => ["=", r, 6.2 + i * 0.12, k.ink])], 5.2, 11.9);
       M.stamp(c, t, p.readTime, V ? [pane.x + pane.w * 0.62, pane.y + 32 * u] : [pane.x + pane.w - 240 * u, pane.y + 32 * u], { at: 7.6, until: 11.8, size: 38 * u, color: k.accent2, rotate: 0 });
       // tap by name: a ring on the row just before the recording opens it
       head(p.tap, 12.1, 18);
@@ -131,25 +132,24 @@ window.drawFrame = function (c, t, film, view, M) {
       if (t > 15.2 && t < 16.4) M.ripple(c, t, [home[0], home[1] + (-PH / 2 + PH * 0.322) * phoneZ], { at: 15.25, count: 2, radius: PW * 0.32, color: k.accent, width: 6 * u, gap: 0.3, dur: 0.6 });
       // honest results: the phone stays dimmed, because nothing on it changed
       head(p.honest, 18.2, 24.5);
-      const short = (r) => r.split(" · ").slice(0, 2).join(" · "); // portrait: the first two fields fit
-      term(V ? [["$", p.cH1, 18.4], ["!", short(p.rH1), 19.4], ["$", p.cH2, 21.2], ["!", short(p.rH2), 22.0]] : [["$", p.cH1, 18.4], ["!", p.rH1, 19.4], ["#", p.nH1, 19.9], ["$", p.cH2, 21.2], ["!", p.rH2, 22.0], ["#", p.nH2, 22.5]], 18.3, 24.4);
+      const short = (r) => r.split(" · ").slice(0, 2).join(" · "); // portrait: the fields that fit; for the batch refusal, its point
+      term(V ? [["$", p.cH1, 18.4], ["!", short(p.rH1), 19.4], ["$", p.cH2, 21.2], ["!", p.rH2.split(" · ").pop(), 22.0]] : [["$", p.cH1, 18.4], ["!", p.rH1, 19.4], ["#", p.nH1, 19.9], ["$", p.cH2, 21.2], ["!", p.rH2, 22.0], ["#", p.nH2, 22.5]], 18.3, 24.4);
       // flow replay
       head(p.flow, 24.6, 31);
       term([["$", p.cFlow, 24.8], ["=", p.rFlow, 27.4]], 24.7, 30.9);
-      M.stamp(c, t, p.tokens, V ? [W * 0.46, pane.y + pane.h * 0.72] : [pane.x + pane.w / 2, pane.y + pane.h * 0.62], { at: 28.4, until: 30.9, size: (V ? 56 : 66) * u, color: k.accent2, rotate: 0, box: false });
+      M.stamp(c, t, p.tokens, V ? [W * 0.46, pane.y + pane.h * 0.52] : [pane.x + pane.w / 2, pane.y + pane.h * 0.62], { at: 28.4, until: 30.9, size: (V ? 56 : 66) * u, color: k.accent2, rotate: 0, box: false });
       // Wi-Fi: this session's own status
       head(p.wifi, 31.1, 37);
       term([["$", p.cStatus, 31.3], ["=", p.s1, 32.2], ["=", p.s2, 32.4, k.ink], ["=", p.s3, 32.6, k.ink]], 31.2, 36.9);
-      M.stamp(c, t, p.ios, V ? [pane.x + pane.w * 0.7, pane.y + pane.h * 0.72] : [pane.x + pane.w * 0.72, pane.y + pane.h * 0.78], { at: 34.0, until: 36.9, size: (V ? 54 : 84) * u, color: k.accent2, rotate: -0.05 });
+      M.stamp(c, t, p.ios, V ? [pane.x + pane.w * 0.8, pane.y + 34 * u] : [pane.x + pane.w * 0.72, pane.y + pane.h * 0.78], { at: 34.0, until: 36.9, size: (V ? 54 : 84) * u, color: k.accent2, rotate: -0.05 });
       if (t > 32.2 && t < 37) M.ripple(c, t, [home[0], home[1] - (PH / 2) * phoneZ - 30 * u], { at: 32.3, count: 3, gap: 0.4, dur: 1.3, radius: (V ? 70 : 110) * u, color: k.accent, width: 6 * u });
     });
   }
 
   // Remote control: the real recording of the browser control page. A click on the live picture
-  // operates the phone; then the sidebar's scan-to-connect (iPhone app) and grid (several phones).
+  // operates the phone; then 扫码连接 opens the real pairing dialog (its one-time code is blurred).
   if (t >= 37 && t < 49.5) {
     const page = M.video("people", t);
-    let sp = null;
     if (page) {
       const iw = page.naturalWidth || page.width,
         ih = page.naturalHeight || page.height;
@@ -160,23 +160,32 @@ window.drawFrame = function (c, t, film, view, M) {
         dx = V ? 0 : Math.min(0, Math.max(W - dw, W / 2 - 0.5 * dw)),
         dy = V ? H * 0.43 - dh / 2 : Math.min(0, Math.max(H - dh, H / 2 - 0.47 * dh));
       const P = (px, py) => [dx + (px / 1920) * dw, dy + (py / 1080) * dh]; // recording pixels → frame
-      const click = P(866, 398),
-        side = P(1800, 470);
-      // View: screen = T + (p − F)·Z. Portrait pushes in on the click, then slides to the sidebar and
-      // brings it to the middle of the safe area; landscape pulses in on the click and holds the page.
+      // Positions measured on the recording: the click, the 扫码连接 button, the dialog's centre.
+      const click = P(866, 672),
+        btn = P(1826, 554),
+        dlg = P(960, 540),
+        tClick = 37 + 3.16,
+        tPair = 37 + 4.99;
+      // View: screen = T + (p − F)·Z. Portrait pushes in on the click, pulls back to the whole page as
+      // the button is clicked, then centres the dialog in the safe area; landscape pulses on each click.
       let F = click,
         T = click,
         Z = 1;
       if (V) {
         const into = M.tween(t, 39.2, 0.5),
-          slide = M.tween(t, 43.5, 0.6),
-          out = M.tween(t, 48.6, 0.4);
-        F = M.lerp2(click, side, slide);
-        T = M.lerp2(click, [W * 0.46, H * 0.42], slide);
-        // 1× → 2.6× on the click, then 1.6× on the sidebar, back to 1× on the way out.
-        Z = M.mix(M.mix(1, 2.6, into), 1.6, slide) * (1 - out) + out;
-      } else Z = 1 + 0.14 * M.tween(t, 39.4, 0.28) * (1 - M.tween(t, 42.6, 0.28));
-      sp = (pt) => [T[0] + (pt[0] - F[0]) * Z, T[1] + (pt[1] - F[1]) * Z];
+          back = M.tween(t, 41.0, 0.5),
+          open = M.tween(t, 42.3, 0.6),
+          out = M.tween(t, 48.6, 0.4),
+          rest = [W * 0.46, H * 0.42];
+        F = M.lerp2(click, dlg, open);
+        T = M.lerp2(click, rest, open);
+        // 1× → 2.6× on the click, back to the whole page for the button, 2.6× on the dialog, 1× out.
+        Z = M.mix(M.mix(M.mix(1, 2.6, into), 1, back), 2.6, open) * (1 - out) + out;
+      } else {
+        const pulse = (at, len) => 0.14 * M.tween(t, at, 0.28) * (1 - M.tween(t, at + len, 0.28));
+        Z = 1 + pulse(39.9, 1.6) + pulse(42.1, 6);
+        F = T = M.lerp2(click, dlg, M.tween(t, 41.9, 0.3));
+      }
       c.save();
       if (V) (c.beginPath(), c.rect(0, 0, W, view.safe.y + view.safe.h), c.clip());
       // Portrait enters with the same whip as the other beats; landscape fades in from black.
@@ -185,21 +194,22 @@ window.drawFrame = function (c, t, film, view, M) {
       c.scale(Z, Z);
       c.translate(-F[0], -F[1]);
       c.drawImage(page, dx, dy, dw, dh);
-      // The click where it happened in the recording.
-      const at = 37 + 3.06;
-      if (t < at + 1.6) M.cursor(c, t, [[at - 0.6, click[0] + 120 * u, click[1] + 90 * u], [at - 0.05, click[0], click[1]], [at + 1.2, click[0], click[1]]], { clicks: [at], size: 1.3 / Z });
+      // The two clicks where they happened in the recording.
+      if (t < tClick + 1.6) M.cursor(c, t, [[tClick - 0.6, click[0] + 120 * u, click[1] + 90 * u], [tClick - 0.05, click[0], click[1]], [tClick + 1.2, click[0], click[1]]], { clicks: [tClick], size: 1.3 / Z });
+      else if (t > tPair - 0.9 && t < tPair + 0.8) M.cursor(c, t, [[tPair - 0.9, btn[0] - 160 * u, btn[1] + 120 * u], [tPair - 0.05, btn[0], btn[1]], [tPair + 0.8, btn[0], btn[1]]], { clicks: [tPair], size: 1.3 / Z });
       c.restore();
-      // Point out the two sidebar controls (positions measured on the recording).
-      // Portrait: labels open to the right of the sidebar, in the empty part of the safe area.
-      M.callout(c, t, sp(P(1808, 553)), p.qr, { sub: p.qrSub, bg: k.bg, fg: k.ink, at: 44.2, until: 49.2, dx: (V ? 140 : -380) * u, dy: (V ? 150 : 70) * u, size: (V ? 34 : 40) * u });
-      M.callout(c, t, sp(P(1795, 383)), p.grid, { sub: p.gridSub, bg: k.bg, fg: k.ink, at: 45.4, until: 49.2, dx: (V ? 140 : -380) * u, dy: (V ? -150 : -70) * u, size: (V ? 34 : 40) * u });
+      // Landscape: name the dialog in the viewer's language (the page itself is Chinese).
+      if (!V) {
+        const sp = (pt) => [T[0] + (pt[0] - F[0]) * Z, T[1] + (pt[1] - F[1]) * Z];
+        M.callout(c, t, sp(P(1130, 520)), p.qr, { sub: p.pairHint, bg: k.bg, fg: k.ink, at: 42.6, until: 49.2, dx: 190 * u, dy: 70 * u, size: 38 * u });
+      }
     }
     // Enter through black instead of a hard cut into the bright page.
     const veil = V ? 0.85 * (1 - M.tween(t, 37, 0.8)) + 0.6 * M.tween(t, 48.9, 0.3) : 1 - M.tween(t, 37, 0.8, "sineInOut") + 0.8 * M.tween(t, 48.7, 0.45);
     if (veil > 0) ((c.fillStyle = `rgba(11,13,16,${Math.min(1, veil)})`), c.fillRect(0, 0, W, H));
     const top = { y: V ? 0.13 : 0.09, size: (V ? 44 : 52) * u, color: k.ink, weight: 900, maxWidth: V ? view.safe.w : W * 0.9, x: V ? (view.safe.x + view.safe.w / 2) / W : 0.5 };
-    M.caption(c, t, p.remote1, 37.5, 43.4, { ...top, plate: "rgba(11,13,16,.88)" });
-    M.caption(c, t, p.remote2, 43.6, 49.3, { ...top, plate: "rgba(10,132,255,.94)" });
+    M.caption(c, t, p.remote1, 37.5, 42.0, { ...top, plate: "rgba(11,13,16,.88)" });
+    M.caption(c, t, p.remote2, 42.1, 49.3, { ...top, plate: "rgba(10,132,255,.94)" });
   }
 
   // Outro: icon, name, the repository large and the command readable.
@@ -248,6 +258,8 @@ window.drawFrame = function (c, t, film, view, M) {
   }
   // Provenance note at the foot of the opening terminal (portrait) or the frame (landscape).
   M.caption(c, t, p.real, 0.6, 4.9, { x: V ? 0.46 : 0.5, y: V ? (pane.y + pane.h - 26 * u) / H : 0.968, size: (V ? 22 : 26) * u, color: k.sub, weight: 600, maxWidth: V ? pane.w - 40 * u : W * 0.9 });
+  // The Chinese narration spells "A I" so the voice says two letters (as one word it is misread); subtitles show AI.
+  for (const cue of film.captions ?? []) cue.text = cue.text.replace("A I", "AI");
   // Landscape subtitles sit low; portrait uses the default, the bottom of view.safe.
   // Portrait subtitles: bottom of view.safe, centred on it (clear of the right action column).
   M.captions(c, t, undefined, V ? { x: (view.safe.x + view.safe.w / 2) / W, lines: 3 } : { y: t < 49.1 ? 0.9 : 0.95 });
