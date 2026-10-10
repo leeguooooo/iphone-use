@@ -1922,7 +1922,7 @@ impl ServerHandler for PhoneHandler {
                 .enable_resources()
                 .build(),
         )
-            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::new(
                 "iphone-use-mcp",
                 env!("CARGO_PKG_VERSION"),
