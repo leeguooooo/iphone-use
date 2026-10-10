@@ -1,6 +1,7 @@
 pub mod advice;
 pub mod apps;
 pub mod config;
+pub mod device_identity;
 pub mod flows;
 pub mod focus;
 pub mod h264sps;

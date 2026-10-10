@@ -20,7 +20,13 @@ final class DeviceSession: Identifiable {
     var record: DeviceRecord
     nonisolated let id: UUID
     var address: String { record.address }
-    var name: String { record.name }
+    /// The person's name for it, else the phone's own name and model.
+    var name: String { record.displayName }
+    /// The Mac's address (after the phone's name when the person renamed it).
+    var secondaryName: String { record.secondaryText }
+    /// The phone named itself differently from what the record remembers;
+    /// `AppModel` saves it.
+    var onIdentity: ((UUID, PhoneIdentity) -> Void)?
 
     var phase: Phase = .idle {
         didSet {
@@ -29,7 +35,13 @@ final class DeviceSession: Identifiable {
         }
     }
     var status: PhoneStatus? {
-        didSet { trackStarting() }
+        didSet {
+            trackStarting()
+            if let device = status?.device, device != record.phone {
+                record.phone = device
+                onIdentity?(id, device)
+            }
+        }
     }
     /// When the current connection attempt started.
     private(set) var connectingSince: Date?
@@ -111,10 +123,22 @@ final class DeviceSession: Identifiable {
     /// the running stream reconnects it, starting on a fresh keyframe.
     var preferQuality: Bool = false {
         didSet {
-            guard preferQuality != oldValue, reader != nil, streamQuality != wantedQuality else { return }
+            guard preferQuality != oldValue else { return }
+            // A fresh choice gets a fresh try at quality.
+            qualityUnavailable = false
+            guard reader != nil, streamQuality != wantedQuality else { return }
             restartStream()
         }
     }
+
+    /// Quality was asked for and no picture came (an older daemon that does
+    /// not fall back on its own, on a phone whose encoder cannot do full
+    /// size): this session streams performance until the choice changes.
+    private(set) var qualityUnavailable = false
+    /// How long a quality stream may stay without a frame before that. The
+    /// daemon falls back after 3 s itself, so this only catches older ones.
+    static let qualityFirstFrameTimeout: TimeInterval = 8
+    private var qualityWatch: Task<Void, Never>?
 
     /// The app is in the background: hold no stream, so the daemon sees no
     /// viewer and its idle release works as if the app were closed.
@@ -448,7 +472,7 @@ final class DeviceSession: Identifiable {
         updateStream()
     }
 
-    private var wantedQuality: Bool { role == .full && preferQuality }
+    private var wantedQuality: Bool { role == .full && preferQuality && !qualityUnavailable }
 
     func requestKeyframe() {
         guard let client else { return }
@@ -497,12 +521,30 @@ final class DeviceSession: Identifiable {
             if videoWaitSince == nil { videoWaitSince = Date() }
             video?.reset()
             reader.start()
+            qualityWatch?.cancel()
+            if quality {
+                let started = Date()
+                qualityWatch = Task { [weak self, weak reader] in
+                    try? await Task.sleep(for: .seconds(Self.qualityFirstFrameTimeout))
+                    guard !Task.isCancelled, let self, let reader, self.reader === reader else { return }
+                    if Self.qualityFailed(started: started, lastFrameAt: self.lastFrameAt) {
+                        self.qualityUnavailable = true
+                        self.restartStream()
+                    }
+                }
+            }
         } else if !wanted, let reader {
             reader.stop()
             self.reader = nil
             videoLive = false
             videoWaitSince = nil
         }
+    }
+
+    /// A quality stream that started at `started` has shown no frame since.
+    nonisolated static func qualityFailed(started: Date, lastFrameAt: Date?) -> Bool {
+        guard let lastFrameAt else { return true }
+        return lastFrameAt < started
     }
 
     private func restartStream() {

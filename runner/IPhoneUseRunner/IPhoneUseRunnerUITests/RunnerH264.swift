@@ -24,6 +24,12 @@
 // strips bit 1 before forwarding. Any byte the client sends asks for a keyframe, so one upstream
 // connection can serve viewers that join later.
 //
+// Not every phone's encoder takes every size: the iPhone X (A11, iOS 16) accepts a full-size
+// 1124x2436 session and then never emits a frame, so quality mode was a black screen there. An
+// encoder that has produced nothing after a few frames (or reports an error) steps down a ladder
+// (`EncodeLimit`): long side 1920, then Main profile at 30 fps, then long side 1280. The step a
+// mode needed is remembered for the runner's life, so the next viewer starts there.
+//
 // One capture thread feeds one decode+encode thread (latest wins, so a slow encode drops stale
 // captures instead of queueing them); both serve every client and run only while one is connected.
 // Overlapping the two lets full-size quality mode reach the frame rate capture alone allows.
@@ -34,6 +40,52 @@ import CoreVideo
 import Foundation
 import Network
 import VideoToolbox
+
+/// Steps down from what a viewer asked for, for an encoder that cannot do it.
+enum EncodeLimit {
+  /// Level 0 is as asked; each level after it is cheaper. The last one is the floor.
+  static let levels = 4
+  /// Frames an encoder may take without output before it counts as failed (it is also given
+  /// `graceSeconds`): VideoToolbox emits within a frame or two when it works.
+  static let graceFrames = 3
+  static let graceSeconds = 1.0
+
+  /// The longest side allowed at `level`, or nil for no cap.
+  static func longSideCap(level: Int) -> Int? {
+    switch level {
+    case ..<1: return nil
+    case 1, 2: return 1920
+    default: return 1280
+    }
+  }
+
+  /// `settings` and the even frame size to encode at `level`, for an image of `width`x`height`.
+  static func apply(_ settings: RunnerH264Stream.Settings, level: Int, width: Int, height: Int)
+    -> (settings: RunnerH264Stream.Settings, width: Int, height: Int)
+  {
+    var result = settings
+    if level >= 2 {
+      result.highProfile = false
+      result.fps = min(result.fps, 30)
+    }
+    var w = width
+    var h = height
+    if let cap = longSideCap(level: level), max(w, h) > cap {
+      let ratio = Double(cap) / Double(max(w, h))
+      w = Int((Double(w) * ratio).rounded())
+      h = Int((Double(h) * ratio).rounded())
+    }
+    return (result, max(2, w & ~1), max(2, h & ~1))
+  }
+
+  /// Whether an encoder that took `submitted` frames over `age` seconds and produced `outputs`
+  /// (with `errors` failed encodes) has failed.
+  static func failed(submitted: Int, outputs: Int, errors: Int, age: TimeInterval) -> Bool {
+    if outputs > 0 { return false }
+    if errors > 0 { return true }
+    return submitted >= graceFrames && age >= graceSeconds
+  }
+}
 
 /// Viewers that cannot keep up: when one is cut off, and how often stalls may cost a keyframe.
 enum StreamStall {
@@ -93,6 +145,10 @@ final class RunnerH264Stream {
   private var stallKeyframeWanted = false
   private var lastStallKeyframe = Date.distantPast
   private var blank = false
+  /// Per mode, the `EncodeLimit` level this phone's encoder needed (under `lock`).
+  private var learnedLevel: [Settings.Mode: Int] = [:]
+  private var activeLevel = 0
+  private var encodedSize = (width: 0, height: 0)
   private var stats = (frames: 0, bytes: 0, since: Date(), fps: 0.0, kbps: 0.0, captureMs: 0.0, encodeMs: 0.0,
                        captures: 0, skipped: 0, skipRatio: 0.0, decodeMs: 0.0)
 
@@ -156,6 +212,9 @@ final class RunnerH264Stream {
       "keyframeSeconds": settings.keyframeSeconds,
       "skipUnchanged": settings.skipUnchanged,
       "skippedRatio": (stats.skipRatio * 100).rounded() / 100,
+      "encodeLevel": activeLevel,
+      "encodedWidth": encodedSize.width,
+      "encodedHeight": encodedSize.height,
     ]
   }
 
@@ -318,6 +377,9 @@ final class RunnerH264Stream {
     var encoder: Encoder?
     var frameIndex = 0
     var lastBlankCheck = Date.distantPast
+    /// The current encoder's failure was reported already (at the lowest level there is nothing
+    /// to step down to; it is said once, not per frame).
+    var failureReported = false
     let started = Date()
     while true {
       handoff.lock()
@@ -347,22 +409,35 @@ final class RunnerH264Stream {
         NSLog("ipu-runner: H.264 frame could not be decoded")
         continue
       }
-      // H.264 wants even dimensions; drop the odd last row/column.
-      let width = image.width & ~1
-      let height = image.height & ~1
+      lock.lock()
+      let level = learnedLevel[job.settings.mode] ?? 0
+      lock.unlock()
+      // H.264 wants even dimensions; drop the odd last row/column (`apply` does).
+      let target = EncodeLimit.apply(job.settings, level: level, width: image.width, height: image.height)
+      let width = target.width
+      let height = target.height
       var rebuilt = false
-      if encoder == nil || encoder?.width != width || encoder?.height != height
-        || encoder?.settings != job.settings {
+      if encoder == nil || encoder?.isValid == false || encoder?.width != width || encoder?.height != height
+        || encoder?.settings != target.settings {
         encoder?.invalidate()
-        encoder = Encoder(width: width, height: height, settings: job.settings) { [weak self] data, isKey, pts in
+        encoder = Encoder(width: width, height: height, settings: target.settings) { [weak self] data, isKey, pts in
           self?.broadcast(data, keyframe: isKey, pts: pts)
         }
         rebuilt = true
+        failureReported = false
         if encoder == nil {
-          NSLog("ipu-runner: H.264 encoder could not start (%dx%d)", width, height)
-          Thread.sleep(forTimeInterval: 1)
+          NSLog("ipu-runner: H.264 encoder could not start (%dx%d, %@ level %d)",
+                width, height, job.settings.mode.rawValue, level)
+          if !stepDown(job.settings.mode, from: level) { Thread.sleep(forTimeInterval: 1) }
           continue
         }
+        lock.lock()
+        activeLevel = level
+        encodedSize = (width, height)
+        lock.unlock()
+        NSLog("ipu-runner: H.264 encoder %dx%d %@ (level %d, %d fps, %d kbps, %@)",
+              width, height, job.settings.mode.rawValue, level, target.settings.fps, target.settings.kbps,
+              target.settings.highProfile ? "High" : "Main")
       }
       guard let encoder, let buffer = encoder.pixelBuffer(drawing: image) else { continue }
       let decodeMs = Date().timeIntervalSince(decodeStart) * 1000
@@ -385,7 +460,37 @@ final class RunnerH264Stream {
       stats.decodeMs = decodeMs
       stats.encodeMs = encodeMs
       lock.unlock()
+      // An encoder that takes frames and never emits one (the iPhone X at full size) is replaced
+      // by a cheaper one; viewers would otherwise wait on a black screen forever.
+      let health = encoder.health()
+      if !failureReported,
+         EncodeLimit.failed(submitted: health.submitted, outputs: health.outputs, errors: health.errors,
+                            age: health.age) {
+        failureReported = true
+        NSLog("ipu-runner: H.264 encoder %dx%d produced no frame (%d in, %d errors, last status %d)",
+              encoder.width, encoder.height, health.submitted, health.errors, Int(health.lastStatus))
+        if stepDown(job.settings.mode, from: level) {
+          encoder.invalidate()
+          self.forceKeyframeAfterRebuild()
+        }
+      }
     }
+  }
+
+  /// Remember that `mode` needs a cheaper level than `level`. Returns false at the floor.
+  private func stepDown(_ mode: Settings.Mode, from level: Int) -> Bool {
+    guard level + 1 < EncodeLimit.levels else { return false }
+    lock.lock()
+    learnedLevel[mode] = max(learnedLevel[mode] ?? 0, level + 1)
+    lock.unlock()
+    NSLog("ipu-runner: H.264 %@ mode steps down to level %d", mode.rawValue, level + 1)
+    return true
+  }
+
+  private func forceKeyframeAfterRebuild() {
+    lock.lock()
+    forceKeyframe = true
+    lock.unlock()
   }
 
   private func broadcast(_ annexB: Data, keyframe: Bool, pts: Double) {
@@ -503,6 +608,33 @@ final class RunnerH264Stream {
     private var session: VTCompressionSession?
     private var pool: CVPixelBufferPool?
     private let output: (Data, Bool, Double) -> Void
+    private let createdAt = Date()
+    /// Frames handed in, frames out and failed encodes; the output callback runs on
+    /// VideoToolbox's thread, hence the lock.
+    private let counts = NSLock()
+    private var submitted = 0
+    private var outputs = 0
+    private var errors = 0
+    private var lastStatus: OSStatus = noErr
+
+    var isValid: Bool { session != nil }
+
+    func health() -> (submitted: Int, outputs: Int, errors: Int, age: TimeInterval, lastStatus: OSStatus) {
+      counts.lock()
+      defer { counts.unlock() }
+      return (submitted, outputs, errors, Date().timeIntervalSince(createdAt), lastStatus)
+    }
+
+    private func count(submitted: Int = 0, output: Int = 0, error status: OSStatus = noErr) {
+      counts.lock()
+      self.submitted += submitted
+      outputs += output
+      if status != noErr {
+        errors += 1
+        lastStatus = status
+      }
+      counts.unlock()
+    }
 
     init?(width: Int, height: Int, settings: Settings, output: @escaping (Data, Bool, Double) -> Void) {
       self.width = width
@@ -531,9 +663,18 @@ final class RunnerH264Stream {
         kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: settings.keyframeSeconds,
       ]
       for (key, value) in properties {
-        VTSessionSetProperty(created, key: key, value: value as CFTypeRef)
+        let status = VTSessionSetProperty(created, key: key, value: value as CFTypeRef)
+        if status != noErr {
+          NSLog("ipu-runner: H.264 encoder refused %@ (%d)", key as String, Int(status))
+        }
       }
-      VTCompressionSessionPrepareToEncodeFrames(created)
+      let prepared = VTCompressionSessionPrepareToEncodeFrames(created)
+      if prepared != noErr {
+        NSLog("ipu-runner: H.264 encoder could not prepare %dx%d (%d)", width, height, Int(prepared))
+        VTCompressionSessionInvalidate(created)
+        session = nil
+        return nil
+      }
       let attributes: [CFString: Any] = [
         kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
         kCVPixelBufferWidthKey: width,
@@ -570,8 +711,13 @@ final class RunnerH264Stream {
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
       else { return nil }
-      context.interpolationQuality = .none
-      context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+      // Same size: copy pixels as they are. Smaller (an `EncodeLimit` cap): scale smoothly.
+      let scaled = image.width & ~1 != width || image.height & ~1 != height
+      context.interpolationQuality = scaled ? .medium : .none
+      let rect = scaled
+        ? CGRect(x: 0, y: 0, width: width, height: height)
+        : CGRect(x: 0, y: 0, width: image.width, height: image.height)
+      context.draw(image, in: rect)
       return buffer
     }
 
@@ -580,14 +726,22 @@ final class RunnerH264Stream {
       let time = CMTime(seconds: pts, preferredTimescale: 1_000_000)
       let frameProperties: CFDictionary? = forceKeyframe
         ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue!] as CFDictionary : nil
-      VTCompressionSessionEncodeFrame(
+      count(submitted: 1)
+      let submittedStatus = VTCompressionSessionEncodeFrame(
         session, imageBuffer: buffer, presentationTimeStamp: time, duration: .invalid,
         frameProperties: frameProperties, infoFlagsOut: nil
       ) { [weak self] status, _, sample in
-        guard status == noErr, let sample, let self else { return }
-        guard let annexB = Self.annexB(sample) else { return }
+        guard let self else { return }
+        guard status == noErr else {
+          self.count(error: status)
+          return
+        }
+        // A dropped frame (no sample) is not a failure.
+        guard let sample, let annexB = Self.annexB(sample) else { return }
+        self.count(output: 1)
         self.output(annexB.data, annexB.keyframe, pts)
       }
+      if submittedStatus != noErr { count(error: submittedStatus) }
     }
 
     /// AVCC sample (length-prefixed NAL units) → Annex-B, with SPS + PPS in front of keyframes.

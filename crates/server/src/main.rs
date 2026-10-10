@@ -1131,6 +1131,8 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
         server::keep_awake::spawn(state.clone());
         // Passcode + Auto-Lock for `lock_readiness` in /agent/status.
         server::lock_readiness::spawn(state.clone());
+        // Name, model and iOS version for `device` in /agent/status.
+        server::device_identity::spawn(state.clone());
 
         let app = http::router(state);
         let serve_result = axum::serve(listener, app)

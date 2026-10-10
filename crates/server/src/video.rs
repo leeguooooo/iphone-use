@@ -22,6 +22,13 @@
 //! quality while any quality viewer is connected and drops back when the last
 //! one leaves.
 //!
+//! A mode the phone cannot stream falls back to the other one: an upstream
+//! that yields no frame within [`FIRST_FRAME_TIMEOUT`] marks its mode failed
+//! for [`MODE_FAILURE_TTL`] ([`ModeFailures`]), and the hub reconnects in the
+//! other mode. Viewers keep their connection and just get the other size (a
+//! keyframe carries the new SPS). An iPhone X on iOS 16 answered
+//! `mode=quality` with no frames at all while performance streamed fine.
+//!
 //! Wire format of `GET /agent/h264` (see [`frame_message`]): a stream of
 //! messages, each `[u32 BE length of the rest][u8 flags][u64 BE pts µs][Annex-B
 //! access unit]`, flags bit 0 = keyframe. Keyframes carry SPS and PPS in-band,
@@ -128,6 +135,68 @@ impl VideoMode {
     }
 }
 
+/// How long a new upstream connection may go without a frame before its mode
+/// counts as failed. The runner forces a keyframe for every new connection and
+/// sends a heartbeat frame every second on a still screen, so a healthy stream
+/// has its first frame well inside this.
+pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
+/// A failed mode is not asked for again for this long (unless the other mode
+/// fails too); then it is retried, so a runner that was replaced gets its
+/// chance.
+pub const MODE_FAILURE_TTL: Duration = Duration::from_secs(600);
+
+/// Which modes recently produced no frame on this upstream.
+#[derive(Debug, Default)]
+pub struct ModeFailures {
+    performance: Option<std::time::Instant>,
+    quality: Option<std::time::Instant>,
+}
+
+impl ModeFailures {
+    fn slot(&mut self, mode: VideoMode) -> &mut Option<std::time::Instant> {
+        match mode {
+            VideoMode::Performance => &mut self.performance,
+            VideoMode::Quality => &mut self.quality,
+        }
+    }
+
+    fn failed(&self, mode: VideoMode, now: std::time::Instant) -> bool {
+        let at = match mode {
+            VideoMode::Performance => self.performance,
+            VideoMode::Quality => self.quality,
+        };
+        at.is_some_and(|at| now.saturating_duration_since(at) < MODE_FAILURE_TTL)
+    }
+
+    /// `mode` produced no frame. Returns true when this is news (it was not
+    /// already marked), so the caller logs once per failure.
+    pub fn mark_failed(&mut self, mode: VideoMode, now: std::time::Instant) -> bool {
+        let fresh = !self.failed(mode, now);
+        *self.slot(mode) = Some(now);
+        fresh
+    }
+
+    /// `mode` streamed a frame: it works.
+    pub fn mark_ok(&mut self, mode: VideoMode) {
+        *self.slot(mode) = None;
+    }
+
+    /// The mode to ask the upstream for when viewers want `wanted`: the other
+    /// one while `wanted` is marked failed and the other is not. With both
+    /// failed, the wanted one (nothing better to offer).
+    pub fn resolve(&self, wanted: VideoMode, now: std::time::Instant) -> VideoMode {
+        let other = match wanted {
+            VideoMode::Performance => VideoMode::Quality,
+            VideoMode::Quality => VideoMode::Performance,
+        };
+        if self.failed(wanted, now) && !self.failed(other, now) {
+            other
+        } else {
+            wanted
+        }
+    }
+}
+
 /// Serialize one frame for the `/agent/h264` stream.
 pub fn frame_message(frame: &H264Frame) -> Bytes {
     let rest = 1 + 8 + frame.data.len();
@@ -225,6 +294,9 @@ pub struct VideoHub {
     /// `subscribers`).
     quality_subscribers: Arc<AtomicUsize>,
     force_idr: Arc<AtomicBool>,
+    /// Modes that produced no frame on the runner's own H.264 (see
+    /// [`ModeFailures`]).
+    mode_failures: Mutex<ModeFailures>,
     /// Wakes the passthrough loop as soon as a keyframe is asked for or a
     /// viewer arrives, instead of at its next read timeout (up to 1 s on a
     /// still screen, where the runner sends one frame a second).
@@ -275,6 +347,7 @@ impl VideoHub {
             subscribers: Arc::new(AtomicUsize::new(0)),
             quality_subscribers: Arc::new(AtomicUsize::new(0)),
             force_idr: Arc::new(AtomicBool::new(true)),
+            mode_failures: Mutex::new(ModeFailures::default()),
             wake: tokio::sync::Notify::new(),
             running: Mutex::new(false),
             bitrate,
@@ -348,13 +421,22 @@ impl VideoHub {
         cfg!(target_os = "macos")
     }
 
-    /// The mode the upstream should run in: quality while any viewer wants it.
-    pub fn effective_mode(&self) -> VideoMode {
+    /// The mode viewers ask for: quality while any viewer wants it.
+    pub fn wanted_mode(&self) -> VideoMode {
         if self.quality_subscribers.load(Ordering::Acquire) > 0 {
             VideoMode::Quality
         } else {
             VideoMode::Performance
         }
+    }
+
+    /// The mode the upstream should run in: the wanted one, unless it
+    /// recently produced no frame and the other one did not.
+    pub fn effective_mode(&self) -> VideoMode {
+        self.mode_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .resolve(self.wanted_mode(), std::time::Instant::now())
     }
 
     /// Subscribe to the encoded stream, starting the pipeline if needed.
@@ -428,8 +510,9 @@ impl VideoHub {
                         return Ok(());
                     }
                     Passthrough::Unsupported => break,
-                    // A viewer switched modes: reconnect at once with the new one.
-                    Passthrough::ModeChanged => {}
+                    // A viewer switched modes, or the mode yielded no frame:
+                    // reconnect at once with the (new) effective one.
+                    Passthrough::ModeChanged | Passthrough::NoFrames => {}
                     Passthrough::Lost => {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         if self.should_stop(&mut idle_since) {
@@ -477,6 +560,7 @@ impl VideoHub {
         if stream.write_all(request.as_bytes()).await.is_err() {
             return Passthrough::Lost;
         }
+        let connected_at = std::time::Instant::now();
 
         // Response head: the runner marks its H.264 stream; anything else
         // (an MJPEG multipart answer) means this upstream cannot do it.
@@ -491,6 +575,8 @@ impl VideoHub {
             let mut chunk = [0u8; 4096];
             match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk)).await {
                 Ok(Ok(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+                // Accepted and silent for seconds: as good as no frame.
+                Err(_) => return self.no_frames(mode),
                 _ => return Passthrough::Lost,
             }
         };
@@ -509,13 +595,24 @@ impl VideoHub {
         *self.latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         let mut chunk = vec![0u8; 64 * 1024];
+        let mut streamed = false;
         loop {
             while let Some((frame, blank)) = take_message(&mut buf) {
                 self.frame_blank.store(blank, Ordering::Release);
                 let _ = self.tx.send(low_delay(frame));
+                if !streamed {
+                    streamed = true;
+                    self.mode_failures
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .mark_ok(mode);
+                }
             }
             if self.should_stop(idle_since) {
                 return Passthrough::Stopped;
+            }
+            if !streamed && connected_at.elapsed() >= FIRST_FRAME_TIMEOUT {
+                return self.no_frames(mode);
             }
             if self.effective_mode() != mode {
                 // The new connection starts with a keyframe for everyone.
@@ -533,6 +630,13 @@ impl VideoHub {
                 () = self.wake.notified() => continue,
             };
             match read {
+                // Closed without ever sending a frame, after the grace: the
+                // mode does not work here. Sooner, it is a restart.
+                Ok(Ok(0)) | Ok(Err(_))
+                    if !streamed && connected_at.elapsed() >= FIRST_FRAME_TIMEOUT =>
+                {
+                    return self.no_frames(mode)
+                }
                 Ok(Ok(0)) | Ok(Err(_)) => return Passthrough::Lost,
                 Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
                 Err(_) => {} // a still screen sends little; check viewers again
@@ -541,6 +645,26 @@ impl VideoHub {
                 return Passthrough::Lost;
             }
         }
+    }
+
+    /// `mode` produced no frame on this upstream: mark it failed (logging
+    /// once) so the next connection uses the other mode.
+    fn no_frames(&self, mode: VideoMode) -> Passthrough {
+        let now = std::time::Instant::now();
+        let (fresh, next) = {
+            let mut failures = self.mode_failures.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = failures.mark_failed(mode, now);
+            (fresh, failures.resolve(self.wanted_mode(), now))
+        };
+        if fresh {
+            tracing::warn!(
+                "h264: the runner sent no {} frame in {} s; streaming {} instead",
+                mode.as_str(),
+                FIRST_FRAME_TIMEOUT.as_secs(),
+                next.as_str()
+            );
+        }
+        Passthrough::NoFrames
     }
 
     /// The MJPEG → H.264 path: decode each upstream JPEG and encode it on the
@@ -670,6 +794,9 @@ enum Passthrough {
     Lost,
     /// The effective [`VideoMode`] changed; reconnect with the new one.
     ModeChanged,
+    /// Connected, but no frame came within [`FIRST_FRAME_TIMEOUT`]; the mode
+    /// is marked failed, reconnect in whatever is effective now.
+    NoFrames,
 }
 
 /// Runner flag: the frame's content band is one flat colour.
@@ -1613,5 +1740,128 @@ mod tests {
             hub.passthrough(&mut idle).await,
             Passthrough::Unsupported
         ));
+    }
+
+    #[test]
+    fn a_failed_mode_falls_back_to_the_other_until_it_expires() {
+        let now = std::time::Instant::now();
+        let mut failures = ModeFailures::default();
+        assert_eq!(
+            failures.resolve(VideoMode::Quality, now),
+            VideoMode::Quality
+        );
+        assert!(failures.mark_failed(VideoMode::Quality, now));
+        // Logged once: the same failure again is not news.
+        assert!(!failures.mark_failed(VideoMode::Quality, now));
+        assert_eq!(
+            failures.resolve(VideoMode::Quality, now),
+            VideoMode::Performance
+        );
+        assert_eq!(
+            failures.resolve(VideoMode::Performance, now),
+            VideoMode::Performance
+        );
+        // Both failed: nothing better than what was asked for.
+        failures.mark_failed(VideoMode::Performance, now);
+        assert_eq!(
+            failures.resolve(VideoMode::Quality, now),
+            VideoMode::Quality
+        );
+        assert_eq!(
+            failures.resolve(VideoMode::Performance, now),
+            VideoMode::Performance
+        );
+        // A frame in performance clears it again.
+        failures.mark_ok(VideoMode::Performance);
+        assert_eq!(
+            failures.resolve(VideoMode::Quality, now),
+            VideoMode::Performance
+        );
+        // After the TTL quality gets another chance.
+        let later = now + MODE_FAILURE_TTL;
+        assert_eq!(
+            failures.resolve(VideoMode::Quality, later),
+            VideoMode::Quality
+        );
+        failures.mark_ok(VideoMode::Quality);
+        assert_eq!(
+            failures.resolve(VideoMode::Quality, now),
+            VideoMode::Quality
+        );
+    }
+
+    #[test]
+    fn a_quality_upstream_that_sends_nothing_falls_back_to_performance() {
+        block_on(silent_quality_falls_back());
+    }
+
+    async fn silent_quality_falls_back() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A runner like the iPhone X's: `mode=quality` answers its header and
+        // then nothing; performance streams.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let lines_tx = lines_tx.clone();
+                tokio::spawn(async move {
+                    let mut request = vec![0u8; 1024];
+                    let n = socket.read(&mut request).await.unwrap_or(0);
+                    let line = String::from_utf8_lossy(&request[..n])
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    let _ = lines_tx.send(line.clone());
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.0 200 OK\r\nX-Video-Format: iphone-use-h264-annexb-v1\r\n\r\n",
+                        )
+                        .await;
+                    if !line.contains("mode=quality") {
+                        let _ = socket
+                            .write_all(&runner_message(FLAG_KEYFRAME, 1, &[0, 0, 0, 1, 0x65, 1]))
+                            .await;
+                    }
+                    let mut sink = [0u8; 64];
+                    while matches!(socket.read(&mut sink).await, Ok(n) if n > 0) {}
+                });
+            }
+        });
+        let hub = VideoHub::new(url);
+        hub.subscribers.store(1, Ordering::Release);
+        hub.quality_subscribers.store(1, Ordering::Release);
+        assert_eq!(hub.effective_mode(), VideoMode::Quality);
+        let mut idle = None;
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), hub.passthrough(&mut idle))
+            .await
+            .expect("passthrough gave up on the silent stream");
+        assert!(matches!(outcome, Passthrough::NoFrames));
+        assert!(started.elapsed() >= FIRST_FRAME_TIMEOUT);
+        assert!(lines.recv().await.unwrap().contains("mode=quality"));
+        // The viewer still wants quality; the upstream now runs performance.
+        assert_eq!(hub.wanted_mode(), VideoMode::Quality);
+        assert_eq!(hub.effective_mode(), VideoMode::Performance);
+
+        let mut frames = hub.tx.subscribe();
+        let hub2 = Arc::clone(&hub);
+        let run = tokio::spawn(async move {
+            let mut idle = None;
+            hub2.passthrough(&mut idle).await
+        });
+        let frame = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+            .await
+            .expect("no frame after the fallback")
+            .unwrap();
+        assert!(frame.keyframe);
+        assert!(lines.recv().await.unwrap().contains("mode=performance"));
+        hub.subscribers.store(0, Ordering::Release);
+        hub.quality_subscribers.store(0, Ordering::Release);
+        run.abort();
     }
 }
