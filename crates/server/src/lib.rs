@@ -23,6 +23,7 @@ pub mod runtime_dir;
 pub mod schedules;
 pub mod scope;
 pub mod setup;
+pub mod telemetry;
 pub mod timing;
 pub mod tunnel;
 pub mod update;

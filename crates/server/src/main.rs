@@ -1111,6 +1111,9 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
         // something to name. Runs `iphone-use-mcp flow update`, never a
         // second implementation of fetching and verification.
         spawn_flow_registry_refresh();
+        // Anonymous usage telemetry: a no-op unless a project token is set and
+        // the user has not opted out (see `telemetry`, docs/telemetry.md).
+        server::telemetry::init_from_env(server::instance::current().state_dir.clone());
 
         // Scheduled flows and test suites. The scheduler drives the phone
         // through this daemon's own API, as an agent would.

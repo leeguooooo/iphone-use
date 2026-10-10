@@ -360,6 +360,11 @@ pub async fn layer(request: Request, next: Next) -> Response {
     }
     let status = response.status();
     let (response, json) = attach(response, &summary).await;
+    // Anonymous usage counts (off unless a token is configured; see
+    // `telemetry`). A refused request is nobody's usage.
+    if !matches!(status.as_u16(), 401 | 403 | 429) {
+        crate::telemetry::record(&path, classify(status, json.as_ref()), started.elapsed(), flow_call);
+    }
     let mut recorder = recorder;
     if let Some(guard) = recorder.guard.take() {
         {

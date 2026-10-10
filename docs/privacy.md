@@ -31,6 +31,19 @@ The app talks **only to the Mac address you enter or scan**, which is software y
 Deleting the app removes its stored address; **Forget this Mac** in the app's settings removes the
 saved password and pairing token.
 
+## The Mac daemon's usage counts
+
+The iphone-use daemon on your Mac contains code for anonymous usage counts, and it is **currently
+off for everyone**: no project token ships with it, so it sends nothing. The iOS app has no such
+code at all.
+
+If a future release turns it on, it will say so here and in [telemetry.md](telemetry.md). It would
+count only which agent API endpoint was called, whether it worked, a failure class from a fixed
+list, and how long it took, with the daemon's version, platform and a random install id. It would
+never send text, element labels, screenshots, app bundle ids, phone identifiers or names, or file
+paths. `IPHONE_USE_TELEMETRY=0` or `DO_NOT_TRACK=1` in the daemon's environment turns it off
+completely.
+
 ## Demo mode
 
 **Try the demo** shows screens recorded in advance and bundled with the app. It connects to nothing.
