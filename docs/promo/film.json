@@ -1,0 +1,307 @@
+{
+  "version": 1,
+  "kind": "film",
+  "name": "iphone-use",
+  "duration": 55.5,
+  "fps": 30,
+  "languages": [
+    "zh",
+    "en"
+  ],
+  "formats": [
+    "landscape",
+    "vertical"
+  ],
+  "composition": "composition/draw.js",
+  "look": {
+    "style": "A real iPhone beside the agent's terminal on near-black: every action is a real tool call followed by the real screen recording",
+    "palette": [
+      "#0B0D10",
+      "#F2F2F0",
+      "#0A84FF",
+      "#30D158",
+      "#8A9099",
+      "#16191E"
+    ],
+    "character": "the phone, its real screen recordings and the agent's real tool calls; no people on screen"
+  },
+  "music": {
+    "builtin": "pulse",
+    "volume": 0.32,
+    "hits": [
+      12.2,
+      15.6,
+      18.2,
+      25.4,
+      31.2,
+      37.2,
+      49.7
+    ]
+  },
+  "assets": {
+    "general": "images/general.png",
+    "datetime": "images/datetime.png",
+    "notes": "images/notes.png",
+    "icon": "images/icon.png"
+  },
+  "videos": {
+    "notes": {
+      "file": "footage/notes.mp4",
+      "at": 0,
+      "from": 5.6,
+      "rate": 1.2,
+      "length": 5
+    },
+    "read": {
+      "file": "footage/general.mp4",
+      "at": 5,
+      "from": 0,
+      "rate": 0.6,
+      "length": 7
+    },
+    "tap": {
+      "file": "footage/general.mp4",
+      "at": 12,
+      "from": 4.25,
+      "rate": 1,
+      "length": 5.3
+    },
+    "flow": {
+      "file": "footage/flow.mp4",
+      "at": 25.6,
+      "from": 0.15,
+      "rate": 0.5,
+      "length": 2.8
+    },
+    "people": {
+      "file": "footage/control.mp4",
+      "at": 37,
+      "from": 0,
+      "rate": 1,
+      "length": 12.5
+    }
+  },
+  "data": {
+    "rows": [
+      "#1  [NavigationBar] \"通用\"",
+      "#10 [Button] \"关于本机\"",
+      "#14 [Button] \"软件更新\"",
+      "#18 [Button] \"iPhone储存空间\"",
+      "#26 [Button] \"隔空投送\"",
+      "#34 [Button] \"画中画\"",
+      "#38 [Button] \"屏幕捕捉\""
+    ],
+    "install": "curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh",
+    "repo": "github.com/leeguooooo/iphone-use"
+  },
+  "copy": {
+    "zh": {
+      "title1": "让 AI 用你的",
+      "title2": "真 iPhone",
+      "cType": "type \"周报草稿…\" · 278 字，一步",
+      "rType": "ok · 1 applied",
+      "read": "屏幕读成文字",
+      "cRead": "phone_elements",
+      "readTime": "约 0.1 秒",
+      "tap": "按名字点",
+      "cTap1": "phone_run_steps  scroll · scroll",
+      "cTap2": "  tap_label \"日期与时间\"",
+      "rTap": "ok · 3 applied · 画面已稳定",
+      "honest": "结果说实话",
+      "cH1": "phone_tap_label \"新备忘录\"",
+      "rH1": "FAILED element_occluded · nothing_applied · retry_safe",
+      "nH1": "按钮被遮住：没点，也不假装点了",
+      "cH2": "wait_for \"自动设置\"",
+      "rH2": "partially_applied · retry_safe=false · read the screen first",
+      "nH2": "没等到：说清楚哪些做了、能不能重试",
+      "flow": "重放 flow",
+      "cFlow": "phone_flow_run settings/open",
+      "rFlow": "ok · 2 steps · verified",
+      "tokens": "不经过模型 · 0 token",
+      "wifi": "插一次线，之后走 Wi-Fi",
+      "cStatus": "phone_status",
+      "s1": "\"transport\": \"wifi-tunnel\"",
+      "s2": "\"device\": \"iPhone 17 Pro Max · iOS 27.0\"",
+      "s3": "\"drivable\": true",
+      "ios": "iOS 15+",
+      "people": "人也能接手：在浏览器里点画面",
+      "real": "真机录屏，终端内容为本次录制的真实调用",
+      "install": "一行命令安装",
+      "hidden": "私人画面已遮挡",
+      "typed": "一步写入 278 字"
+    },
+    "en": {
+      "title1": "Let AI use",
+      "title2": "your real iPhone",
+      "cType": "type \"Weekly report…\" · 278 chars, 1 step",
+      "rType": "ok · 1 applied",
+      "read": "The screen as text",
+      "cRead": "phone_elements",
+      "readTime": "about 0.1 s",
+      "tap": "Tap by name",
+      "cTap1": "phone_run_steps  scroll · scroll",
+      "cTap2": "  tap_label \"日期与时间\"   # Date & Time",
+      "rTap": "ok · 3 applied · screen settled",
+      "honest": "Honest results",
+      "cH1": "phone_tap_label \"新备忘录\"   # New Note",
+      "rH1": "FAILED element_occluded · nothing_applied · retry_safe",
+      "nH1": "Covered button: not tapped, not faked",
+      "cH2": "wait_for \"自动设置\"",
+      "rH2": "partially_applied · retry_safe=false · read the screen first",
+      "nH2": "Says what was done and whether a retry is safe",
+      "flow": "Replay a flow",
+      "cFlow": "phone_flow_run settings/open",
+      "rFlow": "ok · 2 steps · verified",
+      "tokens": "no model · 0 tokens",
+      "wifi": "Cable once, then Wi-Fi",
+      "cStatus": "phone_status",
+      "s1": "\"transport\": \"wifi-tunnel\"",
+      "s2": "\"device\": \"iPhone 17 Pro Max · iOS 27.0\"",
+      "s3": "\"drivable\": true",
+      "ios": "iOS 15+",
+      "people": "People can take over: click the live picture",
+      "real": "Real iPhone recordings; the terminal shows this session's real calls",
+      "install": "One command to install",
+      "hidden": "private screen hidden",
+      "typed": "278 characters, one step"
+    }
+  },
+  "shots": [
+    {
+      "id": "hook",
+      "start": 0,
+      "end": 5,
+      "camera": "push",
+      "text": {
+        "zh": "真 iPhone",
+        "en": "real iPhone"
+      },
+      "purpose": "Open on the product doing something",
+      "action": "The agent sends one type call and the real phone fills a note with 278 characters",
+      "narration": {
+        "zh": "让 AI 用你的真 iPhone，一步写进 278 个字。",
+        "en": "Let AI use your real iPhone."
+      }
+    },
+    {
+      "id": "read",
+      "start": 5,
+      "end": 12,
+      "camera": "push",
+      "text": {
+        "zh": "约 0.1 秒",
+        "en": "0.1 s"
+      },
+      "purpose": "Show the screen read as text",
+      "action": "phone_elements returns the real element rows of the General screen beside its recording",
+      "narration": {
+        "zh": "它把屏幕读成文字，一次大约零点一秒。",
+        "en": "It reads the screen as text, in about a tenth of a second."
+      }
+    },
+    {
+      "id": "tap",
+      "start": 12,
+      "end": 18,
+      "camera": "pan",
+      "text": {
+        "zh": "按名字点",
+        "en": "tap by name"
+      },
+      "purpose": "Show an action by name",
+      "action": "The agent asks for Date & Time by name; the recording scrolls and opens that row",
+      "narration": {
+        "zh": "然后按名字点，滑动也一样。",
+        "en": "Then it taps by name, and scrolls."
+      }
+    },
+    {
+      "id": "honest",
+      "start": 18,
+      "end": 24.5,
+      "camera": "push",
+      "text": {
+        "zh": "结果说实话",
+        "en": "honest results"
+      },
+      "purpose": "Show honest results",
+      "action": "Two real refusals from this session print in the terminal while the phone stays unchanged",
+      "narration": {
+        "zh": "点不到或没等到，它都直说，还告诉你能不能重试。",
+        "en": "When a step does not land, it says so, and whether to retry."
+      }
+    },
+    {
+      "id": "flow",
+      "start": 24.5,
+      "end": 31,
+      "camera": "push",
+      "text": {
+        "zh": "0 token",
+        "en": "0 tokens"
+      },
+      "purpose": "Show a flow replay",
+      "action": "phone_flow_run replays a saved flow and the recording opens Settings in one call",
+      "narration": {
+        "zh": "做过的任务存成流程，重放一次调用，不花 token。",
+        "en": "Saved flows replay in one call, with no tokens."
+      }
+    },
+    {
+      "id": "wifi",
+      "start": 31,
+      "end": 37,
+      "camera": "pan",
+      "text": {
+        "zh": "iOS 15+",
+        "en": "iOS 15+"
+      },
+      "purpose": "Show the connection",
+      "action": "phone_status prints the Wi-Fi tunnel transport of this very session",
+      "narration": {
+        "zh": "插一次线，之后走加密 Wi-Fi，iOS 15 也行。",
+        "en": "Plug in once, then go wireless. iOS 15 and up."
+      }
+    },
+    {
+      "id": "people",
+      "start": 37,
+      "end": 49.5,
+      "camera": "hold",
+      "holdReason": "a real browser recording plays through: a person taps a row on the live picture and goes back",
+      "text": {
+        "zh": "人也能接手",
+        "en": "take over"
+      },
+      "purpose": "Show remote control for people",
+      "action": "In the browser control page a person clicks the live picture; the phone opens Date & Time, then goes back",
+      "narration": {
+        "zh": "人也能在浏览器里接手，直接点手机画面。",
+        "en": "People can take over from a browser and click the live picture."
+      }
+    },
+    {
+      "id": "outro",
+      "start": 49.5,
+      "end": 55.5,
+      "camera": "pull",
+      "text": {
+        "zh": "iphone-use",
+        "en": "iphone-use"
+      },
+      "purpose": "Resolve",
+      "action": "The icon pops, the name is written and the install command types itself",
+      "narration": {
+        "zh": "iphone-use，一行命令装好。",
+        "en": "iphone-use. One command to install."
+      }
+    }
+  ],
+  "voiceover": {
+    "dir": "voiceover",
+    "rate": {
+      "zh": "+6%",
+      "en": "+4%"
+    }
+  }
+}
