@@ -79,6 +79,12 @@ while [ "$#" -gt 0 ]; do
                 printf 'ERROR: %s requires a value\n' "$1" >&2
                 exit 2
             fi
+            case "$2" in
+                -*)
+                    printf "ERROR: %s requires a value, got the option '%s'\n" "$1" "$2" >&2
+                    exit 2
+                    ;;
+            esac
             case "$1" in
                 --instance) INSTANCE_NAME="$2" ;;
                 --udid) INSTANCE_UDID="$2" ;;
@@ -90,6 +96,24 @@ while [ "$#" -gt 0 ]; do
             # Exported so the pinned inner installer sees it too.
             export IPHONE_USE_NO_SETUP=1
             shift
+            ;;
+        -*)
+            # Not an app path. The common way to get here is a caller that
+            # kept options in one variable and expanded it unquoted under
+            # zsh, which does not word-split: `sh -s -- $a` then passes
+            # "--instance ix --udid …" as ONE argument. Treating it as an app
+            # path used to fail later with a misleading "local app path"
+            # error; name the real problem before anything is touched.
+            case "$1" in
+                *" "*)
+                    printf "ERROR: '%s' arrived as one argument; each option and its value must be separate arguments.\n" "$1" >&2
+                    printf '       zsh does not word-split $var: use ${=var}, an array, or write the options out.\n' >&2
+                    ;;
+                *)
+                    printf "ERROR: unknown option '%s' (accepted: --instance NAME, --udid UDID, --port N, --no-setup, [app path]).\n" "$1" >&2
+                    ;;
+            esac
+            exit 2
             ;;
         *)
             INSTALL_ARGS+=("$1")

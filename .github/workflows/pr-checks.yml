@@ -201,6 +201,7 @@ jobs:
           bash scripts/test-install-cli-link.sh
           bash scripts/test-install-runner-sources.sh
           bash scripts/test-install-named-swap.sh
+          bash scripts/test-install-args.sh
           bash scripts/test-install-adhoc-signing.sh
           bash scripts/test-uninstall-safety.sh
           bash scripts/test-setup-wda-shim.sh
