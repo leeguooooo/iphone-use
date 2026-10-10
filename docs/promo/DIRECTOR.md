@@ -37,3 +37,10 @@ Oddity seen while recording the control page: for about two seconds the phone sh
 - Audio checked by transcription (whisper small and large-v3-turbo): every line present and in order. Two TTS misreadings fixed: "AI" as one word came out as "A-A-I" (script now spells "A I", subtitles keep "AI"), and 重试 was read as 重视 (now 再试). Music ducks to 25 % under the voice; −14.2/−14.8 LUFS, true peak ≤ −0.7 dBFS.
 
 - Do: transcribe every narration clip with a second ASR model before release. Evidence: two polyphone/acronym misreadings only ASR caught. Why: nobody listens to every take. When: any TTS voiceover.
+
+## Round 8 (overprinted text, 2026-10-11)
+
+- The opening's second stamp ("一步写入 278 字" / "278 characters, one step") started at 2.8 s, inside the first stamp's 0.18 s exit, so for about five frames both lines were printed on top of each other in every cut. The first stamp now starts leaving at 2.6 s and is gone by 2.78 s, before the second lands at 2.8 s. Found by motion-use 0.7.1's collision check (2.80–2.87 s in all four cuts), after a reviewer noticed it in the embedded footage of another film.
+- Portrait: the provenance note sat at the foot of the opening terminal, where the three-line subtitle is; it showed through the translucent subtitle plate in the Chinese cut (0.6–4.5 s). It now sits on the terminal's title bar, right of the window dots.
+
+- Do: start the next line only after the previous one's exit has finished. Evidence: a 0.1 s gap inside a 0.18 s exit shipped an overprint to nine platforms. Why: the eye reads the overlap as a glitch even at five frames. When: any stamp, caption or title that hands over in the same spot.
