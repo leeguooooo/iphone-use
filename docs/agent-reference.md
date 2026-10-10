@@ -273,6 +273,7 @@ only on a trusted network.
 | `GET /agent/apps?query=<name>` | App lookup by name: `{candidates:[{name,bundle_id,source,installed_verified,match,publisher?}], installation_checked, warnings}`. `source=auto` (phone's app list → bundled catalog → App Store), `installed`, `catalog` (offline), `apple` (`country=cn`, rate limited). Exact matches hide partial ones. MCP `phone_apps` |
 | `GET /agent/intents`, `POST /agent/intent` | Semantic intents ([below](#semantic-intents)) |
 | `POST /agent/mode`, `/agent/hold`, `/agent/owner`, `/agent/prewarm` | Reconnect / hold / release lease / pre-warm ([above](#phone-states-and-recovery)) |
+| `POST /agent/runner-handoff` | Setup's: after it verifies a new runner the daemon still reports down, the daemon drops its state from the previous runner and probes again; answers `{up, actionable, locked, retried, error}`. Agents never need it |
 
 Every state-changing POST needs `X-Phone-Control: 1`; a 403 names the missing
 header — fix the request once, do not repeat it. Give your client **at least

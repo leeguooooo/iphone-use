@@ -280,11 +280,7 @@ impl WdaClient {
     /// `base_url` is the WDA server root, e.g. `http://<phone-ip>:8100` (LAN) or
     /// `http://127.0.0.1:8100` when tunneled over USB with `iproxy 8100 8100`.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(20))
-            .build()
-            .context("build reqwest client for WDA")?;
+        let http = Self::build_http()?;
         Ok(Self {
             base: base_url.into().trim_end_matches('/').to_string(),
             http,
@@ -304,6 +300,31 @@ impl WdaClient {
         })
     }
 
+    fn build_http() -> Result<reqwest::Client> {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .context("build reqwest client for WDA")
+    }
+
+    /// Forget everything learned from the runner that was serving until now:
+    /// its session and what was read through it, the cached launch token, and
+    /// every pooled connection (which may still lead into a relay or tunnel
+    /// that served the previous launch). Setup calls this through
+    /// `POST /agent/runner-handoff` when it has just verified a NEW runner
+    /// and the daemon still cannot reach it.
+    pub fn forget_runner(&mut self) {
+        self.invalidate_session();
+        self.device_settle = None;
+        self.settled_frame = None;
+        self.settle_frames_paused_until = None;
+        self.auth.forget();
+        if let Ok(http) = Self::build_http() {
+            self.http = http;
+        }
+    }
+
     /// Sign requests with the token in `source` instead of this instance's
     /// (tests, tools pointed at another state dir).
     pub fn with_runner_auth(mut self, source: crate::runner_token::TokenSource) -> Self {
@@ -316,6 +337,13 @@ impl WdaClient {
     /// feeds [`wda_rtt_ms`]: `/status` does no work on the phone, so its time
     /// is the transport's round trip.
     pub async fn is_up(&self) -> bool {
+        self.status_probe().await.is_ok()
+    }
+
+    /// [`Self::is_up`] with the reason when it is not: the transport error,
+    /// or the status and error the runner answered with (a 401 is a request
+    /// signed with another launch's token, or not signed at all).
+    pub async fn status_probe(&self) -> std::result::Result<(), String> {
         let started = std::time::Instant::now();
         match self
             .http
@@ -325,9 +353,29 @@ impl WdaClient {
         {
             Ok(r) => {
                 record_rtt(started.elapsed());
-                r.status().is_success()
+                let status = r.status();
+                if status.is_success() {
+                    return Ok(());
+                }
+                let body = r.text().await.unwrap_or_default();
+                let error = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| {
+                        let value = v.get("value")?;
+                        let code = value.get("error")?.as_str()?.to_string();
+                        let message = value.get("message").and_then(|m| m.as_str());
+                        Some(match message {
+                            Some(message) => format!("{code}: {message}"),
+                            None => code,
+                        })
+                    })
+                    .unwrap_or_else(|| body_summary(&body));
+                Err(format!(
+                    "GET /status answered HTTP {} ({error})",
+                    status.as_u16()
+                ))
             }
-            Err(_) => false,
+            Err(error) => Err(format!("GET /status: {error:#}")),
         }
     }
 
@@ -416,9 +464,20 @@ impl WdaClient {
     /// testmanagerd for the active process list without traversing the
     /// foreground app's element tree, and is also safe on the Home screen.
     pub async fn probe_health(&mut self) -> WdaHealth {
-        if !self.is_up().await {
-            return WdaHealth::down();
+        self.probe_health_detailed().await.0
+    }
+
+    /// [`Self::probe_health`] plus, when the runner did not answer `/status`,
+    /// why (see [`Self::status_probe`]).
+    pub async fn probe_health_detailed(&mut self) -> (WdaHealth, Option<String>) {
+        if let Err(error) = self.status_probe().await {
+            return (WdaHealth::down(), Some(error));
         }
+        (self.probe_reachable_health().await, None)
+    }
+
+    /// The rest of [`Self::probe_health`] once `/status` answered.
+    async fn probe_reachable_health(&mut self) -> WdaHealth {
         // Reachability is settled here; everything below only decides
         // actionability. Read the lock state without a session first: a
         // locked phone stalls `POST /session`, so asking after would mean

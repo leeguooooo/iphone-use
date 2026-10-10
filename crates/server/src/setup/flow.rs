@@ -2454,10 +2454,14 @@ impl Setup {
         if token.is_empty() {
             token = sys::plist_env(&self.ctx.daemon_plist, "PHONE_REMOTE_PASSWORD");
         }
+        let handoff_after = env_number("DAEMON_HANDOFF_AFTER_TRIES", 20);
         let url = format!("http://127.0.0.1:{}/agent/status", daemon.port);
         let mut verdict = Verdict::Down;
         let mut status = serde_json::Value::Null;
         let mut reachable_tries = 0;
+        let mut down_tries = 0;
+        let mut handoff_error: Option<String> = None;
+        let mut handed_off = false;
         let mut ready = false;
         for _ in 0..max_tries {
             let body = if token.is_empty() {
@@ -2480,18 +2484,33 @@ impl Setup {
                     break;
                 }
             }
+            // The runner answered setup's own signed probe through the relay
+            // moments ago, so a daemon that still reports it down is holding
+            // state from the runner before. Ask it once to drop that state
+            // and probe again; its answer names the cause if it still fails.
+            if verdict == Verdict::Down {
+                down_tries += 1;
+                if !handed_off && down_tries >= handoff_after {
+                    handed_off = true;
+                    handoff_error = self.handoff_to_daemon(&daemon.port, &token);
+                }
+            }
             proc::sleep(Duration::from_millis(500))?;
         }
         token.clear();
         let locked = status.get("wda_locked") == Some(&serde_json::Value::Bool(true));
         if !ready {
+            let cause = handoff_error
+                .as_deref()
+                .map(|error| format!(": {error}"))
+                .unwrap_or_default();
             self.phase(
                 "daemon-fail",
                 "wda",
-                "daemon never reached the device runner after a verified handoff",
+                &format!("daemon never reached the device runner after a verified handoff{cause}"),
             );
             return die(format!(
-                "the device runner, relays, and launchd supervision are verified, but the daemon did not report wda=true within {}s.\n   Inspect: ~/Library/Logs/iPhoneUse/iphone-use.err",
+                "the device runner, relays, and launchd supervision are verified, but the daemon did not report wda=true within {}s{cause}.\n   Inspect: ~/Library/Logs/iPhoneUse/iphone-use.log",
                 max_tries / 2
             ));
         }
@@ -2505,6 +2524,37 @@ impl Setup {
             warn("the device runner answers but cannot act yet (drivable=false) — keep the iPhone unlocked and awake; the daemon keeps probing");
         }
         Ok(())
+    }
+
+    /// `POST /agent/runner-handoff`: the daemon drops what it knows about the
+    /// previous runner and probes the one setup just verified. Returns why
+    /// the daemon still cannot reach it, if it cannot.
+    fn handoff_to_daemon(&self, port: &str, token: &str) -> Option<String> {
+        let url = format!("http://127.0.0.1:{port}/agent/runner-handoff");
+        warn("the daemon still reports the device runner down; asking it to drop its state from the previous runner");
+        let Some((code, body)) = sys::http_post_auth(&url, Duration::from_secs(60), token) else {
+            let error = "the daemon did not answer the runner handoff".to_string();
+            warn(&error);
+            return Some(error);
+        };
+        let answer: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        if code == 404 {
+            // A daemon older than this setup: nothing to ask it.
+            return None;
+        }
+        if answer.get("up") == Some(&serde_json::Value::Bool(true)) {
+            ok("the daemon reaches the device runner after dropping its old state");
+            return None;
+        }
+        let error = answer
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("runner handoff answered HTTP {code}"));
+        warn(&format!(
+            "the daemon cannot reach the device runner: {error}"
+        ));
+        Some(error)
     }
 
     fn summary(&self, url: &str, target_url: &str, daemon: &DaemonEndpoint, source_hash: &str) {

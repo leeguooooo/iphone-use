@@ -463,6 +463,11 @@ pub struct AppState {
     pub owner: Arc<Mutex<Option<PhoneOwner>>>,
     /// How long an owner's lease outlives its last control request.
     pub owner_lease_secs: u64,
+    /// How a reconnect brings the managed supervisor up: `(setup_sh, log,
+    /// udid) -> started`. Blocking. The daemon uses
+    /// [`write_and_bootstrap_wda_agent`]; tests substitute a fake so a
+    /// reconnect can run without touching launchd.
+    pub wda_bootstrap: fn(&str, &str, &str) -> bool,
 }
 
 /// The current phone owner: a client-chosen name and when it last acted.
@@ -947,6 +952,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // `agent_input` / `agent_status`.
         .route("/agent/status", get(agent_status))
         .route("/agent/mode", post(agent_mode))
+        .route("/agent/runner-handoff", post(agent_runner_handoff))
         .route("/agent/input", post(agent_input))
         .route("/agent/actions", post(agent_actions))
         .route("/agent/screenshot", get(agent_screenshot))
@@ -2212,6 +2218,12 @@ impl WdaReadinessOwnership {
         self.resolved = true;
         finish_wda_readiness_wait(&self.lifecycle, self.token, outcome);
     }
+
+    /// The supervisor never came up: end the round without a readiness wait.
+    fn abandon(mut self) {
+        self.resolved = true;
+        self.lifecycle.finish_reconnecting(self.token);
+    }
 }
 
 impl Drop for WdaReadinessOwnership {
@@ -2251,6 +2263,9 @@ async fn run_wda_readiness_wait(
     );
     let mut seen_up = false;
     let mut setup_blocker = String::new();
+    // Why the last probe failed, so a reconnect that runs out of time says
+    // what it kept hitting instead of only that it did not finish.
+    let mut last_error = String::new();
     let outcome = loop {
         // Another round taking over means this task owns nothing: it must not
         // publish evidence and must not finish anyone's transition.
@@ -2283,10 +2298,21 @@ async fn run_wda_readiness_wait(
             // Absolute, so a probe cannot outlive the budget no matter how
             // long the work before it took.
             let result = tokio::time::timeout_at(probe_deadline, async {
-                wda.lock().await.probe_health().await
+                wda.lock().await.probe_health_detailed().await
             })
             .await;
-            if let Ok(health) = result {
+            if result.is_err() {
+                last_error = "the probe did not finish in time (the device-runner client stayed busy, or the runner did not answer)".to_string();
+            }
+            if let Ok((health, error)) = result {
+                if let Some(error) = error {
+                    if error != last_error {
+                        tracing::debug!(%error, "readiness probe: the device runner did not answer /status");
+                    }
+                    last_error = error;
+                } else {
+                    last_error.clear();
+                }
                 // A completion that lands after the budget is late evidence:
                 // it must not be published, and it must not report ready.
                 if tokio::time::Instant::now() >= deadline {
@@ -2347,11 +2373,13 @@ async fn run_wda_readiness_wait(
                 tracing::warn!(
                     locked = ?health.locked,
                     elapsed_secs = started.elapsed().as_secs(),
+                    last_error = %last_error,
                     "managed WDA is running but did not become actionable before reconnect deadline"
                 );
             } else {
                 tracing::warn!(
                     elapsed_secs = started.elapsed().as_secs(),
+                    last_error = %last_error,
                     "managed WDA did not become actionable before reconnect deadline"
                 );
             }
@@ -2364,11 +2392,10 @@ async fn run_wda_readiness_wait(
     outcome
 }
 
-fn spawn_wda_readiness_wait(state: Arc<AppState>, token: WdaTransitionToken) {
-    // Constructed BEFORE the spawn and moved in, so a future the runtime drops
-    // without ever polling it still releases its own generation. Building it
-    // inside the async body would leave that window unguarded.
-    let ownership = WdaReadinessOwnership::new(state.wda_lifecycle.clone(), token);
+fn spawn_wda_readiness_wait(state: Arc<AppState>, ownership: WdaReadinessOwnership) {
+    // The ownership guard is moved in, so a future the runtime drops without
+    // ever polling it still releases its own generation.
+    let token = ownership.token;
     tokio::spawn(async move {
         let mut ownership = ownership;
         let setup_status_path =
@@ -3742,7 +3769,7 @@ fn clear_wda_retry_backoff(state_dir: &std::path::Path) {
 /// bootstrapped because launchd caches environment variables; an unchanged
 /// policy may be kickstarted. A minimal plist is created only when no
 /// setup-generated file exists yet.
-fn write_and_bootstrap_wda_agent(setup_sh: &str, log: &str, udid: &str) -> bool {
+pub fn write_and_bootstrap_wda_agent(setup_sh: &str, log: &str, udid: &str) -> bool {
     if !std::path::Path::new(setup_sh).is_file() || !valid_wda_udid(udid) {
         return false;
     }
@@ -4469,41 +4496,81 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
     });
 }
 
+/// How long starting the supervisor (`launchctl` bootout/bootstrap or
+/// kickstart, which waits for the previous setup run to exit) may take
+/// before the reconnect stops waiting for it. The blocking call carries on;
+/// only the lifecycle is freed, so status probes the runner again.
+const WDA_BOOTSTRAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Start one managed reconnect round and run it to its end in the
+/// background: own the lifecycle, start the supervisor, then hand the round
+/// to the readiness wait. `None` when another reconnect or release owns the
+/// lifecycle.
+///
+/// The round lives in a detached task holding an ownership guard from the
+/// moment it begins. A request handler that awaited the bootstrap itself was
+/// cancelled with its request (a client that timed out or went away), and
+/// the round it had begun stayed `reconnecting` forever: no readiness wait
+/// was ever spawned, status kept answering from the cache it never refreshes
+/// mid-reconnect, setup's handoff check saw `wda:false` on every runner it
+/// brought up, and only a daemon restart ended it. Awaiting the returned
+/// handle is safe: dropping it does not cancel the round.
+fn begin_managed_reconnect(
+    state: &Arc<AppState>,
+    udid: String,
+) -> Option<tokio::task::JoinHandle<bool>> {
+    let token = state.wda_lifecycle.try_begin_reconnecting()?;
+    let ownership = WdaReadinessOwnership::new(state.wda_lifecycle.clone(), token);
+    let setup_sh = crate::instance::Instance::path_str(&crate::instance::current().setup_sh());
+    let log = crate::instance::Instance::path_str(&crate::instance::current().agent_log());
+    let bootstrap = state.wda_bootstrap;
+    let state = state.clone();
+    Some(tokio::spawn(async move {
+        let started = tokio::task::spawn_blocking(move || bootstrap(&setup_sh, &log, &udid));
+        let bootstrapped = match tokio::time::timeout(WDA_BOOTSTRAP_BUDGET, started).await {
+            Ok(Ok(started)) => started,
+            Ok(Err(error)) => {
+                tracing::warn!("starting the device-runner supervisor failed: {error}");
+                false
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "starting the device-runner supervisor took longer than {}s; ending this reconnect so status probes the runner directly",
+                    WDA_BOOTSTRAP_BUDGET.as_secs()
+                );
+                false
+            }
+        };
+        if bootstrapped {
+            // launchd acceptance is not device readiness: keep the
+            // transition visible until a real action-level probe succeeds
+            // (or the readiness budget ends).
+            *recover(state.wda_health.lock()) = crate::wda::WdaHealth::down();
+            state
+                .wda_actionable
+                .store(false, std::sync::atomic::Ordering::Release);
+            spawn_wda_readiness_wait(state, ownership);
+        } else {
+            ownership.abandon();
+        }
+        bootstrapped
+    }))
+}
+
 /// Bring an idle-released phone back in the background: the same bring-up
 /// an action on a released phone starts. Returns whether this call started
 /// it (false when another reconnect or release already owns the lifecycle).
 fn start_released_recovery(state: &Arc<AppState>) -> bool {
-    let Some(reconnect_token) = state.wda_lifecycle.try_begin_reconnecting() else {
-        return false;
-    };
-    note_reconnect_after_release();
     // Someone just asked for the phone, so it is not idle — restart the
     // clock before the supervisor starts building. Otherwise the idle
     // watchdog can reach its window mid-bring-up and stop the very build
-    // this request triggered.
+    // this request triggered. (The watchdog skips while the lifecycle is
+    // transitioning, so touching right after the round begins is in time.)
+    if begin_managed_reconnect(state, state.device_udid.clone().unwrap_or_default()).is_none() {
+        return false;
+    }
+    note_reconnect_after_release();
     state.touch_activity();
-    let recovery_state = state.clone();
-    let setup_sh = crate::instance::Instance::path_str(&crate::instance::current().setup_sh());
-    let log = crate::instance::Instance::path_str(&crate::instance::current().agent_log());
-    let udid = state.device_udid.clone().unwrap_or_default();
-    tokio::spawn(async move {
-        let bootstrapped = tokio::task::spawn_blocking(move || {
-            write_and_bootstrap_wda_agent(&setup_sh, &log, &udid)
-        })
-        .await
-        .unwrap_or(false);
-        if bootstrapped {
-            *recover(recovery_state.wda_health.lock()) = crate::wda::WdaHealth::down();
-            recovery_state
-                .wda_actionable
-                .store(false, std::sync::atomic::Ordering::Release);
-            spawn_wda_readiness_wait(recovery_state, reconnect_token);
-        } else {
-            recovery_state
-                .wda_lifecycle
-                .finish_reconnecting(reconnect_token);
-        }
-    });
     true
 }
 
@@ -5078,6 +5145,131 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
     )
 }
 
+/// `POST /agent/runner-handoff` — setup verified a new device runner through
+/// the relay and the daemon still does not report it: drop everything the
+/// daemon knows about the runner that served before (session and what was
+/// read through it, the cached launch token, pooled connections into the old
+/// relay or tunnel), probe again, and on failure reset and retry once. The
+/// probe error is logged at warn and returned, so setup's failure names a
+/// cause. Agent bearer and `X-Phone-Control: 1`; it reads the runner and
+/// never acts on the phone.
+///
+/// While a reconnect is in progress its readiness wait owns the published
+/// health and picks the reset client up on its next probe; otherwise the
+/// observation is published here.
+async fn agent_runner_handoff(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    match agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    let json = |status: StatusCode, body: serde_json::Value| {
+        with_security_headers(
+            Response::builder()
+                .status(status)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        )
+    };
+    let Some(wda) = state.wda.as_ref().filter(|_| state.managed_wda) else {
+        return json(
+            StatusCode::CONFLICT,
+            serde_json::json!({"ok": false, "error": "wda_not_managed"}),
+        );
+    };
+    let _priority = state.begin_wda_control();
+    let Ok(mut client) = tokio::time::timeout(std::time::Duration::from_secs(10), wda.lock()).await
+    else {
+        tracing::warn!(
+            "runner handoff: the device-runner client stayed busy for 10s; nothing was reset"
+        );
+        return json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"ok": false, "error": "client_busy"}),
+        );
+    };
+    client.forget_runner();
+    state
+        .wda_read_degraded
+        .store(false, std::sync::atomic::Ordering::Release);
+    let (mut health, mut error) = handoff_probe(&mut client).await;
+    let mut retried = false;
+    if let Some(first) = error.as_deref().filter(|_| !health.up) {
+        tracing::warn!(
+            error = %first,
+            "runner handoff: setup verified the device runner but the daemon cannot reach it; dropped its per-runner state, retrying once"
+        );
+        retried = true;
+        client.forget_runner();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        (health, error) = handoff_probe(&mut client).await;
+        if let Some(second) = error.as_deref().filter(|_| !health.up) {
+            tracing::warn!(
+                error = %second,
+                "runner handoff: the device runner is still unreachable from the daemon after a reset"
+            );
+        }
+    }
+    drop(client);
+    let lifecycle = state.wda_lifecycle.current();
+    if lifecycle == WdaLifecycleTransition::Active {
+        apply_wda_health_probe_tracked(
+            &state.wda_health,
+            &state.wda_actionable,
+            &state.released,
+            false,
+            Some(&state.wda_death),
+            health,
+        );
+    }
+    let lifecycle = match lifecycle {
+        WdaLifecycleTransition::Active => "active",
+        WdaLifecycleTransition::Releasing => "releasing",
+        WdaLifecycleTransition::Reconnecting => "reconnecting",
+    };
+    json(
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": health.up,
+            "up": health.up,
+            "actionable": health.actionable,
+            "locked": health.locked,
+            "retried": retried,
+            "error": error,
+            "lifecycle": lifecycle,
+        }),
+    )
+}
+
+/// One bounded handoff probe, with why it failed.
+async fn handoff_probe(
+    client: &mut crate::wda::WdaClient,
+) -> (crate::wda::WdaHealth, Option<String>) {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        client.probe_health_detailed(),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        (
+            crate::wda::WdaHealth::down(),
+            Some("the probe did not finish within 20s".to_string()),
+        )
+    })
+}
+
 /// `POST /agent/mode` — bring the phone up for remote control, or give it back
 /// to the person holding it.
 ///
@@ -5232,7 +5424,8 @@ async fn agent_mode_inner(
             //      the runner dies so launchd sees the exit and rebuilds.
             // ThrottleInterval caps the rebuild rate so a persistent killer
             // (WARP Always-On) thrashes harmlessly instead of hot-looping.
-            let Some(reconnect_token) = state.wda_lifecycle.try_begin_reconnecting() else {
+            let was_released = state.released.load(std::sync::atomic::Ordering::Acquire);
+            let Some(round) = begin_managed_reconnect(&state, udid.unwrap_or_default()) else {
                 return with_security_headers(
                     Response::builder()
                         .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -5244,11 +5437,10 @@ async fn agent_mode_inner(
                         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
                 );
             };
-            if state.released.load(std::sync::atomic::Ordering::Acquire) {
+            if was_released {
                 note_reconnect_after_release();
             }
             let log = crate::instance::Instance::path_str(&crate::instance::current().agent_log());
-            let udid_env = udid.unwrap_or_default();
             // Taking the phone back is decided by this request, not by whether
             // launchd accepts the bring-up a few seconds later — the bootstrap
             // can outlast a client's timeout, and status must not keep saying
@@ -5259,25 +5451,10 @@ async fn agent_mode_inner(
             // window ends with the watchdog stopping the very supervisor this
             // request started.
             state.touch_activity();
-            let setup_for_bootstrap = setup_sh.clone();
-            let log_for_bootstrap = log.clone();
-            let spawned = tokio::task::spawn_blocking(move || {
-                write_and_bootstrap_wda_agent(&setup_for_bootstrap, &log_for_bootstrap, &udid_env)
-            })
-            .await
-            .unwrap_or(false);
-            if spawned {
-                // launchd acceptance is not device readiness. Keep the
-                // transition visible and suppress duplicate reconnects until a
-                // real action-level probe succeeds (or the 120s budget ends).
-                *recover(state.wda_health.lock()) = crate::wda::WdaHealth::down();
-                state
-                    .wda_actionable
-                    .store(false, std::sync::atomic::Ordering::Release);
-                spawn_wda_readiness_wait(state.clone(), reconnect_token);
-            } else {
-                state.wda_lifecycle.finish_reconnecting(reconnect_token);
-            }
+            // The round runs detached: if this request is cancelled while
+            // the supervisor starts, the round still reaches its readiness
+            // wait (or ends) instead of staying `reconnecting` forever.
+            let spawned = round.await.unwrap_or(false);
             let body = format!(
                 r#"{{"ok":{spawned},"mode":"agent","starting":{spawned},"reconnecting":{spawned},"self_healing":true,"log":"{log}","hint":"if the phone is locked, unlock it once now — startup remains reconnecting until WDA can perform actions"}}"#
             );
