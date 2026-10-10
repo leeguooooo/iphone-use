@@ -444,6 +444,7 @@ const DAEMON_ERROR_CODES: &[&str] = &[
     "phone_handed_to_human",
     "phone_owned",
     "reconnect_in_progress",
+    "runner_rejected",
     "serialization_failed",
     "stale_element_snapshot",
     "target_change_requires_restart",

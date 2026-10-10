@@ -1199,6 +1199,9 @@ RUNNER_SRC_DL=""
 RUNNER_SRC_HAD_EXISTING=0
 RUNNER_SRC_REPLACED=0
 RUNNER_SRC_COMMITTED=0
+# 1 when the installed runner sources differ from the ones they replaced: a
+# runner already running on the phone was built from the old ones.
+RUNNER_SRC_CHANGED=0
 
 # A runner tree: IPhoneUseRunner/ with its project file, and no symlinks.
 runner_tree_valid() {
@@ -1297,6 +1300,16 @@ install_runner_sources() {
     RUNNER_SRC_STAGE=""
     RUNNER_SRC_REPLACED=1
     ok "Device runner sources atomically updated: $RUNNER_SRC_DST"
+    # Same exclusions as the product cache's source hash (dotfiles, xcuserdata).
+    RUNNER_SRC_CHANGED=1
+    if [ "$RUNNER_SRC_HAD_EXISTING" = "1" ] \
+        && diff -rq -x xcuserdata -x '.*' \
+            "$RUNNER_SRC_BACKUP/IPhoneUseRunner" "$RUNNER_SRC_DST/IPhoneUseRunner" >/dev/null 2>&1; then
+        RUNNER_SRC_CHANGED=0
+        ok "Device runner sources unchanged; a runner already on the phone stays current"
+    elif [ "$RUNNER_SRC_HAD_EXISTING" = "1" ]; then
+        info "Device runner sources changed; the next iphone-use setup rebuilds the runner on the phone"
+    fi
 }
 
 # Where this install's runner sources come from: the local checkout, else the
@@ -3206,6 +3219,12 @@ if command -v curl >/dev/null 2>&1 \
     && curl -fsS --noproxy '*' -m 4 "${WDA_URL%/}/status" >/dev/null 2>&1; then
     WDA_READY=1
     ok "Existing device runner endpoint verified; the direct daemon can start now"
+    if [ "$RUNNER_SRC_CHANGED" = "1" ] && [ "$RUNNER_SRC_HAD_EXISTING" = "1" ]; then
+        # The reachable runner predates this install: reusing it is fine for
+        # now, but its fixes are not on the phone until it is rebuilt.
+        warn "The device runner on the phone was built from the previous runner sources."
+        warn "Run 'iphone-use setup' to rebuild it now (it is also rebuilt the next time the runner restarts)."
+    fi
 elif launchctl print "gui/$UID_NUM/$WDA_PLIST_LABEL" >/dev/null 2>&1; then
     info "Existing device runner supervisor found; it can recover the device layer."
 else
@@ -3434,7 +3453,9 @@ else
     printf "  The installer will not start, stop, or rewrite that service.\n"
 fi
 echo ""
-if [ "$WDA_READY" = "1" ]; then
+if [ "$WDA_READY" = "1" ] && [ "$RUNNER_SRC_CHANGED" = "1" ] && [ "$RUNNER_SRC_HAD_EXISTING" = "1" ]; then
+    warn "The device runner was reachable, but it is the previous build; run 'iphone-use setup' to rebuild it from the new sources."
+elif [ "$WDA_READY" = "1" ]; then
     ok "The device runner was already reachable during this install."
 elif [ "$WDA_MANAGED" = "false" ]; then
     warn "The external device runner endpoint was not reachable; verify it independently."

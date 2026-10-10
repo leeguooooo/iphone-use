@@ -314,6 +314,8 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
 - **At-most-once delivery.** Expiry before dispatch → `408 not_sent`, `retry_safe:true`.
   Transport failure after dispatch → `502`, post-dispatch deadline → `504`, both
   `outcome_unknown`, `retry_safe:false`: read the screen before doing anything again.
+  A runner that refused an action before touching the screen gives `422 runner_rejected`
+  (`not_sent`, `retry_safe:true`); `runner_error` carries the runner's own reason.
 - **Snapshot-bound targets.** An element index is valid only with the `snapshot` from the
   same `/agent/elements` response; a changed tree fails with `409 stale_element_snapshot`.
   Exact-label taps fail closed on zero or multiple matches. Persist labels, identifiers,

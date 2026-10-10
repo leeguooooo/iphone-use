@@ -61,11 +61,23 @@ pub fn run(ctx: &Ctx) -> i32 {
     }
     match checks::runner_source_valid(ctx) {
         Ok(()) => match checks::runner_source_hash(&ctx.runner_src) {
-            Some(hash) => ok(&format!(
-                "Device runner source: {} (sha256 {})",
-                ctx.runner_src.display(),
-                &hash[..12]
-            )),
+            Some(hash) => {
+                ok(&format!(
+                    "Device runner source: {} (sha256 {})",
+                    ctx.runner_src.display(),
+                    &hash[..12]
+                ));
+                // An upgrade lays down new sources but leaves a running
+                // runner alone (issue #257): say when it is the older build.
+                if let Some(built) = super::runner::built_source_hash(ctx) {
+                    if built != hash {
+                        warn(&format!(
+                            "~ the device runner was last built from other sources (sha256 {}); run `iphone-use setup` to rebuild it from these",
+                            &built[..12.min(built.len())]
+                        ));
+                    }
+                }
+            }
             None => {
                 warn(&format!(
                     "X device runner sources could not be read: {}",
