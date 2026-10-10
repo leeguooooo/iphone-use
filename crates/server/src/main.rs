@@ -991,6 +991,7 @@ fn serve() -> Result<()> {
         hold_until: Arc::new(Mutex::new(None)),
         owner: Arc::new(Mutex::new(None)),
         owner_lease_secs: cfg.owner_lease_secs,
+        wda_bootstrap: server::http::write_and_bootstrap_wda_agent,
     });
 
     run_server(cfg, state, dir)

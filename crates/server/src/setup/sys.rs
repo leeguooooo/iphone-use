@@ -174,11 +174,21 @@ pub fn pid_exists(pid: u32) -> bool {
 /// nothing answered. Like `curl -fsS`, a status of 400 or more counts as
 /// failure in [`http_ok`].
 pub fn http_get(url: &str, limit: Duration) -> Option<(u16, Vec<u8>)> {
-    http_request(url, limit, Auth::None, None)
+    http_request("GET", url, limit, Auth::None, None)
+}
+
+/// An empty-bodied `POST`, with a bearer token unless `bearer` is empty.
+pub fn http_post_auth(url: &str, limit: Duration, bearer: &str) -> Option<(u16, Vec<u8>)> {
+    let auth = if bearer.is_empty() {
+        Auth::None
+    } else {
+        Auth::Bearer(bearer)
+    };
+    http_request("POST", url, limit, auth, None)
 }
 
 pub fn http_get_auth(url: &str, limit: Duration, bearer: &str) -> Option<(u16, Vec<u8>)> {
-    http_request(url, limit, Auth::Bearer(bearer), None)
+    http_request("GET", url, limit, Auth::Bearer(bearer), None)
 }
 
 /// A GET to the device runner, signed with its per-launch token (see
@@ -189,7 +199,7 @@ pub fn runner_get(
     limit: Duration,
     auth: &crate::runner_token::TokenSource,
 ) -> Option<(u16, Vec<u8>)> {
-    http_request(url, limit, Auth::Runner(auth), None)
+    http_request("GET", url, limit, Auth::Runner(auth), None)
 }
 
 /// [`runner_get`] answered below 400.
@@ -205,7 +215,7 @@ pub fn runner_get_prefix(
     max_body: usize,
     auth: &crate::runner_token::TokenSource,
 ) -> Option<(u16, Vec<u8>)> {
-    http_request(url, limit, Auth::Runner(auth), Some(max_body))
+    http_request("GET", url, limit, Auth::Runner(auth), Some(max_body))
 }
 
 #[derive(Clone, Copy)]
@@ -216,6 +226,7 @@ enum Auth<'a> {
 }
 
 fn http_request(
+    method: &str,
     url: &str,
     limit: Duration,
     auth: Auth<'_>,
@@ -238,13 +249,17 @@ fn http_request(
     };
     stream.set_write_timeout(Some(remaining(deadline))).ok()?;
     let mut request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: */*\r\nConnection: close\r\nUser-Agent: iphone-use-setup\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: */*\r\nConnection: close\r\nUser-Agent: iphone-use-setup\r\n"
     );
+    if method != "GET" {
+        // The daemon refuses a state-changing POST without this header.
+        request.push_str("Content-Length: 0\r\nX-Phone-Control: 1\r\n");
+    }
     match auth {
         Auth::None => {}
         Auth::Bearer(token) => request.push_str(&format!("Authorization: Bearer {token}\r\n")),
         Auth::Runner(source) => {
-            request.push_str(&crate::runner_token::header_line(source, "GET", path, b""))
+            request.push_str(&crate::runner_token::header_line(source, method, path, b""))
         }
     }
     request.push_str("\r\n");
@@ -489,5 +504,48 @@ mod tests {
         let (out, ok) = run_bounded("/bin/echo", &["hi"], Duration::from_secs(5));
         assert!(ok);
         assert_eq!(out.trim(), "hi");
+    }
+
+    /// The runner handoff is a POST the daemon accepts: bearer, the control
+    /// header, and an empty body it does not wait for.
+    #[test]
+    fn a_handoff_post_carries_what_the_daemon_requires() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/agent/runner-handoff",
+            listener.local_addr().unwrap()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while find_subsequence(&request, b"\r\n\r\n").is_none() {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "the request ended before its headers");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let body = r#"{"up":true}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let (status, body) = http_post_auth(&url, Duration::from_secs(5), "tok").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, br#"{"up":true}"#);
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("POST /agent/runner-handoff HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.contains("Authorization: Bearer tok\r\n"),
+            "{request}"
+        );
+        assert!(request.contains("X-Phone-Control: 1\r\n"), "{request}");
+        assert!(request.contains("Content-Length: 0\r\n"), "{request}");
     }
 }

@@ -139,6 +139,12 @@ impl TokenSource {
         token
     }
 
+    /// Drop the cached token so the next request reads the file again, even
+    /// when its (mtime, size, inode) look unchanged.
+    pub fn forget(&self) {
+        *self.cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// The Authorization value for one request, when there is a token.
     pub fn authorization(&self, method: &str, target: &str, body: &[u8]) -> Option<String> {
         self.token()
