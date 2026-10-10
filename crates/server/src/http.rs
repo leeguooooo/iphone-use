@@ -8740,6 +8740,18 @@ fn text_partial_body(
     })
 }
 
+/// Typing a long text can outlast the owner lease and the idle-release
+/// window, both measured from when the request arrived. Count its end as
+/// activity and renew the caller's lease, so the follow-up (an append of the
+/// rest, a tap on Send) is not refused or met by a released phone.
+fn renew_after_long_text(state: &AppState, headers: &HeaderMap, action: &serde_json::Value) {
+    if crate::text_input::action_allowance(action).is_zero() {
+        return;
+    }
+    state.touch_activity();
+    let _ = claim_phone_owner(state, headers);
+}
+
 /// A `text` action longer than the daemon types, refused before anything is
 /// sent.
 fn reject_oversized_text(value: &serde_json::Value) -> Result<(), Response> {
@@ -10525,6 +10537,7 @@ async fn agent_actions_inner(
                     completed += 1;
                     continue;
                 }
+                renew_after_long_text(&state, &headers, action);
                 if let WdaControlOutcome::TextPartial {
                     confirmed,
                     uncertain,
@@ -12098,6 +12111,7 @@ async fn agent_input_inner(
             return wda_deadline_response(posted_since(wda, mark).await);
         }
     };
+    renew_after_long_text(&state, &headers, &value);
     // Post-action observation (`?return=delta`), still holding the SAME
     // guard so no other control interleaves between the action and its
     // read — but on its own budget, bounded by both the caller's

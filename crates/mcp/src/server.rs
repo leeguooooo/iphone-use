@@ -3000,6 +3000,73 @@ mod tests {
         );
     }
 
+    fn partial_text_body(extra: serde_json::Value) -> Vec<u8> {
+        let mut body = serde_json::json!({
+            "ok": false,
+            "error": "text_partially_typed",
+            "outcome": "partial",
+            "retry_safe": false,
+            "characters_confirmed": 400,
+            "characters_uncertain": 200,
+            "characters_total": 10_600,
+            "remaining_text": "字".repeat(10_200),
+            "hint": "send only the rest",
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        body.to_string().into_bytes()
+    }
+
+    /// A long text that stopped part-way: the counts and retry_safe=false must
+    /// be readable even though remaining_text alone is far past any preview.
+    #[test]
+    fn a_partially_typed_text_reaches_the_model_with_its_counts() {
+        let (url, task) = scripted_daemon("502 Bad Gateway", partial_text_body(serde_json::json!({})));
+        let handler = handler_for(&url);
+        // The request stays small (the scripted daemon reads one 8 KiB
+        // buffer); the answer is what is under test.
+        let result = block(handler.phone_type(Parameters(TypeParams {
+            text: "x".repeat(600),
+            observe: Some(false),
+        })));
+        task.join().unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let text = text_of(&result);
+        assert!(text.contains("retry_safe=false"), "{text}");
+        assert!(text.contains("characters_confirmed"), "{text}");
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["characters_confirmed"], 400);
+        assert_eq!(structured["remaining_text"].as_str().unwrap().chars().count(), 10_200);
+    }
+
+    #[test]
+    fn a_partially_typed_batch_names_how_far_the_text_got() {
+        let (url, task) = scripted_daemon(
+            "502 Bad Gateway",
+            partial_text_body(serde_json::json!({
+                "failed_step": 0, "completed": 0, "applied_actions": 0,
+                "failed_step_outcome": "partial", "batch_outcome": "partially_applied",
+                "steps": []
+            })),
+        );
+        let handler = handler_for(&url);
+        let result = block(handler.phone_run_steps(Parameters(RunStepsParams {
+            steps: vec![PhoneStep::Type {
+                text: "x".repeat(600),
+                clear: false,
+                after_ms: 0,
+            }],
+            observe: Some(false),
+        })));
+        task.join().unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let text = text_of(&result);
+        assert!(text.contains("400 of 10600 characters typed"), "{text}");
+        assert!(text.contains("retry_safe=false"), "{text}");
+        assert!(!text.contains(&"字".repeat(50)), "the remaining text stays structured: {text}");
+    }
+
     /// A 400 the daemon spelled out is still a spelled-out refusal.
     ///
     /// `invalid_action` is newer than this renderer. Nothing here keeps a list

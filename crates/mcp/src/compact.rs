@@ -552,6 +552,22 @@ pub fn failed_batch(json: &Value) -> Option<String> {
         None => {}
     }
     let mut out = vec![head];
+    // A long text that stopped part-way: how far it got is the whole point.
+    // `remaining_text` itself stays in the structured content.
+    if let Some(confirmed) = json.get("characters_confirmed").and_then(Value::as_u64) {
+        let total = json
+            .get("characters_total")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let uncertain = json
+            .get("characters_uncertain")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        out.push(format!(
+            "text: {confirmed} of {total} characters typed, {uncertain} uncertain; read the field, \
+             then type only the rest (remaining_text) with clear=false — never the whole text"
+        ));
+    }
     let list = steps
         .iter()
         .enumerate()
