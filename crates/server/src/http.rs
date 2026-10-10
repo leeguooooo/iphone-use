@@ -2692,8 +2692,11 @@ async fn agent_status(
     let lock_readiness = crate::lock_readiness::current_json();
     // Which phone this is: name, model, iOS (cache only, no I/O).
     let device = crate::device_identity::current_json();
+    // Agent Do Not Disturb: whether it is on and the gate's last outcome with
+    // its time, so a Shortcuts flash on a recording can be matched to it.
+    let agent_focus = recover(state.agent_focus.lock()).status_json();
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device}}}"#,
+        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -10476,11 +10479,16 @@ async fn agent_actions_inner(
 
     state.touch_activity();
     state.cancel_settled_frame_prefetch();
-    let focus_block = engage_agent_focus(&state, &mut *wda.lock().await).await;
-    if let Some(waiting) = focus_permission_pending(focus_block.as_ref()) {
-        return waiting;
-    }
+    // Do Not Disturb at a quiet moment; a batch that opens with launch_app
+    // is one (its launch covers the Shortcuts app).
+    let first_launch = request.steps.iter().find_map(|step| match step {
+        AgentActionStep::Action { action, .. } => Some(crate::focus::launch_bundle(action)),
+        _ => None,
+    });
+    // Control priority first: a health probe must not hold the runner while
+    // the focus step (or the action after it) waits for it.
     let _priority = state.begin_wda_control();
+    engage_agent_focus(&state, wda, first_launch.flatten(), true).await;
     // Long text steps add their typing time (zero for text up to one chunk).
     let typing_allowance: std::time::Duration = request
         .steps
@@ -11085,10 +11093,9 @@ async fn begin_list_control<'a>(
     }
     state.touch_activity();
     state.cancel_settled_frame_prefetch();
-    let focus_block = engage_agent_focus(state, &mut *wda.lock().await).await;
-    if let Some(waiting) = focus_permission_pending(focus_block.as_ref()) {
-        return Err(waiting);
-    }
+    // Inside an app by definition: never a quiet moment for Do Not Disturb,
+    // and no foreground look in front of the list read either.
+    engage_agent_focus(state, wda, None, false).await;
     // These calls swipe: whatever screen the owner's tracker held is gone.
     if let Some(owner) = trusted_bearer_owner(state, headers) {
         crate::advice::reset(&owner);
@@ -12119,11 +12126,11 @@ async fn agent_input_inner(
     state.cancel_settled_frame_prefetch();
     // Do Not Disturb before the first action of a session; its time is not
     // charged to the action's own budget.
+    // Control priority first: a health probe must not hold the runner while
+    // the focus step (or the action after it) waits for it.
+    let _priority = state.begin_wda_control();
     let focus_started = tokio::time::Instant::now();
-    let focus_block = engage_agent_focus(&state, &mut *wda.lock().await).await;
-    if let Some(waiting) = focus_permission_pending(focus_block.as_ref()) {
-        return waiting;
-    }
+    engage_agent_focus(&state, wda, crate::focus::launch_bundle(&value), true).await;
     // A long text gets its typing time on top (zero for text up to one chunk),
     // so the per-chunk timeouts, not this deadline, decide how it ends.
     let agent_wda_deadline = agent_wda_deadline
@@ -12132,7 +12139,6 @@ async fn agent_input_inner(
     if tokio::time::Instant::now() >= agent_wda_deadline {
         return wda_deadline_response(false);
     }
-    let _priority = state.begin_wda_control();
     let dispatched = Arc::new(std::sync::Mutex::new(None::<Option<std::time::Instant>>));
     let dispatch_marker = dispatched.clone();
     let want_delta = query.return_mode.as_deref() == Some("delta");
@@ -12395,22 +12401,79 @@ fn focus_bridge() -> Option<String> {
 /// agent is timing; past it the action goes ahead.
 const AGENT_FOCUS_ENGAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(6);
 
-/// First control request of a session: ask the phone for Do Not Disturb, then
-/// put the foreground app back (the bridge shortcut opens the Shortcuts app).
-/// Best-effort and bounded by [`AGENT_FOCUS_ENGAGE_BUDGET`] — any failure
-/// leaves the request it precedes untouched.
+/// First quiet control request of a session: ask the phone for Do Not
+/// Disturb, then put the phone back (the bridge shortcut opens the Shortcuts
+/// app). Best-effort and bounded by [`AGENT_FOCUS_ENGAGE_BUDGET`] — any
+/// failure leaves the request it precedes untouched, and the request's own
+/// action always runs after this returns, on the phone as it was put back.
+///
+/// The Shortcuts app in front reads as a mis-tap to anyone watching, so it
+/// runs only when nobody can see it and the phone is at a moment that hides
+/// it (see [`crate::focus::decide`]); otherwise a later action tries again.
+/// `launch` is the bundle when the action is `launch_app`; `may_probe_home`
+/// lets a deferred session look (throttled) for the Home Screen.
 async fn engage_agent_focus(
     state: &AppState,
-    w: &mut crate::wda::WdaClient,
-) -> Option<serde_json::Value> {
+    wda: &tokio::sync::Mutex<crate::wda::WdaClient>,
+    launch: Option<String>,
+    may_probe_home: bool,
+) {
     // Only the daemon's own phone: an external WDA endpoint belongs to
     // someone else's setup (and test daemons never touch the real registry).
     if !state.managed_wda || recover(state.agent_focus.lock()).attempted() {
-        return None;
+        return;
     }
-    let bridge = focus_bridge()?;
-    let deadline = tokio::time::Instant::now() + AGENT_FOCUS_ENGAGE_BUDGET;
-    let previous = w.active_bundle().await.ok().flatten();
+    let Some(bridge) = focus_bridge() else {
+        return;
+    };
+    let owner = owner_status(state).0;
+    let viewers = state.live_streams.load(std::sync::atomic::Ordering::Relaxed);
+    let blocked = crate::focus::blocker(owner.as_deref(), human_handoff_active(), viewers);
+    let mut w = None;
+    let moment = match (blocked, launch) {
+        (Some(_), _) => crate::focus::Moment::InApp,
+        (None, Some(bundle)) => crate::focus::Moment::LaunchApp(bundle),
+        (None, None) => {
+            let probe = may_probe_home
+                && recover(state.agent_focus.lock()).take_probe(Instant::now());
+            if probe {
+                let client = w.insert(wda.lock().await);
+                match client.active_bundle().await {
+                    Ok(Some(bundle)) if bundle == "com.apple.springboard" => {
+                        crate::focus::Moment::HomeScreen
+                    }
+                    _ => crate::focus::Moment::InApp,
+                }
+            } else {
+                crate::focus::Moment::InApp
+            }
+        }
+    };
+    if let Err(reason) =
+        crate::focus::decide(owner.as_deref(), human_handoff_active(), viewers, &moment)
+    {
+        let fresh = recover(state.agent_focus.lock()).note("waiting", Some(reason), None);
+        if fresh {
+            tracing::info!("agent focus: Do Not Disturb skipped for now ({reason})");
+        }
+        crate::timing::note(
+            "agent_focus",
+            serde_json::json!({"outcome": "waiting", "reason": reason}),
+        );
+        return;
+    }
+    let mut w = match w {
+        Some(guard) => guard,
+        None => wda.lock().await,
+    };
+    let started = tokio::time::Instant::now();
+    let deadline = started + AGENT_FOCUS_ENGAGE_BUDGET;
+    // Where the phone goes back to: the launch target (the action itself
+    // launches it — nothing to restore), else the Home Screen it is on.
+    let launch_target = match &moment {
+        crate::focus::Moment::LaunchApp(bundle) => Some(bundle.clone()),
+        _ => None,
+    };
     let link = intent_deep_link(
         &bridge,
         crate::focus::FOCUS_ON_VERB,
@@ -12419,82 +12482,90 @@ async fn engage_agent_focus(
     );
     if let Err(error) = w.open_url(&link).await {
         tracing::warn!("agent focus: could not open the bridge: {error:#}");
-        return None;
+        return;
     }
     recover(state.agent_focus.lock()).mark_attempted();
-    let run = watch_bridge_run(w, &bridge, true, deadline).await;
+    let run = watch_bridge_run(&mut w, &bridge, true, deadline).await;
     // The notice is the evidence focus_on turned DND on. A run held by a
-    // prompt counts too: focus_on only prompts inside its "no Focus" branch.
+    // prompt counts too: focus_on only prompts inside its "no Focus" branch,
+    // so if the person answers it later, DND is still this session's to undo.
     let ours = run.saw_on_notice || !run.finished;
     if ours {
         recover(state.agent_focus.lock()).set(true);
     }
-    if !run.finished {
-        // A one-time permission prompt over the Shortcuts app. Moving away
-        // would hide it and leave the run hanging: stay, let the agent answer.
-        tracing::warn!("agent focus: the bridge did not finish; leaving Shortcuts in front");
-        return Some(crate::focus::waiting_block());
-    }
-    let restored = match previous.as_deref() {
-        Some(bundle) if bundle != "com.apple.shortcuts" && bundle != "com.apple.springboard" => {
-            w.launch_app(bundle).await
-        }
-        _ => w.press_home().await,
+    // Never leave the Shortcuts app in front, not even over a permission
+    // prompt (that once swallowed an agent's launch_app): a launch_app action
+    // replaces it itself, anything else goes back to the Home Screen it came
+    // from. A prompt left behind is the person's to answer.
+    let restored = match &launch_target {
+        Some(_) => Ok(()),
+        None => w.press_home().await,
     };
     if let Err(error) = restored {
-        tracing::warn!("agent focus: could not return to {previous:?}: {error:#}");
+        tracing::warn!("agent focus: could not return to the Home Screen: {error:#}");
     }
     // The notice is SpringBoard's banner: while it is up, tree reads land on
     // it instead of the app (hardware: the first tap_locator after DND came
     // back element_not_found). Let it go before the agent's action runs.
-    if ours {
-        while tokio::time::Instant::now() < deadline {
-            match w.active_bundles().await {
-                Ok(active) if !active.iter().any(|b| b == "com.apple.springboard") => break,
-                Ok(_) => sleep_until_or(deadline, std::time::Duration::from_millis(250)).await,
-                Err(_) => break,
-            }
-        }
+    if run.saw_on_notice {
+        wait_for_focus_notice_gone(&mut w, launch_target.is_none(), deadline).await;
     }
-    let block = if ours {
-        tracing::info!("agent focus: Do Not Disturb turned on (returned to {previous:?})");
-        crate::focus::engaged_block()
+    drop(w);
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let (outcome, block) = if !run.finished {
+        tracing::warn!(
+            "agent focus: the bridge is held by a permission prompt; phone put back, \
+             Do Not Disturb needs the user's permission ({elapsed_ms} ms)"
+        );
+        ("needs_permission", crate::focus::needs_permission_block())
+    } else if ours {
+        let at = launch_target
+            .as_deref()
+            .map_or("on the Home Screen".to_string(), |b| format!("before launching {b}"));
+        tracing::info!("agent focus: Do Not Disturb turned on ({at}, {elapsed_ms} ms)");
+        ("turned_on", crate::focus::engaged_block())
     } else {
-        tracing::info!("agent focus: a Focus was already on; left alone");
-        crate::focus::already_focused_block()
+        tracing::info!("agent focus: a Focus was already on; left alone ({elapsed_ms} ms)");
+        ("left_as_is", crate::focus::already_focused_block())
     };
+    crate::timing::note(
+        "agent_focus",
+        serde_json::json!({"outcome": outcome, "elapsed_ms": elapsed_ms}),
+    );
+    let mut focus = recover(state.agent_focus.lock());
+    focus.note(outcome, None, Some(elapsed_ms));
     // Delivered with the next successful response (see `take_focus_notice`).
-    recover(state.agent_focus.lock()).queue_notice(block);
-    None
+    focus.queue_notice(block);
 }
 
-/// The Do Not Disturb run is held by a permission prompt: refuse the action
-/// (`not_sent`, safe to retry) rather than dispatch it — an action would move
-/// the phone away and hide the prompt again, leaving the run hanging.
-fn focus_permission_pending(block: Option<&serde_json::Value>) -> Option<Response> {
-    let block = block?;
-    if block.get("do_not_disturb").and_then(serde_json::Value::as_str)
-        != Some("waiting_for_permission")
-    {
-        return None;
+/// Wait (bounded) for focus_on's notice banner to go. Over an app it shows as
+/// SpringBoard among the active apps; on the Home Screen SpringBoard is the
+/// app itself, so there the banner is looked for in the tree instead.
+async fn wait_for_focus_notice_gone(
+    w: &mut crate::wda::WdaClient,
+    on_home_screen: bool,
+    deadline: tokio::time::Instant,
+) {
+    while tokio::time::Instant::now() < deadline {
+        let gone = if on_home_screen {
+            match w.elements().await {
+                Ok(rows) => !rows.iter().any(|row| {
+                    row.label.contains(crate::focus::NOTICE_TITLE)
+                        && row.label.contains(crate::focus::ON_NOTICE)
+                }),
+                Err(_) => true,
+            }
+        } else {
+            match w.active_bundles().await {
+                Ok(active) => !active.iter().any(|b| b == "com.apple.springboard"),
+                Err(_) => true,
+            }
+        };
+        if gone {
+            return;
+        }
+        sleep_until_or(deadline, std::time::Duration::from_millis(250)).await;
     }
-    let body = serde_json::json!({
-        "ok": false,
-        "error": "focus_permission_pending",
-        "outcome": "not_sent",
-        "failed_step_outcome": "not_sent",
-        "batch_outcome": "nothing_applied",
-        "retry_safe": true,
-        "agent_focus": block,
-        "hint": "your action was NOT sent: answer the permission prompt on screen first (screenshot, tap 'Always Allow'), then send the action again"
-    });
-    Some(with_security_headers(
-        Response::builder()
-            .status(StatusCode::CONFLICT)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-    ))
 }
 
 /// What one deep-link run of the bridge was seen to do.

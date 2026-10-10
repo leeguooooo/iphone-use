@@ -386,10 +386,13 @@ Then import it on the phone — an agent can do this itself: Files → search
 on the Mac and accepting the import works too).
 
 **Do Not Disturb while an agent drives.** With `focus_on` / `focus_off` in the bridge and
-the registry, the daemon turns DND on before an agent session's first action — only if no
-Focus is already on — and off again when the phone is released, idles out or is handed to
-a person. The phone shows a notice both times; the first run asks once to allow the
-bridge's notifications (the agent is told, as `agent_focus: waiting_for_permission`).
+the registry, the daemon turns DND on for an agent session — only if no Focus is already
+on — and off again when the phone is released, idles out or is handed to a person. The
+Shortcuts app shows for a moment while it runs, so it waits for a moment nobody would
+notice: never while you drive the phone yourself or a live view is open, and only when the
+agent launches an app or the phone is on the Home Screen. The phone shows a notice both
+times; the first run asks once to allow the bridge's notifications (the agent is told, as
+`agent_focus: needs_permission`: open Shortcuts and tap Always Allow).
 Fire-and-forget, so it works with the return path below left closed.
 `PHONE_REMOTE_AUTO_FOCUS=0` turns it off.
 

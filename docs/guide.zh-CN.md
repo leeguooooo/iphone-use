@@ -192,7 +192,7 @@ open "iU Bridge.shortcut"     # 接受导入；iCloud 会同步到手机
 
 装到手机上可以交给 AI：把生成的文件放进 iCloud 云盘，在手机「文件」里搜 `iU Bridge`，点开后选「添加快捷指令」，不用在 Mac 上点导入框。
 
-**AI 操作时自动勿扰。** 桥接快捷指令和注册表里有 `focus_on` / `focus_off` 时，AI 每次开始操作前，守护进程会先开勿扰（你本来就开着专注模式时不动），交还手机、空闲释放或交给人工时再关掉。开、关时手机上都会弹提醒。第一次运行会问一次是否允许桥接快捷指令发通知，AI 会收到 `agent_focus: waiting_for_permission` 并处理。只发不收，不需要打开下面的回传通道。设 `PHONE_REMOTE_AUTO_FOCUS=0` 可以关掉。
+**AI 操作时自动勿扰。** 桥接快捷指令和注册表里有 `focus_on` / `focus_off` 时，AI 会话期间守护进程会开勿扰（你本来就开着专注模式时不动），交还手机、空闲释放或交给人工时再关掉。运行时快捷指令 App 会在前台闪一下，所以它只挑没人注意的时机：你自己在遥控或有人开着实时画面时不跑，只在 AI 打开某个 App 或手机停在主屏幕时跑。开、关时手机上都会弹提醒。第一次运行会问一次是否允许桥接快捷指令发通知，AI 会收到 `agent_focus: needs_permission`，请到快捷指令里点「始终允许」。只发不收，不需要打开下面的回传通道。设 `PHONE_REMOTE_AUTO_FOCUS=0` 可以关掉。
 
 verb 定义在 `~/.iphone-use/intents-registry.json`（从 [`deploy/intents-registry.example.json`](../deploy/intents-registry.example.json) 起步）。快捷指令名必须等于注册表的 `bridge.name`，bearer token 放在快捷指令自己的请求头里。`--self-test` 检查 plist 里那些会静默失败的部分。每个 verb 首次使用要在手机上点一次授权，调用期间快捷指令会到前台。
 

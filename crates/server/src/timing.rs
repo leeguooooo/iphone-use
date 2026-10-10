@@ -39,6 +39,9 @@ struct Recorder {
     /// Set by [`authenticated`]. Dropped unfinished (a cancelled request), it
     /// records the call as cancelled.
     guard: Option<crate::metrics::CallGuard>,
+    /// Daemon events behind this request's time (e.g. `agent_focus`), added
+    /// to its log line under `notes`.
+    notes: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Called by the auth checks when a request authenticates: register its
@@ -63,6 +66,17 @@ struct Call {
     /// Dropped before it answered: a deadline (or a cancelled request) cut
     /// it short. Its time was still the runner's.
     cancelled: bool,
+}
+
+/// Attach a daemon event to this request's log line (`notes.<key>`), so the
+/// time it added can be matched to its cause without raising the log level.
+/// A no-op outside a timed request.
+pub fn note(key: &str, value: serde_json::Value) {
+    let _ = RECORDER.try_with(|recorder| {
+        if let Ok(mut recorder) = recorder.lock() {
+            recorder.notes.insert(key.to_string(), value);
+        }
+    });
 }
 
 /// Record one WDA call. A no-op outside a timed request.
@@ -354,8 +368,12 @@ pub async fn layer(request: Request, next: Next) -> Response {
             "query": query,
             "status": response.status().as_u16(),
             "timing": summary.json(),
-        })
-        .to_string();
+        });
+        let mut line = line;
+        if !recorder.notes.is_empty() {
+            line["notes"] = serde_json::Value::Object(recorder.notes.clone());
+        }
+        let line = line.to_string();
         tokio::task::spawn_blocking(move || append_log_line(line));
     }
     let status = response.status();
@@ -787,6 +805,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn notes_ride_on_the_request_they_happened_in() {
+        note("ignored", serde_json::json!(1)); // outside a request: a no-op
+        let notes = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(RECORDER.scope(Mutex::new(Recorder::default()), async {
+                note(
+                    "agent_focus",
+                    serde_json::json!({"outcome": "waiting", "reason": "live_viewer"}),
+                );
+                RECORDER.with(|r| r.lock().unwrap().notes.clone())
+            }));
+        assert_eq!(notes["agent_focus"]["reason"], "live_viewer");
+        assert!(!notes.contains_key("ignored"));
     }
 
     #[test]
