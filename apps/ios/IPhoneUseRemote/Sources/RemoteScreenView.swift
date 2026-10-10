@@ -39,6 +39,9 @@ final class RemoteScreenUIView: UIView, UIGestureRecognizerDelegate {
     var onAction: ((PhoneAction) -> Void)?
     /// The zoom changed (1 = fit).
     var onZoom: ((CGFloat) -> Void)?
+    /// Where the picture shows, in window coordinates (with the zoom, the
+    /// part of the stage it covers), so the chrome can keep off it.
+    var onPictureFrame: ((CGRect) -> Void)?
 
     /// Rounded, clipped frame the picture sits in; zoom transforms it.
     private let screen = UIView()
@@ -145,6 +148,27 @@ final class RemoteScreenUIView: UIView, UIGestureRecognizerDelegate {
         #endif
         zoom.clamp(content: fit.size, view: bounds.size)
         screen.transform = zoomTransform
+        reportPictureFrame()
+    }
+
+    private var reportedPictureFrame: CGRect?
+
+    /// Tell SwiftUI where the picture is when that moved. Like the zoom,
+    /// posted to the next turn: layout can run inside a SwiftUI update.
+    private func reportPictureFrame() {
+        guard window != nil else { return }
+        let visible = screen.frame.intersection(bounds)
+        guard !visible.isNull, visible.width > 0 else { return }
+        let frame = convert(visible, to: nil).integral
+        guard frame != reportedPictureFrame else { return }
+        reportedPictureFrame = frame
+        DispatchQueue.main.async { [weak self] in self?.onPictureFrame?(frame) }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        reportedPictureFrame = nil
+        reportPictureFrame()
     }
 
     #if DEBUG
@@ -207,6 +231,7 @@ final class RemoteScreenUIView: UIView, UIGestureRecognizerDelegate {
             apply()
         }
         reportZoom()
+        reportPictureFrame()
     }
 
     private var reportedZoom: CGFloat = 1
@@ -621,6 +646,8 @@ struct CanvasOptions {
     /// Bumped to zoom back out to fit.
     var resetZoom = 0
     var onZoom: (CGFloat) -> Void = { _ in }
+    /// Where the picture shows (window coordinates); see `PictureFrameSink`.
+    var onPictureFrame: (CGRect) -> Void = { _ in }
     /// Drawn over the picture, zoomed with it (the wireframe of a screen
     /// the app hides from capture).
     var overlay: UIImage?
@@ -634,6 +661,7 @@ extension RemoteScreenUIView {
         setDimmed(options.dimmed)
         setOverlay(options.overlay)
         onZoom = options.onZoom
+        onPictureFrame = options.onPictureFrame
         if options.resetZoom != previousReset {
             previousReset = options.resetZoom
             resetZoom(animated: true)

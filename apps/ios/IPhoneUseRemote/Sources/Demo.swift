@@ -198,7 +198,8 @@ struct DemoView: View {
     @State private var resetZoom = 0
 
     var body: some View {
-        RemoteScaffold(immersive: immersive, typing: false, onExitImmersive: { immersive = false }) { axis in
+        RemoteScaffold(immersive: immersive, typing: false, onExitImmersive: { immersive = false },
+                       toast: session.toast) { axis in
             RemoteTopBar(axis: axis, backSymbol: "xmark", backLabel: "退出演示", zoom: zoom,
                          onBack: exit, onResetZoom: { resetZoom += 1 }, onImmersive: { immersive = true }) {
                 if axis == .horizontal {
@@ -209,17 +210,7 @@ struct DemoView: View {
                 }
             }
         } screen: {
-            ZStack {
-                DemoScreen(session: session, options: CanvasOptions(
-                    resetZoom: resetZoom,
-                    onZoom: { zoom = $0 },
-                    accessibilityLabel: String(localized: "演示画面"),
-                    accessibilityActions: [
-                        (String(localized: "主屏幕"), { session.handle(.home) }),
-                        (String(localized: "返回"), { session.handle(.back) }),
-                    ]))
-                ToastLayer(text: session.toast)
-            }
+            DemoStage(session: session, resetZoom: resetZoom, zoom: $zoom)
         } accessory: { _ in
             EmptyView()
         } banner: {
@@ -238,5 +229,25 @@ struct DemoView: View {
         } keyboard: {
             EmptyView()
         }
+    }
+}
+
+/// The demo's recorded screens on the touch surface.
+private struct DemoStage: View {
+    let session: DemoSession
+    var resetZoom: Int
+    @Binding var zoom: CGFloat
+    @Environment(\.pictureFrameSink) private var pictureFrameSink
+
+    var body: some View {
+        DemoScreen(session: session, options: CanvasOptions(
+            resetZoom: resetZoom,
+            onZoom: { zoom = $0 },
+            onPictureFrame: { pictureFrameSink($0) },
+            accessibilityLabel: String(localized: "演示画面"),
+            accessibilityActions: [
+                (String(localized: "主屏幕"), { session.handle(.home) }),
+                (String(localized: "返回"), { session.handle(.back) }),
+            ]))
     }
 }

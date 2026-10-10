@@ -499,7 +499,8 @@ struct SyncView: View {
     }
 
     var body: some View {
-        RemoteScaffold(immersive: immersive, typing: typing, onExitImmersive: { immersive = false }) { axis in
+        RemoteScaffold(immersive: immersive, typing: typing, onExitImmersive: { immersive = false },
+                       toast: lead.toast ?? app.toast) { axis in
             RemoteTopBar(axis: axis, backSymbol: "xmark", backLabel: "退出同步", zoom: zoom,
                          onBack: { app.stopSync() },
                          onResetZoom: { resetZoom += 1 },

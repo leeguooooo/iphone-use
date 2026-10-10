@@ -491,7 +491,8 @@ struct RemoteView: View {
     }
 
     var body: some View {
-        RemoteScaffold(immersive: immersive, typing: typing, onExitImmersive: { immersive = false }) { axis in
+        RemoteScaffold(immersive: immersive, typing: typing, onExitImmersive: { immersive = false },
+                       toast: session.toast ?? app.toast) { axis in
             RemoteTopBar(axis: axis, zoom: zoom,
                          onBack: { app.focusedID = nil },
                          onResetZoom: { resetZoom += 1 },
@@ -526,20 +527,23 @@ struct RemoteView: View {
             if defaults.bool(forKey: "immersive") { immersive = true }
             if defaults.bool(forKey: "typing") { typing = true }
             if defaults.bool(forKey: "settings") { showSettings = true }
+            // `-toast <text>` holds a toast up.
+            if let toast = defaults.string(forKey: "toast") { session.toast = toast }
             #endif
         }
     }
 }
 
 /// The picture of one phone with everything drawn over it: the touch
-/// surface, a wireframe where the app hides its screen from capture, the
-/// state card or strip, and toasts.
+/// surface, a wireframe where the app hides its screen from capture, and
+/// the state card or strip. (Toasts go in the chrome, off the picture.)
 struct RemoteStage: View {
     let app: AppModel
     let session: DeviceSession
     @Binding var zoom: CGFloat
     var resetZoom: Int
     let onAction: (PhoneAction) -> Void
+    @Environment(\.pictureFrameSink) private var pictureFrameSink
 
     var body: some View {
         ZStack {
@@ -549,6 +553,7 @@ struct RemoteStage: View {
                     dimmed: p.dimsPicture,
                     resetZoom: resetZoom,
                     onZoom: { zoom = $0 },
+                    onPictureFrame: { pictureFrameSink($0) },
                     overlay: session.redactedImage,
                     accessibilityLabel: String(localized: "\(session.name) 的屏幕"),
                     accessibilityActions: [
@@ -558,7 +563,6 @@ struct RemoteStage: View {
                     ]), onAction: onAction)
             }
             StatusOverlay(app: app, session: session)
-            ToastLayer(text: session.toast ?? app.toast)
         }
     }
 }
