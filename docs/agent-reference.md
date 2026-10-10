@@ -489,17 +489,33 @@ where they stopped.
   `GET /agent/apps?query=`. Spotlight + typing is
   the slow path and breaks under the Chinese IME.
 - **Do Not Disturb is automatic** when the intents registry lists the bridge's
-  `focus_on` / `focus_off` verbs. The session's first action runs `focus_on`
-  (Shortcuts flashes ~5 s, then the previous app comes back); releasing the
-  phone (`phone_release_owner`), idling out or handing it to a person runs
-  `focus_off`. The response that did it carries `agent_focus` — tell the user:
+  `focus_on` / `focus_off` verbs. Running the bridge brings the Shortcuts app
+  to the front for ~2 s, so the daemon runs `focus_on` only at a quiet moment
+  of your session, before your action and never in the middle of it:
+  - never while a person drives (owner `ios-remote`, or the phone handed to a
+    person) and never while a live view is open (`viewer_count` > 0: the web
+    panel, the iPhone Use app, a recording) — it waits until nobody watches;
+  - only when your action is `launch_app` (single or the first step of a batch:
+    your launch replaces Shortcuts, nothing else flashes) or the phone is on the
+    Home Screen (looked at no more than every 15 s). Inside an app it waits.
+
+  Releasing the phone (`phone_release_owner`), idling out or handing it to a
+  person runs `focus_off`. The response that turned it on carries
+  `agent_focus` — tell the user:
   - `requested_on` / `requested_off`: DND on for your session / off again; the
     phone shows a notice each time.
   - `left_as_is`: a Focus was already on; it is left alone, also on release.
-  - `waiting_for_permission`, with the action refused as
-    `focus_permission_pending` (`not_sent`, retry-safe): a one-time iOS prompt
-    for the bridge (allow notifications) is on screen. It is not in the element
-    tree — screenshot, tap **Allow / 允许**, then send the action again.
+  - `needs_permission`: the bridge is held by a one-time iOS prompt (allow
+    notifications). Your action was still sent, on the phone as it was (the
+    prompt is not left in front of it), and this session does not try again.
+    Ask the user to open Shortcuts and answer the prompt with **Always Allow /
+    始终允许**; the next session gets DND without it.
+
+  `GET /agent/status` → `agent_focus: {engaged, attempted, last}`, where `last`
+  is the gate's latest `outcome` (`waiting` with `reason`
+  `live_viewer` / `human_owner` / `in_app`, `turned_on`, `left_as_is`,
+  `needs_permission`), `at_ms` (Unix ms) and `elapsed_ms`. The request it
+  happened in also carries it in `agent-timing.jsonl` as `notes.agent_focus`.
   Banners otherwise hijack taps (hardware-seen: a chat banner opened WeChat; a
   recurring alert banner broke flow runs). Opt out with `PHONE_REMOTE_AUTO_FOCUS=0`.
 
