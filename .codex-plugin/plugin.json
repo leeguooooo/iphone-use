@@ -1,0 +1,32 @@
+{
+  "name": "iphone-use",
+  "version": "0.17.12",
+  "description": "Drive a real iPhone from your agent: read the screen as text, tap, type, scroll and replay saved per-app flows through the iphone-use daemon on your Mac.",
+  "author": {
+    "name": "leeguooooo",
+    "url": "https://github.com/leeguooooo"
+  },
+  "homepage": "https://github.com/leeguooooo/iphone-use",
+  "repository": "https://github.com/leeguooooo/iphone-use",
+  "license": "MIT",
+  "keywords": ["iphone", "ios", "mobile", "automation", "xctest", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "iPhone Use",
+    "shortDescription": "Let your agent operate a real iPhone",
+    "longDescription": "Operate the apps on your own iPhone that have no API: Health, banking, chat apps and the rest. The iphone-use daemon on your Mac drives the phone through its own XCTest runner over USB or Wi-Fi. The agent reads each screen as a text list of elements, acts on what it names, and replays saved per-app flows in one call. The daemon is installed separately with one curl line; iphone-use doctor then says what the Mac, Xcode or the phone still needs.",
+    "developerName": "leeguooooo",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/leeguooooo/iphone-use",
+    "privacyPolicyURL": "https://github.com/leeguooooo/iphone-use/blob/main/docs/privacy.md",
+    "defaultPrompt": [
+      "Install iphone-use, run iphone-use doctor, and walk me through anything it says I have to do on the phone.",
+      "Check that my iPhone is drivable, then open Settings and tell me which iOS version it runs.",
+      "用 iPhone Use 打开健康 App，告诉我今天走了多少步。"
+    ],
+    "logo": "./assets/icon-1024.png",
+    "composerIcon": "./assets/icon-1024.png"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "iphone-use",
+  "interface": {
+    "displayName": "iPhone Use"
+  },
+  "plugins": [
+    {
+      "name": "iphone-use",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/leeguooooo/iphone-use.git"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
