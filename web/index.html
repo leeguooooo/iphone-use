@@ -362,6 +362,20 @@
     #trail circle { fill: rgba(255,255,255,.95); }
     #trail.fade { transition: opacity .45s .1s; opacity: 0; }
 
+    /* stalled: connected but no new frame for a moment — dim the frozen
+       picture and say so on the screen itself, without blocking input */
+    #screen.stalled .frame { filter: saturate(.35) brightness(.78); transition: filter .3s; }
+    #stallPill {
+      position: absolute; left: 50%; top: 9%; z-index: 14; transform: translateX(-50%);
+      display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+      padding: 7px 13px; border-radius: 999px;
+      background: rgba(12,14,20,.82); color: #fff; border: 1px solid rgba(255,255,255,.14);
+      font: 650 var(--fs-s)/1 var(--sans); box-shadow: var(--shadow-m);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      pointer-events: none;
+    }
+    #stallPill .ol-spinner { display: block; }
+    #metrics b.warn, #metrics .warn { color: var(--warn); }
     /* keyboard capture: an invisible textarea keeps IME composition native */
     #keyCatcher {
       position: absolute; left: 50%; bottom: 18%; width: 2px; height: 24px;
@@ -886,6 +900,9 @@
         </div>
         <textarea id="keyCatcher" aria-label="键盘输入到 iPhone" tabindex="-1"
                   autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        <div id="stallPill" role="status" aria-live="polite" hidden>
+          <span class="ol-spinner" aria-hidden="true"></span><span>画面卡住 · 正在恢复…</span>
+        </div>
         <div id="typingHint" aria-hidden="true">键盘直达手机 <kbd>Esc</kbd> 退出</div>
 
         <!-- state layer: a chip for transient states, a card when the phone is unusable -->
@@ -5334,7 +5351,33 @@ function syncOwnerBadge(status) {
 
 /* ── Metrics: what the picture and the controls cost right now ───── */
 let renderedFrames = 0, frameRate = null, frameRateAt = performance.now();
-function noteRenderedFrame() { renderedFrames++; }
+let lastRenderedAt = null;
+function noteRenderedFrame() {
+  renderedFrames++;
+  lastRenderedAt = performance.now();
+  if (screenEl.classList.contains('stalled')) syncStallIndicator();
+}
+/* A frozen frame must not look live. While the page is connected and showing
+   the H.264 picture, more than STALL_AFTER_MS without a decoded frame dims the
+   picture and puts a pill on the screen; the next frame clears it. Input is
+   not touched here: readiness keeps its own (longer) freshness rule. */
+const STALL_AFTER_MS = 1500;
+let pictureStalled = false;
+function syncStallIndicator() {
+  const now = performance.now();
+  const stalled = overlayState === 'hidden' &&
+    document.visibilityState === 'visible' &&
+    directFeedActive &&
+    h264Frame.classList.contains('active') &&
+    lastRenderedAt !== null &&
+    now - lastRenderedAt > STALL_AFTER_MS;
+  if (stalled === pictureStalled) return;
+  pictureStalled = stalled;
+  screenEl.classList.toggle('stalled', stalled);
+  document.getElementById('stallPill').hidden = !stalled;
+  renderMetrics();
+}
+setInterval(syncStallIndicator, 250);
 let controlRttMs = null;
 function noteControlRtt(ms) {
   if (!Number.isFinite(ms) || ms < 0) return;
@@ -5351,7 +5394,7 @@ function renderMetrics() {
   const parts = [];
   const live = overlayState === 'hidden' && document.visibilityState === 'visible';
   if (h264Frame.classList.contains('active')) {
-    parts.push(['H.264', live && frameRate != null ? `${frameRate} fps` : '']);
+    parts.push(['H.264', live && frameRate != null ? `${frameRate} fps` : '', pictureStalled]);
   } else if (mjpegFrame.classList.contains('active')) {
     parts.push(['MJPEG', '']);
   } else if (stillFrame.classList.contains('active')) {
@@ -5362,10 +5405,16 @@ function renderMetrics() {
   const transport = TRANSPORT_LABEL[backendStatus?.transport];
   if (transport) parts.push([transport, '']);
   const nodes = [];
-  parts.forEach(([strong, rest], i) => {
+  parts.forEach(([strong, rest, warn], i) => {
     if (i) { const sep = document.createElement('span'); sep.className = 'sep'; sep.textContent = '·'; nodes.push(sep); }
     const b = document.createElement('b'); b.textContent = strong; nodes.push(b);
-    if (rest) nodes.push(document.createTextNode(rest));
+    if (warn) b.className = 'warn';
+    if (rest) {
+      const span = document.createElement('span');
+      span.textContent = ' ' + rest;
+      if (warn) span.className = 'warn';
+      nodes.push(span);
+    }
   });
   const text = parts.map(p => p.join(' ')).join(' · ');
   if (metricsEl.dataset.text !== text) {

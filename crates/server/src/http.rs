@@ -17222,6 +17222,9 @@ mod tests {
         assert!(INDEX_HTML.contains("type: 'scroll'"));
         assert!(INDEX_HTML.contains("'phone_owned'"));
         assert!(INDEX_HTML.contains("id=\"device\""));
+        // A frozen picture says so on the screen itself.
+        assert!(INDEX_HTML.contains("id=\"stallPill\""));
+        assert!(INDEX_HTML.contains("const STALL_AFTER_MS = 1500;"));
     }
 
     #[test]
