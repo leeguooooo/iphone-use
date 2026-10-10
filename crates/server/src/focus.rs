@@ -55,7 +55,11 @@ pub fn is_human_owner(owner: Option<&str>) -> bool {
 
 /// Why Do Not Disturb must not run now, whatever the phone shows: a person
 /// is driving or watching. `None` = nobody would see the Shortcuts app.
-pub fn blocker(owner: Option<&str>, human_handoff: bool, live_viewers: usize) -> Option<&'static str> {
+pub fn blocker(
+    owner: Option<&str>,
+    human_handoff: bool,
+    live_viewers: usize,
+) -> Option<&'static str> {
     if human_handoff || is_human_owner(owner) {
         Some("human_owner")
     } else if live_viewers > 0 {
@@ -151,7 +155,12 @@ impl AgentFocus {
 
     /// Record a gate outcome (`ran`, `waiting`, …) with its time. Returns
     /// true the first time a session waits for this reason (log it then).
-    pub fn note(&mut self, outcome: &str, reason: Option<&'static str>, elapsed_ms: Option<u64>) -> bool {
+    pub fn note(
+        &mut self,
+        outcome: &str,
+        reason: Option<&'static str>,
+        elapsed_ms: Option<u64>,
+    ) -> bool {
         self.last = Some(serde_json::json!({
             "outcome": outcome,
             "reason": reason,
