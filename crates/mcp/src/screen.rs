@@ -138,6 +138,12 @@ pub fn status_summary(status: &StatusResponse, own_owner: &str) -> Value {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty());
     let blocked_on = status.setup_blocked_on.as_deref().filter(|b| !b.is_empty());
+    // A private hold: the person is signing in, so there is no frame to show.
+    let private_secs = status
+        .extra
+        .get("screen_private_secs")
+        .and_then(Value::as_u64)
+        .filter(|secs| *secs > 0);
     json!({
         "phone": text("name"),
         "model": text("model"),
@@ -150,6 +156,7 @@ pub fn status_summary(status: &StatusResponse, own_owner: &str) -> Value {
         "hint": status.hint,
         "blocked_on": blocked_on,
         "next_step": next_step,
+        "private_secs": private_secs,
     })
 }
 
@@ -164,11 +171,16 @@ pub fn frame_result(
         Ok(summary) => (summary, None),
         Err(e) => (json!({}), Some(e)),
     };
+    // While the screen is private the refused screenshot is expected, and no
+    // frame is shown even if one raced the hold.
+    let private = !body["private_secs"].is_null();
+    let frame = if private { Ok(Vec::new()) } else { frame };
     let (frame, frame_error) = match frame {
         Ok(bytes) if !bytes.is_empty() => (
             json!({ "mime_type": "image/png", "data": B64.encode(&bytes) }),
             None,
         ),
+        Ok(_) if private => (Value::Null, None),
         Ok(_) => (
             Value::Null,
             Some("the screenshot came back empty".to_string()),
@@ -207,6 +219,24 @@ mod tests {
                 .unwrap();
         let summary = status_summary(&ready, "me");
         assert!(summary["blocked_on"].is_null() && summary["next_step"].is_null());
+    }
+
+    #[test]
+    fn a_private_screen_sends_no_frame_and_no_error() {
+        let status: StatusResponse = serde_json::from_value(json!({
+            "ok": true, "drivable": true, "screen_private_secs": 90,
+        }))
+        .unwrap();
+        let summary = status_summary(&status, "me");
+        assert_eq!(summary["private_secs"], 90);
+        let result = frame_result(Ok(summary), Ok(vec![1, 2, 3]));
+        let body = result.structured_content.unwrap();
+        assert!(body["frame"].is_null(), "a frame that raced the hold is dropped");
+        assert!(body["error"].is_null());
+
+        let open: StatusResponse =
+            serde_json::from_value(json!({"ok": true, "screen_private_secs": 0})).unwrap();
+        assert!(status_summary(&open, "me")["private_secs"].is_null());
     }
 
     #[test]

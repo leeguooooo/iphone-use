@@ -138,7 +138,7 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| `GET` | `/agent/status` | 就绪与生命周期：`backend`、`device_state`、`drivable`、`wda_actionable`、`recovery_owner`、`setup_blocked_on` / `setup_phase` / `setup_message`、`hint`、viewer 计数、`instance`、`udid`、`owner` / `owner_lease_remaining_secs`、`hold_remaining_secs`、`idle_secs`（距上一次 agent 请求的秒数，轮询状态不算）、`capture_redacted`（正在看的画面因为 App 禁止截屏而是空白的）、`version` / `latest`。 |
+| `GET` | `/agent/status` | 就绪与生命周期：`backend`、`device_state`、`drivable`、`wda_actionable`、`recovery_owner`、`setup_blocked_on` / `setup_phase` / `setup_message`、`hint`、viewer 计数、`instance`、`udid`、`owner` / `owner_lease_remaining_secs`、`hold_remaining_secs`、`screen_private_secs`（私密 hold：有人正在手机上验证身份，这段时间不读屏幕）、`idle_secs`（距上一次 agent 请求的秒数，轮询状态不算）、`capture_redacted`（正在看的画面因为 App 禁止截屏而是空白的）、`version` / `latest`。 |
 | `GET` | `/agent/screenshot` | 当前屏幕 PNG，来自手机。遇到 App 禁止截屏的界面，返回的是把控件树画在空白处的线框图，响应头带 `X-Capture-Redacted: 1`；`?raw=1` 返回原始截图。 |
 | `GET` | `/agent/elements` | 扁平化的辅助功能树，带一次性 `snapshot` 令牌、`ax_stats` 可用性块，以及系统弹窗在场时的 `alert` 块。`?since=<snapshot>` 只返回 `delta`。WDA 缺失或繁忙 `503`，source 失败 `502`，不会用空数组伪装 `200`。 |
 | `GET` | `/agent/mjpeg` | 鉴权后的实时 MJPEG。 |

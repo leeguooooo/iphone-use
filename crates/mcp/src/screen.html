@@ -147,7 +147,8 @@
   function describe(body) {
     const name = body.phone || body.model || "iPhone";
     const parts = [name];
-    if (body.released) parts.push("released");
+    if (body.private_secs) parts.push("private");
+    else if (body.released) parts.push("released");
     else if (body.locked) parts.push("locked");
     else if (body.drivable === true) parts.push("drivable");
     else if (body.drivable === false) parts.push("not drivable" + (body.blocked_on ? " (" + body.blocked_on + ")" : body.state ? " (" + body.state + ")" : ""));
@@ -163,6 +164,14 @@
     let text = describe(body);
     if (body.error && !body.frame) text += " — " + body.error;
     else if (body.drivable === false && (body.next_step || body.hint)) text += " — " + (body.next_step || body.hint);
+    if (body.private_secs) {
+      setStatus("warn", describe(body));
+      image.hidden = true;
+      image.removeAttribute("src");
+      empty.textContent = "Someone is signing in on the phone. The screen stays hidden until the agent continues.";
+      empty.hidden = false;
+      return false;
+    }
     setStatus(tone, text);
     const frame = body.frame;
     if (frame && typeof frame.data === "string" && frame.data.length > 0

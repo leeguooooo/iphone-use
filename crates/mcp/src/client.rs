@@ -421,12 +421,12 @@ impl DaemonClient {
         Ok(text)
     }
 
-    pub async fn hold(&self, secs: u64) -> anyhow::Result<String> {
+    pub async fn hold(&self, secs: u64, private: bool) -> anyhow::Result<String> {
         let req = self
             .auth(self.client.post(self.url("/agent/hold")))
             .header("x-phone-control", "1")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(format!(r#"{{"secs":{secs}}}"#));
+            .body(serde_json::json!({ "secs": secs, "private": private }).to_string());
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
         Ok(resp.text().await?)

@@ -642,6 +642,11 @@ pub struct ScrollFindParams {
 pub struct HoldParams {
     /// Seconds to keep the phone (0 clears the hold; at most 14400).
     pub secs: u64,
+    /// The person is signing in (passcode, Face ID, a code): nothing reads
+    /// the screen until the hold ends or is cleared — screenshots, elements
+    /// and live views are refused with `screen_private`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>,
 }
 
 impl PhoneHandler {
@@ -1404,13 +1409,15 @@ impl PhoneHandler {
         description = "Keep the phone for a bounded human-in-the-loop pause inside the \
         current user-requested task (the operator types a PIN, approves a prompt, \
         fetches a code): the idle watchdog will not release it for `secs` seconds \
-        (0 clears the hold; max 14400). Not for initialization, health checks, or \
+        (0 clears the hold; max 14400). When the person signs in (passcode, Face ID, \
+        a code), pass private=true: the screen is not read or streamed until you clear \
+        the hold. Not for initialization, health checks, or \
         keeping the phone ready; clear it when the step is done. Fails with \
         device_release_in_progress if the daemon is already releasing, and with \
         phone_owned if another session holds the phone lease."
     )]
     async fn phone_hold(&self, Parameters(params): Parameters<HoldParams>) -> CallToolResult {
-        match self.daemon.hold(params.secs).await {
+        match self.daemon.hold(params.secs, params.private.unwrap_or(false)).await {
             Ok(body) => CallToolResult::success(vec![Content::text(body)]),
             Err(e) => CallToolResult::error(vec![Content::text(format!("hold failed: {e:#}"))]),
         }

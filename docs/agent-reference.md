@@ -115,7 +115,11 @@ prevents idle release; it does not start WDA or prove readiness. Never use it
 to keep the phone ready without a task. Taking a hold extends your owner
 lease to cover it, so no other session can drive the phone during the pause.
 A live owner lease also prevents idle release; the idle window starts when you
-release it.
+release it. `"private":true` (MCP `phone_hold(secs, private=true)`) is for the
+person signing in: until the hold ends or is cleared nobody reads the screen —
+screenshots, `/agent/elements` and live video answer `423 screen_private`, open
+streams end, and status shows `screen_private_secs`. A later hold without
+`private` lifts it.
 
 **Pre-warm.** A released phone may already be coming back when you look:
 `warming:true` means the daemon started the bring-up ahead of time (MCP does
@@ -551,8 +555,9 @@ Face ID / Touch ID, an app passcode or PIN, a one-time code with no source
 `phone_login` can read, a login `phone_login` could not finish, or a payment
 confirmation: these belong to the person.
 
-1. Stop sending input. Take `phone_hold(secs)` so the phone stays ready while
-   they act.
+1. Stop sending input. Take `phone_hold(secs, private=true)` (HTTP
+   `{"secs":N,"private":true}`): the phone stays ready while they act, and
+   nothing reads or streams its screen until you clear the hold.
 2. Ask with the host's question tool (for example `AskUserQuestion` in Claude
    Code, `request_user_input` in Codex), not a line in your reply. Name the app, what the screen
    asks for and what you will do next; offer "Done, continue" and "Can't right
@@ -561,7 +566,7 @@ confirmation: these belong to the person.
    only in some modes); then wait for the person's reply.
 3. Never ask for the password, PIN or code, and never type one with
    `phone_type` or a batch, even when the field is not marked secure.
-4. After "Done": clear the hold, read the screen again (`phone_elements`) and
+4. After "Done": clear the hold (`phone_hold(0)`), read the screen again (`phone_elements`) and
    plan from what is there. The person may have moved on; old snapshots,
    element ids and coordinates are stale. If something was submitted during
    the hand-off, read the result before resending anything.
