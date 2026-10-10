@@ -407,7 +407,7 @@ collapse into one. `stop_reason`:
 | `duplicate_page` | After a swipe the page was the same: the list did not move (its end, or the swipe hit something that does not scroll) |
 | `no_progress` | The list moved but showed nothing new |
 | `max_pages` | Page budget used up; more rows may follow |
-| `deadline` | The 80 s call budget ran out |
+| `deadline` | Too little of the 80 s call budget was left to swipe and read another page |
 | `read_failed` / `swipe_failed` | Stopped early; rows so far are returned, no snapshot |
 | `no_rows` | No row of that kind on the first page: check `row_kind` or `region` |
 

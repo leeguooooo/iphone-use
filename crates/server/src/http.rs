@@ -10965,7 +10965,7 @@ async fn agent_scroll_find(
         if swipes >= request.max_swipes {
             break verdict;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if crate::collect::too_late_to_swipe(deadline) {
             stop_error = Some(("deadline", "the call's time budget ran out".to_string()));
             break verdict;
         }

@@ -28,6 +28,16 @@ pub const MAX_FIND_SWIPES: u32 = 5;
 /// The whole collection, swipes and reads included. Below the MCP client's
 /// 90 s budget for this call so the daemon, not a timed-out client, answers.
 pub const COLLECT_DEADLINE: Duration = Duration::from_secs(80);
+/// Time kept for the read after a swipe: no swipe starts with less left, so
+/// the screen is never left moved without being read (a heavy tree reads in
+/// 6–7 s).
+pub const READ_RESERVE: Duration = Duration::from_secs(15);
+
+/// Too little time left to swipe and still read the page it shows.
+pub fn too_late_to_swipe(deadline: tokio::time::Instant) -> bool {
+    deadline.saturating_duration_since(tokio::time::Instant::now()) < READ_RESERVE
+}
+
 /// After a swipe, before the next read: the list decelerates for a moment.
 pub const SWIPE_SETTLE: Duration = Duration::from_millis(500);
 /// Descendant texts kept per row when the row itself has no label.
@@ -533,7 +543,7 @@ pub(crate) async fn collect<P: Pager>(
         if number >= request.max_pages {
             break StopReason::MaxPages;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if too_late_to_swipe(deadline) {
             break StopReason::Deadline;
         }
         seen_pages.push(key);
@@ -542,9 +552,6 @@ pub(crate) async fn collect<P: Pager>(
             break StopReason::SwipeFailed;
         }
         swipes += 1;
-        if tokio::time::Instant::now() >= deadline {
-            break StopReason::Deadline;
-        }
         match pager.read().await {
             Ok(next) => page = next,
             Err(e) => {
@@ -860,6 +867,24 @@ mod tests {
         );
         assert!(page_dy(844.0 * 0.6, Direction::Up) < 0.0);
         assert_eq!(page_dy(2000.0, Direction::Down), 400.0, "capped");
+    }
+
+    #[test]
+    fn no_swipe_starts_without_time_to_read_its_page() {
+        let mut pager = Scripted::new(vec![screen_of(&[("A", 100.0)]), screen_of(&[("B", 100.0)])]);
+        let request = request(serde_json::json!({}));
+        let collection = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(collect(
+                &mut pager,
+                &request,
+                tokio::time::Instant::now() + READ_RESERVE / 2,
+            ))
+            .unwrap();
+        assert_eq!(collection.stop, StopReason::Deadline);
+        assert!(pager.swipes.is_empty(), "the screen is not moved past the budget");
     }
 
     #[test]
