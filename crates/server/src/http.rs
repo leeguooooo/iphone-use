@@ -14155,7 +14155,10 @@ async fn agent_screenshot(
     };
     match capture_with_retry(wda, request, !raw).await {
         Ok((capture, degraded)) if is_valid_capture(&capture) => {
-            let mut response = finish_screenshot(wda, capture, raw, max_side, None).await;
+            // After a smaller retry the image is held to the retry's size,
+            // whatever the runner sent.
+            let side = degraded.or(max_side);
+            let mut response = finish_screenshot(wda, capture, raw, side, None).await;
             if let Some(side) = degraded {
                 if let Ok(value) = header::HeaderValue::from_str(&format!("max_side={side}")) {
                     response.headers_mut().insert("x-screenshot-degraded", value);
