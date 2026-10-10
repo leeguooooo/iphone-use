@@ -31,7 +31,7 @@ mod onboarding;
 /// PID file name inside the runtime dir.
 const PID_FILE: &str = "iphone-use.pid";
 /// Secret file name inside the runtime dir.
-const SECRET_FILE: &str = "secret";
+const SECRET_FILE: &str = server::runtime_dir::SECRET_FILE;
 const PID_RECORD_VERSION: u8 = 1;
 const STOP_WAIT_SECS: u64 = 5;
 /// Seconds to sleep before exiting on an unattended startup failure, so a
@@ -1561,7 +1561,16 @@ fn write_pid(dir: &std::path::Path) -> Result<Vec<u8>> {
 
 fn stop() -> Result<()> {
     let dir = server::runtime_dir::runtime_dir().context("locate runtime dir")?;
-    let path = dir.join(PID_FILE);
+    let mut path = dir.join(PID_FILE);
+    // A daemon started before the runtime directory was renamed keeps its pid
+    // record in the old one.
+    if path.symlink_metadata().is_err() {
+        if let Some(legacy) = server::runtime_dir::legacy_runtime_dir() {
+            if legacy.join(PID_FILE).symlink_metadata().is_ok() {
+                path = legacy.join(PID_FILE);
+            }
+        }
+    }
     let contents = match read_pid_file(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
