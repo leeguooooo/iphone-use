@@ -4471,9 +4471,12 @@ impl Setup {
     /// The signed legacy app, reused while nothing that goes into it changed.
     fn legacy_app(&mut self, built: &Path, key: &str) -> Step<(PathBuf, String)> {
         let (profile, identity) = self.legacy_signing(built)?;
+        // The recipe version: a fix to the assembly itself must not be
+        // skipped by an app the previous recipe assembled from the same inputs.
         let assembled_key = legacy_ios::sha256_hex(
             format!(
-                "{key}|{identity}|{}|{}",
+                "r{}|{key}|{identity}|{}|{}",
+                legacy_ios::ASSEMBLY_RECIPE,
                 legacy_ios::sha256_hex(&profile),
                 legacy_ios::sha256_hex(legacy_ios::host_source(&self.ctx).as_bytes())
             )
