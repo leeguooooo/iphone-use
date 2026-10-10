@@ -8661,7 +8661,7 @@ fn runner_failure_outcome(
         return WdaControlOutcome::RunnerRejected;
     }
     // A WDA call that should have worked failed. Callers fail closed.
-    actionable.store(false, Ordering::Relaxed);
+    actionable.store(false, Ordering::Release);
     w.invalidate_session();
     tracing::warn!("wda control ({typ}): {error:#}");
     WdaControlOutcome::Failed
