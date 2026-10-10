@@ -115,6 +115,17 @@ pub struct ScreenshotParams {
     pub max_side: Option<u32>,
 }
 
+/// Parameters for [`phone_screen_frame`] (called by the screen panel only).
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ScreenFrameParams {
+    /// Longest side of the frame in pixels (200–1000, default 600).
+    #[serde(default)]
+    pub max_side: Option<u32>,
+    /// Capture now instead of reusing the settled or live frame.
+    #[serde(default)]
+    pub fresh: Option<bool>,
+}
+
 /// Parameters for [`phone_key`].
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct KeyParams {
@@ -907,10 +918,59 @@ impl PhoneHandler {
                 }
                 let json =
                     serde_json::to_string(&s).unwrap_or_else(|_| r#"{"ok":true}"#.to_string());
-                CallToolResult::success(vec![Content::text(json)])
+                crate::screen::with_panel_session(CallToolResult::success(vec![Content::text(
+                    json,
+                )]))
             }
             Err(e) => CallToolResult::error(vec![Content::text(format!("status failed: {e:#}"))]),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // phone_screen / phone_screen_frame (MCP Apps live panel, see screen.rs)
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Open the live iPhone screen panel beside the chat, or reuse the one \
+        already open, in hosts that render MCP Apps: the person watches the phone while you \
+        work and can press Home or refresh. Read-only: takes no owner lease and wakes \
+        nothing. Returns a short status (phone, drivable, owner). Open it once when the \
+        person wants to watch; it never replaces phone_elements or phone_screenshot for \
+        your own observation. Hosts without MCP Apps show no panel."
+    )]
+    async fn phone_screen(&self) -> CallToolResult {
+        let text = match self.daemon.status().await {
+            Ok(status) => {
+                let mut summary = crate::screen::status_summary(&status, self.daemon.owner());
+                summary["panel"] = serde_json::json!(crate::screen::screen_uri());
+                summary.to_string()
+            }
+            Err(e) => format!("panel opened; status failed: {e:#}"),
+        };
+        crate::screen::with_panel_session(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        description = "Internal: one frame for the iphone-use screen panel. Called by the \
+        panel itself (MCP Apps visibility [\"app\"]); models use phone_screenshot instead."
+    )]
+    async fn phone_screen_frame(
+        &self,
+        Parameters(ScreenFrameParams { max_side, fresh }): Parameters<ScreenFrameParams>,
+    ) -> CallToolResult {
+        let side = max_side
+            .unwrap_or(crate::screen::DEFAULT_FRAME_SIDE)
+            .clamp(200, 1000);
+        let (status, frame) = tokio::join!(
+            self.daemon.status(),
+            self.daemon.screen_frame(side, fresh.unwrap_or(false))
+        );
+        crate::screen::frame_result(
+            status
+                .map(|s| crate::screen::status_summary(&s, self.daemon.owner()))
+                .map_err(|e| format!("status failed: {e:#}")),
+            frame.map_err(|e| format!("{e:#}")),
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -1716,6 +1776,22 @@ fn slim_tools(tools: Vec<rmcp::model::Tool>) -> Vec<rmcp::model::Tool> {
         .collect()
 }
 
+/// [`shape_structured`] for every tool but the panel's frame tool: a frame
+/// is read by the panel, never the model, and its base64 image must reach
+/// `structuredContent` whole.
+fn finish_result(tool: &str, result: CallToolResult, mode: StructuredMode) -> CallToolResult {
+    if tool == crate::screen::FRAME_TOOL {
+        result
+    } else {
+        shape_structured(result, mode)
+    }
+}
+
+/// What `tools/list` answers: slimmed schemas plus the MCP Apps `_meta`.
+fn listed_tools() -> Vec<rmcp::model::Tool> {
+    crate::screen::decorate_tools(slim_tools(PhoneHandler::tool_router().list_all()))
+}
+
 /// How much of a result's JSON goes out as `structuredContent`
 /// (`IPHONE_USE_MCP_STRUCTURED`).
 ///
@@ -1797,9 +1873,10 @@ impl ServerHandler for PhoneHandler {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let name = request.name.clone();
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let result = Self::tool_router().call(tcc).await?;
-        Ok(shape_structured(result, StructuredMode::from_env()))
+        Ok(finish_result(&name, result, StructuredMode::from_env()))
     }
 
     async fn list_tools(
@@ -1808,14 +1885,43 @@ impl ServerHandler for PhoneHandler {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult {
-            tools: slim_tools(Self::tool_router().list_all()),
+            tools: listed_tools(),
             meta: None,
             next_cursor: None,
         })
     }
 
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
+        Ok(rmcp::model::ListResourcesResult::with_all_items(
+            crate::screen::resources(),
+        ))
+    }
+
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResult, rmcp::ErrorData> {
+        match crate::screen::read(&request.uri) {
+            Some(contents) => Ok(rmcp::model::ReadResourceResult::new(vec![contents])),
+            None => Err(rmcp::ErrorData::resource_not_found(
+                format!("unknown resource {}", request.uri),
+                None,
+            )),
+        }
+    }
+
     fn get_info(&self) -> rmcp::model::ServerInfo {
-        InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+        InitializeResult::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
                 "iphone-use-mcp",
@@ -2795,10 +2901,12 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            26,
+            28,
             "tool count changed; update README, the skill, and the CI assertion: {names:?}"
         );
         for required in [
+            "phone_screen",
+            "phone_screen_frame",
             "phone_login",
             "phone_jev_run",
             "phone_flow_draft",
@@ -3193,6 +3301,67 @@ mod tests {
         let text = serde_json::to_string(&tools).unwrap();
         assert!(!text.contains("\"$schema\""), "no meta-schema URIs left");
         assert_eq!(tools.len(), PhoneHandler::tool_router().list_all().len());
+    }
+
+    #[test]
+    fn tools_list_carries_the_mcp_apps_meta() {
+        let tools = serde_json::to_value(listed_tools()).unwrap();
+        let tools = tools.as_array().unwrap();
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{name} listed"))
+        };
+        let uri = crate::screen::screen_uri();
+        for name in ["phone_screen", "phone_status"] {
+            let tool = find(name);
+            assert_eq!(tool["_meta"]["ui"]["resourceUri"], uri, "{name}: {tool}");
+            assert!(
+                tool["_meta"]["ui"].get("visibility").is_none(),
+                "{name} stays model-visible"
+            );
+        }
+        assert_eq!(
+            find("phone_screen")["_meta"]["openai/ui"]["entrypoints"][0]["type"],
+            "thread"
+        );
+        let frame = find("phone_screen_frame");
+        assert_eq!(
+            frame["_meta"]["ui"]["visibility"],
+            serde_json::json!(["app"])
+        );
+        assert!(frame["_meta"]["ui"].get("resourceUri").is_none());
+        // Nothing else gains MCP Apps metadata.
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
+            if !["phone_screen", "phone_status", "phone_screen_frame"].contains(&name) {
+                assert!(tool.get("_meta").is_none(), "{name} has no _meta: {tool}");
+            }
+        }
+        assert_eq!(tools.len(), 28, "26 tools before the panel, plus two");
+    }
+
+    #[test]
+    fn a_panel_frame_skips_structured_shaping() {
+        let status = serde_json::json!({"phone": "x", "drivable": true});
+        let frame = crate::screen::frame_result(Ok(status), Ok(vec![7; 600]));
+        let kept = finish_result("phone_screen_frame", frame.clone(), StructuredMode::Slim);
+        let data = kept.structured_content.unwrap()["frame"]["data"].clone();
+        assert!(
+            data.as_str().unwrap().len() > SLIM_STRING_LIMIT,
+            "base64 frame intact"
+        );
+        // Any other tool would have lost it.
+        let shaped = finish_result("phone_screenshot", frame, StructuredMode::Slim);
+        assert!(shaped.structured_content.unwrap().get("frame").is_none());
+    }
+
+    #[test]
+    fn the_server_advertises_resources() {
+        let info = serde_json::to_value(handler_for("http://127.0.0.1:9").get_info()).unwrap();
+        assert!(info["capabilities"]["resources"].is_object(), "{info}");
+        assert!(info["capabilities"]["tools"].is_object(), "{info}");
     }
 
     #[test]

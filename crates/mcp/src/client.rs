@@ -89,6 +89,9 @@ const ELEMENTS_TIMEOUT: Duration = Duration::from_secs(45);
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(45);
 const ACTIONS_TIMEOUT: Duration = Duration::from_secs(90);
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+/// One live-panel frame: a WDA capture takes 0.5–1.5 s, the cached paths
+/// milliseconds; anything slower is skipped and the next poll tries again.
+const SCREEN_FRAME_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_ERROR_BODY_CHARS: usize = 2_048;
 
 /// Thin async wrapper over the daemon's `GET /agent/*` and
@@ -572,6 +575,27 @@ impl DaemonClient {
         let resp = check_status(resp).await?;
         let bytes = resp.bytes().await?;
         Ok(bytes.to_vec())
+    }
+
+    /// [`Self::screenshot`] for the live screen panel: always sized, `fresh`
+    /// only when the person pressed refresh, and a short deadline so a stuck
+    /// capture shows up as a stale frame instead of a frozen panel.
+    pub async fn screen_frame(&self, max_side: u32, fresh: bool) -> anyhow::Result<Vec<u8>> {
+        let mut path = format!("/agent/screenshot?max_side={max_side}");
+        if fresh {
+            path.push_str("&fresh=1");
+        }
+        let req = self
+            .auth(self.client.get(self.url(&path)))
+            .timeout(SCREEN_FRAME_TIMEOUT);
+        let resp = check_status(req.send().await?).await?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// The `X-Phone-Owner` this client presents, so a status reader can tell
+    /// whether the lease holder is this session.
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
 
     /// `GET /agent/elements` — the phone's UI as a flattened element list

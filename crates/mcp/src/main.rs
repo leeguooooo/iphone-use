@@ -36,6 +36,7 @@ mod jev;
 mod outputs;
 mod registry;
 mod schedule;
+mod screen;
 mod server;
 mod suite;
 mod types;
