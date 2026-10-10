@@ -39,7 +39,7 @@ jobs:
       # is attached, and reaching for one would hang rather than fail. Point
       # the daemon URL at a port nothing listens on so any code that tried
       # would fail fast and visibly.
-      PHONE_REMOTE_URL: http://127.0.0.1:1
+      IPHONE_USE_URL: http://127.0.0.1:1
 
     steps:
       - name: Checkout repository

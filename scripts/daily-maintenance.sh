@@ -22,7 +22,7 @@
 
 set -uo pipefail
 
-REPO="${REPO:-/Users/leo/github.com/iphone-remote-panel}"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 LOG="${LOG:-$HOME/Library/Logs/iphone-use-daily-maintenance.log}"
 LOCK="${LOCK:-/tmp/iphone-use-daily-maintenance.lock}"
 RELEASE="${RELEASE:-1}"

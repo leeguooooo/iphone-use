@@ -23,7 +23,7 @@
 //! is handled by keeping only a runner that is *up*: a runner that is already
 //! down is still released, which stops the relaunches.
 //!
-//! `PHONE_REMOTE_IDLE_RELEASE=force` turns the exception off: the owner would
+//! `IPHONE_USE_IDLE_RELEASE=force` turns the exception off: the owner would
 //! rather have the phone released when idle than kept in automation mode.
 
 use std::path::Path;
@@ -73,12 +73,12 @@ impl Because {
     pub fn hint(self) -> (&'static str, &'static str) {
         match self {
             Self::Passcode => (
-                "这台手机设了锁屏密码，每次启动设备服务都要有人在手机上输入密码，所以空闲时不停掉设备服务：手机会一直处在自动化模式，屏幕照常自动锁定。想让它空闲时照常释放，设置 PHONE_REMOTE_IDLE_RELEASE=force。",
-                "This phone has a passcode and every start of the device service asks for it on the phone, so the service is kept running while idle: the phone stays in automation mode, and the screen still locks as usual. Set PHONE_REMOTE_IDLE_RELEASE=force to release it when idle anyway.",
+                "这台手机设了锁屏密码，每次启动设备服务都要有人在手机上输入密码，所以空闲时不停掉设备服务：手机会一直处在自动化模式，屏幕照常自动锁定。想让它空闲时照常释放，设置 IPHONE_USE_IDLE_RELEASE=force。",
+                "This phone has a passcode and every start of the device service asks for it on the phone, so the service is kept running while idle: the phone stays in automation mode, and the screen still locks as usual. Set IPHONE_USE_IDLE_RELEASE=force to release it when idle anyway.",
             ),
             Self::WifiStartRefused => (
-                "这台手机不允许通过 Wi‑Fi 启动设备服务，空闲时停掉的话要插线才能再启动，所以设备服务一直保持运行。想让它空闲时照常释放，设置 PHONE_REMOTE_IDLE_RELEASE=force。",
-                "This phone will not start the device service over Wi-Fi, so stopping it while idle would need the cable to undo; it is kept running. Set PHONE_REMOTE_IDLE_RELEASE=force to release it when idle anyway.",
+                "这台手机不允许通过 Wi‑Fi 启动设备服务，空闲时停掉的话要插线才能再启动，所以设备服务一直保持运行。想让它空闲时照常释放，设置 IPHONE_USE_IDLE_RELEASE=force。",
+                "This phone will not start the device service over Wi-Fi, so stopping it while idle would need the cable to undo; it is kept running. Set IPHONE_USE_IDLE_RELEASE=force to release it when idle anyway.",
             ),
         }
     }
@@ -95,7 +95,7 @@ pub struct Signals<'a> {
     pub passcode_protected: Option<bool>,
     /// Setup left [`RELAUNCH_NEEDS_PERSON_FILE`].
     pub passcode_marker: bool,
-    /// `PHONE_REMOTE_IDLE_RELEASE=force`.
+    /// `IPHONE_USE_IDLE_RELEASE=force`.
     pub force_release: bool,
 }
 
@@ -116,14 +116,14 @@ pub fn reason(signals: Signals<'_>) -> Option<Because> {
     }
 }
 
-/// `PHONE_REMOTE_IDLE_RELEASE=force`: release idle runners even when the next
+/// `IPHONE_USE_IDLE_RELEASE=force`: release idle runners even when the next
 /// start needs a person.
 pub fn force_release_from_env(value: Option<&str>) -> bool {
     value.is_some_and(|value| value.trim().eq_ignore_ascii_case("force"))
 }
 
 pub fn force_release() -> bool {
-    force_release_from_env(std::env::var("PHONE_REMOTE_IDLE_RELEASE").ok().as_deref())
+    force_release_from_env(std::env::var("IPHONE_USE_IDLE_RELEASE").ok().as_deref())
 }
 
 pub fn passcode_marker(state_dir: &Path) -> bool {
@@ -284,7 +284,7 @@ mod tests {
         assert!(v["hint"]["zh"]
             .as_str()
             .unwrap()
-            .contains("PHONE_REMOTE_IDLE_RELEASE=force"));
+            .contains("IPHONE_USE_IDLE_RELEASE=force"));
         assert!(v["hint"]["en"]
             .as_str()
             .unwrap()

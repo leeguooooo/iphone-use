@@ -345,7 +345,7 @@ pub struct AppState {
     /// action and POSTs the result here. Bounded ring buffer; oldest dropped.
     pub inbox: Arc<Mutex<std::collections::VecDeque<InboxItem>>>,
     /// Optional L2 element-tree control via WebDriverAgent on the phone
-    /// (`PHONE_REMOTE_WDA_URL`, e.g. `http://<phone-ip>:8100`). When present,
+    /// (`IPHONE_USE_WDA_URL`, e.g. `http://<phone-ip>:8100`). When present,
     /// agent input auto-routes through it (see [`agent_input`]): text goes in
     /// as Unicode (CJK lands cleanly), taps are synthesized on-device (no host
     /// cursor). Control fails closed on WDA errors.
@@ -355,7 +355,7 @@ pub struct AppState {
     /// Whether this daemon owns the local WDA supervisor and relay lifecycle.
     ///
     /// Only a direct backend pointed at a loopback WDA URL is managed. A remote
-    /// `PHONE_REMOTE_WDA_URL` is externally owned: this process may use it, but
+    /// `IPHONE_USE_WDA_URL` is externally owned: this process may use it, but
     /// must never stop or bootstrap local launchd jobs on its behalf.
     pub managed_wda: bool,
     /// A local Direct backend whose managed ownership is waiting for a
@@ -372,7 +372,7 @@ pub struct AppState {
     /// is configured. The `/agent/mjpeg` endpoint proxies it for live video —
     /// the MJPEG server runs inside the same XCUITest session as control.
     /// Defaults to `127.0.0.1:9100` (the relay target), override via
-    /// `PHONE_REMOTE_WDA_MJPEG_URL`.
+    /// `IPHONE_USE_WDA_MJPEG_URL`.
     pub mjpeg_url: Option<String>,
     /// The H.264 re-encoder fed from `mjpeg_url` (see [`crate::video`]);
     /// `None` where it cannot run (no WDA video, or not macOS).
@@ -1348,7 +1348,7 @@ async fn pair_new(
             serde_json::json!({
                 "ok": false,
                 "error": "loopback_only",
-                "hint": "this Mac only listens on 127.0.0.1, so a phone cannot reach it; set PHONE_REMOTE_HOST=0.0.0.0 (re-run install.sh and allow LAN access)"
+                "hint": "this Mac only listens on 127.0.0.1, so a phone cannot reach it; set IPHONE_USE_HOST=0.0.0.0 (re-run install.sh and allow LAN access)"
             }),
         );
     }
@@ -1690,7 +1690,7 @@ fn pair_form_code(body: &[u8]) -> String {
 // Agent operation entry (connect-in HTTP API)
 // ---------------------------------------------------------------------------
 //
-// An agent (Hermes, an MCP client, or a script) drives the phone by POSTing to
+// An agent (an MCP client or a script) drives the phone by POSTing to
 // this already-running daemon, which dispatches to on-device WDA.
 
 /// Extract the bytes after `Authorization: Bearer `.
@@ -2601,7 +2601,7 @@ async fn agent_status(
         ("releasing", "direct device service is being released after inactivity — wait for confirmation before reconnecting")
     } else if !wda {
         if state.managed_wda_pending {
-            ("unconfigured", "no canonical iPhone target is configured — run iphone-use setup to persist PHONE_REMOTE_UDID; until then the daemon will not stop or start the local device runner")
+            ("unconfigured", "no canonical iPhone target is configured — run iphone-use setup to persist IPHONE_USE_UDID; until then the daemon will not stop or start the local device runner")
         } else if let Some(blocker_hint) = setup_hint.as_deref() {
             ("blocker", blocker_hint)
         } else if reconnecting {
@@ -3214,8 +3214,8 @@ fn relay_ports_label() -> String {
     };
     format!(
         "{}/{}",
-        port("PHONE_REMOTE_WDA_URL", "8100"),
-        port("PHONE_REMOTE_WDA_MJPEG_URL", "9100")
+        port("IPHONE_USE_WDA_URL", "8100"),
+        port("IPHONE_USE_WDA_MJPEG_URL", "9100")
     )
 }
 
@@ -3834,8 +3834,8 @@ pub fn write_and_bootstrap_wda_agent(setup_sh: &str, log: &str, udid: &str) -> b
             "WDA_ASC_ISSUER_ID",
             // A named instance's supervisor must run its own setup copy as
             // that instance (#67); unset for the default instance.
-            "PHONE_REMOTE_INSTANCE",
-            "PHONE_REMOTE_STATE_DIR",
+            "IPHONE_USE_INSTANCE",
+            "IPHONE_USE_STATE_DIR",
         ] {
             if let Ok(value) = std::env::var(key) {
                 if !value.is_empty() {
@@ -4137,7 +4137,7 @@ fn prepare_idle_wda_probe(state: &AppState) -> bool {
 }
 
 /// Idle auto-release — the phone belongs to its owner first. When WDA is
-/// configured and nobody has driven it for `PHONE_REMOTE_IDLE_RELEASE_SECS`
+/// configured and nobody has driven it for `IPHONE_USE_IDLE_RELEASE_SECS`
 /// (default 300; `0` disables) and no viewer is streaming, stop the on-phone
 /// WDA runner and boot out its KeepAlive LaunchAgent so the device is free for
 /// hands-on use. The next `/agent/input` re-bootstraps WDA (see [`agent_input`]).
@@ -4150,7 +4150,7 @@ fn prepare_idle_wda_probe(state: &AppState) -> bool {
 const COLD_START_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Idle window before the watchdog releases the phone when
-/// `PHONE_REMOTE_IDLE_RELEASE_SECS` is unset. Five minutes: while a runner is
+/// `IPHONE_USE_IDLE_RELEASE_SECS` is unset. Five minutes: while a runner is
 /// up iOS shows its "Automation Running" overlay, so an idle phone should not
 /// keep it long; a phone wanted back soon after a release stretches the next
 /// window (see the adaptive idle window below), so steady work does not pay a
@@ -4229,13 +4229,13 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
     // iphone-use (one install logged 11,717 launches, 200 of them successful).
     // The cost that justified keeping it up is gone: a reconnect reuses the
     // cached runner product instead of rebuilding. `0` still keeps it up.
-    let idle_secs = std::env::var("PHONE_REMOTE_IDLE_RELEASE_SECS")
+    let idle_secs = std::env::var("IPHONE_USE_IDLE_RELEASE_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_IDLE_RELEASE_SECS);
     if idle_secs == 0 {
         tracing::info!(
-            "idle auto-release disabled (PHONE_REMOTE_IDLE_RELEASE_SECS=0): the runner stays up between requests"
+            "idle auto-release disabled (IPHONE_USE_IDLE_RELEASE_SECS=0): the runner stays up between requests"
         );
         return;
     }
@@ -4444,7 +4444,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                             "idle, but keeping the runner: it is up over Wi-Fi and this iPhone refused to start one over Wi-Fi (wifi_automation_refused), so a release would need the cable to undo"
                         ),
                         crate::keep_runner::Because::Passcode => tracing::info!(
-                            "idle, but keeping the runner: this iPhone has a passcode and every runner start asks for it on the phone, so a release would need a person to undo (PHONE_REMOTE_IDLE_RELEASE=force releases anyway)"
+                            "idle, but keeping the runner: this iPhone has a passcode and every runner start asks for it on the phone, so a release would need a person to undo (IPHONE_USE_IDLE_RELEASE=force releases anyway)"
                         ),
                     }
                 }
@@ -5357,7 +5357,7 @@ async fn agent_mode_inner(
     // Optional target UDID. Invalid values are rejected rather than silently
     // falling back to another phone. Once Direct has a persisted target, a
     // transient request may not switch it behind status/idle recovery's back;
-    // change PHONE_REMOTE_UDID and restart to make a target change atomic.
+    // change IPHONE_USE_UDID and restart to make a target change atomic.
     let requested_udid = parsed
         .as_ref()
         .and_then(|v| v.get("udid").and_then(|u| u.as_str()))
@@ -5374,7 +5374,7 @@ async fn agent_mode_inner(
                     .status(StatusCode::CONFLICT)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"ok":false,"error":"target_not_configured","hint":"run setup-wda.sh so PHONE_REMOTE_UDID is persisted before starting managed WDA"}"#,
+                        r#"{"ok":false,"error":"target_not_configured","hint":"run setup-wda.sh so IPHONE_USE_UDID is persisted before starting managed WDA"}"#,
                     ))
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
             );
@@ -12337,7 +12337,7 @@ async fn agent_input_inner(
                             .status(StatusCode::CONFLICT)
                             .header(header::CONTENT_TYPE, "application/json")
                             .body(Body::from(format!(
-                                r#"{{"ok":false,"error":"target_required","connected_candidates":{count},"hint":"configure PHONE_REMOTE_UDID or pass an explicit matching udid"}}"#
+                                r#"{{"ok":false,"error":"target_required","connected_candidates":{count},"hint":"configure IPHONE_USE_UDID or pass an explicit matching udid"}}"#
                             )))
                             .unwrap_or_else(|_| {
                                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -15622,7 +15622,7 @@ impl InventoryFailure {
     fn reason(&self) -> String {
         match self {
             Self::TargetRequired(count) => format!(
-                "devicectl inventory needs an explicit target ({count} connected candidates); configure PHONE_REMOTE_UDID"
+                "devicectl inventory needs an explicit target ({count} connected candidates); configure IPHONE_USE_UDID"
             ),
             Self::Unavailable(reason) => reason.clone(),
         }
@@ -15637,7 +15637,7 @@ impl InventoryFailure {
                     "ok": false,
                     "error": "target_required",
                     "connected_candidates": count,
-                    "hint": "configure PHONE_REMOTE_UDID (run setup-wda.sh) so the daemon knows which phone to ask",
+                    "hint": "configure IPHONE_USE_UDID (run setup-wda.sh) so the daemon knows which phone to ask",
                 }),
             ),
             Self::Unavailable(reason) => agent_apps_json(
@@ -16158,7 +16158,7 @@ async fn agent_intent(
     state.touch_activity();
     let Some(wda) = &state.wda else {
         return intent_error_response(&IntentError::BridgeUnavailable {
-            reason: "WDA is not configured (PHONE_REMOTE_WDA_URL / setup)".to_string(),
+            reason: "WDA is not configured (IPHONE_USE_WDA_URL / setup)".to_string(),
         });
     };
     if tokio::time::Instant::now() >= agent_wda_deadline {

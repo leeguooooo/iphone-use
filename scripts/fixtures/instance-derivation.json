@@ -49,7 +49,7 @@
       "daemon_label": "com.leeguoo.iphone-use.lab",
       "wda_label": "com.leeguoo.iphone-use.wda.lab",
       "wda_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.wda.lab.plist",
-      "_note": "PHONE_REMOTE_STATE_DIR overrides the derived state dir only"
+      "_note": "IPHONE_USE_STATE_DIR overrides the derived state dir only"
     }
   ],
   "invalid_names": [

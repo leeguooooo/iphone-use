@@ -134,16 +134,16 @@ fn env_secs(name: &str) -> Option<u64> {
 }
 
 impl Policy {
-    /// `PHONE_REMOTE_PREWARM=0` turns pre-warm off;
-    /// `PHONE_REMOTE_PREWARM_INTERVAL_SECS` and
-    /// `PHONE_REMOTE_PREWARM_RECENT_SECS` tune the limits.
+    /// `IPHONE_USE_PREWARM=0` turns pre-warm off;
+    /// `IPHONE_USE_PREWARM_INTERVAL_SECS` and
+    /// `IPHONE_USE_PREWARM_RECENT_SECS` tune the limits.
     pub fn from_env() -> Self {
         let default = Self::default();
         Self {
-            enabled: std::env::var("PHONE_REMOTE_PREWARM").map_or(true, |v| v.trim() != "0"),
-            min_interval: env_secs("PHONE_REMOTE_PREWARM_INTERVAL_SECS")
+            enabled: std::env::var("IPHONE_USE_PREWARM").map_or(true, |v| v.trim() != "0"),
+            min_interval: env_secs("IPHONE_USE_PREWARM_INTERVAL_SECS")
                 .map_or(default.min_interval, Duration::from_secs),
-            recent: env_secs("PHONE_REMOTE_PREWARM_RECENT_SECS")
+            recent: env_secs("IPHONE_USE_PREWARM_RECENT_SECS")
                 .map_or(default.recent, Duration::from_secs),
         }
     }

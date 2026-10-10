@@ -1,5 +1,5 @@
-//! Environment-variable configuration surface, mirroring v1's
-//! `phone_remote_server.py` defaults exactly so that nothing regresses.
+//! Environment-variable configuration surface (`IPHONE_USE_*`; the older
+//! `PHONE_REMOTE_*` spelling arrives renamed, see `core::env`).
 //!
 //! Call [`Config::from_env`] in production code, or [`Config::from_map`]
 //! (passing a closure) in tests to avoid touching the real process
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Resolved configuration for the phone-remote server.
+/// Resolved configuration for the iphone-use daemon.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// IP address / hostname to listen on. Default: `127.0.0.1`.
@@ -27,9 +27,9 @@ pub struct Config {
     /// Optional directory for persistent state files.
     pub state_dir: Option<PathBuf>,
     /// How long a client's phone-owner lease outlives its last control
-    /// request (`PHONE_REMOTE_OWNER_LEASE_SECS`). Default: `300`.
+    /// request (`IPHONE_USE_OWNER_LEASE_SECS`). Default: `300`.
     pub owner_lease_secs: u64,
-    /// Optional dedicated bearer token for agent/API access (`PHONE_REMOTE_AGENT_TOKEN`).
+    /// Optional dedicated bearer token for agent/API access (`IPHONE_USE_AGENT_TOKEN`).
     ///
     /// When set, the agent `Authorization: Bearer <token>` path checks this value
     /// **instead of** the human login password — the password is no longer accepted
@@ -46,7 +46,7 @@ pub struct Config {
 }
 
 // ---------------------------------------------------------------------------
-// Defaults matching v1 phone_remote_server.py
+// Defaults
 // ---------------------------------------------------------------------------
 
 const DEFAULT_HOST: &str = "127.0.0.1";
@@ -69,38 +69,38 @@ impl Config {
     /// `std::env::var`.  In tests, pass a closure over a `HashMap<&str,
     /// &str>` (or similar) to avoid side-effects on the real environment.
     pub fn from_map(get: impl Fn(&str) -> Option<String>) -> Config {
-        let host = get("PHONE_REMOTE_HOST")
+        let host = get("IPHONE_USE_HOST")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_HOST.to_owned());
 
-        let port = get("PHONE_REMOTE_PORT")
+        let port = get("IPHONE_USE_PORT")
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(DEFAULT_PORT);
 
-        let password = get("PHONE_REMOTE_PASSWORD").filter(|s| !s.is_empty());
-        let secret = get("PHONE_REMOTE_SECRET").filter(|s| !s.is_empty());
+        let password = get("IPHONE_USE_PASSWORD").filter(|s| !s.is_empty());
+        let secret = get("IPHONE_USE_SECRET").filter(|s| !s.is_empty());
 
         // A zero TTL signs tokens that are already expired when issued, which
         // locks the operator out of their own web UI with no error to read —
         // the login just never sticks. Treat it as the typo it always is and
         // fall back, the same way the activation deadline does (#29/#30).
-        // Unlike PHONE_REMOTE_IDLE_RELEASE_SECS, zero has no "disabled"
+        // Unlike IPHONE_USE_IDLE_RELEASE_SECS, zero has no "disabled"
         // meaning here: there is no such thing as a session that never ends.
-        let session_ttl_secs = get("PHONE_REMOTE_SESSION_TTL")
+        let session_ttl_secs = get("IPHONE_USE_SESSION_TTL")
             .and_then(|s| s.trim().parse::<u64>().ok())
             .filter(|secs| *secs > 0)
             .unwrap_or(DEFAULT_SESSION_TTL_SECS);
 
-        let owner_lease_secs = get("PHONE_REMOTE_OWNER_LEASE_SECS")
+        let owner_lease_secs = get("IPHONE_USE_OWNER_LEASE_SECS")
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|secs| *secs > 0)
             .unwrap_or(300);
-        let state_dir = get("PHONE_REMOTE_STATE_DIR")
+        let state_dir = get("IPHONE_USE_STATE_DIR")
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
 
-        let agent_token = get("PHONE_REMOTE_AGENT_TOKEN").filter(|s| !s.is_empty());
-        let device_udid = get("PHONE_REMOTE_UDID")
+        let agent_token = get("IPHONE_USE_AGENT_TOKEN").filter(|s| !s.is_empty());
+        let device_udid = get("IPHONE_USE_UDID")
             .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
 
         Config {
@@ -148,21 +148,21 @@ mod tests {
 
     #[test]
     fn host_override() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_HOST", "0.0.0.0")]);
+        let cfg = map_cfg(&[("IPHONE_USE_HOST", "0.0.0.0")]);
         assert_eq!(cfg.host, "0.0.0.0");
     }
 
     #[test]
     fn port_override_valid() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_PORT", "9000")]);
+        let cfg = map_cfg(&[("IPHONE_USE_PORT", "9000")]);
         assert_eq!(cfg.port, 9000);
     }
 
     #[test]
     fn password_and_secret_override() {
         let cfg = map_cfg(&[
-            ("PHONE_REMOTE_PASSWORD", "hunter2"),
-            ("PHONE_REMOTE_SECRET", "s3cr3t"),
+            ("IPHONE_USE_PASSWORD", "hunter2"),
+            ("IPHONE_USE_SECRET", "s3cr3t"),
         ]);
         assert_eq!(cfg.password, Some("hunter2".to_owned()));
         assert_eq!(cfg.secret, Some("s3cr3t".to_owned()));
@@ -170,10 +170,10 @@ mod tests {
 
     #[test]
     fn session_ttl_override() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_SESSION_TTL", "3600")]);
+        let cfg = map_cfg(&[("IPHONE_USE_SESSION_TTL", "3600")]);
         assert_eq!(cfg.session_ttl_secs, 3600);
         assert_eq!(
-            map_cfg(&[("PHONE_REMOTE_SESSION_TTL", " 3600 ")]).session_ttl_secs,
+            map_cfg(&[("IPHONE_USE_SESSION_TTL", " 3600 ")]).session_ttl_secs,
             3600
         );
     }
@@ -185,43 +185,43 @@ mod tests {
         // own UI with nothing to read. Junk deserves the same fallback.
         for raw in ["0", "", "abc", "-1", "3600s", "1.5"] {
             assert_eq!(
-                map_cfg(&[("PHONE_REMOTE_SESSION_TTL", raw)]).session_ttl_secs,
+                map_cfg(&[("IPHONE_USE_SESSION_TTL", raw)]).session_ttl_secs,
                 DEFAULT_SESSION_TTL_SECS,
-                "PHONE_REMOTE_SESSION_TTL={raw:?} must fall back, not lock the user out"
+                "IPHONE_USE_SESSION_TTL={raw:?} must fall back, not lock the user out"
             );
         }
     }
 
     #[test]
     fn state_dir_override() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_STATE_DIR", "/var/lib/hermes")]);
-        assert_eq!(cfg.state_dir, Some(PathBuf::from("/var/lib/hermes")));
+        let cfg = map_cfg(&[("IPHONE_USE_STATE_DIR", "/var/lib/iphone-use")]);
+        assert_eq!(cfg.state_dir, Some(PathBuf::from("/var/lib/iphone-use")));
     }
 
     // --- bad values fall back to defaults, don't panic ---
 
     #[test]
     fn bad_port_falls_back_to_default() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_PORT", "not-a-number")]);
+        let cfg = map_cfg(&[("IPHONE_USE_PORT", "not-a-number")]);
         assert_eq!(cfg.port, 44321);
     }
 
     #[test]
     fn port_out_of_u16_range_falls_back_to_default() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_PORT", "99999")]);
+        let cfg = map_cfg(&[("IPHONE_USE_PORT", "99999")]);
         assert_eq!(cfg.port, 44321);
     }
 
     #[test]
     fn bad_ttl_falls_back_to_default() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_SESSION_TTL", "abc")]);
+        let cfg = map_cfg(&[("IPHONE_USE_SESSION_TTL", "abc")]);
         assert_eq!(cfg.session_ttl_secs, 8 * 3600);
     }
 
     #[test]
     fn negative_ttl_string_falls_back_to_default() {
         // "-1" can't parse as u64, so default is used.
-        let cfg = map_cfg(&[("PHONE_REMOTE_SESSION_TTL", "-1")]);
+        let cfg = map_cfg(&[("IPHONE_USE_SESSION_TTL", "-1")]);
         assert_eq!(cfg.session_ttl_secs, 8 * 3600);
     }
 
@@ -229,13 +229,13 @@ mod tests {
 
     #[test]
     fn empty_host_uses_default() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_HOST", "")]);
+        let cfg = map_cfg(&[("IPHONE_USE_HOST", "")]);
         assert_eq!(cfg.host, "127.0.0.1");
     }
 
     #[test]
     fn empty_password_gives_none() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_PASSWORD", "")]);
+        let cfg = map_cfg(&[("IPHONE_USE_PASSWORD", "")]);
         assert_eq!(cfg.password, None);
     }
 
@@ -250,34 +250,34 @@ mod tests {
 
     #[test]
     fn agent_token_empty_gives_none() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_AGENT_TOKEN", "")]);
+        let cfg = map_cfg(&[("IPHONE_USE_AGENT_TOKEN", "")]);
         assert_eq!(cfg.agent_token, None);
     }
 
     #[test]
     fn device_udid_is_preserved_and_empty_is_ignored() {
         assert_eq!(
-            map_cfg(&[("PHONE_REMOTE_UDID", "00008110-001234567890001E")]).device_udid,
+            map_cfg(&[("IPHONE_USE_UDID", "00008110-001234567890001E")]).device_udid,
             Some("00008110-001234567890001E".to_string())
         );
-        assert_eq!(map_cfg(&[("PHONE_REMOTE_UDID", "   ")]).device_udid, None);
+        assert_eq!(map_cfg(&[("IPHONE_USE_UDID", "   ")]).device_udid, None);
         assert_eq!(
-            map_cfg(&[("PHONE_REMOTE_UDID", "device</string>")]).device_udid,
+            map_cfg(&[("IPHONE_USE_UDID", "device</string>")]).device_udid,
             None
         );
     }
 
     #[test]
     fn agent_token_set_is_preserved() {
-        let cfg = map_cfg(&[("PHONE_REMOTE_AGENT_TOKEN", "sk-agent-abc123")]);
+        let cfg = map_cfg(&[("IPHONE_USE_AGENT_TOKEN", "sk-agent-abc123")]);
         assert_eq!(cfg.agent_token, Some("sk-agent-abc123".to_owned()));
     }
 
     #[test]
     fn agent_token_can_coexist_with_password() {
         let cfg = map_cfg(&[
-            ("PHONE_REMOTE_PASSWORD", "hunter2"),
-            ("PHONE_REMOTE_AGENT_TOKEN", "sk-agent-xyz"),
+            ("IPHONE_USE_PASSWORD", "hunter2"),
+            ("IPHONE_USE_AGENT_TOKEN", "sk-agent-xyz"),
         ]);
         assert_eq!(cfg.password, Some("hunter2".to_owned()));
         assert_eq!(cfg.agent_token, Some("sk-agent-xyz".to_owned()));

@@ -35,7 +35,7 @@ passcode.
 | `device_state` | Meaning | What to do |
 |---|---|---|
 | `ready` + `drivable:true` | Drivable | Proceed with the task. |
-| `locked` | Phone is locked | Without a passcode the next `/agent/input` unlocks it first; with one, ask the operator to unlock it — only if the task needs the phone. While a session drives the phone it is kept from auto-locking (`PHONE_REMOTE_KEEP_AWAKE_SECS`). |
+| `locked` | Phone is locked | Without a passcode the next `/agent/input` unlocks it first; with one, ask the operator to unlock it — only if the task needs the phone. While a session drives the phone it is kept from auto-locking (`IPHONE_USE_KEEP_AWAKE_SECS`). |
 | `released` / `released:true` | Normal idle | Leave it unless the task needs the phone; then see *Reconnect* below. |
 | `releasing` | Release in progress | Do not reconnect or hold. Wait, then reassess, only if the task still needs it. |
 | reconnecting (`reconnecting:true`) | Bring-up running | If `setup_blocked_on` is set, follow `hint`; else report `setup_phase`/`setup_message` and poll. A first build after an Xcode update can take minutes. |
@@ -96,12 +96,12 @@ curl -s -H "$AUTH" -H "$MUTATION" -H 'Content-Type: application/json' \
   -X POST "$HOST/agent/mode" -d '{"mode":"agent"}'      # MCP: phone_reconnect
 ```
 
-The target is canonical: to switch devices, change `PHONE_REMOTE_UDID`, rerun
+The target is canonical: to switch devices, change `IPHONE_USE_UDID`, rerun
 setup, and restart the daemon. Never pass a one-off UDID. `503
 device_release_in_progress` (with `Retry-After`) means release already started.
 
 **Owner lease.** Name yourself on every state-changing request with
-`X-Phone-Owner: <session-name>` (MCP does it from `PHONE_REMOTE_OWNER`, else
+`X-Phone-Owner: <session-name>` (MCP does it from `IPHONE_USE_OWNER`, else
 `mcp-<pid>`). Status shows `owner` and `owner_lease_remaining_secs`. If `owner`
 is someone else, do not drive: control calls answer `409 phone_owned`. Never
 send `X-Phone-Owner-Takeover: 1` unless the user confirms the other session is
@@ -206,7 +206,7 @@ KeepAlive keeps the last concrete blocker while it re-checks).
 `{"reason":"relaunch_needs_person","because":"passcode"|"wifi_start_refused","hint":{zh,en}}`
 when idle release keeps a runner that is up because starting it again would need a
 person (a passcode phone, or the Wi-Fi case above). The screen still auto-locks; only
-the runner process stays. `PHONE_REMOTE_IDLE_RELEASE=force` on the daemon turns it off.
+the runner process stays. `IPHONE_USE_IDLE_RELEASE=force` on the daemon turns it off.
 - **`usb`**: the configured iPhone is neither on USB nor on its encrypted
   CoreDevice Wi-Fi tunnel (or `WDA_TRANSPORT=usb` requires the cable). Off the
   cable, setup and relaunch go through that tunnel on their own, with no flag;
@@ -265,7 +265,7 @@ only on a trusted network.
 |---|---|
 | `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, keep_runner_alive, device, …}` — gate on `drivable` |
 | `GET /agent/capabilities` | What this build supports + whether the phone is drivable now (`blocked_by`); touches nothing |
-| `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max` |
+| `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `IPHONE_USE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max` |
 | `GET /agent/screenshot` | Device PNG. `?max_side=1200` shrinks it (~0.9k image tokens instead of ~1.5k; MCP's default) and lets a current live frame answer while someone watches. `X-Capture-Redacted: 1` = wireframe of a protected screen ([below](#screens-hidden-from-capture)); `?raw=1` untouched. A sized request is shrunk and JPEG-encoded on the phone, so a slow link carries ~50–100 KB instead of a multi-MB PNG. A capture the link cuts or times out is retried once smaller (`X-Screenshot-Degraded: max_side=N`); a failure is JSON with `cause` (`timeout`, `body_truncated`, `connection_lost`, `connect`, `runner_error`), `transport` and `attempts` (504 on timeout, else 502) |
 | `POST /agent/input` | One action; `?return=delta` adds the settled change |
 | `POST /agent/actions` | `{"steps":[…]}`: up to 24 `action` / `wait_for` / `pause` steps, validated first, stops at the first failure |
@@ -528,7 +528,7 @@ where they stopped.
   `needs_permission`), `at_ms` (Unix ms) and `elapsed_ms`. The request it
   happened in also carries it in `agent-timing.jsonl` as `notes.agent_focus`.
   Banners otherwise hijack taps (hardware-seen: a chat banner opened WeChat; a
-  recurring alert banner broke flow runs). Opt out with `PHONE_REMOTE_AUTO_FOCUS=0`.
+  recurring alert banner broke flow runs). Opt out with `IPHONE_USE_AUTO_FOCUS=0`.
 
 ## Logging in from the password vault
 

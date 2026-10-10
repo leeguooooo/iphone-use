@@ -95,8 +95,8 @@ impl McpServer {
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", home)
-            .env("PHONE_REMOTE_URL", url)
-            .env("PHONE_REMOTE_TOKEN", "test-token")
+            .env("IPHONE_USE_URL", url)
+            .env("IPHONE_USE_TOKEN", "test-token")
             // The scripted daemon answers only the requests each test lists.
             .env("IPHONE_USE_MCP_PREWARM", "0")
             // These tests read every step of a result from its structure.

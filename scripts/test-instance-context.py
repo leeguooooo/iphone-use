@@ -42,7 +42,7 @@ def check(cond, message):
 
 def run(script, args, home, env_extra=None, unset=()):
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("PHONE_REMOTE_", "WDA_", "MJPEG_"))}
+           if not k.startswith(("IPHONE_USE_", "PHONE_REMOTE_", "WDA_", "MJPEG_"))}
     env["HOME"] = str(home)
     env["IPHONE_USE_SETUP_BIN"] = str(BIN)
     for key in unset:
@@ -55,7 +55,7 @@ def run(script, args, home, env_extra=None, unset=()):
 def context(home, name, env_extra=None, script=SETUP):
     extra = dict(env_extra or {})
     if name is not None:
-        extra["PHONE_REMOTE_INSTANCE"] = name
+        extra["IPHONE_USE_INSTANCE"] = name
     result = run(script, ["instance-context"], home, extra)
     values = {}
     for line in result.stdout.splitlines():
@@ -88,7 +88,7 @@ def main():
         for case in FIXTURE["cases"]:
             extra = {}
             if "state_dir_override" in case:
-                extra["PHONE_REMOTE_STATE_DIR"] = case["state_dir_override"]
+                extra["IPHONE_USE_STATE_DIR"] = case["state_dir_override"]
             result, got = context(home, case["name"], extra)
             label = case["name"] or "<empty>"
             check(result.returncode == 0, f"{label}: instance-context failed: {result.stderr.strip()}")
@@ -109,7 +109,7 @@ def main():
                 bad = str(home.parent)  # an ancestor of HOME stays an ancestor
             else:
                 bad = bad.replace(FIXTURE_HOME, str(home), 1)
-            result, _ = context(home, "lab", {"PHONE_REMOTE_STATE_DIR": bad})
+            result, _ = context(home, "lab", {"IPHONE_USE_STATE_DIR": bad})
             check(result.returncode == 2, f"state dir override {bad!r} was accepted")
 
         # 2. Ports: default keeps its own; named instances take their slot.
@@ -131,14 +131,14 @@ def main():
         home = fresh_home(tmp, "claimed")
         lab = ports["first_slot"]["lab"]
         write_plist(home, "com.leeguoo.iphone-use", {
-            "PHONE_REMOTE_PORT": "45432", "PHONE_REMOTE_UDID": "00008150-AAAA"})
+            "IPHONE_USE_PORT": "45432", "IPHONE_USE_UDID": "00008150-AAAA"})
         write_plist(home, "com.leeguoo.iphone-use.wda", {
             "WDA_UDID": "00008150-AAAA", "WDA_PORT": "8100", "MJPEG_PORT": "9100"})
         write_plist(home, "com.leeguoo.iphone-use.other", {
-            "PHONE_REMOTE_INSTANCE": "other", "PHONE_REMOTE_PORT": str(lab["daemon_port"]),
-            "PHONE_REMOTE_UDID": "00008110-BBBB"})
+            "IPHONE_USE_INSTANCE": "other", "IPHONE_USE_PORT": str(lab["daemon_port"]),
+            "IPHONE_USE_UDID": "00008110-BBBB"})
         # Maintenance agents share the prefix but bind nothing.
-        write_plist(home, "com.leeguoo.iphone-use.autoupdate", {"PHONE_REMOTE_PORT": "1"})
+        write_plist(home, "com.leeguoo.iphone-use.autoupdate", {"IPHONE_USE_PORT": "1"})
         _, got = context(home, "lab")
         check(got.get("daemon_port") == str(lab["daemon_port"] + 1),
               f"lab did not skip the slot instance 'other' claims: {got.get('daemon_port')}")
@@ -151,7 +151,7 @@ def main():
         result, _ = context(home, "lab", {"WDA_UDID": "00008110-CCCC", "WDA_PORT": "8100"})
         check(result.returncode == 1 and "TCP 8100" in result.stderr,
               "a named instance was allowed the default instance's WDA port")
-        result, _ = context(home, "default", {"PHONE_REMOTE_PORT": str(lab["daemon_port"])})
+        result, _ = context(home, "default", {"IPHONE_USE_PORT": str(lab["daemon_port"])})
         check(result.returncode == 1, "the default instance was allowed a port 'other' owns")
         result, got = context(home, "default")
         check(result.returncode == 0 and got.get("daemon_port") == "45432",

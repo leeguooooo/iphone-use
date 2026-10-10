@@ -4,8 +4,8 @@
 //! # Usage
 //!
 //! ```
-//! PHONE_REMOTE_URL=http://192.168.1.x:44321 \
-//! PHONE_REMOTE_TOKEN=your-password \
+//! IPHONE_USE_URL=http://192.168.1.x:44321 \
+//! IPHONE_USE_TOKEN=your-password \
 //!   iphone-use-mcp
 //! ```
 //!
@@ -297,8 +297,16 @@ enum FlowCommand {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // While the process is still single-threaded (see `core::env`).
+    iu_core::env::adopt_legacy_names();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Log to stderr so it does not interfere with the MCP stdio protocol on
@@ -325,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(Command::Test { suite, json, junit, confirm, artifacts_dir, owner, validate }) = &cli.command {
         if let Some(owner) = owner {
-            std::env::set_var("PHONE_REMOTE_OWNER", owner);
+            std::env::set_var("IPHONE_USE_OWNER", owner);
         }
         let code = suite::test_command(
             suite,

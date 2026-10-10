@@ -196,7 +196,7 @@ regresses the lean-JSON contract. `perform` still accepts them (§2.2); `actions
 
 Raw traits: do **not** emit a `traits` array by default (most values duplicate `kind`).
 For debugging/forward-compat, gate a verbatim `"traits":[…]` field behind
-`PHONE_REMOTE_ELEMENTS_TRAITS=1`, mirroring the `snapshot_settings_from_env` opt-in
+`IPHONE_USE_ELEMENTS_TRAITS=1`, mirroring the `snapshot_settings_from_env` opt-in
 pattern already in `wda.rs`.
 
 No-regression analysis against the snapshot-token model:
@@ -330,7 +330,7 @@ already emits.
 
 ### Next-step spike (recommended)
 
-Behind `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1` (default off ⇒ byte-identical JSON):
+Behind `IPHONE_USE_ELEMENTS_AFFORDANCES=1` (default off ⇒ byte-identical JSON):
 
 1. Parse `traits` / `minValue` / `maxValue` in `flatten_tree`; emit sparse
    `selected`, `min`, `max`, and derived `actions` per §2.1, with unit tests mirroring

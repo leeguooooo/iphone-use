@@ -27,9 +27,9 @@ fn stop_all(ctx: &Ctx, legacy: &Legacy) -> bool {
 /// lines) when a port or the phone is already bound to another instance.
 pub fn instance_context(ctx: &Ctx) -> i32 {
     let first = super::ctx::derive_ports(ctx, false).unwrap_or((0, 0, 0));
-    let mut daemon_port = std::env::var("PHONE_REMOTE_PORT").unwrap_or_default();
+    let mut daemon_port = std::env::var("IPHONE_USE_PORT").unwrap_or_default();
     if daemon_port.is_empty() {
-        daemon_port = sys::plist_env(&ctx.daemon_plist, "PHONE_REMOTE_PORT");
+        daemon_port = sys::plist_env(&ctx.daemon_plist, "IPHONE_USE_PORT");
     }
     if daemon_port.is_empty() {
         daemon_port = if ctx.instance.is_default() {

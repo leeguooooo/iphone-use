@@ -29,8 +29,15 @@
 # failure. This script adds only the decision and the schedule.
 set -euo pipefail
 
+# Installs made before the rename set PHONE_REMOTE_*; read them as IPHONE_USE_*
+# (the new name wins). Names are [A-Z0-9_], so the eval is safe.
+for _legacy in $(env | sed -n 's/^PHONE_REMOTE_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p'); do
+    eval "[ -n \"\${IPHONE_USE_${_legacy}+x}\" ] || export IPHONE_USE_${_legacy}=\"\$PHONE_REMOTE_${_legacy}\""
+done
+unset _legacy
+
 REPO="${IPHONE_USE_REPO:-leeguooooo/iphone-use}"
-STATE_DIR="${PHONE_REMOTE_STATE_DIR:-$HOME/.iphone-use}"
+STATE_DIR="${IPHONE_USE_STATE_DIR:-$HOME/.iphone-use}"
 LABEL="com.leeguoo.iphone-use.autoupdate"
 DAEMON_PLIST="$HOME/Library/LaunchAgents/com.leeguoo.iphone-use.plist"
 JOB_PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -52,7 +59,8 @@ daemon_env() {  # print "port token host" from the daemon LaunchAgent
     python3 - "$DAEMON_PLIST" <<'PY'
 import plistlib, sys
 env = plistlib.load(open(sys.argv[1], 'rb')).get('EnvironmentVariables', {})
-print(env.get('PHONE_REMOTE_PORT', '44321'), env.get('PHONE_REMOTE_AGENT_TOKEN', ''), env.get('PHONE_REMOTE_HOST', '127.0.0.1'))
+get = lambda name, default: env.get('IPHONE_USE_' + name, env.get('PHONE_REMOTE_' + name, default))  # older plists
+print(get('PORT', '44321'), get('AGENT_TOKEN', ''), get('HOST', '127.0.0.1'))
 PY
 }
 

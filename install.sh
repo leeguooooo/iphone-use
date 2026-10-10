@@ -29,6 +29,14 @@ if [ -z "${HOME:-}" ]; then
 fi
 umask 077
 
+# Installs made before the rename set PHONE_REMOTE_*; read them as IPHONE_USE_*
+# (the new name wins). Names are [A-Z0-9_], so the eval is safe. Plists
+# written by older installers are read the same way (plist_env_get_from).
+for _legacy in $(env | sed -n 's/^PHONE_REMOTE_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p'); do
+    eval "[ -n \"\${IPHONE_USE_${_legacy}+x}\" ] || export IPHONE_USE_${_legacy}=\"\$PHONE_REMOTE_${_legacy}\""
+done
+unset _legacy
+
 # ── Inline ad-hoc signer ──────────────────────────────────────────────────────
 # Direct mode uses this only when the supplied app has no valid signature. It
 # creates no certificate and never changes the user's keychain search list.
@@ -839,7 +847,7 @@ first_run_setup() {
 register_claude_mcp() {
     local mcp="$1" name="$2" instance="${3:-}" existing json
     command -v claude >/dev/null 2>&1 || {
-        info "MCP command for agents: $mcp${instance:+ (env PHONE_REMOTE_INSTANCE=$instance)}"
+        info "MCP command for agents: $mcp${instance:+ (env IPHONE_USE_INSTANCE=$instance)}"
         return 0
     }
     if existing="$(claude mcp get "$name" 2>/dev/null)"; then
@@ -851,7 +859,7 @@ register_claude_mcp() {
         return 0
     fi
     if [ -n "$instance" ]; then
-        json="$(printf '{"type":"stdio","command":"%s","args":[],"env":{"PHONE_REMOTE_INSTANCE":"%s"}}' "$mcp" "$instance")"
+        json="$(printf '{"type":"stdio","command":"%s","args":[],"env":{"IPHONE_USE_INSTANCE":"%s"}}' "$mcp" "$instance")"
     else
         json="$(printf '{"type":"stdio","command":"%s","args":[]}' "$mcp")"
     fi
@@ -869,11 +877,11 @@ register_codex_mcp() {
     local mcp="$1" name="$2" instance="${3:-}" existing current
     command -v codex >/dev/null 2>&1 || return 0
     if existing="$(codex mcp get "$name" --json 2>/dev/null)"; then
-        # "<command>\t<PHONE_REMOTE_INSTANCE or empty>" of the existing entry.
+        # "<command>\t<IPHONE_USE_INSTANCE or empty>" of the existing entry.
         current="$(printf '%s' "$existing" | python3 -c '
 import json, sys
 t = json.load(sys.stdin).get("transport") or {}
-print("%s\t%s" % (t.get("command") or "", (t.get("env") or {}).get("PHONE_REMOTE_INSTANCE") or ""))
+print("%s\t%s" % (t.get("command") or "", (t.get("env") or {}).get("IPHONE_USE_INSTANCE") or ""))
 ' 2>/dev/null)" || current=""
         if [ "$current" = "$mcp	$instance" ]; then
             ok "Codex already has the $name MCP server."
@@ -897,7 +905,7 @@ print("%s\t%s" % (t.get("command") or "", (t.get("env") or {}).get("PHONE_REMOTE
         fi
     fi
     if [ -n "$instance" ]; then
-        set -- codex mcp add "$name" --env "PHONE_REMOTE_INSTANCE=$instance" -- "$mcp"
+        set -- codex mcp add "$name" --env "IPHONE_USE_INSTANCE=$instance" -- "$mcp"
     else
         set -- codex mcp add "$name" -- "$mcp"
     fi
@@ -2198,8 +2206,7 @@ fi
 # changed. Paths, labels and ports come from setup-wda.sh `instance-context`
 # (the setup engine in the app being installed).
 named_plist_env() {
-    [ -f "$1" ] || { printf ''; return; }
-    /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$2" "$1" 2>/dev/null || printf ''
+    plist_env_get_from "$1" "$2"
 }
 
 install_named_instance() {
@@ -2221,10 +2228,10 @@ install_named_instance() {
     # Resolve and check the instance before touching anything: an invalid
     # name, a port another instance owns, or a phone another daemon drives
     # all fail here.
-    if ! ctx="$(env PHONE_REMOTE_INSTANCE="$INSTANCE_NAME" \
+    if ! ctx="$(env IPHONE_USE_INSTANCE="$INSTANCE_NAME" \
         IPHONE_USE_SETUP_BIN="$app_src/Contents/MacOS/iphone-use" \
         ${INSTANCE_UDID:+WDA_UDID="$INSTANCE_UDID"} \
-        ${INSTANCE_PORT:+PHONE_REMOTE_PORT="$INSTANCE_PORT"} \
+        ${INSTANCE_PORT:+IPHONE_USE_PORT="$INSTANCE_PORT"} \
         /bin/bash "$setup_src" instance-context 2>&1)"; then
         die "Instance $INSTANCE_NAME cannot be installed: $(printf '%s' "$ctx" | tail -1)"
     fi
@@ -2270,7 +2277,7 @@ install_named_instance() {
     [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_src/Contents/Info.plist" 2>/dev/null)" = "$BUNDLE_ID" ] \
         || die "$app_src is not $BUNDLE_ID."
     codesign --verify "$app_src" 2>/dev/null || die "$app_src fails signature verification."
-    probe="$(env PHONE_REMOTE_INSTANCE="$INSTANCE_NAME" "$app_src/$BINARY_INSIDE_APP" instance-context 2>/dev/null || true)"
+    probe="$(env IPHONE_USE_INSTANCE="$INSTANCE_NAME" "$app_src/$BINARY_INSIDE_APP" instance-context 2>/dev/null || true)"
     printf '%s' "$probe" | grep -q "\"name\": *\"$INSTANCE_NAME\"" \
         || die "$app_src predates named instances (no instance-context); install a newer release."
 
@@ -2286,28 +2293,28 @@ install_named_instance() {
         [ -n "$v" ] || [ "${2:-}" != inherit ] || v="$(named_plist_env "$default_wda_plist" "$1")"
         printf '%s' "$v"
     }
-    token="$(pick PHONE_REMOTE_AGENT_TOKEN)"
+    token="$(pick IPHONE_USE_AGENT_TOKEN)"
     [ -n "$token" ] || token="$(openssl rand -hex 32)" || die "Could not generate an agent token."
-    add_env PHONE_REMOTE_INSTANCE "$INSTANCE_NAME"
+    add_env IPHONE_USE_INSTANCE "$INSTANCE_NAME"
     # The daemon keeps its pid record and session secret under $TMPDIR; daemons
     # up to v0.10.12 used one directory per user, so a second daemon saw the
     # first one's pid and refused to start. A private TMPDIR keeps them apart
     # on any release.
     add_env TMPDIR "$state_dir/tmp"
-    add_env PHONE_REMOTE_HOST "$(pick PHONE_REMOTE_HOST)"
-    [ -n "$(pick PHONE_REMOTE_HOST)" ] || add_env PHONE_REMOTE_HOST 127.0.0.1
-    add_env PHONE_REMOTE_PORT "$daemon_port"
-    add_env PHONE_REMOTE_AGENT_TOKEN "$token"
-    add_env PHONE_REMOTE_BACKEND direct
-    add_env PHONE_REMOTE_UDID "$udid"
-    add_env PHONE_REMOTE_WDA_MANAGED true
-    add_env PHONE_REMOTE_WDA_URL "http://127.0.0.1:$wda_port"
-    add_env PHONE_REMOTE_WDA_MJPEG_URL "http://127.0.0.1:$mjpeg_port"
+    add_env IPHONE_USE_HOST "$(pick IPHONE_USE_HOST)"
+    [ -n "$(pick IPHONE_USE_HOST)" ] || add_env IPHONE_USE_HOST 127.0.0.1
+    add_env IPHONE_USE_PORT "$daemon_port"
+    add_env IPHONE_USE_AGENT_TOKEN "$token"
+    add_env IPHONE_USE_BACKEND direct
+    add_env IPHONE_USE_UDID "$udid"
+    add_env IPHONE_USE_WDA_MANAGED true
+    add_env IPHONE_USE_WDA_URL "http://127.0.0.1:$wda_port"
+    add_env IPHONE_USE_WDA_MJPEG_URL "http://127.0.0.1:$mjpeg_port"
     add_env WDA_PORT "$wda_port"
     add_env MJPEG_PORT "$mjpeg_port"
     add_env RUST_LOG "$(pick RUST_LOG)"
     [ -n "$(pick RUST_LOG)" ] || add_env RUST_LOG warn
-    for key in PHONE_REMOTE_IDLE_RELEASE_SECS PHONE_REMOTE_IDLE_RELEASE PHONE_REMOTE_PASSWORD PHONE_REMOTE_NO_UPDATE_CHECK; do
+    for key in IPHONE_USE_IDLE_RELEASE_SECS IPHONE_USE_IDLE_RELEASE IPHONE_USE_PASSWORD IPHONE_USE_NO_UPDATE_CHECK; do
         add_env "$key" "$(pick "$key")"
     done
     for key in WDA_TEAM_ID WDA_BUNDLE_ID WDA_ALLOW_LAN WDA_TRANSPORT IPU_RUNNER_SRC; do
@@ -2444,12 +2451,12 @@ install_named_instance() {
     info "iPhone      : $udid"
     info "Daemon      : http://127.0.0.1:$daemon_port   (launchd $label)"
     info "Relays      : 127.0.0.1:$wda_port control, 127.0.0.1:$mjpeg_port video (launchd $wda_label)"
-    info "Token       : EnvironmentVariables:PHONE_REMOTE_AGENT_TOKEN in $plist"
+    info "Token       : EnvironmentVariables:IPHONE_USE_AGENT_TOKEN in $plist"
     info "State       : $state_dir"
     echo ""
-    printf '  Agents target this phone with PHONE_REMOTE_INSTANCE=%s (the MCP server\n' "$INSTANCE_NAME"
+    printf '  Agents target this phone with IPHONE_USE_INSTANCE=%s (the MCP server\n' "$INSTANCE_NAME"
     printf '  reads the URL and token from the plist), or with:\n'
-    printf "    ${BOLD}PHONE_REMOTE_URL=http://127.0.0.1:%s PHONE_REMOTE_AGENT_TOKEN=<token>${RESET}\n" "$daemon_port"
+    printf "    ${BOLD}IPHONE_USE_URL=http://127.0.0.1:%s IPHONE_USE_AGENT_TOKEN=<token>${RESET}\n" "$daemon_port"
     printf '  Remove only this instance with:\n'
     printf "    ${BOLD}%s/uninstall.sh --instance %s${RESET}\n" "$state_dir" "$INSTANCE_NAME"
     if [ "$first_install" = 1 ] && first_run_interactive; then
@@ -2677,7 +2684,14 @@ plist_env_get_from() {
     local plist="$1"
     local key="$2"
     [ -f "$plist" ] || { printf ''; return; }
-    /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null || printf ''
+    /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null && return
+    # An older installer wrote IPHONE_USE_X as PHONE_REMOTE_X.
+    case "$key" in
+        IPHONE_USE_?*)
+            /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:PHONE_REMOTE_${key#IPHONE_USE_}" "$plist" 2>/dev/null \
+                || printf '' ;;
+        *) printf '' ;;
+    esac
 }
 
 plist_env_get() {
@@ -2700,8 +2714,8 @@ env_or_existing() {
 
 # The iPhone Mirroring backend was removed in v0.9; every install serves the
 # phone over WDA. An older plist may still say mirror: say so and move on.
-if [ "${PHONE_REMOTE_BACKEND:-$(plist_env_get PHONE_REMOTE_BACKEND)}" = "mirror" ] \
-    || [ "${PHONE_REMOTE_BACKEND:-$(plist_env_get PHONE_REMOTE_BACKEND)}" = "legacy-mirror" ]; then
+if [ "${IPHONE_USE_BACKEND:-$(plist_env_get IPHONE_USE_BACKEND)}" = "mirror" ] \
+    || [ "${IPHONE_USE_BACKEND:-$(plist_env_get IPHONE_USE_BACKEND)}" = "legacy-mirror" ]; then
     warn "The iPhone Mirroring backend was removed in v0.9; this install serves the phone over the device runner."
     warn "  Run setup-wda.sh once if this Mac has never set the device runner up."
 fi
@@ -2831,18 +2845,18 @@ append_plist_env() {
 # The iPhone reaches the web UI over the LAN, so bind 0.0.0.0 by default.
 # A password remains mandatory here — generated only when neither the current
 # environment nor the previous install supplies one.
-HOST="$(env_or_existing PHONE_REMOTE_HOST 0.0.0.0)"
-PORT="$(env_or_existing PHONE_REMOTE_PORT 44321)"
+HOST="$(env_or_existing IPHONE_USE_HOST 0.0.0.0)"
+PORT="$(env_or_existing IPHONE_USE_PORT 44321)"
 HOST="$(printf '%s' "$HOST" \
     | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 case "$HOST" in
     ""|*[!A-Za-z0-9._:-]*)
-        die "PHONE_REMOTE_HOST must be a non-empty IP address or hostname without spaces/control characters."
+        die "IPHONE_USE_HOST must be a non-empty IP address or hostname without spaces/control characters."
         ;;
 esac
 case "$PORT" in
     ""|*[!0-9]*)
-        die "PHONE_REMOTE_PORT must be a decimal integer from 1 to 65535 (got '$PORT')."
+        die "IPHONE_USE_PORT must be a decimal integer from 1 to 65535 (got '$PORT')."
         ;;
 esac
 PORT_NORMALIZED="$(printf '%s' "$PORT" | sed 's/^0*//')"
@@ -2850,17 +2864,17 @@ PORT_NORMALIZED="$(printf '%s' "$PORT" | sed 's/^0*//')"
 if [ "${#PORT_NORMALIZED}" -gt 5 ] \
     || { [ "${#PORT_NORMALIZED}" -eq 5 ] && [ "$PORT_NORMALIZED" -gt 65535 ]; } \
     || [ "$PORT_NORMALIZED" = "0" ]; then
-    die "PHONE_REMOTE_PORT must be a decimal integer from 1 to 65535 (got '$PORT')."
+    die "IPHONE_USE_PORT must be a decimal integer from 1 to 65535 (got '$PORT')."
 fi
 PORT="$PORT_NORMALIZED"
 
 # Password precedence: explicit env > existing plist > freshly generated.
 # Re-running install must NOT rotate a working password (it would break every
 # saved client/bookmark) — only mint one when there genuinely isn't one yet.
-PASSWORD="${PHONE_REMOTE_PASSWORD:-}"
+PASSWORD="${IPHONE_USE_PASSWORD:-}"
 PW_SOURCE="env"
 if [ -z "$PASSWORD" ]; then
-    PASSWORD="$(plist_env_get PHONE_REMOTE_PASSWORD)"
+    PASSWORD="$(plist_env_get IPHONE_USE_PASSWORD)"
     PW_SOURCE="existing"
 fi
 if [ -z "$PASSWORD" ]; then
@@ -2869,7 +2883,7 @@ if [ -z "$PASSWORD" ]; then
     PW_SOURCE="generated"
 fi
 case "$PW_SOURCE" in
-    env)      ok "Using password from \$PHONE_REMOTE_PASSWORD" ;;
+    env)      ok "Using password from \$IPHONE_USE_PASSWORD" ;;
     existing) ok "Reusing the password from the existing install" ;;
     generated) ok "Generated a random access password (shown at the end)" ;;
 esac
@@ -2887,8 +2901,8 @@ LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/nu
 # WDA_ALLOW_LAN=1 escape hatch: it is unencrypted (and an old runner without
 # request signing accepts anyone), so that one belongs on a trusted, isolated
 # network only. An iOS 15/16 phone whose runner signs gets its LAN path anyway.
-WDA_URL="$(env_or_existing PHONE_REMOTE_WDA_URL)"
-WDA_MJPEG_URL="$(env_or_existing PHONE_REMOTE_WDA_MJPEG_URL)"
+WDA_URL="$(env_or_existing IPHONE_USE_WDA_URL)"
+WDA_MJPEG_URL="$(env_or_existing IPHONE_USE_WDA_MJPEG_URL)"
 if [ -z "$WDA_URL" ] && [ -z "$WDA_MJPEG_URL" ]; then
     WDA_URL="http://127.0.0.1:8100"
     WDA_MJPEG_URL="http://127.0.0.1:9100"
@@ -2896,19 +2910,19 @@ elif [ -z "$WDA_URL" ]; then
     if is_loopback_wda_url "$WDA_MJPEG_URL"; then
         WDA_URL="http://127.0.0.1:8100"
     else
-        die "External Direct WDA requires both PHONE_REMOTE_WDA_URL and PHONE_REMOTE_WDA_MJPEG_URL; refusing a remote/local split."
+        die "External Direct WDA requires both IPHONE_USE_WDA_URL and IPHONE_USE_WDA_MJPEG_URL; refusing a remote/local split."
     fi
 elif [ -z "$WDA_MJPEG_URL" ]; then
     if is_loopback_wda_url "$WDA_URL"; then
         WDA_MJPEG_URL="http://127.0.0.1:9100"
     else
-        die "External Direct WDA requires both PHONE_REMOTE_WDA_URL and PHONE_REMOTE_WDA_MJPEG_URL; refusing a remote/local split."
+        die "External Direct WDA requires both IPHONE_USE_WDA_URL and IPHONE_USE_WDA_MJPEG_URL; refusing a remote/local split."
     fi
 fi
 is_network_wda_url "$WDA_URL" \
-    || die "PHONE_REMOTE_WDA_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
+    || die "IPHONE_USE_WDA_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
 is_network_wda_url "$WDA_MJPEG_URL" \
-    || die "PHONE_REMOTE_WDA_MJPEG_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
+    || die "IPHONE_USE_WDA_MJPEG_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
 if is_loopback_wda_url "$WDA_URL"; then
     WDA_CONTROL_LOOPBACK=1
 else
@@ -2925,7 +2939,7 @@ ok "WDA control endpoint: $WDA_URL"
 ok "WDA video endpoint: $WDA_MJPEG_URL"
 
 # Recognize the product-owned supervisor shipped before
-# PHONE_REMOTE_WDA_MANAGED existed. Exact label + exact fixed setup-script path
+# IPHONE_USE_WDA_MANAGED existed. Exact label + exact fixed setup-script path
 # avoids claiming an unrelated/custom WDA service merely because a plist exists.
 legacy_product_wda_supervisor_owned() {
     local label
@@ -2944,7 +2958,7 @@ PRODUCT_WDA_SUPERVISOR_OWNED=0
 if legacy_product_wda_supervisor_owned; then
     PRODUCT_WDA_SUPERVISOR_OWNED=1
 fi
-WDA_MANAGED="$(env_or_existing PHONE_REMOTE_WDA_MANAGED)"
+WDA_MANAGED="$(env_or_existing IPHONE_USE_WDA_MANAGED)"
 if [ -z "$WDA_MANAGED" ]; then
     if [ "$PRODUCT_WDA_SUPERVISOR_OWNED" = "1" ]; then
         WDA_MANAGED="true"
@@ -2961,21 +2975,21 @@ fi
 case "$WDA_MANAGED" in
     1|true|TRUE|yes|YES) WDA_MANAGED="true" ;;
     0|false|FALSE|no|NO) WDA_MANAGED="false" ;;
-    *) die "PHONE_REMOTE_WDA_MANAGED must be true or false (got '$WDA_MANAGED')." ;;
+    *) die "IPHONE_USE_WDA_MANAGED must be true or false (got '$WDA_MANAGED')." ;;
 esac
 if [ "$WDA_MANAGED" = "true" ] \
     && { ! is_loopback_wda_url "$WDA_URL" \
         || ! is_loopback_wda_url "$WDA_MJPEG_URL"; }; then
-    die "PHONE_REMOTE_WDA_MANAGED=true requires loopback HTTP control and MJPEG URLs (127.0.0.1 or localhost). Set it to false for external WDA."
+    die "IPHONE_USE_WDA_MANAGED=true requires loopback HTTP control and MJPEG URLs (127.0.0.1 or localhost). Set it to false for external WDA."
 fi
 ok "WDA lifecycle managed by iphone-use: $WDA_MANAGED"
 
 # Persist one explicit device target across browser reconnects, idle release,
 # daemon upgrades, and multi-device Macs. Accept WDA_UDID as a first-install
-# convenience, but store the daemon's canonical PHONE_REMOTE_UDID key.
-DEVICE_UDID="$(env_or_existing PHONE_REMOTE_UDID "${WDA_UDID:-}")"
+# convenience, but store the daemon's canonical IPHONE_USE_UDID key.
+DEVICE_UDID="$(env_or_existing IPHONE_USE_UDID "${WDA_UDID:-}")"
 if [ -n "$DEVICE_UDID" ] && ! printf '%s' "$DEVICE_UDID" | grep -Eq '^[0-9A-Fa-f-]+$'; then
-    die "PHONE_REMOTE_UDID contains invalid characters (expected hex and dashes)."
+    die "IPHONE_USE_UDID contains invalid characters (expected hex and dashes)."
 fi
 [ -z "$DEVICE_UDID" ] || ok "Target iPhone fixed to UDID: $DEVICE_UDID"
 
@@ -3064,32 +3078,32 @@ info "For cross-network access, put an authenticated HTTPS reverse proxy or a tr
 # headline values. This is intentionally an allow-list: it preserves supported
 # configuration without copying arbitrary/untrusted LaunchAgent environment.
 append_plist_env RUST_LOG "$(env_or_existing RUST_LOG info)"
-append_plist_env PHONE_REMOTE_HOST "$HOST"
-append_plist_env PHONE_REMOTE_PORT "$PORT"
-append_plist_env PHONE_REMOTE_PASSWORD "$PASSWORD"
-append_plist_env PHONE_REMOTE_UDID "$DEVICE_UDID"
-append_plist_env PHONE_REMOTE_WDA_URL "$WDA_URL"
-append_plist_env PHONE_REMOTE_WDA_MJPEG_URL "$WDA_MJPEG_URL"
-append_plist_env PHONE_REMOTE_WDA_MANAGED "$WDA_MANAGED"
+append_plist_env IPHONE_USE_HOST "$HOST"
+append_plist_env IPHONE_USE_PORT "$PORT"
+append_plist_env IPHONE_USE_PASSWORD "$PASSWORD"
+append_plist_env IPHONE_USE_UDID "$DEVICE_UDID"
+append_plist_env IPHONE_USE_WDA_URL "$WDA_URL"
+append_plist_env IPHONE_USE_WDA_MJPEG_URL "$WDA_MJPEG_URL"
+append_plist_env IPHONE_USE_WDA_MANAGED "$WDA_MANAGED"
 for ENV_KEY in \
-    PHONE_REMOTE_AGENT_TOKEN \
-    PHONE_REMOTE_NO_UPDATE_CHECK \
-    PHONE_REMOTE_SECRET \
-    PHONE_REMOTE_SESSION_TTL \
-    PHONE_REMOTE_STATE_DIR \
-    PHONE_REMOTE_TOKEN \
-    PHONE_REMOTE_URL
+    IPHONE_USE_AGENT_TOKEN \
+    IPHONE_USE_NO_UPDATE_CHECK \
+    IPHONE_USE_SECRET \
+    IPHONE_USE_SESSION_TTL \
+    IPHONE_USE_STATE_DIR \
+    IPHONE_USE_TOKEN \
+    IPHONE_USE_URL
 do
     append_plist_env "$ENV_KEY" "$(env_or_existing "$ENV_KEY")"
 done
 # Unset means the daemon's default: release the phone after 600 idle seconds
 # and bring WDA up again on the next request. A stored value (including 0,
 # "keep the runner up") is the operator's choice and is carried forward.
-IDLE_RELEASE_SECS="$(env_or_existing PHONE_REMOTE_IDLE_RELEASE_SECS)"
-append_plist_env PHONE_REMOTE_IDLE_RELEASE_SECS "$IDLE_RELEASE_SECS"
+IDLE_RELEASE_SECS="$(env_or_existing IPHONE_USE_IDLE_RELEASE_SECS)"
+append_plist_env IPHONE_USE_IDLE_RELEASE_SECS "$IDLE_RELEASE_SECS"
 # `force`: release idle runners even on a phone whose next start needs a
 # person (a passcode phone); carried forward like the window.
-append_plist_env PHONE_REMOTE_IDLE_RELEASE "$(env_or_existing PHONE_REMOTE_IDLE_RELEASE)"
+append_plist_env IPHONE_USE_IDLE_RELEASE "$(env_or_existing IPHONE_USE_IDLE_RELEASE)"
 for ENV_KEY in \
     WDA_TEAM_ID \
     WDA_BUNDLE_ID \
@@ -3378,7 +3392,7 @@ ok "Daemon identity, listener, and HTTP control plane verified (pid $DAEMON_PID)
 DAEMON_PRODUCT_READY=0
 if [ "$WDA_READY" = "1" ] \
     && [ "$DAEMON_HTTP_READY" = "1" ]; then
-    DAEMON_AGENT_SECRET="$(plist_env_get PHONE_REMOTE_AGENT_TOKEN)"
+    DAEMON_AGENT_SECRET="$(plist_env_get IPHONE_USE_AGENT_TOKEN)"
     [ -n "$DAEMON_AGENT_SECRET" ] || DAEMON_AGENT_SECRET="$PASSWORD"
     DAEMON_STATUS_TRIES=0
     while [ "$DAEMON_STATUS_TRIES" -lt 30 ]; do
@@ -3517,7 +3531,7 @@ printf "  Ready?    : iphone-use status         Fix: iphone-use doctor\n"
 printf "  Set up    : iphone-use setup          Try: iphone-use try\n"
 printf "  Control   : http://%s:%s/phone\n" "$LAN_IP" "$PORT"
 printf "  Sign in   : iphone-use login          (one-time link + QR code for the iPhone)\n"
-printf "  Password  : PHONE_REMOTE_PASSWORD in %s\n" "$PLIST_DST"
+printf "  Password  : IPHONE_USE_PASSWORD in %s\n" "$PLIST_DST"
 printf "  Restart   : launchctl kickstart -k gui/%s/%s\n" "$UID_NUM" "$PLIST_LABEL"
 printf "  Uninstall : %s\n" "$UNINSTALL_DST"
 printf "  Logs      : %s/iphone-use.log, %s/.iphone-use/wda-agent.log\n" "$LOG_DIR" "$HOME"

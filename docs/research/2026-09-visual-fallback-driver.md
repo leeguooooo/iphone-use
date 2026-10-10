@@ -247,8 +247,8 @@ What the daemon *should* add (all additive, all optional):
   changed" without re-downloading identical PNGs. Nice-to-have, not required.
 
 Env-style config, if/when a daemon-side provider is ever wanted, follows the
-existing convention: `PHONE_REMOTE_VISION_URL`, `PHONE_REMOTE_VISION_TOKEN`,
-`PHONE_REMOTE_VISION_MODEL`. Explicitly **out of scope for v1**.
+existing convention: `IPHONE_USE_VISION_URL`, `IPHONE_USE_VISION_TOKEN`,
+`IPHONE_USE_VISION_MODEL`. Explicitly **out of scope for v1**.
 
 ---
 

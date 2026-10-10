@@ -1390,7 +1390,9 @@ preflight_phone_target() {
     [ "$REMOVE_PHONE_RUNNER" = "1" ] || return 0
 
     if plist_owned daemon "$DAEMON_PLIST"; then
-        daemon_udid="$(plist_get "$DAEMON_PLIST" EnvironmentVariables:PHONE_REMOTE_UDID)"
+        daemon_udid="$(plist_get "$DAEMON_PLIST" EnvironmentVariables:IPHONE_USE_UDID)"
+        # A plist written before the rename spells it PHONE_REMOTE_UDID.
+        [ -n "$daemon_udid" ] || daemon_udid="$(plist_get "$DAEMON_PLIST" EnvironmentVariables:PHONE_REMOTE_UDID)"
         daemon_bundle="$(plist_get "$DAEMON_PLIST" EnvironmentVariables:WDA_BUNDLE_ID)"
     fi
     if plist_owned wda "$WDA_PLIST"; then
@@ -1406,7 +1408,7 @@ preflight_phone_target() {
     canonical_udid="${daemon_udid:-$wda_udid}"
     if [ -z "$canonical_udid" ]; then
         printf 'ERROR: no ownership-verified canonical iPhone UDID is configured; refusing phone removal.\n' >&2
-        printf '       Configure PHONE_REMOTE_UDID/WDA_UDID first, or use devicectl manually after verification.\n' >&2
+        printf '       Configure IPHONE_USE_UDID/WDA_UDID first, or use devicectl manually after verification.\n' >&2
         return 1
     fi
     if [ "$PHONE_UDID" != "$canonical_udid" ]; then

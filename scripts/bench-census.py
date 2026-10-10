@@ -6,7 +6,7 @@ tables into the PR. It goes through the daemon only (never WDA :8100 directly,
 which bypasses the owner lease and is not counted as activity), takes the
 phone with an owner name and a hold, and releases both at the end.
 
-    PHONE_REMOTE_URL=http://127.0.0.1:45432 PHONE_REMOTE_TOKEN=... \\
+    IPHONE_USE_URL=http://127.0.0.1:45432 IPHONE_USE_TOKEN=... \\
         python3 scripts/bench-census.py [--runs 3] [--app com.apple.calculator]
 
 Each row: wall-clock ms per run, then the daemon's own timing split of the last
@@ -25,13 +25,20 @@ import urllib.request
 OWNER = "bench-census"
 
 
+# Installs made before the rename set PHONE_REMOTE_*; read them as IPHONE_USE_*
+# (the new name wins).
+for _key, _value in list(os.environ.items()):
+    if _key.startswith("PHONE_REMOTE_") and len(_key) > len("PHONE_REMOTE_"):
+        os.environ.setdefault("IPHONE_USE_" + _key[len("PHONE_REMOTE_"):], _value)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--app", default="com.apple.calculator")
     args = parser.parse_args()
-    base = os.environ.get("PHONE_REMOTE_URL", "http://127.0.0.1:44321").rstrip("/")
-    token = os.environ.get("PHONE_REMOTE_TOKEN", "")
+    base = os.environ.get("IPHONE_USE_URL", "http://127.0.0.1:44321").rstrip("/")
+    token = os.environ.get("IPHONE_USE_TOKEN", "")
     headers = {
         "Authorization": "Bearer " + token,
         "X-Phone-Control": "1",

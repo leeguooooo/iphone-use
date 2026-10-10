@@ -30,7 +30,7 @@ UDID = os.environ["AB_UDID"]  # required; not committed
 PORT, OWNER = 45690, "ab-agent"
 TOKEN = secrets.token_hex(16)
 I13_TOKEN = subprocess.run(
-    ["plutil", "-extract", "EnvironmentVariables.PHONE_REMOTE_AGENT_TOKEN", "raw",
+    ["plutil", "-extract", "EnvironmentVariables.IPHONE_USE_AGENT_TOKEN", "raw",
      os.path.expanduser("~/Library/LaunchAgents/com.leeguoo.iphone-use.i13.plist")],
     capture_output=True, text=True).stdout.strip()
 
@@ -57,8 +57,8 @@ def http(port, token, method, path, body=None, run=None):
 class Mcp:
     def __init__(self, binary):
         env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"),
-               "PHONE_REMOTE_URL": f"http://127.0.0.1:{PORT}", "PHONE_REMOTE_TOKEN": TOKEN,
-               "PHONE_REMOTE_OWNER": OWNER, "IPHONE_USE_MCP_PREWARM": "0",
+               "IPHONE_USE_URL": f"http://127.0.0.1:{PORT}", "IPHONE_USE_TOKEN": TOKEN,
+               "IPHONE_USE_OWNER": OWNER, "IPHONE_USE_MCP_PREWARM": "0",
                "IPHONE_USE_NO_UPDATE_CHECK": "1"}
         self.p = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, env=env, text=True)
@@ -153,12 +153,12 @@ def main():
     s, held = http(I13_PORT, I13_TOKEN, "POST", "/agent/hold", {"secs": 1800})
     print("i13 hold", s, held.get("hold_remaining_secs"))
     env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "TMPDIR": state,
-           "PHONE_REMOTE_HOST": "127.0.0.1", "PHONE_REMOTE_PORT": str(PORT),
-           "PHONE_REMOTE_STATE_DIR": state, "PHONE_REMOTE_INSTANCE": "ab",
-           "PHONE_REMOTE_BACKEND": "direct", "PHONE_REMOTE_WDA_URL": RELAY,
-           "PHONE_REMOTE_WDA_MJPEG_URL": MJPEG, "PHONE_REMOTE_WDA_MANAGED": "0",
-           "PHONE_REMOTE_UDID": UDID, "PHONE_REMOTE_AGENT_TOKEN": TOKEN,
-           "PHONE_REMOTE_PASSWORD": secrets.token_hex(12), "IPHONE_USE_NO_UPDATE_CHECK": "1"}
+           "IPHONE_USE_HOST": "127.0.0.1", "IPHONE_USE_PORT": str(PORT),
+           "IPHONE_USE_STATE_DIR": state, "IPHONE_USE_INSTANCE": "ab",
+           "IPHONE_USE_BACKEND": "direct", "IPHONE_USE_WDA_URL": RELAY,
+           "IPHONE_USE_WDA_MJPEG_URL": MJPEG, "IPHONE_USE_WDA_MANAGED": "0",
+           "IPHONE_USE_UDID": UDID, "IPHONE_USE_AGENT_TOKEN": TOKEN,
+           "IPHONE_USE_PASSWORD": secrets.token_hex(12), "IPHONE_USE_NO_UPDATE_CHECK": "1"}
     daemon = subprocess.Popen([os.path.join(REPO, "target/release/iphone-use"), "serve"], env=env,
                               stdout=subprocess.DEVNULL, stderr=open(os.path.join(HERE, "daemon.err"), "w"))
     try:

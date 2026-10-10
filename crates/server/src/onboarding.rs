@@ -1,7 +1,7 @@
 //! First-run commands: `iphone-use setup | doctor | status | try | login`.
 //!
 //! They find the installed daemon of one instance (`--instance`, else
-//! `PHONE_REMOTE_INSTANCE`, else the default) through its LaunchAgent, so a
+//! `IPHONE_USE_INSTANCE`, else the default) through its LaunchAgent, so a
 //! person never has to know where `setup-wda.sh` lives, which port the daemon
 //! took, or what the agent token is.
 
@@ -28,24 +28,24 @@ impl Target {
     pub fn resolve(name: Option<&str>) -> Result<Target> {
         let name = name
             .map(str::to_string)
-            .or_else(|| std::env::var("PHONE_REMOTE_INSTANCE").ok())
+            .or_else(|| std::env::var("IPHONE_USE_INSTANCE").ok())
             .unwrap_or_default();
         let home = std::env::var("HOME").context("HOME is not set")?;
         let instance = Instance::derive(&name, home, None).map_err(|e| anyhow!(e))?;
         // The same order as the MCP server: explicit environment first, then
         // the daemon's own LaunchAgent.
         let env = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
-        let base = env("PHONE_REMOTE_URL")
+        let base = env("IPHONE_USE_URL")
             .map(|url| url.trim_end_matches('/').to_string())
             .unwrap_or_else(|| {
-                let port = plist_env(&instance.daemon_label, "PHONE_REMOTE_PORT")
+                let port = plist_env(&instance.daemon_label, "IPHONE_USE_PORT")
                     .and_then(|p| p.trim().parse::<u16>().ok())
                     .unwrap_or(DEFAULT_PORT);
                 format!("http://127.0.0.1:{port}")
             });
-        let token = env("PHONE_REMOTE_TOKEN").or_else(|| {
-            plist_env(&instance.daemon_label, "PHONE_REMOTE_AGENT_TOKEN")
-                .or_else(|| plist_env(&instance.daemon_label, "PHONE_REMOTE_PASSWORD"))
+        let token = env("IPHONE_USE_TOKEN").or_else(|| {
+            plist_env(&instance.daemon_label, "IPHONE_USE_AGENT_TOKEN")
+                .or_else(|| plist_env(&instance.daemon_label, "IPHONE_USE_PASSWORD"))
         });
         Ok(Target {
             instance,
@@ -77,6 +77,12 @@ impl Target {
 }
 
 fn plist_env(label: &str, key: &str) -> Option<String> {
+    // A plist written before the rename spells the key PHONE_REMOTE_*.
+    plist_env_as(label, key)
+        .or_else(|| core::env::legacy_name(key).and_then(|old| plist_env_as(label, &old)))
+}
+
+fn plist_env_as(label: &str, key: &str) -> Option<String> {
     let home = std::env::var_os("HOME")?;
     let plist = std::path::Path::new(&home).join(format!("Library/LaunchAgents/{label}.plist"));
     if !plist.is_file() {
@@ -112,10 +118,10 @@ pub fn run_mcp(target: &Target, args: &[String]) -> i32 {
         return 2;
     };
     let mut command = std::process::Command::new(mcp);
-    command.args(args).env("PHONE_REMOTE_URL", target.base());
+    command.args(args).env("IPHONE_USE_URL", target.base());
     match &target.token {
-        Some(token) => command.env("PHONE_REMOTE_TOKEN", token),
-        None => command.env_remove("PHONE_REMOTE_TOKEN"),
+        Some(token) => command.env("IPHONE_USE_TOKEN", token),
+        None => command.env_remove("IPHONE_USE_TOKEN"),
     };
     match command.status() {
         Ok(status) => status.code().unwrap_or(1),
@@ -173,7 +179,7 @@ pub fn run_setup(target: &Target, args: &[String]) -> i32 {
         command.env("IPHONE_USE_XCODE", xcode);
     }
     if let Some(name) = target.named() {
-        command.env("PHONE_REMOTE_INSTANCE", name);
+        command.env("IPHONE_USE_INSTANCE", name);
     }
     match command.status() {
         Ok(status) => status.code().unwrap_or(1),
@@ -188,7 +194,7 @@ pub fn run_setup(target: &Target, args: &[String]) -> i32 {
 pub fn run_doctor(target: &Target) -> i32 {
     // Before any thread exists: the setup engine resolves the instance (and
     // everything else) from the environment, exactly as the script does.
-    std::env::set_var("PHONE_REMOTE_INSTANCE", &target.instance.name);
+    std::env::set_var("IPHONE_USE_INSTANCE", &target.instance.name);
     server::setup::main(&["doctor".to_string()])
 }
 
@@ -365,7 +371,7 @@ fn hint(status: &Value) -> Option<String> {
 /// when it says ok.
 pub fn run_auth(target: &Target, path: &str, body: Value) -> Result<i32> {
     let mut daemon = Daemon::new(target)?;
-    daemon.owner = std::env::var("PHONE_REMOTE_OWNER")
+    daemon.owner = std::env::var("IPHONE_USE_OWNER")
         .ok()
         .filter(|owner| !owner.trim().is_empty())
         .unwrap_or_else(|| "iphone-use-auth".to_string());

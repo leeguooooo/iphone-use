@@ -1,7 +1,7 @@
 //! Per-user runtime directory for pid/log/secret files.
 //!
-//! The directory lives at `$TMPDIR/hermes-phone-remote-$UID` (falling back to
-//! `/tmp/hermes-phone-remote-$UID` when `$TMPDIR` is unset).  It is created
+//! The directory lives at `$TMPDIR/iphone-use-$UID` (falling back to
+//! `/tmp/iphone-use-$UID` when `$TMPDIR` is unset).  It is created
 //! with mode `0700`; every access validates ownership and permissions so that
 //! an adversary who controls other paths under `/tmp` cannot trick the process
 //! into reading or writing their files.
@@ -17,9 +17,10 @@ use std::path::{Path, PathBuf};
 
 /// Return (and, if necessary, create) the per-user runtime directory.
 ///
-/// The path is `$TMPDIR/hermes-phone-remote-$UID` (`-<instance>` appended for
-/// a named instance), falling back to
-/// `/tmp/hermes-phone-remote-$UID` when `$TMPDIR` is unset or empty.
+/// The path is `$TMPDIR/iphone-use-$UID` (`-<instance>` appended for a named
+/// instance), falling back to `/tmp/iphone-use-$UID` when `$TMPDIR` is unset
+/// or empty. A directory left under the pre-rename name is moved here first,
+/// so the session secret — and with it every paired device — carries over.
 ///
 /// If the directory already exists its owner and mode are validated; an
 /// `io::Error` with kind `PermissionDenied` is returned if either check fails.
@@ -29,19 +30,42 @@ pub fn runtime_dir() -> io::Result<PathBuf> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/tmp".to_owned());
-    let dir = PathBuf::from(base).join(dir_name(uid, crate::instance::current()));
+    let instance = crate::instance::current();
+    let dir = PathBuf::from(&base).join(dir_name(uid, instance));
+    adopt_legacy_dir(&PathBuf::from(&base).join(legacy_dir_name(uid, instance)), &dir);
     ensure_dir(&dir)?;
     Ok(dir)
+}
+
+/// Move the pre-rename directory to `dir` when only the old one exists and
+/// it passes the same owner and mode checks. Best effort: on any failure the
+/// daemon starts with a new directory (and a new session secret).
+fn adopt_legacy_dir(legacy: &Path, dir: &Path) {
+    if dir.symlink_metadata().is_ok() || legacy.symlink_metadata().is_err() {
+        return;
+    }
+    if validate_dir(legacy).is_ok() {
+        let _ = fs::rename(legacy, dir);
+    }
 }
 
 /// The pid record and session secret are per daemon: a named instance (#67)
 /// gets its own directory so the default daemon's live pid record does not
 /// read as "already running" to it.
 fn dir_name(uid: u32, instance: &crate::instance::Instance) -> String {
+    named(&format!("iphone-use-{uid}"), instance)
+}
+
+/// The name before the rename.
+fn legacy_dir_name(uid: u32, instance: &crate::instance::Instance) -> String {
+    named(&format!("hermes-phone-remote-{uid}"), instance)
+}
+
+fn named(base: &str, instance: &crate::instance::Instance) -> String {
     if instance.is_default() {
-        format!("hermes-phone-remote-{uid}")
+        base.to_string()
     } else {
-        format!("hermes-phone-remote-{uid}-{}", instance.name)
+        format!("{base}-{}", instance.name)
     }
 }
 
@@ -197,8 +221,9 @@ mod tests {
     fn a_named_instance_gets_its_own_runtime_dir() {
         let default = crate::instance::Instance::derive("", "/Users/x", None).unwrap();
         let lab = crate::instance::Instance::derive("lab", "/Users/x", None).unwrap();
-        assert_eq!(dir_name(501, &default), "hermes-phone-remote-501");
-        assert_eq!(dir_name(501, &lab), "hermes-phone-remote-501-lab");
+        assert_eq!(dir_name(501, &default), "iphone-use-501");
+        assert_eq!(dir_name(501, &lab), "iphone-use-501-lab");
+        assert_eq!(legacy_dir_name(501, &lab), "hermes-phone-remote-501-lab");
     }
 
     // Helper: create a fresh 0700 tempdir.
@@ -258,6 +283,35 @@ mod tests {
         fs::set_permissions(td.path(), fs::Permissions::from_mode(0o755)).unwrap();
         let err = validate_dir(td.path()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn the_pre_rename_directory_moves_over_with_its_secret() {
+        let base = tmp700();
+        let legacy = base.path().join("hermes-phone-remote-501");
+        let dir = base.path().join("iphone-use-501");
+        ensure_dir(&legacy).unwrap();
+        write_secret(&legacy, "secret", b"0123456789abcdef0123456789abcdef").unwrap();
+
+        adopt_legacy_dir(&legacy, &dir);
+        assert!(!legacy.exists());
+        assert_eq!(read_secret(&dir, "secret").unwrap(), b"0123456789abcdef0123456789abcdef");
+
+        // Once the new one exists, a stray old one is left alone.
+        ensure_dir(&legacy).unwrap();
+        adopt_legacy_dir(&legacy, &dir);
+        assert!(legacy.exists() && dir.exists());
+    }
+
+    #[test]
+    fn a_loose_pre_rename_directory_is_not_adopted() {
+        let base = tmp700();
+        let legacy = base.path().join("hermes-phone-remote-501");
+        let dir = base.path().join("iphone-use-501");
+        fs::create_dir(&legacy).unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o755)).unwrap();
+        adopt_legacy_dir(&legacy, &dir);
+        assert!(legacy.exists() && !dir.exists());
     }
 
     #[test]

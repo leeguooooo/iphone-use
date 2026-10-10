@@ -1144,13 +1144,13 @@ impl Scheduler {
         command
             .args(Self::command_args(&schedule, &artifacts))
             .current_dir(&artifacts)
-            .env("PHONE_REMOTE_URL", &self.config.self_url)
-            .env("PHONE_REMOTE_OWNER", &owner)
+            .env("IPHONE_USE_URL", &self.config.self_url)
+            .env("IPHONE_USE_OWNER", &owner)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
         match &self.config.credential {
-            Some(token) => command.env("PHONE_REMOTE_TOKEN", token),
-            None => command.env_remove("PHONE_REMOTE_TOKEN"),
+            Some(token) => command.env("IPHONE_USE_TOKEN", token),
+            None => command.env_remove("IPHONE_USE_TOKEN"),
         };
         let outcome = tokio::time::timeout(RUN_TIMEOUT, command.output()).await;
         let duration_ms = clock.elapsed().as_millis() as u64;

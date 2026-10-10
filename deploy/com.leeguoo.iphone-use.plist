@@ -60,21 +60,21 @@
         <!-- Remote browsers/agents reach the daemon over the LAN, so this
              template binds 0.0.0.0. A password is mandatory for that binding;
              install.sh generates one when none is supplied. -->
-        <key>PHONE_REMOTE_HOST</key>
+        <key>IPHONE_USE_HOST</key>
         <string>0.0.0.0</string>
-        <key>PHONE_REMOTE_PORT</key>
+        <key>IPHONE_USE_PORT</key>
         <string>44321</string>
-        <key>PHONE_REMOTE_PASSWORD</key>
+        <key>IPHONE_USE_PASSWORD</key>
         <string>__PASSWORD__</string>
         <!-- Direct/WDA is the default. The installer owns these loopback USB
              relays; custom or remote WDA endpoints must set managed=false. -->
-        <key>PHONE_REMOTE_BACKEND</key>
+        <key>IPHONE_USE_BACKEND</key>
         <string>direct</string>
-        <key>PHONE_REMOTE_WDA_URL</key>
+        <key>IPHONE_USE_WDA_URL</key>
         <string>http://127.0.0.1:8100</string>
-        <key>PHONE_REMOTE_WDA_MJPEG_URL</key>
+        <key>IPHONE_USE_WDA_MJPEG_URL</key>
         <string>http://127.0.0.1:9100</string>
-        <key>PHONE_REMOTE_WDA_MANAGED</key>
+        <key>IPHONE_USE_WDA_MANAGED</key>
         <string>true</string>
     </dict>
 </dict>

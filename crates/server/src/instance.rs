@@ -57,7 +57,7 @@ impl Instance {
         let name = if name.is_empty() { DEFAULT_NAME } else { name };
         if name != DEFAULT_NAME && !valid_name(name) {
             return Err(format!(
-                "PHONE_REMOTE_INSTANCE={name:?} is not a valid instance name: lowercase [a-z][a-z0-9-], at most {NAME_MAX_LEN} chars, not one of {RESERVED_NAMES:?}"
+                "IPHONE_USE_INSTANCE={name:?} is not a valid instance name: lowercase [a-z][a-z0-9-], at most {NAME_MAX_LEN} chars, not one of {RESERVED_NAMES:?}"
             ));
         }
         let base = home.join(".iphone-use");
@@ -131,17 +131,17 @@ impl Instance {
         Ok(())
     }
 
-    /// From `PHONE_REMOTE_INSTANCE`, `HOME`, and an optional
-    /// `PHONE_REMOTE_STATE_DIR` override. Values are taken verbatim: a name
+    /// From `IPHONE_USE_INSTANCE`, `HOME`, and an optional
+    /// `IPHONE_USE_STATE_DIR` override. Values are taken verbatim: a name
     /// with stray whitespace is invalid, not trimmed into a different
     /// instance.
     pub fn from_env() -> Result<Instance, String> {
-        let name = std::env::var("PHONE_REMOTE_INSTANCE").unwrap_or_default();
+        let name = std::env::var("IPHONE_USE_INSTANCE").unwrap_or_default();
         let home = std::env::var("HOME").unwrap_or_default();
         if home.is_empty() {
             return Err("HOME is not set; cannot derive the instance state dir".into());
         }
-        let state_dir = std::env::var("PHONE_REMOTE_STATE_DIR")
+        let state_dir = std::env::var("IPHONE_USE_STATE_DIR")
             .ok()
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
@@ -179,7 +179,7 @@ impl Instance {
     }
 }
 
-/// Lexical rules for a `PHONE_REMOTE_STATE_DIR` override. The on-disk rules
+/// Lexical rules for a `IPHONE_USE_STATE_DIR` override. The on-disk rules
 /// (symlink, ownership) are [`Instance::verify_on_disk`].
 ///
 /// The override must be absolute and must stay clear of the `~/.iphone-use`
@@ -187,7 +187,7 @@ impl Instance {
 /// it — so it can neither alias the default instance nor overlap another
 /// named instance's derived directory. Nor may it be `/` or HOME.
 fn check_state_dir_override(dir: &Path, home: &Path) -> Result<(), String> {
-    let reject = |why: &str| Err(format!("PHONE_REMOTE_STATE_DIR={}: {why}", dir.display()));
+    let reject = |why: &str| Err(format!("IPHONE_USE_STATE_DIR={}: {why}", dir.display()));
     if !dir.is_absolute() {
         return reject("must be an absolute path");
     }

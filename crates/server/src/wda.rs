@@ -64,7 +64,7 @@ pub struct WdaClient {
     /// What the read path has learned about tree sizes; decides when a read
     /// needs the size probe (see [`ProbeMemory::should_probe`]).
     probe: ProbeMemory,
-    /// `PHONE_REMOTE_SOURCE_VISIBLE=1`: read trees with `isVisible` again
+    /// `IPHONE_USE_SOURCE_VISIBLE=1`: read trees with `isVisible` again
     /// (size-probed). Off by default: every read skips it.
     full_visibility: bool,
     /// The screen as it stood after the last action settled, kept in memory
@@ -1837,7 +1837,7 @@ impl WdaClient {
     /// Probing every read (not once per app) matters: one app can hold both
     /// kinds of screen, and backing out of a WeChat chat lands on the list.
     async fn bounded_source(&mut self) -> Result<(serde_json::Value, bool)> {
-        if std::env::var("PHONE_REMOTE_SOURCE_PROBE").is_ok_and(|value| value.trim() == "0") {
+        if std::env::var("IPHONE_USE_SOURCE_PROBE").is_ok_and(|value| value.trim() == "0") {
             return Ok((self.source().await?, false));
         }
         // Every read skips `isVisible` unless asked otherwise (the approach
@@ -2182,19 +2182,19 @@ impl WdaClient {
 
 /// Node count above which [`WdaClient::bounded_source`] keeps the tree read
 /// without `isVisible`. 1000 is about a quarter of the WeChat list that
-/// killed the runner; `PHONE_REMOTE_SOURCE_MAX_NODES` overrides it.
+/// killed the runner; `IPHONE_USE_SOURCE_MAX_NODES` overrides it.
 fn full_source_max_nodes() -> usize {
-    std::env::var("PHONE_REMOTE_SOURCE_MAX_NODES")
+    std::env::var("IPHONE_USE_SOURCE_MAX_NODES")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(1000)
 }
 
-/// `PHONE_REMOTE_SOURCE_VISIBLE=1`: read trees with WDA's `isVisible` again
+/// `IPHONE_USE_SOURCE_VISIBLE=1`: read trees with WDA's `isVisible` again
 /// (size-probed, as before every read went lite).
 fn full_visibility_requested() -> bool {
-    std::env::var("PHONE_REMOTE_SOURCE_VISIBLE").is_ok_and(|value| value.trim() == "1")
+    std::env::var("IPHONE_USE_SOURCE_VISIBLE").is_ok_and(|value| value.trim() == "1")
 }
 
 /// WDA attributes the size probe does not compute: the two per-node
@@ -2418,17 +2418,17 @@ fn mark_rows_clipped_by_scroll_containers(tree: &serde_json::Value, rows: &mut [
 }
 
 /// Bounded-snapshot WDA settings from the environment (issue #44), applied
-/// once per created session. `PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH` maps to
+/// once per created session. `IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH` maps to
 /// WDA's `snapshotMaxDepth` (tree levels; WDA's own default is 50) and
-/// `PHONE_REMOTE_WDA_SNAPSHOT_TIMEOUT_S` to `customSnapshotTimeout` (seconds;
+/// `IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S` to `customSnapshotTimeout` (seconds;
 /// WDA's default 15). Unset or unparseable values are simply omitted, so the
 /// default daemon applies no settings at all.
 fn snapshot_settings_from_env() -> Option<serde_json::Map<String, serde_json::Value>> {
     snapshot_settings(
-        std::env::var("PHONE_REMOTE_WDA_SNAPSHOT_MAX_DEPTH")
+        std::env::var("IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH")
             .ok()
             .as_deref(),
-        std::env::var("PHONE_REMOTE_WDA_SNAPSHOT_TIMEOUT_S")
+        std::env::var("IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S")
             .ok()
             .as_deref(),
     )
@@ -2506,7 +2506,7 @@ pub struct ElementRow {
     /// Text-input placeholder when WDA exposes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
-    /// Derived non-default affordances (`PHONE_REMOTE_ELEMENTS_AFFORDANCES=1`
+    /// Derived non-default affordances (`IPHONE_USE_ELEMENTS_AFFORDANCES=1`
     /// only): the named `perform` actions this element supports beyond the
     /// universal tap/longpress family, from `type` + accessibility traits +
     /// min/max — e.g. `["increment","decrement","adjust"]`. Emitted only for
@@ -2524,7 +2524,7 @@ pub struct ElementRow {
     pub min: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
-    /// Verbatim accessibility trait names (`PHONE_REMOTE_ELEMENTS_TRAITS=1`
+    /// Verbatim accessibility trait names (`IPHONE_USE_ELEMENTS_TRAITS=1`
     /// only, for debugging/forward-compat) — most values duplicate `kind`, so
     /// this is not part of the default or affordances payload.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2732,10 +2732,10 @@ fn derived_actions(
 /// default to off, which keeps the emitted JSON byte-identical.
 #[derive(Debug, Clone, Copy, Default)]
 struct FlattenOptions {
-    /// `PHONE_REMOTE_ELEMENTS_AFFORDANCES=1`: emit sparse `actions`,
+    /// `IPHONE_USE_ELEMENTS_AFFORDANCES=1`: emit sparse `actions`,
     /// `selected`, `min`, and `max` derived from traits + min/max values.
     affordances: bool,
-    /// `PHONE_REMOTE_ELEMENTS_TRAITS=1`: emit the verbatim `traits` names.
+    /// `IPHONE_USE_ELEMENTS_TRAITS=1`: emit the verbatim `traits` names.
     raw_traits: bool,
 }
 
@@ -2745,8 +2745,8 @@ fn env_flag(name: &str) -> bool {
 
 fn flatten_options_from_env() -> FlattenOptions {
     FlattenOptions {
-        affordances: env_flag("PHONE_REMOTE_ELEMENTS_AFFORDANCES"),
-        raw_traits: env_flag("PHONE_REMOTE_ELEMENTS_TRAITS"),
+        affordances: env_flag("IPHONE_USE_ELEMENTS_AFFORDANCES"),
+        raw_traits: env_flag("IPHONE_USE_ELEMENTS_TRAITS"),
     }
 }
 

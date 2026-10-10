@@ -68,7 +68,7 @@ fn fake_mcp(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
         format!(
             r#"#!/bin/sh
 echo "ARGS $*" >> '{log}'
-echo "OWNER $PHONE_REMOTE_OWNER TOKEN ${{PHONE_REMOTE_TOKEN:+set}} URL $PHONE_REMOTE_URL" >> '{log}'
+echo "OWNER $IPHONE_USE_OWNER TOKEN ${{IPHONE_USE_TOKEN:+set}} URL $IPHONE_USE_URL" >> '{log}'
 case "$1 $2 $3" in
   "flow validate risky/send") echo '{{"ok":true,"risk":"side_effect"}}' ;;
   "flow validate missing/flow") echo "no such flow" >&2; exit 1 ;;

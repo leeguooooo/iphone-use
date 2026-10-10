@@ -388,15 +388,23 @@ pub fn plist_scalar(value: Option<&Value>) -> String {
 
 /// `EnvironmentVariables:<key>` of a LaunchAgent plist; empty when absent.
 pub fn plist_env(path: &Path, key: &str) -> String {
-    read_plist(path)
-        .map(|plist| {
-            plist_scalar(
-                plist
-                    .get("EnvironmentVariables")
-                    .and_then(|env| env.get(key)),
-            )
-        })
-        .unwrap_or_default()
+    let read = |key: &str| {
+        read_plist(path)
+            .map(|plist| {
+                plist_scalar(
+                    plist
+                        .get("EnvironmentVariables")
+                        .and_then(|env| env.get(key)),
+                )
+            })
+            .unwrap_or_default()
+    };
+    let value = read(key);
+    // A plist written before the rename spells the key PHONE_REMOTE_*.
+    match core::env::legacy_name(key) {
+        Some(old) if value.is_empty() => read(&old),
+        _ => value,
+    }
 }
 
 /// A top-level scalar (`Label`) or `ProgramArguments` item of a plist.
