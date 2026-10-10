@@ -31,6 +31,7 @@ use crate::{client::DaemonClient, types::InputMsg};
 
 /// Parameters for [`phone_tap`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TapParams {
     /// Horizontal position, normalized 0–1 (0 = left edge, 1 = right edge).
     pub x: f64,
@@ -48,6 +49,7 @@ pub struct TapParams {
 
 /// Parameters for [`phone_scroll`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScrollParams {
     /// Horizontal anchor position, normalized 0–1.
     pub x: f64,
@@ -66,6 +68,7 @@ pub struct ScrollParams {
 
 /// Parameters for [`phone_type`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TypeParams {
     /// Unicode text to send through the device-side input service. Focus the
     /// intended field and verify it before typing. Up to 20000 characters;
@@ -81,6 +84,7 @@ pub struct TypeParams {
 
 /// Parameters for [`phone_apps`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AppsParams {
     /// The app's name as a person would say it (微信, WeChat, 招商银行, Settings)
     /// or a bundle id. 1–100 characters.
@@ -99,6 +103,7 @@ pub struct AppsParams {
 
 /// Parameters for [`phone_tap_label`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TapLabelParams {
     /// The element's visible accessibility label, exactly as shown by
     /// `phone_elements` (e.g. "新备忘录", "Connect").
@@ -111,6 +116,7 @@ pub struct TapLabelParams {
 
 /// Parameters for [`phone_tap_element`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TapElementParams {
     /// Zero-based element index from `phone_elements`.
     pub element: usize,
@@ -128,6 +134,7 @@ const DEFAULT_SCREENSHOT_MAX_SIDE: u32 = 1200;
 
 /// Parameters for [`phone_screenshot`].
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotParams {
     /// Longest side of the image in pixels. Default 1200, which reads fine and
     /// costs ~0.9k image tokens instead of ~1.5k at full resolution; ask for
@@ -138,6 +145,7 @@ pub struct ScreenshotParams {
 
 /// Parameters for [`phone_screen_frame`] (called by the screen panel only).
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenFrameParams {
     /// Longest side of the frame in pixels (200–1000, default 600).
     #[serde(default)]
@@ -149,6 +157,7 @@ pub struct ScreenFrameParams {
 
 /// Parameters for [`phone_key`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KeyParams {
     /// Supported names: `return`/`enter`, `escape`, `space`, `tab`,
     /// `delete`/`backspace`, `up`, `down`, `left`, `right`.
@@ -161,6 +170,7 @@ pub struct KeyParams {
 
 /// Parameters for [`phone_shortcut`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ShortcutParams {
     /// Supported names: `home` (Home Screen) and `spotlight` (search).
     /// App Switcher is unsupported by the device runner.
@@ -173,6 +183,7 @@ pub struct ShortcutParams {
 
 /// Parameters for [`phone_run_steps`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RunStepsParams {
     /// Ordered steps. The daemon validates the whole list before sending the
     /// first action and stops immediately when any action or wait condition
@@ -405,6 +416,7 @@ fn default_phone_poll_ms() -> u64 {
 
 /// Parameters for [`phone_flow_list`].
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FlowListParams {
     /// Only flows in this registry category (e.g. `health`, `system`, `finance`, `im`).
     #[serde(default)]
@@ -423,6 +435,7 @@ pub struct FlowListParams {
 
 /// Parameters for [`phone_flow_info`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FlowInfoParams {
     /// Registry id such as `health/export-all`.
     pub id: String,
@@ -430,6 +443,7 @@ pub struct FlowInfoParams {
 
 /// Parameters for [`phone_flow_run`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FlowRunParams {
     /// Registry id such as `health/export-all` (see phone_flow_list), or the
     /// path of a flow file (`*.json`) — e.g. a draft saved by phone_flow_draft,
@@ -459,6 +473,7 @@ pub struct FlowRunParams {
 
 /// Parameters for [`phone_jev_run`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JevRunParams {
     /// The whole goal in plain language, with every value it needs
     /// ("In Settings, turn on Low Power Mode"). Jev never invents personal data.
@@ -473,6 +488,7 @@ pub struct JevRunParams {
 
 /// Parameters for [`phone_flow_draft`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FlowDraftParams {
     /// Optional path to write the draft flow to (a new `.json` file; existing
     /// files are never overwritten). It is validated after writing.
@@ -482,6 +498,7 @@ pub struct FlowDraftParams {
 
 /// Parameters for [`phone_flow_publish`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FlowPublishParams {
     /// Flow file path, or an id installed with `flow add`.
     pub source: String,
@@ -503,6 +520,7 @@ pub struct FlowPublishParams {
 
 /// Parameters for [`phone_flow_report`].
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FlowReportParams {
     /// Registry id of the flow that failed.
     pub id: String,
@@ -531,6 +549,7 @@ pub struct PhoneHandler {
 
 /// Parameters for [`PhoneHandler::phone_login`].
 #[derive(Debug, Default, serde::Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LoginParams {
     /// Vault entry name or id, when several entries match the app.
     #[serde(default)]
@@ -551,6 +570,7 @@ pub struct LoginParams {
 
 /// Parameters for [`PhoneHandler::phone_run_start`].
 #[derive(Debug, serde::Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RunStartParams {
     /// A short id for this task: 1–64 of A-Z a-z 0-9 . _ : @ -
     pub run_id: String,
@@ -563,6 +583,7 @@ pub struct RunStartParams {
 
 /// Parameters for [`PhoneHandler::phone_run_end`].
 #[derive(Debug, serde::Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RunEndParams {
     pub run_id: String,
     /// Every model turn id of the task, when phone_run_start declared a
@@ -573,6 +594,7 @@ pub struct RunEndParams {
 
 /// Parameters for [`PhoneHandler::phone_collect_list`].
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CollectListParams {
     /// Element kind of one list row (default `Cell`; e.g. `StaticText`,
     /// `Button`, `Link`). A row without a label is named by its texts.
@@ -596,6 +618,7 @@ pub struct CollectListParams {
 
 /// Parameters for [`PhoneHandler::phone_scroll_find`].
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScrollFindParams {
     /// Exact label to find.
     pub label: String,
@@ -615,6 +638,7 @@ pub struct ScrollFindParams {
 
 /// Parameters for [`PhoneHandler::phone_hold`].
 #[derive(Debug, serde::Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HoldParams {
     /// Seconds to keep the phone (0 clears the hold; at most 14400).
     pub secs: u64,
@@ -2801,6 +2825,21 @@ async fn send_input_observed(
 
 #[cfg(test)]
 mod tests {
+
+    /// A misspelled or unsupported argument must fail loudly. Before this,
+    /// `phone_tap_label {"label":…, "kind":"Button"}` silently dropped
+    /// `kind`, and the agent believed its filter had applied.
+    #[test]
+    fn tool_arguments_reject_unknown_fields() {
+        let err = serde_json::from_value::<TapLabelParams>(
+            serde_json::json!({"label": "删除", "kind": "Button"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field `kind`"), "{err}");
+        assert!(serde_json::from_value::<TapLabelParams>(serde_json::json!({"label": "删除"})).is_ok());
+        let schema = serde_json::to_value(rmcp::schemars::schema_for!(TapLabelParams)).unwrap();
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false), "{schema}");
+    }
     use super::*;
 
     // ---------------------------------------------------------------------

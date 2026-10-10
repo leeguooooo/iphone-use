@@ -300,6 +300,10 @@ values from the start), `characters_uncertain`, `remaining_text`, and
 `retry_safe:false`: read the field, then send only what is missing with
 `clear:false` — never the whole text again. One batch types at most 20000
 characters in total.
+To check a long text, look at a screenshot of its end. Do not compare
+`value`: iOS cuts a text view's accessibility value short. On an iPhone
+17 Pro Max with iOS 27, a 1986-character note read back as only its first
+477 characters, although the whole text was on screen.
 
 `force_press` answers `422 force_press_unsupported` (retry-safe, nothing sent)
 on every iPhone since XR/11; use `menu`. App uninstall: `{"type":"uninstall","bundle":…}`
