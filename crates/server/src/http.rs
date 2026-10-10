@@ -14215,7 +14215,8 @@ const SCREENSHOT_FIRST_ATTEMPT: std::time::Duration = std::time::Duration::from_
 /// asked size (at least 320 px), or 1024 px for a full-resolution request.
 fn retry_shot(first: crate::wda::ShotRequest) -> crate::wda::ShotRequest {
     let side = match first.max_side {
-        Some(side) => (side / 2).max(320).min(side),
+        Some(side) if side <= 320 => side,
+        Some(side) => (side / 2).max(320),
         None => 1024,
     };
     crate::wda::ShotRequest {
