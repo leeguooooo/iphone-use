@@ -84,7 +84,7 @@ window.drawFrame = function (c, t, film, view, M) {
     // the terminal stay put inside view.safe, so the agent is on screen the whole time.
     // The phone grows in place while it acts (portrait 1.3×, landscape 1.12×), then settles.
     const zMax = V ? 1.3 : 1.12;
-    phoneZ = M.camera(t, [[0.3, "Z"], [2.5, 1], [5.1, "Z"], [6.9, 1], [10.3, "Z"], [11.5, 1], [12.1, "Z"], [16.3, 1], [23.0, "Z"], [24.0, 1], [24.6, "Z"], [28.3, 1], [29.7, "Z"], [30.8, 1], [33.8, "Z"], [35.6, 1]].map(([at, z]) => ({ at, kind: "to", z: z === "Z" ? zMax : z })), { z: 1 }).z;
+    phoneZ = M.camera(t, [[0.3, "Z"], [2.5, 1], [5.1, "Z"], [6.9, 1], [10.3, "Z"], [11.5, 1], [12.1, "Z"], [16.3, 1], [23.0, "Z"], [24.0, 1], [24.6, "Z"], [28.3, 1], [29.7, "Z"], [30.8, 1], [33.8, "Z"], [35.6, 1]].map(([at, z]) => ({ at, kind: "to", z: z === "Z" ? (at < 1 && V ? 1.12 : zMax) : z, dur: 0.45, ease: "cubicInOut" })), { z: 1 }).z; // the opening zoom stays clear of the headline
     // Between beats: a 0.3 s whip — the old beat slides out right, the new one slides in from the
     // left. Text only crosses the frame edge mid-move; at rest everything is inside view.safe.
     const Cw = C0, // the default camera centre, so the layout rests exactly where it was designed
@@ -95,6 +95,7 @@ window.drawFrame = function (c, t, film, view, M) {
       ]);
     M.shoot(c, t, V ? whips : [...whips, 
       [0.3, "push", toPhone, 0.04],
+      [2.6, "push", toPane, 0.08],
       [5.1, "to", C0, 1],
       [6.4, "push", toPane, 0.1],
       [9.6, "push", toPhone, 0.03],
@@ -117,7 +118,9 @@ window.drawFrame = function (c, t, film, view, M) {
       // Frame 0 is the cover: the title and the command are already in place.
       if (t < 5) term([["$", p.cType, -2], ["=", p.rType, 2.6]], -1, 4.9);
       // The claim in words, once the note has filled: long text goes in with one call.
-      M.stamp(c, t, p.typed, V ? [W * 0.46, pane.y + pane.h * 0.66] : [pane.x + pane.w / 2, pane.y + pane.h * 0.6], { at: 2.8, until: 4.9, size: (V ? 52 : 64) * u, color: k.accent2, rotate: 0, box: false });
+      const proof = V ? [W * 0.46, pane.y + pane.h * 0.66] : [pane.x + pane.w / 2, pane.y + pane.h * 0.6];
+      M.stamp(c, t, p.key, proof, { at: 0.5, until: 2.7, size: (V ? 52 : 64) * u, color: k.ink, rotate: 0, box: false });
+      M.stamp(c, t, p.typed, proof, { at: 2.8, until: 4.9, size: (V ? 52 : 64) * u, color: k.accent2, rotate: 0, box: false });
       // read
       head(p.read, 5.1, 12);
       term([["$", p.cRead, 5.4], ...d.rows.slice(0, V ? 4 : 7).map((r, i) => ["=", r, 6.2 + i * 0.12, k.ink])], 5.2, 11.9);
@@ -142,50 +145,61 @@ window.drawFrame = function (c, t, film, view, M) {
     });
   }
 
-  // People take over: the real recording of the browser control page, a person clicking the picture.
+  // Remote control: the real recording of the browser control page. A click on the live picture
+  // operates the phone; then the sidebar's scan-to-connect (iPhone app) and grid (several phones).
   if (t >= 37 && t < 49.5) {
     const page = M.video("people", t);
+    let sp = null;
     if (page) {
       const iw = page.naturalWidth || page.width,
         ih = page.naturalHeight || page.height;
-      // Landscape fills the frame with the page; portrait shows the whole page first (the browser
-      // is part of the claim), then pushes far in on each click.
       const base = V ? W / iw : Math.max(W / iw, H / ih),
         s = V ? base : base * (1 + 0.06 * M.tween(t, 37, 1.2, "expoOut")),
         dw = iw * s,
         dh = ih * s,
         dx = V ? 0 : Math.min(0, Math.max(W - dw, W / 2 - 0.5 * dw)),
         dy = V ? H * 0.43 - dh / 2 : Math.min(0, Math.max(H - dh, H / 2 - 0.47 * dh));
-      const clicks = [[37 + 3.06, 866, 398], [37 + 9.0, 679, 183]].map(([at, px, py]) => [at, dx + (px / 1920) * dw, dy + (py / 1080) * dh]);
-      let focus = null,
-        zp = 1;
+      const P = (px, py) => [dx + (px / 1920) * dw, dy + (py / 1080) * dh]; // recording pixels → frame
+      const click = P(866, 398),
+        side = P(1800, 470);
+      // View: screen = T + (p − F)·Z. Portrait pushes in on the click, then slides to the sidebar and
+      // brings it to the middle of the safe area; landscape pulses in on the click and holds the page.
+      let F = click,
+        T = click,
+        Z = 1;
       if (V) {
-        // One smooth push in that holds through both clicks; the focus slides from one to the next.
-        const k2 = M.tween(t, 39.3, 0.5) * (1 - M.tween(t, 48.4, 0.5)),
-          slide = M.tween(t, 44.6, 0.6);
-        focus = M.lerp2([clicks[0][1], clicks[0][2]], [clicks[1][1], clicks[1][2]], slide);
-        zp = 1 + 1.6 * k2;
-      } else
-        for (const [at, x, y] of clicks) {
-          const k2 = M.tween(t, at - 0.7, 0.28) * (1 - M.tween(t, at + 2.6, 0.28));
-          if (k2 > 0) ((focus = [x, y]), (zp = 1 + 0.14 * k2));
-        }
+        const into = M.tween(t, 39.2, 0.5),
+          slide = M.tween(t, 43.5, 0.6),
+          out = M.tween(t, 48.6, 0.4);
+        F = M.lerp2(click, side, slide);
+        T = M.lerp2(click, [W * 0.46, H * 0.42], slide);
+        // 1× → 2.6× on the click, then 1.6× on the sidebar, back to 1× on the way out.
+        Z = M.mix(M.mix(1, 2.6, into), 1.6, slide) * (1 - out) + out;
+      } else Z = 1 + 0.14 * M.tween(t, 39.4, 0.28) * (1 - M.tween(t, 42.6, 0.28));
+      sp = (pt) => [T[0] + (pt[0] - F[0]) * Z, T[1] + (pt[1] - F[1]) * Z];
       c.save();
-      // Portrait enters with the same whip as the other beats; landscape fades through black.
+      if (V) (c.beginPath(), c.rect(0, 0, W, view.safe.y + view.safe.h), c.clip());
+      // Portrait enters with the same whip as the other beats; landscape fades in from black.
       if (V) c.translate((M.easings.expoOut((t - 37) / 0.3) - 1) * W + M.easings.expoIn((t - 48.9) / 0.3) * W, 0);
-      if (focus) (c.translate(focus[0], focus[1]), c.scale(zp, zp), c.translate(-focus[0], -focus[1]));
+      c.translate(T[0], T[1]);
+      c.scale(Z, Z);
+      c.translate(-F[0], -F[1]);
       c.drawImage(page, dx, dy, dw, dh);
-      // Mark the person's two clicks where they happened (page pixels at 1920×1080).
-      for (const [at, px, py] of [[37 + 3.06, 866, 398], [37 + 9.0, 679, 183]]) {
-        const pt = [dx + (px / 1920) * dw, dy + (py / 1080) * dh];
-        if (t < at + 1.6) M.cursor(c, t, [[at - 0.6, pt[0] + 120 * u, pt[1] + 90 * u], [at - 0.05, pt[0], pt[1]], [at + 1.2, pt[0], pt[1]]], { clicks: [at], size: 1.3 });
-      }
+      // The click where it happened in the recording.
+      const at = 37 + 3.06;
+      if (t < at + 1.6) M.cursor(c, t, [[at - 0.6, click[0] + 120 * u, click[1] + 90 * u], [at - 0.05, click[0], click[1]], [at + 1.2, click[0], click[1]]], { clicks: [at], size: 1.3 / Z });
       c.restore();
+      // Point out the two sidebar controls (positions measured on the recording).
+      // Portrait: labels open to the right of the sidebar, in the empty part of the safe area.
+      M.callout(c, t, sp(P(1808, 553)), p.qr, { sub: p.qrSub, bg: k.bg, fg: k.ink, at: 44.2, until: 49.2, dx: (V ? 140 : -380) * u, dy: (V ? 150 : 70) * u, size: (V ? 34 : 40) * u });
+      M.callout(c, t, sp(P(1795, 383)), p.grid, { sub: p.gridSub, bg: k.bg, fg: k.ink, at: 45.4, until: 49.2, dx: (V ? 140 : -380) * u, dy: (V ? -150 : -70) * u, size: (V ? 34 : 40) * u });
     }
-    // Enter and leave through black instead of a hard cut.
-    const veil = V ? 0.6 * (1 - M.tween(t, 37, 0.3)) + 0.6 * M.tween(t, 48.9, 0.3) : 1 - M.tween(t, 37, 0.45) + 0.8 * M.tween(t, 48.7, 0.45);
+    // Enter through black instead of a hard cut into the bright page.
+    const veil = V ? 0.85 * (1 - M.tween(t, 37, 0.8)) + 0.6 * M.tween(t, 48.9, 0.3) : 1 - M.tween(t, 37, 0.8, "sineInOut") + 0.8 * M.tween(t, 48.7, 0.45);
     if (veil > 0) ((c.fillStyle = `rgba(11,13,16,${Math.min(1, veil)})`), c.fillRect(0, 0, W, H));
-    M.caption(c, t, p.people, 37.5, 49.3, { y: V ? 0.13 : 0.09, size: (V ? 46 : 54) * u, color: k.ink, plate: "rgba(11,13,16,.88)", weight: 900, maxWidth: W * 0.9 });
+    const top = { y: V ? 0.13 : 0.09, size: (V ? 44 : 52) * u, color: k.ink, weight: 900, maxWidth: V ? view.safe.w : W * 0.9, x: V ? (view.safe.x + view.safe.w / 2) / W : 0.5 };
+    M.caption(c, t, p.remote1, 37.5, 43.4, { ...top, plate: "rgba(11,13,16,.88)" });
+    M.caption(c, t, p.remote2, 43.6, 49.3, { ...top, plate: "rgba(10,132,255,.94)" });
   }
 
   // Outro: icon, name, the repository large and the command readable.
@@ -196,6 +210,9 @@ window.drawFrame = function (c, t, film, view, M) {
     c.fillStyle = k.bg;
     c.fillRect(0, 0, W, H);
     c.restore();
+    // The end card arrives with the same whip as the beats.
+    c.save();
+    c.translate((M.easings.expoOut((t - 49.1) / 0.32) - 1) * W, 0);
     const cx = V ? W * 0.46 : W / 2,
       pop = M.easings.backOut(M.clamp((t - 49.2) / 0.4), 2.2),
       C = [cx, H * (V ? 0.22 : 0.24)],
@@ -227,6 +244,7 @@ window.drawFrame = function (c, t, film, view, M) {
       });
     }
     M.caption(c, t, p.install, 52.3, Infinity, { x: cx / W, y: V ? 0.66 : 0.88, size: 36 * u, color: k.sub, weight: 700 });
+    c.restore();
   }
   // Provenance note at the foot of the opening terminal (portrait) or the frame (landscape).
   M.caption(c, t, p.real, 0.6, 4.9, { x: V ? 0.46 : 0.5, y: V ? (pane.y + pane.h - 26 * u) / H : 0.968, size: (V ? 22 : 26) * u, color: k.sub, weight: 600, maxWidth: V ? pane.w - 40 * u : W * 0.9 });

@@ -23,3 +23,8 @@ The first cut failed our own pacing gate (fast_ratio 0.009) and then the indepen
 Oddity seen while recording the control page: for about two seconds the phone showed the app switcher and Shortcuts, not caused by the recording script (it only clicked twice). Those seconds are not used.
 
 - Do: put each tool call in a terminal next to the recording it caused. Evidence: the reviewer's first complaint was that the agent never appears. Why: the product is the link between call and action. When: any agent tool promo.
+
+## Round 6 (user feedback, 2026-10-10)
+
+- The opening states the point first: "let AI drive your real iPhone — any app, no API needed", then the 278-character proof.
+- The remote-control beat is about remote control, not about agent/person collisions: click the live picture in a browser (from anywhere), and the sidebar's scan-to-connect (iPhone app) and grid (several phones) controls.

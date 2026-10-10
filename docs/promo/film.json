@@ -96,8 +96,8 @@
   },
   "copy": {
     "zh": {
-      "title1": "让 AI 用你的",
-      "title2": "真 iPhone",
+      "title1": "让 AI 直接操作",
+      "title2": "你的真 iPhone",
       "cType": "type \"周报草稿…\" · 278 字，一步",
       "rType": "ok · 1 applied",
       "read": "屏幕读成文字",
@@ -124,13 +124,19 @@
       "s2": "\"device\": \"iPhone 17 Pro Max · iOS 27.0\"",
       "s3": "\"drivable\": true",
       "ios": "iOS 15+",
-      "people": "人也能接手：在浏览器里点画面",
       "real": "真机录屏，终端内容为本次录制的真实调用",
       "install": "一行命令安装",
-      "typed": "一步写入 278 字"
+      "typed": "一步写入 278 字",
+      "key": "任何 App，不需要 API",
+      "remote1": "远程操作 iPhone：浏览器里直接点画面",
+      "remote2": "iPhone App 扫码连上，一起控制多台设备",
+      "qr": "扫码连接",
+      "grid": "网格",
+      "qrSub": "iPhone App 远程控制",
+      "gridSub": "多台设备同屏控制"
     },
     "en": {
-      "title1": "Let AI use",
+      "title1": "Let AI drive",
       "title2": "your real iPhone",
       "cType": "type \"Weekly report…\" · 278 chars, 1 step",
       "rType": "ok · 1 applied",
@@ -158,10 +164,16 @@
       "s2": "\"device\": \"iPhone 17 Pro Max · iOS 27.0\"",
       "s3": "\"drivable\": true",
       "ios": "iOS 15+",
-      "people": "People can take over: click the live picture",
       "real": "Real iPhone recordings; the terminal shows this session's real calls",
       "install": "One command to install",
-      "typed": "278 characters, one step"
+      "typed": "278 characters, one step",
+      "key": "Any app, no API needed",
+      "remote1": "Remote control: click the live picture",
+      "remote2": "Pair the iPhone app, drive several phones",
+      "qr": "Scan to connect",
+      "grid": "Grid",
+      "qrSub": "the iPhone app",
+      "gridSub": "several phones at once"
     }
   },
   "shots": [
@@ -171,14 +183,14 @@
       "end": 5,
       "camera": "push",
       "text": {
-        "zh": "真 iPhone",
-        "en": "real iPhone"
+        "zh": "让 AI 操作真 iPhone",
+        "en": "AI drives a real iPhone"
       },
       "purpose": "Open on the product doing something",
       "action": "The agent sends one type call and the real phone fills a note with 278 characters",
       "narration": {
-        "zh": "让 AI 用你的真 iPhone，一步写进 278 个字。",
-        "en": "Let AI use your real iPhone."
+        "zh": "让 AI 直接操作你的真 iPhone，任何 App 都行。",
+        "en": "Let AI drive your real iPhone. Any app, no API needed."
       }
     },
     {
@@ -226,7 +238,7 @@
       "action": "Two real refusals print in the terminal while the recorded Date & Time page stays exactly as it was",
       "narration": {
         "zh": "点不到或没等到，它都直说，还告诉你能不能重试。",
-        "en": "When a step does not land, it says so, and whether to retry."
+        "en": "When a step does not land, it says so, and whether to retry. Nothing is faked."
       }
     },
     {
@@ -266,16 +278,16 @@
       "start": 37,
       "end": 49.5,
       "camera": "hold",
-      "holdReason": "a real browser recording plays through: a person taps a row on the live picture and goes back",
+      "holdReason": "a real browser recording plays through, then the sidebar controls for the iPhone app and several phones are pointed out",
       "text": {
-        "zh": "人也能接手",
-        "en": "take over"
+        "zh": "远程控制",
+        "en": "remote control"
       },
-      "purpose": "Show remote control for people",
-      "action": "In the browser control page a person clicks the live picture; the phone opens Date & Time, then goes back",
+      "purpose": "Show remote control",
+      "action": "In the browser control page a click on the live picture opens Date & Time on the phone; then the sidebar's scan-to-connect and grid controls are pointed out",
       "narration": {
-        "zh": "人也能在浏览器里接手：直接点手机画面，打开日期与时间，再点返回。agent 和人共用一台手机，不会互相抢。",
-        "en": "People can take over from a browser: click the live picture to open Date and Time, then go back. Agents and people share one phone without colliding."
+        "zh": "还能远程控制：在浏览器里直接点手机画面，外网也能连；用 iPhone App 扫码连上，还能一起控制多台手机。",
+        "en": "Remote control, too: click the live picture in a browser, even from outside your network, or pair the iPhone app and drive several phones."
       }
     },
     {
