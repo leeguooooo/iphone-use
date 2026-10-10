@@ -953,6 +953,38 @@ remove_cli_link() {
     return 0
 }
 
+# install.sh registers the MCP server with Claude Code and the Codex CLI.
+# Remove each entry only while it still launches this app's iphone-use-mcp;
+# a failure here is a warning, never a reason to keep the rest.
+remove_agent_mcp_entries() {
+    local mcp="$APP_PATH/Contents/MacOS/iphone-use-mcp"
+    local name="iphone-use" existing
+    [ "$INSTANCE_NAME" = default ] || name="iphone-use-$INSTANCE_NAME"
+    if command -v claude >/dev/null 2>&1 \
+        && existing="$(claude mcp get "$name" 2>/dev/null)" \
+        && printf '%s' "$existing" | grep -qF "$mcp"; then
+        if [ "$DRY_RUN" = "1" ]; then
+            plan "remove Claude Code MCP server $name (claude mcp remove -s user $name)"
+        elif claude mcp remove -s user "$name" >/dev/null 2>&1; then
+            ok "removed Claude Code MCP server $name"
+        else
+            warn "could not remove Claude Code MCP server $name; remove it with: claude mcp remove -s user $name"
+        fi
+    fi
+    if command -v codex >/dev/null 2>&1 \
+        && existing="$(codex mcp get "$name" --json 2>/dev/null)" \
+        && printf '%s' "$existing" | grep -qF "\"$mcp\""; then
+        if [ "$DRY_RUN" = "1" ]; then
+            plan "remove Codex MCP server $name (codex mcp remove $name)"
+        elif codex mcp remove "$name" >/dev/null 2>&1; then
+            ok "removed Codex MCP server $name"
+        else
+            warn "could not remove Codex MCP server $name; remove it with: codex mcp remove $name"
+        fi
+    fi
+    return 0
+}
+
 remove_owned_app() {
     local path="$1"
     local expected_path="$2"
@@ -1475,6 +1507,7 @@ if [ "$DAEMON_RUNTIME_CLEAN" = "1" ]; then
     DAEMON_ARTIFACTS_CLEAN=1
     remove_owned_app "$APP_PATH" "$APP_PATH" "$APP_BINARY" \
         "com.leeguoo.iphone-use" || DAEMON_ARTIFACTS_CLEAN=0
+    [ "$DAEMON_ARTIFACTS_CLEAN" = "0" ] || remove_agent_mcp_entries
     if [ "$INSTANCE_NAME" = default ]; then
         [ "$DAEMON_ARTIFACTS_CLEAN" = "0" ] || remove_cli_link || DAEMON_ARTIFACTS_CLEAN=0
     elif [ "$DAEMON_ARTIFACTS_CLEAN" = "1" ] && [ -d "$APP_PARENT" ] && [ ! -L "$APP_PARENT" ]; then
