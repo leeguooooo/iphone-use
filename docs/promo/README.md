@@ -12,7 +12,7 @@ motion-use render . --allow-code --quality high
 Everything on screen is real, recorded on 2026-10-10 with iphone-use v0.17.14 on an iPhone 17 Pro Max (iOS 27.0):
 
 - `footage/notes.mp4`, `general.mp4`, `flow.mp4`: the phone's screen from the daemon's own `/agent/mjpeg` stream while an agent drove it — one `type` call writing a 278-character draft into a new note (the note was deleted afterwards), Settings › General read and scrolled, Date & Time opened by name, and `phone_flow_run settings/open` replaying a saved flow.
-- `footage/control.mp4`: the browser control page recorded in an isolated headless Chrome while a scripted "person" clicked the live picture (Date & Time, then back). The cursor in the film marks those two clicks where they happened.
+- `footage/control.mp4`: the browser control page recorded in an isolated headless Chrome while a scripted click on the live picture opened Date & Time on the phone (remote control). The cursor in the film marks that click where it happened; the callouts point at the page's own sidebar controls for scanning to connect the iPhone app and the multi-phone grid.
 - The terminal lines are this session's real calls and responses, including two real refusals: `element_occluded · nothing_applied · retry_safe` and `partially_applied · retry_safe=false`. `phone_status` really reported `"transport": "wifi-tunnel"`.
 - Drawn: the terminal frame, the Wi-Fi rings and stamps. Numbers (0.1 s read, iOS 15+) come from the README; update both together.
 
