@@ -54,7 +54,7 @@ extension RunnerTests {
     case "GET":
       if match(parts, "status") != nil { return .value(statusValue(), sessionId: Self.sessionID) }
       if match(parts, "source") != nil { return try source(request) }
-      if match(parts, "screenshot") != nil { return try screenshot() }
+      if match(parts, "screenshot") != nil { return try screenshot(request) }
       if match(parts, "window/size") != nil { return windowSize() }
       if match(parts, "window/rect") != nil {
         let size = windowSizePoints()

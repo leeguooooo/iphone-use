@@ -217,6 +217,69 @@ enum CommandAge {
   }
 }
 
+/// `GET /screenshot` options. Without any of them the route answers exactly as WebDriverAgent does
+/// (a full-resolution PNG); with them the phone shrinks and encodes the capture itself, so a slow
+/// link carries a ~100 KB JPEG instead of a multi-megabyte PNG (17 Pro Max: 1320×2868).
+///   max_side=<px>      longer side at most this many pixels, aspect kept (16…8192)
+///   format=png|jpeg    default png
+///   quality=<0…1>      JPEG quality, default 0.7
+/// The envelope stays `{"value": "<base64>"}`; the X-IPU-Image-* headers say what came back, and
+/// their absence tells the daemon it reached a runner without this support.
+struct ScreenshotOptions: Equatable {
+  static let minSide = 16
+  static let maxSideLimit = 8192
+  static let defaultQuality = 0.7
+
+  var maxSide: Int?
+  var png: Bool
+  var quality: Double
+
+  /// nil when the query names none of the options (the WebDriverAgent-compatible screenshot).
+  static func parse(_ query: [String: String]) throws -> ScreenshotOptions? {
+    let side = query["max_side"]
+    let format = query["format"]
+    let quality = query["quality"]
+    if side == nil && format == nil && quality == nil { return nil }
+    var options = ScreenshotOptions(maxSide: nil, png: true, quality: defaultQuality)
+    if let side, !side.isEmpty {
+      guard let value = Int(side), value >= minSide, value <= maxSideLimit else {
+        throw RunnerError.invalidArgument("max_side must be an integer from \(minSide) to \(maxSideLimit), got \(side)")
+      }
+      options.maxSide = value
+    }
+    switch format?.lowercased() {
+    case nil, "", "png": options.png = true
+    case "jpeg", "jpg": options.png = false
+    case let other?: throw RunnerError.invalidArgument("format must be png or jpeg, got \(other)")
+    }
+    if let quality, !quality.isEmpty {
+      guard let value = Double(quality), value.isFinite, value >= 0, value <= 1 else {
+        throw RunnerError.invalidArgument("quality must be a number from 0 to 1, got \(quality)")
+      }
+      options.quality = value
+    }
+    return options
+  }
+
+  /// What the image is, from the bridge's info (sourceWidth/sourceHeight/width/height/png).
+  /// X-IPU-Image-Scale is returned pixels per captured pixel.
+  static func headers(_ info: [String: NSNumber]) -> [String: String] {
+    let width = info["width"]?.intValue ?? 0
+    let height = info["height"]?.intValue ?? 0
+    let sourceWidth = info["sourceWidth"]?.intValue ?? 0
+    let sourceHeight = info["sourceHeight"]?.intValue ?? 0
+    let scale = sourceWidth > 0 ? Double(width) / Double(sourceWidth) : 1
+    return [
+      "X-IPU-Image-Width": String(width),
+      "X-IPU-Image-Height": String(height),
+      "X-IPU-Image-Source-Width": String(sourceWidth),
+      "X-IPU-Image-Source-Height": String(sourceHeight),
+      "X-IPU-Image-Scale": String(format: "%.4f", scale),
+      "X-IPU-Image-Format": info["png"]?.boolValue == false ? "jpeg" : "png",
+    ]
+  }
+}
+
 /// Requests answered on the capture queue instead of main: GET screenshots and on-device settle.
 /// Anything the capture handler declines (a failed off-main capture) falls through to main.
 enum CaptureLane {

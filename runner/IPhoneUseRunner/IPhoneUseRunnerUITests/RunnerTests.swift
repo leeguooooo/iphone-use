@@ -182,7 +182,27 @@ final class RunnerTests: XCTestCase {
     var response: HTTPResponse
     switch CaptureLane.route(request.path) {
     case "/screenshot":
+      let options: ScreenshotOptions?
+      do {
+        options = try ScreenshotOptions.parse(request.query)
+      } catch {
+        return .from(error)
+      }
       var failure: NSString?
+      if let options {
+        var info: NSDictionary?
+        guard let image = autoreleasepool(invoking: {
+          IPURBridge.sizedScreenshot(
+            withMaxSide: UInt(options.maxSide ?? 0), png: options.png, quality: options.quality,
+            info: &info, error: &failure)
+        }) else {
+          NSLog("ipu-runner: off-main sized screenshot failed (%@); capturing on main", (failure as String?) ?? "-")
+          return nil
+        }
+        response = .value(image.base64EncodedString())
+        response.headers.merge(ScreenshotOptions.headers(info as? [String: NSNumber] ?? [:])) { $1 }
+        break
+      }
       guard let png = autoreleasepool(invoking: { IPURBridge.requestedPNGScreenshot(error: &failure) }) else {
         NSLog("ipu-runner: off-main screenshot failed (%@); capturing on main", (failure as String?) ?? "-")
         return nil
@@ -305,7 +325,7 @@ final class RunnerTests: XCTestCase {
     case ("POST", "/home"): return try home()
     case ("POST", "/launch"): return try launch(request)
     case ("GET", "/apps/active"): return try activeApp()
-    case ("GET", "/screenshot"): return try screenshot()
+    case ("GET", "/screenshot"): return try screenshot(request)
     case ("GET", "/alert"): return try alert()
     case ("POST", "/alert"): return try alertTap(request)
     case ("GET", "/window/size"): return windowSize()
@@ -664,13 +684,22 @@ final class RunnerTests: XCTestCase {
 
   // MARK: - Screen
 
-  func screenshot() throws -> HTTPResponse {
+  func screenshot(_ request: HTTPRequest) throws -> HTTPResponse {
+    let options = try ScreenshotOptions.parse(request.query)
     var png = Data()
     if let exception = IPURBridge.catchException({ png = XCUIScreen.main.screenshot().pngRepresentation }) {
       throw RunnerError.failed("screenshot failed: \(exception)")
     }
     guard !png.isEmpty else { throw RunnerError.failed("screenshot returned no data") }
-    return .value(png.base64EncodedString())
+    guard let options else { return .value(png.base64EncodedString()) }
+    var info: NSDictionary?
+    guard let image = IPURBridge.fitImage(
+      png, maxSide: UInt(options.maxSide ?? 0), png: options.png, quality: options.quality, info: &info)
+    else {
+      throw RunnerError.failed("the screenshot could not be resized")
+    }
+    return .value(image.base64EncodedString(),
+                  headers: ScreenshotOptions.headers(info as? [String: NSNumber] ?? [:]))
   }
 
   /// The screen in points as the UI on it is oriented: the interface orientation, never the

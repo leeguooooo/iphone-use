@@ -162,6 +162,26 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 + (nullable NSData *)requestedPNGScreenshotWithError:(NSString *_Nullable *_Nullable)error
   NS_SWIFT_NAME(requestedPNGScreenshot(error:));
 
+/// The screen for `GET /screenshot?max_side=&format=&quality=`, sized and encoded on the phone so
+/// a slow link carries a ~100 KB JPEG instead of a multi-megabyte full-resolution PNG. Safe off
+/// the main thread. PNG (`png`) comes from testmanagerd's PNG request; JPEG from the same capture
+/// paths as `screenCaptureWithQuality:`. `maxSide` 0 keeps full size. `info` receives
+/// sourceWidth/sourceHeight/width/height (pixels) and png (BOOL). nil when no off-main path
+/// works; the caller then captures on main and uses `fitImage:`.
++ (nullable NSData *)sizedScreenshotWithMaxSide:(NSUInteger)maxSide
+                                            png:(BOOL)png
+                                        quality:(double)quality
+                                           info:(NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable)info
+                                          error:(NSString *_Nullable *_Nullable)error;
+
+/// `IPURFitImage` (IPURImageCodec.h) for Swift: `data` (PNG or JPEG) re-encoded as PNG or JPEG
+/// at `quality`, its longer side at most `maxSide` pixels (0: full size).
++ (nullable NSData *)fitImage:(NSData *)data
+                      maxSide:(NSUInteger)maxSide
+                          png:(BOOL)png
+                      quality:(double)quality
+                         info:(NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable)info;
+
 /// One JPEG of the main screen, safe to call off the main thread. Tries, fastest first:
 /// 1. `XCUIDevice.screenDataSource requestScreenshotWithRequest:withReply:` with an
 ///    XCTScreenshotRequest asking testmanagerd for JPEG at `quality` (what WDA's MJPEG server uses);

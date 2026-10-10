@@ -51,6 +51,7 @@ runner/
     RunnerMJPEG.swift    MJPEG server
     RunnerHTTP.swift     HTTP/1.1 server (NWListener), envelopes, errors
     IPURBridge.h/.m      private XCTest API (AX snapshot, event synthesis, screenshots, lock state)
+    IPURImageCodec.h     screenshot resize + re-encode (ImageIO; also compiled by unit-check.sh)
 scripts/runner-compat.py           host-side WDA compatibility check (every WdaClient route + MJPEG)
 scripts/runner-smoke.py            host-side smoke test / benchmark of the native routes
 ```
@@ -101,7 +102,7 @@ has one fixed session id per launch.
 | GET, DELETE | `/session/:sid` | session info / no-op |
 | GET, POST | `/session/:sid/appium/settings` | Accepted and echoed. `mjpegServerFramerate`, `mjpegScalingFactor` and `mjpegServerScreenshotQuality` drive the MJPEG stream. |
 | GET | `/source?format=json[&excluded_attributes=…]` | WDA node shape; `excluded_attributes` is ignored, since the expensive attributes are never computed |
-| GET | `/screenshot` | base64 PNG |
+| GET | `/screenshot` | base64 PNG. `?max_side=<px>&format=jpeg&quality=0.7` shrinks and encodes on the phone (off main); the `X-IPU-Image-{Width,Height,Source-Width,Source-Height,Scale,Format}` headers describe the result, and their absence means a runner without this support |
 | GET | `/session/:sid/window/size`, `/window/rect` | points |
 | POST | `/session/:sid/actions` | W3C actions, details below |
 | POST | `/session/:sid/elements`, `/element` | `using`: `accessibility id`, `id`, `name`, `class name`, `predicate string`, `class chain`, `link text`, `partial link text` |

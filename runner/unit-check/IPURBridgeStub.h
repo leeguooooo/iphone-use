@@ -19,6 +19,19 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                          path:(NSString *_Nullable *_Nullable)path
                                         error:(NSString *_Nullable *_Nullable)error;
 + (nullable CGImageRef)decodeScreenCapture:(NSData *)data scale:(double)scale CF_RETURNS_RETAINED;
++ (nullable NSData *)sizedScreenshotWithMaxSide:(NSUInteger)maxSide
+                                            png:(BOOL)png
+                                        quality:(double)quality
+                                           info:(NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable)info
+                                          error:(NSString *_Nullable *_Nullable)error;
++ (nullable NSData *)fitImage:(NSData *)data
+                      maxSide:(NSUInteger)maxSide
+                          png:(BOOL)png
+                      quality:(double)quality
+                         info:(NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable)info;
+/// Test helper: `data` decoded and encoded again as an uncompressed-ish ImageIO PNG, the way the
+/// phone's XCTest screenshot is encoded (repo assets are optimized PNGs or JPEGs).
++ (nullable NSData *)reencodePNG:(NSData *)data;
 @end
 
 NS_ASSUME_NONNULL_END
