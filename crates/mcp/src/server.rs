@@ -544,6 +544,48 @@ pub struct RunEndParams {
     pub turn_ids: Option<Vec<String>>,
 }
 
+/// Parameters for [`PhoneHandler::phone_collect_list`].
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct CollectListParams {
+    /// Element kind of one list row (default `Cell`; e.g. `StaticText`,
+    /// `Button`, `Link`). A row without a label is named by its texts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_kind: Option<String>,
+    /// Only rows whose centre lies in this normalized `[x, y, w, h]` area,
+    /// and swipes inside it (default: the whole screen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<Vec<f64>>,
+    /// Pages to read, 1–10 (default 6). One swipe between pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pages: Option<u32>,
+    /// Exact label that marks the end of the list ("没有更多了", "No more
+    /// results"). Only this makes the result `complete:true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_label: Option<String>,
+    /// `down` (default) reveals rows below, `up` rows above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+}
+
+/// Parameters for [`PhoneHandler::phone_scroll_find`].
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct ScrollFindParams {
+    /// Exact label to find.
+    pub label: String,
+    /// Narrow to one element kind (e.g. `Button`) when a text shares the label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Swipes allowed when the label is not on screen, 0–5 (default 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_swipes: Option<u32>,
+    /// `down` (default) or `up`: which way to look when the label is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    /// Swipe inside this normalized `[x, y, w, h]` area (default: whole screen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<Vec<f64>>,
+}
+
 /// Parameters for [`PhoneHandler::phone_hold`].
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct HoldParams {
@@ -1218,6 +1260,51 @@ impl PhoneHandler {
         match self.daemon.run_end(&params.run_id, params.turn_ids).await {
             Ok(body) => CallToolResult::success(vec![Content::text(body)]),
             Err(e) => CallToolResult::error(vec![Content::text(format!("run end failed: {e:#}"))]),
+        }
+    }
+
+    #[tool(
+        description = "Read a scrolling list across pages in ONE call instead of scroll + read \
+        turns: reads the rows of one kind (default Cell) on screen, swipes one page, reads \
+        again, and stops when the list stops moving (duplicate_page), a page adds nothing \
+        new (no_progress), end_label is on screen, or max_pages (default 6, max 10) is \
+        reached. Rows are deduplicated on (kind, label, value): identical-looking rows \
+        collapse, so reconcile counts the user cares about. `complete` is true ONLY when \
+        end_label was seen; no_progress or duplicate_page is not proof the list ended. Only \
+        what the accessibility tree exposes is collected. It swipes the live list, so the \
+        screen is left where the last page was; `snapshot` is that last page. \
+        Requires phone_status drivable=true."
+    )]
+    async fn phone_collect_list(
+        &self,
+        Parameters(params): Parameters<CollectListParams>,
+    ) -> CallToolResult {
+        self.progress_reset();
+        let body = serde_json::to_value(&params).unwrap_or_else(|_| serde_json::json!({}));
+        match self.daemon.list_call("/agent/collect", &body).await {
+            Ok(response) => list_result(&response, crate::compact::collected_list),
+            Err(e) => unknown_action_result("transport_error", format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Find one exact label, swiping at most max_swipes times (default 1, \
+        max 5) when it is not on screen. Stops AT ONCE — no further swipe — when the label \
+        is ambiguous (several on-screen matches: `candidates` with index and frame), covered \
+        by another control, or not drawn. Found: `target` (index, kind, frame) plus a \
+        `snapshot` for phone_tap_element. Not found: on-screen labels containing the text \
+        as `candidates`. No screenshot is taken; absence after the budget is not proof — \
+        look at the screen before swiping further. Requires phone_status drivable=true."
+    )]
+    async fn phone_scroll_find(
+        &self,
+        Parameters(params): Parameters<ScrollFindParams>,
+    ) -> CallToolResult {
+        self.progress_reset();
+        let body = serde_json::to_value(&params).unwrap_or_else(|_| serde_json::json!({}));
+        match self.daemon.list_call("/agent/scroll_find", &body).await {
+            Ok(response) => list_result(&response, crate::compact::found_label),
+            Err(e) => unknown_action_result("transport_error", format!("{e:#}")),
         }
     }
 
@@ -2563,6 +2650,28 @@ fn daemon_read_result(response: &crate::client::DaemonResponse) -> CallToolResul
     )
 }
 
+/// A list call's answer: compact text for the model, the JSON as structured
+/// content. A verdict with `ok:false` (not found, ambiguous) is an error
+/// result that still carries its candidates; a refusal or failure keeps the
+/// daemon's summary.
+fn list_result(
+    response: &crate::client::DaemonResponse,
+    compact: fn(&serde_json::Value) -> Option<String>,
+) -> CallToolResult {
+    let text = response.json.as_ref().and_then(compact);
+    match text {
+        Some(text) if response.status.is_success() => {
+            let result = if response.ok() {
+                CallToolResult::success(vec![Content::text(text)])
+            } else {
+                CallToolResult::error(vec![Content::text(text)])
+            };
+            with_structure(result, response)
+        }
+        _ => daemon_read_result(response),
+    }
+}
+
 /// Add per-flow `compat` to a daemon `registry` block, fetching the installed
 /// app inventory only when there is a block to annotate.
 async fn with_flow_compat(daemon: &DaemonClient, body: String) -> String {
@@ -2901,7 +3010,7 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            28,
+            30,
             "tool count changed; update README, the skill, and the CI assertion: {names:?}"
         );
         for required in [
@@ -2915,6 +3024,8 @@ mod tests {
             "phone_run_steps",
             "phone_hold",
             "phone_release_owner",
+            "phone_collect_list",
+            "phone_scroll_find",
         ] {
             assert!(names.contains(&required), "{required} missing: {names:?}");
         }
@@ -3339,7 +3450,7 @@ mod tests {
                 assert!(tool.get("_meta").is_none(), "{name} has no _meta: {tool}");
             }
         }
-        assert_eq!(tools.len(), 28, "26 tools before the panel, plus two");
+        assert_eq!(tools.len(), 30, "28 tools plus the list collector and scroll finder");
     }
 
     #[test]

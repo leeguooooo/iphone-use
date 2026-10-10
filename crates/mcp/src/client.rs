@@ -556,6 +556,23 @@ impl DaemonClient {
         read_response(req.send().await?).await
     }
 
+    /// A swiping list call (`/agent/collect`, `/agent/scroll_find`): several
+    /// reads and swipes in one request, so it gets the batch budget — the
+    /// daemon answers within its own 80 s deadline.
+    pub async fn list_call(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<DaemonResponse> {
+        let req = self
+            .auth(self.client.post(self.url(path)))
+            .timeout(ACTIONS_TIMEOUT)
+            .header("x-phone-control", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        read_response(req.send().await?).await
+    }
+
     /// `GET /agent/flow/draft` — the daemon's recorded action trail as a flow
     /// v1 draft (404 `no_trail` when there is nothing to draft).
     pub async fn flow_draft(&self) -> anyhow::Result<DaemonResponse> {
