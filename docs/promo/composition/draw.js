@@ -118,9 +118,10 @@ window.drawFrame = function (c, t, film, view, M) {
       M.caption(c, t, p.title2, -1, 4.9, { x: headAt[0] / W, align: "left", y: V ? 0.506 : 0.175, size: (V ? 66 : 90) * u, color: k.accent, weight: 900, maxWidth: V ? W * 0.8 : pane.w });
       // Frame 0 is the cover: the title and the command are already in place.
       if (t < 5) term([["$", p.cType, -2], ["=", p.rType, 2.6]], -1, 4.9);
-      // The claim in words, once the note has filled: long text goes in with one call.
+      // The claim in words, once the note has filled: long text goes in with one call. The second
+      // line lands only after the first has gone (its exit takes 0.18 s), never on top of it.
       const proof = V ? [W * 0.46, pane.y + pane.h * 0.5] : [pane.x + pane.w / 2, pane.y + pane.h * 0.6];
-      M.stamp(c, t, p.key, proof, { at: 0.5, until: 2.7, size: (V ? 52 : 64) * u, color: k.ink, rotate: 0, box: false });
+      M.stamp(c, t, p.key, proof, { at: 0.5, until: 2.6, size: (V ? 52 : 64) * u, color: k.ink, rotate: 0, box: false });
       M.stamp(c, t, p.typed, proof, { at: 2.8, until: 4.9, size: (V ? 52 : 64) * u, color: k.accent2, rotate: 0, box: false });
       // read
       head(p.read, 5.1, 12);
@@ -256,8 +257,11 @@ window.drawFrame = function (c, t, film, view, M) {
     M.caption(c, t, p.install, 52.3, Infinity, { x: cx / W, y: V ? 0.66 : 0.88, size: 36 * u, color: k.sub, weight: 700 });
     c.restore();
   }
-  // Provenance note at the foot of the opening terminal (portrait) or the frame (landscape).
-  M.caption(c, t, p.real, 0.6, 4.9, { x: V ? 0.46 : 0.5, y: V ? (pane.y + pane.h - 26 * u) / H : 0.968, size: (V ? 22 : 26) * u, color: k.sub, weight: 600, maxWidth: V ? pane.w - 40 * u : W * 0.9 });
+  // Provenance note: in portrait on the opening terminal's title bar, right of the window dots
+  // (its foot is where the three-line subtitle sits); in landscape at the foot of the frame.
+  M.caption(c, t, p.real, 0.6, 4.9, V
+    ? { x: (pane.x + pane.w - 28 * u) / W, align: "right", y: (pane.y + 30 * u) / H, size: 22 * u, color: k.sub, weight: 600, maxWidth: pane.w - 150 * u }
+    : { x: 0.5, y: 0.968, size: 26 * u, color: k.sub, weight: 600, maxWidth: W * 0.9 });
   // The Chinese narration spells "A I" so the voice says two letters (as one word it is misread); subtitles show AI.
   for (const cue of film.captions ?? []) cue.text = cue.text.replace("A I", "AI");
   // Landscape subtitles sit low; portrait uses the default, the bottom of view.safe.
