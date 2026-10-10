@@ -9,10 +9,16 @@ import UIKit
 /// Lays out the remote: portrait stacks bar / picture / keys; landscape
 /// puts the bar and the keys in rails beside the picture; immersive hides
 /// both and gives the picture the whole screen.
+///
+/// A toast goes in the room the picture leaves free (beside it in
+/// landscape, above it in immersive), else on the key bar, never over the
+/// picture.
 struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Keys: View, Keyboard: View>: View {
     var immersive: Bool
     var typing: Bool
     var onExitImmersive: () -> Void
+    /// A moment's message about the last action.
+    var toast: String? = nil
     @ViewBuilder var top: (Axis) -> Top
     @ViewBuilder var screen: () -> Screen
     @ViewBuilder var accessory: (Axis) -> Accessory
@@ -22,8 +28,16 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Ke
     @ViewBuilder var keys: (Axis) -> Keys
     @ViewBuilder var keyboard: () -> Keyboard
     @Environment(\.verticalSizeClass) private var verticalSize
+    @State private var frames = ToastFrames()
 
     private var landscape: Bool { verticalSize == .compact }
+
+    private var toastGeometry: ToastGeometry {
+        ToastGeometry(stage: frames.stage, picture: frames.picture,
+                      keys: !immersive && !typing ? frames.keys : nil,
+                      top: !immersive ? frames.top : nil,
+                      immersive: immersive, content: frames.content)
+    }
 
     var body: some View {
         Group {
@@ -31,6 +45,7 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Ke
                 HStack(spacing: 0) {
                     if !immersive {
                         top(.vertical)
+                            .globalFrame { frames.top = $0 }
                             .padding(.vertical, Theme.Space.s)
                             .transition(.move(edge: .leading).combined(with: .opacity))
                     }
@@ -39,10 +54,12 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Ke
                         banner()
                         screen()
                             .padding(immersive ? 0 : Theme.Space.s)
+                            .globalFrame { frames.stage = $0 }
                         if typing { keyboard() }
                     }
                     if !immersive && !typing {
                         keys(.vertical)
+                            .globalFrame { frames.keys = $0 }
                             .padding(.vertical, Theme.Space.s)
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
@@ -52,6 +69,7 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Ke
                 VStack(spacing: 0) {
                     if !immersive {
                         top(.horizontal)
+                            .globalFrame { frames.top = $0 }
                             .padding(.horizontal, Theme.Space.m)
                             .padding(.bottom, Theme.Space.s)
                             .transition(.move(edge: .top).combined(with: .opacity))
@@ -61,10 +79,12 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Ke
                     screen()
                         .padding(.horizontal, immersive ? 0 : Theme.Space.s)
                         .padding(.vertical, immersive ? 0 : Theme.Space.xs)
+                        .globalFrame { frames.stage = $0 }
                     if typing {
                         keyboard()
                     } else if !immersive {
                         keys(.horizontal)
+                            .globalFrame { frames.keys = $0 }
                             .padding(.horizontal, Theme.Space.m)
                             .padding(.top, Theme.Space.s)
                             .padding(.bottom, Theme.Space.xs)
@@ -74,7 +94,13 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Ke
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .globalFrame { frames.content = $0 }
+        .environment(\.pictureFrameSink, PictureFrameSink { frames.picture = $0 })
         .background(Theme.stage.ignoresSafeArea())
+        .overlay {
+            PlacedToast(text: toast, geometry: toastGeometry)
+                .ignoresSafeArea()
+        }
         // In the corner the hidden status bar leaves free (beside the Dynamic
         // Island; in landscape, in the side inset), never over the picture.
         .overlay(alignment: .topTrailing) {
@@ -688,6 +714,215 @@ struct StatusStrip: View {
     }
 }
 
+// MARK: - Toast
+
+/// Where the remote's chrome reports the picture's frame (window
+/// coordinates) so the toast can keep off it.
+struct PictureFrameSink {
+    var report: @MainActor (CGRect) -> Void = { _ in }
+
+    @MainActor func callAsFunction(_ frame: CGRect) { report(frame) }
+}
+
+extension EnvironmentValues {
+    @Entry var pictureFrameSink = PictureFrameSink()
+}
+
+extension View {
+    /// Report this view's frame in window coordinates when it changes.
+    func globalFrame(_ action: @escaping (CGRect) -> Void) -> some View {
+        onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { action($0) }
+    }
+}
+
+/// Where the remote's pieces are, in window coordinates.
+struct ToastFrames: Equatable {
+    var stage: CGRect = .zero
+    var picture: CGRect?
+    var keys: CGRect = .zero
+    var top: CGRect = .zero
+    /// Everything inside the safe area (the banners included).
+    var content: CGRect = .zero
+}
+
+/// Where a toast of a given size goes: in the room the picture leaves free
+/// in the stage, else on the key bar (or the top bar while typing), so it
+/// never covers the phone's own screen.
+struct ToastGeometry: Equatable {
+    var stage: CGRect
+    var picture: CGRect?
+    /// The key bar, when it shows.
+    var keys: CGRect?
+    /// The top bar or rail, when it shows.
+    var top: CGRect?
+    var immersive: Bool
+    /// Inside the safe area, banners included: in immersive, what is above
+    /// it (the hidden status bar's band) is free.
+    var content: CGRect = .zero
+    /// The whole window.
+    var window: CGRect = .zero
+
+    enum Placement: Equatable {
+        /// A pill centered here, no wider than the room.
+        case pill(CGRect)
+        /// A plate laid over a bar of the chrome.
+        case bar(CGRect)
+    }
+
+    static let margin: CGFloat = 8
+    /// Keeps a toast in immersive clear of the exit button in the corner.
+    static let cornerButtonRoom: CGFloat = 56
+
+    /// The free bands around the picture, best first: below it (by the
+    /// keys), above it, then beside it.
+    func rooms() -> [CGRect] {
+        let area = immersive && !window.isEmpty ? window : stage
+        guard !area.isEmpty else { return [] }
+        let p = (picture ?? stage).intersection(area)
+        guard !p.isNull else { return [area] }
+        // In immersive, up to the safe area: a banner may sit over the picture's top.
+        let aboveEnd = immersive && !content.isEmpty ? min(p.minY, content.minY) : p.minY
+        var above = CGRect(x: area.minX, y: area.minY, width: area.width, height: aboveEnd - area.minY)
+        if immersive { above.size.width -= Self.cornerButtonRoom }   // the exit button's corner
+        let below = CGRect(x: area.minX, y: p.maxY, width: area.width, height: area.maxY - p.maxY)
+        // Beside the picture, the lower part: off the corner button, near the keys.
+        let top = immersive ? area.minY + Self.cornerButtonRoom : area.minY
+        let trailing = CGRect(x: p.maxX, y: top, width: area.maxX - p.maxX, height: p.maxY - top)
+        let leading = CGRect(x: area.minX, y: top, width: p.minX - area.minX, height: p.maxY - top)
+        return [below, above, trailing, leading]
+    }
+
+    func placement(for size: CGSize) -> Placement? { placement(for: [size]) }
+
+    /// `sizes`: the toast laid out at its widest, then narrower (wrapped);
+    /// a band takes the first that fits.
+    func placement(for sizes: [CGSize]) -> Placement? {
+        let sizes = sizes.filter { $0.width > 0 && $0.height > 0 }
+        guard let widest = sizes.first else { return nil }
+        let m = Self.margin
+        for (index, room) in rooms().enumerated() {
+            let inner = room.insetBy(dx: m, dy: m)
+            guard let size = sizes.first(where: { inner.width >= $0.width && inner.height >= $0.height })
+            else { continue }
+            if index >= 2 {
+                // Beside the picture: at the bottom of the band.
+                return .pill(CGRect(x: inner.midX - size.width / 2, y: inner.maxY - size.height,
+                                    width: size.width, height: size.height))
+            }
+            return .pill(CGRect(x: inner.midX - size.width / 2, y: inner.midY - size.height / 2,
+                                width: size.width, height: size.height))
+        }
+        if let keys, !keys.isEmpty { return .bar(keys) }
+        if let top, !top.isEmpty { return .bar(top) }
+        // Nowhere free (should not happen): the top edge of the window.
+        let area = window.isEmpty ? stage : window
+        let x = min(area.midX - widest.width / 2, area.maxX - Self.cornerButtonRoom - widest.width)
+        return .pill(CGRect(x: max(area.minX + m, x), y: area.minY + m, width: widest.width, height: widest.height))
+    }
+}
+
+/// The remote's toast, placed by `ToastGeometry` and announced to VoiceOver.
+struct PlacedToast: View {
+    let text: String?
+    var geometry: ToastGeometry
+    /// The toast at its widest and wrapped narrow.
+    @State private var sizes: [CGFloat: CGSize] = [:]
+    @State private var window: CGRect = .zero
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    static let widths: [CGFloat] = [340, 220]
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+            if let text {
+                // Measures the pill at its natural size, up to the widest
+                // a toast gets, invisibly.
+                ForEach(Self.widths, id: \.self) { width in
+                    Color.clear
+                        .frame(width: width, height: 1)
+                        .overlay(alignment: .topLeading) {
+                            ToastText(text: text, lines: nil)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .onGeometryChange(for: CGSize.self) { $0.size } action: { sizes[width] = $0 }
+                        }
+                }
+                .hidden()
+                .accessibilityHidden(true)
+                if let placement = place() {
+                    toast(text, placement)
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.94)))
+                }
+            }
+        }
+        .globalFrame { window = $0 }
+        .allowsHitTesting(false)
+        .animation(reduceMotion ? .easeOut(duration: 0.2) : .snappy(duration: 0.25), value: text)
+        .onChange(of: text) { _, new in
+            if let new { AccessibilityNotification.Announcement(new).post() }
+        }
+    }
+
+    private func place() -> ToastGeometry.Placement? {
+        var g = geometry
+        g.window = window
+        return g.placement(for: Self.widths.compactMap { sizes[$0] })
+    }
+
+    @ViewBuilder
+    private func toast(_ text: String, _ placement: ToastGeometry.Placement) -> some View {
+        let origin = window.origin
+        switch placement {
+        case .pill(let rect):
+            let shape = RoundedRectangle(cornerRadius: min(rect.height / 2, 22), style: .continuous)
+            ToastText(text: text, lines: nil)
+                .frame(width: rect.width, height: rect.height)
+                .glassBackground(shape)
+                .background(Theme.stage.opacity(0.6), in: shape)
+                .shadow(color: .black.opacity(0.3), radius: 12, y: 4)
+                .modifier(ToastAccessibility())
+                .offset(x: rect.minX - origin.x, y: rect.minY - origin.y)
+        case .bar(let rect):
+            // Over the bar, opaque, the same shape: the bar says it for a moment.
+            let shape = RoundedRectangle(cornerRadius: min(rect.width, rect.height) < 80 ? 20 : 22, style: .continuous)
+            // A rail (landscape, zoomed in) is narrow: smaller type, as many lines as it takes.
+            let rail = rect.width < 120
+            ToastText(text: text, lines: rail ? nil : rect.height < 56 ? 2 : 3, rail: rail)
+                .minimumScaleFactor(rail ? 0.7 : 0.8)
+                .frame(width: rect.width, height: rect.height)
+                .glassBackground(shape)
+                .background(Theme.stage, in: shape)
+                .modifier(ToastAccessibility())
+                .offset(x: rect.minX - origin.x, y: rect.minY - origin.y)
+        }
+    }
+}
+
+private struct ToastText: View {
+    let text: String
+    var lines: Int? = 3
+    var rail = false
+
+    var body: some View {
+        Text(text)
+            .font(rail ? .caption : .callout)
+            .multilineTextAlignment(.center)
+            .lineLimit(lines)
+            .padding(.horizontal, rail ? 6 : 16).padding(.vertical, 10)
+    }
+}
+
+private struct ToastAccessibility: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isStaticText)
+            .accessibilityIdentifier("toast")
+    }
+}
+
+/// A toast at the bottom of a screen with no single picture to keep off
+/// (the grid of phones).
 struct ToastLayer: View {
     let text: String?
 
@@ -704,10 +939,13 @@ struct ToastLayer: View {
                     .padding(.bottom, Theme.Space.m)
                     .padding(.horizontal)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .accessibilityAddTraits(.updatesFrequently)
+                    .accessibilityIdentifier("toast")
             }
         }
         .allowsHitTesting(false)
         .animation(.snappy(duration: 0.25), value: text)
+        .onChange(of: text) { _, new in
+            if let new { AccessibilityNotification.Announcement(new).post() }
+        }
     }
 }
