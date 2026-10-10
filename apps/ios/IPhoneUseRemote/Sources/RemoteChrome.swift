@@ -830,7 +830,7 @@ struct PlacedToast: View {
     @State private var window: CGRect = .zero
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    static let widths: [CGFloat] = [340, 220, 160]
+    static let widths: [CGFloat] = [340, 220]
 
     var body: some View {
         ZStack(alignment: .topLeading) {
