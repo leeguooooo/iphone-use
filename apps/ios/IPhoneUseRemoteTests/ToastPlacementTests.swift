@@ -81,8 +81,11 @@ final class ToastPlacementTests: XCTestCase {
         var g = ToastGeometry(stage: CGRect(x: 0, y: 128, width: 402, height: 712), picture: picture,
                               keys: nil, top: nil, immersive: true, content: content)
         g.window = window
-        let placed = try XCTUnwrap(frame(g.placement(for: CGSize(width: 260, height: 41))))
+        guard case .pill(let placed) = g.placement(for: CGSize(width: 294, height: 41)) else {
+            return XCTFail("expected a pill")
+        }
         XCTAssertLessThanOrEqual(placed.maxY, content.minY)
+        XCTAssertLessThanOrEqual(placed.maxX, window.maxX - ToastGeometry.cornerButtonRoom)
     }
 
     /// Room below the picture (iPad, a short picture) is the first choice.

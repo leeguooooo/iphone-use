@@ -771,7 +771,7 @@ struct ToastGeometry: Equatable {
 
     static let margin: CGFloat = 8
     /// Keeps a toast in immersive clear of the exit button in the corner.
-    static let cornerButtonRoom: CGFloat = 64
+    static let cornerButtonRoom: CGFloat = 56
 
     /// The free bands around the picture, best first: below it (by the
     /// keys), above it, then beside it.
@@ -783,7 +783,7 @@ struct ToastGeometry: Equatable {
         // In immersive, up to the safe area: a banner may sit over the picture's top.
         let aboveEnd = immersive && !content.isEmpty ? min(p.minY, content.minY) : p.minY
         var above = CGRect(x: area.minX, y: area.minY, width: area.width, height: aboveEnd - area.minY)
-        if immersive { above = above.insetBy(dx: Self.cornerButtonRoom, dy: 0) }
+        if immersive { above.size.width -= Self.cornerButtonRoom }   // the exit button's corner
         let below = CGRect(x: area.minX, y: p.maxY, width: area.width, height: area.maxY - p.maxY)
         // Beside the picture, the lower part: off the corner button, near the keys.
         let top = immersive ? area.minY + Self.cornerButtonRoom : area.minY
@@ -816,8 +816,8 @@ struct ToastGeometry: Equatable {
         if let top, !top.isEmpty { return .bar(top) }
         // Nowhere free (should not happen): the top edge of the window.
         let area = window.isEmpty ? stage : window
-        return .pill(CGRect(x: area.midX - widest.width / 2, y: area.minY + m,
-                            width: widest.width, height: widest.height))
+        let x = min(area.midX - widest.width / 2, area.maxX - Self.cornerButtonRoom - widest.width)
+        return .pill(CGRect(x: max(area.minX + m, x), y: area.minY + m, width: widest.width, height: widest.height))
     }
 }
 
