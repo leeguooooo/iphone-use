@@ -1,20 +1,21 @@
 # iphone-use promo video
 
-Source for the promo video, rendered with [motion-use](https://github.com/leeguooooo/motion-use):
-zh and en, 1920×1080 and 1080×1920, ~2 min, with Microsoft neural-voice narration.
+A 55-second film rendered with [motion-use](https://github.com/leeguooooo/motion-use) ≥ 0.5: Chinese and English, 1920×1080 and 1080×1920, narrated, with subtitles timed from the narration.
 
 ```bash
-motion-use validate brief.json
-motion-use still brief.json    # keyframes + contact sheet in out/stills
-motion-use render brief.json   # MP4s in out/
+motion-use validate .
+motion-use voiceover . --engine edge      # or --engine azure for a published cut
+motion-use still . --allow-code --shot honest
+motion-use render . --allow-code --quality high
 ```
 
-- `images/hero.png` is the browser control view; `images/wireframe.png` is the daemon's wireframe of a
-  screen an app hides from capture (`cargo test --lib redaction::sample -- --ignored` with
-  `WIREFRAME_SAMPLE=<path>` regenerates it).
-- Narration: `python3 make-voiceover.py` (needs `edge-tts`) writes `voiceover/<lang>/<scene-id>.mp3` with
-  `zh-CN-YunxiNeural` / `en-US-AndrewMultilingualNeural`. edge-tts uses Microsoft Edge's read-aloud service and
-  no license for the audio has been confirmed; for a published cut, regenerate with Azure Speech (same voices).
-- README embeds: GitHub plays attachments up to 10 MB inline, so upload a re-encode
-  (`ffmpeg -i out/<name>.mp4 -c:v libx264 -crf 26 -c:a aac -b:a 96k -movflags +faststart web.mp4`, ~3.7 MB).
-- Every claim comes from the README; update both together.
+Everything on screen is real, recorded on 2026-10-10 with iphone-use v0.17.14 on an iPhone 17 Pro Max (iOS 27.0):
+
+- `footage/notes.mp4`, `general.mp4`, `flow.mp4`: the phone's screen from the daemon's own `/agent/mjpeg` stream while an agent drove it — one `type` call writing a 278-character draft into a new note (the note was deleted afterwards), Settings › General read and scrolled, Date & Time opened by name, and `phone_flow_run settings/open` replaying a saved flow.
+- `footage/control.mp4`: the browser control page recorded in an isolated headless Chrome while a scripted "person" clicked the live picture (Date & Time, then back). The cursor in the film marks those two clicks where they happened.
+- The terminal lines are this session's real calls and responses, including two real refusals: `element_occluded · nothing_applied · retry_safe` and `partially_applied · retry_safe=false`. `phone_status` really reported `"transport": "wifi-tunnel"`.
+- Drawn: the terminal frame, the Wi-Fi rings and stamps. Numbers (0.1 s read, iOS 15+) come from the README; update both together.
+
+Only harmless screens were recorded: no Settings root (account name), About (serial, IMEI), home screen or Notes folder list.
+
+Narration uses edge-tts preview voices; no license for that audio is confirmed. Regenerate with Azure Speech before publishing outside this repository. README embeds: GitHub plays attachments up to 10 MB inline (`motion-use render . --allow-code --target github`).

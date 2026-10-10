@@ -1,1 +1,3 @@
 out/
+# Narration is generated (edge-tts preview voices); regenerate with `motion-use voiceover .`
+voiceover/
