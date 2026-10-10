@@ -88,7 +88,13 @@ final class DemoSession {
             }
         case .home:
             go(to: manifest.home)
-        case .longPress, .drag, .text:
+        case .back:
+            if let back = screen.back { go(to: back) } else { show(String(localized: "已经在第一页了")) }
+        case .spotlight:
+            show(String(localized: "连上自己的 Mac 后，这个键会打开手机的搜索"))
+        case .text, .key:
+            show(String(localized: "连上自己的 Mac 后，键盘会把文字实时打到手机上"))
+        case .longPress, .drag:
             show(String(localized: "演示里只能点按和从左边缘右滑返回"))
         }
     }
@@ -102,20 +108,21 @@ final class DemoSession {
     }
 }
 
-/// A recorded screen drawn the same way the live video is: aspect-fit, with
-/// touches mapped onto the picture.
+/// A recorded screen drawn the same way the live video is: at its aspect,
+/// with touches mapped onto the picture.
 final class DemoImageView: UIImageView, ScreenDisplay {
     /// The recorded buttons that do something, outlined so the demo shows
     /// where to tap.
     var targets: [[Double]] = [] { didSet { setNeedsLayout() } }
+    var onContentChange: (() -> Void)?
     private let outlines = CAShapeLayer()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentMode = .scaleAspectFit
         backgroundColor = .black
-        outlines.fillColor = UIColor.systemBlue.withAlphaComponent(0.12).cgColor
-        outlines.strokeColor = UIColor.systemBlue.withAlphaComponent(0.85).cgColor
+        outlines.fillColor = Theme.uiAccent.withAlphaComponent(0.12).cgColor
+        outlines.strokeColor = Theme.uiAccent.withAlphaComponent(0.9).cgColor
         outlines.lineWidth = 2
         outlines.lineDashPattern = [6, 4]
         layer.addSublayer(outlines)
@@ -123,7 +130,14 @@ final class DemoImageView: UIImageView, ScreenDisplay {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    var contentRect: CGRect {
+    override var image: UIImage? {
+        didSet { if oldValue?.size != image?.size || (oldValue == nil) != (image == nil) { onContentChange?() } }
+    }
+
+    var contentSize: CGSize? { image?.size }
+    var hasContent: Bool { image != nil }
+
+    private var contentRect: CGRect {
         guard let size = image?.size, size.width > 0, size.height > 0 else { return bounds }
         return AVMakeRect(aspectRatio: size, insideRect: bounds)
     }
@@ -146,17 +160,26 @@ final class DemoImageView: UIImageView, ScreenDisplay {
 
 struct DemoScreen: UIViewRepresentable {
     let session: DemoSession
+    var options = CanvasOptions()
+
+    final class Coordinator { var reset = 0 }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> RemoteScreenUIView {
         let image = DemoImageView(frame: .zero)
         image.image = session.image
         image.targets = session.screen.taps.map(\.rect)
         let view = RemoteScreenUIView(display: image)
+        view.accessibilityIdentifier = "remote-screen"
         view.onAction = { action in session.handle(action) }
+        context.coordinator.reset = options.resetZoom
+        view.apply(options, previousReset: &context.coordinator.reset)
         return view
     }
 
     func updateUIView(_ uiView: RemoteScreenUIView, context: Context) {
+        uiView.apply(options, previousReset: &context.coordinator.reset)
         guard let image = uiView.display as? DemoImageView, image.image !== session.image else { return }
         image.targets = session.screen.taps.map(\.rect)
         UIView.transition(with: image, duration: 0.25, options: .transitionCrossDissolve) {
@@ -165,58 +188,53 @@ struct DemoScreen: UIViewRepresentable {
     }
 }
 
+/// The demo, in the same chrome as a live phone: the keys work on the
+/// recording (Home, back), the rest explain themselves.
 struct DemoView: View {
     let session: DemoSession
     let exit: () -> Void
+    @State private var immersive = false
+    @State private var zoom: CGFloat = 1
+    @State private var resetZoom = 0
 
     var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                Circle().fill(Color.orange).frame(width: 8, height: 8)
-                Text("演示 · 录制的画面").font(.caption.monospaced())
+        RemoteScaffold(immersive: immersive, typing: false, onExitImmersive: { immersive = false }) { axis in
+            RemoteTopBar(axis: axis, backSymbol: "xmark", backLabel: "退出演示", zoom: zoom,
+                         onBack: exit, onResetZoom: { resetZoom += 1 }, onImmersive: { immersive = true }) {
+                if axis == .horizontal {
+                    DeviceBadge(name: String(localized: "演示"), health: .attention,
+                                caption: String(localized: "录制的画面，不连接任何手机"))
+                } else {
+                    Chip(text: String(localized: "演示"), color: Theme.attention)
+                }
             }
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.ultraThinMaterial, in: Capsule())
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal)
-            // Above the picture, not over it: the recorded back button lives
-            // at the top of the screen.
-            Text("这是演示：画面是事先录好的，不会连接或操作任何手机。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal)
+        } screen: {
             ZStack {
-                DemoScreen(session: session)
-                VStack {
-                    Spacer()
-                    if let toast = session.toast {
-                        Text(toast)
-                            .font(.callout)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 14).padding(.vertical, 8)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .padding(.bottom, 10)
-                            .transition(.opacity)
-                    }
-                }
-                .padding(.horizontal)
-                .allowsHitTesting(false)
+                DemoScreen(session: session, options: CanvasOptions(
+                    resetZoom: resetZoom,
+                    onZoom: { zoom = $0 },
+                    accessibilityLabel: String(localized: "演示画面"),
+                    accessibilityActions: [
+                        (String(localized: "主屏幕"), { session.handle(.home) }),
+                        (String(localized: "返回"), { session.handle(.back) }),
+                    ]))
+                ToastLayer(text: session.toast)
             }
-            HStack {
-                ToolButton(title: "主屏幕", symbol: "house") { session.handle(.home) }
-                ToolButton(title: "键盘", symbol: "keyboard") {
-                    session.show(String(localized: "连上自己的 Mac 后，可以在这里给手机输入文字"))
+        } accessory: { _ in
+            EmptyView()
+        } keys: { axis in
+            KeyBar(axis: axis,
+                   onBack: { session.handle(.back) },
+                   onHome: { session.handle(.home) },
+                   onSearch: { session.handle(.spotlight) },
+                   onKeyboard: { session.handle(.text("")) }) {
+                Button { immersive = true } label: {
+                    Label("沉浸模式", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
-                ToolButton(title: "退出演示", symbol: "xmark.circle", action: exit)
+                Button(role: .destructive, action: exit) { Label("退出演示", systemImage: "xmark.circle") }
             }
-            .padding(.horizontal, 8).padding(.vertical, 6)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-            .padding(.horizontal)
-            .padding(.bottom, 6)
+        } keyboard: {
+            EmptyView()
         }
-        .background(Color.black.ignoresSafeArea())
-        .animation(.easeInOut(duration: 0.2), value: session.toast)
     }
 }

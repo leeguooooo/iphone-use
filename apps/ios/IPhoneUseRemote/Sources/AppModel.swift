@@ -64,13 +64,15 @@ final class AppModel {
 
     /// The person's viewing choice for the focused screen, remembered on this
     /// device. Tiles always stream in performance mode.
-    var videoQuality: Bool = UserDefaults.standard.bool(forKey: "videoQuality") {
+    var videoPreference: VideoPreference = VideoPreference.load(from: .standard) {
         didSet {
-            guard videoQuality != oldValue else { return }
-            UserDefaults.standard.set(videoQuality, forKey: "videoQuality")
-            for session in sessions.values { session.preferQuality = videoQuality }
+            guard videoPreference != oldValue else { return }
+            UserDefaults.standard.set(videoPreference.rawValue, forKey: VideoPreference.key)
+            for session in sessions.values { session.videoPreference = videoPreference }
         }
     }
+    /// This iPhone is on cellular only (auto video picks performance).
+    private(set) var onCellular = false
 
     /// A pairing link opened from outside the app (the camera's landing page,
     /// or any other app). It waits for the person to confirm, so a stray link
@@ -102,6 +104,10 @@ final class AppModel {
         // UI checks on the simulator: `-address <url> -password <pw>`, or
         // `-pair <QR text>` standing in for a scan (the simulator has no camera).
         if defaults.bool(forKey: "grid") { focusedID = nil }
+        // `-sync YES`: every saved phone in sync, the first one leading.
+        if defaults.bool(forKey: "sync"), let lead = devices.first?.id {
+            startSync(lead: lead, followers: devices.map(\.id))
+        }
         if defaults.bool(forKey: "edit"), let id = focusedID { editing = .init(id: id) }
         if defaults.bool(forKey: "scan") { scanning = true }
         if let scanned = defaults.string(forKey: "pair"), let link = PairLink.parse(scanned) {
@@ -137,7 +143,8 @@ final class AppModel {
 
     /// Settings every session gets, however it was created.
     private func prepare(_ session: DeviceSession) {
-        session.preferQuality = videoQuality
+        session.videoPreference = videoPreference
+        session.onCellular = onCellular
         session.onIdentity = { [weak self] id, phone in self?.notePhone(phone, for: id) }
     }
 
@@ -416,10 +423,16 @@ final class AppModel {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
             let satisfied = path.status == .satisfied
+            let cellular = path.usesInterfaceType(.cellular) && !path.usesInterfaceType(.wifi)
+                && !path.usesInterfaceType(.wiredEthernet)
             Task { @MainActor in
                 guard let self else { return }
                 let cameBack = satisfied && !self.online
                 self.online = satisfied
+                if self.onCellular != cellular {
+                    self.onCellular = cellular
+                    for session in self.sessions.values { session.onCellular = cellular }
+                }
                 if cameBack {
                     for session in self.sessions.values { Task { await session.retryIfWaiting() } }
                 }
@@ -460,6 +473,17 @@ final class AppModel {
         for (id, session) in sessions {
             session.autoWakeAllowed = id == focusedID || members.contains(id)
         }
+    }
+
+    /// `dispatch`, finishing once every phone answered (typed text keeps
+    /// its order).
+    func perform(_ action: PhoneAction, from origin: DeviceSession) async {
+        guard let group = sync, group.lead == origin.id else {
+            await origin.perform(action)
+            return
+        }
+        let members = group.members.compactMap { sessions[$0] }
+        await fanOut(to: members) { client in await client.deliver(action) }
     }
 
     /// One gesture from the screen of `origin`. Outside sync, or from a

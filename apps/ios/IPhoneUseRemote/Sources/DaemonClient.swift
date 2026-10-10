@@ -33,6 +33,11 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
     /// Which phone this is (`device`); nil from a daemon that predates it or
     /// before it has read the phone once.
     var device: PhoneIdentity?
+    /// How the Mac reaches the phone: `usb`, `wifi`, `wifi-tunnel` (empty
+    /// from older daemons).
+    var transport: String
+    /// The Mac's round trip to the phone's runner, in milliseconds.
+    var phoneRttMs: Int?
 
     /// Another session (an agent, the web page, a schedule) holds this
     /// phone's lease: a gesture from here would be refused with 409.
@@ -57,6 +62,8 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         case ownerLeaseRemainingSecs = "owner_lease_remaining_secs"
         case lockReadiness = "lock_readiness"
         case device
+        case transport
+        case phoneRttMs = "wda_rtt_ms"
     }
 
     init(from decoder: Decoder) throws {
@@ -82,6 +89,17 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         lockReadiness = try? c.decodeIfPresent(LockReadiness.self, forKey: .lockReadiness)
         let identity = (try? c.decodeIfPresent(PhoneIdentity.self, forKey: .device)) ?? nil
         device = identity?.label == nil ? nil : identity
+        transport = (try? c.decodeIfPresent(String.self, forKey: .transport)) ?? ""
+        phoneRttMs = (try? c.decodeIfPresent(Int.self, forKey: .phoneRttMs)) ?? nil
+    }
+
+    /// The Mac-to-phone link in a person's words.
+    var transportLabel: String? {
+        switch transport {
+        case "usb": return String(localized: "USB 线")
+        case "wifi", "wifi-tunnel": return "Wi‑Fi"
+        default: return nil
+        }
     }
 
     /// The line to show a person: the daemon's `next_step`, else (older
@@ -97,7 +115,13 @@ enum PhoneAction: Sendable {
     case swipe(x1: Double, y1: Double, x2: Double, y2: Double, durationMs: Int)
     case drag(x1: Double, y1: Double, x2: Double, y2: Double, holdMs: Int, durationMs: Int)
     case text(String)
+    /// A named key on the phone's keyboard: `return`, `backspace`, …
+    case key(String)
     case home
+    /// The system back gesture (a swipe in from the left edge).
+    case back
+    /// Open Spotlight search.
+    case spotlight
 
     var json: [String: Any] {
         switch self {
@@ -112,8 +136,14 @@ enum PhoneAction: Sendable {
                     "hold_ms": hold, "duration_ms": ms]
         case let .text(text):
             return ["type": "text", "text": text]
+        case let .key(name):
+            return ["type": "key", "name": name]
         case .home:
             return ["type": "shortcut", "name": "home"]
+        case .back:
+            return ["type": "back"]
+        case .spotlight:
+            return ["type": "shortcut", "name": "spotlight"]
         }
     }
 }

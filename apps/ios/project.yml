@@ -42,6 +42,19 @@ targets:
         # The app's product name has spaces; xcodegen's default host path uses the target name.
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Phone Use Remote.app/Phone Use Remote"
         SWIFT_STRICT_CONCURRENCY: complete
+  IPhoneUseRemoteUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - IPhoneUseRemoteUITests
+    dependencies:
+      - target: IPhoneUseRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.remote.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: IPhoneUseRemote
+        SWIFT_STRICT_CONCURRENCY: complete
 schemes:
   IPhoneUseRemote:
     build:
@@ -51,3 +64,13 @@ schemes:
     test:
       targets:
         - IPhoneUseRemoteTests
+  # Needs Tools/mock_daemon.py running (see README); kept out of the main
+  # scheme so `xcodebuild test` stays self-contained.
+  IPhoneUseRemoteUITests:
+    build:
+      targets:
+        IPhoneUseRemote: all
+        IPhoneUseRemoteUITests: [test]
+    test:
+      targets:
+        - IPhoneUseRemoteUITests

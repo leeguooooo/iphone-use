@@ -96,7 +96,19 @@ final class DeviceSession: Identifiable {
     var videoMessage: String?
     var toast: String?
     var busy = false
-    var lastFrameAt: Date?
+    /// Set on every frame, so not observed: a view that read it would
+    /// redraw 30–60 times a second. Read it under a timeline instead.
+    @ObservationIgnored var lastFrameAt: Date?
+    /// Frames shown in the last second, updated once a second while the
+    /// full screen shows this phone.
+    private(set) var fps = 0
+    /// Round trip of a status read to the Mac (smoothed), in milliseconds.
+    private(set) var rttMs: Int?
+    /// How long the last stream took from opening to its first frame.
+    private(set) var firstFrameMs: Int?
+    @ObservationIgnored private var framesThisSecond = 0
+    @ObservationIgnored private var streamOpenedAt: Date?
+    private var metricsTask: Task<Void, Never>?
     /// Wireframe shown over a picture the app blanked (see `captureRedacted`).
     var redactedImage: UIImage?
     /// Requests go straight to the Mac on the LAN rather than through the
@@ -118,17 +130,38 @@ final class DeviceSession: Identifiable {
         return client.publicBase.scheme == "https" ? String(localized: "外网") : nil
     }
 
-    /// The person's viewing choice for the focused screen (quality: native
-    /// resolution, high frame rate). Tiles ignore it. A change that alters
-    /// the running stream reconnects it, starting on a fresh keyframe.
-    var preferQuality: Bool = false {
+    /// The person's viewing choice for the focused screen. Tiles ignore it.
+    var videoPreference: VideoPreference = .auto {
+        didSet { if videoPreference != oldValue { refreshQuality(fresh: true) } }
+    }
+    /// This iPhone reaches the network over cellular only.
+    var onCellular = false {
+        didSet { if onCellular != oldValue { refreshQuality(fresh: false) } }
+    }
+
+    /// What the preference comes to right now (quality: native resolution,
+    /// high frame rate). A change that alters the running stream reconnects
+    /// it, starting on a fresh keyframe.
+    private(set) var preferQuality: Bool = false {
         didSet {
             guard preferQuality != oldValue else { return }
-            // A fresh choice gets a fresh try at quality.
-            qualityUnavailable = false
             guard reader != nil, streamQuality != wantedQuality else { return }
             restartStream()
         }
+    }
+
+    /// The route is local (the LAN, or an http address on it) as opposed to
+    /// a public tunnel.
+    var onLocalRoute: Bool {
+        guard let client else { return false }
+        if onLAN { return true }
+        return client.publicBase.scheme == "http"
+    }
+
+    private func refreshQuality(fresh: Bool) {
+        // A fresh choice gets a fresh try at quality.
+        if fresh { qualityUnavailable = false }
+        preferQuality = videoPreference.wantsQuality(localRoute: onLocalRoute, cellular: onCellular)
     }
 
     /// Quality was asked for and no picture came (an older daemon that does
@@ -362,6 +395,7 @@ final class DeviceSession: Identifiable {
         self.status = status
         lastProbe = Date()
         onLAN = client.onLAN
+        refreshQuality(fresh: false)
         retryAttempt = 0
         lastProblem = nil
         cancelRetry()
@@ -393,7 +427,10 @@ final class DeviceSession: Identifiable {
     private func routeChanged() {
         guard let client else { return }
         onLAN = client.onLAN
-        if reader != nil { restartStream() }
+        let quality = preferQuality
+        refreshQuality(fresh: false)
+        // A quality change restarted the stream already.
+        if reader != nil, quality == preferQuality { restartStream() }
     }
 
     private func startPathMonitor() {
@@ -408,6 +445,10 @@ final class DeviceSession: Identifiable {
     }
 
     private func teardown() {
+        metricsTask?.cancel()
+        metricsTask = nil
+        fps = 0
+        rttMs = nil
         statusTask?.cancel()
         statusTask = nil
         probeTask?.cancel()
@@ -480,10 +521,55 @@ final class DeviceSession: Identifiable {
     }
 
     func frameArrived() {
-        lastFrameAt = Date()
+        let now = Date()
+        lastFrameAt = now
+        framesThisSecond += 1
+        if let opened = streamOpenedAt {
+            streamOpenedAt = nil
+            let ms = Int(now.timeIntervalSince(opened) * 1000)
+            firstFrameMs = ms
+            metricsLog.notice("first frame \(ms, privacy: .public) ms after the stream opened (\(self.streamQuality ? "quality" : "performance", privacy: .public))")
+        }
         if !videoLive { videoLive = true }
-        videoWaitSince = nil
+        if videoWaitSince != nil { videoWaitSince = nil }
     }
+
+    /// While the full screen shows this phone: count frames per second, and
+    /// reopen a stream that went silent (the runner sends a frame at least
+    /// every second, so silence means the connection died without saying so).
+    private func updateMetrics() {
+        let wanted = role == .full && video != nil && reader != nil
+        if wanted, metricsTask == nil {
+            metricsTask = Task { [weak self] in
+                var restarts = 0
+                var lastRestart = Date.distantPast
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(1))
+                    guard let self, !Task.isCancelled else { return }
+                    let frames = self.framesThisSecond
+                    self.framesThisSecond = 0
+                    if self.fps != frames { self.fps = frames }
+                    if frames > 0 {
+                        restarts = 0
+                    } else if let last = self.lastFrameAt, self.videoLive, restarts < 3,
+                              Date().timeIntervalSince(last) > Self.stallRestartAfter,
+                              Date().timeIntervalSince(lastRestart) > Self.stallRestartAfter {
+                        restarts += 1
+                        lastRestart = Date()
+                        metricsLog.notice("stream silent for \(Int(Date().timeIntervalSince(last)), privacy: .public) s: reopening")
+                        self.restartStream(keepPicture: true)
+                    }
+                }
+            }
+        } else if !wanted, let task = metricsTask {
+            task.cancel()
+            metricsTask = nil
+            fps = 0
+        }
+    }
+
+    /// A stream with no frame for this long is reopened.
+    static let stallRestartAfter: TimeInterval = 6
 
     /// Reconnect the picture by hand (it never arrived).
     func reloadVideo() {
@@ -519,6 +605,7 @@ final class DeviceSession: Identifiable {
             self.reader = reader
             streamQuality = quality
             if videoWaitSince == nil { videoWaitSince = Date() }
+            streamOpenedAt = Date()
             video?.reset()
             reader.start()
             qualityWatch?.cancel()
@@ -539,6 +626,7 @@ final class DeviceSession: Identifiable {
             videoLive = false
             videoWaitSince = nil
         }
+        updateMetrics()
     }
 
     /// A quality stream that started at `started` has shown no frame since.
@@ -547,10 +635,12 @@ final class DeviceSession: Identifiable {
         return lastFrameAt < started
     }
 
-    private func restartStream() {
+    /// Reopen the stream. The last picture stays up meanwhile (the decoder
+    /// is flushed without clearing it), so a reconnect does not flash.
+    private func restartStream(keepPicture: Bool = false) {
         reader?.stop()
         reader = nil
-        videoLive = false
+        if !keepPicture { videoLive = false }
         updateStream()
     }
 
@@ -606,8 +696,10 @@ final class DeviceSession: Identifiable {
             while !Task.isCancelled {
                 guard let self, let client = self.client else { return }
                 do {
+                    let asked = Date()
                     let status = try await client.status()
                     guard self.client === client else { return }
+                    self.noteRoundTrip(since: asked)
                     self.linkUp()
                     self.status = status
                     self.updateStream()
@@ -626,6 +718,14 @@ final class DeviceSession: Identifiable {
                 try? await Task.sleep(for: .seconds(pause))
             }
         }
+    }
+
+    /// Smooth the status read's round trip into `rttMs`.
+    private func noteRoundTrip(since asked: Date) {
+        let ms = Date().timeIntervalSince(asked) * 1000
+        let smoothed = rttMs.map { Double($0) * 0.6 + ms * 0.4 } ?? ms
+        let value = Int(smoothed.rounded())
+        if value != rttMs { rttMs = value }
     }
 
     /// A status read failed. One miss is noise (a slow tunnel); two in a row
@@ -716,15 +816,20 @@ final class DeviceSession: Identifiable {
 
     /// Drive this phone alone: one gesture, its result as a toast on failure.
     func send(_ action: PhoneAction) {
+        Task { await perform(action) }
+    }
+
+    /// `send`, finishing once the daemon answered: typed text goes out one
+    /// piece after the other, in order.
+    func perform(_ action: PhoneAction) async {
         if let refusal = preflight() {
+            Haptics.warning()
             if case .owned = refusal { show(refusal.sentence) } else { show(hintForUndrivable()) }
             return
         }
         guard let client else { return }
-        Task {
-            let outcome = await client.deliver(action)
-            await settle(outcome, announce: true)
-        }
+        let outcome = await client.deliver(action)
+        await settle(outcome, announce: true)
     }
 
     /// Why a gesture cannot go to this phone right now, decided locally
@@ -820,6 +925,8 @@ final class DeviceSession: Identifiable {
 
     func inputs(now: Date = Date()) -> ConnectionInputs {
         ConnectionInputs(phase: phase, status: status, videoLive: videoLive || video == nil,
+                         hasPicture: video?.hasPicture ?? false,
+                         lastFrameAt: video == nil ? nil : lastFrameAt,
                          connectingSince: connectingSince, linkDownSince: linkDownSince,
                          linkProblem: linkProblem, startingSince: startingSince,
                          videoWaitSince: videoWaitSince, nextRetryAt: nextRetryAt,

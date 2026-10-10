@@ -11,6 +11,20 @@ xcodegen generate          # writes IPhoneUseRemote.xcodeproj from project.yml
 open IPhoneUseRemote.xcodeproj
 ```
 
+Driving a phone: the picture fills the space between a slim top bar (phone, route, round trip
+to the Mac and frame rate; tap it for settings) and a key bar (back, Home, Spotlight, keyboard,
+more), with the phone's own rounded corners; landscape moves both into side rails, and immersive
+mode hides them. One finger goes to the phone — tap, hold (a ring fills toward the long press, with
+a haptic), swipe (a flick is carried further so lists scroll as under a real finger), hold-then-move
+drag — and is drawn at once under the finger. Two fingers stay in the app: pinch or two-finger
+double-tap to zoom, two-finger drag to pan; touches are mapped through the zoom. The keyboard types
+into the phone as you type (committed text only, so Pinyin sends the chosen characters), with
+delete, return and paste on its bar. Video starts on a placeholder and fades in; a stream that goes
+silent (the runner sends at least one frame a second) is marked stalled, dimmed and reopened while
+the last picture stays up. Picture quality is Auto (sharp on the LAN, smooth through a tunnel or on
+cellular), Smooth or Sharp. The phone's App Switcher and volume keys are not offered: the device
+runner cannot press them.
+
 Connecting: scan the QR code from the web page's **Scan** button (in-app camera, or the system
 camera → landing page → `iphoneuse://pair?u=…&c=…`). The app keeps the returned device token in
 the Keychain and renews its session with it; typing the address and password still works.
@@ -60,6 +74,23 @@ place of a scan (the simulator has no camera). More Debug-only switches for UI c
 uses), `-grid YES` opens the overview, `-edit YES` the focused device's address/password form,
 `-scan YES` the scanner: `xcrun simctl launch booted
 com.leeguoo.iphone-use.remote -pair 'http://127.0.0.1:44321/pair?c=…'`.
+
+More Debug switches for screenshots: `-demo YES`, `-immersive YES`, `-typing YES`, `-settings YES`,
+`-zoom 2.5`, `-sync YES`, `-orientation landscape`. Metrics (time to first frame, touch → feedback
+on screen, stream reopen) are logged under `com.leeguoo.iphone-use.remote` / `metrics`.
+
+Without a phone: `Tools/mock_daemon.py` (python3 + ffmpeg) stands in for a daemon — login, a scripted
+`/agent/status`, a recorded H.264 stream replayed in a loop, and every `/control` action printed and
+kept for `GET /mock/actions`. Switch what it reports while the app runs with
+`curl -X POST -d '{"name":"stall"}' 127.0.0.1:47001/mock/scenario` (`live`, `stall`, `released`,
+`starting`, `locked`, `handoff`, `owned`).
+
+```bash
+python3 Tools/mock_daemon.py --port 47001 --name "Test iPhone" &
+xcrun simctl launch booted com.leeguoo.iphone-use.remote -address http://127.0.0.1:47001 -password mock
+# gestures end to end: taps, long press, swipe, flick, pinch + zoomed tap, keyboard, keys
+xcodebuild -scheme IPhoneUseRemoteUITests -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
+```
 
 The phone being controlled must stay unlocked: iOS does not let automation type the
 lock-screen passcode.

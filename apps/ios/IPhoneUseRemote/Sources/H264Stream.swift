@@ -69,7 +69,11 @@ final class VideoDisplayView: UIView {
 
     /// Pixel size of the decoded video, once known.
     private(set) var videoSize: CGSize = .zero
-    var onVideoSize: ((CGSize) -> Void)?
+    /// A picture is on screen (the first frame arrived; a reconnect keeps
+    /// the last one up rather than going black).
+    private(set) var hasPicture = false
+    /// The picture's size or presence changed.
+    var onContentChange: (() -> Void)?
     var onFrame: (() -> Void)?
     /// The decoder lost its place and waits for a keyframe; keyframes are
     /// otherwise ~10 s apart, so ask the daemon for one.
@@ -112,7 +116,7 @@ final class VideoDisplayView: UIView {
                 format = newFormat
                 let dims = CMVideoFormatDescriptionGetDimensions(newFormat)
                 videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
-                onVideoSize?(videoSize)
+                onContentChange?()
             }
         }
         if waitingForKeyframe {
@@ -128,6 +132,10 @@ final class VideoDisplayView: UIView {
             return
         }
         renderer.enqueue(sample)
+        if !hasPicture {
+            hasPicture = true
+            onContentChange?()
+        }
         onFrame?()
     }
 
