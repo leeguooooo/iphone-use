@@ -5910,6 +5910,10 @@ enum WdaControlOutcome {
     /// ones were sent without an acknowledgement and may be partly typed.
     /// Never replayed — the caller appends only the rest.
     TextPartial { confirmed: usize, uncertain: usize },
+    /// The runner refused the request and said nothing reached the screen
+    /// (issue #257: a scroll point outside the runner's screen). Its reason
+    /// is in the `runner_error` detail.
+    RunnerRejected,
     Failed,
 }
 
@@ -8638,14 +8642,41 @@ async fn wda_control_with_client(
             tracing::warn!("wda control ({typ}): not sent, WDA unreachable: {e:#}");
             WdaControlOutcome::NotSent
         }
-        Err(e) => {
-            // A WDA call that should have worked failed. Callers fail closed.
-            actionable.store(false, Ordering::Relaxed);
-            w.invalidate_session();
-            tracing::warn!("wda control ({typ}): {e:#}");
-            WdaControlOutcome::Failed
-        }
+        Err(e) => runner_failure_outcome(w, actionable, &e, typ, detail),
     }
+}
+
+/// A runner call failed after the request reached it. When the runner said it
+/// acted on nothing (see [`crate::wda::RunnerHttpError::nothing_sent`]) the
+/// action was refused: the session and the read path stay as they were, and
+/// the cached window size goes (the refusal is a touch point off the screen
+/// the runner measures, so the daemon's size disagreed with it). Anything
+/// else fails closed as an unknown outcome. Either way the runner's own
+/// reason rides along in `detail.runner_error`.
+fn runner_failure_outcome(
+    w: &mut crate::wda::WdaClient,
+    actionable: &std::sync::atomic::AtomicBool,
+    error: &anyhow::Error,
+    typ: &str,
+    detail: &mut Option<serde_json::Value>,
+) -> WdaControlOutcome {
+    use std::sync::atomic::Ordering;
+    let runner = crate::wda::runner_http_error(error);
+    if let Some(runner) = runner {
+        *detail = Some(serde_json::json!({ "runner_error": runner.to_json() }));
+    }
+    if runner.is_some_and(crate::wda::RunnerHttpError::nothing_sent) {
+        let cached = w.forget_window_size();
+        tracing::warn!(
+            "wda control ({typ}): refused by the runner before dispatch (daemon window size {cached:?}): {error:#}"
+        );
+        return WdaControlOutcome::RunnerRejected;
+    }
+    // A WDA call that should have worked failed. Callers fail closed.
+    actionable.store(false, Ordering::Release);
+    w.invalidate_session();
+    tracing::warn!("wda control ({typ}): {error:#}");
+    WdaControlOutcome::Failed
 }
 
 /// `POST /control` — cookie-authenticated browser control for the direct backend.
@@ -8720,6 +8751,49 @@ fn wda_failed_after_dispatch_response() -> Response {
                 r#"{"ok":false,"error":"outcome_unknown","outcome":"unknown","retry_safe":false}"#,
             ))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
+}
+
+/// `outcome_unknown`, carrying the runner's own reason (`runner_error`) when
+/// it answered with an error status (issue #257).
+fn wda_failed_after_dispatch_response_with(detail: Option<&serde_json::Value>) -> Response {
+    let Some(runner_error) = detail.and_then(|d| d.get("runner_error")) else {
+        return wda_failed_after_dispatch_response();
+    };
+    let body = serde_json::json!({
+        "ok": false,
+        "error": "outcome_unknown",
+        "outcome": "unknown",
+        "retry_safe": false,
+        "runner_error": runner_error,
+    });
+    with_security_headers((StatusCode::BAD_GATEWAY, axum::Json(body)).into_response())
+}
+
+const RUNNER_REJECTED_HINT: &str = "the device runner refused this action before touching the screen (see runner_error); nothing was sent, so fix what it names and send it again";
+
+/// The runner refused the action and said nothing reached the screen.
+fn runner_rejected_body(detail: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "ok": false,
+        "error": "runner_rejected",
+        "outcome": "not_sent",
+        "retry_safe": true,
+        "hint": RUNNER_REJECTED_HINT,
+    });
+    if let Some(runner_error) = detail.and_then(|d| d.get("runner_error")) {
+        body["runner_error"] = runner_error.clone();
+    }
+    body
+}
+
+fn runner_rejected_response(detail: Option<&serde_json::Value>) -> Response {
+    with_security_headers(
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            axum::Json(runner_rejected_body(detail)),
+        )
+            .into_response(),
     )
 }
 
@@ -9210,12 +9284,7 @@ async fn direct_agent_action(
             actionable.store(true, Ordering::Release);
             WdaControlOutcome::Applied
         }
-        Err(error) => {
-            actionable.store(false, Ordering::Release);
-            w.invalidate_session();
-            tracing::warn!("wda agent action ({typ}): {error:#}");
-            WdaControlOutcome::Failed
-        }
+        Err(error) => runner_failure_outcome(w, actionable, &error, typ, detail),
     }
 }
 
@@ -9381,7 +9450,10 @@ async fn direct_control(
             actionable: false,
             locked,
         };
-        return wda_failed_after_dispatch_response();
+        return wda_failed_after_dispatch_response_with(detail.as_ref());
+    }
+    if outcome == WdaControlOutcome::RunnerRejected {
+        return runner_rejected_response(detail.as_ref());
     }
     if outcome == WdaControlOutcome::NotSent {
         mark_wda_read_path_unactionable(&state);
@@ -10744,13 +10816,14 @@ async fn agent_actions_inner(
                 // point, the action outcome is unknown and the whole batch must
                 // not be replayed automatically.
                 let post_mark = w.last_post();
+                let mut step_detail = None;
                 let outcome = match tokio::time::timeout_at(
                     batch_deadline,
                     direct_agent_action(
                         &mut w,
                         &state.wda_actionable,
                         action,
-                        &mut None,
+                        &mut step_detail,
                         batch_deadline,
                     ),
                 )
@@ -10910,6 +10983,12 @@ async fn agent_actions_inner(
                             "not_sent",
                             true,
                         ),
+                        WdaControlOutcome::RunnerRejected => (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "runner_rejected",
+                            "not_sent",
+                            true,
+                        ),
                         WdaControlOutcome::Failed => {
                             (StatusCode::BAD_GATEWAY, "outcome_unknown", "unknown", false)
                         }
@@ -10923,8 +11002,7 @@ async fn agent_actions_inner(
                     ) {
                         mark_wda_read_path_unactionable(&state);
                     }
-                    return agent_actions_failure(
-                        status,
+                    let mut body = agent_actions_failure_body(
                         index,
                         completed,
                         applied_actions,
@@ -10934,6 +11012,13 @@ async fn agent_actions_inner(
                         &step_results,
                         None,
                     );
+                    // The runner's own reason for a refused or failed step.
+                    if let Some(runner_error) =
+                        step_detail.as_ref().and_then(|d| d.get("runner_error"))
+                    {
+                        body["runner_error"] = runner_error.clone();
+                    }
+                    return agent_actions_json(status, body);
                 }
                 applied_actions += 1;
                 if *after_ms > 0
@@ -12569,7 +12654,8 @@ async fn agent_input_inner(
                     .into_response(),
             )
         }
-        WdaControlOutcome::Failed => wda_failed_after_dispatch_response(),
+        WdaControlOutcome::RunnerRejected => runner_rejected_response(detail.as_ref()),
+        WdaControlOutcome::Failed => wda_failed_after_dispatch_response_with(detail.as_ref()),
     }
 }
 
@@ -19161,10 +19247,15 @@ mod tests {
                     };
                     let request = String::from_utf8_lossy(&buffer[..read]).to_string();
                     let body = responder(&request);
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
+                    // A responder that returns a whole response picks its own status.
+                    let response = if body.starts_with("HTTP/1.1 ") {
+                        body
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    };
                     let _ = stream.write_all(response.as_bytes());
                 }
             });
@@ -20386,6 +20477,136 @@ mod tests {
             .await;
             assert_eq!(outcome, WdaControlOutcome::NotSent);
             assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), 0);
+            wda.shutdown();
+        });
+    }
+
+    // -- runner error statuses (issue #257) ------------------------------------
+
+    /// A runner that answers `POST /actions` with `status` and the W3C error
+    /// envelope `{code, message}`, and a 393×852 window otherwise.
+    fn refusing_actions_wda(
+        status: &'static str,
+        code: &'static str,
+        message: &'static str,
+    ) -> (MockWda, Arc<std::sync::atomic::AtomicUsize>) {
+        let posts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = posts.clone();
+        let wda = MockWda::start(move |request| {
+            if request.starts_with("POST /session/SESSION/actions ") {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body =
+                    serde_json::json!({"value": {"error": code, "message": message}}).to_string();
+                return format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+            if request.contains("/window/size") {
+                return r#"{"value":{"width":393,"height":852}}"#.to_string();
+            }
+            healthy_wda_responder(request)
+        });
+        (wda, posts)
+    }
+
+    const OFF_SCREEN_REFUSAL: &str =
+        "action point (196, 489) is outside the 852x393 screen; nothing was sent";
+
+    #[test]
+    fn a_scroll_the_runner_refused_before_dispatch_is_not_sent_with_its_reason() {
+        block(async {
+            let (mut wda, posts) =
+                refusing_actions_wda("400 Bad Request", "invalid argument", OFF_SCREEN_REFUSAL);
+            let mut client = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(true);
+            let mut detail = None;
+            let outcome = direct_agent_action(
+                &mut client,
+                &actionable,
+                &serde_json::json!({"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":80}),
+                &mut detail,
+                far_deadline(),
+            )
+            .await;
+            assert_eq!(outcome, WdaControlOutcome::RunnerRejected);
+            assert_eq!(
+                posts.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "sent once"
+            );
+            assert!(
+                actionable.load(std::sync::atomic::Ordering::SeqCst),
+                "a refused request says nothing about the runner's health"
+            );
+            let runner = &detail.as_ref().unwrap()["runner_error"];
+            assert_eq!(runner["status"], 400);
+            assert_eq!(runner["code"], "invalid argument");
+            assert_eq!(runner["message"], OFF_SCREEN_REFUSAL);
+            assert_eq!(runner["call"], "POST /actions (swipe)");
+
+            let body = runner_rejected_body(detail.as_ref());
+            assert_eq!(body["error"], "runner_rejected");
+            assert_eq!(body["outcome"], "not_sent");
+            assert_eq!(body["retry_safe"], true);
+            assert_eq!(body["runner_error"]["message"], OFF_SCREEN_REFUSAL);
+            wda.shutdown();
+        });
+    }
+
+    #[test]
+    fn any_other_runner_error_stays_unknown_but_keeps_its_reason() {
+        block(async {
+            // A 400 alone does not prove nothing happened.
+            let (mut wda, _) =
+                refusing_actions_wda("400 Bad Request", "invalid argument", "typing failed");
+            let mut client = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(true);
+            let mut detail = None;
+            let outcome = direct_agent_action(
+                &mut client,
+                &actionable,
+                &serde_json::json!({"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":80}),
+                &mut detail,
+                far_deadline(),
+            )
+            .await;
+            assert_eq!(outcome, WdaControlOutcome::Failed);
+            assert!(!actionable.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(
+                detail.as_ref().unwrap()["runner_error"]["message"],
+                "typing failed"
+            );
+            wda.shutdown();
+
+            let (mut wda, _) = refusing_actions_wda(
+                "500 Internal Server Error",
+                "unknown error",
+                "actions failed: synthesis error",
+            );
+            let mut client = crate::wda::WdaClient::new(wda.base()).unwrap();
+            let mut detail = None;
+            let outcome = direct_agent_action(
+                &mut client,
+                &actionable,
+                &serde_json::json!({"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":80}),
+                &mut detail,
+                far_deadline(),
+            )
+            .await;
+            assert_eq!(outcome, WdaControlOutcome::Failed);
+            let response = wda_failed_after_dispatch_response_with(detail.as_ref());
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            use http_body_util::BodyExt;
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"], "outcome_unknown");
+            assert_eq!(body["retry_safe"], false);
+            assert_eq!(body["runner_error"]["status"], 500);
+            assert_eq!(
+                body["runner_error"]["message"],
+                "actions failed: synthesis error"
+            );
             wda.shutdown();
         });
     }

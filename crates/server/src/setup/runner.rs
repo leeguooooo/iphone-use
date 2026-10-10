@@ -427,6 +427,27 @@ pub fn cache_key(
     format!("v3|{source_hash}|{bundle}|{team}|{signer}|{udid}|{xcode_version}|{sdk}|{deployment_override}")
 }
 
+/// The runner-source hash inside a [`cache_key`] (`v3|<hash>|…`).
+pub fn key_source_hash(key: &str) -> Option<&str> {
+    let mut fields = key.split('|');
+    (fields.next()? == "v3")
+        .then(|| fields.next())
+        .flatten()
+        .filter(|hash| !hash.is_empty())
+}
+
+/// The source hash of the last runner setup built for this instance (the
+/// one it launched), from the product-cache record.
+pub fn built_source_hash(ctx: &Ctx) -> Option<String> {
+    let meta = std::fs::symlink_metadata(&ctx.runner_cache).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&ctx.runner_cache).ok()?).ok()?;
+    key_source_hash(record.get("key")?.as_str()?).map(str::to_string)
+}
+
 pub fn cache_drop(ctx: &Ctx) -> bool {
     match std::fs::symlink_metadata(&ctx.runner_cache) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -906,6 +927,18 @@ mod tests {
         );
         ctx.asc_key_path = "relative.p8".into();
         assert!(xcodebuild_args(&ctx, &base).is_err());
+    }
+
+    #[test]
+    fn the_source_hash_is_read_back_from_a_cache_key() {
+        let ctx = crate::setup::ctx::tests_support::ctx();
+        let key = cache_key(&ctx, "abc123", "b", "T", "U", "27.0", "27.0", "");
+        assert_eq!(key_source_hash(&key), Some("abc123"));
+        // The icon component setup appends does not disturb it.
+        assert_eq!(key_source_hash(&format!("{key}|icon:xyz")), Some("abc123"));
+        assert_eq!(key_source_hash("v2|abc|b"), None, "an older key format");
+        assert_eq!(key_source_hash("v3||b"), None);
+        assert_eq!(key_source_hash(""), None);
     }
 
     #[test]

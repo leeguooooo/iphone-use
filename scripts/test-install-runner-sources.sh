@@ -71,6 +71,20 @@ run_hook "$TEST_HOME/src-v2" "" 0 || fail_test "upgrade failed: $(cat "$TEST_HOM
 [ "$(installed_marker)" = v2 ] || fail_test "upgrade did not replace the sources"
 no_leftovers
 pass "an upgrade replaces the sources and drops the backup on commit"
+grep -q "Device runner sources changed" "$TEST_HOME/out" \
+    || fail_test "an upgrade with new sources did not say the runner needs a rebuild: $(cat "$TEST_HOME/out")"
+pass "an upgrade with new sources says the runner on the phone needs a rebuild"
+
+# Same sources again (only Xcode per-user state differs): nothing to rebuild.
+make_tree "$TEST_HOME/src-v2-again" v2
+run_hook "$TEST_HOME/src-v2-again" "" 0 || fail_test "reinstall failed: $(cat "$TEST_HOME/out")"
+grep -q "Device runner sources unchanged" "$TEST_HOME/out" \
+    || fail_test "identical sources were reported as changed: $(cat "$TEST_HOME/out")"
+if grep -q "Device runner sources changed" "$TEST_HOME/out"; then
+    fail_test "identical sources were reported as changed"
+fi
+no_leftovers
+pass "reinstalling identical sources leaves the runner on the phone current"
 
 make_tree "$TEST_HOME/src-v3" v3
 if run_hook "$TEST_HOME/src-v3" "" 1; then fail_test "the simulated failure did not fail"; fi

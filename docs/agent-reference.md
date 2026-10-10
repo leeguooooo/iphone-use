@@ -416,7 +416,11 @@ is no longer cached). The action result and the observation are separate facts:
   from a tree with nothing in it — screenshot instead.
 - A 502/504 after dispatch (`outcome_unknown`, `retry_safe:false`) may have
   acted. Read elements or a screenshot before deciding; never replay text,
-  scroll, back, pay, send or delete blindly.
+  scroll, back, pay, send or delete blindly. When the runner answered with an
+  error, `runner_error` (`call`, `status`, `code`, `message`) says why.
+- `422 runner_rejected` (`not_sent`, `retry_safe:true`): the runner refused the
+  action before touching the screen (for example a point outside the screen it
+  measures); `runner_error.message` names the reason.
 - A non-2xx read or an empty tree with `error` is a failed checkpoint even if
   the last status said `drivable:true`.
 
