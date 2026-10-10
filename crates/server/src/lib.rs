@@ -1,4 +1,5 @@
 pub mod advice;
+pub mod app_lookup;
 pub mod apps;
 pub mod collect;
 pub mod config;
@@ -24,6 +25,7 @@ pub mod schedules;
 pub mod scope;
 pub mod setup;
 pub mod telemetry;
+pub mod text_input;
 pub mod timing;
 pub mod tunnel;
 pub mod update;

@@ -84,13 +84,14 @@ it off again.
 
 | What | HTTP `/agent/input` `type` | MCP | Flow / batch step `kind` |
 |---|---|---|---|
-| Open an app | `launch_app` `bundle` (or `name` for built-ins: 健康, Settings…) | `phone_run_steps` step | `launch_app` |
+| Find an app's bundle id | `GET /agent/apps?query=微信` | `phone_apps` | — |
+| Open an app | `launch_app` `bundle` (or `name` for built-ins, or `app`: any app's exact name — refused with candidates if ambiguous) | `phone_run_steps` step | `launch_app` (`bundle` or `app`) |
 | Read the screen | `GET /agent/elements` | `phone_elements` | `wait_for` (`application`, `present`, `absent`) |
 | Tap an element | `tap` + `element` + `snapshot` | `phone_tap_element` | `tap_locator` (durable) |
 | Tap a unique label | `tap` + `label` | `phone_tap_label` | `tap_label` |
 | Tap by locator | `tap_locator` + `locator` | `phone_run_steps` step | `tap_locator` |
 | Tap a point | `tap` + `x`,`y` | `phone_tap` | `tap` |
-| Type | `text` (into the focused field) | `phone_type` | `type` (`input` names a runtime value) |
+| Type | `text` (into the focused field; up to 20000 chars — on `text_partially_typed` send only `remaining_text` with `clear:false`) | `phone_type` | `type` (`input` names a runtime value) |
 | Key | `key` `return`… | `phone_key` | `key` |
 | Home / Spotlight | `shortcut` | `phone_shortcut` | `shortcut` |
 | Scroll | `scroll` `dy` (80 ≈ 15% of a screen, 400 ≈ 75%) | `phone_scroll` | `scroll` |

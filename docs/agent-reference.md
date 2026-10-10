@@ -255,6 +255,7 @@ only on a trusted network.
 | `GET /agent/flow/draft` | The daemon's recorded trail as a flow v1 draft ([below](#saving-a-flow)) |
 | `GET /agent/reference` | This document, as compiled into the running daemon (`text/markdown`) |
 | `GET /agent/apps` | Installed apps `{device, apps:[{bundle,name,version,bundle_version,system,…}]}`; `?bundle=`; cached 10 min (`?refresh=1`). `503 apps_unavailable` = unknown, not "not installed" |
+| `GET /agent/apps?query=<name>` | App lookup by name: `{candidates:[{name,bundle_id,source,installed_verified,match,publisher?}], installation_checked, warnings}`. `source=auto` (phone's app list → bundled catalog → App Store), `installed`, `catalog` (offline), `apple` (`country=cn`, rate limited). Exact matches hide partial ones. MCP `phone_apps` |
 | `GET /agent/intents`, `POST /agent/intent` | Semantic intents ([below](#semantic-intents)) |
 | `POST /agent/mode`, `/agent/hold`, `/agent/owner`, `/agent/prewarm` | Reconnect / hold / release lease / pre-warm ([above](#phone-states-and-recovery)) |
 
@@ -271,11 +272,12 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 
 ```jsonc
 {"type":"launch_app","bundle":"com.apple.Health"}       // or "name":"健康" for built-in apps
+{"type":"launch_app","app":"微信"}                       // any app's exact name; 422 ambiguous_app|app_not_found|app_not_installed (+candidates), nothing sent
 {"type":"tap","element":3,"snapshot":"…"}               // from the SAME elements read
 {"type":"tap","label":"新备忘录"}                         // exact, unique; add "kind":"Button" if a StaticText shares it
 {"type":"tap_locator","locator":{"identifier":"save"}}  // label/identifier/kind/value/focused/enabled/visible
 {"type":"tap","x":0.5,"y":0.3}                          // last resort
-{"type":"text","text":"Health"}                         // into the FOCUSED field
+{"type":"text","text":"Health"}                         // into the FOCUSED field; up to 20000 chars (see long text below)
 {"type":"set_value","element":5,"snapshot":"…","value":"你好"}  // write a field directly; 409 value_not_applied → tap + text instead (web views)
 {"type":"key","name":"return"}                          // return|enter|send|go|search fire Return; escape, space, tab, delete/backspace, arrows
 {"type":"keyboard"}                                     // dismiss the keyboard
@@ -289,6 +291,15 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"picker","column":0,"value":"2026"}
 {"type":"perform","element":9,"snapshot":"…","action":"toggle"}  // increment|decrement|adjust(+value)|toggle|menu|double_tap|two_finger_tap|scroll_to_visible|pinch|rotate
 ```
+
+**Long text.** Text over 200 characters is typed in chunks of about 200 (never
+splitting an emoji, flag, or combining mark), roughly 60 characters a second;
+the request's deadline grows with the text. If typing stops part-way the answer
+is `502 text_partially_typed` with `characters_confirmed` (Unicode scalar
+values from the start), `characters_uncertain`, `remaining_text`, and
+`retry_safe:false`: read the field, then send only what is missing with
+`clear:false` — never the whole text again. One batch types at most 20000
+characters in total.
 
 `force_press` answers `422 force_press_unsupported` (retry-safe, nothing sent)
 on every iPhone since XR/11; use `menu`. App uninstall: `{"type":"uninstall","bundle":…}`
@@ -454,7 +465,9 @@ where they stopped.
   key ACKs without sending.
 - **`back`** is a left-edge swipe; on a screen with no back target it can switch
   apps. Prefer tapping the on-screen back control.
-- **App launch**: `launch_app` by bundle (or built-in name). Spotlight + typing is
+- **App launch**: `launch_app` by bundle (or built-in name, or any app's exact
+  name as `app`). Never guess a bundle id: look it up with `phone_apps` /
+  `GET /agent/apps?query=`. Spotlight + typing is
   the slow path and breaks under the Chinese IME.
 - **Do Not Disturb is automatic** when the intents registry lists the bridge's
   `focus_on` / `focus_off` verbs. The session's first action runs `focus_on`
@@ -539,8 +552,8 @@ worked example below.
 
 ## MCP specifics
 
-30 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
-`phone_release_owner`, `phone_login`, `phone_screenshot`, `phone_elements`, `phone_tap`,
+31 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
+`phone_release_owner`, `phone_login`, `phone_apps`, `phone_screenshot`, `phone_elements`, `phone_tap`,
 `phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_scroll_find`, `phone_collect_list`, `phone_type`,
 `phone_key`, `phone_shortcut`, `phone_run_steps`, `phone_jev_run`,
 `phone_run_start`, `phone_run_end`, and `phone_flow_list / info / run / draft /
