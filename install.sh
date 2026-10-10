@@ -79,6 +79,12 @@ while [ "$#" -gt 0 ]; do
                 printf 'ERROR: %s requires a value\n' "$1" >&2
                 exit 2
             fi
+            case "$2" in
+                -*)
+                    printf "ERROR: %s requires a value, got the option '%s'\n" "$1" "$2" >&2
+                    exit 2
+                    ;;
+            esac
             case "$1" in
                 --instance) INSTANCE_NAME="$2" ;;
                 --udid) INSTANCE_UDID="$2" ;;

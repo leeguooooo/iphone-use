@@ -50,6 +50,12 @@ for shell in /bin/sh /bin/bash; do
     r="$(run "$shell" --instance)"
     [ "${r%%|*}" = 2 ] || bad "$shell: --instance without value exit ${r%%|*}, want 2: $r"
     ok_t "$shell: --instance without a value is still refused"
+
+    r="$(run "$shell" --instance --no-setup)"
+    [ "${r%%|*}" = 2 ] || bad "$shell: --instance --no-setup exit ${r%%|*}, want 2: $r"
+    printf '%s' "$r" | grep -q "requires a value, got the option '--no-setup'" \
+        || bad "$shell: option-as-value message missing: $r"
+    ok_t "$shell: an option is never consumed as another option's value"
 done
 
 printf '1..%d\n' "$pass"
