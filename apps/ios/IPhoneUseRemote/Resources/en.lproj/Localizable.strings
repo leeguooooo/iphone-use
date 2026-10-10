@@ -294,3 +294,82 @@
 "%lld 分钟" = "%lld min";
 "%lld 秒" = "%lld s";
 "锁屏设置" = "Lock screen";
+
+/* Remote: chrome, keys, zoom, immersive */
+"返回" = "Back";
+"搜索" = "Search";
+"更多" = "More";
+"沉浸模式" = "Immersive";
+"退出沉浸模式" = "Exit immersive mode";
+"缩放 %@ 倍，点按还原" = "Zoom %@×, tap to fit";
+"单指操作手机；双指捏合或双击缩放" = "One finger drives the phone; pinch or double-tap with two fingers to zoom";
+"%@ 的屏幕" = "%@ screen";
+"打开这台手机的设置" = "Opens this phone's settings";
+"延迟 %lld 毫秒" = "latency %lld milliseconds";
+"每秒 %lld 帧" = "%lld frames per second";
+"交还手机" = "Hand back phone";
+"这台设备没有联网，联网后会自动重连" = "This device is offline; it reconnects once it is back online";
+
+/* Remote: live keyboard */
+"实时输入到手机：先在画面上点一下输入框" = "Typing live into the phone: tap a text field on its screen first";
+"实时输入到 %lld 台手机" = "Typing live into %lld phones";
+"发送中" = "Sending";
+"已发送 %lld 字" = "%lld characters sent";
+"输入的文字实时发到手机" = "What you type goes to the phone live";
+"输入到手机" = "Type into the phone";
+"输入的文字会实时发到手机上" = "What you type is sent to the phone as you type";
+"收起键盘" = "Hide keyboard";
+"把剪贴板粘贴到手机" = "Paste the clipboard into the phone";
+"退格" = "Delete";
+"换行" = "Return";
+
+/* Remote: video */
+"自动" = "Auto";
+"流畅" = "Smooth";
+"清晰" = "Sharp";
+"局域网用清晰，外网和蜂窝网络用流畅" = "Sharp on the LAN, smooth over the internet or cellular";
+"半分辨率、低码率，延迟最低" = "Half resolution, low bit rate, lowest latency";
+"原始分辨率，最高 60 帧，需要好网络" = "Full resolution, up to 60 fps; needs a good network";
+"正在恢复画面…" = "Restoring the picture…";
+"恢复画面" = "Restoring picture";
+"画面卡住了" = "The picture is stuck";
+"仍可操作，画面恢复后会自动更新。" = "You can still drive it; the picture updates once it recovers.";
+"画面卡顿" = "Picture stalled";
+"· %lld 秒" = "· %lld s";
+"画面" = "Picture";
+"现在是「%@」。格子里的小画面总是用流畅。" = "Currently %@. Grid tiles always use Smooth.";
+"上次画面 %lld 毫秒出现。" = "The last picture appeared after %lld ms.";
+
+/* Settings */
+"这台设备到 Mac" = "This device to Mac";
+"Mac 到手机" = "Mac to phone";
+"USB 线" = "USB cable";
+"交还：停止远程控制，手机留给拿着它的人用。断开：这台设备不再连接这台 Mac。" = "Hand back stops remote control and leaves the phone to whoever holds it. Disconnect stops this device from connecting to the Mac.";
+
+/* Welcome */
+"在这里看到并操作连在你 Mac 上的 iPhone：点按、滑动、打字，就像拿在手里。" = "See and drive the iPhone connected to your Mac from here: tap, swipe and type as if it were in your hand.";
+"在 Mac 上装好 iphone-use" = "Install iphone-use on your Mac";
+"它在 Mac 上运行，用线或 Wi‑Fi 连着要操作的 iPhone。" = "It runs on the Mac and reaches the iPhone over a cable or Wi‑Fi.";
+"打开它的网页，点「扫码」" = "Open its page and tap Scan";
+"页面会显示一个二维码，5 分钟内有效。" = "The page shows a QR code, valid for 5 minutes.";
+"用这里扫一下" = "Scan it here";
+"自动配对，不用输入地址和密码。iPhone 自带相机扫也可以。" = "Pairs on its own, no address or password to type. The Camera app works too.";
+"先试用演示" = "Try the demo first";
+"手动输入地址和密码" = "Enter address and password";
+"演示播放从真实 iPhone 录下的画面，不连接任何设备。" = "The demo plays screens recorded from a real iPhone and connects to nothing.";
+"手动连接" = "Connect manually";
+"Mac 地址和控制密码" = "Mac address and control password";
+
+/* Grid */
+"所有手机都从总览隐藏了。在「设备」里打开「显示在总览」。" = "Every phone is hidden from the overview. Turn on Show in overview under Devices.";
+"打开设备列表" = "Open device list";
+"扫它在 Mac 上的二维码" = "Scan its code on the Mac";
+"扫描 Mac 上的二维码；长按可以手动输入地址" = "Scans the code on the Mac; touch and hold to type an address";
+
+/* Demo */
+"演示" = "Demo";
+"演示画面" = "Demo screen";
+"录制的画面，不连接任何手机" = "Recorded screens, no phone connected";
+"已经在第一页了" = "Already on the first screen";
+"连上自己的 Mac 后，这个键会打开手机的搜索" = "Connected to your own Mac, this key opens the phone's search";
+"连上自己的 Mac 后，键盘会把文字实时打到手机上" = "Connected to your own Mac, the keyboard types into the phone live";

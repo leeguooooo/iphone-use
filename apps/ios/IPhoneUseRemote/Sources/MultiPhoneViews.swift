@@ -19,30 +19,38 @@ struct DeviceGridView: View {
                 OfflineBanner(online: app.online)
                 let tiles = app.gridSessions
                 if tiles.isEmpty {
-                    ContentUnavailableView("没有显示的手机", systemImage: "rectangle.grid.2x2",
-                                           description: Text("在「设备」里打开「显示在总览」。"))
-                        .padding(.top, 80)
+                    ContentUnavailableView {
+                        Label("没有显示的手机", systemImage: "rectangle.grid.2x2")
+                    } description: {
+                        Text("所有手机都从总览隐藏了。在「设备」里打开「显示在总览」。")
+                    } actions: {
+                        Button("打开设备列表") { showDevices = true }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .padding(.top, 80)
                 } else {
-                    LazyVGrid(columns: columns, spacing: 14) {
+                    LazyVGrid(columns: columns, spacing: Theme.Space.l) {
                         ForEach(tiles) { session in
                             DeviceTile(app: app, session: session)
                         }
+                        AddPhoneTile(onScan: { scanning = true }, onManual: { adding = true })
                     }
-                    .padding(.horizontal)
-                    .padding(.bottom, 24)
+                    .padding(.horizontal, Theme.Space.l)
+                    .padding(.top, Theme.Space.s)
+                    .padding(.bottom, Theme.Space.xl)
                 }
             }
             // Pull down: every waiting phone tries again now.
             .refreshable { await app.refreshAll() }
-            .background(Color.black.ignoresSafeArea())
+            .background(Theme.canvas.ignoresSafeArea())
             .navigationTitle("我的手机")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showDevices = true } label: { Label("设备", systemImage: "list.bullet") }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button { showSync = true } label: { Label("同步", systemImage: "rectangle.on.rectangle") }
+                    Button { showSync = true } label: { Label("同步操作", systemImage: "square.on.square.dashed") }
                         .disabled(app.devices.count < 2)
                     Menu {
                         Button { scanning = true } label: { Label("扫码添加", systemImage: "qrcode.viewfinder") }
@@ -66,7 +74,48 @@ struct DeviceGridView: View {
 
     /// Two across on an iPhone, more on an iPad.
     private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: sizeClass == .regular ? 200 : 150), spacing: 14)]
+        [GridItem(.adaptive(minimum: sizeClass == .regular ? 190 : 150), spacing: Theme.Space.l)]
+    }
+}
+
+/// The last tile: add another phone (scan; hold for typing an address).
+struct AddPhoneTile: View {
+    let onScan: () -> Void
+    let onManual: () -> Void
+
+    var body: some View {
+        Button(action: onScan) {
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
+                VStack(spacing: Theme.Space.s) {
+                    Image(systemName: "qrcode.viewfinder")
+                        .font(.title2.weight(.semibold))
+                        .frame(width: 52, height: 52)
+                        .background(Theme.accent.opacity(0.16), in: Circle())
+                        .foregroundStyle(Theme.accent)
+                    Text("添加手机").font(.subheadline.weight(.semibold))
+                    Text("扫它在 Mac 上的二维码").font(.caption2).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(Theme.Space.m)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .aspectRatio(9.0 / 19.5, contentMode: .fit)
+                .background {
+                    TileShape()
+                        .stroke(style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
+                        .foregroundStyle(Color.secondary.opacity(0.5))
+                }
+                // The labels under the other tiles.
+                Color.clear.frame(height: 36)
+            }
+        }
+        .buttonStyle(PressableStyle())
+        .foregroundStyle(.primary)
+        .contextMenu {
+            Button(action: onScan) { Label("扫码添加", systemImage: "qrcode.viewfinder") }
+            Button(action: onManual) { Label("手动添加", systemImage: "keyboard") }
+        }
+        .accessibilityLabel(Text("添加手机"))
+        .accessibilityHint(Text("扫描 Mac 上的二维码；长按可以手动输入地址"))
     }
 }
 
@@ -82,23 +131,28 @@ struct DeviceTile: View {
         Button {
             app.focusedID = session.id
         } label: {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
                 TilePicture(session: session)
-                HStack(spacing: 6) {
-                    HealthDot(health: session.health)
-                    Text(session.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        HealthDot(health: session.health)
+                        Text(session.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    }
+                    HStack(spacing: 4) {
+                        let p = session.presentation()
+                        Text(p.short)
+                            .font(.caption)
+                            .foregroundStyle(p.tone == .ok ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.color(p.tone)))
+                            .lineLimit(1)
+                        if let route = session.routeLabel {
+                            Chip(text: route, color: .secondary)
+                        }
+                    }
                 }
-                Text(session.secondaryName)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Text(session.shortState)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                .padding(.horizontal, 2)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(tileLabel))
         .accessibilityHint(Text("打开全屏操作"))
@@ -152,20 +206,22 @@ struct TilePicture: View {
             if p.placement == .cover || !session.videoLive {
                 VStack(spacing: 6) {
                     if p.progress {
-                        ProgressView()
+                        ProgressView().tint(Theme.color(p.tone))
                     } else {
-                        Image(systemName: p.symbol).font(.title2)
+                        Image(systemName: p.symbol).font(.title2).foregroundStyle(Theme.color(p.tone))
                     }
-                    Text(p.short).font(.caption2).multilineTextAlignment(.center)
+                    Text(p.short).font(.caption2.weight(.medium)).multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
                 }
-                .foregroundStyle(.secondary)
                 .padding(8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.opacity(p.placement == .cover ? 0.55 : 0))
+                .background(Color.black.opacity(p.placement == .cover ? 0.6 : 0))
                 .allowsHitTesting(false)
+                .transition(.opacity)
             }
             if let note = session.delivery {
                 DeliveryBadge(outcome: note.outcome).padding(6)
+                    .transition(.scale.combined(with: .opacity))
             }
             if let lock = session.status?.lockBadge {
                 LockBadgeView(badge: lock, compact: true)
@@ -176,10 +232,20 @@ struct TilePicture: View {
         }
         .aspectRatio(9.0 / 19.5, contentMode: .fit)
         .frame(maxWidth: .infinity)
-        .background(Color(white: 0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.12)))
-        .animation(.easeInOut(duration: 0.2), value: session.delivery)
+        .background(Color(white: 0.07))
+        .clipShape(TileShape())
+        .overlay(TileShape().stroke(Theme.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
+        .animation(.snappy(duration: 0.25), value: session.delivery)
+        .animation(.easeInOut(duration: 0.25), value: session.videoLive)
+    }
+}
+
+/// A tile's outline: the phone's own rounded corners at tile size.
+struct TileShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let radius = Theme.screenCornerRatio(for: rect.size) * min(rect.width, rect.height)
+        return Path(roundedRect: rect, cornerRadius: max(radius, 10), style: .continuous)
     }
 }
 
@@ -192,18 +258,14 @@ struct LockBadgeView: View {
     var body: some View {
         Group {
             if compact {
-                Label(badge.title, systemImage: badge.symbol)
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6).padding(.vertical, 3)
-                    .background((badge.urgent ? Color.orange : Color.gray).opacity(0.85), in: Capsule())
-                    .foregroundStyle(.white)
+                Chip(text: badge.title, symbol: badge.symbol,
+                     color: badge.urgent ? Theme.attention : Color(white: 0.45), style: .filled)
             } else {
                 Label(badge.sentence, systemImage: badge.symbol)
                     .font(.caption)
-                    .foregroundStyle(badge.urgent ? Color.orange : Color.secondary)
+                    .foregroundStyle(badge.urgent ? Theme.attention : Color.secondary)
             }
         }
-        .labelStyle(.titleAndIcon)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(badge.sentence))
     }
@@ -214,12 +276,7 @@ struct DeliveryBadge: View {
     let outcome: DeliveryOutcome
 
     var body: some View {
-        Label(outcome.badge, systemImage: symbol)
-            .font(.caption2.weight(.semibold))
-            .labelStyle(.titleAndIcon)
-            .padding(.horizontal, 6).padding(.vertical, 3)
-            .background(color.opacity(0.85), in: Capsule())
-            .foregroundStyle(.white)
+        Chip(text: outcome.badge, symbol: symbol, color: color, style: .filled)
             .accessibilityLabel(Text(outcome.sentence))
     }
 
@@ -235,11 +292,11 @@ struct DeliveryBadge: View {
 
     private var color: Color {
         switch outcome {
-        case .ok: return .green
+        case .ok: return Theme.ok
         case .notSent: return .gray
         case .owned: return .purple
-        case .outcomeUnknown: return .orange
-        case .failed: return .red
+        case .outcomeUnknown: return Theme.attention
+        case .failed: return Theme.down
         }
     }
 }
@@ -421,81 +478,105 @@ struct SyncView: View {
     let lead: DeviceSession
     let group: AppModel.SyncGroup
     @State private var typing = false
-    @Environment(\.horizontalSizeClass) private var sizeClass
+    @State private var immersive = false
+    @State private var showSettings = false
+    @State private var zoom: CGFloat = 1
+    @State private var resetZoom = 0
+    @State private var queue: TypingQueue
+
+    init(app: AppModel, lead: DeviceSession, group: AppModel.SyncGroup) {
+        self.app = app
+        self.lead = lead
+        self.group = group
+        _queue = State(initialValue: TypingQueue { [weak app, weak lead] action in
+            guard let app, let lead else { return }
+            await app.perform(action, from: lead)
+        })
+    }
 
     private var followers: [DeviceSession] {
         group.followers.compactMap { app.session($0) }
     }
 
     var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                BackToGridButton(app: app) { app.stopSync() }
-                    .accessibilityLabel(Text("退出同步"))
-                Label("同步 · \(group.members.count) 台", systemImage: "rectangle.on.rectangle")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Color.orange.opacity(0.3), in: Capsule())
-                StatusPill(session: lead, showName: true)
+        RemoteScaffold(immersive: immersive, typing: typing, onExitImmersive: { immersive = false }) { axis in
+            RemoteTopBar(axis: axis, backSymbol: "xmark", backLabel: "退出同步", zoom: zoom,
+                         onBack: { app.stopSync() },
+                         onResetZoom: { resetZoom += 1 },
+                         onImmersive: { immersive = true }) {
+                Button { showSettings = true } label: { SessionBadge(session: lead, axis: axis) }
+                    .buttonStyle(PressableStyle())
+                    .foregroundStyle(.primary)
             }
-            .padding(.horizontal)
-            if sizeClass == .regular {
-                HStack(spacing: 10) {
-                    leadScreen
-                    ScrollView {
-                        VStack(spacing: 10) { followerTiles }
+        } screen: {
+            RemoteStage(app: app, session: lead, zoom: $zoom, resetZoom: resetZoom) { app.dispatch($0, from: lead) }
+        } accessory: { axis in
+            if !immersive { followerStrip(axis) }
+        } banner: {
+            StatusBanner(app: app, session: lead)
+        } keys: { axis in
+            KeyBar(axis: axis,
+                   onBack: { app.dispatch(.back, from: lead) },
+                   onHome: { app.dispatch(.home, from: lead) },
+                   onSearch: { app.dispatch(.spotlight, from: lead) },
+                   onKeyboard: { typing = true }) {
+                Button { app.connectAll(group.members) } label: { Label("全部连接", systemImage: "bolt.horizontal") }
+                Picker(selection: $app.videoPreference) {
+                    ForEach(VideoPreference.allCases, id: \.self) { choice in
+                        Label(choice.title, systemImage: choice.symbol).tag(choice)
                     }
-                    .frame(width: 170)
+                } label: {
+                    Label("画面", systemImage: "sparkles.tv")
                 }
-                .padding(.horizontal, 8)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) { followerTiles }
-                        .padding(.horizontal)
+                .pickerStyle(.menu)
+                Button { immersive = true } label: {
+                    Label("沉浸模式", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
-                .frame(height: 150)
-                leadScreen
+                Divider()
+                Button(role: .destructive) { app.stopSync() } label: { Label("退出同步", systemImage: "xmark.circle") }
             }
-            HStack {
-                ToolButton(title: "主屏幕", symbol: "house") { app.dispatch(.home, from: lead) }
-                ToolButton(title: "键盘", symbol: "keyboard") { typing = true }
-                ToolButton(title: "全部连接", symbol: "bolt.horizontal") { app.connectAll(group.members) }
-                ToolButton(title: "退出同步", symbol: "xmark.circle") { app.stopSync() }
-            }
-            .padding(.horizontal, 8).padding(.vertical, 6)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-            .padding(.horizontal)
-            .padding(.bottom, 6)
+        } keyboard: {
+            LiveKeyboardBar(queue: queue, targets: group.members.count, onDone: { typing = false })
         }
-        .background(Color.black.ignoresSafeArea())
-        .animation(.easeInOut(duration: 0.2), value: lead.toast)
-        .sheet(isPresented: $typing) {
-            TypeSheet(targets: group.members.count) { app.dispatch(.text($0), from: lead) }
-        }
+        .sheet(isPresented: $showSettings) { SettingsSheet(app: app, session: lead) }
     }
 
-    private var leadScreen: some View {
-        ZStack {
-            RemoteScreen(session: lead) { app.dispatch($0, from: lead) }
-            if let wireframe = lead.redactedImage {
-                Image(uiImage: wireframe).resizable().scaledToFit().allowsHitTesting(false)
+    @ViewBuilder
+    private func followerStrip(_ axis: Axis) -> some View {
+        let header = Chip(text: String(localized: "同步 · \(group.members.count) 台"), symbol: "square.on.square.dashed",
+                          color: Theme.attention)
+        if axis == .horizontal {
+            VStack(alignment: .leading, spacing: 6) {
+                header.padding(.horizontal, Theme.Space.m)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: Theme.Space.s) { followerTiles(width: 58) }
+                        .padding(.horizontal, Theme.Space.m)
+                }
             }
-            StatusOverlay(app: app, session: lead)
-            ToastLayer(text: lead.toast)
+            .frame(height: 158)
+        } else {
+            VStack(spacing: 6) {
+                header
+                ScrollView {
+                    VStack(spacing: Theme.Space.s) { followerTiles(width: 64) }
+                }
+            }
+            .frame(width: 84)
+            .padding(.vertical, Theme.Space.s)
         }
     }
 
     @ViewBuilder
-    private var followerTiles: some View {
+    private func followerTiles(width: CGFloat) -> some View {
         ForEach(followers) { session in
             VStack(spacing: 3) {
                 TilePicture(session: session)
                 HStack(spacing: 4) {
-                    HealthDot(health: session.health)
+                    HealthDot(health: session.health, size: 6)
                     Text(session.name).font(.caption2).lineLimit(1)
                 }
             }
-            .frame(width: sizeClass == .regular ? 150 : 62)
+            .frame(width: width)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text(followerLabel(session)))
         }

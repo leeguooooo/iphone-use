@@ -217,6 +217,59 @@ enum RetryPolicy {
     }
 }
 
+// MARK: - Video
+
+/// How sharp the focused phone's picture is. Auto streams quality (full
+/// size, up to 60 fps) on the LAN and performance (half size, low bit
+/// rate) through a tunnel or over cellular, where bandwidth is scarce.
+enum VideoPreference: String, CaseIterable, Sendable {
+    case auto
+    case performance
+    case quality
+
+    func wantsQuality(localRoute: Bool, cellular: Bool) -> Bool {
+        switch self {
+        case .performance: return false
+        case .quality: return true
+        case .auto: return localRoute && !cellular
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .auto: return String(localized: "自动")
+        case .performance: return String(localized: "流畅")
+        case .quality: return String(localized: "清晰")
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .auto: return String(localized: "局域网用清晰，外网和蜂窝网络用流畅")
+        case .performance: return String(localized: "半分辨率、低码率，延迟最低")
+        case .quality: return String(localized: "原始分辨率，最高 60 帧，需要好网络")
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .auto: return "wand.and.stars"
+        case .performance: return "hare"
+        case .quality: return "sparkles.tv"
+        }
+    }
+
+    static let key = "videoPreference"
+
+    /// The saved choice. Before there was a choice, a single switch was
+    /// saved as `videoQuality`: on means quality, off (the old default)
+    /// becomes auto.
+    static func load(from defaults: UserDefaults) -> VideoPreference {
+        if let raw = defaults.string(forKey: key), let saved = VideoPreference(rawValue: raw) { return saved }
+        return defaults.bool(forKey: "videoQuality") ? .quality : .auto
+    }
+}
+
 // MARK: - What the screen says
 
 /// Everything that decides what a device's screen, tile and pill say.
@@ -231,6 +284,10 @@ struct ConnectionInputs: Equatable {
     var phase: Phase
     var status: PhoneStatus?
     var videoLive = false
+    /// A picture is up (the last frame stays while a stream reconnects).
+    var hasPicture = false
+    /// When the last frame arrived, while a picture is shown.
+    var lastFrameAt: Date?
     /// When the current attempt started (`connecting`).
     var connectingSince: Date?
     /// Status reads have been failing since then while connected.
@@ -285,6 +342,9 @@ struct ConnectionPresentation: Equatable {
     var retryIn: Int?
     var primary: Action?
     var secondary: Action?
+    /// The picture shown is not live (stalled, or the last frame of a
+    /// stream that is reconnecting): dim it.
+    var stale = false
 
     static func make(_ i: ConnectionInputs) -> ConnectionPresentation {
         func seconds(since date: Date?) -> Int? {
@@ -419,6 +479,13 @@ struct ConnectionPresentation: Equatable {
         }
         if !i.videoLive {
             let waited = seconds(since: i.videoWaitSince) ?? 0
+            if i.hasPicture, waited < 15 {
+                // A reconnect with the last picture still up: say so in a
+                // strip, not a card that flashes over the phone.
+                return .init(title: String(localized: "正在恢复画面…"), short: String(localized: "恢复画面"),
+                             symbol: "arrow.triangle.2.circlepath", tone: .busy, placement: .banner,
+                             progress: true, elapsed: waited >= 3 ? waited : nil, stale: true)
+            }
             if waited >= 15 {
                 return .init(title: String(localized: "画面还没出来"),
                              detail: String(localized: "可以操作，但画面没有传过来。可能是网络慢，试试重新加载。"),
@@ -429,9 +496,24 @@ struct ConnectionPresentation: Equatable {
                          symbol: "hourglass", tone: .busy, placement: .cover, progress: true,
                          elapsed: waited >= 3 ? waited : nil)
         }
+        if let last = i.lastFrameAt, i.now.timeIntervalSince(last) >= Self.stallAfter {
+            // The runner sends a frame at least every second: silence is a
+            // stall, and a frozen picture must not pass for a live one.
+            let quiet = Int(i.now.timeIntervalSince(last))
+            return .init(title: String(localized: "画面卡住了"),
+                         detail: String(localized: "仍可操作，画面恢复后会自动更新。"),
+                         short: String(localized: "画面卡顿"), symbol: "pause.rectangle", tone: .busy,
+                         placement: .banner, elapsed: quiet, primary: .reloadVideo, stale: true)
+        }
         return .init(title: String(localized: "可操作"), short: String(localized: "可操作"),
                      symbol: "checkmark.circle", tone: .ok, placement: .none)
     }
+
+    /// No frame for this long while live is a stall.
+    static let stallAfter: TimeInterval = 2.5
+
+    /// The picture should be dimmed: it is not live right now.
+    var dimsPicture: Bool { placement == .cover || stale }
 
     /// A setup blocker: something on the Mac or the iPhone a person has to
     /// clear. The daemon's `next_step` says exactly what; the title names it.
