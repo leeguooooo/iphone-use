@@ -378,8 +378,19 @@ enum AlertScan {
   /// Safari's own dialogs sit on level 11 (`webDialogID`, hardware: iOS 27), the last level this
   /// read returns; the container then arrives without children and `firstAlert` asks for the full
   /// read. Reading even one level deeper in Safari costs the whole page (iOS 27, a Wikipedia
-  /// article: 54 nodes / ~60 ms at 12 levels, 523 nodes / ~225 ms at 13), so the depth stays.
+  /// article: 54 nodes / ~60 ms at 12 levels, 523 nodes / ~225 ms at 13), so the depth stays;
+  /// the alert routes instead look once at full depth in Safari before answering "no alert"
+  /// (`mayHoldWebDialog`).
   static let shallowDepth = 12
+
+  /// Processes that draw Safari's own dialogs: Safari and the in-app Safari sheet.
+  static let webDialogHosts: Set<String> = ["com.apple.mobilesafari", "com.apple.SafariViewService"]
+
+  /// Whether an alert route that found nothing at `shallowDepth` should read this process's full
+  /// tree for a Safari dialog nested deeper than the shallow read reaches.
+  static func mayHoldWebDialog(bundleID: String?) -> Bool {
+    bundleID.map(webDialogHosts.contains) ?? false
+  }
 
   /// The first alert in a tree read to `maxDepth` node levels, and whether the depth cap may have
   /// cut its subtree (a childless node on the deepest level can be one whose children the AX

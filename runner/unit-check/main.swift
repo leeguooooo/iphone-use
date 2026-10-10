@@ -633,6 +633,25 @@ do {
   let shallow = AlertScan.firstAlert(in: cut(tree, 0, AlertScan.shallowDepth), maxDepth: AlertScan.shallowDepth)
   check(shallow?.alert["rawIdentifier"] as? String == "SFDialogView" && shallow?.maybeCut == true,
         "a 12-level read sees the dialog's container and asks for the full read")
+
+  // A dialog nested one level deeper: the quick scan misses it, the alert routes' full-depth
+  // fallback (Safari only) finds it.
+  // (one extra Other between the application and its window: the dialog moves to level 12)
+  let deeper: [String: Any] = [
+    "type": "XCUIElementTypeApplication",
+    "children": [["type": "XCUIElementTypeOther", "children": tree["children"] ?? []]],
+  ]
+  check(AlertScan.firstAlert(in: cut(deeper, 0, AlertScan.shallowDepth), maxDepth: AlertScan.shallowDepth) == nil,
+        "the 12-level quick scan cannot see a dialog on level 12")
+  check(AlertScan.mayHoldWebDialog(bundleID: "com.apple.mobilesafari")
+        && AlertScan.mayHoldWebDialog(bundleID: "com.apple.SafariViewService")
+        && !AlertScan.mayHoldWebDialog(bundleID: "com.apple.Preferences")
+        && !AlertScan.mayHoldWebDialog(bundleID: nil),
+        "the full-depth fallback runs only in Safari and its in-app sheet")
+  let fallback = AlertScan.webDialog(in: deeper)
+  check(fallback?.depth == 12 && fallback.map { AlertScan.describe($0.node) }?.text == message
+        && fallback.map { AlertScan.describe($0.node) }?.buttons.map(\.label) == ["好"],
+        "the full-depth fallback finds the deeper dialog with its text and button")
 }
 
 // MARK: - Element registry bounds

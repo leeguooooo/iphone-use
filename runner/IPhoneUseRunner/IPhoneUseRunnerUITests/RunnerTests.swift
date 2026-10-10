@@ -742,8 +742,27 @@ final class RunnerTests: XCTestCase {
       privateWorked = true
       if let alert = readable { return alert }
     }
-    if privateWorked { return nil }
+    if privateWorked {
+      // Only the alert routes get here, never plain reads: one full-depth look for a Safari dialog
+      // the 12-level scan cannot reach, so a dialog a /source read reported is always answerable.
+      if let element = target.element, AlertScan.mayHoldWebDialog(bundleID: target.bundleID) {
+        return webDialogAtFullDepth(element, pid: target.pid)
+      }
+      return nil
+    }
     return findAlertWithQueries()
+  }
+
+  /// A Safari dialog anywhere in the target's tree (AlertScan.webDialog), read at full depth.
+  func webDialogAtFullDepth(_ element: AnyObject, pid: Int32) -> FoundAlert? {
+    let tree = timed("AlertWebDialogRead") {
+      IPURBridge.wdaTree(
+        forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
+        extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
+    }
+    guard (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any],
+          let dialog = AlertScan.webDialog(in: root) else { return nil }
+    return describeAlert(dialog.node, pid: pid)
   }
 
   /// An alert node (XCUIElementTypeAlert, or a Safari dialog's container: AlertScan) as text
