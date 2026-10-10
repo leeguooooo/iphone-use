@@ -11611,6 +11611,10 @@ async fn settle_frame(
 /// captures.
 const SETTLED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Longest side of the settled frame captured after an action: covers
+/// phone_screenshot's 1200 and the live panel; a larger request captures anew.
+const SETTLED_FRAME_MAX_SIDE: u32 = 1600;
+
 /// Capture the settled screen in the background, unless something was sent
 /// in the meantime (`post_mark` is the last POST the observation saw) — then
 /// that screen is gone and there is nothing to keep. The next control
@@ -11629,11 +11633,15 @@ fn capture_settled_frame_later(
         if w.last_post() != post_mark || w.settled_frame(SETTLED_FRAME_MAX_AGE).is_some() {
             return;
         }
-        if let Ok(Ok(png)) =
-            tokio::time::timeout(std::time::Duration::from_secs(3), w.screenshot_png()).await
+        // Sized on the phone: the agent that looks next asks for a size
+        // (phone_screenshot: 1200), and over Wi-Fi a full PNG of a big phone
+        // is megabytes the 3 s budget may not carry.
+        let shot = crate::wda::ShotRequest::jpeg(Some(SETTLED_FRAME_MAX_SIDE));
+        let budget = std::time::Duration::from_secs(3);
+        if let Ok(Ok(frame)) = tokio::time::timeout(budget, w.screenshot_sized(shot, budget)).await
         {
-            if w.last_post() == post_mark && is_valid_png(&png) {
-                w.remember_settled_frame(png);
+            if w.last_post() == post_mark && is_valid_capture(&frame) {
+                w.remember_settled_frame(frame);
             }
         }
     });
@@ -11780,7 +11788,7 @@ async fn settle_and_read_elements(
                 // That frame IS the settled screen: keep it for a screenshot
                 // request, which then costs no capture.
                 if let Some(after) = after {
-                    w.remember_settled_frame(after);
+                    w.remember_settled_frame(crate::wda::Capture::full_png(after));
                 }
                 report.settled = true;
                 report.reason = SettleReason::Stable;
@@ -13784,32 +13792,44 @@ struct ScreenshotQuery {
     fresh: Option<String>,
 }
 
-/// A valid capture, finished for the caller: the wireframe when the app hid
-/// its screen from capture, else the capture shrunk to `max_side` (`raw`
-/// skips both).
+/// A valid capture, finished for the caller as PNG: the wireframe when the
+/// app hid its screen from capture, else the capture shrunk to `max_side`
+/// (`raw` skips both). A JPEG sized on the phone is decoded and re-encoded
+/// here — small, so cheap — and callers keep getting `image/png`.
 async fn finish_screenshot(
     wda: &Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
-    bytes: Vec<u8>,
+    capture: crate::wda::Capture,
     raw: bool,
     max_side: Option<u32>,
     source: Option<&'static str>,
 ) -> Response {
+    let jpeg = capture.format == crate::wda::ImageFormat::Jpeg;
+    let bytes = capture.bytes;
     // `raw` is WDA's capture untouched, size included.
-    let check = bytes.len() <= REDACTION_CHECK_MAX_PNG_BYTES;
-    if raw || (!check && max_side.is_none()) {
+    if raw && !jpeg {
+        return png_response(bytes, source, false);
+    }
+    // A JPEG is a sized capture, never megabytes: always checked.
+    let check = !raw && (jpeg || bytes.len() <= REDACTION_CHECK_MAX_PNG_BYTES);
+    if !jpeg && !check && max_side.is_none() {
         return png_response(bytes, source, false);
     }
     // One decode serves the hidden-screen check, the wireframe and the
     // shrink; each used to decode the capture (and the wireframe its own
     // re-encoded PNG) again.
     let bytes = Arc::new(bytes);
-    let png = Arc::clone(&bytes);
-    let decoded = tokio::task::spawn_blocking(move || crate::redaction::decode_png(&png))
+    let encoded = Arc::clone(&bytes);
+    let decoded = tokio::task::spawn_blocking(move || decode_capture(&encoded))
         .await
         .ok()
         .flatten();
     let bytes = Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone());
     let Some(image) = decoded else {
+        if jpeg {
+            return with_security_headers(
+                (StatusCode::BAD_GATEWAY, "the runner sent an undecodable JPEG").into_response(),
+            );
+        }
         return png_response(bytes, source, false);
     };
     let image = if check {
@@ -13833,28 +13853,70 @@ async fn finish_screenshot(
                 if let Some(png) = fitted {
                     return png_response(png, Some("accessibility-wireframe"), true);
                 }
-                return png_response(bytes, source, false);
+                return png_or_reencoded(bytes, jpeg, source).await;
             }
             Ok(Some(Err(image))) => image,
             // The check outlived its budget (or lost its worker) and took
             // the image with it.
             Ok(None) | Err(_) => {
-                return png_response(fit_png(bytes, max_side).await, source, false)
+                if jpeg {
+                    return png_or_reencoded(bytes, jpeg, source).await;
+                }
+                return png_response(fit_png(bytes, max_side).await, source, false);
             }
         }
     } else {
         image
     };
-    let Some(max_side) = max_side.filter(|&side| image.width.max(image.height) > side) else {
+    let needs_fit = max_side.filter(|&side| image.width.max(image.height) > side);
+    if needs_fit.is_none() && !jpeg {
         return png_response(bytes, source, false);
-    };
+    }
     let fitted = tokio::task::spawn_blocking(move || {
-        crate::redaction::encode_png(&crate::redaction::fit_within(image, max_side))
+        let image = match needs_fit {
+            Some(side) => crate::redaction::fit_within(image, side),
+            None => image,
+        };
+        crate::redaction::encode_png(&image)
     })
     .await
     .ok()
     .flatten();
-    png_response(fitted.unwrap_or(bytes), source, false)
+    match fitted {
+        Some(png) => png_response(png, source, false),
+        None if !jpeg => png_response(bytes, source, false),
+        None => with_security_headers(
+            (StatusCode::BAD_GATEWAY, "the capture could not be re-encoded").into_response(),
+        ),
+    }
+}
+
+/// PNG bytes as they are, or a JPEG decoded and re-encoded as PNG.
+async fn png_or_reencoded(bytes: Vec<u8>, jpeg: bool, source: Option<&'static str>) -> Response {
+    if !jpeg {
+        return png_response(bytes, source, false);
+    }
+    let png = tokio::task::spawn_blocking(move || {
+        crate::redaction::decode_jpeg(&bytes).and_then(|image| crate::redaction::encode_png(&image))
+    })
+    .await
+    .ok()
+    .flatten();
+    match png {
+        Some(png) => png_response(png, source, false),
+        None => with_security_headers(
+            (StatusCode::BAD_GATEWAY, "the runner sent an undecodable JPEG").into_response(),
+        ),
+    }
+}
+
+/// Decode a capture whatever its encoding (PNG from the full path, JPEG
+/// from a sized one).
+fn decode_capture(bytes: &[u8]) -> Option<crate::redaction::Image> {
+    match crate::wda::ImageFormat::of(bytes) {
+        crate::wda::ImageFormat::Jpeg => crate::redaction::decode_jpeg(bytes),
+        _ => crate::redaction::decode_png(bytes),
+    }
 }
 
 /// Shrink a PNG to `max_side` off the async runtime; the original when it
@@ -13909,7 +13971,14 @@ fn refresh_capture_verdict(state: &Arc<AppState>, hub: &Arc<crate::video::VideoH
                 let mut w = wda.lock().await;
                 let rows = w.elements().await.ok()?;
                 let window = w.window_size().await.ok()?;
-                let png = w.screenshot_png().await.ok()?;
+                // The check reads rows against pixels at any scale: a sized
+                // JPEG is plenty and a fraction of the full PNG on the wire.
+                let shot = crate::wda::ShotRequest::jpeg(Some(1024));
+                let png = w
+                    .screenshot_sized(shot, std::time::Duration::from_secs(8))
+                    .await
+                    .ok()?
+                    .bytes;
                 (rows, window, png)
             };
             if !crate::redaction::tree_has_hidden_content(&rows, window) {
@@ -13918,7 +13987,7 @@ fn refresh_capture_verdict(state: &Arc<AppState>, hub: &Arc<crate::video::VideoH
             // The live frame only says "flat"; a sparse real page is flat
             // too. Check that the capture leaves the labelled rows undrawn.
             tokio::task::spawn_blocking(move || {
-                let image = crate::redaction::decode_png(&png)?;
+                let image = decode_capture(&png)?;
                 Some(!crate::redaction::labelled_rows_show_content(&image, &rows, window))
             })
             .await
@@ -14034,11 +14103,15 @@ async fn agent_screenshot(
     // The screen as it settled after the last action was captured then (see
     // `SETTLED_FRAME_MAX_AGE`); nothing was sent since, so it is this screen.
     if !raw && !fresh {
-        let settled = wda.lock().await.settled_frame(SETTLED_FRAME_MAX_AGE);
-        if let Some(png) = settled {
+        let settled = wda
+            .lock()
+            .await
+            .settled_frame(SETTLED_FRAME_MAX_AGE)
+            .filter(|frame| frame.covers(max_side));
+        if let Some(frame) = settled {
             return finish_screenshot(
                 wda,
-                (*png).clone(),
+                (*frame).clone(),
                 false,
                 max_side,
                 Some("settled-after-action"),
@@ -14073,42 +14146,197 @@ async fn agent_screenshot(
             }
         }
     }
-    return match tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        wda.lock().await.screenshot_png().await
-    })
-    .await
-    {
-        Ok(Ok(bytes)) if is_valid_png(&bytes) => {
-            finish_screenshot(wda, bytes, raw, max_side, None).await
+    let request = if raw || max_side.is_none() {
+        crate::wda::ShotRequest::full_png()
+    } else {
+        // Sized on the phone: the full PNG of a 17 Pro Max is megabytes,
+        // which a degraded Wi-Fi link cut mid-body after 18 s.
+        crate::wda::ShotRequest::jpeg(max_side)
+    };
+    match capture_with_retry(wda, request, !raw).await {
+        Ok((capture, degraded)) if is_valid_capture(&capture) => {
+            // After a smaller retry the image is held to the retry's size,
+            // whatever the runner sent.
+            let side = degraded.or(max_side);
+            let mut response = finish_screenshot(wda, capture, raw, side, None).await;
+            if let Some(side) = degraded {
+                if let Ok(value) = header::HeaderValue::from_str(&format!("max_side={side}")) {
+                    response.headers_mut().insert("x-screenshot-degraded", value);
+                }
+            }
+            response
         }
-        Ok(Ok(bytes)) => {
+        Ok((capture, _)) => {
             tracing::warn!(
-                "agent screenshot: Direct WDA returned {} bytes, not a valid PNG",
-                bytes.len()
+                "agent screenshot: the runner returned {} bytes, not a valid image",
+                capture.bytes.len()
             );
             mark_wda_read_path_unactionable(&state);
-            with_security_headers(
-                (StatusCode::BAD_GATEWAY, "WDA returned an invalid PNG").into_response(),
+            screenshot_failure_response(
+                &state,
+                StatusCode::BAD_GATEWAY,
+                "invalid_image",
+                1,
+                "the runner returned bytes that are not a PNG or JPEG image",
             )
+            .await
         }
-        Ok(Err(error)) => {
-            tracing::warn!("agent screenshot: Direct WDA failed: {error:#}");
+        Err(failure) => {
+            tracing::warn!(
+                "agent screenshot: failed after {} attempt(s) ({}): {}",
+                failure.attempts,
+                failure.cause,
+                failure.detail
+            );
             mark_wda_read_path_unactionable(&state);
-            with_security_headers(
-                (StatusCode::BAD_GATEWAY, "WDA screenshot failed").into_response(),
+            let status = if failure.cause == "timeout" {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            screenshot_failure_response(
+                &state,
+                status,
+                failure.cause,
+                failure.attempts,
+                &failure.detail,
             )
+            .await
         }
-        Err(_) => {
-            mark_wda_read_path_unactionable(&state);
-            with_security_headers(
-                (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "WDA screenshot exceeded the server deadline",
-                )
-                    .into_response(),
-            )
-        }
+    }
+}
+
+/// The whole `/agent/screenshot` capture budget, and the first attempt's
+/// share of it: a retry needs time left to carry its smaller image.
+const SCREENSHOT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+const SCREENSHOT_FIRST_ATTEMPT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// The smaller retry after a capture the link cut or timed out: half the
+/// asked size (at least 320 px), or 1024 px for a full-resolution request.
+fn retry_shot(first: crate::wda::ShotRequest) -> crate::wda::ShotRequest {
+    let side = match first.max_side {
+        Some(side) if side <= 320 => side,
+        Some(side) => (side / 2).max(320),
+        None => 1024,
     };
+    crate::wda::ShotRequest {
+        max_side: Some(side),
+        jpeg: true,
+        quality: 0.6,
+    }
+}
+
+struct ScreenshotFailure {
+    cause: &'static str,
+    attempts: u32,
+    detail: String,
+}
+
+/// One capture for `/agent/screenshot`. When the link cuts the body or the
+/// request times out, retries once smaller (see [`retry_shot`]) if `retry`;
+/// `Ok((capture, Some(side)))` then says the image is smaller than asked.
+async fn capture_with_retry(
+    wda: &Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
+    first: crate::wda::ShotRequest,
+    retry: bool,
+) -> Result<(crate::wda::Capture, Option<u32>), ScreenshotFailure> {
+    let deadline = tokio::time::Instant::now() + SCREENSHOT_DEADLINE;
+    let budget = if retry {
+        SCREENSHOT_FIRST_ATTEMPT
+    } else {
+        SCREENSHOT_DEADLINE
+    };
+    let first_error = match attempt_capture(wda, first, budget).await {
+        Ok(capture) => return Ok((capture, None)),
+        Err(error) => error,
+    };
+    let cause = first_error.0;
+    if !retry || !crate::wda::screenshot_failure_retryable(cause) {
+        return Err(ScreenshotFailure {
+            cause,
+            attempts: 1,
+            detail: first_error.1,
+        });
+    }
+    let second = retry_shot(first);
+    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if left < std::time::Duration::from_secs(1) {
+        return Err(ScreenshotFailure {
+            cause,
+            attempts: 1,
+            detail: first_error.1,
+        });
+    }
+    tracing::info!(
+        "agent screenshot: {cause} on the first capture; retrying once at max_side={}",
+        second.max_side.unwrap_or_default()
+    );
+    match attempt_capture(wda, second, left).await {
+        Ok(capture) => Ok((capture, second.max_side)),
+        Err((cause, detail)) => Err(ScreenshotFailure {
+            cause,
+            attempts: 2,
+            detail: format!("{detail}; first attempt: {}", first_error.1),
+        }),
+    }
+}
+
+async fn attempt_capture(
+    wda: &Arc<tokio::sync::Mutex<crate::wda::WdaClient>>,
+    request: crate::wda::ShotRequest,
+    budget: std::time::Duration,
+) -> Result<crate::wda::Capture, (&'static str, String)> {
+    let started = tokio::time::Instant::now();
+    // The lock wait counts against the budget, the request gets what is left.
+    let captured = tokio::time::timeout(budget, async {
+        let mut w = wda.lock().await;
+        let left = budget.saturating_sub(started.elapsed());
+        w.screenshot_sized(request, left.max(std::time::Duration::from_millis(100)))
+            .await
+    })
+    .await;
+    match captured {
+        Ok(Ok(capture)) => Ok(capture),
+        Ok(Err(error)) => Err((
+            crate::wda::screenshot_failure_cause(&error),
+            format!("{error:#}"),
+        )),
+        Err(_) => Err((
+            "timeout",
+            format!("no screenshot within {} ms", budget.as_millis()),
+        )),
+    }
+}
+
+/// A failed screenshot as JSON the caller can act on: what failed (`cause`),
+/// over which link (`transport`), after how many attempts.
+async fn screenshot_failure_response(
+    state: &AppState,
+    status: StatusCode,
+    cause: &str,
+    attempts: u32,
+    detail: &str,
+) -> Response {
+    let transport = managed_transport(state).await;
+    let hint = match cause {
+        "timeout" | "body_truncated" | "connection_lost" => {
+            "the link to the phone is slow or dropping; retry with a smaller max_side, or connect the iPhone with a cable"
+        }
+        "connect" => "the device runner is not answering; check phone_status",
+        _ => "check phone_status; the runner answered but did not produce an image",
+    };
+    json_response(
+        status,
+        serde_json::json!({
+            "ok": false,
+            "error": if status == StatusCode::GATEWAY_TIMEOUT { "screenshot_timeout" } else { "screenshot_failed" },
+            "cause": cause,
+            "transport": transport,
+            "attempts": attempts,
+            "detail": detail,
+            "hint": hint,
+        }),
+    )
 }
 
 /// `GET /agent/mjpeg` — LIVE video in agent mode by proxying WDA's on-device
@@ -14469,6 +14697,15 @@ async fn agent_h264_keyframe(
 /// True when `bytes` is a plausibly-decodable PNG: the 8-byte signature plus
 /// enough length to carry an IHDR. Guards the agent's decoder against the
 /// runt/garbage frames a capture can emit mid-transition (issue #14).
+/// A capture worth decoding: a PNG (see [`is_valid_png`]) or a JPEG.
+fn is_valid_capture(capture: &crate::wda::Capture) -> bool {
+    match capture.format {
+        crate::wda::ImageFormat::Png => is_valid_png(&capture.bytes),
+        crate::wda::ImageFormat::Jpeg => capture.bytes.len() >= 4,
+        crate::wda::ImageFormat::Other => false,
+    }
+}
+
 fn is_valid_png(bytes: &[u8]) -> bool {
     const PNG_SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
     // 8 sig + 4 len + 4 "IHDR" + 13 IHDR data + 4 CRC = 33 minimum.

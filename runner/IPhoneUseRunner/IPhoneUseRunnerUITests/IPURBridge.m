@@ -9,6 +9,7 @@
 
 #import "IPURBridge.h"
 #import "IPURGeometry.h"
+#import "IPURImageCodec.h"
 
 #import <ImageIO/ImageIO.h>
 #import <dlfcn.h>
@@ -1344,6 +1345,47 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
     if (error) *error = [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason];
     return nil;
   }
+}
+
++ (nullable NSData *)sizedScreenshotWithMaxSide:(NSUInteger)maxSide
+                                            png:(BOOL)png
+                                        quality:(double)quality
+                                           info:(NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable)info
+                                          error:(NSString *_Nullable *_Nullable)error
+{
+  NSString *failure = nil;
+  NSData *capture = nil;
+  if (png) {
+    capture = [self requestedPNGScreenshotWithError:&failure];
+  } else {
+    // A capture that is about to be shrunk is taken at high quality, so the one lossy pass that
+    // matters is the final encode at `quality`.
+    capture = [self screenCaptureWithQuality:(maxSide > 0 ? MAX(quality, 0.9) : quality)
+                                        path:NULL
+                                       error:&failure];
+  }
+  if (capture == nil) {
+    if (error) *error = failure ?: @"screen capture failed";
+    return nil;
+  }
+  NSData *output = [self fitImage:capture maxSide:maxSide png:png quality:quality info:info];
+  if (output == nil && error) *error = @"the capture could not be resized";
+  return output;
+}
+
++ (nullable NSData *)fitImage:(NSData *)data
+                      maxSide:(NSUInteger)maxSide
+                          png:(BOOL)png
+                      quality:(double)quality
+                         info:(NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable)info
+{
+  IPURImageInfo fitted = {0};
+  NSData *output = nil;
+  @autoreleasepool {
+    output = IPURFitImage(data, maxSide, png, quality, &fitted);
+  }
+  if (output != nil && info) *info = IPURImageInfoDictionary(fitted);
+  return output;
 }
 
 + (nullable CGImageRef)decodeScreenCapture:(NSData *)data scale:(double)scale

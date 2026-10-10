@@ -1,4 +1,5 @@
 #import "IPURBridgeStub.h"
+#import "../IPhoneUseRunner/IPhoneUseRunnerUITests/IPURImageCodec.h"
 
 NSString *const IPURNodeAXElementKey = @"__axElement";
 
@@ -61,6 +62,46 @@ NSString *const IPURNodeAXElementKey = @"__axElement";
 + (nullable CGImageRef)decodeScreenCapture:(NSData *)data scale:(double)scale
 {
   return NULL;
+}
+
++ (nullable NSData *)sizedScreenshotWithMaxSide:(NSUInteger)maxSide
+                                            png:(BOOL)png
+                                        quality:(double)quality
+                                           info:(NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable)info
+                                          error:(NSString *_Nullable *_Nullable)error
+{
+  if (error) *error = @"no screen on the Mac";
+  return nil;
+}
+
+// The runner's own codec (IPURImageCodec.h), so the check measures what the phone runs.
++ (nullable NSData *)fitImage:(NSData *)data
+                      maxSide:(NSUInteger)maxSide
+                          png:(BOOL)png
+                      quality:(double)quality
+                         info:(NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable)info
+{
+  IPURImageInfo fitted = {0};
+  NSData *output = IPURFitImage(data, maxSide, png, quality, &fitted);
+  if (output != nil && info) *info = IPURImageInfoDictionary(fitted);
+  return output;
+}
+
++ (nullable NSData *)reencodePNG:(NSData *)data
+{
+  CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+  if (source == NULL) return nil;
+  CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+  CFRelease(source);
+  if (image == NULL) return nil;
+  NSMutableData *output = [NSMutableData data];
+  CGImageDestinationRef destination =
+    CGImageDestinationCreateWithData((__bridge CFMutableDataRef)output, CFSTR("public.png"), 1, NULL);
+  CGImageDestinationAddImage(destination, image, NULL);
+  BOOL ok = CGImageDestinationFinalize(destination);
+  CFRelease(destination);
+  CGImageRelease(image);
+  return ok ? output : nil;
 }
 
 @end

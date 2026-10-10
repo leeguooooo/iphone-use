@@ -4,6 +4,7 @@
 
 import CoreGraphics
 import Foundation
+import ImageIO
 
 var failures = 0
 var checks = 0
@@ -634,6 +635,119 @@ do {
   check(accepted >= RunnerAuth.maxNonces, "distinct nonces are accepted up to the cap and beyond")
   let replayOld = signed("GET", "/status", Data(), header("GET", "/status", Data(), ts: ts - 600, nonce: String(format: "%032x", 0)))!
   check(small.check(replayOld, now: now) == .replay, "a forgotten nonce's timestamp is below the floor: still a replay")
+}
+
+// MARK: - Sized screenshots (GET /screenshot?max_side=&format=&quality=)
+
+do {
+  check((try ScreenshotOptions.parse([:])) == nil, "no options: the WebDriverAgent screenshot, untouched")
+  check((try ScreenshotOptions.parse(["foo": "1"])) == nil, "unrelated query keys change nothing")
+  let jpeg = try? ScreenshotOptions.parse(["max_side": "1024", "format": "jpeg", "quality": "0.7"])
+  check(jpeg == ScreenshotOptions(maxSide: 1024, png: false, quality: 0.7), "max_side + format + quality parse")
+  check((try? ScreenshotOptions.parse(["max_side": "800"])) == ScreenshotOptions(maxSide: 800, png: true, quality: 0.7),
+        "max_side alone stays PNG")
+  check((try? ScreenshotOptions.parse(["format": "JPG"]))?.png == false, "jpg is jpeg, any case")
+  check((try? ScreenshotOptions.parse(["format": "jpeg"]))??.maxSide == nil, "format alone keeps full size")
+  check((try? ScreenshotOptions.parse(["quality": "1"]))??.quality == 1, "quality 1 is allowed")
+  expectThrows("invalid argument", "max_side must be a number") { _ = try ScreenshotOptions.parse(["max_side": "big"]) }
+  expectThrows("invalid argument", "max_side below 16") { _ = try ScreenshotOptions.parse(["max_side": "8"]) }
+  expectThrows("invalid argument", "max_side above 8192") { _ = try ScreenshotOptions.parse(["max_side": "9000"]) }
+  expectThrows("invalid argument", "unknown format") { _ = try ScreenshotOptions.parse(["format": "webp"]) }
+  expectThrows("invalid argument", "quality above 1") { _ = try ScreenshotOptions.parse(["quality": "1.5"]) }
+  expectThrows("invalid argument", "quality not a number") { _ = try ScreenshotOptions.parse(["quality": "nan"]) }
+
+  if case .complete(let request) = HTTPRequest.parse(Data("GET /session/S/screenshot?max_side=1024&format=jpeg&quality=0.7 HTTP/1.1\r\n\r\n".utf8)) {
+    check(CaptureLane.claims(request), "a sized screenshot still takes the capture lane")
+    check(request.target == "/session/S/screenshot?max_side=1024&format=jpeg&quality=0.7",
+          "the signature covers the sizing query (the raw target is what is signed)")
+    check((try? ScreenshotOptions.parse(request.query))??.maxSide == 1024, "options read from the request line")
+  } else {
+    check(false, "sized screenshot request parses")
+  }
+
+  let headers = ScreenshotOptions.headers(["sourceWidth": 1320, "sourceHeight": 2868, "width": 471, "height": 1024, "png": false])
+  check(headers["X-IPU-Image-Width"] == "471" && headers["X-IPU-Image-Height"] == "1024", "pixel size in headers")
+  check(headers["X-IPU-Image-Source-Width"] == "1320" && headers["X-IPU-Image-Source-Height"] == "2868", "capture size in headers")
+  check(headers["X-IPU-Image-Scale"] == "0.3568" && headers["X-IPU-Image-Format"] == "jpeg", "scale and format in headers")
+
+  // The codec the runner runs (IPURImageCodec.h), on a synthetic 1320×2868 capture shaped like a
+  // photo (smooth gradients plus sensor-like noise): the screens whose full PNG runs to megabytes.
+  let width = 1320, height = 2868
+  var pixels = [UInt8](repeating: 0, count: width * height * 4)
+  var seed: UInt32 = 0x2468ace1
+  func noise() -> Int {
+    seed = seed &* 1_664_525 &+ 1_013_904_223
+    return Int(seed >> 27) - 16
+  }
+  for y in 0..<height {
+    for x in 0..<width {
+      let i = (y * width + x) * 4
+      let r = 40 + x * 160 / width, g = 60 + y * 140 / height, b = 200 - (x + y) * 120 / (width + height)
+      pixels[i] = UInt8(max(0, min(255, r + noise())))
+      pixels[i + 1] = UInt8(max(0, min(255, g + noise())))
+      pixels[i + 2] = UInt8(max(0, min(255, b + noise())))
+      pixels[i + 3] = 255
+    }
+  }
+  let space = CGColorSpaceCreateDeviceRGB()
+  let context = CGContext(data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                          space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+  let synthetic = context.makeImage()!
+  let pngData = NSMutableData()
+  let destination = CGImageDestinationCreateWithData(pngData, "public.png" as CFString, 1, nil)!
+  CGImageDestinationAddImage(destination, synthetic, nil)
+  check(CGImageDestinationFinalize(destination), "synthetic capture encodes")
+  let full = pngData as Data
+
+  var raw: NSDictionary?
+  var info: [String: NSNumber]? { raw as? [String: NSNumber] }
+  let same = IPURBridge.fitImage(full, maxSide: UInt(0), png: true, quality: 0.7, info: &raw)
+  check(same == full, "full size PNG asked of a PNG: the bytes come back untouched")
+  check(info?["width"]?.intValue == width && info?["sourceHeight"]?.intValue == height, "full size info")
+  let big = IPURBridge.fitImage(full, maxSide: UInt(4000), png: true, quality: 0.7, info: &raw)
+  check(big == full, "max_side above the capture never upscales")
+  let shrunk = IPURBridge.fitImage(full, maxSide: UInt(1024), png: false, quality: 0.7, info: &raw)
+  check(shrunk.map { $0.starts(with: [0xff, 0xd8]) } == true, "JPEG asked: JPEG back")
+  check(info?["height"]?.intValue == 1024 && info?["width"]?.intValue == 471, "long side 1024, aspect kept (1320×2868 → 471×1024)")
+  check(info?["png"]?.boolValue == false && info?["sourceWidth"]?.intValue == width, "info names the format and the capture")
+  let shrunkPNG = IPURBridge.fitImage(full, maxSide: UInt(600), png: true, quality: 0.7, info: &raw)
+  check(shrunkPNG.map { $0.starts(with: [0x89, 0x50, 0x4e, 0x47]) } == true && info?["height"]?.intValue == 600,
+        "PNG asked with max_side: a smaller PNG")
+  check(IPURBridge.fitImage(Data("not an image".utf8), maxSide: UInt(100), png: false, quality: 0.7, info: &raw) == nil,
+        "undecodable bytes: nil, never garbage")
+
+  // IPU_BENCH=1 (paths in IPU_BENCH_IMAGES, ':'-separated): bytes and time of the full PNG the
+  // runner used to send vs the scaled JPEG, per image. Run by unit-check.sh --bench.
+  if ProcessInfo.processInfo.environment["IPU_BENCH"] == "1" {
+    let paths = (ProcessInfo.processInfo.environment["IPU_BENCH_IMAGES"] ?? "").split(separator: ":").map(String.init)
+    var inputs: [(String, Data)] = paths.compactMap { path in
+      guard let data = FileManager.default.contents(atPath: path), let png = IPURBridge.reencodePNG(data) else { return nil }
+      return ((path as NSString).lastPathComponent, png)
+    }
+    inputs.append(("synthetic-photo", full))
+    func ms(_ body: () -> Void) -> Double {
+      let runs = 5
+      let start = Date()
+      for _ in 0..<runs { autoreleasepool { body() } }
+      return Date().timeIntervalSince(start) * 1000 / Double(runs)
+    }
+    print("bench: image | full PNG bytes | variant | bytes | ratio | encode ms (Mac)")
+    for (name, png) in inputs {
+      for (label, side, asPNG, quality) in [("jpeg q0.7 max_side 1024", 1024, false, 0.7),
+                                            ("jpeg q0.7 max_side 1200", 1200, false, 0.7),
+                                            ("jpeg q0.5 max_side 512", 512, false, 0.5),
+                                            ("png max_side 1024", 1024, true, 0.7)] {
+        var out: Data?
+        var metaRaw: NSDictionary?
+        let t = ms { out = IPURBridge.fitImage(png, maxSide: UInt(side), png: asPNG, quality: quality, info: &metaRaw) }
+        let meta = metaRaw as? [String: NSNumber]
+        let bytes = out?.count ?? 0
+        print(String(format: "bench: %@ (%@×%@) | %d | %@ | %d | %.1f%% | %.1f", name,
+                     meta?["sourceWidth"] ?? 0, meta?["sourceHeight"] ?? 0, png.count, label, bytes,
+                     100 * Double(bytes) / Double(max(png.count, 1)), t))
+      }
+    }
+  }
 }
 
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")

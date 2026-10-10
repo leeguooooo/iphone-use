@@ -67,10 +67,10 @@ pub struct WdaClient {
     /// `PHONE_REMOTE_SOURCE_VISIBLE=1`: read trees with `isVisible` again
     /// (size-probed). Off by default: every read skips it.
     full_visibility: bool,
-    /// The screen as it stood after the last action settled (PNG), kept in
-    /// memory only so `/agent/screenshot` can answer without a new capture.
-    /// Dropped by the next screen-changing POST.
-    settled_frame: Option<(std::sync::Arc<Vec<u8>>, std::time::Instant)>,
+    /// The screen as it stood after the last action settled, kept in memory
+    /// only so `/agent/screenshot` can answer without a new capture. Dropped
+    /// by the next screen-changing POST.
+    settled_frame: Option<(std::sync::Arc<Capture>, std::time::Instant)>,
     /// Until when screenshots are not used to judge "settled" (a frame was
     /// slow or failed; see `settle_frame` in http.rs).
     settle_frames_paused_until: Option<std::time::Instant>,
@@ -97,6 +97,183 @@ pub fn wda_rtt_ms() -> Option<u64> {
         0 => None,
         ms => Some(ms),
     }
+}
+
+/// What a screenshot asks the runner for (see [`WdaClient::screenshot_sized`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShotRequest {
+    /// Longest side in pixels; `None` = full resolution.
+    pub max_side: Option<u32>,
+    /// JPEG at `quality` (0–1) instead of PNG.
+    pub jpeg: bool,
+    pub quality: f32,
+}
+
+impl ShotRequest {
+    /// JPEG quality for sized screenshots: text stays crisp at 1024–1600 px,
+    /// a phone screen comes to ~50–100 KB.
+    pub const DEFAULT_QUALITY: f32 = 0.7;
+
+    pub fn jpeg(max_side: Option<u32>) -> Self {
+        Self {
+            max_side,
+            jpeg: true,
+            quality: Self::DEFAULT_QUALITY,
+        }
+    }
+
+    /// The WebDriverAgent-compatible full-resolution PNG (no query at all).
+    pub fn full_png() -> Self {
+        Self {
+            max_side: None,
+            jpeg: false,
+            quality: Self::DEFAULT_QUALITY,
+        }
+    }
+
+    /// `?max_side=…&format=…&quality=…`, or nothing for [`Self::full_png`]
+    /// (an old runner and WebDriverAgent see exactly the request they know).
+    pub fn query(&self) -> String {
+        if *self == Self::full_png() {
+            return String::new();
+        }
+        let mut query = Vec::new();
+        if let Some(side) = self.max_side {
+            query.push(format!("max_side={side}"));
+        }
+        if self.jpeg {
+            query.push("format=jpeg".to_string());
+            query.push(format!("quality={:.2}", self.quality.clamp(0.0, 1.0)));
+        } else {
+            query.push("format=png".to_string());
+        }
+        format!("?{}", query.join("&"))
+    }
+}
+
+/// An image's encoding, from its first bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+    Other,
+}
+
+impl ImageFormat {
+    pub fn of(bytes: &[u8]) -> Self {
+        if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+            Self::Png
+        } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            Self::Jpeg
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// One screenshot as the runner sent it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Capture {
+    pub bytes: Vec<u8>,
+    pub format: ImageFormat,
+    /// Pixel size of `bytes` and of the full capture, from the runner's
+    /// `X-IPU-Image-*` headers; `None` from a runner that does not size
+    /// screenshots (it sent the full PNG and ignored the query).
+    pub size: Option<(u32, u32)>,
+    pub source_size: Option<(u32, u32)>,
+}
+
+impl Capture {
+    /// A full-resolution PNG from the old path.
+    pub fn full_png(bytes: Vec<u8>) -> Self {
+        Self {
+            format: ImageFormat::of(&bytes),
+            bytes,
+            size: None,
+            source_size: None,
+        }
+    }
+
+    fn from_runner(bytes: Vec<u8>, headers: &reqwest::header::HeaderMap) -> Self {
+        let number = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|&v| v > 0)
+        };
+        let pair = |w: &str, h: &str| number(w).zip(number(h));
+        Self {
+            format: ImageFormat::of(&bytes),
+            bytes,
+            size: pair("x-ipu-image-width", "x-ipu-image-height"),
+            source_size: pair("x-ipu-image-source-width", "x-ipu-image-source-height"),
+        }
+    }
+
+    /// The runner sized this capture itself (it answered the sizing query).
+    pub fn sized_on_device(&self) -> bool {
+        self.size.is_some()
+    }
+
+    /// Whether this capture can answer a request for `max_side` (`None`:
+    /// full resolution) without losing pixels: a full capture answers
+    /// anything, a shrunk one only requests no larger than itself.
+    pub fn covers(&self, max_side: Option<u32>) -> bool {
+        let full = match (self.size, self.source_size) {
+            (None, _) => true,
+            (Some(size), Some(source)) => size == source,
+            (Some(_), None) => false,
+        };
+        if full {
+            return true;
+        }
+        match (max_side, self.size) {
+            (Some(side), Some((w, h))) => side <= w.max(h),
+            _ => false,
+        }
+    }
+}
+
+/// Why a screenshot failed, for the caller (`cause` in the 502/504 body).
+/// `timeout` and `body_truncated` are what a degraded link does to a large
+/// capture (the relay closes mid-body) — worth one smaller retry; the rest
+/// are not.
+pub fn screenshot_failure_cause(error: &anyhow::Error) -> &'static str {
+    for cause in error.chain() {
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            if error.is_timeout() {
+                return "timeout";
+            }
+            if error.is_connect() {
+                return "connect";
+            }
+            if error.is_body() || error.is_decode() {
+                return "body_truncated";
+            }
+            if error.is_status() {
+                return "runner_error";
+            }
+            if error.is_request() {
+                return "connection_lost";
+            }
+        }
+    }
+    let text = format!("{error:#}");
+    if text.contains("response is not JSON") || text.contains("decode screenshot base64") {
+        // A body cut short parses as broken JSON.
+        "body_truncated"
+    } else if text.contains("GET /screenshot failed (") {
+        "runner_error"
+    } else {
+        "other"
+    }
+}
+
+/// Whether a screenshot failure is the link's, so one smaller retry may get
+/// through.
+pub fn screenshot_failure_retryable(cause: &str) -> bool {
+    matches!(cause, "timeout" | "body_truncated" | "connection_lost")
 }
 
 impl WdaClient {
@@ -1501,6 +1678,36 @@ impl WdaClient {
         Ok(())
     }
 
+    /// The phone screen sized and encoded on the phone (`GET
+    /// /screenshot?max_side=&format=&quality=`): a slow link then carries a
+    /// ~50–100 KB JPEG instead of a multi-megabyte full-resolution PNG
+    /// (17 Pro Max: 1320×2868). A runner without that support ignores the
+    /// query and sends the full PNG; [`Capture::sized_on_device`] says which
+    /// came back. `timeout` bounds this one request (the client's own is 20 s).
+    pub async fn screenshot_sized(
+        &mut self,
+        request: ShotRequest,
+        timeout: Duration,
+    ) -> Result<Capture> {
+        let response = self
+            .http
+            .get(format!("{}/screenshot{}", self.base, request.query()))
+            .timeout(timeout)
+            .send_signed(&self.auth)
+            .await
+            .context("GET /screenshot")?;
+        let headers = response.headers().clone();
+        let value = ensure_wda_success(response, "GET /screenshot").await?;
+        let encoded = value
+            .as_str()
+            .ok_or_else(|| anyhow!("GET /screenshot returned non-string value"))?;
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .context("decode screenshot base64")?;
+        Ok(Capture::from_runner(bytes, &headers))
+    }
+
     /// Current phone screen as PNG bytes (`GET /screenshot`, base64 in the
     /// envelope). The capture happens on the phone.
     pub async fn screenshot_png(&mut self) -> Result<Vec<u8>> {
@@ -1664,17 +1871,17 @@ impl WdaClient {
         self.settle_frames_paused_until = Some(std::time::Instant::now() + for_how_long);
     }
 
-    /// Keep `png` as the settled screen (see `settled_frame`).
-    pub fn remember_settled_frame(&mut self, png: Vec<u8>) {
-        self.settled_frame = Some((std::sync::Arc::new(png), std::time::Instant::now()));
+    /// Keep `frame` as the settled screen (see `settled_frame`).
+    pub fn remember_settled_frame(&mut self, frame: Capture) {
+        self.settled_frame = Some((std::sync::Arc::new(frame), std::time::Instant::now()));
     }
 
     /// The settled screen, when it is younger than `max_age` and nothing that
     /// changes the screen was sent since it was captured.
-    pub fn settled_frame(&self, max_age: Duration) -> Option<std::sync::Arc<Vec<u8>>> {
-        let (png, at) = self.settled_frame.as_ref()?;
+    pub fn settled_frame(&self, max_age: Duration) -> Option<std::sync::Arc<Capture>> {
+        let (frame, at) = self.settled_frame.as_ref()?;
         let untouched = self.posted_at.is_none_or(|posted| posted < *at);
-        (untouched && at.elapsed() < max_age).then(|| png.clone())
+        (untouched && at.elapsed() < max_age).then(|| frame.clone())
     }
 
     /// Drop the reusable tree so the next snapshot-bound action reads afresh.
@@ -4320,5 +4527,108 @@ mod body_summary_tests {
         assert!(!format!("{error:#}").contains(secret), "{error:#}");
         let error = parse_element_id(&not_json).unwrap_err();
         assert!(!format!("{error:#}").contains(secret), "{error:#}");
+    }
+}
+
+#[cfg(test)]
+mod sized_screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn the_full_png_request_carries_no_query() {
+        assert_eq!(ShotRequest::full_png().query(), "");
+        assert_eq!(
+            ShotRequest::jpeg(Some(1024)).query(),
+            "?max_side=1024&format=jpeg&quality=0.70"
+        );
+        assert_eq!(ShotRequest::jpeg(None).query(), "?format=jpeg&quality=0.70");
+        let png = ShotRequest {
+            max_side: Some(800),
+            jpeg: false,
+            quality: 0.7,
+        };
+        assert_eq!(png.query(), "?max_side=800&format=png");
+    }
+
+    #[test]
+    fn the_signature_covers_the_sizing_query() {
+        let url = reqwest::Url::parse(&format!(
+            "http://127.0.0.1:8100/screenshot{}",
+            ShotRequest::jpeg(Some(1024)).query()
+        ))
+        .unwrap();
+        let mut request = reqwest::Request::new(reqwest::Method::GET, url);
+        let dir = tempfile::tempdir().unwrap();
+        let token = crate::runner_token::rotate(dir.path()).unwrap();
+        let source = crate::runner_token::TokenSource::at(dir.path());
+        crate::runner_token::sign_request(&source, &mut request);
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("signed")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // Verifies only against the target with its query.
+        let verify = |target: &str| {
+            crate::core_crate::runner_auth::verify(&token, "GET", target, b"", Some(&authorization), now)
+        };
+        assert!(verify("/screenshot?max_side=1024&format=jpeg&quality=0.70").is_ok());
+        assert!(verify("/screenshot?max_side=4000&format=jpeg&quality=0.70").is_err());
+    }
+
+    #[test]
+    fn a_sized_capture_answers_only_requests_no_larger_than_itself() {
+        let sized = Capture {
+            bytes: vec![0xff, 0xd8, 0xff, 0xe0],
+            format: ImageFormat::Jpeg,
+            size: Some((736, 1600)),
+            source_size: Some((1320, 2868)),
+        };
+        assert!(sized.covers(Some(1200)));
+        assert!(sized.covers(Some(1600)));
+        assert!(!sized.covers(Some(2000)));
+        assert!(!sized.covers(None), "a full-resolution request captures anew");
+        let old_runner = Capture::full_png(vec![0x89, b'P', b'N', b'G']);
+        assert!(!old_runner.sized_on_device());
+        assert!(old_runner.covers(None) && old_runner.covers(Some(4000)));
+        let full = Capture {
+            size: Some((1320, 2868)),
+            ..sized.clone()
+        };
+        assert!(full.covers(None), "a capture the phone did not shrink is full");
+    }
+
+    #[test]
+    fn image_formats_from_magic_bytes() {
+        assert_eq!(ImageFormat::of(&[0x89, b'P', b'N', b'G', 0x0d]), ImageFormat::Png);
+        assert_eq!(ImageFormat::of(&[0xff, 0xd8, 0xff, 0xdb]), ImageFormat::Jpeg);
+        assert_eq!(ImageFormat::of(b"{\"value\""), ImageFormat::Other);
+    }
+
+    #[test]
+    fn only_link_faults_are_worth_a_smaller_retry() {
+        assert_eq!(
+            screenshot_failure_cause(&anyhow!(
+                "GET /screenshot failed (unknown error): screenshot failed"
+            )),
+            "runner_error"
+        );
+        assert_eq!(
+            screenshot_failure_cause(
+                &anyhow!("EOF while parsing").context("GET /screenshot response is not JSON (9 bytes)")
+            ),
+            "body_truncated"
+        );
+        for cause in ["timeout", "body_truncated", "connection_lost"] {
+            assert!(screenshot_failure_retryable(cause));
+        }
+        for cause in ["connect", "runner_error", "other"] {
+            assert!(!screenshot_failure_retryable(cause));
+        }
     }
 }
