@@ -33,8 +33,9 @@ saved password and pairing token.
 
 ## The Mac daemon's usage counts
 
-The iphone-use daemon on your Mac contains code for anonymous usage counts, and it is **currently
-off for everyone**: no project token ships with it, so it sends nothing. The iOS app has no such
+The iphone-use daemon on your Mac contains code for anonymous usage counts, and it is **off by
+default**: no project token ships with it, so it sends nothing unless you set
+`IPHONE_USE_TELEMETRY_TOKEN` yourself. The iOS app has no such
 code at all.
 
 If a future release turns it on, it will say so here and in [telemetry.md](telemetry.md). It would

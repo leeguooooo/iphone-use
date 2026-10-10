@@ -29,6 +29,9 @@ use std::time::Duration;
 pub const BUILT_IN_TOKEN: &str = "";
 
 const CAPTURE_URL: &str = "https://us.i.posthog.com/batch/";
+/// The capture hosts a project may live on (PostHog's US and EU clouds).
+/// `IPHONE_USE_TELEMETRY_HOST` picks one; anything else falls back to US.
+const CAPTURE_HOSTS: &[&str] = &["us.i.posthog.com", "eu.i.posthog.com"];
 const ID_FILE: &str = "telemetry-id";
 const QUEUE_CAP: usize = 256;
 const BATCH_MAX: usize = 20;
@@ -180,6 +183,14 @@ pub struct PosthogSender {
     url: String,
 }
 
+/// The batch URL for `host` when it is one of [`CAPTURE_HOSTS`].
+pub fn capture_url(host: Option<&str>) -> String {
+    match host.map(str::trim).filter(|h| CAPTURE_HOSTS.contains(h)) {
+        Some(host) => format!("https://{host}/batch/"),
+        None => CAPTURE_URL.to_string(),
+    }
+}
+
 impl PosthogSender {
     pub fn new() -> Option<Self> {
         let client = reqwest::Client::builder()
@@ -188,7 +199,7 @@ impl PosthogSender {
             .ok()?;
         Some(Self {
             client,
-            url: CAPTURE_URL.to_string(),
+            url: capture_url(std::env::var("IPHONE_USE_TELEMETRY_HOST").ok().as_deref()),
         })
     }
 }
@@ -368,12 +379,14 @@ async fn deliver(
     flush_delay: Duration,
 ) {
     while let Some(first) = rx.recv().await {
-        tokio::time::sleep(flush_delay).await;
+        // Collect for up to `flush_delay`, but send as soon as a batch is full,
+        // so a burst drains instead of overflowing the queue.
         let mut batch = vec![first];
+        let deadline = tokio::time::Instant::now() + flush_delay;
         while batch.len() < BATCH_MAX {
-            match rx.try_recv() {
-                Ok(event) => batch.push(event),
-                Err(_) => break,
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(event)) => batch.push(event),
+                _ => break,
             }
         }
         for attempt in 0..2 {
@@ -464,6 +477,9 @@ mod tests {
     fn off_without_a_token_and_under_either_opt_out() {
         assert_eq!(BUILT_IN_TOKEN, "", "this build ships no token");
         assert_eq!(token_from(env(&[])), None);
+        assert_eq!(capture_url(None), "https://us.i.posthog.com/batch/");
+        assert_eq!(capture_url(Some("eu.i.posthog.com")), "https://eu.i.posthog.com/batch/");
+        assert_eq!(capture_url(Some("evil.example")), "https://us.i.posthog.com/batch/");
         assert_eq!(
             token_from(env(&[("IPHONE_USE_TELEMETRY_TOKEN", "  ")])),
             None

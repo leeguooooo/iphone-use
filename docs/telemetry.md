@@ -28,7 +28,8 @@ video, app bundle ids, phone UDIDs or names, owner or session names, request
 bodies, query strings, file paths, error messages. Status polls
 (`/agent/status`), video streams, the browser UI, schedules and refused
 (401/403/429) requests are not counted at all. Events go to PostHog with
-person profiles and GeoIP disabled.
+person profiles and GeoIP disabled, on the US cloud unless
+`IPHONE_USE_TELEMETRY_HOST=eu.i.posthog.com` selects the EU one.
 
 The install id is a random UUID in `telemetry-id` in the daemon's state
 directory (mode 0600). It names an install, not a person or a phone; delete
@@ -38,7 +39,8 @@ it.
 ## Turning it off
 
 Telemetry stays off unless a token is present. With a token, either of these
-turns it off completely (no id file, no background task):
+turns it off completely (no new id file, no background task; an id file left by an
+earlier run stays until you delete `telemetry-id` from the state directory):
 
 ```sh
 IPHONE_USE_TELEMETRY=0     # also: false, off, no
