@@ -4862,6 +4862,7 @@ const CAPABILITY_SINGLE_STEP_ACTIONS: &[&str] = &[
     "keyboard",
     "launch_app",
     "longpress",
+    "open_url",
     "perform",
     "picker",
     "scroll",
@@ -4902,6 +4903,24 @@ const ACTION_TYPE_GUESSES: &[(&[&str], &str)] = &[
         &["open_app", "open", "launch", "activate"],
         r#"{"type":"launch_app","bundle":"com.example.app"}"#,
     ),
+    (
+        &[
+            "open_link",
+            "openurl",
+            "open_uri",
+            "deeplink",
+            "deep_link",
+            "open_deeplink",
+            "open_deep_link",
+            "url",
+            "link",
+            "navigate",
+            "visit",
+            "goto",
+            "go_to_url",
+        ],
+        r#"{"type":"open_url","url":"https://example.com/page"} (http/https always; other schemes only when the phone owner allows them)"#,
+    ),
     (&["go_back", "navigate_back"], r#"{"type":"back"}"#),
     (&["press_home", "home_button"], r#"{"type":"home"}"#),
     (
@@ -4931,6 +4950,7 @@ const CAPABILITY_BATCH_ACTIONS: &[&str] = &[
     "keyboard",
     "launch_app",
     "longpress",
+    "open_url",
     "perform",
     "picker",
     "scroll",
@@ -9247,6 +9267,34 @@ fn reject_oversized_text(value: &serde_json::Value) -> Result<(), Response> {
     ))
 }
 
+/// An `open_url` whose `url` is missing or malformed, refused before
+/// anything is sent. The scheme policy is checked separately (403).
+fn reject_invalid_open_url(value: &serde_json::Value) -> Result<(), Response> {
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("open_url") {
+        return Ok(());
+    }
+    let detail = match value.get("url").and_then(serde_json::Value::as_str) {
+        None => "open_url needs a url string, such as https://example.com".to_string(),
+        Some(url) => match crate::guard::parse_url(url) {
+            Ok(_) => return Ok(()),
+            Err(detail) => format!("open_url: {detail}"),
+        },
+    };
+    Err(with_security_headers(
+        (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error": "invalid_value",
+                "detail": detail,
+                "outcome": "not_sent",
+                "retry_safe": true,
+            })),
+        )
+            .into_response(),
+    ))
+}
+
 /// Execute one Direct agent action exactly once.
 ///
 /// Locator and geometry reads may precede the mutation, but once a mutating WDA
@@ -9283,6 +9331,24 @@ async fn direct_agent_action(
                 return WdaControlOutcome::Unsupported;
             };
             Some(w.launch_app(&bundle).await)
+        }
+        // The handlers refuse a disallowed scheme with a 403 before this;
+        // checked again here so no path can dial or message by accident.
+        "open_url" => {
+            let Some(url) = value
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .filter(|url| crate::guard::parse_url(url).is_ok())
+            else {
+                return WdaControlOutcome::Unsupported;
+            };
+            if crate::guard::Policy::get().check_url(value).is_err() {
+                return WdaControlOutcome::Refused(
+                    "url_scheme_not_allowed",
+                    "the phone owner has not allowed this URL scheme (IPHONE_USE_ALLOW_URL_SCHEMES); http and https always open",
+                );
+            }
+            Some(w.open_url(url).await)
         }
         "tap" if value.get("label").is_some() => {
             let Some(label) = value
@@ -10251,6 +10317,14 @@ fn validate_agent_action_value(
                 );
             }
         }
+        "open_url" => {
+            let Some(url) = action.get("url").and_then(serde_json::Value::as_str) else {
+                return invalid("open_url needs a url string, such as https://example.com");
+            };
+            if let Err(detail) = crate::guard::parse_url(url) {
+                return invalid(&format!("open_url: {detail}"));
+            }
+        }
         "picker" => {
             if !action
                 .get("value")
@@ -10913,6 +10987,14 @@ async fn agent_actions_inner(
     // refuse the whole batch before anything is sent; a blocked app in front
     // is checked per step, since an earlier step may have left or entered it.
     let policy = crate::guard::Policy::get();
+    // The link-scheme policy holds with or without the other limits.
+    for step in &request.steps {
+        if let AgentActionStep::Action { action, .. } = step {
+            if let Err(refusal) = policy.check_url(action) {
+                return guard_refusal(&refusal, true);
+            }
+        }
+    }
     if policy.is_active() {
         let mut actions = 0_u32;
         for step in &request.steps {
@@ -12624,12 +12706,19 @@ async fn agent_input_inner(
     if let Err(response) = reject_oversized_text(&value) {
         return response;
     }
+    if let Err(response) = reject_invalid_open_url(&value) {
+        return response;
+    }
     let mut value = value;
     if let Err(refusal) = resolve_launch_app_action(&state, &mut value).await {
         return refusal;
     }
-    // A blocked app is refused before anything else runs (`crate::guard`).
-    if let Err(refusal) = crate::guard::Policy::get().check_launch(&value) {
+    // A blocked app, or a link scheme the owner has not allowed, is refused
+    // before anything else runs (`crate::guard`).
+    if let Err(refusal) = crate::guard::Policy::get()
+        .check_launch(&value)
+        .and_then(|()| crate::guard::Policy::get().check_url(&value))
+    {
         return guard_refusal(&refusal, false);
     }
     // The MCP client waits 30 seconds. Keep the daemon's complete Direct WDA
@@ -13527,7 +13616,13 @@ async fn agent_elements(
     let full_read = query.since.is_none();
     let scope = query.scope.clone();
     let image_auto = query.image.as_deref() == Some("auto");
-    if let Err(error) = crate::scope::validate(scope.as_deref(), query.since.as_deref()) {
+    let filter_query = query.query.clone();
+    let filter_limit = query.limit.as_deref().and_then(|l| l.trim().parse::<usize>().ok());
+    if let Err(error) = crate::scope::validate(scope.as_deref(), query.since.as_deref())
+        .and_then(|()| {
+            crate::scope::validate_filter(filter_query.as_deref(), query.limit.as_deref())
+        })
+    {
         // Authenticate first: a refused caller learns nothing about scopes.
         return match browser_or_agent_auth(&state, &headers) {
             AgentAuth::Ok => json_response(StatusCode::BAD_REQUEST, error),
@@ -13641,6 +13736,8 @@ async fn agent_elements(
     if let Some(scope) = scope.as_deref().filter(|scope| *scope != "changed") {
         crate::scope::apply(&mut json, scope);
     }
+    // After the scope, so `query`/`limit` narrow a scoped view too.
+    crate::scope::filter(&mut json, filter_query.as_deref(), filter_limit);
     let (mut parts, _) = response.into_parts();
     parts.headers.remove(header::CONTENT_LENGTH);
     Response::from_parts(parts, Body::from(json.to_string()))
@@ -14317,6 +14414,14 @@ struct AgentElementsQuery {
     /// `auto`: attach a screenshot only when the tree is unusable (Mode A).
     #[serde(default)]
     image: Option<String>,
+    /// Keep rows whose label, identifier, value or placeholder contains this
+    /// text, case-insensitively (see [`crate::scope::filter`]).
+    #[serde(default)]
+    query: Option<String>,
+    /// At most this many rows (1..=500) after `scope` and `query`. Kept as
+    /// text so a bad value gets the daemon's own 400, not a parse error.
+    #[serde(default)]
+    limit: Option<String>,
 }
 
 /// A read-path failure is enough to revoke `drivable`, even when the last
@@ -20932,6 +21037,26 @@ mod tests {
         ]}))
         .unwrap();
         assert!(validate_agent_actions(&batch).unwrap_err().contains("in total"));
+    }
+
+    #[test]
+    fn open_url_is_validated_and_its_guesses_point_at_it() {
+        let ok = |v: serde_json::Value| validate_agent_action_value(v.as_object().unwrap(), 0).is_ok();
+        assert!(ok(serde_json::json!({"type":"open_url","url":"https://example.com/a?b=1"})));
+        // A disallowed scheme is valid input; the 403 policy refuses it.
+        assert!(ok(serde_json::json!({"type":"open_url","url":"tel:10086"})));
+        assert!(!ok(serde_json::json!({"type":"open_url"})));
+        assert!(!ok(serde_json::json!({"type":"open_url","url":42})));
+        assert!(!ok(serde_json::json!({"type":"open_url","url":"example.com"})));
+        assert!(!ok(serde_json::json!({"type":"open_url","url":"https://"})));
+        let long = format!("https://example.com/{}", "a".repeat(2048));
+        assert!(!ok(serde_json::json!({"type":"open_url","url":long})));
+        assert!(reject_invalid_open_url(&serde_json::json!({"type":"open_url","url":long})).is_err());
+        assert!(reject_invalid_open_url(&serde_json::json!({"type":"tap","x":1,"y":1})).is_ok());
+        for guess in ["open_link", "deeplink", "openURL", "open-link", "Deep_Link"] {
+            let hint = guessed_action_hint(guess).unwrap_or_default();
+            assert!(hint.contains(r#""type":"open_url""#), "{guess}: {hint}");
+        }
     }
 
     // -- app lookup -----------------------------------------------------------

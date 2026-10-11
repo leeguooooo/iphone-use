@@ -7,8 +7,12 @@
 //! - `IPHONE_USE_MAX_ACTIONS`: actions per run and caller. A run is the span
 //!   between `POST /agent/run {"action":"start"}` calls, or, without them, one
 //!   that ends after [`crate::metrics::IDLE_GAP_MS`] without an action.
+//! - `IPHONE_USE_ALLOW_URL_SCHEMES`: comma-separated URL schemes an
+//!   `open_url` action may open besides `http`/`https` ("tel, weixin", or
+//!   `*` for any). Without it every other scheme is refused: `tel:` dials,
+//!   `sms:`/`mailto:` compose, and a custom scheme drives another app.
 //!
-//! Both are off by default. A refusal is `403` with `outcome: not_sent`: no
+//! The first two are off by default. A refusal is `403` with `outcome: not_sent`: no
 //! input reached the phone. The human control page is never limited.
 
 use std::collections::HashMap;
@@ -33,6 +37,67 @@ pub struct Policy {
     pub blocked: Vec<Blocked>,
     /// `None`: no budget.
     pub max_actions: Option<u32>,
+    /// Lowercased schemes `open_url` may open besides `http`/`https`.
+    pub allowed_url_schemes: Vec<String>,
+    /// `IPHONE_USE_ALLOW_URL_SCHEMES=*`: any scheme.
+    pub allow_any_url_scheme: bool,
+}
+
+/// Longest URL `open_url` accepts, in bytes.
+pub const MAX_URL_LEN: usize = 2048;
+
+/// Schemes `open_url` always opens: they only show a page.
+const ALWAYS_ALLOWED_SCHEMES: &[&str] = &["http", "https"];
+
+/// The scheme of an `open_url` URL (lowercased) and its host, if it has one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedUrl {
+    pub scheme: String,
+    pub host: Option<String>,
+}
+
+/// Parse `url` far enough to apply the scheme policy: an RFC 3986 scheme,
+/// no whitespace or control characters, at most [`MAX_URL_LEN`] bytes, and a
+/// host for `http`/`https`. The error says what is wrong.
+pub fn parse_url(url: &str) -> Result<ParsedUrl, &'static str> {
+    if url.is_empty() || url.len() > MAX_URL_LEN {
+        return Err("url must be 1 to 2048 bytes");
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("url must not contain spaces or control characters (percent-encode them)");
+    }
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return Err("url needs a scheme, such as https://example.com");
+    };
+    let mut chars = scheme.chars();
+    let valid_scheme = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !valid_scheme {
+        return Err("url needs a scheme, such as https://example.com");
+    }
+    let scheme = scheme.to_ascii_lowercase();
+    let host = rest.strip_prefix("//").and_then(|authority| {
+        let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority.rsplit('@').next().unwrap_or_default();
+        let host = if let Some(bracketed) = host.strip_prefix('[') {
+            bracketed.split(']').next().unwrap_or_default()
+        } else {
+            host.split(':').next().unwrap_or_default()
+        };
+        (!host.is_empty()).then(|| host.to_ascii_lowercase())
+    });
+    if ALWAYS_ALLOWED_SCHEMES.contains(&scheme.as_str()) && host.is_none() {
+        return Err("an http(s) url needs a host, such as https://example.com/path");
+    }
+    Ok(ParsedUrl { scheme, host })
+}
+
+/// The `url` of an `open_url` action, if `action` is one.
+pub fn open_url_target(action: &Value) -> Option<&str> {
+    if action.get("type").and_then(Value::as_str) != Some("open_url") {
+        return None;
+    }
+    action.get("url").and_then(Value::as_str)
 }
 
 /// Why an action was refused.
@@ -46,6 +111,8 @@ pub enum Refusal {
     ForegroundUnknown,
     /// The run's budget would be exceeded.
     Budget { max: u32, used: u32, wanted: u32 },
+    /// `open_url` of a scheme the owner has not allowed.
+    UrlScheme(String),
 }
 
 impl Refusal {
@@ -54,6 +121,7 @@ impl Refusal {
             Refusal::BlockedLaunch(_) | Refusal::BlockedForeground(_) => "blocked_app",
             Refusal::ForegroundUnknown => "foreground_unverified",
             Refusal::Budget { .. } => "action_budget_exhausted",
+            Refusal::UrlScheme(_) => "url_scheme_not_allowed",
         }
     }
 
@@ -70,6 +138,9 @@ impl Refusal {
             Refusal::ForegroundUnknown => "the app in front could not be read, and the phone owner blocks some apps (IPHONE_USE_BLOCKED_APPS). Nothing was sent; read the screen and retry.".to_string(),
             Refusal::Budget { max, used, wanted } => format!(
                 "this run has used {used} of its {max} actions (IPHONE_USE_MAX_ACTIONS) and this request needs {wanted}. Stop and report progress to the user; a new run (POST /agent/run start) gets a fresh budget."
+            ),
+            Refusal::UrlScheme(scheme) => format!(
+                "{scheme}: links are not opened unless the phone owner allows the scheme (IPHONE_USE_ALLOW_URL_SCHEMES, e.g. IPHONE_USE_ALLOW_URL_SCHEMES={scheme}). http and https links always open. Do not reach it another way; tell the user."
             ),
         }
     }
@@ -88,6 +159,9 @@ impl Refusal {
             }
             Refusal::Budget { max, used, .. } => {
                 body["budget"] = serde_json::json!({"max": max, "used": used});
+            }
+            Refusal::UrlScheme(scheme) => {
+                body["scheme"] = Value::String(scheme.clone());
             }
             Refusal::ForegroundUnknown => {}
         }
@@ -121,9 +195,28 @@ impl Policy {
         let max_actions = get("IPHONE_USE_MAX_ACTIONS")
             .and_then(|raw| raw.trim().parse::<u32>().ok())
             .filter(|max| *max > 0);
+        let mut allowed_url_schemes: Vec<String> = Vec::new();
+        let mut allow_any_url_scheme = false;
+        for entry in get("IPHONE_USE_ALLOW_URL_SCHEMES")
+            .unwrap_or_default()
+            .split([',', '，', '\n'])
+            .map(|entry| entry.trim().trim_end_matches("://").trim_end_matches(':'))
+            .filter(|entry| !entry.is_empty())
+        {
+            if entry == "*" {
+                allow_any_url_scheme = true;
+                continue;
+            }
+            let scheme = entry.to_ascii_lowercase();
+            if !allowed_url_schemes.contains(&scheme) {
+                allowed_url_schemes.push(scheme);
+            }
+        }
         Policy {
             blocked,
             max_actions,
+            allowed_url_schemes,
+            allow_any_url_scheme,
         }
     }
 
@@ -144,6 +237,23 @@ impl Policy {
             Some(app) => Err(Refusal::BlockedLaunch(app.name.clone())),
             None => Ok(()),
         }
+    }
+
+    /// An `open_url` whose scheme the owner has not allowed, checked without
+    /// touching the phone. Applies with or without the other limits: `http`
+    /// and `https` always pass, every other scheme only when listed.
+    /// A URL that does not parse is left to the action's validation.
+    pub fn check_url(&self, action: &Value) -> Result<(), Refusal> {
+        let Some(Ok(parsed)) = open_url_target(action).map(parse_url) else {
+            return Ok(());
+        };
+        if self.allow_any_url_scheme
+            || ALWAYS_ALLOWED_SCHEMES.contains(&parsed.scheme.as_str())
+            || self.allowed_url_schemes.contains(&parsed.scheme)
+        {
+            return Ok(());
+        }
+        Err(Refusal::UrlScheme(parsed.scheme))
     }
 
     /// Whether the foreground must be read before `action`: there is a
@@ -205,10 +315,11 @@ fn launch_target(action: &Value) -> Option<String> {
         })
 }
 
-/// Actions that only leave the app in front.
+/// Actions that only leave the app in front. `open_url` hands the link to
+/// another app (Safari, or the scheme's owner), so it leaves too.
 fn leaves_app(action: &Value) -> bool {
     match action.get("type").and_then(Value::as_str) {
-        Some("home" | "launch_app") => true,
+        Some("home" | "launch_app" | "open_url") => true,
         Some("shortcut") => action.get("name").and_then(Value::as_str) == Some("home"),
         _ => false,
     }
@@ -285,6 +396,15 @@ pub fn describe(policy: &Policy) -> Value {
             .map(|b| serde_json::json!({"bundle": b.bundle, "name": b.name}))
             .collect::<Vec<_>>(),
         "max_actions_per_run": policy.max_actions,
+        "open_url_schemes": if policy.allow_any_url_scheme {
+            serde_json::json!("*")
+        } else {
+            serde_json::json!(ALWAYS_ALLOWED_SCHEMES
+                .iter()
+                .map(|s| s.to_string())
+                .chain(policy.allowed_url_schemes.iter().cloned())
+                .collect::<Vec<_>>())
+        },
     })
 }
 
@@ -385,5 +505,90 @@ mod tests {
         assert!(charge(&p, "owner-a-per", 1, 0).is_ok());
         assert!(charge(&p, "owner-b-per", 1, 0).is_ok());
         assert!(charge(&p, "owner-a-per", 1, 0).is_err());
+    }
+
+    #[test]
+    fn urls_parse_to_a_scheme_and_host() {
+        let parsed = parse_url("HTTPS://user:pw@Example.COM:8443/a?q=secret#x").unwrap();
+        assert_eq!(parsed.scheme, "https");
+        assert_eq!(parsed.host.as_deref(), Some("example.com"));
+        assert_eq!(parse_url("tel:+15551234").unwrap().host, None);
+        assert_eq!(
+            parse_url("weixin://dl/scan").unwrap().host.as_deref(),
+            Some("dl")
+        );
+        assert_eq!(
+            parse_url("http://[::1]:80/").unwrap().host.as_deref(),
+            Some("::1")
+        );
+        assert_eq!(parse_url("prefs:root=WIFI").unwrap().scheme, "prefs");
+        for bad in [
+            "",
+            "example.com",
+            "://x",
+            "1http://x",
+            "https://",
+            "https:///path",
+            "https://a b.com",
+            "https://a.com/\n",
+        ] {
+            assert!(parse_url(bad).is_err(), "{bad:?}");
+        }
+        assert!(parse_url(&format!("https://a.com/{}", "x".repeat(MAX_URL_LEN))).is_err());
+    }
+
+    #[test]
+    fn only_web_links_open_unless_the_owner_allows_the_scheme() {
+        let open = |url: &str| json!({"type":"open_url","url":url});
+        let p = Policy::from_map(|_| None);
+        assert!(p.check_url(&open("https://example.com")).is_ok());
+        assert!(p.check_url(&open("http://example.com/x")).is_ok());
+        for url in [
+            "tel:10086",
+            "sms:10086",
+            "facetime://a@b.c",
+            "facetime-audio:1",
+            "mailto:a@b.c",
+            "itms-services://?action=download-manifest",
+            "weixin://dl/scan",
+            "prefs:root=WIFI",
+            "TEL:1",
+        ] {
+            let refused = p.check_url(&open(url)).unwrap_err();
+            assert_eq!(refused.error(), "url_scheme_not_allowed", "{url}");
+            let body = refused.to_json();
+            assert_eq!(body["outcome"], "not_sent");
+            assert!(body["hint"]
+                .as_str()
+                .unwrap()
+                .contains("IPHONE_USE_ALLOW_URL_SCHEMES"));
+        }
+        assert!(p.check_url(&json!({"type":"tap","x":1,"y":1})).is_ok());
+        assert!(
+            !p.is_active(),
+            "the scheme policy alone does not switch the other limits on"
+        );
+
+        let some = Policy::from_map(|key| {
+            (key == "IPHONE_USE_ALLOW_URL_SCHEMES").then(|| "Weixin://, tel:".to_string())
+        });
+        assert!(some.check_url(&open("weixin://dl/scan")).is_ok());
+        assert!(some.check_url(&open("tel:10086")).is_ok());
+        assert!(some.check_url(&open("sms:10086")).is_err());
+        let any = Policy::from_map(|key| {
+            (key == "IPHONE_USE_ALLOW_URL_SCHEMES").then(|| " * ".to_string())
+        });
+        assert!(any.check_url(&open("sms:10086")).is_ok());
+        assert_eq!(describe(&any)["open_url_schemes"], "*");
+        assert_eq!(
+            describe(&some)["open_url_schemes"],
+            json!(["http", "https", "weixin", "tel"])
+        );
+    }
+
+    #[test]
+    fn open_url_leaves_a_blocked_app() {
+        let p = policy("com.example.bank", "");
+        assert!(!p.needs_foreground(&json!({"type":"open_url","url":"https://example.com"})));
     }
 }

@@ -122,6 +122,99 @@ pub fn apply(json: &mut Value, scope: &str) {
     });
 }
 
+/// Longest `query` accepted, in characters.
+pub const MAX_QUERY_CHARS: usize = 200;
+/// Largest `limit` accepted.
+pub const MAX_LIMIT: usize = 500;
+
+/// Reject a `query`/`limit` the caller cannot get: an empty or oversized
+/// query, or a limit outside `1..=MAX_LIMIT` (never clamped silently).
+pub fn validate_filter(query: Option<&str>, limit: Option<&str>) -> Result<(), Value> {
+    if let Some(query) = query {
+        if query.trim().is_empty() {
+            return Err(json!({"ok": false, "error": "invalid_query",
+                "hint": "query must be non-empty text matched against label, identifier, value and placeholder; omit it to get every row"}));
+        }
+        if query.chars().count() > MAX_QUERY_CHARS {
+            return Err(json!({"ok": false, "error": "invalid_query",
+                "hint": format!("query is at most {MAX_QUERY_CHARS} characters; search for a shorter distinctive part of the text")}));
+        }
+    }
+    if let Some(limit) = limit {
+        match limit.trim().parse::<usize>() {
+            Ok(n) if (1..=MAX_LIMIT).contains(&n) => {}
+            _ => {
+                return Err(json!({"ok": false, "error": "invalid_limit",
+                    "hint": format!("limit is a whole number from 1 to {MAX_LIMIT}")}))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `row` contains `needle` (already lowercased) in its label,
+/// identifier, value or placeholder. Non-ASCII text (CJK) compares as is.
+fn row_matches(row: &Value, needle: &str) -> bool {
+    ["label", "identifier", "value", "placeholder"]
+        .iter()
+        .filter_map(|key| row.get(*key).and_then(Value::as_str))
+        .any(|text| text.to_lowercase().contains(needle))
+}
+
+/// Keep only the rows matching `query`, then at most `limit` of them, each
+/// carrying its original `index` (a scoped view's rows already do). Applied
+/// after a scope, so the two combine. The snapshot is left as it is.
+pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>) {
+    if query.is_none() && limit.is_none() {
+        return;
+    }
+    let Some(rows) = json.get("elements").and_then(Value::as_array).cloned() else {
+        return;
+    };
+    let total = rows.len();
+    let needle = query.map(|q| q.trim().to_lowercase());
+    let matched: Vec<Value> = rows
+        .into_iter()
+        .enumerate()
+        .filter(|(_, row)| needle.as_deref().is_none_or(|n| row_matches(row, n)))
+        .map(|(i, mut row)| {
+            if row.get("index").is_none() {
+                row["index"] = json!(i);
+            }
+            row
+        })
+        .collect();
+    let n_matched = matched.len();
+    let kept: Vec<Value> = matched
+        .into_iter()
+        .take(limit.unwrap_or(usize::MAX))
+        .collect();
+    let returned = kept.len();
+    json["elements"] = Value::Array(kept);
+    let mut summary = json!({
+        "matched": n_matched,
+        "returned": returned,
+        "omitted": n_matched - returned,
+        "of": total,
+        "note": "indexes refer to the full read with this snapshot",
+    });
+    if let Some(query) = query {
+        summary["query"] = json!(query);
+    }
+    if let Some(limit) = limit {
+        summary["limit"] = json!(limit);
+    }
+    if n_matched > returned {
+        summary["hint"] =
+            json!("more rows matched than the limit; narrow the query or raise limit");
+    } else if n_matched == 0 {
+        summary["hint"] = json!(
+            "no row matched; the text may be off screen, spelled differently, or only in the image"
+        );
+    }
+    json["filter"] = summary;
+}
+
 /// The tree cannot be used at all (no interactive rows, containers only).
 /// A capture-redacted screen is excluded: its screenshot adds nothing.
 pub fn needs_image(json: &Value) -> bool {
@@ -325,5 +418,98 @@ mod tests {
             ok["image"].get("captured_at_ms").is_none(),
             "never a made-up instant"
         );
+    }
+
+    #[test]
+    fn query_matches_any_text_field_case_insensitively_and_keeps_indexes() {
+        let mut json = json!({"snapshot": "H", "elements": [
+            {"kind": "Application", "label": "设置", "depth": 0},
+            {"kind": "Button", "label": "Sign In", "depth": 1},
+            {"kind": "TextField", "label": "", "placeholder": "Email address", "depth": 1},
+            {"kind": "Cell", "label": "x", "identifier": "signin.cell", "depth": 1},
+            {"kind": "Switch", "label": "Wi-Fi", "value": "1", "depth": 1},
+            {"kind": "StaticText", "label": "通用设置", "depth": 1},
+        ]});
+        let mut cjk = json.clone();
+        filter(&mut json, Some("SIGNIN"), None);
+        let indexes = |json: &Value| -> Vec<u64> {
+            json["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["index"].as_u64().unwrap())
+                .collect()
+        };
+        assert_eq!(indexes(&json), vec![3]);
+        assert_eq!(json["snapshot"], "H");
+        assert_eq!(json["filter"]["matched"], 1);
+        assert_eq!(json["filter"]["of"], 6);
+        filter(&mut cjk, Some("设置"), None);
+        assert_eq!(indexes(&cjk), vec![0, 5]);
+        let mut email = read();
+        email["elements"][2]["placeholder"] = json!("Email");
+        filter(&mut email, Some("email"), None);
+        assert_eq!(indexes(&email), vec![2]);
+    }
+
+    #[test]
+    fn limit_caps_rows_after_the_query_and_scope_and_reports_omitted() {
+        let mut json = read();
+        apply(&mut json, "interactive");
+        filter(&mut json, None, Some(2));
+        let indexes: Vec<u64> = json["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            indexes,
+            vec![2, 3],
+            "scoped rows keep their full-read index"
+        );
+        assert_eq!(json["filter"]["matched"], 4);
+        assert_eq!(json["filter"]["omitted"], 2);
+        assert!(json["filter"]["hint"].is_string());
+        assert_eq!(json["scope"]["name"], "interactive");
+
+        let mut both = read();
+        filter(&mut both, Some("通用"), Some(1));
+        assert_eq!(both["elements"][0]["index"], 3);
+        assert_eq!(
+            (
+                both["filter"]["matched"].as_u64(),
+                both["filter"]["omitted"].as_u64()
+            ),
+            (Some(2), Some(1))
+        );
+
+        let mut none = read();
+        filter(&mut none, Some("nothing here"), None);
+        assert_eq!(none["elements"].as_array().unwrap().len(), 0);
+        assert_eq!(none["filter"]["matched"], 0);
+    }
+
+    #[test]
+    fn filter_parameters_are_validated() {
+        assert!(validate_filter(None, None).is_ok());
+        assert!(validate_filter(Some("通用"), Some("500")).is_ok());
+        assert_eq!(
+            validate_filter(Some("  "), None).unwrap_err()["error"],
+            "invalid_query"
+        );
+        let long = "a".repeat(MAX_QUERY_CHARS + 1);
+        assert_eq!(
+            validate_filter(Some(&long), None).unwrap_err()["error"],
+            "invalid_query"
+        );
+        assert!(validate_filter(Some(&"字".repeat(MAX_QUERY_CHARS)), None).is_ok());
+        for bad in ["0", "501", "-1", "ten", ""] {
+            assert_eq!(
+                validate_filter(None, Some(bad)).unwrap_err()["error"],
+                "invalid_limit",
+                "{bad}"
+            );
+        }
     }
 }

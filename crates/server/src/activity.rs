@@ -235,6 +235,26 @@ pub fn describe(action: &Value, rows: Option<&[ElementRow]>) -> Line {
                 None => line("Opened an app", "打开一个 App"),
             }
         }
+        // A web link's host only: a path or query can carry tokens or
+        // personal data. Any other scheme is named by its scheme alone.
+        "open_url" => match action
+            .get("url")
+            .and_then(Value::as_str)
+            .and_then(|url| crate::guard::parse_url(url).ok())
+        {
+            Some(crate::guard::ParsedUrl {
+                host: Some(host),
+                scheme,
+            }) if scheme == "http" || scheme == "https" => line(
+                format!("Opened a link to {host}"),
+                format!("打开链接 {host}"),
+            ),
+            Some(parsed) => line(
+                format!("Opened a {}: link", parsed.scheme),
+                format!("打开 {}: 链接", parsed.scheme),
+            ),
+            None => line("Opened a link", "打开链接"),
+        },
         "scroll" if action.get("element").is_some() => on("Scrolled", "滚动"),
         "scroll" => line("Scrolled", "滚动"),
         "swipe" => swipe_line(action),
@@ -404,5 +424,25 @@ mod tests {
         assert!(recent(next, 10)["items"].as_array().unwrap().is_empty());
         assert_eq!(recent(next - 2, 10)["items"].as_array().unwrap().len(), 2);
         assert_eq!(recent(0, 3)["items"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_link_shows_only_its_host() {
+        let line = describe(
+            &json!({"type":"open_url","url":"https://user:pw@Example.com/reset?token=SECRET"}),
+            None,
+        );
+        assert_eq!(line.en, "Opened a link to example.com");
+        assert_eq!(line.zh, "打开链接 example.com");
+        assert!(!line.en.contains("SECRET") && !line.zh.contains("SECRET"));
+        assert_eq!(
+            en(json!({"type":"open_url","url":"tel:10086"}), None),
+            "Opened a tel: link"
+        );
+        assert_eq!(
+            en(json!({"type":"open_url","url":"weixin://dl/scan"}), None),
+            "Opened a weixin: link"
+        );
+        assert_eq!(en(json!({"type":"open_url"}), None), "Opened a link");
     }
 }

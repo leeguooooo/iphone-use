@@ -265,7 +265,7 @@ only on a trusted network.
 |---|---|
 | `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, keep_runner_alive, device, …}` — gate on `drivable` |
 | `GET /agent/capabilities` | What this build supports + whether the phone is drivable now (`blocked_by`); touches nothing |
-| `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `IPHONE_USE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max` |
+| `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `IPHONE_USE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max`. `?scope=`, `?query=` and `?limit=` filter the same read ([below](#scoped-and-searched-reads)) |
 | `GET /agent/screenshot` | Device PNG. `?max_side=1200` shrinks it (~0.9k image tokens instead of ~1.5k; MCP's default) and lets a current live frame answer while someone watches. `X-Capture-Redacted: 1` = wireframe of a protected screen ([below](#screens-hidden-from-capture)); `?raw=1` untouched. A sized request is shrunk and JPEG-encoded on the phone, so a slow link carries ~50–100 KB instead of a multi-MB PNG. A capture the link cuts or times out is retried once smaller (`X-Screenshot-Degraded: max_side=N`); a failure is JSON with `cause` (`timeout`, `body_truncated`, `connection_lost`, `connect`, `runner_error`), `transport` and `attempts` (504 on timeout, else 502) |
 | `POST /agent/input` | One action; `?return=delta` adds the settled change |
 | `POST /agent/actions` | `{"steps":[…]}`: up to 24 `action` / `wait_for` / `pause` steps, validated first, stops at the first failure |
@@ -294,6 +294,7 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 ```jsonc
 {"type":"launch_app","bundle":"com.apple.Health"}       // or "name":"健康" for built-in apps
 {"type":"launch_app","app":"微信"}                       // any app's exact name; 422 ambiguous_app|app_not_found|app_not_installed (+candidates), nothing sent
+{"type":"open_url","url":"https://example.com/page"}    // http/https always; other schemes only if the owner allows them (403 url_scheme_not_allowed)
 {"type":"tap","element":3,"snapshot":"…"}               // from the SAME elements read
 {"type":"tap","label":"新备忘录"}                         // exact, unique; add "kind":"Button" if a StaticText shares it
 {"type":"tap_locator","locator":{"identifier":"save"}}  // label/identifier/kind/value/focused/enabled/visible
@@ -327,6 +328,17 @@ UTF-16 code units (an emoji counts two to four). On an iPhone 17 Pro Max
 with iOS 27, a 1986-character note read back as only its first 477
 characters, although the whole text was on screen. When the cut splits an
 emoji, the value ends in U+FFFD.
+
+**Links.** `open_url` hands the URL to iOS, which opens it in Safari or in the
+app that owns its scheme. The `url` needs a scheme and at most 2048 bytes
+(a malformed one is `400 invalid_value`, nothing sent); percent-encode spaces.
+`http` and `https` always open. Every other scheme (`tel:`, `sms:`,
+`facetime:`, `mailto:`, `itms-services:`, and app schemes such as
+`weixin://` or `prefs:`) is refused with `403 url_scheme_not_allowed`
+unless the phone owner lists it in `IPHONE_USE_ALLOW_URL_SCHEMES`
+([below](#owner-limits-and-the-activity-feed)). It counts as one action and
+leaves the app in front, so it is allowed while a blocked app is in front.
+Flows cannot record it yet: a saved draft lists it under `todo`.
 
 `force_press` answers `422 force_press_unsupported` (retry-safe, nothing sent)
 on every iPhone since XR/11; use `menu`. App uninstall: `{"type":"uninstall","bundle":…}`
@@ -651,9 +663,22 @@ update / publish / report`.
 - Decide by `retry_safe`, not `outcome`: `outcome:"unknown"` with
   `retry_safe:false` may have reached the phone. `not_sent` on one step never
   makes a whole batch replayable.
+- `phone_elements` takes `query` (keep rows whose label, identifier, value or
+  placeholder contain the text) and `limit` (cap the rows). Each kept row keeps
+  its index and the snapshot is the full read's, so `phone_tap_element` works
+  on a narrowed read.
+- Every tool declares MCP annotations (`readOnlyHint`, `openWorldHint`; acting
+  tools also `destructiveHint`, `idempotentHint`). Read-only: `phone_status`,
+  `phone_capabilities`, `phone_apps`, `phone_screen`, `phone_screen_frame`,
+  `phone_screenshot`, `phone_elements`, `phone_flow_list`, `phone_flow_info`,
+  `phone_flow_draft`.
+- `IPHONE_USE_MCP_TOOLS` picks the exposed tools: `all` (default), `readonly`
+  (only the read-only set), or a comma list of tool names (unknown names are
+  warned about on stderr and ignored). A hidden tool is not listed, and a call
+  to it is refused with an error naming the setting; nothing is sent.
 - Not in MCP: `set_value`, `keyboard`, element/page `scroll`, uninstall,
-  intents. `launch_app`, `alert`, `picker`, `perform`, `swipe`, `drag`,
-  `longpress`, `back` exist only as `phone_run_steps` step kinds.
+  intents. `launch_app`, `open_url`, `alert`, `picker`, `perform`, `swipe`,
+  `drag`, `longpress`, `back` exist only as `phone_run_steps` step kinds.
 
 ## Task metrics, runs and advice
 
@@ -687,6 +712,8 @@ Re-read and change approach. It never fires while a spinner is on screen,
 across overlapping calls, or for targets it cannot name: relative scrolls and
 locators.
 
+### Scoped and searched reads
+
 **Scoped reads.** `GET /agent/elements?scope=…` filters the same fresh read.
 The `snapshot` and every row's original `index` stay valid for taps.
 - `app`: the active app's subtree, plus the keyboard. The top-level `alert`
@@ -695,6 +722,19 @@ The `snapshot` and every row's original `index` stay valid for taps.
 - `focused`: the focused field's container.
 - `changed`: needs `since=<snapshot>`. A baseline the daemon no longer holds
   answers 400 `baseline_unavailable`; it never falls back to a full tree.
+
+**Searched reads.** `?query=<text>` keeps the rows whose `label`,
+`identifier`, `value` or `placeholder` contains the text, ignoring case
+(Chinese and other scripts match as written). `?limit=<n>` (1–500) returns at
+most that many rows, in screen order, after `scope` and `query`. Both work
+with any `scope`. Rows keep their original `index`, and `snapshot` is still the full read's
+token, so `{"type":"tap","element":N,"snapshot":"…"}` works on them. The answer
+adds `filter: {query?, limit?, matched, returned, omitted, of}`. When rows were
+left out, `omitted` says how many, and a `hint` suggests narrowing the query
+or raising `limit`. A `query` that is empty or over 200 characters is 400
+`invalid_query`; a bad `limit` is 400 `invalid_limit`. A `delta` answer
+(`since` without `scope=changed`) is not filtered. Search when you know the words on screen.
+Read the whole screen when you do not.
 
 **Images only when needed.** `?image=auto` attaches a screenshot only when the
 tree is unusable (no interactive rows, containers only). The screenshot is
@@ -709,17 +749,19 @@ labels in the text and no base64 in the text or the structured copy.
 ## Owner limits and the activity feed
 
 **Limits.** The phone's owner can set limits the daemon enforces whatever an
-agent's prompt says. Both are off by default:
+agent's prompt says. The first two are off by default:
 
 | Setting | Effect |
 |---|---|
 | `IPHONE_USE_BLOCKED_APPS` | Comma-separated bundle ids or app names (`Wallet, com.example.bank, 微信`). An agent cannot open or uninstall them, and while one is in front only leaving is allowed: `{"type":"home"}` or `launch_app` of another app (`collect` and `scroll_find` are refused there too). |
 | `IPHONE_USE_MAX_ACTIONS` | Actions per run and `X-Phone-Owner`: a batch counts each `action` step; `collect`, `scroll_find` and an intent count one each. A run starts with `POST /agent/run {"action":"start"}`, or after 2 minutes without an action. |
+| `IPHONE_USE_ALLOW_URL_SCHEMES` | URL schemes `open_url` may open besides `http`/`https`, comma-separated (`tel, weixin`), or `*` for any. Unset, every other scheme is refused: `tel:` dials, `sms:`/`mailto:` compose, and an app scheme drives that app. |
 
 A refusal is `403` with `outcome:"not_sent"` and a `hint`: nothing reached the
 phone. `error` is `blocked_app` (with `app`), `foreground_unverified` (the app
 in front could not be read; `retry_safe:true`, read the screen and retry) or
-`action_budget_exhausted` (with `budget:{max,used}`). On a blocked app, tell
+`action_budget_exhausted` (with `budget:{max,used}`) or `url_scheme_not_allowed`
+(with `scheme`; a batch with such a step runs no step). On a blocked app, tell
 the user; do not try to reach it another way. On an exhausted budget, stop
 and report progress. `GET /agent/capabilities` lists the limits under
 `limits`. The web control page and people driving the phone are never limited.
@@ -736,8 +778,9 @@ launchctl bootout gui/$(id -u) "$plist"; launchctl bootstrap gui/$(id -u) "$plis
 
 **Activity feed.** Every action an agent applied is kept as one line in plain
 words, resolved from the screen the action named: `Tapped “Wi-Fi”`,
-`Opened Settings`, `Typed 12 characters` (typed text and set values are never
-kept, only their length). `GET /agent/activity` returns the last lines
+`Opened Settings`, `Typed 12 characters`, `Opened a link to example.com`
+(typed text and set values are never kept, only their length; a link shows its
+host only, or for other schemes only the scheme, such as `Opened a tel: link`). `GET /agent/activity` returns the last lines
 (`text` in English, `text_zh` in Chinese, `owner` when the caller named
 itself) and `next`; pass `?since=<next>` to get only newer ones. The web
 control page shows each new line over the phone screen for a few seconds. The

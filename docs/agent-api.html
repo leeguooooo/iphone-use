@@ -228,7 +228,7 @@
   "scope": "ui_control",
   "supported": {
     "single_step_actions": ["alert","back","drag","home","key","keyboard","launch_app",
-                            "longpress","perform","picker","scroll","set_value",
+                            "longpress","open_url","perform","picker","scroll","set_value",
                             "shortcut","swipe","tap","tap_locator","text"],
     "batch_actions": ["…the same set validated by /agent/actions…"],
     "perform_actions": ["increment","decrement","adjust","toggle","menu","double_tap",
@@ -363,6 +363,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   <tr><td><code>{"type":"shortcut","name":"switcher"}</code></td><td><strong>Unsupported.</strong> WDA cannot synthesize the App Switcher system gesture; the request fails instead of pretending success.</td></tr>
   <tr><td><code>{"type":"back"}</code></td><td>Navigate back with an on-device left-edge swipe.</td></tr>
   <tr><td><code>{"type":"launch_app","bundle":"com.apple.Preferences"}</code></td><td>Launch/foreground an app by bundle id. A limited known-name mapping is also accepted.</td></tr>
+  <tr><td><code>{"type":"open_url","url":"https://example.com/page"}</code></td><td>Open a link through WDA (<code>POST /session/:sid/url</code>): Safari, or the app that owns the scheme. The <code>url</code> needs a scheme and at most 2048 bytes (else <code>400 invalid_value</code>, nothing sent). <code>http</code>/<code>https</code> always open; any other scheme (<code>tel:</code>, <code>sms:</code>, <code>facetime:</code>, <code>mailto:</code>, <code>itms-services:</code>, app schemes such as <code>weixin://</code>) is refused with <code>403 url_scheme_not_allowed</code>, <code>outcome:"not_sent"</code>, unless the owner lists it in <code>IPHONE_USE_ALLOW_URL_SCHEMES</code> (comma list, <code>*</code> = any). Counts as one action against <code>IPHONE_USE_MAX_ACTIONS</code>, and leaves the app, so it is allowed while a blocked app is in front. The activity feed shows the host only.</td></tr>
   <tr><td><code>{"type":"picker","column":0,"value":"March"}</code></td><td>Set a WDA PickerWheel value.</td></tr>
 </table>
 <h4><code>?return=delta</code> — the post-action observation</h4>
@@ -744,6 +745,19 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   WDA explicitly reports them true. An absent state field is therefore not a positive
   assertion when an upstream source omitted that attribute. <code>identifier</code> and
   <code>placeholder</code> appear only when the application supplies them.
+</p>
+<p class="muted">
+  Optional filters of the same fresh read, combinable with each other and with
+  <code>?scope=app|interactive|focused</code>: <code>?query=&lt;text&gt;</code> keeps rows
+  whose <code>label</code>, <code>identifier</code>, <code>value</code> or
+  <code>placeholder</code> contains the text, case-insensitively (CJK as written; at most
+  200 characters, else <code>400 invalid_query</code>); <code>?limit=&lt;n&gt;</code>
+  (1–500, else <code>400 invalid_limit</code>) caps the rows after scope and query. Kept
+  rows carry their original <code>index</code> and <code>snapshot</code> stays the full
+  read's token, so element taps work unchanged. The answer adds
+  <code>"filter": {"query", "limit", "matched", "returned", "omitted", "of"}</code>, with a
+  <code>hint</code> when rows were omitted or nothing matched. A <code>delta</code> answer
+  (<code>?since=</code>) is not filtered.
 </p>
 
 <h3><span class="method get">GET</span>/<span class="method post">POST</span> <span class="ep">/agent/inbox</span></h3>
