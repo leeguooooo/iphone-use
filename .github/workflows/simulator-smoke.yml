@@ -1,0 +1,65 @@
+name: Simulator smoke
+
+# The simulator preview end to end on a hosted Mac, against real simctl and
+# xcodebuild: build the runner for a simulator, start it and a daemon, drive
+# the daemon's simulator routes and run an MCP test suite. No phone involved.
+# It takes a while (an unsigned runner build and a simulator boot), so it runs
+# only when the simulator path changes, or by hand.
+on:
+  pull_request:
+    paths:
+      - crates/server/src/simulator.rs
+      - crates/server/src/main.rs
+      - crates/mcp/src/client.rs
+      - runner/**
+      - scripts/test-simulator-smoke.sh
+      - .github/workflows/simulator-smoke.yml
+  workflow_dispatch:
+
+concurrency:
+  group: >-
+    simulator-smoke-${{ github.event.pull_request.number
+      || format('{0}-{1}', github.event.pull_request.head.repo.full_name || github.repository, github.ref) }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Simulator end to end
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build iphone-use and iphone-use-mcp
+        run: cargo build --release --locked -p server -p iphone-use-mcp
+
+      - name: Xcode and simulators
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+          ./target/release/iphone-use simulators
+
+      - name: Smoke test
+        timeout-minutes: 35
+        run: bash scripts/test-simulator-smoke.sh
+
+      - name: Logs
+        if: always()
+        run: |
+          for f in ~/.iphone-use/instances/ci-sim/simulator-runner.log \
+                   ~/.iphone-use/instances/ci-sim/simulator-daemon.log; do
+            [ -f "$f" ] && { echo "== $f"; tail -120 "$f"; }
+          done
+          ls -1 ~/.iphone-use/instances/ci-sim/ 2>/dev/null || true
