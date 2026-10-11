@@ -26,6 +26,11 @@ use super::usbdiag;
 
 const RUNNER_DEVICE_PORT: u16 = 8100;
 const MJPEG_DEVICE_PORT: u16 = 9100;
+/// How long a launch keeps retrying, in place, while a previous runner still
+/// holds the runner port on the phone (#265) …
+const PORT_IN_USE_WINDOW: Duration = Duration::from_secs(60);
+/// … and how long it waits between those attempts.
+const PORT_IN_USE_RETRY: Duration = Duration::from_secs(3);
 /// Published as `not_connected`; the daemon's hint says the same.
 const NOT_CONNECTED_MESSAGE: &str = "the iPhone isn't connected to this Mac — plug it in over USB (or join the same Wi-Fi) and unlock it";
 /// Published as `needs_passcode_on_phone`: a start on a phone with a passcode
@@ -63,6 +68,9 @@ pub struct Setup {
     build_locked: bool,
     validation_error: String,
     warned_link_drop: bool,
+    /// The last launch failed only because a previous runner still holds the
+    /// runner port on the phone (#265).
+    runner_port_in_use: bool,
     sup: SupervisorTx,
     self_install: SelfInstallTx,
     /// Where the runner serves (for restarting only the relays).
@@ -142,6 +150,7 @@ impl Setup {
             build_locked: false,
             validation_error: String::new(),
             warned_link_drop: false,
+            runner_port_in_use: false,
             sup: SupervisorTx::default(),
             self_install: SelfInstallTx::default(),
             phone_url: String::new(),
@@ -362,6 +371,10 @@ impl Setup {
                     if previous != Some(Kind::NeedsReboot) {
                         warn("the iPhone's developer services need a restart of the iPhone; checking again every few minutes");
                     }
+                } else if self.failure_kind == Kind::PortInUse {
+                    warn(&format!(
+                        "a previous device runner still holds port {RUNNER_DEVICE_PORT} on the phone; next retry in {delay}s (failure {attempt})"
+                    ));
                 } else if self.failure_kind == Kind::Owned {
                     warn(&format!(
                         "another session holds the phone; checking its lease again in {delay}s"
@@ -470,16 +483,15 @@ impl Setup {
         info("Building + launching the device runner on the phone (the first build takes a minute or two)");
         // Replacing a live runner takes the phone from whoever drives it.
         // Recovering a dead one is fine: nobody can be using it.
-        if !owner::overridden(&self.ctx)
-            && pid::validate(
-                &self.ctx,
-                &self.ctx.runner_pid_file,
-                &self.legacy.runner,
-                Role::Runner,
-                false,
-            )
-            .is_some()
-        {
+        let replacing = pid::validate(
+            &self.ctx,
+            &self.ctx.runner_pid_file,
+            &self.legacy.runner,
+            Role::Runner,
+            false,
+        )
+        .is_some();
+        if !owner::overridden(&self.ctx) && replacing {
             if let Some(lease) =
                 owner::foreign(owner::current(&self.ctx), owner::caller().as_deref())
             {
@@ -502,6 +514,17 @@ impl Setup {
             Role::Runner,
         ) {
             return die("the prior runner PID record does not safely identify a process; refusing to kill anything");
+        }
+        // Stopping xcodebuild does not always end the runner on the phone,
+        // and one still there keeps the new runner off its port (#265). End
+        // it now when this run replaced a live runner, or when the last round
+        // already failed on that port.
+        let port_failed_last = retry::read(&self.ctx.retry_state)
+            .ok()
+            .flatten()
+            .is_some_and(|state| state.kind == Kind::PortInUse);
+        if self.legacy_ios.is_none() && (replacing || port_failed_last) {
+            super::commands::end_device_runner(&self.ctx);
         }
         let _ = std::fs::write(&self.ctx.run_log, b"");
         let xcodebuild = PathBuf::from(sys::stdout_of("xcrun", &["--find", "xcodebuild"]));
@@ -531,7 +554,7 @@ impl Setup {
         let url = if self.legacy_ios.is_some() {
             self.legacy_launch(&products, &key)?
         } else {
-            self.launch(&xcodebuild, &xctestrun, from_cache)?
+            self.launch_when_port_free(&xcodebuild, &xctestrun, from_cache)?
         };
         self.phone_url = url.clone();
         let mut target_url = self.relays(&url)?;
@@ -1750,6 +1773,74 @@ impl Setup {
         .filter(|id| !id.is_empty())
     }
 
+    /// [`Setup::launch`], retried in place every few seconds for up to a
+    /// minute while a previous runner still holds the runner port on the
+    /// phone, ending that runner through devicectl before each retry (#265).
+    fn launch_when_port_free(
+        &mut self,
+        xcodebuild: &Path,
+        xctestrun: &Path,
+        from_cache: bool,
+    ) -> Step<String> {
+        let started = Instant::now();
+        loop {
+            // A retry that fails some other way must back off as that.
+            self.runner_port_in_use = false;
+            if self.failure_kind == Kind::PortInUse {
+                self.failure_kind = Kind::Generic;
+            }
+            let launched = self.launch(xcodebuild, xctestrun, from_cache);
+            if launched.is_ok() || !self.runner_port_in_use {
+                return launched;
+            }
+            if !owner::overridden(&self.ctx) {
+                if let Some(lease) =
+                    owner::foreign(owner::current(&self.ctx), owner::caller().as_deref())
+                {
+                    self.failure_kind = Kind::Owned;
+                    self.phase(
+                        "building",
+                        "",
+                        &format!(
+                            "the phone is in use by session {}; not ending the runner that holds port {RUNNER_DEVICE_PORT}",
+                            lease.owner
+                        ),
+                    );
+                    return die(owner::refusal(&lease, &self.ctx));
+                }
+            }
+            let ended = super::commands::end_device_runner(&self.ctx);
+            let waited = started.elapsed().as_secs();
+            if started.elapsed() >= PORT_IN_USE_WINDOW {
+                let message = format!(
+                    "a previous device runner still holds port {RUNNER_DEVICE_PORT} on the phone after {waited}s"
+                );
+                if self.ctx.keepalive {
+                    self.phase("building", &self.build_blocker.clone(), &message);
+                } else {
+                    self.phase("building-fail", "wda", &message);
+                }
+                // Keep the kind: KeepAlive retries within seconds, not the
+                // build failure's minutes.
+                self.failure_kind = Kind::PortInUse;
+                return die(format!("{message}. Log: {}", self.ctx.run_log.display()));
+            }
+            warn(&format!(
+                "a previous device runner still holds port {RUNNER_DEVICE_PORT} on the phone{}; launching again in {}s",
+                if ended { " (ended it)" } else { "" },
+                PORT_IN_USE_RETRY.as_secs()
+            ));
+            self.phase(
+                "building",
+                &self.build_blocker.clone(),
+                &format!(
+                    "waiting for the previous device runner to free port {RUNNER_DEVICE_PORT} on the phone ({waited}s)"
+                ),
+            );
+            proc::sleep(PORT_IN_USE_RETRY)?;
+        }
+    }
+
     /// Launch the runner from its product and wait until it serves. Returns
     /// the URL it serves on (its LAN address, or 127.0.0.1:8100 when the
     /// answer came straight over USB).
@@ -1902,6 +1993,15 @@ impl Setup {
                     return die(
                         "the phone is locked and xcodebuild exited. Unlock it, then rerun setup.",
                     );
+                }
+                // A previous runner still holds the port on the phone: the
+                // product is fine, so nothing is evicted and the caller
+                // retries in seconds instead of backing off like a failed
+                // build (#265).
+                if runner::log_shows_port_in_use(&self.ctx.run_log) {
+                    self.runner_port_in_use = true;
+                    self.failure_kind = Kind::PortInUse;
+                    return Err(Exit(1));
                 }
                 // Only a failure of the product itself evicts it; a dropped
                 // device link says nothing about the product.

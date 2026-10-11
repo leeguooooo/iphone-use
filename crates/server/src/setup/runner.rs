@@ -196,6 +196,13 @@ pub fn log_shows_device_unavailable(path: &Path) -> bool {
     )
 }
 
+/// The runner started but could not listen on its port on the phone: another
+/// runner, usually the previous one still exiting, holds it (#265). The
+/// product is fine; only the old process is in the way.
+pub fn log_shows_port_in_use(path: &Path) -> bool {
+    read_log(path).contains("on the phone is already in use")
+}
+
 pub fn log_shows_automation_disabled(path: &Path) -> bool {
     let text = read_log(path).to_lowercase();
     text.contains("timed out while enabling automation mode")
@@ -906,6 +913,19 @@ mod tests {
             ),
             "a missing iOS platform is not an unreachable phone"
         );
+        // What a runner that lost the race for port 8100 leaves behind: a
+        // failed test, not a failed product (#265).
+        let busy = log("2026-10-11 03:07:41.512+0900 IPhoneUseRunnerUITests-Runner[812:40211] ipu-runner: port 8100 on the phone is already in use \u{2014} another runner (or a previous one still exiting) holds it\n\
+            /Users/x/runner/IPhoneUseRunnerUITests/RunnerTests.swift:153: error: -[RunnerTests testServe] : failed - ipu-runner: port 8100 on the phone is already in use \u{2014} another runner (or a previous one still exiting) holds it\n\
+            Test Case '-[RunnerTests testServe]' failed (2.104 seconds).\n\
+            Failing tests:\n\tRunnerTests.testServe()\n** TEST EXECUTE FAILED **\n");
+        assert!(log_shows_port_in_use(busy.path()));
+        assert!(!log_shows_product_failure(busy.path()));
+        assert!(!log_shows_lock(busy.path()));
+        assert!(!log_shows_ide_refusal(busy.path()));
+        assert!(!log_shows_port_in_use(
+            log("ipu-runner: could not listen on port 8100: POSIXErrorCode(rawValue: 13)").path()
+        ));
         assert!(log_shows_product_failure(log("Error 0xE8008001").path()));
         assert!(!log_shows_product_failure(
             log("Failed to establish communication with the test runner").path()

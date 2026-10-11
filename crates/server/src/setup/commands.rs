@@ -308,15 +308,29 @@ fn sweep_device_runner(ctx: &Ctx) {
         warn("the iOS 15/16 runner still answered right after its launcher stopped; it ends with that session");
         return;
     }
+    if !end_device_runner(ctx) {
+        warn("the runner still answers on the phone, but its process could not be found to end it");
+    }
+}
+
+/// End every runner app process on the phone through devicectl, and say
+/// whether one was found. Unlike [`sweep_device_runner`] this asks nothing
+/// over usbmuxd first, so it also reaches a phone on the CoreDevice Wi-Fi
+/// tunnel: setup calls it when a new runner finds the old one still holding
+/// its port on the phone (#265). Not for iOS 15/16, whose runner CoreDevice
+/// cannot see.
+pub(super) fn end_device_runner(ctx: &Ctx) -> bool {
+    if ctx.udid.is_empty() {
+        return false;
+    }
     let pids = sys::devicectl_json(15, &["device", "info", "processes", "--device", &ctx.udid])
         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
         .map(|value| runner_pids(&value))
         .unwrap_or_default();
     if pids.is_empty() {
-        warn("the runner still answers on the phone, but its process could not be found to end it");
-        return;
+        return false;
     }
-    for pid in pids {
+    for pid in &pids {
         let pid = pid.to_string();
         let (_, ended) = sys::run_bounded(
             "xcrun",
@@ -342,6 +356,7 @@ fn sweep_device_runner(ctx: &Ctx) {
             ));
         }
     }
+    true
 }
 
 /// Pids of the runner app (`…/iPhoneUse-Runner.app/…`) in a devicectl

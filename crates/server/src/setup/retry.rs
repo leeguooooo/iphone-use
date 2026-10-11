@@ -33,6 +33,10 @@ pub enum Kind {
     /// An iOS 15/16 phone neither on USB nor reachable over Wi-Fi: a cable
     /// (or the phone back on this network) fixes it, not a retry.
     LegacyUnreachable,
+    /// The new runner could not listen on port 8100 on the phone: a previous
+    /// runner is still alive or still exiting there (#265). Nothing about the
+    /// build is wrong, so it retries soon instead of backing off to minutes.
+    PortInUse,
 }
 
 impl Kind {
@@ -48,6 +52,7 @@ impl Kind {
             Kind::NotConnected => "not_connected",
             Kind::NeedsReboot => "needs_reboot",
             Kind::LegacyUnreachable => "legacy_unreachable",
+            Kind::PortInUse => "port_in_use",
         }
     }
 
@@ -63,6 +68,7 @@ impl Kind {
             "not_connected" => Some(Kind::NotConnected),
             "needs_reboot" => Some(Kind::NeedsReboot),
             "legacy_unreachable" => Some(Kind::LegacyUnreachable),
+            "port_in_use" => Some(Kind::PortInUse),
             _ => None,
         }
     }
@@ -90,6 +96,10 @@ impl Kind {
             // The supervisor cuts this short when the phone shows up on USB
             // or answers on its LAN address again.
             Kind::LegacyUnreachable => (300, 300),
+            // The old runner goes away within seconds to minutes; setup has
+            // already retried for a minute in place and tried to end it, so
+            // keep checking every few seconds, never the build's 5 min.
+            Kind::PortInUse => (3, 60),
             Kind::Generic => (5, 300),
         }
     }
@@ -227,6 +237,18 @@ mod tests {
         // A Wi-Fi refusal waits as long, and its kind survives a re-read.
         assert_eq!(record_failure(&path, Kind::WifiAutomation).unwrap().1, 900);
         assert_eq!(read(&path).unwrap().unwrap().kind, Kind::WifiAutomation);
+        // A runner still holding the phone's port retries within seconds and
+        // never escalates to the build failure's 300 s (#265).
+        assert_eq!(
+            record_failure(&path, Kind::PortInUse).unwrap(),
+            (1, 3, Some(Kind::WifiAutomation))
+        );
+        let mut last = 0;
+        for _ in 0..10 {
+            last = record_failure(&path, Kind::PortInUse).unwrap().1;
+        }
+        assert_eq!(last, 60);
+        assert_eq!(read(&path).unwrap().unwrap().kind, Kind::PortInUse);
         reset(&path).unwrap();
         assert_eq!(read(&path), Ok(None));
     }
@@ -252,6 +274,9 @@ mod tests {
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(read(&path), Err(()), "a loose mode is not trusted");
+        std::fs::write(&path, "version=1\nkind=port_in_use\nattempt=2\nnext_at=1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read(&path).unwrap().unwrap().kind, Kind::PortInUse);
         std::fs::write(&path, "version=1\nkind=weird\nattempt=3\nnext_at=1\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(read(&path), Err(()));
