@@ -491,7 +491,14 @@ impl Setup {
             false,
         )
         .is_some();
-        if !owner::overridden(&self.ctx) && replacing {
+        // A last round that failed on the runner port means a runner may
+        // still live on the phone; ending it (below) takes the phone too.
+        let port_failed_last = self.legacy_ios.is_none()
+            && retry::read(&self.ctx.retry_state)
+                .ok()
+                .flatten()
+                .is_some_and(|state| state.kind == Kind::PortInUse);
+        if !owner::overridden(&self.ctx) && (replacing || port_failed_last) {
             if let Some(lease) =
                 owner::foreign(owner::current(&self.ctx), owner::caller().as_deref())
             {
@@ -519,10 +526,6 @@ impl Setup {
         // and one still there keeps the new runner off its port (#265). End
         // it now when this run replaced a live runner, or when the last round
         // already failed on that port.
-        let port_failed_last = retry::read(&self.ctx.retry_state)
-            .ok()
-            .flatten()
-            .is_some_and(|state| state.kind == Kind::PortInUse);
         if self.legacy_ios.is_none() && (replacing || port_failed_last) {
             super::commands::end_device_runner(&self.ctx);
         }
