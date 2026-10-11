@@ -56,6 +56,16 @@ for shell in /bin/sh /bin/bash; do
     printf '%s' "$r" | grep -q "requires a value, got the option '--no-setup'" \
         || bad "$shell: option-as-value message missing: $r"
     ok_t "$shell: an option is never consumed as another option's value"
+
+    r="$(run "$shell" --simulator)"
+    [ "${r%%|*}" = 2 ] || bad "$shell: --simulator without value exit ${r%%|*}, want 2: $r"
+    ok_t "$shell: --simulator without a value is refused"
+
+    r="$(run "$shell" --simulator --no-setup)"
+    [ "${r%%|*}" = 2 ] || bad "$shell: --simulator --no-setup exit ${r%%|*}, want 2: $r"
+    printf '%s' "$r" | grep -q "requires a value, got the option '--no-setup'" \
+        || bad "$shell: --simulator option-as-value message missing: $r"
+    ok_t "$shell: --simulator never takes another option as its simulator"
 done
 
 printf '1..%d\n' "$pass"

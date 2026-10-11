@@ -74,7 +74,8 @@ REPO="leeguooooo/iphone-use"
 BINARY_INSIDE_APP="Contents/MacOS/iphone-use"
 MCP_BINARY_INSIDE_APP="Contents/MacOS/iphone-use-mcp"
 
-# --instance/--udid/--port select a named instance; anything else is the
+# --instance/--udid/--port select a named instance; --simulator NAME starts
+# that iOS Simulator after the install (preview); anything else is the
 # optional local app path, as before.
 INSTANCE_NAME="default"
 INSTANCE_UDID=""
@@ -82,7 +83,7 @@ INSTANCE_PORT=""
 INSTALL_ARGS=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --instance|--udid|--port)
+        --instance|--udid|--port|--simulator)
             if [ "$#" -lt 2 ] || [ -z "$2" ]; then
                 printf 'ERROR: %s requires a value\n' "$1" >&2
                 exit 2
@@ -97,6 +98,8 @@ while [ "$#" -gt 0 ]; do
                 --instance) INSTANCE_NAME="$2" ;;
                 --udid) INSTANCE_UDID="$2" ;;
                 --port) INSTANCE_PORT="$2" ;;
+                # Exported so the pinned inner installer sees it too.
+                --simulator) export IPHONE_USE_SETUP_SIMULATOR="$2" ;;
             esac
             shift 2
             ;;
@@ -118,7 +121,7 @@ while [ "$#" -gt 0 ]; do
                     printf '       zsh does not word-split $var: use ${=var}, an array, or write the options out.\n' >&2
                     ;;
                 *)
-                    printf "ERROR: unknown option '%s' (accepted: --instance NAME, --udid UDID, --port N, --no-setup, [app path]).\n" "$1" >&2
+                    printf "ERROR: unknown option '%s' (accepted: --instance NAME, --udid UDID, --port N, --simulator NAME, --no-setup, [app path]).\n" "$1" >&2
                     ;;
             esac
             exit 2
@@ -823,6 +826,7 @@ first_run_setup() {
     usb="$(usb_iphones)"
     if [ -z "$usb" ] || { [ -n "$wanted" ] && case " $usb " in *" $wanted "*) false ;; *) true ;; esac; }; then
         info "Plug the iPhone in with a cable, unlock it, then run: $rerun"
+        info "No phone at hand? Drive an iOS Simulator instead (preview, needs Xcode): iphone-use simulator start \"iPhone 16 Pro\""
         return 0
     fi
     info "An iPhone is plugged in; setting it up now (keep it unlocked; the first build takes a few minutes)."
@@ -838,6 +842,25 @@ first_run_setup() {
         FIRST_SETUP_DONE=1
     else
         warn "The phone is set up but the first run did not finish; check with: iphone-use status${*:+ $*}"
+    fi
+}
+
+# simulator_setup <cli> <mcp-binary>
+# --simulator NAME / IPHONE_USE_SETUP_SIMULATOR=NAME (preview): start that
+# simulator with the runner and a daemon (instance `sim`) and register an
+# iphone-sim MCP server for it. It was asked for, so it also runs without a
+# terminal (CI) and on upgrades, and a failure fails the install.
+simulator_setup() {
+    local cli="$1" mcp="$2" name="${IPHONE_USE_SETUP_SIMULATOR:-}"
+    echo ""
+    printf '%b━━━ Set up the simulator ━━━%b\n' "$BOLD" "$RESET"
+    if ! "$cli" setup --simulator "$name"; then
+        echo ""
+        warn "The simulator did not start. Fix what it said above, then run: iphone-use simulator start \"$name\""
+        return 1
+    fi
+    if [ "${IPHONE_USE_NO_CLIENT_SETUP:-0}" != "1" ]; then
+        register_claude_mcp "$mcp" "iphone-sim" "sim"
     fi
 }
 
@@ -3636,4 +3659,9 @@ if [ "$PLIST_HAD_EXISTING" = "0" ] && first_run_interactive; then
         first_run_setup "$DEST/$BINARY_INSIDE_APP" ""
     fi
     [ "$DAEMON_HTTP_READY" != "1" ] || first_run_login "$DEST/$BINARY_INSIDE_APP"
+fi
+
+# ── Step 12 — Simulator (opt-in) ─────────────────────────────────────────────
+if [ -n "${IPHONE_USE_SETUP_SIMULATOR:-}" ]; then
+    simulator_setup "$DEST/$BINARY_INSIDE_APP" "$DEST/$MCP_BINARY_INSIDE_APP" || exit 1
 fi

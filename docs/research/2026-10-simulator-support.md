@@ -18,11 +18,13 @@
 - `setup --simulator <name|udid>` runs `simulator start`; `doctor` lists available and
   booted simulators; `device_state` is `booting` / `shutdown` from the simctl state
   (refreshed every 15 s); recording uses `simctl io recordVideo`.
+- The installer takes `--simulator <name>` (starts it and registers an `iphone-sim` MCP
+  server) and, with no phone plugged in, points at `simulator start`.
 
 Not yet done:
 
-- Installer integration. `IPHONE_USE_TARGET` is not stored in an instance plist (the
-  simulator instance runs without launchd).
+- `IPHONE_USE_TARGET` is not stored in an instance plist: the simulator instance runs
+  without launchd and does not survive a reboot.
 - Live H.264 from the runner on a simulator is unverified (MJPEG and recordings don't
   need it).
 - Verification on a Mac: everything is unit-tested only, because no Xcode was available.

@@ -646,13 +646,16 @@ holds the runner token, logs and PID records. Neither process gets a launchd job
 time and the exact command line. Add `--shutdown` to shut the simulator down too.
 
 `iphone-use setup --simulator <name|udid>` does the same as `simulator start` and skips
-the phone setup. `iphone-use doctor` adds one line with the available and booted
+the phone setup. The installer takes `--simulator <name>` too (`curl … install.sh | sh -s --
+--simulator "iPhone 16 Pro"`): after installing, it starts that simulator and registers an
+`iphone-sim` MCP server with Claude Code, and a failure fails the install. Without a phone
+plugged in, the installer's first run points at `simulator start`. `iphone-use doctor` adds one line with the available and booted
 simulators.
 
 The preview doesn't cover these yet:
 
-- The installer doesn't set up a simulator, and `IPHONE_USE_TARGET` isn't stored in an
-  instance plist (the simulator instance runs without launchd).
+- `IPHONE_USE_TARGET` isn't stored in an instance plist: the simulator instance runs
+  without launchd, so it doesn't come back after a reboot (run `simulator start` again).
 - Live H.264 video from the runner hasn't been verified on a simulator (MJPEG and
   recordings don't depend on it).
 - Simulators have no camera, App Store apps, real push notifications or Face ID (unless

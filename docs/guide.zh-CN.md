@@ -330,11 +330,11 @@ claude mcp add iphone-sim -e IPHONE_USE_INSTANCE=sim -- iphone-use-mcp   # 只�
 
 `iphone-use simulator stop <名字|udid>` 会停止 daemon 和 runner，并释放 `sim` 实例。它只停止自己记录并核实过的进程，加 `--shutdown` 会同时关闭模拟器。
 
-`iphone-use setup --simulator <名字|udid>` 等同于 `simulator start`，跳过真机配置。`iphone-use doctor` 会多一行，列出可用和已启动的模拟器。
+`iphone-use setup --simulator <名字|udid>` 等同于 `simulator start`，跳过真机配置。安装器也支持 `--simulator <名字>`（`curl … install.sh | sh -s -- --simulator "iPhone 16 Pro"`）：装完后启动这台模拟器，并在 Claude Code 里注册名为 `iphone-sim` 的 MCP 服务；模拟器启动失败时安装也算失败。没插手机时，安装器的首次运行会提示可以改用 `simulator start`。`iphone-use doctor` 会多一行，列出可用和已启动的模拟器。
 
 预览版还不支持以下内容：
 
-- 安装器不会配置模拟器，`IPHONE_USE_TARGET` 也不写进实例 plist（模拟器实例不走 launchd）。
+- `IPHONE_USE_TARGET` 不写进实例 plist：模拟器实例不走 launchd，重启 Mac 后不会自动恢复（再执行一次 `simulator start` 即可）。
 - 模拟器上 runner 的 H.264 实时画面尚未验证（MJPEG 和录屏不依赖它）。
 - 模拟器没有相机、App Store app、真实推送和 Face ID，依赖这些的任务只能在真机上做。
 
