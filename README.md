@@ -115,7 +115,7 @@ codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-us
 
 The same daemon that serves agents lets you drive the phone yourself:
 
-- **From a browser.** The live screen arrives as H.264 encoded on the phone: native resolution at about 50 fps on the LAN, and a lighter mode for slow links. Click to tap, drag to swipe, hold to long-press, scroll with the wheel or trackpad. Type straight into the phone with your input method, and ⌘V pastes. The Controls panel (控件) lists the screen's elements so you can tap by label, and the Flow panel (流程) records what you do as a replayable flow. The page is in Chinese for now.
+- **From a browser.** The live screen arrives as H.264 encoded on the phone: native resolution at about 50 fps on the LAN, and a lighter mode for slow links. Click to tap, drag to swipe, hold to long-press, scroll with the wheel or trackpad. Type straight into the phone with your input method, and ⌘V pastes. The Controls panel lists the screen's elements so you can tap by label, and the Flow panel records what you do as a replayable flow. The page follows your browser's language (English or Chinese), with a switch in the sidebar.
 - **From another iPhone.** The native iOS app (iOS 17+) pairs by scanning a QR code on the Mac's page, with no address or password to type. It plays the screen with the hardware decoder and switches between your phones.
 - **Screens hidden from capture.** Banking and payment apps black out screen capture; there you see a live wireframe of the screen's elements instead of a blank picture, and you can still tap through it.
 - **From anywhere.** Reach the Mac through an authenticated HTTPS reverse proxy or a VPN such as Tailscale, and control the phone from outside your network ([security notes](docs/guide.md#security)).
@@ -164,7 +164,7 @@ See the [MCP tools](crates/mcp/README.md) and the [Agent API reference](docs/age
 
 ## Flows: do a task once, replay it with no model
 
-Tasks you repeat are kept as **flows**: reviewed per-app scripts that replay without a model, so they cost no tokens. The official registry is **[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**. Record a flow in the browser's Flow panel (流程) and publish it there with a PR.
+Tasks you repeat are kept as **flows**: reviewed per-app scripts that replay without a model, so they cost no tokens. The official registry is **[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**. Record a flow in the browser's Flow panel and publish it there with a PR.
 
 Agents find flows on their own: when one enters an app, the response lists that app's flows. After an agent does a multi-step task in an app that has none, it asks whether to save the task as a flow; the daemon has already recorded the steps as a draft. The daemon keeps the registry fresh by itself (`IPHONE_USE_FLOWS_NO_AUTO_UPDATE=1` turns that off, `IPHONE_USE_FLOWS_NO_SUGGEST=1` silences the save suggestions).
 

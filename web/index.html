@@ -696,6 +696,8 @@
     .flow-note summary::-webkit-details-marker { display: none; }
     .flow-note summary::after { content: "展开"; color: var(--subtle); font: 600 10px/1 var(--sans); }
     .flow-note[open] summary::after { content: "收起"; }
+    html[lang="en"] .flow-note summary::after { content: "Show"; }
+    html[lang="en"] .flow-note[open] summary::after { content: "Hide"; }
     .flow-note-body { margin: 0; padding: 0 12px 12px; }
     #flowInputs { border: 1px solid var(--accent-line); background: var(--accent-soft); }
     .flow-inputs-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
@@ -1024,6 +1026,10 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/><path d="M2.5 12h3M18.5 12h3"/></svg>
         <span class="lbl">交还</span>
       </button>
+      <button id="btnLang" class="tbtn" type="button" title="切换语言 / Switch language" aria-label="切换语言 / Switch language">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.1-3.6-8.5s1.2-6.2 3.6-8.5z"/></svg>
+        <span class="lbl">English</span>
+      </button>
       <button id="btnLogout" class="tbtn danger" title="退出登录" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 012 2v12a2 2 0 01-2 2h-3"/><path d="M10 17l-5-5 5-5"/><path d="M15 12H5"/></svg>
         <span class="lbl">退出</span>
@@ -1181,6 +1187,519 @@
    ================================================================ */
 'use strict';
 
+/* ── i18n: Chinese is the source text; English comes from I18N_EN. ── */
+const LANG = (() => {
+  try { const s = localStorage.getItem('iphone-use-lang'); if (s === 'zh' || s === 'en') return s; } catch {}
+  const c = document.cookie.match(/(?:^|;\s*)iphone_use_lang=(zh|en)/);
+  if (c) return c[1];
+  const first = (navigator.languages && navigator.languages[0]) || navigator.language || 'zh';
+  return first.toLowerCase().startsWith('zh') ? 'zh' : 'en';
+})();
+document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
+const I18N_EN = {
+  '画面指标': 'Stream metrics',
+  '打开自动化流程并审核正在录制的步骤': 'Open Flow and review the steps being recorded',
+  '录制中 · 0 步': 'Recording · 0 steps',
+  '键盘快捷键 (?)': 'Keyboard shortcuts (?)',
+  '键盘快捷键': 'Keyboard shortcuts',
+  '本次会话不再提示': 'Don’t show again this session',
+  '关闭更新提示': 'Dismiss update notice',
+  '收起，状态栏里的标记仍可展开': 'Hide; the badge in the top bar opens it again',
+  '收起锁屏提示': 'Hide lock screen notice',
+  'iPhone 屏幕：点按、拖动、滚轮操作手机；鼠标点过屏幕后可直接用键盘输入，Esc 退出': 'iPhone screen: click, drag and scroll to use the phone; after you click the screen, typing goes to the phone, Esc to stop',
+  'iPhone 设备静态画面': 'iPhone still screenshot',
+  'iPhone 设备实时画面': 'iPhone live screen',
+  '这个界面被 App 屏蔽了截屏，显示的是按控件树画的线框图': 'This app blocks screen capture; showing a wireframe drawn from the element tree',
+  '键盘输入到 iPhone': 'Keyboard input to iPhone',
+  '有人正在手机上验证身份': 'Someone is verifying their identity on the phone',
+  '画面已暂停，验证完成、agent 继续后恢复': 'The screen is paused and resumes when verification is done and the agent continues',
+  '画面卡住 · 正在恢复…': 'Screen stalled · recovering…',
+  '键盘直达手机': 'Typing goes to the phone ·',
+  '退出': 'Sign out',
+  '画面已停止': 'Screen stopped',
+  '正在检查设备连接状态': 'Checking the device connection',
+  '在这台 Mac 的终端运行': 'Run in Terminal on this Mac',
+  '复制命令': 'Copy command',
+  '打开连接向导': 'Open the setup guide',
+  '重新连接': 'Reconnect',
+  '控制栏': 'Controls',
+  '手机': 'Phone',
+  '回到主屏幕 (H 或 ⌘⇧H)': 'Go to Home Screen (H or ⌘⇧H)',
+  'Spotlight 搜索 (S 或 ⌘⇧S)': 'Spotlight search (S or ⌘⇧S)',
+  '搜索': 'Search',
+  '输入': 'Input',
+  '输入一段文字 (K)': 'Type some text (K)',
+  '键盘': 'Keyboard',
+  '把剪贴板里的文字输入到手机 (⌘V)': 'Type the clipboard text on the phone (⌘V)',
+  '粘贴': 'Paste',
+  '工具': 'Tools',
+  '可访问控件列表 (E)': 'Accessible controls list (E)',
+  '控件': 'Controls',
+  '录制并运行自动化流程 (R)': 'Record and run automation flows (R)',
+  '录制并运行自动化流程': 'Record and run automation flows',
+  '流程': 'Flow',
+  '数字网格覆盖 (G)': 'Numbered grid overlay (G)',
+  '网格': 'Grid',
+  '画面': 'View',
+  '画面模式 (Q)：自动 → 性能（半分辨率、省流量）→ 画质（原生分辨率、高帧率）': 'Stream mode (Q): Auto → Performance (half resolution, less data) → Quality (native resolution, high frame rate)',
+  '画面：': 'View: ',
+  '自动': 'Auto',
+  '全屏 (F)': 'Full screen (F)',
+  '全屏': 'Full screen',
+  '会话': 'Session',
+  '手机扫码连接：用 iPhone 扫码，免输地址和密码': 'Scan to connect: scan with an iPhone, no address or password to type',
+  '扫码连接': 'Scan to connect',
+  '交还手机给持有人：停止远程控制，手机留给拿着它的人用': 'Hand the phone back: stop remote control and leave the phone to the person holding it',
+  '交还': 'Hand back',
+  '退出登录': 'Sign out',
+  '更多': 'More',
+  '点一下屏幕，键盘就直接输入到手机。': 'Click the screen and your keyboard types on the phone. ',
+  '全部快捷键': 'All shortcuts',
+  '手机扫码连接': 'Scan to connect',
+  '用 iPhone 相机或 Phone Use Remote App 扫码，不用输地址和密码。二维码只能用一次，5 分钟内有效。': 'Scan with the iPhone Camera or the Phone Use Remote app; no address or password to type. The code works once and expires in 5 minutes.',
+  '配对二维码': 'Pairing QR code',
+  '手机连这个地址': 'Phone connects to this address',
+  '换一个': 'New code',
+  '关闭': 'Close',
+  '键盘与鼠标': 'Keyboard and mouse',
+  '鼠标点过手机屏幕后，键盘直接输入到手机里当前的输入框（中文输入法照常用）；按 Esc 退出。': 'After you click the phone screen, your keyboard types into the focused field on the phone (input methods work as usual). Press Esc to stop.',
+  '鼠标': 'Mouse',
+  '单击': 'Click',
+  '点按': 'Tap',
+  '拖动': 'Drag',
+  '滑动': 'Swipe',
+  '按住不动': 'Click and hold',
+  '长按（按住后再拖 = 拖拽）': 'Long press (hold, then move = drag)',
+  '右键': 'Right-click',
+  '长按': 'Long press',
+  '滚轮 / 触控板': 'Wheel / trackpad',
+  '滚动': 'Scroll',
+  '键盘（在屏幕外）': 'Keyboard (outside the screen)',
+  '回到主屏幕': 'Go to Home Screen',
+  'Spotlight 搜索': 'Spotlight search',
+  '输入一段文字': 'Type some text',
+  '控件列表 · 流程 · 网格': 'Controls · Flow · Grid',
+  '画面模式 · 全屏': 'Stream mode · Full screen',
+  '在屏幕上输入时': 'While typing on the screen',
+  '粘贴文字到手机': 'Paste text on the phone',
+  '换行/发送 · 删除 · Tab · 方向键': 'Return/send · Delete · Tab · Arrow keys',
+  '退出键盘输入': 'Stop typing on the phone',
+  '好': 'OK',
+  '显示控制栏': 'Show controls',
+  '退出全屏': 'Exit full screen',
+  '输入到 iPhone': 'Type on iPhone',
+  '输入到手机…': 'Type on the phone…',
+  '发送': 'Send',
+  'iPhone 可访问控件': 'iPhone accessible controls',
+  '来自当前设备画面的元素树': 'The element tree of the current screen',
+  '刷新': 'Refresh',
+  '当前 iPhone 控件': 'Current iPhone controls',
+  '自动化流程': 'Automation flows',
+  '把一串手机操作录成流程，以后一次运行': 'Record a series of phone actions as a flow and run it in one go later',
+  '流程名称': 'Flow name',
+  '例如：查询指定联系人流水': 'e.g. Look up transactions for a contact',
+  '尚未录制': 'Not recorded yet',
+  '0 / 24 步': '0 / 24 steps',
+  '隐私与稳定性保护': 'Privacy and reliability safeguards',
+  '文字只会变成运行参数，不会把刚才输入的姓名、搜索词或账号写进文件；参数值只保留在当前页面。通过「控件」点按会优先保存稳定标签；页面变化时只用 identifier 或应用名追加检查点，不会自动保存画面文字和值；直接点画面会标记为易失坐标，保存前请逐项检查。': 'Typed text becomes a run input; the names, search terms or accounts you typed are never written to the file, and input values stay on this page only. Taps through Controls save a stable label first. When the screen changes, checkpoints use only an identifier or the app name and never save on-screen text or values. Taps directly on the picture are marked as fragile coordinates; review each step before saving.',
+  '运行参数': 'Run inputs',
+  '只用于本次执行，不写入 JSON': 'Used for this run only, not written to the JSON',
+  '已录制步骤': 'Recorded steps',
+  '录一次，以后整段执行': 'Record once, replay the whole thing later',
+  '点击「开始录制」': 'Click “Start recording”',
+  '关闭面板，照常操作手机': 'Close the panel and use the phone as usual',
+  '回来审核并运行，或保存成脚本': 'Come back to review and run it, or save it as a script',
+  '下次点「打开脚本」，正常重放不需要 AI 逐步操作。': 'Next time, click “Open script”; a normal replay needs no AI step by step.',
+  '我已逐项检查：这个流程不包含付款、转账、发送、发布、删除或其他不可逆操作。': 'I checked every step: this flow does not pay, transfer, send, post, delete or do anything else that cannot be undone.',
+  '开始录制': 'Start recording',
+  '打开脚本': 'Open script',
+  '保存脚本': 'Save script',
+  '运行全部步骤': 'Run all steps',
+  '清空步骤': 'Clear steps',
+  '重新检查': 'Check again',
+  '连接手机': 'Connect phone',
+  '正在检查…': 'Checking…',
+  '请先完成 iPhone 设备设置': 'Finish setting up the iPhone first',
+  '请在设备 runner 所在主机恢复服务': 'Restore the service on the host that runs the device runner',
+  '正在启动…': 'Starting…',
+  '设备正在启动': 'The device is starting',
+  '命令已复制，请在这台 Mac 的终端运行': 'Command copied; run it in Terminal on this Mac',
+  '请长按命令复制，然后在这台 Mac 的终端运行': 'Press and hold the command to copy it, then run it in Terminal on this Mac',
+  '尚未选择 iPhone，请先运行设备设置': 'No iPhone selected yet; run device setup first',
+  '设备 runner 由外部服务管理，请在来源主机恢复': 'The device runner is managed by an external service; restore it on that host',
+  '设备正在释放，请稍后再试': 'The device is being released; try again shortly',
+  '设备已经在重新连接': 'The device is already reconnecting',
+  '启动失败，请检查设备连接': 'Could not start; check the device connection',
+  'WARP 设备配置需要调整': 'The WARP device profile needs a change',
+  '若只需特定站点走 WARP，请管理员使用 Traffic only + Split Tunnels Include 目标 IP；全隧道模式则需排除 fe80::/10 与 fd00::/8': 'If only some sites should go through WARP, ask your admin to use Traffic only + Split Tunnels Include for the target IPs; full-tunnel mode must exclude fe80::/10 and fd00::/8',
+  '系统代理不可用': 'The system proxy is not working',
+  '请启动代理应用，或关闭已失效的代理项；修复后会自动重试': 'Start the proxy app or turn off the stale proxy setting; it retries automatically once fixed',
+  'iPhone 没有连到这台 Mac': 'The iPhone is not connected to this Mac',
+  '用 USB 线插上 iPhone（或连到同一个 Wi-Fi）并解锁；手机回来后会自动重连': 'Plug the iPhone in with a USB cable (or join the same Wi-Fi) and unlock it; it reconnects automatically when the phone is back',
+  '请连接 iPhone': 'Connect the iPhone',
+  '请用 USB 连接并解锁这台 iPhone，保持亮屏；连接后会自动继续': 'Connect this iPhone over USB, unlock it and keep the screen on; it continues automatically once connected',
+  '等待设备信任': 'Waiting for trust',
+  '请在 iPhone 上信任开发者证书；完成后会自动继续': 'Trust the developer certificate on the iPhone; it continues automatically when done',
+  '开发者服务未就绪': 'Developer services are not ready',
+  '请保持 USB、解锁和亮屏；设备准备完成后会自动继续': 'Keep the phone on USB, unlocked and with the screen on; it continues automatically when the device is ready',
+  '请开启 UI 自动化': 'Turn on UI Automation',
+  '解锁 iPhone，打开 设置 › 开发者 › 启用 UI 自动化，并确认手机上的密码或“允许自动化”提示；稍候会自动重试': 'Unlock the iPhone, turn on Settings › Developer › Enable UI Automation, and confirm the passcode or “Allow automation” prompt on the phone; it retries automatically shortly',
+  '请解锁 iPhone': 'Unlock the iPhone',
+  '手机锁着屏，设备服务启动不了；解锁并保持亮屏后会自动接着连接': 'The phone is locked, so the device service cannot start; unlock it and keep the screen on and it connects automatically',
+  'iPhone 重启后还没解锁': 'The iPhone has not been unlocked since it restarted',
+  '这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。': 'This iPhone has not been unlocked since it restarted: someone needs to enter the passcode on the phone once, then it connects automatically.',
+  '需要有人在手机上输入密码': 'Someone needs to enter the passcode on the phone',
+  '手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。': 'The phone has a passcode: this start needs someone to enter it on the phone to allow UI Automation. It won’t ask again while the connection stays up.',
+  'iPhone 没有授权 UI 自动化': 'The iPhone did not allow UI Automation',
+  'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败；请解锁 iPhone、确认 设置 › 开发者 › 启用 UI 自动化 已打开，下次重试时完成这个提示；稍候会自动重试': 'When the runner starts, the phone shows a passcode or “Allow” prompt that fails after about 30 seconds; unlock the iPhone, make sure Settings › Developer › Enable UI Automation is on, and answer the prompt on the next try; it retries automatically shortly',
+  'Wi-Fi 下无法授权 UI 自动化': 'UI Automation cannot be allowed over Wi-Fi',
+  '通过 Wi-Fi 时手机弹不出输密码的提示（有些 iOS 版本干脆拒绝）；请用 USB 连接这台 iPhone，并在它要求时输入密码。插上 USB 后会立刻重试；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB': 'Over Wi-Fi the phone cannot show the passcode prompt (some iOS versions refuse outright); connect this iPhone over USB and enter the passcode when asked. It retries as soon as USB is plugged in; if Wi-Fi still fails afterwards, keep this phone on USB',
+  '这台 Mac 还驱动不了这台 iPhone 的系统': 'This Mac cannot drive this iPhone’s iOS version yet',
+  'iOS 15 和 16 不用升级，但需要付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），配好后重新运行 iphone-use setup；iOS 14 及更早的系统只能升级手机；换线、重试和重连都解决不了': 'iOS 15 and 16 need no update, but they need an App Store Connect API key from a paid developer account (WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID); set it and run iphone-use setup again. iOS 14 and earlier can only be fixed by updating the phone. A new cable, retrying or reconnecting won’t help',
+  '请重启一次 iPhone': 'Restart the iPhone once',
+  'iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来；重启手机、解锁并保持插线后会自动接着连接': 'An old developer disk image is left on the iPhone, so developer services cannot start; restart the phone, unlock it and keep it plugged in, and it connects automatically',
+  '请用数据线连接 iPhone': 'Connect the iPhone with a cable',
+  '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi；插一次线并保持解锁，大约 20 秒连上；之后只要手机和这台 Mac 在同一网络就可以拔线（状态里 unplug_ok 为 true 时）': 'This iOS 15/16 iPhone is not plugged in and this Mac cannot reach it over Wi-Fi; plug it in once and keep it unlocked, and it connects in about 20 seconds. After that you can unplug it as long as the phone and this Mac are on the same network (when unplug_ok is true in the status)',
+  'Xcode 版本太旧': 'Xcode is too old',
+  'iPhone 的 iOS 比这台 Mac 上的 Xcode 新；请安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），再运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它；重试和重连都解决不了': 'The iPhone’s iOS is newer than the Xcode on this Mac; install an Xcode that supports it (a beta iOS needs a beta Xcode), then run iphone-use setup --xcode <that Xcode.app> so this phone uses it. Retrying or reconnecting won’t help',
+  '设备服务启动失败': 'The device service failed to start',
+  '请保持 USB、解锁和亮屏，然后重新运行下方设置命令': 'Keep the phone on USB, unlocked and with the screen on, then run the setup command below again',
+  '设备设置尚未完成': 'Device setup is not finished',
+  '请处理第一个阻塞项，然后重新运行下方设置命令': 'Fix the first blocker, then run the setup command below again',
+  '连接并解锁 iPhone 后，在这台 Mac 的终端运行': 'Connect and unlock the iPhone, then run in Terminal on this Mac',
+  '处理上面的阻塞项后，在这台 Mac 的终端运行': 'After fixing the blocker above, run in Terminal on this Mac',
+  '在这台 Mac 的终端检查设备服务': 'Check the device service in Terminal on this Mac',
+  '设备未连接': 'Device not connected',
+  '启动设备连接后即可查看并控制 iPhone': 'Start the device connection to see and control the iPhone',
+  '尚未选择 iPhone': 'No iPhone selected',
+  '请连接、解锁并信任 iPhone，然后在这台 Mac 上完成首次设置': 'Connect, unlock and trust the iPhone, then finish first-time setup on this Mac',
+  '外部设备 runner 未连接': 'External device runner not connected',
+  '请在设备服务所在主机恢复设备 runner；本机不会擅自重启外部服务': 'Restore the device runner on the host that runs it; this Mac won’t restart an external service on its own',
+  '无法获取设备状态': 'Can’t get device status',
+  '请检查服务是否正在运行，然后重试': 'Check that the service is running, then try again',
+  '页面在后台 · 画面已暂停': 'Page in background · screen paused',
+  '页面在后台 · 画面已断开': 'Page in background · screen disconnected',
+  '切回这个页面后立即恢复': 'Resumes as soon as you return to this page',
+  '后台超过一段时间，已断开设备画面；切到前台后会自动重新连接': 'The page was in the background for a while, so the screen was disconnected; it reconnects when you return',
+  '正在恢复画面': 'Restoring the screen',
+  '页面回到前台，正在取最新一帧': 'Page is back; fetching the latest frame',
+  '手机已交还': 'Phone handed back',
+  '设备空闲中': 'Device idle',
+  '手机在持有人手里，远程控制已停止。需要远程操作时点「连接手机」': 'The phone is with the person holding it and remote control has stopped. Click “Connect phone” when you need it again',
+  '一段时间没人操作，设备连接已暂停。点「连接手机」继续（手机需解锁亮屏）': 'Nobody used it for a while, so the device connection is paused. Click “Connect phone” to continue (the phone must be unlocked with the screen on)',
+  '正在释放设备': 'Releasing the device',
+  '正在确认设备连接已停止，请稍候': 'Confirming the device connection has stopped, please wait',
+  '手机不可用': 'Phone unavailable',
+  '请解锁手机并保持唤醒，设备连接会自动恢复': 'Unlock the phone and keep it awake; the connection comes back automatically',
+  '设备控制暂不可用': 'Device control unavailable',
+  '设备服务仍在线，但当前不能执行操作。请重新连接；若仍失败，在这台 Mac 上运行 iphone-use doctor': 'The device service is online but cannot run actions right now. Reconnect; if that fails, run iphone-use doctor on this Mac',
+  '画面已停滞': 'Screen frozen',
+  '当前显示的是最后一帧，已暂停控制；收到新画面后会自动恢复': 'Showing the last frame and control is paused; it resumes when a new frame arrives',
+  '正在确认刚才的操作': 'Confirming the last action',
+  '操作可能已经执行，正在等待新画面；确认前请勿重复操作': 'The action may already have run; waiting for a new frame. Don’t repeat it until it’s confirmed',
+  '正在连接设备画面': 'Connecting to the screen',
+  '控制服务已就绪，正在等待第一帧': 'Control is ready; waiting for the first frame',
+  '正在重新连接设备': 'Reconnecting the device',
+  '正在恢复设备端控制服务，请稍候': 'Restoring the on-device control service, please wait',
+  '设备画面暂时没有更新': 'The screen has not updated for a while',
+  '新版本 ': 'New version ',
+  ' 可用(当前 v{version})— 升级:': ' is available (current v{version}). Upgrade: ',
+  '会锁屏 · 需有人解锁': 'Will lock · needs a person to unlock',
+  '会锁屏 · 可自动解锁': 'Will lock · can unlock itself',
+  '会锁屏': 'Will lock',
+  '会锁屏 · 自动解锁': 'Will lock · auto-unlock',
+  '{tag}：{text}': '{tag}: {text}',
+  '锁屏提示：{tag}': 'Lock screen notice: {tag}',
+  '设备实时画面暂不可用 — 每 2.5 秒刷新，仍可点按操作': 'Live screen unavailable — refreshing every 2.5 s; you can still tap',
+  '设备实时画面正在连接…': 'Connecting the live screen…',
+  '正在获取设备状态…': 'Getting device status…',
+  '正在重新连接设备…': 'Reconnecting the device…',
+  '正在释放设备…': 'Releasing the device…',
+  '设备已释放': 'Device released',
+  '设备不可用 · 请解锁': 'Device unavailable · unlock it',
+  '设备设置被阻塞': 'Device setup blocked',
+  '操作结果待确认 · 等待新画面': 'Action result pending · waiting for a new frame',
+  '设备在线 · 画面停滞': 'Device online · screen frozen',
+  '设备在线 · 等待画面': 'Device online · waiting for the screen',
+  '已连接 · 可以操作': 'Connected · ready',
+  '控件列表已变化，请重新选择': 'The controls list changed; choose again',
+  '这个控件当前不可操作，请刷新列表': 'This control can’t be used right now; refresh the list',
+  '操作结果未知，请先查看画面再重试': 'Result unknown; check the screen before retrying',
+  '操作未发送，设备连接未就绪': 'Action not sent; the device connection isn’t ready',
+  '；约 {left} 秒后可用': '; available in about {left} s',
+  '手机正被 {owner} 使用，操作没有发出{wait}': 'The phone is in use by {owner}; the action was not sent{wait}',
+  '手机正被其他会话使用，操作没有发出{wait}': 'The phone is in use by another session; the action was not sent{wait}',
+  '设备连接已变化，流程录制已停止，请先审核现有步骤': 'The device connection changed, so recording stopped; review the steps so far',
+  '设备连接未就绪': 'The device connection isn’t ready',
+  '操作失败，设备未连接': 'Action failed; the device is not connected',
+  '滚动失败，设备未连接': 'Scroll failed; the device is not connected',
+  '输入没有送到手机，请点一下手机上的输入框后重试': 'The text didn’t reach the phone; tap a text field on the phone and try again',
+  '剪贴板里没有文字': 'There is no text on the clipboard',
+  '设备连接未就绪，暂时不能粘贴': 'The device connection isn’t ready, so you can’t paste yet',
+  '已粘贴前 1000 个字（共 {total} 个）': 'Pasted the first 1000 characters (of {total})',
+  '已粘贴 {count} 个字': 'Pasted {count} characters',
+  '点按「{label}」': 'Tap “{label}”',
+  '稳定标签': 'Stable label',
+  '控件 {id}': 'control {id}',
+  '「{label}」': '“{label}”',
+  '语义控件': 'semantic control',
+  '点按 {target}': 'Tap {target}',
+  '稳定定位条件': 'Stable locator',
+  '点按画面坐标': 'Tap screen coordinates',
+  '长按画面': 'Long press on screen',
+  '滑动画面': 'Swipe on screen',
+  '长按拖动': 'Long press and drag',
+  '返回主屏幕': 'Go to Home Screen',
+  '打开搜索': 'Open search',
+  '快捷操作 · {name}': 'Shortcut · {name}',
+  '滚动画面': 'Scroll the screen',
+  '按键 {name}': 'Press {name}',
+  '设备按键': 'Device key',
+  '返回上一层': 'Go back',
+  '应用内导航': 'In-app navigation',
+  '系统弹窗按「{button}」': 'System alert: press “{button}”',
+  '系统弹窗 确认': 'System alert: accept',
+  '系统弹窗 取消': 'System alert: dismiss',
+  '原生 alert 路径 · 无弹窗时不动作': 'Native alert path · does nothing if no alert',
+  '打开指定应用': 'Open an app',
+  '选择「{value}」': 'Choose “{value}”',
+  '第 {n} 列选择器': 'Picker column {n}',
+  '等待 {ms}ms': 'Wait {ms}ms',
+  '固定等待 · 建议优先使用界面检查点': 'Fixed wait · prefer a screen checkpoint',
+  '输入「{label}」': 'Type “{label}”',
+  '运行参数 · {input} · 先清空': 'Run input · {input} · clear first',
+  '运行参数 · {input}': 'Run input · {input}',
+  '应用「{app}」': 'app “{app}”',
+  '目标界面': 'the target screen',
+  '等待 {target} 消失': 'Wait for {target} to disappear',
+  '等待 {target} 出现': 'Wait for {target} to appear',
+  '界面检查点 · 最长 {ms}ms': 'Screen checkpoint · up to {ms}ms',
+  '等待填写 {n} 个运行参数': 'Waiting for {n} run input(s)',
+  '等待审核': 'Ready for review',
+  '填写本次运行使用的文字': 'Text to use for this run',
+  '易受布局变化影响': 'Breaks if the layout changes',
+  '未找到可靠检查点，保留 350ms 等待': 'No reliable checkpoint found; keeping a 350ms wait',
+  '上移': 'Up',
+  '上移第 {n} 步及其检查点': 'Move step {n} and its checkpoint up',
+  '上移第 {n} 步': 'Move step {n} up',
+  '删除': 'Delete',
+  '删除第 {n} 步及其检查点': 'Delete step {n} and its checkpoint',
+  '删除第 {n} 步': 'Delete step {n}',
+  '{count} / 24 步': '{count} / 24 steps',
+  '录制中 · {count} 步 · 检查中': 'Recording · {count} steps · checking',
+  '录制中 · {count} 步': 'Recording · {count} steps',
+  '正在运行全部步骤': 'Running all steps',
+  '正在建立语义基线': 'Building the semantic baseline',
+  '正在完成最后一个检查点': 'Finishing the last checkpoint',
+  '正在录制': 'Recording',
+  ' · 正在生成检查点': ' · generating checkpoint',
+  ' · {n} 个动作未录入': ' · {n} action(s) not recorded',
+  '流程不完整 · {n} 个动作未录入': 'Flow incomplete · {n} action(s) not recorded',
+  '正在准备…': 'Preparing…',
+  '正在完成…': 'Finishing…',
+  '停止录制并审核': 'Stop and review',
+  '继续录制': 'Keep recording',
+  '保存草稿': 'Save draft',
+  '目标 iPhone 尚未通过 USB 连接。连接、解锁并保持亮屏后，这里会自动恢复。': 'The iPhone is not connected over USB. Connect it, unlock it and keep the screen on, and this comes back automatically.',
+  '请在 iPhone 上完成信任确认并保持解锁；完成后这里会自动恢复。': 'Confirm trust on the iPhone and keep it unlocked; this comes back automatically when done.',
+  '正在等待最新手机画面；画面出现后即可录制或运行。': 'Waiting for the latest phone screen; you can record or run once it appears.',
+  '设备控制尚未就绪；恢复连接后即可录制或运行流程。': 'Device control isn’t ready; you can record or run flows once the connection is back.',
+  '正在打开…': 'Opening…',
+  '已达到 24 步上限，录制已停止，请打开「流程」审核': 'Reached the 24-step limit and recording stopped; open Flow to review',
+  '文字参数 {n}': 'Text input {n}',
+  '录制时第 {n} 个文字输入；值仅在每次运行时提供。': 'Text input #{n} from the recording; the value is given on each run only.',
+  '这个控件没有稳定标签：操作已执行，但没有写入流程': 'This control has no stable label: the action ran but was not added to the flow',
+  '未命名流程': 'Untitled flow',
+  '由 iphone-use 流程录制生成；有 {n} 个动作未写入，当前仅为不完整草稿，补齐并审核后才能运行。': 'Recorded with iphone-use; {n} action(s) were not saved, so this is an incomplete draft. Complete and review it before running.',
+  '由 iphone-use 流程录制生成；文字保存为运行参数，不包含录制时输入的原文。执行前请填写参数并逐项审核。': 'Recorded with iphone-use; typed text is saved as run inputs, without the text typed while recording. Fill in the inputs and review each step before running.',
+  '由 iphone-use 流程录制生成；已自动建议语义检查点，执行前请逐项审核。': 'Recorded with iphone-use; semantic checkpoints were suggested automatically. Review each step before running.',
+  '{context} 必须是对象': '{context} must be an object',
+  '{context} 缺少 {key}': '{context} is missing {key}',
+  '{context} 包含未知字段 {key}': '{context} has an unknown field {key}',
+  '{context} 必须是文字': '{context} must be text',
+  '{context} 不能为空': '{context} can’t be empty',
+  '{context} 不能超过 {max} 个字符': '{context} can’t be longer than {max} characters',
+  '{context} 不能包含控制字符': '{context} can’t contain control characters',
+  '{context} 必须是 {min}–{max} 的整数': '{context} must be an integer from {min} to {max}',
+  '{context} 必须是 {min}–{max} 的数字': '{context} must be a number from {min} to {max}',
+  '{context} 至少需要一个定位条件': '{context} needs at least one locator field',
+  '{context} 必须是 true 或 false': '{context} must be true or false',
+  '{context} 必须是数组': '{context} must be an array',
+  '{context} 至少需要一个界面条件': '{context} needs at least one screen condition',
+  '第 {n} 步': 'Step {n}',
+  '{context} 的起点和终点不能相同': '{context} can’t start and end at the same point',
+  '{context} 写死了文字；请改用 input 运行参数，避免把隐私保存进脚本': '{context} has hard-coded text; use an input run parameter instead so private data stays out of the script',
+  '{context} 引用了未定义参数 {input}': '{context} uses an undefined input {input}',
+  '{context} 使用了不支持的按键 {name}': '{context} uses an unsupported key {name}',
+  '{context} 使用了不支持的快捷操作 {name}': '{context} uses an unsupported shortcut {name}',
+  '{context} 的滚动距离不能全为 0': '{context} can’t scroll by 0 in both directions',
+  '{context} 必须是合法的应用标识': '{context} must be a valid bundle identifier',
+  '{context} 需要 button 或 action 二选一': '{context} needs either button or action, not both',
+  '{context} 只能是 accept 或 dismiss': '{context} must be accept or dismiss',
+  '{context} 使用了不支持的类型 {kind}': '{context} uses an unsupported kind {kind}',
+  '流程文件': 'Flow file',
+  '只支持 version 1 的流程文件': 'Only version 1 flow files are supported',
+  '流程说明': 'Flow description',
+  'inputs 必须是对象': 'inputs must be an object',
+  '运行参数不能超过 16 个': 'A flow can have at most 16 run inputs',
+  '参数名 {key} 的格式不正确': 'Input name {key} is not valid',
+  '参数 {key}': 'Input {key}',
+  '参数 {key} 只支持 string 类型': 'Input {key} only supports type string',
+  '参数 {key} 的说明': 'Description of input {key}',
+  '参数 {key} 必须设为 required: true': 'Input {key} must be required: true',
+  '每次运行时填写参数 {key}': 'Fill in {key} on each run',
+  'steps 必须是数组': 'steps must be an array',
+  '流程必须包含 1–24 步': 'A flow must have 1–24 steps',
+  '流程声明的总等待时间不能超过 60 秒': 'The flow’s total declared wait time can’t exceed 60 seconds',
+  '存在未使用的运行参数：{list}': 'Unused run inputs: {list}',
+  '、': ', ',
+  'app 必须是 bundle id，例如 com.apple.Health': 'app must be a bundle id, e.g. com.apple.Health',
+  'category 必须是小写 slug，例如 health': 'category must be a lowercase slug, e.g. health',
+  'risk 只能是 read_only、navigation 或 side_effect': 'risk must be read_only, navigation or side_effect',
+  'locale 必须形如 en 或 zh-CN': 'locale must look like en or zh-CN',
+  'tags 必须是不超过 8 个、不重复的小写 slug': 'tags must be at most 8 unique lowercase slugs',
+  'verified_on 必须是包含 device/ios/app_version/date 字段的对象列表': 'verified_on must be a list of objects with device/ios/app_version/date fields',
+  '已打开「{filename}」，共 {count} 步。请填写运行参数并逐项审核。': 'Opened “{filename}” with {count} steps. Fill in the run inputs and review each step.',
+  '正在检查脚本格式和安全边界…': 'Checking the script format and safety limits…',
+  '脚本文件大小必须在 1B–64KB 之间': 'The script file must be 1B–64KB',
+  '流程脚本': 'Flow script',
+  'JSON 格式不正确': 'The JSON is not valid',
+  '无法读取这个文件': 'Can’t read this file',
+  '无法打开脚本：{detail}': 'Can’t open the script: {detail}',
+  '录制已停止，请逐项审核后下载或执行': 'Recording stopped; review each step before saving or running',
+  '设备连接未就绪，暂时不能开始录制': 'The device connection isn’t ready, so recording can’t start yet',
+  '设备状态已变化，没有开始录制': 'The device status changed; recording did not start',
+  '已开始录制；页面变化会自动生成检查点': 'Recording; screen changes add checkpoints automatically',
+  '已开始录制；暂时无法读取控件，将保留短等待并标注': 'Recording; controls can’t be read right now, so short waits are kept and marked',
+  '不完整草稿已保存：请补齐安全参数后再运行': 'Incomplete draft saved: add the missing inputs before running',
+  '流程脚本已保存；参数值未写入文件，运行时用 --input 提供': 'Flow script saved; input values are not in the file, pass them with --input when running',
+  '流程脚本已保存；可用 iphone-use-mcp flow validate/run': 'Flow script saved; use iphone-use-mcp flow validate/run',
+  '请先填写全部运行参数': 'Fill in all run inputs first',
+  '结果未知：已确认完成 {completed} 个动作，请先查看手机，不要直接重试': 'Result unknown: {completed} action(s) confirmed. Check the phone before retrying',
+  '流程已停止：完成 {completed} 个动作，第 {failed} 步失败': 'Flow stopped: {completed} action(s) done, step {failed} failed',
+  '流程已停止：完成 {completed} 个动作': 'Flow stopped: {completed} action(s) done',
+  '流程完成：共执行 {count} 步': 'Flow finished: ran {count} steps',
+  '流程结果未知，请先查看手机状态，不要直接重试': 'Flow result unknown; check the phone before retrying',
+  '再次点击确认清空': 'Click again to clear',
+  '已清空这次录制': 'Recording cleared',
+  '已返回主屏幕': 'Went to Home Screen',
+  '已打开搜索': 'Opened search',
+  '发送中…': 'Sending…',
+  '输入失败，文字已保留': 'Typing failed; your text is kept',
+  '文字已变成运行参数；刚才输入的原文没有保存': 'Text became a run input; what you typed was not saved',
+  '文字已输入': 'Text typed',
+  '交给 agent': 'Give to agent',
+  '把手机交回给 agent：重新连接设备（手机需解锁亮屏）': 'Give the phone back to the agent: reconnect the device (the phone must be unlocked with the screen on)',
+  '把手机交回给 agent？设备连接会重新建立（手机锁着的话需要解锁一次）。': 'Give the phone back to the agent? The device connection will be set up again (if the phone is locked, it needs to be unlocked once).',
+  '已交回 agent，正在连接设备': 'Given back to the agent; connecting the device',
+  '交回失败，请查看服务日志': 'Couldn’t give it back; check the service log',
+  '交回失败，请稍后再试': 'Couldn’t give it back; try again later',
+  '设备 runner 在别的主机上，本机无法交还': 'The device runner is on another host, so this Mac can’t hand it back',
+  '把手机交还给持有人？远程控制会停止，手机留给拿着它的人用；需要时再点「交给 agent」。': 'Hand the phone back to the person holding it? Remote control stops and the phone is theirs to use; click “Give to agent” when you need it again.',
+  '设备正在切换，稍后再试': 'The device is switching; try again shortly',
+  '交还失败，请查看服务日志': 'Couldn’t hand back; check the service log',
+  '已交还，远程控制已停止': 'Handed back; remote control stopped',
+  '交还失败，请稍后再试': 'Couldn’t hand back; try again later',
+  '正在生成…': 'Generating…',
+  '这台 Mac 只允许本机访问，手机连不上。重新运行安装程序并允许局域网访问后再试。': 'This Mac only allows local access, so the phone can’t connect. Run the installer again, allow LAN access, then try again.',
+  '这台 Mac 现在没有手机能访问的网络地址，先连上 Wi-Fi。': 'This Mac has no network address the phone can reach; join Wi-Fi first.',
+  '生成失败，请稍后再试': 'Couldn’t create a code; try again later',
+  '已过期，点「换一个」': 'Expired; click “New code”',
+  '{time} 后失效': 'Expires in {time}',
+  '生成失败，请检查网络': 'Couldn’t create a code; check the network',
+  '读取超时，请确认设备已解锁后重试': 'Timed out; make sure the device is unlocked and try again',
+  '设备正在切换连接状态，请稍后刷新': 'The device connection is changing; refresh shortly',
+  '尚未选择 iPhone，请先完成设备设置': 'No iPhone selected yet; finish device setup first',
+  '读取控件超时，请保持 iPhone 解锁和亮屏': 'Reading controls timed out; keep the iPhone unlocked with the screen on',
+  '当前无法读取 iPhone 控件，请检查设备连接': 'Can’t read iPhone controls right now; check the device connection',
+  '控件列表读取失败，请稍后刷新': 'Couldn’t read the controls list; refresh shortly',
+  '，': ', ',
+  '，当前值 {value}': ', value {value}',
+  '，当前不可操作': ', not available',
+  '当前值：{value}': 'Value: {value}',
+  '设备连接未就绪，请刷新后再试': 'The device connection isn’t ready; refresh and try again',
+  '正在点按「{label}」…': 'Tapping “{label}”…',
+  '控件操作失败，请查看设备状态': 'The control action failed; check the device status',
+  '已点按「{label}」': 'Tapped “{label}”',
+  '正在读取当前 iPhone 控件…': 'Reading the current iPhone controls…',
+  '已读取 {count} 个控件。选择一项可在 iPhone 上点按': 'Read {count} controls. Choose one to tap it on the iPhone',
+  '当前画面没有可访问控件，请返回 iPhone 后刷新': 'No accessible controls on this screen; go back on the iPhone and refresh',
+  '设备连接未就绪，暂时无法读取控件': 'The device connection isn’t ready, so controls can’t be read yet',
+  '性能': 'Performance',
+  '画质': 'Quality',
+  '自动（当前{current}）': 'Auto (now {current})',
+  '画面模式：{detail}': 'Stream mode: {detail}',
+  '画面模式：{detail}。点击切换 自动 → 性能 → 画质 (Q)': 'Stream mode: {detail}. Click to switch Auto → Performance → Quality (Q)',
+  '画面跟不上，已自动切到性能模式': 'The stream fell behind, so it switched to Performance mode',
+  '收起': 'Less',
+  '按 ⌘V 把剪贴板粘贴到手机': 'Press ⌘V to paste the clipboard on the phone',
+  '按 Ctrl+V 把剪贴板粘贴到手机': 'Press Ctrl+V to paste the clipboard on the phone',
+  '{owner} 正在操作{suffix}': '{owner} is driving{suffix}',
+  '{owner} 持有这台手机的操作租约；在它松手或租约到期前，这里的点按会被拒绝（不会执行）。': '{owner} holds this phone’s control lease; until it lets go or the lease expires, taps from here are refused (not run).',
+  'Wi-Fi 隧道': 'Wi-Fi tunnel',
+  '外部': 'External',
+  '局域网': 'LAN',
+  '截图': 'Screenshot',
+  '操作': 'Control',
+  '设备': 'Device',
+  '画面编码 · 帧率 · 点按往返时间 · 手机连接方式': 'Stream codec · frame rate · tap round trip · phone connection',
+};
+/* t('手机正被{owner}使用', {owner}) — placeholders are {name}. */
+function t(zh, vars) {
+  let s = (LANG === 'en' && Object.prototype.hasOwnProperty.call(I18N_EN, zh)) ? I18N_EN[zh] : zh;
+  if (vars) s = s.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+  return s;
+}
+/* A server {zh, en} pair in the page's language, else whichever half exists. */
+function pick(pair) {
+  if (pair == null) return '';
+  if (typeof pair !== 'object') return String(pair);
+  return (LANG === 'en' ? (pair.en || pair.zh) : (pair.zh || pair.en)) || '';
+}
+/* Static markup: translate text nodes and aria-label/title/placeholder/alt
+   whose trimmed value is a dictionary key. Run once at startup (and on any
+   subtree you build from an HTML string). */
+function localizeDom(root) {
+  if (LANG !== 'en') return;
+  root = root || document;
+  const walker = document.createTreeWalker(root.body || root, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const raw = n.nodeValue, key = raw.trim();
+    if (key && Object.prototype.hasOwnProperty.call(I18N_EN, key)) n.nodeValue = raw.replace(key, I18N_EN[key]);
+  }
+  for (const el of (root.querySelectorAll ? root : document).querySelectorAll('[aria-label],[title],[placeholder],[alt],[data-label]')) {
+    for (const a of ['aria-label', 'title', 'placeholder', 'alt', 'data-label']) {
+      const v = el.getAttribute(a);
+      if (v && Object.prototype.hasOwnProperty.call(I18N_EN, v.trim())) el.setAttribute(a, I18N_EN[v.trim()]);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(I18N_EN, document.title)) document.title = I18N_EN[document.title];
+}
+function setLang(lang) {
+  try { localStorage.setItem('iphone-use-lang', lang); } catch {}
+  document.cookie = `iphone_use_lang=${lang}; Path=/; Max-Age=31536000; SameSite=Lax`;
+  location.reload();
+}
+/* The script sits at the end of <body>, so the markup is parsed: localize it
+   before the first paint. */
+localizeDom();
+if (LANG === 'en') {
+  /* A multi-line paragraph, keyed by its lines joined. */
+  const flowNoteBody = document.querySelector('.flow-note-body');
+  if (flowNoteBody) flowNoteBody.textContent = t(flowNoteBody.textContent.trim().split(/\s*\n\s*/).join(''));
+  /* "退出" here means "Esc exits", not the Sign out button's "退出". */
+  const typingHintTail = document.getElementById('typingHint')?.lastChild;
+  if (typingHintTail && typingHintTail.nodeType === Node.TEXT_NODE) typingHintTail.nodeValue = ' to exit';
+}
+{
+  const btnLang = document.getElementById('btnLang');
+  const other = LANG === 'en' ? 'zh' : 'en';
+  const label = btnLang.querySelector('.lbl');
+  label.textContent = other === 'en' ? 'English' : '中文';
+  label.lang = other === 'en' ? 'en' : 'zh-CN';
+  btnLang.addEventListener('click', () => setLang(other));
+}
+
 /* ── Constants ────────────────────────────────────────────────── */
 const TAP_SLOP     = 10;
 const LONGPRESS_MS = 500;
@@ -1269,8 +1788,8 @@ function syncReconnectControl(kind = overlayState) {
   reconnectBtn.disabled = reconnectActionBusy;
   if (!reconnectActionBusy) {
     setTextIfChanged(reconnectBtn, kind === 'status-error'
-      ? '重新检查'
-      : (kind === 'released' ? '连接手机' : '重新连接'));
+      ? t('重新检查')
+      : (kind === 'released' ? t('连接手机') : t('重新连接')));
   }
 }
 if (reconnectBtn) reconnectBtn.onclick = async () => {
@@ -1278,7 +1797,7 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
   if (overlayState === 'status-error') {
     reconnectActionBusy = true;
     reconnectBtn.disabled = true;
-    reconnectBtn.textContent = '正在检查…';
+    reconnectBtn.textContent = t('正在检查…');
     cancelStatusPoll();
     try {
       await pollAgentMode();
@@ -1293,13 +1812,13 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
     backendStatus?.recovery_owner === 'external'
   ) {
     toast(backendStatus.recovery_owner === 'unconfigured'
-      ? '请先完成 iPhone 设备设置'
-      : '请在设备 runner 所在主机恢复服务');
+      ? t('请先完成 iPhone 设备设置')
+      : t('请在设备 runner 所在主机恢复服务'));
     return;
   }
   reconnectActionBusy = true;
   reconnectBtn.disabled = true;
-  reconnectBtn.textContent = '正在启动…';
+  reconnectBtn.textContent = t('正在启动…');
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
@@ -1325,7 +1844,7 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
       error.result = result;
       throw error;
     }
-    toast('设备正在启动');
+    toast(t('设备正在启动'));
     await pollAgentMode();
   } catch (error) {
     toast(recoveryFailureText(error?.result));
@@ -1404,22 +1923,22 @@ copySetupBtn.addEventListener('click', async () => {
     }
   }
   toast(copied
-    ? '命令已复制，请在这台 Mac 的终端运行'
-    : '请长按命令复制，然后在这台 Mac 的终端运行');
+    ? t('命令已复制，请在这台 Mac 的终端运行')
+    : t('请长按命令复制，然后在这台 Mac 的终端运行'));
 });
 
 function recoveryFailureText(result = {}) {
   switch (result.error) {
     case 'target_not_configured':
-      return '尚未选择 iPhone，请先运行设备设置';
+      return t('尚未选择 iPhone，请先运行设备设置');
     case 'wda_is_externally_managed':
-      return '设备 runner 由外部服务管理，请在来源主机恢复';
+      return t('设备 runner 由外部服务管理，请在来源主机恢复');
     case 'device_release_in_progress':
-      return '设备正在释放，请稍后再试';
+      return t('设备正在释放，请稍后再试');
     case 'reconnect_in_progress':
-      return '设备已经在重新连接';
+      return t('设备已经在重新连接');
     default:
-      return result.hint || '启动失败，请检查设备连接';
+      return result.hint || t('启动失败，请检查设备连接');
   }
 }
 
@@ -1427,43 +1946,43 @@ function setupBlockerCopy(blockedOn) {
   switch (blockedOn) {
     case 'warp':
       return [
-        'WARP 设备配置需要调整',
-        '若只需特定站点走 WARP，请管理员使用 Traffic only + Split Tunnels Include 目标 IP；全隧道模式则需排除 fe80::/10 与 fd00::/8',
+        t('WARP 设备配置需要调整'),
+        t('若只需特定站点走 WARP，请管理员使用 Traffic only + Split Tunnels Include 目标 IP；全隧道模式则需排除 fe80::/10 与 fd00::/8'),
       ];
     case 'proxy':
-      return ['系统代理不可用', '请启动代理应用，或关闭已失效的代理项；修复后会自动重试'];
+      return [t('系统代理不可用'), t('请启动代理应用，或关闭已失效的代理项；修复后会自动重试')];
     case 'not_connected':
-      return ['iPhone 没有连到这台 Mac', '用 USB 线插上 iPhone（或连到同一个 Wi-Fi）并解锁；手机回来后会自动重连'];
+      return [t('iPhone 没有连到这台 Mac'), t('用 USB 线插上 iPhone（或连到同一个 Wi-Fi）并解锁；手机回来后会自动重连')];
     case 'usb':
-      return ['请连接 iPhone', '请用 USB 连接并解锁这台 iPhone，保持亮屏；连接后会自动继续'];
+      return [t('请连接 iPhone'), t('请用 USB 连接并解锁这台 iPhone，保持亮屏；连接后会自动继续')];
     case 'trust':
-      return ['等待设备信任', '请在 iPhone 上信任开发者证书；完成后会自动继续'];
+      return [t('等待设备信任'), t('请在 iPhone 上信任开发者证书；完成后会自动继续')];
     case 'ddi':
-      return ['开发者服务未就绪', '请保持 USB、解锁和亮屏；设备准备完成后会自动继续'];
+      return [t('开发者服务未就绪'), t('请保持 USB、解锁和亮屏；设备准备完成后会自动继续')];
     case 'automation_mode_disabled':
-      return ['请开启 UI 自动化', '解锁 iPhone，打开 设置 › 开发者 › 启用 UI 自动化，并确认手机上的密码或“允许自动化”提示；稍候会自动重试'];
+      return [t('请开启 UI 自动化'), t('解锁 iPhone，打开 设置 › 开发者 › 启用 UI 自动化，并确认手机上的密码或“允许自动化”提示；稍候会自动重试')];
     case 'locked':
-      return ['请解锁 iPhone', '手机锁着屏，设备服务启动不了；解锁并保持亮屏后会自动接着连接'];
+      return [t('请解锁 iPhone'), t('手机锁着屏，设备服务启动不了；解锁并保持亮屏后会自动接着连接')];
     case 'locked_after_restart':
-      return ['iPhone 重启后还没解锁', '这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。'];
+      return [t('iPhone 重启后还没解锁'), t('这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。')];
     case 'needs_passcode_on_phone':
-      return ['需要有人在手机上输入密码', '手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。'];
+      return [t('需要有人在手机上输入密码'), t('手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。')];
     case 'automation_not_allowed':
-      return ['iPhone 没有授权 UI 自动化', 'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败；请解锁 iPhone、确认 设置 › 开发者 › 启用 UI 自动化 已打开，下次重试时完成这个提示；稍候会自动重试'];
+      return [t('iPhone 没有授权 UI 自动化'), t('runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败；请解锁 iPhone、确认 设置 › 开发者 › 启用 UI 自动化 已打开，下次重试时完成这个提示；稍候会自动重试')];
     case 'wifi_automation_refused':
-      return ['Wi-Fi 下无法授权 UI 自动化', '通过 Wi-Fi 时手机弹不出输密码的提示（有些 iOS 版本干脆拒绝）；请用 USB 连接这台 iPhone，并在它要求时输入密码。插上 USB 后会立刻重试；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB'];
+      return [t('Wi-Fi 下无法授权 UI 自动化'), t('通过 Wi-Fi 时手机弹不出输密码的提示（有些 iOS 版本干脆拒绝）；请用 USB 连接这台 iPhone，并在它要求时输入密码。插上 USB 后会立刻重试；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB')];
     case 'ios_too_old':
-      return ['这台 Mac 还驱动不了这台 iPhone 的系统', 'iOS 15 和 16 不用升级，但需要付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），配好后重新运行 iphone-use setup；iOS 14 及更早的系统只能升级手机；换线、重试和重连都解决不了'];
+      return [t('这台 Mac 还驱动不了这台 iPhone 的系统'), t('iOS 15 和 16 不用升级，但需要付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），配好后重新运行 iphone-use setup；iOS 14 及更早的系统只能升级手机；换线、重试和重连都解决不了')];
     case 'ddi_needs_reboot':
-      return ['请重启一次 iPhone', 'iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来；重启手机、解锁并保持插线后会自动接着连接'];
+      return [t('请重启一次 iPhone'), t('iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来；重启手机、解锁并保持插线后会自动接着连接')];
     case 'legacy_needs_usb':
-      return ['请用数据线连接 iPhone', '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi；插一次线并保持解锁，大约 20 秒连上；之后只要手机和这台 Mac 在同一网络就可以拔线（状态里 unplug_ok 为 true 时）'];
+      return [t('请用数据线连接 iPhone'), t('这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi；插一次线并保持解锁，大约 20 秒连上；之后只要手机和这台 Mac 在同一网络就可以拔线（状态里 unplug_ok 为 true 时）')];
     case 'xcode_too_old':
-      return ['Xcode 版本太旧', 'iPhone 的 iOS 比这台 Mac 上的 Xcode 新；请安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），再运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它；重试和重连都解决不了'];
+      return [t('Xcode 版本太旧'), t('iPhone 的 iOS 比这台 Mac 上的 Xcode 新；请安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），再运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它；重试和重连都解决不了')];
     case 'wda':
-      return ['设备服务启动失败', '请保持 USB、解锁和亮屏，然后重新运行下方设置命令'];
+      return [t('设备服务启动失败'), t('请保持 USB、解锁和亮屏，然后重新运行下方设置命令')];
     default:
-      return ['设备设置尚未完成', '请处理第一个阻塞项，然后重新运行下方设置命令'];
+      return [t('设备设置尚未完成'), t('请处理第一个阻塞项，然后重新运行下方设置命令')];
   }
 }
 
@@ -1514,21 +2033,22 @@ function managedSetupWillRetry(status) {
 function directHintText(status, fallback) {
   /* The daemon says what to do in one line (`next_step`), the same line the
      iOS app shows; the substring mapping below is for older daemons. */
-  const nextStep = String(status?.next_step?.zh || '');
+  const nextStep = pick(status?.next_step);
   if (nextStep) return nextStep;
   const hint = String(status?.hint || '');
   if (!hint) return fallback;
+  /* English mode shows the daemon's own English line for a known hint. */
   if (hint.includes('canonical iPhone target')) {
-    return '请连接、解锁并信任 iPhone，然后在这台 Mac 上完成首次设置';
+    return LANG === 'en' ? hint : '请连接、解锁并信任 iPhone，然后在这台 Mac 上完成首次设置';
   }
   if (hint.includes('externally managed')) {
-    return '请在设备 runner 所在主机恢复服务；本机不会接管或重启它';
+    return LANG === 'en' ? hint : '请在设备 runner 所在主机恢复服务；本机不会接管或重启它';
   }
   if (hint.includes('locked')) {
-    return '请解锁 iPhone 并保持亮屏，连接会自动恢复';
+    return LANG === 'en' ? hint : '请解锁 iPhone 并保持亮屏，连接会自动恢复';
   }
   if (hint.includes('start or repair WDA')) {
-    return '请运行下方状态检查，修复设备服务与 USB 中继';
+    return LANG === 'en' ? hint : '请运行下方状态检查，修复设备服务与 USB 中继';
   }
   // Server hints are diagnostic English for API callers. The Chinese UI must
   // not leak an unmapped internal message to the user.
@@ -1537,22 +2057,22 @@ function directHintText(status, fallback) {
 
 function updateSetupHelp(kind) {
   let command = '';
-  let label = '在这台 Mac 的终端运行';
+  let label = t('在这台 Mac 的终端运行');
   if (kind === 'unconfigured') {
     command = 'iphone-use setup';
-    label = '连接并解锁 iPhone 后，在这台 Mac 的终端运行';
+    label = t('连接并解锁 iPhone 后，在这台 Mac 的终端运行');
   } else if (
     kind === 'setup-blocked' &&
     !managedSetupWillRetry(backendStatus)
   ) {
     command = 'iphone-use setup';
-    label = '处理上面的阻塞项后，在这台 Mac 的终端运行';
+    label = t('处理上面的阻塞项后，在这台 Mac 的终端运行');
   } else if (
     kind === 'offline' &&
     backendStatus?.recovery_owner !== 'external'
   ) {
     command = 'iphone-use status';
-    label = '在这台 Mac 的终端检查设备服务';
+    label = t('在这台 Mac 的终端检查设备服务');
   }
   setupHelp.hidden = command.length === 0;
   setupHelp.inert = command.length === 0;
@@ -1609,24 +2129,24 @@ function showOverlay(kind) {
   offlineOverlay.dataset.kind = kind;
   syncReconnectControl(kind);
   if (kind === 'offline') {
-    setTextIfChanged(olTitle, '设备未连接');
+    setTextIfChanged(olTitle, t('设备未连接'));
     setTextIfChanged(olSub, directHintText(
       backendStatus,
-      '启动设备连接后即可查看并控制 iPhone',
+      t('启动设备连接后即可查看并控制 iPhone'),
     ));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'unconfigured') {
-    setTextIfChanged(olTitle, '尚未选择 iPhone');
+    setTextIfChanged(olTitle, t('尚未选择 iPhone'));
     setTextIfChanged(olSub, directHintText(
       backendStatus,
-      '请连接、解锁并信任 iPhone，然后在这台 Mac 上完成首次设置',
+      t('请连接、解锁并信任 iPhone，然后在这台 Mac 上完成首次设置'),
     ));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'external') {
-    setTextIfChanged(olTitle, '外部设备 runner 未连接');
+    setTextIfChanged(olTitle, t('外部设备 runner 未连接'));
     setTextIfChanged(olSub, directHintText(
       backendStatus,
-      '请在设备服务所在主机恢复设备 runner；本机不会擅自重启外部服务',
+      t('请在设备服务所在主机恢复设备 runner；本机不会擅自重启外部服务'),
     ));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'setup-blocked') {
@@ -1635,60 +2155,60 @@ function showOverlay(kind) {
     setTextIfChanged(olSub, detail);
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'status-error') {
-    setTextIfChanged(olTitle, '无法获取设备状态');
-    setTextIfChanged(olSub, '请检查服务是否正在运行，然后重试');
+    setTextIfChanged(olTitle, t('无法获取设备状态'));
+    setTextIfChanged(olSub, t('请检查服务是否正在运行，然后重试'));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'background') {
     const kept = directFeedActive;
-    setTextIfChanged(olTitle, kept ? '页面在后台 · 画面已暂停' : '页面在后台 · 画面已断开');
+    setTextIfChanged(olTitle, kept ? t('页面在后台 · 画面已暂停') : t('页面在后台 · 画面已断开'));
     setTextIfChanged(olSub, kept
-      ? '切回这个页面后立即恢复'
-      : '后台超过一段时间，已断开设备画面；切到前台后会自动重新连接');
+      ? t('切回这个页面后立即恢复')
+      : t('后台超过一段时间，已断开设备画面；切到前台后会自动重新连接'));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'resuming') {
-    setTextIfChanged(olTitle, '正在恢复画面');
-    setTextIfChanged(olSub, '页面回到前台，正在取最新一帧');
+    setTextIfChanged(olTitle, t('正在恢复画面'));
+    setTextIfChanged(olSub, t('页面回到前台，正在取最新一帧'));
   } else if (kind === 'released') {
     const handedOver = backendStatus?.human_handoff === true;
-    setTextIfChanged(olTitle, handedOver ? '手机已交还' : '设备空闲中');
+    setTextIfChanged(olTitle, handedOver ? t('手机已交还') : t('设备空闲中'));
     setTextIfChanged(olSub, handedOver
-      ? '手机在持有人手里，远程控制已停止。需要远程操作时点「连接手机」'
-      : '一段时间没人操作，设备连接已暂停。点「连接手机」继续（手机需解锁亮屏）');
+      ? t('手机在持有人手里，远程控制已停止。需要远程操作时点「连接手机」')
+      : t('一段时间没人操作，设备连接已暂停。点「连接手机」继续（手机需解锁亮屏）'));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'releasing') {
-    setTextIfChanged(olTitle, '正在释放设备');
-    setTextIfChanged(olSub, '正在确认设备连接已停止，请稍候');
+    setTextIfChanged(olTitle, t('正在释放设备'));
+    setTextIfChanged(olSub, t('正在确认设备连接已停止，请稍候'));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'locked') {
-    setTextIfChanged(olTitle, '手机不可用');
-    setTextIfChanged(olSub, '请解锁手机并保持唤醒，设备连接会自动恢复');
+    setTextIfChanged(olTitle, t('手机不可用'));
+    setTextIfChanged(olSub, t('请解锁手机并保持唤醒，设备连接会自动恢复'));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'blocked') {
-    setTextIfChanged(olTitle, '设备控制暂不可用');
+    setTextIfChanged(olTitle, t('设备控制暂不可用'));
     setTextIfChanged(olSub, directHintText(
       backendStatus,
-      '设备服务仍在线，但当前不能执行操作。请重新连接；若仍失败，在这台 Mac 上运行 iphone-use doctor',
+      t('设备服务仍在线，但当前不能执行操作。请重新连接；若仍失败，在这台 Mac 上运行 iphone-use doctor'),
     ));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'frame-stale') {
-    setTextIfChanged(olTitle, '画面已停滞');
-    setTextIfChanged(olSub, '当前显示的是最后一帧，已暂停控制；收到新画面后会自动恢复');
+    setTextIfChanged(olTitle, t('画面已停滞'));
+    setTextIfChanged(olSub, t('当前显示的是最后一帧，已暂停控制；收到新画面后会自动恢复'));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'outcome-unknown') {
-    setTextIfChanged(olTitle, '正在确认刚才的操作');
-    setTextIfChanged(olSub, '操作可能已经执行，正在等待新画面；确认前请勿重复操作');
+    setTextIfChanged(olTitle, t('正在确认刚才的操作'));
+    setTextIfChanged(olSub, t('操作可能已经执行，正在等待新画面；确认前请勿重复操作'));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'connecting') {
-    setTextIfChanged(olTitle, '正在连接设备画面');
-    setTextIfChanged(olSub, '控制服务已就绪，正在等待第一帧');
+    setTextIfChanged(olTitle, t('正在连接设备画面'));
+    setTextIfChanged(olSub, t('控制服务已就绪，正在等待第一帧'));
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'reconnecting') {
-    setTextIfChanged(olTitle, '正在重新连接设备');
-    setTextIfChanged(olSub, '正在恢复设备端控制服务，请稍候');
+    setTextIfChanged(olTitle, t('正在重新连接设备'));
+    setTextIfChanged(olSub, t('正在恢复设备端控制服务，请稍候'));
     offlineOverlay.classList.add('disconnected');
   } else {
-    setTextIfChanged(olTitle, '画面已停止');
-    setTextIfChanged(olSub, '设备画面暂时没有更新');
+    setTextIfChanged(olTitle, t('画面已停止'));
+    setTextIfChanged(olSub, t('设备画面暂时没有更新'));
   }
   offlineOverlay.hidden = false;
   offlineOverlay.inert = false;
@@ -1711,9 +2231,9 @@ function showOverlay(kind) {
       command.textContent =
         'curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh';
       updateText.replaceChildren(
-        document.createTextNode('新版本 '),
+        document.createTextNode(t('新版本 ')),
         latest,
-        document.createTextNode(` 可用(当前 v${String(s.version || '—')})— 升级:`),
+        document.createTextNode(t(' 可用(当前 v{version})— 升级:', { version: String(s.version || '—') })),
         command,
       );
       document.getElementById('updateBanner').classList.add('visible');
@@ -1730,19 +2250,19 @@ function showOverlay(kind) {
    nobody drives it. Only the two "will lock" verdicts are shown; the line is
    the daemon's own hint, so the page never words it differently. */
 const LOCK_NOTICE_TAGS = {
-  will_lock_needs_person: '会锁屏 · 需有人解锁',
-  will_lock_auto_unlocks: '会锁屏 · 可自动解锁',
+  will_lock_needs_person: t('会锁屏 · 需有人解锁'),
+  will_lock_auto_unlocks: t('会锁屏 · 可自动解锁'),
 };
 function lockNoticeFor(status) {
   const readiness = status?.lock_readiness;
   const verdict = String(readiness?.verdict || '');
   const tag = LOCK_NOTICE_TAGS[verdict];
   if (!tag) return null;
-  return { verdict, tag, text: String(readiness?.hint?.zh || '') };
+  return { verdict, tag, text: pick(readiness?.hint) };
 }
 const LOCK_BADGE_TEXT = {
-  will_lock_needs_person: '会锁屏',
-  will_lock_auto_unlocks: '会锁屏 · 自动解锁',
+  will_lock_needs_person: t('会锁屏'),
+  will_lock_auto_unlocks: t('会锁屏 · 自动解锁'),
 };
 function syncLockNotice(status) {
   const notice = document.getElementById('lockNotice');
@@ -1772,8 +2292,8 @@ function syncLockNotice(status) {
     label.className = 'badge-label';
     label.textContent = LOCK_BADGE_TEXT[shown.verdict] || shown.tag;
     lockBadge.append(label);
-    lockBadge.title = `${shown.tag}：${shown.text}`;
-    lockBadge.setAttribute('aria-label', `锁屏提示：${shown.tag}`);
+    lockBadge.title = t('{tag}：{text}', { tag: shown.tag, text: shown.text });
+    lockBadge.setAttribute('aria-label', t('锁屏提示：{tag}', { tag: shown.tag }));
     if (dismissed !== shown.verdict) notice.classList.add('visible');
   }
   lockBadge.setAttribute('aria-expanded', String(notice.classList.contains('visible')));
@@ -2174,7 +2694,7 @@ async function fetchStill(generation = stillsGeneration) {
       stillFrame.onload = () => setScreenAspect(stillFrame.naturalWidth, stillFrame.naturalHeight);
       stillFrame.src = next;
       if (!mjpegLive) stillFrame.classList.add('active');
-      olSub.textContent = '设备实时画面暂不可用 — 每 2.5 秒刷新，仍可点按操作';
+      olSub.textContent = t('设备实时画面暂不可用 — 每 2.5 秒刷新，仍可点按操作');
       syncDirectFrameFreshness();
     }
   } catch (_) {
@@ -2536,7 +3056,7 @@ function startMjpegAttempt(generation) {
   }
   if (!h264Disabled) {
     startH264Attempt(generation, mjpegStreamId);
-    if (!stillsUrl) olSub.textContent = '设备实时画面正在连接…';
+    if (!stillsUrl) olSub.textContent = t('设备实时画面正在连接…');
     return;
   }
   mjpegFrame.onload = () => mjpegReady(generation);
@@ -2547,7 +3067,7 @@ function startMjpegAttempt(generation) {
   // as the authoritative readiness signal and bound a silent TCP connection.
   mjpegProbeTimer = setInterval(() => mjpegReady(generation), 200);
   mjpegConnectTimer = setTimeout(() => mjpegFailed(generation), 8000);
-  if (!stillsUrl) olSub.textContent = '设备实时画面正在连接…';
+  if (!stillsUrl) olSub.textContent = t('设备实时画面正在连接…');
 }
 function startStills() {
   if (directFeedActive) return;
@@ -2608,31 +3128,31 @@ function hideOverlay() {
 /* ── Status line ──────────────────────────────────────────────── */
 function setStatus(msg) { setTextIfChanged(statusLine, msg); }
 function updateStatusLine() {
-  if (overlayState === 'status-error') { setStatus('无法获取设备状态'); return; }
-  if (!backendStatus) { setStatus('正在获取设备状态…'); return; }
-  if (backendStatus.reconnecting === true) { setStatus('正在重新连接设备…'); return; }
-  if (backendStatus.releasing === true) { setStatus('正在释放设备…'); return; }
-  if (backendStatus.released === true) { setStatus('设备已释放'); return; }
+  if (overlayState === 'status-error') { setStatus(t('无法获取设备状态')); return; }
+  if (!backendStatus) { setStatus(t('正在获取设备状态…')); return; }
+  if (backendStatus.reconnecting === true) { setStatus(t('正在重新连接设备…')); return; }
+  if (backendStatus.releasing === true) { setStatus(t('正在释放设备…')); return; }
+  if (backendStatus.released === true) { setStatus(t('设备已释放')); return; }
   if (backendStatus.drivable !== true) {
     switch (directUnavailableKind(backendStatus)) {
-      case 'locked': setStatus('设备不可用 · 请解锁'); break;
-      case 'setup-blocked': setStatus('设备设置被阻塞'); break;
-      case 'unconfigured': setStatus('尚未选择 iPhone'); break;
-      case 'external': setStatus('外部设备 runner 未连接'); break;
-      case 'blocked': setStatus('设备控制暂不可用'); break;
-      default: setStatus('设备未连接');
+      case 'locked': setStatus(t('设备不可用 · 请解锁')); break;
+      case 'setup-blocked': setStatus(t('设备设置被阻塞')); break;
+      case 'unconfigured': setStatus(t('尚未选择 iPhone')); break;
+      case 'external': setStatus(t('外部设备 runner 未连接')); break;
+      case 'blocked': setStatus(t('设备控制暂不可用')); break;
+      default: setStatus(t('设备未连接'));
     }
     return;
   }
   if (directVisualEvidenceRequiredAfter !== null) {
-    setStatus('操作结果待确认 · 等待新画面');
+    setStatus(t('操作结果待确认 · 等待新画面'));
     return;
   }
   if (!hasFreshDirectFrame()) {
-    setStatus(directFrameSeen ? '设备在线 · 画面停滞' : '设备在线 · 等待画面');
+    setStatus(directFrameSeen ? t('设备在线 · 画面停滞') : t('设备在线 · 等待画面'));
     return;
   }
-  setStatus('已连接 · 可以操作');
+  setStatus(t('已连接 · 可以操作'));
 }
 
 /* ── Wake Lock [iOS §Wake Lock] ───────────────────────────────── */
@@ -2783,21 +3303,24 @@ function controlResult(ok, failure = null) {
 }
 function controlFailureText(result, fallback) {
   if (result && result.failure === 'stale_element_snapshot') {
-    return '控件列表已变化，请重新选择';
+    return t('控件列表已变化，请重新选择');
   }
   if (result && result.failure === 'invalid_element_snapshot') {
-    return '这个控件当前不可操作，请刷新列表';
+    return t('这个控件当前不可操作，请刷新列表');
   }
   if (result && result.failure === 'outcome_unknown') {
-    return '操作结果未知，请先查看画面再重试';
+    return t('操作结果未知，请先查看画面再重试');
   }
   if (result && result.failure === 'not_sent') {
-    return '操作未发送，设备连接未就绪';
+    return t('操作未发送，设备连接未就绪');
   }
   if (result && result.failure === 'phone_owned') {
     const owner = lastOwnerRefusal?.owner;
     const left = Number(lastOwnerRefusal?.owner_lease_remaining_secs);
-    return `手机正被${owner ? ` ${owner} ` : '其他会话'}使用，操作没有发出${Number.isFinite(left) && left > 0 ? `；约 ${left} 秒后可用` : ''}`;
+    const wait = Number.isFinite(left) && left > 0 ? t('；约 {left} 秒后可用', { left }) : '';
+    return owner
+      ? t('手机正被 {owner} 使用，操作没有发出{wait}', { owner, wait })
+      : t('手机正被其他会话使用，操作没有发出{wait}', { wait });
   }
   return fallback;
 }
@@ -2831,7 +3354,7 @@ function stopFlowRecordingForConnectionChange() {
   flowCheckpointSession++;
   flowLastObservation = null;
   renderRecordedFlow();
-  toast('设备连接已变化，流程录制已停止，请先审核现有步骤');
+  toast(t('设备连接已变化，流程录制已停止，请先审核现有步骤'));
 }
 /* `background: true` — the page only went to the background: input pauses, but
    a recording survives a quick switch to another window. The return path
@@ -3178,7 +3701,7 @@ function onPointerUp(e) {
   if (!directGestureIsCurrent(pd)) {
     fadeTrail(true);
     if (pd.directReadyAtDown === false && coords && dist <= TAP_SLOP) {
-      toast(overlayState === 'hidden' ? '设备连接未就绪' : setupBlockerToastText());
+      toast(overlayState === 'hidden' ? t('设备连接未就绪') : setupBlockerToastText());
     }
     return;
   }
@@ -3204,7 +3727,7 @@ function onPointerUp(e) {
       type:'longpress', x:b.nx, y:b.ny,
       duration_ms: pd.secondary ? 800 : Math.max(600, Math.min(10_000, Math.round(dt))),
     };
-    feedback = '长按';
+    feedback = t('长按');
   } else if (b && gesture === 'tap') {
     action = { type:'tap', x:b.nx, y:b.ny };
   }
@@ -3215,7 +3738,7 @@ function onPointerUp(e) {
     if (!result.ok) {
       ripple?.fail();
       fadeTrail(true);
-      toast(controlFailureText(result, '操作失败，设备未连接'));
+      toast(controlFailureText(result, t('操作失败，设备未连接')));
       return;
     }
     ripple?.ok();
@@ -3232,7 +3755,7 @@ function onPointerCancel(e) {
   touchCursor.classList.remove('down');
 }
 function setupBlockerToastText() {
-  return olTitle.textContent || '设备连接未就绪';
+  return olTitle.textContent || t('设备连接未就绪');
 }
 
 /* ── Wheel / trackpad → scroll ───────────────────────────────────
@@ -3273,7 +3796,7 @@ async function flushWheel() {
   wheel.inflight = true;
   try {
     const result = await sendControl(action);
-    if (!result.ok) toast(controlFailureText(result, '滚动失败，设备未连接'));
+    if (!result.ok) toast(controlFailureText(result, t('滚动失败，设备未连接')));
   } finally {
     wheel.inflight = false;
   }
@@ -3334,7 +3857,7 @@ async function pumpTypeOps() {
       typeOps.shift();
       if (!result.ok) {
         typeOps.length = 0;
-        toast(controlFailureText(result, '输入没有送到手机，请点一下手机上的输入框后重试'));
+        toast(controlFailureText(result, t('输入没有送到手机，请点一下手机上的输入框后重试')));
         break;
       }
     }
@@ -3380,14 +3903,14 @@ keyCatcher.addEventListener('keydown', e => {
 });
 function sendPastedText(text) {
   const clean = String(text || '').replace(/\r\n?/g, '\n');
-  if (!clean) { toast('剪贴板里没有文字'); return; }
-  if (!directControlReady) { toast('设备连接未就绪，暂时不能粘贴'); return; }
+  if (!clean) { toast(t('剪贴板里没有文字')); return; }
+  if (!directControlReady) { toast(t('设备连接未就绪，暂时不能粘贴')); return; }
   const clipped = clean.slice(0, 1000);
   queueTypeOp({ text: clipped });
   flushTypeOps();
   toast(clipped.length < clean.length
-    ? `已粘贴前 1000 个字（共 ${clean.length} 个）`
-    : `已粘贴 ${clipped.length} 个字`);
+    ? t('已粘贴前 1000 个字（共 {total} 个）', { total: clean.length })
+    : t('已粘贴 {count} 个字', { count: clipped.length }));
 }
 keyCatcher.addEventListener('paste', e => {
   e.preventDefault();
@@ -3412,50 +3935,54 @@ function roundedFlowCoord(value) {
 function flowStepPresentation(step) {
   switch (step.kind) {
     case 'tap_label':
-      return [`点按「${step.label}」`, '稳定标签'];
+      return [t('点按「{label}」', { label: step.label }), t('稳定标签')];
     case 'tap_locator': {
       const locator = step.locator || {};
       const target = locator.identifier
-        ? `控件 ${locator.identifier}`
+        ? t('控件 {id}', { id: locator.identifier })
         : locator.label
-          ? `「${locator.label}」`
+          ? t('「{label}」', { label: locator.label })
           : locator.kind
             ? locator.kind
-            : '语义控件';
-      return [`点按 ${target}`, '稳定定位条件'];
+            : t('语义控件');
+      return [t('点按 {target}', { target }), t('稳定定位条件')];
     }
     case 'tap':
-      return ['点按画面坐标', `x ${step.x} · y ${step.y}`];
+      return [t('点按画面坐标'), `x ${step.x} · y ${step.y}`];
     case 'longpress':
-      return ['长按画面', `x ${step.x} · y ${step.y} · ${step.duration_ms}ms`];
+      return [t('长按画面'), `x ${step.x} · y ${step.y} · ${step.duration_ms}ms`];
     case 'swipe':
-      return ['滑动画面', `${step.x1},${step.y1} → ${step.x2},${step.y2}`];
+      return [t('滑动画面'), `${step.x1},${step.y1} → ${step.x2},${step.y2}`];
     case 'drag':
-      return ['长按拖动', `${step.x1},${step.y1} → ${step.x2},${step.y2}`];
+      return [t('长按拖动'), `${step.x1},${step.y1} → ${step.x2},${step.y2}`];
     case 'shortcut':
-      return [step.name === 'home' ? '返回主屏幕' : '打开搜索', `快捷操作 · ${step.name}`];
+      return [step.name === 'home' ? t('返回主屏幕') : t('打开搜索'), t('快捷操作 · {name}', { name: step.name })];
     case 'scroll':
-      return ['滚动画面', `dx ${step.dx} · dy ${step.dy}`];
+      return [t('滚动画面'), `dx ${step.dx} · dy ${step.dy}`];
     case 'key':
-      return [`按键 ${step.name}`, '设备按键'];
+      return [t('按键 {name}', { name: step.name }), t('设备按键')];
     case 'back':
-      return ['返回上一层', '应用内导航'];
+      return [t('返回上一层'), t('应用内导航')];
     case 'alert':
       return [
-        step.button ? `系统弹窗按「${step.button}」` : `系统弹窗 ${step.action === 'accept' ? '确认' : '取消'}`,
-        '原生 alert 路径 · 无弹窗时不动作',
+        step.button
+          ? t('系统弹窗按「{button}」', { button: step.button })
+          : (step.action === 'accept' ? t('系统弹窗 确认') : t('系统弹窗 取消')),
+        t('原生 alert 路径 · 无弹窗时不动作'),
       ];
     case 'launch_app':
-      return ['打开指定应用', step.bundle];
+      return [t('打开指定应用'), step.bundle];
     case 'picker':
-      return [`选择「${step.value}」`, `第 ${Number(step.column || 0) + 1} 列选择器`];
+      return [t('选择「{value}」', { value: step.value }), t('第 {n} 列选择器', { n: Number(step.column || 0) + 1 })];
     case 'pause':
-      return [`等待 ${step.ms}ms`, '固定等待 · 建议优先使用界面检查点'];
+      return [t('等待 {ms}ms', { ms: step.ms }), t('固定等待 · 建议优先使用界面检查点')];
     case 'type': {
       const input = recordedFlowInputs.find(candidate => candidate.key === step.input);
       return [
-        `输入「${input?.label || step.input || '运行参数'}」`,
-        `运行参数 · ${step.input}${step.clear ? ' · 先清空' : ''}`,
+        t('输入「{label}」', { label: input?.label || step.input || t('运行参数') }),
+        step.clear
+          ? t('运行参数 · {input} · 先清空', { input: step.input })
+          : t('运行参数 · {input}', { input: step.input }),
       ];
     }
     case 'wait_for': {
@@ -3464,17 +3991,20 @@ function flowStepPresentation(step) {
       const absentLocator = Array.isArray(expected.absent) ? expected.absent[0] : null;
       const locator = presentLocator || absentLocator;
       const target = locator?.identifier
-        ? `控件 ${locator.identifier}`
+        ? t('控件 {id}', { id: locator.identifier })
         : locator?.label
-          ? `「${locator.label}」`
+          ? t('「{label}」', { label: locator.label })
           : expected.application
-            ? `应用「${expected.application}」`
-            : '目标界面';
-      const change = absentLocator && !presentLocator ? '消失' : '出现';
-      return [`等待 ${target} ${change}`, `界面检查点 · 最长 ${step.timeout_ms || 5000}ms`];
+            ? t('应用「{app}」', { app: expected.application })
+            : t('目标界面');
+      const gone = absentLocator && !presentLocator;
+      return [
+        gone ? t('等待 {target} 消失', { target }) : t('等待 {target} 出现', { target }),
+        t('界面检查点 · 最长 {ms}ms', { ms: step.timeout_ms || 5000 }),
+      ];
     }
     default:
-      return [step.kind, '已录制步骤'];
+      return [step.kind, t('已录制步骤')];
   }
 }
 
@@ -3507,7 +4037,7 @@ function syncFlowParameterState() {
     excludedUnrecordedActions > 0
   ) return;
   const missing = missingFlowInputs().length;
-  flowState.textContent = missing ? `等待填写 ${missing} 个运行参数` : '等待审核';
+  flowState.textContent = missing ? t('等待填写 {n} 个运行参数', { n: missing }) : t('等待审核');
 }
 
 function renderFlowInputs() {
@@ -3531,7 +4061,7 @@ function renderFlowInputs() {
     field.maxLength = 1000;
     field.autocomplete = 'off';
     field.spellcheck = false;
-    field.placeholder = '填写本次运行使用的文字';
+    field.placeholder = t('填写本次运行使用的文字');
     field.value = flowInputValues.get(input.key) || '';
     field.disabled = flowRunning || flowRecording || flowStarting || flowFinalizing;
     field.addEventListener('input', () => {
@@ -3571,8 +4101,8 @@ function renderRecordedFlow() {
     title.textContent = titleText;
     meta.textContent = [
       metaText,
-      entry.fragile ? '易受布局变化影响' : '',
-      entry.checkpointMiss ? '未找到可靠检查点，保留 350ms 等待' : '',
+      entry.fragile ? t('易受布局变化影响') : '',
+      entry.checkpointMiss ? t('未找到可靠检查点，保留 350ms 等待') : '',
     ].filter(Boolean).join(' · ');
     copy.append(title, meta);
 
@@ -3583,7 +4113,7 @@ function renderRecordedFlow() {
     const up = document.createElement('button');
     up.type = 'button';
     up.className = 'flow-step-button';
-    up.textContent = '上移';
+    up.textContent = t('上移');
     up.disabled =
       entry.checkpoint ||
       index === 0 ||
@@ -3592,8 +4122,8 @@ function renderRecordedFlow() {
     up.setAttribute(
       'aria-label',
       pairedCheckpoint
-        ? `上移第 ${index + 1} 步及其检查点`
-        : `上移第 ${index + 1} 步`,
+        ? t('上移第 {n} 步及其检查点', { n: index + 1 })
+        : t('上移第 {n} 步', { n: index + 1 }),
     );
     up.addEventListener('click', () => {
       if (
@@ -3617,13 +4147,13 @@ function renderRecordedFlow() {
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'flow-step-button';
-    remove.textContent = '删除';
+    remove.textContent = t('删除');
     remove.disabled = flowRunning || flowCheckpointPending > 0;
     remove.setAttribute(
       'aria-label',
       pairedCheckpoint
-        ? `删除第 ${index + 1} 步及其检查点`
-        : `删除第 ${index + 1} 步`,
+        ? t('删除第 {n} 步及其检查点', { n: index + 1 })
+        : t('删除第 {n} 步', { n: index + 1 }),
     );
     remove.addEventListener('click', () => {
       if (flowRunning || flowCheckpointPending > 0) return;
@@ -3649,53 +4179,55 @@ function renderRecordedFlow() {
   const incomplete = excludedUnrecordedActions;
   const missingInputs = missingFlowInputs().length;
   flowEmpty.hidden = count > 0;
-  flowCount.textContent = `${count} / 24 步`;
-  recordingPill.textContent = `录制中 · ${count} 步${flowCheckpointPending ? ' · 检查中' : ''}`;
+  flowCount.textContent = t('{count} / 24 步', { count });
+  recordingPill.textContent = flowCheckpointPending
+    ? t('录制中 · {count} 步 · 检查中', { count })
+    : t('录制中 · {count} 步', { count });
   recordingPill.hidden = !flowRecording;
   flowState.textContent = flowRunning
-    ? '正在运行全部步骤'
+    ? t('正在运行全部步骤')
     : flowStarting
-      ? '正在建立语义基线'
+      ? t('正在建立语义基线')
       : flowFinalizing
-        ? '正在完成最后一个检查点'
+        ? t('正在完成最后一个检查点')
     : flowRecording
-      ? `正在录制${flowCheckpointPending ? ' · 正在生成检查点' : ''}${incomplete ? ` · ${incomplete} 个动作未录入` : ''}`
+      ? t('正在录制') + (flowCheckpointPending ? t(' · 正在生成检查点') : '') + (incomplete ? t(' · {n} 个动作未录入', { n: incomplete }) : '')
       : count
         ? incomplete
-          ? `流程不完整 · ${incomplete} 个动作未录入`
+          ? t('流程不完整 · {n} 个动作未录入', { n: incomplete })
           : missingInputs
-            ? `等待填写 ${missingInputs} 个运行参数`
-          : '等待审核'
-        : '尚未录制';
+            ? t('等待填写 {n} 个运行参数', { n: missingInputs })
+          : t('等待审核')
+        : t('尚未录制');
   flowRecord.textContent = flowStarting
-    ? '正在准备…'
+    ? t('正在准备…')
     : flowFinalizing
-      ? '正在完成…'
+      ? t('正在完成…')
       : flowRecording
-        ? '停止录制并审核'
+        ? t('停止录制并审核')
         : count
-          ? '继续录制'
-          : '开始录制';
+          ? t('继续录制')
+          : t('开始录制');
   flowRecord.classList.toggle('recording', flowRecording);
   flowRecord.classList.toggle('primary', !flowRecording && count === 0);
-  flowDownload.textContent = incomplete ? '保存草稿' : '保存脚本';
+  flowDownload.textContent = incomplete ? t('保存草稿') : t('保存脚本');
   syncFlowControls();
 }
 
 function flowUnavailableCopy() {
-  if (backendStatus?.next_step?.zh && backendStatus?.drivable !== true) {
-    return backendStatus.next_step.zh;
+  if (pick(backendStatus?.next_step) && backendStatus?.drivable !== true) {
+    return pick(backendStatus.next_step);
   }
   if (backendStatus?.setup_blocked_on === 'usb') {
-    return '目标 iPhone 尚未通过 USB 连接。连接、解锁并保持亮屏后，这里会自动恢复。';
+    return t('目标 iPhone 尚未通过 USB 连接。连接、解锁并保持亮屏后，这里会自动恢复。');
   }
   if (backendStatus?.setup_blocked_on === 'trust') {
-    return '请在 iPhone 上完成信任确认并保持解锁；完成后这里会自动恢复。';
+    return t('请在 iPhone 上完成信任确认并保持解锁；完成后这里会自动恢复。');
   }
   if (backendStatus?.drivable === true) {
-    return '正在等待最新手机画面；画面出现后即可录制或运行。';
+    return t('正在等待最新手机画面；画面出现后即可录制或运行。');
   }
-  return '设备控制尚未就绪；恢复连接后即可录制或运行流程。';
+  return t('设备控制尚未就绪；恢复连接后即可录制或运行流程。');
 }
 
 function syncFlowControls() {
@@ -3713,7 +4245,7 @@ function syncFlowControls() {
   flowSafetyGate.hidden = !hasSteps;
   flowOpen.hidden = !showOpen;
   flowOpen.disabled = flowImportBusy;
-  flowOpen.textContent = flowImportBusy ? '正在打开…' : '打开脚本';
+  flowOpen.textContent = flowImportBusy ? t('正在打开…') : t('打开脚本');
   flowOpen.classList.toggle('primary', showOpen && !drivable);
   flowRecord.classList.toggle('wide', !showOpen);
   flowDownload.hidden = !hasSteps;
@@ -3746,7 +4278,7 @@ function addRecordedFlowStep(step, { fragile = false, checkpoint = false } = {})
   if (!flowRecording) return;
   if (recordedFlowSteps.length >= 24) {
     flowRecording = false;
-    toast('已达到 24 步上限，录制已停止，请打开「流程」审核');
+    toast(t('已达到 24 步上限，录制已停止，请打开「流程」审核'));
     renderRecordedFlow();
     return null;
   }
@@ -3954,8 +4486,8 @@ function recordSuccessfulControl(action) {
     const inputNumber = flowInputSequence;
     recordedFlowInputs.push({
       key,
-      label: `文字参数 ${inputNumber}`,
-      description: `录制时第 ${inputNumber} 个文字输入；值仅在每次运行时提供。`,
+      label: t('文字参数 {n}', { n: inputNumber }),
+      description: t('录制时第 {n} 个文字输入；值仅在每次运行时提供。', { n: inputNumber }),
     });
     flowInputValues.set(key, '');
     const entry = addRecordedFlowStep({
@@ -3979,7 +4511,7 @@ function recordSuccessfulControl(action) {
     flowLastObservation = null;
     flowSafety.checked = false;
     renderRecordedFlow();
-    toast('这个控件没有稳定标签：操作已执行，但没有写入流程');
+    toast(t('这个控件没有稳定标签：操作已执行，但没有写入流程'));
     return;
   } else if (action.type === 'tap') {
     entry = addRecordedFlowStep({
@@ -4028,13 +4560,13 @@ function recordSuccessfulControl(action) {
 }
 
 function flowDocument() {
-  const safeName = flowName.value.trim().slice(0, 100) || '未命名流程';
+  const safeName = flowName.value.trim().slice(0, 100) || t('未命名流程');
   const omitted = excludedUnrecordedActions;
   const description = omitted
-    ? `由 iphone-use 流程录制生成；有 ${omitted} 个动作未写入，当前仅为不完整草稿，补齐并审核后才能运行。`
+    ? t('由 iphone-use 流程录制生成；有 {n} 个动作未写入，当前仅为不完整草稿，补齐并审核后才能运行。', { n: omitted })
     : recordedFlowInputs.length
-      ? '由 iphone-use 流程录制生成；文字保存为运行参数，不包含录制时输入的原文。执行前请填写参数并逐项审核。'
-      : '由 iphone-use 流程录制生成；已自动建议语义检查点，执行前请逐项审核。';
+      ? t('由 iphone-use 流程录制生成；文字保存为运行参数，不包含录制时输入的原文。执行前请填写参数并逐项审核。')
+      : t('由 iphone-use 流程录制生成；已自动建议语义检查点，执行前请逐项审核。');
   const document = {
     version: 1,
     name: safeName,
@@ -4098,13 +4630,13 @@ function requireFlow(condition, message) {
 }
 
 function requireFlowKeys(value, required, optional, context) {
-  requireFlow(flowPlainObject(value), `${context} 必须是对象`);
+  requireFlow(flowPlainObject(value), t('{context} 必须是对象', { context }));
   const allowed = new Set([...required, ...optional]);
   for (const key of required) {
-    requireFlow(Object.prototype.hasOwnProperty.call(value, key), `${context} 缺少 ${key}`);
+    requireFlow(Object.prototype.hasOwnProperty.call(value, key), t('{context} 缺少 {key}', { context, key }));
   }
   for (const key of Object.keys(value)) {
-    requireFlow(allowed.has(key), `${context} 包含未知字段 ${key}`);
+    requireFlow(allowed.has(key), t('{context} 包含未知字段 {key}', { context, key }));
   }
 }
 
@@ -4117,21 +4649,21 @@ function requireFlowString(value, context, {
   max,
   trim = true,
 } = {}) {
-  requireFlow(typeof value === 'string', `${context} 必须是文字`);
+  requireFlow(typeof value === 'string', t('{context} 必须是文字', { context }));
   const count = flowCharacterCount(value);
   const meaningful = trim ? value.trim().length > 0 : count >= min;
-  requireFlow(meaningful && count >= min, `${context} 不能为空`);
+  requireFlow(meaningful && count >= min, t('{context} 不能为空', { context }));
   if (max !== undefined) {
-    requireFlow(count <= max, `${context} 不能超过 ${max} 个字符`);
+    requireFlow(count <= max, t('{context} 不能超过 {max} 个字符', { context, max }));
   }
-  requireFlow(!/\p{Cc}/u.test(value), `${context} 不能包含控制字符`);
+  requireFlow(!/\p{Cc}/u.test(value), t('{context} 不能包含控制字符', { context }));
   return value;
 }
 
 function requireFlowInteger(value, min, max, context) {
   requireFlow(
     Number.isInteger(value) && value >= min && value <= max,
-    `${context} 必须是 ${min}–${max} 的整数`,
+    t('{context} 必须是 {min}–{max} 的整数', { context, min, max }),
   );
   return value;
 }
@@ -4139,7 +4671,7 @@ function requireFlowInteger(value, min, max, context) {
 function requireFlowNumber(value, min, max, context) {
   requireFlow(
     typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max,
-    `${context} 必须是 ${min}–${max} 的数字`,
+    t('{context} 必须是 {min}–{max} 的数字', { context, min, max }),
   );
   return value;
 }
@@ -4154,7 +4686,7 @@ function normalizeImportedLocator(locator, context) {
   const stringFields = ['label', 'identifier', 'kind', 'value'];
   const booleanFields = ['focused', 'enabled', 'visible'];
   requireFlowKeys(locator, [], [...stringFields, ...booleanFields], context);
-  requireFlow(Object.keys(locator).length > 0, `${context} 至少需要一个定位条件`);
+  requireFlow(Object.keys(locator).length > 0, t('{context} 至少需要一个定位条件', { context }));
   const normalized = {};
   for (const field of stringFields) {
     if (!Object.prototype.hasOwnProperty.call(locator, field)) continue;
@@ -4163,7 +4695,7 @@ function normalizeImportedLocator(locator, context) {
   }
   for (const field of booleanFields) {
     if (!Object.prototype.hasOwnProperty.call(locator, field)) continue;
-    requireFlow(typeof locator[field] === 'boolean', `${context}.${field} 必须是 true 或 false`);
+    requireFlow(typeof locator[field] === 'boolean', t('{context} 必须是 true 或 false', { context: `${context}.${field}` }));
     normalized[field] = locator[field];
   }
   return normalized;
@@ -4181,20 +4713,20 @@ function normalizeImportedExpectation(expect, context) {
   }
   for (const field of ['present', 'absent']) {
     if (!Object.prototype.hasOwnProperty.call(expect, field)) continue;
-    requireFlow(Array.isArray(expect[field]), `${context}.${field} 必须是数组`);
+    requireFlow(Array.isArray(expect[field]), t('{context} 必须是数组', { context: `${context}.${field}` }));
     normalized[field] = expect[field].map((locator, index) =>
       normalizeImportedLocator(locator, `${context}.${field}[${index}]`));
   }
   const hasLocator =
     (normalized.present?.length || 0) > 0 ||
     (normalized.absent?.length || 0) > 0;
-  requireFlow(normalized.application || hasLocator, `${context} 至少需要一个界面条件`);
+  requireFlow(normalized.application || hasLocator, t('{context} 至少需要一个界面条件', { context }));
   return normalized;
 }
 
 function normalizeImportedStep(step, index, inputDefinitions) {
-  const context = `第 ${index + 1} 步`;
-  requireFlow(flowPlainObject(step), `${context} 必须是对象`);
+  const context = t('第 {n} 步', { n: index + 1 });
+  requireFlow(flowPlainObject(step), t('{context} 必须是对象', { context }));
   const kind = requireFlowString(step.kind, `${context}.kind`, { max: 40 });
   const withAfter = (required, optional = []) =>
     requireFlowKeys(step, ['kind', ...required], [...optional, 'after_ms'], context);
@@ -4234,7 +4766,7 @@ function normalizeImportedStep(step, index, inputDefinitions) {
       const y1 = requireFlowNumber(step.y1, 0, 1, `${context}.y1`);
       const x2 = requireFlowNumber(step.x2, 0, 1, `${context}.x2`);
       const y2 = requireFlowNumber(step.y2, 0, 1, `${context}.y2`);
-      requireFlow(x1 !== x2 || y1 !== y2, `${context} 的起点和终点不能相同`);
+      requireFlow(x1 !== x2 || y1 !== y2, t('{context} 的起点和终点不能相同', { context }));
       const normalized = {
         x1, y1, x2, y2,
         duration_ms: Object.prototype.hasOwnProperty.call(step, 'duration_ms')
@@ -4261,13 +4793,13 @@ function normalizeImportedStep(step, index, inputDefinitions) {
     case 'type': {
       requireFlow(
         !Object.prototype.hasOwnProperty.call(step, 'text'),
-        `${context} 写死了文字；请改用 input 运行参数，避免把隐私保存进脚本`,
+        t('{context} 写死了文字；请改用 input 运行参数，避免把隐私保存进脚本', { context }),
       );
       withAfter(['input'], ['clear']);
       const input = requireFlowString(step.input, `${context}.input`, { max: 64 });
-      requireFlow(inputDefinitions.has(input), `${context} 引用了未定义参数 ${input}`);
+      requireFlow(inputDefinitions.has(input), t('{context} 引用了未定义参数 {input}', { context, input }));
       if (Object.prototype.hasOwnProperty.call(step, 'clear')) {
-        requireFlow(typeof step.clear === 'boolean', `${context}.clear 必须是 true 或 false`);
+        requireFlow(typeof step.clear === 'boolean', t('{context} 必须是 true 或 false', { context: `${context}.clear` }));
       }
       return finishAction({ input, clear: Boolean(step.clear) });
     }
@@ -4275,21 +4807,21 @@ function normalizeImportedStep(step, index, inputDefinitions) {
       withAfter(['name']);
       const name = requireFlowString(step.name, `${context}.name`, { max: 20 })
         .trim().toLowerCase();
-      requireFlow(FLOW_KEY_NAMES.has(name), `${context} 使用了不支持的按键 ${name}`);
+      requireFlow(FLOW_KEY_NAMES.has(name), t('{context} 使用了不支持的按键 {name}', { context, name }));
       return finishAction({ name });
     }
     case 'shortcut': {
       withAfter(['name']);
       const name = requireFlowString(step.name, `${context}.name`, { max: 20 })
         .trim().toLowerCase();
-      requireFlow(name === 'home' || name === 'spotlight', `${context} 使用了不支持的快捷操作 ${name}`);
+      requireFlow(name === 'home' || name === 'spotlight', t('{context} 使用了不支持的快捷操作 {name}', { context, name }));
       return finishAction({ name });
     }
     case 'scroll': {
       withAfter(['x', 'y', 'dx', 'dy']);
       const dx = requireFlowNumber(step.dx, -1000, 1000, `${context}.dx`);
       const dy = requireFlowNumber(step.dy, -1000, 1000, `${context}.dy`);
-      requireFlow(dx !== 0 || dy !== 0, `${context} 的滚动距离不能全为 0`);
+      requireFlow(dx !== 0 || dy !== 0, t('{context} 的滚动距离不能全为 0', { context }));
       return finishAction({
         x: requireFlowNumber(step.x, 0, 1, `${context}.x`),
         y: requireFlowNumber(step.y, 0, 1, `${context}.y`),
@@ -4302,7 +4834,7 @@ function normalizeImportedStep(step, index, inputDefinitions) {
       const bundle = requireFlowString(step.bundle, `${context}.bundle`, { max: 200 });
       requireFlow(
         new TextEncoder().encode(bundle).length <= 200 && /^[A-Za-z0-9.-]+$/.test(bundle),
-        `${context}.bundle 必须是合法的应用标识`,
+        t('{context} 必须是合法的应用标识', { context: `${context}.bundle` }),
       );
       return finishAction({ bundle });
     }
@@ -4313,11 +4845,11 @@ function normalizeImportedStep(step, index, inputDefinitions) {
       withAfter([], ['button', 'action']);
       const hasButton = step.button !== undefined;
       const hasAction = step.action !== undefined;
-      requireFlow(hasButton !== hasAction, `${context} 需要 button 或 action 二选一`);
+      requireFlow(hasButton !== hasAction, t('{context} 需要 button 或 action 二选一', { context }));
       if (hasButton) {
         return finishAction({ button: requireFlowString(step.button, `${context}.button`, { max: 200 }) });
       }
-      requireFlow(step.action === 'accept' || step.action === 'dismiss', `${context}.action 只能是 accept 或 dismiss`);
+      requireFlow(step.action === 'accept' || step.action === 'dismiss', t('{context} 只能是 accept 或 dismiss', { context: `${context}.action` }));
       return finishAction({ action: step.action });
     }
     case 'picker': {
@@ -4353,7 +4885,7 @@ function normalizeImportedStep(step, index, inputDefinitions) {
       return { step: { kind, ms }, declaredWaitMs: ms };
     }
     default:
-      throw new Error(`${context} 使用了不支持的类型 ${kind}`);
+      throw new Error(t('{context} 使用了不支持的类型 {kind}', { context, kind }));
   }
 }
 
@@ -4362,49 +4894,49 @@ function validateImportedFlowDocument(document) {
     document,
     ['version', 'name', 'steps'],
     ['description', 'inputs', ...FLOW_REGISTRY_META_KEYS],
-    '流程文件',
+    t('流程文件'),
   );
-  requireFlow(document.version === 1, '只支持 version 1 的流程文件');
+  requireFlow(document.version === 1, t('只支持 version 1 的流程文件'));
   const registryMeta = validateFlowRegistryMeta(document);
-  const name = requireFlowString(document.name, '流程名称', { max: 100 }).trim();
+  const name = requireFlowString(document.name, t('流程名称'), { max: 100 }).trim();
   if (document.description !== undefined && document.description !== null) {
-    requireFlowString(document.description, '流程说明', { min: 0, max: 1000, trim: false });
+    requireFlowString(document.description, t('流程说明'), { min: 0, max: 1000, trim: false });
   }
 
   const inputObject = document.inputs === undefined ? {} : document.inputs;
-  requireFlow(flowPlainObject(inputObject), 'inputs 必须是对象');
+  requireFlow(flowPlainObject(inputObject), t('inputs 必须是对象'));
   const inputEntries = Object.entries(inputObject);
-  requireFlow(inputEntries.length <= 16, '运行参数不能超过 16 个');
+  requireFlow(inputEntries.length <= 16, t('运行参数不能超过 16 个'));
   const inputDefinitions = new Map();
   for (const [key, definition] of inputEntries) {
     requireFlow(
       /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key),
-      `参数名 ${key} 的格式不正确`,
+      t('参数名 {key} 的格式不正确', { key }),
     );
-    requireFlowKeys(definition, ['type'], ['description', 'required'], `参数 ${key}`);
-    requireFlow(definition.type === 'string', `参数 ${key} 只支持 string 类型`);
+    requireFlowKeys(definition, ['type'], ['description', 'required'], t('参数 {key}', { key }));
+    requireFlow(definition.type === 'string', t('参数 {key} 只支持 string 类型', { key }));
     if (definition.description !== undefined) {
-      requireFlowString(definition.description, `参数 ${key} 的说明`, {
+      requireFlowString(definition.description, t('参数 {key} 的说明', { key }), {
         min: 0,
         max: 200,
         trim: false,
       });
     }
     if (definition.required !== undefined) {
-      requireFlow(typeof definition.required === 'boolean', `参数 ${key}.required 必须是 true 或 false`);
+      requireFlow(typeof definition.required === 'boolean', t('{context} 必须是 true 或 false', { context: t('参数 {key}', { key }) + '.required' }));
     }
-    requireFlow(definition.required !== false, `参数 ${key} 必须设为 required: true`);
+    requireFlow(definition.required !== false, t('参数 {key} 必须设为 required: true', { key }));
     inputDefinitions.set(key, {
       key,
       label: definition.description?.trim().slice(0, 60) || key,
-      description: definition.description || `每次运行时填写参数 ${key}`,
+      description: definition.description || t('每次运行时填写参数 {key}', { key }),
     });
   }
 
-  requireFlow(Array.isArray(document.steps), 'steps 必须是数组');
+  requireFlow(Array.isArray(document.steps), t('steps 必须是数组'));
   requireFlow(
     document.steps.length >= 1 && document.steps.length <= 24,
-    '流程必须包含 1–24 步',
+    t('流程必须包含 1–24 步'),
   );
   const normalizedSteps = [];
   const referencedInputs = new Set();
@@ -4417,10 +4949,10 @@ function validateImportedFlowDocument(document) {
   });
   requireFlow(
     declaredWaitMs <= FLOW_MAX_TOTAL_WAIT_MS,
-    '流程声明的总等待时间不能超过 60 秒',
+    t('流程声明的总等待时间不能超过 60 秒'),
   );
   const unused = [...inputDefinitions.keys()].filter(key => !referencedInputs.has(key));
-  requireFlow(unused.length === 0, `存在未使用的运行参数：${unused.join('、')}`);
+  requireFlow(unused.length === 0, t('存在未使用的运行参数：{list}', { list: unused.join(t('、')) }));
 
   return {
     name,
@@ -4441,25 +4973,25 @@ function validateFlowRegistryMeta(document) {
   if (document.app !== undefined) {
     requireFlow(
       typeof document.app === 'string' && /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(document.app),
-      'app 必须是 bundle id，例如 com.apple.Health',
+      t('app 必须是 bundle id，例如 com.apple.Health'),
     );
     meta.app = document.app;
   }
   if (document.category !== undefined) {
     requireFlow(
       typeof document.category === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(document.category),
-      'category 必须是小写 slug，例如 health',
+      t('category 必须是小写 slug，例如 health'),
     );
     meta.category = document.category;
   }
   if (document.risk !== undefined) {
-    requireFlow(FLOW_RISK_VALUES.has(document.risk), 'risk 只能是 read_only、navigation 或 side_effect');
+    requireFlow(FLOW_RISK_VALUES.has(document.risk), t('risk 只能是 read_only、navigation 或 side_effect'));
     meta.risk = document.risk;
   }
   if (document.locale !== undefined) {
     requireFlow(
       typeof document.locale === 'string' && /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(document.locale),
-      'locale 必须形如 en 或 zh-CN',
+      t('locale 必须形如 en 或 zh-CN'),
     );
     meta.locale = document.locale;
   }
@@ -4468,7 +5000,7 @@ function validateFlowRegistryMeta(document) {
       Array.isArray(document.tags) && document.tags.length <= 8
         && document.tags.every(tag => typeof tag === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(tag))
         && new Set(document.tags).size === document.tags.length,
-      'tags 必须是不超过 8 个、不重复的小写 slug',
+      t('tags 必须是不超过 8 个、不重复的小写 slug'),
     );
     meta.tags = [...document.tags];
   }
@@ -4479,7 +5011,7 @@ function validateFlowRegistryMeta(document) {
           && Object.keys(entry).length >= 1
           && Object.keys(entry).every(key => ['device', 'ios', 'app_version', 'date'].includes(key))
           && Object.values(entry).every(value => typeof value === 'string' && value.length >= 1 && value.length <= 64)),
-      'verified_on 必须是包含 device/ios/app_version/date 字段的对象列表',
+      t('verified_on 必须是包含 device/ios/app_version/date 字段的对象列表'),
     );
     meta.verified_on = document.verified_on.map(entry => ({ ...entry }));
   }
@@ -4521,9 +5053,9 @@ function applyImportedFlow(validated, filename) {
   flowActionSerial = 0;
   flowSafety.checked = false;
   flowName.value = validated.name;
-  flowClear.textContent = '清空步骤';
+  flowClear.textContent = t('清空步骤');
   setFlowFileStatus(
-    `已打开「${filename}」，共 ${recordedFlowSteps.length} 步。请填写运行参数并逐项审核。`,
+    t('已打开「{filename}」，共 {count} 步。请填写运行参数并逐项审核。', { filename, count: recordedFlowSteps.length }),
     'success',
   );
   renderRecordedFlow();
@@ -4586,25 +5118,25 @@ flowOpenFile.addEventListener('change', async () => {
   flowOpenFile.value = '';
   if (!file || flowImportBusy || recordedFlowSteps.length > 0) return;
   flowImportBusy = true;
-  setFlowFileStatus('正在检查脚本格式和安全边界…');
+  setFlowFileStatus(t('正在检查脚本格式和安全边界…'));
   syncFlowControls();
   try {
     requireFlow(
       file.size >= 1 && file.size <= FLOW_FILE_MAX_BYTES,
-      '脚本文件大小必须在 1B–64KB 之间',
+      t('脚本文件大小必须在 1B–64KB 之间'),
     );
     const text = await file.text();
     const document = JSON.parse(text);
     const validated = validateImportedFlowDocument(document);
     const filename =
       (file.name || '').replace(/\p{Cc}/gu, '').slice(0, 120) ||
-      '流程脚本';
+      t('流程脚本');
     applyImportedFlow(validated, filename);
   } catch (error) {
     const detail = error instanceof SyntaxError
-      ? 'JSON 格式不正确'
-      : String(error?.message || '无法读取这个文件');
-    setFlowFileStatus(`无法打开脚本：${detail}`, 'error');
+      ? t('JSON 格式不正确')
+      : String(error?.message || t('无法读取这个文件'));
+    setFlowFileStatus(t('无法打开脚本：{detail}', { detail }), 'error');
   } finally {
     flowImportBusy = false;
     renderRecordedFlow();
@@ -4621,11 +5153,11 @@ async function toggleFlowRecording() {
     if (flowFinalizing) await flowCheckpointTail;
     flowFinalizing = false;
     renderRecordedFlow();
-    toast('录制已停止，请逐项审核后下载或执行');
+    toast(t('录制已停止，请逐项审核后下载或执行'));
     return;
   }
   if (!directControlReady) {
-    toast('设备连接未就绪，暂时不能开始录制');
+    toast(t('设备连接未就绪，暂时不能开始录制'));
     return;
   }
   setFlowFileStatus('');
@@ -4639,7 +5171,7 @@ async function toggleFlowRecording() {
   ) {
     flowStarting = false;
     renderRecordedFlow();
-    toast('设备状态已变化，没有开始录制');
+    toast(t('设备状态已变化，没有开始录制'));
     return;
   }
   flowLastObservation = baseline;
@@ -4651,8 +5183,8 @@ async function toggleFlowRecording() {
   renderRecordedFlow();
   closeFlowPanel({ restoreFocus: false });
   toast(baseline
-    ? '已开始录制；页面变化会自动生成检查点'
-    : '已开始录制；暂时无法读取控件，将保留短等待并标注');
+    ? t('已开始录制；页面变化会自动生成检查点')
+    : t('已开始录制；暂时无法读取控件，将保留短等待并标注'));
 }
 flowDownload.addEventListener('click', () => {
   if (!recordedFlowSteps.length || flowRunning || flowCheckpointPending) return;
@@ -4669,10 +5201,10 @@ flowDownload.addEventListener('click', () => {
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   toast(excludedUnrecordedActions
-    ? '不完整草稿已保存：请补齐安全参数后再运行'
+    ? t('不完整草稿已保存：请补齐安全参数后再运行')
     : recordedFlowInputs.length
-      ? '流程脚本已保存；参数值未写入文件，运行时用 --input 提供'
-      : '流程脚本已保存；可用 iphone-use-mcp flow validate/run');
+      ? t('流程脚本已保存；参数值未写入文件，运行时用 --input 提供')
+      : t('流程脚本已保存；可用 iphone-use-mcp flow validate/run'));
 });
 flowRun.addEventListener('click', async () => {
   if (
@@ -4691,7 +5223,7 @@ flowRun.addEventListener('click', async () => {
   try {
     batchSteps = recordedFlowSteps.map(entry => flowStepToBatchStep(entry.step));
   } catch (_) {
-    toast('请先填写全部运行参数');
+    toast(t('请先填写全部运行参数'));
     return;
   }
   flowRunning = true;
@@ -4721,16 +5253,18 @@ flowRun.addEventListener('click', async () => {
       const completed = Number(result.applied_actions ?? result.completed ?? 0);
       const failed = Number.isInteger(result.failed_step) ? result.failed_step + 1 : null;
       toast(result.outcome === 'unknown'
-        ? `结果未知：已确认完成 ${completed} 个动作，请先查看手机，不要直接重试`
-        : `流程已停止：完成 ${completed} 个动作${failed ? `，第 ${failed} 步失败` : ''}`);
+        ? t('结果未知：已确认完成 {completed} 个动作，请先查看手机，不要直接重试', { completed })
+        : failed
+          ? t('流程已停止：完成 {completed} 个动作，第 {failed} 步失败', { completed, failed })
+          : t('流程已停止：完成 {completed} 个动作', { completed }));
       void pollAgentMode();
       return;
     }
-    toast(`流程完成：共执行 ${recordedFlowSteps.length} 步`);
+    toast(t('流程完成：共执行 {count} 步', { count: recordedFlowSteps.length }));
     flowSafety.checked = false;
     void pollAgentMode();
   } catch (_) {
-    toast('流程结果未知，请先查看手机状态，不要直接重试');
+    toast(t('流程结果未知，请先查看手机状态，不要直接重试'));
     void pollAgentMode();
   } finally {
     clearTimeout(timeout);
@@ -4743,9 +5277,9 @@ flowClear.addEventListener('click', () => {
   const now = Date.now();
   if (now > clearFlowArmedUntil) {
     clearFlowArmedUntil = now + 3500;
-    flowClear.textContent = '再次点击确认清空';
+    flowClear.textContent = t('再次点击确认清空');
     setTimeout(() => {
-      if (Date.now() >= clearFlowArmedUntil) flowClear.textContent = '清空步骤';
+      if (Date.now() >= clearFlowArmedUntil) flowClear.textContent = t('清空步骤');
     }, 3600);
     return;
   }
@@ -4765,22 +5299,22 @@ flowClear.addEventListener('click', () => {
   flowLastObservation = null;
   flowActionSerial = 0;
   flowSafety.checked = false;
-  flowClear.textContent = '清空步骤';
+  flowClear.textContent = t('清空步骤');
   setFlowFileStatus('');
   renderRecordedFlow();
-  toast('已清空这次录制');
+  toast(t('已清空这次录制'));
 });
 
 /* ── Toolbar handlers (v1 parity) ─────────────────────────────── */
 async function runShortcut(name, successText) {
   const result = await sendControl({ type:'shortcut', name });
-  toast(result.ok ? successText : controlFailureText(result, '操作失败，设备未连接'));
+  toast(result.ok ? successText : controlFailureText(result, t('操作失败，设备未连接')));
 }
 document.getElementById('btnHome').addEventListener('click', () => {
-  void runShortcut('home', '已返回主屏幕');
+  void runShortcut('home', t('已返回主屏幕'));
 });
 document.getElementById('btnSearch').addEventListener('click', () => {
-  void runShortcut('spotlight', '已打开搜索');
+  void runShortcut('spotlight', t('已打开搜索'));
 });
 
 const btnGrid = document.getElementById('btnGrid');
@@ -4798,20 +5332,20 @@ async function sendText() {
   if (text.length === 0 || textSendBusy || !directControlReady) return false;
   textSendBusy = true;
   syncDirectControlAvailability();
-  btnSend.textContent = '发送中…';
+  btnSend.textContent = t('发送中…');
   const result = await sendControl({ type:'text', text });
   textSendBusy = false;
   syncDirectControlAvailability();
-  btnSend.textContent = '发送';
+  btnSend.textContent = t('发送');
   if (!result.ok) {
-    toast(controlFailureText(result, '输入失败，文字已保留'));
+    toast(controlFailureText(result, t('输入失败，文字已保留')));
     if (textPanel.classList.contains('open')) textInput.focus();
     return false;
   }
   textInput.value = '';
   toast(flowRecording
-    ? '文字已变成运行参数；刚才输入的原文没有保存'
-    : '文字已输入');
+    ? t('文字已变成运行参数；刚才输入的原文没有保存')
+    : t('文字已输入'));
   closeTextPanel();
   return true;
 }
@@ -4826,10 +5360,10 @@ function syncHandoffButton() {
   if (!btnHandoff) return;
   const handedOver = backendStatus?.human_handoff === true;
   const label = btnHandoff.querySelector('.lbl');
-  if (label) setTextIfChanged(label, handedOver ? '交给 agent' : '交还');
+  if (label) setTextIfChanged(label, handedOver ? t('交给 agent') : t('交还'));
   btnHandoff.title = handedOver
-    ? '把手机交回给 agent：重新连接设备（手机需解锁亮屏）'
-    : '交还手机给持有人：停止远程控制，手机留给拿着它的人用';
+    ? t('把手机交回给 agent：重新连接设备（手机需解锁亮屏）')
+    : t('交还手机给持有人：停止远程控制，手机留给拿着它的人用');
 }
 
 function updateModeControls() {
@@ -4843,7 +5377,7 @@ document.getElementById('btnLogout').addEventListener('click', () => { location.
    again ("交给 agent" or 「连接手机」). */
 const btnHandoff = document.getElementById('btnHandoff');
 async function takePhoneBackForAgent() {
-  if (!confirm('把手机交回给 agent？设备连接会重新建立（手机锁着的话需要解锁一次）。')) return;
+  if (!confirm(t('把手机交回给 agent？设备连接会重新建立（手机锁着的话需要解锁一次）。'))) return;
   btnHandoff.disabled = true;
   try {
     invalidateDirectControlQueue();
@@ -4854,11 +5388,11 @@ async function takePhoneBackForAgent() {
     });
     if (r.status === 401) { location.replace('/login'); return; }
     const result = await r.json().catch(() => ({}));
-    toast(r.ok && result.ok === true ? '已交回 agent，正在连接设备' : '交回失败，请查看服务日志');
+    toast(r.ok && result.ok === true ? t('已交回 agent，正在连接设备') : t('交回失败，请查看服务日志'));
     cancelStatusPoll();
     await pollAgentMode();
   } catch (_) {
-    toast('交回失败，请稍后再试');
+    toast(t('交回失败，请稍后再试'));
   } finally {
     btnHandoff.disabled = false;
   }
@@ -4868,8 +5402,8 @@ if (btnHandoff) btnHandoff.addEventListener('click', async () => {
     await takePhoneBackForAgent();
     return;
   }
-  if (backendStatus?.recovery_owner === 'external') { toast('设备 runner 在别的主机上，本机无法交还'); return; }
-  if (!confirm('把手机交还给持有人？远程控制会停止，手机留给拿着它的人用；需要时再点「交给 agent」。')) return;
+  if (backendStatus?.recovery_owner === 'external') { toast(t('设备 runner 在别的主机上，本机无法交还')); return; }
+  if (!confirm(t('把手机交还给持有人？远程控制会停止，手机留给拿着它的人用；需要时再点「交给 agent」。'))) return;
   btnHandoff.disabled = true;
   try {
     invalidateDirectControlQueue();
@@ -4881,14 +5415,14 @@ if (btnHandoff) btnHandoff.addEventListener('click', async () => {
     if (r.status === 401) { location.replace('/login'); return; }
     const result = await r.json().catch(() => ({}));
     if (!r.ok || result.ok !== true) {
-      toast(result?.error === 'lifecycle_busy' ? '设备正在切换，稍后再试' : '交还失败，请查看服务日志');
+      toast(result?.error === 'lifecycle_busy' ? t('设备正在切换，稍后再试') : t('交还失败，请查看服务日志'));
     } else {
-      toast('已交还，远程控制已停止');
+      toast(t('已交还，远程控制已停止'));
     }
     cancelStatusPoll();
     await pollAgentMode();
   } catch (_) {
-    toast('交还失败，请稍后再试');
+    toast(t('交还失败，请稍后再试'));
   } finally {
     btnHandoff.disabled = false;
   }
@@ -4910,7 +5444,7 @@ function setPairStatus(text, isError) {
 }
 async function loadPairCode(host) {
   clearInterval(pairTimer);
-  setPairStatus('正在生成…');
+  setPairStatus(t('正在生成…'));
   pairQr.classList.remove('expired');
   try {
     const q = host ? '?host=' + encodeURIComponent(host) : '';
@@ -4924,9 +5458,9 @@ async function loadPairCode(host) {
       pairQr.replaceChildren();
       pairUrl.textContent = '';
       setPairStatus(res.error === 'loopback_only'
-        ? '这台 Mac 只允许本机访问，手机连不上。重新运行安装程序并允许局域网访问后再试。'
-        : res.error === 'no_lan_address' ? '这台 Mac 现在没有手机能访问的网络地址，先连上 Wi-Fi。'
-        : '生成失败，请稍后再试', true);
+        ? t('这台 Mac 只允许本机访问，手机连不上。重新运行安装程序并允许局域网访问后再试。')
+        : res.error === 'no_lan_address' ? t('这台 Mac 现在没有手机能访问的网络地址，先连上 Wi-Fi。')
+        : t('生成失败，请稍后再试'), true);
       return;
     }
     pairQr.innerHTML = res.svg || '';
@@ -4938,16 +5472,16 @@ async function loadPairCode(host) {
       if (left <= 0) {
         clearInterval(pairTimer);
         pairQr.classList.add('expired');
-        setPairStatus('已过期，点「换一个」');
+        setPairStatus(t('已过期，点「换一个」'));
         return;
       }
-      setPairStatus(`${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} 后失效`);
+      setPairStatus(t('{time} 后失效', { time: `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` }));
       left -= 1;
     };
     tick();
     pairTimer = setInterval(tick, 1000);
   } catch (_) {
-    setPairStatus('生成失败，请检查网络', true);
+    setPairStatus(t('生成失败，请检查网络'), true);
   }
 }
 document.getElementById('btnPair').addEventListener('click', () => {
@@ -5034,19 +5568,19 @@ function closeElementPanel({ restoreFocus = true } = {}) {
 }
 
 function elementFailureText(error) {
-  if (error?.name === 'AbortError') return '读取超时，请确认设备已解锁后重试';
+  if (error?.name === 'AbortError') return t('读取超时，请确认设备已解锁后重试');
   switch (error?.code) {
     case 'device_transition_in_progress':
-      return '设备正在切换连接状态，请稍后刷新';
+      return t('设备正在切换连接状态，请稍后刷新');
     case 'target_not_configured':
-      return '尚未选择 iPhone，请先完成设备设置';
+      return t('尚未选择 iPhone，请先完成设备设置');
     case 'wda_source_timeout':
-      return '读取控件超时，请保持 iPhone 解锁和亮屏';
+      return t('读取控件超时，请保持 iPhone 解锁和亮屏');
     case 'wda_source_failed':
     case 'wda_not_configured':
-      return '当前无法读取 iPhone 控件，请检查设备连接';
+      return t('当前无法读取 iPhone 控件，请检查设备连接');
     default:
-      return '控件列表读取失败，请稍后刷新';
+      return t('控件列表读取失败，请稍后刷新');
   }
 }
 
@@ -5071,7 +5605,7 @@ function appendAccessibleElement(row, index, snapshot, duplicateLabels) {
   button.disabled = !actionable;
   button.setAttribute(
     'aria-label',
-    `${label}，${kind}${value ? `，当前值 ${value}` : ''}${actionable ? '' : '，当前不可操作'}`,
+    `${label}${t('，')}${kind}${value ? t('，当前值 {value}', { value }) : ''}${actionable ? '' : t('，当前不可操作')}`,
   );
 
   const labelNode = document.createElement('span');
@@ -5084,17 +5618,17 @@ function appendAccessibleElement(row, index, snapshot, duplicateLabels) {
   if (value) {
     const valueNode = document.createElement('span');
     valueNode.className = 'element-value';
-    valueNode.textContent = `当前值：${value}`;
+    valueNode.textContent = t('当前值：{value}', { value });
     button.append(valueNode);
   }
 
   button.addEventListener('click', async () => {
     if (!actionable || !directControlReady) {
-      toast('设备连接未就绪，请刷新后再试');
+      toast(t('设备连接未就绪，请刷新后再试'));
       return;
     }
     button.disabled = true;
-    setTextIfChanged(elementStatus, `正在点按「${label}」…`);
+    setTextIfChanged(elementStatus, t('正在点按「{label}」…', { label }));
     let action;
     if (uniqueLabel) {
       // A unique accessibility label survives layout movement better than an
@@ -5109,16 +5643,16 @@ function appendAccessibleElement(row, index, snapshot, duplicateLabels) {
     const result = await sendControl(action);
     if (!result.ok) {
       if (result.failure === 'stale_element_snapshot') {
-        toast(controlFailureText(result, '控件列表已变化，请重新选择'));
+        toast(controlFailureText(result, t('控件列表已变化，请重新选择')));
         void loadAccessibleElements();
         return;
       }
       closeElementPanel({ restoreFocus: false });
-      toast(controlFailureText(result, '控件操作失败，请查看设备状态'));
+      toast(controlFailureText(result, t('控件操作失败，请查看设备状态')));
       return;
     }
     closeElementPanel();
-    toast(`已点按「${label}」`);
+    toast(t('已点按「{label}」', { label }));
   });
 
   item.append(button);
@@ -5133,7 +5667,7 @@ async function loadAccessibleElements() {
   const timeout = setTimeout(() => controller.abort(), ELEMENTS_REQUEST_TIMEOUT_MS);
   elementPanel.setAttribute('aria-busy', 'true');
   elementRefresh.disabled = true;
-  setTextIfChanged(elementStatus, '正在读取当前 iPhone 控件…');
+  setTextIfChanged(elementStatus, t('正在读取当前 iPhone 控件…'));
   elementList.replaceChildren();
   try {
     const response = await fetch('/agent/elements', {
@@ -5167,8 +5701,8 @@ async function loadAccessibleElements() {
     setTextIfChanged(
       elementStatus,
       rows.length
-        ? `已读取 ${rows.length} 个控件。选择一项可在 iPhone 上点按`
-        : '当前画面没有可访问控件，请返回 iPhone 后刷新',
+        ? t('已读取 {count} 个控件。选择一项可在 iPhone 上点按', { count: rows.length })
+        : t('当前画面没有可访问控件，请返回 iPhone 后刷新'),
     );
   } catch (error) {
     if (generation !== elementRequestGeneration) return;
@@ -5185,7 +5719,7 @@ async function loadAccessibleElements() {
 
 function openElementPanel() {
   if (!directControlReady) {
-    toast('设备连接未就绪，暂时无法读取控件');
+    toast(t('设备连接未就绪，暂时无法读取控件'));
     return;
   }
   if (textPanel.classList.contains('open')) {
@@ -5257,13 +5791,14 @@ btnImmersive.addEventListener('click', () => setImmersive(!document.body.classLi
 
 const btnQuality = document.getElementById('btnQuality');
 const qualityLabel = document.getElementById('qualityLabel');
-const VIDEO_PREF_LABEL = { auto: '自动', performance: '性能', quality: '画质' };
+const VIDEO_PREF_LABEL = { auto: t('自动'), performance: t('性能'), quality: t('画质') };
 function renderVideoMode() {
   qualityLabel.textContent = VIDEO_PREF_LABEL[videoPref];
-  const current = videoMode === 'quality' ? '画质' : '性能';
-  const detail = videoPref === 'auto' ? `自动（当前${current}）` : current;
-  btnQuality.setAttribute('aria-label', `画面模式：${detail}`);
-  btnQuality.title = `画面模式：${detail}。点击切换 自动 → 性能 → 画质 (Q)`;
+  const current = videoMode === 'quality' ? t('画质') : t('性能');
+  const detail = videoPref === 'auto' ? t('自动（当前{current}）', { current }) : current;
+  btnQuality.dataset.detail = detail;
+  btnQuality.setAttribute('aria-label', t('画面模式：{detail}', { detail }));
+  btnQuality.title = t('画面模式：{detail}。点击切换 自动 → 性能 → 画质 (Q)', { detail });
 }
 function applyVideoMode() {
   const next = effectiveVideoMode();
@@ -5282,7 +5817,7 @@ btnQuality.addEventListener('click', () => {
     else localStorage.setItem(VIDEO_MODE_KEY, videoPref);
   } catch {}
   applyVideoMode();
-  toast(`画面模式：${btnQuality.getAttribute('aria-label').replace('画面模式：', '')}`);
+  toast(t('画面模式：{detail}', { detail: btnQuality.dataset.detail || '' }));
 });
 /* 自动 steps down once when the decoder keeps falling behind. */
 let decodeBacklogTimes = [];
@@ -5294,7 +5829,7 @@ function noteDecodeBacklog() {
     autoVideoDowngraded = true;
     decodeBacklogTimes = [];
     applyVideoMode();
-    toast('画面跟不上，已自动切到性能模式');
+    toast(t('画面跟不上，已自动切到性能模式'));
   }
 }
 renderVideoMode();
@@ -5308,7 +5843,7 @@ function setMoreSheet(open) {
   toolbar.classList.toggle('expanded', open);
   sheetScrim.classList.toggle('on', open);
   btnMore.setAttribute('aria-expanded', String(open));
-  setTextIfChanged(btnMore.querySelector('.lbl'), open ? '收起' : '更多');
+  setTextIfChanged(btnMore.querySelector('.lbl'), open ? t('收起') : t('更多'));
   syncToolbarReserve();
 }
 btnMore.addEventListener('click', () => setMoreSheet(!toolbar.classList.contains('expanded')));
@@ -5331,7 +5866,7 @@ document.getElementById('btnPaste').addEventListener('click', async () => {
     } catch (_) { /* permission refused: fall through to ⌘V */ }
   }
   armTyping();
-  toast(/Mac|iPhone|iPad/.test(navigator.platform) ? '按 ⌘V 把剪贴板粘贴到手机' : '按 Ctrl+V 把剪贴板粘贴到手机');
+  toast(/Mac|iPhone|iPad/.test(navigator.platform) ? t('按 ⌘V 把剪贴板粘贴到手机') : t('按 Ctrl+V 把剪贴板粘贴到手机'));
 });
 
 /* ── Shortcut help ─────────────────────────────────────────────── */
@@ -5383,8 +5918,8 @@ function syncOwnerBadge(status) {
   const left = Number(status.owner_lease_remaining_secs);
   const suffix = Number.isFinite(left) && left > 0
     ? ` · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : '';
-  setTextIfChanged(ownerBadge, `${owner} 正在操作${suffix}`);
-  ownerBadge.title = `${owner} 持有这台手机的操作租约；在它松手或租约到期前，这里的点按会被拒绝（不会执行）。`;
+  setTextIfChanged(ownerBadge, t('{owner} 正在操作{suffix}', { owner, suffix }));
+  ownerBadge.title = t('{owner} 持有这台手机的操作租约；在它松手或租约到期前，这里的点按会被拒绝（不会执行）。', { owner });
 }
 
 /* ── Metrics: what the picture and the controls cost right now ───── */
@@ -5421,7 +5956,7 @@ function noteControlRtt(ms) {
   if (!Number.isFinite(ms) || ms < 0) return;
   controlRttMs = controlRttMs == null ? ms : controlRttMs * 0.7 + ms * 0.3;
 }
-const TRANSPORT_LABEL = { usb: 'USB', wifi: 'Wi-Fi', 'wifi-tunnel': 'Wi-Fi 隧道', external: '外部', lan: '局域网' };
+const TRANSPORT_LABEL = { usb: 'USB', wifi: 'Wi-Fi', 'wifi-tunnel': t('Wi-Fi 隧道'), external: t('外部'), lan: t('局域网') };
 function renderMetrics() {
   const now = performance.now();
   if (now - frameRateAt >= 900) {
@@ -5436,10 +5971,10 @@ function renderMetrics() {
   } else if (mjpegFrame.classList.contains('active')) {
     parts.push(['MJPEG', '']);
   } else if (stillFrame.classList.contains('active')) {
-    parts.push(['截图', '2.5 s']);
+    parts.push([t('截图'), '2.5 s']);
   }
-  if (controlRttMs != null) parts.push(['操作', `${Math.round(controlRttMs)} ms`]);
-  else if (Number.isFinite(backendStatus?.wda_rtt_ms)) parts.push(['设备', `${backendStatus.wda_rtt_ms} ms`]);
+  if (controlRttMs != null) parts.push([t('操作'), `${Math.round(controlRttMs)} ms`]);
+  else if (Number.isFinite(backendStatus?.wda_rtt_ms)) parts.push([t('设备'), `${backendStatus.wda_rtt_ms} ms`]);
   const transport = TRANSPORT_LABEL[backendStatus?.transport];
   if (transport) parts.push([transport, '']);
   const nodes = [];
@@ -5458,7 +5993,7 @@ function renderMetrics() {
   if (metricsEl.dataset.text !== text) {
     metricsEl.dataset.text = text;
     metricsEl.replaceChildren(...nodes);
-    metricsEl.title = '画面编码 · 帧率 · 点按往返时间 · 手机连接方式';
+    metricsEl.title = t('画面编码 · 帧率 · 点按往返时间 · 手机连接方式');
   }
 }
 setInterval(renderMetrics, 1000);
@@ -5510,6 +6045,9 @@ new MutationObserver(paintDot).observe(statusLine, { childList:true, characterDa
 const agentActivityEl = document.getElementById('agentActivity');
 const AGENT_ACTIVITY_SHOW_MS = 6000;
 let agentActivityCursor = null, agentActivityTimer = null, agentActivityBusy = false;
+function activityLine(item) {
+  return (LANG === 'en' ? (item.text || item.text_zh) : (item.text_zh || item.text)) || '';
+}
 async function pollAgentActivity() {
   if (agentActivityBusy || document.visibilityState !== 'visible') return;
   agentActivityBusy = true;
@@ -5526,8 +6064,8 @@ async function pollAgentActivity() {
     const who = document.createElement('span');
     who.className = 'who';
     who.textContent = last.owner ? `${last.owner}` : 'Agent';
-    agentActivityEl.replaceChildren(who, document.createTextNode(last.text_zh || last.text || ''));
-    agentActivityEl.title = items.slice(-5).map(item => item.text_zh || item.text).join('\n');
+    agentActivityEl.replaceChildren(who, document.createTextNode(activityLine(last)));
+    agentActivityEl.title = items.slice(-5).map(activityLine).join('\n');
     agentActivityEl.classList.add('on');
     clearTimeout(agentActivityTimer);
     agentActivityTimer = setTimeout(() => agentActivityEl.classList.remove('on'), AGENT_ACTIVITY_SHOW_MS);
