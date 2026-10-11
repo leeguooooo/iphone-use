@@ -8,7 +8,7 @@
 Claude Code、Codex 或任何 MCP 客户端都能用它把屏幕读成文字，在任意 App 里点击、输入、滑动，包括没有 API 的 App。</p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="许可证：MIT"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm_Shield_1.0.0-blue.svg" alt="许可证：PolyForm Shield 1.0.0"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="平台：macOS 15+">
   <img src="https://img.shields.io/badge/iPhone-iOS%2015%2B-black" alt="iPhone：iOS 15+">
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="使用 Rust 构建">
@@ -180,7 +180,7 @@ iphone-use 用自研的 XCTest runner（[`runner/`](runner/README.md)）操作�
 
 ## 许可证
 
-[MIT](LICENSE)
+[PolyForm Shield 1.0.0](LICENSE)。本项目采用源码可见许可，允许符合条款的非竞争用途、修改和分发；禁止使用本软件提供竞争产品或服务，包括免费竞品。详见[许可范围与第三方声明](LICENSING.md)。
 
 <!-- use-family -->
 ## `*-use` 家族

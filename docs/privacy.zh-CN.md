@@ -2,7 +2,7 @@
 
 更新日期：2026-10-07 · [English](privacy.md)
 
-本政策适用于 **Phone Use Remote** iOS App（`com.leeguoo.iphone-use.remote`），以及它所连接的开源软件
+本政策适用于 **Phone Use Remote** iOS App（`com.leeguoo.iphone-use.remote`），以及它所连接的源码可见软件
 [iphone-use](https://github.com/leeguooooo/iphone-use)。
 
 ## App 做什么

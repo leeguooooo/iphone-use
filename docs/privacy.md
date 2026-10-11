@@ -3,7 +3,7 @@
 Last updated: 2026-10-07 · [中文](privacy.zh-CN.md)
 
 This policy covers the **Phone Use Remote** iOS app (bundle `com.leeguoo.iphone-use.remote`) and the
-open-source [iphone-use](https://github.com/leeguooooo/iphone-use) software it connects to.
+source-available [iphone-use](https://github.com/leeguooooo/iphone-use) software it connects to.
 
 ## What the app does
 

@@ -2,7 +2,7 @@
 name = "legacy-launch"
 version = "0.17.16"
 edition = "2024"
-license = "MIT"
+license = "PolyForm-Shield-1.0.0"
 description = "Launches the iphone-use XCTest runner on iOS 15/16 over USB or Wi-Fi and holds it alive"
 
 [lib]

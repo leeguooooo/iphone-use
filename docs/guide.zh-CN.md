@@ -413,4 +413,4 @@ IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use s
 
 ## 许可证
 
-[MIT](../LICENSE)
+[PolyForm Shield 1.0.0](../LICENSE)。本项目采用源码可见许可，允许符合条款的非竞争用途、修改和分发；禁止使用本软件提供竞争产品或服务，包括免费竞品。详见[许可范围与第三方声明](../LICENSING.md)。

@@ -8,7 +8,7 @@
 Claude Code, Codex or any MCP client reads the screen as text, taps, types and swipes in any app, including the ones with no API.</p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm_Shield_1.0.0-blue.svg" alt="License: PolyForm Shield 1.0.0"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="Platform: macOS 15+">
   <img src="https://img.shields.io/badge/iPhone-iOS%2015%2B-black" alt="iPhone: iOS 15+">
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="Built with Rust">
@@ -182,7 +182,7 @@ Through the full agent API, a tap by label that returns the settled change takes
 
 ## License
 
-[MIT](LICENSE)
+[PolyForm Shield 1.0.0](LICENSE). This project is source-available. Non-competing use, modification and distribution are permitted subject to the license; using the software to provide a competing product or service, including a free one, is prohibited. See [licensing scope and third-party notices](LICENSING.md).
 
 <!-- use-family -->
 ## The `*-use` family

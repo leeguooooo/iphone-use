@@ -853,4 +853,4 @@ user's consent) when the API misleads them, and to send flow problems to the
 
 ## License
 
-[MIT](../LICENSE)
+[PolyForm Shield 1.0.0](../LICENSE). This project is source-available. Non-competing use, modification and distribution are permitted subject to the license; using the software to provide a competing product or service, including a free one, is prohibited. See [licensing scope and third-party notices](../LICENSING.md).
