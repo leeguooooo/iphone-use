@@ -37,6 +37,8 @@ suite: 设置冒烟测试 (4 cases)
 | `--confirm` | required when the suite sends, publishes, pays or deletes |
 | `--owner NAME` | the phone owner name for this run (`X-Phone-Owner`) |
 | `--validate` | parse and check the file only; never contacts the daemon |
+| `--from N[:M]` | resume at case N, or at step M of case N ([below](#resuming-retries-and-the-timing-trace)) |
+| `--retries N` | run a failed case again, up to N times (at most 10) |
 
 Exit code: `0` every case passed, `1` a case failed, `2` the suite is invalid or the phone
 cannot be driven (locked, owned by another session, unreachable). A released phone is
@@ -84,9 +86,39 @@ It leaves `<artifacts-dir>/<case>/` (mode 0700) with:
 - `steps.json`: every step that ran, its time and the daemon's answer.
 - `error.json`: which step or assertion failed, and why.
 
+Every run, passing or not, also writes `<artifacts-dir>/trace.ndjson` (see below).
+
 That is usually enough to tell a broken app from a broken test. An example: the iPhone 13's
 General row sits under the iOS 26 floating search bar. Its screenshot showed the tap had
 landed on the bar.
+
+### Resuming, retries and the timing trace
+
+**`--from N[:M]`** starts a run part way through. Cases and steps count from 1; a case's steps
+are its `steps` (a `flow` step counts once per step of that flow), then its assertions.
+
+- `--from 3` runs `setup`, then case 3 and the cases after it.
+- `--from 3:2` skips `setup` and starts case 3 at its second step, on whatever screen the phone
+  is showing. Use it after fixing the phone or the suite by hand.
+
+A failed case prints where to resume (`resume: --from 3:2`, the step that failed; `resume_from`
+in `--json`). Skipped cases count as `skipped` in the report and the JUnit file.
+
+**`--retries N`** runs a failed case again from its first step, up to N more times. The case
+passes if any attempt passes; the report says so (`passed on attempt 2`, `attempts` and
+`earlier_failures` in `--json`). Evidence is kept for the last failed attempt only. Since a
+retry starts where the last attempt stopped, it helps most when each case begins by bringing
+the app to a known screen.
+
+**`trace.ndjson`** has one JSON line per step that ran, setup and every attempt included:
+
+```json
+{"case":"open General","attempt":1,"step":1,"origin":"cases[1].steps[0]","kind":"tap_locator","role":"step","ms":412,"outcome":"ok"}
+{"case":"open General","attempt":1,"step":2,"origin":"cases[1].assert[0]","kind":"wait_for","role":"assert","ms":5003,"outcome":"expectation_timeout"}
+```
+
+`step` is the `M` of `--from N:M`, `outcome` is `ok` or the error that failed the step. Each run
+replaces the file; `jq -s 'sort_by(-.ms)[:5]' trace.ndjson` lists the slowest steps.
 
 ### Writing reliable suites
 

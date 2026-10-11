@@ -13,6 +13,10 @@
 //! evidence (screenshot, element tree, step timings, error) and the suite
 //! moves on to the next case. Exit code: 0 all passed, 1 a case failed, 2 the
 //! suite is invalid or the phone could not be driven.
+//!
+//! `--from N[:M]` resumes at case N (step M), `--retries N` runs a failed case
+//! again up to N times, and every run writes `trace.ndjson` (one line per
+//! step: case, step, kind, ms, outcome) at the top of the artifacts directory.
 
 use crate::client::DaemonClient;
 use crate::flow::{self, FlowRisk};
@@ -35,6 +39,10 @@ pub const EXIT_UNUSABLE: i32 = 2;
 /// How long `test` waits for a released phone to come back.
 const RECONNECT_WAIT: Duration = Duration::from_secs(150);
 const MAX_CASES: usize = 200;
+/// Upper bound for `--retries`: more than this hides a broken case.
+pub const MAX_RETRIES: u32 = 10;
+/// The per-step timing trace, at the top of the artifacts directory.
+pub const TRACE_FILE: &str = "trace.ndjson";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +91,8 @@ pub struct CompiledStep {
     pub origin: String,
     /// `step` or `assert`.
     pub role: &'static str,
+    /// The flow step kind sent (`tap_locator`, `wait_for` for an assert, …).
+    pub kind: String,
     /// Short human description, e.g. `tap_locator label=通用`.
     pub describe: String,
     /// `{"steps":[…one step…]}` ready for `/agent/actions`.
@@ -244,6 +254,11 @@ fn compile_step(
     Ok(CompiledStep {
         origin,
         role,
+        kind: value
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string(),
         describe: describe_step(value),
         request,
     })
@@ -431,12 +446,22 @@ pub struct StepResult {
 pub struct CaseResult {
     pub name: String,
     pub passed: bool,
+    /// Every attempt, retries included.
     pub ms: u64,
+    /// The steps of the last attempt.
     pub steps: Vec<StepResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<String>,
+    /// 1 unless `--retries` ran the case again.
+    pub attempts: u32,
+    /// Why each earlier attempt failed (a case that then passed is flaky).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub earlier_failures: Vec<String>,
+    /// `--from` value that resumes at the failed step, e.g. `3:2`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_from: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -448,8 +473,131 @@ pub struct SuiteReport {
     pub ms: u64,
     pub setup: Vec<StepResult>,
     pub cases: Vec<CaseResult>,
+    /// Cases before `--from` that did not run.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped: usize,
+    /// Where the per-step timing trace went.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// Where `--from` resumes: case `case` (1-based) at its step `step` (1-based,
+/// counting a case's steps, expanded flow steps and assertions in order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumePoint {
+    pub case: usize,
+    pub step: usize,
+}
+
+impl ResumePoint {
+    /// `N` or `N:M`.
+    pub fn parse(text: &str) -> Result<Self> {
+        let number = |part: &str| -> Result<usize> {
+            match part.trim().parse::<usize>() {
+                Ok(n) if n >= 1 => Ok(n),
+                _ => bail!("--from takes N or N:M with 1-based numbers, got {text:?}"),
+            }
+        };
+        let (case, step) = match text.split_once(':') {
+            Some((case, step)) => (number(case)?, number(step)?),
+            None => (number(text)?, 1),
+        };
+        Ok(Self { case, step })
+    }
+
+    /// Check the point against the suite it resumes.
+    pub fn check(&self, suite: &Suite) -> Result<()> {
+        let Some(case) = suite.cases.get(self.case - 1) else {
+            bail!(
+                "--from {}: the suite has {} cases",
+                self.case,
+                suite.cases.len()
+            );
+        };
+        if self.step > case.steps.len() {
+            bail!(
+                "--from {}:{}: case {:?} has {} steps (assertions included)",
+                self.case,
+                self.step,
+                case.name,
+                case.steps.len()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// How [`run_suite`] runs a suite beyond its file.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunOptions {
+    pub from: Option<ResumePoint>,
+    pub retries: u32,
+}
+
+/// One line of `trace.ndjson`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TraceLine {
+    /// Case name, or `setup`.
+    pub case: String,
+    pub attempt: u32,
+    /// 1-based step number within the case: the `M` of `--from N:M`.
+    pub step: usize,
+    pub origin: String,
+    pub kind: String,
+    pub role: &'static str,
+    pub ms: u64,
+    /// `ok`, or the error that failed the step.
+    pub outcome: String,
+}
+
+fn trace_lines(
+    case: &str,
+    attempt: u32,
+    first_step: usize,
+    compiled: &[CompiledStep],
+    results: &[StepResult],
+) -> Vec<TraceLine> {
+    compiled
+        .iter()
+        .zip(results)
+        .enumerate()
+        .map(|(index, (step, result))| TraceLine {
+            case: case.to_string(),
+            attempt,
+            step: first_step + index,
+            origin: result.origin.clone(),
+            kind: step.kind.clone(),
+            role: result.role,
+            ms: result.ms,
+            outcome: if result.ok {
+                "ok".to_string()
+            } else {
+                result.error.clone().unwrap_or_else(|| "failed".to_string())
+            },
+        })
+        .collect()
+}
+
+/// Write the trace; returns where it went or why it did not.
+fn write_trace(root: &Path, lines: &[TraceLine]) -> String {
+    let path = root.join(TRACE_FILE);
+    let mut body = Vec::new();
+    for line in lines {
+        if let Ok(json) = serde_json::to_vec(line) {
+            body.extend(json);
+            body.push(b'\n');
+        }
+    }
+    match private_dir(root).and_then(|()| private_write(&path, &body)) {
+        Ok(()) => path.display().to_string(),
+        Err(error) => format!("(not written: {error:#})"),
+    }
 }
 
 impl SuiteReport {
@@ -664,9 +812,16 @@ pub fn is_locked(status: &serde_json::Value) -> bool {
         || status.get("wda_locked").and_then(|v| v.as_bool()) == Some(true)
 }
 
-/// Run a validated suite. The caller has already checked `--confirm`.
-pub async fn run_suite(suite: &Suite, daemon: &DaemonClient, artifacts_root: &Path) -> SuiteReport {
+/// Run a validated suite. The caller has already checked `--confirm` and
+/// `options.from` against the suite.
+pub async fn run_suite(
+    suite: &Suite,
+    daemon: &DaemonClient,
+    artifacts_root: &Path,
+    options: RunOptions,
+) -> SuiteReport {
     let clock = Instant::now();
+    let from = options.from.unwrap_or(ResumePoint { case: 1, step: 1 });
     let mut report = SuiteReport {
         suite: suite.name.clone(),
         path: suite.path.display().to_string(),
@@ -675,6 +830,8 @@ pub async fn run_suite(suite: &Suite, daemon: &DaemonClient, artifacts_root: &Pa
         ms: 0,
         setup: Vec::new(),
         cases: Vec::new(),
+        skipped: from.case - 1,
+        trace: None,
         error: None,
     };
     if let Err(reason) = ensure_drivable(daemon).await {
@@ -682,29 +839,59 @@ pub async fn run_suite(suite: &Suite, daemon: &DaemonClient, artifacts_root: &Pa
         report.ms = clock.elapsed().as_millis() as u64;
         return report;
     }
-    let (setup, failure) = run_steps(daemon, &suite.setup).await;
-    report.setup = setup;
-    if let Some(failure) = failure {
-        let dir = artifacts_root.join("setup");
-        let _ = save_failure_evidence(daemon, &dir, &failure, &report.setup).await;
-        report.error = Some(format!(
-            "setup failed, no case ran: {failure} (artifacts: {})",
-            dir.display()
-        ));
-        report.failed = suite.cases.len();
-        report.ms = clock.elapsed().as_millis() as u64;
-        return report;
+    let mut trace = Vec::new();
+    // Resuming inside a case continues from the screen the phone is on, so
+    // setup (which brings the app to its start) does not run.
+    if from.step == 1 {
+        let (setup, failure) = run_steps(daemon, &suite.setup).await;
+        trace.extend(trace_lines("setup", 1, 1, &suite.setup, &setup));
+        report.setup = setup;
+        if let Some(failure) = failure {
+            let dir = artifacts_root.join("setup");
+            let _ = save_failure_evidence(daemon, &dir, &failure, &report.setup).await;
+            report.error = Some(format!(
+                "setup failed, no case ran: {failure} (artifacts: {})",
+                dir.display()
+            ));
+            report.failed = suite.cases.len() - report.skipped;
+            report.trace = Some(write_trace(artifacts_root, &trace));
+            report.ms = clock.elapsed().as_millis() as u64;
+            return report;
+        }
     }
-    for case in &suite.cases {
+    for (index, case) in suite.cases.iter().enumerate().skip(from.case - 1) {
+        let number = index + 1;
+        let first_step = if number == from.case { from.step } else { 1 };
+        let steps = &case.steps[first_step - 1..];
         let case_clock = Instant::now();
-        let (steps, failure) = run_steps(daemon, &case.steps).await;
+        let mut earlier_failures = Vec::new();
+        let mut attempt = 1;
+        let (results, failure) = loop {
+            let (results, failure) = run_steps(daemon, steps).await;
+            trace.extend(trace_lines(
+                &case.name, attempt, first_step, steps, &results,
+            ));
+            match failure {
+                Some(failure) if attempt <= options.retries => {
+                    earlier_failures.push(failure);
+                    attempt += 1;
+                }
+                failure => break (results, failure),
+            }
+        };
+        let resume_from = failure
+            .is_some()
+            .then(|| format!("{number}:{}", first_step + results.len() - 1));
         let mut result = CaseResult {
             name: case.name.clone(),
             passed: failure.is_none(),
             ms: case_clock.elapsed().as_millis() as u64,
-            steps,
+            steps: results,
             failure: failure.clone(),
             artifacts: None,
+            attempts: attempt,
+            earlier_failures,
+            resume_from,
         };
         if let Some(failure) = &failure {
             let dir = artifacts_root.join(slug(&case.name));
@@ -718,6 +905,7 @@ pub async fn run_suite(suite: &Suite, daemon: &DaemonClient, artifacts_root: &Pa
         }
         report.cases.push(result);
     }
+    report.trace = Some(write_trace(artifacts_root, &trace));
     report.ms = clock.elapsed().as_millis() as u64;
     report
 }
@@ -735,10 +923,21 @@ pub fn text_report(report: &SuiteReport) -> String {
     if let Some(error) = &report.error {
         out.push_str(&format!("  ! {error}\n"));
     }
+    if report.skipped > 0 {
+        out.push_str(&format!(
+            "  (resumed: the first {} cases were skipped)\n",
+            report.skipped
+        ));
+    }
     for case in &report.cases {
         let mark = if case.passed { "✓" } else { "✗" };
+        let attempts = match (case.attempts, case.passed) {
+            (1, _) => String::new(),
+            (n, true) => format!("  (passed on attempt {n})"),
+            (n, false) => format!("  ({n} attempts)"),
+        };
         out.push_str(&format!(
-            "  {mark} {:<40} {:>6}s\n",
+            "  {mark} {:<40} {:>6}s{attempts}\n",
             case.name,
             seconds(case.ms)
         ));
@@ -748,13 +947,24 @@ pub fn text_report(report: &SuiteReport) -> String {
         if let Some(artifacts) = &case.artifacts {
             out.push_str(&format!("      artifacts: {artifacts}\n"));
         }
+        if let Some(from) = &case.resume_from {
+            out.push_str(&format!("      resume: --from {from}\n"));
+        }
     }
+    let skipped = if report.skipped > 0 {
+        format!(", {} skipped", report.skipped)
+    } else {
+        String::new()
+    };
     out.push_str(&format!(
-        "{} passed, {} failed ({}s)\n",
+        "{} passed, {} failed{skipped} ({}s)\n",
         report.passed,
         report.failed,
         seconds(report.ms)
     ));
+    if let Some(trace) = &report.trace {
+        out.push_str(&format!("trace: {trace}\n"));
+    }
     out
 }
 
@@ -777,10 +987,11 @@ pub fn junit_report(report: &SuiteReport) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     let tests = report.cases.len().max(report.failed);
     out.push_str(&format!(
-        "<testsuite name=\"{}\" tests=\"{tests}\" failures=\"{}\" errors=\"{}\" time=\"{}\">\n",
+        "<testsuite name=\"{}\" tests=\"{tests}\" failures=\"{}\" errors=\"{}\" skipped=\"{}\" time=\"{}\">\n",
         xml_escape(&report.suite),
         report.failed,
         usize::from(report.error.is_some() && report.cases.is_empty()),
+        report.skipped,
         seconds(report.ms)
     ));
     if report.cases.is_empty() {
@@ -816,6 +1027,22 @@ pub struct TestOptions {
     pub confirm: bool,
     pub artifacts_dir: Option<PathBuf>,
     pub validate_only: bool,
+    /// `--from N[:M]`, unparsed.
+    pub from: Option<String>,
+    pub retries: u32,
+}
+
+/// Print a suite-level refusal the way `--json` or the terminal expects it.
+fn refuse(json: bool, error: &str, message: &str) -> i32 {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "ok": false, "error": error, "message": message })
+        );
+    } else {
+        eprintln!("{message}");
+    }
+    EXIT_UNUSABLE
 }
 
 /// `iphone-use-mcp test <suite>`; returns the process exit code.
@@ -852,12 +1079,29 @@ pub async fn test_command(target: &str, options: TestOptions) -> i32 {
         }
         return EXIT_UNUSABLE;
     }
+    if options.retries > MAX_RETRIES {
+        let message = format!("--retries is at most {MAX_RETRIES}");
+        return refuse(options.json, "invalid_retries", &message);
+    }
+    let from = match options.from.as_deref().map(|text| {
+        let point = ResumePoint::parse(text)?;
+        point.check(&suite)?;
+        Ok::<_, anyhow::Error>(point)
+    }) {
+        None => None,
+        Some(Ok(point)) => Some(point),
+        Some(Err(error)) => return refuse(options.json, "invalid_from", &format!("{error:#}")),
+    };
     let daemon = DaemonClient::from_env();
     let artifacts_root = options
         .artifacts_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from("iphone-use-test-artifacts"));
-    let report = run_suite(&suite, &daemon, &artifacts_root).await;
+    let run = RunOptions {
+        from,
+        retries: options.retries,
+    };
+    let report = run_suite(&suite, &daemon, &artifacts_root, run).await;
     // The run is over either way: hand the phone back for the next session.
     let _ = daemon.release_owner().await;
     if let Some(junit) = &options.junit {
@@ -1013,6 +1257,9 @@ cases:
                     steps: vec![],
                     failure: None,
                     artifacts: None,
+                    attempts: 1,
+                    earlier_failures: vec![],
+                    resume_from: None,
                 },
                 CaseResult {
                     name: "bad & worse".into(),
@@ -1021,20 +1268,27 @@ cases:
                     steps: vec![],
                     failure: Some("assert cases[1].assert[0] failed: expectation_timeout".into()),
                     artifacts: Some("dir/bad-worse".into()),
+                    attempts: 1,
+                    earlier_failures: vec![],
+                    resume_from: Some("2:1".into()),
                 },
             ],
+            skipped: 0,
+            trace: None,
             error: None,
         }
     }
 
     /// A daemon that answers by path: status drivable, every action OK except
-    /// a `wait_for` looking for "关于本机", which times out.
-    fn path_daemon() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    /// a `wait_for` looking for "关于本机", which times out, and one looking for
+    /// "偶发", which times out the first `flaky` times it is asked.
+    fn path_daemon(flaky: usize) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = seen.clone();
+        let mut flaky_left = flaky;
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
@@ -1061,8 +1315,11 @@ cases:
                         "application/json",
                         br#"{"snapshot":"s1","elements":[{"kind":"Button","label":"x"}]}"#.to_vec(),
                     )
-                } else if line.starts_with("POST /agent/actions") && request.contains("关于本机")
+                } else if line.starts_with("POST /agent/actions")
+                    && (request.contains("关于本机")
+                        || (request.contains("偶发") && flaky_left > 0))
                 {
+                    flaky_left = flaky_left.saturating_sub(usize::from(request.contains("偶发")));
                     ("504 Gateway Timeout", "application/json",
                      br#"{"ok":false,"error":"expectation_timeout","failed_step":0,"outcome":"no_effect","retry_safe":true,"steps":[]}"#.to_vec())
                 } else {
@@ -1086,11 +1343,11 @@ cases:
 
     #[tokio::test]
     async fn a_failed_assert_fails_its_case_saves_evidence_and_the_next_case_still_runs() {
-        let (url, seen) = path_daemon();
+        let (url, seen) = path_daemon(0);
         let daemon = DaemonClient::new(url, None);
         let suite = parse(SETTINGS, "settings.yaml").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let report = run_suite(&suite, &daemon, dir.path()).await;
+        let report = run_suite(&suite, &daemon, dir.path(), RunOptions::default()).await;
         assert_eq!((report.passed, report.failed), (1, 1), "{report:?}");
         assert_eq!(report.exit_code(), EXIT_FAILED);
         assert_eq!(report.setup.len(), 1);
@@ -1129,6 +1386,172 @@ cases:
             4,
             "{seen:?}"
         );
+    }
+
+    fn read_trace(dir: &Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(dir.join(TRACE_FILE))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn every_step_lands_in_the_timing_trace() {
+        let (url, _) = path_daemon(0);
+        let daemon = DaemonClient::new(url, None);
+        let suite = parse(SETTINGS, "settings.yaml").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let report = run_suite(&suite, &daemon, dir.path(), RunOptions::default()).await;
+        assert_eq!(
+            report.trace.as_deref(),
+            Some(dir.path().join(TRACE_FILE).display().to_string().as_str())
+        );
+        let trace = read_trace(dir.path());
+        // setup launch, case 1 assert, case 2 step + failed assert.
+        assert_eq!(trace.len(), 4, "{trace:?}");
+        assert_eq!(trace[0]["case"], "setup");
+        assert_eq!(trace[0]["kind"], "launch_app");
+        assert_eq!(trace[2]["case"], "open General");
+        assert_eq!(
+            (&trace[2]["step"], &trace[2]["kind"], &trace[2]["outcome"]),
+            (
+                &serde_json::json!(1),
+                &serde_json::json!("tap_locator"),
+                &serde_json::json!("ok")
+            )
+        );
+        assert_eq!(trace[3]["kind"], "wait_for");
+        assert_eq!(trace[3]["role"], "assert");
+        assert_eq!(trace[3]["outcome"], "expectation_timeout");
+        assert!(trace[3]["ms"].is_u64() && trace[3]["attempt"] == 1);
+        assert_eq!(report.cases[1].resume_from.as_deref(), Some("2:2"));
+        assert!(text_report(&report).contains("resume: --from 2:2"));
+    }
+
+    #[test]
+    fn resume_points_parse_and_are_checked_against_the_suite() {
+        let suite = parse(SETTINGS, "settings.yaml").unwrap();
+        assert_eq!(
+            ResumePoint::parse("2").unwrap(),
+            ResumePoint { case: 2, step: 1 }
+        );
+        assert_eq!(
+            ResumePoint::parse("2:3").unwrap(),
+            ResumePoint { case: 2, step: 3 }
+        );
+        for bad in ["0", "2:0", "x", "", "1:2:3", "-1"] {
+            assert!(ResumePoint::parse(bad).is_err(), "{bad:?} parsed");
+        }
+        assert!(ResumePoint::parse("2:3").unwrap().check(&suite).is_ok());
+        let past_cases = ResumePoint::parse("3").unwrap().check(&suite).unwrap_err();
+        assert!(format!("{past_cases}").contains("2 cases"), "{past_cases}");
+        let past_steps = ResumePoint::parse("2:4")
+            .unwrap()
+            .check(&suite)
+            .unwrap_err();
+        assert!(format!("{past_steps}").contains("3 steps"), "{past_steps}");
+    }
+
+    #[tokio::test]
+    async fn from_skips_earlier_cases_and_inside_a_case_also_skips_setup() {
+        let (url, seen) = path_daemon(0);
+        let daemon = DaemonClient::new(url, None);
+        let suite = parse(SETTINGS, "settings.yaml").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let options = RunOptions {
+            from: Some(ResumePoint { case: 2, step: 3 }),
+            retries: 0,
+        };
+        let report = run_suite(&suite, &daemon, dir.path(), options).await;
+        assert!(
+            report.setup.is_empty(),
+            "setup is skipped when resuming mid-case"
+        );
+        assert_eq!((report.passed, report.failed, report.skipped), (1, 0, 1));
+        assert_eq!(report.cases.len(), 1);
+        assert_eq!(report.cases[0].steps.len(), 1, "only the last assert ran");
+        assert_eq!(report.cases[0].steps[0].origin, "cases[1].assert[1]");
+        let trace = read_trace(dir.path());
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0]["step"], 3, "steps keep their numbers in the case");
+        let actions = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("POST /agent/actions"))
+            .count();
+        assert_eq!(actions, 1);
+        let text = text_report(&report);
+        assert!(text.contains("1 passed, 0 failed, 1 skipped"), "{text}");
+        assert!(junit_report(&report).contains("skipped=\"1\""));
+
+        // A whole case: setup still runs, earlier cases do not.
+        let report = run_suite(
+            &suite,
+            &daemon,
+            dir.path(),
+            RunOptions {
+                from: Some(ResumePoint { case: 2, step: 1 }),
+                retries: 0,
+            },
+        )
+        .await;
+        assert_eq!(report.setup.len(), 1);
+        assert_eq!(report.cases.len(), 1);
+        assert_eq!(report.cases[0].name, "open General");
+    }
+
+    const FLAKY: &str = r#"
+cases:
+  - name: flaky
+    steps:
+      - {kind: shortcut, name: home}
+    assert:
+      - present: 偶发
+"#;
+
+    #[tokio::test]
+    async fn retries_rerun_a_failed_case_and_report_the_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let suite = parse(FLAKY, "flaky.yaml").unwrap();
+
+        // Fails twice, then passes: two retries are enough.
+        let (url, _) = path_daemon(2);
+        let daemon = DaemonClient::new(url, None);
+        let options = RunOptions {
+            from: None,
+            retries: 2,
+        };
+        let report = run_suite(&suite, &daemon, dir.path(), options).await;
+        let case = &report.cases[0];
+        assert!(case.passed, "{report:?}");
+        assert_eq!(case.attempts, 3);
+        assert_eq!(case.earlier_failures.len(), 2);
+        assert!(case.artifacts.is_none() && case.resume_from.is_none());
+        assert_eq!(report.exit_code(), EXIT_PASSED);
+        assert!(text_report(&report).contains("(passed on attempt 3)"));
+        let attempts: Vec<_> = read_trace(dir.path())
+            .iter()
+            .map(|line| line["attempt"].as_u64().unwrap())
+            .collect();
+        assert_eq!(attempts, [1, 1, 2, 2, 3, 3]);
+
+        // Fails three times: one retry is not enough, the evidence is the last.
+        let (url, _) = path_daemon(3);
+        let daemon = DaemonClient::new(url, None);
+        let options = RunOptions {
+            from: None,
+            retries: 1,
+        };
+        let report = run_suite(&suite, &daemon, dir.path(), options).await;
+        let case = &report.cases[0];
+        assert!(!case.passed);
+        assert_eq!(case.attempts, 2);
+        assert_eq!(case.earlier_failures.len(), 1);
+        assert!(dir.path().join("flaky/error.json").exists());
+        assert!(text_report(&report).contains("(2 attempts)"));
+        assert_eq!(report.exit_code(), EXIT_FAILED);
     }
 
     #[test]

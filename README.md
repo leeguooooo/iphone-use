@@ -75,7 +75,7 @@ One daemon per phone runs on the Mac. It reads the screen as an accessibility tr
 - An iPhone with iOS 15 or later and Developer Mode on (Settings → Privacy & Security → Developer Mode).
 - A USB cable for the first setup. Plug the iPhone in and unlock it before you install.
 
-The installer then sets the phone up and shows an agent opening Settings and reading it. It registers the MCP server with Claude Code and Codex, and opens the control page in your browser with a one-time sign-in, so there is no password to copy. If anything is missing, it says what and how to fix it.
+The installer then sets the phone up and shows an agent opening Settings and reading it. It registers the MCP server with Claude Code and Codex, and with Cursor and Claude Desktop when they are installed (`IPHONE_USE_NO_CLIENT_SETUP=1` skips those two), and opens the control page in your browser with a one-time sign-in, so there is no password to copy. If anything is missing, it says what and how to fix it.
 
 ```bash
 iphone-use status    # is the phone ready for agents?
@@ -103,12 +103,19 @@ Install iphone-use (https://github.com/leeguooooo/iphone-use) on this Mac so you
 5. If the phone_* tools are not loaded in this chat yet, tell me to start a new chat.
 ```
 
-### Codex plugin
+### Codex and Claude Code plugins
 
-Adds the skill and the MCP server; it still needs the install above:
+Each adds the skill and the MCP server; they still need the install above:
 
 ```bash
 codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-use@iphone-use
+```
+
+In Claude Code:
+
+```text
+/plugin marketplace add leeguooooo/iphone-use
+/plugin install iphone-use@iphone-use
 ```
 
 ## Remote control for people
@@ -131,7 +138,7 @@ A daemon on your Mac drives the phone and offers the same control in three forms
 - an **HTTP API** for agents and scripts (`/agent/*`);
 - a **web page and a native iOS app** for people ([remote control](#remote-control-for-people)).
 
-The installer registers the MCP server with Claude Code and Codex when they are present. Any other MCP client needs only the command; on this Mac the server finds the daemon and its token by itself:
+The installer registers the MCP server with Claude Code, Codex, Cursor and Claude Desktop when they are present (`IPHONE_USE_NO_CLIENT_SETUP=1` leaves Cursor and Claude Desktop alone). Any other MCP client needs only the command; on this Mac the server finds the daemon and its token by itself:
 
 ```json
 {
@@ -142,6 +149,45 @@ The installer registers the MCP server with Claude Code and Codex when they are 
   }
 }
 ```
+
+<details>
+<summary>Config for Cursor, VS Code, Claude Desktop, Gemini CLI, opencode, Windsurf</summary>
+
+Use the absolute path (replace `YOU`) and merge the entry into the file; keep the servers already there.
+
+- **Cursor**: `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project), the `mcpServers` block above.
+- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json`, the `mcpServers` block above; quit and reopen the app.
+- **Gemini CLI**: `~/.gemini/settings.json` (or `.gemini/settings.json` in a project), the `mcpServers` block above.
+- **Windsurf / Devin Desktop**: `~/.codeium/windsurf/mcp_config.json` (newer builds: `~/.config/devin/mcp_config.json`), the `mcpServers` block above.
+- **VS Code / Copilot**: `.vscode/mcp.json` in a workspace, or **MCP: Open User Configuration** for every workspace. The key is `servers`:
+
+  ```json
+  {
+    "servers": {
+      "iphone-use": {
+        "type": "stdio",
+        "command": "/Users/YOU/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
+      }
+    }
+  }
+  ```
+
+- **opencode**: `~/.config/opencode/opencode.json` (or `opencode.json` in a project). The key is `mcp` and the command is an array:
+
+  ```json
+  {
+    "$schema": "https://opencode.ai/config.json",
+    "mcp": {
+      "iphone-use": {
+        "type": "local",
+        "command": ["/Users/YOU/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"],
+        "enabled": true
+      }
+    }
+  }
+  ```
+
+</details>
 
 Or call the HTTP API directly:
 

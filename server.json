@@ -1,0 +1,19 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.leeguooooo/iphone-use",
+  "title": "iPhone Use",
+  "description": "Drive a real iPhone from a Mac: read the screen as text, tap, type, scroll, replay saved flows.",
+  "repository": {
+    "url": "https://github.com/leeguooooo/iphone-use",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/leeguooooo/iphone-use/blob/main/llms-install.md",
+  "version": "0.17.17",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/leeguooooo/iphone-use/main/assets/icon-1024.png",
+      "mimeType": "image/png",
+      "sizes": ["1024x1024"]
+    }
+  ]
+}

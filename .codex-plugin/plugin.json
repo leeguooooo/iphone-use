@@ -1,6 +1,6 @@
 {
   "name": "iphone-use",
-  "version": "0.17.16",
+  "version": "0.17.17",
   "description": "Drive a real iPhone from your agent: read the screen as text, tap, type, scroll and replay saved per-app flows through the iphone-use daemon on your Mac.",
   "author": {
     "name": "leeguooooo",
@@ -8,7 +8,7 @@
   },
   "homepage": "https://github.com/leeguooooo/iphone-use",
   "repository": "https://github.com/leeguooooo/iphone-use",
-  "license": "MIT",
+  "license": "PolyForm-Shield-1.0.0",
   "keywords": ["iphone", "ios", "mobile", "automation", "xctest", "mcp"],
   "skills": "./skills/",
   "mcpServers": "./.codex-plugin/mcp.json",

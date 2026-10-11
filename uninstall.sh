@@ -953,7 +953,8 @@ remove_cli_link() {
     return 0
 }
 
-# install.sh registers the MCP server with Claude Code and the Codex CLI.
+# install.sh registers the MCP server with Claude Code, the Codex CLI, Cursor
+# and Claude Desktop.
 # Remove each entry only while it still launches this app's iphone-use-mcp;
 # a failure here is a warning, never a reason to keep the rest.
 remove_agent_mcp_entries() {
@@ -982,6 +983,54 @@ remove_agent_mcp_entries() {
             warn "could not remove Codex MCP server $name; remove it with: codex mcp remove $name"
         fi
     fi
+    remove_json_mcp_entry "Cursor" "$HOME/.cursor/mcp.json" "$mcp" "$name"
+    remove_json_mcp_entry "Claude Desktop" \
+        "$HOME/Library/Application Support/Claude/claude_desktop_config.json" "$mcp" "$name"
+    return 0
+}
+
+# install.sh also adds the server to Cursor's and Claude Desktop's JSON
+# configs ({"mcpServers": {...}}). Drop that one entry only while it still
+# launches this app's iphone-use-mcp; other servers and keys are kept and the
+# old file is backed up as <file>.iphone-use.bak.
+remove_json_mcp_entry() {
+    local client="$1" file="$2" mcp="$3" name="$4" rc=0
+    [ -f "$file" ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$file" "$mcp" "$name" "$DRY_RUN" 2>/dev/null <<'PY' || rc=$?
+import json, os, shutil, sys, tempfile
+path, mcp, name, dry = sys.argv[1:5]
+path = os.path.realpath(path)
+try:
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+except (OSError, ValueError):
+    sys.exit(5)
+servers = cfg.get("mcpServers") if isinstance(cfg, dict) else None
+entry = servers.get(name) if isinstance(servers, dict) else None
+if not (isinstance(entry, dict) and entry.get("command") == mcp):
+    sys.exit(3)
+if dry == "1":
+    sys.exit(2)
+del servers[name]
+shutil.copy2(path, path + ".iphone-use.bak")
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".iphone-use.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    shutil.copymode(path, tmp)
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    case "$rc" in
+        0) ok "removed $client MCP server $name (backup: $file.iphone-use.bak)" ;;
+        2) plan "remove $client MCP server $name from $file" ;;
+        3) ;;
+        *) warn "could not remove $client MCP server $name; delete \"$name\" under mcpServers in $file" ;;
+    esac
     return 0
 }
 

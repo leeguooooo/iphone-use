@@ -1,0 +1,44 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "iphone-use",
+  "description": "iPhone Use: let your agent operate a real iPhone through the iphone-use daemon on your Mac.",
+  "owner": {
+    "name": "leeguooooo",
+    "url": "https://github.com/leeguooooo"
+  },
+  "plugins": [
+    {
+      "name": "iphone-use",
+      "source": "./",
+      "displayName": "iPhone Use",
+      "version": "0.17.17",
+      "description": "Drive a real iPhone from your agent: read the screen as text, tap, type, scroll and replay saved per-app flows through the iphone-use daemon on your Mac. The daemon is installed separately with install.sh.",
+      "author": {
+        "name": "leeguooooo",
+        "url": "https://github.com/leeguooooo"
+      },
+      "homepage": "https://github.com/leeguooooo/iphone-use",
+      "repository": "https://github.com/leeguooooo/iphone-use",
+      "license": "PolyForm-Shield-1.0.0",
+      "keywords": [
+        "iphone",
+        "ios",
+        "mobile",
+        "automation",
+        "xctest",
+        "mcp"
+      ],
+      "category": "productivity",
+      "mcpServers": {
+        "iphone-use": {
+          "type": "stdio",
+          "command": "/bin/sh",
+          "args": [
+            "-c",
+            "mcp=\"$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp\"; [ -x \"$mcp\" ] || { echo 'iphone-use is not installed on this Mac. Install it with: curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh' >&2; exit 1; }; exec \"$mcp\""
+          ]
+        }
+      }
+    }
+  ]
+}

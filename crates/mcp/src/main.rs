@@ -89,6 +89,15 @@ enum Command {
         /// Only parse and validate; never contacts the daemon.
         #[arg(long)]
         validate: bool,
+        /// Resume at case N (1-based), or at step M of case N with N:M
+        /// (skips setup: the phone must already be on that screen). A failed
+        /// case prints its own resume point.
+        #[arg(long, value_name = "N[:M]")]
+        from: Option<String>,
+        /// Run a failed case again up to N times (at most 10); the report
+        /// says which attempt passed.
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        retries: u32,
     },
     /// Scheduled flows and test suites, run by the daemon.
     Schedule {
@@ -331,7 +340,7 @@ async fn run() -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    if let Some(Command::Test { suite, json, junit, confirm, artifacts_dir, owner, validate }) = &cli.command {
+    if let Some(Command::Test { suite, json, junit, confirm, artifacts_dir, owner, validate, from, retries }) = &cli.command {
         if let Some(owner) = owner {
             std::env::set_var("IPHONE_USE_OWNER", owner);
         }
@@ -343,6 +352,8 @@ async fn run() -> anyhow::Result<()> {
                 confirm: *confirm,
                 artifacts_dir: artifacts_dir.clone(),
                 validate_only: *validate,
+                from: from.clone(),
+                retries: *retries,
             },
         )
         .await;

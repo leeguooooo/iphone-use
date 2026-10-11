@@ -916,6 +916,72 @@ print("%s\t%s" % (t.get("command") or "", (t.get("env") or {}).get("IPHONE_USE_I
     fi
 }
 
+# register_json_mcp <client> <config-file> <mcp-binary> <server-name> [instance]
+# Adds the server to a desktop client's JSON config ({"mcpServers": {...}}),
+# only when the client's config directory exists (the app is installed).
+# Other servers and keys are kept, the old file is backed up next to it as
+# <file>.iphone-use.bak, and an unreadable file or a same-named entry with
+# another command is left alone. IPHONE_USE_NO_CLIENT_SETUP=1 skips it.
+register_json_mcp() {
+    local client="$1" file="$2" mcp="$3" name="$4" instance="${5:-}" rc=0
+    [ "${IPHONE_USE_NO_CLIENT_SETUP:-0}" = "1" ] && return 0
+    [ -d "$(dirname "$file")" ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$file" "$mcp" "$name" "$instance" 2>/dev/null <<'PY' || rc=$?
+import json, os, shutil, sys, tempfile
+path, mcp, name, instance = sys.argv[1:5]
+path = os.path.realpath(path)  # a symlinked config keeps its link
+cfg = {}
+if os.path.exists(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        cfg = json.loads(text) if text.strip() else {}
+    except (OSError, ValueError):
+        sys.exit(5)
+if not isinstance(cfg, dict):
+    sys.exit(5)
+servers = cfg.setdefault("mcpServers", {})
+if not isinstance(servers, dict):
+    sys.exit(5)
+entry = {"command": mcp, "args": []}
+if instance:
+    entry["env"] = {"IPHONE_USE_INSTANCE": instance}
+old = servers.get(name)
+if old is not None:
+    same = isinstance(old, dict) and old.get("command") == mcp \
+        and ((old.get("env") or {}).get("IPHONE_USE_INSTANCE") or "") == instance
+    sys.exit(3 if same else 4)
+servers[name] = entry
+if os.path.exists(path):
+    shutil.copy2(path, path + ".iphone-use.bak")
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".iphone-use.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    if os.path.exists(path):
+        shutil.copymode(path, tmp)
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    case "$rc" in
+        0) ok "$client can now use the iPhone (MCP server \"$name\" in $file; restart $client). Undo: remove \"$name\" from that file" ;;
+        3) ok "$client already has the $name MCP server." ;;
+        4) warn "$client already has an MCP server named $name with another command; left it unchanged." ;;
+        5) warn "Could not read $file as JSON; left it unchanged. Add \"$name\": {\"command\": \"$mcp\"} under mcpServers by hand." ;;
+        *) warn "Could not register the MCP server with $client; add \"$name\": {\"command\": \"$mcp\"} under mcpServers in $file by hand." ;;
+    esac
+}
+
+# register_desktop_mcp <mcp-binary> <server-name> [instance]: Cursor and Claude Desktop.
+register_desktop_mcp() {
+    register_json_mcp "Cursor" "$HOME/.cursor/mcp.json" "$@"
+    register_json_mcp "Claude Desktop" "$HOME/Library/Application Support/Claude/claude_desktop_config.json" "$@"
+}
+
 # first_run_login <cli> [--instance NAME]: one-time browser sign-in + phone QR.
 first_run_login() {
     local cli="$1"
@@ -2465,6 +2531,7 @@ install_named_instance() {
         printf '%b━━━ Agents ━━━%b\n' "$BOLD" "$RESET"
         register_claude_mcp "$app_dst/$MCP_BINARY_INSIDE_APP" "iphone-use-$INSTANCE_NAME" "$INSTANCE_NAME"
         register_codex_mcp "$app_dst/$MCP_BINARY_INSIDE_APP" "iphone-use-$INSTANCE_NAME" "$INSTANCE_NAME"
+        register_desktop_mcp "$app_dst/$MCP_BINARY_INSIDE_APP" "iphone-use-$INSTANCE_NAME" "$INSTANCE_NAME"
     else
         echo ""
         info "Set up or repair this phone with: iphone-use setup --instance $INSTANCE_NAME"
@@ -2509,6 +2576,18 @@ if [ "${IPHONE_USE_INTERNAL_TEST_RUNNER_ONLY:-0}" = "1" ]; then
     fi
     RUNNER_SRC_COMMITTED=1
     _finish_runner_sources
+    exit 0
+fi
+
+# Exercises the desktop-client MCP registration (Cursor, Claude Desktop) in an
+# isolated fake HOME. Same gating as the hooks around it.
+if [ "${IPHONE_USE_INTERNAL_TEST_CLIENT_CONFIG_ONLY:-0}" = "1" ]; then
+    [ "$SCRIPT_IS_LOCAL" = "1" ] \
+        || die "The internal client-config test hook requires a local installer."
+    [ -f "$HOME/.iphone-use-installer-test-root" ] \
+        || die "The internal client-config test sentinel is missing."
+    register_desktop_mcp "$HOME/Applications/$APP_NAME/$MCP_BINARY_INSIDE_APP" \
+        "${IPHONE_USE_INTERNAL_TEST_MCP_NAME:-iphone-use}" "${IPHONE_USE_INTERNAL_TEST_MCP_INSTANCE:-}"
     exit 0
 fi
 
@@ -3498,6 +3577,7 @@ echo ""
 printf '%b━━━ Agents ━━━%b\n' "$BOLD" "$RESET"
 register_claude_mcp "$DEST/$MCP_BINARY_INSIDE_APP" "iphone-use"
 register_codex_mcp "$DEST/$MCP_BINARY_INSIDE_APP" "iphone-use"
+register_desktop_mcp "$DEST/$MCP_BINARY_INSIDE_APP" "iphone-use"
 info "Other MCP clients: command $DEST/$MCP_BINARY_INSIDE_APP (no env needed on this Mac)."
 
 echo ""

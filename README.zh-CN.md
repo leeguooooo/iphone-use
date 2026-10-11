@@ -75,7 +75,7 @@ agent 可以直接按名字打开 App（`launch_app {"app": "健康"}`），一�
 - 一台 iOS 15 及以上的 iPhone，打开开发者模式（设置 → 隐私与安全性 → 开发者模式）。
 - 第一次配置需要一根数据线。安装前把 iPhone 插上并解锁。
 
-安装脚本接着会把手机配好，让 agent 打开「设置」读一遍屏幕给你看，在 Claude Code 和 Codex 里注册好 MCP server，再用一次性链接在浏览器里打开控制页，不用抄密码。缺什么会直接告诉你缺什么、怎么补。
+安装脚本接着会把手机配好，让 agent 打开「设置」读一遍屏幕给你看，在 Claude Code 和 Codex 里注册好 MCP server（装了 Cursor、Claude Desktop 的话也会一并注册，设 `IPHONE_USE_NO_CLIENT_SETUP=1` 可跳过这两个），再用一次性链接在浏览器里打开控制页，不用抄密码。缺什么会直接告诉你缺什么、怎么补。
 
 ```bash
 iphone-use status    # 手机现在能不能给 agent 用
@@ -101,12 +101,19 @@ iphone-use upgrade   # 升级全部组件
 5. 如果这个对话里还没有 phone_* 工具，告诉我新开一个对话。
 ```
 
-### Codex 插件
+### Codex 和 Claude Code 插件
 
 插件带 skill 和 MCP server，但仍需先完成上面的安装：
 
 ```bash
 codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-use@iphone-use
+```
+
+在 Claude Code 里：
+
+```text
+/plugin marketplace add leeguooooo/iphone-use
+/plugin install iphone-use@iphone-use
 ```
 
 ## 人用的远程控制
@@ -129,7 +136,7 @@ Mac 上的守护进程负责操作手机，对外提供三种入口：
 - **HTTP 接口**：给 agent 和脚本用（`/agent/*`）；
 - **网页和 iOS 原生 App**：给人用（见[人用的远程控制](#人用的远程控制)）。
 
-装了 Claude Code 或 Codex 的话，安装时会自动给它注册 MCP server。其他 MCP 客户端只要填命令，在这台 Mac 上 server 会自己找到守护进程和令牌：
+装了 Claude Code、Codex、Cursor 或 Claude Desktop 的话，安装时会自动给它们注册 MCP server（`IPHONE_USE_NO_CLIENT_SETUP=1` 不动 Cursor 和 Claude Desktop）。其他 MCP 客户端只要填命令，在这台 Mac 上 server 会自己找到守护进程和令牌：
 
 ```json
 {
@@ -140,6 +147,45 @@ Mac 上的守护进程负责操作手机，对外提供三种入口：
   }
 }
 ```
+
+<details>
+<summary>Cursor、VS Code、Claude Desktop、Gemini CLI、opencode、Windsurf 的配置</summary>
+
+填绝对路径（替换 `你的用户名`），把这一项合并进文件，保留里面已有的 server。
+
+- **Cursor**：`~/.cursor/mcp.json`（或项目里的 `.cursor/mcp.json`），用上面的 `mcpServers` 写法。
+- **Claude Desktop**：`~/Library/Application Support/Claude/claude_desktop_config.json`，用上面的 `mcpServers` 写法；改完退出再重开 App。
+- **Gemini CLI**：`~/.gemini/settings.json`（或项目里的 `.gemini/settings.json`），用上面的 `mcpServers` 写法。
+- **Windsurf / Devin Desktop**：`~/.codeium/windsurf/mcp_config.json`（新版本是 `~/.config/devin/mcp_config.json`），用上面的 `mcpServers` 写法。
+- **VS Code / Copilot**：工作区里的 `.vscode/mcp.json`，或用 **MCP: Open User Configuration** 对所有工作区生效。键名是 `servers`：
+
+  ```json
+  {
+    "servers": {
+      "iphone-use": {
+        "type": "stdio",
+        "command": "/Users/你的用户名/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
+      }
+    }
+  }
+  ```
+
+- **opencode**：`~/.config/opencode/opencode.json`（或项目里的 `opencode.json`）。键名是 `mcp`，命令写成数组：
+
+  ```json
+  {
+    "$schema": "https://opencode.ai/config.json",
+    "mcp": {
+      "iphone-use": {
+        "type": "local",
+        "command": ["/Users/你的用户名/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"],
+        "enabled": true
+      }
+    }
+  }
+  ```
+
+</details>
 
 也可以直接调 HTTP 接口：
 
