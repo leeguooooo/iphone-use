@@ -323,15 +323,19 @@ claude mcp add iphone-sim -e IPHONE_USE_INSTANCE=sim -- iphone-use-mcp   # 只�
 - 设备日志、崩溃报告、模拟定位、安装和卸载 app、已安装 app 清单都改走 `xcrun simctl`。
 - 崩溃报告取自 `~/Library/Logs/DiagnosticReports`，只包含这台模拟器的报告。
 - 安装只接受模拟器构建的 `.app`，不接受 `.ipa`。
+- 录屏（`POST /agent/record`、`phone_record`）改用 `simctl io recordVideo`，不依赖 H.264 实时画面。结果里有 `"via":"simctl"`，没有帧数。
+- 模拟器启动中时 `device_state` 是 `booting`，关机时是 `shutdown`。
 - 保持唤醒和勿扰模式不启用。
 - `/agent/status` 里会给出 `"target":"simulator"`，`lock_readiness.verdict` 为 `"ready"`，`device` 是模拟器的名字和运行时。
 
 `iphone-use simulator stop <名字|udid>` 会停止 daemon 和 runner，并释放 `sim` 实例。它只停止自己记录并核实过的进程，加 `--shutdown` 会同时关闭模拟器。
 
+`iphone-use setup --simulator <名字|udid>` 等同于 `simulator start`，跳过真机配置。`iphone-use doctor` 会多一行，列出可用和已启动的模拟器。
+
 预览版还不支持以下内容：
 
-- setup、doctor 和安装器不认识模拟器。
-- 模拟器上的 H.264 实时画面尚未验证。
+- 安装器不会配置模拟器，`IPHONE_USE_TARGET` 也不写进实例 plist（模拟器实例不走 launchd）。
+- 模拟器上 runner 的 H.264 实时画面尚未验证（MJPEG 和录屏不依赖它）。
 - 模拟器没有相机、App Store app、真实推送和 Face ID，依赖这些的任务只能在真机上做。
 
 ### 生命周期与恢复

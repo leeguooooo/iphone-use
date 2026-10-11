@@ -2796,6 +2796,14 @@ async fn agent_status(
     } else {
         "offline"
     };
+    // A simulator that is still booting, or switched off, says so instead
+    // of `offline` (its simctl state, refreshed in the background).
+    let device_state = match state.simulator.as_ref().and_then(|s| s.info()) {
+        Some(device) if !wda_actionable => {
+            crate::simulator::device_state_for(&device.state).unwrap_or(device_state)
+        }
+        _ => device_state,
+    };
     let screen_state = if wda && mjpeg_stream_fresh {
         "live"
     } else if wda {
@@ -17358,6 +17366,9 @@ async fn agent_record_post(
     let action = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v.get("action")?.as_str().map(str::to_string));
+    if let Some(simulator) = state.simulator.clone() {
+        return simulator_record(&state, &headers, &simulator.udid, action.as_deref()).await;
+    }
     let recorder = crate::recording::Recorder::global();
     match action.as_deref() {
         Some("start") => {
@@ -17441,16 +17452,87 @@ async fn agent_record_post(
     }
 }
 
+/// `/agent/record` on a simulator: `simctl io recordVideo` instead of the
+/// runner's H.264 stream. Same request and answer shapes (`via:"simctl"`,
+/// no frame count).
+async fn simulator_record(state: &AppState, headers: &HeaderMap, udid: &str, action: Option<&str>) -> Response {
+    let recorder = crate::simulator::SimRecorder::global();
+    match action {
+        Some("start") => {
+            state.touch_activity();
+            match recorder.start(udid, &recordings_dir()).await {
+                Ok(status) => {
+                    crate::activity::record(
+                        named_owner(headers),
+                        crate::activity::recording_started(),
+                        crate::metrics::now_ms(),
+                    );
+                    json_response(StatusCode::OK, serde_json::json!({"ok": true, "recording": status}))
+                }
+                Err(error) if format!("{error:#}").contains("already recording") => json_response(
+                    StatusCode::CONFLICT,
+                    serde_json::json!({"ok": false, "error": "already_recording",
+                        "recording": recorder.status().await,
+                        "hint": r#"one recording at a time: POST /agent/record {"action":"stop"} first"#}),
+                ),
+                Err(error) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"ok": false, "error": "recording_failed",
+                        "detail": format!("{error:#}"),
+                        "hint": "simctl recordVideo could not start; check that the simulator is booted (GET /agent/status) and retry"}),
+                ),
+            }
+        }
+        Some("stop") => match recorder.stop().await {
+            Ok(Some(summary)) => {
+                let seconds = summary["seconds"].as_f64().unwrap_or(0.0);
+                crate::activity::record(
+                    named_owner(headers),
+                    crate::activity::recording_saved(seconds),
+                    crate::metrics::now_ms(),
+                );
+                json_response(StatusCode::OK, serde_json::json!({"ok": true, "summary": summary}))
+            }
+            Ok(None) => json_response(StatusCode::OK, serde_json::json!({"ok": true, "summary": null})),
+            Err(error) if format!("{error:#}").contains("no video frames") => json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({"ok": false, "error": "recording_empty",
+                    "detail": format!("{error:#}"),
+                    "hint": "simctl wrote no video, so there is no file; check that the simulator is booted and record again"}),
+            ),
+            Err(error) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": "recording_failed",
+                    "detail": format!("{error:#}"),
+                    "hint": "the recording could not be finished; record again"}),
+            ),
+        },
+        Some("status") => json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "recording": recorder.status().await}),
+        ),
+        _ => agent_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_record_action",
+            r#"send {"action":"start"} or {"action":"stop"}; GET /agent/record shows a running recording"#,
+        ),
+    }
+}
+
 /// `GET /agent/record` — the running recording's progress, or `null`.
 async fn agent_record_get(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(refused) = auth_refusal(browser_or_agent_auth(&state, &headers)) {
         return refused;
     }
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({"ok": true,
-            "recording": crate::recording::Recorder::global().status().await}),
-    )
+    let recording = if state.simulator.is_some() {
+        crate::simulator::SimRecorder::global().status().await
+    } else {
+        crate::recording::Recorder::global()
+            .status()
+            .await
+            .and_then(|status| serde_json::to_value(status).ok())
+    };
+    json_response(StatusCode::OK, serde_json::json!({"ok": true, "recording": recording}))
 }
 
 /// Largest app `install` accepts (a file, or a download).
@@ -22815,6 +22897,49 @@ mod tests {
             device_services(&sim),
             DeviceServices::Simulator(s) if s.udid == crate::simulator::tests::UDID
         ));
+    }
+
+    /// On a simulator, `/agent/record` is the simctl recorder (no video
+    /// hub needed), and `device_state` follows the simulator's own state.
+    #[test]
+    fn simulator_record_and_device_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(crate::simulator::tests::FakeSimctl::default());
+        let state = simulator_test_state(fake, dir.path());
+        assert!(state.video.is_none(), "the phone recorder would answer video_unavailable");
+        block(async {
+            let (status, body) = call(&state, "GET", "/agent/record", "").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body.contains(r#""recording":null"#), "{body}");
+            let (status, body) = call(&state, "POST", "/agent/record", r#"{"action":"stop"}"#).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body.contains(r#""summary":null"#), "{body}");
+            let (status, body) = call(&state, "POST", "/agent/record", r#"{"action":"pause"}"#).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(!body.contains("video_unavailable"), "{body}");
+        });
+        let sim = state.simulator.clone().unwrap();
+        *sim_info_slot(&sim) = Some(crate::simulator::SimDevice {
+            state: "Booting".into(),
+            ..crate::simulator::parse_devices(crate::simulator::tests::DEVICES_JSON)
+                .unwrap()
+                .into_iter()
+                .find(|d| d.udid == crate::simulator::tests::UDID)
+                .unwrap()
+        });
+        block(async {
+            let (_, body) = call(&state, "GET", "/agent/status", "").await;
+            assert!(body.contains(r#""device_state":"booting""#), "{body}");
+        });
+        sim_info_slot(&sim).as_mut().unwrap().state = "Shutdown".into();
+        block(async {
+            let (_, body) = call(&state, "GET", "/agent/status", "").await;
+            assert!(body.contains(r#""device_state":"shutdown""#), "{body}");
+        });
+    }
+
+    fn sim_info_slot(sim: &crate::simulator::Simulator) -> std::sync::MutexGuard<'_, Option<crate::simulator::SimDevice>> {
+        sim.info_slot()
     }
 
     /// With a simulator configured (and no phone UDID, so any lockdown call

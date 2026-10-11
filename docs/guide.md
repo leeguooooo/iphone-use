@@ -633,6 +633,9 @@ holds the runner token, logs and PID records. Neither process gets a launchd job
 - Crash reports come from `~/Library/Logs/DiagnosticReports`. Only reports from that
   simulator are included.
 - Install takes a simulator `.app` build. It refuses an `.ipa`.
+- Recording (`POST /agent/record`, `phone_record`) uses `simctl io recordVideo`, so it
+  needs no live H.264 stream. The summary says `"via":"simctl"` and has no frame count.
+- `device_state` is `booting` while the simulator boots and `shutdown` when it is off.
 - The daemon never manages the runner: `recovery_owner` is `external`.
 - Keep-awake and agent Do Not Disturb are off.
 - `/agent/status` says `"target":"simulator"`, `lock_readiness.verdict` is `"ready"`, and
@@ -642,10 +645,16 @@ holds the runner token, logs and PID records. Neither process gets a launchd job
 `sim` instance. It signals only the PIDs it recorded, after it checks the user, the start
 time and the exact command line. Add `--shutdown` to shut the simulator down too.
 
+`iphone-use setup --simulator <name|udid>` does the same as `simulator start` and skips
+the phone setup. `iphone-use doctor` adds one line with the available and booted
+simulators.
+
 The preview doesn't cover these yet:
 
-- Setup, doctor and the installer don't know about simulators.
-- Live H.264 video from the runner hasn't been verified on a simulator.
+- The installer doesn't set up a simulator, and `IPHONE_USE_TARGET` isn't stored in an
+  instance plist (the simulator instance runs without launchd).
+- Live H.264 video from the runner hasn't been verified on a simulator (MJPEG and
+  recordings don't depend on it).
 - Simulators have no camera, App Store apps, real push notifications or Face ID (unless
   you use `simctl` enrollment), so tasks that need those only work on a phone.
 

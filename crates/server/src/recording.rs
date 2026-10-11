@@ -187,7 +187,7 @@ impl Drop for Recording {
 }
 
 /// `<dir>/<UTC time>.mp4`, with a counter when that name is taken.
-fn new_path(dir: &Path) -> PathBuf {
+pub(crate) fn new_path(dir: &Path) -> PathBuf {
     let stamp = crate::apps::now_rfc3339().replace(':', "-");
     let mut path = dir.join(format!("{stamp}.mp4"));
     let mut n = 2;

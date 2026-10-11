@@ -15,12 +15,16 @@
 - Lock, keep-awake and Do Not Disturb are skipped. `/agent/status` reports
   `"target":"simulator"`.
 
+- `setup --simulator <name|udid>` runs `simulator start`; `doctor` lists available and
+  booted simulators; `device_state` is `booting` / `shutdown` from the simctl state
+  (refreshed every 15 s); recording uses `simctl io recordVideo`.
+
 Not yet done:
 
-- `setup --simulator`, doctor and installer integration. `IPHONE_USE_TARGET` is not
-  stored in the instance plist.
-- `device_state` values `booting` and `shutdown`.
-- H.264 and `simctl io recordVideo` fallbacks.
+- Installer integration. `IPHONE_USE_TARGET` is not stored in an instance plist (the
+  simulator instance runs without launchd).
+- Live H.264 from the runner on a simulator is unverified (MJPEG and recordings don't
+  need it).
 - Verification on a Mac: everything is unit-tested only, because no Xcode was available.
 
 The CI recipe is in [testing.md](../testing.md#running-suites-on-a-simulator-in-ci-preview).

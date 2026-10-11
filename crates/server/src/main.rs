@@ -832,13 +832,33 @@ fn main() -> Result<()> {
         Command::Device { query } => std::process::exit(device_query(query)),
         Command::Upgrade { check, json } => std::process::exit(upgrade(check || json, json)),
         Command::Setup { instance, args } => {
+            // `setup --simulator <name|udid>`: no phone setup at all, the
+            // same as `simulator start` (preview).
+            match server::simulator::setup_simulator_arg(&args) {
+                Some(Ok(simulator)) => std::process::exit(server::simulator::cli_start(
+                    &simulator,
+                    None,
+                    None,
+                    instance.as_deref(),
+                    true,
+                )),
+                Some(Err(message)) => {
+                    eprintln!("iphone-use: {message}");
+                    std::process::exit(2)
+                }
+                None => {}
+            }
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_setup(&target, &args))
         }
         Command::SetupNative { args } => std::process::exit(server::setup::main(&args)),
         Command::Doctor { instance } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;
-            std::process::exit(onboarding::run_doctor(&target))
+            let code = onboarding::run_doctor(&target);
+            if cfg!(target_os = "macos") {
+                server::simulator::print_doctor_section();
+            }
+            std::process::exit(code)
         }
         Command::Metrics {
             instance,
@@ -1224,9 +1244,20 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
             // A simulator never locks: no keep-awake lease, no lock readiness
             // probe, and its name/runtime come from simctl.
             tracing::info!("simulator {} (preview): device services via simctl", simulator.udid);
+            // Refreshed every 15 s, so `device_state` follows a boot or a
+            // shutdown (`booting` / `shutdown`).
             tokio::spawn(async move {
-                if let Err(error) = simulator.refresh_info().await {
-                    tracing::warn!("simulator info: {error:#}");
+                let mut warned = false;
+                loop {
+                    match simulator.refresh_info().await {
+                        Ok(_) => warned = false,
+                        Err(error) if !warned => {
+                            tracing::warn!("simulator info: {error:#}");
+                            warned = true;
+                        }
+                        Err(_) => {}
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                 }
             });
         } else {

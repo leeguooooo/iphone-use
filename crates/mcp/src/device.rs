@@ -378,9 +378,12 @@ pub fn recording(json: &Value) -> Option<String> {
         let mut parts = vec![
             text(r, "path").unwrap_or_else(|| "?".to_string()),
             format!("{} s", text(r, "seconds").unwrap_or_else(|| "?".to_string())),
-            format!("{} frames", text(r, "frames").unwrap_or_else(|| "?".to_string())),
-            format!("{} bytes", text(r, "bytes").unwrap_or_else(|| "?".to_string())),
         ];
+        // A simulator recording (`via:"simctl"`) has no frame count.
+        if let Some(frames) = text(r, "frames") {
+            parts.push(format!("{frames} frames"));
+        }
+        parts.push(format!("{} bytes", text(r, "bytes").unwrap_or_else(|| "?".to_string())));
         if let (Some(w), Some(h)) = (text(r, "width"), text(r, "height")) {
             parts.push(format!("{w}x{h}"));
         }
@@ -647,6 +650,10 @@ mod tests {
             "nothing was recording"
         );
         assert_eq!(recording(&json!({"ok": true, "recording": null})).unwrap(), "not recording");
+        assert_eq!(
+            recording(&json!({"ok": true, "summary": {"path": "/r/s.mp4", "seconds": 4.5, "bytes": 2048, "via": "simctl"}})).unwrap(),
+            "saved recording /r/s.mp4 · 4.5 s · 2048 bytes"
+        );
         let saved = recording(&json!({"ok": true, "summary": {"path": "/r/a.mp4", "seconds": 12.0,
             "frames": 360, "bytes": 1000, "width": 1170, "height": 2532, "ended": "max_duration"}}))
         .unwrap();

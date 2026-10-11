@@ -765,6 +765,11 @@ impl Simulator {
             .context("simctl task")?
     }
 
+    #[cfg(test)]
+    pub fn info_slot(&self) -> std::sync::MutexGuard<'_, Option<SimDevice>> {
+        self.info.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The cached `simctl list` row for this simulator (no I/O).
     pub fn info(&self) -> Option<SimDevice> {
         self.info.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -1518,6 +1523,198 @@ fn stop(query: &str, shutdown: bool, instance: Option<&str>) -> Result<(), Strin
     Ok(())
 }
 
+// ── device state, setup, doctor ─────────────────────────────────────────────
+
+/// `device_state` for a simulator that is not ready, from its simctl state:
+/// `booting` while it boots, `shutdown` when it is off. `None` otherwise
+/// (the daemon's own state stands).
+pub fn device_state_for(sim_state: &str) -> Option<&'static str> {
+    match sim_state.trim().to_ascii_lowercase().as_str() {
+        "booting" => Some("booting"),
+        "shutdown" | "shutting down" => Some("shutdown"),
+        _ => None,
+    }
+}
+
+/// `iphone-use setup --simulator <name|udid>`: the simulator named, if the
+/// arguments ask for one (`Err` when the flag has no value).
+pub fn setup_simulator_arg(args: &[String]) -> Option<Result<String, String>> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(value) = arg.strip_prefix("--simulator=") {
+            return Some(Ok(value.to_string()).and_then(non_empty));
+        }
+        if arg == "--simulator" {
+            return Some(
+                iter.next()
+                    .filter(|value| !value.starts_with("--"))
+                    .cloned()
+                    .ok_or_else(|| "--simulator needs a simulator name or UDID (`iphone-use simulators` lists them)".to_string())
+                    .and_then(non_empty),
+            );
+        }
+    }
+    None
+}
+
+fn non_empty(value: String) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err("--simulator needs a simulator name or UDID (`iphone-use simulators` lists them)".to_string())
+    } else {
+        Ok(value)
+    }
+}
+
+/// The doctor's simulator line: what is available and booted, and how to
+/// start one. Empty when simctl could not be read (Xcode is checked above it).
+pub fn doctor_lines(devices: &[SimDevice]) -> Vec<String> {
+    let ios: Vec<&SimDevice> = devices.iter().filter(|d| d.platform == "iOS").collect();
+    if ios.is_empty() {
+        return vec![
+            "Simulators (preview): none installed; add one in Xcode > Settings > Components to drive a simulator without a phone".to_string(),
+        ];
+    }
+    let booted: Vec<&str> = ios.iter().filter(|d| d.booted()).map(|d| d.name.as_str()).collect();
+    let mut line = format!("Simulators (preview): {} available", ios.len());
+    if !booted.is_empty() {
+        line.push_str(&format!(", booted: {}", booted.join(", ")));
+    }
+    vec![
+        line,
+        format!("  drive one without a phone: iphone-use simulator start \"{}\"", booted.first().copied().unwrap_or(ios[0].name.as_str())),
+    ]
+}
+
+/// Print [`doctor_lines`] (best effort; silent when simctl is missing).
+pub fn print_doctor_section() {
+    if let Ok(devices) = list_devices(&Xcrun) {
+        println!();
+        for line in doctor_lines(&devices) {
+            println!("{line}");
+        }
+    }
+}
+
+// ── screen recording (simctl io recordVideo) ────────────────────────────────
+
+/// How long a simulator recording may run before it stops by itself.
+pub const RECORD_MAX: Duration = Duration::from_secs(10 * 60);
+
+pub fn record_video_argv(udid: &str, path: &Path) -> Vec<String> {
+    let mut args = argv(&["simctl", "io", udid, "recordVideo", "--codec=h264", "--force"]);
+    args.push(path.display().to_string());
+    args
+}
+
+struct SimRecording {
+    path: PathBuf,
+    started: std::time::Instant,
+    child: tokio::process::Child,
+    ended: Option<&'static str>,
+}
+
+impl SimRecording {
+    fn status(&self) -> Value {
+        json!({
+            "path": self.path,
+            "seconds": (self.started.elapsed().as_secs_f64() * 10.0).round() / 10.0,
+            "bytes": std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0),
+            "ended": self.ended,
+            "via": "simctl",
+        })
+    }
+}
+
+/// The daemon's one simulator recording slot: `simctl io recordVideo`,
+/// stopped with SIGINT so it finishes the file. Replaces the H.264 recorder
+/// on a simulator, whose runner encoder is unverified.
+#[derive(Default)]
+pub struct SimRecorder {
+    current: tokio::sync::Mutex<Option<SimRecording>>,
+}
+
+impl SimRecorder {
+    pub fn global() -> &'static SimRecorder {
+        static RECORDER: std::sync::OnceLock<SimRecorder> = std::sync::OnceLock::new();
+        RECORDER.get_or_init(SimRecorder::default)
+    }
+
+    /// Start `xcrun simctl io <udid> recordVideo` into a new file in `dir`.
+    pub async fn start(&'static self, udid: &str, dir: &Path) -> Result<Value> {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = crate::recording::new_path(dir);
+        let args = record_video_argv(udid, &path);
+        self.start_with("xcrun", &args, path, RECORD_MAX).await
+    }
+
+    /// [`SimRecorder::start`] with any program (tests use a shell script).
+    pub async fn start_with(&'static self, program: &str, args: &[String], path: PathBuf, max: Duration) -> Result<Value> {
+        let mut current = self.current.lock().await;
+        if let Some(recording) = current.as_ref() {
+            bail!("already recording to {} (stop it first)", recording.path.display());
+        }
+        let child = tokio::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("start {program}"))?;
+        let recording = SimRecording { path: path.clone(), started: std::time::Instant::now(), child, ended: None };
+        let status = recording.status();
+        *current = Some(recording);
+        drop(current);
+        // The 10-minute limit: interrupt it, and let `stop` collect the file.
+        tokio::spawn(async move {
+            tokio::time::sleep(max).await;
+            let mut current = self.current.lock().await;
+            if let Some(recording) = current.as_mut().filter(|r| r.path == path && r.ended.is_none()) {
+                interrupt(&recording.child);
+                recording.ended = Some("max_duration");
+            }
+        });
+        Ok(status)
+    }
+
+    /// Stop the recording and return its summary; `Ok(None)` when none runs.
+    pub async fn stop(&self) -> Result<Option<Value>> {
+        let Some(mut recording) = self.current.lock().await.take() else {
+            return Ok(None);
+        };
+        let seconds = (recording.started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+        interrupt(&recording.child);
+        if tokio::time::timeout(Duration::from_secs(20), recording.child.wait()).await.is_err() {
+            let _ = recording.child.kill().await;
+            bail!("simctl recordVideo did not finish the file within 20 s and was stopped");
+        }
+        let bytes = std::fs::metadata(&recording.path).map(|m| m.len()).unwrap_or(0);
+        if bytes == 0 {
+            let _ = std::fs::remove_file(&recording.path);
+            bail!("no video frames were written by simctl recordVideo");
+        }
+        let mut summary = json!({"path": recording.path, "seconds": seconds, "bytes": bytes, "via": "simctl"});
+        if let Some(ended) = recording.ended {
+            summary["ended"] = json!(ended);
+        }
+        Ok(Some(summary))
+    }
+
+    pub async fn status(&self) -> Option<Value> {
+        self.current.lock().await.as_ref().map(SimRecording::status)
+    }
+}
+
+/// SIGINT: recordVideo writes the file's index and exits.
+fn interrupt(child: &tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        // SAFETY: our own child's pid, still unreaped.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGINT);
+        }
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -1870,6 +2067,80 @@ pub mod tests {
         assert!(crash_read(dir.path(), UDID, "Gone-2026-10-11-070102.ips").is_err());
         assert!(crash_read(dir.path(), UDID, "../Demo-2026-10-11-070102.ips").is_err());
         assert!(crash_list(&dir.path().join("missing"), UDID, &CrashFilter::default()).is_empty());
+    }
+
+    #[test]
+    fn simulator_states_show_as_device_states() {
+        assert_eq!(device_state_for("Booting"), Some("booting"));
+        assert_eq!(device_state_for("Shutdown"), Some("shutdown"));
+        assert_eq!(device_state_for("Shutting Down"), Some("shutdown"));
+        assert_eq!(device_state_for("Booted"), None);
+        assert_eq!(device_state_for(""), None);
+    }
+
+    #[test]
+    fn setup_takes_a_simulator_flag() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(setup_simulator_arg(&args(&[])), None);
+        assert_eq!(setup_simulator_arg(&args(&["--wifi"])), None);
+        assert_eq!(setup_simulator_arg(&args(&["--simulator", "iPhone 16 Pro"])), Some(Ok("iPhone 16 Pro".into())));
+        assert_eq!(setup_simulator_arg(&args(&["--simulator=iPhone 15"])), Some(Ok("iPhone 15".into())));
+        assert!(matches!(setup_simulator_arg(&args(&["--simulator"])), Some(Err(_))));
+        assert!(matches!(setup_simulator_arg(&args(&["--simulator", "--json"])), Some(Err(_))));
+        assert!(matches!(setup_simulator_arg(&args(&["--simulator="])), Some(Err(_))));
+    }
+
+    #[test]
+    fn doctor_names_what_can_be_started() {
+        let devices = parse_devices(DEVICES_JSON).unwrap();
+        let lines = doctor_lines(&devices);
+        assert!(lines[0].starts_with("Simulators (preview): "), "{lines:?}");
+        assert!(lines[1].contains("iphone-use simulator start \""), "{lines:?}");
+        assert!(doctor_lines(&[])[0].contains("none installed"));
+    }
+
+    #[test]
+    fn a_recording_runs_simctl_record_video() {
+        let args = record_video_argv(UDID, Path::new("/r/a.mp4"));
+        assert_eq!(args, ["simctl", "io", UDID, "recordVideo", "--codec=h264", "--force", "/r/a.mp4"]);
+    }
+
+    #[test]
+    fn a_simulator_recording_stops_with_sigint_and_keeps_the_file() {
+        static RECORDER: std::sync::OnceLock<SimRecorder> = std::sync::OnceLock::new();
+        let recorder: &'static SimRecorder = RECORDER.get_or_init(SimRecorder::default);
+        let dir = std::env::temp_dir().join(format!("iu-simrec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.mp4");
+        // Stands in for recordVideo: writes the file when interrupted.
+        let script = "trap 'printf movie > \"$0\"; exit 0' INT; while :; do sleep 0.05; done";
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let started = recorder
+                .start_with("sh", &["-c".into(), script.into(), path.display().to_string()], path.clone(), RECORD_MAX)
+                .await
+                .unwrap();
+            assert_eq!(started["via"], "simctl");
+            let again = recorder.start_with("sh", &["-c".into(), "sleep 5".into()], dir.join("b.mp4"), RECORD_MAX).await;
+            assert!(format!("{:#}", again.unwrap_err()).contains("already recording"));
+            assert!(recorder.status().await.is_some());
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let summary = recorder.stop().await.unwrap().unwrap();
+            assert_eq!(summary["bytes"], 5);
+            assert!(summary.get("ended").is_none());
+            assert!(recorder.stop().await.unwrap().is_none());
+            // Nothing written: no file, and an error that says so.
+            recorder.start_with("sh", &["-c".into(), "trap 'exit 0' INT; while :; do sleep 0.05; done".into()], dir.join("c.mp4"), RECORD_MAX).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(format!("{:#}", recorder.stop().await.unwrap_err()).contains("no video frames"));
+            // The limit interrupts it by itself.
+            let d = dir.join("d.mp4");
+            recorder.start_with("sh", &["-c".into(), script.into(), d.display().to_string()], d.clone(), Duration::from_millis(300)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            assert_eq!(recorder.status().await.unwrap()["ended"], "max_duration");
+            assert_eq!(recorder.stop().await.unwrap().unwrap()["ended"], "max_duration");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -92,7 +92,11 @@ comes up and every 30 minutes.
 case, `device` holds the simulator's `name`, `model`, `runtime` (`"iOS 18.2"`), `ios`,
 `udid` and `"simulator":true`. `lock_readiness.verdict` is always `"ready"` (`applicable:
 false`). Logs, crashes, location, install and `GET /agent/apps` work the same way, but
-install takes a simulator `.app`, not an `.ipa`.
+install takes a simulator `.app`, not an `.ipa`. Recording goes through `simctl io
+recordVideo`: its status and summary carry `"via":"simctl"` and no `frames`, `width` or
+`height`. While the runner is not actionable, `device_state` is `booting` when the
+simulator is still booting and `shutdown` when it is off; wait, or run `iphone-use
+simulator start` again.
 
 **Reconnect** only when the current task needs the phone, `recovery_owner` is
 `daemon`, blockers are resolved, and no release/reconnect is in progress. Send
