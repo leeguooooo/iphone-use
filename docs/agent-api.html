@@ -32,7 +32,7 @@
   th { font-weight: 600; color: var(--muted); font-size: .82rem; text-transform: uppercase; letter-spacing: .04em; }
   .method { font-family: ui-monospace, monospace; font-weight: 700; font-size: .82rem;
             padding: .12em .5em; border-radius: 4px; color: #fff; }
-  .get { background: #2e7d32; } .post { background: #1565c0; }
+  .get { background: #2e7d32; } .post { background: #1565c0; } .put { background: #ef6c00; }
   .ep { font-family: ui-monospace, monospace; font-weight: 600; }
   aside { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent);
           border-radius: 6px; padding: .8rem 1rem; margin: 1.2rem 0; font-size: .92rem; }
@@ -126,11 +126,16 @@
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/status</td><td>WDA reachability/actionability, device lifecycle, and recovery hints.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/input</td><td>Bearer-authenticated control with the mutation header. Routes to WDA and fails closed.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/actions</td><td>Bounded multi-step WDA execution with full-batch validation, semantic waits, one control lock, and first-failure stop.</td></tr>
-  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/screenshot</td><td>Current target screen as PNG, read from WDA.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/screenshot</td><td>Current target screen as PNG, read from WDA. <code>?overlay=elements</code> numbers each interactive element on it.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/mjpeg</td><td>Live WDA MJPEG stream; accepts bearer auth or a logged-in browser cookie.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/h264</td><td>The same live screen as H.264 (~10× less bandwidth); same auth and viewer accounting as <code>/agent/mjpeg</code>.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/elements</td><td>Snapshot-bound, flattened WDA element list with sparse locator/state fields and screen dimensions.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/activity</td><td>What agents did, in plain words (<code>Tapped “Wi-Fi”</code>), newest last; <code>?since=&lt;next&gt;</code> for newer lines. Typed text is never kept. Bearer or a logged-in browser cookie.</td></tr>
+  <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/logs</td><td>Capture the phone's system log (<code>{"action":"start"|"stop"|"clear"}</code>) and read it with filters.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/crashes[/:name]</td><td>The phone's crash reports, newest first; one report's text.</td></tr>
+  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/location</td><td>Simulated GPS position (<code>{"lat","lon"}</code>) or <code>{"clear":true}</code>.</td></tr>
+  <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/record</td><td>Record the live view to an MP4 (<code>{"action":"start"|"stop"}</code>); GET shows the running recording.</td></tr>
+  <tr><td><span class="method get">GET</span> / <span class="method put">PUT</span></td><td class="ep">/agent/app-notes</td><td>Per-app markdown notes (<code>?bundle=</code>), also shown in the <code>registry</code> block when an agent enters the app.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/mode</td><td><code>mode=agent</code> brings WDA up; <code>mode=human</code> stops WDA and hands the phone back to the person holding it. It never changes the persisted target.</td></tr>
   <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/inbox</td><td>Legacy Shortcuts-bridge result queue. GET is always a read-only peek; POST appends and requires the mutation header.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/inbox/drain</td><td>Atomically return and clear the inbox; requires bearer auth and the mutation header.</td></tr>
@@ -365,6 +370,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   <tr><td><code>{"type":"launch_app","bundle":"com.apple.Preferences"}</code></td><td>Launch/foreground an app by bundle id. A limited known-name mapping is also accepted.</td></tr>
   <tr><td><code>{"type":"open_url","url":"https://example.com/page"}</code></td><td>Open a link through WDA (<code>POST /session/:sid/url</code>): Safari, or the app that owns the scheme. The <code>url</code> needs a scheme and at most 2048 bytes (else <code>400 invalid_value</code>, nothing sent). <code>http</code>/<code>https</code> always open; any other scheme (<code>tel:</code>, <code>sms:</code>, <code>facetime:</code>, <code>mailto:</code>, <code>itms-services:</code>, app schemes such as <code>weixin://</code>) is refused with <code>403 url_scheme_not_allowed</code>, <code>outcome:"not_sent"</code>, unless the owner lists it in <code>IPHONE_USE_ALLOW_URL_SCHEMES</code> (comma list, <code>*</code> = any). Counts as one action against <code>IPHONE_USE_MAX_ACTIONS</code>, and leaves the app, so it is allowed while a blocked app is in front. The activity feed shows the host only.</td></tr>
   <tr><td><code>{"type":"picker","column":0,"value":"March"}</code></td><td>Set a WDA PickerWheel value.</td></tr>
+  <tr><td><code>{"type":"install","path":"/abs/App.ipa"}</code></td><td>Install an <code>.ipa</code> or built <code>.app</code> from the daemon's Mac through CoreDevice (<code>xcrun devicectl device install app</code>; macOS only, else <code>501 install_needs_macos</code>). Or <code>"url":"https://…/App.ipa"</code>: https only, at most 2 GB, downloaded to a temporary folder removed afterwards. <code>"fresh":true</code> uninstalls the bundle first. The bundle id is read from the app's <code>Info.plist</code> (<code>Payload/&lt;App&gt;.app/Info.plist</code> in an <code>.ipa</code>); a bundle in <code>IPHONE_USE_BLOCKED_APPS</code> is <code>403 blocked_app</code>, and an unreadable one is <code>403 install_unverified</code> while any app is blocked. Answers <code>{ok, bundle, installed:true}</code>; a bad request is <code>400 invalid_install</code>, nothing run. Never batched; one action against the budget.</td></tr>
 </table>
 <h4><code>?return=delta</code> — the post-action observation</h4>
 <p>
@@ -758,6 +764,57 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   <code>"filter": {"query", "limit", "matched", "returned", "omitted", "of"}</code>, with a
   <code>hint</code> when rows were omitted or nothing matched. A <code>delta</code> answer
   (<code>?since=</code>) is not filtered.
+</p>
+<p class="muted">
+  <code>?ocr=auto</code> (or <code>1</code>) adds Apple Vision text recognition of a fresh
+  screenshot when the tree is unusable (no interactive rows, containers only);
+  <code>?ocr=force</code> adds it on every full read; anything but <code>auto</code>,
+  <code>1</code>, <code>force</code> or <code>off</code> is <code>400 invalid_ocr</code>. The
+  answer gains <code>"ocr": {"rows": [{"kind":"OCRText","label","rect","depth":0,"source":"ocr","confidence"}], "source": "vision"}</code>;
+  <code>rect</code> is in points like every row. Rows have no element behind them: tap by
+  coordinates. A failure is an <code>ocr_error</code> string beside a normal answer.
+</p>
+
+<h3><span class="method get">GET</span> <span class="ep">/agent/screenshot?overlay=elements</span></h3>
+<p>
+  The same PNG with each interactive element (the rows <code>?scope=interactive</code> keeps)
+  outlined and numbered with its index in a full <code>/agent/elements</code> read. The
+  response adds <code>X-Overlay: elements</code>, <code>X-Overlay-Marks: &lt;n&gt;</code> and
+  <code>X-Elements-Snapshot</code>, the snapshot to tap by
+  (<code>{"type":"tap","element":12,"snapshot":"…"}</code>). It works with
+  <code>max_side</code>. When the tree cannot be read, the plain picture comes back with
+  <code>X-Overlay: unavailable</code>.
+</p>
+
+<h3>Device diagnostics, location and recording</h3>
+<p>
+  These use the daemon's configured phone (<code>IPHONE_USE_UDID</code>) over its lockdown
+  services. Without one they answer <code>503 device_not_configured</code>; an unreachable phone
+  is <code>502 device_service_failed</code> or <code>504 device_timeout</code>, each with
+  <code>detail</code> and <code>hint</code>. Reads accept the bearer or a logged-in browser;
+  POSTs need the bearer, <code>X-Phone-Control: 1</code>, and take the owner lease.
+</p>
+<table>
+  <tr><th>Call</th><th>Answer</th></tr>
+  <tr><td><code>POST /agent/logs {"action":"start"|"stop"|"clear"}</code></td><td><code>{ok, capturing}</code>. Captures <code>com.apple.syslog_relay</code> into a ring of the last 5,000 lines; stops by itself 15 minutes after the last read. Lines never reach the daemon's own log.</td></tr>
+  <tr><td><code>GET /agent/logs?since=&amp;process=&amp;contains=&amp;level=&amp;limit=</code></td><td><code>{ok, items:[{seq,ts,process,subsystem?,pid,level,message}], next, capturing, missed?, stopped?}</code>. <code>level</code> is that level or more severe; <code>next</code> is the next <code>since</code>.</td></tr>
+  <tr><td><code>GET /agent/crashes?process=&amp;since=&amp;limit=</code></td><td><code>{ok, items:[{name,folder?,process,time,stamp?,size}]}</code>, newest first (<code>limit</code> 1–500, default 50).</td></tr>
+  <tr><td><code>GET /agent/crashes/:name</code></td><td><code>{ok, name, text, size, truncated}</code>, first 2 MB. <code>400 invalid_name</code> for anything but a bare report name; <code>404 not_found</code>.</td></tr>
+  <tr><td><code>POST /agent/location {"lat":35.68,"lon":139.76}</code> / <code>{"clear":true}</code></td><td><code>{ok}</code>. <code>com.apple.dt.simulatelocation</code> (Developer Mode and the Developer Disk Image). <code>400 invalid_location</code> out of range. One action against <code>IPHONE_USE_MAX_ACTIONS</code>.</td></tr>
+  <tr><td><code>POST /agent/record {"action":"start"}</code></td><td><code>{ok, recording:{path,seconds,frames,bytes,ended}}</code>, into <code>&lt;state dir&gt;/runs/recordings</code>. <code>409 already_recording</code>; <code>503 video_unavailable</code> without the macOS live view.</td></tr>
+  <tr><td><code>POST /agent/record {"action":"stop"}</code></td><td><code>{ok, summary:{path,seconds,frames,bytes,width,height,ended?}}</code>, or <code>summary:null</code> when nothing was recording. <code>502 recording_empty</code> when no frame arrived. Ends by itself at 10 minutes or 200 MB (<code>ended</code>).</td></tr>
+  <tr><td><code>GET /agent/record</code></td><td><code>{ok, recording}</code> (<code>null</code> when none).</td></tr>
+</table>
+
+<h3><span class="method get">GET</span>/<span class="method put">PUT</span> <span class="ep">/agent/app-notes?bundle=…</span></h3>
+<p>
+  Plain markdown about one app, written by agents or the person: obstacles, where things
+  are, what not to do. GET answers <code>{ok, bundle, text, updated_at?}</code> (empty
+  <code>text</code> when none); PUT takes the markdown as the body (at most 16 KB, else
+  <code>413 too_large</code>; empty deletes) and needs <code>X-Phone-Control: 1</code>.
+  Stored as <code>~/.iphone-use/app-notes/&lt;bundle&gt;.md</code>, beside the flow store.
+  The first 2 KB appear as <code>app_notes</code> in the <code>registry</code> block when an
+  agent enters the app.
 </p>
 
 <h3><span class="method get">GET</span>/<span class="method post">POST</span> <span class="ep">/agent/inbox</span></h3>

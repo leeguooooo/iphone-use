@@ -164,7 +164,11 @@ fn risk_rank(risk: Option<&str>) -> u8 {
 /// The `registry` block for one app. `None` only when the store is unreadable
 /// (a hint must never break the response it decorates).
 pub fn registry_block(key: AppKey<'_>) -> Option<Value> {
-    registry_block_from(index_path().as_deref(), key)
+    with_app_notes(
+        registry_block_from(index_path().as_deref(), key),
+        key,
+        &app_notes_dir(),
+    )
 }
 
 fn registry_block_from(path: Option<&Path>, key: AppKey<'_>) -> Option<Value> {
@@ -245,6 +249,123 @@ fn registry_block_from(path: Option<&Path>, key: AppKey<'_>) -> Option<Value> {
     } else {
         "If one of these does the task, run it instead of driving by hand: phone_flow_run / `flow run <id>`."
     });
+    Some(block)
+}
+
+// ---------------------------------------------------------------------------
+// App notes
+// ---------------------------------------------------------------------------
+
+/// Largest notes file `PUT /agent/app-notes` accepts.
+pub const APP_NOTES_MAX_BYTES: usize = 16 * 1024;
+/// How much of an app's notes rides along in its `registry` block.
+const APP_NOTES_IN_BLOCK: usize = 2 * 1024;
+
+/// Per-app notes (`<bundle>.md`): plain markdown an agent or a person keeps
+/// about an app — obstacles, where things are, what not to do. Beside the
+/// flow store, never inside it (`flow update` refreshes the store from the
+/// registry), so notes survive updates and upgrades.
+pub fn app_notes_dir() -> PathBuf {
+    store_dir()
+        .and_then(|dir| dir.parent().map(|parent| parent.join("app-notes")))
+        .unwrap_or_else(|| crate::instance::current().state_dir.join("app-notes"))
+}
+
+/// A bundle id safe to use as a file name: reverse-DNS characters only.
+pub fn valid_app_notes_bundle(bundle: &str) -> bool {
+    !bundle.is_empty()
+        && bundle.len() <= 200
+        && !bundle.starts_with('.')
+        && !bundle.contains("..")
+        && bundle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// One app's notes and when they were last written (Unix seconds).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppNotes {
+    pub text: String,
+    pub updated_at: Option<u64>,
+}
+
+fn app_notes_path(dir: &Path, bundle: &str) -> Option<PathBuf> {
+    valid_app_notes_bundle(bundle).then(|| dir.join(format!("{bundle}.md")))
+}
+
+/// The notes for `bundle` in `dir`; `None` when there are none.
+pub fn read_app_notes(dir: &Path, bundle: &str) -> Option<AppNotes> {
+    let path = app_notes_path(dir, bundle)?;
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > 4 * APP_NOTES_MAX_BYTES as u64 {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&std::fs::read(&path).ok()?).into_owned();
+    let updated_at = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|age| age.as_secs());
+    Some(AppNotes { text, updated_at })
+}
+
+/// Replace `bundle`'s notes; empty (or blank) text deletes them.
+pub fn write_app_notes(dir: &Path, bundle: &str, text: &str) -> std::io::Result<()> {
+    let path = app_notes_path(dir, bundle).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a bundle id")
+    })?;
+    if text.trim().is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    std::fs::create_dir_all(dir)?;
+    let tmp = path.with_extension("md.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// The first [`APP_NOTES_IN_BLOCK`] bytes, cut at a character boundary.
+fn notes_excerpt(text: &str) -> (String, bool) {
+    let text = text.trim();
+    if text.len() <= APP_NOTES_IN_BLOCK {
+        return (text.to_string(), false);
+    }
+    let mut end = APP_NOTES_IN_BLOCK;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}…", &text[..end]), true)
+}
+
+/// Add the app's notes to its `registry` block (making one when the store
+/// gave none), so an agent entering the app reads what earlier runs learned.
+fn with_app_notes(block: Option<Value>, key: AppKey<'_>, dir: &Path) -> Option<Value> {
+    let bundle = match key {
+        AppKey::Bundle(bundle) => Some(bundle.to_string()),
+        AppKey::Label(_) => block
+            .as_ref()
+            .and_then(|block| block.get("bundle"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    let Some(bundle) = bundle else {
+        return block;
+    };
+    let Some(notes) = read_app_notes(dir, &bundle).filter(|n| !n.text.trim().is_empty()) else {
+        return block;
+    };
+    let mut block = block.unwrap_or_else(|| json!({ "key": key.as_str(), "bundle": bundle }));
+    let (excerpt, truncated) = notes_excerpt(&notes.text);
+    block["app_notes"] = json!(excerpt);
+    if truncated {
+        block["app_notes_truncated"] = json!(true);
+    }
+    block["app_notes_hint"] = json!(format!(
+        "Notes kept for this app by earlier runs or the user; read them before driving. \
+         Full text: GET /agent/app-notes?bundle={bundle} (MCP: phone_app_notes); add what you learn the same way."
+    ));
     Some(block)
 }
 
@@ -882,5 +1003,49 @@ mod tests {
         assert_eq!(flow["steps"][0]["kind"], "launch_app");
         assert_eq!(flow["steps"][1], json!({"kind":"wait_for","expect":{"application":"健康"},"timeout_ms":15000}));
         assert!(draft["todo"].to_string().contains("Coordinate taps"));
+    }
+
+    #[test]
+    fn app_notes_ride_along_in_the_registry_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store(dir.path());
+        let notes = dir.path().join("app-notes");
+        // No notes: the block is untouched.
+        let block = with_app_notes(
+            registry_block_from(Some(&path), AppKey::Bundle("com.apple.Health")),
+            AppKey::Bundle("com.apple.Health"),
+            &notes,
+        )
+        .unwrap();
+        assert!(block.get("app_notes").is_none(), "{block}");
+
+        write_app_notes(&notes, "com.apple.Health", "Steps live under Browse.\n").unwrap();
+        for key in [AppKey::Bundle("com.apple.Health"), AppKey::Label("健康")] {
+            let block = with_app_notes(registry_block_from(Some(&path), key), key, &notes).unwrap();
+            assert_eq!(block["app_notes"], "Steps live under Browse.", "{block}");
+            assert!(block["flows"].is_array(), "{block}");
+        }
+        let read = read_app_notes(&notes, "com.apple.Health").unwrap();
+        assert_eq!(read.text, "Steps live under Browse.\n");
+        assert!(read.updated_at.is_some());
+
+        // An unreadable store still carries the notes; long notes are cut.
+        let long = "长".repeat(1000);
+        write_app_notes(&notes, "com.example.x", &long).unwrap();
+        let block = with_app_notes(None, AppKey::Bundle("com.example.x"), &notes).unwrap();
+        let excerpt = block["app_notes"].as_str().unwrap();
+        assert!(excerpt.len() <= APP_NOTES_IN_BLOCK + "…".len(), "{}", excerpt.len());
+        assert!(excerpt.ends_with('…'));
+        assert_eq!(block["app_notes_truncated"], true);
+        assert_eq!(block["bundle"], "com.example.x");
+
+        // Blank text deletes; path tricks are refused.
+        write_app_notes(&notes, "com.example.x", "  ").unwrap();
+        assert!(read_app_notes(&notes, "com.example.x").is_none());
+        write_app_notes(&notes, "com.example.x", "").unwrap();
+        for bad in ["", "../etc", "a/b", ".hidden", "a..b", "x y"] {
+            assert!(!valid_app_notes_bundle(bad), "{bad}");
+            assert!(write_app_notes(&notes, bad, "x").is_err(), "{bad}");
+        }
     }
 }

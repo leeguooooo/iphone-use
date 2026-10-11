@@ -998,6 +998,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/capabilities", get(agent_capabilities))
         .route("/agent/metrics", get(agent_metrics))
         .route("/agent/run", post(agent_run))
+        // Device diagnostics over lockdown (`syslog`, `crash`, `location`),
+        // screen recording (`recording`) and per-app notes (`flows`).
+        .route("/agent/logs", get(agent_logs_get).post(agent_logs_post))
+        .route("/agent/crashes", get(agent_crashes))
+        .route("/agent/crashes/:name", get(agent_crash))
+        .route("/agent/location", post(agent_location))
+        .route("/agent/record", get(agent_record_get).post(agent_record_post))
+        .route(
+            "/agent/app-notes",
+            get(agent_app_notes_get).put(agent_app_notes_put),
+        )
         // Scheduled flows and test suites (see `schedules`).
         .route("/schedules", get(crate::schedules::page))
         .route(
@@ -10070,9 +10081,9 @@ fn validate_agent_action_value(
             "steps[{index}].action.type must be a non-empty string"
         ));
     };
-    if typ == "uninstall" {
+    if typ == "uninstall" || typ == "install" {
         return Err(format!(
-            "steps[{index}] cannot batch destructive uninstall actions"
+            "steps[{index}] cannot batch destructive {typ} actions"
         ));
     }
 
@@ -12559,6 +12570,15 @@ async fn agent_input_inner(
     if let Err(refused) = claim_phone_owner(&state, &headers) {
         return refused;
     }
+    // App install via CoreDevice (`agent_install`): checked on every
+    // platform, installed on macOS.
+    if body.contains("install") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+            if v.get("type").and_then(serde_json::Value::as_str) == Some("install") {
+                return agent_install(&state, &headers, &v).await;
+            }
+        }
+    }
     // App uninstall via CoreDevice (`devicectl`) — WDA can't remove apps and
     // UI-driven deletion is unreliable to automate, so this is the dependable
     // "Delete App (with data)" primitive (e.g. resetting a wedged app to its
@@ -13618,10 +13638,12 @@ async fn agent_elements(
     let image_auto = query.image.as_deref() == Some("auto");
     let filter_query = query.query.clone();
     let filter_limit = query.limit.as_deref().and_then(|l| l.trim().parse::<usize>().ok());
+    let ocr_mode = parse_ocr_mode(query.ocr.as_deref());
     if let Err(error) = crate::scope::validate(scope.as_deref(), query.since.as_deref())
         .and_then(|()| {
             crate::scope::validate_filter(filter_query.as_deref(), query.limit.as_deref())
         })
+        .and_then(|()| ocr_mode.clone().map(|_| ()))
     {
         // Authenticate first: a refused caller learns nothing about scopes.
         return match browser_or_agent_auth(&state, &headers) {
@@ -13696,6 +13718,7 @@ async fn agent_elements(
                     raw: None,
                     max_side: Some(side),
                     fresh: Some("1".to_string()),
+                    overlay: None,
                 }),
             )
             .await;
@@ -13732,6 +13755,13 @@ async fn agent_elements(
             break;
         }
         crate::scope::attach_image(&mut json, outcome);
+    }
+    // Before the scope: whether the tree is usable is judged on all of it.
+    if let Ok(Some(mode)) = ocr_mode {
+        if mode == OcrMode::Force || crate::scope::needs_image(&json) {
+            let result = elements_ocr(&state, &headers, &json).await;
+            attach_ocr(&mut json, result);
+        }
     }
     if let Some(scope) = scope.as_deref().filter(|scope| *scope != "changed") {
         crate::scope::apply(&mut json, scope);
@@ -14422,6 +14452,10 @@ struct AgentElementsQuery {
     /// text so a bad value gets the daemon's own 400, not a parse error.
     #[serde(default)]
     limit: Option<String>,
+    /// `1`/`auto`: add Vision OCR rows when the tree is unusable; `force`:
+    /// always (see [`elements_ocr`]).
+    #[serde(default)]
+    ocr: Option<String>,
 }
 
 /// A read-path failure is enough to revoke `drivable`, even when the last
@@ -14518,6 +14552,9 @@ struct ScreenshotQuery {
     /// `fresh=1`: capture now, even when the screen as it settled after the
     /// last action is already in memory.
     fresh: Option<String>,
+    /// `elements`: number each interactive element on the picture (see
+    /// [`agent_screenshot`]).
+    overlay: Option<String>,
 }
 
 /// A valid capture, finished for the caller as PNG: the wireframe when the
@@ -14773,7 +14810,7 @@ async fn redacted_capture_wireframe(
     .ok()
 }
 
-async fn agent_screenshot(
+async fn agent_screenshot_capture(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<ScreenshotQuery>,
@@ -16623,6 +16660,1225 @@ fn now_secs() -> u64 {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Device diagnostics, screen recording, app install, app notes, overlay, OCR
+// ---------------------------------------------------------------------------
+
+/// The refusal for a failed [`AgentAuth`]; `None` when it passed.
+fn auth_refusal(auth: AgentAuth) -> Option<Response> {
+    match auth {
+        AgentAuth::Ok => None,
+        AgentAuth::Locked => Some(with_security_headers(
+            (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+        )),
+        AgentAuth::Denied => Some(with_security_headers(
+            (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+        )),
+    }
+}
+
+/// `{ok:false, error, hint}`.
+fn agent_error(status: StatusCode, error: &str, hint: impl Into<String>) -> Response {
+    json_response(
+        status,
+        serde_json::json!({"ok": false, "error": error, "hint": hint.into()}),
+    )
+}
+
+/// What every state-changing device route needs, like `/agent/input`: the
+/// bearer, `X-Phone-Control: 1`, and the phone owner lease.
+fn authorize_device_mutation(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    if let Some(refused) = auth_refusal(agent_auth(state, headers)) {
+        return Err(refused);
+    }
+    if !has_phone_control_header(headers) {
+        return Err(missing_phone_control_header_response());
+    }
+    claim_phone_owner(state, headers).map(|_| ())
+}
+
+/// The daemon's target iPhone, which the lockdown services talk to.
+fn lockdown_udid(state: &AppState) -> Result<String, Response> {
+    match state
+        .device_udid
+        .as_deref()
+        .map(str::trim)
+        .filter(|udid| !udid.is_empty())
+    {
+        Some(udid) => Ok(udid.to_string()),
+        None => Err(agent_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "device_not_configured",
+            "this daemon has no target iPhone yet (IPHONE_USE_UDID, which setup-wda.sh writes); device logs, crash reports and simulated location talk to that phone directly. Ask the user to finish setup.",
+        )),
+    }
+}
+
+/// How long one lockdown service call may take.
+const DEVICE_SERVICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+const LOCKDOWN_HINT: &str = "check that the phone is connected (USB, or the same Wi-Fi with Wi-Fi sync on), unlocked once since it started, and trusts this Mac; then retry";
+const LOCATION_HINT: &str = "simulated location is a developer service: the phone needs Developer Mode on and the Developer Disk Image mounted (connect it to Xcode once), and must trust this Mac";
+
+/// A failed device service call: 502 `device_service_failed` with the
+/// error, or 504 `device_timeout` (`None`) after [`DEVICE_SERVICE_TIMEOUT`].
+fn device_failure(what: &str, hint: &str, error: Option<&anyhow::Error>) -> Response {
+    match error {
+        Some(error) => {
+            tracing::warn!("{what}: {error:#}");
+            json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({"ok": false, "error": "device_service_failed",
+                    "detail": format!("{what}: {error:#}"), "hint": hint}),
+            )
+        }
+        None => json_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            serde_json::json!({"ok": false, "error": "device_timeout",
+                "detail": format!("{what} did not finish in {} s", DEVICE_SERVICE_TIMEOUT.as_secs()),
+                "hint": hint}),
+        ),
+    }
+}
+
+/// A device service call bounded by [`DEVICE_SERVICE_TIMEOUT`].
+async fn device_call<T>(
+    what: &str,
+    hint: &str,
+    call: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> Result<T, Response> {
+    match tokio::time::timeout(DEVICE_SERVICE_TIMEOUT, call).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(device_failure(what, hint, Some(&error))),
+        Err(_) => Err(device_failure(what, hint, None)),
+    }
+}
+
+/// An optional number query parameter; `Err` names the parameter.
+fn query_number<T: std::str::FromStr>(
+    query: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Result<Option<T>, String> {
+    match query.get(key).map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse()
+            .map(Some)
+            .map_err(|_| format!("{key} must be a whole number, not {raw:?}")),
+    }
+}
+
+/// An optional text query parameter of at most 200 characters.
+fn query_text(
+    query: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match query.get(key).filter(|v| !v.is_empty()) {
+        Some(text) if text.chars().count() > 200 => {
+            Err(format!("{key} is at most 200 characters"))
+        }
+        other => Ok(other.cloned()),
+    }
+}
+
+const LOG_LEVELS: &[&str] = &[
+    "debug", "info", "notice", "default", "warning", "warn", "error", "err", "fault",
+];
+
+/// `GET /agent/logs` parameters as a [`crate::syslog::LogFilter`].
+fn logs_filter(
+    query: &std::collections::HashMap<String, String>,
+) -> Result<crate::syslog::LogFilter, String> {
+    let limit = query_number::<usize>(query, "limit")?;
+    if limit.is_some_and(|n| n == 0 || n > crate::syslog::RING_CAPACITY) {
+        return Err(format!(
+            "limit is 1..={}",
+            crate::syslog::RING_CAPACITY
+        ));
+    }
+    let level = query_text(query, "level")?.map(|level| level.to_ascii_lowercase());
+    if let Some(level) = level.as_deref().filter(|l| !LOG_LEVELS.contains(l)) {
+        return Err(format!(
+            "level {level:?} is not one of debug, info, notice, warning, error, fault (that level or more severe is returned)"
+        ));
+    }
+    Ok(crate::syslog::LogFilter {
+        since: query_number(query, "since")?,
+        process: query_text(query, "process")?,
+        contains: query_text(query, "contains")?,
+        level,
+        limit,
+    })
+}
+
+/// `POST /agent/logs {"action":"start"|"stop"|"clear"}` — capture the
+/// phone's system log (`com.apple.syslog_relay`) into the daemon's ring of
+/// the last 5,000 lines. A capture stops by itself 15 minutes after the
+/// last read. Lines are never written to the daemon's own log.
+async fn agent_logs_post(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(refused) = authorize_device_mutation(&state, &headers) {
+        return refused;
+    }
+    let action = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("action")?.as_str().map(str::to_string));
+    let capture = crate::syslog::global();
+    match action.as_deref() {
+        Some("start") => {
+            let udid = match lockdown_udid(&state) {
+                Ok(udid) => udid,
+                Err(refused) => return refused,
+            };
+            if let Err(failed) =
+                device_call("start the device log", LOCKDOWN_HINT, capture.start(&udid)).await
+            {
+                return failed;
+            }
+        }
+        Some("stop") => capture.stop(),
+        Some("clear") => capture.clear(),
+        _ => {
+            return agent_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_logs_action",
+                r#"send {"action":"start"}, {"action":"stop"} or {"action":"clear"}; read lines with GET /agent/logs"#,
+            )
+        }
+    }
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"ok": true, "capturing": capture.capturing()}),
+    )
+}
+
+/// `GET /agent/logs?since=&process=&contains=&level=&limit=` — captured
+/// lines, oldest first; `next` is the `since` for the following read.
+/// Readable by a logged-in browser too.
+async fn agent_logs_get(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refused) = auth_refusal(browser_or_agent_auth(&state, &headers)) {
+        return refused;
+    }
+    let filter = match logs_filter(&query) {
+        Ok(filter) => filter,
+        Err(hint) => return agent_error(StatusCode::BAD_REQUEST, "invalid_query", hint),
+    };
+    let read = crate::syslog::global().read(&filter);
+    let idle = !read.capturing && read.items.is_empty();
+    let mut body = serde_json::to_value(&read).unwrap_or_else(|_| serde_json::json!({}));
+    body["ok"] = serde_json::Value::Bool(true);
+    if idle {
+        body["hint"] = serde_json::json!(
+            r#"the device log is not being captured: POST /agent/logs {"action":"start"}, reproduce the problem, then read again"#
+        );
+    }
+    json_response(StatusCode::OK, body)
+}
+
+/// `GET /agent/crashes?process=&since=&limit=` — the phone's crash reports,
+/// newest first (pokes the crash mover first, so a crash from seconds ago
+/// is listed).
+async fn agent_crashes(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refused) = auth_refusal(browser_or_agent_auth(&state, &headers)) {
+        return refused;
+    }
+    let filter = (|| {
+        let limit = query_number::<usize>(&query, "limit")?;
+        if limit.is_some_and(|n| n == 0 || n > 500) {
+            return Err("limit is 1..=500".to_string());
+        }
+        Ok(crate::crash::CrashFilter {
+            process: query_text(&query, "process")?,
+            since: query_number(&query, "since")?,
+            limit,
+        })
+    })();
+    let filter = match filter {
+        Ok(filter) => filter,
+        Err(hint) => return agent_error(StatusCode::BAD_REQUEST, "invalid_query", hint),
+    };
+    let udid = match lockdown_udid(&state) {
+        Ok(udid) => udid,
+        Err(refused) => return refused,
+    };
+    match device_call(
+        "list crash reports",
+        LOCKDOWN_HINT,
+        crate::crash::list(&udid, &filter),
+    )
+    .await
+    {
+        Ok(items) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "items": items}),
+        ),
+        Err(failed) => failed,
+    }
+}
+
+/// `GET /agent/crashes/:name` — one report's text (first 2 MB).
+async fn agent_crash(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refused) = auth_refusal(browser_or_agent_auth(&state, &headers)) {
+        return refused;
+    }
+    if !crate::crash::valid_name(&name) {
+        return agent_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "use a name exactly as GET /agent/crashes lists it: a bare file name ending in .ips, .crash or .synced",
+        );
+    }
+    let udid = match lockdown_udid(&state) {
+        Ok(udid) => udid,
+        Err(refused) => return refused,
+    };
+    match tokio::time::timeout(DEVICE_SERVICE_TIMEOUT, crate::crash::read(&udid, &name)).await {
+        Ok(Ok(report)) => {
+            let mut body = serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}));
+            body["ok"] = serde_json::Value::Bool(true);
+            json_response(StatusCode::OK, body)
+        }
+        Ok(Err(error)) if format!("{error:#}").contains("no crash report named") => agent_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no report by that name on the phone; list them again with GET /agent/crashes",
+        ),
+        Ok(Err(error)) => device_failure("read a crash report", LOCKDOWN_HINT, Some(&error)),
+        Err(_) => device_failure("read a crash report", LOCKDOWN_HINT, None),
+    }
+}
+
+/// A `POST /agent/location` body: `Some((lat, lon))` to set, `None` to clear.
+fn parse_location(body: &str) -> Result<Option<(f64, f64)>, String> {
+    const USAGE: &str = r#"send {"lat":35.6812,"lon":139.7671} (decimal degrees) or {"clear":true}"#;
+    let value = serde_json::from_str::<serde_json::Value>(body).map_err(|_| USAGE.to_string())?;
+    let object = value.as_object().ok_or_else(|| USAGE.to_string())?;
+    let lat = object.get("lat");
+    let lon = object.get("lon");
+    match object.get("clear") {
+        Some(serde_json::Value::Bool(true)) if lat.is_none() && lon.is_none() => return Ok(None),
+        Some(serde_json::Value::Bool(false)) | None => {}
+        Some(_) => return Err(USAGE.to_string()),
+    }
+    match (
+        lat.and_then(serde_json::Value::as_f64),
+        lon.and_then(serde_json::Value::as_f64),
+    ) {
+        (Some(lat), Some(lon)) => crate::location::validate(lat, lon)
+            .map(|()| Some((lat, lon)))
+            .map_err(|error| format!("{error}; {USAGE}")),
+        _ => Err(USAGE.to_string()),
+    }
+}
+
+/// `POST /agent/location {"lat":…,"lon":…}` or `{"clear":true}` — move the
+/// phone's reported GPS position (`com.apple.dt.simulatelocation`), or give
+/// the real one back. One action against the run budget.
+async fn agent_location(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(refused) = authorize_device_mutation(&state, &headers) {
+        return refused;
+    }
+    let target = match parse_location(&body) {
+        Ok(target) => target,
+        Err(hint) => return agent_error(StatusCode::BAD_REQUEST, "invalid_location", hint),
+    };
+    let udid = match lockdown_udid(&state) {
+        Ok(udid) => udid,
+        Err(refused) => return refused,
+    };
+    if let Err(refusal) = crate::guard::charge(
+        crate::guard::Policy::get(),
+        &guard_owner(&headers),
+        1,
+        crate::metrics::now_ms(),
+    ) {
+        return guard_refusal(&refusal, false);
+    }
+    state.touch_activity();
+    let result = match target {
+        Some((lat, lon)) => {
+            device_call(
+                "set the simulated location",
+                LOCATION_HINT,
+                crate::location::set(&udid, lat, lon),
+            )
+            .await
+        }
+        None => {
+            device_call(
+                "clear the simulated location",
+                LOCATION_HINT,
+                crate::location::clear(&udid),
+            )
+            .await
+        }
+    };
+    if let Err(failed) = result {
+        return failed;
+    }
+    crate::activity::record(
+        named_owner(&headers),
+        crate::activity::location(target.is_none()),
+        crate::metrics::now_ms(),
+    );
+    json_response(StatusCode::OK, serde_json::json!({"ok": true}))
+}
+
+/// Where recordings go: `<instance state dir>/runs/recordings`.
+fn recordings_dir() -> std::path::PathBuf {
+    crate::instance::current()
+        .state_dir
+        .join("runs")
+        .join("recordings")
+}
+
+/// `POST /agent/record {"action":"start"|"stop"}` — record the live H.264
+/// stream to an MP4 under the instance state dir (`recording`). A recording
+/// ends at `stop`, or by itself after 10 minutes / 200 MB (`stop` then still
+/// returns the file, with `ended`).
+async fn agent_record_post(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(refused) = authorize_device_mutation(&state, &headers) {
+        return refused;
+    }
+    let action = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("action")?.as_str().map(str::to_string));
+    let recorder = crate::recording::Recorder::global();
+    match action.as_deref() {
+        Some("start") => {
+            let Some(hub) = state.video.clone() else {
+                return agent_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "video_unavailable",
+                    "recording needs the live H.264 view, which runs on a macOS daemon with the phone's video stream (GET /agent/status); use screenshots instead",
+                );
+            };
+            state.touch_activity();
+            match recorder
+                .start(hub, &recordings_dir(), crate::recording::Limits::default())
+                .await
+            {
+                Ok(status) => {
+                    crate::activity::record(
+                        named_owner(&headers),
+                        crate::activity::recording_started(),
+                        crate::metrics::now_ms(),
+                    );
+                    json_response(
+                        StatusCode::OK,
+                        serde_json::json!({"ok": true, "recording": status}),
+                    )
+                }
+                Err(error) if format!("{error:#}").contains("already recording") => {
+                    json_response(
+                        StatusCode::CONFLICT,
+                        serde_json::json!({"ok": false, "error": "already_recording",
+                            "recording": recorder.status().await,
+                            "hint": r#"one recording at a time: POST /agent/record {"action":"stop"} first"#}),
+                    )
+                }
+                Err(error) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"ok": false, "error": "recording_failed",
+                        "detail": format!("{error:#}"),
+                        "hint": "the recording could not start; check the daemon's disk space and retry"}),
+                ),
+            }
+        }
+        Some("stop") => match recorder.stop().await {
+            Ok(Some(summary)) => {
+                crate::activity::record(
+                    named_owner(&headers),
+                    crate::activity::recording_saved(summary.seconds),
+                    crate::metrics::now_ms(),
+                );
+                json_response(
+                    StatusCode::OK,
+                    serde_json::json!({"ok": true, "summary": summary}),
+                )
+            }
+            Ok(None) => json_response(
+                StatusCode::OK,
+                serde_json::json!({"ok": true, "summary": null}),
+            ),
+            Err(error) if format!("{error:#}").contains("no video frames") => json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({"ok": false, "error": "recording_empty",
+                    "detail": format!("{error:#}"),
+                    "hint": "no video frame arrived while recording, so there is no file; check the live view (GET /agent/status) and record again"}),
+            ),
+            Err(error) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": "recording_failed",
+                    "detail": format!("{error:#}"),
+                    "hint": "the recording could not be finished; record again"}),
+            ),
+        },
+        Some("status") => json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "recording": recorder.status().await}),
+        ),
+        _ => agent_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_record_action",
+            r#"send {"action":"start"} or {"action":"stop"}; GET /agent/record shows a running recording"#,
+        ),
+    }
+}
+
+/// `GET /agent/record` — the running recording's progress, or `null`.
+async fn agent_record_get(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(refused) = auth_refusal(browser_or_agent_auth(&state, &headers)) {
+        return refused;
+    }
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"ok": true,
+            "recording": crate::recording::Recorder::global().status().await}),
+    )
+}
+
+/// Largest app `install` accepts (a file, or a download).
+const INSTALL_MAX_BYTES: u64 = 2 << 30;
+/// A download's whole budget.
+const INSTALL_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// What `{"type":"install", …}` installs.
+#[derive(Debug, PartialEq)]
+enum InstallSource {
+    Path(std::path::PathBuf),
+    Url(String),
+}
+
+const INSTALL_USAGE: &str = r#"send {"type":"install","path":"/absolute/path/App.ipa"} (an .ipa or .app on this Mac) or {"type":"install","url":"https://example.com/App.ipa"}, optionally with "fresh":true to uninstall it first"#;
+
+/// `{"type":"install","path"|"url",…,"fresh"?}`, checked before anything
+/// runs: `(source, fresh)`, or what is wrong.
+fn parse_install(value: &serde_json::Value) -> Result<(InstallSource, bool), String> {
+    let fresh = match value.get("fresh") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(fresh)) => *fresh,
+        Some(_) => return Err("\"fresh\" must be true or false".to_string()),
+    };
+    let source = match (value.get("path"), value.get("url")) {
+        (Some(serde_json::Value::String(path)), None) => {
+            InstallSource::Path(check_install_path(path)?)
+        }
+        (None, Some(serde_json::Value::String(url))) => {
+            InstallSource::Url(check_install_url(url)?)
+        }
+        (Some(_), Some(_)) => return Err(format!("send \"path\" or \"url\", not both; {INSTALL_USAGE}")),
+        _ => return Err(INSTALL_USAGE.to_string()),
+    };
+    Ok((source, fresh))
+}
+
+fn check_install_path(path: &str) -> Result<std::path::PathBuf, String> {
+    if path.is_empty() || path.len() > 4096 || path.contains('\0') {
+        return Err(format!("install \"path\" is not a usable path; {INSTALL_USAGE}"));
+    }
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("install \"path\" must be absolute (a path on the Mac running the daemon)".to_string());
+    }
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("app") if path.is_dir() => Ok(path),
+        Some("app") => Err(format!("{} is not an .app bundle folder on this Mac", path.display())),
+        Some("ipa") => match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() && meta.len() > INSTALL_MAX_BYTES => Err(format!(
+                "{} is larger than the 2 GB install limit",
+                path.display()
+            )),
+            Ok(meta) if meta.is_file() => Ok(path),
+            _ => Err(format!("{} is not a file on this Mac", path.display())),
+        },
+        _ => Err(format!("install \"path\" must end in .ipa or .app; {INSTALL_USAGE}")),
+    }
+}
+
+fn check_install_url(url: &str) -> Result<String, String> {
+    if url.len() > crate::guard::MAX_URL_LEN {
+        return Err(format!(
+            "install \"url\" is longer than {} characters",
+            crate::guard::MAX_URL_LEN
+        ));
+    }
+    let parsed =
+        reqwest::Url::parse(url).map_err(|_| format!("install \"url\" is not a URL; {INSTALL_USAGE}"))?;
+    if parsed.scheme() != "https" {
+        return Err("install \"url\" must be https".to_string());
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err("install \"url\" has no host".to_string());
+    }
+    Ok(url.to_string())
+}
+
+/// A bundle id that can go on a command line: reverse-DNS characters only.
+fn install_bundle_ok(bundle: &str) -> bool {
+    !bundle.is_empty()
+        && bundle.len() <= 200
+        && bundle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+/// `CFBundleIdentifier` from an Info.plist, binary or XML.
+fn bundle_id_from_info_plist(bytes: &[u8]) -> Option<String> {
+    let value = plist::Value::from_reader(std::io::Cursor::new(bytes)).ok()?;
+    let bundle = value
+        .as_dictionary()?
+        .get("CFBundleIdentifier")?
+        .as_string()?
+        .trim();
+    install_bundle_ok(bundle).then(|| bundle.to_string())
+}
+
+/// `Payload/<Name>.app/Info.plist`, the app's own plist in an .ipa (not a
+/// plugin's or framework's, which sit deeper).
+fn is_ipa_info_plist(entry: &str) -> bool {
+    entry
+        .strip_prefix("Payload/")
+        .and_then(|rest| rest.strip_suffix("/Info.plist"))
+        .is_some_and(|app| app.len() > 4 && app.ends_with(".app") && !app.contains('/'))
+}
+
+/// An archive member name as an `unzip` pattern that matches only itself.
+fn unzip_literal(entry: &str) -> String {
+    let mut out = String::with_capacity(entry.len());
+    for c in entry.chars() {
+        // Info-ZIP's matcher takes a backslash escape (not `[[]`).
+        if matches!(c, '[' | ']' | '*' | '?' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Run `unzip` (macOS ships it) and return its stdout.
+async fn run_unzip(args: &[&std::ffi::OsStr]) -> Result<Vec<u8>, String> {
+    let run = tokio::process::Command::new("unzip")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), run)
+        .await
+        .map_err(|_| "unzip timed out".to_string())?
+        .map_err(|error| format!("run unzip: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "unzip failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
+/// The bundle id of an `.app` folder or an `.ipa`.
+async fn install_bundle_id(path: &std::path::Path) -> Result<String, String> {
+    let bytes = if path.is_dir() {
+        std::fs::read(path.join("Info.plist"))
+            .map_err(|error| format!("read {}/Info.plist: {error}", path.display()))?
+    } else {
+        let listing = run_unzip(&["-Z1".as_ref(), path.as_os_str()]).await?;
+        let listing = String::from_utf8_lossy(&listing);
+        let entry = listing
+            .lines()
+            .find(|entry| is_ipa_info_plist(entry))
+            .ok_or_else(|| "the .ipa has no Payload/<App>.app/Info.plist".to_string())?;
+        let pattern = unzip_literal(entry);
+        run_unzip(&["-p".as_ref(), path.as_os_str(), pattern.as_ref()]).await?
+    };
+    bundle_id_from_info_plist(&bytes)
+        .ok_or_else(|| "Info.plist has no valid CFBundleIdentifier".to_string())
+}
+
+/// Download an .ipa over https into `dir` (2 GB cap); `Err((status, error,
+/// detail))`.
+async fn download_ipa(
+    url: &str,
+    dir: &std::path::Path,
+) -> Result<std::path::PathBuf, (StatusCode, &'static str, String)> {
+    use tokio::io::AsyncWriteExt as _;
+    let failed = |detail: String| (StatusCode::BAD_GATEWAY, "download_failed", detail);
+    let too_large = || {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            "the download is larger than the 2 GB install limit".to_string(),
+        )
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(INSTALL_DOWNLOAD_TIMEOUT)
+        // Redirects stay on https.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.url().scheme() == "https" && attempt.previous().len() < 10 {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
+        .map_err(|error| failed(format!("HTTP client: {error}")))?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| failed(format!("download: {error}")))?;
+    if !response.status().is_success() {
+        return Err(failed(format!("the server answered {}", response.status())));
+    }
+    if response.content_length().is_some_and(|n| n > INSTALL_MAX_BYTES) {
+        return Err(too_large());
+    }
+    let path = dir.join("download.ipa");
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|error| failed(format!("create {}: {error}", path.display())))?;
+    let mut total = 0u64;
+    let mut head: Vec<u8> = Vec::with_capacity(4);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| failed(format!("download: {error}")))?
+    {
+        total += chunk.len() as u64;
+        if total > INSTALL_MAX_BYTES {
+            return Err(too_large());
+        }
+        if head.len() < 4 {
+            head.extend(chunk.iter().take(4 - head.len()));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| failed(format!("write the download: {error}")))?;
+    }
+    file.flush()
+        .await
+        .map_err(|error| failed(format!("write the download: {error}")))?;
+    // An .ipa is a zip archive.
+    if head.as_slice() != b"PK\x03\x04" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "not_an_ipa",
+            "the URL did not serve an .ipa (zip) file".to_string(),
+        ));
+    }
+    Ok(path)
+}
+
+/// `POST /agent/input {"type":"install","path":"/abs/App.ipa|.app"}` or
+/// `{"type":"install","url":"https://…/App.ipa"}`, optionally `"fresh":true`
+/// (uninstall first, so the app starts with no data). Installs over
+/// CoreDevice (`xcrun devicectl device install app`) on macOS. A bundle the
+/// owner blocks (IPHONE_USE_BLOCKED_APPS) is refused; a download goes to a
+/// temporary folder removed afterwards.
+async fn agent_install(
+    state: &AppState,
+    headers: &HeaderMap,
+    value: &serde_json::Value,
+) -> Response {
+    let invalid = |hint: String| {
+        json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "invalid_install", "hint": hint,
+                "outcome": "not_sent", "retry_safe": true}),
+        )
+    };
+    let (source, fresh) = match parse_install(value) {
+        Ok(parsed) => parsed,
+        Err(hint) => return invalid(hint),
+    };
+    // Held until this returns: the download's folder goes with it.
+    let mut _download_dir = None;
+    let path = match source {
+        InstallSource::Path(path) => path,
+        InstallSource::Url(url) => {
+            let dir = match tempfile::Builder::new()
+                .prefix("iphone-use-install-")
+                .tempdir()
+            {
+                Ok(dir) => dir,
+                Err(error) => {
+                    return agent_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "download_failed",
+                        format!("could not make a temporary folder: {error}"),
+                    )
+                }
+            };
+            let downloaded = download_ipa(&url, dir.path()).await;
+            _download_dir = Some(dir);
+            match downloaded {
+                Ok(path) => path,
+                Err((status, error, detail)) => {
+                    return json_response(
+                        status,
+                        serde_json::json!({"ok": false, "error": error, "detail": detail,
+                            "outcome": "not_sent",
+                            "hint": "check the link opens an .ipa from this Mac (https only, at most 2 GB)"}),
+                    )
+                }
+            }
+        }
+    };
+    let bundle = match install_bundle_id(&path).await {
+        Ok(bundle) => Some(bundle),
+        Err(error) if fresh => {
+            return invalid(format!(
+                "\"fresh\" needs the app's bundle id, which could not be read: {error}"
+            ))
+        }
+        Err(error) => {
+            tracing::warn!("install: no bundle id from {}: {error}", path.display());
+            None
+        }
+    };
+    if let Err(refusal) = crate::guard::Policy::get().check_install(bundle.as_deref()) {
+        return guard_refusal(&refusal, false);
+    }
+    install_on_device(state, headers, path, bundle, fresh).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn install_on_device(
+    _state: &AppState,
+    _headers: &HeaderMap,
+    _path: std::path::PathBuf,
+    bundle: Option<String>,
+    _fresh: bool,
+) -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        serde_json::json!({"ok": false, "error": "install_needs_macos", "bundle": bundle,
+            "outcome": "not_sent",
+            "hint": "installing apps uses Xcode's devicectl, which only runs on macOS"}),
+    )
+}
+
+#[cfg(target_os = "macos")]
+async fn install_on_device(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: std::path::PathBuf,
+    bundle: Option<String>,
+    fresh: bool,
+) -> Response {
+    if let Err(refusal) = crate::guard::charge(
+        crate::guard::Policy::get(),
+        &guard_owner(headers),
+        1,
+        crate::metrics::now_ms(),
+    ) {
+        return guard_refusal(&refusal, false);
+    }
+    state.touch_activity();
+    let udid = state.device_udid.clone();
+    let uninstall = bundle.clone().filter(|_| fresh);
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(bundle) = &uninstall {
+            match devicectl_uninstall(udid.as_deref(), bundle) {
+                // Not installed yet is the usual reason; the install decides.
+                Ok(()) | Err(DevicectlError::Failed(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+        devicectl_install(udid.as_deref(), &path)
+    })
+    .await
+    .unwrap_or_else(|e| Err(DevicectlError::Failed(format!("join error: {e}"))));
+    match result {
+        Ok(()) => {
+            crate::activity::record(
+                named_owner(headers),
+                crate::activity::installed(bundle.as_deref()),
+                crate::metrics::now_ms(),
+            );
+            json_response(
+                StatusCode::OK,
+                serde_json::json!({"ok": true, "bundle": bundle, "installed": true, "fresh": fresh}),
+            )
+        }
+        Err(DevicectlError::Timeout) => {
+            tracing::warn!("devicectl install exceeded the server deadline and was killed");
+            json_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                serde_json::json!({"ok": false, "error": "install_timeout", "outcome": "unknown",
+                    "hint": "devicectl was stopped after 5 minutes; check the phone (GET /agent/apps lists what is installed) before retrying"}),
+            )
+        }
+        Err(DevicectlError::TargetRequired(count)) => json_response(
+            StatusCode::CONFLICT,
+            serde_json::json!({"ok": false, "error": "target_required",
+                "connected_candidates": count,
+                "hint": "configure IPHONE_USE_UDID so the daemon knows which phone to install on"}),
+        ),
+        Err(DevicectlError::Failed(error)) => {
+            tracing::warn!("devicectl install failed: {error}");
+            json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({"ok": false, "error": "install_failed", "detail": error,
+                    "hint": "devicectl refused the app: it must be signed for this phone (development or ad-hoc profile that includes it) and built for its iOS version"}),
+            )
+        }
+    }
+}
+
+/// Install an app (`.ipa` or `.app`) on a paired device via CoreDevice.
+#[cfg(target_os = "macos")]
+fn devicectl_install(udid: Option<&str>, path: &std::path::Path) -> Result<(), DevicectlError> {
+    let device = match udid {
+        Some(u) => u.to_string(),
+        None => detect_connected_device()?,
+    };
+    let out = run_child_with_deadline(
+        std::process::Command::new("xcrun")
+            .args([
+                "devicectl",
+                "--quiet",
+                "--timeout",
+                "300",
+                "device",
+                "install",
+                "app",
+                "--device",
+                &device,
+            ])
+            .arg(path),
+        std::time::Duration::from_secs(330),
+    )?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(DevicectlError::Failed(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AppNotesQuery {
+    bundle: Option<String>,
+}
+
+/// The `bundle` parameter, or the 400 that says what it must be.
+fn app_notes_bundle(query: &AppNotesQuery) -> Result<String, Response> {
+    match query.bundle.as_deref().map(str::trim) {
+        Some(bundle) if crate::flows::valid_app_notes_bundle(bundle) => Ok(bundle.to_string()),
+        _ => Err(agent_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_bundle",
+            "pass the app's bundle id: ?bundle=com.example.app (GET /agent/apps lists them)",
+        )),
+    }
+}
+
+/// `GET /agent/app-notes?bundle=…` — what earlier runs or the user wrote
+/// down about an app; empty `text` when nothing yet.
+async fn agent_app_notes_get(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AppNotesQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = authorize_extension(&state, &headers, false) {
+        return refused;
+    }
+    let bundle = match app_notes_bundle(&query) {
+        Ok(bundle) => bundle,
+        Err(refused) => return refused,
+    };
+    let mut body = serde_json::json!({"ok": true, "bundle": bundle, "text": ""});
+    if let Some(notes) = crate::flows::read_app_notes(&crate::flows::app_notes_dir(), &bundle) {
+        body["text"] = serde_json::json!(notes.text);
+        if let Some(updated_at) = notes.updated_at {
+            body["updated_at"] = serde_json::json!(updated_at);
+        }
+    }
+    json_response(StatusCode::OK, body)
+}
+
+/// `PUT /agent/app-notes?bundle=…` with the markdown as the body (at most
+/// 16 KB; empty deletes). Notes do not touch the phone, so they take no
+/// owner lease: a person can write them while an agent drives.
+async fn agent_app_notes_put(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AppNotesQuery>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(refused) = authorize_extension(&state, &headers, true) {
+        return refused;
+    }
+    let bundle = match app_notes_bundle(&query) {
+        Ok(bundle) => bundle,
+        Err(refused) => return refused,
+    };
+    if body.len() > crate::flows::APP_NOTES_MAX_BYTES {
+        return agent_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            format!(
+                "notes are at most {} KB; keep what the next run needs (obstacles, where things are, what not to do)",
+                crate::flows::APP_NOTES_MAX_BYTES / 1024
+            ),
+        );
+    }
+    match crate::flows::write_app_notes(&crate::flows::app_notes_dir(), &bundle, &body) {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "bundle": bundle, "bytes": body.trim().len()}),
+        ),
+        Err(error) => {
+            tracing::warn!("write app notes for {bundle}: {error}");
+            agent_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "write_failed",
+                format!("the notes could not be saved: {error}"),
+            )
+        }
+    }
+}
+
+/// `(index, rect)` of each interactive row worth drawing, indexes as in the
+/// full `/agent/elements` read of `rows` (the same rows `scope=interactive`
+/// keeps).
+fn overlay_marks(rows: &[crate::wda::ElementRow], window: (f64, f64)) -> Vec<(usize, [f64; 4])> {
+    let mut view = serde_json::json!({ "elements": rows });
+    crate::scope::apply(&mut view, "interactive");
+    view["elements"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("index")?.as_u64())
+        .filter_map(|index| {
+            let row = rows.get(index as usize)?;
+            let [x, y, w, h] = row.rect;
+            let drawable = row.visible != Some(false)
+                && row.rect.iter().all(|v| v.is_finite())
+                && w >= 2.0
+                && h >= 2.0
+                && x < window.0
+                && y < window.1
+                && x + w > 0.0
+                && y + h > 0.0;
+            drawable.then_some((index as usize, row.rect))
+        })
+        .collect()
+}
+
+/// `GET /agent/screenshot` — the phone screen as PNG (see
+/// [`agent_screenshot_capture`]). `overlay=elements` numbers each
+/// interactive element on it (outline plus index badge), so a vision
+/// fallback can say "tap 12": the indexes are those of a full
+/// `/agent/elements` read, whose snapshot comes back in
+/// `x-elements-snapshot` so `{"type":"tap","element":12,"snapshot":…}`
+/// works. When the tree cannot be read the plain picture comes back with
+/// `x-overlay: unavailable`.
+async fn agent_screenshot(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ScreenshotQuery>,
+) -> Response {
+    match query.overlay.as_deref() {
+        None | Some("") | Some("none") => {
+            return agent_screenshot_capture(state, headers, Query(query)).await
+        }
+        Some("elements") => {}
+        Some(_) => {
+            if let Some(refused) = auth_refusal(browser_or_agent_auth(&state, &headers)) {
+                return refused;
+            }
+            return agent_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_overlay",
+                "overlay=elements numbers the interactive elements; leave it out for the plain picture",
+            );
+        }
+    }
+    let shot = agent_screenshot_capture(state.clone(), headers.clone(), Query(query)).await;
+    if !shot.status().is_success() {
+        return shot;
+    }
+    let (mut parts, body) = shot.into_parts();
+    let Ok(png) = axum::body::to_bytes(body, 64 << 20).await else {
+        return with_security_headers(
+            (StatusCode::BAD_GATEWAY, "the capture could not be read").into_response(),
+        );
+    };
+    let unavailable = |mut parts: axum::http::response::Parts, png: bytes::Bytes| {
+        parts
+            .headers
+            .insert("x-overlay", HeaderValue::from_static("unavailable"));
+        Response::from_parts(parts, Body::from(png))
+    };
+    let Some(wda) = state.wda.clone() else {
+        return unavailable(parts, png);
+    };
+    let read = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let mut w = wda.lock().await;
+        let rows = w.elements().await.ok()?;
+        let window = w.window_size().await.ok()?;
+        Some((rows, window))
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some((rows, window)) = read else {
+        return unavailable(parts, png);
+    };
+    let marks = overlay_marks(&rows, window);
+    let count = marks.len();
+    let snapshot = element_snapshot_id(&rows).ok();
+    if let Some(snapshot) = &snapshot {
+        remember_element_snapshot(&state, snapshot, &Arc::new(rows));
+        note_owner_snapshot(&state, &headers, snapshot);
+    }
+    let source = png.clone();
+    let drawn = tokio::task::spawn_blocking(move || {
+        let mut image = crate::redaction::decode_png(&source)?;
+        crate::redaction::draw_element_marks(&mut image, &marks, window);
+        crate::redaction::encode_png(&image)
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(drawn) = drawn else {
+        return unavailable(parts, png);
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts
+        .headers
+        .insert("x-overlay", HeaderValue::from_static("elements"));
+    if let Ok(value) = HeaderValue::from_str(&count.to_string()) {
+        parts.headers.insert("x-overlay-marks", value);
+    }
+    if let Some(value) = snapshot.and_then(|s| HeaderValue::from_str(&s).ok()) {
+        parts.headers.insert("x-elements-snapshot", value);
+    }
+    Response::from_parts(parts, Body::from(drawn))
+}
+
+/// `?ocr=` on `/agent/elements`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OcrMode {
+    /// Only when the tree is unusable ([`crate::scope::needs_image`]).
+    Auto,
+    /// On every full read.
+    Force,
+}
+
+fn parse_ocr_mode(raw: Option<&str>) -> Result<Option<OcrMode>, serde_json::Value> {
+    match raw.map(str::trim) {
+        None | Some("") | Some("0") | Some("off") | Some("false") => Ok(None),
+        Some("1") | Some("auto") | Some("true") => Ok(Some(OcrMode::Auto)),
+        Some("force") => Ok(Some(OcrMode::Force)),
+        Some(_) => Err(serde_json::json!({"ok": false, "error": "invalid_ocr",
+            "hint": "ocr is auto (or 1: only when the tree is unusable), force (always) or off"})),
+    }
+}
+
+/// A recognition run's budget, the screenshot excluded. The first run on a
+/// Mac compiles the helper and may not fit; the next read then works.
+const ELEMENTS_OCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A PNG's width from its header.
+fn png_width(bytes: &[u8]) -> Option<u32> {
+    (bytes.len() >= 24 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") && &bytes[12..16] == b"IHDR")
+        .then(|| u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]))
+}
+
+/// Vision OCR of a fresh screenshot, as element-shaped rows in points.
+async fn elements_ocr(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    json: &serde_json::Value,
+) -> Result<Vec<serde_json::Value>, String> {
+    let width = json
+        .get("screen")
+        .and_then(|screen| screen.get("width"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|width| *width > 0.0)
+        .ok_or("the screen size is unknown, so recognized text cannot be placed")?;
+    let shot = agent_screenshot_capture(
+        State(state.clone()),
+        headers.clone(),
+        Query(ScreenshotQuery {
+            raw: None,
+            max_side: None,
+            fresh: Some("1".to_string()),
+            overlay: None,
+        }),
+    )
+    .await;
+    if !shot.status().is_success() {
+        return Err(format!("the screenshot for OCR failed ({})", shot.status()));
+    }
+    if shot
+        .headers()
+        .get("x-capture-redacted")
+        .is_some_and(|v| v.as_bytes() == b"1")
+    {
+        return Err("the app hides this screen from capture; there is no text to read".to_string());
+    }
+    let png = axum::body::to_bytes(shot.into_body(), 64 << 20)
+        .await
+        .map_err(|error| format!("read the screenshot: {error}"))?;
+    let pixels = png_width(&png).ok_or("the screenshot is not a PNG")?;
+    let scale = f64::from(pixels) / width;
+    let rows = tokio::time::timeout(ELEMENTS_OCR_TIMEOUT, crate::ocr::recognize(&png, scale))
+        .await
+        .map_err(|_| format!("OCR did not finish in {} s", ELEMENTS_OCR_TIMEOUT.as_secs()))?
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(crate::ocr::rows_for_elements(&rows))
+}
+
+/// `ocr: {rows, source}` or `ocr_error`; never fails the read.
+fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value>, String>) {
+    match result {
+        Ok(rows) => {
+            json["ocr"] = serde_json::json!({
+                "rows": rows,
+                "source": "vision",
+                "note": "recognized text, not elements: tap the centre of a row's rect by coordinates",
+            });
+        }
+        Err(error) => {
+            json["ocr_error"] = serde_json::Value::String(error);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -21214,6 +22470,161 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(body["error"], "invalid_query");
         });
+    }
+
+    // -- batch 2: install, location, logs, OCR, overlay ------------------------
+
+    #[test]
+    fn install_requests_are_checked_before_anything_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Demo.app");
+        std::fs::create_dir(&app).unwrap();
+        let ipa = dir.path().join("Demo.IPA");
+        std::fs::write(&ipa, b"PK\x03\x04").unwrap();
+        let parse = |v: serde_json::Value| parse_install(&v);
+        assert_eq!(
+            parse(serde_json::json!({"type":"install","path":app.to_str().unwrap()})).unwrap(),
+            (InstallSource::Path(app.clone()), false)
+        );
+        assert!(
+            parse(serde_json::json!({"type":"install","path":ipa.to_str().unwrap(),"fresh":true}))
+                .unwrap()
+                .1
+        );
+        assert_eq!(
+            parse(serde_json::json!({"type":"install","url":"https://example.com/a/App.ipa?sig=1"}))
+                .unwrap()
+                .0,
+            InstallSource::Url("https://example.com/a/App.ipa?sig=1".to_string())
+        );
+        let missing = dir.path().join("Gone.ipa");
+        for (bad, why) in [
+            (serde_json::json!({"type":"install"}), "path"),
+            (serde_json::json!({"type":"install","path":"Demo.app"}), "absolute"),
+            (serde_json::json!({"type":"install","path":missing.to_str().unwrap()}), "not a file"),
+            (serde_json::json!({"type":"install","path":dir.path().to_str().unwrap()}), ".ipa or .app"),
+            (serde_json::json!({"type":"install","path":ipa.join("x.app").to_str().unwrap()}), "bundle folder"),
+            (serde_json::json!({"type":"install","url":"http://example.com/App.ipa"}), "https"),
+            (serde_json::json!({"type":"install","url":"not a url"}), "not a URL"),
+            (serde_json::json!({"type":"install","url":"https://example.com/x","path":"/a.ipa"}), "not both"),
+            (serde_json::json!({"type":"install","url":42}), "path"),
+            (serde_json::json!({"type":"install","path":app.to_str().unwrap(),"fresh":"yes"}), "fresh"),
+        ] {
+            let error = parse(bad.clone()).unwrap_err();
+            assert!(error.contains(why), "{bad}: {error}");
+        }
+        // Batches never carry an install.
+        let step = serde_json::json!({"type":"install","path":"/a.ipa"});
+        assert!(validate_agent_action_value(step.as_object().unwrap(), 0).is_err());
+    }
+
+    #[test]
+    fn bundle_ids_come_from_xml_or_binary_info_plists_and_the_ipa_payload() {
+        let mut dict = plist::Dictionary::new();
+        dict.insert("CFBundleIdentifier".into(), plist::Value::String("com.example.demo".into()));
+        dict.insert("CFBundleName".into(), plist::Value::String("Demo".into()));
+        let value = plist::Value::Dictionary(dict);
+        let mut xml = Vec::new();
+        value.to_writer_xml(&mut xml).unwrap();
+        let mut binary = Vec::new();
+        value.to_writer_binary(&mut binary).unwrap();
+        assert!(binary.starts_with(b"bplist"));
+        assert_eq!(bundle_id_from_info_plist(&xml).as_deref(), Some("com.example.demo"));
+        assert_eq!(bundle_id_from_info_plist(&binary).as_deref(), Some("com.example.demo"));
+        assert_eq!(bundle_id_from_info_plist(b"not a plist"), None);
+        let mut bad = plist::Dictionary::new();
+        bad.insert("CFBundleIdentifier".into(), plist::Value::String("com.x; rm -rf /".into()));
+        let mut bad_xml = Vec::new();
+        plist::Value::Dictionary(bad).to_writer_xml(&mut bad_xml).unwrap();
+        assert_eq!(bundle_id_from_info_plist(&bad_xml), None, "only reverse-DNS ids");
+
+        assert!(is_ipa_info_plist("Payload/Demo.app/Info.plist"));
+        assert!(is_ipa_info_plist("Payload/My App.app/Info.plist"));
+        assert!(!is_ipa_info_plist("Payload/Demo.app/PlugIns/W.appex/Info.plist"));
+        assert!(!is_ipa_info_plist("Payload/Demo.app/Frameworks/F.framework/Info.plist"));
+        assert!(!is_ipa_info_plist("Payload/.app/Info.plist"));
+        assert!(!is_ipa_info_plist("Demo.app/Info.plist"));
+        assert_eq!(unzip_literal("Payload/A[1]*?.app/Info.plist"), r"Payload/A\[1\]\*\?.app/Info.plist");
+    }
+
+    #[test]
+    fn location_bodies_set_or_clear() {
+        assert_eq!(parse_location(r#"{"lat":35.5,"lon":139.25}"#).unwrap(), Some((35.5, 139.25)));
+        assert_eq!(parse_location(r#"{"clear":true}"#).unwrap(), None);
+        assert_eq!(parse_location(r#"{"lat":-1,"lon":2,"clear":false}"#).unwrap(), Some((-1.0, 2.0)));
+        for bad in [
+            "",
+            "[]",
+            r#"{"lat":91,"lon":0}"#,
+            r#"{"lat":0,"lon":181}"#,
+            r#"{"lat":"35","lon":"139"}"#,
+            r#"{"lat":35}"#,
+            r#"{"clear":true,"lat":1,"lon":2}"#,
+            r#"{"clear":"yes"}"#,
+        ] {
+            assert!(parse_location(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn log_filters_and_ocr_modes_are_validated() {
+        let q = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let filter = logs_filter(&q(&[("since", "7"), ("level", "Error"), ("process", "SpringBoard"), ("limit", "20")])).unwrap();
+        assert_eq!(filter.since, Some(7));
+        assert_eq!(filter.level.as_deref(), Some("error"));
+        assert_eq!(filter.limit, Some(20));
+        for bad in [("since", "-1"), ("limit", "0"), ("limit", "5001"), ("level", "loud")] {
+            assert!(logs_filter(&q(&[bad])).is_err(), "{bad:?}");
+        }
+        assert!(logs_filter(&q(&[("contains", &"x".repeat(201))])).is_err());
+
+        assert_eq!(parse_ocr_mode(None).unwrap(), None);
+        assert_eq!(parse_ocr_mode(Some("off")).unwrap(), None);
+        assert_eq!(parse_ocr_mode(Some("1")).unwrap(), Some(OcrMode::Auto));
+        assert_eq!(parse_ocr_mode(Some("auto")).unwrap(), Some(OcrMode::Auto));
+        assert_eq!(parse_ocr_mode(Some("force")).unwrap(), Some(OcrMode::Force));
+        assert_eq!(parse_ocr_mode(Some("always")).unwrap_err()["error"], "invalid_ocr");
+
+        let mut json = serde_json::json!({"elements": []});
+        attach_ocr(&mut json, Err("OCR needs macOS".to_string()));
+        assert_eq!(json["ocr_error"], "OCR needs macOS");
+        attach_ocr(&mut json, Ok(vec![serde_json::json!({"kind":"OCRText"})]));
+        assert_eq!(json["ocr"]["source"], "vision");
+        assert_eq!(json["ocr"]["rows"][0]["kind"], "OCRText");
+
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend(1179u32.to_be_bytes());
+        png.extend(2556u32.to_be_bytes());
+        assert_eq!(png_width(&png), Some(1179));
+        assert_eq!(png_width(b"GIF89a"), None);
+    }
+
+    #[test]
+    fn overlay_marks_are_the_interactive_rows_on_screen_by_full_index() {
+        let row = |kind: &str, rect: [f64; 4]| crate::wda::ElementRow {
+            kind: kind.to_string(),
+            rect,
+            ..Default::default()
+        };
+        let mut hidden = row("Button", [10.0, 10.0, 50.0, 20.0]);
+        hidden.visible = Some(false);
+        let rows = vec![
+            row("Application", [0.0, 0.0, 390.0, 844.0]),
+            row("StaticText", [10.0, 50.0, 100.0, 20.0]),
+            row("Button", [10.0, 100.0, 100.0, 44.0]),
+            hidden,
+            row("Cell", [0.0, 900.0, 390.0, 44.0]),
+            row("TextField", [20.0, 200.0, 300.0, 40.0]),
+        ];
+        let marks = overlay_marks(&rows, (390.0, 844.0));
+        let indexes: Vec<usize> = marks.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indexes, vec![2, 5]);
+        assert_eq!(marks[0].1, [10.0, 100.0, 100.0, 44.0]);
     }
 }
 

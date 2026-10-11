@@ -48,9 +48,30 @@ struct HelperRow {
     rect: [f64; 4],
 }
 
+/// A recognizer standing in for the Vision helper.
+pub type StandIn = std::sync::Arc<dyn Fn(&[u8], f64) -> Result<Vec<OcrRow>> + Send + Sync>;
+
+static STAND_IN: std::sync::Mutex<Option<StandIn>> = std::sync::Mutex::new(None);
+
+/// Replace [`recognize`] with `stand_in` (`None` restores Vision). For tests
+/// of the HTTP layer, which cannot run the helper off macOS.
+#[doc(hidden)]
+pub fn set_stand_in(stand_in: Option<StandIn>) {
+    *STAND_IN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = stand_in;
+}
+
 /// Recognize the text in a PNG screenshot. `scale` is pixels per point (the
 /// screenshot's width over the screen's width in points, e.g. 3.0).
 pub async fn recognize(png: &[u8], scale: f64) -> Result<Vec<OcrRow>> {
+    let stand_in = STAND_IN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(stand_in) = stand_in {
+        return stand_in(png, scale);
+    }
     if !cfg!(target_os = "macos") {
         bail!(
             "OCR needs macOS (Apple's Vision framework); this daemon runs on {}",

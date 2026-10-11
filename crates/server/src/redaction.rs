@@ -423,6 +423,74 @@ impl Canvas<'_> {
     }
 }
 
+/// Outline and badge colour of the element overlay: magenta stands out on
+/// iOS's whites, greys and system blue alike.
+const MARK_COLOUR: [u8; 4] = [230, 0, 126, 255];
+
+/// 3×5 digit glyphs, one row per `u8` (bit 2 is the left column). Built in,
+/// so the overlay's numbers draw on any host, with or without a system font.
+const DIGITS: [[u8; 5]; 10] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111],
+    [0b010, 0b110, 0b010, 0b010, 0b111],
+    [0b111, 0b001, 0b111, 0b100, 0b111],
+    [0b111, 0b001, 0b111, 0b001, 0b111],
+    [0b101, 0b101, 0b111, 0b001, 0b001],
+    [0b111, 0b100, 0b111, 0b001, 0b111],
+    [0b111, 0b100, 0b111, 0b101, 0b111],
+    [0b111, 0b001, 0b001, 0b001, 0b001],
+    [0b111, 0b101, 0b111, 0b101, 0b111],
+    [0b111, 0b101, 0b111, 0b001, 0b111],
+];
+
+/// Number each element on the screenshot (`GET /agent/screenshot?overlay=
+/// elements`): its rect outlined and a badge with its index at the top-left,
+/// so a model reading the picture can answer "tap 12". `marks` are
+/// `(index, [x, y, w, h])` in points; `window` is the screen in points (the
+/// image may be any size, e.g. shrunk to `max_side`).
+pub fn draw_element_marks(image: &mut Image, marks: &[(usize, [f64; 4])], window: (f64, f64)) {
+    let scale = image.width as f64 / window.0.max(1.0);
+    // One glyph pixel; digits stay legible down to a ~400 px wide image.
+    let cell = (scale * 2.4).round().max(2.0);
+    let stroke = (scale * 0.8).max(1.0);
+    let mut canvas = Canvas { image, font: None };
+    // Outlines first, then every badge, so no outline crosses a number.
+    for (_, rect) in marks {
+        let [x, y, w, h] = rect.map(|v| v * scale);
+        canvas.stroke_rect(x, y, w, h, MARK_COLOUR, stroke);
+    }
+    for (index, rect) in marks {
+        let [x, y, _, _] = rect.map(|v| v * scale);
+        let digits: Vec<usize> = index
+            .to_string()
+            .bytes()
+            .map(|b| usize::from(b - b'0'))
+            .collect();
+        let pad = cell;
+        let badge_w = digits.len() as f64 * 4.0 * cell - cell + 2.0 * pad;
+        let badge_h = 5.0 * cell + 2.0 * pad;
+        // Inside the image even for a rect that starts off screen.
+        let bx = x.max(0.0).min(canvas.image.width as f64 - badge_w).max(0.0);
+        let by = y.max(0.0).min(canvas.image.height as f64 - badge_h).max(0.0);
+        canvas.fill_rect(bx, by, badge_w, badge_h, MARK_COLOUR);
+        for (n, digit) in digits.iter().enumerate() {
+            let left = bx + pad + n as f64 * 4.0 * cell;
+            for (row, bits) in DIGITS[*digit].iter().enumerate() {
+                for col in 0..3 {
+                    if bits & (0b100 >> col) != 0 {
+                        canvas.fill_rect(
+                            left + col as f64 * cell,
+                            by + pad + row as f64 * cell,
+                            cell,
+                            cell,
+                            [255, 255, 255, 255],
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +530,29 @@ mod tests {
             depth: 3,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn element_marks_outline_each_rect_and_number_it() {
+        // A 2x capture of a 100x200-point screen.
+        let mut image = flat(200, 400, [255, 255, 255]);
+        draw_element_marks(&mut image, &[(7, [20.0, 50.0, 60.0, 30.0]), (12, [10.0, 150.0, 80.0, 40.0])], (100.0, 200.0));
+        let px = |x: u32, y: u32| {
+            let i = ((y * image.width + x) * 4) as usize;
+            [image.rgba[i], image.rgba[i + 1], image.rgba[i + 2]]
+        };
+        // The outline's bottom edge and right edge, in pixels.
+        assert_eq!(px(100, 50 * 2 + 30 * 2 - 1), [230, 0, 126]);
+        assert_eq!(px((20 + 60) * 2 - 1, 120), [230, 0, 126]);
+        // The badge sits at the rect's top-left; the inside stays untouched.
+        assert_eq!(px(40 + 1, 100 + 1), [230, 0, 126]);
+        assert_eq!(px(140, 130), [255, 255, 255]);
+        // Its digit pixels are white on the badge: "7" starts with a full top row.
+        let cell = 5; // (2.0 * 2.4).round()
+        assert_eq!(px(40 + cell + 1, 100 + cell + 1), [255, 255, 255]);
+        // Two digits make a wider badge than one.
+        let badge = |y0: u32| (0..200).filter(|&x| px(x, y0 + 1) == [230, 0, 126]).count();
+        assert!(badge(300) > badge(100), "{} vs {}", badge(300), badge(100));
     }
 
     #[test]

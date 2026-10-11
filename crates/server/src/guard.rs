@@ -113,6 +113,9 @@ pub enum Refusal {
     Budget { max: u32, used: u32, wanted: u32 },
     /// `open_url` of a scheme the owner has not allowed.
     UrlScheme(String),
+    /// An app install whose bundle id could not be read while the owner
+    /// blocks some apps: it cannot be ruled out.
+    InstallUnverified,
 }
 
 impl Refusal {
@@ -122,6 +125,7 @@ impl Refusal {
             Refusal::ForegroundUnknown => "foreground_unverified",
             Refusal::Budget { .. } => "action_budget_exhausted",
             Refusal::UrlScheme(_) => "url_scheme_not_allowed",
+            Refusal::InstallUnverified => "install_unverified",
         }
     }
 
@@ -142,6 +146,7 @@ impl Refusal {
             Refusal::UrlScheme(scheme) => format!(
                 "{scheme}: links are not opened unless the phone owner allows the scheme (IPHONE_USE_ALLOW_URL_SCHEMES, e.g. IPHONE_USE_ALLOW_URL_SCHEMES={scheme}). http and https links always open. Do not reach it another way; tell the user."
             ),
+            Refusal::InstallUnverified => "the app's bundle id could not be read from the .app/.ipa, and the phone owner blocks some apps (IPHONE_USE_BLOCKED_APPS), so it is not installed. Tell the user.".to_string(),
         }
     }
 
@@ -163,7 +168,7 @@ impl Refusal {
             Refusal::UrlScheme(scheme) => {
                 body["scheme"] = Value::String(scheme.clone());
             }
-            Refusal::ForegroundUnknown => {}
+            Refusal::ForegroundUnknown | Refusal::InstallUnverified => {}
         }
         body
     }
@@ -254,6 +259,20 @@ impl Policy {
             return Ok(());
         }
         Err(Refusal::UrlScheme(parsed.scheme))
+    }
+
+    /// An app install of `bundle` (`None`: its bundle id could not be read).
+    /// A blocked app is the owner's to put on the phone, not an agent's; an
+    /// unreadable bundle cannot be ruled out while anything is blocked.
+    pub fn check_install(&self, bundle: Option<&str>) -> Result<(), Refusal> {
+        match bundle {
+            Some(bundle) => match self.blocked_bundle(bundle) {
+                Some(app) => Err(Refusal::BlockedLaunch(app.name.clone())),
+                None => Ok(()),
+            },
+            None if !self.blocked.is_empty() => Err(Refusal::InstallUnverified),
+            None => Ok(()),
+        }
     }
 
     /// Whether the foreground must be read before `action`: there is a
@@ -590,5 +609,16 @@ mod tests {
     fn open_url_leaves_a_blocked_app() {
         let p = policy("com.example.bank", "");
         assert!(!p.needs_foreground(&json!({"type":"open_url","url":"https://example.com"})));
+    }
+
+    #[test]
+    fn installs_of_blocked_or_unreadable_bundles_are_refused_only_with_a_blocklist() {
+        let p = policy("com.example.bank", "");
+        let refused = p.check_install(Some("COM.example.bank")).unwrap_err();
+        assert_eq!(refused.error(), "blocked_app");
+        assert!(p.check_install(Some("com.example.notes")).is_ok());
+        let unknown = p.check_install(None).unwrap_err();
+        assert_eq!(unknown.to_json()["error"], "install_unverified");
+        assert!(Policy::from_map(|_| None).check_install(None).is_ok());
     }
 }

@@ -301,6 +301,38 @@ pub fn describe(action: &Value, rows: Option<&[ElementRow]>) -> Line {
     }
 }
 
+/// A screen recording started.
+pub fn recording_started() -> Line {
+    line("Started recording", "开始录屏")
+}
+
+/// A recording saved, with its length in whole seconds.
+pub fn recording_saved(seconds: f64) -> Line {
+    let n = seconds.max(0.0).round() as u64;
+    line(
+        format!("Saved a recording ({n} s)"),
+        format!("保存录屏（{n} 秒）"),
+    )
+}
+
+/// The simulated location set or cleared. Never the coordinates: where a
+/// person is (or pretends to be) is not for the feed.
+pub fn location(cleared: bool) -> Line {
+    if cleared {
+        line("Cleared the simulated location", "取消模拟定位")
+    } else {
+        line("Set a simulated location", "设置模拟定位")
+    }
+}
+
+/// An app installed (`None`: its bundle id was not read).
+pub fn installed(bundle: Option<&str>) -> Line {
+    match bundle.map(app_name) {
+        Some(app) => line(format!("Installed {app}"), format!("安装 {app}")),
+        None => line("Installed an app", "安装一个 App"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +476,18 @@ mod tests {
             "Opened a weixin: link"
         );
         assert_eq!(en(json!({"type":"open_url"}), None), "Opened a link");
+    }
+
+    #[test]
+    fn recording_location_and_install_lines() {
+        assert_eq!(recording_started().zh, "开始录屏");
+        assert_eq!(
+            recording_saved(11.6),
+            line("Saved a recording (12 s)", "保存录屏（12 秒）")
+        );
+        assert_eq!(location(false).en, "Set a simulated location");
+        assert_eq!(location(true).zh, "取消模拟定位");
+        assert_eq!(installed(Some("com.example.x")).en, "Installed com.example.x");
+        assert_eq!(installed(None).en, "Installed an app");
     }
 }
