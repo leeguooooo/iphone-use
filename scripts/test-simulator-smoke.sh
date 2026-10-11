@@ -83,6 +83,9 @@ bytes="$(printf '%s' "$body" | json 'd["summary"]["bytes"]')" || bad "record sto
 [ "$bytes" -gt 0 ] || bad "empty recording: $body"
 ok_t "recording via simctl recordVideo saved $bytes bytes"
 
+# Give the owner lease back, so the MCP client (another owner) may drive.
+curl -fsS -m 30 "${H[@]}" -X POST "$B/agent/owner" -d '{"release":true}' >/dev/null || bad "release the owner lease"
+
 suite="$(mktemp -d)/settings.yaml"
 cat >"$suite" <<'YAML'
 suite: Simulator smoke
