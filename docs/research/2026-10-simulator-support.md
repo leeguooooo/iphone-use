@@ -7,7 +7,9 @@
   runner (`runner/build.sh --simulator`, or `xcodebuild build-for-testing` on the installed
   runner project when `build.sh` is absent), launches the runner with
   `test-without-building -destination id=<udid>` under a per-simulator instance state
-  dir, and prints the daemon command.
+  dir, then starts a daemon for it (`--no-serve` prints the command instead). The first
+  simulator takes the instance `sim`, and `iphone-use-mcp` finds its daemon port in
+  `simulator.json`, so `IPHONE_USE_INSTANCE=sim` is the whole MCP config.
 - With `IPHONE_USE_SIMULATOR=<udid>`, the daemon routes logs, crashes, location,
   install/uninstall and the app inventory through `simctl` (`crates/server/src/simulator.rs`).
 - Lock, keep-awake and Do Not Disturb are skipped. `/agent/status` reports

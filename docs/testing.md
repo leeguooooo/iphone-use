@@ -132,8 +132,8 @@ replaces the file; `jq -s 'sort_by(-.ms)[:5]' trace.ndjson` lists the slowest st
 ### Running suites on a simulator in CI (preview)
 
 A simulator needs no phone and no Apple ID, so a suite can run on a GitHub-hosted Mac.
-`iphone-use simulator start` boots the simulator, builds the runner for it, waits until the
-runner answers and prints the daemon command. Simulator support is a preview and has not been
+`iphone-use simulator start` boots the simulator, builds the runner for it, starts the runner
+and a daemon, and returns once both answer. Simulator support is a preview and has not been
 verified on every Xcode yet; see [the design note](research/2026-10-simulator-support.md).
 
 ```yaml
@@ -148,18 +148,13 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh \
             | IPHONE_USE_NO_SETUP=1 IPHONE_USE_NO_CLIENT_SETUP=1 sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Boot a simulator and start the runner
-        run: iphone-use simulator start "iPhone 15" --instance ci-sim | tee sim.txt
+      - name: Boot a simulator, start the runner and the daemon
+        run: iphone-use simulator start "iPhone 15" --instance ci-sim
       - name: Build and install the app under test
         run: |
           xcodebuild -scheme MyApp -destination 'platform=iOS Simulator,name=iPhone 15' \
             -derivedDataPath build build
           xcrun simctl install booted build/Build/Products/Debug-iphonesimulator/MyApp.app
-      - name: Start the daemon
-        run: |
-          cmd=$(grep -m1 'IPHONE_USE_INSTANCE=' sim.txt | sed 's/^ *//')
-          nohup env $cmd > daemon.log 2>&1 &
-          sleep 3
       - name: Run the suite
         run: IPHONE_USE_INSTANCE=ci-sim iphone-use-mcp test tests/smoke.yaml --junit report.xml
       - if: always()
@@ -168,16 +163,15 @@ jobs:
           name: ui-tests
           path: |
             report.xml
-            daemon.log
+            ~/.iphone-use/instances/ci-sim/simulator-daemon.log
       - if: always()
         run: iphone-use simulator stop "iPhone 15" --instance ci-sim || true
 ```
 
 - The suite's exit code fails the job: `0` all passed, `1` a case failed, `2` the suite could
   not run.
-- The printed command looks like `IPHONE_USE_INSTANCE=ci-sim IPHONE_USE_SIMULATOR=<udid>
-  IPHONE_USE_WDA_URL=http://127.0.0.1:<port> … iphone-use serve`. Add `--retries 1` to the test
-  step if the app has known slow screens.
+- `--instance ci-sim` names the instance the test step reaches with `IPHONE_USE_INSTANCE`.
+  Add `--retries 1` to the test step if the app has known slow screens.
 - `simulator start` turns off the Simulator's "Connect Hardware Keyboard" preference, so
   `type` steps get the software keyboard.
 - Simulators have no camera, no App Store apps, and no push notifications without `simctl push`.

@@ -200,6 +200,8 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
 
 For app developers and testers the same tools also read the phone's logs and crash reports, record the screen to MP4, install a build (`.ipa`, `.app` or an https link), set a simulated location, and keep per-app notes that agents read when they enter the app. `IPHONE_USE_MCP_TOOLS=readonly` exposes only the tools that read, and `iphone-use-mcp --listen 127.0.0.1:PORT` serves MCP over HTTP for remote clients.
 
+No phone at hand? While you develop, drive an iOS Simulator the same way (preview, needs Xcode): `iphone-use simulator start "iPhone 16 Pro"` builds and starts everything, then point the agent at it with `claude mcp add iphone-sim -e IPHONE_USE_INSTANCE=sim -- iphone-use-mcp`. See [Simulators](docs/guide.md#simulators-preview).
+
 See the [MCP tools](crates/mcp/README.md) and the [Agent API reference](docs/agent-api.html).
 
 ## Safety and privacy

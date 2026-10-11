@@ -108,7 +108,7 @@ cases:
 
 ### 在 CI 里用模拟器跑套件（预览）
 
-模拟器不需要手机，也不需要 Apple ID，所以套件可以在 GitHub 托管的 Mac 上跑。`iphone-use simulator start` 会启动模拟器、为它编译 runner、等 runner 有响应后打印守护进程的启动命令。模拟器支持还是预览版，还没在各个 Xcode 版本上验证过，详见[设计说明](research/2026-10-simulator-support.md)。
+模拟器不需要手机，也不需要 Apple ID，所以套件可以在 GitHub 托管的 Mac 上跑。`iphone-use simulator start` 会启动模拟器、为它编译 runner、启动 runner 和守护进程，两者都有响应后返回。模拟器支持还是预览版，还没在各个 Xcode 版本上验证过，详见[设计说明](research/2026-10-simulator-support.md)。
 
 ```yaml
 # .github/workflows/ui-tests.yml
@@ -122,18 +122,13 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh \
             | IPHONE_USE_NO_SETUP=1 IPHONE_USE_NO_CLIENT_SETUP=1 sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: 启动模拟器和 runner
-        run: iphone-use simulator start "iPhone 15" --instance ci-sim | tee sim.txt
+      - name: 启动模拟器、runner 和守护进程
+        run: iphone-use simulator start "iPhone 15" --instance ci-sim
       - name: 编译并安装被测 App
         run: |
           xcodebuild -scheme MyApp -destination 'platform=iOS Simulator,name=iPhone 15' \
             -derivedDataPath build build
           xcrun simctl install booted build/Build/Products/Debug-iphonesimulator/MyApp.app
-      - name: 启动守护进程
-        run: |
-          cmd=$(grep -m1 'IPHONE_USE_INSTANCE=' sim.txt | sed 's/^ *//')
-          nohup env $cmd > daemon.log 2>&1 &
-          sleep 3
       - name: 跑套件
         run: IPHONE_USE_INSTANCE=ci-sim iphone-use-mcp test tests/smoke.yaml --junit report.xml
       - if: always()
@@ -142,13 +137,13 @@ jobs:
           name: ui-tests
           path: |
             report.xml
-            daemon.log
+            ~/.iphone-use/instances/ci-sim/simulator-daemon.log
       - if: always()
         run: iphone-use simulator stop "iPhone 15" --instance ci-sim || true
 ```
 
 - 套件的退出码决定任务成败：`0` 全部通过，`1` 有用例失败，`2` 套件没能运行。
-- 打印出的命令形如 `IPHONE_USE_INSTANCE=ci-sim IPHONE_USE_SIMULATOR=<udid> IPHONE_USE_WDA_URL=http://127.0.0.1:<port> … iphone-use serve`。如果 App 有已知的慢页面，可以给测试步骤加 `--retries 1`。
+- `--instance ci-sim` 给实例起名，测试步骤用 `IPHONE_USE_INSTANCE` 找到它。如果 App 有已知的慢页面，可以给测试步骤加 `--retries 1`。
 - `simulator start` 会关掉模拟器的「连接硬件键盘」选项，这样 `type` 步骤能弹出软键盘。
 - 模拟器没有摄像头、不能装 App Store 应用，推送通知只能用 `simctl push` 模拟。需要这些的套件请留在真机上跑。
 

@@ -892,6 +892,20 @@ pub fn instance_name_for(udid: &str) -> String {
     format!("sim-{short}")
 }
 
+/// The instance every simulator tries first, so one MCP config
+/// (`IPHONE_USE_INSTANCE=sim`) reaches whichever simulator was started.
+pub const SHARED_INSTANCE: &str = "sim";
+
+/// The instance a simulator uses when none is named: `sim`, unless `sim`
+/// already belongs to another simulator (`sim_owner`, the UDID in its
+/// record), then `sim-<first 8 of the UDID>`.
+pub fn default_instance_name(udid: &str, sim_owner: Option<&str>) -> String {
+    match sim_owner {
+        Some(owner) if !owner.eq_ignore_ascii_case(udid) => instance_name_for(udid),
+        _ => SHARED_INSTANCE.to_string(),
+    }
+}
+
 /// `xcodebuild` arguments that launch the runner on simulator `udid`.
 pub fn runner_launch_argv(udid: &str, xctestrun: &Path) -> Vec<String> {
     vec![
@@ -991,11 +1005,33 @@ impl PidRecord {
             && (program == "xcodebuild" || program.ends_with("/xcodebuild"))
             && self.command.contains(&format!(" -destination id={udid} test-without-building "))
     }
+
+    /// Whether the live process is still the daemon `simulator start` ran.
+    pub fn matches_daemon(&self, our_uid: u32, live: (Option<u32>, &str, &str)) -> bool {
+        let (uid, lstart, command) = live;
+        uid == Some(our_uid)
+            && lstart == self.lstart
+            && command == self.command
+            && self.command.ends_with(" serve")
+    }
 }
 
 const PID_FILE: &str = "simulator-runner.pid";
 const RECORD_FILE: &str = "simulator.json";
 const RUN_LOG: &str = "simulator-runner.log";
+const DAEMON_PID_FILE: &str = "simulator-daemon.pid";
+const DAEMON_LOG: &str = "simulator-daemon.log";
+
+/// The simulator UDID a record file names.
+fn record_udid(text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(text).ok()?.get("udid")?.as_str().map(str::to_string)
+}
+
+/// The daemon port a simulator record names (`simulator start` writes it).
+pub fn record_daemon_port(text: &str) -> Option<u16> {
+    let port = serde_json::from_str::<Value>(text).ok()?.get("daemon_port")?.as_u64()?;
+    u16::try_from(port).ok().filter(|port| *port > 0)
+}
 
 fn print_err(message: &str) {
     eprintln!("iphone-use: {message}");
@@ -1036,7 +1072,17 @@ pub fn cli_list(json_out: bool) -> i32 {
 
 /// The state directory of the instance for a simulator.
 fn instance_for(udid: &str, instance: Option<&str>) -> Result<crate::instance::Instance, String> {
-    let name = instance.map(str::to_string).unwrap_or_else(|| instance_name_for(udid));
+    let name = match instance {
+        Some(name) => name.to_string(),
+        None => {
+            let shared = crate::instance::Instance::derive(SHARED_INSTANCE, crate::setup::sys::home(), None)?;
+            let owner = std::fs::read_to_string(shared.state_dir.join(RECORD_FILE))
+                .ok()
+                .as_deref()
+                .and_then(record_udid);
+            default_instance_name(udid, owner.as_deref())
+        }
+    };
     crate::instance::Instance::derive(&name, crate::setup::sys::home(), None)
 }
 
@@ -1124,9 +1170,63 @@ fn log_tail(path: &Path, lines: usize) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
-/// `iphone-use simulator start <name|udid> [--port N] [--xctestrun P] [--instance N]`.
-pub fn cli_start(query: &str, port: Option<u16>, xctestrun: Option<PathBuf>, instance: Option<&str>) -> i32 {
-    match start(query, port, xctestrun, instance) {
+/// Stop the process a pid file records, once `verify` confirms the live
+/// process is still that one. `Ok(true)` when it stopped one.
+fn stop_recorded(
+    pid_file: &Path,
+    what: &str,
+    verify: impl Fn(&PidRecord, (Option<u32>, &str, &str)) -> bool,
+) -> Result<bool, String> {
+    use crate::setup::sys;
+    let Ok(text) = std::fs::read_to_string(pid_file) else {
+        return Ok(false);
+    };
+    let record = PidRecord::parse(&text)
+        .ok_or_else(|| format!("invalid pid record {}; refusing to act", pid_file.display()))?;
+    if !sys::pid_exists(record.pid) {
+        let _ = std::fs::remove_file(pid_file);
+        println!("The recorded {what} (pid {}) is no longer running.", record.pid);
+        return Ok(false);
+    }
+    let live = (sys::ps_uid(record.pid), sys::ps_lstart(record.pid), sys::ps_command(record.pid));
+    if !verify(&record, (live.0, &live.1, &live.2)) {
+        return Err(format!(
+            "pid {} is not the {what} this command started; refusing to signal it",
+            record.pid
+        ));
+    }
+    // SAFETY: a verified pid of our own process.
+    unsafe {
+        libc::kill(record.pid as libc::pid_t, libc::SIGTERM);
+    }
+    for _ in 0..40 {
+        if !sys::pid_exists(record.pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    if sys::pid_exists(record.pid) {
+        return Err(format!("{what} pid {} did not stop after SIGTERM", record.pid));
+    }
+    let _ = std::fs::remove_file(pid_file);
+    println!("Stopped the {what} (pid {}).", record.pid);
+    Ok(true)
+}
+
+/// The environment of the daemon that drives a started simulator.
+pub fn daemon_env(instance: &str, udid: &str, port: u16, mjpeg_port: u16, daemon_port: u16) -> Vec<(&'static str, String)> {
+    vec![
+        ("IPHONE_USE_INSTANCE", instance.to_string()),
+        (ENV, udid.to_string()),
+        ("IPHONE_USE_WDA_URL", format!("http://127.0.0.1:{port}")),
+        ("IPHONE_USE_WDA_MJPEG_URL", format!("http://127.0.0.1:{mjpeg_port}")),
+        ("IPHONE_USE_PORT", daemon_port.to_string()),
+    ]
+}
+
+/// `iphone-use simulator start <name|udid> [--port N] [--xctestrun P] [--instance N] [--no-serve]`.
+pub fn cli_start(query: &str, port: Option<u16>, xctestrun: Option<PathBuf>, instance: Option<&str>, serve: bool) -> i32 {
+    match start(query, port, xctestrun, instance, serve) {
         Ok(()) => 0,
         Err(message) => {
             print_err(&message);
@@ -1135,7 +1235,7 @@ pub fn cli_start(query: &str, port: Option<u16>, xctestrun: Option<PathBuf>, ins
     }
 }
 
-fn start(query: &str, port: Option<u16>, xctestrun: Option<PathBuf>, instance: Option<&str>) -> Result<(), String> {
+fn start(query: &str, port: Option<u16>, xctestrun: Option<PathBuf>, instance: Option<&str>, serve: bool) -> Result<(), String> {
     use crate::setup::{proc, sys};
     let runner = Xcrun;
     let devices = list_devices(&runner).map_err(|e| format!("{e:#} (simulators need Xcode on this Mac)"))?;
@@ -1158,6 +1258,9 @@ fn start(query: &str, port: Option<u16>, xctestrun: Option<PathBuf>, instance: O
             ));
         }
     }
+    // A daemon left from an earlier start drives a runner that is gone.
+    let our_uid = sys::uid();
+    stop_recorded(&state_dir.join(DAEMON_PID_FILE), "daemon", |record, live| record.matches_daemon(our_uid, live))?;
     let (port, mjpeg_port) = pick_ports(port, free_port)?;
 
     println!("Simulator: {} ({}, {}) {udid}", device.name, device.runtime, device.state);
@@ -1294,13 +1397,87 @@ fn start(query: &str, port: Option<u16>, xctestrun: Option<PathBuf>, instance: O
     }
     let daemon_port = (44331..44431).find(|p| free_port(*p)).unwrap_or(44331);
     println!("The runner answers on http://127.0.0.1:{port}.");
+    let mut summary = summary;
+    summary["instance"] = json!(instance.name);
+    summary["daemon_port"] = json!(daemon_port);
+    let _ = sys::write_atomic(&state_dir.join(RECORD_FILE), summary.to_string().as_bytes(), 0o600);
+    if !serve {
+        println!();
+        println!("Run a daemon for this simulator (preview; logs, crashes, location and apps go through simctl):");
+        println!("  {}", daemon_command(&instance.name, &udid, port, mjpeg_port, daemon_port));
+        println!();
+        println!("Then point an agent at http://127.0.0.1:{daemon_port} (iphone-use status --instance {} checks it).", instance.name);
+        println!("Stop the runner with: iphone-use simulator stop {udid} [--shutdown]");
+        return Ok(());
+    }
+
+    let exe = std::env::current_exe().map_err(|e| format!("locate iphone-use: {e}"))?;
+    let daemon_args = vec!["serve".to_string()];
+    let daemon_command_line = format!("{} serve", exe.display());
+    if daemon_command_line.contains(['|', '\n']) {
+        return Err("the iphone-use path holds a character the pid record cannot store".into());
+    }
+    let env = daemon_env(&instance.name, &udid, port, mjpeg_port, daemon_port);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(key, value)| (*key, value.as_str())).collect();
+    let daemon_log = state_dir.join(DAEMON_LOG);
+    let daemon_pid = proc::spawn_detached_env(&exe, &daemon_args, Some(&state_dir), &daemon_log, None, &env_refs)
+        .map_err(|e| format!("start the daemon: {e}"))?;
+    let mut daemon_record = None;
+    for _ in 0..30 {
+        let lstart = sys::ps_lstart(daemon_pid);
+        if !lstart.is_empty() && sys::ps_command(daemon_pid) == daemon_command_line {
+            daemon_record = Some(PidRecord { pid: daemon_pid, lstart, command: daemon_command_line.clone() });
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let daemon_record = daemon_record.ok_or_else(|| {
+        format!(
+            "the daemon (pid {daemon_pid}) did not become the expected process; nothing was recorded. Log: {}",
+            daemon_log.display()
+        )
+    })?;
+    let daemon_pid_file = state_dir.join(DAEMON_PID_FILE);
+    sys::write_atomic(&daemon_pid_file, daemon_record.encode().as_bytes(), 0o600)
+        .map_err(|e| format!("{}: {e}", daemon_pid_file.display()))?;
+    let started = std::time::Instant::now();
+    loop {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], daemon_port));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+            break;
+        }
+        if !sys::pid_exists(daemon_pid) {
+            let _ = std::fs::remove_file(&daemon_pid_file);
+            return Err(format!(
+                "the daemon exited before it listened. Last lines of {}:\n{}",
+                daemon_log.display(),
+                log_tail(&daemon_log, 20)
+            ));
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            return Err(format!(
+                "the daemon did not listen on 127.0.0.1:{daemon_port} within a minute. Log: {}",
+                daemon_log.display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
     println!();
-    println!("Run a daemon for this simulator (preview; logs, crashes, location and apps go through simctl):");
-    println!("  {}", daemon_command(&instance.name, &udid, port, mjpeg_port, daemon_port));
-    println!();
-    println!("Then point an agent at http://127.0.0.1:{daemon_port} (iphone-use status --instance {} checks it).", instance.name);
-    println!("Stop the runner with: iphone-use simulator stop {udid} [--shutdown]");
+    println!("Ready: http://127.0.0.1:{daemon_port}/phone (instance {}, preview).", instance.name);
+    for line in agent_hints(&instance.name) {
+        println!("{line}");
+    }
+    println!("Stop it with: iphone-use simulator stop {udid} [--shutdown]");
     Ok(())
+}
+
+/// How to point an agent at a simulator's daemon.
+pub fn agent_hints(instance: &str) -> Vec<String> {
+    vec![
+        "Point an agent at it:".to_string(),
+        format!("  claude mcp add iphone-{instance} -e IPHONE_USE_INSTANCE={instance} -- iphone-use-mcp"),
+        format!("  (any MCP client: run iphone-use-mcp with IPHONE_USE_INSTANCE={instance})"),
+    ]
 }
 
 /// `iphone-use simulator stop <name|udid> [--shutdown] [--instance N]`.
@@ -1324,41 +1501,15 @@ fn stop(query: &str, shutdown: bool, instance: Option<&str>) -> Result<(), Strin
         find(&devices, query)?.udid.clone()
     };
     let instance = instance_for(&udid, instance)?;
+    let our_uid = sys::uid();
+    stop_recorded(&instance.state_dir.join(DAEMON_PID_FILE), "daemon", |record, live| record.matches_daemon(our_uid, live))?;
     let pid_file = instance.state_dir.join(PID_FILE);
-    match std::fs::read_to_string(&pid_file) {
-        Err(_) => println!("No runner recorded for {udid} (nothing to stop)."),
-        Ok(text) => {
-            let record = PidRecord::parse(&text)
-                .ok_or_else(|| format!("invalid pid record {}; refusing to act", pid_file.display()))?;
-            if !sys::pid_exists(record.pid) {
-                let _ = std::fs::remove_file(&pid_file);
-                println!("The recorded runner (pid {}) is no longer running.", record.pid);
-            } else {
-                let live = (sys::ps_uid(record.pid), sys::ps_lstart(record.pid), sys::ps_command(record.pid));
-                if !record.matches(sys::uid(), &udid, (live.0, &live.1, &live.2)) {
-                    return Err(format!(
-                        "pid {} is not the runner this command started for {udid}; refusing to signal it",
-                        record.pid
-                    ));
-                }
-                // SAFETY: a verified pid of our own runner.
-                unsafe {
-                    libc::kill(record.pid as libc::pid_t, libc::SIGTERM);
-                }
-                for _ in 0..40 {
-                    if !sys::pid_exists(record.pid) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(250));
-                }
-                if sys::pid_exists(record.pid) {
-                    return Err(format!("runner pid {} did not stop after SIGTERM", record.pid));
-                }
-                let _ = std::fs::remove_file(&pid_file);
-                println!("Stopped the runner (pid {}).", record.pid);
-            }
-        }
+    if !pid_file.exists() {
+        println!("No runner recorded for {udid} (nothing to stop).");
     }
+    stop_recorded(&pid_file, "runner", |record, live| record.matches(our_uid, &udid, live))?;
+    // Frees the shared `sim` instance for the next simulator.
+    let _ = std::fs::remove_file(instance.state_dir.join(RECORD_FILE));
     if shutdown {
         checked(&runner, &shutdown_argv(&udid), BOOT_TIMEOUT)
             .map_err(|e| format!("shut the simulator down: {e:#}"))?;
@@ -1719,6 +1870,50 @@ pub mod tests {
         assert!(crash_read(dir.path(), UDID, "Gone-2026-10-11-070102.ips").is_err());
         assert!(crash_read(dir.path(), UDID, "../Demo-2026-10-11-070102.ips").is_err());
         assert!(crash_list(&dir.path().join("missing"), UDID, &CrashFilter::default()).is_empty());
+    }
+
+    #[test]
+    fn the_first_simulator_takes_the_shared_instance() {
+        assert_eq!(default_instance_name(UDID, None), "sim");
+        assert_eq!(default_instance_name(UDID, Some(UDID)), "sim");
+        assert_eq!(default_instance_name(UDID, Some(&UDID.to_ascii_lowercase())), "sim");
+        assert_eq!(default_instance_name(UDID, Some("11111111-2222-3333-4444-555555555555")), "sim-8a1bc3d4");
+        assert!(crate::instance::valid_name(SHARED_INSTANCE));
+        let record = format!(r#"{{"udid":"{UDID}","instance":"sim","daemon_port":44331}}"#);
+        assert_eq!(record_udid(&record).as_deref(), Some(UDID));
+        assert_eq!(record_daemon_port(&record), Some(44331));
+        assert_eq!(record_daemon_port(r#"{"daemon_port":0}"#), None);
+        assert_eq!(record_udid("not json"), None);
+    }
+
+    #[test]
+    fn the_daemon_runs_against_the_started_runner() {
+        let env = daemon_env("sim", UDID, 8200, 9200, 44331);
+        let get = |key: &str| env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str());
+        assert_eq!(get("IPHONE_USE_INSTANCE"), Some("sim"));
+        assert_eq!(get(ENV), Some(UDID));
+        assert_eq!(get("IPHONE_USE_WDA_URL"), Some("http://127.0.0.1:8200"));
+        assert_eq!(get("IPHONE_USE_WDA_MJPEG_URL"), Some("http://127.0.0.1:9200"));
+        assert_eq!(get("IPHONE_USE_PORT"), Some("44331"));
+        // The printed --no-serve command carries the same settings.
+        let line = daemon_command("sim", UDID, 8200, 9200, 44331);
+        for (key, value) in &env {
+            assert!(line.contains(&format!("{key}={value}")), "{key} missing from {line}");
+        }
+        assert!(agent_hints("sim").iter().any(|l| l.contains("IPHONE_USE_INSTANCE=sim -- iphone-use-mcp")));
+    }
+
+    #[test]
+    fn stop_only_signals_the_recorded_daemon() {
+        let command = "/Users/me/.local/bin/iphone-use serve".to_string();
+        let lstart = "Sun Oct 11 07:01:02 2026";
+        let record = PidRecord { pid: 4321, lstart: lstart.into(), command: command.clone() };
+        assert!(record.matches_daemon(501, (Some(501), lstart, &command)));
+        assert!(!record.matches_daemon(501, (Some(0), lstart, &command)), "another user");
+        assert!(!record.matches_daemon(501, (Some(501), "Sun Oct 11 07:09:09 2026", &command)), "a reused pid");
+        assert!(!record.matches_daemon(501, (Some(501), lstart, "/bin/zsh")), "another program");
+        let other = PidRecord { command: "/usr/bin/xcodebuild test".into(), ..record.clone() };
+        assert!(!other.matches_daemon(501, (Some(501), lstart, &other.command)), "not a serve command");
     }
 
     #[test]

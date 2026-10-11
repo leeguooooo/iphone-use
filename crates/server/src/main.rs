@@ -325,8 +325,8 @@ enum Command {
     /// Drive an iOS simulator instead of a phone (preview).
     ///
     /// `start` boots it, builds the device runner for it, starts the runner
-    /// and prints the daemon command to run against it; `stop` stops that
-    /// runner.
+    /// and a daemon for it (instance `sim`, so `IPHONE_USE_INSTANCE=sim`
+    /// reaches it from MCP); `stop` stops both.
     Simulator {
         #[command(subcommand)]
         action: SimulatorAction,
@@ -335,8 +335,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SimulatorAction {
-    /// Boot the simulator, start the device runner on it and wait until it
-    /// answers on 127.0.0.1.
+    /// Boot the simulator, start the device runner on it, then a daemon
+    /// against it, and wait until both answer on 127.0.0.1.
     Start {
         /// The simulator's name (as `iphone-use simulators` lists it) or UDID.
         simulator: String,
@@ -347,11 +347,15 @@ enum SimulatorAction {
         /// Use this simulator build of the runner instead of building one.
         #[arg(long)]
         xctestrun: Option<std::path::PathBuf>,
-        /// The instance (state dir) to use; default: sim-<first 8 of the UDID>.
+        /// The instance (state dir) to use; default: `sim`, or
+        /// sim-<first 8 of the UDID> when `sim` belongs to another simulator.
         #[arg(long)]
         instance: Option<String>,
+        /// Start only the runner and print the daemon command instead.
+        #[arg(long)]
+        no_serve: bool,
     },
-    /// Stop the runner `start` started (only the PID it recorded).
+    /// Stop the daemon and runner `start` started (only the PIDs it recorded).
     Stop {
         /// The simulator's name or UDID.
         simulator: String,
@@ -903,7 +907,8 @@ fn main() -> Result<()> {
                 port,
                 xctestrun,
                 instance,
-            } => server::simulator::cli_start(&simulator, port, xctestrun, instance.as_deref()),
+                no_serve,
+            } => server::simulator::cli_start(&simulator, port, xctestrun, instance.as_deref(), !no_serve),
             SimulatorAction::Stop {
                 simulator,
                 shutdown,

@@ -198,6 +198,8 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
 
 给开发和测试用的功能也在同一套工具里：读取手机日志和崩溃报告、录屏保存为 MP4、安装测试包（`.ipa`、`.app` 或 https 链接）、模拟定位，以及按 App 记录经验笔记，agent 进入该 App 时会自动读到。`IPHONE_USE_MCP_TOOLS=readonly` 只开放读取类工具；`iphone-use-mcp --listen 127.0.0.1:端口` 可以通过 HTTP 提供 MCP，供远程客户端使用。
 
+手边没有手机？开发时可以用同样的方式操作 iOS 模拟器（预览，需要 Xcode）：`iphone-use simulator start "iPhone 16 Pro"` 会编译并启动所需的一切，然后用 `claude mcp add iphone-sim -e IPHONE_USE_INSTANCE=sim -- iphone-use-mcp` 把 agent 接上去。详见[模拟器](docs/guide.zh-CN.md#模拟器预览)。
+
 详见 [MCP 工具](crates/mcp/README.md) 和 [Agent API 参考](docs/agent-api.html)。
 
 ## 安全与隐私

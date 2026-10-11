@@ -59,6 +59,29 @@ fn launch_agent_env(label: &str, key: &str) -> Option<String> {
     })
 }
 
+/// A named instance with no LaunchAgent may be a simulator that
+/// `iphone-use simulator start` runs: its record names the daemon port.
+fn instance_env(label: &str, key: &str) -> Option<String> {
+    launch_agent_env(label, key).or_else(|| {
+        let name = label.strip_prefix(&format!("{DAEMON_LABEL}."))?;
+        if key != "IPHONE_USE_PORT" {
+            return None;
+        }
+        let home = std::env::var_os("HOME")?;
+        let record = std::path::Path::new(&home)
+            .join(".iphone-use/instances")
+            .join(name)
+            .join("simulator.json");
+        simulator_record_port(&std::fs::read_to_string(record).ok()?).map(|port| port.to_string())
+    })
+}
+
+/// `daemon_port` from a simulator record (`simulator.json`).
+fn simulator_record_port(text: &str) -> Option<u16> {
+    let port = serde_json::from_str::<serde_json::Value>(text).ok()?.get("daemon_port")?.as_u64()?;
+    u16::try_from(port).ok().filter(|port| *port > 0)
+}
+
 fn launch_agent_env_as(label: &str, key: &str) -> Option<String> {
     let home = std::env::var_os("HOME")?;
     let plist = std::path::Path::new(&home).join(format!("Library/LaunchAgents/{label}.plist"));
@@ -275,7 +298,7 @@ impl DaemonClient {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         };
-        let (base_url, token) = daemon_target(env, launch_agent_env);
+        let (base_url, token) = daemon_target(env, instance_env);
         Self::new(base_url, token)
     }
 
@@ -1569,6 +1592,17 @@ mod tests {
             daemon_target(none, nothing),
             (DEFAULT_URL.to_string(), None)
         );
+    }
+
+    #[test]
+    fn a_simulator_record_names_the_daemon_port() {
+        let record = r#"{"udid":"8A1BC3D4-5E6F-4A7B-8C9D-0E1F2A3B4C5D","port":8200,"daemon_port":44331}"#;
+        assert_eq!(simulator_record_port(record), Some(44331));
+        for bad in ["", "{}", r#"{"daemon_port":0}"#, r#"{"daemon_port":70000}"#, r#"{"daemon_port":"44331"}"#] {
+            assert_eq!(simulator_record_port(bad), None, "{bad}");
+        }
+        // Only the port comes from the record; never a secret.
+        assert_eq!(instance_env("com.leeguoo.iphone-use.no-such-instance-xyz", "IPHONE_USE_PASSWORD"), None);
     }
 
     #[test]
