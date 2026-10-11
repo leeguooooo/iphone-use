@@ -298,9 +298,10 @@ do {
     let bytes = [UInt8](first?.0 ?? Data())
     check(bytes.starts(with: [0, 0, 0, 1]) && bytes.count > 5 && bytes[4] & 0x1F == 7,
           "keyframe starts with an Annex-B SPS")
-    let nalTypes = Set(stride(from: 0, to: max(0, bytes.count - 4), by: 1).compactMap { i -> UInt8? in
-      bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 0 && bytes[i + 3] == 1 && i + 4 < bytes.count
-        ? bytes[i + 4] & 0x1F : nil
+    let nalTypes: Set<UInt8> = Set(stride(from: 0, to: max(0, bytes.count - 4), by: 1).compactMap { i -> UInt8? in
+      guard bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 0, bytes[i + 3] == 1,
+            i + 4 < bytes.count else { return nil }
+      return bytes[i + 4] & 0x1F
     })
     check(nalTypes.isSuperset(of: [7, 8, 5]), "keyframe carries SPS, PPS and an IDR slice")
     let health = encoder.health()
@@ -428,6 +429,35 @@ do {
         "landscape bounds with a portrait interface read portrait")
   check(ScreenOrientation.size(natural: landscape, interfaceOrientation: 3) == landscape,
         "landscape bounds with a landscape interface stay landscape")
+}
+
+// MARK: - Runner compatibility viewport (issue #257)
+
+do {
+  let viewport = CGSize(width: 320, height: 480)
+  let frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+  let natural = IPURScreenSizeFromFrame(frame, viewport)
+  check(natural == frame.size, "system screen frame replaces the runner's 320x480 viewport")
+  let portrait = ScreenOrientation.size(natural: natural, interfaceOrientation: 1)
+  let path: [[[String: Any]]] = [[["x": 196, "y": 489], ["x": 196, "y": 363]]]
+  check(TapBounds.firstOffScreen(path, portrait) == nil,
+        "the original dy:80 scroll fits the 393x852 system screen")
+  check(!TapBounds.onScreen(CGPoint(x: 196, y: 900), portrait),
+        "a point beyond the actual screen is still refused")
+  let landscape = ScreenOrientation.size(natural: natural, interfaceOrientation: 3)
+  check(landscape == CGSize(width: 852, height: 393), "landscape uses the same system dimensions")
+  check(IPURPortraitPoint(CGPoint(x: 300, y: 190), 3, natural) == CGPoint(x: 203, y: 300),
+        "landscape touch conversion uses 393 points, not the runner's 320")
+  check(IPURPortraitPoint(CGPoint(x: 300, y: 190), 4, natural) == CGPoint(x: 190, y: 552),
+        "landscape-left touch conversion uses the 852-point system height")
+  check(IPURPortraitPoint(CGPoint(x: 196, y: 489), 2, natural) == CGPoint(x: 197, y: 363),
+        "upside-down touch conversion uses both system dimensions")
+  for invalid in [CGRect.zero, CGRect.null, CGRect.infinite,
+                  CGRect(x: 0, y: 0, width: Double.nan, height: 852),
+                  CGRect(x: 1, y: 0, width: 393, height: 852)] {
+    check(IPURScreenSizeFromFrame(invalid, viewport) == viewport,
+          "an unavailable or non-screen system frame keeps the UIKit fallback")
+  }
 }
 
 // MARK: - Touch points turned to the portrait screen

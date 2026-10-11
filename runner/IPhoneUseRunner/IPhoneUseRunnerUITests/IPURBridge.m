@@ -182,6 +182,7 @@ static void IPURNoopVoidMethod(Class cls, NSString *selectorName, NSMutableArray
 static BOOL IPURRequestCacheEnabled = NO;
 static NSArray *IPURCachedActive = nil;
 static id IPURCachedSystem = nil;
+static NSValue *IPURCachedScreenSize = nil;
 
 + (void)setRequestCacheEnabled:(BOOL)enabled
 {
@@ -189,6 +190,7 @@ static id IPURCachedSystem = nil;
   IPURRequestCacheEnabled = enabled;
   IPURCachedActive = nil;
   IPURCachedSystem = nil;
+  IPURCachedScreenSize = nil;
 }
 
 + (void)invalidateRequestCache
@@ -196,6 +198,7 @@ static id IPURCachedSystem = nil;
   if (!NSThread.isMainThread) return;
   IPURCachedActive = nil;
   IPURCachedSystem = nil;
+  IPURCachedScreenSize = nil;
 }
 
 static BOOL IPURUseRequestCache(void)
@@ -527,6 +530,24 @@ static NSDictionary *IPURRect(id snapshot)
     @"width": @(frame.size.width),
     @"height": @(frame.size.height),
   };
+}
+
++ (CGSize)screenSizePoints
+{
+  if (IPURUseRequestCache() && IPURCachedScreenSize != nil) return IPURCachedScreenSize.CGSizeValue;
+  // Read the system root only: no foreground resolution (which itself needs screenCenter),
+  // children, or application content. UIKit's nativeBounds can be compatibility-sized too.
+  id system = [self systemApplicationElement];
+  id snapshot = system == nil ? nil : [self requestSnapshotForElement:system
+                                                            maxDepth:1 maxNodes:1 error:NULL];
+  CGRect frame = CGRectZero;
+  id value = IPURKVC(snapshot, @"frame");
+  if ([value isKindOfClass:NSValue.class] && strcmp([(NSValue *)value objCType], @encode(CGRect)) == 0) {
+    [(NSValue *)value getValue:&frame];
+  }
+  CGSize size = IPURScreenSizeFromFrame(frame, UIScreen.mainScreen.bounds.size);
+  if (IPURUseRequestCache()) IPURCachedScreenSize = [NSValue valueWithCGSize:size];
+  return size;
 }
 
 static NSString *IPURBoolString(id snapshot, NSString *key, BOOL fallback)
@@ -873,7 +894,7 @@ static long long IPURTouchOrientation = 1;
 
 static CGPoint IPURTouchPoint(CGPoint point)
 {
-  return IPURPortraitPoint(point, IPURTouchOrientation, UIScreen.mainScreen.bounds.size);
+  return IPURPortraitPoint(point, IPURTouchOrientation, [IPURBridge screenSizePoints]);
 }
 
 static NSString *IPURCreateGestureRecord(NSString *name, int pid, id *record)

@@ -2,6 +2,19 @@
 // call the same code the runner runs).
 #pragma once
 #import <CoreGraphics/CoreGraphics.h>
+#import <math.h>
+
+/// XCTest's system application frame is in the screen's coordinate space. UIKit can describe
+/// only the runner host's compatibility viewport (320x480 on an iPhone 16, issue #257).
+static inline CGSize IPURScreenSizeFromFrame(CGRect systemFrame, CGSize fallback)
+{
+  if (systemFrame.origin.x == 0 && systemFrame.origin.y == 0
+      && isfinite(systemFrame.size.width) && isfinite(systemFrame.size.height)
+      && systemFrame.size.width > 0 && systemFrame.size.height > 0) {
+    return systemFrame.size;
+  }
+  return fallback;
+}
 
 /// Where a point in the interface's coordinates (UIInterfaceOrientation raw value
 /// `interfaceOrientation`, the space /window/size and the element rects use) sits in the screen's
