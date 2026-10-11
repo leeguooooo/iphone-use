@@ -971,6 +971,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/h264", get(agent_h264))
         .route("/agent/h264/keyframe", post(agent_h264_keyframe))
         .route("/agent/elements", get(agent_elements))
+        .route("/agent/activity", get(agent_activity))
         .route("/agent/collect", post(agent_collect))
         .route("/agent/scroll_find", post(agent_scroll_find))
         .route("/agent/flow/draft", get(agent_flow_draft))
@@ -5018,6 +5019,45 @@ async fn agent_metrics(
     )
 }
 
+#[derive(Debug, Deserialize)]
+struct AgentActivityQuery {
+    since: Option<u64>,
+    limit: Option<usize>,
+}
+
+/// `GET /agent/activity?since=<seq>&limit=<n>` — what the agent did, in plain
+/// words (`Tapped “Wi-Fi”`), oldest first; `next` is the cursor for the next
+/// call. Readable by a logged-in browser, like `/agent/status`.
+async fn agent_activity(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AgentActivityQuery>,
+    headers: HeaderMap,
+) -> Response {
+    match browser_or_agent_auth(&state, &headers) {
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Ok => {}
+    }
+    let limit = query.limit.unwrap_or(20).min(crate::activity::CAPACITY);
+    let mut body = crate::activity::recent(query.since.unwrap_or(0), limit);
+    if let Some(budget) = crate::guard::budget_status(
+        crate::guard::Policy::get(),
+        &guard_owner(&headers),
+        crate::metrics::now_ms(),
+    ) {
+        body["budget"] = budget;
+    }
+    json_response(StatusCode::OK, body)
+}
+
 /// `POST /agent/run` — mark a run boundary for the caller (`X-Phone-Owner`):
 /// `{"action":"start","run_id":…,"complete_trace":true?}` or
 /// `{"action":"end","run_id":…,"turn_ids":[…]?}`. An explicit run makes the
@@ -5055,8 +5095,9 @@ async fn agent_run(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
     if !crate::metrics::valid_id(&owner) || !crate::metrics::valid_id(run_id) {
         return invalid("owner and run_id: 1–64 characters of A-Z a-z 0-9 . _ : @ -");
     }
-    // A run boundary: the no_progress tracker starts over.
+    // A run boundary: the no_progress tracker and the action budget start over.
     crate::advice::reset(&owner);
+    crate::guard::reset(&owner);
     match value.get("action").and_then(serde_json::Value::as_str) {
         Some("start") => {
             let complete = value.get("complete_trace") == Some(&serde_json::Value::Bool(true));
@@ -5147,6 +5188,8 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
             "lifecycle_managed_here": state.managed_wda,
         },
         "available": capability_availability(&state, &headers),
+        // Owner-set limits (`IPHONE_USE_BLOCKED_APPS`, `IPHONE_USE_MAX_ACTIONS`).
+        "limits": crate::guard::describe(crate::guard::Policy::get()),
     });
 
     with_security_headers(
@@ -9665,6 +9708,42 @@ impl ControlRefusal {
     }
 }
 
+/// How long the guard waits for the foreground app before refusing.
+const GUARD_FOREGROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// A [`crate::guard`] refusal: `403`, nothing sent. `batch` adds the
+/// `/agent/actions` fields that say no step ran.
+fn guard_refusal(refusal: &crate::guard::Refusal, batch: bool) -> Response {
+    let refusal = ControlRefusal {
+        status: StatusCode::FORBIDDEN,
+        body: refusal.to_json(),
+        retry_soon: false,
+    };
+    if batch { refusal.for_batch() } else { refusal }.into_response()
+}
+
+/// The caller a run budget belongs to: its `X-Phone-Owner`, or one shared
+/// budget for callers that send none.
+fn guard_owner(headers: &HeaderMap) -> String {
+    named_owner(headers).unwrap_or_default().to_string()
+}
+
+/// Refuse `action` when a blocked app is in front and the action does not
+/// leave it. No read at all without a blocklist.
+async fn guard_foreground(
+    client: &mut crate::wda::WdaClient,
+    action: &serde_json::Value,
+) -> Result<(), crate::guard::Refusal> {
+    let policy = crate::guard::Policy::get();
+    if !policy.needs_foreground(action) {
+        return Ok(());
+    }
+    match tokio::time::timeout(GUARD_FOREGROUND_TIMEOUT, client.active_bundles()).await {
+        Ok(Ok(active)) => policy.check_foreground(&active),
+        _ => Err(crate::guard::Refusal::ForegroundUnknown),
+    }
+}
+
 /// The one readiness check `/agent/input` and `/agent/actions` share: why the
 /// phone cannot take a control request now, if it cannot. An idle-released
 /// managed phone starts coming back here, whichever endpoint asked (the batch
@@ -10738,6 +10817,27 @@ async fn agent_actions_inner(
             .into_response();
     };
 
+    // Owner limits (`crate::guard`): blocked launches and the run budget
+    // refuse the whole batch before anything is sent; a blocked app in front
+    // is checked per step, since an earlier step may have left or entered it.
+    let policy = crate::guard::Policy::get();
+    if policy.is_active() {
+        let mut actions = 0_u32;
+        for step in &request.steps {
+            if let AgentActionStep::Action { action, .. } = step {
+                if let Err(refusal) = policy.check_launch(action) {
+                    return guard_refusal(&refusal, true);
+                }
+                actions += 1;
+            }
+        }
+        if let Err(refusal) =
+            crate::guard::charge(policy, &guard_owner(&headers), actions, crate::metrics::now_ms())
+        {
+            return guard_refusal(&refusal, true);
+        }
+    }
+
     state.touch_activity();
     state.cancel_settled_frame_prefetch();
     // Do Not Disturb at a quiet moment; a batch that opens with launch_app
@@ -10812,6 +10912,29 @@ async fn agent_actions_inner(
 
         match step {
             AgentActionStep::Action { action, after_ms } => {
+                if let Err(refusal) = guard_foreground(&mut w, action).await {
+                    let mut body = agent_actions_failure_body(
+                        index,
+                        completed,
+                        applied_actions,
+                        refusal.error(),
+                        "not_sent",
+                        applied_actions == 0
+                            && matches!(refusal, crate::guard::Refusal::ForegroundUnknown),
+                        &step_results,
+                        None,
+                    );
+                    if let (Some(body), serde_json::Value::Object(extra)) =
+                        (body.as_object_mut(), refusal.to_json())
+                    {
+                        for key in ["hint", "app"] {
+                            if let Some(value) = extra.get(key) {
+                                body.insert(key.to_string(), value.clone());
+                            }
+                        }
+                    }
+                    return agent_actions_json(StatusCode::FORBIDDEN, body);
+                }
                 // Dispatch exactly once. If the batch deadline wins after this
                 // point, the action outcome is unknown and the whole batch must
                 // not be replayed automatically.
@@ -11021,6 +11144,7 @@ async fn agent_actions_inner(
                     return agent_actions_json(status, body);
                 }
                 applied_actions += 1;
+                record_activity(&state, &headers, action);
                 if *after_ms > 0
                     && tokio::time::timeout_at(
                         batch_deadline,
@@ -11384,6 +11508,20 @@ async fn begin_list_control<'a>(
         ));
     }
     unlock_before_action(state, &mut w, deadline).await;
+    // Owner limits (`crate::guard`): these calls swipe inside the app in
+    // front, and count as one action.
+    let policy = crate::guard::Policy::get();
+    if policy.is_active() {
+        if let Err(refusal) = guard_foreground(&mut w, &serde_json::json!({"type": "swipe"})).await
+        {
+            return Err(guard_refusal(&refusal, false));
+        }
+        if let Err(refusal) =
+            crate::guard::charge(policy, &guard_owner(headers), 1, crate::metrics::now_ms())
+        {
+            return Err(guard_refusal(&refusal, false));
+        }
+    }
     Ok(w)
 }
 
@@ -12309,6 +12447,12 @@ async fn agent_input_inner(
                     );
                 }
             };
+            // A blocked app is the owner's to remove, not an agent's.
+            if let Err(refusal) = crate::guard::Policy::get()
+                .check_launch(&serde_json::json!({"type": "launch_app", "bundle": bundle}))
+            {
+                return guard_refusal(&refusal, false);
+            }
             let bundle = bundle.to_string();
             let r =
                 tokio::task::spawn_blocking(move || devicectl_uninstall(udid.as_deref(), &bundle))
@@ -12392,6 +12536,10 @@ async fn agent_input_inner(
     if let Err(refusal) = resolve_launch_app_action(&state, &mut value).await {
         return refusal;
     }
+    // A blocked app is refused before anything else runs (`crate::guard`).
+    if let Err(refusal) = crate::guard::Policy::get().check_launch(&value) {
+        return guard_refusal(&refusal, false);
+    }
     // The MCP client waits 30 seconds. Keep the daemon's complete Direct WDA
     // budget comfortably below that so the authoritative HTTP outcome arrives
     // before the client can abandon a still-running action. It starts AFTER
@@ -12420,6 +12568,28 @@ async fn agent_input_inner(
         + crate::text_input::action_allowance(&value);
     if tokio::time::Instant::now() >= agent_wda_deadline {
         return wda_deadline_response(false);
+    }
+    // Owner limits (`crate::guard`), checked last so a refused action costs
+    // no budget; the foreground read happens only with a blocklist.
+    let policy = crate::guard::Policy::get();
+    if policy.is_active() {
+        if policy.needs_foreground(&value) {
+            let checked = tokio::time::timeout_at(agent_wda_deadline, async {
+                let mut client = wda.lock().await;
+                guard_foreground(&mut client, &value).await
+            })
+            .await;
+            match checked {
+                Ok(Ok(())) => {}
+                Ok(Err(refusal)) => return guard_refusal(&refusal, false),
+                Err(_) => return wda_deadline_response(false),
+            }
+        }
+        if let Err(refusal) =
+            crate::guard::charge(policy, &guard_owner(&headers), 1, crate::metrics::now_ms())
+        {
+            return guard_refusal(&refusal, false);
+        }
     }
     let dispatched = Arc::new(std::sync::Mutex::new(None::<Option<std::time::Instant>>));
     let dispatch_marker = dispatched.clone();
@@ -13050,6 +13220,19 @@ fn record_flow_action(state: &AppState, action: &serde_json::Value, now: Instant
     bundle
 }
 
+/// One applied action on the activity feed, in plain words (`crate::activity`).
+fn record_activity(state: &AppState, headers: &HeaderMap, action: &serde_json::Value) {
+    let rows = action
+        .get("snapshot")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|snapshot| lookup_element_snapshot(state, snapshot));
+    crate::activity::record(
+        named_owner(headers),
+        crate::activity::describe(action, rows.as_deref().map(Vec::as_slice)),
+        crate::metrics::now_ms(),
+    );
+}
+
 /// `registry` (after a launch) and `flow_suggestion` (when due) for one
 /// applied `/agent/input` action.
 fn flow_after_input(
@@ -13057,6 +13240,7 @@ fn flow_after_input(
     headers: &HeaderMap,
     action: &serde_json::Value,
 ) -> Vec<(&'static str, serde_json::Value)> {
+    record_activity(state, headers, action);
     if headers.contains_key(FLOW_RUN_HEADER) {
         return Vec::new();
     }
@@ -16163,6 +16347,15 @@ async fn agent_intent(
     };
     if tokio::time::Instant::now() >= agent_wda_deadline {
         return intent_error_response(&IntentError::NotSent);
+    }
+    // An intent is one action against the run budget (`crate::guard`).
+    if let Err(refusal) = crate::guard::charge(
+        crate::guard::Policy::get(),
+        &guard_owner(&headers),
+        1,
+        crate::metrics::now_ms(),
+    ) {
+        return guard_refusal(&refusal, false);
     }
     let _priority = state.begin_wda_control();
     let correlation_id = new_intent_correlation_id();

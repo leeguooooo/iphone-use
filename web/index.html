@@ -375,6 +375,19 @@
       pointer-events: none;
     }
     #stallPill .ol-spinner { display: block; }
+    /* What the agent just did, in plain words (GET /agent/activity). */
+    #agentActivity {
+      position: absolute; left: 50%; bottom: 7%; z-index: 13; transform: translate(-50%, 6px);
+      max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      padding: 7px 13px; border-radius: 999px;
+      background: rgba(12,14,20,.78); color: #fff; border: 1px solid rgba(255,255,255,.14);
+      font: 600 var(--fs-s)/1.2 var(--sans); box-shadow: var(--shadow-m);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      pointer-events: none; opacity: 0; transition: opacity .25s, transform .25s;
+    }
+    #agentActivity.on { opacity: 1; transform: translate(-50%, 0); }
+    #agentActivity .who { opacity: .62; margin-right: 6px; }
+    @media (prefers-reduced-motion: reduce) { #agentActivity { transition: none; } }
     /* A private hold: the person is signing in, nothing of the screen shows. */
     #privateCover {
       position: absolute; inset: 0; z-index: 15; display: flex; flex-direction: column;
@@ -916,6 +929,7 @@
           <span class="ol-spinner" aria-hidden="true"></span><span>画面卡住 · 正在恢复…</span>
         </div>
         <div id="typingHint" aria-hidden="true">键盘直达手机 <kbd>Esc</kbd> 退出</div>
+        <div id="agentActivity" role="status" aria-live="polite" aria-atomic="true"></div>
 
         <!-- state layer: a chip for transient states, a card when the phone is unusable -->
         <div id="offlineOverlay" aria-live="polite" aria-atomic="true" hidden inert>
@@ -5489,6 +5503,41 @@ function paintDot() {
 /* Also keep the MutationObserver so any direct setStatus() call refreshes the dot. */
 new MutationObserver(paintDot).observe(statusLine, { childList:true, characterData:true, subtree:true });
 
+/* ── Agent activity: what the agent just did, in plain words ──────
+   GET /agent/activity is in-memory on the daemon and never touches the
+   phone, so it is cheap to poll. Lines that were already there when the page
+   opened are not replayed; each new one shows for a few seconds. */
+const agentActivityEl = document.getElementById('agentActivity');
+const AGENT_ACTIVITY_SHOW_MS = 6000;
+let agentActivityCursor = null, agentActivityTimer = null, agentActivityBusy = false;
+async function pollAgentActivity() {
+  if (agentActivityBusy || document.visibilityState !== 'visible') return;
+  agentActivityBusy = true;
+  try {
+    const since = agentActivityCursor ?? 0;
+    const limit = agentActivityCursor === null ? 0 : 20;
+    const r = await fetch(`/agent/activity?since=${since}&limit=${limit}`, { cache: 'no-store' });
+    if (!r.ok) return;
+    const feed = await r.json();
+    if (Number.isFinite(feed?.next)) agentActivityCursor = feed.next;
+    const items = Array.isArray(feed?.items) ? feed.items : [];
+    if (!items.length) return;
+    const last = items[items.length - 1];
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = last.owner ? `${last.owner}` : 'Agent';
+    agentActivityEl.replaceChildren(who, document.createTextNode(last.text_zh || last.text || ''));
+    agentActivityEl.title = items.slice(-5).map(item => item.text_zh || item.text).join('\n');
+    agentActivityEl.classList.add('on');
+    clearTimeout(agentActivityTimer);
+    agentActivityTimer = setTimeout(() => agentActivityEl.classList.remove('on'), AGENT_ACTIVITY_SHOW_MS);
+  } catch {
+    // Best effort: the feed is a convenience, the screen is the record.
+  } finally {
+    agentActivityBusy = false;
+  }
+}
+
 /* ── Boot ─────────────────────────────────────────────────────── */
 videoArea.addEventListener('contextmenu', e => e.preventDefault());
 function pollAgentModeOnInterval() {
@@ -5504,6 +5553,8 @@ async function boot() {
   paintDot();
   await pollAgentMode();
   setInterval(pollAgentModeOnInterval, 3000);
+  void pollAgentActivity();
+  setInterval(pollAgentActivity, 2000);
 }
 void boot();
 </script>

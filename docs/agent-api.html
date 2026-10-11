@@ -130,6 +130,7 @@
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/mjpeg</td><td>Live WDA MJPEG stream; accepts bearer auth or a logged-in browser cookie.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/h264</td><td>The same live screen as H.264 (~10× less bandwidth); same auth and viewer accounting as <code>/agent/mjpeg</code>.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/elements</td><td>Snapshot-bound, flattened WDA element list with sparse locator/state fields and screen dimensions.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/activity</td><td>What agents did, in plain words (<code>Tapped “Wi-Fi”</code>), newest last; <code>?since=&lt;next&gt;</code> for newer lines. Typed text is never kept. Bearer or a logged-in browser cookie.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/mode</td><td><code>mode=agent</code> brings WDA up; <code>mode=human</code> stops WDA and hands the phone back to the person holding it. It never changes the persisted target.</td></tr>
   <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/inbox</td><td>Legacy Shortcuts-bridge result queue. GET is always a read-only peek; POST appends and requires the mutation header.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/inbox/drain</td><td>Atomically return and clear the inbox; requires bearer auth and the mutation header.</td></tr>

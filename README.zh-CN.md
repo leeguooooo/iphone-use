@@ -136,6 +136,8 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
   -d '{"type":"tap","element":7,"snapshot":"…"}'            # 点击，并返回界面变化（约 2 秒）
 ```
 
+你可以设置守护进程强制执行的限制，不管 agent 收到什么指令都有效：不许打开的 App（`IPHONE_USE_BLOCKED_APPS`，例如 `Wallet, Passwords`），以及每个任务最多多少步操作（`IPHONE_USE_MAX_ACTIONS`）。网页会把 agent 的每一步用大白话显示在手机画面上，例如「点按“无线局域网”」（[详情](docs/agent-reference.md#owner-limits-and-the-activity-feed)）。
+
 详见 [MCP 工具](crates/mcp/README.md) 和 [Agent API 参考](docs/agent-api.html)。
 
 ## Flow：做过一次的事，沉淀成脚本

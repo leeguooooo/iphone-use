@@ -32,6 +32,9 @@ off usbmuxd since a restart), offline, unconfigured, owned
 (another session holds the owner lease; /control answers 409), will-lock
 (ready, lock_readiness says a person must unlock), redacted.
 
+Push an agent activity line (shown over the screen) with
+GET /__mock/activity?zh=点按“Wi-Fi”&owner=claude-code.
+
 Inspect what the page sent with GET /__mock/controls (JSON list, newest last);
 DELETE /__mock/controls clears it. Every control is also printed to stdout.
 """
@@ -62,6 +65,7 @@ STATE = {
     "stream_id": None,
     "stream_last_frame": 0.0,
     "controls": [],
+    "activity": [],
     "owner": "codex-agent",
     "rtt": 40,
 }
@@ -316,6 +320,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if p == "/agent/elements":
             time.sleep(0.4)
             return self.send(200, elements_json())
+        if p == "/agent/activity":
+            since, limit = int(q.get("since") or 0), int(q.get("limit") or 20)
+            with LOCK:
+                newer = [item for item in STATE["activity"] if item["seq"] > since]
+                items = newer[len(newer) - limit:] if limit else []
+                return self.send(200, {"ok": True, "items": items, "next": len(STATE["activity"])})
+        if p == "/__mock/activity":
+            with LOCK:
+                STATE["activity"].append({
+                    "seq": len(STATE["activity"]) + 1,
+                    "at_ms": int(time.time() * 1000),
+                    "text": q.get("text", "Tapped “Wi-Fi”"),
+                    "text_zh": q.get("zh", "点按“Wi-Fi”"),
+                    "owner": q.get("owner", "claude-code"),
+                })
+                return self.send(200, {"ok": True, "next": len(STATE["activity"])})
         if p == "/__mock/scenario":
             if "name" in q:
                 with LOCK:

@@ -272,6 +272,7 @@ only on a trusted network.
 | `POST /agent/collect` | Read a list across pages: rows of `row_kind`, one swipe per page, deduplicated ([below](#long-lists-collect-and-scroll_find)) |
 | `POST /agent/scroll_find` | Is this label on screen and tappable? Swipe at most `max_swipes` (default 1) to find it ([below](#long-lists-collect-and-scroll_find)) |
 | `GET /agent/flow/draft` | The daemon's recorded trail as a flow v1 draft ([below](#saving-a-flow)) |
+| `GET /agent/activity` | What agents did, in plain words, for people watching: `{items:[{seq,at_ms,text,text_zh,owner?}], next, budget?}`; `?since=<next>` for newer lines only ([below](#owner-limits-and-the-activity-feed)) |
 | `GET /agent/reference` | This document, as compiled into the running daemon (`text/markdown`) |
 | `GET /agent/apps` | Installed apps `{device, apps:[{bundle,name,version,bundle_version,system,…}]}`; `?bundle=`; cached 10 min (`?refresh=1`). `503 apps_unavailable` = unknown, not "not installed" |
 | `GET /agent/apps?query=<name>` | App lookup by name: `{candidates:[{name,bundle_id,source,installed_verified,match,publisher?}], installation_checked, warnings}`. `source=auto` (phone's app list → bundled catalog → App Store), `installed`, `catalog` (offline), `apple` (`country=cn`, rate limited). Exact matches hide partial ones. MCP `phone_apps` |
@@ -423,6 +424,31 @@ is no longer cached). The action result and the observation are separate facts:
   measures); `runner_error.message` names the reason.
 - A non-2xx read or an empty tree with `error` is a failed checkpoint even if
   the last status said `drivable:true`.
+
+## Resuming an interrupted task
+
+A dropped connection, a client timeout, a daemon restart or a crashed agent
+session can cut a task off mid-step. Before you continue, decide what each
+cut-off call did, and only then go on:
+
+- **Reads** (`/agent/elements`, screenshots, status, `wait_for` on its own) can
+  simply be repeated.
+- **An action whose answer you never got** counts as `outcome:"unknown"`: it
+  may have reached the phone. Read the screen first. If what you see shows it
+  applied, carry on from there; if it shows it did not, send it again. Never
+  resend text, a scroll, back, send, pay or delete before you have looked.
+- **A batch** answers `completed` / `applied_actions`: steps before
+  `failed_step` ran, later ones never did. Continue from `failed_step`, not
+  from the start, after reading the screen. `failed_step_outcome:"not_sent"`
+  only means *that* step can be sent again.
+- **A flow** that stopped is a batch that stopped: never run it again from the
+  top when its first steps may have acted (see [Fixing a flow](#fixing-a-flow)).
+- **After a daemon restart**, take a fresh `/agent/elements` before tapping by
+  `element`: snapshot tokens live in memory and do not survive the restart.
+  An open `/agent/run` does not either; start a new one.
+
+What the agent did last is on the [activity feed](#owner-limits-and-the-activity-feed),
+which helps a person (or you, after losing context) see where the task stopped.
 
 ## Long lists: collect and scroll_find
 
@@ -679,6 +705,43 @@ sized to keep the whole answer under about 3.5 MB; otherwise the answer says
 `image_omitted` and the text stays. MCP `phone_elements` reads with
 `image=auto` and returns that same image once as image content, with its
 labels in the text and no base64 in the text or the structured copy.
+
+## Owner limits and the activity feed
+
+**Limits.** The phone's owner can set limits the daemon enforces whatever an
+agent's prompt says. Both are off by default:
+
+| Setting | Effect |
+|---|---|
+| `IPHONE_USE_BLOCKED_APPS` | Comma-separated bundle ids or app names (`Wallet, com.example.bank, 微信`). An agent cannot open or uninstall them, and while one is in front only leaving is allowed: `{"type":"home"}` or `launch_app` of another app (`collect` and `scroll_find` are refused there too). |
+| `IPHONE_USE_MAX_ACTIONS` | Actions per run and `X-Phone-Owner`: a batch counts each `action` step; `collect`, `scroll_find` and an intent count one each. A run starts with `POST /agent/run {"action":"start"}`, or after 2 minutes without an action. |
+
+A refusal is `403` with `outcome:"not_sent"` and a `hint`: nothing reached the
+phone. `error` is `blocked_app` (with `app`), `foreground_unverified` (the app
+in front could not be read; `retry_safe:true`, read the screen and retry) or
+`action_budget_exhausted` (with `budget:{max,used}`). On a blocked app, tell
+the user; do not try to reach it another way. On an exhausted budget, stop
+and report progress. `GET /agent/capabilities` lists the limits under
+`limits`. The web control page and people driving the phone are never limited.
+
+The daemon runs as a LaunchAgent, so a limit goes into its plist and the
+daemon is restarted:
+
+```sh
+plist=~/Library/LaunchAgents/com.leeguoo.iphone-use.plist
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:IPHONE_USE_BLOCKED_APPS string 'Wallet, Passwords'" "$plist"
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:IPHONE_USE_MAX_ACTIONS string 80" "$plist"
+launchctl bootout gui/$(id -u) "$plist"; launchctl bootstrap gui/$(id -u) "$plist"
+```
+
+**Activity feed.** Every action an agent applied is kept as one line in plain
+words, resolved from the screen the action named: `Tapped “Wi-Fi”`,
+`Opened Settings`, `Typed 12 characters` (typed text and set values are never
+kept, only their length). `GET /agent/activity` returns the last lines
+(`text` in English, `text_zh` in Chinese, `owner` when the caller named
+itself) and `next`; pass `?since=<next>` to get only newer ones. The web
+control page shows each new line over the phone screen for a few seconds. The
+feed is in memory (the last 50 lines) and starts empty after a restart.
 
 ## Flows: format, compat, saving, fixing
 

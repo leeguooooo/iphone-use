@@ -138,6 +138,8 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
   -d '{"type":"tap","element":7,"snapshot":"…"}'            # tap, then what changed (~2 s)
 ```
 
+You can set limits the daemon enforces whatever the agent is told: apps it may not open (`IPHONE_USE_BLOCKED_APPS`, for example `Wallet, Passwords`) and a number of actions per task (`IPHONE_USE_MAX_ACTIONS`). The web page shows each action the agent takes in plain words over the phone screen, for example `Tapped “Wi-Fi”` ([details](docs/agent-reference.md#owner-limits-and-the-activity-feed)).
+
 See the [MCP tools](crates/mcp/README.md) and the [Agent API reference](docs/agent-api.html).
 
 ## Flows: do a task once, replay it with no model
