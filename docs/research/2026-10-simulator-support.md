@@ -3,7 +3,9 @@
 **Status**: preview implemented (2026-10). What exists:
 
 - `iphone-use simulators` and `iphone-use simulator start|stop`. `start` boots the
-  simulator, runs `runner/build.sh --simulator`, launches the runner with
+  simulator, turns off the Simulator's "Connect Hardware Keyboard" preference, builds the
+  runner (`runner/build.sh --simulator`, or `xcodebuild build-for-testing` on the installed
+  runner project when `build.sh` is absent), launches the runner with
   `test-without-building -destination id=<udid>` under a per-simulator instance state
   dir, and prints the daemon command.
 - With `IPHONE_USE_SIMULATOR=<udid>`, the daemon routes logs, crashes, location,
@@ -17,9 +19,10 @@ Not yet done:
   stored in the instance plist.
 - `device_state` values `booting` and `shutdown`.
 - H.264 and `simctl io recordVideo` fallbacks.
-- The hardware-keyboard preference.
-- The CI recipe.
 - Verification on a Mac: everything is unit-tested only, because no Xcode was available.
+
+The CI recipe is in [testing.md](../testing.md#running-suites-on-a-simulator-in-ci-preview).
+
 **Why now**: every large competitor drives simulators (XcodeBuildMCP, mobile-mcp,
 agent-device, iOS-simulator-mcp). It is how app developers and CI start, before
 they have a spare phone. iphone-use drives real devices only.

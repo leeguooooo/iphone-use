@@ -214,6 +214,20 @@ pub fn boot_argv(udid: &str) -> Vec<String> {
     argv(&["simctl", "boot", udid])
 }
 
+/// `defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool
+/// false`: with Simulator's hardware keyboard connected, iOS hides the
+/// software keyboard that text input waits for. Read when Simulator.app
+/// starts, so it is set before booting.
+pub fn software_keyboard_argv() -> Vec<String> {
+    argv(&[
+        "write",
+        "com.apple.iphonesimulator",
+        "ConnectHardwareKeyboard",
+        "-bool",
+        "false",
+    ])
+}
+
 /// Waits until the simulator has finished booting (`-b` boots it first if
 /// needed).
 pub fn bootstatus_argv(udid: &str) -> Vec<String> {
@@ -1147,6 +1161,10 @@ fn start(query: &str, port: Option<u16>, xctestrun: Option<PathBuf>, instance: O
     let (port, mjpeg_port) = pick_ports(port, free_port)?;
 
     println!("Simulator: {} ({}, {}) {udid}", device.name, device.runtime, device.state);
+    // Best effort: a failure only means typing may need the keyboard shown by hand.
+    let _ = std::process::Command::new("/usr/bin/defaults")
+        .args(software_keyboard_argv())
+        .status();
     if !device.booted() {
         println!("Booting ...");
         // "Unable to boot device in current state: Booted" is a race, not a failure.
@@ -1895,6 +1913,14 @@ pub mod tests {
         assert_eq!(
             newest_xctestrun(&dir.path().join("dd")),
             Some(products.join("IPhoneUseRunner_iphonesimulator.xctestrun"))
+        );
+    }
+
+    #[test]
+    fn start_turns_off_the_hardware_keyboard() {
+        assert_eq!(
+            software_keyboard_argv(),
+            ["write", "com.apple.iphonesimulator", "ConnectHardwareKeyboard", "-bool", "false"]
         );
     }
 }
