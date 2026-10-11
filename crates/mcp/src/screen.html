@@ -70,6 +70,55 @@
   const IDLE_INTERVAL_MS = 2000;   // released / offline phone
   const REQUEST_TIMEOUT_MS = 8000;
 
+  /* ── i18n: English is the source; Chinese follows the viewer's browser. ── */
+  const I18N_ZH = {
+    "iPhone screen": "iPhone 屏幕",
+    "connecting…": "正在连接…",
+    "waiting for the first frame…": "正在等待第一帧画面…",
+    "Home": "主屏幕",
+    "Go to the Home Screen": "回到主屏幕",
+    "Refresh": "刷新",
+    "Capture a fresh frame now": "立即截取新画面",
+    "private": "画面已隐藏",
+    "released": "已交还",
+    "locked": "已锁屏",
+    "drivable": "可操作",
+    "not drivable": "不可操作",
+    "owner {owner}": "使用者 {owner}",
+    "owner {owner} (this session)": "使用者 {owner}（本会话）",
+    "no owner": "无人使用",
+    "Someone is signing in on the phone. The screen stays hidden until the agent continues.":
+      "有人正在手机上登录。agent 继续之前，画面会一直隐藏。",
+    "phone released — the agent reconnects it when needed": "手机已交还——agent 需要时会重新连接",
+    "no frame yet": "暂无画面",
+    "panel cannot reach iphone-use — {error}": "面板连不上 iphone-use — {error}",
+    "Home failed": "回到主屏幕失败",
+    "Home failed: {error}": "回到主屏幕失败：{error}",
+    "sent Home": "已回到主屏幕",
+    "this host did not answer ui/initialize": "宿主没有响应 ui/initialize",
+    "frame tool failed": "截图工具出错",
+    "empty frame": "没有收到画面",
+  };
+  const ZH = (() => {
+    const first = (navigator.languages && navigator.languages[0]) || navigator.language || "en";
+    return first.toLowerCase().startsWith("zh");
+  })();
+  document.documentElement.lang = ZH ? "zh-CN" : "en";
+  /* t("owner {owner}", {owner}) — placeholders are {name}. */
+  function t(en, vars) {
+    let s = (ZH && Object.prototype.hasOwnProperty.call(I18N_ZH, en)) ? I18N_ZH[en] : en;
+    if (vars) s = s.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+    return s;
+  }
+  if (ZH) {
+    document.title = t(document.title);
+    for (const el of document.querySelectorAll("#status-text, #empty, button")) el.textContent = t(el.textContent);
+    for (const el of document.querySelectorAll("[title], [alt]")) {
+      if (el.title) el.title = t(el.title);
+      if (el.alt) el.alt = t(el.alt);
+    }
+  }
+
   const $ = (id) => document.getElementById(id);
   const image = $("image"), empty = $("empty"), dot = $("dot");
   const statusText = $("status-text"), note = $("note");
@@ -147,13 +196,13 @@
   function describe(body) {
     const name = body.phone || body.model || "iPhone";
     const parts = [name];
-    if (body.private_secs) parts.push("private");
-    else if (body.released) parts.push("released");
-    else if (body.locked) parts.push("locked");
-    else if (body.drivable === true) parts.push("drivable");
-    else if (body.drivable === false) parts.push("not drivable" + (body.blocked_on ? " (" + body.blocked_on + ")" : body.state ? " (" + body.state + ")" : ""));
-    if (body.owner) parts.push("owner " + body.owner + (body.mine ? " (this session)" : ""));
-    else parts.push("no owner");
+    if (body.private_secs) parts.push(t("private"));
+    else if (body.released) parts.push(t("released"));
+    else if (body.locked) parts.push(t("locked"));
+    else if (body.drivable === true) parts.push(t("drivable"));
+    else if (body.drivable === false) parts.push(t("not drivable") + (body.blocked_on ? " (" + body.blocked_on + ")" : body.state ? " (" + body.state + ")" : ""));
+    if (body.owner) parts.push(t(body.mine ? "owner {owner} (this session)" : "owner {owner}", { owner: body.owner }));
+    else parts.push(t("no owner"));
     return parts.join(" · ");
   }
 
@@ -163,12 +212,15 @@
       : body.drivable === true ? "ok" : "warn";
     let text = describe(body);
     if (body.error && !body.frame) text += " — " + body.error;
-    else if (body.drivable === false && (body.next_step || body.hint)) text += " — " + (body.next_step || body.hint);
+    else if (body.drivable === false) {
+      const step = (ZH && body.next_step_zh) || body.next_step || body.hint;
+      if (step) text += " — " + step;
+    }
     if (body.private_secs) {
       setStatus("warn", describe(body));
       image.hidden = true;
       image.removeAttribute("src");
-      empty.textContent = "Someone is signing in on the phone. The screen stays hidden until the agent continues.";
+      empty.textContent = t("Someone is signing in on the phone. The screen stays hidden until the agent continues.");
       empty.hidden = false;
       return false;
     }
@@ -180,8 +232,8 @@
       image.hidden = false;
       empty.hidden = true;
     } else if (image.hidden) {
-      empty.textContent = body.released ? "phone released — the agent reconnects it when needed"
-        : "no frame yet";
+      empty.textContent = body.released ? t("phone released — the agent reconnects it when needed")
+        : t("no frame yet");
       empty.hidden = false;
     }
     return !!frame && !body.released;
@@ -225,7 +277,7 @@
     } catch (error) {
       failures += 1;
       delay = Math.min(5000, 1000 * failures);
-      if (failures > 1) setStatus("bad", "panel cannot reach iphone-use — " + error.message);
+      if (failures > 1) setStatus("bad", t("panel cannot reach iphone-use — {error}", { error: t(error.message) }));
     } finally {
       inFlight = false;
       kick(delay);
@@ -238,12 +290,12 @@
       const result = await callTool("phone_shortcut", { name: "home", observe: false });
       if (result && result.isError) {
         const text = (result.content || []).map((c) => c.text || "").join(" ").trim();
-        flash("Home failed" + (text ? ": " + text.slice(0, 160) : ""));
+        flash(text ? t("Home failed: {error}", { error: text.slice(0, 160) }) : t("Home failed"));
       } else {
-        flash("sent Home");
+        flash(t("sent Home"));
       }
     } catch (error) {
-      flash("Home failed: " + error.message);
+      flash(t("Home failed: {error}", { error: error.message }));
     } finally {
       homeButton.disabled = false;
       stop();
@@ -281,7 +333,7 @@
   }
   if ("ResizeObserver" in window) new ResizeObserver(reportSize).observe(document.body);
 
-  connect().catch(() => setStatus("bad", "this host did not answer ui/initialize"))
+  connect().catch(() => setStatus("bad", t("this host did not answer ui/initialize")))
     .finally(() => kick(0));
 })();
 </script>

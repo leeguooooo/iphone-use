@@ -4493,3 +4493,135 @@ fn a_private_hold_keeps_the_screen_unread_until_it_is_cleared() {
         assert_eq!(status["screen_private_secs"], 0, "{status}");
     });
 }
+
+// ---------------------------------------------------------------------------
+// Language of the daemon's own pages (login, scan-to-connect)
+// ---------------------------------------------------------------------------
+
+async fn page(app: &axum::Router, request: Request<Body>) -> (StatusCode, String) {
+    let resp = app.clone().oneshot(request).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+fn get_with(uri: &str, headers: &[(header::HeaderName, &str)]) -> Request<Body> {
+    let mut builder = Request::builder().uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(name, *value);
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+/// CJK left in an English page, apart from the switch's own `中文` label and
+/// its bilingual aria-label.
+fn stray_chinese(html: &str) -> Vec<char> {
+    html.replace(">中文</a>", "")
+        .replace("切换语言 / Switch language", "")
+        .chars()
+        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c) || ('\u{3000}'..='\u{303f}').contains(c))
+        .collect()
+}
+
+#[test]
+fn login_page_follows_the_language_cookie_then_the_browser() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+
+        // No language at all: Chinese, as before, with a switch to English.
+        let (status, html) = page(&app, get_with("/login", &[])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.starts_with(r#"<!doctype html><html lang="zh-CN">"#));
+        assert!(html.contains("<title>登录 · iphone-use</title>"));
+        assert!(html.contains(r#"data-lang="en""#) && html.contains(">English</a>"));
+        assert!(html.contains("iphone_use_lang="));
+
+        // An English browser gets English.
+        let en = [(header::ACCEPT_LANGUAGE, "en-US,en;q=0.9,zh-CN;q=0.8")];
+        let (_, html) = page(&app, get_with("/login?next=%2Fschedules", &en)).await;
+        assert!(html.starts_with(r#"<!doctype html><html lang="en">"#));
+        assert!(html.contains(r#"<label for="password">Control password</label>"#));
+        assert!(html.contains(r#"<button type="submit">Sign in</button>"#));
+        assert!(html.contains(r#"data-lang="zh""#) && html.contains(">中文</a>"));
+        assert!(html.contains(r#"<input type="hidden" name="next" value="/schedules">"#));
+        assert!(stray_chinese(&html).is_empty(), "{:?}", stray_chinese(&html));
+
+        // A Chinese browser gets Chinese.
+        let (_, html) = page(&app, get_with("/login", &[(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")])).await;
+        assert!(html.contains(r#"<label for="password">控制密码</label>"#));
+
+        // The switch's cookie outranks the browser, both ways.
+        let (_, html) = page(
+            &app,
+            get_with("/login", &[(header::ACCEPT_LANGUAGE, "zh-CN"), (header::COOKIE, "iphone_use_lang=en")]),
+        )
+        .await;
+        assert!(html.contains("Control password"));
+        let (_, html) = page(
+            &app,
+            get_with("/login", &[(header::ACCEPT_LANGUAGE, "en-US"), (header::COOKIE, "iphone_use_lang=zh")]),
+        )
+        .await;
+        assert!(html.contains("控制密码") && html.contains(">English</a>"));
+    });
+}
+
+#[test]
+fn login_errors_speak_the_request_language() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        for (password, status, zh, en) in [
+            ("", StatusCode::BAD_REQUEST, "请输入控制密码", "Enter the control password"),
+            (
+                "wrong",
+                StatusCode::UNAUTHORIZED,
+                "密码错误，请检查安装时保存的控制密码",
+                "Wrong password. Check the control password you saved during installation",
+            ),
+        ] {
+            for english in [false, true] {
+                let mut builder = Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+                if english {
+                    builder = builder.header(header::ACCEPT_LANGUAGE, "en-GB");
+                }
+                let (got, html) = page(&app, builder.body(Body::from(format!("password={password}"))).unwrap()).await;
+                assert_eq!(got, status);
+                assert!(html.contains(if english { en } else { zh }), "{html}");
+                assert!(!html.contains(if english { zh } else { en }));
+                if english {
+                    assert!(stray_chinese(&html).is_empty(), "{:?}", stray_chinese(&html));
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn pairing_pages_speak_the_scanning_phones_language() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        let en = [(header::ACCEPT_LANGUAGE, "en-US")];
+
+        let (status, html) = page(&app, get_with("/pair?c=AAAAAAAAAAAAAAAAAAAAAA", &en)).await;
+        assert_eq!(status, StatusCode::GONE);
+        assert!(html.contains("<h1>QR code expired</h1>"), "{html}");
+        assert!(stray_chinese(&html).is_empty(), "{:?}", stray_chinese(&html));
+        let (_, html) = page(&app, get_with("/pair?c=AAAAAAAAAAAAAAAAAAAAAA", &[])).await;
+        assert!(html.contains("<h1>二维码已失效</h1>"));
+
+        let cookie = login_cookie(&app, "hunter2").await;
+        let code = code_of(&new_pair_code(&app, &cookie).await);
+        let uri = format!("/pair?c={code}");
+        let host = (header::HOST, "192.168.1.11:45432");
+        let (status, html) = page(&app, get_with(&uri, &[en[0].clone(), host.clone()])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("<h1>Connect to the iPhone on this Mac</h1>"));
+        assert!(html.contains(">Control in the browser</button>"));
+        assert!(stray_chinese(&html).is_empty(), "{:?}", stray_chinese(&html));
+        let (_, html) = page(&app, get_with(&uri, &[(header::ACCEPT_LANGUAGE, "zh-Hans-CN"), host])).await;
+        assert!(html.contains("<h1>连接这台 Mac 上的 iPhone</h1>") && html.contains(">English</a>"));
+    });
+}

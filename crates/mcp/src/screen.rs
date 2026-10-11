@@ -129,14 +129,19 @@ pub fn status_summary(status: &StatusResponse, own_owner: &str) -> Value {
             .map(str::to_string)
     };
     let owner = status.owner.as_deref().filter(|o| !o.is_empty());
-    // The daemon's one line for a person (English here), e.g. "enter the
-    // passcode on the phone" for `needs_passcode_on_phone`.
-    let next_step = status
-        .extra
-        .get("next_step")
-        .and_then(|step| step.get("en"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
+    // The daemon's one line for a person, e.g. "enter the passcode on the
+    // phone" for `needs_passcode_on_phone`: English, plus the Chinese half
+    // for a panel whose viewer reads Chinese.
+    let step = |lang: &str| {
+        status
+            .extra
+            .get("next_step")
+            .and_then(|step| step.get(lang))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    let next_step = step("en");
+    let next_step_zh = step("zh");
     let blocked_on = status.setup_blocked_on.as_deref().filter(|b| !b.is_empty());
     // A private hold: the person is signing in, so there is no frame to show.
     let private_secs = status
@@ -156,6 +161,7 @@ pub fn status_summary(status: &StatusResponse, own_owner: &str) -> Value {
         "hint": status.hint,
         "blocked_on": blocked_on,
         "next_step": next_step,
+        "next_step_zh": next_step_zh,
         "private_secs": private_secs,
     })
 }
@@ -214,11 +220,13 @@ mod tests {
         let summary = status_summary(&status, "me");
         assert_eq!(summary["blocked_on"], "needs_passcode_on_phone");
         assert_eq!(summary["next_step"], "This iPhone has a passcode");
+        assert_eq!(summary["next_step_zh"], "手机设了锁屏密码");
         let ready: StatusResponse =
             serde_json::from_value(json!({"ok": true, "drivable": true, "setup_blocked_on": ""}))
                 .unwrap();
         let summary = status_summary(&ready, "me");
         assert!(summary["blocked_on"].is_null() && summary["next_step"].is_null());
+        assert!(summary["next_step_zh"].is_null());
     }
 
     #[test]
@@ -259,6 +267,9 @@ mod tests {
             "tool name filled in"
         );
         assert!(!text.contains("__IU_"), "no placeholder left");
+        // Follows the viewer's language: Chinese for every English line.
+        assert!(text.contains("const I18N_ZH = {"));
+        assert!(text.contains("\"connecting…\": \"正在连接…\""));
         // Self-contained: nothing fetched from the network.
         assert!(!text.contains("<script src"));
         assert!(!text.contains("https://"));

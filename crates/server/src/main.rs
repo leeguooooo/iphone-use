@@ -544,7 +544,7 @@ fn open_console() -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/phone");
     if !answering() {
         let install = "curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh";
-        let message = if onboarding::prefers_chinese() {
+        let message = if server::locale::prefers_chinese() {
             format!("iphone-use 服务没有运行（127.0.0.1:{port} 无响应）。请重新运行安装命令：\n{install}")
         } else {
             format!("The iphone-use service is not running (nothing answers on 127.0.0.1:{port}). Run the installer again:\n{install}")

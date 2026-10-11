@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
 use server::instance::Instance;
+use server::locale::prefers_chinese;
 
 const DEFAULT_PORT: u16 = 44321;
 const TRY_OWNER: &str = "iphone-use-try";
@@ -334,48 +335,6 @@ fn owned_message(value: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("another session");
     format!("the phone is being driven by {owner}; try again when it is done")
-}
-
-/// Whether the person at this terminal reads Chinese. The POSIX locale
-/// variables decide, in their own precedence (`LC_ALL`, `LC_MESSAGES`,
-/// `LANG`); when none names a language (unset, `C`, `POSIX`), the first of
-/// macOS's preferred languages does, since a Chinese Mac often starts a shell
-/// with no `LANG` at all.
-pub(crate) fn prefers_chinese() -> bool {
-    prefers_chinese_from(|key| std::env::var(key).ok(), apple_language)
-}
-
-fn prefers_chinese_from(
-    get: impl Fn(&str) -> Option<String>,
-    system: impl FnOnce() -> Option<String>,
-) -> bool {
-    let named = ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .into_iter()
-        .filter_map(&get)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .find(|value| !value.is_empty());
-    match named {
-        Some(value) if value != "c" && value != "posix" && !value.starts_with("c.") => {
-            value.starts_with("zh")
-        }
-        _ => system().is_some_and(|lang| lang.trim().to_ascii_lowercase().starts_with("zh")),
-    }
-}
-
-/// The first entry of `AppleLanguages` (`zh-Hans-CN`, `en-US`), if any.
-fn apple_language() -> Option<String> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    let output = std::process::Command::new("/usr/bin/defaults")
-        .args(["read", "-g", "AppleLanguages"])
-        .output()
-        .ok()?;
-    // `(\n    "zh-Hans-CN",\n    en\n)`: entries may or may not be quoted.
-    String::from_utf8_lossy(&output.stdout)
-        .split(|c: char| matches!(c, '(' | ')' | ',' | '"') || c.is_whitespace())
-        .find(|token| !token.is_empty())
-        .map(str::to_string)
 }
 
 /// One `{zh, en}` pair in the person's language, or whichever half exists.
@@ -791,33 +750,6 @@ mod tests {
         assert_eq!(next_step(&status).as_deref(), Some("Unlock the iPhone"));
         assert_eq!(hint(&json!({"hint": "raw"})).as_deref(), Some("raw"));
         assert_eq!(hint(&json!({"hint": ""})), None);
-    }
-
-    #[test]
-    fn the_locale_variables_decide_before_the_system_language() {
-        let env = |pairs: &'static [(&'static str, &'static str)]| {
-            move |key: &str| {
-                pairs
-                    .iter()
-                    .find(|(k, _)| *k == key)
-                    .map(|(_, v)| v.to_string())
-            }
-        };
-        let zh_system = || Some("zh-Hans-CN".to_string());
-        let en_system = || Some("en-US".to_string());
-        assert!(prefers_chinese_from(env(&[("LANG", "zh_CN.UTF-8")]), en_system));
-        assert!(!prefers_chinese_from(env(&[("LANG", "en_US.UTF-8")]), zh_system));
-        // LC_ALL outranks LANG.
-        assert!(!prefers_chinese_from(
-            env(&[("LC_ALL", "en_US.UTF-8"), ("LANG", "zh_CN.UTF-8")]),
-            zh_system
-        ));
-        // No language named: the Mac's own language decides.
-        assert!(prefers_chinese_from(env(&[]), zh_system));
-        assert!(prefers_chinese_from(env(&[("LANG", "C.UTF-8")]), zh_system));
-        assert!(prefers_chinese_from(env(&[("LC_ALL", "POSIX")]), zh_system));
-        assert!(!prefers_chinese_from(env(&[]), en_system));
-        assert!(!prefers_chinese_from(env(&[]), || None));
     }
 
     #[test]

@@ -1152,6 +1152,9 @@ button{background:var(--accent);border:1px solid var(--accent);color:#fff;border
 button:hover{filter:brightness(1.06)}
 .err{color:var(--danger);font-size:13px;line-height:1.4}
 .err:empty{display:none}
+.lang{align-self:center;color:var(--muted);font-size:12.5px;text-decoration:none;padding:4px 8px;border-radius:8px}
+.lang:hover{color:var(--text)}
+.lang:focus-visible{outline:3px solid var(--ring);outline-offset:1px}
 </style></head><body>
 <form method="POST" action="/login" novalidate>
   <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg></div>
@@ -1164,7 +1167,60 @@ button:hover{filter:brightness(1.06)}
     aria-describedby="passwordHint loginError" aria-invalid="__INVALID__" />
   <div class="err" id="loginError" role="alert" aria-live="assertive">__ERR__</div>
   <button type="submit">登录</button>
+  __LANG_SWITCH__
 </form></body></html>"#;
+
+/// `LOGIN_HTML` (Chinese, the source) → English, phrase by phrase.
+const LOGIN_EN: &[(&str, &str)] = &[
+    (r#"<html lang="zh-CN">"#, r#"<html lang="en">"#),
+    ("<title>登录 · iphone-use</title>", "<title>Sign in · iphone-use</title>"),
+    (
+        "请输入这台 Mac 安装 iphone-use 时生成的控制密码。忘记后，请回到 Mac 重新运行安装程序查看或重设。",
+        "Enter the control password created when iphone-use was installed on this Mac. If you forgot it, run the installer again on the Mac to see or reset it.",
+    ),
+    (
+        r#"<label for="password">控制密码</label>"#,
+        r#"<label for="password">Control password</label>"#,
+    ),
+    (
+        r#"<button type="submit">登录</button>"#,
+        r#"<button type="submit">Sign in</button>"#,
+    ),
+];
+
+/// Login errors, `[Chinese, English]`.
+const LOGIN_EMPTY: [&str; 2] = ["请输入控制密码", "Enter the control password"];
+const LOGIN_LOCKED: [&str; 2] = [
+    "尝试次数过多。为保护手机，请 30 秒后再试",
+    "Too many attempts. To protect the phone, try again in 30 seconds",
+];
+const LOGIN_WRONG: [&str; 2] = [
+    "密码错误，请检查安装时保存的控制密码",
+    "Wrong password. Check the control password you saved during installation",
+];
+
+/// A Chinese page → English through its phrase table; Chinese stays as is.
+fn localize_page(html: &str, table: &[(&str, &str)], chinese: bool) -> String {
+    if chinese {
+        return html.to_string();
+    }
+    table
+        .iter()
+        .fold(html.to_string(), |page, (zh, en)| page.replace(zh, en))
+}
+
+/// The small 中文/English link on the daemon's own pages: it names the other
+/// language and remembers the choice the way the web pages' `setLang` does
+/// (localStorage + the `iphone_use_lang` cookie), then reloads with a GET so
+/// a page answering a form POST is not resubmitted.
+fn lang_switch(chinese: bool) -> String {
+    let (lang, label) = if chinese { ("en", "English") } else { ("zh", "中文") };
+    format!(
+        r##"<a class="lang" href="#" data-lang="{lang}" aria-label="切换语言 / Switch language">{label}</a>
+<script>document.querySelector('a.lang').addEventListener('click',function(e){{e.preventDefault();var l=this.getAttribute('data-lang');try{{localStorage.setItem('iphone-use-lang',l)}}catch(_){{}}document.cookie='{cookie}='+l+'; Path=/; Max-Age=31536000; SameSite=Lax';location.replace(location.pathname+location.search)}})</script>"##,
+        cookie = crate::locale::LANG_COOKIE,
+    )
+}
 
 fn login_destination(next: Option<&str>) -> &'static str {
     match next {
@@ -1174,13 +1230,15 @@ fn login_destination(next: Option<&str>) -> &'static str {
     }
 }
 
-fn render_login(error: &str, next: Option<&str>) -> String {
+fn render_login(error: Option<[&str; 2]>, next: Option<&str>, chinese: bool) -> String {
+    let error = error.map_or("", |[zh, en]| if chinese { zh } else { en });
     let next_input = match login_destination(next) {
         "/setup" => r#"<input type="hidden" name="next" value="/setup">"#,
         "/schedules" => r#"<input type="hidden" name="next" value="/schedules">"#,
         _ => "",
     };
-    LOGIN_HTML
+    localize_page(LOGIN_HTML, LOGIN_EN, chinese)
+        .replace("__LANG_SWITCH__", &lang_switch(chinese))
         .replace("__NEXT_INPUT__", next_input)
         .replace("__ERR__", error)
         .replace(
@@ -1205,7 +1263,8 @@ async fn login_form(
     if is_authed(&state, &headers) {
         return with_security_headers(Redirect::to(destination).into_response());
     }
-    with_security_headers(Html(render_login("", Some(destination))).into_response())
+    let chinese = crate::locale::request_prefers_chinese(&headers);
+    with_security_headers(Html(render_login(None, Some(destination), chinese)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1221,6 +1280,7 @@ async fn login_submit(
     Form(form): Form<LoginForm>,
 ) -> Response {
     let destination = login_destination(form.next.as_deref());
+    let chinese = crate::locale::request_prefers_chinese(&headers);
     let expected = match &state.password {
         // Open mode: any login succeeds (no password configured); no limiting.
         None => return redirect_with_cookie(&state, destination, &headers),
@@ -1231,7 +1291,7 @@ async fn login_submit(
     // missing value as an authentication failure: the user has not attempted a
     // credential yet.
     if form.password.is_empty() {
-        let mut resp = Html(render_login("请输入控制密码", Some(destination))).into_response();
+        let mut resp = Html(render_login(Some(LOGIN_EMPTY), Some(destination), chinese)).into_response();
         *resp.status_mut() = StatusCode::BAD_REQUEST;
         return with_security_headers(resp);
     }
@@ -1239,10 +1299,7 @@ async fn login_submit(
     {
         let limiter = state.auth_limiter.lock().unwrap();
         if limiter.is_locked() {
-            let mut resp = Html(render_login(
-                "尝试次数过多。为保护手机，请 30 秒后再试",
-                Some(destination),
-            ))
+            let mut resp = Html(render_login(Some(LOGIN_LOCKED), Some(destination), chinese))
             .into_response();
             *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
             resp.headers_mut()
@@ -1255,7 +1312,7 @@ async fn login_submit(
         redirect_with_cookie(&state, destination, &headers)
     } else {
         state.auth_limiter.lock().unwrap().record_failure();
-        let body = render_login("密码错误，请检查安装时保存的控制密码", Some(destination));
+        let body = render_login(Some(LOGIN_WRONG), Some(destination), chinese);
         let mut resp = Html(body).into_response();
         *resp.status_mut() = StatusCode::UNAUTHORIZED;
         with_security_headers(resp)
@@ -1473,15 +1530,44 @@ a,button{display:block;box-sizing:border-box;width:100%;text-align:center;text-d
 a{background:#4f8cff;color:#fff;border:1px solid #4f8cff}
 button{background:transparent;color:#eef2ff;border:1px solid #272b38}
 form{margin:0}
-</style></head><body><main>__BODY__</main></body></html>"#;
+a.lang{display:inline-block;width:auto;align-self:center;background:none;border:0;color:#8b93a7;
+  font-size:13px;font-weight:500;padding:6px 10px}
+a.lang:hover{color:#eef2ff}
+</style></head><body><main>__BODY__
+__LANG_SWITCH__</main></body></html>"#;
 
-fn render_pair_page(body: &str) -> String {
-    PAIR_HTML.replace("__BODY__", body)
+/// The pairing pages (`PAIR_HTML` and the bodies below; Chinese is the
+/// source) → English.
+const PAIR_EN: &[(&str, &str)] = &[
+    (r#"<html lang="zh-CN">"#, r#"<html lang="en">"#),
+    ("<title>扫码连接 · iphone-use</title>", "<title>Scan to connect · iphone-use</title>"),
+    ("<h1>二维码已失效</h1>", "<h1>QR code expired</h1>"),
+    (
+        "<p>每个二维码只能用一次，5 分钟内有效。请在 Mac 的 iphone-use 页面上点「手机扫码连接」重新生成。</p>",
+        "<p>Each QR code works once, for 5 minutes. On the iphone-use page on your Mac, click “Scan to connect” to make a new one.</p>",
+    ),
+    ("<h1>正在登录 iphone-use…</h1>", "<h1>Signing in to iphone-use…</h1>"),
+    (">打开控制页</button>", ">Open the control page</button>"),
+    ("<h1>连接这台 Mac 上的 iPhone</h1>", "<h1>Connect to the iPhone on this Mac</h1>"),
+    (
+        "<p>装了 Phone Use Remote App 就用 App 打开，画面更流畅；没装也可以直接在浏览器里控制。</p>",
+        "<p>If you have the Phone Use Remote App, open it there for smoother video. Without it, you can control the phone right here in the browser.</p>",
+    ),
+    (">在 Phone Use Remote App 中打开</a>", ">Open in Phone Use Remote App</a>"),
+    (">在浏览器里控制</button>", ">Control in the browser</button>"),
+    ("<h1>尝试次数过多</h1>", "<h1>Too many attempts</h1>"),
+    ("<p>为保护手机，请 30 秒后再试。</p>", "<p>To protect the phone, try again in 30 seconds.</p>"),
+];
+
+fn render_pair_page(body: &str, chinese: bool) -> String {
+    let page = PAIR_HTML.replace("__BODY__", body);
+    localize_page(&page, PAIR_EN, chinese).replace("__LANG_SWITCH__", &lang_switch(chinese))
 }
 
-fn pair_expired_html() -> String {
+fn pair_expired_html(chinese: bool) -> String {
     render_pair_page(
         "<h1>二维码已失效</h1><p>每个二维码只能用一次，5 分钟内有效。请在 Mac 的 iphone-use 页面上点「手机扫码连接」重新生成。</p>",
+        chinese,
     )
 }
 
@@ -1501,8 +1587,9 @@ async fn pair_page(
     Query(query): Query<PairQuery>,
 ) -> Response {
     let code = query.c.unwrap_or_default();
+    let chinese = crate::locale::request_prefers_chinese(&headers);
     if !pair_code_shape_ok(&code) || !state.pairing.is_live(&code) {
-        let mut resp = Html(pair_expired_html()).into_response();
+        let mut resp = Html(pair_expired_html(chinese)).into_response();
         *resp.status_mut() = StatusCode::GONE;
         return with_security_headers(resp);
     }
@@ -1514,7 +1601,7 @@ async fn pair_page(
 <form method="POST" action="/pair"><input type="hidden" name="c" value="{code}"><button type="submit">打开控制页</button></form>
 <script>document.forms[0].submit()</script>"#
         );
-        return with_security_headers(Html(render_pair_page(&body)).into_response());
+        return with_security_headers(Html(render_pair_page(&body, chinese)).into_response());
     }
     let scheme = if request_is_https(&state, &headers) {
         "https"
@@ -1533,7 +1620,7 @@ async fn pair_page(
 <a href="{app_link}">在 Phone Use Remote App 中打开</a>
 <form method="POST" action="/pair"><input type="hidden" name="c" value="{code}"><button type="submit">在浏览器里控制</button></form>"#
     );
-    with_security_headers(Html(render_pair_page(&body)).into_response())
+    with_security_headers(Html(render_pair_page(&body, chinese)).into_response())
 }
 
 #[derive(Default, Deserialize)]
@@ -1565,6 +1652,7 @@ async fn pair_submit(
         } else {
             let mut r = Html(render_pair_page(
                 "<h1>尝试次数过多</h1><p>为保护手机，请 30 秒后再试。</p>",
+                crate::locale::request_prefers_chinese(&headers),
             ))
             .into_response();
             *r.status_mut() = StatusCode::TOO_MANY_REQUESTS;
@@ -1583,7 +1671,8 @@ async fn pair_submit(
             return redirect_with_cookie(&state, "/phone", &headers);
         }
         state.auth_limiter.lock().unwrap().record_failure();
-        let mut resp = Html(pair_expired_html()).into_response();
+        let chinese = crate::locale::request_prefers_chinese(&headers);
+        let mut resp = Html(pair_expired_html(chinese)).into_response();
         *resp.status_mut() = StatusCode::UNAUTHORIZED;
         return with_security_headers(resp);
     }

@@ -1802,7 +1802,7 @@ impl Setup {
                     "trust",
                     "trust the Apple Development cert on the iPhone",
                 );
-                return die("Developer cert not trusted. On the iPhone: 设置 → 通用 → VPN与设备管理 → 信任 'Apple Development: …', then re-run. (pitfall ②)");
+                return die("Developer cert not trusted. On the iPhone: Settings → General → VPN & Device Management → Trust 'Apple Development: …' (设置 → 通用 → VPN与设备管理 → 信任), then re-run. (pitfall ②)");
             }
             if pid::validate(
                 &self.ctx,
