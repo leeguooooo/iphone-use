@@ -37,6 +37,7 @@ cargo build --release -p iphone-use-mcp
 |---|---|---|
 | `IPHONE_USE_URL` | `http://127.0.0.1:44321` | Base URL of the daemon |
 | `IPHONE_USE_TOKEN` | _(none)_ | Bearer token / password (omit for open-mode daemons) |
+| `IPHONE_USE_MCP_TOOLS` | `all` | Which tools are listed and callable: `all`, `readonly`, or a comma list of tool names (see [Tool profiles](#tool-profiles-and-annotations)) |
 
 ## MCP client config
 
@@ -276,7 +277,7 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 | `phone_release_owner` | — | Release this session's owner lease when the task is done |
 | `phone_login` | `item?`, `user?`, `submit?`, `code_via?`, `code_from?` | Sign the app on screen in from the user's own vault entry (bitwarden-use), inside the daemon; the password never reaches the model |
 | `phone_screenshot` | `max_side?` | Capture current screen → PNG image content |
-| `phone_elements` | — | The UI as a flattened element list — prefer over screenshots for reasoning |
+| `phone_elements` | `query?`, `limit?` | The UI as a flattened element list — prefer over screenshots for reasoning. `query` keeps rows whose label/identifier/value/placeholder contain the text; `limit` caps the rows. Kept rows keep their index and the snapshot, so taps still work |
 | `phone_tap` | `x`, `y` (0–1), `observe?` | Single tap at normalized position |
 | `phone_tap_element` | `element`, `snapshot`, `observe?` | Snapshot-bound indexed tap; stale trees are rejected without tapping |
 | `phone_tap_label` | `label`, `observe?` | Exact-label tap; requires one unique match and sends nothing on ambiguity |
@@ -284,7 +285,7 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 | `phone_type` | `text`, `observe?` | Type text; any Unicode (incl. CJK) lands cleanly |
 | `phone_key` | `name`, `observe?` | Named key: `return`, `escape`, `space`, `tab`, `delete`, `up`, `down`, `left`, `right` |
 | `phone_shortcut` | `name`, `observe?` | iOS system shortcut: `home` or `spotlight`; App Switcher is unsupported |
-| `phone_run_steps` | `steps`, `observe?` | Run up to 24 guarded action/wait steps in one MCP call; includes long-press/swipe/drag, strict `tap_locator`, bundle-id `launch_app`, `alert`, `picker`, `perform` (toggle a switch, adjust a slider), full preflight, one device lock, and first-failure stop |
+| `phone_run_steps` | `steps`, `observe?` | Run up to 24 guarded action/wait steps in one MCP call; includes long-press/swipe/drag, strict `tap_locator`, bundle-id `launch_app`, `open_url` (links; non-http schemes need `IPHONE_USE_ALLOW_URL_SCHEMES` on the daemon), `alert`, `picker`, `perform` (toggle a switch, adjust a slider), full preflight, one device lock, and first-failure stop |
 | `phone_jev_run` | `goal`, `app?`, `max_steps?` | Hand a whole goal to the fast on-phone agent; returns `done` / `blocked` with its step history |
 | `phone_flow_list` | `category?`, `app?`, `verified?`, `detail?` | Installed registry flows, one row each (id · risk · compat · inputs — description); `detail=true` for every field. Check this before exploring an app step by step |
 | `phone_flow_info` | `id` | One flow's metadata, inputs, and step templates (never runtime values) |
@@ -295,6 +296,33 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 | `phone_flow_report` | `id`, `note?`, `confirm` | File a registry issue for a failed flow using the captured last failure (redacted); `confirm=true` only after the user agreed |
 | `phone_run_start` | `run_id`, `complete_trace?` | Mark one task's start for the daemon's task metrics; this session's calls carry the run until `phone_run_end` (optional — runs are otherwise inferred from idle gaps) |
 | `phone_run_end` | `run_id`, `turn_ids?` | Close the task and return its summary: HTTP calls (not model turns), batches, observed and flow calls, stale/unknown, failures, p50/p95; model round trips only for a declared complete trace |
+
+### Tool profiles and annotations
+
+Every tool carries MCP `annotations`: `readOnlyHint`, `openWorldHint`, and for
+tools that act, `destructiveHint` and `idempotentHint`. Clients that honour
+them can auto-approve the read-only ones and confirm the rest. The read-only
+set is `phone_status`, `phone_capabilities`, `phone_apps`, `phone_screen`,
+`phone_screen_frame`, `phone_screenshot`, `phone_elements`, `phone_flow_list`,
+`phone_flow_info` and `phone_flow_draft` (its `save_as` writes a new local
+file and is refused under `IPHONE_USE_MCP_TOOLS=readonly`; the phone is never
+touched).
+
+`IPHONE_USE_MCP_TOOLS` in the server's `env` narrows the surface:
+
+| Value | Listed and callable |
+|---|---|
+| `all` (default) | every tool |
+| `readonly` | only the read-only set above: an observer that can never act on the phone |
+| `phone_status,phone_elements,phone_tap` | exactly the named tools (`phone_screen` brings `phone_screen_frame` along for the panel); unknown names are reported on stderr and ignored |
+
+A hidden tool is left out of `tools/list`, and a call to it anyway is refused
+with an error that names `IPHONE_USE_MCP_TOOLS`; nothing reaches the phone.
+The setting is read once when the server starts.
+
+```json
+"env": { "IPHONE_USE_MCP_TOOLS": "readonly" }
+```
 
 ### Reading a result: the text block and `structuredContent`
 

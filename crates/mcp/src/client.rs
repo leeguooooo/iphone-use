@@ -702,8 +702,17 @@ impl DaemonClient {
     /// is unusable the answer carries a fresh, budget-bounded screenshot
     /// taken after the read (never a cached frame). For the model-facing
     /// read only; flow and lookup reads stay text.
-    pub async fn elements_with_image(&self) -> anyhow::Result<String> {
-        self.elements_at("/agent/elements?image=auto").await
+    ///
+    /// Narrowed by the daemon when asked: `query` keeps
+    /// rows whose label, identifier, value or placeholder contain the text,
+    /// `limit` caps the rows returned. Kept rows carry their original index
+    /// and the snapshot is the full read's, so taps by element stay valid.
+    pub async fn elements_with_image(
+        &self,
+        query: Option<&str>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<String> {
+        self.elements_at(&elements_path(query, limit)).await
     }
 
     async fn elements_at(&self, path: &str) -> anyhow::Result<String> {
@@ -1069,6 +1078,23 @@ fn url_query_escape(value: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// The model-facing `/agent/elements` path: `image=auto`, plus `query` and
+/// `limit` when given (a blank query is no filter), percent-encoded.
+pub(crate) fn elements_path(query: Option<&str>, limit: Option<usize>) -> String {
+    let mut url = reqwest::Url::parse("http://daemon/agent/elements").expect("static URL");
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("image", "auto");
+        if let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) {
+            pairs.append_pair("query", query);
+        }
+        if let Some(limit) = limit {
+            pairs.append_pair("limit", &limit.to_string());
+        }
+    }
+    format!("{}?{}", url.path(), url.query().unwrap_or_default())
 }
 
 #[cfg(test)]

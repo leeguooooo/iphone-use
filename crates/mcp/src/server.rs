@@ -101,6 +101,19 @@ pub struct AppsParams {
     pub limit: Option<usize>,
 }
 
+/// Parameters for [`phone_elements`].
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ElementsParams {
+    /// Keep only rows whose label, identifier, value or placeholder contains
+    /// this text (case-insensitive). Rows keep their original index.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Return at most this many rows; the answer says how many were left out.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 /// Parameters for [`phone_tap_label`].
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -298,6 +311,16 @@ pub enum PhoneStep {
         bundle: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app: Option<String>,
+        #[serde(default)]
+        after_ms: u64,
+    },
+    /// Open a link (`https://…`, or a deep link such as `weixin://`) with
+    /// the app iOS assigns to it. http/https always work; other schemes
+    /// (tel, sms, mailto, app deep links) are refused unless the operator
+    /// allowed them in IPHONE_USE_ALLOW_URL_SCHEMES. It leaves the current
+    /// app, so guard the next screen with `wait_for`.
+    OpenUrl {
+        url: String,
         #[serde(default)]
         after_ms: u64,
     },
@@ -545,6 +568,9 @@ pub struct PhoneHandler {
     last_flow_failure: std::sync::Arc<std::sync::Mutex<Option<crate::contrib::ReportContext>>>,
     /// Observed actions this session took, for the `no_progress` advisory.
     progress: std::sync::Arc<std::sync::Mutex<crate::hints::ProgressTracker>>,
+    /// Which tools are listed and callable (`IPHONE_USE_MCP_TOOLS`), read
+    /// once at start.
+    profile: std::sync::Arc<ToolProfile>,
 }
 
 /// Parameters for [`PhoneHandler::phone_login`].
@@ -655,7 +681,15 @@ impl PhoneHandler {
             daemon,
             last_flow_failure: std::sync::Arc::new(std::sync::Mutex::new(None)),
             progress: std::sync::Arc::default(),
+            profile: std::sync::Arc::new(ToolProfile::from_env()),
         }
+    }
+
+    /// The same handler exposing `profile` instead of the environment's.
+    #[cfg(test)]
+    fn with_profile(mut self, profile: ToolProfile) -> Self {
+        self.profile = std::sync::Arc::new(profile);
+        self
     }
 
     /// Start tracking an observed action: the screen and the action's key are
@@ -719,6 +753,7 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "What this iphone-use build supports, and whether the phone can be \
         driven right now. Read-only: it opens no device connection, wakes nothing, and \
         takes no owner lease, so it is safe to call before deciding what to do. \
@@ -745,6 +780,7 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = true),
         description = "Find an app's bundle id by name instead of guessing it. Read-only: \
         it never touches the screen and takes no owner lease. Searches the phone's own app \
         list, then a bundled catalog of popular apps (bundle ids verified against Apple's \
@@ -782,6 +818,7 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = true),
         description = "Capture the current iPhone screen through the device runner and \
         return it as an image/png content block (1200 px on the long side unless max_side \
         says otherwise). Right after an observed action this is instant: the screen as it \
@@ -817,11 +854,19 @@ impl PhoneHandler {
     // phone_tap
     // -----------------------------------------------------------------------
 
-    #[tool(description = "Tap the iPhone screen at a normalized position. \
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+        description = "Tap the iPhone screen at a normalized position. \
         x and y are in the range 0–1 where (0,0) is the top-left corner and \
         (1,1) is the bottom-right corner. Prefer phone_elements + \
         phone_tap_element for semantic controls; use phone_screenshot for \
-        pixel-only targets.")]
+        pixel-only targets."
+    )]
     async fn phone_tap(
         &self,
         Parameters(TapParams { x, y, observe }): Parameters<TapParams>,
@@ -835,11 +880,19 @@ impl PhoneHandler {
     // phone_scroll
     // -----------------------------------------------------------------------
 
-    #[tool(description = "Scroll with a device-side swipe. x,y = normalized anchor (0–1); \
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+        description = "Scroll with a device-side swipe. x,y = normalized anchor (0–1); \
         keep it away from text fields and screen edges. Positive dy reveals content farther \
         down, negative dy content above; dx likewise to the right/left. The swipe travels \
         1.5×|dy| points, clamped to 15–75% of the screen: dy≈80 moves about 15% of a screen, \
-        dy≈400 about 75%.")]
+        dy≈400 about 75%."
+    )]
     async fn phone_scroll(
         &self,
         Parameters(ScrollParams { x, y, dx, dy, observe }): Parameters<ScrollParams>,
@@ -855,6 +908,12 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "Type Unicode text into the currently focused iPhone field \
         through the device runner. Check phone_status.drivable and verify the focused element \
         before typing; text lands in whichever field currently owns keyboard focus."
@@ -871,9 +930,17 @@ impl PhoneHandler {
     // phone_key
     // -----------------------------------------------------------------------
 
-    #[tool(description = "Send a device-native named key. Supported names: \
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+        description = "Send a device-native named key. Supported names: \
         return/enter, escape, space, tab, delete/backspace, up, down, left, right. \
-        Other names return an explicit unsupported error.")]
+        Other names return an explicit unsupported error."
+    )]
     async fn phone_key(
         &self,
         Parameters(KeyParams { name, observe }): Parameters<KeyParams>,
@@ -896,12 +963,20 @@ impl PhoneHandler {
     // phone_shortcut
     // -----------------------------------------------------------------------
 
-    #[tool(description = "Trigger a supported iOS system shortcut. \
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+        description = "Trigger a supported iOS system shortcut. \
         Supported names: \
         'home' — go to the iOS Home Screen; \
         'spotlight' — open Spotlight search. \
         'switcher' is explicitly unsupported because the device runner cannot synthesize the \
-        system App Switcher gesture.")]
+        system App Switcher gesture."
+    )]
     async fn phone_shortcut(
         &self,
         Parameters(ShortcutParams { name, observe }): Parameters<ShortcutParams>,
@@ -928,13 +1003,19 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "THE DEFAULT WAY TO ACT: run a sequence of actions in ONE call and get the \
         screen it ended on back in the same reply (observe, on by default) — one turn instead of one \
         per tap. The daemon validates the whole \
         sequence first, holds one control lock, and stops at the first failure. Use it as soon as a \
         segment is understood; keep single-action tools for exploring an unknown screen. Step kinds: \
-        launch_app, tap_locator, tap_label, tap, type, key, shortcut, scroll, swipe, drag, longpress, \
-        back, alert (system alerts; taps on them do not act), picker, perform (toggle a \
+        launch_app, open_url, tap_locator, tap_label, tap, type, key, shortcut, scroll, swipe, drag, \
+        longpress, back, alert (system alerts; taps on them do not act), picker, perform (toggle a \
         switch, adjust a slider: element+snapshot from phone_elements), wait_for, pause. Guard every \
         screen change with wait_for; never batch an irreversible step you have not verified. These \
         step objects are exactly a saved flow's `steps` — when the response carries \
@@ -1022,6 +1103,7 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = true),
         description = "Read the phone's status without taking control. `owner` names the \
         session currently driving the phone (this session presents IPHONE_USE_OWNER, \
         else mcp-<pid>); if it is someone else, do not drive the phone — control calls \
@@ -1070,6 +1152,7 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = true),
         description = "Open the live iPhone screen panel beside the chat, or reuse the one \
         already open, in hosts that render MCP Apps: the person watches the phone while you \
         work and can press Home or refresh. Read-only: takes no owner lease and wakes \
@@ -1090,6 +1173,7 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = true),
         description = "Internal: one frame for the iphone-use screen panel. Called by the \
         panel itself (MCP Apps visibility [\"app\"]); models use phone_screenshot instead."
     )]
@@ -1117,16 +1201,29 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = true),
         description = "The current screen as text — use this instead of screenshots (an order \
         of magnitude cheaper). Rows carry kind, label, identifier, value, rect and state, plus a \
         `snapshot` token for phone_tap_element; indexes and snapshot tokens are valid for this read \
-        only. On the first read in a newly entered app a `registry` block lists saved flows for \
+        only. `query` keeps only rows containing that text (label, identifier, value, placeholder) \
+        and `limit` caps the rows — both keep each row's index and the snapshot, so taps still \
+        work. On the first read in a newly entered app a `registry` block lists saved flows for \
         it: if one does the task, phone_flow_run it instead of tapping step by step. An `alert` \
         block means a system alert is up: answer it with an `alert` step, taps on alerts do not act. \
         Requires phone_status drivable=true."
     )]
-    async fn phone_elements(&self) -> CallToolResult {
-        match self.daemon.elements_with_image().await {
+    async fn phone_elements(
+        &self,
+        Parameters(ElementsParams { query, limit }): Parameters<ElementsParams>,
+    ) -> CallToolResult {
+        // A narrowed read is not the whole screen: it must not become the
+        // no-progress tracker's baseline.
+        let narrowed = query.as_deref().is_some_and(|q| !q.trim().is_empty()) || limit.is_some();
+        match self
+            .daemon
+            .elements_with_image(query.as_deref(), limit)
+            .await
+        {
             // The daemon adds `registry` on the first read in a newly
             // entered app; compat per flow is added here.
             Ok(json) => {
@@ -1149,7 +1246,7 @@ impl PhoneHandler {
                     .and_then(crate::compact::elements)
                     .unwrap_or_else(|| body.clone());
                 if let Ok(mut tracker) = self.progress.lock() {
-                    tracker.note_screen(parsed.as_ref());
+                    tracker.note_screen(parsed.as_ref().filter(|_| !narrowed));
                 }
                 let mut content = vec![Content::text(text)];
                 if let Some(json) = parsed.as_ref() {
@@ -1199,6 +1296,12 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "Tap one element by its zero-based index and snapshot token \
         from the SAME phone_elements response. The daemon re-reads the tree and \
         refuses the action if the UI changed, so a stale element reference cannot \
@@ -1255,12 +1358,20 @@ impl PhoneHandler {
     // phone_tap_label (L2)
     // -----------------------------------------------------------------------
 
-    #[tool(description = "Tap an iPhone UI element by an EXACT visible label \
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+        description = "Tap an iPhone UI element by an EXACT visible label \
         (requires drivable=true in phone_status). Reads a fresh \
         phone_elements snapshot, requires exactly one match, then performs a \
         snapshot-bound tap. Zero or multiple matches return an error and send NO \
         action. For duplicate labels, choose by identifier/kind/state from \
-        phone_elements and call phone_tap_element with that response's snapshot.")]
+        phone_elements and call phone_tap_element with that response's snapshot."
+    )]
     async fn phone_tap_label(
         &self,
         Parameters(TapLabelParams { label, observe }): Parameters<TapLabelParams>,
@@ -1302,6 +1413,12 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "Start/restart on-device automation for the configured phone. \
         This occupies the phone and may require the operator to unlock it. \
         Use only to continue a current user-requested phone operation or screen/UI \
@@ -1326,6 +1443,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        ),
         description = "Mark the start of one task for the daemon's task metrics: every \
         later call of this session counts toward this run until phone_run_end. Optional \
         — without it, runs are inferred from idle gaps. Set complete_trace only if you \
@@ -1347,6 +1470,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        ),
         description = "Close the task opened with phone_run_start and get its summary: \
         tool calls (HTTP calls, not model turns), batches, observed actions, flow calls, \
         stale/unknown outcomes, failures and p50/p95 call time. Pass turn_ids only if \
@@ -1361,6 +1490,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "Read a scrolling list across pages in ONE call instead of scroll + read \
         turns: reads the rows of one kind (default Cell) on screen, swipes one page, reads \
         again, and stops when the list stops moving (duplicate_page), a page adds nothing \
@@ -1385,6 +1520,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "Find one exact label, swiping at most max_swipes times (default 1, \
         max 5) when it is not on screen. Stops AT ONCE — no further swipe — when the label \
         is ambiguous (several on-screen matches: `candidates` with index and frame), covered \
@@ -1406,6 +1547,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        ),
         description = "Keep the phone for a bounded human-in-the-loop pause inside the \
         current user-requested task (the operator types a PIN, approves a prompt, \
         fetches a code): the idle watchdog will not release it for `secs` seconds \
@@ -1425,6 +1572,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        ),
         description = "Hand the phone lease back when this session's phone task is \
         finished, so another session may drive it without waiting for the lease \
         to lapse. Only the current owner can release."
@@ -1439,6 +1592,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "Log the app on screen in with the user's OWN account from their password \
         vault (bitwarden-use on the Mac). The daemon reads the vault entry and types it into the \
         phone, so no password or username passes through this conversation. Use it when an app \
@@ -1480,6 +1639,7 @@ impl PhoneHandler {
     // -----------------------------------------------------------------------
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List installed registry flows: reviewed, deterministic per-app \
         scripts (id like `health/export-all`) that replay a whole task with NO model \
         and NO screenshots. CHECK THIS FIRST before driving an app step by step: if a \
@@ -1524,6 +1684,7 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Show one installed registry flow: metadata, declared inputs, and \
         its step templates (tap_label/tap_locator/wait_for/... with input placeholders, \
         never values). Use it to check preconditions (which app, which locale, verified \
@@ -1547,6 +1708,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "Run one flow exactly once — an installed registry id, or a flow file \
         path (*.json, e.g. a phone_flow_draft you are proving before publishing). A flow \
         that declares `outputs` returns what it read as top-level `outputs` (e.g. today's \
@@ -1699,6 +1866,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "Hand ONE whole goal to a fast on-phone agent instead of driving it step by \
         step: TypeSafe's Jev picks each next operation and target from the screen's element table \
         (~1–2 s per step instead of a model turn), a small LLM types field values. Use it for a \
@@ -1728,6 +1901,7 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Turn what you just did on the phone into a flow. The daemon records \
         every action it applied in the current app (single actions and phone_run_steps \
         batches, not flow runs); this returns that trail as a flow v1 document (snapshot \
@@ -1754,6 +1928,12 @@ impl PhoneHandler {
             return CallToolResult::error(vec![Content::text(response.body().to_string())]);
         };
         if let Some(path) = save_as {
+            // Read-only means nothing is written, a local file included.
+            if *self.profile == ToolProfile::ReadOnly {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "save_as is not available with {TOOLS_ENV}=readonly; the draft itself is                      returned without it"
+                ))]);
+            }
             match crate::flow::save_draft(&path, &draft["flow"]) {
                 Ok(validation) => {
                     draft["saved_as"] = serde_json::json!(path);
@@ -1770,6 +1950,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "Contribute a working flow to the official registry: fork if needed, add the \
         file (+ app.json for a new app), rebuild index.json, push a branch, and open a pull \
         request via the user's GitHub CLI login. OUTWARD-FACING: requires confirm=true, which \
@@ -1820,6 +2006,12 @@ impl PhoneHandler {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
         description = "File an issue on the official flow registry for an installed flow that \
         failed (label changed, app updated, wrong locale). Uses the failure captured by the last \
         phone_flow_run of that id — failed step, redacted daemon result, daemon version — so you \
@@ -1881,11 +2073,19 @@ impl PhoneHandler {
         }
     }
 
-    #[tool(description = "Mirror the official iphone-use flow registry \
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+        description = "Mirror the official iphone-use flow registry \
         (github.com/leeguooooo/iphone-use-flows) into the local store. Every file is \
         checksum-verified and strictly validated before it is written; locally added \
         flows are kept. Call once when phone_flow_list reports an empty store, or to \
-        pick up new flows. Network only; the phone is not touched.")]
+        pick up new flows. Network only; the phone is not touched."
+    )]
     async fn phone_flow_update(&self) -> CallToolResult {
         match crate::registry::update().await {
             Ok(report) => CallToolResult::success(vec![Content::text(
@@ -1974,9 +2174,118 @@ fn finish_result(tool: &str, result: CallToolResult, mode: StructuredMode) -> Ca
     }
 }
 
-/// What `tools/list` answers: slimmed schemas plus the MCP Apps `_meta`.
-fn listed_tools() -> Vec<rmcp::model::Tool> {
-    crate::screen::decorate_tools(slim_tools(PhoneHandler::tool_router().list_all()))
+/// What `tools/list` answers under `profile`: the tools it exposes, with
+/// slimmed schemas plus the MCP Apps `_meta`.
+fn listed_tools(profile: &ToolProfile) -> Vec<rmcp::model::Tool> {
+    let tools = PhoneHandler::tool_router()
+        .list_all()
+        .into_iter()
+        .filter(|tool| profile.allows(tool))
+        .collect();
+    crate::screen::decorate_tools(slim_tools(tools))
+}
+
+/// Which tools this server lists and accepts (`IPHONE_USE_MCP_TOOLS`).
+///
+/// `all` (the default) is the whole surface; `readonly` keeps the tools
+/// annotated `read_only_hint = true` (they never act on the phone); a comma
+/// list is an explicit allowlist of tool names. A hidden tool is neither
+/// listed nor callable: a call is refused with a message naming the setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolProfile {
+    All,
+    ReadOnly,
+    Allow(std::collections::BTreeSet<String>),
+}
+
+/// The environment variable that selects a [`ToolProfile`].
+const TOOLS_ENV: &str = "IPHONE_USE_MCP_TOOLS";
+
+impl ToolProfile {
+    /// Read `IPHONE_USE_MCP_TOOLS`; problems with it go to stderr (stdout is
+    /// the MCP pipe).
+    pub(crate) fn from_env() -> Self {
+        let raw = std::env::var(TOOLS_ENV).ok();
+        let (profile, warnings) = Self::parse(raw.as_deref());
+        for warning in warnings {
+            eprintln!("iphone-use-mcp: {warning}");
+        }
+        profile
+    }
+
+    /// Parse a setting against the real tool surface. Unknown names in an
+    /// allowlist are dropped with a warning; the panel's frame tool follows
+    /// `phone_screen`, since the panel cannot draw without it.
+    fn parse(raw: Option<&str>) -> (Self, Vec<String>) {
+        let raw = raw.map(str::trim).unwrap_or_default();
+        match raw.to_ascii_lowercase().as_str() {
+            "" | "all" => return (Self::All, Vec::new()),
+            "readonly" | "read-only" | "read_only" => return (Self::ReadOnly, Vec::new()),
+            _ => {}
+        }
+        let known: std::collections::BTreeSet<String> = PhoneHandler::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        let mut warnings = Vec::new();
+        let mut allowed = std::collections::BTreeSet::new();
+        for name in raw.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+            if known.contains(name) {
+                allowed.insert(name.to_string());
+            } else {
+                warnings.push(format!("{TOOLS_ENV}: unknown tool {name:?} ignored"));
+            }
+        }
+        if allowed.contains(crate::screen::SCREEN_TOOL) {
+            allowed.insert(crate::screen::FRAME_TOOL.to_string());
+        }
+        if allowed.is_empty() {
+            warnings.push(format!(
+                "{TOOLS_ENV}={raw:?} names no known tool; no tools are exposed \
+                 (use all, readonly, or a comma list of tool names)"
+            ));
+        }
+        (Self::Allow(allowed), warnings)
+    }
+
+    fn allows(&self, tool: &rmcp::model::Tool) -> bool {
+        match self {
+            Self::All => true,
+            Self::ReadOnly => tool
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.read_only_hint)
+                == Some(true),
+            Self::Allow(names) => names.contains(tool.name.as_ref()),
+        }
+    }
+
+    /// The refusal for a call to `name`, or `None` when the profile exposes
+    /// it. Unknown names fall through to the router's own error.
+    fn refusal(&self, name: &str) -> Option<CallToolResult> {
+        let router = PhoneHandler::tool_router();
+        let tool = router.get(name)?;
+        if self.allows(tool) {
+            return None;
+        }
+        let why = match self {
+            Self::All => return None,
+            Self::ReadOnly => format!(
+                "{TOOLS_ENV}=readonly exposes only read-only tools (observation, lookup, flow \
+                 list/info/draft)"
+            ),
+            Self::Allow(names) => format!(
+                "{TOOLS_ENV} allows only: {}",
+                names.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
+            ),
+        };
+        Some(CallToolResult::error(vec![Content::text(format!(
+            "{name} is not available in this session: {why}. Nothing was sent to the phone. \
+             The operator can change {TOOLS_ENV} in the MCP server's environment (all, readonly, \
+             or a comma list of tool names)."
+        ))]))
+    }
 }
 
 /// How much of a result's JSON goes out as `structuredContent`
@@ -2061,6 +2370,9 @@ impl ServerHandler for PhoneHandler {
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let name = request.name.clone();
+        if let Some(refusal) = self.profile.refusal(&name) {
+            return Ok(refusal);
+        }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let result = Self::tool_router().call(tcc).await?;
         Ok(finish_result(&name, result, StructuredMode::from_env()))
@@ -2072,7 +2384,7 @@ impl ServerHandler for PhoneHandler {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult {
-            tools: listed_tools(),
+            tools: listed_tools(&self.profile),
             meta: None,
             next_cursor: None,
         })
@@ -2154,6 +2466,20 @@ fn phone_locator_has_condition(locator: &PhoneElementLocator) -> bool {
 /// Longest text one step (or a whole batch) may type — the daemon's
 /// `text_input::MAX_TEXT_CHARS`, in Unicode scalar values.
 const MAX_TEXT_CHARS: usize = 20_000;
+
+/// The longest `open_url` the daemon accepts (contract with /agent/actions).
+const MAX_URL_CHARS: usize = 2048;
+
+/// Whether `url` starts with an RFC 3986 scheme (`ALPHA *( ALPHA / DIGIT /
+/// "+" / "-" / "." ) ":"`). Which schemes may open is the daemon's call.
+fn url_has_scheme(url: &str) -> bool {
+    let Some((scheme, _)) = url.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
 
 pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::Value, String> {
     const MAX_STEPS: usize = 24;
@@ -2456,6 +2782,17 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                     serde_json::json!({"type":"launch_app","bundle":bundle}),
                     after_ms,
                 )
+            }
+            PhoneStep::OpenUrl { url, after_ms } => {
+                validate_after(after_ms)?;
+                let url = url.trim().to_string();
+                if url.is_empty() || url.chars().count() > MAX_URL_CHARS || !url_has_scheme(&url) {
+                    return Err(format!(
+                        "steps[{index}].url must be an absolute URL with a scheme (https://…, \
+                         weixin://…) of at most {MAX_URL_CHARS} characters; no action was sent"
+                    ));
+                }
+                action_step(serde_json::json!({"type":"open_url","url":url}), after_ms)
             }
             PhoneStep::Back { after_ms } => {
                 validate_after(after_ms)?;
@@ -3305,6 +3642,215 @@ mod tests {
         }
     }
 
+    /// The tools that only read: no phone input, no outward-facing writes.
+    /// `IPHONE_USE_MCP_TOOLS=readonly` exposes exactly these.
+    const READ_ONLY_TOOLS: [&str; 10] = [
+        "phone_apps",
+        "phone_capabilities",
+        "phone_elements",
+        "phone_flow_draft",
+        "phone_flow_info",
+        "phone_flow_list",
+        "phone_screen",
+        "phone_screen_frame",
+        "phone_screenshot",
+        "phone_status",
+    ];
+
+    /// Every tool states read_only_hint and open_world_hint explicitly (the
+    /// spec defaults would call every tool a destructive open-world one), and
+    /// the read-only set is exactly the intended one. Acting tools also say
+    /// whether they are destructive and idempotent.
+    #[test]
+    fn every_tool_declares_its_annotations() {
+        let tools = PhoneHandler::tool_router().list_all();
+        let mut read_only = Vec::new();
+        for tool in &tools {
+            let name = tool.name.as_ref();
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} has no annotations"));
+            let ro = annotations
+                .read_only_hint
+                .unwrap_or_else(|| panic!("{name} does not declare read_only_hint"));
+            assert!(
+                annotations.open_world_hint.is_some(),
+                "{name} does not declare open_world_hint"
+            );
+            if ro {
+                read_only.push(name);
+            } else {
+                assert!(
+                    annotations.destructive_hint.is_some() && annotations.idempotent_hint.is_some(),
+                    "{name} acts but does not declare destructive/idempotent hints"
+                );
+            }
+        }
+        read_only.sort_unstable();
+        assert_eq!(read_only, READ_ONLY_TOOLS);
+
+        // Anything that sends input to the phone or publishes is destructive.
+        for name in ["phone_tap", "phone_run_steps", "phone_flow_run", "phone_flow_publish"] {
+            let tool = tools.iter().find(|t| t.name.as_ref() == name).unwrap();
+            assert_eq!(
+                tool.annotations.as_ref().unwrap().destructive_hint,
+                Some(true),
+                "{name}"
+            );
+        }
+        // The hints reach the wire under their MCP names.
+        let listed = serde_json::to_value(listed_tools(&ToolProfile::All)).unwrap();
+        let status = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "phone_status")
+            .unwrap();
+        assert_eq!(status["annotations"]["readOnlyHint"], true);
+    }
+
+    fn listed_names(profile: &ToolProfile) -> Vec<String> {
+        let mut names: Vec<String> = listed_tools(profile)
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn the_all_profile_is_the_default_and_hides_nothing() {
+        for raw in [None, Some(""), Some("all"), Some(" ALL ")] {
+            let (profile, warnings) = ToolProfile::parse(raw);
+            assert_eq!(profile, ToolProfile::All, "{raw:?}");
+            assert!(warnings.is_empty());
+        }
+        let all = PhoneHandler::tool_router().list_all().len();
+        assert_eq!(listed_names(&ToolProfile::All).len(), all);
+        assert!(ToolProfile::All.refusal("phone_tap").is_none());
+    }
+
+    #[test]
+    fn the_readonly_profile_lists_and_accepts_only_read_only_tools() {
+        let (profile, warnings) = ToolProfile::parse(Some("readonly"));
+        assert_eq!(profile, ToolProfile::ReadOnly);
+        assert!(warnings.is_empty());
+        assert_eq!(listed_names(&profile), READ_ONLY_TOOLS);
+
+        for name in READ_ONLY_TOOLS {
+            assert!(profile.refusal(name).is_none(), "{name} refused");
+        }
+        let refused = profile.refusal("phone_tap").expect("phone_tap is hidden");
+        assert_eq!(refused.is_error, Some(true));
+        let text = text_of(&refused);
+        assert!(text.contains("IPHONE_USE_MCP_TOOLS=readonly"), "{text}");
+        assert!(text.contains("phone_tap"), "{text}");
+        // A name that is no tool at all is left to the router's own error.
+        assert!(profile.refusal("phone_nonexistent").is_none());
+    }
+
+    #[test]
+    fn readonly_returns_a_draft_but_never_writes_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("draft.json");
+        let (url, server) = scripted_daemon(
+            "200 OK",
+            br#"{"ok":true,"flow":{"version":1,"app":"com.example","steps":[]},"todo":[]}"#.to_vec(),
+        );
+        let handler = handler_for(&url).with_profile(ToolProfile::ReadOnly);
+        let result = block(handler.phone_flow_draft(Parameters(FlowDraftParams {
+            save_as: Some(target.display().to_string()),
+        })));
+        server.join().unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(text_of(&result).contains("IPHONE_USE_MCP_TOOLS=readonly"));
+        assert!(!target.exists(), "nothing may be written in readonly mode");
+    }
+
+    #[test]
+    fn an_allowlist_profile_keeps_named_tools_and_ignores_unknown_ones() {
+        let (profile, warnings) =
+            ToolProfile::parse(Some("phone_status, phone_tap,phone_bogus,,phone_screen"));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("phone_bogus"), "{warnings:?}");
+        // The panel's frame tool follows phone_screen.
+        assert_eq!(
+            listed_names(&profile),
+            ["phone_screen", "phone_screen_frame", "phone_status", "phone_tap"]
+        );
+        assert!(profile.refusal("phone_tap").is_none());
+        let refused = profile.refusal("phone_run_steps").expect("hidden");
+        let text = text_of(&refused);
+        assert!(text.contains("IPHONE_USE_MCP_TOOLS allows only"), "{text}");
+        assert!(text.contains("phone_status"), "{text}");
+
+        let (empty, warnings) = ToolProfile::parse(Some("nope"));
+        assert_eq!(empty, ToolProfile::Allow(Default::default()));
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(listed_names(&empty).is_empty());
+        assert!(handler_for("http://127.0.0.1:9")
+            .with_profile(empty)
+            .profile
+            .refusal("phone_status")
+            .is_some());
+    }
+
+    #[test]
+    fn phone_elements_passes_query_and_limit_through() {
+        use crate::client::elements_path;
+        assert_eq!(elements_path(None, None), "/agent/elements?image=auto");
+        assert_eq!(
+            elements_path(Some("Wi-Fi & 蓝牙"), Some(5)),
+            "/agent/elements?image=auto&query=Wi-Fi+%26+%E8%93%9D%E7%89%99&limit=5"
+        );
+        // A blank query is no filter.
+        assert_eq!(
+            elements_path(Some("  "), Some(0)),
+            "/agent/elements?image=auto&limit=0"
+        );
+        let tool = PhoneHandler::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name.as_ref() == "phone_elements")
+            .unwrap();
+        let properties = tool.input_schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("query") && properties.contains_key("limit"));
+        assert!(tool
+            .input_schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .is_none_or(|r| r.is_empty()));
+    }
+
+    #[test]
+    fn open_url_is_a_run_steps_kind() {
+        let steps: Vec<PhoneStep> = serde_json::from_value(serde_json::json!([
+            {"kind": "open_url", "url": " https://example.com/a?b=1 ", "after_ms": 200}
+        ]))
+        .unwrap();
+        let request = phone_steps_request(steps).unwrap();
+        assert_eq!(
+            request["steps"][0]["action"],
+            serde_json::json!({"type": "open_url", "url": "https://example.com/a?b=1"})
+        );
+        assert_eq!(request["steps"][0]["after_ms"], 200);
+
+        // Scheme policy is the daemon's; the MCP only refuses what is not a URL.
+        let ok: Vec<PhoneStep> =
+            serde_json::from_value(serde_json::json!([{"kind": "open_url", "url": "weixin://"}]))
+                .unwrap();
+        assert!(phone_steps_request(ok).is_ok());
+        for bad in ["", "example.com", "://x", "1http://x", &format!("https://{}", "a".repeat(2048))]
+        {
+            let steps: Vec<PhoneStep> =
+                serde_json::from_value(serde_json::json!([{"kind": "open_url", "url": bad}]))
+                    .unwrap();
+            let error = phone_steps_request(steps).unwrap_err();
+            assert!(error.contains("no action was sent"), "{bad}: {error}");
+        }
+    }
+
     #[test]
     fn multi_step_request_encodes_actions_and_semantic_waits() {
         let request = phone_steps_request(vec![
@@ -3698,7 +4244,7 @@ mod tests {
 
     #[test]
     fn tools_list_carries_the_mcp_apps_meta() {
-        let tools = serde_json::to_value(listed_tools()).unwrap();
+        let tools = serde_json::to_value(listed_tools(&ToolProfile::All)).unwrap();
         let tools = tools.as_array().unwrap();
         let find = |name: &str| {
             tools
