@@ -102,6 +102,9 @@ const SCREEN_FRAME_TIMEOUT: Duration = Duration::from_secs(6);
 /// App lookup by name may read the phone's inventory cold: two devicectl
 /// calls with 30 s deadlines each, then (rarely) a 5 s store search.
 const APPS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(75);
+/// `install` downloads up to 2 GB and runs devicectl; the daemon answers
+/// when the phone has the app or has refused it.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_ERROR_BODY_CHARS: usize = 2_048;
 
 /// Characters the daemon types in one runner request; longer text is chunked.
@@ -368,6 +371,22 @@ impl DaemonClient {
         }
     }
 
+    /// A client for one more MCP session of this process (`--listen`): same
+    /// daemon and token, its own owner name (`<owner>-<n>`, so two remote
+    /// agents never share one phone lease), snapshot baseline and run id.
+    pub fn for_session(&self, n: u64) -> Self {
+        let suffix = format!("-{n}");
+        let mut owner = self.owner.clone();
+        owner.truncate(64 - suffix.len());
+        owner.push_str(&suffix);
+        Self {
+            owner,
+            last_snapshot: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            run_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            ..self.clone()
+        }
+    }
+
     /// The same client, marking every request as part of a flow replay.
     pub fn for_flow(&self) -> Self {
         Self {
@@ -617,8 +636,37 @@ impl DaemonClient {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> anyhow::Result<DaemonResponse> {
+        self.request_json_within(method, path, body, REQUEST_TIMEOUT).await
+    }
+
+    /// `POST /agent/input {"type":"install",…}`: [`Self::request_json`] with
+    /// the install deadline.
+    pub async fn install(&self, body: &serde_json::Value) -> anyhow::Result<DaemonResponse> {
+        self.request_json_within(reqwest::Method::POST, "/agent/input", Some(body), INSTALL_TIMEOUT)
+            .await
+    }
+
+    /// `PUT <path>` with a Markdown body (app notes), keeping the answer.
+    pub async fn put_markdown(&self, path: &str, text: &str) -> anyhow::Result<DaemonResponse> {
+        let req = self
+            .auth(self.client.put(self.url(path)))
+            .header("x-phone-control", "1")
+            .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+            .body(text.to_string());
+        read_response(req.send().await?).await
+    }
+
+    async fn request_json_within(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        timeout: Duration,
+    ) -> anyhow::Result<DaemonResponse> {
         let mutation = method != reqwest::Method::GET;
-        let mut req = self.auth(self.client.request(method, self.url(path)));
+        let mut req = self
+            .auth(self.client.request(method, self.url(path)))
+            .timeout(timeout);
         if mutation {
             req = req
                 .header("x-phone-control", "1");
@@ -658,10 +706,24 @@ impl DaemonClient {
     /// `GET /agent/screenshot` — returns raw PNG bytes, shrunk to `max_side`
     /// on the long side when given.
     pub async fn screenshot(&self, max_side: Option<u32>) -> anyhow::Result<Vec<u8>> {
-        let path = match max_side {
-            Some(side) => format!("/agent/screenshot?max_side={side}"),
-            None => "/agent/screenshot".to_string(),
-        };
+        self.screenshot_with(max_side, false).await
+    }
+
+    /// [`Self::screenshot`], with each interactive element's frame and index
+    /// drawn on it when `overlay` (`overlay=elements`).
+    pub async fn screenshot_with(
+        &self,
+        max_side: Option<u32>,
+        overlay: bool,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut params = Vec::new();
+        if let Some(side) = max_side {
+            params.push(("max_side", side.to_string()));
+        }
+        if overlay {
+            params.push(("overlay", "elements".to_string()));
+        }
+        let path = query_path("/agent/screenshot", &params);
         let req = self.auth(self.client.get(self.url(&path)));
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
@@ -707,12 +769,16 @@ impl DaemonClient {
     /// rows whose label, identifier, value or placeholder contain the text,
     /// `limit` caps the rows returned. Kept rows carry their original index
     /// and the snapshot is the full read's, so taps by element stay valid.
+    ///
+    /// `ocr` (`1` or `force`) asks for text read from a fresh screenshot when
+    /// the tree is unusable (or always, with `force`).
     pub async fn elements_with_image(
         &self,
         query: Option<&str>,
         limit: Option<usize>,
+        ocr: Option<&str>,
     ) -> anyhow::Result<String> {
-        self.elements_at(&elements_path(query, limit)).await
+        self.elements_at(&elements_path(query, limit, ocr)).await
     }
 
     async fn elements_at(&self, path: &str) -> anyhow::Result<String> {
@@ -1082,18 +1148,32 @@ fn url_query_escape(value: &str) -> String {
 
 /// The model-facing `/agent/elements` path: `image=auto`, plus `query` and
 /// `limit` when given (a blank query is no filter), percent-encoded.
-pub(crate) fn elements_path(query: Option<&str>, limit: Option<usize>) -> String {
-    let mut url = reqwest::Url::parse("http://daemon/agent/elements").expect("static URL");
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("image", "auto");
-        if let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) {
-            pairs.append_pair("query", query);
-        }
-        if let Some(limit) = limit {
-            pairs.append_pair("limit", &limit.to_string());
-        }
+pub(crate) fn elements_path(
+    query: Option<&str>,
+    limit: Option<usize>,
+    ocr: Option<&str>,
+) -> String {
+    let mut params = vec![("image", "auto".to_string())];
+    if let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) {
+        params.push(("query", query.to_string()));
     }
+    if let Some(limit) = limit {
+        params.push(("limit", limit.to_string()));
+    }
+    if let Some(ocr) = ocr {
+        params.push(("ocr", ocr.to_string()));
+    }
+    query_path("/agent/elements", &params)
+}
+
+/// `path?k=v&…` with each value form-encoded; `path` alone without params.
+pub(crate) fn query_path(path: &str, params: &[(&str, String)]) -> String {
+    if params.is_empty() {
+        return path.to_string();
+    }
+    let mut url = reqwest::Url::parse("http://daemon/").expect("static URL");
+    url.set_path(path);
+    url.query_pairs_mut().extend_pairs(params);
     format!("{}?{}", url.path(), url.query().unwrap_or_default())
 }
 

@@ -17,15 +17,19 @@ iu_core = { package = "core", path = "../core" }
 #   macros        — #[tool], #[tool_router] proc-macro (default-on)
 #   transport-io  — tokio stdio transport for the MCP stdio server mode
 #   schemars      — JSON Schema generation for tool parameter types
-rmcp = { version = "1.7.0", features = ["server", "macros", "transport-io", "schemars"] }
+#   transport-streamable-http-server — `--listen`: MCP over streamable HTTP
+rmcp = { version = "1.7.0", features = ["server", "macros", "transport-io", "schemars", "transport-streamable-http-server"] }
 schemars = "0.8"
 
 # HTTP client — same version / features as crates/server so the workspace
 # resolves a single copy of the crate.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# `--listen` serves rmcp's streamable HTTP service; same axum as crates/server.
+axum = "0.7"
+
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 
 # Logging — stderr so it does not contaminate the MCP stdio pipe
 tracing = "0.1"

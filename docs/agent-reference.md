@@ -265,14 +265,19 @@ only on a trusted network.
 |---|---|
 | `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, keep_runner_alive, device, …}` — gate on `drivable` |
 | `GET /agent/capabilities` | What this build supports + whether the phone is drivable now (`blocked_by`); touches nothing |
-| `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `IPHONE_USE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max`. `?scope=`, `?query=` and `?limit=` filter the same read ([below](#scoped-and-searched-reads)) |
-| `GET /agent/screenshot` | Device PNG. `?max_side=1200` shrinks it (~0.9k image tokens instead of ~1.5k; MCP's default) and lets a current live frame answer while someone watches. `X-Capture-Redacted: 1` = wireframe of a protected screen ([below](#screens-hidden-from-capture)); `?raw=1` untouched. A sized request is shrunk and JPEG-encoded on the phone, so a slow link carries ~50–100 KB instead of a multi-MB PNG. A capture the link cuts or times out is retried once smaller (`X-Screenshot-Degraded: max_side=N`); a failure is JSON with `cause` (`timeout`, `body_truncated`, `connection_lost`, `connect`, `runner_error`), `transport` and `attempts` (504 on timeout, else 502) |
+| `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `IPHONE_USE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max`. `?scope=`, `?query=` and `?limit=` filter the same read ([below](#scoped-and-searched-reads)). `?ocr=auto` adds `ocr:{rows,source}` text rows when the tree is unusable, `?ocr=force` always ([below](#vision-fallback)) |
+| `GET /agent/screenshot` | Device PNG. `?max_side=1200` shrinks it (~0.9k image tokens instead of ~1.5k; MCP's default) and lets a current live frame answer while someone watches. `X-Capture-Redacted: 1` = wireframe of a protected screen ([below](#screens-hidden-from-capture)); `?raw=1` untouched. A sized request is shrunk and JPEG-encoded on the phone, so a slow link carries ~50–100 KB instead of a multi-MB PNG. A capture the link cuts or times out is retried once smaller (`X-Screenshot-Degraded: max_side=N`); a failure is JSON with `cause` (`timeout`, `body_truncated`, `connection_lost`, `connect`, `runner_error`), `transport` and `attempts` (504 on timeout, else 502). `?overlay=elements` numbers each interactive element on the picture ([below](#vision-fallback)) |
 | `POST /agent/input` | One action; `?return=delta` adds the settled change |
 | `POST /agent/actions` | `{"steps":[…]}`: up to 24 `action` / `wait_for` / `pause` steps, validated first, stops at the first failure |
 | `POST /agent/collect` | Read a list across pages: rows of `row_kind`, one swipe per page, deduplicated ([below](#long-lists-collect-and-scroll_find)) |
 | `POST /agent/scroll_find` | Is this label on screen and tappable? Swipe at most `max_swipes` (default 1) to find it ([below](#long-lists-collect-and-scroll_find)) |
 | `GET /agent/flow/draft` | The daemon's recorded trail as a flow v1 draft ([below](#saving-a-flow)) |
 | `GET /agent/activity` | What agents did, in plain words, for people watching: `{items:[{seq,at_ms,text,text_zh,owner?}], next, budget?}`; `?since=<next>` for newer lines only ([below](#owner-limits-and-the-activity-feed)) |
+| `GET /agent/logs`, `POST /agent/logs` | The phone's system log: `POST {"action":"start"\|"stop"\|"clear"}` → `{ok, capturing}`; `GET ?since=&process=&contains=&level=&limit=` → `{items:[{seq,ts,process,subsystem?,pid,level,message}], next, capturing, missed?, stopped?}` ([below](#device-logs-crash-reports-location-and-recording)) |
+| `GET /agent/crashes`, `GET /agent/crashes/<name>` | Crash reports: `?process=&since=&limit=` → `{items:[{name,folder?,process,time,stamp?,size}]}`; one report → `{name, text, size, truncated}` (first 2 MB) |
+| `POST /agent/location` | `{"lat":…,"lon":…}` or `{"clear":true}`: simulated GPS position; one action |
+| `POST /agent/record`, `GET /agent/record` | Screen recording to MP4: `{"action":"start"}` → `{recording}`, `{"action":"stop"}` → `{summary:{path,seconds,frames,bytes,width,height,ended?}}` |
+| `GET /agent/app-notes?bundle=`, `PUT …` | Per-app notes (markdown, ≤16 KB): `{bundle, text, updated_at?}` ([below](#app-notes)) |
 | `GET /agent/reference` | This document, as compiled into the running daemon (`text/markdown`) |
 | `GET /agent/apps` | Installed apps `{device, apps:[{bundle,name,version,bundle_version,system,…}]}`; `?bundle=`; cached 10 min (`?refresh=1`). `503 apps_unavailable` = unknown, not "not installed" |
 | `GET /agent/apps?query=<name>` | App lookup by name: `{candidates:[{name,bundle_id,source,installed_verified,match,publisher?}], installation_checked, warnings}`. `source=auto` (phone's app list → bundled catalog → App Store), `installed`, `catalog` (offline), `apple` (`country=cn`, rate limited). Exact matches hide partial ones. MCP `phone_apps` |
@@ -343,6 +348,20 @@ Flows cannot record it yet: a saved draft lists it under `todo`.
 `force_press` answers `422 force_press_unsupported` (retry-safe, nothing sent)
 on every iPhone since XR/11; use `menu`. App uninstall: `{"type":"uninstall","bundle":…}`
 (destructive; HTTP only).
+
+**Installing an app.** `{"type":"install","path":"/abs/App.ipa"}` (an `.ipa`
+or a built `.app` folder on the Mac running the daemon) or
+`{"type":"install","url":"https://…/App.ipa"}` (https only, downloaded to a
+temporary folder that is removed afterwards; at most 2 GB). Add
+`"fresh":true` to uninstall it first, so it starts with no data. It goes
+through Xcode's `devicectl` on macOS (other hosts answer
+`501 install_needs_macos`) and can take minutes for a large app; the app must
+be signed for this phone. The bundle id is read from the app's `Info.plist`
+(inside `Payload/` for an `.ipa`): a blocked app is refused (`403
+blocked_app`), and while the owner blocks any app an unreadable one is too
+(`403 install_unverified`). Answers `{ok, bundle, installed:true}`; a bad
+request is `400 invalid_install` with a `hint`, nothing run. Destructive, one
+action, never in a batch.
 
 ## Jev: hand over a whole goal
 
@@ -625,6 +644,46 @@ the first line, tap inside the input box to bring up the edit menu and pick
 whole draft back, then send once. No such menu item: stop and ask whether one
 line is acceptable. Never press Return to get a line break.
 
+## Device logs, crash reports, location and recording
+
+These talk to the daemon's configured phone directly (its lockdown services),
+not through the runner, so they work while the screen is locked or the app
+under test has crashed. Without a configured phone they answer
+`503 device_not_configured`; a phone that cannot be reached is
+`502 device_service_failed` (or `504 device_timeout`) with `detail` and a
+`hint`. The POSTs need `X-Phone-Control: 1` and take the owner lease like
+`/agent/input`.
+
+- **Logs.** `POST /agent/logs {"action":"start"}` starts capturing the
+  system log into a ring of the last 5,000 lines; reproduce the problem, then
+  `GET /agent/logs?process=MyApp&level=error` (`level` returns that level and
+  more severe: `debug`, `info`, `notice`, `warning`, `error`, `fault`;
+  `contains` is a case-insensitive substring; `limit` up to 5,000, default
+  the newest 200). Pass the answer's `next` as `since` to get only newer
+  lines; `missed` counts lines the ring dropped in between. A capture stops by
+  itself 15 minutes after the last read (`stopped` says why); `stop` ends it,
+  `clear` empties the ring. Lines stay in memory and never reach the daemon's
+  own log.
+- **Crash reports.** `GET /agent/crashes?process=MyApp&since=<unix>` lists
+  reports newest first (a crash from seconds ago is included: the phone is
+  asked to move pending reports first); `GET /agent/crashes/<name>` returns
+  one report's text, cut at 2 MB (`truncated`). A name is a bare file name as
+  listed (`400 invalid_name` otherwise; `404 not_found` when it is gone).
+- **Location.** `POST /agent/location {"lat":35.6812,"lon":139.7671}` moves
+  the phone's reported GPS position for every app; `{"clear":true}` gives
+  the real one back. It needs Developer Mode and the Developer Disk Image
+  (connect the phone to Xcode once). One action against the run budget; the
+  activity feed says "Set a simulated location", never the coordinates.
+- **Recording.** `POST /agent/record {"action":"start"}` records the live
+  view to `<state dir>/runs/recordings/<time>.mp4`; `{"action":"stop"}`
+  answers `{summary:{path,seconds,frames,bytes,width,height,ended?}}`
+  (`summary:null` when nothing was recording). One recording at a time
+  (`409 already_recording`); it stops by itself after 10 minutes or 200 MB
+  (`ended`), and `stop` still returns the file. It needs the macOS live
+  view (`503 video_unavailable` otherwise); `502 recording_empty` means no
+  frame arrived, so there is no file. `GET /agent/record` shows a running
+  recording's progress.
+
 ## Getting files from the phone to the Mac
 
 AirDrop is the shortest path for a photo, video or document the task needs
@@ -637,12 +696,13 @@ worked example below.
 
 ## MCP specifics
 
-31 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
+37 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
 `phone_release_owner`, `phone_login`, `phone_apps`, `phone_screenshot`, `phone_elements`, `phone_tap`,
 `phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_scroll_find`, `phone_collect_list`, `phone_type`,
 `phone_key`, `phone_shortcut`, `phone_run_steps`, `phone_jev_run`,
-`phone_run_start`, `phone_run_end`, and `phone_flow_list / info / run / draft /
-update / publish / report`.
+`phone_run_start`, `phone_run_end`, `phone_flow_list / info / run / draft /
+update / publish / report`, and the device tools `phone_logs`, `phone_crashes`,
+`phone_set_location`, `phone_record`, `phone_install_app`, `phone_app_notes`.
 
 - The text block is compact and meant for the model. It carries the settled
   change, one line per element, or a batch's verdict and end screen; for a
@@ -666,18 +726,36 @@ update / publish / report`.
 - `phone_elements` takes `query` (keep rows whose label, identifier, value or
   placeholder contain the text) and `limit` (cap the rows). Each kept row keeps
   its index and the snapshot is the full read's, so `phone_tap_element` works
-  on a narrowed read.
+  on a narrowed read. `ocr` (`auto` | `force` | `off`, default off) maps to
+  `?ocr=1` / `?ocr=force`; OCR rows are printed under the tree with their
+  centre as `phone_tap` x/y, and an `ocr_error` never fails the read.
+  `phone_screenshot overlay=true` is `?overlay=elements`.
+- Device tools map one-to-one onto the daemon routes: `phone_logs` →
+  `POST/GET /agent/logs`, `phone_crashes` → `GET /agent/crashes[/:name]`,
+  `phone_set_location` → `POST /agent/location`, `phone_record` →
+  `POST/GET /agent/record`, `phone_install_app` → `/agent/input`
+  `{"type":"install"}` (15-minute deadline), `phone_app_notes` →
+  `GET/PUT /agent/app-notes`. Malformed arguments (a filter on
+  `action=start`, an out-of-range coordinate, an `http:` install URL, a
+  relative path, a non-bundle id, notes over 16 KB) are refused before
+  anything is sent.
 - Every tool declares MCP annotations (`readOnlyHint`, `openWorldHint`; acting
   tools also `destructiveHint`, `idempotentHint`). Read-only: `phone_status`,
   `phone_capabilities`, `phone_apps`, `phone_screen`, `phone_screen_frame`,
-  `phone_screenshot`, `phone_elements`, `phone_flow_list`, `phone_flow_info`,
-  `phone_flow_draft`.
+  `phone_screenshot`, `phone_elements`, `phone_crashes`, `phone_flow_list`,
+  `phone_flow_info`, `phone_flow_draft`. `phone_logs` is not read-only (its
+  start/stop change the capture); `phone_install_app` is destructive.
 - `IPHONE_USE_MCP_TOOLS` picks the exposed tools: `all` (default), `readonly`
   (only the read-only set), or a comma list of tool names (unknown names are
   warned about on stderr and ignored). A hidden tool is not listed, and a call
   to it is refused with an error naming the setting; nothing is sent.
-- Not in MCP: `set_value`, `keyboard`, element/page `scroll`, uninstall,
-  intents. `launch_app`, `open_url`, `alert`, `picker`, `perform`, `swipe`,
+- `iphone-use-mcp --listen ADDR` serves the same tools over streamable HTTP at
+  `http://ADDR/mcp`. With `IPHONE_USE_MCP_TOKEN` set every request needs
+  `Authorization: Bearer <token>` (else 401); without it only a loopback
+  address is accepted. Each HTTP session presents its own owner
+  (`<owner>-<n>`).
+- Not in MCP: `set_value`, `keyboard`, element/page `scroll`, uninstall
+  (except `phone_install_app fresh=true`), intents. `launch_app`, `open_url`, `alert`, `picker`, `perform`, `swipe`,
   `drag`, `longpress`, `back` exist only as `phone_run_steps` step kinds.
 
 ## Task metrics, runs and advice
@@ -753,8 +831,8 @@ agent's prompt says. The first two are off by default:
 
 | Setting | Effect |
 |---|---|
-| `IPHONE_USE_BLOCKED_APPS` | Comma-separated bundle ids or app names (`Wallet, com.example.bank, 微信`). An agent cannot open or uninstall them, and while one is in front only leaving is allowed: `{"type":"home"}` or `launch_app` of another app (`collect` and `scroll_find` are refused there too). |
-| `IPHONE_USE_MAX_ACTIONS` | Actions per run and `X-Phone-Owner`: a batch counts each `action` step; `collect`, `scroll_find` and an intent count one each. A run starts with `POST /agent/run {"action":"start"}`, or after 2 minutes without an action. |
+| `IPHONE_USE_BLOCKED_APPS` | Comma-separated bundle ids or app names (`Wallet, com.example.bank, 微信`). An agent cannot open, install or uninstall them, and while one is in front only leaving is allowed: `{"type":"home"}` or `launch_app` of another app (`collect` and `scroll_find` are refused there too). |
+| `IPHONE_USE_MAX_ACTIONS` | Actions per run and `X-Phone-Owner`: a batch counts each `action` step; `collect`, `scroll_find`, an intent, a simulated location and an app install count one each. A run starts with `POST /agent/run {"action":"start"}`, or after 2 minutes without an action. |
 | `IPHONE_USE_ALLOW_URL_SCHEMES` | URL schemes `open_url` may open besides `http`/`https`, comma-separated (`tel, weixin`), or `*` for any. Unset, every other scheme is refused: `tel:` dials, `sms:`/`mailto:` compose, and an app scheme drives that app. |
 
 A refusal is `403` with `outcome:"not_sent"` and a `hint`: nothing reached the
@@ -780,7 +858,10 @@ launchctl bootout gui/$(id -u) "$plist"; launchctl bootstrap gui/$(id -u) "$plis
 words, resolved from the screen the action named: `Tapped “Wi-Fi”`,
 `Opened Settings`, `Typed 12 characters`, `Opened a link to example.com`
 (typed text and set values are never kept, only their length; a link shows its
-host only, or for other schemes only the scheme, such as `Opened a tel: link`). `GET /agent/activity` returns the last lines
+host only, or for other schemes only the scheme, such as `Opened a tel: link`).
+Recordings, locations and installs show too: `Started recording`,
+`Saved a recording (12 s)`, `Set a simulated location` (never the
+coordinates), `Installed Notes`. `GET /agent/activity` returns the last lines
 (`text` in English, `text_zh` in Chinese, `owner` when the caller named
 itself) and `next`; pass `?since=<next>` to get only newer ones. The web
 control page shows each new line over the phone screen for a few seconds. The
@@ -812,10 +893,27 @@ MCP="$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
   rides on `launch_app` responses (single or batch) and on the first
   `/agent/elements` read in a newly entered app — not on every read. Flows are
   sorted read-only first. `installed:0` means the store is not on this Mac yet.
-  MCP adds `compat` per flow.
+  MCP adds `compat` per flow. When the app has [notes](#app-notes), the block
+  also carries `app_notes` (their first 2 KB; `app_notes_truncated` when
+  longer) — read them before driving.
 - `flow_suggestion` `{key, steps, message}` appears once per task after ≥5
   applied steps in one app that has no flow, at most once per app per 14 days
   (opt out: `IPHONE_USE_FLOWS_NO_SUGGEST=1`). Flow runs never count.
+
+### App notes
+
+Plain markdown kept per app, for what the next agent should know before
+driving it: obstacles (a pop-up after login, a slow first screen), where
+things are, what not to do. `GET /agent/app-notes?bundle=com.example.app`
+returns `{bundle, text, updated_at?}` (`text` is empty when there are none);
+`PUT /agent/app-notes?bundle=…` with the markdown as the body replaces them
+(at most 16 KB, `413 too_large` past it; an empty body deletes them; needs
+`X-Phone-Control: 1`). The person can write them too; they are stored as
+`~/.iphone-use/app-notes/<bundle>.md`, beside the flow store (which updates
+replace), so they survive updates. Their first 2 KB ride along in the
+`registry` block whenever an agent enters the app. When you learn something
+an earlier run would have wanted, add it: read the notes, append, put the
+whole text back. Never write passwords, codes or personal data into them.
 
 ### Compat
 
@@ -962,6 +1060,24 @@ AX first; vision only when the tree is unusable.
   kill) and says so with `ax_stats.visibility: "geometric"`. On such a tree
   `visible:false` only marks rows outside the screen; a row hidden inside it is
   not flagged, so read rects with care before tapping by element.
+
+Two helpers for Mode A:
+
+- **OCR rows.** `GET /agent/elements?ocr=auto` (or `ocr=1`) adds
+  `ocr:{rows:[…], source:"vision"}` when the tree is unusable
+  (`n_interactive == 0 && container_only`); `ocr=force` adds it on every full
+  read. Each row looks like an element (`kind:"OCRText"`, `label`, `rect` in
+  points, `source:"ocr"`, `confidence`) but has no element behind it: tap the
+  centre of its `rect` by coordinates (divide by `screen` for the 0–1
+  fractions), never by `element`. It runs Apple's Vision on a fresh
+  screenshot (macOS; the first use compiles a small helper and can take
+  longer). A failure is `ocr_error` beside a normal answer, never a failed read.
+- **Numbered screenshot.** `GET /agent/screenshot?overlay=elements` outlines
+  each interactive element and draws its index in a magenta badge, so you can
+  say "tap 12" from the picture: `{"type":"tap","element":12,"snapshot":…}`
+  with the `X-Elements-Snapshot` header's value. It works with `max_side`;
+  `X-Overlay: unavailable` means the tree could not be read and the picture
+  is plain.
 
 AX-free loop: screenshot → pick a target yourself → coordinate `tap` /
 `longpress` / `swipe` / `scroll` → verify with a screenshot after ~300–800 ms.
