@@ -555,13 +555,13 @@ static BOOL IPURHasStableScreenSize = NO;
   if ([value isKindOfClass:NSValue.class] && strcmp([(NSValue *)value objCType], @encode(CGRect)) == 0) {
     [(NSValue *)value getValue:&frame];
   }
-  CGSize system = IPURScreenSizeFromFrame(frame, CGSizeZero);
-  if (system.width > 0) {
+  CGSize systemSize = IPURScreenSizeFromFrame(frame, CGSizeZero);
+  if (systemSize.width > 0) {
     @synchronized (self) {
-      IPURStableScreenSize = system;
+      IPURStableScreenSize = systemSize;
       IPURHasStableScreenSize = YES;
     }
-    return system;
+    return systemSize;
   }
   CGSize size = UIScreen.mainScreen.bounds.size;
   if (IPURUseRequestCache()) IPURCachedScreenSize = [NSValue valueWithCGSize:size];
