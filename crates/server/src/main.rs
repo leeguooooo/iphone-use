@@ -11,6 +11,8 @@
 //! iphone-use login   # one-time browser sign-in + a QR code for the phone
 //! iphone-use test    # run a test suite (iphone-use-mcp test)
 //! iphone-use schedule # scheduled flows and suites (iphone-use-mcp schedule)
+//! iphone-use simulators # list iOS simulators (preview)
+//! iphone-use simulator start|stop # the device runner on a simulator (preview)
 //! ```
 //!
 //! The device runner on the phone (an XCTest runner with a
@@ -313,6 +315,52 @@ enum Command {
         instance: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// List the iOS simulators on this Mac (preview; needs Xcode).
+    Simulators {
+        /// As JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drive an iOS simulator instead of a phone (preview).
+    ///
+    /// `start` boots it, builds the device runner for it, starts the runner
+    /// and prints the daemon command to run against it; `stop` stops that
+    /// runner.
+    Simulator {
+        #[command(subcommand)]
+        action: SimulatorAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SimulatorAction {
+    /// Boot the simulator, start the device runner on it and wait until it
+    /// answers on 127.0.0.1.
+    Start {
+        /// The simulator's name (as `iphone-use simulators` lists it) or UDID.
+        simulator: String,
+        /// The runner's port on 127.0.0.1 (its video port is this + 1000);
+        /// default: the first free one from 8200.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Use this simulator build of the runner instead of building one.
+        #[arg(long)]
+        xctestrun: Option<std::path::PathBuf>,
+        /// The instance (state dir) to use; default: sim-<first 8 of the UDID>.
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Stop the runner `start` started (only the PID it recorded).
+    Stop {
+        /// The simulator's name or UDID.
+        simulator: String,
+        /// Shut the simulator down too.
+        #[arg(long)]
+        shutdown: bool,
+        /// The instance `start` used, when it was not the default.
+        #[arg(long)]
+        instance: Option<String>,
     },
 }
 
@@ -848,6 +896,20 @@ fn main() -> Result<()> {
             let args = [vec!["schedule".to_string()], args].concat();
             std::process::exit(onboarding::run_mcp(&target, &args))
         }
+        Command::Simulators { json } => std::process::exit(server::simulator::cli_list(json)),
+        Command::Simulator { action } => std::process::exit(match action {
+            SimulatorAction::Start {
+                simulator,
+                port,
+                xctestrun,
+                instance,
+            } => server::simulator::cli_start(&simulator, port, xctestrun, instance.as_deref()),
+            SimulatorAction::Stop {
+                simulator,
+                shutdown,
+                instance,
+            } => server::simulator::cli_stop(&simulator, shutdown, instance.as_deref()),
+        }),
     };
 
     // Issue #28: under launchd `KeepAlive=true`, a startup that fails fast
@@ -923,7 +985,15 @@ fn serve() -> Result<()> {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "http://127.0.0.1:9100".to_string());
     let endpoints_are_local = endpoint_is_loopback(&wda_url) && endpoint_is_loopback(&mjpeg_url);
-    let managed_setting = optional_env_bool("IPHONE_USE_WDA_MANAGED")?;
+    // A simulator (IPHONE_USE_SIMULATOR, preview): device services go through
+    // simctl, and its runner is started by `iphone-use simulator start`, never
+    // by this daemon's launchd supervisor.
+    let simulator = server::simulator::Simulator::from_env()?.map(Arc::new);
+    let managed_setting = if simulator.is_some() {
+        Some(false)
+    } else {
+        optional_env_bool("IPHONE_USE_WDA_MANAGED")?
+    };
     let managed_wda_pending = wda_management_pending(
         endpoints_are_local,
         cfg.device_udid.as_deref(),
@@ -957,6 +1027,7 @@ fn serve() -> Result<()> {
         auth_limiter: Arc::new(Mutex::new(http::AuthLimiter::new())),
         agent_token: cfg.agent_token.clone(),
         device_udid: cfg.device_udid.clone(),
+        simulator: simulator.clone(),
         inbox: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         wda: match server::wda::WdaClient::new(&wda_url) {
             Ok(c) => {
@@ -1144,12 +1215,23 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
         if state.managed_wda {
             http::spawn_idle_release_watchdog(state.clone());
         }
-        // Keep-awake asks the runner for a lease, managed or not.
-        server::keep_awake::spawn(state.clone());
-        // Passcode + Auto-Lock for `lock_readiness` in /agent/status.
-        server::lock_readiness::spawn(state.clone());
-        // Name, model and iOS version for `device` in /agent/status.
-        server::device_identity::spawn(state.clone());
+        if let Some(simulator) = state.simulator.clone() {
+            // A simulator never locks: no keep-awake lease, no lock readiness
+            // probe, and its name/runtime come from simctl.
+            tracing::info!("simulator {} (preview): device services via simctl", simulator.udid);
+            tokio::spawn(async move {
+                if let Err(error) = simulator.refresh_info().await {
+                    tracing::warn!("simulator info: {error:#}");
+                }
+            });
+        } else {
+            // Keep-awake asks the runner for a lease, managed or not.
+            server::keep_awake::spawn(state.clone());
+            // Passcode + Auto-Lock for `lock_readiness` in /agent/status.
+            server::lock_readiness::spawn(state.clone());
+            // Name, model and iOS version for `device` in /agent/status.
+            server::device_identity::spawn(state.clone());
+        }
 
         let app = http::router(state);
         let serve_result = axum::serve(listener, app)

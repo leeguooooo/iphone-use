@@ -11,6 +11,10 @@
 #
 # Options / environment:
 #   --unsigned                    force an unsigned compile-check build
+#   --simulator                   build for the iOS Simulator instead (preview): destination
+#                                 generic/platform=iOS Simulator, CODE_SIGNING_ALLOWED=NO (no Apple
+#                                 ID), its own derived data (default runner/build/DerivedData-simulator).
+#                                 Also IPU_RUNNER_SIMULATOR=1.
 #   --device <udid>               (signed builds) build for that connected device and register it
 #                                 in the team, so the provisioning profile includes it
 #                                 (-destination id=<udid> -allowProvisioningDeviceRegistration).
@@ -31,6 +35,7 @@ XCODEBUILD_BIN="${XCODEBUILD:-xcodebuild}"
 WDA_PLIST="$HOME/Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist"
 
 unsigned="${IPU_RUNNER_UNSIGNED:-0}"
+simulator="${IPU_RUNNER_SIMULATOR:-0}"
 device="${IPU_RUNNER_DEVICE_ID:-}"
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -40,7 +45,8 @@ while [ "$#" -gt 0 ]; do
             device="$2"
             shift
             ;;
-        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        --simulator) simulator=1 ;;
+        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
@@ -53,13 +59,22 @@ destination="generic/platform=iOS"
 if [ -n "$device" ] && [ "$unsigned" != "1" ]; then
     destination="id=$device"
 fi
+if [ "$simulator" = "1" ]; then
+    # A simulator build needs no signing and keeps its own products, so it never replaces
+    # (or is mistaken for) the device build.
+    destination="generic/platform=iOS Simulator"
+    DERIVED_DATA="${IPU_RUNNER_DERIVED_DATA:-$SCRIPT_DIR/build/DerivedData-simulator}"
+    if [ -n "$device" ]; then
+        echo "ipu-runner build: --device ignored for a simulator build" >&2
+    fi
+fi
 
 _plist_env() {
     [ -f "$WDA_PLIST" ] || return 0
     plutil -extract "EnvironmentVariables.$1" raw -o - "$WDA_PLIST" 2>/dev/null || true
 }
 
-if [ "$unsigned" != "1" ]; then
+if [ "$unsigned" != "1" ] && [ "$simulator" != "1" ]; then
     : "${WDA_ASC_KEY_PATH:=$(_plist_env WDA_ASC_KEY_PATH)}"
     : "${WDA_ASC_KEY_ID:=$(_plist_env WDA_ASC_KEY_ID)}"
     : "${WDA_ASC_ISSUER_ID:=$(_plist_env WDA_ASC_ISSUER_ID)}"
@@ -73,7 +88,11 @@ args=(
     -derivedDataPath "$DERIVED_DATA"
 )
 
-if [ "$unsigned" != "1" ] && [ -n "${WDA_ASC_KEY_PATH:-}" ] && [ -n "${WDA_ASC_KEY_ID:-}" ] \
+if [ "$simulator" = "1" ]; then
+    echo "ipu-runner build: iOS Simulator (CODE_SIGNING_ALLOWED=NO)" >&2
+    args+=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="")
+    mode=simulator
+elif [ "$unsigned" != "1" ] && [ -n "${WDA_ASC_KEY_PATH:-}" ] && [ -n "${WDA_ASC_KEY_ID:-}" ] \
     && [ -n "${WDA_ASC_ISSUER_ID:-}" ]; then
     if [ ! -f "$WDA_ASC_KEY_PATH" ]; then
         echo "ipu-runner build: WDA_ASC_KEY_PATH does not point at a file" >&2

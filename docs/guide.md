@@ -583,6 +583,63 @@ with `IPHONE_USE_URL=http://127.0.0.1:<port>` and that instance's
 Remove only that instance with `uninstall.sh --instance lab`. The default uninstall
 refuses while named instances remain.
 
+### Simulators (preview)
+
+The device runner also runs on an iOS Simulator, which needs no phone, no Apple ID and
+no signing. You need a Mac with Xcode and at least one iOS simulator runtime. The runner
+is built from the sources the installer keeps in `~/.iphone-use/runner` (or a checkout's
+`runner/` via `IPU_RUNNER_SRC`); `--xctestrun` reuses a ready simulator build.
+
+```bash
+iphone-use simulators                       # name, runtime, state, UDID (--json too)
+iphone-use simulator start "iPhone 16 Pro"  # or a UDID; --port N picks the runner port
+```
+
+`start` does the following:
+
+1. Boots the simulator and waits for `simctl bootstatus`.
+2. Builds the runner for the simulator (unsigned, with its own derived data): with
+   `runner/build.sh --simulator` in a checkout, else `xcodebuild build-for-testing` on
+   the installed Xcode project.
+3. Starts the runner with
+   `xcodebuild test-without-building -destination id=<udid>` under a fresh runner token.
+4. Waits until the runner answers on `127.0.0.1:<port>`. The default port is the first
+   free one from 8200, and the MJPEG video port is that port + 1000.
+5. Prints the command that runs a daemon for the simulator:
+
+```bash
+IPHONE_USE_INSTANCE=sim-8a1bc3d4 IPHONE_USE_SIMULATOR=<udid> \
+  IPHONE_USE_WDA_URL=http://127.0.0.1:8200 IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9200 \
+  IPHONE_USE_PORT=44331 iphone-use serve
+```
+
+Each simulator gets its own instance state dir (`~/.iphone-use/instances/sim-<first 8 of
+the UDID>`). That dir holds the runner token, log and PID record. The daemon gets no
+launchd job: run it in a terminal. With `IPHONE_USE_SIMULATOR` set, the daemon changes
+how it handles these services:
+
+- Device logs, crash reports, simulated location, app install and uninstall, and the
+  installed-app inventory (`GET /agent/apps`, `launch_app` by name) go through `xcrun
+  simctl` instead of lockdown and devicectl.
+- Crash reports come from `~/Library/Logs/DiagnosticReports`. Only reports from that
+  simulator are included.
+- Install takes a simulator `.app` build. It refuses an `.ipa`.
+- The daemon never manages the runner: `recovery_owner` is `external`.
+- Keep-awake and agent Do Not Disturb are off.
+- `/agent/status` says `"target":"simulator"`, `lock_readiness.verdict` is `"ready"`, and
+  `device` names the simulator and its runtime.
+
+`iphone-use simulator stop <name|udid>` stops the runner. It signals only the PID it
+recorded, after it checks the user, the start time and the exact command line. Add
+`--shutdown` to shut the simulator down too.
+
+The preview doesn't cover these yet:
+
+- Setup, doctor and the installer don't know about simulators.
+- Live H.264 video from the runner hasn't been verified on a simulator.
+- Simulators have no camera, App Store apps, real push notifications or Face ID (unless
+  you use `simctl` enrollment), so tasks that need those only work on a phone.
+
 ### Lifecycle and recovery
 
 `/agent/status` is the source of truth. `recovery_owner` is `daemon` for managed

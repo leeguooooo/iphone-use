@@ -1,6 +1,25 @@
 # Simulator support: driving iOS simulators with the same runner
 
-**Status**: research / design (no code). 2026-10.
+**Status**: preview implemented (2026-10). What exists:
+
+- `iphone-use simulators` and `iphone-use simulator start|stop`. `start` boots the
+  simulator, runs `runner/build.sh --simulator`, launches the runner with
+  `test-without-building -destination id=<udid>` under a per-simulator instance state
+  dir, and prints the daemon command.
+- With `IPHONE_USE_SIMULATOR=<udid>`, the daemon routes logs, crashes, location,
+  install/uninstall and the app inventory through `simctl` (`crates/server/src/simulator.rs`).
+- Lock, keep-awake and Do Not Disturb are skipped. `/agent/status` reports
+  `"target":"simulator"`.
+
+Not yet done:
+
+- `setup --simulator`, doctor and installer integration. `IPHONE_USE_TARGET` is not
+  stored in the instance plist.
+- `device_state` values `booting` and `shutdown`.
+- H.264 and `simctl io recordVideo` fallbacks.
+- The hardware-keyboard preference.
+- The CI recipe.
+- Verification on a Mac: everything is unit-tested only, because no Xcode was available.
 **Why now**: every large competitor drives simulators (XcodeBuildMCP, mobile-mcp,
 agent-device, iOS-simulator-mcp). It is how app developers and CI start, before
 they have a spare phone. iphone-use drives real devices only.

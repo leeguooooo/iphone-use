@@ -34,6 +34,7 @@ pub mod runtime_dir;
 pub mod schedules;
 pub mod scope;
 pub mod setup;
+pub mod simulator;
 pub mod syslog;
 pub mod telemetry;
 pub mod text_input;

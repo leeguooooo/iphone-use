@@ -27,6 +27,7 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
         auth_limiter: Arc::new(Mutex::new(srv::http::AuthLimiter::new())),
         agent_token: None,
         device_udid: None,
+        simulator: None,
         inbox: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         wda: None,
         managed_wda: false,

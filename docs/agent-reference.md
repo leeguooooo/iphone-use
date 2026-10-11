@@ -87,6 +87,13 @@ an unplugged phone keeps its last reading; `null` until a first read:
 when the daemon does not know that identifier. Refreshed when the runner
 comes up and every 30 minutes.
 
+**Simulator (preview).** A daemon driving an iOS Simulator adds
+`"target":"simulator"` to `/agent/status`; a phone's status has no `target`. In that
+case, `device` holds the simulator's `name`, `model`, `runtime` (`"iOS 18.2"`), `ios`,
+`udid` and `"simulator":true`. `lock_readiness.verdict` is always `"ready"` (`applicable:
+false`). Logs, crashes, location, install and `GET /agent/apps` work the same way, but
+install takes a simulator `.app`, not an `.ipa`.
+
 **Reconnect** only when the current task needs the phone, `recovery_owner` is
 `daemon`, blockers are resolved, and no release/reconnect is in progress. Send
 it once, then poll status until `drivable:true`:

@@ -249,7 +249,12 @@ impl Ring {
     }
 
     pub fn push(&mut self, raw: &str) {
-        let parsed = parse_line(raw);
+        self.push_parsed(parse_line(raw));
+    }
+
+    /// Store a record another source already parsed (the simulator's
+    /// `log stream`, see `crate::simulator`).
+    pub fn push_parsed(&mut self, parsed: Parsed) {
         self.last_seq += 1;
         if self.lines.len() == self.capacity {
             self.lines.pop_front();
@@ -427,6 +432,34 @@ impl SyslogCapture {
         )));
     }
 
+    /// Start capturing newline-separated lines from another source than the
+    /// relay (a simulator's `log stream`), each parsed with `parse` (`None`
+    /// skips a line). `guard` lives as long as the capture: a child process
+    /// with kill-on-drop ends with it.
+    pub fn start_lines<S, G>(&self, source: &str, stream: S, parse: LineParser, guard: G)
+    where
+        S: AsyncRead + Send + Unpin + 'static,
+        G: Send + 'static,
+    {
+        let mut state = self.lock();
+        if let Some(task) = state.task.take() {
+            task.abort();
+        }
+        state.generation += 1;
+        state.udid = Some(source.to_string());
+        state.last_read = Instant::now();
+        state.stopped = None;
+        let generation = state.generation;
+        state.task = Some(tokio::spawn(pump_lines(
+            self.state.clone(),
+            generation,
+            stream,
+            parse,
+            self.idle_stop,
+            guard,
+        )));
+    }
+
     /// Stop capturing; the lines read so far stay.
     pub fn stop(&self) {
         let mut state = self.lock();
@@ -521,6 +554,76 @@ async fn pump<S: AsyncRead + Unpin>(
                 guard.ring.push(&record);
             }
         }
+        guard.generation += 1;
+        guard.task = None;
+        guard.udid = None;
+        guard.stopped = Some(reason);
+    }
+}
+
+/// Parses one line of a line-oriented log source; `None` skips it.
+pub type LineParser = fn(&str) -> Option<Parsed>;
+
+/// [`pump`] for a newline-separated source: same cursor, idle stop and
+/// generation rules. `guard` is dropped when the pump ends or is aborted.
+async fn pump_lines<S: AsyncRead + Unpin, G>(
+    state: Arc<Mutex<State>>,
+    generation: u64,
+    mut stream: S,
+    parse: LineParser,
+    idle_stop: Duration,
+    guard: G,
+) {
+    let _guard = guard;
+    let check_every = (idle_stop / 4).clamp(Duration::from_millis(10), Duration::from_secs(30));
+    let mut ticker = tokio::time::interval(check_every);
+    let mut pending: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    let push_lines = |guard: &mut State, bytes: &[u8]| {
+        for line in String::from_utf8_lossy(bytes).split('\n') {
+            let line = line.trim_end_matches('\r');
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(parsed) = parse(line) {
+                guard.ring.push_parsed(parsed);
+            }
+        }
+    };
+    let reason = loop {
+        tokio::select! {
+            read = stream.read(&mut chunk) => match read {
+                Ok(0) => break "the log stream ended".to_string(),
+                Ok(n) => {
+                    pending.extend_from_slice(&chunk[..n]);
+                    let cut_at = match pending.iter().rposition(|b| *b == b'\n') {
+                        Some(at) => at + 1,
+                        None if pending.len() > MAX_PENDING => pending.len(),
+                        None => continue,
+                    };
+                    let complete: Vec<u8> = pending.drain(..cut_at).collect();
+                    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                    if guard.generation != generation {
+                        return;
+                    }
+                    push_lines(&mut guard, &complete);
+                }
+                Err(error) => break format!("the log stream failed: {error}"),
+            },
+            _ = ticker.tick() => {
+                let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.generation != generation {
+                    return;
+                }
+                if guard.last_read.elapsed() >= idle_stop {
+                    break format!("stopped after {} min without a read", idle_stop.as_secs() / 60);
+                }
+            }
+        }
+    };
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.generation == generation {
+        push_lines(&mut guard, &pending);
         guard.generation += 1;
         guard.task = None;
         guard.udid = None;
@@ -817,5 +920,51 @@ mod tests {
         assert!(!capture.capturing());
         let read = capture.read(&LogFilter::default());
         assert!(read.stopped.unwrap().contains("without a read"));
+    }
+
+    #[test]
+    fn a_line_source_feeds_the_same_ring_and_drops_its_guard_when_it_ends() {
+        block_on(a_line_source_feeds_the_same_ring_and_drops_its_guard_when_it_ends_body());
+    }
+
+    async fn a_line_source_feeds_the_same_ring_and_drops_its_guard_when_it_ends_body() {
+        struct Flag(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Flag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        fn parse(line: &str) -> Option<Parsed> {
+            (!line.starts_with("header")).then(|| Parsed {
+                process: Some("Sim".into()),
+                level: Some("error".into()),
+                message: line.to_string(),
+                ..Parsed::default()
+            })
+        }
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let capture = SyslogCapture::new(100, Duration::from_secs(60));
+        let (mut source, host) = tokio::io::duplex(1 << 16);
+        capture.start_lines("SIM-UDID", host, parse, Flag(dropped.clone()));
+        assert_eq!(capture.udid().as_deref(), Some("SIM-UDID"));
+        source.write_all(b"header line\nfirst\r\nsec").await.unwrap();
+        source.write_all(b"ond\n").await.unwrap();
+        wait_for(&capture, |c| c.read(&LogFilter::default()).items.len() == 2).await;
+        let read = capture.read(&LogFilter {
+            level: Some("error".into()),
+            ..LogFilter::default()
+        });
+        assert_eq!(read.items[0].message, "first");
+        assert_eq!(read.items[1].message, "second");
+        assert_eq!(read.items[1].process.as_deref(), Some("Sim"));
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+
+        source.write_all(b"tail without newline").await.unwrap();
+        drop(source);
+        wait_for(&capture, |c| !c.capturing()).await;
+        let read = capture.read(&LogFilter::default());
+        assert_eq!(read.items.last().unwrap().message, "tail without newline");
+        assert!(read.stopped.unwrap().contains("ended"));
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

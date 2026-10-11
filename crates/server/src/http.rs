@@ -338,6 +338,10 @@ pub struct AppState {
     pub agent_token: Option<String>,
     /// Persisted target iPhone UDID used by every WDA start/restart.
     pub device_udid: Option<String>,
+    /// The iOS simulator this daemon drives instead of a phone
+    /// (`IPHONE_USE_SIMULATOR`, preview): device services go through simctl
+    /// (see [`DeviceServices`]). `None` on a real phone.
+    pub simulator: Option<Arc<crate::simulator::Simulator>>,
     /// Inbox: structured results POSTed back BY the phone (e.g. an iOS Shortcut's
     /// "Get Contents of URL" action returning Health / battery / location JSON),
     /// for an agent to GET. This is the return path of the Shortcuts RPC bridge —
@@ -2835,19 +2839,30 @@ async fn agent_status(
     let lock_readiness = crate::lock_readiness::current_json();
     // Which phone this is: name, model, iOS (cache only, no I/O).
     let device = crate::device_identity::current_json();
+    // A simulator (`IPHONE_USE_SIMULATOR`) never locks and simctl names it;
+    // its status also says `"target":"simulator"` (absent for a phone).
+    let (lock_readiness, device, target_field, status_udid) = match device_services(&state) {
+        DeviceServices::Simulator(simulator) => (
+            crate::simulator::lock_readiness_json(),
+            simulator.status_device_json(),
+            r#""target":"simulator","#,
+            Some(simulator.udid.clone()),
+        ),
+        DeviceServices::Phone => (lock_readiness, device, "", state.device_udid.clone()),
+    };
     // Agent Do Not Disturb: whether it is on and the gate's last outcome with
     // its time, so a Shortcuts flash on a recording can be matched to it.
     let agent_focus = recover(state.agent_focus.lock()).status_json();
     let body = format!(
-        r#"{{"ok":true,"backend":"direct","instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus}}}"#,
+        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus}}}"#,
         crate::instance::current().name,
-        serde_json::to_string(&state.device_udid).unwrap_or_else(|_| "null".into()),
+        serde_json::to_string(&status_udid).unwrap_or_else(|_| "null".into()),
         {
             let (owner, _) = owner_status(&state);
             serde_json::to_string(&owner).unwrap_or_else(|_| "null".into())
         },
         owner_status(&state).1,
-        state.device_udid.is_some(),
+        status_udid.is_some(),
         state.managed_wda,
         state.managed_wda_pending,
     );
@@ -12596,6 +12611,14 @@ async fn agent_input_inner(
             }
         }
     }
+    // On a simulator, uninstall goes through simctl (see `DeviceServices`).
+    if let DeviceServices::Simulator(simulator) = device_services(&state) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("uninstall") {
+                return simulator_uninstall(simulator, &v).await;
+            }
+        }
+    }
     // App uninstall via CoreDevice (`devicectl`) — WDA can't remove apps and
     // UI-driven deletion is unreliable to automate, so this is the dependable
     // "Delete App (with data)" primitive (e.g. resetting a wedged app to its
@@ -13097,7 +13120,11 @@ async fn engage_agent_focus(
 ) {
     // Only the daemon's own phone: an external WDA endpoint belongs to
     // someone else's setup (and test daemons never touch the real registry).
-    if !state.managed_wda || recover(state.agent_focus.lock()).attempted() {
+    // A simulator has no Focus to engage.
+    if !state.managed_wda
+        || state.simulator.is_some()
+        || recover(state.agent_focus.lock()).attempted()
+    {
         return;
     }
     let Some(bridge) = focus_bridge() else {
@@ -16108,6 +16135,9 @@ async fn installed_inventory(
     refresh: bool,
     max_age: std::time::Duration,
 ) -> Result<serde_json::Value, InventoryFailure> {
+    if let DeviceServices::Simulator(simulator) = device_services(state) {
+        return simulator_inventory(simulator, refresh, max_age).await;
+    }
     // With a configured target the cache can answer before any CoreDevice
     // call; without one, the target is only known after detection.
     if let (Some(udid), false) = (state.device_udid.as_deref(), refresh) {
@@ -16728,6 +16758,211 @@ fn authorize_device_mutation(state: &AppState, headers: &HeaderMap) -> Result<()
     claim_phone_owner(state, headers).map(|_| ())
 }
 
+/// Which backend answers the device-service routes (device logs, crash
+/// reports, simulated location, app install/uninstall and the installed-app
+/// inventory): the phone over lockdown/devicectl, or the simulator this daemon
+/// was started for (`IPHONE_USE_SIMULATOR`) over simctl. Each route asks once,
+/// up front; the phone branch below it is the code it always ran.
+enum DeviceServices<'a> {
+    Phone,
+    Simulator(&'a crate::simulator::Simulator),
+}
+
+fn device_services(state: &AppState) -> DeviceServices<'_> {
+    match state.simulator.as_deref() {
+        Some(simulator) => DeviceServices::Simulator(simulator),
+        None => DeviceServices::Phone,
+    }
+}
+
+const SIMCTL_HINT: &str = "the simulator is reached through `xcrun simctl` on this Mac: check that it is still booted (`iphone-use simulators`) and Xcode is installed; then retry";
+
+/// `GET /agent/crashes/:name` on a simulator.
+async fn simulator_crash(simulator: &crate::simulator::Simulator, name: &str) -> Response {
+    match tokio::time::timeout(DEVICE_SERVICE_TIMEOUT, simulator.crash(name)).await {
+        Ok(Ok(report)) => {
+            let mut body = serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}));
+            body["ok"] = serde_json::Value::Bool(true);
+            json_response(StatusCode::OK, body)
+        }
+        Ok(Err(error)) if format!("{error:#}").contains("no crash report named") => agent_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no report by that name from this simulator; list them again with GET /agent/crashes",
+        ),
+        Ok(Err(error)) => device_failure("read a crash report", SIMCTL_HINT, Some(&error)),
+        Err(_) => device_failure("read a crash report", SIMCTL_HINT, None),
+    }
+}
+
+/// `POST /agent/location` on a simulator (`simctl location`): the same
+/// budget charge and activity entry as on a phone.
+async fn simulator_location(
+    state: &AppState,
+    headers: &HeaderMap,
+    simulator: &crate::simulator::Simulator,
+    target: Option<(f64, f64)>,
+) -> Response {
+    if let Err(refusal) = crate::guard::charge(
+        crate::guard::Policy::get(),
+        &guard_owner(headers),
+        1,
+        crate::metrics::now_ms(),
+    ) {
+        return guard_refusal(&refusal, false);
+    }
+    state.touch_activity();
+    let result = match target {
+        Some((lat, lon)) => {
+            device_call("set the simulated location", SIMCTL_HINT, simulator.set_location(lat, lon)).await
+        }
+        None => device_call("clear the simulated location", SIMCTL_HINT, simulator.clear_location()).await,
+    };
+    if let Err(failed) = result {
+        return failed;
+    }
+    crate::activity::record(
+        named_owner(headers),
+        crate::activity::location(target.is_none()),
+        crate::metrics::now_ms(),
+    );
+    json_response(StatusCode::OK, serde_json::json!({"ok": true}))
+}
+
+/// The installed-app inventory of a simulator (`simctl listapps`), cached
+/// per UDID like a phone's.
+async fn simulator_inventory(
+    simulator: &crate::simulator::Simulator,
+    refresh: bool,
+    max_age: std::time::Duration,
+) -> Result<serde_json::Value, InventoryFailure> {
+    if !refresh {
+        if let Some(body) = crate::apps::cache_get_within(&simulator.udid, max_age) {
+            return Ok(body);
+        }
+    }
+    let reason = match tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        simulator.installed_apps(),
+    )
+    .await
+    {
+        Ok(Ok(body)) => {
+            crate::apps::cache_put(&simulator.udid, &body);
+            return Ok(body);
+        }
+        Ok(Err(error)) => format!("{error:#}"),
+        Err(_) => "simctl listapps timed out".to_string(),
+    };
+    tracing::warn!("simulator app inventory unavailable: {reason}");
+    Err(InventoryFailure::Unavailable(reason))
+}
+
+/// `{"type":"install",…}` on a simulator: a simulator build (`.app`) goes
+/// in with `simctl install`; an `.ipa` is a device build and is refused.
+async fn install_on_simulator(
+    state: &AppState,
+    headers: &HeaderMap,
+    simulator: &crate::simulator::Simulator,
+    path: std::path::PathBuf,
+    bundle: Option<String>,
+    fresh: bool,
+) -> Response {
+    let is_app = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("app"));
+    if !is_app {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "simulator_needs_app", "bundle": bundle,
+                "outcome": "not_sent", "retry_safe": true,
+                "hint": "a simulator installs simulator builds: pass the .app folder from an iOS Simulator build (xcodebuild -destination 'generic/platform=iOS Simulator'), not an .ipa"}),
+        );
+    }
+    if let Err(refusal) = crate::guard::charge(
+        crate::guard::Policy::get(),
+        &guard_owner(headers),
+        1,
+        crate::metrics::now_ms(),
+    ) {
+        return guard_refusal(&refusal, false);
+    }
+    state.touch_activity();
+    if let (Some(bundle), true) = (&bundle, fresh) {
+        // Not installed yet is the usual failure; the install decides.
+        let _ = simulator.uninstall(bundle).await;
+    }
+    match simulator.install(&path).await {
+        Ok(()) => {
+            crate::activity::record(
+                named_owner(headers),
+                crate::activity::installed(bundle.as_deref()),
+                crate::metrics::now_ms(),
+            );
+            json_response(
+                StatusCode::OK,
+                serde_json::json!({"ok": true, "bundle": bundle, "installed": true, "fresh": fresh}),
+            )
+        }
+        Err(error) => {
+            tracing::warn!("simctl install failed: {error:#}");
+            json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({"ok": false, "error": "install_failed", "detail": format!("{error:#}"),
+                    "hint": "simctl refused the app: it must be built for the iOS Simulator (and this simulator's architecture and iOS version)"}),
+            )
+        }
+    }
+}
+
+/// `{"type":"uninstall","bundle":…}` on a simulator (`simctl uninstall`),
+/// with the same checks and plain-text answers as on a phone.
+async fn simulator_uninstall(
+    simulator: &crate::simulator::Simulator,
+    value: &serde_json::Value,
+) -> Response {
+    let bundle = value.get("bundle").and_then(|b| b.as_str()).unwrap_or("");
+    let bundle_ok = !bundle.is_empty()
+        && bundle.len() <= 200
+        && bundle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    if !bundle_ok {
+        return with_security_headers(
+            (
+                StatusCode::BAD_REQUEST,
+                "uninstall needs a valid \"bundle\" (reverse-DNS id)",
+            )
+                .into_response(),
+        );
+    }
+    match value.get("udid") {
+        None => {}
+        Some(serde_json::Value::String(udid)) if udid.eq_ignore_ascii_case(&simulator.udid) => {}
+        Some(_) => {
+            return json_response(
+                StatusCode::CONFLICT,
+                serde_json::json!({"ok": false, "error": "target_change_requires_restart"}),
+            )
+        }
+    }
+    if let Err(refusal) = crate::guard::Policy::get()
+        .check_launch(&serde_json::json!({"type": "launch_app", "bundle": bundle}))
+    {
+        return guard_refusal(&refusal, false);
+    }
+    match simulator.uninstall(bundle).await {
+        Ok(()) => with_security_headers((StatusCode::OK, "ok (uninstalled)").into_response()),
+        Err(error) => {
+            tracing::warn!("simctl uninstall failed: {error:#}");
+            with_security_headers(
+                (StatusCode::BAD_GATEWAY, format!("uninstall failed: {error:#}")).into_response(),
+            )
+        }
+    }
+}
+
 /// The daemon's target iPhone, which the lockdown services talk to.
 fn lockdown_udid(state: &AppState) -> Result<String, Response> {
     match state
@@ -16858,6 +17093,17 @@ async fn agent_logs_post(
         .ok()
         .and_then(|v| v.get("action")?.as_str().map(str::to_string));
     let capture = crate::syslog::global();
+    if action.as_deref() == Some("start") {
+        if let DeviceServices::Simulator(simulator) = device_services(&state) {
+            if let Err(error) = simulator.start_logs(capture) {
+                return device_failure("start the simulator log", SIMCTL_HINT, Some(&error));
+            }
+            return json_response(
+                StatusCode::OK,
+                serde_json::json!({"ok": true, "capturing": capture.capturing()}),
+            );
+        }
+    }
     match action.as_deref() {
         Some("start") => {
             let udid = match lockdown_udid(&state) {
@@ -16939,6 +17185,15 @@ async fn agent_crashes(
         Ok(filter) => filter,
         Err(hint) => return agent_error(StatusCode::BAD_REQUEST, "invalid_query", hint),
     };
+    if let DeviceServices::Simulator(simulator) = device_services(&state) {
+        return match device_call("list crash reports", SIMCTL_HINT, simulator.crashes(&filter)).await {
+            Ok(items) => json_response(
+                StatusCode::OK,
+                serde_json::json!({"ok": true, "items": items}),
+            ),
+            Err(failed) => failed,
+        };
+    }
     let udid = match lockdown_udid(&state) {
         Ok(udid) => udid,
         Err(refused) => return refused,
@@ -16973,6 +17228,9 @@ async fn agent_crash(
             "invalid_name",
             "use a name exactly as GET /agent/crashes lists it: a bare file name ending in .ips, .crash or .synced",
         );
+    }
+    if let DeviceServices::Simulator(simulator) = device_services(&state) {
+        return simulator_crash(simulator, &name).await;
     }
     let udid = match lockdown_udid(&state) {
         Ok(udid) => udid,
@@ -17032,6 +17290,9 @@ async fn agent_location(
         Ok(target) => target,
         Err(hint) => return agent_error(StatusCode::BAD_REQUEST, "invalid_location", hint),
     };
+    if let DeviceServices::Simulator(simulator) = device_services(&state) {
+        return simulator_location(&state, &headers, simulator, target).await;
+    }
     let udid = match lockdown_udid(&state) {
         Ok(udid) => udid,
         Err(refused) => return refused,
@@ -17498,6 +17759,9 @@ async fn agent_install(
     };
     if let Err(refusal) = crate::guard::Policy::get().check_install(bundle.as_deref()) {
         return guard_refusal(&refusal, false);
+    }
+    if let DeviceServices::Simulator(simulator) = device_services(state) {
+        return install_on_simulator(state, headers, simulator, path, bundle, fresh).await;
     }
     install_on_device(state, headers, path, bundle, fresh).await
 }
@@ -22500,6 +22764,174 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(body["error"], "invalid_query");
         });
+    }
+
+    // -- simulator (IPHONE_USE_SIMULATOR) ------------------------------------
+
+    fn simulator_test_state(
+        fake: Arc<crate::simulator::tests::FakeSimctl>,
+        reports: &std::path::Path,
+    ) -> Arc<AppState> {
+        let Ok(mut state) = Arc::try_unwrap(fixture_app_state(None)) else {
+            unreachable!("a fresh fixture has one owner")
+        };
+        state.simulator = Some(Arc::new(crate::simulator::Simulator::new(
+            crate::simulator::tests::UDID,
+            fake,
+            reports.to_path_buf(),
+        )));
+        Arc::new(state)
+    }
+
+    async fn call(
+        state: &Arc<AppState>,
+        method: &str,
+        uri: &str,
+        body: &str,
+    ) -> (StatusCode, String) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-phone-control", "1")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[test]
+    fn device_services_follow_the_simulator_switch() {
+        let phone = fixture_app_state(None);
+        assert!(matches!(device_services(&phone), DeviceServices::Phone));
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(crate::simulator::tests::FakeSimctl::default());
+        let sim = simulator_test_state(fake, dir.path());
+        assert!(matches!(
+            device_services(&sim),
+            DeviceServices::Simulator(s) if s.udid == crate::simulator::tests::UDID
+        ));
+    }
+
+    /// With a simulator configured (and no phone UDID, so any lockdown call
+    /// would answer 503 device_not_configured and any devicectl call would
+    /// fail), every device-service route answers from simctl.
+    #[test]
+    fn simulator_routes_use_simctl_not_lockdown_or_devicectl() {
+        use crate::simulator::tests::{FakeSimctl, UDID};
+        let dir = tempfile::tempdir().unwrap();
+        let report = format!(
+            "{{\"app_name\":\"Demo\"}}\n{{\"procPath\":\"/Users/me/Library/Developer/CoreSimulator/Devices/{UDID}/data/Containers/Bundle/Application/1/Demo.app/Demo\"}}\n"
+        );
+        std::fs::write(dir.path().join("Demo-2026-10-11-070102.ips"), report).unwrap();
+        let app = dir.path().join("Demo.app");
+        std::fs::create_dir(&app).unwrap();
+        let ipa = dir.path().join("Demo.ipa");
+        std::fs::write(&ipa, b"PK\x03\x04").unwrap();
+        let fake = Arc::new(FakeSimctl::default());
+        let state = simulator_test_state(fake.clone(), dir.path());
+        block(async {
+            let (status, body) = call(&state, "GET", "/agent/apps?refresh=1", "").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(json["source"], "simctl");
+            assert_eq!(json["apps"].as_array().unwrap().len(), 3);
+
+            let (status, body) =
+                call(&state, "POST", "/agent/location", r#"{"lat":35.5,"lon":139.25}"#).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let (status, _) = call(&state, "POST", "/agent/location", r#"{"clear":true}"#).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let (status, body) = call(&state, "GET", "/agent/crashes", "").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body.contains("Demo-2026-10-11-070102.ips"), "{body}");
+            let (status, body) =
+                call(&state, "GET", "/agent/crashes/Demo-2026-10-11-070102.ips", "").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body.contains("procPath"));
+            let (status, _) =
+                call(&state, "GET", "/agent/crashes/Gone-2026-10-11-070102.ips", "").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            let (status, body) = call(&state, "POST", "/agent/logs", r#"{"action":"start"}"#).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let (status, _) = call(&state, "POST", "/agent/logs", r#"{"action":"stop"}"#).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let install = serde_json::json!({"type":"install","path":app.to_str().unwrap()}).to_string();
+            let (status, body) = call(&state, "POST", "/agent/input", &install).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let install = serde_json::json!({"type":"install","path":ipa.to_str().unwrap()}).to_string();
+            let (status, body) = call(&state, "POST", "/agent/input", &install).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body.contains("simulator_needs_app"), "{body}");
+
+            let (status, body) = call(
+                &state,
+                "POST",
+                "/agent/input",
+                r#"{"type":"uninstall","bundle":"com.example.demo"}"#,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body, "ok (uninstalled)");
+            let (status, _) = call(
+                &state,
+                "POST",
+                "/agent/input",
+                r#"{"type":"uninstall","bundle":"com.example.demo","udid":"00008110-001234567890001E"}"#,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            let (status, _) =
+                call(&state, "POST", "/agent/input", r#"{"type":"uninstall","bundle":"x;y"}"#).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        });
+        let calls = fake.calls.lock().unwrap();
+        let verbs: Vec<&str> = calls.iter().map(|c| c[1].as_str()).collect();
+        assert_eq!(
+            verbs,
+            ["listapps", "list", "location", "location", "spawn", "install", "uninstall"]
+        );
+        assert_eq!(calls[2][4], "35.5,139.25");
+        assert_eq!(calls[3][3], "clear");
+        assert_eq!(calls[5][3], app.to_str().unwrap());
+        assert!(calls.iter().all(|c| c[0] == "simctl"));
+    }
+
+    #[test]
+    fn status_names_a_simulator_target_and_leaves_a_phone_s_status_alone() {
+        let status_of = |state: Arc<AppState>| {
+            block(async move {
+                let (status, body) = call(&state, "GET", "/agent/status", "").await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                serde_json::from_str::<serde_json::Value>(&body).unwrap()
+            })
+        };
+        let phone = status_of(fixture_app_state(None));
+        assert!(phone.get("target").is_none(), "a phone's status is unchanged");
+        assert_eq!(phone["udid"], serde_json::Value::Null);
+        assert_eq!(phone["target_configured"], false);
+
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(crate::simulator::tests::FakeSimctl::default());
+        let state = simulator_test_state(fake, dir.path());
+        let simulator = state.simulator.clone().unwrap();
+        block(async move { simulator.refresh_info().await.unwrap() });
+        let sim = status_of(state);
+        assert_eq!(sim["target"], "simulator");
+        assert_eq!(sim["udid"], crate::simulator::tests::UDID);
+        assert_eq!(sim["target_configured"], true);
+        assert_eq!(sim["lock_readiness"]["verdict"], "ready");
+        assert_eq!(sim["lock_readiness"]["applicable"], false);
+        assert_eq!(sim["device"]["name"], "iPhone 16 Pro");
+        assert_eq!(sim["device"]["runtime"], "iOS 18.2");
+        assert_eq!(sim["device"]["simulator"], true);
     }
 
     // -- batch 2: install, location, logs, OCR, overlay ------------------------

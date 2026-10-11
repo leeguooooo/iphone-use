@@ -299,6 +299,32 @@ agent 不靠记性去查源，而是被推着走：`phone_elements` 直接列出
 
 ## 运维
 
+### 模拟器（预览）
+
+设备 runner 也能跑在 iOS 模拟器上：不需要手机、Apple ID 和签名，只需要一台装了 Xcode 和至少一个 iOS 模拟器运行时的 Mac。`iphone-use simulators` 列出模拟器（也可加 `--json`）。`iphone-use simulator start "iPhone 16 Pro"`（也可传 UDID，`--port N` 指定端口）会依次完成以下步骤：
+
+1. 启动模拟器。
+2. 为模拟器构建 runner，不签名，使用独立的 derived data：在仓库里用 `runner/build.sh --simulator`，否则直接对安装程序放在 `~/.iphone-use/runner` 的 Xcode 工程执行 `xcodebuild build-for-testing`。也可以用 `IPU_RUNNER_SRC` 指向仓库的 `runner/`，或用 `--xctestrun` 传入现成的模拟器构建。
+3. 用 `xcodebuild test-without-building -destination id=<udid>` 启动 runner。
+4. 等 runner 在 `127.0.0.1:<端口>` 上应答。默认端口从 8200 起取第一个空闲的，视频端口是该端口加 1000。
+5. 打印针对这台模拟器运行 daemon 的命令（`IPHONE_USE_SIMULATOR=<udid> IPHONE_USE_WDA_URL=http://127.0.0.1:<端口> … iphone-use serve`）。
+
+每台模拟器有自己的实例目录 `~/.iphone-use/instances/sim-<UDID 前 8 位>`。这个 daemon 不注册 launchd，在终端里运行即可。设置 `IPHONE_USE_SIMULATOR` 后，daemon 的处理方式有以下变化：
+
+- 设备日志、崩溃报告、模拟定位、安装和卸载 app、已安装 app 清单都改走 `xcrun simctl`。
+- 崩溃报告取自 `~/Library/Logs/DiagnosticReports`，只包含这台模拟器的报告。
+- 安装只接受模拟器构建的 `.app`，不接受 `.ipa`。
+- 保持唤醒和勿扰模式不启用。
+- `/agent/status` 里会给出 `"target":"simulator"`，`lock_readiness.verdict` 为 `"ready"`，`device` 是模拟器的名字和运行时。
+
+`iphone-use simulator stop <名字|udid>` 只停止自己记录并核实过的那个 runner 进程，加 `--shutdown` 会同时关闭模拟器。
+
+预览版还不支持以下内容：
+
+- setup、doctor 和安装器不认识模拟器。
+- 模拟器上的 H.264 实时画面尚未验证。
+- 模拟器没有相机、App Store app、真实推送和 Face ID，依赖这些的任务只能在真机上做。
+
 ### 生命周期与恢复
 
 `/agent/status` 是唯一事实来源。`recovery_owner` 在托管 loopback WDA 下是 `daemon`，首次接入尚未持久化目标时是 `unconfigured`，不托管的端点是 `external`。启动 WDA 之前，daemon 会先问手机是否锁屏：锁着的手机在连接后几秒内就显示 `setup_blocked_on:"locked"`（以前要等 Xcode 约 70 秒超时），连续两次读到解锁才启动。仍然因锁屏失败的，从 5 秒到 1 分钟安静重试；其他失败从 5 秒退避到 5 分钟；一次成功恢复清零两种退避。交互式 setup 最多等 5 分钟解锁。
