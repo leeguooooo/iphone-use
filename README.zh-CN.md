@@ -8,6 +8,8 @@
 Claude Code、Codex 或任何 MCP 客户端都能用它把屏幕读成文字，在任意 App 里点击、输入、滑动，包括没有 API 的 App。</p>
 
 <p align="center">
+  <a href="https://github.com/leeguooooo/iphone-use/releases/latest"><img src="https://img.shields.io/github/v/release/leeguooooo/iphone-use?label=release" alt="最新版本"></a>
+  <a href="https://github.com/leeguooooo/iphone-use/actions/workflows/pr-checks.yml"><img src="https://github.com/leeguooooo/iphone-use/actions/workflows/pr-checks.yml/badge.svg" alt="PR 检查"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm_Shield_1.0.0-blue.svg" alt="许可证：PolyForm Shield 1.0.0"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="平台：macOS 15+">
   <img src="https://img.shields.io/badge/iPhone-iOS%2015%2B-black" alt="iPhone：iOS 15+">
@@ -50,7 +52,20 @@ https://github.com/user-attachments/assets/6192e8a6-ab2d-4dfc-b2e9-2c971f527d55
 在真机上跑一遍我们 App 的登录测试，告诉我哪一步失败了。
 ```
 
-agent 可以直接按名字打开 App（`launch_app {"app": "健康"}`），一次输入最长 2 万字，跨页读完整个列表，并说明有没有读到底。遇到登录、密码、Face ID，agent 会停下来请你在手机上完成，不会向你要密码。
+agent 可以直接按名字打开 App（`launch_app {"app": "健康"}`），一次输入最长 2 万字，跨页读完整个列表，并说明有没有读到底。
+
+## 工作原理
+
+```text
+ Claude Code / Codex / 任何 MCP 客户端 ─MCP──┐
+ 脚本和其他 agent ─────────────────────HTTP──┤
+                                             ▼
+                          Mac 上的 iphone-use 守护进程 ──USB 或 Wi-Fi──▶ iPhone 上的 XCTest runner
+                                             ▲
+ 你，用浏览器或 iOS App ─────────────────────┘
+```
+
+每台手机在 Mac 上对应一个守护进程。它把屏幕读成无障碍树（文字，不是像素），通过装在手机上的小型 XCTest runner 发送点击和输入，并在画面稳定后才返回结果。agent 和人走的是同一个守护进程，同一时间只有一方在用手机。
 
 ## 安装
 
@@ -69,6 +84,7 @@ iphone-use setup     # 重新配置手机（换了 iPhone 或 Xcode 之后）
 iphone-use try       # 无害的检查：打开设置、读屏、回桌面
 iphone-use login     # 重新登录浏览器，附手机扫码用的二维码
 iphone-use upgrade   # 升级全部组件
+~/.iphone-use/uninstall.sh --dry-run   # 看卸载会删掉什么（去掉 --dry-run 就真的卸载）
 ```
 
 ### 或者让 agent 帮你装
@@ -92,8 +108,6 @@ iphone-use upgrade   # 升级全部组件
 ```bash
 codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-use@iphone-use
 ```
-
-[产品指南：安装、MCP 接入、流程和选型](https://blog.leeguoo.com/zh/posts/iphone-use/)
 
 ## 人用的远程控制
 
@@ -136,9 +150,15 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
   -d '{"type":"tap","element":7,"snapshot":"…"}'            # 点击，并返回界面变化（约 2 秒）
 ```
 
-你可以设置守护进程强制执行的限制，不管 agent 收到什么指令都有效：不许打开的 App（`IPHONE_USE_BLOCKED_APPS`，例如 `Wallet, Passwords`），以及每个任务最多多少步操作（`IPHONE_USE_MAX_ACTIONS`）。网页会把 agent 的每一步用大白话显示在手机画面上，例如「点按“无线局域网”」（[详情](docs/agent-reference.md#owner-limits-and-the-activity-feed)）。
-
 详见 [MCP 工具](crates/mcp/README.md) 和 [Agent API 参考](docs/agent-api.html)。
+
+## 安全与隐私
+
+- **密码只在你手里。** 遇到登录、锁屏密码、Face ID，agent 会停下来请你在手机上完成，绝不向你要密码或验证码。
+- **agent 绕不过去的限制。** 守护进程会拒绝你屏蔽的 App（`IPHONE_USE_BLOCKED_APPS`，例如 `Wallet, Passwords`），并限制每个任务的操作步数（`IPHONE_USE_MAX_ACTIONS`），不管 agent 的提示词怎么写（[详情](docs/agent-reference.md#owner-limits-and-the-activity-feed)）。
+- **它做了什么你看得见。** 网页会在实时画面上用大白话显示每一步，例如「点按“无线局域网”」。输入的文字不会被记录，只记字数。
+- **默认只在本机。** 守护进程监听 `127.0.0.1:44321` 并要求密码；手机上的 runner 只接受用每次启动的令牌签名的请求。iOS 15/16 的局域网路径不加密（[安全说明](docs/guide.zh-CN.md#安全)）。
+- **没有遥测。** 当前版本不发送任何使用数据（[遥测说明](docs/telemetry.md) · [隐私政策](docs/privacy.zh-CN.md)）。
 
 ## Flow：做过一次的事，沉淀成脚本
 
@@ -177,7 +197,7 @@ iphone-use 用自研的 XCTest runner（[`runner/`](runner/README.md)）操作�
 
 - [完整指南](docs/guide.zh-CN.md)：网页和 iOS App、flow 与官方 flow 源、Wi-Fi 和 iOS 15/16、生命周期、配置、安全、开发。
 - [Agent API 参考](docs/agent-api.html) · [MCP 工具](crates/mcp/README.md) · [架构](docs/direct-device-architecture.html) · [设备设置常见坑](docs/wda-setup.html) · [设备 runner](runner/README.md) · [隐私](docs/privacy.zh-CN.md)
-- 安全只说一句：密码保护 44321 端口；手机上 runner 自己的端口只接受用每次启动的令牌签名的请求，但 iOS 15/16 的局域网路径不加密（[详情](docs/guide.zh-CN.md#安全)）。
+- [产品指南](https://blog.leeguoo.com/zh/posts/iphone-use/)：安装、MCP 接入、flow 和选型对比。
 - 问题和建议：[GitHub issues](https://github.com/leeguooooo/iphone-use/issues)。
 
 ## 许可证

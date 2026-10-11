@@ -8,6 +8,8 @@
 Claude Code, Codex or any MCP client reads the screen as text, taps, types and swipes in any app, including the ones with no API.</p>
 
 <p align="center">
+  <a href="https://github.com/leeguooooo/iphone-use/releases/latest"><img src="https://img.shields.io/github/v/release/leeguooooo/iphone-use?label=release" alt="Latest release"></a>
+  <a href="https://github.com/leeguooooo/iphone-use/actions/workflows/pr-checks.yml"><img src="https://github.com/leeguooooo/iphone-use/actions/workflows/pr-checks.yml/badge.svg" alt="PR checks"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm_Shield_1.0.0-blue.svg" alt="License: PolyForm Shield 1.0.0"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="Platform: macOS 15+">
   <img src="https://img.shields.io/badge/iPhone-iOS%2015%2B-black" alt="iPhone: iOS 15+">
@@ -50,7 +52,20 @@ Write this 2,000-word draft into a new note in Notes.
 Run my app's login test on the real phone and tell me which step fails.
 ```
 
-The agent finds an app by its name (`launch_app {"app": "Health"}`) and types long text (up to 20,000 characters) in one step. It can read a list across pages and say whether it reached the end. Logins, passcodes and Face ID go to you: the agent stops and asks, and never asks for the secret.
+The agent finds an app by its name (`launch_app {"app": "Health"}`) and types long text (up to 20,000 characters) in one step. It can read a list across pages and say whether it reached the end.
+
+## How it works
+
+```text
+ Claude Code / Codex / any MCP client ──MCP──┐
+ scripts and other agents ─────────────HTTP──┤
+                                             ▼
+                          iphone-use daemon on your Mac ──USB or Wi-Fi──▶ XCTest runner on the iPhone
+                                             ▲
+ you, in a browser or the iOS app ───────────┘
+```
+
+One daemon per phone runs on the Mac. It reads the screen as an accessibility tree (text, not pixels), sends taps and typing through a small XCTest runner it installs on the phone, and checks that the screen has settled before it answers. Agents and people go through the same daemon, and one of them holds the phone at a time.
 
 ## Install
 
@@ -69,6 +84,7 @@ iphone-use setup     # set the phone up again (after a new iPhone or Xcode)
 iphone-use try       # a harmless check: open Settings, read the screen, go Home
 iphone-use login     # sign a browser in again, with a QR code for the iPhone
 iphone-use upgrade   # update everything
+~/.iphone-use/uninstall.sh --dry-run   # what uninstalling would remove (drop --dry-run to do it)
 ```
 
 ### Or ask your agent to install it
@@ -95,13 +111,11 @@ Adds the skill and the MCP server; it still needs the install above:
 codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-use@iphone-use
 ```
 
-[Product guide: installation, MCP setup, flows and comparison](https://blog.leeguoo.com/en/posts/iphone-use/)
-
 ## Remote control for people
 
 The same daemon that serves agents lets you drive the phone yourself:
 
-- **From a browser.** The live screen arrives as H.264 encoded on the phone: native resolution at about 50 fps on the LAN, and a lighter mode for slow links. Click to tap, drag to swipe, hold to long-press, scroll with the wheel or trackpad. Type straight into the phone with your input method, and ⌘V pastes. A controls panel lists the screen's elements so you can tap by label, and the 流程 panel records what you do as a replayable flow.
+- **From a browser.** The live screen arrives as H.264 encoded on the phone: native resolution at about 50 fps on the LAN, and a lighter mode for slow links. Click to tap, drag to swipe, hold to long-press, scroll with the wheel or trackpad. Type straight into the phone with your input method, and ⌘V pastes. The Controls panel (控件) lists the screen's elements so you can tap by label, and the Flow panel (流程) records what you do as a replayable flow. The page is in Chinese for now.
 - **From another iPhone.** The native iOS app (iOS 17+) pairs by scanning a QR code on the Mac's page, with no address or password to type. It plays the screen with the hardware decoder and switches between your phones.
 - **Screens hidden from capture.** Banking and payment apps black out screen capture; there you see a live wireframe of the screen's elements instead of a blank picture, and you can still tap through it.
 - **From anywhere.** Reach the Mac through an authenticated HTTPS reverse proxy or a VPN such as Tailscale, and control the phone from outside your network ([security notes](docs/guide.md#security)).
@@ -138,13 +152,19 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
   -d '{"type":"tap","element":7,"snapshot":"…"}'            # tap, then what changed (~2 s)
 ```
 
-You can set limits the daemon enforces whatever the agent is told: apps it may not open (`IPHONE_USE_BLOCKED_APPS`, for example `Wallet, Passwords`) and a number of actions per task (`IPHONE_USE_MAX_ACTIONS`). The web page shows each action the agent takes in plain words over the phone screen, for example `Tapped “Wi-Fi”` ([details](docs/agent-reference.md#owner-limits-and-the-activity-feed)).
-
 See the [MCP tools](crates/mcp/README.md) and the [Agent API reference](docs/agent-api.html).
+
+## Safety and privacy
+
+- **Secrets stay with you.** For logins, passcodes and Face ID the agent stops and asks you to finish on the phone. It never asks for the password or the code.
+- **Limits the agent cannot talk its way past.** The daemon refuses apps you block (`IPHONE_USE_BLOCKED_APPS`, for example `Wallet, Passwords`) and caps the actions per task (`IPHONE_USE_MAX_ACTIONS`), whatever the agent's prompt says ([details](docs/agent-reference.md#owner-limits-and-the-activity-feed)).
+- **You see what it does.** The web page shows each action over the live screen in plain words, for example `Tapped “Wi-Fi”`. Typed text is never kept, only its length.
+- **Local by default.** The daemon listens on `127.0.0.1:44321` behind a password, and the runner on the phone accepts only requests signed with a per-launch token. The iOS 15/16 LAN path is unencrypted ([security](docs/guide.md#security)).
+- **No telemetry.** This build sends no usage data ([telemetry](docs/telemetry.md) · [privacy policy](docs/privacy.md)).
 
 ## Flows: do a task once, replay it with no model
 
-Tasks you repeat are kept as **flows**: reviewed per-app scripts that replay without a model, so they cost no tokens. The official registry is **[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**. Record a flow in the browser's 流程 panel and publish it there with a PR.
+Tasks you repeat are kept as **flows**: reviewed per-app scripts that replay without a model, so they cost no tokens. The official registry is **[leeguooooo/iphone-use-flows](https://github.com/leeguooooo/iphone-use-flows)**. Record a flow in the browser's Flow panel (流程) and publish it there with a PR.
 
 Agents find flows on their own: when one enters an app, the response lists that app's flows. After an agent does a multi-step task in an app that has none, it asks whether to save the task as a flow; the daemon has already recorded the steps as a draft. The daemon keeps the registry fresh by itself (`IPHONE_USE_FLOWS_NO_AUTO_UPDATE=1` turns that off, `IPHONE_USE_FLOWS_NO_SUGGEST=1` silences the save suggestions).
 
@@ -179,7 +199,7 @@ Through the full agent API, a tap by label that returns the settled change takes
 
 - [Full guide](docs/guide.md): browser and iOS app, flows and the flow registry, Wi-Fi and iOS 15/16, lifecycle, configuration, security, development.
 - [Agent API reference](docs/agent-api.html) · [MCP tools](crates/mcp/README.md) · [Architecture](docs/direct-device-architecture.html) · [Device setup pitfalls](docs/wda-setup.html) · [Device runner](runner/README.md) · [Privacy](docs/privacy.md)
-- Security in one line: the password protects port 44321; the runner's own ports on the phone accept only requests signed with a per-launch token, but the iOS 15/16 LAN path is unencrypted ([details](docs/guide.md#security)).
+- [Product guide](https://blog.leeguoo.com/en/posts/iphone-use/): installation, MCP setup, flows and how it compares.
 - Issues and ideas: [GitHub issues](https://github.com/leeguooooo/iphone-use/issues).
 
 ## License
