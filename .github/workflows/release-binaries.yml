@@ -426,3 +426,35 @@ jobs:
             iphone-use-runner.tar.gz
             iphone-use-runner.tar.gz.sha256
           retention-days: 7
+
+  # List the release in the official MCP Registry (registry.modelcontextprotocol.io).
+  # GitHub OIDC proves the io.github.leeguooooo namespace, so no secret is
+  # needed. server.json carries the version release.sh bumped. A registry
+  # outage must not fail a release that already shipped, hence continue-on-error.
+  publish-mcp-registry:
+    name: Publish to the MCP Registry
+    needs: build-macos
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: macos-14
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Check server.json matches the tag
+        run: |
+          set -euo pipefail
+          want="${GITHUB_REF_NAME#v}"
+          have="$(python3 -c 'import json; print(json.load(open("server.json"))["version"])')"
+          test "$have" = "$want" || { echo "server.json is $have, tag is $want" >&2; exit 1; }
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          brew install mcp-publisher
+          mcp-publisher login github-oidc
+          mcp-publisher publish
+          mcp-publisher logout
