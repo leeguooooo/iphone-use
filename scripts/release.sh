@@ -55,6 +55,7 @@ t bash scripts/test-install-client-config.sh
 t bash scripts/test-setup-wda-shim.sh
 t bash runner/ci-check.sh
 t python3 scripts/test-auto-update.py
+t python3 -I scripts/test-agent-bench.py
 echo "checks passed"
 
 if [ "$DRY" = 1 ]; then

@@ -1,0 +1,9 @@
+{"type":"system","subtype":"init","tools":["mcp__iphone-use__phone_status"]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the phone."},{"type":"tool_use","id":"t1","name":"mcp__iphone-use__phone_status","input":{}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ready"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"mcp__iphone-use__phone_run_steps","input":{"steps":[]}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":"invalid"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"mcp__iphone-use__phone_run_steps","input":{"steps":[{"kind":"action"}]}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t3","content":"ok"}]}}
+not json at all
+{"type":"result","subtype":"success","is_error":false,"num_turns":4,"duration_ms":12345,"total_cost_usd":0.0123,"usage":{"input_tokens":1000,"output_tokens":200},"result":"Your iPhone runs iOS 18.1."}
