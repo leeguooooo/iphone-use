@@ -79,6 +79,8 @@
       color: var(--muted); text-decoration: none; font-size: 13px;
     }
     .back:hover { color: var(--fg); border-color: var(--border-hover); }
+    .topbar-links { display: flex; align-items: center; gap: 8px; }
+    .lang-switch { background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
     main {
       overflow: hidden; border: 1px solid var(--border); border-radius: 20px;
       background: var(--main-bg); box-shadow: var(--shadow);
@@ -185,7 +187,10 @@
   <div class="shell">
     <div class="topbar">
       <div class="brand">iphone-use</div>
-      <a class="back" href="/phone">返回控制页</a>
+      <div class="topbar-links">
+        <button id="langSwitch" class="back lang-switch" type="button" aria-label="切换语言 / Switch language">English</button>
+        <a class="back" href="/phone">返回控制页</a>
+      </div>
     </div>
     <main>
       <header>
@@ -255,6 +260,187 @@
   </div>
   <script>
     'use strict';
+    const I18N_EN = {
+      // static markup
+      '连接真实 iPhone · iphone-use': 'Connect a real iPhone · iphone-use',
+      '返回控制页': 'Back to controls',
+      'Direct · 设备 runner': 'Direct · device runner',
+      '连接真实 iPhone': 'Connect a real iPhone',
+      '这里会持续检查设备状态。设置仍由这台 Mac 上的受控脚本完成；页面不会擅自断开 VPN、修改代理、选择另一台手机或绕过系统信任。':
+        'This page keeps checking the device. Setup itself still runs from a controlled script on this Mac; the page never disconnects your VPN, changes proxies, picks another phone or bypasses system trust on its own.',
+      '正在检查设备状态': 'Checking the device',
+      '请稍候…': 'One moment…',
+      '立即检查': 'Check now',
+      '首次设置只做这四步': 'First-time setup takes four steps',
+      '准备签名环境': 'Prepare code signing',
+      '安装完整 Xcode，在 Xcode 设置中登录 Apple ID；iPhone 已开启开发者模式。':
+        'Install the full Xcode and sign in with your Apple ID in Xcode settings; turn on Developer Mode on the iPhone.',
+      '连接并解锁目标 iPhone': 'Connect and unlock the iPhone',
+      '首次使用 USB，保持亮屏；手机弹窗出现时点“信任”。多设备时脚本会拒绝猜测。':
+        'Use USB the first time and keep the screen on; tap “Trust” when the phone asks. With several devices the script refuses to guess.',
+      '在这台 Mac 的终端运行一次设置': 'Run setup once in a terminal on this Mac',
+      '它会检查 Xcode、网络、签名、设备信任以及 8100/9100 本地中继。':
+        'It checks Xcode, the network, signing, device trust and the 8100/9100 local relays.',
+      '复制命令': 'Copy command',
+      '回到这里等待绿色状态': 'Come back here and wait for green',
+      '本页每 3 秒检查一次；只有': 'This page checks every 3 seconds; controls open only once',
+      '才会开放控制。': 'is reported.',
+      '这台服务不管理设备 runner': 'This service does not manage the device runner',
+      '请到设备 runner 实际运行的主机恢复它。本页只会重新检查连接，不会在本机启动、停止或替换外部服务。':
+        'Restore it on the host where the device runner actually runs. This page only rechecks the connection; it never starts, stops or replaces an external service on this machine.',
+      '进入控制页': 'Open controls',
+      '隐私边界：状态接口只返回连接状态和首要阻塞项；这个页面不会读取手机画面、元素树、账号或通知内容。':
+        'Privacy: the status endpoint returns only the connection state and the main blocker; this page never reads the phone screen, element tree, accounts or notifications.',
+      // blockers
+      'WARP 设备配置需要调整': 'The WARP device profile needs a change',
+      '若 WARP 只用于特定站点，请管理员使用 Traffic only mode，并在 Split Tunnels Include 中只加入目标 IP；若仍使用全隧道，则排除 fe80::/10 与 fd00::/8。':
+        'If WARP is only needed for certain sites, ask an admin to use Traffic only mode and add just the target IPs under Split Tunnels Include; if it stays a full tunnel, exclude fe80::/10 and fd00::/8.',
+      '请管理员使用 Traffic only + Include 目标 IP，或在全隧道模式排除 fe80::/10 与 fd00::/8；策略生效后服务会自动继续。':
+        'Ask an admin to use Traffic only + Include for the target IPs, or exclude fe80::/10 and fd00::/8 in full-tunnel mode; the service continues on its own once the policy applies.',
+      '系统代理当前不可用': 'The system proxy is not working',
+      '启动对应代理应用，或在系统网络设置中关闭已经失效的代理项，再重新运行一次设置命令。':
+        'Start the proxy app, or turn off the dead proxy in the system network settings, then run the setup command again.',
+      '启动对应代理应用，或关闭已经失效的代理项；恢复后服务会自动继续。':
+        'Start the proxy app, or turn off the dead proxy; the service continues on its own once it recovers.',
+      '请连接目标 iPhone': 'Connect the iPhone',
+      '使用 USB 连接目标 iPhone，解锁并保持亮屏；出现提示时点“信任”。':
+        'Connect the iPhone over USB, unlock it and keep the screen on; tap “Trust” when asked.',
+      '使用 USB 连接这台 iPhone，解锁并保持亮屏；连接后服务会自动继续。':
+        'Connect this iPhone over USB, unlock it and keep the screen on; the service continues on its own once it is connected.',
+      'iPhone 没有连到这台 Mac': 'The iPhone is not connected to this Mac',
+      '用 USB 线插上目标 iPhone（或连到同一个 Wi-Fi）并解锁，再重新运行设置命令。':
+        'Plug the iPhone in with a USB cable (or join the same Wi-Fi) and unlock it, then run the setup command again.',
+      '用 USB 线插上 iPhone（或连到同一个 Wi-Fi）并解锁；手机回来后服务会自动重连。':
+        'Plug the iPhone in with a USB cable (or join the same Wi-Fi) and unlock it; the service reconnects on its own once the phone is back.',
+      '开发者证书尚未信任': 'The developer certificate is not trusted yet',
+      '在 iPhone 的“设置 → 通用 → VPN 与设备管理”中信任对应开发者证书。':
+        'On the iPhone, trust the developer certificate in Settings → General → VPN & Device Management.',
+      '在 iPhone 中信任对应开发者证书；完成后服务会自动继续。':
+        'Trust the developer certificate on the iPhone; the service continues on its own afterwards.',
+      'iPhone 开发者服务尚未就绪': 'iPhone developer services are not ready yet',
+      '保持 USB、解锁和亮屏，等待开发者服务完成挂载后再检查。':
+        'Keep it on USB, unlocked and with the screen on; check again once developer services finish mounting.',
+      '保持 USB、解锁和亮屏；开发者服务就绪后会自动继续。':
+        'Keep it on USB, unlocked and with the screen on; it continues on its own once developer services are ready.',
+      'iPhone 未开启 UI 自动化': 'UI Automation is off on the iPhone',
+      '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并在手机上确认密码或“允许自动化”提示，再重新运行设置命令。':
+        'Unlock the iPhone, turn on Settings › Developer › Enable UI Automation, confirm the passcode or “Allow automation” prompt on the phone, then run the setup command again.',
+      '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并确认手机上的密码或“允许自动化”提示；服务会自动重试。':
+        'Unlock the iPhone, turn on Settings › Developer › Enable UI Automation and confirm the passcode or “Allow automation” prompt on the phone; the service retries on its own.',
+      'iPhone 重启后还没解锁': 'The iPhone has not been unlocked since it restarted',
+      '这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。':
+        'This iPhone restarted and has not been unlocked since: someone needs to enter the passcode on the phone once, then it connects on its own.',
+      '需要有人在手机上输入密码': 'Someone needs to enter the passcode on the phone',
+      '手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。请站在手机旁重新运行设置命令，手机要求时输入密码。':
+        'The phone has a passcode: this start needs someone at the phone to enter it and allow UI Automation. It won’t ask again while it stays connected. Stand next to the phone, run the setup command again and enter the passcode when asked.',
+      '手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。':
+        'The phone has a passcode: this start needs someone at the phone to enter it and allow UI Automation. It won’t ask again while it stays connected.',
+      'iPhone 没有授权 UI 自动化': 'The iPhone has not allowed UI Automation',
+      'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败。解锁 iPhone，确认“设置 › 开发者 › 启用 UI 自动化”已打开，重新运行设置命令时盯着手机完成这个提示。':
+        'When the runner starts, the phone shows a passcode or “Allow” prompt that fails after about 30 seconds. Unlock the iPhone, make sure Settings › Developer › Enable UI Automation is on, and watch the phone to answer the prompt when you run the setup command again.',
+      'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败；解锁 iPhone、确认已打开“启用 UI 自动化”，下次重试时完成这个提示；服务会自动安静重试。':
+        'When the runner starts, the phone shows a passcode or “Allow” prompt that fails after about 30 seconds; unlock the iPhone, make sure Enable UI Automation is on, and answer the prompt on the next retry. The service retries quietly on its own.',
+      'Wi-Fi 下无法授权 UI 自动化': 'UI Automation can’t be allowed over Wi-Fi',
+      '通过 Wi-Fi 时手机弹不出输密码的提示（有些 iOS 版本干脆拒绝）。请用 USB 连接这台 iPhone，在它要求时输入密码，再重新运行设置命令；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB。':
+        'Over Wi-Fi the phone can’t show the passcode prompt (some iOS versions refuse outright). Connect this iPhone over USB, enter the passcode when asked, then run the setup command again; if Wi-Fi still fails afterwards, keep this phone on USB.',
+      '通过 Wi-Fi 重试解决不了：请用 USB 连接这台 iPhone，插上后服务会立刻重试，并在手机要求时输入密码。':
+        'Retrying over Wi-Fi won’t fix this: connect this iPhone over USB. The service retries as soon as it is plugged in; enter the passcode when the phone asks.',
+      'Xcode 版本太旧，不支持这台 iPhone 的 iOS': 'Xcode is too old for this iPhone’s iOS',
+      '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode），运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它，再重新运行设置命令。':
+        'Install an Xcode that supports this iPhone’s iOS version (beta iOS needs beta Xcode), run iphone-use setup --xcode <that Xcode.app> so this phone uses it, then run the setup command again.',
+      '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode）；在那之前自动重试也不会成功。':
+        'Install an Xcode that supports this iPhone’s iOS version (beta iOS needs beta Xcode); automatic retries won’t succeed until then.',
+      '这台 Mac 还驱动不了这台 iPhone 的系统': 'This Mac can’t drive this iPhone’s iOS yet',
+      'iOS 15 和 16 不用升级：配置付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），再重新运行设置命令。iOS 14 及更早的系统只能升级手机。':
+        'iOS 15 and 16 don’t need an update: set up an App Store Connect API key from a paid developer account (WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID), then run the setup command again. iOS 14 and earlier can only be fixed by updating the phone.',
+      '配置 App Store Connect API 密钥（iOS 15/16），或升级 iPhone（iOS 14 及更早）；在那之前自动重试也不会成功，换线也没用。':
+        'Set up an App Store Connect API key (iOS 15/16) or update the iPhone (iOS 14 and earlier); automatic retries won’t succeed until then, and a different cable won’t help.',
+      '请重启一次 iPhone': 'Restart the iPhone once',
+      'iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来。重启手机，解锁并保持插线，再重新运行设置命令。':
+        'An old developer disk image is stuck on the iPhone, so developer services can’t start. Restart the phone, unlock it and keep it plugged in, then run the setup command again.',
+      '重启一次 iPhone，解锁并保持插线；服务每隔几分钟会自动再试。':
+        'Restart the iPhone once, unlock it and keep it plugged in; the service tries again every few minutes.',
+      '请用数据线连接 iPhone': 'Connect the iPhone with a cable',
+      '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，再重新运行设置命令；之后只要手机和这台 Mac 在同一网络就可以拔线。':
+        'This iOS 15/16 iPhone is not plugged in and this Mac can’t reach it over Wi-Fi: plug it in once and keep it unlocked, then run the setup command again. After that you can unplug it as long as the phone and this Mac share a network.',
+      '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，服务会立刻接着连接；之后只要手机和这台 Mac 在同一网络就可以拔线。':
+        'This iOS 15/16 iPhone is not plugged in and this Mac can’t reach it over Wi-Fi: plug it in once and keep it unlocked, and the service connects right away. After that you can unplug it as long as the phone and this Mac share a network.',
+      '设备服务启动失败': 'The device service failed to start',
+      '保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。':
+        'Keep the phone unlocked and run the setup command again; if it still fails, check the setup-wda errors in the terminal.',
+      // live state
+      'iPhone 已连接，可以开始控制': 'iPhone connected and ready to control',
+      '设备控制服务已通过检查，可以进入控制页。': 'The device service passed its checks; you can open the controls.',
+      '等待一个连接条件恢复': 'Waiting for one connection condition',
+      '按下方提示处理一次；完成后服务会自动继续。': 'Follow the tip below once; the service continues on its own afterwards.',
+      '首次连接尚未完成': 'First connection not finished',
+      '先处理下方首要提示，再继续首次设置。': 'Fix the main issue below first, then continue first-time setup.',
+      '按下方提示处理后再检查。': 'Follow the tip below, then check again.',
+      '正在释放设备连接': 'Releasing the device',
+      '请等待释放完成，再重新连接。': 'Wait for the release to finish, then reconnect.',
+      '正在恢复设备服务': 'Restoring the device service',
+      '保持 iPhone 解锁、亮屏，本页会继续检查。': 'Keep the iPhone unlocked with the screen on; this page keeps checking.',
+      '外部设备 runner 未连接': 'External device runner not connected',
+      '请在设备服务所在主机恢复；本页会自动重新检查。': 'Restore it on the host that runs the device service; this page rechecks on its own.',
+      '还差一次真机设置': 'One real-device setup left',
+      '完成下面四步后，状态会自动变绿。': 'Finish the four steps below and the status turns green on its own.',
+      'iPhone 当前不可操作': 'The iPhone can’t be controlled right now',
+      '解锁并保持亮屏，连接会自动恢复。': 'Unlock it and keep the screen on; the connection recovers on its own.',
+      '设备服务尚未就绪': 'The device service is not ready',
+      '保持手机连接和解锁，然后重新检查。': 'Keep the phone connected and unlocked, then check again.',
+      '无法获取设备状态': 'Couldn’t get the device status',
+      '确认 iphone-use 服务仍在运行，然后重新检查。': 'Make sure the iphone-use service is still running, then check again.',
+      '检查中…': 'Checking…',
+      '已复制': 'Copied',
+      '长按复制': 'Long-press to copy',
+    };
+    /* ── i18n: Chinese is the source text; English comes from I18N_EN. ── */
+    const LANG = (() => {
+      try { const s = localStorage.getItem('iphone-use-lang'); if (s === 'zh' || s === 'en') return s; } catch {}
+      const c = document.cookie.match(/(?:^|;\s*)iphone_use_lang=(zh|en)/);
+      if (c) return c[1];
+      const first = (navigator.languages && navigator.languages[0]) || navigator.language || 'zh';
+      return first.toLowerCase().startsWith('zh') ? 'zh' : 'en';
+    })();
+    document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
+    /* t('手机正被{owner}使用', {owner}) — placeholders are {name}. */
+    function t(zh, vars) {
+      let s = (LANG === 'en' && Object.prototype.hasOwnProperty.call(I18N_EN, zh)) ? I18N_EN[zh] : zh;
+      if (vars) s = s.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+      return s;
+    }
+    /* A server {zh, en} pair in the page's language, else whichever half exists. */
+    function pick(pair) {
+      if (pair == null) return '';
+      if (typeof pair !== 'object') return String(pair);
+      return (LANG === 'en' ? (pair.en || pair.zh) : (pair.zh || pair.en)) || '';
+    }
+    /* Static markup: translate text nodes and aria-label/title/placeholder/alt
+       whose trimmed value is a dictionary key. Run once at startup (and on any
+       subtree you build from an HTML string). */
+    function localizeDom(root) {
+      if (LANG !== 'en') return;
+      root = root || document;
+      const walker = document.createTreeWalker(root.body || root, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const raw = n.nodeValue, key = raw.trim();
+        if (key && Object.prototype.hasOwnProperty.call(I18N_EN, key)) n.nodeValue = raw.replace(key, I18N_EN[key]);
+      }
+      for (const el of (root.querySelectorAll ? root : document).querySelectorAll('[aria-label],[title],[placeholder],[alt],[data-label]')) {
+        for (const a of ['aria-label', 'title', 'placeholder', 'alt', 'data-label']) {
+          const v = el.getAttribute(a);
+          if (v && Object.prototype.hasOwnProperty.call(I18N_EN, v.trim())) el.setAttribute(a, I18N_EN[v.trim()]);
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(I18N_EN, document.title)) document.title = I18N_EN[document.title];
+    }
+    function setLang(lang) {
+      try { localStorage.setItem('iphone-use-lang', lang); } catch {}
+      document.cookie = `iphone_use_lang=${lang}; Path=/; Max-Age=31536000; SameSite=Lax`;
+      location.reload();
+    }
+    localizeDom();
+
     const liveState = document.getElementById('liveState');
     const stateTitle = document.getElementById('stateTitle');
     const stateDetail = document.getElementById('stateDetail');
@@ -272,84 +458,84 @@
 
     const blockers = {
       warp: {
-        title: 'WARP 设备配置需要调整',
-        setup: '若 WARP 只用于特定站点，请管理员使用 Traffic only mode，并在 Split Tunnels Include 中只加入目标 IP；若仍使用全隧道，则排除 fe80::/10 与 fd00::/8。',
-        retry: '请管理员使用 Traffic only + Include 目标 IP，或在全隧道模式排除 fe80::/10 与 fd00::/8；策略生效后服务会自动继续。',
+        title: t('WARP 设备配置需要调整'),
+        setup: t('若 WARP 只用于特定站点，请管理员使用 Traffic only mode，并在 Split Tunnels Include 中只加入目标 IP；若仍使用全隧道，则排除 fe80::/10 与 fd00::/8。'),
+        retry: t('请管理员使用 Traffic only + Include 目标 IP，或在全隧道模式排除 fe80::/10 与 fd00::/8；策略生效后服务会自动继续。'),
       },
       proxy: {
-        title: '系统代理当前不可用',
-        setup: '启动对应代理应用，或在系统网络设置中关闭已经失效的代理项，再重新运行一次设置命令。',
-        retry: '启动对应代理应用，或关闭已经失效的代理项；恢复后服务会自动继续。',
+        title: t('系统代理当前不可用'),
+        setup: t('启动对应代理应用，或在系统网络设置中关闭已经失效的代理项，再重新运行一次设置命令。'),
+        retry: t('启动对应代理应用，或关闭已经失效的代理项；恢复后服务会自动继续。'),
       },
       usb: {
-        title: '请连接目标 iPhone',
-        setup: '使用 USB 连接目标 iPhone，解锁并保持亮屏；出现提示时点“信任”。',
-        retry: '使用 USB 连接这台 iPhone，解锁并保持亮屏；连接后服务会自动继续。',
+        title: t('请连接目标 iPhone'),
+        setup: t('使用 USB 连接目标 iPhone，解锁并保持亮屏；出现提示时点“信任”。'),
+        retry: t('使用 USB 连接这台 iPhone，解锁并保持亮屏；连接后服务会自动继续。'),
       },
       not_connected: {
-        title: 'iPhone 没有连到这台 Mac',
-        setup: '用 USB 线插上目标 iPhone（或连到同一个 Wi-Fi）并解锁，再重新运行设置命令。',
-        retry: '用 USB 线插上 iPhone（或连到同一个 Wi-Fi）并解锁；手机回来后服务会自动重连。',
+        title: t('iPhone 没有连到这台 Mac'),
+        setup: t('用 USB 线插上目标 iPhone（或连到同一个 Wi-Fi）并解锁，再重新运行设置命令。'),
+        retry: t('用 USB 线插上 iPhone（或连到同一个 Wi-Fi）并解锁；手机回来后服务会自动重连。'),
       },
       trust: {
-        title: '开发者证书尚未信任',
-        setup: '在 iPhone 的“设置 → 通用 → VPN 与设备管理”中信任对应开发者证书。',
-        retry: '在 iPhone 中信任对应开发者证书；完成后服务会自动继续。',
+        title: t('开发者证书尚未信任'),
+        setup: t('在 iPhone 的“设置 → 通用 → VPN 与设备管理”中信任对应开发者证书。'),
+        retry: t('在 iPhone 中信任对应开发者证书；完成后服务会自动继续。'),
       },
       ddi: {
-        title: 'iPhone 开发者服务尚未就绪',
-        setup: '保持 USB、解锁和亮屏，等待开发者服务完成挂载后再检查。',
-        retry: '保持 USB、解锁和亮屏；开发者服务就绪后会自动继续。',
+        title: t('iPhone 开发者服务尚未就绪'),
+        setup: t('保持 USB、解锁和亮屏，等待开发者服务完成挂载后再检查。'),
+        retry: t('保持 USB、解锁和亮屏；开发者服务就绪后会自动继续。'),
       },
       automation_mode_disabled: {
-        title: 'iPhone 未开启 UI 自动化',
-        setup: '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并在手机上确认密码或“允许自动化”提示，再重新运行设置命令。',
-        retry: '解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并确认手机上的密码或“允许自动化”提示；服务会自动重试。',
+        title: t('iPhone 未开启 UI 自动化'),
+        setup: t('解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并在手机上确认密码或“允许自动化”提示，再重新运行设置命令。'),
+        retry: t('解锁 iPhone，打开“设置 › 开发者 › 启用 UI 自动化”，并确认手机上的密码或“允许自动化”提示；服务会自动重试。'),
       },
       locked_after_restart: {
-        title: 'iPhone 重启后还没解锁',
-        setup: '这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。',
-        retry: '这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。',
+        title: t('iPhone 重启后还没解锁'),
+        setup: t('这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。'),
+        retry: t('这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。'),
       },
       needs_passcode_on_phone: {
-        title: '需要有人在手机上输入密码',
-        setup: '手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。请站在手机旁重新运行设置命令，手机要求时输入密码。',
-        retry: '手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。',
+        title: t('需要有人在手机上输入密码'),
+        setup: t('手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。请站在手机旁重新运行设置命令，手机要求时输入密码。'),
+        retry: t('手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。'),
       },
       automation_not_allowed: {
-        title: 'iPhone 没有授权 UI 自动化',
-        setup: 'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败。解锁 iPhone，确认“设置 › 开发者 › 启用 UI 自动化”已打开，重新运行设置命令时盯着手机完成这个提示。',
-        retry: 'runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败；解锁 iPhone、确认已打开“启用 UI 自动化”，下次重试时完成这个提示；服务会自动安静重试。',
+        title: t('iPhone 没有授权 UI 自动化'),
+        setup: t('runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败。解锁 iPhone，确认“设置 › 开发者 › 启用 UI 自动化”已打开，重新运行设置命令时盯着手机完成这个提示。'),
+        retry: t('runner 启动时手机上会弹出密码或“允许”提示，约 30 秒不处理就会失败；解锁 iPhone、确认已打开“启用 UI 自动化”，下次重试时完成这个提示；服务会自动安静重试。'),
       },
       wifi_automation_refused: {
-        title: 'Wi-Fi 下无法授权 UI 自动化',
-        setup: '通过 Wi-Fi 时手机弹不出输密码的提示（有些 iOS 版本干脆拒绝）。请用 USB 连接这台 iPhone，在它要求时输入密码，再重新运行设置命令；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB。',
-        retry: '通过 Wi-Fi 重试解决不了：请用 USB 连接这台 iPhone，插上后服务会立刻重试，并在手机要求时输入密码。',
+        title: t('Wi-Fi 下无法授权 UI 自动化'),
+        setup: t('通过 Wi-Fi 时手机弹不出输密码的提示（有些 iOS 版本干脆拒绝）。请用 USB 连接这台 iPhone，在它要求时输入密码，再重新运行设置命令；如果之后走 Wi-Fi 仍然失败，就让这台手机一直用 USB。'),
+        retry: t('通过 Wi-Fi 重试解决不了：请用 USB 连接这台 iPhone，插上后服务会立刻重试，并在手机要求时输入密码。'),
       },
       xcode_too_old: {
-        title: 'Xcode 版本太旧，不支持这台 iPhone 的 iOS',
-        setup: '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode），运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它，再重新运行设置命令。',
-        retry: '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode）；在那之前自动重试也不会成功。',
+        title: t('Xcode 版本太旧，不支持这台 iPhone 的 iOS'),
+        setup: t('安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode），运行 iphone-use setup --xcode <那个 Xcode.app> 让这台手机用它，再重新运行设置命令。'),
+        retry: t('安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode）；在那之前自动重试也不会成功。'),
       },
       ios_too_old: {
-        title: '这台 Mac 还驱动不了这台 iPhone 的系统',
-        setup: 'iOS 15 和 16 不用升级：配置付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），再重新运行设置命令。iOS 14 及更早的系统只能升级手机。',
-        retry: '配置 App Store Connect API 密钥（iOS 15/16），或升级 iPhone（iOS 14 及更早）；在那之前自动重试也不会成功，换线也没用。',
+        title: t('这台 Mac 还驱动不了这台 iPhone 的系统'),
+        setup: t('iOS 15 和 16 不用升级：配置付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），再重新运行设置命令。iOS 14 及更早的系统只能升级手机。'),
+        retry: t('配置 App Store Connect API 密钥（iOS 15/16），或升级 iPhone（iOS 14 及更早）；在那之前自动重试也不会成功，换线也没用。'),
       },
       ddi_needs_reboot: {
-        title: '请重启一次 iPhone',
-        setup: 'iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来。重启手机，解锁并保持插线，再重新运行设置命令。',
-        retry: '重启一次 iPhone，解锁并保持插线；服务每隔几分钟会自动再试。',
+        title: t('请重启一次 iPhone'),
+        setup: t('iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来。重启手机，解锁并保持插线，再重新运行设置命令。'),
+        retry: t('重启一次 iPhone，解锁并保持插线；服务每隔几分钟会自动再试。'),
       },
       legacy_needs_usb: {
-        title: '请用数据线连接 iPhone',
-        setup: '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，再重新运行设置命令；之后只要手机和这台 Mac 在同一网络就可以拔线。',
-        retry: '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，服务会立刻接着连接；之后只要手机和这台 Mac 在同一网络就可以拔线。',
+        title: t('请用数据线连接 iPhone'),
+        setup: t('这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，再重新运行设置命令；之后只要手机和这台 Mac 在同一网络就可以拔线。'),
+        retry: t('这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，服务会立刻接着连接；之后只要手机和这台 Mac 在同一网络就可以拔线。'),
       },
       wda: {
-        title: '设备服务启动失败',
-        setup: '保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。',
-        retry: '保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。',
+        title: t('设备服务启动失败'),
+        setup: t('保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。'),
+        retry: t('保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。'),
       },
     };
     const managedRetryBlockers = new Set(['warp', 'proxy', 'not_connected', 'usb', 'trust', 'ddi', 'automation_mode_disabled', 'automation_not_allowed', 'needs_passcode_on_phone', 'locked_after_restart']);
@@ -396,47 +582,47 @@
       }
 
       if (ready) {
-        setState('iPhone 已连接，可以开始控制', '设备控制服务已通过检查，可以进入控制页。', 'ok');
+        setState(t('iPhone 已连接，可以开始控制'), t('设备控制服务已通过检查，可以进入控制页。'), 'ok');
         return;
       }
       if (status?.setup_blocked_on && blockers[status.setup_blocked_on]) {
         if (managedRetry) {
-          setState('等待一个连接条件恢复', '按下方提示处理一次；完成后服务会自动继续。');
+          setState(t('等待一个连接条件恢复'), t('按下方提示处理一次；完成后服务会自动继续。'));
         } else if (setupRequired) {
-          setState('首次连接尚未完成', '先处理下方首要提示，再继续首次设置。');
+          setState(t('首次连接尚未完成'), t('先处理下方首要提示，再继续首次设置。'));
         } else {
-          setState(blockers[status.setup_blocked_on].title, '按下方提示处理后再检查。', 'danger');
+          setState(blockers[status.setup_blocked_on].title, t('按下方提示处理后再检查。'), 'danger');
         }
         return;
       }
       if (status?.releasing === true) {
-        setState('正在释放设备连接', '请等待释放完成，再重新连接。');
+        setState(t('正在释放设备连接'), t('请等待释放完成，再重新连接。'));
         return;
       }
       if (status?.reconnecting === true) {
-        setState('正在恢复设备服务', '保持 iPhone 解锁、亮屏，本页会继续检查。');
+        setState(t('正在恢复设备服务'), t('保持 iPhone 解锁、亮屏，本页会继续检查。'));
         return;
       }
       if (external) {
-        setState('外部设备 runner 未连接', '请在设备服务所在主机恢复；本页会自动重新检查。', 'danger');
+        setState(t('外部设备 runner 未连接'), t('请在设备服务所在主机恢复；本页会自动重新检查。'), 'danger');
         return;
       }
       if (setupRequired) {
-        setState('还差一次真机设置', '完成下面四步后，状态会自动变绿。');
+        setState(t('还差一次真机设置'), t('完成下面四步后，状态会自动变绿。'));
         return;
       }
       if (status?.wda_locked === true) {
-        setState('iPhone 当前不可操作', '解锁并保持亮屏，连接会自动恢复。', 'danger');
+        setState(t('iPhone 当前不可操作'), t('解锁并保持亮屏，连接会自动恢复。'), 'danger');
         return;
       }
-      setState('设备服务尚未就绪', '保持手机连接和解锁，然后重新检查。', 'danger');
+      setState(t('设备服务尚未就绪'), t('保持手机连接和解锁，然后重新检查。'), 'danger');
     }
 
     async function pollStatus() {
       if (polling) return;
       polling = true;
       refresh.disabled = true;
-      refresh.textContent = '检查中…';
+      refresh.textContent = t('检查中…');
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 7000);
       try {
@@ -452,13 +638,13 @@
         if (!response.ok) throw new Error('status rejected');
         renderStatus(await response.json());
       } catch (_) {
-        setState('无法获取设备状态', '确认 iphone-use 服务仍在运行，然后重新检查。', 'danger');
+        setState(t('无法获取设备状态'), t('确认 iphone-use 服务仍在运行，然后重新检查。'), 'danger');
         showBlocker('');
       } finally {
         clearTimeout(timeout);
         polling = false;
         refresh.disabled = false;
-        refresh.textContent = '立即检查';
+        refresh.textContent = t('立即检查');
         clearTimeout(pollTimer);
         if (document.visibilityState === 'visible') {
           pollTimer = setTimeout(pollStatus, 3000);
@@ -482,14 +668,18 @@
           selection.removeAllRanges();
         }
       }
-      button.textContent = copied ? '已复制' : '长按复制';
+      button.textContent = copied ? t('已复制') : t('长按复制');
       setTimeout(() => { button.textContent = defaultLabel; }, 1800);
     }
 
     async function copyCommand() {
-      await copyText(setupCommand, copy, '复制命令');
+      await copyText(setupCommand, copy, t('复制命令'));
     }
 
+    const langSwitch = document.getElementById('langSwitch');
+    langSwitch.textContent = LANG === 'en' ? '中文' : 'English';
+    langSwitch.lang = LANG === 'en' ? 'zh-CN' : 'en';
+    langSwitch.addEventListener('click', () => setLang(LANG === 'en' ? 'zh' : 'en'));
     refresh.addEventListener('click', pollStatus);
     copy.addEventListener('click', copyCommand);
     openPhone.addEventListener('click', (event) => {
