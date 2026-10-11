@@ -19,30 +19,8 @@ use rmcp::{transport::stdio, ServiceExt};
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Tests that change process-wide environment variables (the flow store and
-/// source, the daemon URL, fixture dirs, the `gh` stub) all hold this one
-/// lock. Separate per-module locks let a test in one module unset a variable
-/// while another module's test was using it, which then read the real
-/// `~/.iphone-use/flows` and failed on any machine with flows installed.
-#[cfg(test)]
-pub(crate) static TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-mod client;
-mod compact;
-mod compat;
-mod contrib;
-mod device;
-mod flow;
-mod hints;
-mod http;
-mod jev;
-mod outputs;
-mod registry;
-mod schedule;
-mod screen;
-mod server;
-mod suite;
-mod types;
+use iphone_use_mcp::{client, compat, contrib, flow, http, jev, registry, schedule, server, suite};
 
 #[derive(Debug, Parser)]
 #[command(

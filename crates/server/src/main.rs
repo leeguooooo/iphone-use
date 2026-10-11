@@ -20,7 +20,7 @@
 //! daemon needs no iPhone Mirroring, no Mac TCC grant, and never touches the
 //! Mac's screen or pointer.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -1030,12 +1030,6 @@ fn serve() -> Result<()> {
         managed_setting,
     )?;
 
-    // The daemon always serves plain HTTP; whether the cookie is marked `Secure`
-    // is decided per-request from `X-Forwarded-Proto` (the Cloudflare tunnel sets
-    // it to https). Binding to a LAN IP (0.0.0.0) is still plain HTTP, so forcing
-    // Secure here would make browsers reject the cookie over LAN. Keep this
-    // `false`; per-request HTTPS is detected in http.rs.
-    let cookie_secure = false;
     // Per-request /agent/* timings, independent of RUST_LOG (see `timing`).
     server::timing::set_log_path(
         server::instance::current()
@@ -1044,63 +1038,14 @@ fn serve() -> Result<()> {
     );
     // One summary per finished agent run (see `metrics`).
     server::metrics::set_runs_log(server::instance::current().state_dir.join("agent-runs.jsonl"));
-    let state = Arc::new(AppState {
-        password: cfg.password.clone(),
+    let state = server::boot::app_state(server::boot::StateInputs {
+        cfg: &cfg,
         secret,
-        session_ttl_secs: cfg.session_ttl_secs,
-        cookie_secure,
-        auth_limiter: Arc::new(Mutex::new(http::AuthLimiter::new())),
-        agent_token: cfg.agent_token.clone(),
-        device_udid: cfg.device_udid.clone(),
-        simulator: simulator.clone(),
-        inbox: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-        wda: match server::wda::WdaClient::new(&wda_url) {
-            Ok(c) => {
-                tracing::info!("device control via WDA at {wda_url}");
-                Some(Arc::new(tokio::sync::Mutex::new(c)))
-            }
-            Err(e) => {
-                tracing::warn!("IPHONE_USE_WDA_URL set but client failed: {e:#}");
-                None
-            }
-        },
+        wda_url: &wda_url,
+        mjpeg_url,
         managed_wda,
         managed_wda_pending,
-        latest_release: Arc::new(Mutex::new(None)),
-        // WDA's MJPEG stream (see /agent/mjpeg); the relay forwards it to
-        // 127.0.0.1:9100 (override with IPHONE_USE_WDA_MJPEG_URL).
-        video: server::video::VideoHub::supported()
-            .then(|| server::video::VideoHub::new(mjpeg_url.clone())),
-        mjpeg_url: Some(mjpeg_url),
-        wda_actionable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        wda_read_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        pairing: Arc::new(
-            server::pairing::Pairing::new(!server::pairing::is_loopback_host(&cfg.host))
-                .with_port(cfg.port),
-        ),
-        wda_health: Arc::new(Mutex::new(server::wda::WdaHealth::down())),
-        wda_death: Arc::new(Mutex::new(Default::default())),
-        wda_health_probe: Arc::new(Mutex::new(None)),
-        settled_frame_prefetch: Arc::new(Mutex::new(None)),
-        wda_control_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        // Idle auto-release: start the clock now so a daemon that boots with no
-        // one driving releases the phone after the first idle window.
-        last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
-        released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        wda_lifecycle: Arc::new(http::WdaLifecycle::new()),
-        live_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        mjpeg_stream_activity: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        element_snapshots: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-        owner_snapshots: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        flow_trail: Arc::new(Mutex::new(server::flows::FlowTrail::default())),
-        agent_focus: Arc::new(Mutex::new(server::focus::AgentFocus::load(
-            server::focus::state_path(),
-        ))),
-        hold_until: Arc::new(Mutex::new(None)),
-        private_until: Arc::new(Mutex::new(None)),
-        owner: Arc::new(Mutex::new(None)),
-        owner_lease_secs: cfg.owner_lease_secs,
-        wda_bootstrap: server::http::write_and_bootstrap_wda_agent,
+        simulator: simulator.clone(),
     });
 
     run_server(cfg, state, dir)
@@ -1232,6 +1177,7 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
             cfg.port,
             cfg.agent_token.clone().or_else(|| cfg.password.clone()),
             &server::instance::current().state_dir,
+            false,
         );
 
         // Idle auto-release owns only the local supervisor. Remote WDA

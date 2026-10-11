@@ -1,5 +1,7 @@
 # Rust build artifacts
 /target/
+# The on-phone daemon library the release packs into the runner sources
+/runner/embed/
 
 # S0a capture probe output
 /s0-frames/
@@ -17,5 +19,7 @@ env.txt
 url.txt
 
 # build/dev artifacts
+/target-browser-session/
+/apps/ios/SessionLibraries/
 /iPhoneUse.app/
 assets/icon-1024-old.png

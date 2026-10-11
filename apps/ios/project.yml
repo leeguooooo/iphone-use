@@ -2,7 +2,7 @@ name: IPhoneUseRemote
 options:
   bundleIdPrefix: com.leeguoo
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "15.0"
   createIntermediateGroups: true
   developmentLanguage: en
 settings:
@@ -11,7 +11,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "1.0.1"
-    CURRENT_PROJECT_VERSION: "9"
+    CURRENT_PROJECT_VERSION: "13"
 targets:
   IPhoneUseRemote:
     type: application
@@ -19,6 +19,9 @@ targets:
     sources:
       - IPhoneUseRemote/Sources
       - IPhoneUseRemote/Resources
+      - Shared
+    dependencies:
+      - target: AgentActivityWidget
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.remote
@@ -27,6 +30,23 @@ targets:
         INFOPLIST_FILE: IPhoneUseRemote/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_OBJC_BRIDGING_HEADER: IPhoneUseRemote/Sources/SessionBridge.h
+        LIBRARY_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/SessionLibraries/$(PLATFORM_NAME)"
+        OTHER_LDFLAGS: "$(inherited) -lipu_browser_session -framework Security -framework SystemConfiguration"
+  AgentActivityWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.1"
+    sources:
+      - AgentActivityWidget
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.leeguoo.iphone-use.remote.activity
+        INFOPLIST_FILE: AgentActivityWidget/Info.plist
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
         SWIFT_STRICT_CONCURRENCY: complete
   IPhoneUseRemoteTests:
     type: bundle.unit-test

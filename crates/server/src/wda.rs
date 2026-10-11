@@ -358,6 +358,10 @@ impl WdaClient {
                 record_rtt(started.elapsed());
                 let status = r.status();
                 if status.is_success() {
+                    // What the runner says about the daemon it hosts on the
+                    // phone (`phone_daemon` in /agent/status).
+                    let body: serde_json::Value = r.json().await.unwrap_or_default();
+                    crate::phone_daemon::note_runner_status(&body);
                     return Ok(());
                 }
                 let body = r.text().await.unwrap_or_default();
@@ -445,6 +449,16 @@ impl WdaClient {
     /// client's lock: renewing it must never wait behind a slow tree read.
     pub fn keep_awake_endpoint(&self) -> KeepAwakeEndpoint {
         KeepAwakeEndpoint {
+            base: self.base.clone(),
+            http: self.http.clone(),
+            auth: self.auth.clone(),
+        }
+    }
+
+    /// The runner's address and signing for the on-phone daemon's routes,
+    /// without holding this client's lock across the request.
+    pub fn phone_daemon_endpoint(&self) -> crate::phone_daemon::Endpoint {
+        crate::phone_daemon::Endpoint {
             base: self.base.clone(),
             http: self.http.clone(),
             auth: self.auth.clone(),
@@ -1538,6 +1552,21 @@ impl WdaClient {
             .context("POST /wda/apps/launch")?;
         ensure_wda_success(response, "POST /wda/apps/launch").await?;
         Ok(())
+    }
+
+    /// Quit an app (`POST /wda/apps/terminate`), so its next launch starts on
+    /// its first screen rather than the page it was left on. Answers whether
+    /// it was running.
+    pub async fn terminate_app(&mut self, bundle_id: &str) -> Result<bool> {
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .post_req(format!("{}/session/{}/wda/apps/terminate", self.base, sid))
+            .json(&serde_json::json!({ "bundleId": bundle_id }))
+            .send_signed(&self.auth)
+            .await
+            .context("POST /wda/apps/terminate")?;
+        let value = ensure_wda_success(response, "POST /wda/apps/terminate").await?;
+        Ok(value.get("value").and_then(serde_json::Value::as_bool).unwrap_or(true))
     }
 
     /// Bundle id of the foreground app (`GET /session/:sid/wda/apps/list`,

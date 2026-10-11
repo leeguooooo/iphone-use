@@ -120,7 +120,7 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 ## 用原生 iOS App 操作手机
 
-`apps/ios` 是原生 SwiftUI App（iOS 17+）。**扫码连接**：在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，用 App 扫一下就连上（用 iPhone 自带相机扫也行，还能直接在浏览器里控制）。二维码只能用一次、5 分钟内有效；App 会保存一个设备令牌自动续登录，改控制密码会让所有已配对的手机失效。也可以手动填地址和控制密码。App 用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码，所以手机锁着时 App 几秒内就会提示「请解锁」，解锁后马上连上。遇到 App 禁止截屏的界面（支付、银行类 App），画面不再是一片白，而是显示守护进程按控件树画的线框图。构建：`cd apps/ios && xcodegen generate`，再用 Xcode 打开。
+`apps/ios` 是原生 SwiftUI App（最低部署版本 iOS 15）。**扫码连接**：在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，用 App 扫一下就连上（用 iPhone 自带相机扫也行，还能直接在浏览器里控制）。二维码只能用一次、5 分钟内有效；App 会保存一个设备令牌自动续登录，改控制密码会让所有已配对的手机失效。也可以手动填地址和控制密码。App 用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码，所以手机锁着时 App 几秒内就会提示「请解锁」，解锁后马上连上。遇到 App 禁止截屏的界面（支付、银行类 App），画面不再是一片白，而是显示守护进程按控件树画的线框图。构建：`cd apps/ios && xcodegen generate`，再用 Xcode 打开。
 
 ## Agent API
 
@@ -374,6 +374,9 @@ iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/le
 | `IPHONE_USE_OWNER_LEASE_SECS` | `300` | `X-Phone-Owner` 租约在没有请求刷新时的存活时间。 |
 | `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | setup 编译的设备 runner 源码（仓库里的 `scripts/setup-wda.sh` 用仓库自己的 `runner/`）。只有不是默认值时才持久化。 |
 | `WDA_RUNNER_REBUILD` | 关 | `1` 让下一次 setup 忽略记录的 runner 产物、重新编译。 |
+| `IPU_EMBED` | 开 | `0` 编译不带手机端 daemon 的设备 runner。会写进 supervisor。 |
+| `IPU_EMBED_LIB` | `~/.iphone-use/runner/embed/libipu_embed.a` | setup 链接进 runner 的手机端 daemon 库（绝对路径）。仓库里用 `scripts/build-ios-embed.sh` 现编；都找不到就编普通 runner。会写进 supervisor。 |
+| `IPU_DAEMON_HOST` | `127.0.0.1` | runner 里的 daemon 在手机上监听的地址；`0.0.0.0` 让别的设备也能通过它操作这台手机（仍要 token）。会写进 supervisor。 |
 | `IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH` | runner 默认 64 | 只对外部 WebDriverAgent 生效；设备 runner 自己限制读树（深度阶梯、5000 个节点）。 |
 | `IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S` | — | 同上，只对 WebDriverAgent 生效。 |
 | `IPHONE_USE_ELEMENTS_AFFORDANCES` | 关 | `1` 给 `/agent/elements` 的行加稀疏的 `actions`、`selected`、`min` / `max`。 |

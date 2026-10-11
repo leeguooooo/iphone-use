@@ -1,17 +1,16 @@
 import Foundation
 import Network
-import Observation
+import Combine
 
 /// The app: the saved devices (one session each), which one is on screen,
 /// sync mode, pairing, and the demo.
 @MainActor
-@Observable
-final class AppModel {
-    private(set) var devices: [DeviceRecord] = []
-    private(set) var sessions: [UUID: DeviceSession] = [:]
+final class AppModel: ObservableObject {
+    @Published private(set) var devices: [DeviceRecord] = []
+    @Published private(set) var sessions: [UUID: DeviceSession] = [:]
 
     /// The device shown full screen; nil shows the overview grid.
-    var focusedID: UUID? {
+    @Published var focusedID: UUID? {
         didSet {
             guard focusedID != oldValue else { return }
             updateAutoWake()
@@ -21,7 +20,7 @@ final class AppModel {
 
     /// Sync ("同步"): every gesture on the lead goes to the lead and each
     /// follower at once. Nil when off.
-    private(set) var sync: SyncGroup?
+    @Published private(set) var sync: SyncGroup?
 
     struct SyncGroup: Equatable {
         var lead: UUID
@@ -30,23 +29,23 @@ final class AppModel {
     }
 
     /// Adding a device (first launch, or from the device list).
-    var adding = false
-    var addError: String?
-    var toast: String?
+    @Published var adding = false
+    @Published var addError: String?
+    @Published var toast: String?
 
     /// The device whose address and password are being edited (a login
     /// prompt, or Settings › Edit).
-    var editing: EditTarget?
+    @Published var editing: EditTarget?
     /// The scanner is open (from a device's "scan again" button).
-    var scanning = false
+    @Published var scanning = false
 
     struct EditTarget: Identifiable, Equatable {
         let id: UUID
     }
 
     /// This iPhone has a network path at all.
-    private(set) var online = true
-    private var pathMonitor: NWPathMonitor?
+    @Published private(set) var online = true
+    @Published private var pathMonitor: NWPathMonitor?
 
     /// What became of adding or editing a device.
     enum AddOutcome: Equatable {
@@ -60,11 +59,11 @@ final class AppModel {
     }
 
     /// The recorded demo, while someone is trying the app without a Mac.
-    var demo: DemoSession?
+    @Published var demo: DemoSession?
 
     /// The person's viewing choice for the focused screen, remembered on this
     /// device. Tiles always stream in performance mode.
-    var videoPreference: VideoPreference = VideoPreference.load(from: .standard) {
+    @Published var videoPreference: VideoPreference = VideoPreference.load(from: .standard) {
         didSet {
             guard videoPreference != oldValue else { return }
             UserDefaults.standard.set(videoPreference.rawValue, forKey: VideoPreference.key)
@@ -72,17 +71,25 @@ final class AppModel {
         }
     }
     /// This iPhone is on cellular only (auto video picks performance).
-    private(set) var onCellular = false
+    @Published private(set) var onCellular = false
 
     /// A pairing link opened from outside the app (the camera's landing page,
     /// or any other app). It waits for the person to confirm, so a stray link
     /// cannot silently add a server.
-    var pendingLink: PairLink?
+    @Published var pendingLink: PairLink?
+
+    /// The Agent screen (a goal typed here, carried out by a daemon).
+    @Published var agentOpen = false
+    @Published var assistantNavigationRequest: UUID?
+    let agent: AgentController
+    let voiceCall = AssistantVoiceCall()
 
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        agent = AgentController(defaults: defaults)
+        agent.app = self
         #if DEBUG
         // Screenshots: `-demo YES [-demoScreen <id>]` opens the demo directly.
         if defaults.bool(forKey: "demo") {
@@ -100,6 +107,9 @@ final class AppModel {
         for session in sessions.values {
             Task { await session.connect(password: nil) }
         }
+        // A task followed before a relaunch (on 本机 the daemon may have
+        // launched this app to ask a question).
+        agent.resume()
         #if DEBUG
         // UI checks on the simulator: `-address <url> -password <pw>`, or
         // `-pair <QR text>` standing in for a scan (the simulator has no camera).
@@ -110,11 +120,22 @@ final class AppModel {
         }
         if defaults.bool(forKey: "edit"), let id = focusedID { editing = .init(id: id) }
         if defaults.bool(forKey: "scan") { scanning = true }
+        // `-agent YES`: the Agent screen, aimed at the device just added
+        // (if any).
+        let agentScreen = defaults.bool(forKey: "agent")
         if let scanned = defaults.string(forKey: "pair"), let link = PairLink.parse(scanned) {
-            Task { await pair(link) }
+            Task {
+                await pair(link)
+                if agentScreen { openAgent() }
+            }
         } else if let address = defaults.string(forKey: "address"),
                   let password = defaults.string(forKey: "password"), !password.isEmpty {
-            Task { await add(address: address, password: password) }
+            Task {
+                await add(address: address, password: password)
+                if agentScreen { openAgent() }
+            }
+        } else if agentScreen {
+            openAgent()
         }
         #endif
     }
@@ -183,7 +204,13 @@ final class AppModel {
             sessions[record.id] = session
             persist()
         }
-        focusedID = record.id
+        if record.isThisPhone {
+            // 本机 is not driven from a screen of itself: it gets goals on
+            // the Agent screen.
+            agent.targetID = record.id
+        } else {
+            focusedID = record.id
+        }
         if session.phase != .connected { session.phase = .connecting }
         do {
             let token = try await client.pair(code: link.code)
@@ -191,6 +218,11 @@ final class AppModel {
             Keychain.save(password: token, for: DeviceSession.deviceAccount(address))
             session.pendingPair = nil
             try await session.adopt(client)
+            if record.isThisPhone {
+                show(String(localized: "本机已配对，可以让 agent 在这台 iPhone 上做事了"))
+                await agent.refreshHistory()
+                return .connected(record.id)
+            }
             if existing != nil { show(String(localized: "已更新「\(session.name)」的配对")) }
             return .connected(record.id)
         } catch {
@@ -347,6 +379,14 @@ final class AppModel {
     }
 
     func handle(url: URL) {
+        if url.scheme == "iphoneuse", url.host == "assistant" {
+            agentOpen = false; assistantNavigationRequest = UUID(); return
+        }
+        if url.scheme == "iphoneuse", url.host == "agent" {
+            openAgent()
+            agent.resume()
+            return
+        }
         guard let link = PairLink.parse(url.absoluteString) else { return }
         pendingLink = link
     }
@@ -379,6 +419,7 @@ final class AppModel {
 
     /// Forget a device: its credentials, its session and its place in sync.
     func remove(_ id: UUID) {
+        agent.forget(device: id)
         sessions[id]?.forget()
         sessions[id] = nil
         devices.removeAll { $0.id == id }
@@ -400,6 +441,13 @@ final class AppModel {
             // A device whose session died while away is retried on return.
             Task { await session.retryIfWaiting() }
         }
+        agent.resume()
+    }
+
+    /// Open the Agent screen, aimed at the device on screen (else 本机).
+    func openAgent() {
+        agent.chooseDefaultTarget()
+        agentOpen = true
     }
 
     /// Pull to refresh: every waiting device tries again now, every

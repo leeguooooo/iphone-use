@@ -196,6 +196,13 @@ pub fn log_shows_device_unavailable(path: &Path) -> bool {
     )
 }
 
+/// The runner started but could not listen on its port on the phone: another
+/// runner, usually the previous one still exiting, holds it (#265). The
+/// product is fine; only the old process is in the way.
+pub fn log_shows_port_in_use(path: &Path) -> bool {
+    read_log(path).contains("on the phone is already in use")
+}
+
 pub fn log_shows_automation_disabled(path: &Path) -> bool {
     let text = read_log(path).to_lowercase();
     text.contains("timed out while enabling automation mode")
@@ -407,7 +414,8 @@ pub fn resolve_xctestrun(products: &Path, sdk: Option<&str>) -> Option<PathBuf> 
 // ── product cache ───────────────────────────────────────────────────────────
 
 /// Everything that changes the product: sources, signing identity, target,
-/// and the Xcode / SDK / deployment target it was built with.
+/// the Xcode / SDK / deployment target it was built with, and the on-phone
+/// daemon library linked into it (`embed::cache_component`: its content hash).
 #[allow(clippy::too_many_arguments)]
 pub fn cache_key(
     ctx: &Ctx,
@@ -418,13 +426,14 @@ pub fn cache_key(
     xcode_version: &str,
     sdk: &str,
     deployment_override: &str,
+    embed: &str,
 ) -> String {
     let signer = if ctx.asc_signing_enabled() {
         format!("asc:{}", ctx.asc_key_id)
     } else {
         "account".to_string()
     };
-    format!("v3|{source_hash}|{bundle}|{team}|{signer}|{udid}|{xcode_version}|{sdk}|{deployment_override}")
+    format!("v3|{source_hash}|{bundle}|{team}|{signer}|{udid}|{xcode_version}|{sdk}|{deployment_override}|{embed}")
 }
 
 /// The runner-source hash inside a [`cache_key`] (`v3|<hash>|…`).
@@ -740,6 +749,29 @@ pub fn prepare_xcconfig(ctx: &Ctx) -> Result<(String, Option<PathBuf>), String> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_cache_key_carries_the_embed_library_hash() {
+        let ctx = crate::setup::ctx::tests_support::ctx();
+        let key = |embed: &str| cache_key(&ctx, "src", "b", "t", "u", "16", "18.0", "", embed);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(super::super::embed::LIB_NAME);
+        let lib = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            super::super::embed::EmbedLib {
+                path: path.clone(),
+                sha256: format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes)),
+            }
+        };
+        let component = super::super::embed::cache_component;
+        let one = lib(b"one");
+        let plain = key(&component(None));
+        let linked = key(&component(Some(&one)));
+        assert_ne!(plain, linked, "linking the library must rebuild");
+        assert!(linked.ends_with(&format!("|embed:{}", one.sha256)));
+        assert_eq!(linked, key(&component(Some(&lib(b"one")))), "same library reuses");
+        assert_ne!(linked, key(&component(Some(&lib(b"two")))), "a new library rebuilds");
+    }
+
     // `security cms -D -i embedded.mobileprovision` of a free Apple ID runner,
     // trimmed to the keys read.
     const PROFILE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -881,6 +913,19 @@ mod tests {
             ),
             "a missing iOS platform is not an unreachable phone"
         );
+        // What a runner that lost the race for port 8100 leaves behind: a
+        // failed test, not a failed product (#265).
+        let busy = log("2026-10-11 03:07:41.512+0900 IPhoneUseRunnerUITests-Runner[812:40211] ipu-runner: port 8100 on the phone is already in use \u{2014} another runner (or a previous one still exiting) holds it\n\
+            /Users/x/runner/IPhoneUseRunnerUITests/RunnerTests.swift:153: error: -[RunnerTests testServe] : failed - ipu-runner: port 8100 on the phone is already in use \u{2014} another runner (or a previous one still exiting) holds it\n\
+            Test Case '-[RunnerTests testServe]' failed (2.104 seconds).\n\
+            Failing tests:\n\tRunnerTests.testServe()\n** TEST EXECUTE FAILED **\n");
+        assert!(log_shows_port_in_use(busy.path()));
+        assert!(!log_shows_product_failure(busy.path()));
+        assert!(!log_shows_lock(busy.path()));
+        assert!(!log_shows_ide_refusal(busy.path()));
+        assert!(!log_shows_port_in_use(
+            log("ipu-runner: could not listen on port 8100: POSIXErrorCode(rawValue: 13)").path()
+        ));
         assert!(log_shows_product_failure(log("Error 0xE8008001").path()));
         assert!(!log_shows_product_failure(
             log("Failed to establish communication with the test runner").path()
@@ -932,7 +977,7 @@ mod tests {
     #[test]
     fn the_source_hash_is_read_back_from_a_cache_key() {
         let ctx = crate::setup::ctx::tests_support::ctx();
-        let key = cache_key(&ctx, "abc123", "b", "T", "U", "27.0", "27.0", "");
+        let key = cache_key(&ctx, "abc123", "b", "T", "U", "27.0", "27.0", "", "");
         assert_eq!(key_source_hash(&key), Some("abc123"));
         // The icon component setup appends does not disturb it.
         assert_eq!(key_source_hash(&format!("{key}|icon:xyz")), Some("abc123"));

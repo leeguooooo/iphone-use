@@ -1,0 +1,14 @@
+[package]
+name = "ios-embed"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The iphone-use daemon as a static library the device runner starts on the phone"
+
+[lib]
+name = "ipu_embed"
+crate-type = ["staticlib"]
+
+[dependencies]
+server = { path = "../server" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

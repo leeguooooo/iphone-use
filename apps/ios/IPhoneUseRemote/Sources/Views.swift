@@ -2,16 +2,23 @@ import SwiftUI
 
 @main
 struct IPhoneUseRemoteApp: App {
-    @State private var app = AppModel()
+    @StateObject private var app: AppModel
+    init() {
+        #if DEBUG
+        let defaults = BrowserDeviceAcceptanceView.requestedURL != nil ? UserDefaults(suiteName: "acceptance-main-" + UUID().uuidString)! : .standard
+        _app = StateObject(wrappedValue: AppModel(defaults: defaults))
+        #else
+        _app = StateObject(wrappedValue: AppModel())
+        #endif
+    }
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             RootView(app: app)
-                .preferredColorScheme(.dark)
                 // The landing page a scanned QR opens hands off here.
                 .onOpenURL { app.handle(url: $0) }
-                .onChange(of: scenePhase) { _, phase in
+                .appOnChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active: app.becameActive()
                     case .background: app.enteredBackground()
@@ -19,7 +26,9 @@ struct IPhoneUseRemoteApp: App {
                     }
                 }
                 .alert(
-                    "连接到这台 Mac？",
+                    LocalizedStringKey(
+                        app.pendingLink.map { DeviceStore.isThisPhone($0.base.absoluteString) } == true
+                            ? "让 agent 在这台 iPhone 上做事？" : "连接到这台 Mac？"),
                     isPresented: Binding(
                         get: { app.pendingLink != nil },
                         set: { if !$0 { app.pendingLink = nil } }),
@@ -28,10 +37,12 @@ struct IPhoneUseRemoteApp: App {
                     Button("连接") { app.confirmPendingLink() }
                     Button("取消", role: .cancel) { app.pendingLink = nil }
                 } message: { link in
-                    if let name = app.savedName(for: link) {
-                        Text("\(link.base.host() ?? link.base.absoluteString)\n已保存为「\(name)」，会刷新它的配对。只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
+                    if DeviceStore.isThisPhone(link.base.absoluteString) {
+                        Text("配对这台 iPhone 自己的 agent。只在你刚刚在自己 Mac 上点了「配对本机 Agent」时才点「连接」。")
+                    } else if let name = app.savedName(for: link) {
+                        Text("\(link.base.host ?? link.base.absoluteString)\n已保存为「\(name)」，会刷新它的配对。只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
                     } else {
-                        Text("\(link.base.host() ?? link.base.absoluteString)\n只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
+                        Text("\(link.base.host ?? link.base.absoluteString)\n只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
                     }
                 }
         }
@@ -39,51 +50,44 @@ struct IPhoneUseRemoteApp: App {
 }
 
 struct RootView: View {
-    @Bindable var app: AppModel
+    @ObservedObject var app: AppModel
     @State private var manualAfterScan = false
+
+    @ViewBuilder private var normalContent: some View {
+        if let demo = app.demo { DemoView(session: demo) { app.demo = nil }.transition(.opacity) }
+        else { MainTabsView(app: app) }
+    }
 
     var body: some View {
         Group {
-            if let demo = app.demo {
-                DemoView(session: demo) { app.demo = nil }
-                    .transition(.opacity)
-            } else if app.devices.isEmpty {
-                WelcomeView(app: app)
-                    .transition(.opacity)
-            } else if let session = app.focused {
-                Group {
-                    if let group = app.sync, group.lead == session.id {
-                        SyncView(app: app, lead: session, group: group)
-                    } else {
-                        RemoteView(app: app, session: session)
-                    }
-                }
-                // A different phone is a different screen (its own zoom,
-                // keyboard queue).
-                .id(session.id)
-                .transition(.asymmetric(insertion: .scale(scale: 0.94).combined(with: .opacity),
-                                        removal: .opacity))
-            } else {
-                DeviceGridView(app: app)
-                    .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.03)),
-                                            removal: .opacity))
-            }
+            #if DEBUG
+            if let url = BrowserDeviceAcceptanceView.requestedURL {
+                BrowserDeviceAcceptanceView(address: url)
+            } else { normalContent }
+            #else
+            normalContent
+            #endif
         }
-        .animation(.snappy(duration: 0.32), value: app.focusedID)
-        .animation(.snappy(duration: 0.32), value: app.demo == nil)
+        .animation(.appSnappy(duration: 0.32), value: app.focusedID)
+        .animation(.appSnappy(duration: 0.32), value: app.demo == nil)
         .tint(Theme.accent)
         .onAppear {
             #if DEBUG
             // Screenshots: `-orientation landscape`.
             if UserDefaults.standard.string(forKey: "orientation") == "landscape",
                let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-                scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) { _ in }
+                if #available(iOS 16, *) { scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) { _ in } }
             }
             #endif
         }
+        // The Agent screen, from the overview or the remote's menu (and
+        // brought up by a task that waits on the person).
+        .sheet(isPresented: $app.agentOpen) {
+            AgentView(app: app, agent: app.agent)
+        }
         // A device's "enter password" and "scan again" buttons, from any screen.
         .sheet(item: $app.editing) { target in
-            NavigationStack {
+            AppNavigationStack {
                 DeviceEditForm(app: app, id: target.id, closesSheet: true)
             }
         }
@@ -139,7 +143,7 @@ struct OfflineBanner: View {
 /// or the "add device" sheet with its scan button. `onDone` (sheet only)
 /// closes it once the device is saved.
 struct ConnectView: View {
-    @Bindable var app: AppModel
+    @ObservedObject var app: AppModel
     let onDone: (() -> Void)?
     /// Pushed inside the welcome screen's navigation, without its own.
     var embedded = false
@@ -161,7 +165,7 @@ struct ConnectView: View {
         if embedded {
             form
         } else {
-            NavigationStack { form }
+            AppNavigationStack { form }
         }
     }
 
@@ -239,10 +243,8 @@ struct ConnectView: View {
         .navigationTitle(embedded ? "手动连接" : "添加手机")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if onDone != nil {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { working?.cancel(); dismiss() }
-                }
+            ToolbarItem(placement: .cancellationAction) {
+                if onDone != nil { Button("取消") { working?.cancel(); dismiss() } }
             }
         }
         .fullScreenCover(isPresented: $scanning) {
@@ -256,8 +258,8 @@ struct ConnectView: View {
                 onManual: { field = .address })
         }
         .onAppear { app.addError = nil }
-        .onChange(of: address) { problem = nil; canSaveAnyway = false }
-        .onChange(of: password) { if !canSaveAnyway { problem = nil } }
+        .appOnChange(of: address) { problem = nil; canSaveAnyway = false }
+        .appOnChange(of: password) { if !canSaveAnyway { problem = nil } }
     }
 
     private var canSubmit: Bool {
@@ -309,7 +311,7 @@ struct AddressHint: View {
 /// Edit a saved device: name, address, password; also where a login prompt
 /// lands. Saving with an unreachable Mac keeps the change and retries.
 struct DeviceEditForm: View {
-    @Bindable var app: AppModel
+    @ObservedObject var app: AppModel
     let id: UUID
     /// Shown as its own sheet (a login prompt) rather than pushed in Settings.
     var closesSheet = false
@@ -379,8 +381,8 @@ struct DeviceEditForm: View {
         .navigationTitle(closesSheet ? String(localized: "登录") : String(localized: "编辑"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if closesSheet {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) {
+                if closesSheet { Button("取消") { dismiss() } }
             }
         }
         .onAppear {
@@ -389,8 +391,8 @@ struct DeviceEditForm: View {
             name = record.customName ?? ""
             address = record.address
         }
-        .onChange(of: address) { problem = nil }
-        .onChange(of: password) { problem = nil }
+        .appOnChange(of: address) { problem = nil }
+        .appOnChange(of: password) { problem = nil }
         // Presented from here: this form may itself sit in a sheet, where the
         // root's scanner cannot appear.
         .fullScreenCover(isPresented: $scanning) {
@@ -429,7 +431,7 @@ struct DeviceEditForm: View {
 
 /// One line on a device's state, for lists and forms.
 struct ConnectionSummary: View {
-    let session: DeviceSession
+    @ObservedObject var session: DeviceSession
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -455,8 +457,8 @@ struct LockReadinessSection: View {
 
     var body: some View {
         Section {
-            LabeledContent("锁屏密码", value: readiness.passcodeText)
-            LabeledContent("自动锁定", value: readiness.autoLockText ?? String(localized: "未知"))
+            AppLabeledContent("锁屏密码", value: readiness.passcodeText)
+            AppLabeledContent("自动锁定", value: readiness.autoLockText ?? String(localized: "未知"))
             if let badge = readiness.badge {
                 LockBadgeView(badge: badge, compact: false)
             }
@@ -475,19 +477,22 @@ struct LockReadinessSection: View {
 
 /// One phone full screen.
 struct RemoteView: View {
-    @Bindable var app: AppModel
-    let session: DeviceSession
+    @ObservedObject var app: AppModel
+    @ObservedObject var session: DeviceSession
     @State private var typing = false
     @State private var showSettings = false
     @State private var immersive = false
     @State private var zoom: CGFloat = 1
     @State private var resetZoom = 0
-    @State private var queue: TypingQueue
+    @StateObject private var queue: TypingQueue
+    @StateObject private var recorder: FlowRecorder
+    @State private var showFlows = false
 
     init(app: AppModel, session: DeviceSession) {
         self.app = app
         self.session = session
-        _queue = State(initialValue: TypingQueue { [weak session] action in await session?.perform(action) })
+        _queue = StateObject(wrappedValue: TypingQueue { [weak session] action in await session?.perform(action) })
+        _recorder = StateObject(wrappedValue: FlowRecorder(session: session))
     }
 
     var body: some View {
@@ -506,7 +511,10 @@ struct RemoteView: View {
         } accessory: { _ in
             OfflineBanner(online: app.online)
         } banner: {
-            StatusBanner(app: app, session: session)
+            VStack(spacing: 0) {
+                StatusBanner(app: app, session: session)
+                RecordingPill(recorder: recorder)
+            }
         } keys: { axis in
             KeyBar(axis: axis,
                    onBack: { session.send(.back) },
@@ -514,12 +522,17 @@ struct RemoteView: View {
                    onSearch: { session.send(.spotlight) },
                    onKeyboard: { typing = true },
                    keysEnabled: session.phase == .connected) {
-                RemoteMenu(app: app, session: session, immersive: $immersive, showSettings: $showSettings)
+                RemoteMenu(app: app, session: session, immersive: $immersive, showSettings: $showSettings,
+                           recorder: recorder, showFlows: $showFlows)
             }
         } keyboard: {
             LiveKeyboardBar(queue: queue, onDone: { typing = false })
         }
         .sheet(isPresented: $showSettings) { SettingsSheet(app: app, session: session) }
+        .sheet(isPresented: $showFlows) { FlowsHubView(session: session) }
+        .sheet(item: $recorder.draft) { draft in SaveFlowSheet(session: session, draft: draft) }
+        .task(id: session.phase == .connected) { await recorder.sync() }
+        .onDisappear { recorder.leave() }
         .onAppear {
             #if DEBUG
             // Screenshots: `-immersive YES`, `-typing YES`, `-settings YES`.
@@ -538,8 +551,8 @@ struct RemoteView: View {
 /// surface, a wireframe where the app hides its screen from capture, and
 /// the state card or strip. (Toasts go in the chrome, off the picture.)
 struct RemoteStage: View {
-    let app: AppModel
-    let session: DeviceSession
+    @ObservedObject var app: AppModel
+    @ObservedObject var session: DeviceSession
     @Binding var zoom: CGFloat
     var resetZoom: Int
     let onAction: (PhoneAction) -> Void
@@ -570,7 +583,7 @@ struct RemoteStage: View {
 /// The phone's name, its state (or route when all is well), round trip and
 /// frame rate, for the top bar.
 struct SessionBadge: View {
-    let session: DeviceSession
+    @ObservedObject var session: DeviceSession
     var axis: Axis = .horizontal
 
     var body: some View {
@@ -590,12 +603,24 @@ struct SessionBadge: View {
 /// The key bar's "more" menu: picture quality, immersive mode, hand back
 /// or reconnect the phone, settings.
 struct RemoteMenu: View {
-    @Bindable var app: AppModel
-    let session: DeviceSession
+    @ObservedObject var app: AppModel
+    @ObservedObject var session: DeviceSession
     @Binding var immersive: Bool
     @Binding var showSettings: Bool
+    @ObservedObject var recorder: FlowRecorder
+    @Binding var showFlows: Bool
 
     var body: some View {
+        Button { app.openAgent() } label: { Label("让 agent 做", systemImage: "sparkles") }
+        Button { Task { await recorder.toggle() } } label: {
+            recorder.recording
+                ? Label("停止录制（\(recorder.steps) 步）", systemImage: "stop.circle")
+                : Label("录制 flow", systemImage: "record.circle")
+        }
+        .disabled(session.phase != .connected || recorder.busy)
+        Button { showFlows = true } label: { Label("Flow 与定时", systemImage: "alarm") }
+            .disabled(session.phase != .connected)
+        Divider()
         Picker(selection: $app.videoPreference) {
             ForEach(VideoPreference.allCases, id: \.self) { choice in
                 Label(choice.title, systemImage: choice.symbol).tag(choice)
@@ -620,14 +645,14 @@ struct RemoteMenu: View {
 }
 
 struct SettingsSheet: View {
-    @Bindable var app: AppModel
-    let session: DeviceSession
+    @ObservedObject var app: AppModel
+    @ObservedObject var session: DeviceSession
     @State private var name = ""
     @State private var confirmForget = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        AppNavigationStack {
             List {
                 Section {
                     HStack(spacing: Theme.Space.m) {
@@ -674,19 +699,19 @@ struct SettingsSheet: View {
                     NavigationLink {
                         DeviceEditForm(app: app, id: session.id)
                     } label: {
-                        LabeledContent("服务地址", value: session.address)
+                        AppLabeledContent("服务地址", value: session.address)
                     }
                     if let route = session.routeLabel {
-                        LabeledContent("线路", value: route)
+                        AppLabeledContent("线路", value: route)
                     }
                     if let rtt = session.rttMs {
-                        LabeledContent("这台设备到 Mac", value: "\(rtt) ms")
+                        AppLabeledContent("这台设备到 Mac", value: "\(rtt) ms")
                     }
                     if let link = session.status?.transportLabel {
                         let rtt = session.status?.phoneRttMs.map { " · \($0) ms" } ?? ""
-                        LabeledContent("Mac 到手机", value: link + rtt)
+                        AppLabeledContent("Mac 到手机", value: link + rtt)
                     }
-                    LabeledContent("服务版本", value: session.status?.version ?? "—")
+                    AppLabeledContent("服务版本", value: session.status?.version ?? "—")
                 }
                 if let readiness = session.status?.lockReadiness {
                     LockReadinessSection(readiness: readiness)

@@ -97,6 +97,12 @@ pub struct Ctx {
     /// DEVELOPER_DIR in its plists and exported to every xcodebuild, xcrun
     /// and devicectl; `None` uses the Mac's xcode-select choice.
     pub developer_dir: Option<PathBuf>,
+    /// `IPU_EMBED`: `0` builds the runner without the on-phone daemon.
+    pub embed: String,
+    /// `IPU_EMBED_LIB`: the `libipu_embed.a` to link (see `setup::embed`).
+    pub embed_lib: String,
+    /// `IPU_DAEMON_HOST`: where the on-phone daemon listens (unset: loopback).
+    pub daemon_host: String,
     /// What an interactive setup must remember for this phone before it does
     /// anything else: `Some(Some(dir))` keeps that Xcode, `Some(None)` goes
     /// back to the Mac's choice, `None` leaves the remembered choice alone.
@@ -162,6 +168,9 @@ impl Ctx {
             keepalive: false,
             developer_dir: None,
             xcode_to_persist: None,
+            embed: String::new(),
+            embed_lib: String::new(),
+            daemon_host: String::new(),
             script: None,
             instance,
             home,
@@ -316,6 +325,12 @@ impl Ctx {
             daemon_plist: daemon_env("DEVELOPER_DIR"),
         })
         .map_err(|message| (message, 2))?;
+        // The on-phone daemon's build and listen settings; the supervisor
+        // persists them so its relaunches build the same product.
+        ctx.embed = env("IPU_EMBED").unwrap_or_else(|| wda_env("IPU_EMBED"));
+        ctx.embed_lib = env("IPU_EMBED_LIB").unwrap_or_else(|| wda_env("IPU_EMBED_LIB"));
+        ctx.daemon_host = env(crate::phone_daemon::HOST_ENV)
+            .unwrap_or_else(|| wda_env(crate::phone_daemon::HOST_ENV));
         ctx.wda_dir = wda_dir;
         ctx.runner_src = runner_src;
         ctx.runner_project = runner_project;

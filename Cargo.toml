@@ -5,6 +5,8 @@ members = [
     "crates/server",
     "crates/mcp",
     "crates/legacy-launch",
+    "crates/ios-embed",
+    "crates/browser-session",
 ]
 
 # idevice 0.1.68 opens a plain XCTestManager_IDEInterface channel on iOS < 17,

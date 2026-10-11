@@ -25,7 +25,7 @@ final class RemoteGestureUITests: XCTestCase {
         screen = app.otherElements["remote-screen"]
         XCTAssertTrue(screen.waitForExistence(timeout: 15), "the remote screen did not appear")
         // Let the first frame size the picture, then start counting.
-        try await Task.sleep(for: .seconds(2))
+        try await Task.sleep(nanoseconds: UInt64(2) * 1_000_000_000)
         _ = try await request("mock/actions", method: "DELETE")
         let frame = screen.frame
         let scale = min(frame.width / width, frame.height / height)
@@ -41,7 +41,7 @@ final class RemoteGestureUITests: XCTestCase {
     // MARK: helpers
 
     private func request(_ path: String, method: String = "GET", body: String? = nil) async throws -> Data {
-        var request = URLRequest(url: mock.appending(path: path))
+        var request = URLRequest(url: mock.appendingPathComponent( path))
         request.httpMethod = method
         request.httpBody = body?.data(using: .utf8)
         request.timeoutInterval = 3
@@ -60,7 +60,7 @@ final class RemoteGestureUITests: XCTestCase {
             list = (try await json(get: "mock/actions") as? [[String: Any]] ?? [])
                 .filter { $0["path"] as? String == "/control" }
             if list.count >= count { return list }
-            try await Task.sleep(for: .milliseconds(200))
+            try await Task.sleep(nanoseconds: UInt64(200) * 1_000_000)
         } while Date() < deadline
         return list
     }
@@ -116,7 +116,7 @@ final class RemoteGestureUITests: XCTestCase {
 
     func testPinchZoomsWithoutTouchingThePhoneAndTapsStillLand() async throws {
         screen.pinch(withScale: 2.5, velocity: 2)
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(nanoseconds: UInt64(1) * 1_000_000_000)
         let afterPinch = try await actions(count: 1, timeout: 0.3)
         XCTAssertTrue(afterPinch.isEmpty, "zooming must not send anything to the phone: \(afterPinch)")
         let chip = app.buttons["zoom-chip"]

@@ -80,6 +80,9 @@ jobs:
           set -euo pipefail
           cargo test -p iphone-use-mcp --locked
 
+      - name: Encrypted browser handoff and Chrome scope tests
+        run: cargo test -p browser-session --features desktop --locked
+
       - name: cargo test -p legacy-launch
         timeout-minutes: 15
         shell: bash

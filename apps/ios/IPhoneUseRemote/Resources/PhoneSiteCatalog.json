@@ -1,0 +1,765 @@
+{
+  "catalog": {
+    "chrome_use_sites": 1,
+    "adapters": [
+      {
+        "spec": "appstoreconnect/app-create",
+        "meta": {
+          "name": "appstoreconnect/app-create",
+          "description": "Create an app record in App Store Connect (the \"New App\" dialog) for a bundle id already registered in the developer portal. The ASC API key cannot do this; your signed-in session can. Idempotent: if an app with the bundle id exists it is returned, not duplicated.",
+          "domain": "appstoreconnect.apple.com",
+          "args": {
+            "name": {
+              "required": true,
+              "description": "App name as shown on the App Store (at most 30 characters, unique across the store)"
+            },
+            "bundle_id": {
+              "required": true,
+              "description": "Registered bundle id, e.g. com.example.app"
+            },
+            "sku": {
+              "required": true,
+              "description": "Your own unique id for the app, e.g. example-app"
+            },
+            "locale": {
+              "required": false,
+              "description": "Primary language (default en-US), e.g. zh-Hans, ja, en-GB"
+            },
+            "platform": {
+              "required": false,
+              "description": "IOS (default) | MAC_OS | TV_OS | VISION_OS"
+            },
+            "version": {
+              "required": false,
+              "description": "First version string (default 1.0)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": false,
+          "example": "chrome-use site appstoreconnect/app-create --name \"My App\" --bundle_id com.example.app --sku example-app --locale zh-Hans"
+        },
+        "source": "async function (args) {\n  for (const k of ['name', 'bundle_id', 'sku'])\n    if (!args[k]) return { error: 'Missing argument: ' + k };\n  if (String(args.name).length > 30) return { error: 'name is longer than 30 characters' };\n  const platform = String(args.platform || 'IOS').toUpperCase();\n  const locale = args.locale || 'en-US';\n  const version = String(args.version || '1.0');\n  const headers = {\n    Accept: 'application/json',\n    'Content-Type': 'application/json',\n    'X-Csrf-Itc': 'itc'\n  };\n  const iris = location.origin + '/iris/v1';\n  const signedOut = { hint: 'Not signed in to App Store Connect in this browser (sign in, finish 2FA, then retry)' };\n\n  const existing = await fetch(iris + '/apps?' + new URLSearchParams({\n    'filter[bundleId]': args.bundle_id, 'fields[apps]': 'name,bundleId,sku'\n  }), { credentials: 'include', headers });\n  if (existing.status === 401 || existing.status === 403) return { error: 'HTTP ' + existing.status, ...signedOut };\n  if (existing.ok) {\n    const found = ((await existing.json()).data || []).find((a) => a.attributes.bundleId === args.bundle_id);\n    if (found)\n      return {\n        ok: true, created: false, id: found.id, name: found.attributes.name,\n        bundle_id: found.attributes.bundleId, sku: found.attributes.sku,\n        url: location.origin + '/apps/' + found.id\n      };\n  }\n\n  // One compound document, as the web UI sends it: the app, its first\n  // version with a primary-language version localization, and the app info\n  // carrying the name, all linked by local ids. Two things Apple enforces:\n  //  - the name only goes on appInfoLocalizations; on the app itself it is\n  //    rejected (409);\n  //  - the local ids follow the web UI's own scheme (store-version-<platform>,\n  //    new-<platform>VersionLocalization-id, ...). Shorter ids such as\n  //    ${new-version} / ${new-versionLoc} were rejected on a fresh bundle id\n  //    with \"You must provide a value for the relationship\n  //    'appStoreVersionLocalizations'\", while this scheme created the app.\n  const p = platform.toLowerCase();\n  const id = (name) => '${' + name + '}';\n  const versionId = id('store-version-' + p);\n  const versionLocId = id('new-' + p + 'VersionLocalization-id');\n  const appInfoId = id('new-appInfo-id');\n  const appInfoLocId = id('new-appInfoLocalization-id');\n  const payload = {\n    data: {\n      type: 'apps',\n      attributes: { sku: args.sku, primaryLocale: locale, bundleId: args.bundle_id },\n      relationships: {\n        appStoreVersions: { data: [{ type: 'appStoreVersions', id: versionId }] },\n        appInfos: { data: [{ type: 'appInfos', id: appInfoId }] }\n      }\n    },\n    included: [\n      {\n        type: 'appStoreVersions', id: versionId, attributes: { platform, versionString: version },\n        relationships: { appStoreVersionLocalizations: { data: [{ type: 'appStoreVersionLocalizations', id: versionLocId }] } }\n      },\n      { type: 'appStoreVersionLocalizations', id: versionLocId, attributes: { locale } },\n      {\n        type: 'appInfos', id: appInfoId,\n        relationships: { appInfoLocalizations: { data: [{ type: 'appInfoLocalizations', id: appInfoLocId }] } }\n      },\n      { type: 'appInfoLocalizations', id: appInfoLocId, attributes: { locale, name: args.name } }\n    ]\n  };\n  const r = await fetch(iris + '/apps', {\n    method: 'POST', credentials: 'include', headers, body: JSON.stringify(payload)\n  });\n  if (r.status === 401 || r.status === 403) {\n    const text = await r.text();\n    if (r.status === 401 || /NOT_AUTHORIZED|not signed/i.test(text)) return { error: 'HTTP ' + r.status, ...signedOut };\n    return { error: 'HTTP ' + r.status, hint: 'This Apple ID may lack the Admin or App Manager role', detail: text.slice(0, 300) };\n  }\n  const body = await r.json().catch(() => ({}));\n  if (!r.ok) {\n    const errs = (body.errors || []).map((e) => e.detail || e.title).filter(Boolean);\n    return { error: 'App not created (HTTP ' + r.status + ')' + (errs.length ? ': ' + errs.join('; ') : ''), reasons: errs, hint: /bundle/i.test(errs.join(' ')) ? 'Register the bundle id in the developer portal first' : undefined };\n  }\n  const app = body.data;\n  return {\n    ok: true, created: true, id: app.id, name: app.attributes.name,\n    bundle_id: app.attributes.bundleId, sku: app.attributes.sku,\n    url: location.origin + '/apps/' + app.id\n  };\n}",
+        "sha256": "3ca72371f3e641aec5d5c53421d0729dc4a91c45b9b92f6996bc541e0a77dd06",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/appstoreconnect/app-create.js"
+      },
+      {
+        "spec": "appstoreconnect/apps",
+        "meta": {
+          "name": "appstoreconnect/apps",
+          "description": "List the apps in your App Store Connect account (name, bundle id, SKU, Apple ID). Runs as you, in your logged-in appstoreconnect.apple.com tab, through the same /iris/v1 API the web UI uses.",
+          "domain": "appstoreconnect.apple.com",
+          "args": {
+            "bundle_id": {
+              "required": false,
+              "description": "Only the app with this bundle id, e.g. com.example.app"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site appstoreconnect/apps  |  chrome-use site appstoreconnect/apps --bundle_id com.example.app"
+        },
+        "source": "async function (args) {\n  const q = new URLSearchParams({ limit: '200', 'fields[apps]': 'name,bundleId,sku,primaryLocale' });\n  if (args.bundle_id) q.set('filter[bundleId]', args.bundle_id);\n  const r = await fetch(location.origin + '/iris/v1/apps?' + q, {\n    credentials: 'include',\n    headers: { Accept: 'application/json', 'X-Csrf-Itc': 'itc' }\n  });\n  if (r.status === 401 || r.status === 403)\n    return { error: 'HTTP ' + r.status, hint: 'Not signed in to App Store Connect in this browser (sign in, finish 2FA, then retry)' };\n  if (!r.ok) return { error: 'HTTP ' + r.status, detail: (await r.text()).slice(0, 300) };\n  const body = await r.json();\n  const apps = (body.data || []).map((a) => ({\n    id: a.id,\n    name: a.attributes.name,\n    bundle_id: a.attributes.bundleId,\n    sku: a.attributes.sku,\n    primary_locale: a.attributes.primaryLocale,\n    url: location.origin + '/apps/' + a.id\n  }));\n  return { count: apps.length, apps };\n}",
+        "sha256": "bcaf824d543f67c49c9bfb314b79df401faf0e835572c878552e8013e6a04eb5",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/appstoreconnect/apps.js"
+      },
+      {
+        "spec": "appstoreconnect/builds",
+        "meta": {
+          "name": "appstoreconnect/builds",
+          "description": "Recent builds of one app (newest first) with their processing state, so you can see when an upload is ready for TestFlight. Runs as you, in your logged-in appstoreconnect.apple.com tab.",
+          "domain": "appstoreconnect.apple.com",
+          "args": {
+            "bundle_id": {
+              "required": true,
+              "description": "The app's bundle id"
+            },
+            "limit": {
+              "required": false,
+              "description": "How many builds (default 10, max 50)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site appstoreconnect/builds --bundle_id com.example.app"
+        },
+        "source": "async function (args) {\n  if (!args.bundle_id) return { error: 'Missing argument: bundle_id' };\n  const headers = { Accept: 'application/json', 'X-Csrf-Itc': 'itc' };\n  const iris = location.origin + '/iris/v1';\n  const a = await fetch(iris + '/apps?' + new URLSearchParams({ 'filter[bundleId]': args.bundle_id, 'fields[apps]': 'bundleId' }),\n    { credentials: 'include', headers });\n  if (a.status === 401 || a.status === 403)\n    return { error: 'HTTP ' + a.status, hint: 'Not signed in to App Store Connect in this browser (sign in, finish 2FA, then retry)' };\n  if (!a.ok) return { error: 'HTTP ' + a.status };\n  const app = ((await a.json()).data || []).find((x) => x.attributes.bundleId === args.bundle_id);\n  if (!app) return { error: 'No app with bundle id ' + args.bundle_id, hint: 'Create it with appstoreconnect/app-create' };\n\n  const limit = Math.min(50, Math.max(1, Number(args.limit) || 10));\n  const r = await fetch(iris + '/builds?' + new URLSearchParams({\n    'filter[app]': app.id, sort: '-uploadedDate', limit: String(limit),\n    'fields[builds]': 'version,uploadedDate,processingState,expired,minOsVersion'\n  }), { credentials: 'include', headers });\n  if (!r.ok) return { error: 'HTTP ' + r.status, detail: (await r.text()).slice(0, 300) };\n  const builds = ((await r.json()).data || []).map((b) => ({\n    id: b.id,\n    build: b.attributes.version,\n    state: b.attributes.processingState,\n    uploaded: b.attributes.uploadedDate,\n    expired: b.attributes.expired,\n    min_os: b.attributes.minOsVersion\n  }));\n  return { app_id: app.id, count: builds.length, builds };\n}",
+        "sha256": "280ea35418ec937777fed28990b870aec12a48b92a54bb40334bb1b3252f59f7",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/appstoreconnect/builds.js"
+      },
+      {
+        "spec": "chatgpt/conversations",
+        "meta": {
+          "name": "chatgpt/conversations",
+          "description": "List recent ChatGPT conversations, newest first",
+          "domain": "chatgpt.com",
+          "args": {
+            "limit": {
+              "required": false,
+              "description": "How many to return (default 20, max 100)"
+            },
+            "offset": {
+              "required": false,
+              "description": "Skip this many before listing (default 0)"
+            },
+            "project": {
+              "required": false,
+              "description": "Only conversations in this project gizmo id (g-p-...)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site chatgpt/conversations --limit 10"
+        },
+        "source": "async function(args) {\n  args = args || {};\n  const limit = cgptCount(args.limit, 20, 100);\n  const offsetRaw = Number(args.offset);\n  const offset = Number.isInteger(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0;\n\n  const qs =\n    'offset=' + offset + '&limit=' + limit + '&order=updated';\n  const res = await cgptApi('/backend-api/conversations?' + qs);\n  if (!res.ok) return { error: res.error, hint: res.hint, status: res.status };\n\n  const items = (res.data && res.data.items) || [];\n  // `gizmo_id` is how a conversation says \"I live inside this project\". The\n  // server has no project filter on this endpoint, so filter client-side.\n  const wanted = args.project ? String(args.project) : null;\n  const filtered = wanted ? items.filter((c) => c.gizmo_id === wanted) : items;\n\n  return {\n    count: filtered.length,\n    // No `total` on purpose. The endpoint DOES return one, but it is not\n    // account-wide: limit=3 reported total:4 on an account whose sidebar lists\n    // ~28 conversations. A caller paging until `offset >= total` would stop\n    // after the second page believing it was done. A short page — fewer than\n    // `limit` rows — is the real end-of-list signal.\n    offset: offset,\n    project: wanted,\n    conversations: filtered.map((c) => ({\n      id: c.id,\n      title: c.title || null,\n      url: 'https://chatgpt.com/c/' + c.id,\n      created: c.create_time || null,\n      updated: c.update_time || null,\n      project: c.gizmo_id || null,\n      // The preview line ChatGPT shows in the sidebar — the one field that makes\n      // a listing readable without opening anything.\n      snippet: c.snippet || null,\n      archived: c.is_archived === true,\n      starred: c.is_starred === true,\n    })),\n  };\n}",
+        "sha256": "b74aa98d3eba7ae23fb7a1b94aa1b83a5dccc99ffe6a3fcc783976a7f9bd4144",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/chatgpt/conversations.js"
+      },
+      {
+        "spec": "chatgpt/me",
+        "meta": {
+          "name": "chatgpt/me",
+          "description": "Which ChatGPT account this browser is signed in as",
+          "domain": "chatgpt.com",
+          "args": {},
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site chatgpt/me"
+        },
+        "source": "async function(args) {\n  // Two sources, deliberately. /api/auth/session is the page's own session\n  // endpoint and the only place the bearer token exists; /backend-api/me\n  // answers WITHOUT a bearer (cookies alone) and adds the account id and\n  // country. Asking both distinguishes \"signed out\" from \"signed in but the\n  // token mint is broken\", which otherwise look identical.\n  const session = await cgptSession();\n\n  let account = null;\n  try {\n    const r = await fetch('/backend-api/me', { credentials: 'include' });\n    if (r.ok) account = await r.json();\n  } catch (e) {\n    account = null;\n  }\n\n  if (!session && !account) {\n    return {\n      error: 'Not signed in to chatgpt.com',\n      hint: 'Open https://chatgpt.com in this browser and sign in, then retry.',\n    };\n  }\n\n  const user = (session && session.user) || {};\n  return {\n    signed_in: !!session,\n    id: account && account.id ? account.id : user.id || null,\n    email: (account && account.email) || user.email || null,\n    name: user.name || null,\n    country: (account && account.country) || null,\n    region: (account && account.region) || null,\n    auth_provider: (session && session.authProvider) || null,\n    session_expires: (session && session.expires) || null,\n    // A signed-in cookie jar whose token mint fails still can't call\n    // backend-api — say so rather than reporting a healthy-looking account.\n    token_available: !!(session && session.accessToken),\n  };\n}",
+        "sha256": "cb02b833ddaeafc091c18d0e00d444179e5e7787c32c9464fd40338935415291",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/chatgpt/me.js"
+      },
+      {
+        "spec": "chatgpt/projects",
+        "meta": {
+          "name": "chatgpt/projects",
+          "description": "List ChatGPT Projects (folders) on this account",
+          "domain": "chatgpt.com",
+          "args": {
+            "name": {
+              "required": false,
+              "description": "Only the project whose display name matches exactly"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site chatgpt/projects"
+        },
+        "source": "async function(args) {\n  args = args || {};\n  // Projects are \"snorlax\" gizmos internally — the sidebar endpoint is the only\n  // one that lists them. conversations_per_gizmo=0 keeps the response small;\n  // without it the server attaches a conversation preview per project.\n  const res = await cgptApi(\n    '/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=0'\n  );\n  if (!res.ok) return { error: res.error, hint: res.hint, status: res.status };\n\n  const items = (res.data && res.data.items) || [];\n  const projects = [];\n  for (const item of items) {\n    // Doubly nested on purpose: the sidebar wraps a gizmo envelope around the\n    // gizmo itself (item.gizmo.gizmo). Skip anything that doesn't match that\n    // shape rather than emitting half-built rows.\n    const g = item && item.gizmo && item.gizmo.gizmo;\n    if (!g || !g.id) continue;\n    projects.push({\n      id: g.id,\n      name: (g.display && g.display.name) || null,\n      description: (g.display && g.display.description) || null,\n      url: 'https://chatgpt.com/g/' + g.id + '/project',\n      updated: g.updated_at || null,\n      default_model: g.default_model || null,\n    });\n  }\n\n  if (args.name) {\n    const wanted = String(args.name);\n    const hit = projects.find((p) => p.name === wanted);\n    if (!hit) {\n      return {\n        error: 'No project named ' + JSON.stringify(wanted),\n        hint:\n          'Run `chrome-use site chatgpt/projects` to see the ' +\n          projects.length +\n          ' project(s) on this account. Matching is exact and case-sensitive.',\n        count: 0,\n        projects: [],\n      };\n    }\n    return { count: 1, projects: [hit] };\n  }\n\n  return { count: projects.length, projects };\n}",
+        "sha256": "12b220e8898d19506ab5ef95b6601c2f0c84be5869dabc695c6cd6da5de87875",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/chatgpt/projects.js"
+      },
+      {
+        "spec": "csdn/article-publish",
+        "meta": {
+          "name": "csdn/article-publish",
+          "description": "Publish a Markdown article to CSDN (as 原创) as the signed-in user, or save it as a draft only",
+          "domain": "editor.csdn.net",
+          "args": {
+            "title": {
+              "required": true,
+              "description": "Article title (CSDN wants 5-100 characters)"
+            },
+            "markdown": {
+              "required": true,
+              "description": "Full Markdown body (pass a file with --markdown @post.md)"
+            },
+            "summary": {
+              "required": false,
+              "description": "摘要 (Description), up to 256 characters"
+            },
+            "tags": {
+              "required": false,
+              "description": "Comma-separated tag names. Only tags CSDN already has are used (max 5); accounts below blog level 3 cannot create tags, so the rest come back in skipped_tags. Publishing needs at least one"
+            },
+            "category": {
+              "required": false,
+              "description": "Your own 分类专栏 names, comma-separated (optional)"
+            },
+            "html": {
+              "required": false,
+              "description": "Rendered HTML for the body. Default: converted from markdown by the adapter"
+            },
+            "draft": {
+              "required": false,
+              "description": "true = only save a draft, do not publish (default false)"
+            },
+            "id": {
+              "required": false,
+              "description": "Existing article id to overwrite and publish (e.g. a draft the editor autosaved), instead of creating a new article"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": false,
+          "example": "chrome-use site csdn/article-publish --title \"Hello\" --markdown @post.md --summary \"...\" --tags \"AI编程,人工智能,开源\" --draft true"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const title = String(args.title || '').trim()\n  const markdown = String(args.markdown || '')\n  if (!title) return { error: 'Missing argument: title' }\n  if (!markdown.trim()) return { error: 'Missing argument: markdown' }\n  const draftOnly = /^(1|true|yes|y|on)$/i.test(String(args.draft || ''))\n  const tagNames = String(args.tags || '').split(/[,，]/).map((s) => s.trim()).filter(Boolean)\n\n  // ---- markdown → html (shared verbatim by csdn/ and zhihu/; a test keeps the copies equal)\n  // Covers what blog posts use: headings, paragraphs, fenced code, block\n  // quotes, flat or nested lists, rules, GFM tables, bold/italic/strike,\n  // inline code, links, images. Raw HTML in the source is escaped, not passed.\n  const mdToHtml = (src, codeBlock) => {\n    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;')\n    const inline = (text) => {\n      const slots = []\n      const keep = (html) => '\\u0000' + (slots.push(html) - 1) + '\\u0000'\n      let s = String(text).replace(/(`+)([^`]|[^`][\\s\\S]*?[^`])\\1(?!`)/g, (m, t, c) => keep('<code>' + esc(c.trim()) + '</code>'))\n      s = s.replace(/!\\[([^\\]]*)\\]\\(\\s*<?([^)\\s>]+)>?(?:\\s+\"[^\"]*\")?\\s*\\)/g, (m, alt, url) => keep('<img src=\"' + esc(url) + '\" alt=\"' + esc(alt) + '\">'))\n      s = s.replace(/\\[([^\\]]+)\\]\\(\\s*<?([^)\\s>]+)>?(?:\\s+\"[^\"]*\")?\\s*\\)/g, (m, label, url) => keep('<a href=\"' + esc(url) + '\">' + inline(label) + '</a>'))\n      s = s.replace(/<(https?:\\/\\/[^\\s>]+)>/g, (m, url) => keep('<a href=\"' + esc(url) + '\">' + esc(url) + '</a>'))\n      s = esc(s)\n      s = s.replace(/\\*\\*(?=\\S)([\\s\\S]*?\\S)\\*\\*/g, '<strong>$1</strong>').replace(/__(?=\\S)([\\s\\S]*?\\S)__/g, '<strong>$1</strong>')\n      s = s.replace(/~~(?=\\S)([\\s\\S]*?\\S)~~/g, '<del>$1</del>')\n      s = s.replace(/(^|[^*\\w])\\*(?=\\S)([^*]*?\\S)\\*(?!\\*)/g, '$1<em>$2</em>')\n      s = s.replace(/(^|[^_\\w])_(?=\\S)([^_]*?\\S)_(?![_\\w])/g, '$1<em>$2</em>')\n      s = s.replace(/ {2,}\\n/g, '<br>\\n')\n      return s.replace(/\\u0000(\\d+)\\u0000/g, (m, i) => slots[Number(i)])\n    }\n    const cells = (row) => row.trim().replace(/^\\|/, '').replace(/\\|$/, '').split('|').map((c) => c.trim())\n    const blocks = (lines) => {\n      const out = []\n      let i = 0\n      const isFence = (l) => /^\\s{0,3}(```|~~~)/.test(l)\n      const isHr = (l) => /^\\s{0,3}([-*_])(\\s*\\1){2,}\\s*$/.test(l)\n      const isHead = (l) => /^\\s{0,3}#{1,6}(\\s|$)/.test(l)\n      const isQuote = (l) => /^\\s{0,3}>/.test(l)\n      const isItem = (l) => /^\\s{0,3}([-*+]|\\d{1,9}[.)])\\s+/.test(l)\n      const isTable = (k) => /\\|/.test(lines[k] || '') && /^\\s*\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)*\\|?\\s*$/.test(lines[k + 1] || '')\n      while (i < lines.length) {\n        const line = lines[i]\n        if (!line.trim()) { i++; continue }\n        if (isFence(line)) {\n          const fence = line.trim().slice(0, 3)\n          const lang = line.trim().slice(3).trim().split(/\\s+/)[0] || ''\n          const body = []\n          i++\n          while (i < lines.length && !lines[i].trim().startsWith(fence)) body.push(lines[i++])\n          i++\n          out.push(codeBlock(lang, esc(body.join('\\n'))))\n          continue\n        }\n        if (isHead(line)) {\n          const m = line.trim().match(/^(#{1,6})\\s*(.*?)\\s*#*\\s*$/)\n          out.push('<h' + m[1].length + '>' + inline(m[2]) + '</h' + m[1].length + '>')\n          i++\n          continue\n        }\n        if (isHr(line)) { out.push('<hr>'); i++; continue }\n        if (isQuote(line)) {\n          const body = []\n          while (i < lines.length && lines[i].trim() && isQuote(lines[i])) body.push(lines[i++].replace(/^\\s{0,3}>\\s?/, ''))\n          out.push('<blockquote>' + blocks(body) + '</blockquote>')\n          continue\n        }\n        if (isTable(i)) {\n          const head = cells(lines[i])\n          i += 2\n          const rows = []\n          while (i < lines.length && lines[i].trim() && /\\|/.test(lines[i])) rows.push(cells(lines[i++]))\n          out.push('<table><thead><tr>' + head.map((c) => '<th>' + inline(c) + '</th>').join('') + '</tr></thead><tbody>' +\n            rows.map((r) => '<tr>' + r.map((c) => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('') + '</tbody></table>')\n          continue\n        }\n        if (isItem(line)) {\n          const ordered = /^\\s{0,3}\\d/.test(line)\n          const indent = line.match(/^\\s*/)[0].length\n          const items = []\n          while (i < lines.length) {\n            const l = lines[i]\n            const ind = l.match(/^\\s*/)[0].length\n            if (isItem(l) && ind <= indent + 1) {\n              if (/^\\s{0,3}\\d/.test(l) !== ordered) break\n              items.push([l.replace(/^\\s*([-*+]|\\d{1,9}[.)])\\s+/, '')])\n              i++\n            } else if (l.trim() && items.length && (ind > indent || !(isFence(l) || isHead(l) || isQuote(l) || isHr(l)))) {\n              items[items.length - 1].push(ind > indent ? l.slice(Math.min(ind, indent + 2)) : l)\n              i++\n            } else if (!l.trim() && i + 1 < lines.length && lines[i + 1].match(/^\\s*/)[0].length > indent && lines[i + 1].trim()) {\n              items[items.length - 1].push('')\n              i++\n            } else break\n          }\n          const tag = ordered ? 'ol' : 'ul'\n          out.push('<' + tag + '>' + items.map((it) => {\n            const inner = blocks(it)\n            // A tight item is one paragraph: drop its <p> so lists render compact.\n            return '<li>' + (/^<p>[\\s\\S]*<\\/p>$/.test(inner) && inner.indexOf('<p>', 1) < 0 ? inner.slice(3, -4) : inner) + '</li>'\n          }).join('') + '</' + tag + '>')\n          continue\n        }\n        const para = []\n        while (i < lines.length && lines[i].trim() && !isFence(lines[i]) && !isHead(lines[i]) && !isQuote(lines[i]) && !isHr(lines[i]) && !isItem(lines[i]) && !isTable(i)) para.push(lines[i++])\n        out.push('<p>' + inline(para.join('\\n')) + '</p>')\n      }\n      return out.join('')\n    }\n    return blocks(String(src || '').replace(/\\r\\n?/g, '\\n').split('\\n'))\n  }\n  // ---- end markdown → html\n\n  // Every bizapi.csdn.net call carries x-ca-key / x-ca-nonce / x-ca-signature\n  // headers. The editor signs them in its own request client; find that client\n  // in the editor's webpack registry (through the module that saves articles)\n  // and send through it, instead of re-implementing the signature here.\n  const findClient = (win) => {\n    const chunks = win && win.webpackChunkcsdnEdit\n    if (!chunks || typeof chunks.push !== 'function') return null\n    let req = null\n    chunks.push([[Symbol('chrome-use-csdn')], {}, (r) => { req = r }])\n    if (!req || !req.m) return null\n    for (const id of Object.keys(req.m)) {\n      let src\n      try { src = String(req.m[id]) } catch (e) { continue }\n      if (!src.includes('mdeditor/saveArticle')) continue\n      const m = src.match(/(\\w+)=\\w\\((\\d+)\\)[^]*?\\b\\1\\.(\\w+)\\.request\\(\\{method:\"POST\",url:\"\".concat\\(\"https:\\/\\/bizapi\\.csdn\\.net\\/blog-console-api\\/\",\"v3\\/mdeditor\\/saveArticle\"/)\n      if (!m) continue\n      let client = null\n      try { client = req(Number(m[2]))[m[3]] } catch (e) { client = null }\n      if (client && typeof client.request === 'function') return client\n    }\n    return null\n  }\n  if (!/(^|\\.)editor\\.csdn\\.net$/.test(location.hostname)) {\n    return { error: 'Not on editor.csdn.net', hint: 'Run it through `chrome-use site`, which opens editor.csdn.net first.' }\n  }\n  // chrome-use lands on https://editor.csdn.net/, which is not the editor. Load\n  // the editor (/md/) in a hidden same-origin frame and borrow its client; if\n  // this tab already is the editor, use it directly.\n  let client = findClient(window)\n  let frame = null\n  if (!client) {\n    frame = document.createElement('iframe')\n    frame.style.cssText = 'position:fixed;width:1px;height:1px;left:-10px;top:-10px;opacity:0;border:0'\n    frame.src = 'https://editor.csdn.net/md/?not_checkout=1'\n    document.body.appendChild(frame)\n    for (let n = 0; n < 40 && !client; n++) {\n      await new Promise((r) => setTimeout(r, 150))\n      try { client = findClient(frame.contentWindow) } catch (e) { client = null }\n    }\n  }\n  if (!client) {\n    if (frame) frame.remove()\n    return { error: 'Cannot find the CSDN editor request client', hint: 'editor.csdn.net/md/ did not load or changed its bundle; this adapter needs updating.' }\n  }\n  try {\n    return await publish()\n  } finally {\n    if (frame) frame.remove()\n  }\n\n  async function publish() {\n    const send = async (config) => {\n      try {\n        const r = await client.request(Object.assign({ withCredentials: true }, config), false, false)\n        const body = r && r.body\n        if (!body || body.code !== 200) return { ok: false, body, error: (body && (body.msg || body.message)) || 'HTTP ' + (r && r.status) }\n        return { ok: true, data: body.data }\n      } catch (e) {\n        const body = e && e.body\n        return { ok: false, body, error: (body && (body.msg || body.message)) || (e && e.message) || String(e) }\n      }\n    }\n\n    const info = await send({ method: 'GET', url: 'https://bizapi.csdn.net/blog-console-api/v3/editor/getBaseInfo' })\n    if (!info.ok) return { error: 'Not signed in to CSDN (' + info.error + ')', hint: 'Log in at https://passport.csdn.net in this browser, then retry.' }\n    const user = info.data || {}\n\n    // Tags: exact (case-insensitive) matches from CSDN's own tag search.\n    const found = await Promise.all(tagNames.map((name) => send({\n      method: 'POST',\n      url: 'https://bizapi.csdn.net/blog/phoenix/console/v1/tag/search-recommend-tag',\n      body: { key: name, page: 0, page_size: 50, platform: 'pc' },\n    })))\n    const usedTags = []\n    const skippedTags = []\n    tagNames.forEach((name, i) => {\n      const rows = (found[i].ok && Array.isArray(found[i].data)) ? found[i].data : []\n      const hit = rows.find((t) => String(t) === name) || rows.find((t) => String(t).toLowerCase() === name.toLowerCase())\n      if (hit && usedTags.length < 5 && !usedTags.includes(hit)) usedTags.push(hit)\n      else skippedTags.push(name)\n    })\n    if (!draftOnly && !usedTags.length) {\n      return { error: 'None of the tags exist on CSDN: ' + tagNames.join(', '), hint: 'Publishing needs at least one existing tag; this account (blog level ' + user.blog_level + ') cannot create new ones.' }\n    }\n\n    const content = String(args.html || '') || mdToHtml(markdown, (lang, code) =>\n      '<pre><code' + (lang ? ' class=\"prism language-' + lang.replace(/[^\\w+#.-]/g, '') + '\"' : '') + '>' + code + '</code></pre>')\n\n    // Field for field what the editor's own publish sends (status 0 = publish,\n    // 2 = draft; type original = 原创).\n    const saved = await send({\n      method: 'POST',\n      url: 'https://bizapi.csdn.net/blog-console-api/v3/mdeditor/saveArticle',\n      body: {\n        id: /^\\d+$/.test(String(args.id || '').trim()) ? String(args.id).trim() : '',\n        title,\n        markdowncontent: markdown,\n        content,\n        readType: 'public',\n        level: 0,\n        tags: usedTags.join(','),\n        status: draftOnly ? 2 : 0,\n        categories: String(args.category || '').split(/[,，]/).map((s) => s.trim()).filter(Boolean).join(','),\n        type: 'original',\n        original_link: '',\n        authorized_status: false,\n        Description: Array.from(String(args.summary || '')).slice(0, 256).join(''),\n        resource_url: '',\n        not_auto_saved: '1',\n        source: 'pc_mdeditor',\n        cover_images: [],\n        cover_type: 0,\n        is_new: 1,\n        vote_id: 0,\n        resource_id: '',\n        pubStatus: draftOnly ? 'draft' : 'publish',\n        creation_statement: 0,\n      },\n    })\n    if (!saved.ok) {\n      return {\n        error: 'CSDN refused the ' + (draftOnly ? 'draft' : 'publish') + ': ' + saved.error,\n        hint: 'Nothing to retry blindly: check https://mp.csdn.net/mp_blog/manage/article first.',\n        tags: usedTags,\n        skipped_tags: skippedTags,\n      }\n    }\n    const d = saved.data || {}\n    const id = String(d.article_id || d.id || '')\n    return {\n      ok: true,\n      id,\n      url: draftOnly\n        ? 'https://editor.csdn.net/md/?articleId=' + id\n        : d.url || 'https://blog.csdn.net/' + (user.name || '') + '/article/details/' + id,\n      // CSDN reviews new posts; it may stay hidden for a few minutes.\n      status: draftOnly ? 'draft' : 'published',\n      tags: usedTags,\n      skipped_tags: skippedTags,\n    }\n  }\n}",
+        "sha256": "7ab68746295f43c8b4d7c2a34ef955509f7399286091a6f9551aef7763b851f6",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/csdn/article-publish.js"
+      },
+      {
+        "spec": "douyin-creator/me",
+        "meta": {
+          "name": "douyin-creator/me",
+          "description": "Signed-in Douyin creator account: nickname, Douyin ID, followers, following, works count and total likes",
+          "domain": "creator.douyin.com",
+          "args": {},
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site douyin-creator/me"
+        },
+        "source": "async function() {\n  let resp\n  try {\n    resp = await fetch('/web/api/media/user/info/', { credentials: 'include' })\n  } catch (e) {\n    return { error: 'Network error: ' + (e && e.message || e), hint: 'Retry once; creator.douyin.com dropped the request' }\n  }\n  if (!resp.ok) return { error: 'HTTP ' + resp.status, hint: 'Open https://creator.douyin.com and sign in, then retry' }\n  const d = await resp.json().catch(() => null)\n  const u = d && d.user\n  if (!d || d.status_code !== 0 || !u || !u.uid) {\n    return { error: 'Not signed in to creator.douyin.com', hint: 'Open https://creator.douyin.com in this browser and log in, then retry' }\n  }\n  const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))\n  return {\n    uid: String(u.uid),\n    nickname: u.nickname || null,\n    // 抖音号: the custom one when set, else the numeric short id.\n    douyin_id: u.unique_id || u.short_id || null,\n    sec_uid: u.sec_uid || null,\n    signature: u.signature || '',\n    followers: num(u.follower_count),\n    following: num(u.following_count),\n    // Counts private works too; douyin-creator/works says which are public.\n    works: num(u.aweme_count),\n    total_likes: num(u.total_favorited),\n    avatar: (u.avatar_thumb && u.avatar_thumb.url_list && u.avatar_thumb.url_list[0]) || null,\n    profile_url: u.sec_uid ? 'https://www.douyin.com/user/' + u.sec_uid : null,\n  }\n}",
+        "sha256": "02459e212971c75472401720052570d7f87e1d69334e66bb964ae8a8d56cb82c",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/douyin-creator/me.js"
+      },
+      {
+        "spec": "douyin-creator/works",
+        "meta": {
+          "name": "douyin-creator/works",
+          "description": "The signed-in account's own Douyin works, newest first, with plays/likes/comments/shares/collects and whether each is public or private. Private works report 0 plays.",
+          "domain": "creator.douyin.com",
+          "args": {
+            "limit": {
+              "required": false,
+              "description": "How many works to return (default 50, max 500)"
+            },
+            "visibility": {
+              "required": false,
+              "description": "all (default) | public | private — filters after fetching"
+            },
+            "cursor": {
+              "required": false,
+              "description": "Resume from a next_cursor a previous call returned (default: newest)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site douyin-creator/works --limit 20 --visibility public"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const limit = Math.min(Math.max(parseInt(args.limit, 10) || 50, 1), 500)\n  const visibility = String(args.visibility || 'all').toLowerCase()\n  if (!['all', 'public', 'private'].includes(visibility)) {\n    return { error: 'Bad visibility: ' + args.visibility, hint: 'Use all, public or private' }\n  }\n  const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))\n  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))\n\n  // The server returns about six works per page whatever page_size says, so a\n  // full account is dozens of requests. A dropped request (\"Failed to fetch\")\n  // is retried once; if it fails again, the works so far come back with the\n  // cursor to resume from instead of losing the whole call.\n  async function page(cursor) {\n    const url = '/janus/douyin/creator/pc/work_list?page_size=20&status=0&max_cursor=' + encodeURIComponent(cursor)\n    let lastErr = null\n    for (let attempt = 0; attempt < 2; attempt++) {\n      try {\n        const resp = await fetch(url, { credentials: 'include' })\n        if (!resp.ok) { lastErr = 'HTTP ' + resp.status; break }\n        const d = await resp.json()\n        if (d.status_code !== 0) { lastErr = 'status_code ' + d.status_code + (d.status_msg ? ' ' + d.status_msg : ''); break }\n        return { ok: true, d }\n      } catch (e) {\n        lastErr = 'Network error: ' + (e && e.message || e)\n        await sleep(800)\n      }\n    }\n    return { ok: false, error: lastErr }\n  }\n\n  const shape = (a) => {\n    const s = a.statistics || {}\n    const st = a.status || {}\n    const priv = Boolean(st.is_private || st.self_see || (st.private_status && st.private_status !== 0))\n    return {\n      aweme_id: String(a.aweme_id),\n      title: a.item_title || (a.desc || '').split('\\n')[0].slice(0, 80),\n      desc: a.desc || '',\n      created_at: a.create_time ? new Date(Number(a.create_time) * 1000).toISOString() : null,\n      duration_sec: a.duration ? Math.round(Number(a.duration) / 1000) : null,\n      visibility: priv ? 'private' : 'public',\n      in_review: Boolean(st.in_reviewing),\n      plays: num(s.play_count),\n      likes: num(s.digg_count),\n      comments: num(s.comment_count),\n      shares: num(s.share_count),\n      collects: num(s.collect_count),\n      url: 'https://www.douyin.com/video/' + a.aweme_id,\n    }\n  }\n\n  const works = []\n  let cursor = args.cursor != null && args.cursor !== '' ? String(args.cursor) : '0'\n  let total = null\n  let hasMore = true\n  let error = null\n  for (let i = 0; i < 120 && hasMore && works.length < limit; i++) {\n    const r = await page(cursor)\n    if (!r.ok) { error = r.error; break }\n    const d = r.d\n    if (total == null) total = num(d.total)\n    for (const a of d.aweme_list || []) {\n      const w = shape(a)\n      if (visibility === 'all' || w.visibility === visibility) works.push(w)\n      if (works.length >= limit) break\n    }\n    hasMore = Boolean(d.has_more) && d.max_cursor != null && String(d.max_cursor) !== cursor\n    cursor = String(d.max_cursor)\n  }\n\n  if (error && works.length === 0) {\n    return { error, hint: error.startsWith('HTTP 4') || error.startsWith('status_code') ? 'Open https://creator.douyin.com and sign in, then retry' : 'Retry; pass --cursor to resume' }\n  }\n  return {\n    count: works.length,\n    total,\n    has_more: hasMore,\n    next_cursor: hasMore ? cursor : null,\n    error: error || undefined,\n    works,\n  }\n}",
+        "sha256": "d95747b9c53054a5ee1b5e639ac2053109992a5db7f0a0377d35a1722a77ea4b",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/douyin-creator/works.js"
+      },
+      {
+        "spec": "douyin/delete",
+        "meta": {
+          "name": "douyin/delete",
+          "description": "Delete one of the signed-in account's own Douyin works from 作品管理 (creator.douyin.com), the way a person does it: find the work's card by its title, click 删除作品, confirm, then check work_list until the work is gone. Ids are kept as exact strings (19-digit ids do not round). Run with --until-done: the first run opens 作品管理 and the rerun deletes",
+          "domain": "creator.douyin.com",
+          "timeout": 120,
+          "retryStatuses": [
+            "navigating"
+          ],
+          "args": {
+            "aweme_id": {
+              "required": true,
+              "description": "The work's id (aweme_id or item_id, digits only), e.g. from douyin-creator/works"
+            }
+          },
+          "capabilities": [
+            "network",
+            "dom"
+          ],
+          "readOnly": false,
+          "example": "chrome-use site douyin/delete 7694857245896576275 --until-done"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const W = window\n  const D = document\n  const MANAGE_PATH = '/creator-micro/content/manage'\n  const MANAGE_URL = 'https://creator.douyin.com' + MANAGE_PATH\n  const WORK_LIST = '/janus/douyin/creator/pc/work_list?status=0&count=20&scene=star_atlas&device_platform=android&aid=1128&max_cursor='\n  const MAX_PAGES = 10\n  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))\n  const textOf = (node) => ((node && (node.innerText || node.textContent)) || '').trim()\n  const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim()\n  const idOf = (value) => (value == null ? '' : String(value))\n\n  const targetId = String(args.aweme_id == null ? '' : args.aweme_id).trim()\n  if (!targetId) return { error: 'Missing argument: aweme_id', hint: 'Pass the work id, e.g. chrome-use site douyin/delete 7694857245896576275 --until-done' }\n  if (!/^\\d+$/.test(targetId)) return { error: 'aweme_id must be a numeric id, got ' + JSON.stringify(targetId), hint: 'List ids with chrome-use site douyin-creator/works' }\n\n  // Douyin sends 64-bit ids as bare JSON numbers, which JSON.parse rounds\n  // (7694857245896576275 -> 7694857245896576000). Quote every integer that is\n  // not a safe JS integer before parsing, so ids come back as exact strings.\n  function quoteUnsafeIntegers(text) {\n    const src = String(text)\n    let out = ''\n    let i = 0\n    let last = 0\n    while (i < src.length) {\n      const c = src[i]\n      if (c === '\"') {\n        i += 1\n        while (i < src.length && src[i] !== '\"') i += src[i] === '\\\\' ? 2 : 1\n        i += 1\n        continue\n      }\n      if (c === '-' || (c >= '0' && c <= '9')) {\n        const start = i\n        i += 1\n        while (i < src.length && /[0-9.eE+-]/.test(src[i])) i += 1\n        const token = src.slice(start, i)\n        if (/^-?\\d+$/.test(token) && !Number.isSafeInteger(Number(token))) {\n          out += src.slice(last, start) + '\"' + token + '\"'\n          last = i\n        }\n        continue\n      }\n      i += 1\n    }\n    return out + src.slice(last)\n  }\n  const parseJsonKeepingBigInts = (text) => JSON.parse(quoteUnsafeIntegers(text))\n\n  // The card UI lives on 作品管理. Open it and come back: the navigation ends\n  // this run, and --until-done reruns the command there.\n  if (String(W.location.pathname || '').indexOf(MANAGE_PATH) !== 0) {\n    setTimeout(() => W.location.assign(MANAGE_URL), 800)\n    return { status: 'navigating', url: MANAGE_URL, retryAfterMs: 4000, hint: 'Opening 作品管理; run the same command again there, or pass --until-done' }\n  }\n\n  // The target in work_list, paged newest first. `index` counts works across\n  // pages, which is where its card sits in the 全部作品 list.\n  async function loadTarget() {\n    let cursor = '0'\n    let seen = 0\n    for (let page = 0; page < MAX_PAGES; page += 1) {\n      let payload\n      try {\n        const res = await fetch(WORK_LIST + encodeURIComponent(cursor), { credentials: 'include' })\n        if (!res.ok) return { ok: false, reason: 'work_list_http_' + res.status }\n        payload = parseJsonKeepingBigInts(await res.text())\n      } catch (e) {\n        return { ok: false, reason: 'work_list_failed', message: String((e && e.message) || e) }\n      }\n      if (payload.status_code != null && payload.status_code !== 0) {\n        return { ok: false, reason: 'work_list_status', status_code: payload.status_code, status_msg: payload.status_msg }\n      }\n      const list = Array.isArray(payload.aweme_list) ? payload.aweme_list : []\n      const matches = list\n        .map((entry, i) => ({ entry, index: seen + i }))\n        .filter(({ entry }) => idOf(entry.aweme_id) === targetId || idOf(entry.item_id) === targetId)\n      if (matches.length > 1) return { ok: false, reason: 'target_not_unique', count: matches.length }\n      if (matches.length === 1) {\n        const { entry, index } = matches[0]\n        const item = { aweme_id: idOf(entry.aweme_id), item_id: idOf(entry.item_id) }\n        const title = normalize(entry.desc || entry.caption || entry.title || entry.item_title || '')\n        // What a work card shows: its title, or the first line of its text.\n        const key = normalize(entry.item_title || String(entry.desc || entry.caption || entry.title || '').split('\\n')[0]).slice(0, 12)\n        return { ok: true, item, index, listCount: seen + list.length, title, key }\n      }\n      seen += list.length\n      const next = payload.max_cursor == null ? '' : String(payload.max_cursor)\n      if (!payload.has_more || !next || next === cursor) break\n      cursor = next\n    }\n    return { ok: false, reason: 'not_found', count: seen }\n  }\n\n  function visibleWorkCards() {\n    const candidates = Array.from(D.querySelectorAll('[class*=\"video-card\"]')).filter((element) => {\n      const text = normalize(textOf(element))\n      return text.includes('删除作品') && text.includes('继续编辑')\n    })\n    return candidates.filter((candidate) => !candidates.some((other) => other !== candidate && other.contains(candidate)))\n  }\n\n  // The card for the target. With a title: the only card showing it; among\n  // several, the one whose markup carries the id, else the one at the\n  // work_list index. Without a title: the only card whose markup carries the\n  // id, else the index once every listed work is rendered.\n  function findCard(cards, target) {\n    const ids = [target.item.aweme_id, target.item.item_id].filter(Boolean)\n    const carriesId = (card) => ids.some((id) => String(card.outerHTML || '').includes(id))\n    const atIndex = cards[target.index] || null\n    if (target.key) {\n      const byTitle = cards.filter((card) => normalize(textOf(card)).includes(target.key))\n      if (byTitle.length === 1) return byTitle[0]\n      const byId = byTitle.filter(carriesId)\n      if (byId.length === 1) return byId[0]\n      return byTitle.includes(atIndex) ? atIndex : null\n    }\n    const byId = cards.filter(carriesId)\n    if (byId.length === 1) return byId[0]\n    return cards.length >= target.listCount ? atIndex : null\n  }\n\n  const target = await loadTarget()\n  if (!target.ok) {\n    const fail = Object.assign({ error: target.reason, aweme_id: targetId }, target)\n    delete fail.ok\n    if (target.reason === 'not_found') fail.hint = 'No work with this id in the account\\'s work list (already deleted, or not this account\\'s); nothing was clicked. List ids with chrome-use site douyin-creator/works'\n    else fail.hint = 'Nothing was deleted. Open https://creator.douyin.com and sign in, then retry'\n    return fail\n  }\n\n  // The page renders its cards after load.\n  for (let wait = 0; wait < 20 && visibleWorkCards().length === 0; wait += 1) await sleep(500)\n\n  const allTab = Array.from(D.querySelectorAll('button,[role=\"button\"],span,div'))\n    .find((element) => /^全部作品$/.test(normalize(textOf(element))))\n  if (allTab) allTab.click()\n  await sleep(1000)\n\n  const ids = { aweme_id: target.item.aweme_id, item_id: target.item.item_id }\n  for (let attempt = 0; attempt < 20; attempt += 1) {\n    const cards = visibleWorkCards()\n    const card = findCard(cards, target)\n    if (card) {\n      const deleteButton = Array.from(card.querySelectorAll('button,[role=\"button\"],span,div'))\n        .find((element) => /^删除作品$/.test(normalize(textOf(element))))\n      if (!deleteButton) return Object.assign({ error: 'delete_button_not_found', index: target.index, cardCount: cards.length, hint: 'Nothing was deleted' }, ids)\n      deleteButton.click()\n      await sleep(800)\n      const confirmButton = Array.from(D.querySelectorAll('button,[role=\"button\"]'))\n        .find((element) => ['确定', '确认', '删除'].includes(normalize(textOf(element))))\n      if (!confirmButton) return Object.assign({ error: 'confirm_button_not_found', hint: 'The delete dialog did not show a confirm button; nothing was confirmed' }, ids)\n      confirmButton.click()\n      for (let wait = 0; wait < 20; wait += 1) {\n        await sleep(500)\n        const after = await loadTarget()\n        if (!after.ok && after.reason === 'not_found') {\n          return Object.assign({ ok: true, status: 'deleted', title: target.title }, ids)\n        }\n      }\n      return Object.assign({ error: 'delete_not_confirmed', hint: 'Confirm was clicked but the work is still in work_list; check 作品管理 before retrying' }, ids)\n    }\n    // Cards load as the list scrolls; bring the last one into view.\n    const lastCard = cards[cards.length - 1]\n    if (lastCard && lastCard.scrollIntoView) lastCard.scrollIntoView({ block: 'end' })\n    await sleep(500)\n  }\n  return Object.assign({\n    error: 'card_not_found',\n    index: target.index,\n    listCount: target.listCount,\n    cardCount: visibleWorkCards().length,\n    hint: 'No card on 作品管理 shows this work\\'s title; nothing was clicked',\n  }, ids)\n}",
+        "sha256": "3502c2adc2f5379437db7f09225eef696459dd62676d9c7ec786f0161b2b3129",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/douyin/delete.js"
+      },
+      {
+        "spec": "douyin/update",
+        "meta": {
+          "name": "douyin/update",
+          "description": "Change one of the signed-in account's own Douyin works: its scheduled publish time (--reschedule) and/or its text (--caption), through the creator center's own update calls",
+          "domain": "creator.douyin.com",
+          "args": {
+            "aweme_id": {
+              "required": true,
+              "description": "The work's id (aweme_id, digits only), e.g. from douyin-creator/works"
+            },
+            "reschedule": {
+              "required": false,
+              "description": "New publish time for a scheduled work: ISO 8601 (2026-10-20T20:00:00+08:00) or Unix seconds. Must be 2 hours to 14 days from now"
+            },
+            "caption": {
+              "required": false,
+              "description": "New text (正文) for the work"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": false,
+          "example": "chrome-use site douyin/update 7694857245896576275 --caption @caption.txt"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const BASE = 'https://creator.douyin.com'\n  const MIN_OFFSET = 7200 // 2 hours\n  const MAX_OFFSET = 14 * 86400 // 14 days\n\n  const awemeId = String(args.aweme_id == null ? '' : args.aweme_id).trim()\n  if (!awemeId) return { error: 'Missing argument: aweme_id', hint: 'Pass the work id, e.g. chrome-use site douyin/update 7694857245896576275 --caption \"...\"' }\n  if (!/^\\d+$/.test(awemeId)) return { error: 'aweme_id must be a numeric id, got ' + JSON.stringify(awemeId), hint: 'List ids with chrome-use site douyin-creator/works' }\n  const reschedule = String(args.reschedule == null ? '' : args.reschedule).trim()\n  const caption = args.caption == null ? '' : String(args.caption)\n  if (!reschedule && !caption) return { error: 'Nothing to update', hint: 'Pass --reschedule <time> and/or --caption <text>' }\n\n  let publishTime = null\n  if (reschedule) {\n    publishTime = /^\\d+$/.test(reschedule) ? Number(reschedule) : Math.floor(new Date(reschedule).getTime() / 1000)\n    if (!Number.isFinite(publishTime)) return { error: 'Bad --reschedule: ' + JSON.stringify(reschedule), hint: 'Use ISO 8601 (2026-10-20T20:00:00+08:00) or Unix seconds' }\n    const now = Math.floor(Date.now() / 1000)\n    if (publishTime < now + MIN_OFFSET) return { error: 'The new publish time must be at least 2 hours from now', publish_time: publishTime }\n    if (publishTime > now + MAX_OFFSET) return { error: 'The new publish time must be at most 14 days from now', publish_time: publishTime }\n  }\n\n  // Douyin sends 64-bit ids as bare JSON numbers, which JSON.parse rounds.\n  // Quote every integer that is not a safe JS integer before parsing.\n  function quoteUnsafeIntegers(text) {\n    const src = String(text)\n    let out = ''\n    let i = 0\n    let last = 0\n    while (i < src.length) {\n      const c = src[i]\n      if (c === '\"') {\n        i += 1\n        while (i < src.length && src[i] !== '\"') i += src[i] === '\\\\' ? 2 : 1\n        i += 1\n        continue\n      }\n      if (c === '-' || (c >= '0' && c <= '9')) {\n        const start = i\n        i += 1\n        while (i < src.length && /[0-9.eE+-]/.test(src[i])) i += 1\n        const token = src.slice(start, i)\n        if (/^-?\\d+$/.test(token) && !Number.isSafeInteger(Number(token))) {\n          out += src.slice(last, start) + '\"' + token + '\"'\n          last = i\n        }\n        continue\n      }\n      i += 1\n    }\n    return out + src.slice(last)\n  }\n\n  const authLike = (code, msg) => code === 401 || code === 403 || /login|cookie|auth|captcha|verify|forbidden|permission|登录|登陆|权限|验证|验证码/i.test(String(msg || ''))\n\n  // POST a JSON body from the page (cookies and signing come with it).\n  async function post(path, body) {\n    let res\n    let text\n    try {\n      res = await fetch(BASE + path, {\n        method: 'POST',\n        credentials: 'include',\n        headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify(body),\n      })\n      text = await res.text()\n    } catch (e) {\n      return { ok: false, error: 'Network error: ' + String((e && e.message) || e) }\n    }\n    if (!String(text || '').trim()) {\n      return res.ok ? { ok: false, error: 'Empty response from ' + path, hint: 'The endpoint may have been retired or may now need signed parameters' } : { ok: false, error: 'HTTP ' + res.status + ' from ' + path }\n    }\n    let d\n    try {\n      d = JSON.parse(quoteUnsafeIntegers(text))\n    } catch (e) {\n      return { ok: false, error: 'Unreadable response from ' + path + ' (HTTP ' + res.status + ')' }\n    }\n    if (!d || typeof d !== 'object' || Array.isArray(d)) return { ok: false, error: 'Malformed response from ' + path }\n    if ('status_code' in d && d.status_code !== 0) {\n      const msg = d.status_msg || d.message || 'unknown error'\n      return { ok: false, error: 'Douyin API error ' + d.status_code + ' at ' + path + ': ' + msg, loginRequired: authLike(d.status_code, msg) || undefined }\n    }\n    return { ok: true, data: d }\n  }\n\n  const updated = []\n  const fail = (r) => ({\n    error: r.error,\n    hint: r.loginRequired ? 'Open https://creator.douyin.com and sign in, then retry' : r.hint || (updated.length ? 'Already updated: ' + updated.join(', ') + '; the rest was not applied' : 'Nothing was changed'),\n    updated,\n    aweme_id: awemeId,\n  })\n  if (publishTime != null) {\n    const r = await post('/web/api/media/update/timer/?aid=1128', { aweme_id: awemeId, publish_time: publishTime })\n    if (!r.ok) return fail(r)\n    updated.push('reschedule')\n  }\n  if (caption) {\n    const r = await post('/web/api/media/update/desc/?aid=1128', { aweme_id: awemeId, desc: caption })\n    if (!r.ok) return fail(r)\n    updated.push('caption')\n  }\n  return { ok: true, status: 'updated', aweme_id: awemeId, updated, publish_time: publishTime }\n}",
+        "sha256": "e19147b3d130622a08a3b3050bcee28f952f9430244a470308b0eba4fc7df227",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/douyin/update.js"
+      },
+      {
+        "spec": "juejin/article-publish",
+        "meta": {
+          "name": "juejin/article-publish",
+          "description": "Publish a Markdown article to Juejin (掘金) as the signed-in user, or save it as a draft only",
+          "domain": "juejin.cn",
+          "args": {
+            "title": {
+              "required": true,
+              "description": "Article title"
+            },
+            "markdown": {
+              "required": true,
+              "description": "Full Markdown body (pass a file with --markdown @post.md)"
+            },
+            "summary": {
+              "required": false,
+              "description": "摘要 / brief_content. Juejin wants 50-100 characters to publish; derived from the body when omitted"
+            },
+            "tags": {
+              "required": false,
+              "description": "Comma-separated tag names, e.g. \"Claude,AI编程,开源\". Only tags Juejin already has are used (max 3); the rest come back in skipped_tags. Publishing needs at least one"
+            },
+            "category": {
+              "required": false,
+              "description": "Category name or id: 后端 前端 Android iOS 人工智能 开发工具 代码人生 阅读. Required to publish"
+            },
+            "draft": {
+              "required": false,
+              "description": "true = only create the draft, do not publish (default false)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": false,
+          "example": "chrome-use site juejin/article-publish --title \"Hello\" --markdown @post.md --tags \"AI编程,开源\" --category 人工智能 --draft true"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const API = 'https://api.juejin.cn'\n  const title = String(args.title || '').trim()\n  const markdown = String(args.markdown || '')\n  if (!title) return { error: 'Missing argument: title' }\n  if (!markdown.trim()) return { error: 'Missing argument: markdown' }\n  const draftOnly = /^(1|true|yes|y|on)$/i.test(String(args.draft || ''))\n  const tagNames = String(args.tags || '').split(/[,，]/).map((s) => s.trim()).filter(Boolean)\n\n  // One request. The API answers {err_no, err_msg, data}; err_no 0 is success.\n  // `body` null means GET.\n  const call = async (path, body) => {\n    let resp\n    try {\n      const url = API + path + (path.includes('?') ? '&' : '?') + 'aid=2608'\n      resp = await fetch(url, body === null\n        ? { credentials: 'include' }\n        : {\n            method: 'POST',\n            credentials: 'include',\n            headers: { 'content-type': 'application/json' },\n            body: JSON.stringify(body || {}),\n          })\n    } catch (e) {\n      return { ok: false, error: 'Network error calling ' + path + ': ' + (e && e.message) }\n    }\n    let j = null\n    try { j = await resp.json() } catch (e) { j = null }\n    if (!resp.ok || !j) return { ok: false, status: resp.status, error: 'HTTP ' + resp.status + ' from ' + path }\n    if (j.err_no !== 0) return { ok: false, code: j.err_no, error: path + ': ' + (j.err_msg || 'err_no ' + j.err_no) }\n    return { ok: true, data: j.data }\n  }\n\n  const me = await call('/user_api/v1/user/get', null)\n  if (!me.ok || !me.data || !me.data.user_id) {\n    return { error: 'Not signed in to juejin.cn', hint: 'Log in at https://juejin.cn in this browser, then retry.' }\n  }\n\n  // Category: accept a name (as the editor shows it) or a raw id.\n  let categoryId = ''\n  const catArg = String(args.category || '').trim()\n  if (catArg) {\n    if (/^\\d{10,}$/.test(catArg)) {\n      categoryId = catArg\n    } else {\n      const cats = await call('/tag_api/v1/query_category_list', {})\n      if (!cats.ok) return { error: cats.error }\n      const hit = (cats.data || []).find((c) => c.category && c.category.category_name === catArg)\n      if (!hit) {\n        return {\n          error: 'Unknown Juejin category: ' + catArg,\n          hint: 'Use one of: ' + (cats.data || []).map((c) => c.category && c.category.category_name).join(' '),\n        }\n      }\n      categoryId = hit.category_id\n    }\n  }\n\n  // Tags: exact (case-insensitive) matches only, so a typo never tags the\n  // article with some unrelated neighbour from the search results.\n  const tagIds = []\n  const usedTags = []\n  const skippedTags = []\n  const found = await Promise.all(tagNames.map((name) =>\n    call('/tag_api/v1/query_tag_list', { cursor: '0', key_word: name, limit: 10, sort_type: 1 })))\n  tagNames.forEach((name, i) => {\n    const rows = (found[i].ok && found[i].data) || []\n    const hit = rows.find((t) => t.tag && t.tag.tag_name === name) ||\n      rows.find((t) => t.tag && String(t.tag.tag_name).toLowerCase() === name.toLowerCase())\n    if (hit && tagIds.length < 3 && !tagIds.includes(hit.tag_id)) {\n      tagIds.push(hit.tag_id)\n      usedTags.push(hit.tag.tag_name)\n    } else {\n      skippedTags.push(name)\n    }\n  })\n\n  if (!draftOnly) {\n    if (!categoryId) return { error: 'Publishing needs --category', hint: 'e.g. --category 人工智能, or pass --draft true' }\n    if (!tagIds.length) return { error: 'None of the tags exist on Juejin: ' + tagNames.join(', '), hint: 'Publishing needs at least one existing tag.' }\n  }\n\n  // brief_content: Juejin rejects a publish outside 50-100 characters.\n  let brief = String(args.summary || '').trim()\n  if (!brief) {\n    brief = markdown\n      .replace(/```[\\s\\S]*?```/g, ' ')\n      .replace(/!\\[[^\\]]*\\]\\([^)]*\\)/g, ' ')\n      .replace(/\\[([^\\]]*)\\]\\([^)]*\\)/g, '$1')\n      .replace(/[#>*_`~|-]/g, ' ')\n      .replace(/\\s+/g, ' ')\n      .trim()\n  }\n  brief = Array.from(brief).slice(0, 100).join('')\n\n  const created = await call('/content_api/v1/article_draft/create', {\n    category_id: categoryId || '0',\n    tag_ids: tagIds,\n    link_url: '',\n    cover_image: '',\n    title,\n    brief_content: brief,\n    edit_type: 10,\n    html_content: 'deprecated',\n    mark_content: markdown,\n    theme_ids: [],\n  })\n  if (!created.ok) return { error: 'Could not create the draft: ' + created.error }\n  const draftId = created.data && (created.data.id || created.data.draft_id)\n  if (!draftId) return { error: 'Juejin created no draft id', hint: 'The draft API answer changed shape.' }\n  const draftUrl = 'https://juejin.cn/editor/drafts/' + draftId\n  const base = { id: String(draftId), draft_id: String(draftId), tags: usedTags, skipped_tags: skippedTags }\n\n  if (draftOnly) return Object.assign({ ok: true, url: draftUrl, status: 'draft' }, base)\n\n  const pub = await call('/content_api/v1/article/publish', {\n    draft_id: String(draftId),\n    sync_to_org: false,\n    column_ids: [],\n    theme_ids: [],\n  })\n  if (!pub.ok) {\n    return Object.assign({\n      error: 'Draft saved but publish failed: ' + pub.error,\n      hint: 'Finish it by hand at ' + draftUrl + '. Do not re-run: that would create a second draft.',\n      url: draftUrl,\n      status: 'draft',\n    }, base)\n  }\n  const articleId = String((pub.data && pub.data.article_id) || '')\n  return Object.assign(base, {\n    ok: true,\n    id: articleId || String(draftId),\n    url: articleId ? 'https://juejin.cn/post/' + articleId : draftUrl,\n    // New posts go through Juejin's review before they are public.\n    status: 'published',\n  })\n}",
+        "sha256": "c8b63687f481476c8f7a2b809780e51a7819258b4311db00f078f572845ecbb0",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/juejin/article-publish.js"
+      },
+      {
+        "spec": "sggit/pr-create",
+        "meta": {
+          "name": "sggit/pr-create",
+          "description": "Create a pull request on our self-hosted Gogs (sg-git.pwtk.cc). Runs as you, in your logged-in tab; posts the compare form the way the web UI does.",
+          "domain": "sg-git.pwtk.cc",
+          "args": {
+            "base": {
+              "required": true,
+              "description": "Target branch: dev | feature-test | main"
+            },
+            "head": {
+              "required": true,
+              "description": "Source branch, e.g. feat/leo/xxx"
+            },
+            "title": {
+              "required": true,
+              "description": "PR title"
+            },
+            "body": {
+              "required": false,
+              "description": "PR description (markdown)"
+            },
+            "repo": {
+              "required": false,
+              "description": "owner/name (default: ka-cn/super-admin)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": false,
+          "example": "chrome-use site sggit/pr-create --base main --head feat/leo/foo --title \"feat: foo\" --body \"...\""
+        },
+        "source": "async function (args) {\n  const repo = (args.repo || 'ka-cn/super-admin').replace(/^\\/+|\\/+$/g, '');\n  if (!args.base) return { error: 'Missing argument: base', hint: 'dev | feature-test | main' };\n  if (!args.head) return { error: 'Missing argument: head' };\n  if (!args.title) return { error: 'Missing argument: title' };\n  if (args.base === args.head)\n    return { error: 'base and head are the same branch (' + args.base + ')', hint: 'Gogs would create an empty PR — refusing.' };\n\n  const origin = location.origin; // https://sg-git.pwtk.cc\n  const comparePath = '/' + repo + '/compare/' + args.base + '...' + args.head;\n  const compareUrl = origin + comparePath;\n\n  const getCsrf = (html) => {\n    let m = html.match(/name=\"_csrf\"[^>]*\\bvalue=\"([^\"]+)\"/i);\n    if (m) return m[1];\n    m = html.match(/\\bvalue=\"([^\"]+)\"[^>]*name=\"_csrf\"/i);\n    return m ? m[1] : null;\n  };\n\n  // 1) CSRF token — Gogs csrf is session-global, so grab it from the light repo home\n  //    page instead of downloading a potentially huge compare diff.\n  const homeResp = await fetch(origin + '/' + repo, { credentials: 'include', headers: { Accept: 'text/html' } });\n  if (homeResp.status === 401 || homeResp.status === 403)\n    return { error: 'HTTP ' + homeResp.status, hint: 'Not logged in to Gogs (or WARP not connected)' };\n  if (homeResp.status === 404) return { error: 'Repo not found: ' + repo };\n  const csrf = getCsrf(await homeResp.text());\n  if (!csrf) return { error: 'CSRF token not found', hint: 'Not logged in to Gogs?' };\n\n  // 2) POST the compare form exactly like the \"Create Pull Request\" button.\n  const body = new URLSearchParams();\n  body.set('_csrf', csrf);\n  body.set('title', args.title);\n  body.set('content', args.body || '');\n  body.set('label_ids', '');\n  body.set('milestone_id', '0');\n  body.set('assignee_id', '0');\n\n  const resp = await fetch(compareUrl, {\n    method: 'POST',\n    credentials: 'include',\n    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: compareUrl },\n    body: body.toString(),\n    redirect: 'follow'\n  });\n\n  const finalUrl = resp.url || '';\n  const prMatch = finalUrl.match(/\\/pulls\\/(\\d+)/);\n  if (prMatch) {\n    return { ok: true, number: Number(prMatch[1]), url: finalUrl, repo, base: args.base, head: args.head, title: args.title };\n  }\n\n  // Failure: Gogs re-rendered the compare page. Surface the most useful reason.\n  const text = await resp.text();\n  if (/branches are equal|has no changes|nothing to compare/i.test(text))\n    return { error: 'No changes between branches', hint: '\"' + args.head + '\" has no commits ahead of \"' + args.base + '\"' };\n  if (/pull request .*already exists|已经存在/i.test(text))\n    return { error: 'A pull request for these branches already exists', url: finalUrl };\n  const em = (text.match(/class=\"ui[^\"]*negative[^\"]*message\"[^>]*>([\\s\\S]*?)<\\/div>/i) || [])[1];\n  return {\n    error: 'PR not created (still on compare page)',\n    status: resp.status,\n    detail: em ? em.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, 200) : undefined,\n    url: finalUrl\n  };\n}",
+        "sha256": "af928468460e8093aee5d194ff84bcab49d7e85f1a575bd109bc9a5c25340c0b",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/sggit/pr-create.js"
+      },
+      {
+        "spec": "sggit/pr-list",
+        "meta": {
+          "name": "sggit/pr-list",
+          "description": "List pull requests on our self-hosted Gogs (sg-git.pwtk.cc). Runs as you, in your logged-in tab.",
+          "domain": "sg-git.pwtk.cc",
+          "args": {
+            "repo": {
+              "required": false,
+              "description": "owner/name (default: ka-cn/super-admin)"
+            },
+            "status": {
+              "required": false,
+              "description": "open | closed | all (default: open). Use --status, not --state (--state is a reserved chrome-use flag)."
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site sggit/pr-list ka-cn/super-admin closed  (positional)  |  chrome-use site sggit/pr-list --status all"
+        },
+        "source": "async function (args) {\n  const repo = (args.repo || 'ka-cn/super-admin').replace(/^\\/+|\\/+$/g, '');\n  const status = (args.status || args.state || 'open').toLowerCase();\n  // Gogs' pulls page only accepts state=open|closed; expand \"all\" to both.\n  const states = status === 'all' ? ['open', 'closed'] : [status];\n\n  const seen = new Set();\n  const prs = [];\n  for (const st of states) {\n    const url = location.origin + '/' + repo + '/pulls?state=' + encodeURIComponent(st);\n    const r = await fetch(url, { credentials: 'include', headers: { Accept: 'text/html' } });\n    if (r.status === 404) return { error: 'Repo not found: ' + repo };\n    if (r.status === 401 || r.status === 403) return { error: 'HTTP ' + r.status, hint: 'Not logged in to Gogs (or WARP not connected)' };\n    const doc = new DOMParser().parseFromString(await r.text(), 'text/html');\n    doc.querySelectorAll('a[href*=\"/pulls/\"]').forEach((a) => {\n      const m = a.getAttribute('href').match(/\\/pulls\\/(\\d+)(?:$|[?#])/);\n      if (!m) return;\n      const num = Number(m[1]);\n      const title = (a.textContent || '').trim();\n      if (!title || seen.has(num)) return;\n      seen.add(num);\n      prs.push({ number: num, title, state: st, url: location.origin + a.getAttribute('href').split(/[?#]/)[0] });\n    });\n  }\n\n  prs.sort((a, b) => b.number - a.number);\n  return { repo, status, count: prs.length, pulls: prs };\n}",
+        "sha256": "e62b76f5861471869b2f259d7bed106ca468d47bfa098932b5aea97b87d407b0",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/sggit/pr-list.js"
+      },
+      {
+        "spec": "sggit/pr-merge",
+        "meta": {
+          "name": "sggit/pr-merge",
+          "description": "Merge a pull request on our self-hosted Gogs (sg-git.pwtk.cc). Runs as you, in your logged-in tab; posts the merge form the way the web UI does. Intended for the dev PR (auto-merge); use with care on feature-test/main.",
+          "domain": "sg-git.pwtk.cc",
+          "args": {
+            "pr": {
+              "required": true,
+              "description": "PR number, e.g. 134"
+            },
+            "repo": {
+              "required": false,
+              "description": "owner/name (default: ka-cn/super-admin)"
+            },
+            "style": {
+              "required": false,
+              "description": "merge style: create_merge_commit (default) | rebase | squash — must be enabled on the server"
+            },
+            "message": {
+              "required": false,
+              "description": "extra commit description"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": false,
+          "example": "chrome-use site sggit/pr-merge --pr 134"
+        },
+        "source": "async function (args) {\n  const repo = (args.repo || 'ka-cn/super-admin').replace(/^\\/+|\\/+$/g, '');\n  const idx = String(args.pr != null ? args.pr : (args.number != null ? args.number : '')).replace(/^#/, '').trim();\n  if (!/^\\d+$/.test(idx)) return { error: 'Missing/invalid argument: pr', hint: 'PR number, e.g. --pr 134 (or positional: site sggit/pr-merge 134)' };\n  const style = args.style || 'create_merge_commit';\n\n  const origin = location.origin; // https://sg-git.pwtk.cc\n  const prUrl = origin + '/' + repo + '/pulls/' + idx;\n\n  const g = await fetch(prUrl, { credentials: 'include', headers: { Accept: 'text/html' } });\n  if (g.status === 404) return { error: 'PR not found: ' + repo + '#' + idx };\n  if (g.status === 401 || g.status === 403) return { error: 'HTTP ' + g.status, hint: 'Not logged in to Gogs (or WARP not connected)' };\n  const html = await g.text();\n\n  const mergeable = /can be merged automatically/i.test(html);\n  const alreadyMerged = /has been merged|已被合并/i.test(html) && !mergeable;\n  if (alreadyMerged) return { ok: true, already: true, merged: true, number: Number(idx), url: prUrl };\n  if (/can't be merged automatically|cannot be merged|there are conflicts|存在冲突/i.test(html))\n    return { error: 'PR has conflicts — cannot auto-merge', number: Number(idx), url: prUrl, hint: 'resolve conflicts manually' };\n  if (!mergeable)\n    return { error: 'No merge form available', number: Number(idx), url: prUrl, hint: 'PR may be closed/already merged, or you lack merge permission' };\n\n  // csrf is session-global; any _csrf input on the page carries the same token.\n  const csrf = (html.match(/name=\"_csrf\"\\s+value=\"([^\"]+)\"/i) || html.match(/name=\"_csrf\"[^>]*\\bvalue=\"([^\"]+)\"/i) || [])[1];\n  if (!csrf) return { error: 'CSRF token not found', hint: 'Not logged in to Gogs?' };\n\n  const body = new URLSearchParams();\n  body.set('_csrf', csrf);\n  body.set('merge_style', style);\n  body.set('commit_description', args.message || '');\n\n  const p = await fetch(prUrl + '/merge', {\n    method: 'POST',\n    credentials: 'include',\n    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: prUrl },\n    body: body.toString(),\n    redirect: 'follow'\n  });\n\n  // Verify the PR is now merged.\n  const after = await (await fetch(prUrl, { credentials: 'include' })).text();\n  if (/has been merged|已被合并/i.test(after) && !/can be merged automatically/i.test(after))\n    return { ok: true, merged: true, number: Number(idx), url: prUrl, style };\n\n  return { error: 'Merge did not complete (PR still not merged)', status: p.status, number: Number(idx), url: p.url || prUrl };\n}",
+        "sha256": "e1226b4e1761910ba7b8d8f1e116b5a33c4c70524925ca3405bf8d574dfe3eba",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/sggit/pr-merge.js"
+      },
+      {
+        "spec": "si12333/pension-payments",
+        "meta": {
+          "name": "si12333/pension-payments",
+          "description": "国家社会保险公共服务平台：企业职工基本养老保险缴费明细（全部参保地、全部年份）",
+          "domain": "si.12333.gov.cn",
+          "timeout": 600,
+          "args": {
+            "from": {
+              "required": false,
+              "description": "开始年份，默认 1995"
+            },
+            "to": {
+              "required": false,
+              "description": "结束年份，默认今年"
+            },
+            "region": {
+              "required": false,
+              "description": "只查名称包含该文字的参保地，默认全部"
+            }
+          },
+          "readOnly": true
+        },
+        "source": "async function(args) {\n  // The page encrypts both request and response bodies, so the adapter drives\n  // the page's own Vue form instead of calling the API. Max span per query is\n  // 3 years, and each query asks which 参保地 (one per provincial pool) to show.\n  const QUERY_URL = 'https://si.12333.gov.cn/osptb/index.html#/protectCaptureQuery?2KZzg/x4yC1GtuDNv4vsJRwbmqWn7CuZL2iSBqV/vDE=';\n  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));\n  const visible = (el) => !!el && el.offsetParent !== null;\n  const text = (el) => (el && el.innerText || '').replace(/\\s+/g, ' ').trim();\n  const progress = (m) => { if (typeof args.progress === 'function') args.progress(m); };\n\n  const thisYear = new Date().getFullYear();\n  const from = parseInt(args.from || '1995', 10);\n  const to = parseInt(args.to || String(thisYear), 10);\n  if (!(from > 1900 && to >= from)) return { error: 'bad year range', from: args.from, to: args.to };\n\n  const modals = () => [...document.querySelectorAll('.ant-modal-wrap, .ant-modal')].filter(visible);\n  const modalText = () => modals().map(text).join(' | ');\n  const loggedOut = () => /登录信息已失效|请先登录/.test(modalText());\n  const dismissNotices = async () => {\n    for (let i = 0; i < 5; i++) {\n      const b = [...document.querySelectorAll('.ant-modal button')].find((x) => visible(x) && text(x) === '知道了');\n      if (!b) return;\n      b.click();\n      await sleep(250);\n    }\n  };\n  const mainButton = () => [...document.querySelectorAll('button')]\n    .find((x) => text(x).replace(/\\s/g, '') === '查询' && !x.closest('.ant-modal'));\n\n  if (!location.href.includes('protectCaptureQuery')) {\n    location.href = QUERY_URL;\n    return { status: 'incomplete', note: 'opened the query page' };\n  }\n  for (let i = 0; i < 40 && !mainButton(); i++) await sleep(250);\n  if (loggedOut() || !mainButton()) {\n    return { error: 'not logged in', hint: '在 si.12333.gov.cn 用掌上12333扫码或电子社保卡登录后重试' };\n  }\n\n  // Count completed payment queries; the page answers each with querySocialPayment.\n  if (!window.__si12333Hook) {\n    window.__si12333Hook = { done: 0 };\n    const open = XMLHttpRequest.prototype.open;\n    const send = XMLHttpRequest.prototype.send;\n    XMLHttpRequest.prototype.open = function (m, u) { this.__siUrl = String(u); return open.apply(this, arguments); };\n    XMLHttpRequest.prototype.send = function () {\n      if (this.__siUrl && this.__siUrl.includes('querySocialPayment')) {\n        this.addEventListener('loadend', () => { window.__si12333Hook.done++; });\n      }\n      return send.apply(this, arguments);\n    };\n  }\n\n  const form = () => {\n    let v = mainButton().__vue__;\n    while (v && v.$options.name !== 'Form_WrappedComponent') v = v.$parent;\n    return v;\n  };\n  const f = form();\n  if (!f) return { error: 'query form not found; the page layout may have changed' };\n  const shown = f.getFieldsValue();\n  const proto = shown.aae042 || shown.aae041;\n  if (!proto || !proto.clone) return { error: 'month picker value not found; click 重置 once and retry' };\n\n  const readRows = () => {\n    const out = [];\n    document.querySelectorAll('.vxe-table--body .vxe-body--row, .ant-table-tbody tr').forEach((tr) => {\n      const cells = [...tr.querySelectorAll('td')].map(text);\n      if (cells.length >= 5 && /^\\d{6}$/.test(cells[1])) {\n        out.push({ period: cells[1], place: cells[2], employer: cells[3], personal: Number(cells[4]) });\n      }\n    });\n    return out;\n  };\n\n  const waitQuery = async (before) => {\n    for (let i = 0; i < 80; i++) {\n      await sleep(150);\n      if (window.__si12333Hook.done > before) { await sleep(600); return true; }\n      if (loggedOut()) return false;\n    }\n    return false;\n  };\n\n  const queryWindow = async (y1, y2, region) => {\n    await dismissNotices();\n    f.setFieldsValue({\n      aae041: proto.clone().year(y1).month(0).date(1),\n      aae042: proto.clone().year(y2).month(11).date(1),\n    });\n    await sleep(200);\n    const before = window.__si12333Hook.done;\n    mainButton().click();\n    let picker;\n    for (let i = 0; i < 40; i++) {\n      await sleep(150);\n      picker = modals().find((m) => text(m).includes('请选择参保地'));\n      if (picker || window.__si12333Hook.done > before || loggedOut()) break;\n    }\n    if (loggedOut()) throw new Error('logged out');\n    if (!picker) {\n      // A single pool answers directly without the chooser.\n      await waitQuery(before);\n      const notice = modalText();\n      await dismissNotices();\n      return { regions: [], rows: readRows(), notice };\n    }\n    const wrappers = [...picker.querySelectorAll('.ant-radio-wrapper')];\n    const regions = wrappers.map(text);\n    if (!region) return { regions };\n    const w = wrappers.find((x) => text(x) === region);\n    if (!w) throw new Error('region not offered: ' + region);\n    (w.querySelector('input') || w).click();\n    await sleep(200);\n    const ok = [...picker.querySelectorAll('button')].find((x) => text(x).replace(/\\s/g, '') === '查询');\n    const before2 = window.__si12333Hook.done;\n    ok.click();\n    if (!(await waitQuery(before2))) {\n      if (loggedOut()) throw new Error('logged out');\n      throw new Error('query timed out: ' + region + ' ' + y1 + '-' + y2);\n    }\n    const notice = modalText();\n    const rows = /未查询到/.test(notice) ? [] : readRows();\n    await dismissNotices();\n    return { rows, notice };\n  };\n\n  const windows = [];\n  for (let y = from; y <= to; y += 3) windows.push([y, Math.min(y + 2, to)]);\n\n  let regions;\n  try {\n    regions = (await queryWindow(windows[windows.length - 1][0], windows[windows.length - 1][1], null)).regions;\n    const cancel = modals().map((m) => [...m.querySelectorAll('button')].find((x) => text(x).replace(/\\s/g, '') === '返回')).find(Boolean);\n    if (cancel) { cancel.click(); await sleep(300); }\n  } catch (e) {\n    return { error: String(e.message || e) };\n  }\n  if (!regions || !regions.length) regions = [null];\n  if (args.region) regions = regions.filter((r) => r && r.includes(args.region));\n\n  const rows = [];\n  for (const region of regions) {\n    for (const [y1, y2] of windows) {\n      progress((region || '默认参保地') + ' ' + y1 + '-' + y2);\n      try {\n        const r = await queryWindow(y1, y2, region);\n        for (const row of r.rows || []) {\n          if (row.period.slice(0, 4) >= String(y1) && row.period.slice(0, 4) <= String(y2)) rows.push({ pool: region, ...row });\n        }\n      } catch (e) {\n        return { error: String(e.message || e), partial: rows.length, rows };\n      }\n    }\n  }\n\n  const seen = new Set();\n  const unique = rows.filter((r) => {\n    const k = [r.pool, r.period, r.employer, r.personal].join('|');\n    if (seen.has(k)) return false;\n    seen.add(k);\n    return true;\n  }).sort((a, b) => a.period.localeCompare(b.period));\n\n  const byMonth = {};\n  unique.forEach((r) => { (byMonth[r.period] = byMonth[r.period] || []).push(r.pool); });\n  const summary = {};\n  unique.forEach((r) => {\n    const s = summary[r.pool || ''] = summary[r.pool || ''] || { months: 0, first: r.period, last: r.period, personal_total: 0 };\n    s.months++;\n    s.last = r.period;\n    s.personal_total = Math.round((s.personal_total + r.personal) * 100) / 100;\n  });\n\n  return {\n    from, to,\n    pools: regions.filter(Boolean),\n    distinct_months: Object.keys(byMonth).length,\n    overlapping_months: Object.keys(byMonth).filter((k) => new Set(byMonth[k]).size > 1),\n    summary,\n    rows: unique.map((r) => ({ ...r, base_est: Math.round(r.personal / 0.08) })),\n  };\n}",
+        "sha256": "0b459b751768d210b5b66e191defd3d496a7a1451d6cd9c2f421e647de71f1e1",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/si12333/pension-payments.js"
+      },
+      {
+        "spec": "twitter/delete",
+        "meta": {
+          "name": "twitter/delete",
+          "description": "Delete one of the signed-in account's own tweets the way a person does: open the tweet, its ⋯ menu, Delete, confirm. Run with --until-done: the first run opens the tweet and the rerun deletes it",
+          "domain": "x.com",
+          "timeout": 90,
+          "retryStatuses": [
+            "navigating"
+          ],
+          "args": {
+            "tweet": {
+              "required": true,
+              "description": "The tweet's status URL (https://x.com/name/status/123…) or its numeric id"
+            }
+          },
+          "capabilities": [
+            "dom"
+          ],
+          "readOnly": false,
+          "example": "chrome-use site twitter/delete https://x.com/you/status/1890000000000000000 --until-done"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const W = window\n  const D = document\n  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))\n  const isTwitterHost = (h) => h === 'x.com' || h === 'twitter.com' || h.endsWith('.x.com') || h.endsWith('.twitter.com')\n  const statusPath = /^\\/(?:[^/]+|i)\\/status\\/(\\d+)\\/?$/\n\n  // The tweet id: a bare id, or the id in an https x.com/twitter.com status URL.\n  const raw = String(args.tweet == null ? '' : args.tweet).trim()\n  if (!raw) return { error: 'Missing argument: tweet', hint: 'Pass the tweet URL or id, e.g. chrome-use site twitter/delete https://x.com/you/status/123 --until-done' }\n  let tweetId = null\n  if (/^\\d+$/.test(raw)) {\n    tweetId = raw\n  } else {\n    let u = null\n    try { u = new URL(raw) } catch (e) { u = null }\n    if (!u || u.protocol !== 'https:' || !isTwitterHost(u.hostname.toLowerCase())) {\n      return { error: 'Not an x.com tweet URL: ' + raw, hint: 'Use https://x.com/<user>/status/<id> or the numeric id' }\n    }\n    const m = u.pathname.match(statusPath)\n    if (!m) return { error: 'No tweet id in ' + raw, hint: 'Use https://x.com/<user>/status/<id> or the numeric id' }\n    tweetId = m[1]\n  }\n\n  // Open the tweet's own page first: the navigation ends this run, and\n  // --until-done reruns the command there.\n  const here = String(W.location.pathname || '').match(statusPath)\n  if (!here || here[1] !== tweetId) {\n    const url = 'https://x.com/i/status/' + tweetId\n    setTimeout(() => W.location.assign(url), 800)\n    return { status: 'navigating', url, retryAfterMs: 4000, hint: 'Opening the tweet; run the same command again there, or pass --until-done' }\n  }\n\n  const visible = (el) => !!el && (el.offsetParent !== null || (el.getClientRects && el.getClientRects().length > 0))\n  const statusIdOf = (href) => {\n    try {\n      const u = new URL(href, W.location.origin)\n      if (u.protocol !== 'https:' || !isTwitterHost(u.hostname.toLowerCase())) return null\n      const m = u.pathname.match(statusPath)\n      return m ? m[1] : null\n    } catch (e) {\n      return null\n    }\n  }\n  // The <article> whose own status link is this tweet (a quoted or replied-to\n  // tweet on the page has a different id).\n  const findTargetArticle = () => Array.from(D.querySelectorAll('article'))\n    .find((a) => Array.from(a.querySelectorAll('a[href*=\"/status/\"]')).some((link) => statusIdOf(link.href || link.getAttribute('href')) === tweetId))\n\n  // The article's self-link can hydrate late on a slow network.\n  let article = findTargetArticle()\n  for (let i = 0; i < 40 && !article; i += 1) {\n    await sleep(250)\n    article = findTargetArticle()\n  }\n  if (!article) return { error: 'tweet_not_found', id: tweetId, hint: 'The tweet did not show on its page (deleted already, or not visible to this account). Nothing changed' }\n\n  const own = (el) => el.closest('article') === article\n  // X localizes the ⋯ label (zh-Hans: 更多); prefer the data-testid.\n  const moreMenu = Array.from(article.querySelectorAll('[data-testid=\"caret\"]')).filter(own).find(visible)\n    || Array.from(article.querySelectorAll('button,[role=\"button\"]')).filter(own)\n      .find((el) => visible(el) && /^(More|更多)/.test(String(el.getAttribute('aria-label') || '').trim()))\n  if (!moreMenu) return { error: 'menu_not_found', id: tweetId, hint: 'The tweet has no ⋯ menu here; check that x.com is signed in. Nothing changed' }\n\n  const before = new Set(Array.from(D.querySelectorAll('[role=\"menuitem\"]')))\n  moreMenu.click()\n  await sleep(1000)\n  const items = Array.from(D.querySelectorAll('[role=\"menuitem\"]')).filter((item) => visible(item) && !before.has(item))\n  // Delete / 删除, but never the \"Add/remove from Lists\" row.\n  const deleteItem = items.find((item) => {\n    const text = String(item.textContent || '').trim()\n    return (text.includes('Delete') || text.includes('删除')) && !text.includes('List') && !text.includes('列表')\n  })\n  if (!deleteItem) return { error: 'not_own_tweet', id: tweetId, hint: 'The tweet menu has no Delete, so it is not this account\\'s tweet. Nothing changed' }\n  deleteItem.click()\n  await sleep(1000)\n\n  const confirm = D.querySelector('[data-testid=\"confirmationSheetConfirm\"]')\n  if (!confirm) return { error: 'confirm_not_shown', id: tweetId, hint: 'The delete confirmation did not appear; nothing was confirmed' }\n  // Report at once: X may leave the tweet's page after a delete, which would\n  // end this run before it could answer.\n  confirm.click()\n  return { ok: true, status: 'deleted', id: tweetId }\n}",
+        "sha256": "3080927ca07e01a541dc38ad4ca828df142ea0c08c8e07c5f18efc0f33b91bd6",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/twitter/delete.js"
+      },
+      {
+        "spec": "twitter/search",
+        "meta": {
+          "name": "twitter/search",
+          "description": "搜索推文",
+          "domain": "x.com",
+          "args": {
+            "query": {
+              "required": true,
+              "description": "Search query"
+            },
+            "count": {
+              "required": false,
+              "description": "Number of results (default 20, max 50)"
+            },
+            "type": {
+              "required": false,
+              "description": "Result type: latest (default) or top"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site twitter/search \"claude code\""
+        },
+        "source": "async function(args) {\n  if (!args.query) return {error: 'Missing argument: query', hint: 'Provide a search query'};\n  const ct0 = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('ct0='))?.split('=')[1];\n  if (!ct0) return {error: 'No ct0 cookie', hint: 'Please log in to https://x.com first.'};\n\n  const genTxId = await findTransactionIdGenerator();\n  const queryId = findGraphQLQueryId('SearchTimeline', 'Yw6L66Pw54NHKuq4Dp7b4Q');\n  if (!genTxId) return {error: 'Cannot find transaction-id generator', hint: 'x.com webpack structure may have changed'};\n  if (!queryId) return {error: 'Cannot find SearchTimeline queryId', hint: 'x.com API structure may have changed'};\n\n  const bearer = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';\n  const path = '/i/api/graphql/' + queryId + '/SearchTimeline';\n  const txId = await genTxId('x.com', path, 'GET');\n\n  const _h = {\n    'Authorization': 'Bearer ' + bearer, 'X-Csrf-Token': ct0,\n    'X-Twitter-Auth-Type': 'OAuth2Session', 'X-Twitter-Active-User': 'yes',\n    'X-Twitter-Client-Language': 'zh-cn', 'Content-Type': 'application/json',\n    'X-Client-Transaction-Id': txId\n  };\n\n  const requestedCount = Number(args.count);\n  const count = Number.isInteger(requestedCount) && requestedCount > 0\n    ? Math.min(requestedCount, 50)\n    : 20;\n  const product = (args.type === 'top') ? 'Top' : 'Latest';\n  const variables = JSON.stringify({\n    rawQuery: args.query, count, querySource: 'typed_query', product,\n    withGrokTranslatedBio: false, withQuickPromoteEligibilityTweetFields: false\n  });\n  const features = JSON.stringify({\n    rweb_video_screen_enabled: false, rweb_cashtags_enabled: true,\n    profile_label_improvements_pcf_label_in_post_enabled: true,\n    responsive_web_profile_redirect_enabled: false, rweb_tipjar_consumption_enabled: false,\n    verified_phone_label_enabled: false, creator_subscriptions_tweet_preview_api_enabled: true,\n    responsive_web_graphql_timeline_navigation_enabled: true,\n    responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,\n    premium_content_api_read_enabled: false, communities_web_enable_tweet_community_results_fetch: true,\n    c9s_tweet_anatomy_moderator_badge_enabled: true,\n    responsive_web_grok_analyze_button_fetch_trends_enabled: false,\n    responsive_web_grok_analyze_post_followups_enabled: true,\n    rweb_cashtags_composer_attachment_enabled: true,\n    responsive_web_jetfuel_frame: true,\n    responsive_web_grok_share_attachment_enabled: true,\n    responsive_web_grok_annotations_enabled: true,\n    articles_preview_enabled: true, responsive_web_edit_tweet_api_enabled: true,\n    rweb_conversational_replies_downvote_enabled: false,\n    graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,\n    view_counts_everywhere_api_enabled: true, longform_notetweets_consumption_enabled: true,\n    responsive_web_twitter_article_tweet_consumption_enabled: true,\n    content_disclosure_indicator_enabled: true, content_disclosure_ai_generated_indicator_enabled: true,\n    responsive_web_grok_show_grok_translated_post: true,\n    responsive_web_grok_analysis_button_from_backend: true,\n    post_ctas_fetch_enabled: false,\n    freedom_of_speech_not_reach_fetch_enabled: true, standardized_nudges_misinfo: true,\n    tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,\n    longform_notetweets_rich_text_read_enabled: true, longform_notetweets_inline_media_enabled: false,\n    responsive_web_grok_image_annotation_enabled: true,\n    responsive_web_grok_imagine_annotation_enabled: true,\n    responsive_web_grok_community_note_auto_translation_is_enabled: true,\n    responsive_web_enhance_cards_enabled: false\n  });\n  const url = path + '?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);\n  const resp = await fetch(url, {headers: _h, credentials: 'include'});\n  if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'queryId may have changed'};\n  const d = await resp.json();\n\n  const instructions = d.data?.search_by_raw_query?.search_timeline?.timeline?.instructions || [];\n  let tweets = [];\n  for (const inst of instructions) {\n    for (const entry of (inst.entries || [])) {\n      const r = entry.content?.itemContent?.tweet_results?.result;\n      if (!r) continue;\n      const tw = r.tweet || r;\n      const l = tw.legacy || {};\n      if (!tw.rest_id) continue;\n      const u = tw.core?.user_results?.result;\n      const nt = tw.note_tweet?.note_tweet_results?.result?.text;\n      const screenName = u?.legacy?.screen_name || u?.core?.screen_name;\n      const rawViewCount = tw.views?.count;\n      const viewCount = rawViewCount == null ? null : Number(rawViewCount);\n      tweets.push({id: tw.rest_id, author: screenName,\n        name: u?.legacy?.name || u?.core?.name,\n        url: 'https://x.com/' + (screenName || '_') + '/status/' + tw.rest_id,\n        text: nt || l.full_text || '', likes: l.favorite_count ?? null, retweets: l.retweet_count ?? null,\n        replies: l.reply_count ?? null, bookmarks: l.bookmark_count ?? null,\n        views: Number.isFinite(viewCount) ? viewCount : null,\n        in_reply_to: l.in_reply_to_status_id_str || undefined, created_at: l.created_at});\n    }\n  }\n\n  return {query: args.query, product, count: tweets.length, tweets};\n}",
+        "sha256": "8f0c2417b392c57bac30534a671970cb1d4483d13cf216a26de9e5ab65af5fd9",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/twitter/search.js"
+      },
+      {
+        "spec": "twitter/thread",
+        "meta": {
+          "name": "twitter/thread",
+          "description": "获取推文对话线程（原文 + 所有回复）",
+          "domain": "x.com",
+          "args": {
+            "tweet_id": {
+              "required": true,
+              "description": "Tweet ID (numeric) or full URL"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site twitter/thread 2032478407146311850"
+        },
+        "source": "async function(args) {\n  if (!args.tweet_id) return {error: 'Missing argument: tweet_id', hint: 'Provide a tweet ID or URL'};\n  const ct0 = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('ct0='))?.split('=')[1];\n  if (!ct0) return {error: 'No ct0 cookie', hint: 'Not logged into x.com'};\n  const bearer = decodeURIComponent('AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA');\n  const _h = {'Authorization':'Bearer '+bearer, 'X-Csrf-Token':ct0, 'X-Twitter-Auth-Type':'OAuth2Session', 'X-Twitter-Active-User':'yes'};\n\n  let tweetId = args.tweet_id;\n  const urlMatch = tweetId.match(/\\/status\\/(\\d+)/);\n  if (urlMatch) tweetId = urlMatch[1];\n\n  const features = JSON.stringify({\n    responsive_web_graphql_exclude_directive_enabled: true, verified_phone_label_enabled: false,\n    creator_subscriptions_tweet_preview_api_enabled: true, responsive_web_graphql_timeline_navigation_enabled: true,\n    responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,\n    longform_notetweets_consumption_enabled: true, longform_notetweets_rich_text_read_enabled: true,\n    longform_notetweets_inline_media_enabled: true, freedom_of_speech_not_reach_fetch_enabled: true\n  });\n  const fieldToggles = JSON.stringify({withArticleRichContentState: true, withArticlePlainText: false});\n  const tweetDetailQueryId = findGraphQLQueryId('TweetDetail', 'nBS-WpgA6ZG0CyNHD517JQ');\n  if (!tweetDetailQueryId) {\n    return {error: 'Cannot find TweetDetail queryId', hint: 'x.com API structure may have changed'};\n  }\n\n  let tweets = [], seen = new Set(), cursor = null, maxPages = 5;\n\n  function extractTweet(r) {\n    if (!r) return;\n    const tw = r.tweet || r; const l = tw.legacy || {};\n    if (!tw.rest_id || seen.has(tw.rest_id)) return;\n    seen.add(tw.rest_id);\n    const u = tw.core?.user_results?.result;\n    const nt = tw.note_tweet?.note_tweet_results?.result?.text;\n    const screenName = u?.legacy?.screen_name || u?.core?.screen_name;\n    const rawViewCount = tw.views?.count;\n    const viewCount = rawViewCount == null ? null : Number(rawViewCount);\n    tweets.push({id: tw.rest_id, author: screenName, text: nt || l.full_text || '',\n      url: 'https://x.com/' + (screenName || '_') + '/status/' + tw.rest_id,\n      likes: l.favorite_count ?? null, retweets: l.retweet_count ?? null,\n      replies: l.reply_count ?? null, bookmarks: l.bookmark_count ?? null,\n      views: Number.isFinite(viewCount) ? viewCount : null,\n      in_reply_to: l.in_reply_to_status_id_str, created_at: l.created_at});\n  }\n\n  for (let page = 0; page < maxPages; page++) {\n    const vars = {\n      focalTweetId: tweetId, referrer: 'tweet', with_rux_injections: false,\n      includePromotedContent: false, rankingMode: 'Recency',\n      withCommunity: true, withQuickPromoteEligibilityTweetFields: true,\n      withBirdwatchNotes: true, withVoice: true\n    };\n    if (cursor) vars.cursor = cursor;\n\n    const url = '/i/api/graphql/' + tweetDetailQueryId + '/TweetDetail?variables=' + encodeURIComponent(JSON.stringify(vars)) + '&features=' + encodeURIComponent(features) + '&fieldToggles=' + encodeURIComponent(fieldToggles);\n    const resp = await fetch(url, {headers: _h, credentials: 'include'});\n    if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'Tweet may not exist or queryId expired'};\n    const d = await resp.json();\n\n    const instructions = d.data?.threaded_conversation_with_injections_v2?.instructions || d.data?.tweetResult?.result?.timeline?.instructions || [];\n    let nextCursor = null;\n\n    for (const inst of instructions) {\n      for (const entry of (inst.entries || [])) {\n        if (entry.content?.entryType === 'TimelineTimelineCursor' || entry.content?.__typename === 'TimelineTimelineCursor') {\n          if (entry.content.cursorType === 'Bottom' || entry.content.cursorType === 'ShowMore') {\n            nextCursor = entry.content.value;\n          }\n          continue;\n        }\n        if (entry.entryId?.startsWith('cursor-bottom-') || entry.entryId?.startsWith('cursor-showMore-')) {\n          const cv = entry.content?.itemContent?.value || entry.content?.value;\n          if (cv) nextCursor = cv;\n          continue;\n        }\n\n        extractTweet(entry.content?.itemContent?.tweet_results?.result);\n        for (const item of (entry.content?.items || [])) {\n          extractTweet(item.item?.itemContent?.tweet_results?.result);\n        }\n      }\n    }\n\n    if (!nextCursor || nextCursor === cursor) break;\n    cursor = nextCursor;\n  }\n\n  return {tweet_id: tweetId, count: tweets.length, tweets};\n}",
+        "sha256": "1ca4cf3905ba9d2f1ddf2d809a797f7542955472e6d4000252251b9778776276",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/twitter/thread.js"
+      },
+      {
+        "spec": "twitter/user",
+        "meta": {
+          "name": "twitter/user",
+          "description": "X profile counts (followers, following, posts, media, likes) and bio; without a handle, the signed-in account",
+          "domain": "x.com",
+          "args": {
+            "screen_name": {
+              "required": false,
+              "description": "Handle without @ (default: the signed-in account)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site twitter/user leeguooooo"
+        },
+        "source": "async function(args) {\n  args = args || {};\n  const ct0 = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('ct0='))?.split('=')[1];\n  if (!ct0) return {error: 'No ct0 cookie', hint: 'Not logged into x.com. Open x.com and log in first.'};\n  const bearer = decodeURIComponent('AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA');\n  const _h = {'Authorization':'Bearer '+bearer, 'X-Csrf-Token':ct0, 'X-Twitter-Auth-Type':'OAuth2Session', 'X-Twitter-Active-User':'yes'};\n\n  let screenName = String(args.screen_name || '').trim().replace(/^@/, '');\n  const urlMatch = screenName.match(/(?:x|twitter)\\.com\\/([A-Za-z0-9_]+)/);\n  if (urlMatch) screenName = urlMatch[1];\n  if (!screenName) {\n    // The side nav's Profile link carries the signed-in handle.\n    const link = document.querySelector('[data-testid=\"AppTabBar_Profile_Link\"]');\n    const m = link && (link.getAttribute('href') || '').match(/^\\/([A-Za-z0-9_]+)/);\n    if (!m) return {error: 'Cannot tell which account is signed in', hint: 'Pass a handle: chrome-use site twitter/user <screen_name>'};\n    screenName = m[1];\n  }\n\n  const variables = JSON.stringify({screen_name: screenName, withSafetyModeUserFields: true});\n  const features = JSON.stringify({\n    hidden_profile_subscriptions_enabled: true, responsive_web_graphql_exclude_directive_enabled: true,\n    verified_phone_label_enabled: false, responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,\n    responsive_web_graphql_timeline_navigation_enabled: true, profile_label_improvements_pcf_label_in_post_enabled: true,\n    rweb_tipjar_consumption_enabled: true, subscriptions_feature_can_gift_premium: true,\n    highlights_tweets_tab_ui_enabled: true, responsive_web_twitter_article_notes_tab_enabled: true,\n    subscriptions_verification_info_is_identity_verified_enabled: true,\n    subscriptions_verification_info_verified_since_enabled: true, creator_subscriptions_tweet_preview_api_enabled: true\n  });\n  const queryId = findGraphQLQueryId('UserByScreenName', 'pLsOiyHJ1eFwPJlNmLp4Bg');\n  if (!queryId) return {error: 'Cannot find UserByScreenName queryId', hint: 'x.com API structure may have changed'};\n  const url = '/i/api/graphql/' + queryId + '/UserByScreenName?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);\n  const resp = await fetch(url, {headers: _h, credentials: 'include'});\n  if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'queryId may have changed. Check network tab.'};\n  const d = await resp.json();\n  const u = d.data?.user?.result;\n  if (!u || u.__typename === 'UserUnavailable') return {error: 'User not found', hint: 'Check spelling: @' + screenName};\n\n  // X keeps moving profile fields out of `legacy`: name/screen_name/created_at\n  // went to `core`, bio and location to their own objects, and with the 2026\n  // query the counts to relationship_counts / tweet_counts / action_counts.\n  // Read the new place first and fall back to legacy for older query ids.\n  const l = u.legacy || {};\n  const c = u.core || {};\n  const rel = u.relationship_counts || {};\n  const tc = u.tweet_counts || {};\n  const ac = u.action_counts || {};\n  const num = (...vs) => {\n    for (const v of vs) if (v != null && v !== '' && Number.isFinite(Number(v))) return Number(v);\n    return null;\n  };\n  const handle = c.screen_name || l.screen_name || screenName;\n  return {\n    id: u.rest_id || null,\n    name: c.name || l.name || null,\n    screen_name: handle,\n    url: 'https://x.com/' + handle,\n    bio: u.profile_bio?.description ?? l.description ?? null,\n    location: u.location?.location ?? l.location ?? null,\n    website: l.entities?.url?.urls?.[0]?.expanded_url || u.website?.url || l.url || null,\n    created_at: c.created_at || l.created_at || null,\n    followers: num(rel.followers, l.followers_count),\n    following: num(rel.following, l.friends_count),\n    tweets: num(tc.tweets, l.statuses_count),\n    media: num(tc.media_tweets, l.media_count),\n    likes: num(ac.favorites_count, l.favourites_count),\n    pinned_tweet_ids: u.pinned_items?.tweet_ids_str || l.pinned_tweet_ids_str || [],\n    verified: Boolean(u.is_blue_verified),\n  };\n}",
+        "sha256": "8b0bdeb514535d66c27964fa6b28ad626852c45c1b17d22d9cba496197ce6ff6",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/twitter/user.js"
+      },
+      {
+        "spec": "xiaohongshu-creator/me",
+        "meta": {
+          "name": "xiaohongshu-creator/me",
+          "description": "Signed-in Xiaohongshu creator account: profile counts plus the data center's 7/30-day summary",
+          "domain": "creator.xiaohongshu.com",
+          "args": {
+            "summary": {
+              "required": false,
+              "description": "Include the 7/30-day data-center summary (default true; false saves one request)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site xiaohongshu-creator/me"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const budget = xhscBudget()\n  const ready = await xhscReady(budget)\n  if (ready.error) return ready\n  const { client, user } = ready\n  const wantSummary = String(args.summary).toLowerCase() !== 'false'\n\n  // personal_info is what the creator home page header renders. The user id is\n  // not in it; the page's own Vuex store already holds it, so no extra call.\n  // Both requests go out together, as they do when the home page loads.\n  const [info, acct] = await Promise.all([\n    xhscGet(client, '/api/galaxy/creator/home/personal_info', { transform: true }, budget),\n    wantSummary\n      ? xhscGet(client, '/api/galaxy/v2/creator/datacenter/account/base', { transform: true }, budget)\n      : null,\n  ])\n  if (!info.ok) return { error: info.error, hint: info.hint, status: info.status }\n  const p = info.data || {}\n\n  const out = {\n    user_id: user.userId,\n    nickname: p.name || user.userName || null,\n    red_id: p.redNum || user.redId || null,\n    avatar: p.avatar || user.userAvatar || null,\n    desc: p.personalDesc || null,\n    fans: xhscNum(p.fansCount),\n    follows: xhscNum(p.followCount),\n    // 获赞与收藏: XHS only publishes the combined figure.\n    likes_and_collects: xhscNum(p.favedCount),\n    level: xhscNum(p.growInfo && p.growInfo.level),\n    profile_url: 'https://www.xiaohongshu.com/user/profile/' + user.userId,\n    data_center: null,\n  }\n\n  if (!acct) return out\n  if (!acct.ok) {\n    // The profile half is still good; say why the summary is missing.\n    out.data_center = { error: acct.error, hint: acct.hint || null }\n    return out\n  }\n  const period = (d) => {\n    if (!d || typeof d !== 'object') return null\n    return {\n      start: xhscDateFromMs(d.beginTime),\n      end: xhscDateFromMs(d.endTime),\n      impressions: xhscNum(d.implCount),\n      views: xhscNum(d.viewCount),\n      cover_click_rate_pct: xhscNum(d.coverClickRate),\n      avg_view_time_sec: xhscNum(d.avgViewTime != null ? d.avgViewTime : d.viewTimeAvg),\n      home_views: xhscNum(d.homeViewCount),\n      likes: xhscNum(d.likeCount),\n      collects: xhscNum(d.collectCount),\n      comments: xhscNum(d.commentCount),\n      shares: xhscNum(d.shareCount),\n      new_fans: xhscNum(d.riseFansCount),\n      lost_fans: xhscNum(d.lossFansCount),\n      net_new_fans: xhscNum(d.netRiseFansCount),\n      notes_published: xhscNum(d.publishNoteNum),\n    }\n  }\n  out.data_center = {\n    last_7_days: period(acct.data && acct.data.seven),\n    last_30_days: period(acct.data && acct.data.thirty),\n  }\n  return out\n}",
+        "sha256": "e00bcf0bbcda9fd0334cac220187ef0d2363792d97172350e81a0ebd10325b04",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/xiaohongshu-creator/me.js"
+      },
+      {
+        "spec": "xiaohongshu-creator/note-stats",
+        "meta": {
+          "name": "xiaohongshu-creator/note-stats",
+          "description": "Data-center analytics (笔记数据) for one of your own notes: views, watch time, rates, engagement, traffic sources, audience",
+          "domain": "creator.xiaohongshu.com",
+          "args": {
+            "note_id": {
+              "required": true,
+              "description": "Note id, or a www.xiaohongshu.com/explore/<id> URL"
+            },
+            "audience": {
+              "required": false,
+              "description": "Include traffic sources and audience portrait (default true; false saves two requests)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site xiaohongshu-creator/note-stats 6abbe0ef000000001203e9c7"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const noteId = xhscParseNoteId(args.note_id)\n  if (!noteId) {\n    return {\n      error: 'Missing or invalid note_id: ' + (args.note_id == null ? '' : args.note_id),\n      hint: 'Pass a 24-hex note id or a https://www.xiaohongshu.com/explore/<id> URL.',\n    }\n  }\n\n  const budget = xhscBudget()\n  const ready = await xhscReady(budget)\n  if (ready.error) return ready\n  const { client } = ready\n  const opts = { params: { note_id: noteId }, transform: true }\n  const wantAudience = String(args.audience).toLowerCase() !== 'false'\n\n  // The same calls the 笔记数据 detail page makes on open, sent together as it\n  // sends them.\n  const [base, src, det] = await Promise.all([\n    xhscGet(client, '/api/galaxy/creator/datacenter/note/base', opts, budget),\n    wantAudience ? xhscGet(client, '/api/galaxy/creator/datacenter/note/audience/source', opts, budget) : null,\n    wantAudience ? xhscGet(client, '/api/galaxy/creator/datacenter/note/audience/source/detail', opts, budget) : null,\n  ])\n  if (!base.ok) return { error: base.error, hint: base.hint, status: base.status, note_id: noteId }\n  const b = base.data || {}\n  const info = b.noteInfo || {}\n  if (!info.id) {\n    return {\n      error: 'No data-center record for note ' + noteId,\n      hint: 'note-stats only covers notes published by the signed-in account.',\n      note_id: noteId,\n    }\n  }\n  const isVideo = String(info.type || '').toUpperCase() === 'VIDEO'\n\n  const out = {\n    note_id: info.id,\n    type: isVideo ? 'video' : 'normal',\n    desc: info.desc || null,\n    published_at: xhscIsoFromMs(info.postTime),\n    days_since_post: xhscNum(b.notePostDays),\n    // When the data center last rolled up this note's numbers. Absent for\n    // notes still inside the first day, when most rates read -1 (→ null).\n    data_updated_at: xhscIsoFromMs(b.basicDataLastUpdateTime),\n    cover: info.coverUrl || null,\n    url: 'https://www.xiaohongshu.com/explore/' + info.id,\n    topics: Array.isArray(info.tags) ? info.tags.map((t) => t && t.name).filter(Boolean) : [],\n    metrics: {\n      impressions: xhscNum(b.implCount),\n      views: xhscNum(b.viewCount),\n      cover_click_rate_pct: xhscNum(b.coverClickRate),\n      avg_view_time_sec: xhscNum(b.viewTimeAvg),\n      likes: xhscNum(b.likeCount),\n      collects: xhscNum(b.collectCount),\n      comments: xhscNum(b.commentCount),\n      shares: xhscNum(b.shareCount),\n      follows_gained: xhscNum(b.riseFansCount),\n      danmaku: xhscNum(b.danmakuCount),\n      interaction_rate_pct: xhscNum(b.interactionRate),\n      // 图文 only: how many images a viewer swipes through on average.\n      avg_images_viewed: isVideo ? null : xhscNum(b.avgViewImage),\n      // Video only. Image notes report 0 for these, which means \"n/a\", not 0%.\n      full_view_rate_pct: isVideo ? xhscNum(b.fullViewRate) : null,\n      finish_5s_rate_pct: isVideo ? xhscNum(b.finish5sRate) : null,\n      exit_2s_rate_pct: isVideo ? xhscNum(b.exitView2sRate) : null,\n      play_60s_count: isVideo ? xhscNum(b.play60sCount) : null,\n    },\n    traffic_sources: null,\n    audience: null,\n  }\n\n  if (!wantAudience) return out\n\n  // Each item is {title, value, valueWithDouble}; valueWithDouble is the\n  // percentage the page draws (value is sometimes a rounded copy).\n  const shares = (list) =>\n    Array.isArray(list)\n      ? list.map((x) => ({\n          name: (x && (x.title || x.name)) || null,\n          pct: xhscNum(x && (x.valueWithDouble != null ? x.valueWithDouble : x.value)),\n        }))\n      : []\n\n  if (src.ok) {\n    const s = src.data || {}\n    out.traffic_sources = s.noData\n      ? { available: false, reason: s.noDataTipMsg || null, sources: [] }\n      : { available: true, reason: null, sources: shares(s.source) }\n  } else {\n    out.traffic_sources = { available: false, reason: src.error, sources: [] }\n  }\n\n  if (det.ok) {\n    const d = det.data || {}\n    out.audience = {\n      available: !d.noData,\n      reason: d.noData ? d.noDataTipMsg || null : null,\n      gender: shares(d.gender),\n      age: shares(d.age),\n      city: shares(d.city),\n      interest: shares(d.interest),\n    }\n  } else {\n    out.audience = { available: false, reason: det.error, gender: [], age: [], city: [], interest: [] }\n  }\n  return out\n}",
+        "sha256": "e01192ca6fa4a161e4ba7ae2702133519d14d9529a67f8b4bba61512e0aee76e",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/xiaohongshu-creator/note-stats.js"
+      },
+      {
+        "spec": "xiaohongshu-creator/notes",
+        "meta": {
+          "name": "xiaohongshu-creator/notes",
+          "description": "Your published notes from the creator center note manager (笔记管理), with status and metrics",
+          "domain": "creator.xiaohongshu.com",
+          "args": {
+            "limit": {
+              "required": false,
+              "description": "How many notes to return (default 20, max 50; the server pages by 10)"
+            },
+            "page": {
+              "required": false,
+              "description": "Cursor: the next_page from a previous call (default 0, the first page)"
+            },
+            "tab": {
+              "required": false,
+              "description": "all (default) | published | reviewing | rejected | scheduled — or 全部/已发布/审核中/未通过/定时发布"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site xiaohongshu-creator/notes --limit 10 --tab published"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  // The note manager's tab ids. `tab_status` on a note uses a DIFFERENT\n  // numbering (1 published, 2 reviewing, 3 rejected, 4 scheduled).\n  const TABS = {\n    all: 0, '全部': 0, '0': 0,\n    published: 1, '已发布': 1, '1': 1,\n    reviewing: 2, review: 2, '审核中': 2, '2': 2,\n    rejected: 3, deny: 3, '未通过': 3, '3': 3,\n    scheduled: 4, '定时发布': 4, '4': 4,\n  }\n  const STATUS = {\n    1: ['published', '已发布'],\n    2: ['reviewing', '审核中'],\n    3: ['rejected', '未通过'],\n    4: ['scheduled', '定时发布'],\n  }\n  const VISIBILITY = {\n    0: ['public', '公开可见'],\n    1: ['private', '仅自己可见'],\n    2: ['partially_hidden', '部分人不可见'],\n    3: ['partially_visible', '部分人可见'],\n    4: ['friends_only', '仅互关好友可见'],\n  }\n\n  const tabKey = args.tab == null || args.tab === '' ? 'all' : String(args.tab).trim().toLowerCase()\n  if (!(tabKey in TABS)) {\n    return { error: 'Unknown tab: ' + args.tab, hint: 'Use all, published, reviewing, rejected or scheduled.' }\n  }\n  const tab = TABS[tabKey]\n  const limit = xhscCount(args.limit, 20, 50)\n  const startRaw = Number(args.page)\n  let page = Number.isInteger(startRaw) && startRaw > 0 ? startRaw : 0\n\n  const budget = xhscBudget()\n  const ready = await xhscReady(budget)\n  if (ready.error) return ready\n  const { client } = ready\n\n  // One request per server page of 10, capped by `limit`. This is the same\n  // call the note manager makes as you scroll, and it stops at the first\n  // short/last page instead of probing further.\n  const raw = []\n  let total = null\n  let next = page\n  let lastFetched = page\n  let partial = null\n  const maxPages = Math.ceil(limit / 10)\n  for (let i = 0; i < maxPages && next !== -1 && raw.length < limit; i++) {\n    lastFetched = next\n    const res = await xhscGet(client, '/api/galaxy/v2/creator/note/user/posted', {\n      params: { tab, page: next },\n      withCredentials: true,\n    }, budget)\n    if (!res.ok) {\n      if (!raw.length) return { error: res.error, hint: res.hint, status: res.status }\n      // Out of time or failed on a later page: return what we have, with the\n      // cursor pointing at the page that did not arrive.\n      partial = res.error\n      next = lastFetched\n      break\n    }\n    const d = res.data || {}\n    if (total === null && Array.isArray(d.tags) && d.tags[0]) total = xhscNum(d.tags[0].notes_count)\n    const notes = Array.isArray(d.notes) ? d.notes : []\n    raw.push(...notes)\n    // The server returns the NEXT page number, or -1 once it has none left.\n    next = typeof d.page === 'number' ? d.page : -1\n    if (!notes.length) next = -1\n  }\n\n  // The cursor has page granularity. If `limit` cut the last page short, point\n  // next_page back at that page: resuming repeats a few notes (dedupe by id)\n  // rather than silently skipping the ones that were cut.\n  if (raw.length > limit && !partial) next = lastFetched\n\n  const notes = raw.slice(0, limit).map((n) => {\n    const status = STATUS[n.tab_status] || [null, null]\n    const vis = VISIBILITY[n.permission_code] || [null, null]\n    const duration = n.video_info && xhscNum(n.video_info.duration)\n    const isVideo = n.type === 'video' || !!duration\n    // `time` is China-local \"YYYY-MM-DD HH:mm\"; give it an explicit offset.\n    const tm = typeof n.time === 'string' && n.time.match(/^(\\d{4}-\\d{2}-\\d{2}) (\\d{2}:\\d{2})(?::(\\d{2}))?$/)\n    const images = Array.isArray(n.images_list) ? n.images_list : []\n    return {\n      id: n.id,\n      title: n.display_title || null,\n      type: isVideo ? 'video' : 'normal',\n      published_at: tm ? tm[1] + 'T' + tm[2] + ':' + (tm[3] || '00') + '+08:00' : null,\n      status: status[0],\n      status_text: status[1],\n      status_code: n.tab_status == null ? null : n.tab_status,\n      visibility: vis[0],\n      visibility_text: n.permission_msg || vis[1],\n      visibility_code: n.permission_code == null ? null : n.permission_code,\n      pinned: n.sticky === true,\n      scheduled_at: n.schedule_post_time\n        ? xhscIsoFromMs(n.schedule_post_time > 1e12 ? n.schedule_post_time : n.schedule_post_time * 1000)\n        : null,\n      video_duration: isVideo ? duration || null : null,\n      cover: (images[0] && images[0].url) || null,\n      url: xhscNoteUrl(n.id, n.xsec_token, n.xsec_source),\n      xsec_token: n.xsec_token || null,\n      views: xhscNum(n.view_count),\n      likes: xhscNum(n.likes),\n      collects: xhscNum(n.collected_count),\n      comments: xhscNum(n.comments_count),\n      shares: xhscNum(n.shared_count),\n    }\n  })\n\n  return {\n    tab: ['all', 'published', 'reviewing', 'rejected', 'scheduled'][tab],\n    count: notes.length,\n    // tags[0].notes_count: the figure the note manager shows next to the tab.\n    total,\n    page,\n    // Pass back as --page to continue; null means there is nothing more.\n    next_page: next === -1 ? null : next,\n    // Set when a later page failed or ran out of time; `notes` is still valid.\n    partial,\n    notes,\n  }\n}",
+        "sha256": "08a3eff30ad3daf5b7e6d0d9b64c8d07a3ade41ff3b2448044bb6510986f2ef2",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/xiaohongshu-creator/notes.js"
+      },
+      {
+        "spec": "xiaohongshu/me",
+        "meta": {
+          "name": "xiaohongshu/me",
+          "description": "Signed-in Xiaohongshu user on www.xiaohongshu.com with the profile counts (关注 / 粉丝 / 获赞与收藏), IP 属地 and the first page of their notes. No creator-center login needed",
+          "domain": "www.xiaohongshu.com",
+          "args": {
+            "notes": {
+              "required": false,
+              "description": "How many of the newest notes to include (default 0, max 30: the profile page's first load)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site xiaohongshu/me --notes 10"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const wantNotes = Math.min(Math.max(parseInt(args.notes, 10) || 0, 0), 30)\n  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))\n\n  // Who is signed in: the page's own Pinia user store, as the web app has it.\n  let info = null\n  for (let i = 0; i < 20 && !info; i++) {\n    const app = document.querySelector('#app') && document.querySelector('#app').__vue_app__\n    const store = app && app.config && app.config.globalProperties.$pinia && app.config.globalProperties.$pinia._s.get('user')\n    const u = store && store.userInfo\n    if (u && (u.userId || u.user_id) && !u.guest) info = JSON.parse(JSON.stringify(u))\n    else await sleep(250)\n  }\n  if (!info) return { error: 'Not logged in', hint: 'Open https://www.xiaohongshu.com and log in (QR code), then retry' }\n  const userId = info.userId || info.user_id\n\n  // The counts are only in the profile page's server-rendered state. One GET\n  // of that page, the same request a visit to the profile makes; Xiaohongshu\n  // bans accounts for scripted traffic, so no API calls and no paging.\n  let html\n  try {\n    const resp = await fetch('/user/profile/' + userId, { credentials: 'include' })\n    if (!resp.ok) return { error: 'HTTP ' + resp.status, hint: 'Open your profile page once in the browser, then retry' }\n    html = await resp.text()\n  } catch (e) {\n    return { error: 'Network error: ' + (e && e.message || e) }\n  }\n  const m = html.match(/window\\.__INITIAL_STATE__\\s*=\\s*(\\{[\\s\\S]*?\\})\\s*<\\/script>/)\n  if (!m) return { error: 'Profile state not found', hint: 'Xiaohongshu may have changed its page; check the profile page source' }\n  let state\n  try {\n    // The state is a JS literal, not JSON: undefined and new Set([...]) appear in it.\n    state = JSON.parse(m[1].replace(/\\bundefined\\b/g, 'null').replace(/new (?:Set|Map)\\(\\[[^\\]]*\\]\\)/g, '[]'))\n  } catch (e) {\n    return { error: 'Cannot parse profile state: ' + e.message }\n  }\n  const page = (state.user && state.user.userPageData) || {}\n  const basic = page.basicInfo || {}\n  const counts = {}\n  for (const it of page.interactions || []) counts[it.type] = it.count\n  const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))\n\n  const out = {\n    userid: userId,\n    nickname: basic.nickname || info.nickname || null,\n    red_id: basic.redId || info.redId || info.red_id || null,\n    desc: basic.desc != null ? basic.desc : (info.desc || null),\n    gender: basic.gender != null ? basic.gender : (info.gender != null ? info.gender : null),\n    ip_location: basic.ipLocation || null,\n    follows: num(counts.follows),\n    fans: num(counts.fans),\n    // 获赞与收藏: Xiaohongshu only shows the combined figure.\n    likes_and_collects: num(counts.interaction),\n    url: 'https://www.xiaohongshu.com/user/profile/' + userId,\n  }\n  if (wantNotes > 0) {\n    const first = (state.user && Array.isArray(state.user.notes) && state.user.notes[0]) || []\n    out.notes = first.slice(0, wantNotes).map((n) => {\n      const card = n.noteCard || {}\n      const id = card.noteId || n.id\n      return {\n        note_id: id,\n        title: card.displayTitle || '',\n        type: card.type || null,\n        likes: num(card.interactInfo && card.interactInfo.likedCount),\n        sticky: Boolean(card.interactInfo && card.interactInfo.sticky),\n        url: 'https://www.xiaohongshu.com/explore/' + id + (n.xsecToken ? '?xsec_token=' + encodeURIComponent(n.xsecToken) + '&xsec_source=pc_user' : ''),\n      }\n    })\n  }\n  return out\n}",
+        "sha256": "42c01c9a987d7576fa3babfdf6d1dd0e783cefd8b70a93a949447594647643b8",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/xiaohongshu/me.js"
+      },
+      {
+        "spec": "youtube-studio/channel",
+        "meta": {
+          "name": "youtube-studio/channel",
+          "description": "The signed-in YouTube channel from Studio: subscribers, video count, total views, and its uploads (videos and Shorts, any visibility) with views/likes/comments",
+          "domain": "studio.youtube.com",
+          "args": {
+            "limit": {
+              "required": false,
+              "description": "How many uploads to list, newest first (default 30, max 500; 0 = channel totals only)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": true,
+          "example": "chrome-use site youtube-studio/channel --limit 10"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const parsed = parseInt(args.limit, 10)\n  const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 500) : 30\n  const cfg = (k) => (window.ytcfg && typeof window.ytcfg.get === 'function' ? window.ytcfg.get(k) : undefined)\n  const channelId = cfg('CHANNEL_ID')\n  const apiKey = cfg('INNERTUBE_API_KEY')\n  if (!channelId || !apiKey) {\n    return { error: 'Not on a signed-in YouTube Studio page', hint: 'Open https://studio.youtube.com and sign in, then retry' }\n  }\n  const sapisid = (document.cookie.match(/(?:^|;\\s*)(?:SAPISID|__Secure-3PAPISID)=([^;]+)/) || [])[1]\n  if (!sapisid) return { error: 'No SAPISID cookie', hint: 'Sign in to YouTube in this browser, then retry' }\n\n  // Studio's own calls carry a SAPISIDHASH: sha1(\"<ts> <SAPISID> <origin>\").\n  const ts = Math.floor(Date.now() / 1000)\n  const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(ts + ' ' + sapisid + ' ' + location.origin))\n  const hash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')\n  const context = JSON.parse(JSON.stringify(cfg('INNERTUBE_CONTEXT') || {}))\n  context.user = Object.assign({}, context.user, {\n    delegationContext: { externalChannelId: channelId, roleType: { channelRoleType: 'CREATOR_CHANNEL_ROLE_TYPE_OWNER' } },\n  })\n  const headers = {\n    'Content-Type': 'application/json',\n    Authorization: 'SAPISIDHASH ' + ts + '_' + hash,\n    'X-Goog-AuthUser': String(cfg('SESSION_INDEX') || 0),\n    'X-Origin': location.origin,\n    'X-YouTube-Client-Name': String(cfg('INNERTUBE_CONTEXT_CLIENT_NAME') || 62),\n    'X-YouTube-Client-Version': String(cfg('INNERTUBE_CONTEXT_CLIENT_VERSION') || ''),\n  }\n  async function call(path, body) {\n    let resp\n    try {\n      resp = await fetch('/youtubei/v1/' + path + '?alt=json&key=' + encodeURIComponent(apiKey), {\n        method: 'POST', credentials: 'include', headers, body: JSON.stringify(Object.assign({ context }, body)),\n      })\n    } catch (e) {\n      return { error: 'Network error: ' + (e && e.message || e) }\n    }\n    const d = await resp.json().catch(() => null)\n    if (!resp.ok || !d || d.error) {\n      return { error: 'HTTP ' + resp.status + (d && d.error && d.error.message ? ': ' + d.error.message : ''), status: resp.status }\n    }\n    return { d }\n  }\n  const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))\n\n  const ch = await call('creator/get_creator_channels', {\n    channelIds: [channelId],\n    mask: { channelId: true, title: true, customUrl: true, metric: { all: true } },\n  })\n  if (ch.error) return { error: ch.error, hint: ch.status === 401 || ch.status === 403 ? 'Sign in to YouTube Studio again' : 'Studio API may have changed' }\n  const c = (ch.d.channels || [])[0] || {}\n  const m = c.metric || {}\n  const out = {\n    channel_id: channelId,\n    title: c.title || null,\n    custom_url: c.customUrl || null,\n    url: 'https://www.youtube.com/channel/' + channelId,\n    subscribers: num(m.subscriberCount),\n    videos: num(m.videoCount),\n    total_views: num(m.totalVideoViewCount),\n  }\n  if (limit === 0) return out\n\n  const PRIVACY = { VIDEO_PRIVACY_PUBLIC: 'public', VIDEO_PRIVACY_UNLISTED: 'unlisted', VIDEO_PRIVACY_PRIVATE: 'private', VIDEO_PRIVACY_DRAFT: 'draft' }\n  const uploads = []\n  let pageToken = null\n  let error = null\n  for (let i = 0; i < 20 && uploads.length < limit; i++) {\n    const body = {\n      filter: { and: { operands: [{ channelIdIs: { value: channelId } }, { videoOriginIs: { value: 'VIDEO_ORIGIN_UPLOAD' } }] } },\n      order: 'VIDEO_ORDER_DISPLAY_TIME_DESC',\n      pageSize: Math.min(50, limit - uploads.length),\n      mask: {\n        videoId: true, title: true, privacy: true, contentType: true, lengthSeconds: true,\n        timePublishedSeconds: true, timeCreatedSeconds: true, publicMetrics: { all: true }, status: true, draftStatus: true,\n      },\n    }\n    if (pageToken) body.pageToken = pageToken\n    const r = await call('creator/list_creator_videos', body)\n    if (r.error) { error = r.error; break }\n    for (const v of r.d.videos || []) {\n      const pm = v.publicMetrics || {}\n      const secs = num(v.timePublishedSeconds) || num(v.timeCreatedSeconds)\n      uploads.push({\n        video_id: v.videoId,\n        title: v.title || '',\n        type: v.contentType === 'CREATOR_CONTENT_TYPE_SHORTS' ? 'short' : 'video',\n        visibility: v.draftStatus && v.draftStatus !== 'DRAFT_STATUS_NONE' ? 'draft' : (PRIVACY[v.privacy] || v.privacy || null),\n        published_at: secs ? new Date(secs * 1000).toISOString() : null,\n        duration_sec: num(v.lengthSeconds),\n        views: num(pm.externalViewCount),\n        likes: num(pm.likeCount),\n        comments: num(pm.commentCount),\n        url: v.contentType === 'CREATOR_CONTENT_TYPE_SHORTS' ? 'https://www.youtube.com/shorts/' + v.videoId : 'https://www.youtube.com/watch?v=' + v.videoId,\n      })\n    }\n    pageToken = r.d.nextPageToken || null\n    if (!pageToken) break\n  }\n  out.uploads = uploads.slice(0, limit)\n  if (error) out.uploads_error = error\n  return out\n}",
+        "sha256": "574a6e19a1de3f5c9ef6b79362c7f5586f1a2b590e84d36c522a481be7610ed4",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/youtube-studio/channel.js"
+      },
+      {
+        "spec": "zhihu/article-publish",
+        "meta": {
+          "name": "zhihu/article-publish",
+          "description": "Publish a Markdown article to Zhihu 专栏 (知乎文章) as the signed-in user, or save it as a draft only",
+          "domain": "zhuanlan.zhihu.com",
+          "args": {
+            "title": {
+              "required": true,
+              "description": "Article title"
+            },
+            "markdown": {
+              "required": true,
+              "description": "Full Markdown body (pass a file with --markdown @post.md); converted to Zhihu's HTML by the adapter"
+            },
+            "summary": {
+              "required": false,
+              "description": "Ignored: Zhihu builds the excerpt from the body. Accepted so one command line works for every platform"
+            },
+            "tags": {
+              "required": false,
+              "description": "Comma-separated topic (话题) names. Only topics Zhihu already has are bound (max 3); the rest come back in skipped_tags. Publishing needs at least one"
+            },
+            "html": {
+              "required": false,
+              "description": "Ready-made HTML body; overrides the markdown conversion"
+            },
+            "draft": {
+              "required": false,
+              "description": "true = only save a draft, do not publish (default false)"
+            }
+          },
+          "capabilities": [
+            "network"
+          ],
+          "readOnly": false,
+          "example": "chrome-use site zhihu/article-publish --title \"Hello\" --markdown @post.md --tags \"Claude,AI编程,开源\" --draft true"
+        },
+        "source": "async function(args) {\n  args = args || {}\n  const title = String(args.title || '').trim()\n  const markdown = String(args.markdown || '')\n  if (!title) return { error: 'Missing argument: title' }\n  if (!markdown.trim() && !args.html) return { error: 'Missing argument: markdown' }\n  const draftOnly = /^(1|true|yes|y|on)$/i.test(String(args.draft || ''))\n  const tagNames = String(args.tags || '').split(/[,，]/).map((s) => s.trim()).filter(Boolean)\n\n  // ---- markdown → html (shared verbatim by csdn/ and zhihu/; a test keeps the copies equal)\n  // Covers what blog posts use: headings, paragraphs, fenced code, block\n  // quotes, flat or nested lists, rules, GFM tables, bold/italic/strike,\n  // inline code, links, images. Raw HTML in the source is escaped, not passed.\n  const mdToHtml = (src, codeBlock) => {\n    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;')\n    const inline = (text) => {\n      const slots = []\n      const keep = (html) => '\\u0000' + (slots.push(html) - 1) + '\\u0000'\n      let s = String(text).replace(/(`+)([^`]|[^`][\\s\\S]*?[^`])\\1(?!`)/g, (m, t, c) => keep('<code>' + esc(c.trim()) + '</code>'))\n      s = s.replace(/!\\[([^\\]]*)\\]\\(\\s*<?([^)\\s>]+)>?(?:\\s+\"[^\"]*\")?\\s*\\)/g, (m, alt, url) => keep('<img src=\"' + esc(url) + '\" alt=\"' + esc(alt) + '\">'))\n      s = s.replace(/\\[([^\\]]+)\\]\\(\\s*<?([^)\\s>]+)>?(?:\\s+\"[^\"]*\")?\\s*\\)/g, (m, label, url) => keep('<a href=\"' + esc(url) + '\">' + inline(label) + '</a>'))\n      s = s.replace(/<(https?:\\/\\/[^\\s>]+)>/g, (m, url) => keep('<a href=\"' + esc(url) + '\">' + esc(url) + '</a>'))\n      s = esc(s)\n      s = s.replace(/\\*\\*(?=\\S)([\\s\\S]*?\\S)\\*\\*/g, '<strong>$1</strong>').replace(/__(?=\\S)([\\s\\S]*?\\S)__/g, '<strong>$1</strong>')\n      s = s.replace(/~~(?=\\S)([\\s\\S]*?\\S)~~/g, '<del>$1</del>')\n      s = s.replace(/(^|[^*\\w])\\*(?=\\S)([^*]*?\\S)\\*(?!\\*)/g, '$1<em>$2</em>')\n      s = s.replace(/(^|[^_\\w])_(?=\\S)([^_]*?\\S)_(?![_\\w])/g, '$1<em>$2</em>')\n      s = s.replace(/ {2,}\\n/g, '<br>\\n')\n      return s.replace(/\\u0000(\\d+)\\u0000/g, (m, i) => slots[Number(i)])\n    }\n    const cells = (row) => row.trim().replace(/^\\|/, '').replace(/\\|$/, '').split('|').map((c) => c.trim())\n    const blocks = (lines) => {\n      const out = []\n      let i = 0\n      const isFence = (l) => /^\\s{0,3}(```|~~~)/.test(l)\n      const isHr = (l) => /^\\s{0,3}([-*_])(\\s*\\1){2,}\\s*$/.test(l)\n      const isHead = (l) => /^\\s{0,3}#{1,6}(\\s|$)/.test(l)\n      const isQuote = (l) => /^\\s{0,3}>/.test(l)\n      const isItem = (l) => /^\\s{0,3}([-*+]|\\d{1,9}[.)])\\s+/.test(l)\n      const isTable = (k) => /\\|/.test(lines[k] || '') && /^\\s*\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)*\\|?\\s*$/.test(lines[k + 1] || '')\n      while (i < lines.length) {\n        const line = lines[i]\n        if (!line.trim()) { i++; continue }\n        if (isFence(line)) {\n          const fence = line.trim().slice(0, 3)\n          const lang = line.trim().slice(3).trim().split(/\\s+/)[0] || ''\n          const body = []\n          i++\n          while (i < lines.length && !lines[i].trim().startsWith(fence)) body.push(lines[i++])\n          i++\n          out.push(codeBlock(lang, esc(body.join('\\n'))))\n          continue\n        }\n        if (isHead(line)) {\n          const m = line.trim().match(/^(#{1,6})\\s*(.*?)\\s*#*\\s*$/)\n          out.push('<h' + m[1].length + '>' + inline(m[2]) + '</h' + m[1].length + '>')\n          i++\n          continue\n        }\n        if (isHr(line)) { out.push('<hr>'); i++; continue }\n        if (isQuote(line)) {\n          const body = []\n          while (i < lines.length && lines[i].trim() && isQuote(lines[i])) body.push(lines[i++].replace(/^\\s{0,3}>\\s?/, ''))\n          out.push('<blockquote>' + blocks(body) + '</blockquote>')\n          continue\n        }\n        if (isTable(i)) {\n          const head = cells(lines[i])\n          i += 2\n          const rows = []\n          while (i < lines.length && lines[i].trim() && /\\|/.test(lines[i])) rows.push(cells(lines[i++]))\n          out.push('<table><thead><tr>' + head.map((c) => '<th>' + inline(c) + '</th>').join('') + '</tr></thead><tbody>' +\n            rows.map((r) => '<tr>' + r.map((c) => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('') + '</tbody></table>')\n          continue\n        }\n        if (isItem(line)) {\n          const ordered = /^\\s{0,3}\\d/.test(line)\n          const indent = line.match(/^\\s*/)[0].length\n          const items = []\n          while (i < lines.length) {\n            const l = lines[i]\n            const ind = l.match(/^\\s*/)[0].length\n            if (isItem(l) && ind <= indent + 1) {\n              if (/^\\s{0,3}\\d/.test(l) !== ordered) break\n              items.push([l.replace(/^\\s*([-*+]|\\d{1,9}[.)])\\s+/, '')])\n              i++\n            } else if (l.trim() && items.length && (ind > indent || !(isFence(l) || isHead(l) || isQuote(l) || isHr(l)))) {\n              items[items.length - 1].push(ind > indent ? l.slice(Math.min(ind, indent + 2)) : l)\n              i++\n            } else if (!l.trim() && i + 1 < lines.length && lines[i + 1].match(/^\\s*/)[0].length > indent && lines[i + 1].trim()) {\n              items[items.length - 1].push('')\n              i++\n            } else break\n          }\n          const tag = ordered ? 'ol' : 'ul'\n          out.push('<' + tag + '>' + items.map((it) => {\n            const inner = blocks(it)\n            // A tight item is one paragraph: drop its <p> so lists render compact.\n            return '<li>' + (/^<p>[\\s\\S]*<\\/p>$/.test(inner) && inner.indexOf('<p>', 1) < 0 ? inner.slice(3, -4) : inner) + '</li>'\n          }).join('') + '</' + tag + '>')\n          continue\n        }\n        const para = []\n        while (i < lines.length && lines[i].trim() && !isFence(lines[i]) && !isHead(lines[i]) && !isQuote(lines[i]) && !isHr(lines[i]) && !isItem(lines[i]) && !isTable(i)) para.push(lines[i++])\n        out.push('<p>' + inline(para.join('\\n')) + '</p>')\n      }\n      return out.join('')\n    }\n    return blocks(String(src || '').replace(/\\r\\n?/g, '\\n').split('\\n'))\n  }\n  // ---- end markdown → html\n\n  // Zhihu's own fetch wrapper adds the xsrf token and the x-zse signature\n  // headers. Find it in the page's webpack registry by a string only that\n  // module has, and send every request through it.\n  const zfetch = (() => {\n    const chunks = window.webpackChunkheifetz\n    if (!chunks || typeof chunks.push !== 'function') return null\n    let req = null\n    chunks.push([[Symbol('chrome-use-zhihu')], {}, (r) => { req = r }])\n    if (!req || !req.m) return null\n    for (const id of Object.keys(req.m)) {\n      let src\n      try { src = String(req.m[id]) } catch (e) { continue }\n      if (!src.includes('please add fetch polyfill')) continue\n      let mod\n      try { mod = req(Number(id)) } catch (e) { continue }\n      for (const k of Object.keys(mod)) if (typeof mod[k] === 'function') return mod[k]\n    }\n    return null\n  })()\n  if (!zfetch) return { error: 'Cannot find the Zhihu fetch client', hint: 'zhuanlan.zhihu.com changed its bundle; this adapter needs updating.' }\n\n  // Resolves to {ok, data} or {ok:false, error, code}; the wrapper rejects with\n  // the parsed error body ({error:{message, code}}) plus the HTTP status.\n  const call = async (url, method, body, extra) => {\n    try {\n      const opts = Object.assign({ method: method || 'GET' }, extra || {})\n      if (body !== undefined) {\n        opts.headers = { 'Content-Type': 'application/json' }\n        opts.body = JSON.stringify(body)\n      }\n      return { ok: true, data: await zfetch(url, opts) }\n    } catch (e) {\n      const err = (e && (e.error || (e.payload && e.payload.error) || e.payload)) || e || {}\n      return { ok: false, status: e && e.status, code: err.code, error: err.message || (e && e.message) || JSON.stringify(e).slice(0, 300) }\n    }\n  }\n  const ZL = 'https://zhuanlan.zhihu.com/api'\n  const noSig = { zsAutoSignature: false }\n\n  const me = await call('https://www.zhihu.com/api/v4/me')\n  if (!me.ok || !me.data || !me.data.id) return { error: 'Not signed in to zhihu.com', hint: 'Log in at https://www.zhihu.com in this browser, then retry.' }\n\n  // Zhihu articles take h2/h3 only; code blocks go in as <pre lang>, which is\n  // what the editor itself produces.\n  const content = String(args.html || '') || mdToHtml(markdown, (lang, code) =>\n    '<pre lang=\"' + (lang.replace(/[^\\w+#.-]/g, '') || 'text') + '\">' + code + '</pre>')\n    .replace(/<(\\/?)h1>/g, '<$1h2>')\n    .replace(/<(\\/?)h[4-6]>/g, '<$1h3>')\n\n  // Topics: exact (then case-insensitive) matches from the editor's own\n  // topic autocomplete.\n  const found = await Promise.all(tagNames.map((q) =>\n    call(ZL + '/autocomplete/topics?token=' + encodeURIComponent(q) + '&max_matches=5&use_similar=0&topic_filter=1')))\n  const topics = []\n  const skippedTags = []\n  tagNames.forEach((name, i) => {\n    const rows = (found[i].ok && Array.isArray(found[i].data)) ? found[i].data : []\n    const hit = rows.find((t) => t.name === name) || rows.find((t) => String(t.name).toLowerCase() === name.toLowerCase())\n    if (hit && topics.length < 3 && !topics.some((t) => t.id === hit.id)) topics.push(hit)\n    else skippedTags.push(name)\n  })\n  if (!draftOnly && !topics.length) {\n    return { error: 'None of the topics exist on Zhihu: ' + tagNames.join(', '), hint: 'Publishing needs at least one existing topic (话题).' }\n  }\n\n  const created = await call(ZL + '/articles/drafts', 'POST', { title, content, table_of_contents: false, delta_time: 0 }, noSig)\n  if (!created.ok || !created.data || !created.data.id) return { error: 'Could not create the draft: ' + (created.error || 'no id returned') }\n  const id = String(created.data.id)\n  const draftUrl = 'https://zhuanlan.zhihu.com/p/' + id + '/edit'\n  // The create call can drop fields on some accounts; write them once more.\n  const patched = await call(ZL + '/articles/' + id + '/draft', 'PATCH', { title, content, table_of_contents: false, delta_time: 1 }, noSig)\n  if (!patched.ok) return { error: 'Draft ' + id + ' created but saving its body failed: ' + patched.error, hint: 'Check ' + draftUrl, id, url: draftUrl, status: 'draft' }\n\n  const usedTags = []\n  for (const t of topics) {\n    const r = await call(ZL + '/articles/' + id + '/topics', 'POST', t)\n    if (r.ok) usedTags.push(t.name)\n    else skippedTags.push(t.name + ' (' + r.error + ')')\n  }\n  const base = { id, tags: usedTags, skipped_tags: skippedTags }\n  if (draftOnly) return Object.assign({ ok: true, url: draftUrl, status: 'draft' }, base)\n  if (!usedTags.length) return Object.assign({ error: 'Could not bind any topic; not publishing', hint: 'Finish it at ' + draftUrl, url: draftUrl, status: 'draft' }, base)\n\n  // The body the editor's publish button posts (see its PublishPanel): one\n  // /api/v4/content/publish call with action \"article\".\n  const settings = {\n    commentPermission: 'anyone',\n    disclaimer_type: 'none',\n    disclaimer_status: 'close',\n    table_of_contents_enabled: false,\n    content,\n    title,\n    canReward: false,\n    commercial_report_info: { commercial_types: [] },\n  }\n  const text = content.replace(/<[^>]+>/g, '')\n  const data = {\n    extra_info: { publisher: 'pc', pc_business_params: JSON.stringify(settings) },\n    draft: { disabled: 1, id, isPublished: false },\n    commentsPermission: { comment_permission: 'anyone' },\n    creationStatement: { disclaimer_type: 'none', disclaimer_status: 'close' },\n    contentsTables: { table_of_contents_enabled: false },\n    commercialReportInfo: { isReport: 0 },\n    appreciate: { can_reward: false, tagline: '' },\n    hybridInfo: {},\n    hybrid: { html: content, textLength: Array.from(text).length },\n    title: { title },\n  }\n  const pub = await call('https://www.zhihu.com/api/v4/content/publish', 'POST', { action: 'article', data })\n  if (!pub.ok) {\n    return Object.assign({\n      error: 'Draft saved but publish failed: ' + pub.error + (pub.code ? ' (code ' + pub.code + ')' : ''),\n      hint: pub.code === 4031\n        ? 'Zhihu wants account verification (phone/real-name) first; do it by hand, then publish ' + draftUrl\n        : 'Finish it at ' + draftUrl + '. Do not re-run: that would create a second draft.',\n      url: draftUrl,\n      status: 'draft',\n    }, base)\n  }\n  const p = (pub.data && (pub.data.publish || (pub.data.data && pub.data.data.publish))) || {}\n  return Object.assign(base, {\n    ok: true,\n    url: p.url || 'https://zhuanlan.zhihu.com/p/' + id,\n    status: 'published',\n  })\n}",
+        "sha256": "845b78a95b14adb11cef36c19071006b4f739bb2184f027ed51824a37cd4a83c",
+        "origin": "https://github.com/leeguooooo/chrome-use-sites/blob/cbd80677e88fb49543b54dd7110d90ecde6adc50/zhihu/article-publish.js"
+      }
+    ]
+  },
+  "unsupported": [
+    "bilibili-creator/video-publish",
+    "chatgpt/conversation",
+    "chatgpt/images",
+    "chatgpt/models",
+    "chatgpt/open-project",
+    "douyin-creator/video-publish",
+    "segmentfault/article-publish",
+    "twitter/post",
+    "youtube-studio/video-upload"
+  ],
+  "revisions": {
+    "leeguooooo/chrome-use-sites": "cbd80677e88fb49543b54dd7110d90ecde6adc50"
+  }
+}

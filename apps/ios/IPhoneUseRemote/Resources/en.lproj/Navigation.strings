@@ -1,0 +1,17 @@
+"本机助手" = "This iPhone";
+"远程控制" = "Remote Control";
+"让助手在这台 iPhone 的 App 里完成任务。" = "Ask the assistant to carry out tasks in apps on this iPhone.";
+"重新连接本机" = "Reconnect This iPhone";
+"返回本机对话" = "Return to This iPhone";
+"让助手操作这台 iPhone" = "Let the assistant use this iPhone";
+"先连接本机服务，再告诉助手你想在手机上做什么。远程手机在「远程控制」里连接。" = "Connect this iPhone’s service, then describe your task. Connect other iPhones in Remote Control.";
+"连接本机服务" = "Connect This iPhone";
+"模型设置" = "Model Settings";
+"告诉助手要做什么" = "Describe your task";
+"停止任务" = "Stop Task";
+"发送消息" = "Send Message";
+"远程手机" = "Remote iPhones";
+"流程与定时" = "Flows and Schedules";
+"更多" = "More";
+"配置本机助手" = "Set Up This iPhone";
+"先完成本机配置，再告诉助手你想在手机上做什么。远程手机在「远程控制」里连接。" = "Set up this iPhone, then describe your task. Connect other iPhones in Remote Control.";

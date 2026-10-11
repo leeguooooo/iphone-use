@@ -123,7 +123,7 @@ In Claude Code:
 The same daemon that serves agents lets you drive the phone yourself:
 
 - **From a browser.** The live screen arrives as H.264 encoded on the phone: native resolution at about 50 fps on the LAN, and a lighter mode for slow links. Click to tap, drag to swipe, hold to long-press, scroll with the wheel or trackpad. Type straight into the phone with your input method, and ⌘V pastes. The Controls panel lists the screen's elements so you can tap by label, and the Flow panel records what you do as a replayable flow. The page follows your browser's language (English or Chinese), with a switch in the sidebar.
-- **From another iPhone.** The native iOS app (iOS 17+) pairs by scanning a QR code on the Mac's page, with no address or password to type. It plays the screen with the hardware decoder and switches between your phones.
+- **From another iPhone.** The native iOS app (minimum deployment target iOS 15) pairs by scanning a QR code on the Mac's page, with no address or password to type. It plays the screen with the hardware decoder and switches between your phones.
 - **Screens hidden from capture.** Banking and payment apps black out screen capture; there you see a live wireframe of the screen's elements instead of a blank picture, and you can still tap through it.
 - **From anywhere.** Reach the Mac through an authenticated HTTPS reverse proxy or a VPN such as Tailscale, and control the phone from outside your network ([security notes](docs/guide.md#security)).
 - **No collisions.** A phone has one owner at a time. While you are in control, an agent waits or is told who holds the phone, and the reverse is true too.

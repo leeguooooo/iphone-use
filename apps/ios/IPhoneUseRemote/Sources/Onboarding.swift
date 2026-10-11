@@ -3,13 +3,13 @@ import SwiftUI
 /// First launch: what this app does, the three steps to pair, and the ways
 /// in — scan (the obvious one), the demo, or typing an address.
 struct WelcomeView: View {
-    @Bindable var app: AppModel
+    @ObservedObject var app: AppModel
     @State private var scanning = false
     @State private var manual = false
     @State private var manualAfterScan = false
 
     var body: some View {
-        NavigationStack {
+        AppNavigationStack {
             ScrollView {
                 VStack(spacing: Theme.Space.xl) {
                     PairingIllustration()
@@ -67,9 +67,9 @@ struct WelcomeView: View {
                 .padding(.bottom, Theme.Space.xxl)
                 .frame(maxWidth: .infinity)
             }
-            .scrollBounceBehavior(.basedOnSize)
+            .appBounceBasedOnSize()
             .background(Theme.canvas.ignoresSafeArea())
-            .navigationDestination(isPresented: $manual) {
+            .appNavigationDestination(isPresented: $manual) {
                 ConnectView(app: app, onDone: nil, embedded: true)
             }
             .fullScreenCover(isPresented: $scanning, onDismiss: {

@@ -408,6 +408,9 @@ pub struct FlowTrail {
     last_single: Option<Instant>,
     /// The batch hint already went out for this streak.
     batch_hinted: bool,
+    /// An explicit recording (`POST /agent/flow/record`): every applied step
+    /// lands here too, across apps and pauses, until it is stopped or saved.
+    recording: Option<Trail>,
 }
 
 /// Single actions in a row before the agent is told to batch.
@@ -467,7 +470,7 @@ pub fn convert_action(action: &Value, rows: Option<&[crate::wda::ElementRow]>) -
         "shortcut" => copy("shortcut", &["name"]),
         "home" => Converted::Step(json!({ "kind": "shortcut", "name": "home" })),
         "back" => Converted::Step(json!({ "kind": "back" })),
-        "launch_app" if action.get("bundle").is_some() => copy("launch_app", &["bundle"]),
+        "launch_app" if action.get("bundle").is_some() => copy("launch_app", &["bundle", "fresh"]),
         "scroll" if action.get("element").is_none() => copy("scroll", &["x", "y", "dx", "dy"]),
         "swipe" => copy("swipe", &["x1", "y1", "x2", "y2", "duration_ms"]),
         "drag" => copy("drag", &["x1", "y1", "x2", "y2", "hold_ms", "duration_ms"]),
@@ -487,7 +490,7 @@ pub fn convert_action(action: &Value, rows: Option<&[crate::wda::ElementRow]>) -
 /// `kind` it degrades to a kind-only query and every key on a keypad matches
 /// (hardware: Calculator `{identifier:"One",kind:"Key"}` → ambiguous).
 /// Without one, label + kind.
-fn locator_for_row(row: &crate::wda::ElementRow) -> Option<Value> {
+pub fn locator_for_row(row: &crate::wda::ElementRow) -> Option<Value> {
     if let Some(identifier) = row.identifier.as_deref().filter(|s| !s.trim().is_empty()) {
         return Some(json!({ "identifier": identifier }));
     }
@@ -504,7 +507,7 @@ fn locator_for_row(row: &crate::wda::ElementRow) -> Option<Value> {
 impl FlowTrail {
     fn rotate(&mut self) {
         let finished = std::mem::take(&mut self.current);
-        if finished.worth_a_flow() {
+        if finished.steps.len() >= 2 {
             self.previous = Some(finished);
         }
     }
@@ -580,6 +583,11 @@ impl FlowTrail {
         let Some(label) = label.filter(|l| !l.trim().is_empty()) else {
             return false;
         };
+        if let Some(recording) = self.recording.as_mut() {
+            if recording.label.is_none() {
+                recording.label = Some(label.to_string());
+            }
+        }
         self.expire_if_idle(now);
         match self.current.label.as_deref() {
             Some(known) if known == label => {}
@@ -597,8 +605,69 @@ impl FlowTrail {
         true
     }
 
+    /// Start an explicit recording, dropping one in progress.
+    pub fn start_recording(&mut self) {
+        self.recording = Some(Trail::default());
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// Steps recorded so far, or `None` when not recording.
+    pub fn recording_steps(&self) -> Option<usize> {
+        self.recording.as_ref().map(|r| r.steps.len())
+    }
+
+    /// End the recording and return its draft (`None` when nothing was
+    /// recording or it holds no step).
+    pub fn stop_recording(&mut self) -> Option<Value> {
+        let recording = self.recording.take()?;
+        (!recording.steps.is_empty()).then(|| draft_json(&recording, "recording"))
+    }
+
+    /// The recording's draft so far, without stopping it.
+    pub fn recording_draft(&self) -> Option<Value> {
+        let recording = self.recording.as_ref()?;
+        (!recording.steps.is_empty()).then(|| draft_json(recording, "recording"))
+    }
+
+    fn record_into_recording(&mut self, converted: &Converted, now: Instant) {
+        let Some(recording) = self.recording.as_mut() else {
+            return;
+        };
+        if recording.steps.len() >= TRAIL_MAX_STEPS {
+            return;
+        }
+        recording.last = Some(now);
+        match converted {
+            Converted::Step(step) => {
+                let mut step = step.clone();
+                if step.get("kind").and_then(Value::as_str) == Some("launch_app") {
+                    if recording.bundle.is_none() {
+                        recording.bundle = step.get("bundle").and_then(Value::as_str).map(str::to_string);
+                    }
+                    // A recording starts its apps fresh, and so does its replay:
+                    // an app reopened where it was left would miss the steps.
+                    step["fresh"] = json!(true);
+                }
+                recording.steps.push(step);
+            }
+            Converted::Typed { clear } => {
+                recording.inputs += 1;
+                let mut step = json!({ "kind": "type", "input": format!("text{}", recording.inputs) });
+                if *clear {
+                    step["clear"] = json!(true);
+                }
+                recording.steps.push(step);
+            }
+            Converted::Unsupported(note) => recording.todo.push(note.clone()),
+        }
+    }
+
     /// Record one applied step.
     pub fn record(&mut self, converted: Converted, now: Instant) {
+        self.record_into_recording(&converted, now);
         self.expire_if_idle(now);
         if self.current.steps.len() >= TRAIL_MAX_STEPS {
             return;
@@ -636,7 +705,7 @@ impl FlowTrail {
             &mut self.current
         } else {
             match self.previous.as_mut() {
-                Some(previous) if !previous.suggested => previous,
+                Some(previous) if previous.worth_a_flow() && !previous.suggested => previous,
                 _ => return None,
             }
         };
@@ -847,6 +916,57 @@ mod tests {
         }
     }
 
+    fn at(kind: &str, label: &str, rect: [f64; 4]) -> crate::wda::ElementRow {
+        crate::wda::ElementRow { rect, ..row(kind, label, None) }
+    }
+
+    #[test]
+    fn a_persons_tap_records_the_smallest_labelled_element_under_the_finger() {
+        let rows = vec![
+            at("Cell", "电池", [0.0, 100.0, 400.0, 44.0]),
+            at("StaticText", "电池", [16.0, 110.0, 40.0, 20.0]),
+            at("Button", "", [300.0, 100.0, 100.0, 44.0]),
+            crate::wda::ElementRow { visible: Some(false), ..at("Button", "隐藏", [0.0, 100.0, 10.0, 10.0]) },
+        ];
+        // On the text: the text (smallest) wins.
+        assert_eq!(locator_at(&rows, 20.0, 115.0).unwrap()["label"], "电池");
+        // Inside the cell but off the text, and the unlabelled button is skipped.
+        let locator = locator_at(&rows, 350.0, 120.0).unwrap();
+        assert_eq!(locator["kind"], "Cell", "{locator}");
+        assert!(locator_at(&rows, 5.0, 400.0).is_none(), "nothing there: keep the coordinate");
+        assert_eq!(locator_at(&rows, 5.0, 105.0).unwrap()["kind"], "Cell", "a hidden row is never the target");
+    }
+
+    #[test]
+    fn a_recording_spans_apps_and_pauses_and_types_become_inputs() {
+        let mut trail = FlowTrail::default();
+        let t0 = Instant::now();
+        trail.record(Converted::Step(json!({"kind":"shortcut","name":"home"})), t0);
+        assert!(trail.recording_draft().is_none(), "nothing before start");
+        trail.start_recording();
+        trail.launched("com.apple.Preferences", t0);
+        trail.record(Converted::Step(json!({"kind":"launch_app","bundle":"com.apple.Preferences"})), t0);
+        trail.record(Converted::Step(json!({"kind":"tap_locator","locator":{"label":"电池","kind":"Cell"}})), t0);
+        // Long pause and another app: an auto trail would rotate, the recording keeps going.
+        let later = t0 + TRAIL_IDLE + Duration::from_secs(5);
+        trail.launched("com.apple.mobilesafari", later);
+        trail.record(Converted::Step(json!({"kind":"launch_app","bundle":"com.apple.mobilesafari"})), later);
+        trail.record(Converted::Typed { clear: true }, later);
+        trail.record(Converted::Unsupported("a pinch".into()), later);
+        assert_eq!(trail.recording_steps(), Some(4));
+        let draft = trail.stop_recording().unwrap();
+        let steps = draft["flow"]["steps"].as_array().unwrap();
+        assert_eq!(draft["flow"]["app"], "com.apple.Preferences", "{draft}");
+        assert!(steps.iter().any(|s| s["kind"] == "type" && s["input"] == "text1" && s["clear"] == true), "{draft}");
+        assert!(
+            steps.iter().filter(|s| s["kind"] == "launch_app").all(|s| s["fresh"] == true),
+            "a recording replays its apps from their first screen: {draft}"
+        );
+        assert!(draft.to_string().contains("a pinch"), "unsupported steps become todo: {draft}");
+        assert!(!trail.is_recording());
+        assert!(trail.stop_recording().is_none());
+    }
+
     fn store(dir: &Path) -> PathBuf {
         let path = dir.join(LOCAL_INDEX_FILE);
         std::fs::write(
@@ -984,6 +1104,24 @@ mod tests {
     }
 
     #[test]
+    fn short_task_draft_survives_returning_to_the_app_without_a_suggestion() {
+        let now = Instant::now();
+        let dir = tempfile::tempdir().unwrap();
+        let mut trail = FlowTrail::default();
+        trail.launched("com.apple.Preferences", now);
+        trail.record(convert_action(&json!({"type":"launch_app","bundle":"com.apple.Preferences"}), None), now);
+        trail.saw_app(Some("设置"), now);
+        trail.record(Converted::Step(json!({"kind":"tap_locator","locator":{"label":"电池","kind":"Cell"}})), now);
+        trail.launched("com.leeguoo.iphone-use.remote", now);
+        trail.record(convert_action(&json!({"type":"launch_app","bundle":"com.leeguoo.iphone-use.remote"}), None), now);
+        trail.saw_app(Some("Phone Use Remote"), now);
+        let draft = trail.draft().expect("explicit Save as flow retains a short finished task");
+        assert_eq!(draft["flow"]["app"], "com.apple.Preferences");
+        assert_eq!(draft["flow"]["steps"].as_array().unwrap().len(), 3);
+        assert!(trail.suggestion(&dir.path().join("cooldown.json"), 100).is_none(), "short drafts must not trigger automatic suggestions");
+    }
+
+    #[test]
     fn draft_gates_the_launch_and_survives_an_app_switch() {
         let now = Instant::now();
         let mut trail = FlowTrail::default();
@@ -1048,4 +1186,26 @@ mod tests {
             assert!(write_app_notes(&notes, bad, "x").is_err(), "{bad}");
         }
     }
+}
+
+/// Kinds a person's tap means to hit (the smallest one under the finger wins).
+const TAPPABLE: [&str; 15] = [
+    "Button", "Cell", "Link", "Key", "Switch", "Toggle", "TextField", "SecureTextField",
+    "SearchField", "TextView", "Tab", "Icon", "MenuItem", "SegmentedControl", "StaticText",
+];
+
+/// What a person's tap at `(x, y)` (points) hit, as a durable locator: the
+/// smallest visible, tappable element under the point that has a label or an
+/// identifier. `None` falls back to recording the coordinate.
+pub fn locator_at(rows: &[crate::wda::ElementRow], x: f64, y: f64) -> Option<Value> {
+    rows.iter()
+        .filter(|row| TAPPABLE.contains(&row.kind.as_str()))
+        .filter(|row| row.visible != Some(false))
+        .filter(|row| {
+            let [rx, ry, rw, rh] = row.rect;
+            rw > 0.0 && rh > 0.0 && x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+        })
+        .filter_map(|row| locator_for_row(row).map(|locator| (row.rect[2] * row.rect[3], locator)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, locator)| locator)
 }

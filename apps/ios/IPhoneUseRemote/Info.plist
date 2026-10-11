@@ -42,6 +42,10 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>在语音通话中与你交谈，并接收手机操作指令。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>将通话语音转为文字，用于与你交谈和操作手机。语音识别可能由 Apple 在线处理。</string>
 	<key>NSCameraUsageDescription</key>
 	<string>扫描 Mac 上 iphone-use 页面里的二维码，免输地址和密码直接连接。</string>
 	<key>NSLocalNetworkUsageDescription</key>
@@ -69,6 +73,17 @@
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.leeguoo.iphone-use.remote.agent.*</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>processing</string>
+		<string>audio</string>
 	</array>
 </dict>
 </plist>

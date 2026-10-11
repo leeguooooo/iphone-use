@@ -617,13 +617,19 @@ pub fn flow_summary(flow: &ValidatedFlow) -> serde_json::Value {
 
 /// `flow validate <file|id>`: offline, never contacts the daemon.
 pub fn validate_command(target: &str) -> Result<()> {
+    println!("{}", validate_summary(target)?);
+    Ok(())
+}
+
+/// What `flow validate` prints: the flow's summary (risk, inputs) and where
+/// it was found. Never contacts the phone.
+pub fn validate_summary(target: &str) -> Result<serde_json::Value> {
     let path = registry::resolve_target(target)?;
     let flow = load_flow(&path)?;
     let mut summary = flow_summary(&flow);
     summary["path"] = serde_json::json!(path.display().to_string());
     summary["network"] = serde_json::json!("not_contacted");
-    println!("{summary}");
-    Ok(())
+    Ok(summary)
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,6 +1348,54 @@ pub fn fixture_key(target: &str) -> String {
         .unwrap_or_else(|| "file".to_string())
 }
 
+/// Run a parsed flow; when it misses an element, run its locale sibling
+/// instead. Returns the run, the id that actually ran and that flow when it
+/// was the sibling.
+async fn execute_with_fallback(
+    target: &str,
+    flow: &ValidatedFlow,
+    inputs: &BTreeMap<String, String>,
+    daemon: &DaemonClient,
+    confirm: bool,
+) -> Result<(DiagnosedRun, String, Option<ValidatedFlow>)> {
+    let mut run = execute_and_diagnose(flow, inputs, daemon, confirm).await?;
+    let mut ran_id = target.to_string();
+    let mut ran_flow = None;
+    if !run.succeeded {
+        if let Some((sibling_id, sibling, sibling_run)) =
+            locale_fallback(target, flow, inputs, &run.value, daemon).await
+        {
+            let failed = std::mem::replace(&mut run, sibling_run).value;
+            note_fallback(&mut run.value, target, &failed);
+            ran_id = sibling_id;
+            ran_flow = Some(sibling);
+        }
+    }
+    Ok((run, ran_id, ran_flow))
+}
+
+/// A flow run for an agent task: the same checks and locale fallback as
+/// `flow run`, through the caller's daemon client, answering the result
+/// instead of printing it. `inputs` are `KEY=VALUE` assignments.
+pub async fn run_for_task(
+    daemon: &DaemonClient,
+    target: &str,
+    assignments: &[String],
+    confirm: bool,
+) -> Result<(bool, serde_json::Value)> {
+    let path = registry::resolve_target(target)?;
+    let bytes = read_flow_bytes(&path)?;
+    let flow = parse_flow(&bytes, &path.display().to_string())?;
+    let inputs = parse_input_assignments(assignments, &flow.inputs)?;
+    compat_gate(&flow, daemon, false).await?;
+    let (run, ran_id, _) = execute_with_fallback(target, &flow, &inputs, daemon, confirm).await?;
+    let mut value = run.value;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("flow".into(), serde_json::json!(ran_id));
+    }
+    Ok((run.succeeded, value))
+}
+
 /// `flow run <file|id> [--input K=V]... [--confirm]`.
 pub async fn run_command(
     target: &str,
@@ -1369,19 +1423,7 @@ pub async fn run_command(
 
     let started_at = unix_seconds();
     let clock = std::time::Instant::now();
-    let mut run = execute_and_diagnose(&flow, &inputs, &daemon, confirm).await?;
-    let mut ran_id = target.to_string();
-    let mut ran_flow = None;
-    if !run.succeeded {
-        if let Some((sibling_id, sibling, sibling_run)) =
-            locale_fallback(target, &flow, &inputs, &run.value, &daemon).await
-        {
-            let failed = std::mem::replace(&mut run, sibling_run).value;
-            note_fallback(&mut run.value, target, &failed);
-            ran_id = sibling_id;
-            ran_flow = Some(sibling);
-        }
-    }
+    let (run, ran_id, ran_flow) = execute_with_fallback(target, &flow, &inputs, &daemon, confirm).await?;
     let duration_ms = clock.elapsed().as_millis() as u64;
     let (succeeded, status) = (run.succeeded, run.status);
     let mut value = run.value;

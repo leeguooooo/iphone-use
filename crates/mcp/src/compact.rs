@@ -302,7 +302,14 @@ pub fn observed(json: &Value) -> Option<String> {
     if json.get("no_visible_change") == Some(&Value::Bool(true)) {
         head.push_str(" · NO VISIBLE CHANGE");
     }
+    let no_scroll_progress = json.get("no_scroll_progress") == Some(&Value::Bool(true));
+    if no_scroll_progress {
+        head.push_str(" · NO SCROLL PROGRESS");
+    }
     let mut out = vec![head];
+    if no_scroll_progress {
+        out.push("No element in the accessibility tree moved, appeared or disappeared; the only changes were values or numbers redrawn in place (a clock, a counter). The gesture may have reached a boundary, landed in another region, or been blocked by an overlay. Check a screenshot before deciding; do not keep scrolling blindly. This does not mean the list has been fully read.".to_string());
+    }
     if let Some(delta) = json.get("delta") {
         let indexed = |key: &str| -> Vec<(u64, Value)> {
             delta
@@ -631,8 +638,24 @@ pub fn failed_batch(json: &Value) -> Option<String> {
     Some(out.join("\n"))
 }
 
+fn list_app_changed(json: &Value) -> Option<String> {
+    if text(json, "error").as_deref() != Some("app_changed") {
+        return None;
+    }
+    let detail = match (text(json, "expected_app"), text(json, "app")) {
+        (Some(expected), Some(app)) => format!("expected {expected}, now {app}. No"),
+        (None, Some(app)) => format!("now {app}. No"),
+        (Some(expected), None) => format!("expected {expected}. No"),
+        (None, None) => "no".to_string(),
+    };
+    Some(format!("App changed: {detail} swipe was sent. Read the screen again and confirm the target app is in front."))
+}
+
 /// `phone_collect_list`: the verdict, then one line per collected row.
 pub fn collected_list(json: &Value) -> Option<String> {
+    if let Some(refusal) = list_app_changed(json) {
+        return Some(refusal);
+    }
     let rows = json.get("rows")?.as_array()?;
     let mut out = vec![format!(
         "collected {} rows over {} pages ({} swipes); stop_reason={} complete={}",
@@ -642,6 +665,9 @@ pub fn collected_list(json: &Value) -> Option<String> {
         text(json, "stop_reason").unwrap_or_else(|| "?".to_string()),
         text(json, "complete").unwrap_or_else(|| "false".to_string()),
     )];
+    if let Some(app) = text(json, "app") {
+        out[0].push_str(&format!(" in {app}"));
+    }
     if let Some(coverage) = text(json, "coverage") {
         out.push(format!("coverage: {coverage}"));
     }
@@ -689,6 +715,9 @@ fn found_row(row: &Value) -> String {
 
 /// `phone_scroll_find`: found or why not, with the target or candidates.
 pub fn found_label(json: &Value) -> Option<String> {
+    if let Some(refusal) = list_app_changed(json) {
+        return Some(refusal);
+    }
     let found = json.get("found")?.as_bool()?;
     let mut out = vec![format!(
         "found={found} stop_reason={} swipes={}{}",
@@ -696,6 +725,9 @@ pub fn found_label(json: &Value) -> Option<String> {
         text(json, "swipes").unwrap_or_else(|| "0".to_string()),
         text(json, "error").map_or(String::new(), |e| format!(" error={e}")),
     )];
+    if let Some(app) = text(json, "app") {
+        out[0].push_str(&format!(" in {app}"));
+    }
     if let Some(target) = json.get("target").filter(|t| t.is_object()) {
         out.push(format!("target: {}", found_row(target)));
     }
@@ -723,6 +755,45 @@ pub fn found_label(json: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn no_scroll_progress_observed_advice() {
+        let mut body = json!({"ok":true,"snapshot":"S1","delta":{}});
+        assert!(!observed(&body).unwrap().contains("NO SCROLL PROGRESS"));
+        body["no_scroll_progress"] = true.into();
+        let text = observed(&body).unwrap();
+        assert!(text
+            .lines()
+            .next()
+            .unwrap()
+            .contains(" · NO SCROLL PROGRESS"));
+        assert!(text.contains("No element in the accessibility tree moved, appeared or disappeared;"));
+        assert!(!text.contains("only values changed"));
+        assert!(text.contains("Check a screenshot before deciding; do not keep scrolling blindly."));
+        assert!(text.contains("This does not mean the list has been fully read."));
+    }
+
+    #[test]
+    fn collect_app_changed_text_names_app_and_refusal() {
+        for (apps, expected) in [
+            (json!({"app":"Settings"}), "App changed: now Settings. No swipe was sent. Read the screen again and confirm the target app is in front."),
+            (json!({"expected_app":"Music","app":"时钟"}), "App changed: expected Music, now 时钟. No swipe was sent. Read the screen again and confirm the target app is in front."),
+            (json!({"expected_app":"Music"}), "App changed: expected Music. No swipe was sent. Read the screen again and confirm the target app is in front."),
+            (json!({}), "App changed: no swipe was sent. Read the screen again and confirm the target app is in front."),
+        ] {
+            let mut refused = json!({"ok":false,"error":"app_changed","swipes":0});
+            refused.as_object_mut().unwrap().extend(apps.as_object().unwrap().clone());
+            for render in [collected_list, found_label] {
+                assert_eq!(render(&refused).unwrap(), expected);
+            }
+        }
+        assert!(collected_list(&json!({"rows":[],"app":"Music"}))
+            .unwrap()
+            .contains("in Music"));
+        assert!(found_label(&json!({"found":true,"app":"Music"}))
+            .unwrap()
+            .contains("in Music"));
+    }
 
     #[test]
     fn a_collected_list_prints_its_verdict_and_one_line_per_row() {

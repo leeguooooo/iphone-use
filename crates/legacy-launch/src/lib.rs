@@ -449,6 +449,13 @@ pub async fn launch(t: &Target, o: &LaunchOptions) -> Result<(), String> {
             plist::Value::String(token.clone()),
         );
     }
+    // The on-phone daemon's settings travel the same way (setup puts them in
+    // this process's environment; see `server::phone_daemon::runner_env`).
+    for name in ["IPU_DAEMON_TOKEN", "IPU_DAEMON_PASSWORD", "IPU_DAEMON_HOST"] {
+        if let Some(value) = std::env::var(name).ok().filter(|v| !v.is_empty()) {
+            env.insert(name.into(), plist::Value::String(value));
+        }
+    }
     if !env.is_empty() {
         cfg.runner_env = Some(env);
     }

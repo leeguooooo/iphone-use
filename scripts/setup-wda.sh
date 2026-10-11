@@ -31,6 +31,10 @@
 #   WDA_RUNNER_ICON=... the runner's Home Screen icon: auto, none, or a .png/.icns
 #   IPU_RUNNER_SRC=...  device runner sources (default: ~/.iphone-use/runner; a
 #                       repo checkout uses its own runner/)
+#   IPU_EMBED=0         build the runner without the on-phone daemon
+#   IPU_EMBED_LIB=...   on-phone daemon library to link (default:
+#                       <runner sources>/embed/libipu_embed.a; a checkout builds it)
+#   IPU_DAEMON_HOST=... where the on-phone daemon listens (default: 127.0.0.1)
 #   IPHONE_USE_XCODE=... this phone's own Xcode (`iphone-use setup --xcode`)
 #   WDA_PORT=...        control relay port (default: 8100; named instances: derived)
 #   MJPEG_PORT=...      video relay port (default: 9100; named instances: derived)
@@ -108,7 +112,16 @@ PROGRAM=""
 if [ -f "$DAEMON_PLIST" ]; then
     PROGRAM="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$DAEMON_PLIST" 2>/dev/null || true)"
 fi
-for CANDIDATE in "${IPHONE_USE_SETUP_BIN:-}" "$PROGRAM" \
+# An explicit engine is a pin: silently falling back can replace an embedded
+# runner with an older product that has no on-phone daemon.
+if [ -n "${IPHONE_USE_SETUP_BIN:-}" ]; then
+    if [ ! -x "$IPHONE_USE_SETUP_BIN" ] || ! "$IPHONE_USE_SETUP_BIN" setup-native --supports "$COMMAND" >/dev/null 2>&1; then
+        printf 'The explicitly selected setup engine is missing or does not support %s: %s\n' "$COMMAND" "$IPHONE_USE_SETUP_BIN" >&2
+        exit 1
+    fi
+    IPHONE_USE_SETUP_SCRIPT="$SELF" exec "$IPHONE_USE_SETUP_BIN" setup-native "$COMMAND"
+fi
+for CANDIDATE in "$PROGRAM" \
     "$HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use" \
     "/Applications/iPhoneUse.app/Contents/MacOS/iphone-use"; do
     [ -n "$CANDIDATE" ] && [ -x "$CANDIDATE" ] || continue

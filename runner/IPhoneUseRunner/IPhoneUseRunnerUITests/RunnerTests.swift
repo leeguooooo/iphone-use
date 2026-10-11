@@ -128,6 +128,9 @@ final class RunnerTests: XCTestCase {
       }
     }
 
+    // The agent API on the phone itself, when the daemon library is linked (RunnerDaemon.swift).
+    RunnerDaemon.start(environment: environment, runnerPort: port, mjpegPort: mjpegPort)
+
     // Block this test (and keep the main run loop spinning for the request handlers) for a year,
     // or until POST /shutdown.
     let result = XCTWaiter.wait(for: [expectation], timeout: 365 * 24 * 60 * 60)
@@ -159,6 +162,10 @@ final class RunnerTests: XCTestCase {
     if request.path == "/wda/keepawake"
       || (request.path.hasPrefix("/session/") && request.path.hasSuffix("/wda/keepawake")) {
       return keepAwakeResponse(request)
+    }
+    // Minting a pairing code is a lock and a random number in the daemon; never queue it.
+    if request.method == "POST", request.path == "/daemon/pair-code" {
+      return RunnerDaemon.pairCodeResponse()
     }
     guard request.method == "GET" else { return nil }
     if request.path == "/status" {
@@ -261,6 +268,7 @@ final class RunnerTests: XCTestCase {
       value["busyMs"] = Int(Date().timeIntervalSince(busySince) * 1000)
     }
     value["keepAwake"] = keepAwake.statusValue()
+    value["daemon"] = RunnerDaemon.statusValue()
     return value
   }
 

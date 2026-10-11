@@ -111,6 +111,7 @@ extension RunnerTests {
       if match(parts, "wda/apps/launch") != nil || match(parts, "wda/apps/activate") != nil {
         return try launchApp(request)
       }
+      if match(parts, "wda/apps/terminate") != nil { return try terminateApp(request) }
       if match(parts, "wda/keys") != nil { return try wdaKeys(request) }
       if match(parts, "wda/keyboard/dismiss") != nil { return try dismissKeyboard(request) }
       if match(parts, "url") != nil { return try openURL(request) }
@@ -818,6 +819,27 @@ extension RunnerTests {
       throw RunnerError.failed("launching \(bundle) failed: \(failure)")
     }
     return IPURBridge.pid(for: application)
+  }
+
+  /// WDA's `apps/terminate`: quit the app, so the next launch starts on its first screen instead
+  /// of the page it was left on. Answers whether it was running.
+  private func terminateApp(_ request: HTTPRequest) throws -> HTTPResponse {
+    let body = try request.jsonObject()
+    let bundle = try requiredString(body, "bundleId", "bundle")
+    let application = XCUIApplication(bundleIdentifier: bundle)
+    let wasRunning = application.state != .notRunning && application.state != .unknown
+    if wasRunning {
+      let issuesBefore = recordedIssues.count
+      var exception: String?
+      IPURBridge.performWithoutQuiescence(application) {
+        exception = IPURBridge.catchException { application.terminate() }
+        IPURBridge.invalidateRequestCache()
+      }
+      if let failure = exception ?? (recordedIssues.count > issuesBefore ? recordedIssues.last : nil) {
+        throw RunnerError.failed("terminate \(bundle) failed: \(failure)")
+      }
+    }
+    return .value(wasRunning)
   }
 
   private func launchApp(_ request: HTTPRequest) throws -> HTTPResponse {

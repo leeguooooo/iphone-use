@@ -577,6 +577,9 @@ pub struct SchedulerConfig {
     pub credential: Option<String>,
     /// `iphone-use-mcp` next to the daemon.
     pub mcp: Option<PathBuf>,
+    /// Run flows in this process instead of through `iphone-use-mcp`: the
+    /// daemon on the phone, where an app cannot start another program.
+    pub in_process: bool,
     pub notify: bool,
 }
 
@@ -747,6 +750,19 @@ impl Scheduler {
         &self,
         request: &CreateSchedule,
     ) -> Result<(), (&'static str, String)> {
+        if self.config.in_process {
+            let summary = match request.kind {
+                JobKind::Flow => iphone_use_mcp::flow::validate_summary(&request.target)
+                    .map_err(|e| ("invalid_target", truncate(&format!("{e:#}"), 400)))?,
+                JobKind::Test => {
+                    return Err((
+                        "invalid_target",
+                        "test suites are scheduled on the Mac; the phone schedules flows".into(),
+                    ))
+                }
+            };
+            return Self::side_effect_gate(&summary, request);
+        }
         let Some(mcp) = &self.config.mcp else {
             return Err((
                 "mcp_unavailable",
@@ -788,6 +804,14 @@ impl Scheduler {
             .rev()
             .find_map(|line| serde_json::from_str(line).ok())
             .unwrap_or_default();
+        Self::side_effect_gate(&summary, request)
+    }
+
+    /// A side-effect job needs the explicit flag.
+    fn side_effect_gate(
+        summary: &serde_json::Value,
+        request: &CreateSchedule,
+    ) -> Result<(), (&'static str, String)> {
         let side_effect = summary.get("risk").and_then(|v| v.as_str()) == Some("side_effect")
             || summary.get("side_effect").and_then(|v| v.as_bool()) == Some(true);
         if side_effect && !request.confirm_side_effects {
@@ -1061,6 +1085,91 @@ impl Scheduler {
         }
     }
 
+    /// A job run inside the daemon (the phone): the flow runs through the
+    /// same code as `iphone-use-mcp flow run`, against this daemon, as the
+    /// run's owner. Test suites still need the Mac.
+    async fn execute_in_process(&self, run: Run, schedule: Schedule, owner: String) {
+        let started = self.now();
+        let artifacts = self.config.artifacts_dir.join(&run.id);
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&artifacts);
+        }
+        self.update_run(&run.id, |run| {
+            run.state = RunState::Running;
+            run.attempts += 1;
+            run.started_at = Some(started);
+            run.next_attempt_at = None;
+            run.reason = None;
+        });
+        let clock = std::time::Instant::now();
+        let (state, summary, error) = match schedule.kind {
+            JobKind::Test => (
+                RunState::Failed,
+                None,
+                Some("test suites run from the Mac (iphone-use-mcp test); the phone runs flows".to_string()),
+            ),
+            JobKind::Flow => {
+                let daemon = iphone_use_mcp::client::DaemonClient::new(
+                    self.config.self_url.clone(),
+                    self.config.credential.clone(),
+                )
+                .with_owner(owner.clone());
+                let inputs: Vec<String> = schedule
+                    .inputs
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect();
+                let outcome = tokio::time::timeout(
+                    RUN_TIMEOUT,
+                    iphone_use_mcp::flow::run_for_task(
+                        &daemon,
+                        &schedule.target,
+                        &inputs,
+                        schedule.confirm_side_effects,
+                    ),
+                )
+                .await;
+                match outcome {
+                    Ok(Ok((succeeded, value))) => {
+                        let stdout = value.to_string();
+                        let _ = write_private(&artifacts.join("stdout.txt"), stdout.as_bytes());
+                        let summary = Self::summarize(schedule.kind, &stdout);
+                        if succeeded {
+                            (RunState::Passed, summary, None)
+                        } else {
+                            let error = summary.clone().unwrap_or_else(|| "flow failed".into());
+                            (RunState::Failed, summary, Some(truncate(&error, OUTPUT_KEPT)))
+                        }
+                    }
+                    Ok(Err(error)) => (RunState::Failed, None, Some(truncate(&format!("{error:#}"), OUTPUT_KEPT))),
+                    Err(_) => (
+                        RunState::Failed,
+                        None,
+                        Some(format!("timed out after {} minutes; stopped", RUN_TIMEOUT.as_secs() / 60)),
+                    ),
+                }
+            }
+        };
+        let duration_ms = clock.elapsed().as_millis() as u64;
+        self.post("/agent/owner", &owner, r#"{"release":true}"#).await;
+        let finished = self.now();
+        let ended = self.update_run(&run.id, |run| {
+            run.state = state;
+            run.finished_at = Some(finished);
+            run.duration_ms = Some(duration_ms);
+            run.summary = summary;
+            run.error = error;
+            run.artifacts = Some(artifacts.display().to_string());
+        });
+        if let Some(ended) = ended {
+            self.notify(&ended).await;
+        }
+    }
+
     fn command_args(schedule: &Schedule, artifacts: &Path) -> Vec<String> {
         let mut args: Vec<String> = match schedule.kind {
             JobKind::Flow => vec!["flow".into(), "run".into(), schedule.target.clone()],
@@ -1112,6 +1221,9 @@ impl Scheduler {
     }
 
     async fn execute(&self, run: Run, schedule: Schedule, owner: String) {
+        if self.config.in_process {
+            return self.execute_in_process(run, schedule, owner).await;
+        }
         let Some(mcp) = self.config.mcp.clone() else {
             let ended = self.update_run(&run.id, |run| {
                 run.state = RunState::Failed;
@@ -1328,12 +1440,23 @@ pub fn current() -> Option<Arc<Scheduler>> {
     SCHEDULER.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+impl Scheduler {
+    /// A client for this daemon's own API acting as `owner`: how in-process
+    /// flow runs (schedules, `/agent/flow/run`, tasks) drive the phone through
+    /// the same checks and owner lease as any other caller.
+    pub fn self_client(&self, owner: &str) -> iphone_use_mcp::client::DaemonClient {
+        iphone_use_mcp::client::DaemonClient::new(self.config.self_url.clone(), self.config.credential.clone())
+            .with_owner(owner)
+    }
+}
+
 /// Start the scheduler for this daemon. `host`/`port` are the listen address.
 pub fn start(
     host: &str,
     port: u16,
     credential: Option<String>,
     state_dir: &Path,
+    in_process: bool,
 ) -> Arc<Scheduler> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let reach = match host {
@@ -1348,7 +1471,9 @@ pub fn start(
         self_url: format!("http://{reach}:{port}"),
         credential,
         mcp: crate::flows::mcp_binary(),
-        notify: std::env::var_os("IPHONE_USE_SCHEDULE_NO_NOTIFY").is_none(),
+        in_process,
+        // A notification is an osascript call: a Mac thing.
+        notify: !in_process && std::env::var_os("IPHONE_USE_SCHEDULE_NO_NOTIFY").is_none(),
     });
     install(scheduler.clone());
     scheduler.spawn();

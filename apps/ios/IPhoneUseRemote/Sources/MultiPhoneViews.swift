@@ -5,7 +5,8 @@ import SwiftUI
 /// Every phone shown in the grid at once, each a live tile. Tap a tile to
 /// drive that phone full screen.
 struct DeviceGridView: View {
-    @Bindable var app: AppModel
+    @ObservedObject var app: AppModel
+    var remoteOnly = false
     @State private var showDevices = false
     @State private var showSync = false
     @State private var adding = false
@@ -14,18 +15,20 @@ struct DeviceGridView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        NavigationStack {
+        AppNavigationStack {
             ScrollView {
                 OfflineBanner(online: app.online)
-                let tiles = app.gridSessions
+                let tiles = app.gridSessions.filter { !remoteOnly || !$0.record.isThisPhone }
                 if tiles.isEmpty {
-                    ContentUnavailableView {
-                        Label("没有显示的手机", systemImage: "rectangle.grid.2x2")
-                    } description: {
-                        Text("所有手机都从总览隐藏了。在「设备」里打开「显示在总览」。")
-                    } actions: {
+                    VStack(spacing: 16) {
+                        Label("没有显示的手机", systemImage: "rectangle.grid.2x2").font(.title2.bold())
+                        Text("所有手机都从总览隐藏了。在「设备」里打开「显示在总览」。").foregroundStyle(.secondary)
                         Button("打开设备列表") { showDevices = true }
                             .buttonStyle(.borderedProminent)
+                        if !remoteOnly && app.devices.contains(where: \.isThisPhone) {
+                            Button { app.openAgent() } label: { Label("让 agent 做事", systemImage: "sparkles") }
+                                .buttonStyle(.bordered)
+                        }
                     }
                     .padding(.top, 80)
                 } else {
@@ -43,15 +46,19 @@ struct DeviceGridView: View {
             // Pull down: every waiting phone tries again now.
             .refreshable { await app.refreshAll() }
             .background(Theme.canvas.ignoresSafeArea())
-            .navigationTitle("我的手机")
+            .navigationTitle(remoteOnly ? navigationString("远程控制") : String(localized: "我的手机"))
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showDevices = true } label: { Label("设备", systemImage: "list.bullet") }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    if !remoteOnly {
+                        Button { app.openAgent() } label: { Label("Agent", systemImage: "sparkles") }
+                            .accessibilityIdentifier("open-agent")
+                    }
                     Button { showSync = true } label: { Label("同步操作", systemImage: "square.on.square.dashed") }
-                        .disabled(app.devices.count < 2)
+                        .disabled(app.devices.filter { !remoteOnly || !$0.isThisPhone }.count < 2)
                     Menu {
                         Button { scanning = true } label: { Label("扫码添加", systemImage: "qrcode.viewfinder") }
                         Button { adding = true } label: { Label("手动添加", systemImage: "keyboard") }
@@ -61,8 +68,8 @@ struct DeviceGridView: View {
                 }
             }
             .overlay { ToastLayer(text: app.toast) }
-            .sheet(isPresented: $showDevices) { DevicesSheet(app: app) }
-            .sheet(isPresented: $showSync) { SyncSetupSheet(app: app) }
+            .sheet(isPresented: $showDevices) { DevicesSheet(app: app, remoteOnly: remoteOnly) }
+            .sheet(isPresented: $showSync) { SyncSetupSheet(app: app, remoteOnly: remoteOnly) }
             .sheet(isPresented: $adding) { ConnectView(app: app) { adding = false } }
             .fullScreenCover(isPresented: $scanning, onDismiss: {
                 if manualAfterScan { manualAfterScan = false; adding = true }
@@ -121,8 +128,8 @@ struct AddPhoneTile: View {
 
 /// One phone in the grid: its live picture, name, state and last sync result.
 struct DeviceTile: View {
-    @Bindable var app: AppModel
-    let session: DeviceSession
+    @ObservedObject var app: AppModel
+    @ObservedObject var session: DeviceSession
     @State private var renaming = false
     @State private var newName = ""
     @State private var confirmForget = false
@@ -196,7 +203,7 @@ extension DeviceTile {
 /// A tile's picture: the live stream, the reason there is none, the last
 /// sync result as a badge, and a lock badge when the phone locks on its own.
 struct TilePicture: View {
-    let session: DeviceSession
+    @ObservedObject var session: DeviceSession
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -236,7 +243,7 @@ struct TilePicture: View {
         .clipShape(TileShape())
         .overlay(TileShape().stroke(Theme.hairline, lineWidth: 1))
         .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
-        .animation(.snappy(duration: 0.25), value: session.delivery)
+        .animation(.appSnappy(duration: 0.25), value: session.delivery)
         .animation(.easeInOut(duration: 0.25), value: session.videoLive)
     }
 }
@@ -305,23 +312,26 @@ struct DeliveryBadge: View {
 
 /// Manage saved phones: rename, reorder, show or hide in the grid, forget, add.
 struct DevicesSheet: View {
-    @Bindable var app: AppModel
+    @ObservedObject var app: AppModel
+    var remoteOnly = false
+    private var records: [DeviceRecord] { app.devices.filter { !remoteOnly || !$0.isThisPhone } }
     @State private var adding = false
     @State private var scanning = false
     @State private var manualAfterScan = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        AppNavigationStack {
             List {
                 Section {
-                    ForEach(app.devices) { record in
+                    ForEach(records) { record in
                         row(record)
                     }
                     .onDelete { offsets in
-                        for index in offsets { app.remove(app.devices[index].id) }
+                        let ids = offsets.map { records[$0].id }
+                        for id in ids { app.remove(id) }
                     }
-                    .onMove { app.move(from: $0, to: $1) }
+                    .onMove(perform: remoteOnly ? nil : { app.move(from: $0, to: $1) })
                 } footer: {
                     Text("一台手机对应 Mac 上的一个 iphone-use 实例（各自的端口和二维码）。隐藏的手机不占画面，空闲时会自动释放。")
                 }
@@ -330,7 +340,7 @@ struct DevicesSheet: View {
                     Button { adding = true } label: { Label("手动添加", systemImage: "keyboard") }
                 }
             }
-            .navigationTitle("设备")
+            .navigationTitle(remoteOnly ? navigationString("远程手机") : String(localized: "设备"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { EditButton() }
@@ -386,16 +396,18 @@ struct DevicesSheet: View {
 
 /// Pick the lead and the followers for sync.
 struct SyncSetupSheet: View {
-    @Bindable var app: AppModel
+    @ObservedObject var app: AppModel
+    var remoteOnly = false
+    private var records: [DeviceRecord] { app.devices.filter { !remoteOnly || !$0.isThisPhone } }
     @State private var selected: Set<UUID> = []
     @State private var lead: UUID?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        AppNavigationStack {
             List {
                 Section {
-                    ForEach(app.devices) { record in
+                    ForEach(records) { record in
                         let session = app.session(record.id)
                         Button {
                             toggle(record.id)
@@ -441,16 +453,16 @@ struct SyncSetupSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("开始") {
                         guard let lead else { return }
-                        app.startSync(lead: lead, followers: app.devices.map(\.id).filter { selected.contains($0) })
+                        app.startSync(lead: lead, followers: records.map(\.id).filter { selected.contains($0) })
                         dismiss()
                     }
                     .disabled(lead == nil || selected.count < 2)
                 }
             }
             .onAppear {
-                let all = app.devices.map(\.id)
+                let all = records.map(\.id)
                 selected = Set(all)
-                lead = app.focusedID ?? all.first
+                lead = app.focusedID.flatMap { all.contains($0) ? $0 : nil } ?? all.first
             }
         }
     }
@@ -458,7 +470,7 @@ struct SyncSetupSheet: View {
     private func toggle(_ id: UUID) {
         if selected.contains(id) {
             selected.remove(id)
-            if lead == id { lead = app.devices.map(\.id).first { selected.contains($0) } }
+            if lead == id { lead = records.map(\.id).first { selected.contains($0) } }
         } else {
             selected.insert(id)
             if lead == nil { lead = id }
@@ -474,21 +486,21 @@ struct SyncSetupSheet: View {
 /// Sync in progress: the lead full size and touchable, the followers as
 /// small live tiles that show each gesture's result.
 struct SyncView: View {
-    @Bindable var app: AppModel
-    let lead: DeviceSession
+    @ObservedObject var app: AppModel
+    @ObservedObject var lead: DeviceSession
     let group: AppModel.SyncGroup
     @State private var typing = false
     @State private var immersive = false
     @State private var showSettings = false
     @State private var zoom: CGFloat = 1
     @State private var resetZoom = 0
-    @State private var queue: TypingQueue
+    @StateObject private var queue: TypingQueue
 
     init(app: AppModel, lead: DeviceSession, group: AppModel.SyncGroup) {
         self.app = app
         self.lead = lead
         self.group = group
-        _queue = State(initialValue: TypingQueue { [weak app, weak lead] action in
+        _queue = StateObject(wrappedValue: TypingQueue { [weak app, weak lead] action in
             guard let app, let lead else { return }
             await app.perform(action, from: lead)
         })

@@ -22,6 +22,9 @@
 #   IPU_RUNNER_DERIVED_DATA=dir   derived data dir (default: runner/build/DerivedData)
 #   IPU_RUNNER_TEAM_ID=team       signing team (default: 6ZPXG4KVVS)
 #   XCODEBUILD=path               xcodebuild binary (default: xcodebuild)
+#   IPU_EMBED_LIB=path            link the on-phone daemon (libipu_embed.a from
+#                                 scripts/build-ios-embed.sh) into the runner; without it the
+#                                 runner builds and serves as before, with no daemon inside
 #
 # Never prints the ASC key values. Never installs or launches anything on a device.
 set -euo pipefail
@@ -120,6 +123,17 @@ else
     echo "ipu-runner build: unsigned compile check (CODE_SIGNING_ALLOWED=NO)" >&2
     args+=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="")
     mode=unsigned
+fi
+
+if [ -n "${IPU_EMBED_LIB:-}" ]; then
+    if [ ! -f "$IPU_EMBED_LIB" ]; then
+        echo "ipu-runner build: IPU_EMBED_LIB does not point at a file: $IPU_EMBED_LIB" >&2
+        exit 1
+    fi
+    echo "ipu-runner build: linking the on-phone daemon ($IPU_EMBED_LIB)" >&2
+    # -force_load: nothing references the entry points at link time (RunnerDaemon finds them
+    # with dlsym), so a plain link would drop them.
+    args+=("OTHER_LDFLAGS=\$(inherited) -force_load $IPU_EMBED_LIB -framework Security -framework SystemConfiguration")
 fi
 
 log="$DERIVED_DATA/../build-$mode.log"

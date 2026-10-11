@@ -26,6 +26,11 @@ use super::usbdiag;
 
 const RUNNER_DEVICE_PORT: u16 = 8100;
 const MJPEG_DEVICE_PORT: u16 = 9100;
+/// How long a launch keeps retrying, in place, while a previous runner still
+/// holds the runner port on the phone (#265) …
+const PORT_IN_USE_WINDOW: Duration = Duration::from_secs(60);
+/// … and how long it waits between those attempts.
+const PORT_IN_USE_RETRY: Duration = Duration::from_secs(3);
 /// Published as `not_connected`; the daemon's hint says the same.
 const NOT_CONNECTED_MESSAGE: &str = "the iPhone isn't connected to this Mac — plug it in over USB (or join the same Wi-Fi) and unlock it";
 /// Published as `needs_passcode_on_phone`: a start on a phone with a passcode
@@ -63,6 +68,9 @@ pub struct Setup {
     build_locked: bool,
     validation_error: String,
     warned_link_drop: bool,
+    /// The last launch failed only because a previous runner still holds the
+    /// runner port on the phone (#265).
+    runner_port_in_use: bool,
     sup: SupervisorTx,
     self_install: SelfInstallTx,
     /// Where the runner serves (for restarting only the relays).
@@ -77,6 +85,8 @@ pub struct Setup {
     interactive_lock: Option<InteractiveLock>,
     /// Set when the phone takes the legacy (iOS 15/16) path.
     legacy_ios: Option<LegacyRun>,
+    /// The on-phone daemon library linked into the runner (see `embed`).
+    embed: Option<super::embed::EmbedLib>,
 }
 
 /// A phone on the legacy (iOS 15/16) path: see `legacy_ios`.
@@ -140,6 +150,7 @@ impl Setup {
             build_locked: false,
             validation_error: String::new(),
             warned_link_drop: false,
+            runner_port_in_use: false,
             sup: SupervisorTx::default(),
             self_install: SelfInstallTx::default(),
             phone_url: String::new(),
@@ -148,6 +159,7 @@ impl Setup {
             over_tunnel: false,
             interactive_lock: None,
             legacy_ios: None,
+            embed: None,
         }
     }
 
@@ -359,6 +371,10 @@ impl Setup {
                     if previous != Some(Kind::NeedsReboot) {
                         warn("the iPhone's developer services need a restart of the iPhone; checking again every few minutes");
                     }
+                } else if self.failure_kind == Kind::PortInUse {
+                    warn(&format!(
+                        "a previous device runner still holds port {RUNNER_DEVICE_PORT} on the phone; next retry in {delay}s (failure {attempt})"
+                    ));
                 } else if self.failure_kind == Kind::Owned {
                     warn(&format!(
                         "another session holds the phone; checking its lease again in {delay}s"
@@ -446,6 +462,7 @@ impl Setup {
         self.prerequisites()?;
         self.resolve_device()?;
         let source_hash = self.runner_source()?;
+        self.embed = self.embed_library()?;
         let (deployment_override, sdk) = self.xcconfig()?;
         self.destination_fallback()?;
         self.legacy = Legacy::new(&self.ctx, &self.ctx.team_id, &self.ctx.bundle_id);
@@ -466,16 +483,22 @@ impl Setup {
         info("Building + launching the device runner on the phone (the first build takes a minute or two)");
         // Replacing a live runner takes the phone from whoever drives it.
         // Recovering a dead one is fine: nobody can be using it.
-        if !owner::overridden(&self.ctx)
-            && pid::validate(
-                &self.ctx,
-                &self.ctx.runner_pid_file,
-                &self.legacy.runner,
-                Role::Runner,
-                false,
-            )
-            .is_some()
-        {
+        let replacing = pid::validate(
+            &self.ctx,
+            &self.ctx.runner_pid_file,
+            &self.legacy.runner,
+            Role::Runner,
+            false,
+        )
+        .is_some();
+        // A last round that failed on the runner port means a runner may
+        // still live on the phone; ending it (below) takes the phone too.
+        let port_failed_last = self.legacy_ios.is_none()
+            && retry::read(&self.ctx.retry_state)
+                .ok()
+                .flatten()
+                .is_some_and(|state| state.kind == Kind::PortInUse);
+        if !owner::overridden(&self.ctx) && (replacing || port_failed_last) {
             if let Some(lease) =
                 owner::foreign(owner::current(&self.ctx), owner::caller().as_deref())
             {
@@ -499,6 +522,13 @@ impl Setup {
         ) {
             return die("the prior runner PID record does not safely identify a process; refusing to kill anything");
         }
+        // Stopping xcodebuild does not always end the runner on the phone,
+        // and one still there keeps the new runner off its port (#265). End
+        // it now when this run replaced a live runner, or when the last round
+        // already failed on that port.
+        if self.legacy_ios.is_none() && (replacing || port_failed_last) {
+            super::commands::end_device_runner(&self.ctx);
+        }
         let _ = std::fs::write(&self.ctx.run_log, b"");
         let xcodebuild = PathBuf::from(sys::stdout_of("xcrun", &["--find", "xcodebuild"]));
         if xcodebuild.as_os_str().is_empty() || !sys::is_executable(&xcodebuild) {
@@ -519,6 +549,7 @@ impl Setup {
                 &xcode_version,
                 sdk.as_deref().unwrap_or(""),
                 &deployment_override,
+                &super::embed::cache_component(self.embed.as_ref()),
             ),
             icon::cache_component(self.icon_source.as_deref())
         );
@@ -526,7 +557,7 @@ impl Setup {
         let url = if self.legacy_ios.is_some() {
             self.legacy_launch(&products, &key)?
         } else {
-            self.launch(&xcodebuild, &xctestrun, from_cache)?
+            self.launch_when_port_free(&xcodebuild, &xctestrun, from_cache)?
         };
         self.phone_url = url.clone();
         let mut target_url = self.relays(&url)?;
@@ -818,6 +849,45 @@ impl Setup {
             ));
         }
         Ok(hash)
+    }
+
+    /// The on-phone daemon library to link, if any (never fails setup: a
+    /// missing one builds the plain runner).
+    fn embed_library(&mut self) -> Step<Option<super::embed::EmbedLib>> {
+        let inputs = super::embed::Inputs {
+            embed: &self.ctx.embed,
+            embed_lib: &self.ctx.embed_lib,
+            runner_src: &self.ctx.runner_src,
+            keepalive: self.ctx.keepalive,
+        };
+        let log = self.rel("embed-build.log");
+        let home = self.ctx.home.clone();
+        let mut stopped = None;
+        let (lib, line) = super::embed::resolve(&inputs, |repo| {
+            info("Building the on-phone daemon library (scripts/build-ios-embed.sh) ...");
+            let _ = std::fs::write(&log, b"");
+            match proc::run_logged(
+                Path::new("/usr/bin/env"),
+                &super::embed::build_argv(repo, &home),
+                Some(repo),
+                &log,
+                &XcconfigEnv::default(),
+            ) {
+                Ok(built) => built,
+                Err(exit) => {
+                    stopped = Some(exit);
+                    false
+                }
+            }
+        });
+        if let Some(exit) = stopped {
+            return Err(exit);
+        }
+        match &lib {
+            Some(lib) => ok(&format!("{line} (sha256 {})", &lib.sha256[..12])),
+            None => info(&line),
+        }
+        Ok(lib)
     }
 
     /// Returns (deployment override, SDK version).
@@ -1360,8 +1430,12 @@ impl Setup {
             "-allowProvisioningUpdates".into(),
             format!("DEVELOPMENT_TEAM={}", signing.team),
             format!("PRODUCT_BUNDLE_IDENTIFIER={}", signing.bundle),
-            "build-for-testing".into(),
         ];
+        let mut extra = extra.to_vec();
+        if let Some(lib) = &self.embed {
+            extra.push(super::embed::xcodebuild_setting(lib));
+        }
+        extra.push("build-for-testing".into());
         let Ok(args) = runner::project_argv(&self.ctx, &extra) else {
             self.validation_error =
                 format!("build-for-testing failed (log: {})", build_log.display());
@@ -1664,6 +1738,28 @@ impl Setup {
         ))
     }
 
+    /// The on-phone daemon's credentials and listen address for the runner's
+    /// environment (each name behind `prefix`). Generated once per instance
+    /// and kept in its state dir; never logged.
+    fn phone_daemon_env(&self, prefix: &str) -> Step<Vec<(String, String)>> {
+        let Ok(credentials) = crate::phone_daemon::load_or_create(self.ctx.state_dir()) else {
+            return die("could not store the on-phone daemon's credentials in the state dir");
+        };
+        let host = self.ctx.daemon_host.trim();
+        let host = if host.is_empty() {
+            None
+        } else if crate::phone_daemon::valid_host(host) {
+            Some(host)
+        } else {
+            warn(&format!(
+                "{} must be an IP address (got '{host}'); the on-phone daemon stays on 127.0.0.1",
+                crate::phone_daemon::HOST_ENV
+            ));
+            None
+        };
+        Ok(crate::phone_daemon::runner_env(&credentials, host, prefix))
+    }
+
     fn runner_session(&self) -> Option<String> {
         let udid = &self.ctx.udid;
         let auth = crate::runner_token::TokenSource::at(self.ctx.state_dir());
@@ -1678,6 +1774,74 @@ impl Setup {
         })
         .and_then(|status| status.session_id)
         .filter(|id| !id.is_empty())
+    }
+
+    /// [`Setup::launch`], retried in place every few seconds for up to a
+    /// minute while a previous runner still holds the runner port on the
+    /// phone, ending that runner through devicectl before each retry (#265).
+    fn launch_when_port_free(
+        &mut self,
+        xcodebuild: &Path,
+        xctestrun: &Path,
+        from_cache: bool,
+    ) -> Step<String> {
+        let started = Instant::now();
+        loop {
+            // A retry that fails some other way must back off as that.
+            self.runner_port_in_use = false;
+            if self.failure_kind == Kind::PortInUse {
+                self.failure_kind = Kind::Generic;
+            }
+            let launched = self.launch(xcodebuild, xctestrun, from_cache);
+            if launched.is_ok() || !self.runner_port_in_use {
+                return launched;
+            }
+            if !owner::overridden(&self.ctx) {
+                if let Some(lease) =
+                    owner::foreign(owner::current(&self.ctx), owner::caller().as_deref())
+                {
+                    self.failure_kind = Kind::Owned;
+                    self.phase(
+                        "building",
+                        "",
+                        &format!(
+                            "the phone is in use by session {}; not ending the runner that holds port {RUNNER_DEVICE_PORT}",
+                            lease.owner
+                        ),
+                    );
+                    return die(owner::refusal(&lease, &self.ctx));
+                }
+            }
+            let ended = super::commands::end_device_runner(&self.ctx);
+            let waited = started.elapsed().as_secs();
+            if started.elapsed() >= PORT_IN_USE_WINDOW {
+                let message = format!(
+                    "a previous device runner still holds port {RUNNER_DEVICE_PORT} on the phone after {waited}s"
+                );
+                if self.ctx.keepalive {
+                    self.phase("building", &self.build_blocker.clone(), &message);
+                } else {
+                    self.phase("building-fail", "wda", &message);
+                }
+                // Keep the kind: KeepAlive retries within seconds, not the
+                // build failure's minutes.
+                self.failure_kind = Kind::PortInUse;
+                return die(format!("{message}. Log: {}", self.ctx.run_log.display()));
+            }
+            warn(&format!(
+                "a previous device runner still holds port {RUNNER_DEVICE_PORT} on the phone{}; launching again in {}s",
+                if ended { " (ended it)" } else { "" },
+                PORT_IN_USE_RETRY.as_secs()
+            ));
+            self.phase(
+                "building",
+                &self.build_blocker.clone(),
+                &format!(
+                    "waiting for the previous device runner to free port {RUNNER_DEVICE_PORT} on the phone ({waited}s)"
+                ),
+            );
+            proc::sleep(PORT_IN_USE_RETRY)?;
+        }
     }
 
     /// Launch the runner from its product and wait until it serves. Returns
@@ -1696,13 +1860,19 @@ impl Setup {
         let Ok(token) = crate::runner_token::rotate(self.ctx.state_dir()) else {
             return die("could not store the device runner's launch token in the state dir");
         };
+        let mut env = vec![(
+            crate::runner_token::XCODEBUILD_TOKEN_ENV.to_string(),
+            token,
+        )];
+        env.extend(self.phone_daemon_env(crate::phone_daemon::XCODEBUILD_PREFIX)?);
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let Ok(spawned) = proc::spawn_detached_env(
             xcodebuild,
             &argv,
             Some(self.ctx.state_dir()),
             &self.ctx.run_log,
             Some(&self.xcconfig),
-            &[(crate::runner_token::XCODEBUILD_TOKEN_ENV, token.as_str())],
+            &env,
         ) else {
             return die(format!(
                 "xcodebuild did not become the exact expected runner process; no unverified PID was signalled.\n   Inspect {} and any listener before retrying.",
@@ -1826,6 +1996,15 @@ impl Setup {
                     return die(
                         "the phone is locked and xcodebuild exited. Unlock it, then rerun setup.",
                     );
+                }
+                // A previous runner still holds the port on the phone: the
+                // product is fine, so nothing is evicted and the caller
+                // retries in seconds instead of backing off like a failed
+                // build (#265).
+                if runner::log_shows_port_in_use(&self.ctx.run_log) {
+                    self.runner_port_in_use = true;
+                    self.failure_kind = Kind::PortInUse;
+                    return Err(Exit(1));
                 }
                 // Only a failure of the product itself evicts it; a dropped
                 // device link says nothing about the product.
@@ -3247,8 +3426,40 @@ impl ProbeCount {
     }
 }
 
+/// A plain runner is enough only when this setup did not link the daemon.
+/// A supervisor that launched a different product must not pass handoff.
+fn handoff_daemon_ready(body: &[u8], expected: bool) -> bool {
+    if !expected {
+        return true;
+    }
+    let Ok(status) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let daemon = &status["value"]["daemon"];
+    daemon["linked"] == true && daemon["state"] == "serving"
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn handoff_requires_the_linked_daemon_to_be_serving() {
+        use super::handoff_daemon_ready as ready;
+        assert!(ready(
+            br#"{"value":{"daemon":{"linked":true,"state":"serving"}}}"#,
+            true
+        ));
+        for body in [
+            br#"{"value":{"daemon":{"linked":false}}}"#.as_slice(),
+            br#"{"value":{"daemon":{"linked":true,"state":"failed"}}}"#,
+            br#"{"value":{"daemon":{"linked":true,"state":"not_started"}}}"#,
+            br#"{"value":{"ready":true}}"#,
+            b"invalid",
+        ] {
+            assert!(!ready(body, true), "unexpectedly accepted {body:?}");
+            assert!(ready(body, false), "plain runner setup stays compatible");
+        }
+    }
+
     #[test]
     fn an_ios_below_the_coredevice_floor_is_ios_too_old() {
         // Hardware: iPhone 12 mini, lockdownd ProductVersion 15.4.1, Xcode
@@ -3819,6 +4030,14 @@ impl Setup {
             ("WDA_TEAM_ID", ctx.team_id.clone()),
             ("WDA_BUNDLE_ID", ctx.bundle_id.clone()),
         ];
+        // A checkout/custom setup must keep using the explicitly selected
+        // engine after launchd takes over, rather than an older installed app.
+        if let Ok(binary) = std::env::var("IPHONE_USE_SETUP_BIN") {
+            if !binary.is_empty() {
+                let path = std::fs::canonicalize(&binary).unwrap_or_else(|_| PathBuf::from(binary));
+                pairs.push(("IPHONE_USE_SETUP_BIN", path.to_string_lossy().into_owned()));
+            }
+        }
         if ctx.runner_src != ctx.runner_default_src {
             pairs.push((
                 "IPU_RUNNER_SRC",
@@ -3829,6 +4048,11 @@ impl Setup {
         pairs.push(("MJPEG_PORT", ctx.mjpeg_port.clone()));
         pairs.push(("WDA_ALLOW_LAN", ctx.allow_lan.clone()));
         pairs.push(("WDA_TRANSPORT", ctx.transport.clone()));
+        // The on-phone daemon: the supervisor's relaunches must build and
+        // start the same runner as this run.
+        pairs.push(("IPU_EMBED", ctx.embed.clone()));
+        pairs.push(("IPU_EMBED_LIB", ctx.embed_lib.clone()));
+        pairs.push((crate::phone_daemon::HOST_ENV, ctx.daemon_host.clone()));
         if let Ok(icon) = std::env::var("WDA_RUNNER_ICON") {
             if !icon.is_empty() && icon != "auto" {
                 pairs.push(("WDA_RUNNER_ICON", icon));
@@ -3983,11 +4207,14 @@ impl Setup {
                     mjpeg_port,
                 )
                 && status::phase_is(&ctx.status_file, "ready")
-                && sys::runner_ok(
+                && sys::runner_get(
                     &format!("{target_url}/status"),
                     Duration::from_secs(4),
                     &self.ctx.runner_auth(),
                 )
+                .is_some_and(|(status, body)| {
+                    status < 400 && handoff_daemon_ready(&body, self.embed.is_some())
+                })
             {
                 ok("launchd replacement verified: runner identity, both loopback relays, and runner /status");
                 return Ok(());
@@ -4554,13 +4781,17 @@ impl Setup {
                         "could not store the device runner's launch token in the state dir",
                     );
                 };
+                let mut env = vec![(crate::runner_token::TOKEN_ENV.to_string(), token)];
+                env.extend(self.phone_daemon_env("")?);
+                let env: Vec<(&str, &str)> =
+                    env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
                 let Ok(spawned) = proc::spawn_detached_env(
                     &launcher,
                     &argv,
                     Some(self.ctx.state_dir()),
                     &self.ctx.run_log,
                     None,
-                    &[(crate::runner_token::TOKEN_ENV, token.as_str())],
+                    &env,
                 ) else {
                     return die("could not start the iOS 15/16 launcher");
                 };

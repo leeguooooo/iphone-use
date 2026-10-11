@@ -65,10 +65,14 @@ code=$?
 check "an instance's copy refuses another instance (exit 2)" \
     "[ $code = 2 ] && printf '%s' \"\$out\" | grep -q 'belongs to instance \"lab\"'"
 
+# A capable fallback must not replace an explicitly pinned old engine.
+FALLBACK="$HOME_DIR/Applications/iPhoneUse.app/Contents/MacOS/iphone-use"
+mkdir -p "$(dirname "$FALLBACK")"; cp "$FAKE" "$FALLBACK"
+rm -f "$TMP/log"
 out="$(run IPHONE_USE_SETUP_BIN="$OLD" /bin/bash "$SETUP" status 2>&1)"
 code=$?
-check "with no capable binary it says to reinstall (exit 1)" \
-    "[ $code = 1 ] && printf '%s' \"\$out\" | grep -q 'Reinstall it' && printf '%s' \"\$out\" | grep -q 'setup-native status'"
+check "an explicitly pinned old engine is refused without falling back (exit 1)" \
+    "[ $code = 1 ] && printf '%s' \"\$out\" | grep -q 'explicitly selected setup engine' && printf '%s' \"\$out\" | grep -q 'does not support status' && [ ! -e '$TMP/log' ]"
 
 out="$(run IPHONE_USE_SETUP_BIN="$FAKE" /bin/bash "$SETUP" frobnicate 2>&1)"
 code=$?

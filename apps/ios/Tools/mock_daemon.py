@@ -15,6 +15,17 @@ stream video and send gestures, without a phone, a Mac service or WDA:
   GET  /mock/info                    -> the stream's size and frame rate
   DELETE /mock/actions               -> forget them
 
+Agent tasks, flows and schedules (docs/agent-task.md), scripted in memory:
+
+  POST /agent/task, GET /agent/task/<id|current>?since=n, GET /agent/tasks,
+  POST /agent/task/<id>/confirm|cancel -> a task that takes a step a second
+      for 5 steps; a goal that pays, sends or deletes ("付", "发", "删",
+      "pay", "send", "delete") stops at needs_confirm before step 3
+  GET|POST /agent/flow/record, GET /agent/flow/draft, POST /agent/flow/save,
+  GET /agent/flows, POST /agent/flow/run
+  GET|POST /agent/schedules, PATCH|DELETE /agent/schedules/<id>,
+  POST /agent/schedules/<id>/run, GET /agent/schedules/<id>/runs
+
 The stream is made once from any video file (`--video`, default: the demo
 screens bundled with the app as a slideshow) with ffmpeg, cached next to
 this script as `.mock-stream.h264`. Needs python3 and ffmpeg; stdlib only.
@@ -38,6 +49,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 HERE = Path(__file__).resolve().parent
 DEMO = HERE.parent / "IPhoneUseRemote" / "Resources" / "Demo"
@@ -144,6 +156,123 @@ def frame_message(keyframe, pts_us, payload):
     return len(body).to_bytes(4, "big") + body
 
 
+RISKY = ("付", "发", "删", "pay", "send", "delete")
+NO_SCHEDULE = {"ok": False, "error": "no_such_schedule", "message": "no schedule with that id"}
+
+
+class Agent:
+    """Scripted agent tasks, flows and schedules, all in memory."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.tasks = []          # newest last
+        self.recording = None    # the steps, while recording
+        self.flows = [
+            {"id": "settings/battery", "name": "Battery level", "steps": 4, "inputs": [],
+             "app": "com.apple.Preferences", "source": "official", "verified": True, "risk": "read_only",
+             "outputs": ["level"]},
+            {"id": "messages/send-text", "name": "Send a message", "steps": 6, "inputs": ["to", "text"],
+             "app": "com.apple.MobileSMS", "source": "official", "verified": True, "risk": "side_effect",
+             "example_inputs": {"to": "Leo", "text": "hi"}},
+        ]
+        self.schedules = []
+        self.runs = []
+        self.seq = 0
+
+    def next_id(self, prefix):
+        self.seq += 1
+        return f"{prefix}-{self.seq}"
+
+    def start(self, body):
+        with self.lock:
+            running = next((t for t in self.tasks if t["status"] in ("running", "needs_confirm")), None)
+            if running:
+                return 409, {"error": "task_running", "id": running["id"]}
+            goal = (body.get("goal") or "").strip()
+            if not goal:
+                return 400, {"error": "goal_required"}
+            if goal == "__mock_refuse_task__":
+                return 503, {"error": "service_unavailable", "message": "Mock task service is unavailable"}
+            assist = ((body.get("models") or {}).get("assist") or [{}])[0]
+            task = {"id": self.next_id("t"), "goal": goal, "status": "running", "phase": "jev", "flow": None,
+                    "steps": [], "confirm": None, "summary": None, "error": None,
+                    "started_at_ms": int(time.time() * 1000), "elapsed_ms": 0,
+                    "models_used": {"assist": assist.get("model")},
+                    "risky": any(word in goal.lower() for word in RISKY), "answer": None, "cancel": False}
+            self.tasks.append(task)
+        # Keys never reach a log, not even the mock's.
+        models = json.loads(json.dumps(body.get("models") or {}))
+        for entry in [models.get("jev"), models.get("text"), *(models.get("assist") or [])]:
+            if isinstance(entry, dict) and entry.get("key"):
+                entry["key"] = "…"
+        print(json.dumps({"task": task["id"], "goal": goal, "models": models}, ensure_ascii=False), flush=True)
+        threading.Thread(target=self.run, args=(task,), daemon=True).start()
+        return 202, {"id": task["id"], "status": "running"}
+
+    def run(self, task):
+        targets = ["设置", "电池", "电池健康", "确认", "返回"]
+        long_progress = task["goal"] in ("__mock_long_progress__", "__mock_task_conflict_existing__")
+        for n in range(1, 101 if long_progress else 6):
+            time.sleep(3 if long_progress else 1)
+            with self.lock:
+                if task["cancel"]:
+                    task["status"] = "cancelled"
+                    break
+                if n == 3 and task["risky"]:
+                    task["status"] = "needs_confirm"
+                    task["confirm"] = {"action": "CLICK", "target": "确认支付", "reason": "pays ¥55.51",
+                                       "app": "拼多多"}
+            while task["status"] == "needs_confirm" and task["answer"] is None and not task["cancel"]:
+                time.sleep(0.2)
+            with self.lock:
+                if task["status"] == "needs_confirm":
+                    task["confirm"] = None
+                    if task["cancel"]:
+                        task["status"] = "cancelled"
+                        break
+                    if task["answer"] is False:
+                        task["status"] = "blocked"
+                        task["error"] = "你没有允许这一步，任务停在这里。"
+                        break
+                    task["status"] = "running"
+                by = "assist" if n == 4 else "jev"
+                target = f"进度测试 {n}" if long_progress else targets[n - 1]
+                task["phase"] = "acting" if long_progress else by
+                task["planned_action"] = {"action": "WAIT", "target": target} if long_progress else None
+                task["steps"].append({"n": n, "action": "WAIT" if long_progress else "CLICK", "target": target, "text": None,
+                                      "app": "设置", "ok": True, "error": None, "page_changed": True,
+                                      "by": by, "ms": 600 + 50 * n})
+        with self.lock:
+            if task["status"] == "running":
+                task["phase"] = "summary"
+        time.sleep(0.8)
+        with self.lock:
+            if task["status"] == "running":
+                task["status"] = "done"
+                task["summary"] = "进度显示测试完成，未操作手机。" if long_progress else "电池电量 87%，低电量模式关闭。"
+            task["elapsed_ms"] = int(time.time() * 1000) - task["started_at_ms"]
+
+    @staticmethod
+    def public(task, since=0, steps=True):
+        out = {k: v for k, v in task.items() if k not in ("risky", "answer", "cancel")}
+        if task["status"] in ("running", "needs_confirm"):
+            out["elapsed_ms"] = int(time.time() * 1000) - task["started_at_ms"]
+        if steps:
+            out["steps"] = [s for s in task["steps"] if s["n"] > since]
+        else:
+            out.pop("steps")
+        return out
+
+    def find(self, tid):
+        if tid == "current":
+            return next((t for t in reversed(self.tasks) if t["status"] in ("running", "needs_confirm")), None)
+        return next((t for t in self.tasks if t["id"] == tid), None)
+
+    def schedule_view(self, s):
+        last = next((r for r in reversed(self.runs) if r["schedule_id"] == s["id"]), None)
+        return {**s, "last_run": last}
+
+
 class Mock:
     def __init__(self, args):
         self.args = args
@@ -160,6 +289,7 @@ class Mock:
         if not self.units:
             sys.exit("mock_daemon: the stream has no access units")
         self.screenshot = (DEMO / "demo-general.jpg").read_bytes()
+        self.agent = Agent()
 
     def status(self):
         s = dict(BASE_STATUS)
@@ -215,6 +345,8 @@ def handler(mock):
             if path == "/agent/h264/keyframe":
                 mock.want_keyframe.set()
                 return self.send(200, b'{"ok":true}')
+            if path.startswith(("/agent/task", "/agent/flow", "/agent/schedules")):
+                return self.agent_post(path, raw)
             if path in ("/control", "/agent/mode"):
                 try:
                     action = json.loads(raw or b"{}")
@@ -225,6 +357,10 @@ def handler(mock):
                 entry = {"t": round(time.time(), 3), "path": path, **action}
                 with mock.lock:
                     mock.actions.append(entry)
+                with mock.agent.lock:
+                    if path == "/control" and mock.agent.recording is not None:
+                        kind = "tap_locator" if action.get("type") == "tap" else action.get("type")
+                        mock.agent.recording.append({"kind": kind})
                 print(json.dumps(entry), flush=True)
                 if path == "/agent/mode":
                     mock.scenario = "handoff" if action.get("mode") == "human" else "live"
@@ -232,11 +368,172 @@ def handler(mock):
             self.send(404, b"{}")
 
         def do_DELETE(self):
-            if self.path.split("?")[0] == "/mock/actions":
+            path = self.path.split("?")[0]
+            if path == "/mock/actions":
                 with mock.lock:
                     mock.actions.clear()
                 return self.send(200, b'{"ok":true}')
+            if not self.authed():
+                return self.send(401, b'{"ok":false,"error":"unauthorized"}')
+            if path.startswith("/agent/schedules/"):
+                sid = path.split("/")[3]
+                with mock.agent.lock:
+                    before = len(mock.agent.schedules)
+                    mock.agent.schedules = [s for s in mock.agent.schedules if s["id"] != sid]
+                    if len(mock.agent.schedules) == before:
+                        return self.json(404, NO_SCHEDULE)
+                return self.json(200, {"ok": True, "deleted": sid})
             self.send(404, b"{}")
+
+        def do_PATCH(self):
+            path = self.path.split("?")[0]
+            raw = self.body()
+            if not self.authed():
+                return self.send(401, b'{"ok":false,"error":"unauthorized"}')
+            if path.startswith("/agent/schedules/"):
+                sid = path.split("/")[3]
+                body = json.loads(raw or b"{}")
+                with mock.agent.lock:
+                    s = next((s for s in mock.agent.schedules if s["id"] == sid), None)
+                    if s is None:
+                        return self.json(404, NO_SCHEDULE)
+                    s["enabled"] = bool(body.get("enabled"))
+                    return self.json(200, {"ok": True, "schedule": mock.agent.schedule_view(s)})
+            self.send(404, b"{}")
+
+        def json(self, code, obj):
+            return self.send(code, json.dumps(obj, ensure_ascii=False).encode())
+
+        def agent_post(self, path, raw):
+            a = mock.agent
+            try:
+                body = json.loads(raw or b"{}")
+            except ValueError:
+                return self.json(400, {"ok": False, "error": "invalid_json"})
+            if self.headers.get("X-Phone-Control") != "1":
+                return self.json(403, {"ok": False, "error": "missing_phone_control_header"})
+            parts = path.strip("/").split("/")
+            if path == "/agent/task":
+                code, out = a.start(body)
+                return self.json(code, out)
+            if len(parts) == 4 and parts[1] == "task" and parts[3] in ("confirm", "cancel"):
+                with a.lock:
+                    task = a.find(parts[2])
+                    if task is None:
+                        return self.json(404, {"ok": False, "error": "task_not_found"})
+                    if parts[3] == "cancel":
+                        task["cancel"] = True
+                    elif task["status"] != "needs_confirm":
+                        return self.json(409, {"ok": False, "error": "not_waiting", "message": "nothing to answer"})
+                    else:
+                        task["answer"] = bool(body.get("approve"))
+                print(json.dumps({"task": parts[2], parts[3]: body}), flush=True)
+                return self.json(200, {"ok": True})
+            if path == "/agent/flow/record":
+                with a.lock:
+                    if body.get("action") == "start":
+                        a.recording = []
+                        return self.json(200, {"ok": True, "recording": True})
+                    if body.get("action") == "stop":
+                        steps, a.recording = a.recording or [], None
+                        draft = None
+                        if steps:
+                            draft = {"source": "current",
+                                     "app": {"bundle": "com.apple.Preferences", "label": "设置"},
+                                     "recorded_steps": len(steps),
+                                     "flow": {"version": 1, "name": "设置 task", "app": "com.apple.Preferences",
+                                              "steps": [{"kind": "launch_app"}] + steps},
+                                     "todo": ["Give it a real name and description.",
+                                              "Add a wait_for gate after each tap that opens a new screen."]}
+                        return self.json(200, {"ok": True, "recording": False, "draft": draft})
+                return self.json(400, {"ok": False, "error": "invalid_action"})
+            if path == "/agent/flow/save":
+                fid = body.get("id") or ""
+                if "/" not in fid:
+                    return self.json(400, {"ok": False, "error": "id_required", "hint": "an id like myapp/daily-check"})
+                with a.lock:
+                    a.flows = [f for f in a.flows if f["id"] != fid]
+                    steps = len((body.get("flow") or {}).get("steps") or []) or 3
+                    a.flows.append({"id": fid, "name": body.get("name") or fid,
+                                    "description": body.get("description"), "steps": steps, "inputs": [],
+                                    "source": "local", "verified": False, "risk": "unknown"})
+                print(json.dumps({"saved": fid, "with_flow": "flow" in body}), flush=True)
+                return self.json(200, {"ok": True, "saved": {"id": fid, "source": "local"}})
+            if path == "/agent/flow/run":
+                flow = next((f for f in a.flows if f["id"] == body.get("id")), None)
+                if flow is None:
+                    return self.json(422, {"ok": False, "error": "flow_not_run", "message": "no flow with that id"})
+                print(json.dumps({"run": flow["id"], "confirm": body.get("confirm")}), flush=True)
+                if flow.get("risk") == "side_effect" and not body.get("confirm"):
+                    return self.json(200, {"ok": False, "result": {"ok": False, "error": "confirmation_required"}})
+                time.sleep(3)
+                return self.json(200, {"ok": True, "result": {"ok": True, "outputs": {"level": "87%"}}})
+            if path == "/agent/schedules":
+                cron = body.get("cron") or ""
+                if len(cron.split()) != 5:
+                    return self.json(400, {"ok": False, "error": "invalid_cron", "message": "cron needs 5 fields"})
+                with a.lock:
+                    now = int(time.time())
+                    s = {"id": a.next_id("s"), "name": body.get("name"), "cron": cron,
+                         "kind": body.get("kind", "flow"), "target": body.get("target"),
+                         "inputs": body.get("inputs") or {},
+                         "confirm_side_effects": bool(body.get("confirm_side_effects")), "enabled": True,
+                         "window_mins": 30, "created_at": now, "next_run_at": now + 3600}
+                    a.schedules.append(s)
+                    print(json.dumps({"schedule": s}, ensure_ascii=False), flush=True)
+                    return self.json(201, {"ok": True, "schedule": a.schedule_view(s)})
+            if len(parts) == 4 and parts[1] == "schedules" and parts[3] == "run":
+                with a.lock:
+                    s = next((s for s in a.schedules if s["id"] == parts[2]), None)
+                    if s is None:
+                        return self.json(404, NO_SCHEDULE)
+                    now = int(time.time())
+                    run = {"id": a.next_id("r"), "schedule_id": s["id"], "scheduled_for": now,
+                           "deadline": now + 1800, "state": "passed", "manual": True, "attempts": 1,
+                           "finished_at": now + 3, "duration_ms": 3000, "summary": "level=87%"}
+                    a.runs.append(run)
+                    return self.json(202, {"ok": True, "run": run})
+            return self.json(404, {"ok": False, "error": "not_found"})
+
+        def agent_get(self, path, query):
+            a = mock.agent
+            parts = path.strip("/").split("/")
+            with a.lock:
+                if path == "/agent/tasks":
+                    return self.json(200, {"ok": True, "tasks": [Agent.public(t, steps=False)
+                                                                 for t in reversed(a.tasks[-20:])]})
+                if len(parts) == 3 and parts[1] == "task":
+                    task = a.find(parts[2])
+                    if task is None:
+                        return self.json(404, {"ok": False, "error": "task_not_found"})
+                    if task["goal"] == "__mock_task_conflict_existing__":
+                        time.sleep(2)
+                    since = int((query.get("since") or ["0"])[0] or 0)
+                    return self.json(200, Agent.public(task, since))
+                if path == "/agent/flow/record":
+                    return self.json(200, {"ok": True, "recording": a.recording is not None,
+                                           "steps": len(a.recording or []), "draft": None})
+                if path == "/agent/flow/draft":
+                    done = next((t for t in reversed(a.tasks) if t["status"] == "done"), None)
+                    if done is None:
+                        return self.json(404, {"ok": False, "error": "no_trail"})
+                    return self.json(200, {"ok": True, "source": "previous",
+                                           "app": {"bundle": "com.apple.Preferences", "label": "设置"},
+                                           "recorded_steps": len(done["steps"]),
+                                           "flow": {"version": 1, "name": "设置 task", "app": "com.apple.Preferences",
+                                                    "steps": [{"kind": "tap_locator"}] * len(done["steps"])},
+                                           "todo": ["Give it a real name and description."]})
+                if path == "/agent/flows":
+                    return self.json(200, {"ok": True, "source": "mock", "flows": a.flows})
+                if path == "/agent/schedules":
+                    return self.json(200, {"ok": True, "schedules": [a.schedule_view(s) for s in a.schedules],
+                                           "mcp_available": True})
+                if path == "/agent/schedules/runs":
+                    return self.json(200, {"ok": True, "runs": list(reversed(a.runs))})
+                if len(parts) == 4 and parts[1] == "schedules" and parts[3] == "runs":
+                    return self.json(200, {"ok": True, "runs": [r for r in reversed(a.runs)
+                                                                if r["schedule_id"] == parts[2]]})
+            return self.json(404, {"ok": False, "error": "not_found"})
 
         def do_GET(self):
             path = self.path.split("?")[0]
@@ -257,6 +554,8 @@ def handler(mock):
                 return self.send(200, mock.screenshot, "image/jpeg")
             if path == "/agent/h264":
                 return self.stream()
+            if path.startswith(("/agent/task", "/agent/flow", "/agent/schedules")):
+                return self.agent_get(path, parse_qs(self.path.partition("?")[2]))
             self.send(404, b"{}")
 
         def stream(self):

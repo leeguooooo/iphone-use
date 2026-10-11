@@ -200,9 +200,21 @@ fn reject_unknown(
     }
 }
 
+fn parse_snapshot(value: Option<&serde_json::Value>) -> Result<Option<String>, String> {
+    match value {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| Some(s.to_string()))
+            .ok_or_else(|| "snapshot must be a non-empty string".to_string()),
+    }
+}
+
 /// `POST /agent/collect` body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectRequest {
+    pub snapshot: Option<String>,
     pub row_kind: String,
     pub region: Option<Region>,
     pub max_pages: u32,
@@ -220,9 +232,17 @@ impl CollectRequest {
         };
         reject_unknown(
             body,
-            &["row_kind", "region", "max_pages", "end_label", "direction"],
+            &[
+                "row_kind",
+                "region",
+                "max_pages",
+                "end_label",
+                "direction",
+                "snapshot",
+            ],
         )?;
         Ok(Self {
+            snapshot: parse_snapshot(body.get("snapshot"))?,
             row_kind: parse_kind(body.get("row_kind"), Some(DEFAULT_ROW_KIND))?
                 .unwrap_or_else(|| DEFAULT_ROW_KIND.to_string()),
             region: body
@@ -246,6 +266,7 @@ impl CollectRequest {
 /// `POST /agent/scroll_find` body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FindRequest {
+    pub snapshot: Option<String>,
     pub label: String,
     pub kind: Option<String>,
     pub max_swipes: u32,
@@ -260,9 +281,17 @@ impl FindRequest {
             .ok_or("the body must be a JSON object with a \"label\"")?;
         reject_unknown(
             body,
-            &["label", "kind", "max_swipes", "region", "direction"],
+            &[
+                "label",
+                "kind",
+                "max_swipes",
+                "region",
+                "direction",
+                "snapshot",
+            ],
         )?;
         Ok(Self {
+            snapshot: parse_snapshot(body.get("snapshot"))?,
             label: parse_label(body.get("label"), "label")?.ok_or("label is required")?,
             kind: parse_kind(body.get("kind"), None)?,
             max_swipes: parse_count(

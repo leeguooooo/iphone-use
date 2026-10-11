@@ -1,6 +1,6 @@
 [package]
 name = "server"
-version = "0.17.17"
+version = "0.17.19"
 edition = "2021"
 
 # The daemon binary. Lib stays for unit-testable glue (http/signaling/webrtc
@@ -15,6 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 core = { path = "../core" }
+# Flows, the flow registry and Jev, run in process by the daemon on the phone.
+iphone-use-mcp = { path = "../mcp" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -73,6 +75,7 @@ ab_glyph = "0.2"
 plist = "1.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+browser-session = { path = "../browser-session", features = ["desktop"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"

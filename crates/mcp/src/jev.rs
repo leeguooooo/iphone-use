@@ -69,33 +69,33 @@ pub struct Options {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-struct Target {
+pub(crate) struct Target {
     /// Row index in the element tree (for element + snapshot taps).
-    row: usize,
-    kind: String,
-    label: String,
-    value: String,
-    fill: bool,
-    checked: Option<bool>,
+    pub(crate) row: usize,
+    pub(crate) kind: String,
+    pub(crate) label: String,
+    pub(crate) value: String,
+    pub(crate) fill: bool,
+    pub(crate) checked: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
-struct Screen {
-    snapshot: String,
-    app: String,
+pub(crate) struct Screen {
+    pub(crate) snapshot: String,
+    pub(crate) app: String,
     /// The navigation bar's title: which page of the app this is.
-    page: String,
-    text: String,
-    targets: Vec<Target>,
-    keyboard: bool,
-    fingerprint: String,
+    pub(crate) page: String,
+    pub(crate) text: String,
+    pub(crate) targets: Vec<Target>,
+    pub(crate) keyboard: bool,
+    pub(crate) fingerprint: String,
 }
 
 fn str_of<'a>(row: &'a Value, key: &str) -> &'a str {
     row.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-fn observe_screen(tree: &Value) -> Screen {
+pub(crate) fn observe_screen(tree: &Value) -> Screen {
     let rows: &[Value] = tree
         .get("elements")
         .and_then(Value::as_array)
@@ -222,7 +222,7 @@ fn choice_question(criteria: &[(String, Value)], instructions: Value) -> String 
 }
 
 /// Controls offered as operations of their own (no target).
-fn controls(screen: &Screen) -> Vec<(&'static str, &'static str)> {
+pub(crate) fn controls(screen: &Screen) -> Vec<(&'static str, &'static str)> {
     let mut list = vec![
         ("SCROLL_DOWN", "Scroll down to reveal more of the current screen."),
         ("SCROLL_UP", "Scroll up to reveal content above."),
@@ -241,7 +241,7 @@ fn controls(screen: &Screen) -> Vec<(&'static str, &'static str)> {
 /// changed nothing, or one already taken three times in the last four steps.
 /// Hardware: BACK on a top-level page twelve times in a row; tapping a search
 /// field seventeen times as its keyboard came and went.
-fn stuck_actions(history: &[Value]) -> Vec<(String, Value)> {
+pub(crate) fn stuck_actions(history: &[Value]) -> Vec<(String, Value)> {
     let keyed: Vec<((String, Value), bool)> = history
         .iter()
         .map(|h| {
@@ -275,11 +275,11 @@ fn stuck_actions(history: &[Value]) -> Vec<(String, Value)> {
     avoid
 }
 
-struct Decision {
-    operation: String,
+pub(crate) struct Decision {
+    pub(crate) operation: String,
     /// Index into `screen.targets` for CLICK / TYPE_TEXT.
-    target: Option<usize>,
-    latency_ms: u128,
+    pub(crate) target: Option<usize>,
+    pub(crate) latency_ms: u128,
 }
 
 fn valid_choice(answer: &Value, ids: &[String]) -> Result<String> {
@@ -293,13 +293,15 @@ fn valid_choice(answer: &Value, ids: &[String]) -> Result<String> {
     }
 }
 
-struct Models {
-    http: reqwest::Client,
-    typesafe_key: String,
-    typesafe_model: String,
-    text_key: Option<String>,
-    text_base: String,
-    text_model: String,
+pub(crate) struct Models {
+    pub(crate) http: reqwest::Client,
+    pub(crate) typesafe_key: String,
+    pub(crate) typesafe_model: String,
+    /// TypeSafe's API base (`https://api.typesafe.ai/v1`).
+    pub(crate) typesafe_base: String,
+    pub(crate) text_key: Option<String>,
+    pub(crate) text_base: String,
+    pub(crate) text_model: String,
 }
 
 fn key_file(name: &str) -> Option<String> {
@@ -310,7 +312,7 @@ fn key_file(name: &str) -> Option<String> {
 }
 
 impl Models {
-    fn from_env() -> Result<Self> {
+    pub(crate) fn from_env() -> Result<Self> {
         let typesafe_key = std::env::var("TYPESAFE_API_KEY")
             .ok()
             .filter(|k| !k.trim().is_empty())
@@ -322,6 +324,7 @@ impl Models {
                 .build()?,
             typesafe_key,
             typesafe_model: std::env::var("TYPESAFE_MODEL").unwrap_or_else(|_| "jev-latest".into()),
+            typesafe_base: "https://api.typesafe.ai/v1".into(),
             text_key: std::env::var("TEXT_MODEL_API_KEY")
                 .ok()
                 .filter(|k| !k.trim().is_empty())
@@ -334,7 +337,7 @@ impl Models {
         })
     }
 
-    async fn post(&self, url: &str, key: &str, body: String, timeout: Duration) -> Result<Value> {
+    pub(crate) async fn post(&self, url: &str, key: &str, body: String, timeout: Duration) -> Result<Value> {
         for attempt in 0..3u32 {
             let resp = self
                 .http
@@ -359,7 +362,7 @@ impl Models {
         bail!("model unavailable")
     }
 
-    async fn choose(&self, screen: &Screen, goal: &str, history: &[Value]) -> Result<Decision> {
+    pub(crate) async fn choose(&self, screen: &Screen, goal: &str, history: &[Value]) -> Result<Decision> {
         let elements: Vec<Value> = screen
             .targets
             .iter()
@@ -478,7 +481,7 @@ impl Models {
         ]);
         let started = Instant::now();
         let result = self
-            .post("https://api.typesafe.ai/v1/systemone", &self.typesafe_key, body, Duration::from_secs(20))
+            .post(&format!("{}/systemone", self.typesafe_base), &self.typesafe_key, body, Duration::from_secs(20))
             .await?;
         let answers = &result["answers"];
         let operation = valid_choice(&answers["operation"], &op_ids)?;
@@ -500,7 +503,7 @@ impl Models {
 
     /// `Ok(None)` when the helper answers `{"text": null}`: the goal does not
     /// supply a value, which ends the run as blocked.
-    async fn field_text(&self, context: Value) -> Result<Option<String>> {
+    pub(crate) async fn field_text(&self, context: Value) -> Result<Option<String>> {
         let key = self
             .text_key
             .as_deref()
@@ -557,7 +560,7 @@ fn parse_field_text(content: &str) -> Option<Option<String>> {
 // The loop
 // ---------------------------------------------------------------------------
 
-async fn read_screen(daemon: &DaemonClient) -> Result<Screen> {
+pub(crate) async fn read_screen(daemon: &DaemonClient) -> Result<Screen> {
     let body = daemon.elements().await.context("read the phone screen")?;
     let tree: Value = serde_json::from_str(&body).context("parse the element tree")?;
     if tree.get("error").is_some() && tree.get("elements").and_then(Value::as_array).is_none_or(Vec::is_empty) {
@@ -566,13 +569,137 @@ async fn read_screen(daemon: &DaemonClient) -> Result<Screen> {
     Ok(observe_screen(&tree))
 }
 
-async fn act(daemon: &DaemonClient, action: Value) -> Result<Value> {
+pub(crate) async fn act(daemon: &DaemonClient, action: Value) -> Result<Value> {
     let response = daemon.input_value(&action).await?;
     let body = response.json.clone().unwrap_or_else(|| json!({"raw": response.body()}));
     if !response.confirms_action() {
         bail!("the phone refused {}: {}", action["type"], body);
     }
     Ok(body)
+}
+
+/// What one decided operation did.
+pub(crate) enum Executed {
+    Done,
+    /// Stopped: no supported operation helps (with a reason when known).
+    Blocked(Option<String>),
+    /// The phone was asked to act; an `Err` is a refused or failed step,
+    /// which the next decision sees in the history rather than a retry.
+    Acted(Result<()>),
+}
+
+/// Carry out one operation chosen for `screen` (`target` for CLICK and
+/// TYPE_TEXT). `entry` gets the typed text. An `Err` means the phone could not
+/// be read at all, which ends the run.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_operation(
+    daemon: &DaemonClient,
+    models: &Models,
+    screen: &Screen,
+    operation: &str,
+    target: Option<&Target>,
+    goal: &str,
+    history: &[Value],
+    entry: &mut Value,
+    text_ms: &mut u128,
+    provided_text: Option<String>,
+) -> Result<Executed> {
+    let result: Result<()> = match operation {
+        "DONE" => return Ok(Executed::Done),
+        "BLOCKED" => return Ok(Executed::Blocked(None)),
+        "CLICK" => {
+            let t = target.expect("CLICK has a target");
+            act(daemon, json!({"type": "tap", "element": t.row, "snapshot": screen.snapshot}))
+                .await
+                .map(drop)
+        }
+        "TYPE_TEXT" => {
+            let t = target.expect("TYPE_TEXT has a target");
+            let tt = Instant::now();
+            let text = match provided_text {
+                // The deciding model already said what to type.
+                Some(text) => Ok(Some(text)),
+                None => {
+                    models
+                        .field_text(json!({
+                            "goal": goal,
+                            "field": {"label": t.label, "role": t.kind, "current_value": t.value},
+                            "screen": {"app": screen.app, "text": screen.text.chars().take(1500).collect::<String>()},
+                            "history": history,
+                        }))
+                        .await
+                }
+            };
+            *text_ms += tt.elapsed().as_millis();
+            match text {
+                Ok(Some(text)) => {
+                    entry["text"] = json!(text);
+                    // set_value writes the whole string through the field
+                    // itself, so a Chinese keyboard cannot swallow digits.
+                    let first = act(
+                        daemon,
+                        json!({"type": "set_value", "element": t.row, "snapshot": screen.snapshot, "value": text}),
+                    )
+                    .await;
+                    match first {
+                        // The field moved under us (a keyboard still
+                        // animating in): find it again by name, once.
+                        Err(e) if format!("{e:#}").contains("stale_element_snapshot") => {
+                            let fresh = read_screen(daemon).await?;
+                            match fresh.targets.iter().find(|f| f.fill && f.label == t.label) {
+                                Some(f) => act(
+                                    daemon,
+                                    json!({"type": "set_value", "element": f.row, "snapshot": fresh.snapshot, "value": text}),
+                                )
+                                .await
+                                .map(drop),
+                                None => Err(e),
+                            }
+                        }
+                        // Some fields (Settings' search on iOS 27) turn into
+                        // another element once focused, so set_value cannot
+                        // find them: type into whatever now has focus, after
+                        // focusing it if the run has not just done so.
+                        Err(e) if format!("{e:#}").contains("element_not_found") => {
+                            let just_focused = history.last().is_some_and(|h| {
+                                h["action"] == "CLICK" && h["target"] == json!(t.label)
+                            });
+                            if !just_focused {
+                                act(daemon, json!({"type": "tap", "element": t.row, "snapshot": screen.snapshot}))
+                                    .await?;
+                                tokio::time::sleep(Duration::from_millis(400)).await;
+                            }
+                            act(daemon, json!({"type": "text", "text": text, "clear": true}))
+                                .await
+                                .map(drop)
+                        }
+                        other => other.map(drop),
+                    }
+                }
+                Ok(None) => {
+                    return Ok(Executed::Blocked(Some(format!(
+                        "the goal gives no value for the field {:?}",
+                        t.label
+                    ))))
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "SCROLL_DOWN" => act(daemon, json!({"type": "scroll", "x": 0.5, "y": 0.6, "dx": 0, "dy": 300})).await.map(drop),
+        "SCROLL_UP" => act(daemon, json!({"type": "scroll", "x": 0.5, "y": 0.4, "dx": 0, "dy": -300})).await.map(drop),
+        "BACK" => act(daemon, json!({"type": "back"})).await.map(drop),
+        "HOME" => act(daemon, json!({"type": "shortcut", "name": "home"})).await.map(drop),
+        "SPOTLIGHT" => {
+            act(daemon, json!({"type": "shortcut", "name": "spotlight"})).await.map(drop)
+        }
+        "PRESS_RETURN" => act(daemon, json!({"type": "key", "name": "return"})).await.map(drop),
+        "WAIT" => {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            Ok(())
+        }
+        other => Err(anyhow::anyhow!("unknown operation {other}")),
+    };
+    Ok(Executed::Acted(result))
 }
 
 /// Run one goal. Returns the report; `status` is `done`, `blocked`,
@@ -622,102 +749,34 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
             "page_changed": Value::Null,
         });
         let t = Instant::now();
-        let result: Result<()> = match decision.operation.as_str() {
-            "DONE" => {
+        let result: Result<()> = match execute_operation(
+            daemon,
+            &models,
+            &screen,
+            &decision.operation,
+            target.as_ref(),
+            &goal,
+            &history,
+            &mut entry,
+            &mut text_ms,
+            None,
+        )
+        .await?
+        {
+            Executed::Done => {
                 outcome = "done";
                 history.push(entry);
                 break;
             }
-            "BLOCKED" => {
+            Executed::Blocked(why) => {
                 outcome = "blocked";
+                if let Some(why) = why {
+                    reason = json!(why);
+                }
                 history.push(entry);
                 break;
             }
-            "CLICK" => {
-                let t = target.as_ref().expect("CLICK has a target");
-                act(daemon, json!({"type": "tap", "element": t.row, "snapshot": screen.snapshot}))
-                    .await
-                    .map(drop)
-            }
-            "TYPE_TEXT" => {
-                let t = target.as_ref().expect("TYPE_TEXT has a target");
-                let tt = Instant::now();
-                let text = models
-                    .field_text(json!({
-                        "goal": goal,
-                        "field": {"label": t.label, "role": t.kind, "current_value": t.value},
-                        "screen": {"app": screen.app, "text": screen.text.chars().take(1500).collect::<String>()},
-                        "history": history,
-                    }))
-                    .await;
-                text_ms += tt.elapsed().as_millis();
-                match text {
-                    Ok(Some(text)) => {
-                        entry["text"] = json!(text);
-                        // set_value writes the whole string through the field
-                        // itself, so a Chinese keyboard cannot swallow digits.
-                        let first = act(
-                            daemon,
-                            json!({"type": "set_value", "element": t.row, "snapshot": screen.snapshot, "value": text}),
-                        )
-                        .await;
-                        match first {
-                            // The field moved under us (a keyboard still
-                            // animating in): find it again by name, once.
-                            Err(e) if format!("{e:#}").contains("stale_element_snapshot") => {
-                                let fresh = read_screen(daemon).await?;
-                                match fresh.targets.iter().find(|f| f.fill && f.label == t.label) {
-                                    Some(f) => act(
-                                        daemon,
-                                        json!({"type": "set_value", "element": f.row, "snapshot": fresh.snapshot, "value": text}),
-                                    )
-                                    .await
-                                    .map(drop),
-                                    None => Err(e),
-                                }
-                            }
-                            // Some fields (Settings' search on iOS 27) turn into
-                            // another element once focused, so set_value cannot
-                            // find them: type into whatever now has focus, after
-                            // focusing it if the run has not just done so.
-                            Err(e) if format!("{e:#}").contains("element_not_found") => {
-                                let just_focused = history.last().is_some_and(|h| {
-                                    h["action"] == "CLICK" && h["target"] == json!(t.label)
-                                });
-                                if !just_focused {
-                                    act(daemon, json!({"type": "tap", "element": t.row, "snapshot": screen.snapshot}))
-                                        .await?;
-                                    tokio::time::sleep(Duration::from_millis(400)).await;
-                                }
-                                act(daemon, json!({"type": "text", "text": text, "clear": true}))
-                                    .await
-                                    .map(drop)
-                            }
-                            other => other.map(drop),
-                        }
-                    }
-                    Ok(None) => {
-                        outcome = "blocked";
-                        reason = json!(format!("the goal gives no value for the field {:?}", t.label));
-                        history.push(entry);
-                        break;
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            "SCROLL_DOWN" => act(daemon, json!({"type": "scroll", "x": 0.5, "y": 0.6, "dx": 0, "dy": 300})).await.map(drop),
-            "SCROLL_UP" => act(daemon, json!({"type": "scroll", "x": 0.5, "y": 0.4, "dx": 0, "dy": -300})).await.map(drop),
-            "BACK" => act(daemon, json!({"type": "back"})).await.map(drop),
-            "HOME" => act(daemon, json!({"type": "shortcut", "name": "home"})).await.map(drop),
-            "SPOTLIGHT" => {
-                act(daemon, json!({"type": "shortcut", "name": "spotlight"})).await.map(drop)
-            }
-            "PRESS_RETURN" => act(daemon, json!({"type": "key", "name": "return"})).await.map(drop),
-            "WAIT" => {
-                tokio::time::sleep(Duration::from_millis(1000)).await;
-                Ok(())
-            }
-            other => Err(anyhow::anyhow!("unknown operation {other}")),
+            Executed::Acted(result) => result,
         };
         act_ms += t.elapsed().as_millis();
         if let Err(e) = result {

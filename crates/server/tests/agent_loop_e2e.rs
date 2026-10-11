@@ -48,10 +48,14 @@ fn free_port() -> u16 {
 struct Daemon {
     child: Child,
     port: u16,
+    error_log: std::path::PathBuf,
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("daemon diagnostic: {}", std::fs::read_to_string(&self.error_log).unwrap_or_default());
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -89,11 +93,12 @@ fn spawn_daemon_with(
         // so a wrong token is really refused.
         .env("IPHONE_USE_PASSWORD", "e2e-password-not-the-token")
         .env("IPHONE_USE_NO_UPDATE_CHECK", "1")
+        .env("TOKIO_WORKER_THREADS", "2")
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(state.join("daemon.err")).unwrap())
         .spawn()
         .expect("spawn iphone-use serve");
-    let daemon = Daemon { child, port };
+    let daemon = Daemon { child, port, error_log: state.join("daemon.err") };
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {

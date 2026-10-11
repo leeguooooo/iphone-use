@@ -15,26 +15,15 @@ enum Theme {
         ? UIColor(red: 0.035, green: 0.035, blue: 0.045, alpha: 1)
         : UIColor(red: 0.93, green: 0.93, blue: 0.95, alpha: 1) })
     /// Screens with content on them (grid, onboarding).
-    static let canvas = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark
-        ? UIColor(red: 0.055, green: 0.055, blue: 0.066, alpha: 1)
-        : UIColor.systemGroupedBackground })
-    /// Cards and tiles on the canvas.
-    static let surface = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark
-        ? UIColor(red: 0.11, green: 0.11, blue: 0.125, alpha: 1)
-        : UIColor.secondarySystemGroupedBackground })
-    static let hairline = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark
-        ? UIColor.white.withAlphaComponent(0.10)
-        : UIColor.black.withAlphaComponent(0.08) })
-    /// The brand: the periwinkle of the app icon.
-    static let accent = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark
-        ? UIColor(red: 0.45, green: 0.53, blue: 1.0, alpha: 1)
-        : UIColor(red: 0.29, green: 0.36, blue: 0.95, alpha: 1) })
-    static var uiAccent: UIColor { UIColor(red: 0.45, green: 0.53, blue: 1.0, alpha: 1) }
-
-    static let ok = Color(red: 0.19, green: 0.82, blue: 0.35)
-    static let busy = Color(red: 1.0, green: 0.76, blue: 0.20)
-    static let attention = Color(red: 1.0, green: 0.62, blue: 0.04)
-    static let down = Color(red: 1.0, green: 0.27, blue: 0.23)
+    static let canvas = Color(uiColor: .systemGroupedBackground)
+    static let surface = Color(uiColor: .secondarySystemGroupedBackground)
+    static let hairline = Color(uiColor: .separator).opacity(0.35)
+    static let accent = Color(uiColor: .systemBlue)
+    static var uiAccent: UIColor { .systemBlue }
+    static let ok = Color(uiColor: .systemGreen)
+    static let busy = Color(uiColor: .systemYellow)
+    static let attention = Color(uiColor: .systemOrange)
+    static let down = Color(uiColor: .systemRed)
 
     static func color(_ tone: ConnectionPresentation.Tone) -> Color {
         switch tone {

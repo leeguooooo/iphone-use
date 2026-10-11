@@ -14,6 +14,7 @@ pub mod checks;
 pub mod commands;
 pub mod ctx;
 pub mod doctor;
+pub mod embed;
 pub mod flow;
 pub mod icon;
 pub mod launchd;

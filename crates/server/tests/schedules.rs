@@ -120,6 +120,7 @@ fn scheduler(
             self_url: daemon.url.clone(),
             credential: Some("secret-token".into()),
             mcp: Some(mcp),
+            in_process: false,
             notify: false,
         },
         Arc::new(move || clock.load(Ordering::SeqCst)),
@@ -332,4 +333,64 @@ fn the_api_validates_with_iphone_use_mcp_and_refuses_unconfirmed_side_effects() 
     assert_eq!(status, 404);
     let (status, _) = call("GET", "/agent/schedules/..%2Fx/runs", None, false);
     assert_eq!(status, 404);
+}
+
+/// The phone's own daemon cannot start iphone-use-mcp: a due flow runs in
+/// process, against the daemon, as the run's owner, and hands the phone back.
+#[test]
+fn on_the_phone_a_due_flow_runs_in_process_as_its_own_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = fake_daemon();
+    *daemon.status.lock().unwrap() =
+        r#"{"drivable":true,"owner":null,"backend":"direct"}"#.to_string();
+    let flow = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/flows/open-spotlight.json")
+        .canonicalize()
+        .unwrap();
+    std::fs::write(
+        dir.path().join("schedules.json"),
+        serde_json::json!({
+            "schedules": [{
+                "id": "s1", "cron": "0 9 * * *", "kind": "flow",
+                "target": flow.display().to_string(),
+                "inputs": {}, "confirm_side_effects": false,
+                "enabled": true, "window_mins": 60, "created_at": NINE - 86_400,
+                "next_run_at": NINE
+            }],
+            "runs": [], "seq": 0
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let s = Scheduler::with_clock(
+        SchedulerConfig {
+            store_path: dir.path().join("schedules.json"),
+            artifacts_dir: dir.path().join("runs"),
+            self_url: daemon.url.clone(),
+            credential: Some("secret-token".into()),
+            // Nothing to start: an in-process run must not need it.
+            mcp: None,
+            in_process: true,
+            notify: false,
+        },
+        Arc::new(|| NINE + 30),
+        schedules::local_time,
+    );
+    block(s.tick());
+    let run = last_run(&s);
+    assert_ne!(run["state"], "due", "{run}");
+    assert!(
+        run["error"].as_str().map_or(true, |e| !e.contains("iphone-use-mcp")),
+        "never reaches for the binary: {run}"
+    );
+    let seen = daemon.seen.lock().unwrap().join("\n");
+    assert!(
+        seen.lines().any(|l| l.starts_with("POST /agent/") && !l.starts_with("POST /agent/owner") && l.ends_with("owner=schedule-s1")),
+        "the flow drove the daemon as the run's owner: {seen}\n{run}"
+    );
+    assert!(
+        seen.contains("POST /agent/owner HTTP/1.1 owner=schedule-s1"),
+        "lease handed back: {seen}"
+    );
+    assert!(run["artifacts"].is_string(), "{run}");
 }

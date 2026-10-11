@@ -182,6 +182,31 @@ struct CatalogRow {
     country: String,
 }
 
+/// A goal that explicitly starts by opening a named app can launch it
+/// without asking a model to navigate the caller's own composer.
+pub fn starting_app(goal: &str) -> Option<String> {
+    let mut text = goal.trim().to_lowercase();
+    for prefix in ["请帮我", "帮我", "请"] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest.trim_start().to_string();
+            break;
+        }
+    }
+    let tail = ["打开", "启动", "进入", "open ", "launch "]
+        .iter()
+        .find_map(|prefix| text.strip_prefix(prefix))?
+        .trim_start();
+    catalog().iter().flat_map(|app| app.names().map(move |name| (app, name)))
+        .filter(|(_, name)| {
+            let name = name.to_lowercase();
+            let Some(rest) = tail.strip_prefix(&name) else { return false; };
+            rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c.is_ascii_punctuation() || "，。；：".contains(c))
+                || (!name.is_ascii() && ["查看", "看看", "检查", "搜索", "领取", "签到", "播放", "发送", "删除", "购买", "然后", "并", "的", "里", "中查看", "中检查", "查", "看", "搜", "领", "把", "给"].iter().any(|action| rest.starts_with(action)))
+        })
+        .max_by_key(|(_, name)| name.chars().count())
+        .map(|(app, _)| app.bundle_id.clone())
+}
+
 /// The bundled catalog plus Apple's built-in apps. Parsed once.
 pub fn catalog() -> &'static [Candidate] {
     static CATALOG: OnceLock<Vec<Candidate>> = OnceLock::new();
@@ -558,6 +583,18 @@ pub async fn search_apple(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_open_goals_choose_the_app_without_guessing() {
+        assert_eq!(super::starting_app("打开设置查看电池电量").as_deref(), Some("com.apple.Preferences"));
+        assert_eq!(super::starting_app("请帮我打开设置看看蓝牙").as_deref(), Some("com.apple.Preferences"));
+        assert_eq!(super::starting_app("Open SETTINGS and check battery").as_deref(), Some("com.apple.Preferences"));
+        assert_eq!(super::starting_app("看看设置有没有问题"), None);
+        assert_eq!(super::starting_app("不要打开设置"), None);
+        assert_eq!(super::starting_app("open SettingsFake"), None);
+        assert_eq!(super::starting_app("打开设置中心"), None);
+        assert_eq!(super::starting_app("打开一个不知道的 app"), None);
+    }
+
     use super::*;
 
     fn installed(apps: Value) -> Vec<Candidate> {

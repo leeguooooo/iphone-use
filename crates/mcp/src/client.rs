@@ -302,6 +302,12 @@ impl DaemonClient {
         Self::new(base_url, token)
     }
 
+    /// The same client acting for another owner (a scheduled run, a task).
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = owner.into();
+        self
+    }
+
     /// Construct with explicit values (useful for tests).
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
         Self::with_timeouts(base_url, token, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
@@ -716,7 +722,9 @@ impl DaemonClient {
             .header("x-phone-control", "1")
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
-        read_response(req.send().await?).await
+        let response = read_response(req.send().await?).await?;
+        self.remember_snapshot(response.json.as_ref());
+        Ok(response)
     }
 
     /// `GET /agent/flow/draft` — the daemon's recorded action trail as a flow

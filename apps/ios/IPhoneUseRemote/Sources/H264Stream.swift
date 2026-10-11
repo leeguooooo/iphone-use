@@ -97,7 +97,7 @@ final class VideoDisplayView: UIView {
     }
 
     func reset() {
-        displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: false) {}
+        flushVideo()
         waitingForKeyframe = true
     }
 
@@ -124,14 +124,13 @@ final class VideoDisplayView: UIView {
             waitingForKeyframe = false
         }
         guard let format, !slices.isEmpty, let sample = makeSample(slices, format: format) else { return }
-        let renderer = displayLayer.sampleBufferRenderer
-        if renderer.status == .failed {
-            renderer.flush(removingDisplayedImage: false) {}
+        if rendererFailed {
+            flushVideo()
             waitingForKeyframe = true
             onNeedKeyframe?()
             return
         }
-        renderer.enqueue(sample)
+        enqueueVideo(sample)
         if !hasPicture {
             hasPicture = true
             onContentChange?()
@@ -280,5 +279,20 @@ final class H264StreamReader: NSObject, URLSessionDataDelegate, @unchecked Senda
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.connect()
         }
+    }
+}
+
+private extension VideoDisplayView {
+    var rendererFailed: Bool {
+        if #available(iOS 17, *) { return displayLayer.sampleBufferRenderer.status == .failed }
+        return displayLayer.status == .failed
+    }
+    func flushVideo() {
+        if #available(iOS 17, *) { displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: false) {} }
+        else { displayLayer.flush() }
+    }
+    func enqueueVideo(_ sample: CMSampleBuffer) {
+        if #available(iOS 17, *) { displayLayer.sampleBufferRenderer.enqueue(sample) }
+        else { displayLayer.enqueue(sample) }
     }
 }

@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import UIKit
 
@@ -115,9 +116,9 @@ struct RemoteScaffold<Top: View, Screen: View, Accessory: View, Banner: View, Ke
             }
         }
         .statusBarHidden(immersive)
-        .persistentSystemOverlays(immersive ? .hidden : .automatic)
-        .animation(.snappy(duration: 0.3), value: immersive)
-        .animation(.snappy(duration: 0.3), value: typing)
+        .appSystemOverlays(hidden: immersive)
+        .animation(.appSnappy(duration: 0.3), value: immersive)
+        .animation(.appSnappy(duration: 0.3), value: typing)
     }
 }
 
@@ -188,8 +189,7 @@ struct LatencyLabel: View {
 
     var body: some View {
         if rttMs != nil || (fps ?? 0) > 0 {
-            let layout = stacked ? AnyLayout(VStackLayout(spacing: 1)) : AnyLayout(HStackLayout(spacing: 4))
-            layout {
+            AppAxisStack(horizontal: !stacked, spacing: stacked ? 1 : 4) {
                 if let rttMs {
                     Text("\(rttMs) ms").foregroundStyle(color(rttMs))
                 }
@@ -252,7 +252,7 @@ struct RemoteTopBar<Badge: View>: View {
                 GlassIconButton(symbol: "arrow.up.left.and.arrow.down.right", label: "沉浸模式", size: 38,
                                 action: onImmersive)
             }
-            .animation(.snappy, value: zoom > 1.01)
+            .animation(.appSnappy, value: zoom > 1.01)
         } else {
             VStack(spacing: Theme.Space.m) {
                 GlassIconButton(symbol: backSymbol, label: backLabel, size: 40, action: onBack)
@@ -263,7 +263,7 @@ struct RemoteTopBar<Badge: View>: View {
                                 action: onImmersive)
             }
             .frame(width: 56)
-            .animation(.snappy, value: zoom > 1.01)
+            .animation(.appSnappy, value: zoom > 1.01)
         }
     }
 }
@@ -282,8 +282,7 @@ struct KeyBar<Menu: View>: View {
     @ViewBuilder var menu: () -> Menu
 
     var body: some View {
-        let layout = axis == .horizontal ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 2))
-        layout {
+        AppAxisStack(horizontal: axis == .horizontal, spacing: axis == .horizontal ? 0 : 2) {
             KeyButton(symbol: "chevron.backward", title: "返回", compact: axis == .vertical, action: onBack)
                 .disabled(!keysEnabled)
             KeyButton(symbol: "house", title: "主屏幕", compact: axis == .vertical, action: onHome)
@@ -297,7 +296,7 @@ struct KeyBar<Menu: View>: View {
             } label: {
                 KeyFace(symbol: "ellipsis", title: "更多", compact: axis == .vertical)
             }
-            .menuOrder(.fixed)
+            .appMenuOrder()
             .tint(.primary)
             .accessibilityLabel(Text("更多"))
         }
@@ -356,17 +355,16 @@ struct KeyFace: View {
 /// the input method settles, so Pinyin is sent as the chosen characters),
 /// each backspace and return. Sends run one after the other, in order.
 @MainActor
-@Observable
-final class TypingQueue {
+final class TypingQueue: ObservableObject {
     enum Op: Equatable {
         case text(String)
         case key(String)
     }
 
-    private(set) var pending = 0
-    private(set) var sentCharacters = 0
-    private var ops: [Op] = []
-    private var worker: Task<Void, Never>?
+    @Published private(set) var pending = 0
+    @Published private(set) var sentCharacters = 0
+    @Published private var ops: [Op] = []
+    @Published private var worker: Task<Void, Never>?
     private let perform: (PhoneAction) async -> Void
 
     init(perform: @escaping (PhoneAction) async -> Void) {
@@ -530,7 +528,7 @@ enum TypingDiff {
 
 /// The bar above the system keyboard while typing into the phone.
 struct LiveKeyboardBar: View {
-    let queue: TypingQueue
+    @ObservedObject var queue: TypingQueue
     /// Sync: how many phones receive it.
     var targets = 1
     let onDone: () -> Void
@@ -557,12 +555,12 @@ struct LiveKeyboardBar: View {
                     .frame(height: 38)
                     .padding(.horizontal, 14)
                     .glassBackground(Capsule())
-                PasteButton(payloadType: String.self) { strings in
+                AppPasteButton(payloadType: String.self) { strings in
                     let text = strings.joined(separator: "\n")
                     Task { @MainActor in queue.paste(text) }
                 }
                 .labelStyle(.iconOnly)
-                .buttonBorderShape(.circle)
+                .appCircleButtonShape()
                 .tint(Color(white: 0.25))
                 .accessibilityLabel(Text("把剪贴板粘贴到手机"))
                 GlassIconButton(symbol: "delete.left", label: "退格", size: 38) { queue.backspace() }
@@ -583,8 +581,8 @@ struct LiveKeyboardBar: View {
 /// be driven: one title, one explanation, one obvious button, a spinner
 /// with the seconds waited, and when the next automatic try is.
 struct StatusOverlay: View {
-    let app: AppModel
-    let session: DeviceSession
+    @ObservedObject var app: AppModel
+    @ObservedObject var session: DeviceSession
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -593,15 +591,15 @@ struct StatusOverlay: View {
                 StatusCard(p: p, busy: session.busy) { perform($0, on: session, app: app) }
             }
         }
-        .animation(.snappy(duration: 0.25), value: session.presentation().placement)
+        .animation(.appSnappy(duration: 0.25), value: session.presentation().placement)
     }
 }
 
 /// The strip form of the state, for the scaffold's banner slot: above the
 /// picture, so it never hides the phone's status bar or its top buttons.
 struct StatusBanner: View {
-    let app: AppModel
-    let session: DeviceSession
+    @ObservedObject var app: AppModel
+    @ObservedObject var session: DeviceSession
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -610,7 +608,7 @@ struct StatusBanner: View {
                 StatusStrip(p: p) { perform($0, on: session, app: app) }
             }
         }
-        .animation(.snappy(duration: 0.25), value: session.presentation().placement == .banner)
+        .animation(.appSnappy(duration: 0.25), value: session.presentation().placement == .banner)
     }
 }
 
@@ -731,7 +729,7 @@ extension EnvironmentValues {
 extension View {
     /// Report this view's frame in window coordinates when it changes.
     func globalFrame(_ action: @escaping (CGRect) -> Void) -> some View {
-        onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { action($0) }
+        appOnGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { action($0) }
     }
 }
 
@@ -844,7 +842,7 @@ struct PlacedToast: View {
                         .overlay(alignment: .topLeading) {
                             ToastText(text: text, lines: nil)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .onGeometryChange(for: CGSize.self) { $0.size } action: { sizes[width] = $0 }
+                                .appOnGeometryChange(for: CGSize.self) { $0.size } action: { sizes[width] = $0 }
                         }
                 }
                 .hidden()
@@ -857,9 +855,9 @@ struct PlacedToast: View {
         }
         .globalFrame { window = $0 }
         .allowsHitTesting(false)
-        .animation(reduceMotion ? .easeOut(duration: 0.2) : .snappy(duration: 0.25), value: text)
-        .onChange(of: text) { _, new in
-            if let new { AccessibilityNotification.Announcement(new).post() }
+        .animation(reduceMotion ? .easeOut(duration: 0.2) : .appSnappy(duration: 0.25), value: text)
+        .appOnChange(of: text) { _, new in
+            if let new { UIAccessibility.post(notification: .announcement, argument: new) }
         }
     }
 
@@ -943,9 +941,9 @@ struct ToastLayer: View {
             }
         }
         .allowsHitTesting(false)
-        .animation(.snappy(duration: 0.25), value: text)
-        .onChange(of: text) { _, new in
-            if let new { AccessibilityNotification.Announcement(new).post() }
+        .animation(.appSnappy(duration: 0.25), value: text)
+        .appOnChange(of: text) { _, new in
+            if let new { UIAccessibility.post(notification: .announcement, argument: new) }
         }
     }
 }

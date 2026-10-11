@@ -399,9 +399,12 @@ pub fn plist_env(path: &Path, key: &str) -> String {
             })
             .unwrap_or_default()
     };
-    let value = read(key);
-    // A plist written before the rename spells the key PHONE_REMOTE_*.
-    match core::env::legacy_name(key) {
+    let canonical = key
+        .strip_prefix("PHONE_REMOTE_")
+        .map(|suffix| format!("IPHONE_USE_{suffix}"))
+        .unwrap_or_else(|| key.to_owned());
+    let value = read(&canonical);
+    match core::env::legacy_name(&canonical) {
         Some(old) if value.is_empty() => read(&old),
         _ => value,
     }
@@ -498,6 +501,18 @@ pub fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<
 mod tests {
     use super::*;
 
+    #[test]
+    fn setup_reads_branded_ports_and_credentials_from_plists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.plist");
+        std::fs::write(&path,r#"<?xml version="1.0"?><plist version="1.0"><dict><key>EnvironmentVariables</key><dict><key>IPHONE_USE_PORT</key><string>45432</string><key>PHONE_REMOTE_PORT</key><string>44321</string><key>IPHONE_USE_AGENT_TOKEN</key><string>synthetic-token</string><key>WDA_PORT</key><string>8100</string></dict></dict></plist>"#).unwrap();
+        assert_eq!(plist_env(&path, "PHONE_REMOTE_PORT"), "45432");
+        assert_eq!(
+            plist_env(&path, "PHONE_REMOTE_AGENT_TOKEN"),
+            "synthetic-token"
+        );
+        assert_eq!(plist_env(&path, "WDA_PORT"), "8100");
+    }
     /// devicectl can hang forever on a wedged tunnel; every call is bounded.
     #[test]
     fn a_hung_child_is_killed_at_its_deadline() {

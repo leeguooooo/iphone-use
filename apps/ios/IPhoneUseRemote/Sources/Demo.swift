@@ -1,5 +1,5 @@
 import AVFoundation
-import Observation
+import Combine
 import SwiftUI
 import UIKit
 
@@ -40,12 +40,11 @@ struct DemoManifest: Decodable {
 }
 
 @MainActor
-@Observable
-final class DemoSession {
+final class DemoSession: ObservableObject {
     private let manifest: DemoManifest
-    private(set) var screen: DemoManifest.Screen
-    private(set) var image: UIImage?
-    var toast: String?
+    @Published private(set) var screen: DemoManifest.Screen
+    @Published private(set) var image: UIImage?
+    @Published var toast: String?
 
     init?(startingAt id: String? = nil) {
         guard let manifest = DemoManifest.bundled(),
@@ -191,7 +190,7 @@ struct DemoScreen: UIViewRepresentable {
 /// The demo, in the same chrome as a live phone: the keys work on the
 /// recording (Home, back), the rest explain themselves.
 struct DemoView: View {
-    let session: DemoSession
+    @ObservedObject var session: DemoSession
     let exit: () -> Void
     @State private var immersive = false
     @State private var zoom: CGFloat = 1

@@ -1056,6 +1056,7 @@
   <code id="pairUrl"></code>
   <div class="pair-actions">
     <button id="pairRefresh" type="button">换一个</button>
+    <button id="pairSelf" type="button" title="让这台 iPhone 上的 Phone Use Remote App 连上手机自己的 Agent（不经过 Mac）">配对本机 Agent</button>
     <button id="pairClose" class="primary" type="button">关闭</button>
   </div>
 </dialog>
@@ -5442,8 +5443,10 @@ function setPairStatus(text, isError) {
   pairStatus.textContent = text;
   pairStatus.classList.toggle('err', !!isError);
 }
+let pairMode = 'mac';
 async function loadPairCode(host) {
   clearInterval(pairTimer);
+  pairMode = 'mac';
   setPairStatus(t('正在生成…'));
   pairQr.classList.remove('expired');
   try {
@@ -5484,11 +5487,59 @@ async function loadPairCode(host) {
     setPairStatus(t('生成失败，请检查网络'), true);
   }
 }
+/* The other QR: pairs the Phone Use Remote app with the daemon running inside the runner on the
+   phone itself (http://127.0.0.1 on the phone), so the app drives its own phone with no Mac in
+   the path. Scanned with that iPhone's camera. */
+async function loadSelfPairCode() {
+  clearInterval(pairTimer);
+  pairMode = 'self';
+  setPairStatus('正在生成…');
+  pairQr.classList.remove('expired');
+  pairHostRow.hidden = true;
+  try {
+    const r = await fetch('/agent/phone-daemon/pair', {
+      method: 'POST', cache: 'no-store', credentials: 'same-origin',
+      headers: { 'X-Phone-Control': '1' },
+    });
+    if (r.status === 401) { location.replace('/login'); return; }
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok || !res.ok) {
+      pairQr.replaceChildren();
+      pairUrl.textContent = '';
+      setPairStatus(res.error === 'phone_daemon_unavailable'
+        ? '手机上的 runner 没有内置 Agent，或者没启动成功。重新运行 setup 后再试。'
+        : res.error === 'runner_too_old' ? '手机上的 runner 版本太旧，重新运行 setup 后再试。'
+        : res.error === 'runner_unreachable' || res.error === 'no_runner'
+          ? '连不上手机上的 runner，先确认手机已连接。'
+        : '生成失败，请稍后再试', true);
+      return;
+    }
+    pairQr.innerHTML = res.svg || '';
+    pairUrl.textContent = res.link;
+    let left = res.expires_in_secs;
+    const tick = () => {
+      if (left <= 0) {
+        clearInterval(pairTimer);
+        pairQr.classList.add('expired');
+        setPairStatus('已过期，点「换一个」');
+        return;
+      }
+      setPairStatus(`用这台 iPhone 的相机扫码 · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} 后失效`);
+      left -= 1;
+    };
+    tick();
+    pairTimer = setInterval(tick, 1000);
+  } catch (_) {
+    setPairStatus('生成失败，请检查网络', true);
+  }
+}
 document.getElementById('btnPair').addEventListener('click', () => {
   pairDialog.showModal();
   loadPairCode();
 });
-document.getElementById('pairRefresh').addEventListener('click', () => loadPairCode(pairHost.value));
+document.getElementById('pairSelf').addEventListener('click', loadSelfPairCode);
+document.getElementById('pairRefresh').addEventListener('click', () =>
+  pairMode === 'self' ? loadSelfPairCode() : loadPairCode(pairHost.value));
 pairHost.addEventListener('change', () => loadPairCode(pairHost.value));
 document.getElementById('pairClose').addEventListener('click', () => pairDialog.close());
 pairDialog.addEventListener('close', () => clearInterval(pairTimer));

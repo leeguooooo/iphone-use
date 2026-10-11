@@ -260,7 +260,7 @@ distributes.
 
 ## Drive the phone from the native iOS app
 
-`apps/ios` is a native SwiftUI app (iOS 17+). Connect by scanning: on the Mac, open the
+`apps/ios` is a native SwiftUI app (minimum deployment target iOS 15). Connect by scanning: on the Mac, open the
 iphone-use page and press **Scan** in the toolbar, then scan the QR code with the app (or the
 iPhone's own camera, which can also open plain browser control). The code works once, within
 5 minutes, and the app keeps a device token that renews its session; changing the control
@@ -831,6 +831,9 @@ environment and in an existing LaunchAgent plist; when both are set,
 | `IPHONE_USE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
 | `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | Device runner sources setup builds (a repo checkout's `scripts/setup-wda.sh` uses its own `runner/`). Persisted only when not the default. |
 | `WDA_RUNNER_REBUILD` | off | `1` makes the next setup ignore the recorded runner product and build again. |
+| `IPU_EMBED` | on | `0` builds the device runner without the on-phone daemon. Persisted for the supervisor. |
+| `IPU_EMBED_LIB` | `~/.iphone-use/runner/embed/libipu_embed.a` | The on-phone daemon library setup links into the runner (absolute path). A repo checkout builds it with `scripts/build-ios-embed.sh`; none found builds the plain runner. Persisted for the supervisor. |
+| `IPU_DAEMON_HOST` | `127.0.0.1` | Where the daemon inside the runner listens on the phone; `0.0.0.0` lets other devices drive this phone through it (its token is still required). Persisted for the supervisor. |
 | `IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH` | runner default 64 | Applies to an external WebDriverAgent only; the device runner bounds its own tree reads (depth ladder, 5000 nodes). |
 | `IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S` | — | Same: WebDriverAgent only. |
 | `IPHONE_USE_ELEMENTS_AFFORDANCES` | off | `1` adds sparse `actions`, `selected`, `min`/`max` to `/agent/elements` rows. |

@@ -195,6 +195,7 @@ has one fixed session id per launch.
 | POST | `/wda/keepawake` | `{secs}` (0 stops, at most 900) | `{active, remainingMs, beats, skippedLocked, locked, passcodeEnabled, autoLockSecs, autoLockNever, …}`, answered off-main; `autoLockSecs` is the Auto-Lock setting from ManagedConfiguration `maxInactivity` (Never is `2147483647`, with `autoLockNever:true`), absent when it cannot be read. `passcodeEnabled` is SpringBoard's "passcode required now": `false` on an unlocked phone even when a passcode is set (seen on iOS 15.4.1), so it means "no passcode" only together with `locked:true` |
 | GET | `/wda/keepawake` | | the same, without changing the deadline |
 | POST | `/shutdown` | | ends `testServe` |
+| POST | `/daemon/pair-code` | | `{code, port}`: a one-time pairing code from the on-phone daemon, answered off-main; 503 when the daemon is not linked or not serving |
 
 ### `/source` node shape
 
@@ -378,9 +379,46 @@ This is how every install runs the runner; the manual steps below are for develo
 - **Reuse.** The verified product is recorded in `<state>/wda-runner-product.json`, keyed on the
   source hash, signing identity, device and Xcode/SDK; a matching reconnect skips the build.
   `WDA_RUNNER_REBUILD=1` forces one.
+- **On-phone daemon.** When a `libipu_embed.a` is found, the build adds
+  `OTHER_LDFLAGS=$(inherited) -force_load <lib> -framework Security -framework SystemConfiguration`
+  (see [The on-phone daemon](#the-on-phone-daemon)); the library's sha256 is part of the reuse key.
 - **Unchanged.** Relays (8100/9100, now `iphone-use relay`), the KeepAlive supervisor and its label, lock wait and
   backoff, trust/DDI/automation blockers, the status file the daemon reads, and every `WDA_*`
   variable keep their names and behaviour.
+
+## The on-phone daemon
+
+The runner can host the whole iphone-use daemon (`crates/ios-embed`, a static library that wraps
+`server::boot::serve_embedded`). It serves the agent API on the phone's own `127.0.0.1:8787`,
+against this runner, so the iPhone app on the same phone can hand it a goal with no Mac in the
+request path. `RunnerDaemon.swift` looks the entry points up with `dlsym`: a runner built without
+the library starts and serves exactly as before, with `daemon.linked: false` in `/status`.
+
+- **Library.** Setup links the first of: `IPU_EMBED_LIB` (absolute path);
+  `<runner sources>/embed/libipu_embed.a`, which the release ships in `iphone-use-runner.tar.gz`
+  and `install.sh` lays down at `~/.iphone-use/runner/embed/`; in a repo checkout, the output of
+  `scripts/build-ios-embed.sh` (built by an interactive setup into `<repo>/target`; the KeepAlive
+  supervisor never runs cargo and links the last build). `IPU_EMBED=0` opts out. No library is
+  not an error: setup logs one line and builds the plain runner. The library's content hash is in
+  the product cache key, so a new library rebuilds and an unchanged one reuses the product.
+- **Credentials.** Setup generates, once per instance, a daemon token (64 hex) and a password and
+  keeps them in `<state dir>/phone-daemon-token` and `phone-daemon-password` (0600). Every launch
+  passes them as `TEST_RUNNER_IPU_DAEMON_TOKEN` / `TEST_RUNNER_IPU_DAEMON_PASSWORD` (the iOS 15/16
+  launcher forwards `IPU_DAEMON_*`), plus `TEST_RUNNER_IPU_DAEMON_HOST` when `IPU_DAEMON_HOST` is
+  set (`0.0.0.0` lets other devices drive this phone; unset is loopback). Nothing logs them.
+  `IPU_DAEMON_PORT` (runner environment, default 8787; `0` turns the daemon off) is the port.
+- **Status.** `GET /status` carries `daemon: {linked, state, port, error}` (`state`:
+  `not_started`, `serving`, `failed`). The Mac daemon reports the last one as `phone_daemon` in
+  `/agent/status` (`null` while the runner is down or says nothing).
+- **Pairing the app.** `POST /daemon/pair-code` mints a one-time code from the embedded daemon's
+  own pairing, in-process (it works although that daemon only listens on loopback: the app on the
+  same phone is its client). The Mac exposes it as `POST /agent/phone-daemon/pair` (agent bearer
+  or signed-in browser, plus `X-Phone-Control: 1`), answering
+  `{link: "iphoneuse://pair?u=http%3A%2F%2F127.0.0.1%3A8787&c=<code>", svg, port, expires_in_secs}`;
+  the web page's scan dialog shows it as a QR under 「配对本机 Agent」. The code is valid for five
+  minutes and redeems once at the phone's `POST /pair`.
+- **By hand.** `IPU_EMBED_LIB="$(scripts/build-ios-embed.sh | tail -1)" runner/build.sh …`, then
+  launch with `TEST_RUNNER_IPU_DAEMON_TOKEN` set as above.
 
 ## Run on a device
 

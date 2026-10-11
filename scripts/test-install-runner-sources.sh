@@ -56,6 +56,7 @@ make_tree "$TEST_HOME/src-v1" v1
 run_hook "$TEST_HOME/src-v1" "" 0 || fail_test "fresh install failed: $(cat "$TEST_HOME/out")"
 [ "$(installed_marker)" = v1 ] || fail_test "fresh install did not lay down the sources"
 [ -f "$TEST_HOME/.iphone-use/runner/README.md" ] || fail_test "the runner README was not copied"
+[ ! -e "$TEST_HOME/.iphone-use/runner/embed" ] || fail_test "an embed/ dir appeared without a library"
 if find "$TEST_HOME/.iphone-use/runner" -name xcuserdata | grep -q .; then
     fail_test "Xcode per-user state was copied into the shared sources"
 fi
@@ -105,13 +106,19 @@ make_archive() {  # make_archive <name> <setup-function>
     (cd "$work" && COPYFILE_DISABLE=1 /usr/bin/tar -czf "$TEST_HOME/$1.tar.gz" $(ls -A))
     printf '%s\n' "$TEST_HOME/$1.tar.gz"
 }
-good_layout() { make_tree "$1/runner" v4; }
+good_layout() {
+    make_tree "$1/runner" v4
+    mkdir -p "$1/runner/embed"
+    printf '!<arch>\nv4\n' > "$1/runner/embed/libipu_embed.a"
+}
 extra_layout() { make_tree "$1/runner" v5; printf 'x\n' > "$1/evil.sh"; }
 link_layout() { make_tree "$1/runner" v6; ln -s /etc/hosts "$1/runner/IPhoneUseRunner/hosts"; }
 
 run_hook "" "$(make_archive good good_layout)" 0 || fail_test "a valid runner archive was refused: $(cat "$TEST_HOME/out")"
 [ "$(installed_marker)" = v4 ] || fail_test "the archive's sources were not installed"
-pass "a valid runner/ archive installs"
+grep -q v4 "$TEST_HOME/.iphone-use/runner/embed/libipu_embed.a" \
+    || fail_test "the archive's on-phone daemon library was not installed"
+pass "a valid runner/ archive installs, with its on-phone daemon library"
 
 if run_hook "" "$(make_archive extra extra_layout)" 0; then fail_test "an archive with an extra top-level entry was accepted"; fi
 grep -q "unexpected entry" "$TEST_HOME/out" || fail_test "extra-entry refusal reason missing"

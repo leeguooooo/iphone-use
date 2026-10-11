@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "确认闸验收：返回主屏幕",
+  "description": "仅供确认闸验收。故意标为 side_effect 以触发确认；实际动作只有 Home。",
+  "app": "com.apple.Preferences",
+  "risk": "side_effect",
+  "steps": [
+    { "kind": "shortcut", "name": "home" }
+  ]
+}

@@ -18,12 +18,14 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
     /// Kept so the list names the phone while it is offline too.
     var phone: PhoneIdentity?
 
-    init(id: UUID = UUID(), address: String, name: String? = nil, showInGrid: Bool = true,
+    /// `showInGrid` defaults to on, except for 本机: a tile of this iPhone's
+    /// own screen, streamed to itself, shows nothing useful.
+    init(id: UUID = UUID(), address: String, name: String? = nil, showInGrid: Bool? = nil,
          phone: PhoneIdentity? = nil) {
         self.id = id
         self.address = address
         self.name = name ?? DeviceStore.defaultName(for: address)
-        self.showInGrid = showInGrid
+        self.showInGrid = showInGrid ?? !DeviceStore.isThisPhone(address)
         self.phone = phone
     }
 
@@ -44,10 +46,14 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         return trimmed
     }
 
+    /// The daemon inside this iPhone's own device runner (本机).
+    var isThisPhone: Bool { DeviceStore.isThisPhone(address) }
+
     /// What to call it: the person's name, else the phone's own name and
-    /// model, else (never connected yet) the address.
+    /// model, else (never connected yet) the address. This iPhone is 本机.
     var displayName: String {
-        customName ?? phone?.label ?? DeviceStore.defaultName(for: address)
+        if isThisPhone { return customName ?? DeviceStore.defaultName(for: address) }
+        return customName ?? phone?.label ?? DeviceStore.defaultName(for: address)
     }
 
     /// The line under the name: the Mac's address, after the phone's own name
@@ -166,9 +172,19 @@ enum DeviceStore {
         return text
     }
 
-    /// `host:port`, which tells two instances on one Mac apart.
+    /// The address the phone's own daemon answers on, inside its device
+    /// runner (docs/agent-task.md); its pairing link carries exactly this.
+    static let thisPhoneAddress = "http://127.0.0.1:8787"
+
+    static func isThisPhone(_ address: String) -> Bool {
+        same(address, thisPhoneAddress) || same(address, "http://localhost:8787")
+    }
+
+    /// `host:port`, which tells two instances on one Mac apart; 本机 for
+    /// this iPhone's own daemon.
     static func defaultName(for address: String) -> String {
-        guard let url = URL(string: address), let host = url.host() else { return address }
+        if isThisPhone(address) { return String(localized: "本机") }
+        guard let url = URL(string: address), let host = url.host else { return address }
         if let port = url.port { return "\(host):\(port)" }
         return host
     }

@@ -94,7 +94,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios
 
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@v2
@@ -105,12 +105,14 @@ jobs:
         run: >-
           cargo build --release --locked
           --bin iphone-use --bin iphone-use-mcp --bin iphone-use-legacy-launch
+          --bin browser-use-bridge --features browser-session/desktop
           --target aarch64-apple-darwin
 
       - name: Build (x86_64)
         run: >-
           cargo build --release --locked
           --bin iphone-use --bin iphone-use-mcp --bin iphone-use-legacy-launch
+          --bin browser-use-bridge --features browser-session/desktop
           --target x86_64-apple-darwin
 
       - name: Create universal binary
@@ -128,6 +130,7 @@ jobs:
             target/aarch64-apple-darwin/release/iphone-use-legacy-launch \
             target/x86_64-apple-darwin/release/iphone-use-legacy-launch \
             -output target/universal-apple-darwin/release/iphone-use-legacy-launch
+          lipo -create target/aarch64-apple-darwin/release/browser-use-bridge target/x86_64-apple-darwin/release/browser-use-bridge -output target/universal-apple-darwin/release/browser-use-bridge
           chmod +x target/universal-apple-darwin/release/iphone-use
           chmod +x target/universal-apple-darwin/release/iphone-use-mcp
           chmod +x target/universal-apple-darwin/release/iphone-use-legacy-launch
@@ -364,6 +367,34 @@ jobs:
           test "$(tar -tzf iphone-use-mcp-macos-universal.tar.gz)" = "iphone-use-mcp"
           rm -rf "$package_dir"
 
+      - name: Package Chrome handoff helper
+        run: |
+          package_dir="$(mktemp -d)"
+          cp target/universal-apple-darwin/release/browser-use-bridge "$package_dir/"
+          codesign --force --sign - "$package_dir/browser-use-bridge"
+          tar -C "$package_dir" -czf browser-use-bridge-macos-universal.tar.gz browser-use-bridge
+          rm -rf "$package_dir"
+          shasum -a 256 browser-use-bridge-macos-universal.tar.gz > browser-use-bridge-macos-universal.tar.gz.sha256
+
+      # The on-phone daemon (crates/ios-embed) as a static library for iOS
+      # devices. It ships inside the runner sources as runner/embed/, where
+      # setup links it into the runner (see runner/README.md).
+      - name: Build the on-phone daemon library (aarch64-apple-ios)
+        shell: bash
+        run: |
+          set -euo pipefail
+          lib="$(bash scripts/build-ios-embed.sh | tail -1)"
+          test -f "$lib"
+          # (grep -q under pipefail can SIGPIPE its writer; read whole files.)
+          lipo -info "$lib" > "$RUNNER_TEMP/embed-archs.txt"
+          grep -q arm64 "$RUNNER_TEMP/embed-archs.txt"
+          nm -gU "$lib" > "$RUNNER_TEMP/embed-symbols.txt" 2>/dev/null || true
+          grep -q '_ipu_daemon_start$' "$RUNNER_TEMP/embed-symbols.txt"
+          grep -q '_ipu_daemon_pair_code$' "$RUNNER_TEMP/embed-symbols.txt"
+          mkdir -p runner/embed
+          cp "$lib" runner/embed/libipu_embed.a
+          ls -l runner/embed/libipu_embed.a
+
       # install.sh lays these sources down at ~/.iphone-use/runner; every
       # entry must sit under runner/ (the installer refuses anything else).
       - name: Package device runner sources
@@ -372,7 +403,7 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
           COPYFILE_DISABLE=1 tar --exclude xcuserdata --exclude .DS_Store \
-            -czf iphone-use-runner.tar.gz runner/IPhoneUseRunner runner/README.md
+            -czf iphone-use-runner.tar.gz runner/IPhoneUseRunner runner/README.md runner/embed
           # (`! pipeline` would not stop the step under `set -e`; test explicitly.)
           if tar -tzf iphone-use-runner.tar.gz | grep -v '^runner/'; then
             echo "runner archive has entries outside runner/" >&2; exit 1
@@ -382,6 +413,7 @@ jobs:
           fi
           tar -tzf iphone-use-runner.tar.gz \
             | grep -qx 'runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj/project.pbxproj'
+          tar -tzf iphone-use-runner.tar.gz | grep -qx 'runner/embed/libipu_embed.a'
 
       - name: Generate SHA-256 checksums
         run: |
@@ -408,6 +440,8 @@ jobs:
             iphone-use-mcp-macos-universal.tar.gz.sha256
             iphone-use-runner.tar.gz
             iphone-use-runner.tar.gz.sha256
+            browser-use-bridge-macos-universal.tar.gz
+            browser-use-bridge-macos-universal.tar.gz.sha256
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -426,6 +460,8 @@ jobs:
             iphone-use-mcp-macos-universal.tar.gz.sha256
             iphone-use-runner.tar.gz
             iphone-use-runner.tar.gz.sha256
+            browser-use-bridge-macos-universal.tar.gz
+            browser-use-bridge-macos-universal.tar.gz.sha256
           retention-days: 7
 
   # List the release in the official MCP Registry (registry.modelcontextprotocol.io).

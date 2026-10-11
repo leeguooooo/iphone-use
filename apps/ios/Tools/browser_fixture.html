@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Browser fixture</title>
+<style>body{font:20px system-ui;padding:24px}input,button{font:inherit;padding:12px}label{display:block;margin:20px 0}</style>
+<h1>Browser fixture</h1>
+<p>A local page for navigation, page reading and input acceptance.</p>
+<label>Name <input placeholder="Your name"></label>
+<button onclick="document.querySelector('p').textContent='Form updated'">Continue</button>
+<button onclick="document.querySelector('p').textContent=prompt('Enter fixture text', 'initial') ?? 'Prompt cancelled'">Prompt fixture</button>
+</html>

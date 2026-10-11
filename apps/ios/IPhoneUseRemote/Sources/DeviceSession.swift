@@ -1,6 +1,6 @@
 import Foundation
 import Network
-import Observation
+import Combine
 import Security
 import UIKit
 
@@ -8,8 +8,7 @@ import UIKit
 /// video stream and the gestures sent to it. `AppModel` holds one per saved
 /// device.
 @MainActor
-@Observable
-final class DeviceSession: Identifiable {
+final class DeviceSession: ObservableObject, Identifiable {
     typealias Phase = ConnectionInputs.Phase
 
     /// Who is showing this phone's video. The focused screen asks for the
@@ -17,7 +16,7 @@ final class DeviceSession: Identifiable {
     /// (half size, low bit rate), which keeps several decoders cheap.
     enum ViewerRole { case tile, full }
 
-    var record: DeviceRecord
+    @Published var record: DeviceRecord
     nonisolated let id: UUID
     var address: String { record.address }
     /// The person's name for it, else the phone's own name and model.
@@ -26,15 +25,15 @@ final class DeviceSession: Identifiable {
     var secondaryName: String { record.secondaryText }
     /// The phone named itself differently from what the record remembers;
     /// `AppModel` saves it.
-    var onIdentity: ((UUID, PhoneIdentity) -> Void)?
+    @Published var onIdentity: ((UUID, PhoneIdentity) -> Void)?
 
-    var phase: Phase = .idle {
+    @Published var phase: Phase = .idle {
         didSet {
             if phase == .connecting, oldValue != .connecting { connectingSince = Date() }
             if phase != .connecting { connectingSince = nil }
         }
     }
-    var status: PhoneStatus? {
+    @Published var status: PhoneStatus? {
         didSet {
             trackStarting()
             if let device = status?.device, device != record.phone {
@@ -44,27 +43,27 @@ final class DeviceSession: Identifiable {
         }
     }
     /// When the current connection attempt started.
-    private(set) var connectingSince: Date?
+    @Published private(set) var connectingSince: Date?
     /// Status reads have failed since then while connected: the Mac went to
     /// sleep, the network changed, the tunnel dropped. Polling continues and
     /// clears it on the first answer.
-    private(set) var linkDownSince: Date?
-    private(set) var linkProblem: ConnectProblem?
-    private var pollFailures = 0
+    @Published private(set) var linkDownSince: Date?
+    @Published private(set) var linkProblem: ConnectProblem?
+    @Published private var pollFailures = 0
     /// When the daemon was first seen starting the device service.
-    private(set) var startingSince: Date?
+    @Published private(set) var startingSince: Date?
     /// When the picture was first wanted and missing.
-    private(set) var videoWaitSince: Date?
+    @Published private(set) var videoWaitSince: Date?
     /// The next automatic connection attempt, while one is scheduled.
-    private(set) var nextRetryAt: Date?
-    private var retryAttempt = 0
+    @Published private(set) var nextRetryAt: Date?
+    @Published private var retryAttempt = 0
     /// Bumped by every connection attempt; an attempt that finds it changed
     /// when it finishes was overtaken (a typed password, a disconnect) and
     /// leaves the session alone.
-    private var generation = 0
+    @Published private var generation = 0
     /// Why the last attempt failed; cleared once connected.
-    private(set) var lastProblem: ConnectProblem?
-    private var retryTask: Task<Void, Never>?
+    @Published private(set) var lastProblem: ConnectProblem?
+    @Published private var retryTask: Task<Void, Never>?
     /// A scanned code that could not be traded yet (the Mac was unreachable).
     /// Codes live 5 minutes on the daemon, so it is tried until then, across
     /// an app relaunch too (kept in the Keychain next to the device token).
@@ -92,30 +91,30 @@ final class DeviceSession: Identifiable {
         let scannedAt: Date
         var fresh: Bool { Date().timeIntervalSince(scannedAt) < 290 }
     }
-    var videoLive = false
-    var videoMessage: String?
-    var toast: String?
-    var busy = false
+    @Published var videoLive = false
+    @Published var videoMessage: String?
+    @Published var toast: String?
+    @Published var busy = false
     /// Set on every frame, so not observed: a view that read it would
     /// redraw 30–60 times a second. Read it under a timeline instead.
-    @ObservationIgnored var lastFrameAt: Date?
+    var lastFrameAt: Date?
     /// Frames shown in the last second, updated once a second while the
     /// full screen shows this phone.
-    private(set) var fps = 0
+    @Published private(set) var fps = 0
     /// Round trip of a status read to the Mac (smoothed), in milliseconds.
-    private(set) var rttMs: Int?
+    @Published private(set) var rttMs: Int?
     /// How long the last stream took from opening to its first frame.
-    private(set) var firstFrameMs: Int?
-    @ObservationIgnored private var framesThisSecond = 0
-    @ObservationIgnored private var streamOpenedAt: Date?
-    private var metricsTask: Task<Void, Never>?
+    @Published private(set) var firstFrameMs: Int?
+    private var framesThisSecond = 0
+    private var streamOpenedAt: Date?
+    @Published private var metricsTask: Task<Void, Never>?
     /// Wireframe shown over a picture the app blanked (see `captureRedacted`).
-    var redactedImage: UIImage?
+    @Published var redactedImage: UIImage?
     /// Requests go straight to the Mac on the LAN rather than through the
     /// paired (tunnel) address.
-    var onLAN = false
+    @Published var onLAN = false
     /// The last gesture's result while sync is on, shown briefly on its tile.
-    var delivery: DeliveryNote?
+    @Published var delivery: DeliveryNote?
 
     struct DeliveryNote: Equatable {
         let outcome: DeliveryOutcome
@@ -131,18 +130,18 @@ final class DeviceSession: Identifiable {
     }
 
     /// The person's viewing choice for the focused screen. Tiles ignore it.
-    var videoPreference: VideoPreference = .auto {
+    @Published var videoPreference: VideoPreference = .auto {
         didSet { if videoPreference != oldValue { refreshQuality(fresh: true) } }
     }
     /// This iPhone reaches the network over cellular only.
-    var onCellular = false {
+    @Published var onCellular = false {
         didSet { if onCellular != oldValue { refreshQuality(fresh: false) } }
     }
 
     /// What the preference comes to right now (quality: native resolution,
     /// high frame rate). A change that alters the running stream reconnects
     /// it, starting on a fresh keyframe.
-    private(set) var preferQuality: Bool = false {
+    @Published private(set) var preferQuality: Bool = false {
         didSet {
             guard preferQuality != oldValue else { return }
             guard reader != nil, streamQuality != wantedQuality else { return }
@@ -167,19 +166,28 @@ final class DeviceSession: Identifiable {
     /// Quality was asked for and no picture came (an older daemon that does
     /// not fall back on its own, on a phone whose encoder cannot do full
     /// size): this session streams performance until the choice changes.
-    private(set) var qualityUnavailable = false
+    @Published private(set) var qualityUnavailable = false
     /// How long a quality stream may stay without a frame before that. The
     /// daemon falls back after 3 s itself, so this only catches older ones.
     static let qualityFirstFrameTimeout: TimeInterval = 8
-    private var qualityWatch: Task<Void, Never>?
+    @Published private var qualityWatch: Task<Void, Never>?
 
     /// The app is in the background: hold no stream, so the daemon sees no
     /// viewer and its idle release works as if the app were closed.
-    var suspended = false {
+    @Published var suspended = false {
         didSet {
             guard suspended != oldValue else { return }
-            if suspended { cancelRetry() }
+            if suspended && !voiceCallKeepsConnection { cancelRetry() }
             updateStream()
+        }
+    }
+
+    /// A user-started voice call can reconnect its own loopback control
+    /// connection in the background while video remains suspended.
+    var voiceCallKeepsConnection = false {
+        didSet {
+            if !voiceCallKeepsConnection && suspended { cancelRetry() }
+            if voiceCallKeepsConnection { Task { await retryIfWaiting() } }
         }
     }
 
@@ -187,25 +195,25 @@ final class DeviceSession: Identifiable {
     /// is started at once, once per foreground. `AppModel` allows it only
     /// for the device on screen (and sync members), never for every tile,
     /// so phones nobody looks at keep their idle release.
-    var autoWakeAllowed = false {
+    @Published var autoWakeAllowed = false {
         didSet { if autoWakeAllowed && !oldValue { autoWakeTried = false } }
     }
 
-    private var redactedTask: Task<Void, Never>?
-    private(set) var client: DaemonClient?
-    private var reader: H264StreamReader?
+    @Published private var redactedTask: Task<Void, Never>?
+    @Published private(set) var client: DaemonClient?
+    @Published private var reader: H264StreamReader?
     /// The mode the running reader asked for.
-    private var streamQuality = false
+    @Published private var streamQuality = false
     private weak var video: VideoDisplayView?
-    private var role: ViewerRole = .tile
-    private var statusTask: Task<Void, Never>?
-    private var reloginTask: Task<Bool, Never>?
-    private var autoWakeTried = false
-    private var deliverySeq = 0
+    @Published private var role: ViewerRole = .tile
+    @Published private var statusTask: Task<Void, Never>?
+    @Published private var reloginTask: Task<Bool, Never>?
+    @Published private var autoWakeTried = false
+    @Published private var deliverySeq = 0
     /// Network changes (Wi-Fi joined or left) re-check the LAN route.
-    private var pathMonitor: NWPathMonitor?
-    private var probeTask: Task<Void, Never>?
-    private var lastProbe: Date?
+    @Published private var pathMonitor: NWPathMonitor?
+    @Published private var probeTask: Task<Void, Never>?
+    @Published private var lastProbe: Date?
     /// While on the paired route, look for the LAN again this often.
     private static let reprobeInterval: TimeInterval = 30
 
@@ -341,7 +349,7 @@ final class DeviceSession: Identifiable {
     /// Try again later, sooner at first. Paused while the app is in the
     /// background; coming back (or the network returning) retries at once.
     private func scheduleRetry(_ problem: ConnectProblem) {
-        guard !suspended else { return }
+        guard !suspended || voiceCallKeepsConnection else { return }
         let delay = RetryPolicy.delay(attempt: retryAttempt, problem: problem)
         retryAttempt += 1
         nextRetryAt = Date().addingTimeInterval(delay)
@@ -935,7 +943,22 @@ final class DeviceSession: Identifiable {
 
     /// What every surface says about this device (see `ConnectionPresentation`).
     func presentation(now: Date = Date()) -> ConnectionPresentation {
-        ConnectionPresentation.make(inputs(now: now))
+        let input = inputs(now: now)
+        var result = ConnectionPresentation.make(input)
+        guard record.isThisPhone else { return result }
+        switch input.phase {
+        case .failed(.unreachable):
+            result.title = String(localized: "本机执行服务未连接")
+            result.short = result.title
+            result.detail = String(localized: "请从 Mac 启动这台 iPhone 的执行服务，再重试连接。服务启动后，任务由手机自行执行。")
+        case .connecting:
+            result.title = String(localized: "正在连接本机执行服务…")
+        case .connected where input.linkDownSince != nil:
+            result.title = String(localized: "与本机执行服务的连接已断开")
+            result.detail = String(localized: "正在自动重连…")
+        default: break
+        }
+        return result
     }
 
     /// One short state for a pill or a tile.

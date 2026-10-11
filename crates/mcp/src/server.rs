@@ -8,8 +8,8 @@
 //!   1. `#[tool_router]` on the `impl PhoneHandler` block generates the static
 //!      `PhoneHandler::tool_router()` fn.
 //!   2. `#[tool_handler]` on the `impl ServerHandler` block fills in
-//!      `call_tool`, `list_tools`, and `get_tool`.  We add `get_info` manually
-//!      inside the same block so the macro skips its default stub.
+//!      defaults we do not override. Our `call_tool` routes and shapes the
+//!      result, then adapts image-bearing results for the initialized peer.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rmcp::{
@@ -324,6 +324,10 @@ pub enum PhoneStep {
         bundle: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app: Option<String>,
+        /// Quit the app first so it opens on its first screen, not the page
+        /// it was left on (flows recorded on the phone start there).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fresh: bool,
         #[serde(default)]
         after_ms: u64,
     },
@@ -635,6 +639,10 @@ pub struct RunEndParams {
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CollectListParams {
+    /// A snapshot from an earlier read of the target app: when given, a
+    /// different foreground app refuses before any swipe. Not filled in for you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
     /// Element kind of one list row (default `Cell`; e.g. `StaticText`,
     /// `Button`, `Link`). A row without a label is named by its texts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -659,6 +667,10 @@ pub struct CollectListParams {
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScrollFindParams {
+    /// A snapshot from an earlier read of the target app: when given, a
+    /// different foreground app refuses before any swipe. Not filled in for you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
     /// Exact label to find.
     pub label: String,
     /// Narrow to one element kind (e.g. `Button`) when a text shares the label.
@@ -1635,6 +1647,9 @@ impl PhoneHandler {
         end_label was seen; no_progress or duplicate_page is not proof the list ended. Only \
         what the accessibility tree exposes is collected. It swipes the live list, so the \
         screen is left where the last page was; `snapshot` is that last page. \
+        Optional `snapshot` (from a read of the target app; never filled in for you): a known \
+        foreground app mismatch refuses before any swipe (app_changed, not_sent, retry_safe). \
+        Results name the app. \
         Requires phone_status drivable=true."
     )]
     async fn phone_collect_list(
@@ -1662,7 +1677,10 @@ impl PhoneHandler {
         by another control, or not drawn. Found: `target` (index, kind, frame) plus a \
         `snapshot` for phone_tap_element. Not found: on-screen labels containing the text \
         as `candidates`. No screenshot is taken; absence after the budget is not proof — \
-        look at the screen before swiping further. Requires phone_status drivable=true."
+        look at the screen before swiping further. Optional `snapshot` (from a read of the \
+        target app; never filled in for you): a known foreground app mismatch refuses before \
+        any swipe (app_changed, not_sent, retry_safe). Results name the app. Requires \
+        phone_status drivable=true."
     )]
     async fn phone_scroll_find(
         &self,
@@ -2453,8 +2471,8 @@ impl PhoneHandler {
 // ---------------------------------------------------------------------------
 // ServerHandler impl
 //
-// `#[tool_handler]` fills in call_tool / list_tools / get_tool automatically.
-// We provide get_info() ourselves so the macro skips its default stub.
+// `#[tool_handler]` supplies defaults for methods we do not override.
+// Our call_tool preserves routing and shapes the final wire result.
 // ---------------------------------------------------------------------------
 
 /// Drop the parts of a schemars schema a model never needs: the meta-schema
@@ -2651,12 +2669,17 @@ impl ToolProfile {
 ///
 /// Clients do not show the model what the spec suggests: Claude Code hands
 /// the model ONLY `structuredContent` when a successful result has one (the
-/// text block is dropped), and Codex CLI serialises the whole result, text and
-/// structure both. So the full JSON — an element tree, every step of a batch —
+/// text block is dropped). Codex also sends ONLY non-null structured content
+/// as text, dropping every content block, including images (openai/codex,
+/// `codex-rs/protocol/src/models.rs`,
+/// `CallToolResult::as_function_call_output_payload`, 806d973). So the full
+/// JSON — an element tree, every step of a batch —
 /// is what those models read, and the compact text is wasted. The default
 /// `slim` keeps the verdict a program branches on (the top-level scalars:
 /// `ok`, `outcome`, `retry_safe`, `error`, `snapshot`, counts) plus the
 /// compact text as `summary`; `full` sends the whole JSON; `off` sends none.
+/// After shaping, Codex results carrying images omit structured content and
+/// carry any missing verdict fields in text so the model receives the images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StructuredMode {
     Slim,
@@ -2720,6 +2743,37 @@ fn shape_structured(mut result: CallToolResult, mode: StructuredMode) -> CallToo
     }
 }
 
+fn is_codex_client(name: &str) -> bool {
+    name.get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("codex"))
+}
+
+/// Adapt only image-bearing Codex results, after upstream result shaping.
+fn keep_codex_images(mut result: CallToolResult, codex_client: bool) -> CallToolResult {
+    if !codex_client
+        || !result
+            .content
+            .iter()
+            .any(|block| block.as_image().is_some())
+    {
+        return result;
+    }
+    let Some(structured) = result.structured_content.take() else {
+        return result;
+    };
+    let verdict = ["ok", "error", "outcome", "retry_safe", "hint"]
+        .into_iter()
+        .filter_map(|key| {
+            let value = structured.get(key)?;
+            Some(format!("{key}:{value}"))
+        })
+        .collect::<Vec<_>>();
+    if !verdict.is_empty() {
+        result.content.push(Content::text(verdict.join(" ")));
+    }
+    result
+}
+
 #[tool_handler]
 impl ServerHandler for PhoneHandler {
     async fn call_tool(
@@ -2731,9 +2785,16 @@ impl ServerHandler for PhoneHandler {
         if let Some(refusal) = self.profile.refusal(&name) {
             return Ok(refusal);
         }
+        let codex_client = context
+            .peer
+            .peer_info()
+            .is_some_and(|info| is_codex_client(&info.client_info.name));
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let result = Self::tool_router().call(tcc).await?;
-        Ok(finish_result(&name, result, StructuredMode::from_env()))
+        Ok(keep_codex_images(
+            finish_result(&name, result, StructuredMode::from_env()),
+            codex_client,
+        ))
     }
 
     async fn list_tools(
@@ -3100,6 +3161,7 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
             PhoneStep::LaunchApp {
                 bundle: None,
                 app: Some(app),
+                fresh,
                 after_ms,
             } => {
                 validate_after(after_ms)?;
@@ -3109,10 +3171,11 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                         "steps[{index}].app must be an app name of 1 to 100 characters; no action was sent"
                     ));
                 }
-                action_step(
-                    serde_json::json!({"type":"launch_app","app":app}),
-                    after_ms,
-                )
+                let mut action = serde_json::json!({"type":"launch_app","app":app});
+                if fresh {
+                    action["fresh"] = serde_json::json!(true);
+                }
+                action_step(action, after_ms)
             }
             PhoneStep::LaunchApp {
                 bundle: None,
@@ -3131,6 +3194,7 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
             PhoneStep::LaunchApp {
                 bundle: Some(bundle),
                 app: None,
+                fresh,
                 after_ms,
             } => {
                 validate_after(after_ms)?;
@@ -3144,10 +3208,13 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                         "steps[{index}].bundle must be a valid reverse-DNS identifier up to 200 bytes; no action was sent"
                     ));
                 }
-                action_step(
-                    serde_json::json!({"type":"launch_app","bundle":bundle}),
-                    after_ms,
-                )
+                {
+                    let mut action = serde_json::json!({"type":"launch_app","bundle":bundle});
+                    if fresh {
+                        action["fresh"] = serde_json::json!(true);
+                    }
+                    action_step(action, after_ms)
+                }
             }
             PhoneStep::OpenUrl { url, after_ms } => {
                 validate_after(after_ms)?;
@@ -3502,7 +3569,15 @@ fn list_result(
 ) -> CallToolResult {
     let text = response.json.as_ref().and_then(compact);
     match text {
-        Some(text) if response.status.is_success() => {
+        Some(text)
+            if response.status.is_success()
+                || response
+                    .json
+                    .as_ref()
+                    .and_then(|body| body.get("error"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("app_changed") =>
+        {
             let result = if response.ok() {
                 CallToolResult::success(vec![Content::text(text)])
             } else {
@@ -3555,6 +3630,131 @@ async fn send_input_observed(
 
 #[cfg(test)]
 mod tests {
+
+    fn image_verdict_result() -> CallToolResult {
+        let mut result = CallToolResult::error(vec![
+            Content::text("Screenshot after failure · retry_safe:true"),
+            Content::image("cG5n", "image/png"),
+        ]);
+        result.structured_content = Some(serde_json::json!({
+            "ok": false, "error": "x", "outcome": "not_sent",
+            "retry_safe": true, "hint": "try again", "elements": ["bulk"],
+        }));
+        result
+    }
+
+    #[test]
+    fn codex_image_keeps_image_and_always_appends_verdict() {
+        let shaped = finish_result(
+            "phone_screenshot",
+            image_verdict_result(),
+            StructuredMode::Slim,
+        );
+        let mut expected = shaped.clone();
+        expected.structured_content = None;
+        expected.content.push(Content::text(
+            "ok:false error:\"x\" outcome:\"not_sent\" retry_safe:true hint:\"try again\"",
+        ));
+        let adapted = keep_codex_images(shaped, is_codex_client("codex-mcp-client"));
+        assert!(adapted.structured_content.is_none());
+        assert_eq!(adapted.content[1].as_image().unwrap().data, "cG5n");
+        assert_eq!(
+            serde_json::to_vec(&adapted).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_image_without_image_is_unchanged() {
+        let mut result = image_verdict_result();
+        result.content.retain(|block| block.as_image().is_none());
+        for mode in [
+            StructuredMode::Slim,
+            StructuredMode::Full,
+            StructuredMode::Off,
+        ] {
+            let shaped = finish_result("phone_elements", result.clone(), mode);
+            assert_eq!(
+                serde_json::to_vec(&keep_codex_images(shaped.clone(), true)).unwrap(),
+                serde_json::to_vec(&shaped).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn codex_image_other_clients_are_unchanged() {
+        for mode in [
+            StructuredMode::Slim,
+            StructuredMode::Full,
+            StructuredMode::Off,
+        ] {
+            let shaped = finish_result("phone_screenshot", image_verdict_result(), mode);
+            assert_eq!(
+                serde_json::to_vec(&keep_codex_images(shaped.clone(), false)).unwrap(),
+                serde_json::to_vec(&shaped).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn codex_image_name_matching_is_case_insensitive_prefix_only() {
+        for name in ["codex", "Codex-MCP-Client", "CODEX-desktop"] {
+            assert!(is_codex_client(name), "{name}");
+        }
+        for name in ["my-codex", "code", "", " codex", "你好codex"] {
+            assert!(!is_codex_client(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn codex_image_device_text_does_not_suppress_verdict() {
+        for mode in [StructuredMode::Slim, StructuredMode::Full] {
+            let mut result = CallToolResult::success(vec![
+                Content::text("#0 [StaticText] \"Status ok:true now\""),
+                Content::image("cG5n", "image/png"),
+            ]);
+            result.structured_content = Some(serde_json::json!({"ok": true}));
+            let shaped = finish_result("phone_screenshot", result, mode);
+            let mut expected = shaped.clone();
+            expected.structured_content = None;
+            expected.content.push(Content::text("ok:true"));
+            let adapted = keep_codex_images(shaped, true);
+            assert_eq!(
+                serde_json::to_vec(&adapted).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn codex_image_verdict_without_text_and_modes() {
+        for mode in [StructuredMode::Slim, StructuredMode::Full] {
+            let mut result = image_verdict_result();
+            result.content.retain(|block| block.as_image().is_some());
+            let adapted = keep_codex_images(finish_result("phone_screenshot", result, mode), true);
+            assert!(adapted.structured_content.is_none());
+            assert_eq!(
+                adapted.content.last().unwrap().as_text().unwrap().text,
+                "ok:false error:\"x\" outcome:\"not_sent\" retry_safe:true hint:\"try again\""
+            );
+        }
+        let shaped = finish_result(
+            "phone_screenshot",
+            image_verdict_result(),
+            StructuredMode::Off,
+        );
+        assert_eq!(
+            serde_json::to_vec(&keep_codex_images(shaped.clone(), true)).unwrap(),
+            serde_json::to_vec(&shaped).unwrap()
+        );
+        // A structured body with no verdict keys adds no empty text block.
+        let mut bare = image_verdict_result();
+        bare.content.retain(|block| block.as_image().is_some());
+        bare.structured_content = Some(serde_json::json!({"rows": 3}));
+        let adapted = keep_codex_images(bare, true);
+        assert!(adapted.structured_content.is_none());
+        assert!(adapted.content.iter().all(|block| block.as_text().is_none()));
+    }
 
     /// A misspelled or unsupported argument must fail loudly. Before this,
     /// `phone_tap_label {"label":…, "kind":"Button"}` silently dropped
@@ -4425,10 +4625,20 @@ mod tests {
         let request = phone_steps_request(vec![PhoneStep::LaunchApp {
             bundle: Some("com.example.SampleApp".to_string()),
             app: None,
+            fresh: false,
             after_ms: 500,
         }])
         .unwrap();
         assert_eq!(request["steps"][0]["action"]["type"], "launch_app");
+        assert!(request["steps"][0]["action"].get("fresh").is_none(), "only when asked");
+        let fresh = phone_steps_request(vec![PhoneStep::LaunchApp {
+            bundle: Some("com.example.SampleApp".to_string()),
+            app: None,
+            fresh: true,
+            after_ms: 0,
+        }])
+        .unwrap();
+        assert_eq!(fresh["steps"][0]["action"]["fresh"], true);
         assert_eq!(
             request["steps"][0]["action"]["bundle"],
             "com.example.SampleApp"
@@ -4437,6 +4647,7 @@ mod tests {
         let error = phone_steps_request(vec![PhoneStep::LaunchApp {
             bundle: Some("not a bundle".to_string()),
             app: None,
+            fresh: false,
             after_ms: 0,
         }])
         .unwrap_err();

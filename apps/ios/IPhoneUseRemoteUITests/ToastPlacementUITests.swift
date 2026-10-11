@@ -28,7 +28,7 @@ final class ToastPlacementUITests: XCTestCase {
     }
 
     private func request(_ path: String, method: String = "GET", body: String? = nil) async throws -> Data {
-        var request = URLRequest(url: mock.appending(path: path))
+        var request = URLRequest(url: mock.appendingPathComponent( path))
         request.httpMethod = method
         request.httpBody = body?.data(using: .utf8)
         request.timeoutInterval = 3
@@ -45,7 +45,7 @@ final class ToastPlacementUITests: XCTestCase {
         app.launch()
         let screen = app.otherElements["remote-screen"]
         XCTAssertTrue(screen.waitForExistence(timeout: 15), "the remote screen did not appear")
-        try await Task.sleep(for: .seconds(2))
+        try await Task.sleep(nanoseconds: UInt64(2) * 1_000_000_000)
         _ = try await request("mock/scenario", method: "POST", body: #"{"name":"owned"}"#)
 
         let toast = app.descendants(matching: .any)["toast"].firstMatch
@@ -57,7 +57,7 @@ final class ToastPlacementUITests: XCTestCase {
             _ = toast.waitForExistence(timeout: 2)
         }
         XCTAssertTrue(toast.exists, "no toast after tapping a phone another agent holds")
-        try await Task.sleep(for: .milliseconds(400))   // let it settle where it goes
+        try await Task.sleep(nanoseconds: UInt64(400) * 1_000_000)   // let it settle where it goes
 
         let frame = screen.frame
         let scale = min(frame.width / pictureSize.width, frame.height / pictureSize.height)
@@ -67,7 +67,7 @@ final class ToastPlacementUITests: XCTestCase {
         let placed = toast.frame
         if let dir = ProcessInfo.processInfo.environment["SHOT_DIR"] {
             try? XCUIScreen.main.screenshot().pngRepresentation
-                .write(to: URL(fileURLWithPath: dir).appending(path: shot + ".png"))
+                .write(to: URL(fileURLWithPath: dir).appendingPathComponent( shot + ".png"))
         }
         XCTAssertGreaterThan(placed.width, 0)
         XCTAssertFalse(placed.intersects(picture.insetBy(dx: 1, dy: 1)),

@@ -1378,6 +1378,13 @@ install_runner_sources() {
         cp "$source/README.md" "$RUNNER_SRC_STAGE/README.md" \
             || die "Could not copy the device runner README."
     fi
+    # The on-phone daemon (libipu_embed.a, built by the release): setup links
+    # it into the runner when present; without it the plain runner is built.
+    if [ -f "$source/embed/libipu_embed.a" ] && [ ! -L "$source/embed/libipu_embed.a" ]; then
+        mkdir -p "$RUNNER_SRC_STAGE/embed" \
+            && cp "$source/embed/libipu_embed.a" "$RUNNER_SRC_STAGE/embed/libipu_embed.a" \
+            || die "Could not copy the on-phone daemon library."
+    fi
     # Xcode's per-user state never belongs in the shared copy.
     find "$RUNNER_SRC_STAGE" -name xcuserdata -type d -prune -exec rm -rf {} + 2>/dev/null || true
     chmod -R go-w "$RUNNER_SRC_STAGE" && chmod 700 "$RUNNER_SRC_STAGE" \

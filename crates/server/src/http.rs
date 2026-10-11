@@ -960,6 +960,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/pair/new", post(pair_new))
         .route("/pair", get(pair_page).post(pair_submit))
         .route("/pair/probe", get(pair_probe))
+        .route("/browser/chrome", post(browser_chrome))
         // Browser control: one HTTP request per gesture, each with an explicit
         // ACK, alongside the MJPEG view.
         .route("/control", post(direct_control))
@@ -979,6 +980,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/collect", post(agent_collect))
         .route("/agent/scroll_find", post(agent_scroll_find))
         .route("/agent/flow/draft", get(agent_flow_draft))
+        .route("/agent/flow/record", get(agent_flow_record).post(agent_flow_record))
+        .route("/agent/flow/save", post(agent_flow_save))
+        .route("/agent/flows", get(agent_flows))
+        .route("/agent/flow/run", post(agent_flow_run))
+        .route("/agent/task", post(agent_task_start))
+        .route("/agent/task/:id", get(agent_task_get))
+        .route("/agent/task/:id/:verb", post(agent_task_act))
+        .route("/agent/tasks", get(agent_tasks))
         .route("/agent/reference", get(agent_reference))
         // Shortcuts RPC return path: the phone POSTs structured results here.
         // Safe GET only peeks; destructive consumption has an explicit,
@@ -999,6 +1008,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/owner", post(agent_owner))
         .route("/agent/prewarm", post(agent_prewarm))
         .route("/agent/login-link", post(agent_login_link))
+        .route("/agent/phone-daemon/pair", post(crate::phone_daemon::pair))
         .route("/agent/capabilities", get(agent_capabilities))
         .route("/agent/metrics", get(agent_metrics))
         .route("/agent/run", post(agent_run))
@@ -2861,8 +2871,10 @@ async fn agent_status(
     // Agent Do Not Disturb: whether it is on and the gate's last outcome with
     // its time, so a Shortcuts flash on a recording can be matched to it.
     let agent_focus = recover(state.agent_focus.lock()).status_json();
+    // The daemon inside the runner on the phone, as its last /status said.
+    let phone_daemon = crate::phone_daemon::status_json(wda);
     let body = format!(
-        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus}}}"#,
+        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_wda":{},"managed_wda_pending":{},"recovery_owner":"{recovery_owner}","wda":{wda},"wda_actionable":{wda_actionable},"wda_locked":{wda_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"wda_build":{wda_build},"wda_died_reason":"{wda_died_reason}","wda_died_at":{wda_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"transport":"{transport}","wda_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus},"phone_daemon":{phone_daemon}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&status_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -6398,6 +6410,45 @@ fn delta_shows_no_visible_change(delta: &ElementRowsDelta, report: &SettleReport
         && delta.removed.is_empty()
 }
 
+const UNSETTLED_SCROLL_MIN_STILL_ANCHORS: usize = 3;
+
+/// Attach a progress hint only when a fresh, readable observation supports it.
+fn mark_no_scroll_progress(
+    body: &mut serde_json::Value,
+    action: &serde_json::Value,
+    baseline: &[crate::wda::ElementRow],
+    current: &[crate::wda::ElementRow],
+    report: &SettleReport,
+) {
+    if report.sparse
+        || report.stale
+        || body.get("app_changed").is_some()
+        || body.get("no_visible_change") == Some(&serde_json::Value::Bool(true))
+    {
+        return;
+    }
+    let number = |key: &str| action.get(key).and_then(serde_json::Value::as_f64);
+    let direction = match action.get("type").and_then(serde_json::Value::as_str) {
+        Some("scroll") => Some((number("dx").unwrap_or(0.0), number("dy").unwrap_or(0.0))),
+        Some("swipe" | "drag") => match (number("x1"), number("y1"), number("x2"), number("y2")) {
+            (Some(x1), Some(y1), Some(x2), Some(y2)) => Some((x1 - x2, y1 - y2)),
+            _ => None,
+        },
+        _ => None,
+    };
+    if direction.is_some_and(|(dx, dy)| {
+        crate::scroll_progress::scroll_without_progress(baseline, current, dx, dy).is_some_and(
+            |still| match report.reason {
+                SettleReason::Stable => report.settled && still >= 1,
+                SettleReason::BudgetExhausted => still >= UNSETTLED_SCROLL_MIN_STILL_ANCHORS,
+                SettleReason::ObservationFailed => false,
+            },
+        )
+    }) {
+        body["no_scroll_progress"] = serde_json::Value::Bool(true);
+    }
+}
+
 /// Serialize a computed delta for the wire: `added`/`changed` carry the full
 /// current rows with their indexes (so a follow-up snapshot-bound action needs
 /// no re-read), `removed` is baseline indexes only.
@@ -7670,6 +7721,8 @@ fn element_swipe_endpoints(
 async fn scroll_snapshot_element(
     w: &mut crate::wda::WdaClient,
     value: &serde_json::Value,
+    guard_alert: bool,
+    detail: &mut Option<serde_json::Value>,
 ) -> Result<(), SnapshotElementTapError> {
     let dx = value
         .get("dx")
@@ -7722,6 +7775,12 @@ async fn scroll_snapshot_element(
     let (x1, y1, x2, y2) = element_swipe_endpoints(row.rect, [x, y, width, height], screen, dx, dy);
     let dist = ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt();
     let duration = (dist * 1.2).clamp(120.0, 600.0) as u64;
+    if refuse_scroll_alert(w, guard_alert, detail).await {
+        return Err(SnapshotElementTapError::Refused(
+            "alert_present",
+            SCROLL_ALERT_HINT,
+        ));
+    }
     w.swipe(x1, y1, x2, y2, duration)
         .await
         .map_err(SnapshotElementTapError::AfterDispatch)
@@ -8549,6 +8608,7 @@ async fn wda_control_with_client(
     actionable: &std::sync::atomic::AtomicBool,
     v: &serde_json::Value,
     detail: &mut Option<serde_json::Value>,
+    guard_alert: bool,
 ) -> WdaControlOutcome {
     use std::sync::atomic::Ordering;
     let typ = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -8678,12 +8738,15 @@ async fn wda_control_with_client(
                     tracing::info!("scroll page: drag ({x1:.0},{y1:.0}) -> ({x2:.0},{y2:.0})");
                     let dist = ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt();
                     let duration = (dist * 1.2).clamp(120.0, 600.0) as u64;
+                    if refuse_scroll_alert(w, guard_alert, detail).await {
+                        return WdaControlOutcome::Refused("alert_present", SCROLL_ALERT_HINT);
+                    }
                     w.swipe(x1, y1, x2, y2, duration).await
                 }
             }
         }
         "scroll" if v.get("element").is_some() => {
-            let result = scroll_snapshot_element(w, v).await;
+            let result = scroll_snapshot_element(w, v, guard_alert, detail).await;
             match snapshot_element_outcome(result, w, "control element scroll") {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
@@ -8742,7 +8805,26 @@ async fn wda_control_with_client(
             {
                 return WdaControlOutcome::Unsupported;
             }
-            wda_swipe(w, nx, ny, dx, dy).await
+            if guard_alert {
+                let plan = async {
+                    let (sw, sh) = w.window_size().await?;
+                    coordinate_swipe_endpoints(nx, ny, dx, dy, sw, sh)
+                }
+                .await;
+                match plan {
+                    Ok((x1, y1, x2, y2)) => {
+                        if refuse_scroll_alert(w, guard_alert, detail).await {
+                            return WdaControlOutcome::Refused("alert_present", SCROLL_ALERT_HINT);
+                        }
+                        let duration = (((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt() * 1.2)
+                            .clamp(120.0, 600.0) as u64;
+                        w.swipe(x1, y1, x2, y2, duration).await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                wda_swipe(w, nx, ny, dx, dy).await
+            }
         }
         "text" => match v.get("text").and_then(|t| t.as_str()) {
             Some(t) => w.keys(t).await,
@@ -8784,7 +8866,7 @@ async fn wda_control_with_client(
                         .into_iter()
                         .all(|n| (0.0..=1.0).contains(&n)) =>
                 {
-                    async {
+                    let plan = async {
                         let (sw, sh) = w.window_size().await?;
                         let (ax, ay, bx, by) = (
                             normalized_wda_axis(x1, sw)?,
@@ -8797,14 +8879,26 @@ async fn wda_control_with_client(
                             .get("duration_ms")
                             .and_then(|x| x.as_u64())
                             .unwrap_or_else(|| (dist * 0.9).clamp(120.0, 500.0) as u64);
-                        if typ == "drag" {
-                            let hold = v.get("hold_ms").and_then(|x| x.as_u64()).unwrap_or(500);
-                            w.drag(ax, ay, bx, by, hold, duration).await
-                        } else {
-                            w.swipe(ax, ay, bx, by, duration).await
-                        }
+                        Ok::<_, anyhow::Error>((ax, ay, bx, by, duration))
                     }
-                    .await
+                    .await;
+                    match plan {
+                        Ok((ax, ay, bx, by, duration)) => {
+                            let hold = v.get("hold_ms").and_then(|x| x.as_u64()).unwrap_or(500);
+                            if refuse_scroll_alert(w, guard_alert, detail).await {
+                                return WdaControlOutcome::Refused(
+                                    "alert_present",
+                                    SCROLL_ALERT_HINT,
+                                );
+                            }
+                            if typ == "drag" {
+                                w.drag(ax, ay, bx, by, hold, duration).await
+                            } else {
+                                w.swipe(ax, ay, bx, by, duration).await
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
                 (x1, y1, x2, y2) if coordinates_out_of_range(&[x1, y1, x2, y2]) => {
                     return WdaControlOutcome::InvalidValue(COORDINATES_HINT);
@@ -9329,6 +9423,59 @@ fn reject_invalid_open_url(value: &serde_json::Value) -> Result<(), Response> {
     ))
 }
 
+const SCROLL_ALERT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
+const SCROLL_ALERT_HINT: &str = "a system alert is up: answer it first with {\"type\":\"alert\",\"button\":\"<exact button>\"} (or an alert step in phone_run_steps), asking the user before granting a permission, then retry the scroll or gesture";
+
+fn scroll_alert_guard<E>(
+    probe: Result<Option<(String, Vec<String>)>, E>,
+) -> Option<serde_json::Value> {
+    let alert = alert_json(
+        probe
+            .ok()
+            .flatten()
+            .filter(|(text, buttons)| !text.trim().is_empty() || !buttons.is_empty()),
+    )?;
+    Some(
+        serde_json::json!({"ok":false,"error":"alert_present","outcome":"not_sent",
+        "retry_safe":true,"alert":alert,"hint":SCROLL_ALERT_HINT}),
+    )
+}
+
+async fn refuse_scroll_alert(
+    w: &mut crate::wda::WdaClient,
+    guard_alert: bool,
+    detail: &mut Option<serde_json::Value>,
+) -> bool {
+    if !guard_alert {
+        return false;
+    }
+    let probe = tokio::time::timeout(SCROLL_ALERT_PROBE_TIMEOUT, w.alert_summary()).await;
+    let block = scroll_alert_guard(probe.map(|result| result.ok().flatten()));
+    if let Some(block) = block {
+        *detail = Some(block);
+        return true;
+    }
+    false
+}
+
+async fn with_scroll_alert_detail(
+    response: Response,
+    detail: Option<&serde_json::Value>,
+) -> Response {
+    let Some(detail) = detail.filter(|d| d.get("alert").is_some()) else {
+        return response;
+    };
+    let (response, body) = read_json_response(response).await;
+    let Some(mut body) = body else {
+        return response;
+    };
+    body["alert"] = detail["alert"].clone();
+    body["hint"] = detail["hint"].clone();
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(body.to_string()))
+}
+
 /// Execute one Direct agent action exactly once.
 ///
 /// Locator and geometry reads may precede the mutation, but once a mutating WDA
@@ -9364,6 +9511,16 @@ async fn direct_agent_action(
             let Some(bundle) = bundle else {
                 return WdaControlOutcome::Unsupported;
             };
+            // `fresh`: quit it first, so it opens on its first screen and not
+            // the page it was left on (recorded flows start there).
+            let fresh = value.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
+            if fresh {
+                if let Err(error) = w.terminate_app(&bundle).await {
+                    tracing::warn!("fresh launch: terminate {bundle} failed, launching as is: {error:#}");
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+            }
             Some(w.launch_app(&bundle).await)
         }
         // The handlers refuse a disallowed scheme with a 403 before this;
@@ -9512,7 +9669,7 @@ async fn direct_agent_action(
     };
 
     let Some(result) = custom_result else {
-        return wda_control_with_client(w, actionable, value, detail).await;
+        return wda_control_with_client(w, actionable, value, detail, true).await;
     };
     match result {
         Ok(()) => {
@@ -9650,12 +9807,32 @@ async fn direct_control(
         {
             return None;
         }
+        // A recording turns a person's coordinate tap into the element under
+        // the finger, read before the tap changes the screen.
+        let recorded_locator = if recording_tap(&state, &value) {
+            locate_tap(&mut client, &value).await
+        } else {
+            None
+        };
         *recover(dispatch_marker.lock()) = Some(client.last_post());
-        Some(wda_control_with_client(&mut client, &state.wda_actionable, &value, &mut detail).await)
+        let outcome = wda_control_with_client(
+            &mut client,
+            &state.wda_actionable,
+            &value,
+            &mut detail,
+            false,
+        )
+        .await;
+        Some((outcome, recorded_locator))
     })
     .await;
     let outcome = match outcome {
-        Ok(Some(outcome)) => outcome,
+        Ok(Some((outcome, recorded_locator))) => {
+            if outcome == WdaControlOutcome::Applied {
+                record_control_step(&state, &value, recorded_locator);
+            }
+            outcome
+        }
         Ok(None) => return wda_deadline_response(false),
         Err(_) => {
             let mark = *recover(dispatched.lock());
@@ -10998,6 +11175,7 @@ async fn agent_actions_inner(
     // a name that does not resolve refuses the whole batch with nothing sent.
     for step in &mut request.steps {
         if let AgentActionStep::Action { action, .. } = step {
+            fresh_launch_while_recording(&state, action);
             if let Err(refusal) = resolve_launch_app_action(&state, action).await {
                 return refusal;
             }
@@ -11366,7 +11544,11 @@ async fn agent_actions_inner(
                     {
                         body["runner_error"] = runner_error.clone();
                     }
-                    return agent_actions_json(status, body);
+                    return with_scroll_alert_detail(
+                        agent_actions_json(status, body),
+                        step_detail.as_ref(),
+                    )
+                    .await;
                 }
                 applied_actions += 1;
                 record_activity(&state, &headers, action);
@@ -11639,10 +11821,14 @@ async fn agent_actions_inner(
 struct RunnerPager<'a> {
     w: &'a mut crate::wda::WdaClient,
     screen: Option<(f64, f64)>,
+    first_page: Option<crate::collect::Page>,
 }
 
 impl crate::collect::Pager for RunnerPager<'_> {
     async fn read(&mut self) -> anyhow::Result<crate::collect::Page> {
+        if let Some(page) = self.first_page.take() {
+            return Ok(page);
+        }
         // Source reads are idempotent: one more try on a fresh session, as a
         // failed read on /agent/elements gets.
         let rows = match self.w.elements().await {
@@ -11779,6 +11965,41 @@ fn first_read_failed(state: &AppState, error: &anyhow::Error) -> Response {
     )
 }
 
+/// Pure comparison: missing or unnamed applications never refuse a swipe.
+fn collect_app_guard(expected: Option<&str>, app: Option<&str>) -> Option<serde_json::Value> {
+    let (expected, app) = (
+        expected.filter(|s| !s.is_empty())?,
+        app.filter(|s| !s.is_empty())?,
+    );
+    (expected != app).then(|| {
+        serde_json::json!({
+            "ok": false, "error": "app_changed", "outcome": "not_sent", "retry_safe": true,
+            "expected_app": expected, "app": app, "swipes": 0
+        })
+    })
+}
+
+fn expected_collect_app(state: &AppState, snapshot: Option<&str>) -> Option<String> {
+    snapshot
+        .and_then(|id| lookup_element_snapshot(state, id))
+        .and_then(|rows| active_application(&rows))
+        .filter(|app| !app.is_empty())
+}
+
+fn list_app_refusal(
+    state: &AppState,
+    headers: &HeaderMap,
+    expected: Option<&str>,
+    page: &crate::collect::Page,
+) -> Option<Response> {
+    let app = active_application(&page.rows);
+    let mut body = collect_app_guard(expected, app.as_deref())?;
+    if let Some(snapshot) = remember_page(state, headers, page.rows.clone()) {
+        body["snapshot"] = snapshot.into();
+    }
+    Some(json_response(StatusCode::CONFLICT, body))
+}
+
 /// `POST /agent/collect` — read rows of one kind across pages:
 /// `{"row_kind":"Cell","region":[x,y,w,h],"max_pages":6,"end_label":"…","direction":"down"}`
 /// (all optional). See [`crate::collect`] for the stop rules; `complete` is
@@ -11800,6 +12021,7 @@ async fn agent_collect(
         Ok(request) => request,
         Err(detail) => return invalid_list_request(detail),
     };
+    let expected_app = expected_collect_app(&state, request.snapshot.as_deref());
     let Some(wda) = state.wda.clone() else {
         return ControlRefusal::wda_not_configured().into_response();
     };
@@ -11812,7 +12034,17 @@ async fn agent_collect(
     let mut pager = RunnerPager {
         w: &mut w,
         screen: None,
+        first_page: None,
     };
+    use crate::collect::Pager as _;
+    let page = match pager.read().await {
+        Ok(page) => page,
+        Err(error) => return first_read_failed(&state, &error),
+    };
+    if let Some(refusal) = list_app_refusal(&state, &headers, expected_app.as_deref(), &page) {
+        return refusal;
+    }
+    pager.first_page = Some(page);
     let result = crate::collect::collect(&mut pager, &request, deadline).await;
     drop(w);
     match result {
@@ -11824,12 +12056,16 @@ async fn agent_collect(
                 collection.stop,
                 crate::collect::StopReason::ReadFailed | crate::collect::StopReason::SwipeFailed
             );
+            let app = active_application(&collection.last.rows).filter(|app| !app.is_empty());
             let rows = std::mem::take(&mut collection.last.rows);
-            let snapshot = current.then(|| remember_page(&state, &headers, rows)).flatten();
-            json_response(
-                StatusCode::OK,
-                crate::collect::collection_json(&collection, snapshot.as_deref()),
-            )
+            let snapshot = current
+                .then(|| remember_page(&state, &headers, rows))
+                .flatten();
+            let mut body = crate::collect::collection_json(&collection, snapshot.as_deref());
+            if let Some(app) = app {
+                body["app"] = app.into();
+            }
+            json_response(StatusCode::OK, body)
         }
     }
 }
@@ -11909,6 +12145,7 @@ async fn agent_scroll_find(
         Ok(request) => request,
         Err(detail) => return invalid_list_request(detail),
     };
+    let expected_app = expected_collect_app(&state, request.snapshot.as_deref());
     let Some(wda) = state.wda.clone() else {
         return ControlRefusal::wda_not_configured().into_response();
     };
@@ -11921,6 +12158,7 @@ async fn agent_scroll_find(
     let mut pager = RunnerPager {
         w: &mut w,
         screen: None,
+        first_page: None,
     };
     use crate::collect::Pager as _;
     let mut page = match pager.read().await {
@@ -11930,6 +12168,9 @@ async fn agent_scroll_find(
             return first_read_failed(&state, &error);
         }
     };
+    if let Some(refusal) = list_app_refusal(&state, &headers, expected_app.as_deref(), &page) {
+        return refusal;
+    }
     let mut swipes = 0u32;
     let mut stop_error: Option<(&'static str, String)> = None;
     let verdict = loop {
@@ -11969,6 +12210,9 @@ async fn agent_scroll_find(
     };
     drop(w);
     let mut body = serde_json::json!({"swipes": swipes, "max_swipes": request.max_swipes});
+    if let Some(app) = active_application(&page.rows).filter(|app| !app.is_empty()) {
+        body["app"] = app.into();
+    }
     match &verdict {
         FindVerdict::Found(index) => {
             body["ok"] = true.into();
@@ -12778,6 +13022,7 @@ async fn agent_input_inner(
         return response;
     }
     let mut value = value;
+    fresh_launch_while_recording(&state, &mut value);
     if let Err(refusal) = resolve_launch_app_action(&state, &mut value).await {
         return refusal;
     }
@@ -12988,6 +13233,9 @@ async fn agent_input_inner(
                                         body["no_visible_change"] =
                                             serde_json::Value::Bool(true);
                                     }
+                                    mark_no_scroll_progress(
+                                        &mut body, &value, &baseline_rows, &rows, &report,
+                                    );
                                     body
                                 }
                                 None => serde_json::json!({
@@ -13053,7 +13301,7 @@ async fn agent_input_inner(
             hinted_control_response(StatusCode::CONFLICT, error, "no_effect", hint)
         }
         WdaControlOutcome::Refused(error, hint) => {
-            hinted_control_response(StatusCode::CONFLICT, error, "not_sent", hint)
+            with_scroll_alert_detail(hinted_control_response(StatusCode::CONFLICT, error, "not_sent", hint), detail.as_ref()).await
         }
         WdaControlOutcome::NoAlert if optional_alert(&value) => with_security_headers(
             Response::builder()
@@ -13469,8 +13717,12 @@ fn record_flow_action(state: &AppState, action: &serde_json::Value, now: Instant
     let mut trail = recover(state.flow_trail.lock());
     if let Some(bundle) = &bundle {
         trail.launched(bundle, now);
+        let mut step = serde_json::json!({"kind":"launch_app","bundle":bundle});
+        if let Some(fresh) = action.get("fresh").and_then(serde_json::Value::as_bool) {
+            step["fresh"] = serde_json::json!(fresh);
+        }
         trail.record(
-            crate::flows::Converted::Step(serde_json::json!({"kind":"launch_app","bundle":bundle})),
+            crate::flows::Converted::Step(step),
             now,
         );
     } else {
@@ -13633,19 +13885,385 @@ async fn agent_reference(State(state): State<Arc<AppState>>, headers: HeaderMap)
 /// flow v1 document plus a `todo` list. Typed text is never included; each
 /// typing step references a named input instead. 404 `no_trail` when nothing
 /// worth drafting has been recorded since the daemon started.
+/// Recording and a coordinate tap a person sent (not an element/label tap,
+/// which converts by itself).
+fn recording_tap(state: &AppState, value: &serde_json::Value) -> bool {
+    value.get("type").and_then(serde_json::Value::as_str) == Some("tap")
+        && value.get("element").is_none()
+        && value.get("label").is_none()
+        && recover(state.flow_trail.lock()).is_recording()
+}
+
+/// The locator of what a normalized `(x, y)` tap hits on the current screen.
+async fn locate_tap(client: &mut crate::wda::WdaClient, value: &serde_json::Value) -> Option<serde_json::Value> {
+    let x = value.get("x").and_then(serde_json::Value::as_f64)?;
+    let y = value.get("y").and_then(serde_json::Value::as_f64)?;
+    let (width, height) = client.window_size().await.ok()?;
+    let rows = client.elements().await.ok()?;
+    crate::flows::locator_at(&rows, x * width, y * height)
+}
+
+/// A person's applied control message, into an active recording.
+fn record_control_step(state: &AppState, value: &serde_json::Value, locator: Option<serde_json::Value>) {
+    let mut trail = recover(state.flow_trail.lock());
+    if !trail.is_recording() {
+        return;
+    }
+    let converted = match locator {
+        Some(locator) => crate::flows::Converted::Step(serde_json::json!({"kind": "tap_locator", "locator": locator})),
+        None => crate::flows::convert_action(value, None),
+    };
+    trail.record(converted, Instant::now());
+}
+
+fn agent_json_response(status: StatusCode, body: serde_json::Value) -> Response {
+    with_security_headers(
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
+}
+
+/// The agent bearer token, or the session cookie the iPhone app holds (it
+/// pairs and renews a session, like the web page). Writes still need
+/// `X-Phone-Control`, which a cross-site form cannot send.
+fn agent_auth_refusal(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    if is_authed(state, headers) && !state.auth_limiter.lock().is_ok_and(|limiter| limiter.is_locked()) {
+        crate::timing::authenticated();
+        return None;
+    }
+    match agent_auth(state, headers) {
+        AgentAuth::Locked => Some(with_security_headers(
+            (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+        )),
+        AgentAuth::Denied => Some(with_security_headers(
+            (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+        )),
+        AgentAuth::Ok => None,
+    }
+}
+
+/// `GET /agent/flow/record` — whether a recording runs and its draft so far.
+/// `POST /agent/flow/record {"action": "start" | "stop"}` — start one (every
+/// step applied through `/control`, `/agent/input` or `/agent/actions` lands
+/// in it, a person's coordinate taps as the element under the finger), or
+/// stop it and answer its draft.
+async fn agent_flow_record(
+    State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
+    }
+    if method == axum::http::Method::GET {
+        let trail = recover(state.flow_trail.lock());
+        return agent_json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "ok": true,
+                "recording": trail.is_recording(),
+                "steps": trail.recording_steps(),
+                "draft": trail.recording_draft(),
+            }),
+        );
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    let action = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("action").and_then(serde_json::Value::as_str).map(str::to_string));
+    let mut trail = recover(state.flow_trail.lock());
+    match action.as_deref() {
+        Some("start") => {
+            trail.start_recording();
+            agent_json_response(StatusCode::OK, serde_json::json!({"ok": true, "recording": true}))
+        }
+        Some("stop") => {
+            let draft = trail.stop_recording();
+            agent_json_response(
+                StatusCode::OK,
+                serde_json::json!({"ok": true, "recording": false, "draft": draft}),
+            )
+        }
+        _ => agent_json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "invalid_action", "hint": "send {\"action\": \"start\"} or {\"action\": \"stop\"}"}),
+        ),
+    }
+}
+
+/// `POST /agent/flow/save {"id": "app/name", "name": …, "description"?: …,
+/// "flow"?: {…}}` — install a flow into this daemon's local store, where
+/// schedules and tasks find it. Without `flow`, the running or last recording,
+/// else the current trail's draft, is saved. Never publishes anywhere.
+async fn agent_flow_save(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    let Ok(request) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return agent_json_response(StatusCode::BAD_REQUEST, serde_json::json!({"ok": false, "error": "invalid_json"}));
+    };
+    let Some(id) = request.get("id").and_then(serde_json::Value::as_str).map(str::to_string) else {
+        return agent_json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "id_required", "hint": "an id like \"myapp/daily-check\""}),
+        );
+    };
+    let flow = match request.get("flow") {
+        Some(flow) => Some(flow.clone()),
+        None => {
+            let mut trail = recover(state.flow_trail.lock());
+            let draft = trail.stop_recording().or_else(|| trail.draft());
+            draft.and_then(|draft| draft.get("flow").cloned())
+        }
+    };
+    let Some(mut flow) = flow else {
+        return agent_json_response(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"ok": false, "error": "no_trail", "hint": "record first (POST /agent/flow/record {\"action\":\"start\"}) or send \"flow\""}),
+        );
+    };
+    for key in ["name", "description"] {
+        if let Some(value) = request.get(key).filter(|v| v.as_str().is_some_and(|s| !s.trim().is_empty())) {
+            flow[key] = value.clone();
+        }
+    }
+    let result = tokio::task::spawn_blocking(move || save_local_flow(&id, &flow)).await;
+    match result {
+        Ok(Ok(saved)) => agent_json_response(StatusCode::OK, serde_json::json!({"ok": true, "saved": saved})),
+        Ok(Err(error)) => agent_json_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({"ok": false, "error": "invalid_flow", "message": format!("{error:#}")}),
+        ),
+        Err(error) => agent_json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"ok": false, "error": "save_failed", "message": error.to_string()}),
+        ),
+    }
+}
+
+/// `GET /agent/flows[?app=<bundle or name>]` — the flows this daemon can run
+/// (registry and local), as `iphone-use-mcp flow list --json` prints them.
+async fn agent_flows(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
+    }
+    let filter = iphone_use_mcp::registry::ListFilter {
+        category: query.get("category").cloned(),
+        app: query.get("app").cloned(),
+        verified_only: false,
+    };
+    match iphone_use_mcp::registry::list(&filter) {
+        Ok((entries, index)) => agent_json_response(
+            StatusCode::OK,
+            iphone_use_mcp::registry::list_json(&entries, &index, None),
+        ),
+        Err(error) => agent_json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "flows": [], "note": format!("{error:#}")}),
+        ),
+    }
+}
+
+/// `POST /agent/flow/run {"id": "app/flow", "inputs"?: {"k": "v"}, "confirm"?: bool}`
+/// — run a flow this daemon can see (registry or local) in this process, as
+/// the caller's owner (`X-Phone-Owner`, else `flow-run`), and answer its
+/// result. `confirm` is required for a flow that sends, pays or deletes.
+async fn agent_flow_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    let Ok(request) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return agent_json_response(StatusCode::BAD_REQUEST, serde_json::json!({"ok": false, "error": "invalid_json"}));
+    };
+    let Some(id) = request.get("id").and_then(serde_json::Value::as_str).map(str::to_string) else {
+        return agent_json_response(StatusCode::BAD_REQUEST, serde_json::json!({"ok": false, "error": "id_required"}));
+    };
+    let Some(scheduler) = crate::schedules::current() else {
+        return agent_json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"ok": false, "error": "not_ready"}),
+        );
+    };
+    let owner = headers
+        .get("x-phone-owner")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("flow-run")
+        .to_string();
+    let inputs: Vec<String> = request
+        .get("inputs")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| format!("{k}={}", v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())))
+        .collect();
+    let confirm = request.get("confirm").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let daemon = scheduler.self_client(&owner);
+    match iphone_use_mcp::flow::run_for_task(&daemon, &id, &inputs, confirm).await {
+        Ok((succeeded, value)) => agent_json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": succeeded, "result": value}),
+        ),
+        Err(error) => agent_json_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({"ok": false, "error": "flow_not_run", "message": format!("{error:#}")}),
+        ),
+    }
+}
+
+/// `POST /agent/task` — hand the daemon a goal (docs/agent-task.md). 202 with
+/// the task id; 409 `task_running` while another task runs.
+async fn agent_task_start(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    let mut request: iphone_use_mcp::task::TaskRequest = match serde_json::from_str(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return agent_json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": "invalid_request", "message": error.to_string()}),
+            )
+        }
+    };
+    if request.app.is_none() {
+        request.app = crate::app_lookup::starting_app(&request.goal);
+        request.app_fresh = request.app.is_some();
+    }
+    request.return_bundle = headers
+        .get("x-task-return-bundle")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.len() <= 200 && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        .map(str::to_string);
+    let Some(scheduler) = crate::schedules::current() else {
+        return agent_json_response(StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({"ok": false, "error": "not_ready"}));
+    };
+    match iphone_use_mcp::task::start(request, |owner| scheduler.self_client(owner)) {
+        Ok(id) => agent_json_response(StatusCode::ACCEPTED, serde_json::json!({"ok": true, "id": id, "status": "running"})),
+        Err(iphone_use_mcp::task::StartError::Busy(id)) => agent_json_response(
+            StatusCode::CONFLICT,
+            serde_json::json!({"ok": false, "error": "task_running", "id": id}),
+        ),
+        Err(iphone_use_mcp::task::StartError::Invalid(message)) => agent_json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error": "invalid_request", "message": message}),
+        ),
+    }
+}
+
+/// `GET /agent/task/<id>[?since=n]` (`current` for the running or last task).
+async fn agent_task_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
+    }
+    let since = query.get("since").and_then(|v| v.parse().ok());
+    match iphone_use_mcp::task::get(&id, since) {
+        Some(mut task) => {
+            task["ok"] = serde_json::json!(true);
+            agent_json_response(StatusCode::OK, task)
+        }
+        None => agent_json_response(StatusCode::NOT_FOUND, serde_json::json!({"ok": false, "error": "not_found"})),
+    }
+}
+
+/// `POST /agent/task/<id>/confirm {"approve": bool}` and `POST /agent/task/<id>/cancel`.
+async fn agent_task_act(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path((id, verb)): axum::extract::Path<(String, String)>,
+    body: String,
+) -> Response {
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    let result = match verb.as_str() {
+        "confirm" => {
+            let approve = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("approve").and_then(serde_json::Value::as_bool));
+            let Some(approve) = approve else {
+                return agent_json_response(
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({"ok": false, "error": "invalid_request", "message": "send {\"approve\": true|false}"}),
+                );
+            };
+            iphone_use_mcp::task::answer(&id, approve)
+        }
+        "cancel" => iphone_use_mcp::task::cancel(&id),
+        "pause" => iphone_use_mcp::task::pause(&id, true),
+        "resume" => iphone_use_mcp::task::pause(&id, false),
+        _ => return agent_json_response(StatusCode::NOT_FOUND, serde_json::json!({"ok": false, "error": "not_found"})),
+    };
+    match result {
+        Ok(()) => agent_json_response(StatusCode::OK, serde_json::json!({"ok": true})),
+        Err("not_found") => agent_json_response(StatusCode::NOT_FOUND, serde_json::json!({"ok": false, "error": "not_found"})),
+        Err(error) => agent_json_response(StatusCode::CONFLICT, serde_json::json!({"ok": false, "error": error})),
+    }
+}
+
+/// `GET /agent/tasks` — the running task and the last ones, newest first.
+async fn agent_tasks(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
+    }
+    agent_json_response(StatusCode::OK, iphone_use_mcp::task::list())
+}
+
+/// Validate and install `flow` as local flow `id` (the same check and store as
+/// `iphone-use-mcp flow add`).
+fn save_local_flow(id: &str, flow: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let bytes = serde_json::to_vec_pretty(flow)?;
+    iphone_use_mcp::flow::parse_flow(&bytes, id)?;
+    let dir = tempfile::Builder::new().prefix("flow-save").tempdir()?;
+    let file = dir.path().join("flow.json");
+    std::fs::write(&file, &bytes)?;
+    iphone_use_mcp::registry::add(&file, id)
+}
+
 async fn agent_flow_draft(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    match agent_auth(&state, &headers) {
-        AgentAuth::Locked => {
-            return with_security_headers(
-                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
-            )
-        }
-        AgentAuth::Denied => {
-            return with_security_headers(
-                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-            )
-        }
-        AgentAuth::Ok => {}
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
     }
     let draft = recover(state.flow_trail.lock()).draft();
     let (status, body) = match draft {
@@ -16397,6 +17015,16 @@ async fn resolve_launch_app_action(
     Ok(())
 }
 
+/// While recording, an app launch starts the app fresh (on its first screen),
+/// as the recorded flow will when it replays.
+fn fresh_launch_while_recording(state: &AppState, action: &mut serde_json::Value) {
+    if action.get("type").and_then(serde_json::Value::as_str) == Some("launch_app")
+        && recover(state.flow_trail.lock()).is_recording()
+    {
+        action["fresh"] = serde_json::json!(true);
+    }
+}
+
 fn agent_apps_json(status: StatusCode, body: serde_json::Value) -> Response {
     with_security_headers(
         Response::builder()
@@ -18259,6 +18887,236 @@ fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value
 #[cfg(test)]
 mod tests {
     #[test]
+    fn scroll_alert_present_refuses_all_gesture_modes() {
+        let source = include_str!("http.rs");
+        let shared = source
+            .split("async fn wda_control_with_client(")
+            .nth(1)
+            .unwrap()
+            .split("fn no_alert_response")
+            .next()
+            .unwrap();
+        assert!(shared.contains("scroll_snapshot_element(w, v, guard_alert, detail)"));
+        // Page, coordinate and swipe/drag dispatch each have a gate; element has its own.
+        assert_eq!(
+            shared
+                .split("refuse_scroll_alert(w, guard_alert, detail).await")
+                .count()
+                - 1,
+            3
+        );
+        for typ in ["scroll", "swipe", "drag"] {
+            let block =
+                scroll_alert_guard::<()>(Ok(Some((typ.into(), vec!["Cancel".into()])))).unwrap();
+            assert_eq!(block["error"], "alert_present");
+            assert_eq!(block["outcome"], "not_sent");
+            assert_eq!(block["retry_safe"], true);
+        }
+    }
+
+    #[test]
+    fn scroll_alert_absent_allows_dispatch() {
+        assert!(scroll_alert_guard::<()>(Ok(None)).is_none());
+    }
+    #[test]
+    fn scroll_alert_probe_error_allows_dispatch() {
+        assert!(scroll_alert_guard::<&str>(Err("probe failed")).is_none());
+    }
+    #[test]
+    fn scroll_alert_empty_allows_dispatch() {
+        assert!(scroll_alert_guard::<()>(Ok(Some(("".into(), vec![])))).is_none());
+        assert!(scroll_alert_guard::<()>(Ok(Some(("  ".into(), vec![])))).is_none());
+    }
+    #[test]
+    fn scroll_alert_empty_filter_is_guard_only() {
+        for text in ["", "  "] {
+            let alert = Some((text.to_string(), vec![]));
+            let expected = serde_json::json!({"text":text,"buttons":[]});
+            // Failed source reads use this conversion to detect BlockingAlert
+            // and return 409 alert_blocking, including an empty WDA alert.
+            assert_eq!(alert_json(alert.clone()), Some(expected.clone()));
+            // Successful reads must also preserve the empty alert block.
+            let body = attach_alert(r#"{"elements":[]}"#.into(), alert.clone());
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body["alert"], expected);
+            assert_eq!(body["elements"], serde_json::json!([]));
+            assert!(scroll_alert_guard::<()>(Ok(alert)).is_none());
+        }
+    }
+
+    #[test]
+    fn scroll_alert_buttons_only_blocks() {
+        assert!(scroll_alert_guard::<()>(Ok(Some(("".into(), vec!["OK".into()])))).is_some());
+    }
+    #[test]
+    fn scroll_alert_invalid_coordinates_do_not_probe() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for action in [
+                    serde_json::json!({"type":"scroll","x":200,"y":0.5,"dy":100}),
+                    serde_json::json!({"type":"swipe","x1":0.5,"y1":0.8,"x2":195,"y2":100}),
+                    serde_json::json!({"type":"drag","x1":0.5,"y1":0.8,"x2":195,"y2":100}),
+                ] {
+                    let mut w = crate::wda::WdaClient::new("http://127.0.0.1:1").unwrap();
+                    let actionable = std::sync::atomic::AtomicBool::new(true);
+                    let mut detail = None;
+                    {
+                        let mut action = std::pin::pin!(direct_agent_action(
+                            &mut w,
+                            &actionable,
+                            &action,
+                            &mut detail,
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(5)
+                        ));
+                        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                        assert_eq!(
+                            std::future::Future::poll(action.as_mut(), &mut cx),
+                            std::task::Poll::Ready(WdaControlOutcome::InvalidValue(
+                                COORDINATES_HINT
+                            ))
+                        );
+                    }
+                    assert!(detail.is_none());
+                }
+            });
+    }
+    #[test]
+    fn scroll_alert_other_actions_not_gated() {
+        // A non-gesture can complete on its first poll, without starting a probe.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut w = crate::wda::WdaClient::new("http://127.0.0.1:1").unwrap();
+                let actionable = std::sync::atomic::AtomicBool::new(true);
+                for typ in ["tap", "text", "key", "longpress"] {
+                    let mut detail = None;
+                    let action = serde_json::json!({"type":typ});
+                    let mut future = std::pin::pin!(direct_agent_action(
+                        &mut w,
+                        &actionable,
+                        &action,
+                        &mut detail,
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(5)
+                    ));
+                    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                    assert!(std::future::Future::poll(future.as_mut(), &mut cx).is_ready());
+                }
+            });
+    }
+    #[test]
+    fn scroll_alert_browser_control_never_probes() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut w = crate::wda::WdaClient::new("http://127.0.0.1:1").unwrap();
+                assert!(!refuse_scroll_alert(&mut w, false, &mut None).await);
+            });
+        let source = include_str!("http.rs");
+        let browser = source
+            .split("async fn direct_control(")
+            .nth(1)
+            .unwrap()
+            .split("struct AgentActionsRequest")
+            .next()
+            .unwrap();
+        assert!(browser
+            .split_whitespace()
+            .collect::<String>()
+            .contains("&mutdetail,false"));
+        let agent = source
+            .split("async fn direct_agent_action(")
+            .nth(1)
+            .unwrap()
+            .split("async fn direct_control(")
+            .next()
+            .unwrap();
+        assert!(agent.contains("value, detail, true)"));
+    }
+    #[test]
+    fn scroll_alert_error_keeps_full_json_and_buttons() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let block = scroll_alert_guard::<()>(Ok(Some((
+                    "Allow?".into(),
+                    vec!["Allow".into(), "Cancel".into()],
+                ))))
+                .unwrap();
+                let response = with_scroll_alert_detail(
+                    hinted_control_response(
+                        StatusCode::CONFLICT,
+                        "alert_present",
+                        "not_sent",
+                        SCROLL_ALERT_HINT,
+                    ),
+                    Some(&block),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::CONFLICT);
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                for key in ["ok", "error", "outcome", "retry_safe", "alert", "hint"] {
+                    assert_eq!(body[key], block[key]);
+                }
+            });
+    }
+    #[test]
+    fn scroll_alert_batch_preserves_prior_steps_and_retry_safety() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for applied in [0, 1] {
+                    let steps = if applied == 0 {
+                        vec![]
+                    } else {
+                        vec![serde_json::json!({"index":0,"kind":"action","ok":true})]
+                    };
+                    let block = scroll_alert_guard::<()>(Ok(Some((
+                        "Allow?".into(),
+                        vec!["Cancel".into()],
+                    ))))
+                    .unwrap();
+                    let response = with_scroll_alert_detail(
+                        agent_actions_failure(
+                            StatusCode::CONFLICT,
+                            applied,
+                            applied,
+                            applied,
+                            "alert_present",
+                            "not_sent",
+                            applied == 0,
+                            &steps,
+                            None,
+                        ),
+                        Some(&block),
+                    )
+                    .await;
+                    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(body["steps"], serde_json::json!(steps));
+                    assert_eq!(body["failed_step_outcome"], "not_sent");
+                    assert_eq!(body["retry_safe"], applied == 0);
+                    assert_eq!(body["alert"], block["alert"]);
+                }
+            });
+    }
+
+    #[test]
     fn launchctl_print_pid_is_the_jobs_own_line() {
         let running = "gui/501/com.leeguoo.iphone-use.wda = {\n\tactive count = 1\n\tstate = running\n\tpid = 72917\n\tresource coalition = {\n\t\tID = 42823\n\t}\n}\n";
         assert!(launchctl_print_has_pid(running));
@@ -19321,6 +20179,384 @@ mod tests {
                 !PERFORM_VERBS_WITH_FRAME_FALLBACK.contains(&verb),
                 "{verb} must still require a real locator"
             );
+        }
+    }
+
+    #[test]
+    fn collect_app_guard_mismatch_not_sent_with_fields() {
+        block(async {
+            let state = readiness_test_state();
+            let rows = vec![delta_row("Application", "Settings", 0.0)];
+            let page = crate::collect::Page { rows, screen: None };
+            let response =
+                list_app_refusal(&state, &HeaderMap::new(), Some("Music"), &page).unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["ok"], false);
+            assert_eq!(body["error"], "app_changed");
+            assert_eq!(body["outcome"], "not_sent");
+            assert_eq!(body["retry_safe"], true);
+            assert_eq!(body["expected_app"], "Music");
+            assert_eq!(body["app"], "Settings");
+            assert_eq!(body["swipes"], 0);
+            assert_eq!(
+                expected_collect_app(&state, body["snapshot"].as_str()),
+                Some("Settings".into())
+            );
+        });
+    }
+
+    #[test]
+    fn collect_app_guard_same_or_unknown_passes() {
+        for (expected, app) in [
+            (Some("Music"), Some("Music")),
+            (None, Some("Music")),
+            (Some("Music"), None),
+            (Some(""), Some("Music")),
+            (Some("Music"), Some("")),
+        ] {
+            assert!(collect_app_guard(expected, app).is_none());
+        }
+        assert!(
+            expected_collect_app(&readiness_test_state(), Some("missing-cache-token")).is_none()
+        );
+    }
+
+    #[test]
+    fn collect_app_guard_collect_accepts_snapshot_rejects_empty() {
+        use crate::collect::CollectRequest;
+        assert_eq!(
+            CollectRequest::from_json(&serde_json::json!({"snapshot":"S1"}))
+                .unwrap()
+                .snapshot
+                .as_deref(),
+            Some("S1")
+        );
+        assert!(CollectRequest::from_json(&serde_json::json!({}))
+            .unwrap()
+            .snapshot
+            .is_none());
+        for invalid in [
+            serde_json::json!(""),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            assert!(CollectRequest::from_json(&serde_json::json!({"snapshot":invalid})).is_err());
+        }
+    }
+
+    #[test]
+    fn collect_app_guard_scroll_find_accepts_snapshot() {
+        use crate::collect::FindRequest;
+        assert_eq!(
+            FindRequest::from_json(&serde_json::json!({"label":"Target","snapshot":"S1"}))
+                .unwrap()
+                .snapshot
+                .as_deref(),
+            Some("S1")
+        );
+        assert!(
+            FindRequest::from_json(&serde_json::json!({"label":"Target","snapshot":""})).is_err()
+        );
+    }
+
+    fn unsettled_scroll_body(count: usize, reason: SettleReason, gate: &str) -> serde_json::Value {
+        let baseline: Vec<_> = (0..count)
+            .map(|i| delta_row("Cell", &format!("anchor {i}"), 100.0 + i as f64 * 40.0))
+            .collect();
+        let mut current = baseline.clone();
+        current[0].value = Some("00:42.13".into());
+        if gate == "moved" {
+            current[0].rect[1] -= 20.0;
+        }
+        let mut report = SettleReport::new(1000);
+        report.reason = reason;
+        report.sparse = gate == "sparse";
+        report.stale = gate == "stale";
+        let mut body = serde_json::json!({});
+        if gate == "app_changed" {
+            body[gate] = serde_json::json!({"from":"a","to":"b"});
+        }
+        if gate == "no_visible_change" {
+            body[gate] = serde_json::json!(true);
+        }
+        mark_no_scroll_progress(
+            &mut body,
+            &serde_json::json!({"type":"scroll","dy":100}),
+            &baseline,
+            &current,
+            &report,
+        );
+        body
+    }
+
+    #[test]
+    fn scroll_progress_origin_move_with_resize_is_progress() {
+        let baseline = vec![delta_row("Cell", "item", 100.0)];
+        let mut current = baseline.clone();
+        current[0].rect[1] -= 20.0;
+        current[0].rect[2] += 5.0;
+        let mut report = SettleReport::new(1000);
+        report.reason = SettleReason::Stable;
+        report.settled = true;
+        let mut body = serde_json::json!({});
+        mark_no_scroll_progress(
+            &mut body,
+            &serde_json::json!({"type":"scroll","dy":100}),
+            &baseline,
+            &current,
+            &report,
+        );
+        assert!(body.get("no_scroll_progress").is_none());
+    }
+
+    #[test]
+    fn no_scroll_progress_not_flagged_for_moved_buttons_or_paged_swap() {
+        // Button rows scrolled under a fixed title, and a paged feed whose
+        // author/caption were replaced in place while chrome stayed.
+        let title = delta_row("StaticText", "Settings", 50.0);
+        let mut baseline = vec![title.clone()];
+        let mut current = vec![title];
+        for i in 0..5 {
+            baseline.push(delta_row("Button", &format!("Row {i}"), 100.0 + i as f64 * 44.0));
+            current.push(delta_row("Button", &format!("Row {i}"), 56.0 + i as f64 * 44.0));
+        }
+        let chrome = vec![
+            delta_row("StaticText", "For You", 60.0),
+            delta_row("Button", "Like", 500.0),
+            delta_row("Button", "Share", 580.0),
+        ];
+        let mut feed_before = chrome.clone();
+        feed_before.push(delta_row("StaticText", "@alice", 700.0));
+        feed_before.push(delta_row("StaticText", "Sunset at the beach", 740.0));
+        let mut feed_after = chrome;
+        feed_after.push(delta_row("StaticText", "@bob", 700.0));
+        feed_after.push(delta_row("StaticText", "Three-minute noodles", 740.0));
+        for (before, after) in [(&baseline, &current), (&feed_before, &feed_after)] {
+            for reason in [SettleReason::Stable, SettleReason::BudgetExhausted] {
+                let mut report = SettleReport::new(1000);
+                report.reason = reason;
+                report.settled = true;
+                let mut body = serde_json::json!({});
+                mark_no_scroll_progress(
+                    &mut body,
+                    &serde_json::json!({"type":"scroll","dy":100}),
+                    before,
+                    after,
+                    &report,
+                );
+                assert!(body.get("no_scroll_progress").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn no_scroll_progress_stable_requires_all_common_still() {
+        for count in [1, 4] {
+            let baseline: Vec<_> = (0..count)
+                .map(|i| delta_row("Cell", &format!("anchor {i}"), 100.0 + i as f64 * 40.0))
+                .collect();
+            for (dx, dy, expected) in [(0.0, 0.0, true), (2.1, 0.0, false), (0.0, 5.0, false)] {
+                let mut current = baseline.clone();
+                current[count - 1].rect[0] += dx;
+                current[count - 1].rect[1] += dy;
+                current[count - 1].rect[2] += 5.0;
+                let mut report = SettleReport::new(1000);
+                report.reason = SettleReason::Stable;
+                report.settled = true;
+                let mut body = serde_json::json!({});
+                mark_no_scroll_progress(
+                    &mut body,
+                    &serde_json::json!({"type":"scroll","dy":100}),
+                    &baseline,
+                    &current,
+                    &report,
+                );
+                assert_eq!(
+                    body.get("no_scroll_progress").is_some(),
+                    expected,
+                    "count={count}, dx={dx}, dy={dy}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_scroll_progress_unsettled_three_anchors_changing_value() {
+        for count in [3, 5] {
+            assert_eq!(
+                unsettled_scroll_body(count, SettleReason::BudgetExhausted, "")
+                    ["no_scroll_progress"],
+                true
+            );
+        }
+    }
+
+    #[test]
+    fn no_scroll_progress_unsettled_two_anchors() {
+        assert!(unsettled_scroll_body(2, SettleReason::BudgetExhausted, "")
+            .get("no_scroll_progress")
+            .is_none());
+    }
+
+    #[test]
+    fn no_scroll_progress_unsettled_moving_and_resizing_anchors() {
+        let baseline: Vec<_> = (0..3)
+            .map(|i| delta_row("Cell", &format!("anchor {i}"), 100.0 + i as f64 * 40.0))
+            .collect();
+        let mut current = baseline.clone();
+        for row in &mut current {
+            row.rect[1] -= 20.0;
+            row.rect[2] += 5.0;
+        }
+        let mut report = SettleReport::new(1000);
+        report.reason = SettleReason::BudgetExhausted;
+        let mut body = serde_json::json!({});
+        mark_no_scroll_progress(
+            &mut body,
+            &serde_json::json!({"type":"scroll","dy":100}),
+            &baseline,
+            &current,
+            &report,
+        );
+        assert!(body.get("no_scroll_progress").is_none());
+    }
+
+    #[test]
+    fn no_scroll_progress_unsettled_three_still_and_one_moving_resizing_anchor() {
+        let baseline: Vec<_> = (0..4)
+            .map(|i| delta_row("Cell", &format!("anchor {i}"), 100.0 + i as f64 * 40.0))
+            .collect();
+        let mut current = baseline.clone();
+        current[3].rect[1] -= 5.0;
+        current[3].rect[2] += 5.0;
+        let mut report = SettleReport::new(1000);
+        report.reason = SettleReason::BudgetExhausted;
+        let mut body = serde_json::json!({});
+        mark_no_scroll_progress(
+            &mut body,
+            &serde_json::json!({"type":"scroll","dy":100}),
+            &baseline,
+            &current,
+            &report,
+        );
+        assert!(body.get("no_scroll_progress").is_none());
+    }
+
+    #[test]
+    fn no_scroll_progress_unsettled_three_still_and_one_growing_anchor() {
+        let mut baseline: Vec<_> = (0..3)
+            .map(|i| delta_row("Cell", &format!("anchor {i}"), 100.0 + i as f64 * 40.0))
+            .collect();
+        let mut container = delta_row("Other", "主要", 59.0);
+        container.rect = [0.0, 59.0, 393.0, 289.0];
+        baseline.push(container);
+        let mut current = baseline.clone();
+        current[3].rect[3] += 41.0;
+        let mut report = SettleReport::new(1000);
+        report.reason = SettleReason::BudgetExhausted;
+        let mut body = serde_json::json!({});
+        mark_no_scroll_progress(
+            &mut body,
+            &serde_json::json!({"type":"scroll","dy":100}),
+            &baseline,
+            &current,
+            &report,
+        );
+        assert_eq!(body["no_scroll_progress"], true);
+    }
+
+    #[test]
+    fn no_scroll_progress_unsettled_observation_failed() {
+        assert!(
+            unsettled_scroll_body(3, SettleReason::ObservationFailed, "")
+                .get("no_scroll_progress")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn no_scroll_progress_unsettled_suppression_gates() {
+        for gate in [
+            "sparse",
+            "stale",
+            "app_changed",
+            "no_visible_change",
+            "moved",
+        ] {
+            assert!(
+                unsettled_scroll_body(3, SettleReason::BudgetExhausted, gate)
+                    .get("no_scroll_progress")
+                    .is_none(),
+                "{gate}"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_progress_body_gates_and_gesture_directions() {
+        let baseline = vec![delta_row("Cell", "item", 100.0)];
+        let mut current = baseline.clone();
+        current[0].value = Some("updated".into());
+        let mut report = SettleReport::new(1000);
+        report.settled = true;
+        report.reason = SettleReason::Stable;
+        let actions = [
+            serde_json::json!({"type":"scroll", "dy":100}),
+            serde_json::json!({"type":"scroll", "page":true, "dy":100}),
+            serde_json::json!({"type":"scroll", "element":0, "snapshot":"S1", "dy":100}),
+            serde_json::json!({"type":"swipe", "x1":0.5,"x2":0.5,"y1":0.8,"y2":0.2}),
+            serde_json::json!({"type":"drag", "x1":0.5,"x2":0.5,"y1":0.8,"y2":0.2}),
+        ];
+        for action in &actions {
+            let mut body = serde_json::json!({});
+            mark_no_scroll_progress(&mut body, action, &baseline, &current, &report);
+            assert_eq!(body["no_scroll_progress"], true);
+            let mut moved = current.clone();
+            moved[0].rect[1] -= 20.0;
+            let mut body = serde_json::json!({});
+            mark_no_scroll_progress(&mut body, action, &baseline, &moved, &report);
+            assert!(body.get("no_scroll_progress").is_none());
+        }
+        for gate in [
+            "unsettled",
+            "sparse",
+            "stale",
+            "app_changed",
+            "no_visible_change",
+            "no_anchor",
+            "tap",
+            "zero",
+            "missing_endpoint",
+        ] {
+            let mut report = SettleReport::new(1000);
+            report.settled = gate != "unsettled";
+            report.reason = SettleReason::Stable;
+            report.sparse = gate == "sparse";
+            report.stale = gate == "stale";
+            let mut body = serde_json::json!({});
+            if gate == "app_changed" {
+                body[gate] = serde_json::json!({"from":"a","to":"b"});
+            }
+            if gate == "no_visible_change" {
+                body[gate] = serde_json::json!(true);
+            }
+            let action = match gate {
+                "tap" => serde_json::json!({"type":"tap", "dy":100}),
+                "zero" => serde_json::json!({"type":"scroll"}),
+                "missing_endpoint" => serde_json::json!({"type":"swipe", "y1":0.8,"y2":0.2}),
+                _ => actions[0].clone(),
+            };
+            let rows = if gate == "no_anchor" {
+                &[][..]
+            } else {
+                &current
+            };
+            mark_no_scroll_progress(&mut body, &action, &baseline, rows, &report);
+            assert!(body.get("no_scroll_progress").is_none(), "{gate}");
         }
     }
 
@@ -20971,6 +22207,9 @@ mod tests {
         assert!(!INDEX_HTML.contains("turn-creds"));
         assert!(!INDEX_HTML.contains("RTCPeerConnection"));
         assert!(INDEX_HTML.contains("id=\"flowPanel\""));
+        // Pairing the app with the daemon on its own phone.
+        assert!(INDEX_HTML.contains("id=\"pairSelf\""));
+        assert!(INDEX_HTML.contains("'/agent/phone-daemon/pair'"));
         // Lock readiness: the daemon's own hint for phones that will lock.
         assert!(INDEX_HTML.contains("id=\"lockNotice\""));
         assert!(INDEX_HTML.contains("status?.lock_readiness"));
@@ -21237,6 +22476,44 @@ mod tests {
 
     fn readiness_test_state() -> Arc<AppState> {
         fixture_app_state(None)
+    }
+
+    #[test]
+    fn flow_draft_accepts_the_apps_session_without_leaking_to_anonymous_callers() {
+        block(async {
+            let state = fixture_app_state(Some("synthetic-password"));
+            {
+                let mut trail = recover(state.flow_trail.lock());
+                let now = Instant::now();
+                trail.launched("com.apple.Preferences", now);
+                trail.record(crate::flows::Converted::Step(serde_json::json!({"kind":"launch_app","bundle":"com.apple.Preferences"})), now);
+                trail.record(crate::flows::Converted::Step(serde_json::json!({"kind":"tap_locator","locator":{"label":"电池"}})), now);
+            }
+            assert_eq!(agent_flow_draft(State(state.clone()), HeaderMap::new()).await.status(), StatusCode::UNAUTHORIZED);
+            let mut invalid = HeaderMap::new();
+            invalid.insert(header::COOKIE, HeaderValue::from_static("phone_session=invalid"));
+            assert_eq!(agent_flow_draft(State(state.clone()), invalid).await.status(), StatusCode::UNAUTHORIZED);
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, HeaderValue::from_str(&make_session_cookie(&state, false)).unwrap());
+            let response = agent_flow_draft(State(state), headers).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let draft: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(draft["flow"]["app"], "com.apple.Preferences");
+        });
+    }
+
+    #[test]
+    fn recorded_launch_keeps_its_reset_choice_for_later_replay() {
+        for fresh in [Some(true), Some(false), None] {
+            let state = fixture_app_state(None);
+            let mut action = serde_json::json!({"type":"launch_app","bundle":"com.apple.Preferences"});
+            if let Some(fresh) = fresh { action["fresh"] = serde_json::json!(fresh); }
+            record_flow_action(&state, &action, Instant::now());
+            record_flow_action(&state, &serde_json::json!({"type":"tap","label":"电池"}), Instant::now());
+            let draft = recover(state.flow_trail.lock()).draft().unwrap();
+            assert_eq!(draft["flow"]["steps"][0].get("fresh"), action.get("fresh"));
+        }
     }
 
     /// A synthetic WDA on loopback that the test owns and shuts down.
@@ -23434,4 +24711,25 @@ mod unlock_before_action_tests {
         assert!(!should_unlock_before_action(Some(false), LockReport::Unknown));
         assert!(!should_unlock_before_action(None, LockReport::Unlocked));
     }
+}
+
+/// Independent encrypted Chrome grant: HTTP session credentials never unlock it.
+async fn browser_chrome(axum::Json(raw): axum::Json<serde_json::Value>) -> Response {
+    #[cfg(target_os = "macos")]
+    {
+        if raw.to_string().len()>512*1024 { return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({"ok":false,"error":"request_too_large"}))).into_response(); }
+        let result=tokio::task::spawn_blocking(move || {
+            let file=ipu_browser_session::desktop::default_scope_file()?;
+            let home=std::env::var_os("HOME").ok_or("home_unavailable")?;
+            let sites=std::path::PathBuf::from(home).join(".chrome-use/sites");
+            ipu_browser_session::desktop::handle(&file,&sites,&raw,std::path::Path::new("chrome-use"))
+        }).await;
+        match result {
+            Ok(Ok(value))=>axum::Json(value).into_response(),
+            Ok(Err(code))=>(StatusCode::BAD_REQUEST,axum::Json(serde_json::json!({"ok":false,"error":code}))).into_response(),
+            Err(_)=>(StatusCode::INTERNAL_SERVER_ERROR,axum::Json(serde_json::json!({"ok":false,"error":"chrome_bridge_unavailable"}))).into_response(),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _=raw; (StatusCode::NOT_IMPLEMENTED,axum::Json(serde_json::json!({"ok":false,"error":"chrome_requires_paired_mac"}))).into_response() }
 }
