@@ -198,6 +198,8 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
   -d '{"type":"tap","element":7,"snapshot":"…"}'            # tap, then what changed (~2 s)
 ```
 
+For app developers and testers the same tools also read the phone's logs and crash reports, record the screen to MP4, install a build (`.ipa`, `.app` or an https link), set a simulated location, and keep per-app notes that agents read when they enter the app. `IPHONE_USE_MCP_TOOLS=readonly` exposes only the tools that read, and `iphone-use-mcp --listen 127.0.0.1:PORT` serves MCP over HTTP for remote clients.
+
 See the [MCP tools](crates/mcp/README.md) and the [Agent API reference](docs/agent-api.html).
 
 ## Safety and privacy

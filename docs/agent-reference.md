@@ -409,6 +409,11 @@ Optional alerts: an alert step with `"if_present": true` (MCP/flow:
 `{"kind":"alert","button":"允许粘贴","if_present":true}`) answers the alert when
 one is up and passes as `skipped: "no_alert"` when none is — for prompts that
 appear only sometimes. Flows that use it need a client that knows the field.
+The same field on a `tap_locator` step (`{"kind":"tap_locator","locator":{"label":
+"以后再说","kind":"Button"},"if_present":true}`) taps an in-app sheet or banner
+when it is there and passes as `skipped: "not_present"` when nothing matches;
+nothing is sent then. Use it for "Not now" / "Skip" screens that show up only
+sometimes, so one batch or flow covers both cases.
 
 Controls that ignore element taps: some custom buttons acknowledge
 XCUIElement's click and do nothing (hardware: Xiaohongshu's back button). Add

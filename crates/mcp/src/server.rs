@@ -278,6 +278,10 @@ pub enum PhoneStep {
         /// nothing. Default `element`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via: Option<String>,
+        /// Pass instead of failing when no element matches — for screens that
+        /// appear only sometimes ("Not now", "Skip"). Nothing is sent then.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        if_present: bool,
         #[serde(default)]
         after_ms: u64,
     },
@@ -2987,7 +2991,12 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                 }
                 action_step(serde_json::json!({"type":"tap","label":label}), after_ms)
             }
-            PhoneStep::TapLocator { locator, via, after_ms } => {
+            PhoneStep::TapLocator {
+                locator,
+                via,
+                if_present,
+                after_ms,
+            } => {
                 validate_after(after_ms)?;
                 if via.as_deref().is_some_and(|v| v != "element" && v != "point") {
                     return Err(format!(
@@ -3007,6 +3016,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                 let mut action = serde_json::json!({"type":"tap_locator","locator":locator});
                 if via.as_deref() == Some("point") {
                     action["via"] = serde_json::json!("point");
+                }
+                if if_present {
+                    action["if_present"] = serde_json::json!(true);
                 }
                 action_step(action, after_ms)
             }
@@ -4246,6 +4258,7 @@ mod tests {
             },
             PhoneStep::TapLocator {
                 via: None,
+                if_present: false,
                 locator: PhoneElementLocator {
                     label: None,
                     identifier: Some("search-field".to_string()),

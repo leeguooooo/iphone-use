@@ -297,6 +297,58 @@ fn an_optional_alert_step_passes_when_no_alert_is_up() {
     });
 }
 
+/// An optional tap ({"if_present":true}) on an in-app sheet that is not
+/// showing passes without touching the screen; the same tap without it fails.
+#[test]
+fn an_optional_tap_passes_when_its_element_is_absent() {
+    block(async {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = seen.clone();
+        let wda = mock_wda(move |request, _| {
+            record.lock().unwrap().push(request.to_string());
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if request.contains("/source?format=json") {
+                return Some((Duration::ZERO, settings_tree_with_general_at(400, 51)));
+            }
+            if request.starts_with("POST ") && request.contains("/elements") {
+                return Some((Duration::ZERO, r#"{"value":[]}"#.to_string()));
+            }
+            Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
+        });
+        let (status, json) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[
+                {"kind":"action","action":{"type":"tap_locator","locator":{"label":"以后再说","kind":"Button"},"if_present":true}},
+                {"kind":"action","action":{"type":"home"}}
+            ]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["completed"], 2, "{json}");
+        assert_eq!(json["steps"][0]["skipped"], "not_present", "{json}");
+        assert!(
+            !seen.lock().unwrap().iter().any(|r| r.contains("/click") || r.contains("/actions")),
+            "nothing was tapped"
+        );
+
+        let (_, strict) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"以后再说","kind":"Button"}}}]}"#,
+        )
+        .await;
+        assert_eq!(strict["error"], "element_not_found", "{strict}");
+
+        let (status, bad) = post_actions(
+            Some(wda.url()),
+            r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"x"},"if_present":"yes"}}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    });
+}
+
 /// A batched `tap_locator` whose target sits under iOS 26's floating search
 /// field scrolls it into view before clicking (hardware, iPhone 13 Settings:
 /// a plain click on 通用 under the pill ACKed and did nothing).

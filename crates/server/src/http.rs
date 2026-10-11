@@ -10142,6 +10142,9 @@ fn validate_agent_action_value(
             {
                 return invalid("tap_locator via must be \"element\" (default) or \"point\"");
             }
+            if action.get("if_present").is_some_and(|v| !v.is_boolean()) {
+                return invalid("tap_locator if_present must be true or false");
+            }
         }
         "longpress" => {
             if !finite_unit(action.get("x").and_then(serde_json::Value::as_f64))
@@ -11176,6 +11179,20 @@ async fn agent_actions_inner(
                         "kind": "action",
                         "ok": true,
                         "skipped": "no_alert"
+                    }));
+                    completed += 1;
+                    continue;
+                }
+                // The same for an optional tap ({"type":"tap_locator", …,
+                // "if_present":true}) whose element is not there: an in-app
+                // sheet or banner that shows only sometimes. Not found means
+                // nothing was sent.
+                if outcome == WdaControlOutcome::ElementNotFound && optional_tap(action) {
+                    step_results.push(serde_json::json!({
+                        "index": index,
+                        "kind": "action",
+                        "ok": true,
+                        "skipped": "not_present"
                     }));
                     completed += 1;
                     continue;
@@ -12989,6 +13006,12 @@ async fn agent_input_inner(
         WdaControlOutcome::UnsupportedPerformAction => unsupported_perform_action_response(),
         WdaControlOutcome::InvalidElementSnapshot => invalid_element_snapshot_response(),
         WdaControlOutcome::StaleElementSnapshot => stale_element_snapshot_response(),
+        WdaControlOutcome::ElementNotFound if optional_tap(&value) => with_security_headers(
+            Response::builder()
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"ok":true,"skipped":"not_present","outcome":"not_sent"}"#))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        ),
         WdaControlOutcome::ElementNotFound => element_not_found_response(),
         WdaControlOutcome::AmbiguousElement => ambiguous_element_response(detail.as_ref()),
         WdaControlOutcome::InvalidElementTarget => invalid_element_target_response(),
@@ -14028,6 +14051,13 @@ async fn agent_elements_inner(
 /// pass quietly when none is.
 fn optional_alert(action: &serde_json::Value) -> bool {
     action.get("type").and_then(serde_json::Value::as_str) == Some("alert")
+        && action.get("if_present").and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+/// `{"type":"tap_locator", …, "if_present":true}`: tap the element if it is
+/// there, pass quietly when nothing matches.
+fn optional_tap(action: &serde_json::Value) -> bool {
+    action.get("type").and_then(serde_json::Value::as_str) == Some("tap_locator")
         && action.get("if_present").and_then(serde_json::Value::as_bool) == Some(true)
 }
 

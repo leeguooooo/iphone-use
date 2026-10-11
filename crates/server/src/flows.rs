@@ -459,7 +459,7 @@ pub fn convert_action(action: &Value, rows: Option<&[crate::wda::ElementRow]>) -
             (Some(x), Some(y)) => Converted::Step(json!({ "kind": "tap", "x": x, "y": y })),
             _ => Converted::Unsupported("a tap without coordinates".into()),
         },
-        "tap_locator" => copy("tap_locator", &["locator"]),
+        "tap_locator" => copy("tap_locator", &["locator", "via", "if_present"]),
         "text" => Converted::Typed {
             clear: action.get("clear").and_then(Value::as_bool).unwrap_or(false),
         },
