@@ -1213,12 +1213,14 @@ fn localize_page(html: &str, table: &[(&str, &str)], chinese: bool) -> String {
 /// The small 中文/English link on the daemon's own pages: it names the other
 /// language and remembers the choice the way the web pages' `setLang` does
 /// (localStorage + the `iphone_use_lang` cookie), then reloads with a GET so
-/// a page answering a form POST is not resubmitted.
+/// a page answering a form POST is not resubmitted. A failed sign-in answers
+/// the POST at bare `/login`, keeping its destination only in the form's
+/// hidden `next`; the reload carries it so the destination survives.
 fn lang_switch(chinese: bool) -> String {
     let (lang, label) = if chinese { ("en", "English") } else { ("zh", "中文") };
     format!(
         r##"<a class="lang" href="#" data-lang="{lang}" aria-label="切换语言 / Switch language">{label}</a>
-<script>document.querySelector('a.lang').addEventListener('click',function(e){{e.preventDefault();var l=this.getAttribute('data-lang');try{{localStorage.setItem('iphone-use-lang',l)}}catch(_){{}}document.cookie='{cookie}='+l+'; Path=/; Max-Age=31536000; SameSite=Lax';location.replace(location.pathname+location.search)}})</script>"##,
+<script>document.querySelector('a.lang').addEventListener('click',function(e){{e.preventDefault();var l=this.getAttribute('data-lang');try{{localStorage.setItem('iphone-use-lang',l)}}catch(_){{}}document.cookie='{cookie}='+l+'; Path=/; Max-Age=31536000; SameSite=Lax';var u=location.pathname+location.search,n=document.querySelector('input[name=next]');if(n&&!/[?&]next=/.test(location.search))u=location.pathname+'?next='+encodeURIComponent(n.value);location.replace(u)}})</script>"##,
         cookie = crate::locale::LANG_COOKIE,
     )
 }
