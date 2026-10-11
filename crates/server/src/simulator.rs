@@ -1599,6 +1599,10 @@ pub fn print_doctor_section() {
 
 /// How long a simulator recording may run before it stops by itself.
 pub const RECORD_MAX: Duration = Duration::from_secs(10 * 60);
+/// What `simctl io recordVideo` prints on stderr once frames are being
+/// written, and how long `start` waits for it.
+const RECORD_READY_LINE: &str = "Recording started";
+const RECORD_READY_WAIT: Duration = Duration::from_secs(15);
 
 pub fn record_video_argv(udid: &str, path: &Path) -> Vec<String> {
     let mut args = argv(&["simctl", "io", udid, "recordVideo", "--codec=h264", "--force"]);
@@ -1653,14 +1657,30 @@ impl SimRecorder {
         if let Some(recording) = current.as_ref() {
             bail!("already recording to {} (stop it first)", recording.path.display());
         }
-        let child = tokio::process::Command::new(program)
+        let mut child = tokio::process::Command::new(program)
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("start {program}"))?;
+        // recordVideo takes a moment to set up, and a SIGINT before it says
+        // "Recording started" leaves no file. Wait for that line (bounded),
+        // then keep draining stderr so the child never blocks on it.
+        if let Some(stderr) = child.stderr.take() {
+            use tokio::io::AsyncBufReadExt as _;
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            let _ = tokio::time::timeout(RECORD_READY_WAIT, async {
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if line.contains(RECORD_READY_LINE) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+        }
         let recording = SimRecording { path: path.clone(), started: std::time::Instant::now(), child, ended: None };
         let status = recording.status();
         *current = Some(recording);
@@ -2113,7 +2133,7 @@ pub mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.mp4");
         // Stands in for recordVideo: writes the file when interrupted.
-        let script = "trap 'printf movie > \"$0\"; exit 0' INT; while :; do sleep 0.05; done";
+        let script = "echo 'Recording started' >&2; trap 'printf movie > \"$0\"; exit 0' INT; while :; do sleep 0.05; done";
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             let started = recorder
@@ -2130,9 +2150,16 @@ pub mod tests {
             assert!(summary.get("ended").is_none());
             assert!(recorder.stop().await.unwrap().is_none());
             // Nothing written: no file, and an error that says so.
-            recorder.start_with("sh", &["-c".into(), "trap 'exit 0' INT; while :; do sleep 0.05; done".into()], dir.join("c.mp4"), RECORD_MAX).await.unwrap();
+            recorder.start_with("sh", &["-c".into(), "echo 'Recording started' >&2; trap 'exit 0' INT; while :; do sleep 0.05; done".into()], dir.join("c.mp4"), RECORD_MAX).await.unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
             assert!(format!("{:#}", recorder.stop().await.unwrap_err()).contains("no video frames"));
+            // `start` returns only once the recorder says it is recording.
+            let e = dir.join("e.mp4");
+            let slow = "sleep 0.5; echo 'Recording started' >&2; trap 'printf movie > \"$0\"; exit 0' INT; while :; do sleep 0.05; done";
+            let began = std::time::Instant::now();
+            recorder.start_with("sh", &["-c".into(), slow.into(), e.display().to_string()], e.clone(), RECORD_MAX).await.unwrap();
+            assert!(began.elapsed() >= Duration::from_millis(400), "{:?}", began.elapsed());
+            assert_eq!(recorder.stop().await.unwrap().unwrap()["bytes"], 5);
             // The limit interrupts it by itself.
             let d = dir.join("d.mp4");
             recorder.start_with("sh", &["-c".into(), script.into(), d.display().to_string()], d.clone(), Duration::from_millis(300)).await.unwrap();
