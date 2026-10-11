@@ -59,8 +59,10 @@ def parse_task(path):
     return header, text.strip()
 
 
-def audit(lines):
-    """Summarize one stream-json run (an iterable of JSONL lines)."""
+def audit(lines, returncode=0):
+    """Summarize one stream-json run (an iterable of JSONL lines). A run
+    without a final `result` event, or whose `claude` exited non-zero, is an
+    error."""
     calls, failed, names = [], [], {}
     pending = {}
     result = {}
@@ -100,7 +102,7 @@ def audit(lines):
         "input_tokens": usage.get("input_tokens"),
         "output_tokens": usage.get("output_tokens"),
         "answer": result.get("result", ""),
-        "is_error": bool(result.get("is_error")),
+        "is_error": bool(result.get("is_error")) or not result or returncode != 0,
     }
 
 
@@ -108,7 +110,7 @@ def judge(header, summary):
     """Pass/fail and the reasons, from the task header and the audit."""
     reasons = []
     if summary["is_error"]:
-        reasons.append("claude reported an error")
+        reasons.append("claude reported an error, exited non-zero or gave no result")
     expect = header.get("expect")
     if expect and not re.search(expect, summary["answer"] or ""):
         reasons.append(f"answer does not match {expect!r}")
@@ -133,9 +135,9 @@ def run_task(path, out_dir, mcp, model):
         command += ["--model", model]
     started = time.monotonic()
     with open(jsonl, "w", encoding="utf-8") as sink:
-        subprocess.run(command, stdout=sink, stderr=subprocess.STDOUT, cwd=out_dir, check=False)
+        proc = subprocess.run(command, stdout=sink, stderr=subprocess.STDOUT, cwd=out_dir, check=False)
     with open(jsonl, encoding="utf-8") as source:
-        summary = audit(source)
+        summary = audit(source, proc.returncode)
     summary["wall_ms"] = int((time.monotonic() - started) * 1000)
     passed, reasons = judge(header, summary)
     return {"task": header["name"], "passed": passed, "reasons": reasons, **summary}

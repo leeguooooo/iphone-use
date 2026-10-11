@@ -321,7 +321,7 @@ impl Ring {
         };
         let since = filter.since.unwrap_or(0);
         let oldest = self.lines.front().map_or(self.last_seq + 1, |l| l.seq);
-        let missed = if filter.since.is_some() && since + 1 < oldest {
+        let missed = if filter.since.is_some() && since.saturating_add(1) < oldest {
             // Lines after the cursor that are no longer held (dropped by
             // the ring, or cleared).
             oldest - since - 1

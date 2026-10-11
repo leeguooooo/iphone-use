@@ -2079,7 +2079,7 @@ impl PhoneHandler {
             // Read-only means nothing is written, a local file included.
             if *self.profile == ToolProfile::ReadOnly {
                 return CallToolResult::error(vec![Content::text(format!(
-                    "save_as is not available with {TOOLS_ENV}=readonly; the draft itself is                      returned without it"
+                    "save_as is not available with {TOOLS_ENV}=readonly; call phone_flow_draft without save_as to get the draft"
                 ))]);
             }
             match crate::flow::save_draft(&path, &draft["flow"]) {

@@ -983,9 +983,11 @@ remove_agent_mcp_entries() {
             warn "could not remove Codex MCP server $name; remove it with: codex mcp remove $name"
         fi
     fi
-    remove_json_mcp_entry "Cursor" "$HOME/.cursor/mcp.json" "$mcp" "$name"
+    local instance=""
+    [ "$INSTANCE_NAME" = default ] || instance="$INSTANCE_NAME"
+    remove_json_mcp_entry "Cursor" "$HOME/.cursor/mcp.json" "$mcp" "$name" "$instance"
     remove_json_mcp_entry "Claude Desktop" \
-        "$HOME/Library/Application Support/Claude/claude_desktop_config.json" "$mcp" "$name"
+        "$HOME/Library/Application Support/Claude/claude_desktop_config.json" "$mcp" "$name" "$instance"
     return 0
 }
 
@@ -994,12 +996,12 @@ remove_agent_mcp_entries() {
 # launches this app's iphone-use-mcp; other servers and keys are kept and the
 # old file is backed up as <file>.iphone-use.bak.
 remove_json_mcp_entry() {
-    local client="$1" file="$2" mcp="$3" name="$4" rc=0
+    local client="$1" file="$2" mcp="$3" name="$4" instance="${5:-}" rc=0
     [ -f "$file" ] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
-    python3 - "$file" "$mcp" "$name" "$DRY_RUN" 2>/dev/null <<'PY' || rc=$?
+    python3 - "$file" "$mcp" "$name" "$DRY_RUN" "$instance" 2>/dev/null <<'PY' || rc=$?
 import json, os, shutil, sys, tempfile
-path, mcp, name, dry = sys.argv[1:5]
+path, mcp, name, dry, instance = sys.argv[1:6]
 path = os.path.realpath(path)
 try:
     with open(path, encoding="utf-8") as f:
@@ -1008,7 +1010,10 @@ except (OSError, ValueError):
     sys.exit(5)
 servers = cfg.get("mcpServers") if isinstance(cfg, dict) else None
 entry = servers.get(name) if isinstance(servers, dict) else None
-if not (isinstance(entry, dict) and entry.get("command") == mcp):
+# The same entry install.sh wrote: this command, and this instance (no env
+# for the default one). A retargeted entry is the user's; leave it.
+if not (isinstance(entry, dict) and entry.get("command") == mcp
+        and ((entry.get("env") or {}).get("IPHONE_USE_INSTANCE") or "") == instance):
     sys.exit(3)
 if dry == "1":
     sys.exit(2)

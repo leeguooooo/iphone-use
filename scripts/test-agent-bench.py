@@ -24,6 +24,16 @@ assert passed and not reasons, reasons
 passed, reasons = bench.judge({"expect": "Android", "max_tool_calls": 2}, summary)
 assert not passed and len(reasons) == 2, reasons
 
+# A run with no result event, or a failed claude, never passes, even for a
+# task with no expect rule.
+lines = open(HERE / "fixtures" / "agent-bench-run.jsonl", encoding="utf-8").read().splitlines()
+cut = bench.audit([l for l in lines if '"type":"result"' not in l.replace(" ", "")])
+assert cut["is_error"], cut
+assert not bench.judge({}, cut)[0]
+crashed = bench.audit(lines, returncode=1)
+assert crashed["is_error"] and not bench.judge({}, crashed)[0], crashed
+assert not bench.audit(lines)["is_error"]
+
 with tempfile.TemporaryDirectory() as tmp:
     task = pathlib.Path(tmp) / "t.md"
     task.write_text('---\nname: demo\nexpect: "a#b"   # comment\nmax_tool_calls: 5 # budget\n---\nDo it.\n')

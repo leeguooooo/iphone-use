@@ -33,8 +33,13 @@ SIM="${SIM:-$("$BIN/iphone-use" simulators --json \
 [ -n "$SIM" ] || bad "no iPhone simulator on this Mac"
 echo "# simulator: $SIM"
 
+# Shut the simulator down at the end only when this script booted it.
+was_booted="$("$BIN/iphone-use" simulators --json \
+    | json "any(x['udid'] == '$SIM' and x['state'] == 'Booted' for x in d)")"
 cleanup() {
-    "$BIN/iphone-use" simulator stop "$SIM" --instance "$INSTANCE" --shutdown >/dev/null 2>&1 || true
+    local shutdown=--shutdown
+    [ "$was_booted" = "True" ] && shutdown=
+    "$BIN/iphone-use" simulator stop "$SIM" --instance "$INSTANCE" $shutdown >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 

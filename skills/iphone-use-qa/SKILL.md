@@ -12,7 +12,11 @@ batches, `wait_for`, verify); this skill only adds the QA loop and its rules.
 
 ## Before you start
 
-1. `phone_status` must say `drivable:true`; otherwise report its `hint` and stop.
+1. `phone_status` must say `drivable:true`. If the daemon released the phone
+   after idling (`released:true`, `recovery_owner:"daemon"`, no blocker), call
+   `phone_reconnect` once and check `phone_status` again. Otherwise (a human
+   handoff, or a blocker named in `setup_blocked_on`), or if it is still not
+   drivable, report its `hint` and stop.
 2. Agree on the target with the user: the app (`phone_apps` finds the bundle
    id), the areas or the build to focus on, and how long to spend. If the app
    needs a login, use `phone_login` or ask the user to sign in; never ask for

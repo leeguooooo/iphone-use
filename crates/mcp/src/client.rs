@@ -406,7 +406,12 @@ impl DaemonClient {
     pub fn for_session(&self, n: u64) -> Self {
         let suffix = format!("-{n}");
         let mut owner = self.owner.clone();
-        owner.truncate(64 - suffix.len());
+        // Cut on a char boundary: IPHONE_USE_OWNER may be non-ASCII.
+        let mut cut = (64 - suffix.len()).min(owner.len());
+        while !owner.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        owner.truncate(cut);
         owner.push_str(&suffix);
         Self {
             owner,
@@ -1600,6 +1605,18 @@ mod tests {
             daemon_target(none, nothing),
             (DEFAULT_URL.to_string(), None)
         );
+    }
+
+    #[test]
+    fn a_session_owner_is_cut_on_a_char_boundary() {
+        let client = DaemonClient::new("http://127.0.0.1:1".to_string(), None);
+        let mut long = client.clone();
+        long.owner = "代理".repeat(40);
+        for n in [1, 7, 42, 12345] {
+            let owner = long.for_session(n).owner;
+            assert!(owner.len() <= 64, "{owner}");
+            assert!(owner.ends_with(&format!("-{n}")), "{owner}");
+        }
     }
 
     #[test]
