@@ -1037,15 +1037,16 @@ fn with_security_headers(mut resp: Response) -> Response {
 // ---------------------------------------------------------------------------
 
 /// Extract the `phone_session` cookie value from request headers.
+/// Every `Cookie` header is read: a client may send cookies (the session and
+/// `iphone_use_lang`) in separate headers.
 fn session_cookie(headers: &HeaderMap) -> Option<String> {
-    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-    for pair in cookie_header.split(';') {
-        let pair = pair.trim();
-        if let Some(value) = pair.strip_prefix(&format!("{SESSION_COOKIE}=")) {
-            return Some(value.to_string());
-        }
-    }
-    None
+    let prefix = format!("{SESSION_COOKIE}=");
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|pair| pair.trim().strip_prefix(prefix.as_str()).map(str::to_string))
 }
 
 /// Return `true` if the request is authenticated.
@@ -19207,6 +19208,18 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::COOKIE, HeaderValue::from_static("foo=bar"));
         assert_eq!(session_cookie(&headers), None);
+        assert_eq!(session_cookie(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn the_session_cookie_is_found_in_any_cookie_header() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::COOKIE, "iphone_use_lang=en".parse().unwrap());
+        headers.append(
+            header::COOKIE,
+            format!("other=1; {SESSION_COOKIE}=abc").parse().unwrap(),
+        );
+        assert_eq!(session_cookie(&headers).as_deref(), Some("abc"));
         assert_eq!(session_cookie(&HeaderMap::new()), None);
     }
 

@@ -508,22 +508,24 @@ fn print_status(target: &Target, status: &Value) {
     if let Some(owner) = status["owner"].as_str() {
         println!("  in use by: {owner}");
     }
-    if let Some(line) = lock_line(status) {
+    if let Some(line) = lock_line(status, prefers_chinese()) {
         println!("  {line}");
     }
 }
 
 /// The lock-screen line of `iphone-use status`: shown when the phone will
 /// lock on its own (`lock_readiness`), so the owner can change Auto-Lock.
-fn lock_line(status: &Value) -> Option<String> {
+/// Label and hint follow the same language as `next_step` above it.
+fn lock_line(status: &Value, chinese: bool) -> Option<String> {
     let readiness = &status["lock_readiness"];
-    let label = match readiness["verdict"].as_str()? {
-        "will_lock_needs_person" => "lock screen: needs a person",
-        "will_lock_auto_unlocks" => "lock screen: unlocks by itself",
+    let label = match (readiness["verdict"].as_str()?, chinese) {
+        ("will_lock_needs_person", false) => "lock screen: needs a person",
+        ("will_lock_needs_person", true) => "锁屏：需要有人解锁",
+        ("will_lock_auto_unlocks", false) => "lock screen: unlocks by itself",
+        ("will_lock_auto_unlocks", true) => "锁屏：会自动解锁",
         _ => return None,
     };
-    // The hint follows the same language as `next_step` above it.
-    Some(match localized(&readiness["hint"], prefers_chinese()) {
+    Some(match localized(&readiness["hint"], chinese) {
         Some(hint) => format!("{label} — {hint}"),
         None => label.to_string(),
     })
@@ -710,18 +712,26 @@ mod tests {
 
     #[test]
     fn status_names_a_phone_that_will_lock() {
-        let hint = json!({"en": "Set Auto-Lock to Never."});
+        let hint = json!({"en": "Set Auto-Lock to Never.", "zh": "把自动锁定设为永不。"});
         let status = |verdict: &str| json!({"lock_readiness": {"verdict": verdict, "hint": hint}});
         assert_eq!(
-            lock_line(&status("will_lock_needs_person")).as_deref(),
+            lock_line(&status("will_lock_needs_person"), false).as_deref(),
             Some("lock screen: needs a person — Set Auto-Lock to Never.")
         );
-        assert!(lock_line(&status("will_lock_auto_unlocks"))
+        // The whole line is in one language.
+        assert_eq!(
+            lock_line(&status("will_lock_needs_person"), true).as_deref(),
+            Some("锁屏：需要有人解锁 — 把自动锁定设为永不。")
+        );
+        assert!(lock_line(&status("will_lock_auto_unlocks"), false)
             .unwrap()
             .starts_with("lock screen: unlocks by itself"));
-        assert_eq!(lock_line(&status("ready")), None);
-        assert_eq!(lock_line(&status("unknown")), None);
-        assert_eq!(lock_line(&json!({})), None);
+        assert!(lock_line(&status("will_lock_auto_unlocks"), true)
+            .unwrap()
+            .starts_with("锁屏：会自动解锁"));
+        assert_eq!(lock_line(&status("ready"), true), None);
+        assert_eq!(lock_line(&status("unknown"), false), None);
+        assert_eq!(lock_line(&json!({}), false), None);
     }
 
     #[test]

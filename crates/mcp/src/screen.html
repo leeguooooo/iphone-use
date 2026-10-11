@@ -200,7 +200,13 @@
     else if (body.released) parts.push(t("released"));
     else if (body.locked) parts.push(t("locked"));
     else if (body.drivable === true) parts.push(t("drivable"));
-    else if (body.drivable === false) parts.push(t("not drivable") + (body.blocked_on ? " (" + body.blocked_on + ")" : body.state ? " (" + body.state + ")" : ""));
+    // The blocker code is for diagnosis; when a localized next step will
+    // follow (see show), it says the same thing in words.
+    else if (body.drivable === false) {
+      const guided = body.next_step || body.next_step_zh;
+      const detail = body.blocked_on && !guided ? body.blocked_on : !body.blocked_on ? body.state : "";
+      parts.push(t("not drivable") + (detail ? " (" + detail + ")" : ""));
+    }
     if (body.owner) parts.push(t(body.mine ? "owner {owner} (this session)" : "owner {owner}", { owner: body.owner }));
     else parts.push(t("no owner"));
     return parts.join(" · ");
