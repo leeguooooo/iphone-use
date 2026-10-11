@@ -79,4 +79,13 @@ final class LockReadinessTests: XCTestCase {
         XCTAssertNotEqual(LockReadiness(verdict: .ready, passcodeProtected: true).passcodeText,
                           LockReadiness(verdict: .ready, passcodeProtected: false).passcodeText)
     }
+
+    func testBilingualTextFollowsTheAppLanguageAndFallsBack() {
+        let both = ["zh": "解锁手机", "en": "Unlock the iPhone"]
+        XCTAssertEqual(AppLanguage.pick(both, chinese: true), "解锁手机")
+        XCTAssertEqual(AppLanguage.pick(both, chinese: false), "Unlock the iPhone")
+        XCTAssertEqual(AppLanguage.pick(["en": "Unlock"], chinese: true), "Unlock")
+        XCTAssertEqual(AppLanguage.pick(["zh": "解锁", "en": ""], chinese: false), "解锁")
+        XCTAssertEqual(AppLanguage.pick(nil), "")
+    }
 }

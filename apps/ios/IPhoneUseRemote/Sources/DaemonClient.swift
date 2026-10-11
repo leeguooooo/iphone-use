@@ -77,8 +77,7 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         locked = try c.decodeIfPresent(Bool.self, forKey: .locked)
         hint = try c.decodeIfPresent(String.self, forKey: .hint) ?? ""
         let steps = try c.decodeIfPresent([String: String].self, forKey: .nextStep) ?? [:]
-        let chinese = Locale.preferredLanguages.first?.hasPrefix("zh") ?? true
-        nextStep = (chinese ? steps["zh"] : steps["en"]) ?? steps["zh"] ?? ""
+        nextStep = AppLanguage.pick(steps)
         setupBlockedOn = try c.decodeIfPresent(String.self, forKey: .setupBlockedOn) ?? ""
         recoveryOwner = try c.decodeIfPresent(String.self, forKey: .recoveryOwner) ?? ""
         version = try c.decodeIfPresent(String.self, forKey: .version) ?? ""

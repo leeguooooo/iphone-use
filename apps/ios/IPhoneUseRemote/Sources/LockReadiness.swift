@@ -61,8 +61,7 @@ struct LockReadiness: Decodable, Equatable, Sendable {
         }
         keepAwakeActive = (try? c.decodeIfPresent(KeepAwake.self, forKey: .keepAwake))?.active ?? false
         let hints = try? c.decodeIfPresent([String: String].self, forKey: .hint)
-        let chinese = Locale.preferredLanguages.first?.hasPrefix("zh") ?? true
-        hint = (chinese ? hints?["zh"] : hints?["en"]) ?? hints?["zh"] ?? ""
+        hint = AppLanguage.pick(hints)
     }
 
     /// The badge on a tile and a list row; nil when there is nothing to fix

@@ -1,4 +1,5 @@
-/* English UI. Keys are the Chinese source strings (the development language is zh-Hans). */
+/* English UI. Keys are the Chinese source strings; English is the development language,
+   so a phone in any other language gets this table. zh-Hans.lproj maps each key to itself. */
 
 /* Connect */
 "扫码连接" = "Scan to connect";

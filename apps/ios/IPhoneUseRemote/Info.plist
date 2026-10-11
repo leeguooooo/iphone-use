@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
-	<string>zh-Hans</string>
+	<string>en</string>
 	<key>CFBundleDisplayName</key>
 	<string>Phone Use Remote</string>
 	<key>CFBundleExecutable</key>
