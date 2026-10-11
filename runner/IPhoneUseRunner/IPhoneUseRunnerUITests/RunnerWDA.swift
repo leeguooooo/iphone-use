@@ -789,8 +789,14 @@ extension RunnerTests {
     let button: XCUIDevice.Button
     switch name {
     case "home": button = .home
+    #if targetEnvironment(simulator)
+    // The Simulator has no volume buttons (the API is unavailable there).
+    case "volumeup", "volumedown":
+      throw RunnerError.invalidArgument("the Simulator has no volume buttons; only home is supported")
+    #else
     case "volumeup": button = .volumeUp
     case "volumedown": button = .volumeDown
+    #endif
     default: throw RunnerError.invalidArgument("unsupported button '\(name)'; use home, volumeUp or volumeDown")
     }
     defer { IPURBridge.invalidateRequestCache() }
