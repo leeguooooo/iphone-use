@@ -12,6 +12,9 @@
 //!   `com.apple.mobile.mobile_image_mounter` service (needs a paired session).
 //! - [`passcode_protected`]: `PasswordProtected`, which lockdownd only
 //!   answers inside a paired session.
+//! - [`open_service`]: a connected stream to any lockdown service (syslog
+//!   relay, crash reports, location simulation), for the modules that speak
+//!   that service's protocol.
 //!
 //! `PasswordProtected` is not "a passcode is set": on a 12 mini (iOS 15.4.1)
 //! with a passcode it read `true` while the phone was locked and `false` while
@@ -123,30 +126,7 @@ pub async fn ddi_status(udid: &str) -> Result<DdiStatus> {
     let attached = attached(udid).await?;
     let pair = PairRecord::parse(&usbmux::read_pair_record(&attached.serial).await?)?;
     let tls = Arc::new(pair.tls_config()?);
-
-    let mut plain = usbmux::connect(attached.device_id, LOCKDOWN_PORT)
-        .await
-        .context("connect to lockdownd")?;
-    let reply = exchange(
-        &mut plain,
-        &request(&[
-            ("Label", LABEL),
-            ("Request", "StartSession"),
-            ("HostID", &pair.host_id),
-            ("SystemBUID", &pair.system_buid),
-        ]),
-    )
-    .await?;
-    lockdown_error(&reply, "StartSession")?;
-    let session_ssl = reply.get("EnableSessionSSL").and_then(Value::as_bool) == Some(true);
-    let service = if session_ssl {
-        let mut session = handshake(&tls, plain)
-            .await
-            .context("lockdown TLS session")?;
-        start_service(&mut session, IMAGE_MOUNTER).await?
-    } else {
-        start_service(&mut plain, IMAGE_MOUNTER).await?
-    };
+    let service = start_paired_service(&attached, &pair, &tls, IMAGE_MOUNTER).await?;
 
     let raw = usbmux::connect(attached.device_id, service.port)
         .await
@@ -176,29 +156,38 @@ pub async fn start_developer_service(udid: &str, name: &str) -> Result<()> {
     let attached = attached(udid).await?;
     let pair = PairRecord::parse(&usbmux::read_pair_record(&attached.serial).await?)?;
     let tls = Arc::new(pair.tls_config()?);
-    let mut plain = usbmux::connect(attached.device_id, LOCKDOWN_PORT)
-        .await
-        .context("connect to lockdownd")?;
-    let reply = exchange(
-        &mut plain,
-        &request(&[
-            ("Label", LABEL),
-            ("Request", "StartSession"),
-            ("HostID", &pair.host_id),
-            ("SystemBUID", &pair.system_buid),
-        ]),
-    )
-    .await?;
-    lockdown_error(&reply, "StartSession")?;
-    if reply.get("EnableSessionSSL").and_then(Value::as_bool) == Some(true) {
-        let mut session = handshake(&tls, plain)
-            .await
-            .context("lockdown TLS session")?;
-        start_service(&mut session, name).await?;
-    } else {
-        start_service(&mut plain, name).await?;
-    }
+    start_paired_service(&attached, &pair, &tls, name).await?;
     Ok(())
+}
+
+/// A byte stream to a lockdown service, plain or TLS as the service asks.
+pub trait ServiceIo: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> ServiceIo for T {}
+
+/// The connected stream [`open_service`] returns.
+pub type ServiceStream = Box<dyn ServiceIo>;
+
+/// Start the lockdown service `name` (for example `com.apple.syslog_relay`)
+/// through a paired session and connect to it over usbmuxd, wrapped in TLS
+/// when lockdownd answers `EnableServiceSSL`. What the stream carries is the
+/// service's own protocol; the lockdown session is closed by then.
+pub async fn open_service(udid: &str, name: &str) -> Result<ServiceStream> {
+    let attached = attached(udid).await?;
+    let pair = PairRecord::parse(&usbmux::read_pair_record(&attached.serial).await?)?;
+    let tls = Arc::new(pair.tls_config()?);
+    let service = start_paired_service(&attached, &pair, &tls, name).await?;
+    let raw = usbmux::connect(attached.device_id, service.port)
+        .await
+        .with_context(|| format!("connect to {name}"))?;
+    Ok(if service.ssl {
+        Box::new(
+            handshake(&tls, raw)
+                .await
+                .with_context(|| format!("{name} TLS"))?,
+        )
+    } else {
+        Box::new(raw)
+    })
 }
 
 /// `PasswordProtected`: a passcode is required right now (see the module
@@ -366,6 +355,38 @@ fn connection(attached: &usbmux::Attached) -> &'static str {
 struct Service {
     port: u16,
     ssl: bool,
+}
+
+/// `StartSession` with the pairing record (TLS when lockdownd asks for it),
+/// then `StartService name` inside that session.
+async fn start_paired_service(
+    attached: &usbmux::Attached,
+    pair: &PairRecord,
+    tls: &Arc<rustls::ClientConfig>,
+    name: &str,
+) -> Result<Service> {
+    let mut plain = usbmux::connect(attached.device_id, LOCKDOWN_PORT)
+        .await
+        .context("connect to lockdownd")?;
+    let reply = exchange(
+        &mut plain,
+        &request(&[
+            ("Label", LABEL),
+            ("Request", "StartSession"),
+            ("HostID", &pair.host_id),
+            ("SystemBUID", &pair.system_buid),
+        ]),
+    )
+    .await?;
+    lockdown_error(&reply, "StartSession")?;
+    if reply.get("EnableSessionSSL").and_then(Value::as_bool) == Some(true) {
+        let mut session = handshake(tls, plain)
+            .await
+            .context("lockdown TLS session")?;
+        start_service(&mut session, name).await
+    } else {
+        start_service(&mut plain, name).await
+    }
 }
 
 async fn start_service<S: AsyncRead + AsyncWrite + Unpin>(
@@ -688,6 +709,16 @@ mod tests {
     use super::*;
     use rustls::client::danger::ServerCertVerifier as _;
 
+    /// `#[tokio::test]` expands to `::core::…`, which this crate's `core`
+    /// dependency shadows; tests build their own runtime.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
     #[test]
     fn requests_are_length_prefixed_big_endian_xml_with_escaped_strings() {
         let body = request(&[("Label", LABEL), ("Request", "GetValue"), ("Key", "A&B")]);
@@ -820,6 +851,48 @@ mod tests {
         );
         let ok = usbmux::parse_plist("<plist version=\"1.0\"><dict></dict></plist>").unwrap();
         assert!(lockdown_error(&ok, "StartSession").is_ok());
+    }
+
+    #[test]
+    fn start_service_reads_the_port_and_the_ssl_flag() {
+        block_on(start_service_reads_the_port_and_the_ssl_flag_body());
+    }
+
+    async fn start_service_reads_the_port_and_the_ssl_flag_body() {
+        let (mut host, mut device) = tokio::io::duplex(1 << 16);
+        let fake = tokio::spawn(async move {
+            let mut header = [0u8; 4];
+            device.read_exact(&mut header).await.unwrap();
+            let mut body = vec![0u8; u32::from_be_bytes(header) as usize];
+            device.read_exact(&mut body).await.unwrap();
+            let reply = "<plist version=\"1.0\"><dict><key>Port</key><integer>50123</integer>\
+                         <key>EnableServiceSSL</key><true/></dict></plist>";
+            device.write_all(&frame(reply)).await.unwrap();
+            String::from_utf8(body).unwrap()
+        });
+        let service = start_service(&mut host, "com.apple.syslog_relay")
+            .await
+            .unwrap();
+        assert_eq!((service.port, service.ssl), (50123, true));
+        let sent = fake.await.unwrap();
+        assert!(sent.contains("<key>Service</key><string>com.apple.syslog_relay</string>"));
+        assert!(sent.contains("<string>StartService</string>"));
+
+        let (mut host, mut device) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let mut header = [0u8; 4];
+            device.read_exact(&mut header).await.unwrap();
+            let mut body = vec![0u8; u32::from_be_bytes(header) as usize];
+            device.read_exact(&mut body).await.unwrap();
+            let reply = "<plist version=\"1.0\"><dict><key>Error</key>\
+                         <string>InvalidService</string></dict></plist>";
+            device.write_all(&frame(reply)).await.unwrap();
+        });
+        let error = start_service(&mut host, "com.apple.dt.simulatelocation")
+            .await
+            .err()
+            .unwrap();
+        assert!(format!("{error}").contains("InvalidService"), "{error}");
     }
 
     #[test]
