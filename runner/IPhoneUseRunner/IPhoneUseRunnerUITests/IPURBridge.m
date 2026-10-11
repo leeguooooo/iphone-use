@@ -532,8 +532,18 @@ static NSDictionary *IPURRect(id snapshot)
   };
 }
 
+// A valid system frame is this device's screen and does not change: callers apply the
+// interface orientation from its short and long sides. So it is read once per runner launch
+// rather than once per request (a snapshot round trip before every touch). The UIKit fallback
+// is not kept, so a later call tries the system frame again.
+static CGSize IPURStableScreenSize;
+static BOOL IPURHasStableScreenSize = NO;
+
 + (CGSize)screenSizePoints
 {
+  @synchronized (self) {
+    if (IPURHasStableScreenSize) return IPURStableScreenSize;
+  }
   if (IPURUseRequestCache() && IPURCachedScreenSize != nil) return IPURCachedScreenSize.CGSizeValue;
   // Read the system root only: no foreground resolution (which itself needs screenCenter),
   // children, or application content. UIKit's nativeBounds can be compatibility-sized too.
@@ -545,7 +555,15 @@ static NSDictionary *IPURRect(id snapshot)
   if ([value isKindOfClass:NSValue.class] && strcmp([(NSValue *)value objCType], @encode(CGRect)) == 0) {
     [(NSValue *)value getValue:&frame];
   }
-  CGSize size = IPURScreenSizeFromFrame(frame, UIScreen.mainScreen.bounds.size);
+  CGSize system = IPURScreenSizeFromFrame(frame, CGSizeZero);
+  if (system.width > 0) {
+    @synchronized (self) {
+      IPURStableScreenSize = system;
+      IPURHasStableScreenSize = YES;
+    }
+    return system;
+  }
+  CGSize size = UIScreen.mainScreen.bounds.size;
   if (IPURUseRequestCache()) IPURCachedScreenSize = [NSValue valueWithCGSize:size];
   return size;
 }

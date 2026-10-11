@@ -461,7 +461,7 @@ hardware verification:
   Their dimensions come from SpringBoard's shallow root frame, shared with the touch conversion:
   the runner host's UIKit viewport (including `nativeBounds`) can be compatibility-sized at
   320×480 on a larger phone (#257). A missing or invalid system frame falls back to UIKit, and
-  the frame is read once per command request. Never the physical `XCUIDevice.orientation`: a
+  a valid frame is read once per runner launch (the fallback is retried on the next request). Never the physical `XCUIDevice.orientation`: a
   phone lying on its side reads landscape while its UI stays portrait. No target pid is set, so
   events go to whatever is on screen, as with WDA.
 - **Screen capture.** The `XCTScreenshotRequest` is built with `CGRectNull` as the full-screen rect.
