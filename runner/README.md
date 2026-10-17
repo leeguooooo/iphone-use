@@ -54,6 +54,7 @@ runner/
     IPURImageCodec.h     screenshot resize + re-encode (ImageIO; also compiled by unit-check.sh)
 scripts/runner-compat.py           host-side WDA compatibility check (every WdaClient route + MJPEG)
 scripts/runner-smoke.py            host-side smoke test / benchmark of the native routes
+scripts/runner-home-check.py       device regression: Home must foreground SpringBoard, preserving the app
 ```
 
 The phone gets exactly one app, **iPhoneUse-Runner** (bundle id `<PRODUCT_BUNDLE_IDENTIFIER>.xctrunner`;
@@ -440,6 +441,16 @@ python3 scripts/runner-smoke.py --runs 5   # timing of the native routes
   stream off.
 - **Screen-changing checks are opt-in.** `runner-compat.py` takes `--mutate` (Home, Settings,
   swipes, a cell click), `--tap X Y`, `--keys TEXT`, `--url URL` and `--lock`.
+- **Home behavior.** All three Home routes send the Home button event once, preserving dismissal
+  of folders and system overlays. If SpringBoard is still absent after 0.8 seconds, they activate
+  it once and verify foreground arrival for up to two seconds. Errors are reported, not replayed.
+- **Home regression.** Run `python3 scripts/runner-home-check.py` on an unlocked device with
+  no other session driving it. It exercises `/home`, `/wda/homescreen` and `/wda/pressButton`
+  from Calculator, checks SpringBoard is actually in front, repeats Home while already there,
+  and checks Calculator keeps its process. A successful HTTP response alone does not pass.
+  Foreground lookup failures during a switch are polled for up to four seconds; actions
+  are never retried. Run `python3 scripts/test-runner-home-check.py` for device-free
+  regression tests of polling, timeouts and error handling (also included in `ci-check.sh`).
 - **Unlock first.** The phone must be unlocked when the runner starts, as with WDA.
 - **No test timeouts.** Do not pass `-test-timeouts-enabled YES`.
 - **One automation session.** iOS gives one XCTest automation session at a time, so a managed

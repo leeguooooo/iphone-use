@@ -40,6 +40,7 @@ grep -q 'IPhoneUseRunner_\[\^ /\]+\\\.xctestrun -only-testing:IPhoneUseRunnerUIT
 echo "runner ci-check: names coherent across project, the setup engine and uninstall.sh"
 
 # ── 1. device-independent logic ─────────────────────────────────────────────
+python3 scripts/test-runner-home-check.py
 bash runner/unit-check.sh
 
 # ── 2. unsigned iOS build ───────────────────────────────────────────────────

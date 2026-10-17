@@ -654,11 +654,31 @@ final class RunnerTests: XCTestCase {
     return .value(NSNull(), headers: ["X-IPU-Gesture": "synthesized"])
   }
 
+  /// Send Home once to dismiss system UI; activate SpringBoard only if the event had no effect.
   func home() throws -> HTTPResponse {
     defer { IPURBridge.invalidateRequestCache() }
-    if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(.home) }) {
-      throw RunnerError.failed("home failed: \(exception)")
+    func checked(_ action: () -> Void) throws {
+      let issuesBefore = recordedIssues.count
+      let exception = IPURBridge.catchException(action)
+      if let failure = exception ?? (recordedIssues.count > issuesBefore ? recordedIssues.last : nil) {
+        throw RunnerError.failed("home failed: \(failure)")
+      }
     }
+    try HomeAction.run(
+      press: { try checked { XCUIDevice.shared.press(.home) } },
+      isDesktop: {
+        // Every poll must observe fresh AX state, including independent Spotlight processes.
+        IPURBridge.invalidateRequestCache()
+        return self.foreground().bundleID == Self.springBoardBundleID
+      },
+      activate: {
+        let application = XCUIApplication(bundleIdentifier: Self.springBoardBundleID)
+        var failure: Error?
+        IPURBridge.performWithoutQuiescence(application) {
+          do { try checked { application.activate() } } catch { failure = error }
+        }
+        if let failure { throw failure }
+      })
     return .value(NSNull())
   }
 

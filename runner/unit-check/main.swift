@@ -39,6 +39,37 @@ func expectThrows(_ code: String, _ message: String, line: Int = #line, _ body: 
   }
 }
 
+// MARK: Home event and fallback sequencing
+
+do {
+  func scenario(_ states: [Bool], pressFails: Bool = false, activateFails: Bool = false) -> [String] {
+    var events: [String] = []
+    var clock = 0.0
+    var polls = 0
+    do {
+      try HomeAction.run(press: {
+        events.append("press")
+        if pressFails { throw RunnerError.failed("press") }
+      }, isDesktop: {
+        defer { polls += 1 }
+        return states[min(polls, states.count - 1)]
+      }, activate: {
+        events.append("activate")
+        if activateFails { throw RunnerError.failed("activate") }
+      }, now: { clock }, sleep: { clock += $0 })
+      events.append("success")
+    } catch { events.append("error") }
+    return events
+  }
+  check(scenario([true]) == ["press", "success"], "Home on desktop still sends the dismissal event")
+  check(scenario([false, false, true]) == ["press", "success"], "delayed Home avoids activation")
+  check(scenario(Array(repeating: false, count: 30) + [true]) == ["press", "activate", "success"],
+        "ineffective Home activates desktop once")
+  check(scenario([false]) == ["press", "activate", "error"], "fallback must reach desktop")
+  check(scenario([true], pressFails: true) == ["press", "error"], "failed press is not replayed or hidden")
+  check(scenario([false], activateFails: true) == ["press", "activate", "error"], "activation failure propagates")
+}
+
 // MARK: HTTP
 
 do {

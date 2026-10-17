@@ -784,12 +784,13 @@ extension RunnerTests {
 
   // MARK: - Device and apps
 
+  /// 处理 WDA 按键请求；Home 复用桌面激活逻辑，其余按键沿用设备事件。
   private func pressButton(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     let name = (body["name"] as? String ?? "").lowercased()
     let button: XCUIDevice.Button
     switch name {
-    case "home": button = .home
+    case "home": return try home()
     #if targetEnvironment(simulator)
     // The Simulator has no volume buttons (the API is unavailable there).
     case "volumeup", "volumedown":
