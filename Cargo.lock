@@ -501,7 +501,7 @@ name = "core"
 version = "0.19.2"
 dependencies = [
  "base64 0.22.1",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "hmac",
  "serde",
  "serde_json",
@@ -1720,6 +1720,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "phone-control"
+version = "0.1.0"
+dependencies = [
+ "core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2425,7 +2435,7 @@ dependencies = [
  "clap",
  "core",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "http-body-util",
  "iphone-use-mcp",
  "libc",
@@ -3519,14 +3529,4 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29ce2c8a9384ad323cf564b67da86e21d3cfdff87908bc1223ed5c99bc792713"
 dependencies = [
  "zune-core",
-]
-
-[[package]]
-name = "phone-control"
-version = "0.1.0"
-dependencies = [
- "core",
- "serde",
- "serde_json",
- "tokio",
 ]

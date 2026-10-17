@@ -21,7 +21,7 @@ iphone-use-mcp = { path = "../mcp" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
-getrandom = "0.3"
+getrandom = "0.4"
 
 # Daemon integration layer.
 anyhow = "1"
