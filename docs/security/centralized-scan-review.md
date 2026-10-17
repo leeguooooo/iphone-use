@@ -4,8 +4,8 @@ The catalog scan of source commit `9d4b9000969a8b2956de082985deeeb6246e745d` use
 
 ## Changes
 
-- Pin every external GitHub Action to the commit resolved from its existing version reference.
-- Add weekly Dependabot updates for Actions and the Cargo workspace.
+- Pin every external GitHub Action to an immutable commit; use a master-history Rust action commit with an explicit stable toolchain input, as required by upstream. Disable checkout credential persistence in release jobs.
+- Add weekly Dependabot updates for Actions, the root Cargo workspace and the independent launcher workspace.
 - Document vulnerability reporting and supported versions in SECURITY.md.
 - Exclude build products and local credential files from the Codex plugin package.
 - Run the catalog's SHA-pinned scanner action on pull requests and main pushes, with read-only permissions, no persisted checkout credentials, offline scanning and the same score threshold. No repository-level scanner suppressions or baseline are used.

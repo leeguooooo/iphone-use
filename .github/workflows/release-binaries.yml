@@ -32,6 +32,8 @@ jobs:
       # ── Checkout ────────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Validate installer and release coherence
         shell: bash
@@ -92,8 +94,9 @@ jobs:
 
       # ── Rust toolchain ───────────────────────────────────────────────────────
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master; explicit stable toolchain
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios
 
       - name: Cache Rust build artefacts
@@ -530,6 +533,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Check server.json matches the tag
         run: |
