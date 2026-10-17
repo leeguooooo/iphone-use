@@ -342,7 +342,7 @@ fn harness() -> &'static Harness {
 printf '%s\n' "$*" >> '{argv}'
 case "$1" in
   unlocked) exit 0 ;;
-  list) printf '%s' '[{{"id":"e-1","name":"Shop","user":"{USERNAME}","uris":["https://login.example.com/"]}},{{"id":"e-2","name":"Bank","user":"x@y.z","uris":["https://bank.example.org"]}}]' ;;
+  list) printf '%s' '[{{"id":"note-1","name":"Secure note","user":null,"uris":null}},{{"id":"e-1","name":"Shop","user":"{USERNAME}","uris":["https://login.example.com/"]}},{{"id":"e-2","name":"Bank","user":"x@y.z","uris":["https://bank.example.org"]}}]' ;;
   get) printf '%s' '{{"data":{{"username":"{USERNAME}","password":"{PASSWORD}","totp":null}},"id":"e-1","name":"Shop"}}' ;;
   *) exit 1 ;;
 esac

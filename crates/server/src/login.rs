@@ -73,8 +73,18 @@ pub struct VaultEntry {
     pub name: String,
     #[serde(default)]
     pub user: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vault_uris")]
     pub uris: Vec<Value>,
+}
+
+// `bwu list --raw` emits null for entries without website URIs (including
+// non-login items). One such entry must not prevent every login in the vault.
+fn deserialize_vault_uris<'de, D>(deserializer: D) -> Result<Vec<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(Option::<Vec<Value>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl VaultEntry {
@@ -1807,6 +1817,38 @@ pub fn mail_code(stdout: &[u8], from: Option<&str>) -> Option<Secret> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_list_accepts_null_missing_and_empty_uris_without_losing_logins() {
+        let entries: Vec<VaultEntry> = serde_json::from_value(json!([
+            {"id":"note", "name":"Secure note", "user":null, "uris":null},
+            {"id":"missing", "name":"No URI field"},
+            {"id":"empty", "name":"Empty URIs", "uris":[]},
+            {"id":"login", "name":"Example", "user":"example-user",
+             "uris":["https://example.com", {"uri":"https://login.example.com"}]}
+        ]))
+        .unwrap();
+        assert_eq!(entries.len(), 4);
+        assert!(entries[..3].iter().all(|entry| entry.uris.is_empty()));
+        assert_eq!(
+            entries[3].uri_strings().collect::<Vec<_>>(),
+            vec!["https://example.com", "https://login.example.com"]
+        );
+        assert_eq!(by_item(&entries, "login", None)[0].name, "Example");
+    }
+
+    #[test]
+    fn vault_list_still_rejects_malformed_uri_containers() {
+        for uris in [
+            json!("https://example.com"),
+            json!({"uri":"https://example.com"}),
+        ] {
+            assert!(serde_json::from_value::<VaultEntry>(json!({
+                "id":"login", "name":"Example", "uris":uris
+            }))
+            .is_err());
+        }
+    }
 
     fn row(kind: &str, label: &str, y: f64) -> ElementRow {
         ElementRow {
