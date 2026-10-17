@@ -1,0 +1,15 @@
+# Security policy
+
+Security fixes target the latest released version. Upgrade before checking whether a report still reproduces.
+
+## Reporting a vulnerability
+
+Please email leeguoooo@gmail.com with the affected version, platform, reproduction steps and expected impact. Do not put credentials, pairing records, private phone data or exploit details in a public issue. Share a minimal reproduction using synthetic data where possible.
+
+We will assess reports and coordinate a fix and disclosure with the reporter. There is no guaranteed response time or bounty program.
+
+## Security boundaries
+
+The daemon listens on loopback by default and requires authentication. Runner requests use per-launch signing credentials. Remote access should use an authenticated HTTPS proxy or VPN; do not expose device control ports directly to the internet. The opt-in legacy iOS 15/16 LAN transport is unencrypted.
+
+Control of an unlocked phone can expose personal data and perform actions in installed apps. Keep pairing records, signing keys and daemon credentials private. See [the security guide](docs/guide.md#security) and [privacy policy](docs/privacy.md).

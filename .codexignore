@@ -1,0 +1,11 @@
+# Build products, local state and credentials are not part of the plugin package.
+.git/
+target/
+runner/build/
+runner/embed/
+**/DerivedData/
+.env
+.env.*
+*.p8
+*.p12
+*.mobileprovision
