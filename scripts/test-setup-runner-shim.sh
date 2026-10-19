@@ -23,7 +23,7 @@ FAKE="$TMP/iphone-use"
 cat > "$FAKE" <<'FAKE_BIN'
 #!/bin/bash
 if [ "$1 $2" = "setup-native --supports" ]; then
-    case "$3" in setup|status|stop|pause|resume|doctor|instance-context) exit 0 ;; *) exit 1 ;; esac
+    case "$3" in setup|status|stop|pause|resume|doctor|instance-context|prebuild) exit 0 ;; *) exit 1 ;; esac
 fi
 {
     echo "args=$*"
@@ -39,7 +39,7 @@ printf '#!/bin/bash\nexit 2\n' > "$OLD"; chmod +x "$OLD"
 
 run() { env -i HOME="$HOME_DIR" PATH=/usr/bin:/bin FAKE_LOG="$TMP/log" "$@"; }
 
-for command in setup status stop pause resume doctor instance-context; do
+for command in setup status stop pause resume doctor instance-context prebuild; do
     rm -f "$TMP/log"
     if [ "$command" = setup ]; then args=(); else args=("$command"); fi
     run IPHONE_USE_SETUP_BIN="$FAKE" IPU_RUNNER_UDID=0000AB /bin/bash "$SETUP" ${args[@]+"${args[@]}"}

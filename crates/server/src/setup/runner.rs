@@ -448,13 +448,89 @@ pub fn key_source_hash(key: &str) -> Option<&str> {
 /// The source hash of the last runner setup built for this instance (the
 /// one it launched), from the product-cache record.
 pub fn built_source_hash(ctx: &Ctx) -> Option<String> {
+    key_source_hash(&recorded_key(ctx)?).map(str::to_string)
+}
+
+/// The key of the product-cache record, whatever it is for.
+pub fn recorded_key(ctx: &Ctx) -> Option<String> {
     let meta = std::fs::symlink_metadata(&ctx.runner_cache).ok()?;
     if meta.file_type().is_symlink() || !meta.is_file() {
         return None;
     }
     let record: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&ctx.runner_cache).ok()?).ok()?;
-    key_source_hash(record.get("key")?.as_str()?).map(str::to_string)
+    record.get("key")?.as_str().map(str::to_string)
+}
+
+/// The setup status message of a build that only an upgrade caused. The
+/// daemon matches it to tell a person the wait is one-time.
+pub const UPGRADE_BUILD_MESSAGE: &str =
+    "building the device runner once after an upgrade (about 1-2 min)";
+
+/// Whether a product built for `old` is missing only because iphone-use was
+/// upgraded: the runner sources, the on-phone daemon library or the icon
+/// changed, while the phone, signing, Xcode, SDK and deployment target are
+/// the same (`v3|src|bundle|team|signer|udid|xcode|sdk|deploy|embed|icon`).
+pub fn upgrade_rebuild(old: &str, new: &str) -> bool {
+    let old: Vec<&str> = old.split('|').collect();
+    let new: Vec<&str> = new.split('|').collect();
+    old != new
+        && old.len() == new.len()
+        && old.len() >= 10
+        && old[0] == "v3"
+        && new[0] == "v3"
+        && old[2..=8] == new[2..=8]
+}
+
+// ── one build at a time ─────────────────────────────────────────────────────
+
+/// Held while a runner product is built, validated and recorded: setup and
+/// the post-upgrade prebuild share one DerivedData, and two xcodebuilds in
+/// it corrupt each other. Released on drop (the descriptor closes).
+pub struct BuildLock {
+    _file: std::fs::File,
+}
+
+/// Take the build lock without waiting; `None` while another process holds
+/// it (or the lock file is unsafe to use).
+pub fn try_build_lock(ctx: &Ctx) -> Option<BuildLock> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let path = ctx.state_dir().join("runner-build.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.file_type().is_file() || meta.uid() != sys::uid() {
+        return None;
+    }
+    let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
+    // SAFETY: flock on a descriptor this function owns.
+    (unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0)
+        .then_some(BuildLock { _file: file })
+}
+
+// ── the post-upgrade prebuild ───────────────────────────────────────────────
+
+/// The 1-minute load average above which the background prebuild does not
+/// start (it would slow whatever is running and take ages itself): the
+/// core count, or `IPU_PREBUILD_MAX_LOAD`.
+pub fn prebuild_load_limit(cores: usize, configured: Option<&str>) -> f64 {
+    configured
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(cores.max(1) as f64)
+}
+
+/// This Mac's 1-minute load average.
+pub fn load_average() -> Option<f64> {
+    let mut loads = [0f64; 3];
+    // SAFETY: getloadavg writes at most `nelem` doubles into the buffer.
+    (unsafe { libc::getloadavg(loads.as_mut_ptr(), 3) } >= 1).then_some(loads[0])
 }
 
 pub fn cache_drop(ctx: &Ctx) -> bool {
@@ -780,6 +856,49 @@ mod tests {
         assert!(linked.ends_with(&format!("|embed:{}", one.sha256)));
         assert_eq!(linked, key(&component(Some(&lib(b"one")))), "same library reuses");
         assert_ne!(linked, key(&component(Some(&lib(b"two")))), "a new library rebuilds");
+    }
+
+    #[test]
+    fn only_a_change_an_upgrade_makes_counts_as_an_upgrade_rebuild() {
+        let ctx = crate::setup::ctx::tests_support::ctx();
+        let key = |src: &str, udid: &str, xcode: &str, embed: &str| {
+            format!(
+                "{}|icon:none",
+                cache_key(&ctx, src, "b", "t", udid, xcode, "18.0", "", embed)
+            )
+        };
+        let before = key("src1", "u", "16", "embed:aa");
+        // A release replaced the on-phone daemon library, or the sources.
+        assert!(upgrade_rebuild(&before, &key("src1", "u", "16", "embed:bb")));
+        assert!(upgrade_rebuild(&before, &key("src2", "u", "16", "embed:bb")));
+        // Nothing changed, or something an upgrade does not change.
+        assert!(!upgrade_rebuild(&before, &before));
+        assert!(!upgrade_rebuild(&before, &key("src1", "other", "16", "embed:bb")));
+        assert!(!upgrade_rebuild(&before, &key("src1", "u", "17", "embed:aa")));
+        assert!(!upgrade_rebuild("", &before));
+        assert!(!upgrade_rebuild("v2|x|y", &before));
+    }
+
+    #[test]
+    fn the_build_lock_admits_one_holder_at_a_time() {
+        let home = tempfile::tempdir().unwrap();
+        let instance =
+            crate::instance::Instance::derive("", home.path(), None).expect("default instance");
+        let ctx = Ctx::paths(instance);
+        std::fs::create_dir_all(ctx.state_dir()).unwrap();
+        let held = try_build_lock(&ctx).expect("a free lock is taken");
+        assert!(try_build_lock(&ctx).is_none(), "a held lock is refused");
+        drop(held);
+        assert!(try_build_lock(&ctx).is_some(), "released on drop");
+    }
+
+    #[test]
+    fn the_prebuild_load_limit_defaults_to_the_core_count() {
+        assert_eq!(prebuild_load_limit(10, None), 10.0);
+        assert_eq!(prebuild_load_limit(0, None), 1.0);
+        assert_eq!(prebuild_load_limit(10, Some("4.5")), 4.5);
+        assert_eq!(prebuild_load_limit(10, Some("junk")), 10.0);
+        assert_eq!(prebuild_load_limit(10, Some("-1")), 10.0);
     }
 
     // `security cms -D -i embedded.mobileprovision` of a free Apple ID runner,

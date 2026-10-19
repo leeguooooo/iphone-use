@@ -45,7 +45,8 @@ def run(latest, *args, home, installed_log, extra_env=None, status_url=None):
                AUTO_UPDATE_LATEST_TAG=latest, AUTO_UPDATE_SETTLE_SECS="0",
                AUTO_UPDATE_INSTALLER_CMD=f"echo \"$AUTO_UPDATE_INSTANCE $IPHONE_USE_AUTO_UPDATE_JOB\" >> '{installed_log}'"
                                          f" && touch '{installed_log}.'\"$AUTO_UPDATE_INSTANCE\"",
-               AUTO_UPDATE_SELF_URL=f"file://{Path(home) / 'nonexistent.sh'}")
+               AUTO_UPDATE_SELF_URL=f"file://{Path(home) / 'nonexistent.sh'}",
+               AUTO_UPDATE_PREBUILD_CMD=f"echo \"$AUTO_UPDATE_INSTANCE\" >> '{installed_log}.prebuilt'")
     if status_url:
         env.update(AUTO_UPDATE_STATUS_URL=status_url, AUTO_UPDATE_TOKEN="t")
     env.update(extra_env or {})
@@ -254,6 +255,79 @@ with tempfile.TemporaryDirectory() as home:
 with tempfile.TemporaryDirectory() as home:
     rc, err = run("v0.6.0", home=home, installed_log=Path(home) / "installed")
     report("nothing installed → skip", rc == 0 and "skip:not_installed" in err, f"rc={rc} err={err.strip()[-200:]}")
+
+def prebuilt(log):
+    p = Path(f"{log}.prebuilt")
+    return p.read_text().split() if p.exists() else []
+
+# The upgraded instances' runner products are prebuilt (no phone), so the next
+# connect does not build while a person waits; a skipped or failed upgrade is not.
+with tempfile.TemporaryDirectory() as home:
+    log = Path(home) / "installed"
+    servers = {"default": StatusServer(base, marker=f"{log}.default", after_version="0.6.0"),
+               "ix": StatusServer(base, marker=f"{log}.ix", after_version="0.6.0"),
+               "busy": StatusServer({**base, "owner": "agent"})}
+    write_plist(home, "com.leeguoo.iphone-use", servers["default"].port)
+    write_plist(home, "com.leeguoo.iphone-use.ix", servers["ix"].port)
+    write_plist(home, "com.leeguoo.iphone-use.busy", servers["busy"].port)
+    try:
+        rc, err = run("v0.6.0", home=home, installed_log=log)
+    finally:
+        for srv in servers.values(): srv.close()
+    report("each upgraded instance is prebuilt, a skipped one is not",
+           rc == 0 and sorted(prebuilt(log)) == ["default", "ix"] and "prebuild[ix]: finished (exit 0)" in err,
+           f"rc={rc} prebuilt={prebuilt(log)} err={err.strip()[-300:]}")
+
+for name, env, payload, expect in [
+    ("a failed upgrade is not prebuilt", {"AUTO_UPDATE_INSTALLER_CMD": "exit 3"}, base, []),
+    ("up to date is not prebuilt", {}, {**base, "version": "0.6.0"}, []),
+    ("AUTO_UPDATE_PREBUILD=0 turns the prebuild off", {"AUTO_UPDATE_PREBUILD": "0"}, base, []),
+    ("a failing prebuild does not fail the run", {"AUTO_UPDATE_PREBUILD_CMD": "exit 4"}, base, None),
+]:
+    with tempfile.TemporaryDirectory() as home:
+        log = Path(home) / "installed"
+        srv = StatusServer(payload, marker=f"{log}.default", after_version="0.6.0")
+        write_plist(home, "com.leeguoo.iphone-use", srv.port)
+        try:
+            rc, err = run("v0.6.0", home=home, installed_log=log, extra_env=env)
+        finally:
+            srv.close()
+        if expect is None:
+            ok = rc == 0 and "prebuild[default]: finished (exit 4)" in err
+        else:
+            ok = prebuilt(log) == expect and "prebuild[default]: finished" not in err
+        report(name, ok, f"rc={rc} prebuilt={prebuilt(log)} err={err.strip()[-300:]}")
+
+# A prebuild that never ends is stopped, and the run still finishes.
+with tempfile.TemporaryDirectory() as home:
+    log = Path(home) / "installed"
+    srv = StatusServer(base, marker=f"{log}.default", after_version="0.6.0")
+    write_plist(home, "com.leeguoo.iphone-use", srv.port)
+    try:
+        rc, err = run("v0.6.0", home=home, installed_log=log,
+                      extra_env={"AUTO_UPDATE_PREBUILD_CMD": "exec sleep 30", "AUTO_UPDATE_PREBUILD_TIMEOUT": "2"})
+    finally:
+        srv.close()
+    report("a stuck prebuild is stopped at the timeout", rc == 0 and "stopped after 2s" in err,
+           f"rc={rc} err={err.strip()[-300:]}")
+
+# Without the hook, the instance's installed setup-runner.sh is asked to prebuild.
+with tempfile.TemporaryDirectory() as home:
+    log = Path(home) / "installed"
+    state = Path(home) / "state"; (state / "instances" / "ix").mkdir(parents=True)
+    args_log = Path(home) / "setup-args"
+    for script in (state / "setup-runner.sh", state / "instances" / "ix" / "setup-runner.sh"):
+        script.write_text(f"#!/bin/bash\necho \"$IPHONE_USE_INSTANCE $1\" >> '{args_log}'\n")
+    servers = [StatusServer(base, marker=f"{log}.{n}", after_version="0.6.0") for n in ("default", "ix")]
+    write_plist(home, "com.leeguoo.iphone-use", servers[0].port)
+    write_plist(home, "com.leeguoo.iphone-use.ix", servers[1].port)
+    try:
+        rc, err = run("v0.6.0", home=home, installed_log=log, extra_env={"AUTO_UPDATE_PREBUILD_CMD": ""})
+    finally:
+        for srv in servers: srv.close()
+    got = sorted(args_log.read_text().splitlines()) if args_log.exists() else []
+    report("the instance's own setup-runner.sh runs `prebuild`", rc == 0 and got == ["default prebuild", "ix prebuild"],
+           f"rc={rc} got={got} err={err.strip()[-300:]}")
 
 # After an upgrade the installed copy of this script refreshes itself from the
 # new tag, so a fixed idle gate reaches the machine it runs on.

@@ -39,6 +39,15 @@
 # failure. Success is the version the restarted daemon reports, not the
 # installer's exit status; it is recorded in ~/.iphone-use/auto-update-last.json,
 # which /agent/status (`auto_update`) and `iphone-use doctor` report.
+#
+# After an instance is upgraded, its runner product is prebuilt
+# (`setup-runner.sh prebuild`): every release replaces the on-phone daemon
+# library linked into the device runner, so without it the next connect
+# builds, validates and re-signs the runner while a person waits (6.5 min on
+# a busy Mac). The prebuild never touches the phone, runs below normal
+# priority, skips itself on a busy Mac or while setup works, and its failure
+# changes nothing: the next connect then builds as before.
+# AUTO_UPDATE_PREBUILD=0 turns it off.
 set -euo pipefail
 
 # Installs made before the rename set PHONE_REMOTE_*; read them as IPHONE_USE_*
@@ -72,6 +81,9 @@ MINUTE="${AUTO_UPDATE_MINUTE:-30}"
 # How long a restarted daemon gets to report the new version.
 SETTLE_SECS="${AUTO_UPDATE_SETTLE_SECS:-60}"
 case "$SETTLE_SECS" in ''|*[!0-9]*) SETTLE_SECS=60 ;; esac
+# How long one runner prebuild may take before it is stopped.
+PREBUILD_TIMEOUT="${AUTO_UPDATE_PREBUILD_TIMEOUT:-1800}"
+case "$PREBUILD_TIMEOUT" in ''|*[!0-9]*) PREBUILD_TIMEOUT=1800 ;; esac
 
 log() { mkdir -p "$LOG_DIR"; printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "$LOG" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -199,6 +211,46 @@ run_installer() {  # run_installer <instance> <release tag>
     fi
 }
 
+# The installed setup entry point of an instance (setup-runner.sh's own layout).
+setup_script() {  # setup_script <instance>
+    if [ "$1" = default ]; then
+        printf '%s\n' "$STATE_DIR/setup-runner.sh"
+    else
+        printf '%s\n' "$STATE_DIR/instances/$1/setup-runner.sh"
+    fi
+}
+
+# Build the upgraded instance's runner product now, so its next connect reuses
+# it (see the header). Bounded by PREBUILD_TIMEOUT; a stop signal makes the
+# setup engine end its xcodebuild. Never fails the run.
+prebuild_runner() {  # prebuild_runner <instance>
+    if [ "${AUTO_UPDATE_PREBUILD:-1}" = 0 ]; then
+        log "prebuild[$1]: off (AUTO_UPDATE_PREBUILD=0)"; return 0
+    fi
+    local script pid waited=0 rc=0
+    if [ -n "${AUTO_UPDATE_PREBUILD_CMD:-}" ]; then
+        AUTO_UPDATE_INSTANCE="$1" bash -c "$AUTO_UPDATE_PREBUILD_CMD" </dev/null >>"$LOG" 2>&1 &
+    else
+        script="$(setup_script "$1")"
+        if [ ! -f "$script" ]; then
+            log "prebuild[$1]: skipped, $script is missing"; return 0
+        fi
+        IPHONE_USE_INSTANCE="$1" /bin/bash "$script" prebuild </dev/null >>"$LOG" 2>&1 &
+    fi
+    pid=$!
+    log "prebuild[$1]: building the runner product for the next connect (pid $pid)"
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$PREBUILD_TIMEOUT" ]; then
+            kill -TERM "$pid" 2>/dev/null || true
+            log "prebuild[$1]: stopped after ${PREBUILD_TIMEOUT}s; the next connect builds"
+            break
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    wait "$pid" || rc=$?
+    log "prebuild[$1]: finished (exit $rc)"
+}
+
 # The version the restarted daemon serves (empty when it never answered),
 # waiting up to SETTLE_SECS for it to reach <latest>.
 settled_version() {  # settled_version <instance> <plist> <latest>
@@ -213,6 +265,7 @@ settled_version() {  # settled_version <instance> <plist> <latest>
 }
 
 OUTCOME_ROWS=""
+UPGRADED_INSTANCES=""  # upgraded by this run: their runner products are prebuilt
 CURRENT_INSTANCES=" "  # found up to date this run: an earlier failure there is resolved
 record() {  # record <instance> <from> <to> <ok 0|1> <error>
     OUTCOME_ROWS="${OUTCOME_ROWS}$1"$'\t'"$2"$'\t'"$3"$'\t'"$4"$'\t'"$5"$'\n'
@@ -350,6 +403,7 @@ cmd_run() {
         after="$(settled_version "$instance" "$plist" "$latest")"
         if [ -n "$after" ] && newer_or_same "$after" "$latest"; then
             upgraded=1
+            UPGRADED_INSTANCES="$UPGRADED_INSTANCES$instance "
             log "upgrade finished: $instance ${before:-?} -> $after"
             record "$instance" "$before" "$after" 1 ""
         else
@@ -367,6 +421,7 @@ cmd_run() {
     done <<<"$list"
     [ "$dry" = 1 ] || write_outcome "$latest"
     [ "$upgraded" = 0 ] || refresh_self "$latest"
+    for instance in $UPGRADED_INSTANCES; do prebuild_runner "$instance"; done
     [ "$failed" = 0 ] || return 1
     return "$rc"
 }

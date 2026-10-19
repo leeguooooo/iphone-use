@@ -241,6 +241,23 @@ pub fn previous_blocker(path: &Path) -> String {
     }
 }
 
+/// The phase of a setup attempt that is working right now (active, not
+/// terminal, heartbeat within the last minute), else `None`.
+pub fn active_phase(path: &Path) -> Option<String> {
+    active_phase_of(&read_object(path), now())
+}
+
+/// [`active_phase`] on a parsed status: the watcher beats every 15 s, so a
+/// minute of silence means the owner is gone.
+pub fn active_phase_of(data: &Map<String, Value>, now: u64) -> Option<String> {
+    let flag = |key: &str| data.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let beat = data.get("heartbeat_ts").and_then(Value::as_u64).unwrap_or(0);
+    if !flag("active") || flag("terminal") || now.saturating_sub(beat) > 60 {
+        return None;
+    }
+    data.get("phase").and_then(Value::as_str).map(str::to_string)
+}
+
 pub fn phase_is(path: &Path, phase: &str) -> bool {
     read_object(path).get("phase").and_then(Value::as_str) == Some(phase)
 }
@@ -382,6 +399,34 @@ mod tests {
         std::fs::write(&path, r#"{"blocked_on":"locked"}"#).unwrap();
         publish(&owner(&path, "b"), &Op::Begin).unwrap();
         assert_eq!(read(&path)["blocked_on"], "");
+    }
+
+    #[test]
+    fn only_a_live_attempt_has_an_active_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let me = owner(&path, "a");
+        publish(&me, &Op::Begin).unwrap();
+        let phase = |phase: &str| Op::Phase {
+            phase: phase.into(),
+            blocked: "".into(),
+            message: "x".into(),
+        };
+        publish(&me, &phase("building")).unwrap();
+        assert_eq!(active_phase(&path).as_deref(), Some("building"));
+        let mut data = read(&path).as_object().cloned().unwrap();
+        let beat = data["heartbeat_ts"].as_u64().unwrap();
+        assert_eq!(active_phase_of(&data, beat + 60).as_deref(), Some("building"));
+        assert_eq!(active_phase_of(&data, beat + 61), None, "a silent owner is gone");
+        // Ready (the KeepAlive hold) and failures are terminal.
+        publish(&me, &phase("ready")).unwrap();
+        assert_eq!(active_phase(&path), None);
+        publish(&me, &phase("prereq")).unwrap();
+        publish(&me, &Op::Finish(1)).unwrap();
+        assert_eq!(active_phase(&path), None);
+        data.insert("active".into(), json!(false));
+        assert_eq!(active_phase_of(&data, beat), None);
+        assert_eq!(active_phase(&dir.path().join("missing.json")), None);
     }
 
     #[test]

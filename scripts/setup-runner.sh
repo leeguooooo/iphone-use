@@ -20,6 +20,8 @@
 #   ./scripts/setup-runner.sh resume     # re-enable the managed runner supervisor
 #   ./scripts/setup-runner.sh doctor     # read-only preflight checklist
 #   ./scripts/setup-runner.sh instance-context  # read-only: resolved paths/ports
+#   ./scripts/setup-runner.sh prebuild  # build + record the runner product only
+#                                       # (after an upgrade; never touches the phone)
 #
 # Env overrides:
 #   IPU_RUNNER_UDID=...        target device UDID (default: the one USB iPhone)
@@ -61,9 +63,9 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin:$PATH"
 
 COMMAND="${1:-setup}"
 case "$COMMAND" in
-    setup|status|stop|pause|resume|doctor|instance-context) ;;
+    setup|status|stop|pause|resume|doctor|instance-context|prebuild) ;;
     *)
-        printf 'unknown command: %s (use: setup|status|stop|pause|resume|doctor|instance-context)\n' "$COMMAND" >&2
+        printf 'unknown command: %s (use: setup|status|stop|pause|resume|doctor|instance-context|prebuild)\n' "$COMMAND" >&2
         exit 1
         ;;
 esac

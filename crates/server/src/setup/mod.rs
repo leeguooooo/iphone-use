@@ -7,7 +7,8 @@
 //!
 //! Implemented here so far: `doctor`, `status`, `stop`, `pause`, `resume`,
 //! and `setup` as the launchd supervisor runs it (`IPU_RUNNER_KEEPALIVE=1`), plus
-//! the setup status protocol (`status-watch` is a run's heartbeat watcher).
+//! the setup status protocol (`status-watch` is a run's heartbeat watcher),
+//! and `prebuild` (the runner product only, after an upgrade; no phone).
 
 pub mod app;
 pub mod asc;
@@ -43,6 +44,7 @@ pub const COMMANDS: &[&str] = &[
     "setup",
     "owner-check",
     "instance-context",
+    "prebuild",
 ];
 
 /// `iphone-use setup-native <command> [args…]`. Returns the exit code.
@@ -90,6 +92,7 @@ pub fn main(args: &[String]) -> i32 {
                 "resume" => commands::resume(&ctx),
                 "owner-check" => owner::check(&ctx),
                 "instance-context" => commands::instance_context(&ctx),
+                "prebuild" => flow::Setup::new(ctx).run_prebuild(),
                 _ if ctx.keepalive => flow::Setup::new(ctx).run_keepalive(),
                 _ => flow::Setup::new(ctx).run_interactive(),
             }
