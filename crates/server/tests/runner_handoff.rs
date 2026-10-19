@@ -92,7 +92,7 @@ impl FakeRunner {
     }
 }
 
-fn runner(body: &str) -> axum::response::Response {
+fn runner_json(body: &str) -> axum::response::Response {
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -152,9 +152,9 @@ async fn runner_answer(
     let session = format!("L{}", launch.number);
     let path = uri.path();
     match (method.as_str(), path) {
-        ("GET", "/status") => runner(r#"{"value":{"ready":true}}"#),
-        ("GET", "/wda/locked") => runner(r#"{"value":false}"#),
-        ("POST", "/session") => runner(&format!(
+        ("GET", "/status") => runner_json(r#"{"value":{"ready":true}}"#),
+        ("GET", "/wda/locked") => runner_json(r#"{"value":false}"#),
+        ("POST", "/session") => runner_json(&format!(
             r#"{{"value":{{"sessionId":"{session}"}},"sessionId":"{session}"}}"#
         )),
         _ => {
@@ -167,10 +167,10 @@ async fn runner_answer(
                 return runner_error(StatusCode::NOT_FOUND, "invalid session id", sid);
             }
             match route {
-                "appium/settings" => runner(r#"{"value":{}}"#),
-                "wda/locked" => runner(r#"{"value":false}"#),
+                "appium/settings" => runner_json(r#"{"value":{}}"#),
+                "wda/locked" => runner_json(r#"{"value":false}"#),
                 "wda/apps/list" => {
-                    runner(r#"{"value":[{"pid":1,"bundleId":"com.apple.springboard"}]}"#)
+                    runner_json(r#"{"value":[{"pid":1,"bundleId":"com.apple.springboard"}]}"#)
                 }
                 _ => runner_error(StatusCode::NOT_FOUND, "unknown command", route),
             }
