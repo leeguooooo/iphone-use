@@ -2780,6 +2780,20 @@ async fn agent_status(
             .unwrap_or(""),
     )
     .unwrap_or_else(|_| "\"\"".to_string());
+    // A setup attempt bringing the runner up right now (the supervisor's
+    // rebuild after an idle release, an upgrade rebuild): it is a reconnect
+    // in progress whatever the daemon's own lifecycle says, or a person sees
+    // "paused after inactivity" through minutes of building.
+    let setup_working = if state.managed_runner && !runner_actionable && !releasing && !reconnecting
+    {
+        setup_status
+            .as_ref()
+            .and_then(|status| setup_working_advice(&status.phase, &status.message))
+            .filter(|_| setup_in_flight(&crate::instance::current().state_dir))
+    } else {
+        None
+    };
+    let reconnecting = reconnecting || setup_working.is_some();
     // Death attribution (#26 §2). Only meaningful while runner is actually down;
     // a stale cause next to a healthy runner would read as a live problem.
     let death = *recover(state.runner_death.lock());
@@ -2815,6 +2829,8 @@ async fn agent_status(
             ("unconfigured", "no canonical iPhone target is configured — run iphone-use setup to persist IPHONE_USE_UDID; until then the daemon will not stop or start the local device runner")
         } else if let Some(blocker_hint) = setup_hint.as_deref() {
             ("blocker", blocker_hint)
+        } else if let Some(advice) = setup_working {
+            advice
         } else if reconnecting {
             ("reconnecting", "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying")
         } else if released && !state.managed_runner {
@@ -2828,6 +2844,8 @@ async fn agent_status(
         } else {
             ("offline", "direct device service is unreachable — start or repair the device runner and the 8100/9100 relays (iphone-use doctor)")
         }
+    } else if let Some(advice) = setup_working {
+        advice
     } else if reconnecting {
         ("reconnecting", "the daemon is restarting its managed direct device service — wait for reconnecting=false before retrying")
     } else if runner && !runner_actionable {
@@ -3312,12 +3330,77 @@ fn parse_setup_log_blocked_on(txt: &str) -> String {
 /// page and the iOS app show this verbatim, so all three surfaces say the same
 /// thing; `hint` stays the diagnostic text for agents. `None` when there is
 /// nothing to do.
+/// A setup attempt at work, by its published phase and message: the advice
+/// [`human_next_step`] words for a person, and the hint for agents. `None`
+/// for a phase that is not work in progress (ready, failed, backing off,
+/// waiting for a cable or an unlock — those have blockers of their own).
+fn setup_working_advice(phase: &str, message: &str) -> Option<(&'static str, &'static str)> {
+    if phase.is_empty()
+        || phase == "ready"
+        || phase.ends_with("-fail")
+        || matches!(
+            phase,
+            "waiting" | "lock-backoff" | "lock-wait" | "interrupted" | "stopped" | "completed"
+        )
+    {
+        return None;
+    }
+    Some(if message == crate::setup::runner::UPGRADE_BUILD_MESSAGE {
+        (
+            "setting_up_upgrade",
+            "setup is building the device runner once after an iphone-use upgrade (about 1-2 min, longer on a busy Mac) — wait for drivable=true; do not call reconnect again",
+        )
+    } else if message.starts_with("launching the device runner")
+        || message.starts_with("reusing the verified runner product")
+    {
+        (
+            "setting_up_launch",
+            "setup is starting the device runner on the phone — keep the phone unlocked and awake, wait for drivable=true; do not call reconnect again",
+        )
+    } else if phase == "building" {
+        (
+            "setting_up_build",
+            "setup is building the device runner (a minute or two) — wait for drivable=true; do not call reconnect again",
+        )
+    } else if phase == "ddi-wait" {
+        (
+            "setting_up_ddi",
+            "setup is waiting for the phone's developer services — keep the phone unlocked and awake, wait for drivable=true",
+        )
+    } else {
+        (
+            "setting_up",
+            "setup is bringing the device runner up — wait for drivable=true; do not call reconnect again",
+        )
+    })
+}
+
 fn human_next_step(
     advice: &str,
     blocked_on: &str,
     died_reason: &str,
 ) -> Option<(&'static str, &'static str)> {
     Some(match advice {
+        "setting_up_upgrade" => (
+            "升级后需要重新编译一次设备 runner（约 1–2 分钟，Mac 忙时更久），完成后自动连上，请稍候",
+            "Building the device runner once after the upgrade (about 1–2 min, longer on a busy Mac); it connects on its own when done",
+        ),
+        "setting_up_build" => (
+            "正在编译设备 runner（约 1–2 分钟），完成后自动连上，请稍候",
+            "Building the device runner (about 1–2 min); it connects on its own when done",
+        ),
+        "setting_up_launch" => (
+            "正在手机上启动设备 runner，请保持手机解锁亮屏",
+            "Starting the device runner on the phone — keep it unlocked and awake",
+        ),
+        "setting_up_ddi" => (
+            "正在等待手机的开发者服务，请保持手机解锁亮屏",
+            "Waiting for the phone's developer services — keep it unlocked and awake",
+        ),
+        "setting_up" => (
+            "正在连接手机，请稍候",
+            "Connecting to the phone — one moment",
+        ),
         "releasing" => ("正在释放设备，请稍候", "Releasing the phone — one moment"),
         "unconfigured" => (
             "连接、解锁并信任 iPhone，然后在这台 Mac 上运行 iphone-use setup",
@@ -21400,6 +21483,42 @@ mod tests {
         }
         assert_eq!(human_next_step("", "", ""), None, "a ready phone needs nothing");
         assert_eq!(human_next_step("blocker", "unheard_of", ""), None);
+    }
+
+    #[test]
+    fn a_setup_at_work_says_what_it_is_doing_instead_of_paused() {
+        let upgrade = crate::setup::runner::UPGRADE_BUILD_MESSAGE;
+        for (phase, message, advice) in [
+            ("building", upgrade, "setting_up_upgrade"),
+            ("building", "building the device runner", "setting_up_build"),
+            ("building", "building + launching the device runner", "setting_up_build"),
+            ("building", "launching the device runner (58s elapsed)", "setting_up_launch"),
+            (
+                "building",
+                "reusing the verified runner product from the last bring-up",
+                "setting_up_launch",
+            ),
+            ("ddi-wait", "waiting for developer services", "setting_up_ddi"),
+            ("prereq", "checking prerequisites", "setting_up"),
+            ("starting", "starting setup", "setting_up"),
+            ("serving", "verifying the relay", "setting_up"),
+        ] {
+            let (got, hint) = setup_working_advice(phase, message).expect(message);
+            assert_eq!(got, advice, "{phase}: {message}");
+            assert!(hint.contains("drivable=true"), "{hint}");
+            let (zh, en) = human_next_step(got, "", "").expect(advice);
+            assert!(!en.contains("Paused") && !zh.contains("暂停"), "{en}");
+        }
+        let (zh, en) = human_next_step("setting_up_upgrade", "", "").unwrap();
+        assert!(zh.contains("升级") && zh.contains("一次"), "{zh}");
+        assert!(en.contains("once after the upgrade"), "{en}");
+        // Not work in progress: finished, failed, backing off, waiting.
+        for phase in [
+            "", "ready", "building-fail", "ddi-fail", "waiting", "lock-backoff", "lock-wait",
+            "interrupted", "stopped", "completed",
+        ] {
+            assert_eq!(setup_working_advice(phase, "x"), None, "{phase}");
+        }
     }
 
     #[test]

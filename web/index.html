@@ -2209,7 +2209,9 @@ function showOverlay(kind) {
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'reconnecting') {
     setTextIfChanged(olTitle, t('正在重新连接设备'));
-    setTextIfChanged(olSub, t('正在恢复设备端控制服务，请稍候'));
+    /* The daemon names the setup step (building, a one-time build after an
+       upgrade, starting on the phone) in `next_step`; it can take minutes. */
+    setTextIfChanged(olSub, pick(backendStatus?.next_step) || t('正在恢复设备端控制服务，请稍候'));
     offlineOverlay.classList.add('disconnected');
   } else {
     setTextIfChanged(olTitle, t('画面已停止'));
