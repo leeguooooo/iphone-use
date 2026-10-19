@@ -559,11 +559,17 @@ impl RunnerClient {
                 busy_ms = busy.unwrap_or(0),
                 "runner main thread busy on a slow request; keeping the last health verdict"
             );
+            // The runner answers a known lock state off main, so a phone
+            // that locked during the slow read is still reported.
+            let locked = tokio::time::timeout(UNATTACHED_LOCK_BUDGET, self.locked_unattached())
+                .await
+                .ok()
+                .and_then(Result::ok);
             return (
                 RunnerHealth {
                     up: true,
-                    actionable: self.last_actionable,
-                    locked: None,
+                    actionable: self.last_actionable && locked != Some(true),
+                    locked,
                 },
                 None,
             );
@@ -4407,7 +4413,10 @@ mod tests {
         // /status (answered off main) says main has been on a request for 8 s
         // — a heavy screen's tree read. The probe must stop there: no lock
         // read, no `POST /session`, no apps list, and keep its last verdict.
-        let (base, server) = mock_runner(2, |request| {
+        let (base, server) = mock_runner(4, |request| {
+            if request.starts_with("GET /wda/locked ") {
+                return r#"{"value":false}"#.to_string();
+            }
             assert!(request.starts_with("GET /status "), "queued behind main: {request}");
             r#"{"value":{"ready":true,"busy":true,"busyMs":8000}}"#.to_string()
         });
@@ -4418,6 +4427,7 @@ mod tests {
         let health = block(client.probe_health());
         assert!(health.up);
         assert!(health.actionable, "a slow read keeps the last verdict");
+        assert_eq!(health.locked, Some(false));
         assert_eq!(client.session.as_deref(), Some("SESSION"), "session kept");
 
         client.last_actionable = false;

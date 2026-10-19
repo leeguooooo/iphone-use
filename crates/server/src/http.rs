@@ -2160,7 +2160,12 @@ async fn cached_runner_health(state: &AppState) -> crate::runner::RunnerHealth {
                 let degraded = read_degraded.load(Ordering::Acquire);
                 // Only a runner that otherwise looks fine needs the read: if it
                 // is down or not actionable, that already keeps it undrivable.
-                let read_ok = if degraded && health.actionable {
+                // Not while the runner is still on a slow read: the probe
+                // would only queue behind it; stay degraded until it is free.
+                let read_ok = if degraded
+                    && health.actionable
+                    && !crate::runner::busy_working(client.main_busy_ms().await)
+                {
                     tokio::time::timeout(std::time::Duration::from_secs(10), client.read_probe())
                         .await
                         .ok()
@@ -15522,7 +15527,7 @@ fn source_busy_body(busy: &SourceBusy) -> serde_json::Value {
 fn mark_partial(body: &mut serde_json::Value) {
     body["partial"] = serde_json::json!(true);
     body["partial_hint"] = serde_json::json!(
-        "the full tree was too heavy to read in time; this one is capped in depth and size, so deeply nested rows may be missing — read again for the full tree once the screen settles"
+        "the full tree was too heavy to read in time; this one is capped in depth and size, so deeply nested rows may be missing — read again for the full tree once the screen settles, and do not use this snapshot as a ?since= baseline"
     );
 }
 
