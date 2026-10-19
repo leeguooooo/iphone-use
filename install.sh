@@ -2410,7 +2410,7 @@ install_named_instance() {
     add_env MJPEG_PORT "$mjpeg_port"
     add_env RUST_LOG "$(pick RUST_LOG)"
     [ -n "$(pick RUST_LOG)" ] || add_env RUST_LOG warn
-    for key in IPHONE_USE_IDLE_RELEASE_SECS IPHONE_USE_IDLE_RELEASE IPHONE_USE_PASSWORD IPHONE_USE_NO_UPDATE_CHECK; do
+    for key in IPHONE_USE_IDLE_RELEASE_SECS IPHONE_USE_IDLE_RELEASE IPHONE_USE_PASSWORD IPHONE_USE_NO_UPDATE_CHECK IPHONE_USE_BASE_PATH; do
         add_env "$key" "$(pick "$key")"
     done
     for key in WDA_TEAM_ID WDA_BUNDLE_ID WDA_ALLOW_LAN WDA_TRANSPORT IPU_RUNNER_SRC; do
