@@ -2214,7 +2214,13 @@ fn agent_elements_reports_unavailable_instead_of_an_empty_success() {
 fn failed_element_read_revokes_cached_actionability() {
     block(async {
         let (base, server) = mock_runner(4, |request, _| {
-            if request.starts_with("POST /session ") {
+            if request.starts_with("GET /status ") {
+                // Idle: the read failed on its own, not behind a slow one.
+                Some((
+                    std::time::Duration::ZERO,
+                    r#"{"value":{"ready":true,"busy":false}}"#.to_string(),
+                ))
+            } else if request.starts_with("POST /session ") {
                 Some((
                     std::time::Duration::ZERO,
                     r#"{"value":{"sessionId":"SESSION"}}"#.to_string(),
@@ -2282,6 +2288,87 @@ fn failed_element_read_revokes_cached_actionability() {
         assert!(health.up);
         assert!(!health.actionable);
         assert_eq!(health.locked, Some(false));
+    });
+}
+
+#[test]
+fn heavy_screen_read_waits_for_the_runner_and_answers_a_partial_tree() {
+    // The field failure (iOS 27 Photos search results, 345 photos): the full
+    // read fails while the runner is still serializing it. The daemon must
+    // not pile more reads or a `POST /session` onto the runner's main thread,
+    // must not mark the runner degraded, and should answer a bounded tree.
+    block(async {
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = seen.clone();
+        let status_calls = Arc::new(AtomicUsize::new(0));
+        let statuses = status_calls.clone();
+        let (base, server) = mock_runner(6, move |request, _| {
+            let line = request.lines().next().unwrap_or_default().to_string();
+            log.lock().unwrap().push(line.clone());
+            let body = if line.starts_with("GET /status ") {
+                if statuses.fetch_add(1, Ordering::SeqCst) == 0 {
+                    r#"{"value":{"ready":true,"busy":true,"busyMs":5000}}"#
+                } else {
+                    r#"{"value":{"ready":true,"busy":false}}"#
+                }
+                .to_string()
+            } else if line.starts_with("GET /source") && line.contains("max_depth=12") {
+                r#"{"value":{"type":"XCUIElementTypeApplication","label":"Photos","rect":{"x":0,"y":0,"width":440,"height":956},"children":[{"type":"XCUIElementTypeCell","label":"Food","rect":{"x":0,"y":200,"width":146,"height":146},"children":[]}]}}"#.to_string()
+            } else if line.starts_with("GET /source") {
+                r#"{"value":{"error":"unknown error","message":"source unavailable"}}"#.to_string()
+            } else if line.starts_with("POST /session ") {
+                r#"{"value":{"sessionId":"SESSION"}}"#.to_string()
+            } else if line.contains("/alert/text") {
+                r#"{"value":{"error":"no such alert","message":"An attempt was made to operate on a modal dialog when one was not open"}}"#.to_string()
+            } else {
+                panic!("unexpected runner request: {line}");
+            };
+            Some((std::time::Duration::ZERO, body))
+        });
+        let state = build_state_with_runner(&base);
+        state.runner_actionable.store(true, Ordering::Release);
+        let observed = state.clone();
+        let app = http::router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/elements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["partial"], true, "{json}");
+        assert!(
+            json["elements"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["label"] == "Food")),
+            "{json}"
+        );
+        assert!(observed.runner_actionable.load(Ordering::Acquire));
+        assert!(!observed.runner_read_degraded.load(Ordering::Acquire));
+        let seen = seen.lock().unwrap().clone();
+        let idle_at = seen
+            .iter()
+            .rposition(|line| line.starts_with("GET /status "))
+            .expect("asked whether the runner was busy");
+        assert!(
+            seen[..idle_at]
+                .iter()
+                .all(|line| !line.starts_with("POST /session ") && !line.contains("/alert/")),
+            "nothing may queue behind the busy read: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter().filter(|line| line.starts_with("GET /source")).count(),
+            2,
+            "one failed full read, one bounded read: {seen:?}"
+        );
     });
 }
 

@@ -2843,8 +2843,11 @@ impl Setup {
         let runner_port = valid_port(&self.ctx.runner_port).unwrap_or(8100);
         let mjpeg_port = valid_port(&self.ctx.mjpeg_port).unwrap_or(9100);
         let status_url = format!("http://127.0.0.1:{runner_port}/status");
+        // Only the root element: proof the runner can read at all, at the
+        // same small cost on a heavy screen as on a light one.
         let read_url = format!(
-            "http://127.0.0.1:{runner_port}/source?format=json&excluded_attributes=visible,accessible"
+            "http://127.0.0.1:{runner_port}/source?{}",
+            crate::runner::MINIMAL_READ_QUERY
         );
         let mut cycle: u64 = 0;
         let mut failures = 0;
@@ -2914,8 +2917,12 @@ impl Setup {
                 probes = ProbeCount::default();
                 continue;
             }
-            let answered =
-                sys::runner_ok(&status_url, Duration::from_secs(4), &self.ctx.runner_auth());
+            // `/status` is answered off the runner's main thread and says
+            // whether main is still on a request (a heavy screen's tree read
+            // can take ~30 s). A read now would only queue behind it.
+            let status = runner_status(&status_url, &self.ctx.runner_auth());
+            let answered = status.is_some();
+            let busy_ms = status.flatten();
             // A pulled cable looks like a dead runner from here. Ask whether
             // the phone is still attached before counting a miss: an absent
             // phone is `not_connected`, never a runner failure to rebuild.
@@ -2958,10 +2965,19 @@ impl Setup {
             cycle += 1;
             let probe = if !answered {
                 Probe::StatusMiss
+            } else if crate::runner::busy_working(busy_ms) {
+                Probe::Busy
             } else if (cycle.is_multiple_of(3) || probes.suspicious())
                 && !runner_reads(&read_url, &self.ctx.runner_auth())
             {
-                Probe::ReadFail
+                // A minimal read that failed while the runner is working on
+                // something else is still that something being slow.
+                let after = runner_status(&status_url, &self.ctx.runner_auth()).flatten();
+                if crate::runner::busy_working(after) {
+                    Probe::Busy
+                } else {
+                    Probe::ReadFail
+                }
             } else {
                 Probe::Ok
             };
@@ -2980,6 +2996,12 @@ impl Setup {
                     ));
                 }
                 break "half_dead";
+            }
+            if probe == Probe::Busy {
+                info(&format!(
+                    "the device runner is busy on a slow request ({} ms; a heavy screen read); not counted as a failure",
+                    busy_ms.unwrap_or(0)
+                ));
             }
             if probe == Probe::ReadFail {
                 info(&format!(
@@ -3105,8 +3127,21 @@ impl Setup {
     }
 }
 
-/// A light screen read through the runner's relay: 2xx with a tree, not an
-/// error envelope. Heavy screens can take several seconds, hence the budget.
+/// `/status` within 4 s: `None` when it did not answer below 400, else how
+/// long the runner's main thread has been busy (see
+/// [`crate::runner::status_busy_ms`]).
+fn runner_status(url: &str, auth: &crate::runner_token::TokenSource) -> Option<Option<u64>> {
+    let (code, body) = sys::runner_get(url, Duration::from_secs(4), auth)?;
+    (code < 400).then(|| {
+        serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| crate::runner::status_busy_ms(&v))
+    })
+}
+
+/// A minimal screen read through the runner's relay: 2xx with a tree, not an
+/// error envelope. The read is the root element only, but it still queues
+/// behind whatever the runner's main thread is doing, hence the budget.
 fn runner_reads(url: &str, auth: &crate::runner_token::TokenSource) -> bool {
     let Some((status, body)) = sys::runner_get(url, Duration::from_secs(15), auth) else {
         return false;
@@ -3377,9 +3412,15 @@ pub enum Probe {
     Ok,
     /// `/status` did not answer in time.
     StatusMiss,
-    /// `/status` answered but a light screen read failed: the "half dead"
-    /// runner that answers status forever while every agent read errors.
+    /// `/status` answered but a minimal screen read failed while the
+    /// runner was not busy: the "half dead" runner that answers status
+    /// forever while every agent read errors.
     ReadFail,
+    /// `/status` answered and reports the runner's main thread busy on a
+    /// request (a heavy screen's tree read) for less than
+    /// [`crate::runner::RUNNER_WEDGED_MS`]: slow, not broken. Neither a
+    /// failure nor proof of health.
+    Busy,
 }
 
 /// Whether the held phone is still attached, consulted only when `/status`
@@ -3430,7 +3471,11 @@ impl ProbeCount {
             self.recent.pop_front();
         }
         self.recent.push_back(probe);
-        self.failures = self.recent.iter().filter(|p| **p != Probe::Ok).count() as u32;
+        self.failures = self
+            .recent
+            .iter()
+            .filter(|p| matches!(p, Probe::StatusMiss | Probe::ReadFail))
+            .count() as u32;
         self.failures >= Self::MAX
     }
 
@@ -3448,9 +3493,12 @@ impl ProbeCount {
         self.failures > 0
     }
 
-    /// The window holds a failed read while `/status` answered.
+    /// At least [`Self::MAX`] of the window are minimal reads that failed
+    /// while `/status` answered and the runner was idle. One failed read
+    /// among missed `/status` probes is a flaky link, not a runner that
+    /// cannot read; a slow screen is [`Probe::Busy`] and never counts.
     pub fn half_dead(&self) -> bool {
-        self.recent.contains(&Probe::ReadFail)
+        self.recent.iter().filter(|p| **p == Probe::ReadFail).count() as u32 >= Self::MAX
     }
 }
 
@@ -3672,6 +3720,59 @@ mod tests {
             !only_status.half_dead(),
             "status misses alone are not half dead"
         );
+    }
+
+    #[test]
+    fn a_runner_busy_on_a_heavy_screen_is_never_half_dead() {
+        // The field failure (iOS 27 Photos search grid): /status answers,
+        // main is busy ~30 s on a tree read, every read behind it times out.
+        // Busy probes are neither failures nor health, however many.
+        let mut probes = ProbeCount::default();
+        for _ in 0..20 {
+            assert!(!probes.record(Probe::Busy), "a slow screen never rebuilds");
+        }
+        assert!(!probes.half_dead());
+        assert!(!probes.suspicious(), "busy alone does not even count");
+        // Busy probes between real read failures do not hide them.
+        let mut probes = ProbeCount::default();
+        let pattern = [Probe::ReadFail, Probe::Busy, Probe::ReadFail, Probe::ReadFail];
+        let verdicts: Vec<bool> = pattern.iter().map(|p| probes.record(*p)).collect();
+        assert_eq!(verdicts, [false, false, false, true]);
+        assert!(probes.half_dead());
+    }
+
+    #[test]
+    fn one_failed_read_among_status_misses_is_not_half_dead() {
+        // It used to be: `half_dead` was "any ReadFail in the window", so a
+        // flaky link (two /status misses) plus one slow read was restarted as
+        // "cannot read the screen" even under another session's lease.
+        let mut probes = ProbeCount::default();
+        probes.record(Probe::StatusMiss);
+        probes.record(Probe::ReadFail);
+        assert!(probes.record(Probe::StatusMiss), "three failures still count");
+        assert!(!probes.half_dead(), "but they are not three failed reads");
+    }
+
+    #[test]
+    fn busy_status_bodies_are_read_from_the_runner() {
+        use crate::runner::{busy_working, status_busy_ms, RUNNER_WEDGED_MS};
+        let busy = serde_json::json!({"value": {"ready": true, "busy": true, "busyMs": 12_000}});
+        assert_eq!(status_busy_ms(&busy), Some(12_000));
+        assert!(busy_working(status_busy_ms(&busy)));
+        let idle = serde_json::json!({"value": {"ready": true, "busy": false}});
+        assert_eq!(status_busy_ms(&idle), None);
+        let old_runner = serde_json::json!({"value": {"ready": true}});
+        assert_eq!(status_busy_ms(&old_runner), None);
+        let stuck = serde_json::json!({"value": {"busy": true, "busyMs": RUNNER_WEDGED_MS}});
+        assert!(!busy_working(status_busy_ms(&stuck)), "stuck past the cap is not working");
+    }
+
+    #[test]
+    fn the_hold_reads_only_the_root_element() {
+        let query = crate::runner::MINIMAL_READ_QUERY;
+        assert!(query.contains("max_depth=1"), "{query}");
+        assert!(query.contains("max_nodes=1"), "{query}");
+        assert!(query.contains("extension_calls=0"), "{query}");
     }
 
     /// Drive the hold's per-probe decision the way `hold` does: an away probe

@@ -2838,7 +2838,7 @@ async fn agent_status(
         {
             (
                 "read_failing",
-                "the device runner answers /status but cannot read the screen — it is being restarted; wait for drivable=true before retrying",
+                "the device runner answers /status but its last screen reads failed; reads are probed again on every status poll, and the runner is replaced only if even a minimal read keeps failing — wait for drivable=true before retrying",
             )
         } else if runner_locked == "true" {
             (
@@ -3435,8 +3435,8 @@ fn human_next_step(
             ),
         },
         "read_failing" => (
-            "设备 runner 还在应答但读不到屏幕，正在自动重启它，稍等片刻",
-            "The device runner answers but cannot read the screen; it is being restarted — wait a moment",
+            "设备 runner 还在应答但最近几次读屏失败，正在自动复查，持续失败才会重启它，稍等片刻",
+            "The device runner answers but its last screen reads failed; it is being rechecked and is restarted only if reads keep failing — wait a moment",
         ),
         "degraded" => (
             "上一次读取没完成（页面太重或 App 卡住），稍等会自动恢复",
@@ -14727,8 +14727,16 @@ async fn agent_elements_inner(
         let read_started = tokio::time::Instant::now();
         let mut alert_probes = 0u8;
         let mut source_failures = 0u32;
+        // Set once a read failed while the runner was still working on it
+        // (a heavy screen): later reads are bounded, the answer `partial`.
+        let mut bounded = false;
         let rows = loop {
-            match w.elements().await {
+            let attempt = if bounded {
+                w.elements_bounded().await
+            } else {
+                w.elements().await
+            };
+            match attempt {
                 Ok(rows) => break rows,
                 Err(error) => {
                     let error = format!("{error:#}");
@@ -14736,6 +14744,33 @@ async fn agent_elements_inner(
                     if first_source_error.is_none() {
                         first_source_error = Some(error.clone());
                     }
+                    // The runner may still be serializing the read this
+                    // request gave up on (hardware, iOS 27 Photos search
+                    // grid: 4 reads, 29 s, 0 bytes back). Anything sent now —
+                    // another read, an alert probe, a `POST /session` — only
+                    // queues behind it on the runner's main thread. Wait for
+                    // it to finish, then read bounded; if it does not finish
+                    // in time, answer 504 and leave the runner alone.
+                    let waited = if crate::runner::busy_working(w.main_busy_ms().await) {
+                        let until = deadline
+                            .checked_sub(BOUNDED_READ_RESERVE)
+                            .unwrap_or(deadline);
+                        if let Err(busy_ms) = wait_runner_idle(&w, until).await {
+                            tracing::info!(
+                                "runner still busy on a slow screen read after {source_failures} failed reads ({} ms, main busy {busy_ms} ms); answering 504, runner kept",
+                                read_started.elapsed().as_millis()
+                            );
+                            return Err(anyhow::Error::new(SourceBusy {
+                                attempts: source_failures,
+                                elapsed_ms: read_started.elapsed().as_millis() as u64,
+                                busy_ms,
+                            }));
+                        }
+                        bounded = true;
+                        true
+                    } else {
+                        false
+                    };
                     // A system alert holding the app makes every /source
                     // fail until it is answered (hardware: Xiaohongshu's
                     // "Allow Paste" — 109 failures, 35 s). Look right away and
@@ -14755,7 +14790,9 @@ async fn agent_elements_inner(
                     // a fixed 250 ms retry against a runner that keeps failing
                     // was 137 /source calls in 35 s (agent-loop A/B, iPhone 13)
                     // and still ended in a bare 504. No mutation is replayed.
-                    w.invalidate_session();
+                    // The session is kept: `/source` does not use one, and
+                    // dropping it only made the next alert probe or health
+                    // probe queue a `POST /session` behind the stalled read.
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() || source_failures >= SOURCE_READ_MAX_FAILURES {
                         tracing::warn!(
@@ -14769,11 +14806,13 @@ async fn agent_elements_inner(
                             elapsed_ms: read_started.elapsed().as_millis() as u64,
                         }));
                     }
-                    tokio::time::sleep(std::cmp::min(
-                        source_retry_delay(source_failures),
-                        remaining,
-                    ))
-                    .await;
+                    if !waited {
+                        tokio::time::sleep(std::cmp::min(
+                            source_retry_delay(source_failures),
+                            remaining,
+                        ))
+                        .await;
+                    }
                 }
             }
         };
@@ -14784,10 +14823,10 @@ async fn agent_elements_inner(
         // flattened tree misses or misrepresents it (see RunnerClient::alert_summary).
         let alert = probe_alert(&mut w).await;
         let geometric = w.visibility_is_geometric();
-        Ok::<_, anyhow::Error>((rows, screen, alert, geometric))
+        Ok::<_, anyhow::Error>((rows, screen, alert, geometric, bounded))
     })
     .await;
-    let (rows, screen, alert, geometric) = match result {
+    let (rows, screen, alert, geometric, partial) = match result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) if error.downcast_ref::<BlockingAlert>().is_some() => {
             // The phone is fine; an alert is waiting for an answer.
@@ -14801,6 +14840,15 @@ async fn agent_elements_inner(
                     "hint": "a system alert is up and is blocking the screen read: answer it with {\"type\":\"alert\",\"button\":\"<exact button>\"} (or an alert step in phone_run_steps) — only with the user's OK if it grants a permission — then read again"
                 })
                 .to_string(),
+            );
+        }
+        Ok(Err(error)) if error.downcast_ref::<SourceBusy>().is_some() => {
+            // A slow screen, not a broken runner: no degraded mark, no alert
+            // probe (it would queue behind the read too).
+            let busy = error.downcast_ref::<SourceBusy>().expect("checked above");
+            return json_body(
+                StatusCode::GATEWAY_TIMEOUT,
+                source_busy_body(busy).to_string(),
             );
         }
         Ok(Err(error)) => {
@@ -14817,22 +14865,33 @@ async fn agent_elements_inner(
             return json_body(StatusCode::BAD_GATEWAY, body.to_string());
         }
         Err(_) => {
-            mark_runner_read_path_unactionable(&state);
+            // A runner still working on the read is slow, not broken: leave
+            // it drivable (a degraded runner is what the KeepAlive supervisor
+            // and scheduled runs restart), and do not queue an alert probe
+            // behind the read.
+            let busy = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                runner.lock().await.main_busy_ms().await
+            })
+            .await
+            .ok()
+            .flatten();
             // `retry_after_secs` so the caller waits instead of hammering a
             // page that is already too heavy to serialize — without it the
             // only signal was `transitioning:true`, which says "this may
             // clear" but not when to look again (#74).
-            let body = with_blocking_alert(
-                runner,
-                serde_json::json!({
-                    "elements": [],
-                    "error": "runner_source_timeout",
-                    "transitioning": true,
-                    "retry_after_secs": RUNNER_SOURCE_TIMEOUT_RETRY_AFTER_SECS,
-                    "hint": "the accessibility tree took too long to serialize (heavy page or stalled app); wait retry_after_secs and read again, or bring a lighter screen to the foreground first"
-                }),
-            )
-            .await;
+            let mut body = serde_json::json!({
+                "elements": [],
+                "error": "runner_source_timeout",
+                "transitioning": true,
+                "retry_after_secs": RUNNER_SOURCE_TIMEOUT_RETRY_AFTER_SECS,
+                "hint": "the accessibility tree took too long to serialize (heavy page or stalled app); wait retry_after_secs and read again, or bring a lighter screen to the foreground first"
+            });
+            if crate::runner::busy_working(busy) {
+                body["runner_busy_ms"] = busy.unwrap_or(0).into();
+            } else {
+                mark_runner_read_path_unactionable(&state);
+                body = with_blocking_alert(runner, body).await;
+            }
             return json_body(StatusCode::GATEWAY_TIMEOUT, body.to_string());
         }
     };
@@ -14861,7 +14920,7 @@ async fn agent_elements_inner(
     let mut body = match query
         .since
         .as_deref()
-        .filter(|since| !since.is_empty())
+        .filter(|since| !since.is_empty() && !partial)
         .and_then(|since| lookup_element_snapshot(&state, since).map(|rows| (since, rows)))
     {
         Some((since, baseline)) => {
@@ -14891,6 +14950,9 @@ async fn agent_elements_inner(
     // Say so where the caller already looks for tree quality.
     if geometric {
         body["ax_stats"]["visibility"] = serde_json::json!("geometric");
+    }
+    if partial {
+        mark_partial(&mut body);
     }
     if let (Some(object), Some(alert)) = (body.as_object_mut(), alert_json(alert)) {
         object.insert("alert".to_string(), alert);
@@ -15388,6 +15450,81 @@ impl std::fmt::Display for SourceGaveUp {
 }
 
 impl std::error::Error for SourceGaveUp {}
+
+/// Time kept back from the elements deadline for the bounded read that
+/// follows a wait on a busy runner.
+const BOUNDED_READ_RESERVE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Poll the runner's off-main `/status` until its main thread is free.
+/// `Err(busy_ms)` when it is still working at `until`; a runner busy past
+/// [`crate::runner::RUNNER_WEDGED_MS`] counts as free here, so the caller's
+/// usual failure path (and the health probe) judges it instead.
+async fn wait_runner_idle(
+    w: &crate::runner::RunnerClient,
+    until: tokio::time::Instant,
+) -> Result<(), u64> {
+    loop {
+        let busy = w.main_busy_ms().await;
+        if !crate::runner::busy_working(busy) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() + RUNNER_IDLE_POLL >= until {
+            return Err(busy.unwrap_or(0));
+        }
+        tokio::time::sleep(RUNNER_IDLE_POLL).await;
+    }
+}
+
+const RUNNER_IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The element read gave up while the runner was still serializing a read:
+/// a heavy screen, answered 504 with the runner kept.
+#[derive(Debug)]
+struct SourceBusy {
+    attempts: u32,
+    elapsed_ms: u64,
+    busy_ms: u64,
+}
+
+impl std::fmt::Display for SourceBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the device runner was still reading a heavy screen after {} reads ({} ms, busy {} ms)",
+            self.attempts, self.elapsed_ms, self.busy_ms
+        )
+    }
+}
+
+impl std::error::Error for SourceBusy {}
+
+/// Seconds to wait before reading again a screen the runner is still busy
+/// serializing: about what it has spent so far, within 3–30 s.
+fn source_busy_retry_after(busy_ms: u64) -> u64 {
+    (busy_ms / 1000).clamp(RUNNER_SOURCE_TIMEOUT_RETRY_AFTER_SECS, 30)
+}
+
+fn source_busy_body(busy: &SourceBusy) -> serde_json::Value {
+    serde_json::json!({
+        "elements": [],
+        "error": "runner_source_timeout",
+        "transitioning": true,
+        "runner_busy": true,
+        "runner_busy_ms": busy.busy_ms,
+        "source_attempts": busy.attempts,
+        "elapsed_ms": busy.elapsed_ms,
+        "retry_after_secs": source_busy_retry_after(busy.busy_ms),
+        "hint": "the device runner is healthy but still serializing this screen's accessibility tree (a heavy page such as a large photo grid); it is not restarted. Wait retry_after_secs and read again — the next read falls back to a bounded tree marked partial — or bring a lighter screen to the foreground",
+    })
+}
+
+/// A tree read with depth and node caps after a full read stalled.
+fn mark_partial(body: &mut serde_json::Value) {
+    body["partial"] = serde_json::json!(true);
+    body["partial_hint"] = serde_json::json!(
+        "the full tree was too heavy to read in time; this one is capped in depth and size, so deeply nested rows may be missing — read again for the full tree once the screen settles"
+    );
+}
 
 const SOURCE_GAVE_UP_HINT: &str = "the device runner kept failing to read the screen (not a slow page: every read errored). Wait retry_after_secs and read once more; if it keeps failing, check /agent/status and reconnect the phone rather than reading in a loop";
 

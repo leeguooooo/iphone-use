@@ -32,6 +32,50 @@ const ACTIONABILITY_PROBE_BUDGET: Duration = Duration::from_secs(10);
 /// creation in `probe_health`. It is a plain in-process read on the runner.
 const UNATTACHED_LOCK_BUDGET: Duration = Duration::from_secs(3);
 
+/// How long the runner's main thread may stay on one request before "busy"
+/// stops meaning "working". `/status` is answered off main and reports
+/// `busy`/`busyMs` while a request runs there; a heavy screen's tree read
+/// takes seconds to tens of seconds (hardware, iOS 27 Photos search grid:
+/// ~29 s), so anything shorter is a slow page, not a dead runner.
+pub const RUNNER_WEDGED_MS: u64 = 90_000;
+
+/// How long the runner's main thread has been on its current request, from a
+/// `/status` body (`{"value":{"busy":true,"busyMs":…}}`); `None` when idle or
+/// when the runner does not say.
+pub fn status_busy_ms(status: &serde_json::Value) -> Option<u64> {
+    let value = status.get("value").unwrap_or(status);
+    if value.get("busy").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    Some(value.get("busyMs").and_then(serde_json::Value::as_u64).unwrap_or(0))
+}
+
+/// Busy, but not for so long that the request it is on must be stuck: the
+/// runner is serving a slow read and must be left to finish it.
+pub fn busy_working(busy_ms: Option<u64>) -> bool {
+    busy_ms.is_some_and(|ms| ms < RUNNER_WEDGED_MS)
+}
+
+/// The cheapest read that still proves the accessibility client works: the
+/// foreground app's root element only. A heavy screen costs about what a
+/// light one does here, so a failure means the runner cannot read at all.
+pub const MINIMAL_READ_QUERY: &str =
+    "format=json&excluded_attributes=visible,accessible&max_depth=1&max_nodes=1&extension_calls=0";
+
+/// The bounded read an elements request falls back to once a full read
+/// stalled on a heavy screen: deep enough for a grid's cells and their
+/// labels, capped so the runner cannot spend half a minute on it.
+pub const BOUNDED_READ_DEPTH: u32 = 12;
+pub const BOUNDED_READ_NODES: u32 = 1500;
+
+/// The `/source` query of [`RunnerClient::elements_bounded`]. An explicit
+/// `max_depth` also turns off the runner's frontier re-rooting.
+fn bounded_read_query() -> String {
+    format!(
+        "format=json&excluded_attributes=visible,accessible&max_depth={BOUNDED_READ_DEPTH}&max_nodes={BOUNDED_READ_NODES}&extension_calls=0"
+    )
+}
+
 /// A runner endpoint plus a lazily-created session id.
 pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
@@ -79,6 +123,10 @@ pub struct RunnerClient {
     /// How long `probe_health` waits for session/lock/apps-list before
     /// settling on "up, not actionable". Tests shrink it.
     actionability_budget: Duration,
+    /// The actionability the last full health probe found, reported again
+    /// while the runner is busy on a slow read instead of queueing session
+    /// and apps-list requests behind it.
+    last_actionable: bool,
 }
 
 /// Smoothed round trip of runner's no-op `/status`, in ms (0 = not measured).
@@ -302,6 +350,7 @@ impl RunnerClient {
             settled_frame: None,
             settle_frames_paused_until: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
+            last_actionable: false,
         })
     }
 
@@ -321,6 +370,7 @@ impl RunnerClient {
     /// and the daemon still cannot reach it.
     pub fn forget_runner(&mut self) {
         self.invalidate_session();
+        self.last_actionable = false;
         self.device_settle = None;
         self.settled_frame = None;
         self.settle_frames_paused_until = None;
@@ -349,6 +399,12 @@ impl RunnerClient {
     /// or the status and error the runner answered with (a 401 is a request
     /// signed with another launch's token, or not signed at all).
     pub async fn status_probe(&self) -> std::result::Result<(), String> {
+        self.status_probe_busy().await.map(|_| ())
+    }
+
+    /// [`Self::status_probe`] that also returns how long the runner's main
+    /// thread has been busy (see [`status_busy_ms`]).
+    pub async fn status_probe_busy(&self) -> std::result::Result<Option<u64>, String> {
         let started = std::time::Instant::now();
         match self
             .http
@@ -364,7 +420,7 @@ impl RunnerClient {
                     // phone (`phone_daemon` in /agent/status).
                     let body: serde_json::Value = r.json().await.unwrap_or_default();
                     crate::phone_daemon::note_runner_status(&body);
-                    return Ok(());
+                    return Ok(status_busy_ms(&body));
                 }
                 let body = r.text().await.unwrap_or_default();
                 let error = serde_json::from_str::<serde_json::Value>(&body)
@@ -489,10 +545,43 @@ impl RunnerClient {
     /// [`Self::probe_health`] plus, when the runner did not answer `/status`,
     /// why (see [`Self::status_probe`]).
     pub async fn probe_health_detailed(&mut self) -> (RunnerHealth, Option<String>) {
-        if let Err(error) = self.status_probe().await {
-            return (RunnerHealth::down(), Some(error));
+        let busy = match self.status_probe_busy().await {
+            Ok(busy) => busy,
+            Err(error) => return (RunnerHealth::down(), Some(error)),
+        };
+        // Main is still on a slow request (a heavy tree read): session,
+        // lock and apps-list requests would only queue behind it, time out,
+        // drop the session and queue a `POST /session` too — the pile-up seen
+        // on a Photos search grid. Keep the last verdict; the next probe
+        // after the read finishes decides.
+        if busy_working(busy) {
+            tracing::debug!(
+                busy_ms = busy.unwrap_or(0),
+                "runner main thread busy on a slow request; keeping the last health verdict"
+            );
+            return (
+                RunnerHealth {
+                    up: true,
+                    actionable: self.last_actionable,
+                    locked: None,
+                },
+                None,
+            );
         }
-        (self.probe_reachable_health().await, None)
+        let health = self.probe_reachable_health().await;
+        self.last_actionable = health.actionable;
+        (health, None)
+    }
+
+    /// How long the runner's main thread has been on its current request,
+    /// asked through `/status` (answered off main, so it never queues behind
+    /// the request it reports on). `None` when idle or unreachable.
+    pub async fn main_busy_ms(&self) -> Option<u64> {
+        tokio::time::timeout(Duration::from_secs(3), self.status_probe_busy())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
     }
 
     /// The rest of [`Self::probe_health`] once `/status` answered.
@@ -676,8 +765,23 @@ impl RunnerClient {
     /// Can the runner read the screen right now? A light tree read (no
     /// visibility or accessibility attributes), used to tell a runner that
     /// only answers `/status` from one that can do its job.
+    ///
+    /// Only the root element is read ([`MINIMAL_READ_QUERY`]): a full tree on
+    /// a heavy screen takes tens of seconds and would make a working runner
+    /// look broken, and every such read queues on the runner's main thread
+    /// in front of the caller's own reads.
     pub async fn read_probe(&mut self) -> bool {
-        self.source_excluding(Some("visible,accessible")).await.is_ok()
+        let url = format!("{}/source?{MINIMAL_READ_QUERY}", self.base);
+        let Ok(response) = self.http.get(url).send_signed(&self.auth).await else {
+            return false;
+        };
+        let Ok(response) = response.error_for_status() else {
+            return false;
+        };
+        match response.text().await {
+            Ok(body) => parse_runner_value(&body, "GET /source (minimal)").is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// [`Self::source`] with runner's `excluded_attributes` (comma-separated
@@ -1827,10 +1931,37 @@ impl RunnerClient {
     /// needed for [`Self::find_element`]/[`Self::click_element`].
     pub async fn elements(&mut self) -> Result<Vec<ElementRow>> {
         let (tree, lite) = self.bounded_source().await?;
+        Ok(self.rows_from_tree(&tree, lite))
+    }
+
+    /// [`Self::elements`] over a depth- and node-capped read
+    /// ([`BOUNDED_READ_DEPTH`], [`BOUNDED_READ_NODES`], no frontier
+    /// re-rooting): what an elements request falls back to after a full read
+    /// stalled on a heavy screen. The rows may stop short of the deepest
+    /// content, so the caller marks the answer `partial`.
+    pub async fn elements_bounded(&mut self) -> Result<Vec<ElementRow>> {
+        let url = format!("{}/source?{}", self.base, bounded_read_query());
+        let response = self
+            .http
+            .get(url)
+            .send_signed(&self.auth)
+            .await
+            .context("GET /source (bounded)")?
+            .error_for_status()
+            .context("/source (bounded) status")?;
+        let body = response.text().await.context("parse /source (bounded)")?;
+        let tree = parse_runner_value(&body, "GET /source (bounded)")?;
+        // Read without `isVisible`, like a lite read: visibility is geometric.
+        self.lite_source = true;
+        Ok(self.rows_from_tree(&tree, true))
+    }
+
+    /// Flatten a tree read and remember it (window size, last tree).
+    fn rows_from_tree(&mut self, tree: &serde_json::Value, lite: bool) -> Vec<ElementRow> {
         let mut rows = Vec::new();
-        flatten_tree(&tree, 0, &mut rows);
+        flatten_tree(tree, 0, &mut rows);
         if lite {
-            mark_rows_outside_root(&tree, &mut rows);
+            mark_rows_outside_root(tree, &mut rows);
         }
         // The Application node's frame IS the window in points: keep the
         // window-size cache fresh for free instead of a GET /window/size.
@@ -1850,7 +1981,7 @@ impl RunnerClient {
             }
         }
         self.last_tree = Some((std::sync::Arc::new(rows.clone()), std::time::Instant::now()));
-        Ok(rows)
+        rows
     }
 
     /// The tree for [`Self::elements`], never asking runner for a read that can
@@ -4269,6 +4400,63 @@ mod tests {
             "{elapsed:?}"
         );
         assert!(client.session.is_none(), "stalled session must not be kept");
+    }
+
+    #[test]
+    fn health_probe_does_not_queue_behind_a_busy_runner() {
+        // /status (answered off main) says main has been on a request for 8 s
+        // — a heavy screen's tree read. The probe must stop there: no lock
+        // read, no `POST /session`, no apps list, and keep its last verdict.
+        let (base, server) = mock_runner(2, |request| {
+            assert!(request.starts_with("GET /status "), "queued behind main: {request}");
+            r#"{"value":{"ready":true,"busy":true,"busyMs":8000}}"#.to_string()
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        client.session = Some("SESSION".to_string());
+        client.last_actionable = true;
+
+        let health = block(client.probe_health());
+        assert!(health.up);
+        assert!(health.actionable, "a slow read keeps the last verdict");
+        assert_eq!(client.session.as_deref(), Some("SESSION"), "session kept");
+
+        client.last_actionable = false;
+        let health = block(client.probe_health());
+        server.join().unwrap();
+        assert!(!health.actionable, "and never invents one");
+    }
+
+    #[test]
+    fn read_probe_reads_only_the_root_element() {
+        let (base, server) = mock_runner(1, |request| {
+            let line = request.lines().next().unwrap_or_default();
+            assert!(
+                line.starts_with("GET /source?") && line.contains("max_depth=1&max_nodes=1"),
+                "{line}"
+            );
+            r#"{"value":{"type":"XCUIElementTypeApplication"}}"#.to_string()
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        assert!(block(client.read_probe()));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn bounded_elements_read_is_capped_and_geometric() {
+        let (base, server) = mock_runner(1, |request| {
+            let line = request.lines().next().unwrap_or_default();
+            assert!(line.contains("max_depth=12"), "{line}");
+            assert!(line.contains("max_nodes=1500"), "{line}");
+            assert!(line.contains("extension_calls=0"), "{line}");
+            assert!(line.contains("excluded_attributes=visible,accessible"), "{line}");
+            r#"{"value":{"type":"XCUIElementTypeApplication","rect":{"x":0,"y":0,"width":440,"height":956},"children":[{"type":"XCUIElementTypeCell","label":"Food","rect":{"x":0,"y":200,"width":146,"height":146}}]}}"#.to_string()
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        let rows = block(client.elements_bounded()).unwrap();
+        server.join().unwrap();
+        assert!(rows.iter().any(|row| row.label == "Food"), "{rows:?}");
+        assert!(client.visibility_is_geometric());
+        assert!(client.last_tree.is_some());
     }
 
     #[test]
