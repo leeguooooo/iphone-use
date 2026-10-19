@@ -95,6 +95,19 @@ iphone-use upgrade --json     # 同上，JSON：name、current、latest、update
 
 daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `latest` / `update_available`，网页会挂横幅。一次性命令（`iphone-use stop`）每天最多在 stderr 打一行 `iphone-use X is available (you have Y). Upgrade: iphone-use upgrade`（缓存在 `${XDG_CACHE_HOME:-~/.cache}/iphone-use/update-check.json`，超时 2 秒）。设了 `CI`、`IPHONE_USE_NO_UPDATE_CHECK` 或 `USE_NO_UPDATE_CHECK`，每日检查和提示都关掉。安装器具体校验什么见[运维 → 升级](#升级-1)。
 
+**自动升级**默认开启，只在手机空闲时动手。安装器会注册一个每天 04:30 运行的任务，把这台 Mac 上的每个 daemon（默认实例和每个 `--instance`）升到最新 release，前提是有新版本，而且没人在用那台手机：没有 `X-Phone-Owner` 租约、没有 hold、daemon 不在释放或重连、没人在看画面、最近 15 分钟没有 agent 请求（看 `/agent/status` 的 `idle_secs`，用 `AUTO_UPDATE_IDLE_SECS` 改）。手机连着、runner 开着但没人操作，也算空闲。手机忙就跳过，第二天再试；每次判断在 `~/Library/Logs/iPhoneUse/auto-update.log` 记一行。
+
+升级用的是该 release 自己的 `install.sh`，带 SHA-256 校验和回滚，daemon plist 里的设置全部保留。重启后的 daemon 报出新版本才算成功。结果写在 `~/.iphone-use/auto-update-last.json`，`/agent/status` 的 `auto_update`、`iphone-use doctor` 和 `iphone-use upgrade --check` 都会显示。
+
+```bash
+~/.iphone-use/auto-update.sh disable    # 关掉，之后重装也保持关闭
+~/.iphone-use/auto-update.sh enable     # 重新打开
+~/.iphone-use/auto-update.sh status     # 开没开、现在会怎么做、上次结果
+~/.iphone-use/auto-update.sh run --dry-run
+```
+
+安装时加 `--no-auto-update`（或 `IPHONE_USE_AUTO_UPDATE=0`）效果相同。设了 `CI`、`IPHONE_USE_NO_UPDATE_CHECK` 或 `USE_NO_UPDATE_CHECK` 时，安装器不动这个任务。
+
 ## 在浏览器里操作手机
 
 `/phone` 显示手机实时画面：浏览器支持 WebCodecs 时走 `/agent/h264`（device runner 在手机上直接编码 H.264，daemon 原样转发；用 WebDriverAgent 或旧版 runner 时，daemon 退回到在 Mac 上把 JPEG 帧重新编码），否则退回 `/agent/mjpeg`（12–40 Mbit/s，只适合局域网）。设 `IPHONE_USE_H264_PASSTHROUGH=0` 可强制在 Mac 上重新编码。

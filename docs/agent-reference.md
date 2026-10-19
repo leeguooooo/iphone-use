@@ -1194,6 +1194,11 @@ stale — `iphone-use upgrade` or the installer
 installs daemon and skill from the same release. Plugin installs:
 `claude plugin update iphone-use@leeguooooo-plugins`.
 
+`auto_update` on `/agent/status` is the daily automatic upgrade: `enabled`, and
+`last` (`latest`, `ok`, per-instance `from`/`to`/`error`). It upgrades only an
+idle phone, so it never interrupts your session. When `last.ok` is false, tell
+the user the automatic upgrade failed and offer `iphone-use upgrade`.
+
 ## Filing issues
 
 - A registry flow failed → [Fixing a flow](#fixing-a-flow). A flow you wish

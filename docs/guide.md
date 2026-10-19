@@ -197,22 +197,30 @@ timeout). `CI`, `IPHONE_USE_NO_UPDATE_CHECK` or `USE_NO_UPDATE_CHECK`
 turn off both the daily check and the notice. Details of
 what the installer verifies are under [Operations → Upgrades](#upgrades).
 
-**Unattended upgrades** are opt-in and gated on the phone being idle:
+**Automatic upgrades** are on by default and gated on the phone being idle. The installer
+registers a daily job (04:30) that upgrades every daemon on the Mac, the default instance and
+each `--instance`, when a newer release exists *and* nobody is using that phone: no
+`X-Phone-Owner` lease, no hold, the daemon is not releasing/reconnecting, no live viewer, and no
+agent request in the last 15 minutes (`idle_secs` on `/agent/status`; override with
+`AUTO_UPDATE_IDLE_SECS`). A connected phone with runner up but nobody driving it counts as idle.
+A busy phone is skipped until the next day; each decision is one line in
+`~/Library/Logs/iPhoneUse/auto-update.log`.
+
+The upgrade is the release's own `install.sh`, with its SHA-256 checks and rollback, and every
+setting in the daemon's plist is carried over. It succeeded when the restarted daemon reports
+the new version. The result lands in `~/.iphone-use/auto-update-last.json`, shown as
+`auto_update` on `/agent/status`, by `iphone-use doctor` and by `iphone-use upgrade --check`.
 
 ```bash
-~/.iphone-use/auto-update.sh enable     # daily at 04:30; `disable` / `status` / `run --dry-run`
+~/.iphone-use/auto-update.sh disable    # off, and it stays off across installs
+~/.iphone-use/auto-update.sh enable     # on again
+~/.iphone-use/auto-update.sh status     # on or off, what it would do now, the last result
+~/.iphone-use/auto-update.sh run --dry-run
 ```
 
-Each run resolves the latest release and upgrades only when it is newer *and* nobody
-is using the phone: no `X-Phone-Owner` lease, no hold, the daemon is not
-releasing/reconnecting, no live viewer, and no agent request in the last 15 minutes
-(`idle_secs` on `/agent/status`; override with `AUTO_UPDATE_IDLE_SECS`). A connected
-phone with runner up but nobody driving it counts as idle. Otherwise it logs one line to
-`~/Library/Logs/iPhoneUse/auto-update.log` and tries again tomorrow. The upgrade itself is
-`install.sh` with its SHA-256 checks and rollback, after which the script refreshes its
-own installed copy from the new release. `run --force` skips the idle gate;
-`run --reinstall` reinstalls the current release. (`scripts/auto-update.sh` self-installs on
-`enable`; the installer will offer `--auto-update` once the multi-instance work lands.)
+Installing with `--no-auto-update` (or `IPHONE_USE_AUTO_UPDATE=0`) turns it off the same way.
+With `CI`, `IPHONE_USE_NO_UPDATE_CHECK` or `USE_NO_UPDATE_CHECK` set the installer leaves the
+job as it is. `run --force` skips the idle gate; `run --reinstall` reinstalls the current release.
 
 ## Drive the phone from the browser
 
