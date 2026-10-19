@@ -148,6 +148,18 @@ with tempfile.TemporaryDirectory() as home:
     report("the installer is told it runs under the job", rc == 0 and row.get("ok") is True,
            f"rc={rc} row={row} err={err.strip()[-200:]}")
 
+with tempfile.TemporaryDirectory() as home:
+    log = Path(home) / "installed"
+    servers = [StatusServer(base, marker=f"{log}.{n}", after_version="0.6.0") for n in ("default", "ix")]
+    write_plist(home, "com.leeguoo.iphone-use", servers[0].port)
+    write_plist(home, "com.leeguoo.iphone-use.ix", servers[1].port)
+    try:
+        rc, err = run("v0.6.0", "--instance", "ix", home=home, installed_log=log)
+    finally:
+        for s in servers: s.close()
+    report("--instance upgrades only that instance", rc == 0 and installed_instances(log) == ["ix"],
+           f"rc={rc} installed={installed_instances(log)} err={err.strip()[-200:]}")
+
 # Success is the version the restarted daemon reports, not the installer's exit.
 with tempfile.TemporaryDirectory() as home:
     log = Path(home) / "installed"

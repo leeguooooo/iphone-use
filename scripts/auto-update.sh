@@ -10,6 +10,7 @@
 #   auto-update.sh run --force   upgrade now regardless of idleness (still needs a newer release
 #                                unless --reinstall)
 #   auto-update.sh run --dry-run decide and report, change nothing
+#   auto-update.sh run --instance NAME   only that instance (`default` for the default one)
 #
 # install.sh turns this job on by default. It stays off after `disable` (the
 # marker ~/.iphone-use/auto-update.disabled), an install with --no-auto-update or
@@ -276,14 +277,16 @@ refresh_self() {
 }
 
 cmd_run() {
-    local force=0 reinstall=0 dry=0 arg
-    for arg in "$@"; do
-        case "$arg" in
+    local force=0 reinstall=0 dry=0 only=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
             --force) force=1 ;;
             --reinstall) reinstall=1; force=1 ;;
             --dry-run) dry=1 ;;
-            *) die "unknown option for run: $arg" ;;
+            --instance) [ "$#" -ge 2 ] || die "--instance needs a name"; only="$2"; shift ;;
+            *) die "unknown option for run: $1" ;;
         esac
+        shift
     done
     mkdir -p "$STATE_DIR"
     if [ -f "$DISABLED_MARKER" ] && [ "$force" = 0 ]; then
@@ -298,7 +301,8 @@ cmd_run() {
     local latest list
     latest="$(latest_tag)" || { log "decision: skip:latest_unresolved"; return 2; }
     list="$(instances)"
-    [ -n "$list" ] || { log "decision: skip:not_installed (no daemon LaunchAgent)"; return 0; }
+    [ -z "$only" ] || list="$(printf '%s\n' "$list" | awk -v want="$only" '$1 == want')"
+    [ -n "$list" ] || { log "decision: skip:not_installed (no daemon LaunchAgent${only:+ for $only})"; return 0; }
     if [ -z "$INSTALLER_URL" ] && [ -z "${AUTO_UPDATE_INSTALLER_CMD:-}" ]; then
         local commit
         if commit="$(release_commit "$latest")"; then
@@ -428,5 +432,5 @@ case "${1:-}" in
     disable) cmd_disable ;;
     status) cmd_status ;;
     run) shift; cmd_run "$@" ;;
-    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
