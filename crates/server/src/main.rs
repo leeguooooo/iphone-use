@@ -1778,6 +1778,7 @@ mod tests {
             owner_lease_secs: 300,
             agent_token: None,
             device_udid: None,
+            base_path: String::new(),
         }
     }
 

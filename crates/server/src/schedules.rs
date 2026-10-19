@@ -1530,9 +1530,11 @@ fn valid_id(id: &str) -> bool {
 
 pub async fn page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !crate::http::is_authed(&state, &headers) {
-        return secured(Redirect::to("/login?next=%2Fschedules").into_response());
+        return secured(
+            Redirect::to(&crate::http::based(&state, "/login?next=%2Fschedules")).into_response(),
+        );
     }
-    secured(Html(SCHEDULES_HTML).into_response())
+    secured(Html(crate::http::with_base(&state, SCHEDULES_HTML)).into_response())
 }
 
 pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {

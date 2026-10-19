@@ -24,6 +24,7 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
         secret: b"test-secret-key-0123456789abcdef".to_vec(),
         session_ttl_secs: 3600,
         cookie_secure: false,
+        base_path: String::new(),
         auth_limiter: Arc::new(Mutex::new(srv::http::AuthLimiter::new())),
         agent_token: None,
         device_udid: None,

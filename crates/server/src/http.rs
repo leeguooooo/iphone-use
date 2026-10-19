@@ -324,6 +324,9 @@ pub struct AppState {
     pub session_ttl_secs: u64,
     /// Whether to mark the cookie `Secure` (true behind TLS).
     pub cookie_secure: bool,
+    /// Path prefix the daemon is also served under (`IPHONE_USE_BASE_PATH`):
+    /// `""` or e.g. `"/ix"`. Pages, redirects and the session cookie use it.
+    pub base_path: String,
     /// Rate limiter for login and agent bearer auth failures.
     /// After 5 consecutive failures requests are rejected with 429 for 30 s.
     pub auth_limiter: Arc<Mutex<AuthLimiter>>,
@@ -948,17 +951,56 @@ pub struct InboxItem {
 const INBOX_CAP: usize = 64;
 
 /// Build the axum router for the daemon.
+///
+/// With a base path (`IPHONE_USE_BASE_PATH=/ix`) every route is also served
+/// under `/ix`, so a tunnel can send `host/ix/*` here without rewriting the
+/// path. The API stays reachable without the prefix (MCP, iOS app and LAN
+/// clients that know only the port); the browser pages redirect to their
+/// prefixed address so the session cookie, scoped to the prefix, is sent.
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let pages = Router::new()
         .route("/", get(root))
         .route("/phone", get(phone))
         .route("/setup", get(setup))
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", get(logout))
-        // Scan-to-connect: a signed-in page mints a one-time code shown as a
-        // QR; the phone that scans it gets a session without the password.
-        .route("/pair/new", post(pair_new))
         .route("/pair", get(pair_page).post(pair_submit))
+        .route("/schedules", get(crate::schedules::page));
+    let api = api_routes().layer(axum::middleware::from_fn(crate::timing::layer));
+    let base = state.base_path.clone();
+    let app = if base.is_empty() {
+        pages.merge(api)
+    } else {
+        let to_base = || axum::routing::any(redirect_to_base);
+        Router::new()
+            .route("/", to_base())
+            .route("/phone", to_base())
+            .route("/setup", to_base())
+            .route("/login", to_base())
+            .route("/logout", to_base())
+            .route("/pair", to_base())
+            .route("/schedules", to_base())
+            .merge(api.clone())
+            .nest(&base, pages.merge(api))
+    };
+    app.with_state(state)
+}
+
+/// An unprefixed page request on a daemon with a base path: send it to the
+/// same page under the prefix (307 keeps a POST a POST).
+async fn redirect_to_base(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Response {
+    let path_and_query = uri.path_and_query().map_or("/", |pq| pq.as_str());
+    let target = format!("{}{path_and_query}", state.base_path);
+    with_security_headers(Redirect::temporary(&target).into_response())
+}
+
+/// The routes every caller reaches by path: the agent API, video, control.
+fn api_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        // Scan-to-connect: a signed-in page mints a one-time code shown as a
+        // QR; the phone that scans it gets a session without the password
+        // (the `/pair` page itself is in `router`'s pages).
+        .route("/pair/new", post(pair_new))
         .route("/pair/probe", get(pair_probe))
         .route("/browser/chrome", post(browser_chrome))
         // Browser control: one HTTP request per gesture, each with an explicit
@@ -1023,8 +1065,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/agent/app-notes",
             get(agent_app_notes_get).put(agent_app_notes_put),
         )
-        // Scheduled flows and test suites (see `schedules`).
-        .route("/schedules", get(crate::schedules::page))
+        // Scheduled flows and test suites (see `schedules`; the page is in
+        // `router`'s pages).
         .route(
             "/agent/schedules",
             get(crate::schedules::list).post(crate::schedules::create),
@@ -1036,9 +1078,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/agent/schedules/:id/runs", get(crate::schedules::runs))
         .route("/agent/schedules/:id/run", post(crate::schedules::run_now))
-        // Per-request WDA timing on every /agent/* answer (see `timing`).
-        .layer(axum::middleware::from_fn(crate::timing::layer))
-        .with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,32 +1100,34 @@ fn with_security_headers(mut resp: Response) -> Response {
 // Auth helpers
 // ---------------------------------------------------------------------------
 
-/// Extract the `phone_session` cookie value from request headers.
+/// Extract every `phone_session` cookie value from request headers.
 /// Every `Cookie` header is read: a client may send cookies (the session and
-/// `iphone_use_lang`) in separate headers.
-fn session_cookie(headers: &HeaderMap) -> Option<String> {
+/// `iphone_use_lang`) in separate headers. Daemons sharing one host under
+/// different base paths each set their own `phone_session`, and the browser
+/// sends all whose path matches, so there can be several.
+fn session_cookies(headers: &HeaderMap) -> Vec<String> {
     let prefix = format!("{SESSION_COOKIE}=");
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(';'))
-        .find_map(|pair| pair.trim().strip_prefix(prefix.as_str()).map(str::to_string))
+        .filter_map(|pair| pair.trim().strip_prefix(prefix.as_str()).map(str::to_string))
+        .collect()
 }
 
 /// Return `true` if the request is authenticated.
 ///
 /// When no password is configured the daemon runs open (LAN dev) and every
-/// request is treated as authed. Otherwise the `phone_session` cookie must carry
+/// request is treated as authed. Otherwise a `phone_session` cookie must carry
 /// a valid, unexpired token signed by the daemon secret.
 pub fn is_authed(state: &AppState, headers: &HeaderMap) -> bool {
     if state.password.is_none() {
         return true;
     }
-    match session_cookie(headers) {
-        Some(token) => core::auth::check_token(&state.secret, &token, now_secs()),
-        None => false,
-    }
+    session_cookies(headers)
+        .iter()
+        .any(|token| core::auth::check_token(&state.secret, token, now_secs()))
 }
 
 /// True when the request reached us over HTTPS. The daemon itself always serves
@@ -1111,37 +1152,67 @@ fn make_session_cookie(state: &AppState, secure: bool) -> String {
     let token = core::auth::make_token(&state.secret, state.session_ttl_secs, now_secs());
     let secure = if secure { "; Secure" } else { "" };
     format!(
-        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
+        "{SESSION_COOKIE}={token}; Path={}; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
+        cookie_path(state),
         state.session_ttl_secs
     )
 }
 
 /// Build the cookie that clears the session.
-fn clear_session_cookie(secure: bool) -> String {
+fn clear_session_cookie(state: &AppState, secure: bool) -> String {
     let secure = if secure { "; Secure" } else { "" };
-    format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}")
+    format!(
+        "{SESSION_COOKIE}=; Path={}; HttpOnly; SameSite=Lax; Max-Age=0{secure}",
+        cookie_path(state)
+    )
+}
+
+/// The session cookie's `Path`: the base path, so daemons sharing a host do
+/// not overwrite each other's session.
+fn cookie_path(state: &AppState) -> &str {
+    if state.base_path.is_empty() {
+        "/"
+    } else {
+        &state.base_path
+    }
+}
+
+/// `path` (a daemon route such as `/phone`) as the browser must request it.
+pub(crate) fn based(state: &AppState, path: &str) -> String {
+    format!("{}{path}", state.base_path)
 }
 
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
-async fn root() -> Response {
-    with_security_headers(Redirect::to("/phone").into_response())
+async fn root(State(state): State<Arc<AppState>>) -> Response {
+    with_security_headers(Redirect::to(&based(&state, "/phone")).into_response())
 }
 
 async fn phone(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !is_authed(&state, &headers) {
-        return with_security_headers(Redirect::to("/login").into_response());
+        return with_security_headers(Redirect::to(&based(&state, "/login")).into_response());
     }
-    with_security_headers(Html(INDEX_HTML).into_response())
+    with_security_headers(Html(with_base(&state, INDEX_HTML)).into_response())
 }
 
 async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !is_authed(&state, &headers) {
-        return with_security_headers(Redirect::to("/login?next=%2Fsetup").into_response());
+        return with_security_headers(
+            Redirect::to(&based(&state, "/login?next=%2Fsetup")).into_response(),
+        );
     }
-    with_security_headers(Html(SETUP_HTML).into_response())
+    with_security_headers(Html(with_base(&state, SETUP_HTML)).into_response())
+}
+
+/// A page with the base path filled in: the web pages read it from
+/// `<meta name="iphone-use-base">` and prefix every request with it.
+pub(crate) fn with_base(state: &AppState, html: &str) -> String {
+    html.replace(
+        r#"<meta name="iphone-use-base" content="">"#,
+        &format!(r#"<meta name="iphone-use-base" content="{}">"#, state.base_path),
+    )
 }
 
 /// The login form HTML (self-contained, no external assets).
@@ -1182,7 +1253,7 @@ button:hover{filter:brightness(1.06)}
 .lang:hover{color:var(--text)}
 .lang:focus-visible{outline:3px solid var(--ring);outline-offset:1px}
 </style></head><body>
-<form method="POST" action="/login" novalidate>
+<form method="POST" action="__BASE__/login" novalidate>
   <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg></div>
   <h1>iphone-use</h1>
   <p class="hint" id="passwordHint">请输入这台 Mac 安装 iphone-use 时生成的控制密码。忘记后，请回到 Mac 重新运行安装程序查看或重设。</p>
@@ -1258,7 +1329,12 @@ fn login_destination(next: Option<&str>) -> &'static str {
     }
 }
 
-fn render_login(error: Option<[&str; 2]>, next: Option<&str>, chinese: bool) -> String {
+fn render_login(
+    base: &str,
+    error: Option<[&str; 2]>,
+    next: Option<&str>,
+    chinese: bool,
+) -> String {
     let error = error.map_or("", |[zh, en]| if chinese { zh } else { en });
     let next_input = match login_destination(next) {
         "/setup" => r#"<input type="hidden" name="next" value="/setup">"#,
@@ -1269,6 +1345,7 @@ fn render_login(error: Option<[&str; 2]>, next: Option<&str>, chinese: bool) -> 
         .replace("__LANG_SWITCH__", &lang_switch(chinese))
         .replace("__NEXT_INPUT__", next_input)
         .replace("__ERR__", error)
+        .replace("__BASE__", base)
         .replace(
             "__INVALID__",
             if error.is_empty() { "false" } else { "true" },
@@ -1289,10 +1366,12 @@ async fn login_form(
     // Already authed → return to the allow-listed route the user originally
     // requested instead of silently dropping them on the control page.
     if is_authed(&state, &headers) {
-        return with_security_headers(Redirect::to(destination).into_response());
+        return with_security_headers(Redirect::to(&based(&state, destination)).into_response());
     }
     let chinese = crate::locale::request_prefers_chinese(&headers);
-    with_security_headers(Html(render_login(None, Some(destination), chinese)).into_response())
+    with_security_headers(
+        Html(render_login(&state.base_path, None, Some(destination), chinese)).into_response(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -1319,7 +1398,7 @@ async fn login_submit(
     // missing value as an authentication failure: the user has not attempted a
     // credential yet.
     if form.password.is_empty() {
-        let mut resp = Html(render_login(Some(LOGIN_EMPTY), Some(destination), chinese)).into_response();
+        let mut resp = Html(render_login(&state.base_path, Some(LOGIN_EMPTY), Some(destination), chinese)).into_response();
         *resp.status_mut() = StatusCode::BAD_REQUEST;
         return with_security_headers(resp);
     }
@@ -1327,7 +1406,7 @@ async fn login_submit(
     {
         let limiter = state.auth_limiter.lock().unwrap();
         if limiter.is_locked() {
-            let mut resp = Html(render_login(Some(LOGIN_LOCKED), Some(destination), chinese))
+            let mut resp = Html(render_login(&state.base_path, Some(LOGIN_LOCKED), Some(destination), chinese))
             .into_response();
             *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
             resp.headers_mut()
@@ -1340,7 +1419,7 @@ async fn login_submit(
         redirect_with_cookie(&state, destination, &headers)
     } else {
         state.auth_limiter.lock().unwrap().record_failure();
-        let body = render_login(Some(LOGIN_WRONG), Some(destination), chinese);
+        let body = render_login(&state.base_path, Some(LOGIN_WRONG), Some(destination), chinese);
         let mut resp = Html(body).into_response();
         *resp.status_mut() = StatusCode::UNAUTHORIZED;
         with_security_headers(resp)
@@ -1351,7 +1430,7 @@ async fn login_submit(
 /// arrived over HTTPS — see `request_is_https`).
 fn redirect_with_cookie(state: &AppState, to: &str, headers: &HeaderMap) -> Response {
     let secure = request_is_https(state, headers);
-    let mut resp = Redirect::to(to).into_response();
+    let mut resp = Redirect::to(&based(state, to)).into_response();
     if let Ok(v) = HeaderValue::from_str(&make_session_cookie(state, secure)) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
@@ -1360,8 +1439,8 @@ fn redirect_with_cookie(state: &AppState, to: &str, headers: &HeaderMap) -> Resp
 
 async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let secure = request_is_https(&state, &headers);
-    let mut resp = Redirect::to("/login").into_response();
-    if let Ok(v) = HeaderValue::from_str(&clear_session_cookie(secure)) {
+    let mut resp = Redirect::to(&based(&state, "/login")).into_response();
+    if let Ok(v) = HeaderValue::from_str(&clear_session_cookie(&state, secure)) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     with_security_headers(resp)
@@ -1475,7 +1554,7 @@ async fn pair_new(
         None => String::new(),
     };
     let code = state.pairing.issue();
-    let url = format!("{scheme}://{host}{port}/pair?c={code}");
+    let url = format!("{scheme}://{host}{port}{}/pair?c={code}", state.base_path);
     pair_json(
         StatusCode::OK,
         serde_json::json!({
@@ -1626,8 +1705,9 @@ async fn pair_page(
         // preview or prefetch cannot use it up; scripts off → one click.
         let body = format!(
             r#"<h1>正在登录 iphone-use…</h1>
-<form method="POST" action="/pair"><input type="hidden" name="c" value="{code}"><button type="submit">打开控制页</button></form>
-<script>document.forms[0].submit()</script>"#
+<form method="POST" action="{base}/pair"><input type="hidden" name="c" value="{code}"><button type="submit">打开控制页</button></form>
+<script>document.forms[0].submit()</script>"#,
+            base = state.base_path,
         );
         return with_security_headers(Html(render_pair_page(&body, chinese)).into_response());
     }
@@ -1640,13 +1720,14 @@ async fn pair_page(
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let base = format!("{scheme}://{host}");
+    let base = format!("{scheme}://{host}{}", state.base_path);
     let app_link = format!("iphoneuse://pair?u={}&amp;c={code}", percent_encode(&base));
     let body = format!(
         r#"<h1>连接这台 Mac 上的 iPhone</h1>
 <p>装了 Phone Use Remote App 就用 App 打开，画面更流畅；没装也可以直接在浏览器里控制。</p>
 <a href="{app_link}">在 Phone Use Remote App 中打开</a>
-<form method="POST" action="/pair"><input type="hidden" name="c" value="{code}"><button type="submit">在浏览器里控制</button></form>"#
+<form method="POST" action="{}/pair"><input type="hidden" name="c" value="{code}"><button type="submit">在浏览器里控制</button></form>"#,
+        state.base_path,
     );
     with_security_headers(Html(render_pair_page(&body, chinese)).into_response())
 }
@@ -22149,15 +22230,34 @@ mod tests {
             header::COOKIE,
             HeaderValue::from_static("foo=bar; phone_session=abc.def.ghi; baz=qux"),
         );
-        assert_eq!(session_cookie(&headers), Some("abc.def.ghi".to_string()));
+        assert_eq!(session_cookies(&headers), vec!["abc.def.ghi".to_string()]);
     }
 
     #[test]
     fn session_cookie_absent() {
         let mut headers = HeaderMap::new();
         headers.insert(header::COOKIE, HeaderValue::from_static("foo=bar"));
-        assert_eq!(session_cookie(&headers), None);
-        assert_eq!(session_cookie(&HeaderMap::new()), None);
+        assert!(session_cookies(&headers).is_empty());
+        assert!(session_cookies(&HeaderMap::new()).is_empty());
+    }
+
+    #[test]
+    fn every_session_cookie_is_tried() {
+        // Two daemons under different base paths on one host: the browser
+        // sends both `phone_session` cookies; ours may come second.
+        let state = fixture_app_state(Some("pw"));
+        let ours = make_session_cookie(&state, false);
+        let token = ours
+            .strip_prefix("phone_session=")
+            .and_then(|rest| rest.split(';').next())
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("phone_session=someone.elses.token; phone_session={token}"))
+                .unwrap(),
+        );
+        assert!(is_authed(&state, &headers));
     }
 
     #[test]
@@ -22168,8 +22268,8 @@ mod tests {
             header::COOKIE,
             format!("other=1; {SESSION_COOKIE}=abc").parse().unwrap(),
         );
-        assert_eq!(session_cookie(&headers).as_deref(), Some("abc"));
-        assert_eq!(session_cookie(&HeaderMap::new()), None);
+        assert_eq!(session_cookies(&headers), vec!["abc".to_string()]);
+        assert!(session_cookies(&HeaderMap::new()).is_empty());
     }
 
     #[test]
@@ -22183,7 +22283,7 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"flowPanel\""));
         // Pairing the app with the daemon on its own phone.
         assert!(INDEX_HTML.contains("id=\"pairSelf\""));
-        assert!(INDEX_HTML.contains("'/agent/phone-daemon/pair'"));
+        assert!(INDEX_HTML.contains("BASE + '/agent/phone-daemon/pair'"));
         // Lock readiness: the daemon's own hint for phones that will lock.
         assert!(INDEX_HTML.contains("id=\"lockNotice\""));
         assert!(INDEX_HTML.contains("status?.lock_readiness"));
@@ -22206,7 +22306,7 @@ mod tests {
         assert!(INDEX_HTML.contains("界面检查点"));
         assert!(INDEX_HTML.contains("chooseFlowCheckpoint"));
         assert!(INDEX_HTML.contains("kind: 'wait_for'"));
-        assert!(INDEX_HTML.contains("fetch('/agent/actions'"));
+        assert!(INDEX_HTML.contains("fetch(BASE + '/agent/actions'"));
         assert!(INDEX_HTML.contains("X-Phone-Control"));
         assert!(INDEX_HTML.contains("function managedSetupWillRetry"));
         assert!(INDEX_HTML.contains("连接后会自动继续"));
@@ -22233,11 +22333,11 @@ mod tests {
     #[test]
     fn embedded_setup_html_is_the_connection_guide() {
         assert!(SETUP_HTML.contains("连接真实 iPhone"));
-        assert!(SETUP_HTML.contains("fetch('/agent/status'"));
+        assert!(SETUP_HTML.contains("fetch(BASE + '/agent/status'"));
         assert!(SETUP_HTML.contains("setup_blocked_on"));
         assert!(SETUP_HTML.contains("recovery_owner"));
         assert!(SETUP_HTML.contains("aria-disabled=\"true\""));
-        assert!(SETUP_HTML.contains("href=\"/phone\""));
+        assert!(SETUP_HTML.contains("href=\"phone\""));
         assert!(SETUP_HTML.contains("fd00::/8"));
         assert!(SETUP_HTML.contains("fe80::/10"));
         assert!(SETUP_HTML.contains("Traffic only mode"));

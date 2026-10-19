@@ -2,6 +2,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta name="iphone-use-base" content="">
+  <!-- The daemon fills in its base path (IPHONE_USE_BASE_PATH) above;
+       every request below is made under it. -->
+  <script>const BASE = document.querySelector('meta[name="iphone-use-base"]').content;</script>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>连接真实 iPhone · iphone-use</title>
   <style>
@@ -189,7 +193,7 @@
       <div class="brand">iphone-use</div>
       <div class="topbar-links">
         <button id="langSwitch" class="back lang-switch" type="button" aria-label="切换语言 / Switch language">English</button>
-        <a class="back" href="/phone">返回控制页</a>
+        <a class="back" href="phone">返回控制页</a>
       </div>
     </div>
     <main>
@@ -251,7 +255,7 @@
         </aside>
 
         <div class="actions">
-          <a id="openPhone" class="button primary" href="/phone"
+          <a id="openPhone" class="button primary" href="phone"
              aria-disabled="true" tabindex="-1">进入控制页</a>
         </div>
         <p class="footnote">隐私边界：状态接口只返回连接状态和首要阻塞项；这个页面不会读取手机画面、元素树、账号或通知内容。</p>
@@ -626,13 +630,13 @@
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 7000);
       try {
-        const response = await fetch('/agent/status', {
+        const response = await fetch(BASE + '/agent/status', {
           cache: 'no-store',
           credentials: 'same-origin',
           signal: controller.signal,
         });
         if (response.status === 401) {
-          location.replace('/login?next=%2Fsetup');
+          location.replace(BASE + '/login?next=%2Fsetup');
           return;
         }
         if (!response.ok) throw new Error('status rejected');

@@ -19,6 +19,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
+  <meta name="iphone-use-base" content="">
+  <!-- The daemon fills in its base path (IPHONE_USE_BASE_PATH) above;
+       every request below is made under it. -->
+  <script>const BASE = document.querySelector('meta[name="iphone-use-base"]').content;</script>
   <!-- [iOS-notes §Fullscreen/PWA] viewport-fit=cover for safe-area; initial-scale=1 required -->
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <!-- [iOS-notes §Fullscreen/PWA] standalone PWA meta -->
@@ -947,7 +951,7 @@
               <code id="setupCommand"></code>
               <button id="copySetupBtn" type="button">复制命令</button>
             </div>
-            <a id="setupGuideLink" href="/setup" hidden>打开连接向导</a>
+            <a id="setupGuideLink" href="setup" hidden>打开连接向导</a>
             <div id="overlayActions">
               <button id="reconnectBtn" type="button">重新连接</button>
             </div>
@@ -1828,7 +1832,7 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
   try {
     // Every recovery starts the on-device WDA path.
     invalidateDirectControlQueue();
-    const r = await fetch('/agent/mode', {
+    const r = await fetch(BASE + '/agent/mode', {
       method: 'POST', cache: 'no-store',
       credentials: 'same-origin',
       signal: controller.signal,
@@ -1836,7 +1840,7 @@ if (reconnectBtn) reconnectBtn.onclick = async () => {
       body: JSON.stringify({ mode: 'agent' }),
     });
     if (r.status === 401) {
-      location.replace('/login');
+      location.replace(BASE + '/login');
       return;
     }
     const result = await r.json().catch(() => ({}));
@@ -2221,7 +2225,7 @@ function showOverlay(kind) {
    the latest GitHub release daily. Show a dismissible pill when behind. */
 (async () => {
   try {
-    const r = await fetch('/agent/status', { cache: 'no-store' });
+    const r = await fetch(BASE + '/agent/status', { cache: 'no-store' });
     if (!r.ok) return;
     const s = await r.json();
     if (s.update_available && s.latest && !sessionStorage.getItem('updateDismissed')) {
@@ -2360,7 +2364,7 @@ async function refreshRedactedFrame() {
   if (redactedBusy || document.visibilityState !== 'visible') return;
   redactedBusy = true;
   try {
-    const r = await fetch('/agent/screenshot', { cache: 'no-store', credentials: 'same-origin' });
+    const r = await fetch(BASE + '/agent/screenshot', { cache: 'no-store', credentials: 'same-origin' });
     if (!r.ok) return;
     if (r.headers.get('x-capture-redacted') !== '1') { hideRedactedFrame(); return; }
     const url = URL.createObjectURL(await r.blob());
@@ -2406,8 +2410,8 @@ async function pollAgentMode() {
   const timeoutId = setTimeout(() => controller.abort(), STATUS_REQUEST_TIMEOUT_MS);
   const polledStreamId = mjpegStreamId;
   const statusUrl = polledStreamId
-    ? `/agent/status?stream_id=${encodeURIComponent(polledStreamId)}`
-    : '/agent/status';
+    ? `${BASE}/agent/status?stream_id=${encodeURIComponent(polledStreamId)}`
+    : BASE + '/agent/status';
   try {
     const r = await fetch(statusUrl, {
       cache: 'no-store',
@@ -2415,7 +2419,7 @@ async function pollAgentMode() {
     });
     if (generation !== statusPollGeneration) return backendStatus;
     if (r.status === 401) {
-      location.replace('/login');
+      location.replace(BASE + '/login');
       return null;
     }
     if (!r.ok) throw new Error('status rejected');
@@ -2670,12 +2674,12 @@ async function fetchStill(generation = stillsGeneration) {
   stillsAbortController = controller;
   const timeout = setTimeout(() => controller.abort(), STILL_REQUEST_TIMEOUT_MS);
   try {
-    const r = await fetch('/agent/screenshot?t=' + Date.now(), {
+    const r = await fetch(BASE + '/agent/screenshot?t=' + Date.now(), {
       cache: 'no-store',
       signal: controller.signal,
     });
     if (r.status === 401) {
-      location.replace('/login');
+      location.replace(BASE + '/login');
       return;
     }
     if (r.ok) {
@@ -2864,7 +2868,7 @@ function h264RequestKeyframe(session) {
   const now = performance.now();
   if (session.keyAskedAt && now - session.keyAskedAt < 1000) return;
   session.keyAskedAt = now;
-  fetch('/agent/h264/keyframe', {
+  fetch(BASE + '/agent/h264/keyframe', {
     method: 'POST', credentials: 'same-origin', headers: { 'X-Phone-Control': '1' },
   }).catch(() => {});
 }
@@ -2927,7 +2931,7 @@ async function pumpH264(session) {
   let response;
   try {
     response = await fetch(
-      `/agent/h264?stream_id=${encodeURIComponent(session.streamId)}&mode=${videoMode}&t=${Date.now()}`,
+      `${BASE}/agent/h264?stream_id=${encodeURIComponent(session.streamId)}&mode=${videoMode}&t=${Date.now()}`,
       { credentials: 'same-origin', cache: 'no-store', signal: session.controller.signal },
     );
   } catch (e) {
@@ -2936,7 +2940,7 @@ async function pumpH264(session) {
   }
   if (session !== h264Session) return;
   if (response.status === 401) {
-    location.replace('/login');
+    location.replace(BASE + '/login');
     return;
   }
   if (!response.ok || !response.body) {
@@ -3062,7 +3066,7 @@ function startMjpegAttempt(generation) {
   }
   mjpegFrame.onload = () => mjpegReady(generation);
   mjpegFrame.onerror = () => mjpegFailed(generation);
-  mjpegFrame.src = `/agent/mjpeg?stream_id=${encodeURIComponent(mjpegStreamId)}&mode=${videoMode}&t=${Date.now()}`;
+  mjpegFrame.src = `${BASE}/agent/mjpeg?stream_id=${encodeURIComponent(mjpegStreamId)}&mode=${videoMode}&t=${Date.now()}`;
   // Streaming images need not dispatch load until the multipart response ends.
   // naturalWidth becomes non-zero after the first decoded frame, so poll that
   // as the authoritative readiness signal and bound a silent TCP connection.
@@ -3428,7 +3432,7 @@ function sendDirectControl(obj) {
     const timeout = setTimeout(() => controller.abort(), CONTROL_TIMEOUT_MS);
     const sentAt = performance.now();
     try {
-      const r = await fetch('/control', {
+      const r = await fetch(BASE + '/control', {
         method: 'POST',
         cache: 'no-store',
         credentials: 'same-origin',
@@ -3445,7 +3449,7 @@ function sendDirectControl(obj) {
       });
       if (r.status === 401) {
         invalidateDirectControlQueue();
-        location.replace('/login');
+        location.replace(BASE + '/login');
         return controlResult(false, 'unauthorized');
       }
       const result = await r.json().catch(() => ({}));
@@ -4306,13 +4310,13 @@ async function readFlowObservation(timeoutMs = 4500) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch('/agent/elements', {
+    const response = await fetch(BASE + '/agent/elements', {
       cache: 'no-store',
       credentials: 'same-origin',
       signal: controller.signal,
     });
     if (response.status === 401) {
-      location.replace('/login');
+      location.replace(BASE + '/login');
       return null;
     }
     if (!response.ok) return null;
@@ -5232,7 +5236,7 @@ flowRun.addEventListener('click', async () => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 80000);
   try {
-    const response = await fetch('/agent/actions', {
+    const response = await fetch(BASE + '/agent/actions', {
       method: 'POST',
       cache: 'no-store',
       credentials: 'same-origin',
@@ -5246,7 +5250,7 @@ flowRun.addEventListener('click', async () => {
       }),
     });
     if (response.status === 401) {
-      location.replace('/login');
+      location.replace(BASE + '/login');
       return;
     }
     const result = await response.json().catch(() => ({}));
@@ -5372,7 +5376,7 @@ function updateModeControls() {
   if (typeof syncToolbarReserve === 'function') syncToolbarReserve();
 }
 
-document.getElementById('btnLogout').addEventListener('click', () => { location.href = '/logout'; });
+document.getElementById('btnLogout').addEventListener('click', () => { location.href = BASE + '/logout'; });
 /* Hand the phone back to the person holding it: the daemon stops the on-phone
    WDA runner and agent input is refused until someone asks for the agent
    again ("交给 agent" or 「连接手机」). */
@@ -5382,12 +5386,12 @@ async function takePhoneBackForAgent() {
   btnHandoff.disabled = true;
   try {
     invalidateDirectControlQueue();
-    const r = await fetch('/agent/mode', {
+    const r = await fetch(BASE + '/agent/mode', {
       method: 'POST', cache: 'no-store', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Phone-Control': '1' },
       body: JSON.stringify({ mode: 'agent' }),
     });
-    if (r.status === 401) { location.replace('/login'); return; }
+    if (r.status === 401) { location.replace(BASE + '/login'); return; }
     const result = await r.json().catch(() => ({}));
     toast(r.ok && result.ok === true ? t('已交回 agent，正在连接设备') : t('交回失败，请查看服务日志'));
     cancelStatusPoll();
@@ -5408,12 +5412,12 @@ if (btnHandoff) btnHandoff.addEventListener('click', async () => {
   btnHandoff.disabled = true;
   try {
     invalidateDirectControlQueue();
-    const r = await fetch('/agent/mode', {
+    const r = await fetch(BASE + '/agent/mode', {
       method: 'POST', cache: 'no-store', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Phone-Control': '1' },
       body: JSON.stringify({ mode: 'human' }),
     });
-    if (r.status === 401) { location.replace('/login'); return; }
+    if (r.status === 401) { location.replace(BASE + '/login'); return; }
     const result = await r.json().catch(() => ({}));
     if (!r.ok || result.ok !== true) {
       toast(result?.error === 'lifecycle_busy' ? t('设备正在切换，稍后再试') : t('交还失败，请查看服务日志'));
@@ -5451,11 +5455,11 @@ async function loadPairCode(host) {
   pairQr.classList.remove('expired');
   try {
     const q = host ? '?host=' + encodeURIComponent(host) : '';
-    const r = await fetch('/pair/new' + q, {
+    const r = await fetch(BASE + '/pair/new' + q, {
       method: 'POST', cache: 'no-store', credentials: 'same-origin',
       headers: { 'X-Phone-Control': '1' },
     });
-    if (r.status === 401) { location.replace('/login'); return; }
+    if (r.status === 401) { location.replace(BASE + '/login'); return; }
     const res = await r.json().catch(() => ({}));
     if (!r.ok || !res.ok) {
       pairQr.replaceChildren();
@@ -5497,11 +5501,11 @@ async function loadSelfPairCode() {
   pairQr.classList.remove('expired');
   pairHostRow.hidden = true;
   try {
-    const r = await fetch('/agent/phone-daemon/pair', {
+    const r = await fetch(BASE + '/agent/phone-daemon/pair', {
       method: 'POST', cache: 'no-store', credentials: 'same-origin',
       headers: { 'X-Phone-Control': '1' },
     });
-    if (r.status === 401) { location.replace('/login'); return; }
+    if (r.status === 401) { location.replace(BASE + '/login'); return; }
     const res = await r.json().catch(() => ({}));
     if (!r.ok || !res.ok) {
       pairQr.replaceChildren();
@@ -5721,13 +5725,13 @@ async function loadAccessibleElements() {
   setTextIfChanged(elementStatus, t('正在读取当前 iPhone 控件…'));
   elementList.replaceChildren();
   try {
-    const response = await fetch('/agent/elements', {
+    const response = await fetch(BASE + '/agent/elements', {
       cache: 'no-store',
       credentials: 'same-origin',
       signal: controller.signal,
     });
     if (response.status === 401) {
-      location.replace('/login');
+      location.replace(BASE + '/login');
       return;
     }
     const body = await response.json().catch(() => ({}));
@@ -6105,7 +6109,7 @@ async function pollAgentActivity() {
   try {
     const since = agentActivityCursor ?? 0;
     const limit = agentActivityCursor === null ? 0 : 20;
-    const r = await fetch(`/agent/activity?since=${since}&limit=${limit}`, { cache: 'no-store' });
+    const r = await fetch(`${BASE}/agent/activity?since=${since}&limit=${limit}`, { cache: 'no-store' });
     if (!r.ok) return;
     const feed = await r.json();
     if (Number.isFinite(feed?.next)) agentActivityCursor = feed.next;

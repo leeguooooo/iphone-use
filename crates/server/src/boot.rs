@@ -34,6 +34,7 @@ pub fn app_state(inputs: StateInputs<'_>) -> Arc<AppState> {
         // the cookie over LAN. Keep this `false`; per-request HTTPS is detected
         // in http.rs.
         cookie_secure: false,
+        base_path: inputs.cfg.base_path.clone(),
         auth_limiter: Arc::new(Mutex::new(http::AuthLimiter::new())),
         agent_token: inputs.cfg.agent_token.clone(),
         device_udid: inputs.cfg.device_udid.clone(),

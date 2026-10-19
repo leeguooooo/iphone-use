@@ -43,6 +43,11 @@ pub struct Config {
     /// Without this, an idle restart or browser reconnect re-ran auto-detection
     /// and could silently select a different iPhone on a multi-device Mac.
     pub device_udid: Option<String>,
+    /// URL path prefix this daemon is also served under
+    /// (`IPHONE_USE_BASE_PATH`, e.g. `/ix`), so several daemons can share one
+    /// public host with the tunnel routing by path. Normalized to `""` (none)
+    /// or a leading-slash form without a trailing slash.
+    pub base_path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +111,10 @@ impl Config {
         let device_udid = get("IPHONE_USE_UDID")
             .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
 
+        let base_path = get("IPHONE_USE_BASE_PATH")
+            .map(|s| normalize_base_path(&s))
+            .unwrap_or_default();
+
         Config {
             host,
             port,
@@ -116,8 +125,25 @@ impl Config {
             owner_lease_secs,
             agent_token,
             device_udid,
+            base_path,
         }
     }
+}
+
+/// `"ix"`, `"/ix/"` → `"/ix"`; empty, `/` or anything outside
+/// `[A-Za-z0-9._~-]` segments → `""` (no prefix).
+pub fn normalize_base_path(raw: &str) -> String {
+    let segments: Vec<&str> = raw.split('/').filter(|s| !s.is_empty()).collect();
+    let valid = segments.iter().all(|seg| {
+        seg.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-'))
+            && *seg != "."
+            && *seg != ".."
+    });
+    if segments.is_empty() || !valid {
+        return String::new();
+    }
+    format!("/{}", segments.join("/"))
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +294,16 @@ mod tests {
     fn agent_token_empty_gives_none() {
         let cfg = map_cfg(&[("IPHONE_USE_AGENT_TOKEN", "")]);
         assert_eq!(cfg.agent_token, None);
+    }
+
+    #[test]
+    fn base_path_is_normalized() {
+        assert_eq!(map_cfg(&[]).base_path, "");
+        assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "ix")]).base_path, "/ix");
+        assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/ix/")]).base_path, "/ix");
+        assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/")]).base_path, "");
+        assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/a b")]).base_path, "");
+        assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/../x")]).base_path, "");
     }
 
     #[test]
