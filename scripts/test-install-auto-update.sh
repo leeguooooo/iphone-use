@@ -63,6 +63,7 @@ cat > "$TMP/old.plist" <<'PLIST'
 <key>IPHONE_USE_BACKEND</key><string>mirror</string>
 <key>IPHONE_USE_WDA_URL</key><string>http://127.0.0.1:8100</string>
 <key>IPHONE_USE_INTERNAL_TEST_X</key><string>1</string>
+<key>IPU_RUNNER_ASC_KEY_ID</key><string>half-a-set</string>
 <key>RUST_LOG</key><string>info</string>
 <key>PATH</key><string>/usr/bin</string>
 </dict></dict></plist>
@@ -71,7 +72,7 @@ got="$(bash -c "$FUNCS
 plist_own_env_keys '$TMP/old.plist'" | sort | tr '\n' ' ')"
 [ "$got" = "IPHONE_USE_BASE_PATH IPHONE_USE_PORT IPHONE_USE_TELEMETRY IPU_RUNNER_TRANSPORT " ] \
     || bad "carried-forward keys were '$got'"
-ok_t "an upgrade carries our settings forward, minus the mirror backend, old runner names and test hooks"
+ok_t "an upgrade carries our settings forward, minus the mirror backend, old runner names, ASC keys and test hooks"
 grep -q '^    IPHONE_USE_BASE_PATH \\$' "$ROOT/install.sh" || bad "IPHONE_USE_BASE_PATH is not on the default instance's list"
 ok_t "the default instance keeps IPHONE_USE_BASE_PATH"
 

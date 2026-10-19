@@ -130,8 +130,23 @@ with tempfile.TemporaryDirectory() as home:
            rc == 0 and got == ["default", "ix"] and "decision[busy]: skip:phone_owned" in err
            and out.get("ok") is True and sorted(r["instance"] for r in out.get("instances", [])) == ["default", "ix"],
            f"rc={rc} installed={got} outcome={out} err={err.strip()[-300:]}")
-    nested = Path(log).read_text().split()
-    report("the installer is told it runs under the job", nested.count("1") == 2, f"log={nested}")
+
+# install.sh must not reload the job it runs under (that would kill the
+# upgrade): the job says so in IPHONE_USE_AUTO_UPDATE_JOB. This stub installer
+# refuses to run without it, and pins the release it was asked for.
+with tempfile.TemporaryDirectory() as home:
+    log = Path(home) / "installed"
+    srv = StatusServer(base, marker=f"{log}.default", after_version="0.6.0")
+    write_plist(home, "com.leeguoo.iphone-use", srv.port)
+    try:
+        rc, err = run("v0.6.0", home=home, installed_log=log, extra_env={
+            "AUTO_UPDATE_INSTALLER_CMD":
+                f"[ \"$IPHONE_USE_AUTO_UPDATE_JOB\" = 1 ] && touch '{log}.default'"})
+    finally:
+        srv.close()
+    row = ((outcome(home) or {}).get("instances") or [{}])[0]
+    report("the installer is told it runs under the job", rc == 0 and row.get("ok") is True,
+           f"rc={rc} row={row} err={err.strip()[-200:]}")
 
 # Success is the version the restarted daemon reports, not the installer's exit.
 with tempfile.TemporaryDirectory() as home:

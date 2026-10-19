@@ -2446,15 +2446,17 @@ named_plist_env() {
 # Our settings in a daemon plist, one name per line: everything spelled
 # IPHONE_USE_* or IPU_RUNNER_*. An upgrade carries forward the ones it does not
 # set itself, so a setting added by hand (or one this installer does not know)
-# survives the nightly auto-update. IPHONE_USE_BACKEND is left behind on
-# purpose (the mirror backend is gone), as are test hooks.
+# survives the nightly auto-update. Left behind on purpose: IPHONE_USE_BACKEND
+# (the mirror backend is gone), pre-rename runner names (read into the new
+# ones), the ASC signing keys (they travel as a set of three or not at all)
+# and test hooks.
 plist_own_env_keys() {
     [ -f "$1" ] || return 0
     /usr/bin/plutil -extract EnvironmentVariables xml1 -o - "$1" 2>/dev/null \
         | sed -n 's:^[[:space:]]*<key>\([A-Z][A-Z0-9_]*\)</key>.*:\1:p' \
         | while IFS= read -r key; do
             case "$key" in
-                IPHONE_USE_BACKEND|IPHONE_USE_INTERNAL_TEST_*|IPHONE_USE_WDA_*) ;;
+                IPHONE_USE_BACKEND|IPHONE_USE_INTERNAL_TEST_*|IPHONE_USE_WDA_*|IPU_RUNNER_ASC_*) ;;
                 IPHONE_USE_?*|IPU_RUNNER_?*) printf '%s\n' "$key" ;;
             esac
         done
@@ -2589,9 +2591,10 @@ install_named_instance() {
     # Settings: explicit environment > this instance's plist > the default
     # instance's runner supervisor, which holds the signing policy that works on
     # this Mac. The three ASC keys travel as a set.
-    env_keys=(); env_values=()
+    env_keys=(); env_values=(); handled=" "
     add_env() {
         local value="$2"
+        handled="$handled$1 "
         # The runner's identifier before v0.20 (setup removes that app).
         case "$1:$value" in
             IPU_RUNNER_BUNDLE_ID:com.leeguoo.iphone-use.wda.?*)
@@ -2652,7 +2655,7 @@ install_named_instance() {
         done
     fi
     for key in $(plist_own_env_keys "$plist"); do
-        case " ${env_keys[*]-} " in *" $key "*) continue ;; esac
+        case "$handled" in *" $key "*) continue ;; esac
         add_env "$key" "$(named_plist_env "$plist" "$key")"
     done
 
@@ -3147,10 +3150,14 @@ xml_escape() {
 }
 
 PLIST_ENV_BLOCK=""
+# Every key the installer decided on, written or (when empty) dropped, so the
+# carry-forward below never brings back one it left out.
+PLIST_ENV_HANDLED=" "
 append_plist_env() {
     local key="$1"
     local value="${2:-}"
     local escaped
+    PLIST_ENV_HANDLED="${PLIST_ENV_HANDLED}${key} "
     [ -n "$value" ] || return 0
     escaped="$(xml_escape "$value")"
     PLIST_ENV_BLOCK="${PLIST_ENV_BLOCK}        <key>${key}</key>
@@ -3457,7 +3464,7 @@ fi
 
 # The rest of our settings in the previous plist, as they were.
 for ENV_KEY in $(plist_own_env_keys "$PLIST_DST"); do
-    case "$PLIST_ENV_BLOCK" in *"<key>${ENV_KEY}</key>"*) continue ;; esac
+    case "$PLIST_ENV_HANDLED" in *" $ENV_KEY "*) continue ;; esac
     append_plist_env "$ENV_KEY" "$(plist_env_get_from "$PLIST_DST" "$ENV_KEY")"
 done
 

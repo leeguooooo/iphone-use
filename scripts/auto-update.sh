@@ -61,7 +61,9 @@ LOG="$LOG_DIR/auto-update.log"
 INSTALLED_SELF="$STATE_DIR/auto-update.sh"
 DISABLED_MARKER="$STATE_DIR/auto-update.disabled"
 OUTCOME="$STATE_DIR/auto-update-last.json"
-INSTALLER_URL="${AUTO_UPDATE_INSTALLER_URL:-https://raw.githubusercontent.com/$REPO/main/install.sh}"
+# Set per run to install.sh at the release's own commit (see cmd_run); `main`
+# only when the tag cannot be resolved, since main may be ahead of any release.
+INSTALLER_URL="${AUTO_UPDATE_INSTALLER_URL:-}"
 HOUR="${AUTO_UPDATE_HOUR:-4}"
 IDLE_SECS="${AUTO_UPDATE_IDLE_SECS:-900}"
 case "$IDLE_SECS" in ''|*[!0-9]*) IDLE_SECS=900 ;; esac  # a non-integer override falls back
@@ -182,13 +184,15 @@ PY
 # IPHONE_USE_AUTO_UPDATE_JOB tells install.sh it runs under this job, so it must
 # not reload the job: a bootout would kill the upgrade halfway. Earlier copies of
 # this script passed IPHONE_USE_AUTO_UPDATE=1, which install.sh reads the same way.
-run_installer() {  # run_installer <instance>
+# IPHONE_USE_RELEASE_REF keeps the installer on the release this run decided on.
+run_installer() {  # run_installer <instance> <release tag>
     if [ -n "${AUTO_UPDATE_INSTALLER_CMD:-}" ]; then
         AUTO_UPDATE_INSTANCE="$1" IPHONE_USE_AUTO_UPDATE_JOB=1 bash -c "$AUTO_UPDATE_INSTALLER_CMD"
     elif [ "$1" = default ]; then
-        curl -fsSL -m 120 "$INSTALLER_URL" | IPHONE_USE_AUTO_UPDATE_JOB=1 sh
+        curl -fsSL -m 120 "$INSTALLER_URL" | IPHONE_USE_AUTO_UPDATE_JOB=1 IPHONE_USE_RELEASE_REF="$2" sh
     else
-        curl -fsSL -m 120 "$INSTALLER_URL" | IPHONE_USE_AUTO_UPDATE_JOB=1 sh -s -- --instance "$1"
+        curl -fsSL -m 120 "$INSTALLER_URL" \
+            | IPHONE_USE_AUTO_UPDATE_JOB=1 IPHONE_USE_RELEASE_REF="$2" sh -s -- --instance "$1"
     fi
 }
 
@@ -295,6 +299,15 @@ cmd_run() {
     latest="$(latest_tag)" || { log "decision: skip:latest_unresolved"; return 2; }
     list="$(instances)"
     [ -n "$list" ] || { log "decision: skip:not_installed (no daemon LaunchAgent)"; return 0; }
+    if [ -z "$INSTALLER_URL" ] && [ -z "${AUTO_UPDATE_INSTALLER_CMD:-}" ]; then
+        local commit
+        if commit="$(release_commit "$latest")"; then
+            INSTALLER_URL="https://raw.githubusercontent.com/$REPO/$commit/install.sh"
+        else
+            INSTALLER_URL="https://raw.githubusercontent.com/$REPO/main/install.sh"
+            log "could not resolve $latest to a commit; the installer comes from main"
+        fi
+    fi
     local rc=0 failed=0 upgraded=0 instance plist decision drc before after installer_ok why
     while read -r instance plist; do
         drc=0
@@ -308,7 +321,7 @@ cmd_run() {
         before="$(status_version "$instance" "$plist")"
         log "upgrading $instance from ${before:-?} to $latest via $INSTALLER_URL"
         installer_ok=1
-        run_installer "$instance" </dev/null >>"$LOG" 2>&1 || installer_ok=0
+        run_installer "$instance" "$latest" </dev/null >>"$LOG" 2>&1 || installer_ok=0
         after="$(settled_version "$instance" "$plist" "$latest")"
         if [ -n "$after" ] && newer_or_same "$after" "$latest"; then
             upgraded=1
