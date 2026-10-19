@@ -672,7 +672,11 @@ impl DaemonClient {
         if flow_run {
             req = req.header("x-phone-flow-run", "1");
         }
-        read_response(req.send().await?).await
+        let response = read_response(req.send().await?).await?;
+        // An observed batch ends on a new screen: the next observed tap
+        // diffs against it, not against the screen before the batch.
+        self.remember_snapshot(response.json.as_ref());
+        Ok(response)
     }
 
     /// Any JSON call on the agent API, keeping the daemon's answer. A

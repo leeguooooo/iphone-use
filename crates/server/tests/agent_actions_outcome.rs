@@ -921,3 +921,104 @@ fn a_point_locator_tap_hits_the_live_frame_centre() {
         assert_eq!(bad, StatusCode::BAD_REQUEST, "{json}");
     });
 }
+
+/// A Photos-sized screen: `rows` image cells, the first one's label varying.
+fn photo_grid(rows: usize, first: &str) -> String {
+    let cells: Vec<String> = (0..rows)
+        .map(|i| {
+            let label = if i == 0 {
+                first.to_string()
+            } else {
+                format!("截屏, 10月19日, 上午9:{i:03}")
+            };
+            let (x, y) = ((i % 3) * 130, 100 + (i / 3) * 130);
+            format!(
+                r#"{{"type":"XCUIElementTypeImage","label":"{label}","rect":{{"x":{x},"y":{y},"width":128,"height":128}},"isEnabled":"1"}}"#
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"照片","rect":{{"x":0,"y":0,"width":390,"height":844}},"children":[{}]}}}}"#,
+        cells.join(",")
+    )
+}
+
+/// An observed batch answers against the owner's last screen with what
+/// changed, as an observed single action does. Before, every batch carried
+/// the whole tree ("N rows (no baseline: whole screen)" on each call).
+#[test]
+fn an_observed_batch_diffs_against_the_owners_last_screen() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    block(async {
+        let acted = std::sync::Arc::new(AtomicBool::new(false));
+        let seen = acted.clone();
+        let runner = mock_runner(move |request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.to_string()));
+            }
+            if request.contains("/source?format=json") {
+                let first = if seen.load(Ordering::SeqCst) {
+                    "已选择"
+                } else {
+                    "截屏, 10月19日, 上午9:000"
+                };
+                return Some((Duration::ZERO, photo_grid(230, first)));
+            }
+            if request.starts_with("POST ") {
+                seen.store(true, Ordering::SeqCst);
+            }
+            Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
+        });
+        let state = build_state_with_runner(runner.url());
+        let send = |method: &'static str, owner: Option<&'static str>, body: &'static str| {
+            let state = state.clone();
+            async move {
+                let uri = if method == "GET" { "/agent/elements" } else { "/agent/actions" };
+                let mut builder = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("x-phone-control", "1")
+                    .header(header::CONTENT_TYPE, "application/json");
+                if let Some(owner) = owner {
+                    builder = builder.header("x-phone-owner", owner);
+                }
+                let response = server::http::router(state)
+                    .oneshot(builder.body(Body::from(body)).unwrap())
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                let json = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default();
+                (status, bytes.len(), json)
+            }
+        };
+        let batch = r#"{"steps":[{"kind":"action","action":{"type":"home"}}],"observe":true}"#;
+
+        // No owner, no baseline: the whole screen, as before.
+        let (status, whole_bytes, whole) = send("POST", None, batch).await;
+        assert_eq!(status, StatusCode::OK, "{whole}");
+        assert_eq!(whole["elements"].as_array().map(Vec::len), Some(231), "{whole}");
+        assert!(whole.get("delta").is_none(), "{whole}");
+
+        acted.store(false, Ordering::SeqCst);
+        let (status, _, read) = send("GET", Some("photos-agent"), "").await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        let first = read["snapshot"].as_str().unwrap().to_string();
+
+        let (status, delta_bytes, observed) = send("POST", Some("photos-agent"), batch).await;
+        assert_eq!(status, StatusCode::OK, "{observed}");
+        assert!(observed.get("elements").is_none(), "{observed}");
+        assert_eq!(observed["baseline"], first.as_str(), "{observed}");
+        assert_eq!(observed["delta"]["added"].as_array().unwrap().len(), 1, "{observed}");
+        assert_eq!(observed["delta"]["unchanged"], 230, "{observed}");
+        eprintln!(
+            "observed batch on a 231-row screen: whole tree {whole_bytes} B, delta {delta_bytes} B"
+        );
+        assert!(delta_bytes * 10 < whole_bytes, "{delta_bytes} vs {whole_bytes}");
+
+        // The next batch diffs against the screen the last one ended on.
+        let (_, _, again) = send("POST", Some("photos-agent"), batch).await;
+        assert_eq!(again["baseline"], observed["snapshot"], "{again}");
+        assert!(again.get("elements").is_none(), "{again}");
+    });
+}

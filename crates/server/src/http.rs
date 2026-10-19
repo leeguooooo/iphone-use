@@ -6373,7 +6373,7 @@ fn rect_union_area_clipped(rects: &[[f64; 4]], screen_width: f64, screen_height:
 /// How many recent element trees the daemon retains for `?since=` diffs.
 /// An agent diffs against its own previous read, so a handful is plenty; a
 /// miss simply degrades to the full tree.
-const ELEMENT_SNAPSHOT_CACHE_CAP: usize = 8;
+const ELEMENT_SNAPSHOT_CACHE_CAP: usize = 16;
 
 /// Retain `rows` under its snapshot token so a later `?since=` can diff
 /// against it. Re-serving an already-cached snapshot refreshes its position.
@@ -11863,9 +11863,34 @@ async fn agent_actions_inner(
         if let Some((snapshot, rows)) = observed {
             let rows = Arc::new(rows);
             remember_element_snapshot(&state, &snapshot, &rows);
+            // Like an observed single action: against the last screen this
+            // owner saw, answer with what changed. Every batch used to
+            // carry the whole tree (Photos 精选集: 230 rows per batch).
+            let baseline = owner_last_snapshot(&state, &headers).and_then(|since| {
+                lookup_element_snapshot(&state, &since).map(|rows| (since, rows))
+            });
             note_owner_snapshot(&state, &headers, &snapshot);
             result["snapshot"] = serde_json::json!(snapshot);
-            result["elements"] = serde_json::json!(&*rows);
+            match baseline {
+                Some((baseline_id, baseline_rows)) => {
+                    let delta = diff_element_rows(&baseline_rows, &rows);
+                    if let Some(changed) = app_changed_json(&baseline_rows, &rows) {
+                        result["app_changed"] = changed;
+                    }
+                    // Nothing in common (another app, another screen): the
+                    // whole tree is no bigger than a delta of it.
+                    if delta.unchanged == 0 && !rows.is_empty() {
+                        result["elements"] = serde_json::json!(&*rows);
+                    } else {
+                        result["baseline"] = serde_json::json!(baseline_id);
+                        result["delta"] = elements_delta_json(&delta, &rows);
+                        if delta_shows_no_visible_change(&delta, &report) {
+                            result["no_visible_change"] = serde_json::Value::Bool(true);
+                        }
+                    }
+                }
+                None => result["elements"] = serde_json::json!(&*rows),
+            }
         }
         result["settle"] = report.to_json();
         if let Some(alert) = alert_json(probe_alert(&mut w).await) {
@@ -13373,18 +13398,21 @@ async fn agent_input_inner(
                             // carrying the token. Read before noting the new one.
                             let owner_baseline = owner_last_snapshot(&state, &headers);
                             note_owner_snapshot(&state, &headers, &snapshot);
-                            let baseline = query
-                                .since
-                                .as_deref()
-                                .filter(|since| !since.is_empty())
-                                .or_else(|| {
-                                    value.get("snapshot").and_then(serde_json::Value::as_str)
-                                })
-                                .or(owner_baseline.as_deref())
-                                .and_then(|since| {
-                                    lookup_element_snapshot(&state, since)
-                                        .map(|baseline| (since, baseline))
-                                });
+                            // The first of these still cached: a named
+                            // baseline evicted from the cache falls back to
+                            // the owner's last screen rather than to the
+                            // whole tree.
+                            let baseline = [
+                                query.since.as_deref().filter(|since| !since.is_empty()),
+                                value.get("snapshot").and_then(serde_json::Value::as_str),
+                                owner_baseline.as_deref(),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .find_map(|since| {
+                                lookup_element_snapshot(&state, since)
+                                    .map(|baseline| (since, baseline))
+                            });
                             match baseline {
                                 Some((baseline_id, baseline_rows)) => {
                                     let delta = diff_element_rows(&baseline_rows, &rows);
