@@ -23924,11 +23924,11 @@ mod tests {
                 actionable.load(std::sync::atomic::Ordering::SeqCst),
                 "a refused request says nothing about the runner's health"
             );
-            let runner = &detail.as_ref().unwrap()["runner_error"];
-            assert_eq!(runner["status"], 400);
-            assert_eq!(runner["code"], "invalid argument");
-            assert_eq!(runner["message"], OFF_SCREEN_REFUSAL);
-            assert_eq!(runner["call"], "POST /actions (swipe)");
+            let error = &detail.as_ref().unwrap()["runner_error"];
+            assert_eq!(error["status"], 400);
+            assert_eq!(error["code"], "invalid argument");
+            assert_eq!(error["message"], OFF_SCREEN_REFUSAL);
+            assert_eq!(error["call"], "POST /actions (swipe)");
 
             let body = runner_rejected_body(detail.as_ref());
             assert_eq!(body["error"], "runner_rejected");

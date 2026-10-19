@@ -49,7 +49,7 @@ pub fn local_time(unix: u64) -> LocalTime {
         hour: tm.tm_hour as u32,
         day: tm.tm_mday as u32,
         month: tm.tm_mon as u32 + 1,
-        weekday: tm.tm_runnery as u32,
+        weekday: tm.tm_wday as u32,
     }
 }
 
