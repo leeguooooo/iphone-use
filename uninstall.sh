@@ -1648,7 +1648,9 @@ if [ "$INSTANCE_NAME" = default ]; then
             warn "preserving $AUTO_UPDATE_PLIST: it does not run $HOME/.iphone-use/auto-update.sh"
         fi
     fi
-    if [ "$STATE_SAFE" = "1" ] && [ -d "$STATE_DIR" ]; then
+    # A job we did not remove still runs the script: leave its files with it.
+    if [ "$STATE_SAFE" = "1" ] && [ -d "$STATE_DIR" ] \
+        && { [ ! -e "$AUTO_UPDATE_PLIST" ] || [ "$DRY_RUN" = "1" ]; }; then
         for AUTO_UPDATE_FILE in auto-update.sh auto-update.disabled auto-update-last.json; do
             [ ! -f "$STATE_DIR/$AUTO_UPDATE_FILE" ] \
                 || remove_file "$STATE_DIR/$AUTO_UPDATE_FILE" "$STATE_DIR/$AUTO_UPDATE_FILE"

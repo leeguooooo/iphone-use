@@ -7,15 +7,18 @@ SCRIPT = Path(__file__).resolve().parent / "auto-update.sh"
 
 class StatusServer:
     """Serves `payload`; once `marker` exists (the stub installer ran for this
-    instance) it reports `after_version`, like a restarted daemon would."""
-    def __init__(self, payload, marker=None, after_version=None):
-        self.payload, self.marker, self.after_version = payload, marker, after_version
+    instance) it reports `after_version`, like a restarted daemon would. With
+    `bearer` set, any other Authorization is refused."""
+    def __init__(self, payload, marker=None, after_version=None, bearer=None):
+        self.payload, self.marker, self.after_version, self.bearer = payload, marker, after_version, bearer
         handler = self._handler()
         self.httpd = http.server.HTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
     def _handler(s):
         class H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                if s.bearer is not None and self.headers.get("Authorization") != f"Bearer {s.bearer}":
+                    self.send_response(401); self.send_header("Content-Length", "0"); self.end_headers(); return
                 payload = dict(s.payload)
                 if s.marker is not None and s.after_version and Path(s.marker).exists():
                     payload["version"] = s.after_version
@@ -30,12 +33,12 @@ class StatusServer:
     def url(self): return f"http://127.0.0.1:{self.port}/agent/status"
     def close(self): self.httpd.shutdown()
 
-def write_plist(home, label, port):
+def write_plist(home, label, port, credential=("IPHONE_USE_AGENT_TOKEN", "t")):
     agents = Path(home) / "Library" / "LaunchAgents"
     agents.mkdir(parents=True, exist_ok=True)
     with open(agents / f"{label}.plist", "wb") as f:
         plistlib.dump({"Label": label, "EnvironmentVariables": {
-            "IPHONE_USE_PORT": str(port), "IPHONE_USE_AGENT_TOKEN": "t", "IPHONE_USE_HOST": "127.0.0.1"}}, f)
+            "IPHONE_USE_PORT": str(port), credential[0]: credential[1], "IPHONE_USE_HOST": "127.0.0.1"}}, f)
 
 def run(latest, *args, home, installed_log, extra_env=None, status_url=None):
     env = dict(os.environ, HOME=home, IPHONE_USE_STATE_DIR=str(Path(home) / "state"),
@@ -159,6 +162,48 @@ with tempfile.TemporaryDirectory() as home:
         for s in servers: s.close()
     report("--instance upgrades only that instance", rc == 0 and installed_instances(log) == ["ix"],
            f"rc={rc} installed={installed_instances(log)} err={err.strip()[-200:]}")
+
+# A default install has no agent token: the daemon takes its password instead.
+with tempfile.TemporaryDirectory() as home:
+    log = Path(home) / "installed"
+    srv = StatusServer(base, marker=f"{log}.default", after_version="0.6.0", bearer="pw")
+    write_plist(home, "com.leeguoo.iphone-use", srv.port, credential=("IPHONE_USE_PASSWORD", "pw"))
+    try:
+        rc, err = run("v0.6.0", home=home, installed_log=log)
+    finally:
+        srv.close()
+    report("a daemon with only a password is reached with it", rc == 0 and installed_instances(log) == ["default"],
+           f"rc={rc} err={err.strip()[-200:]}")
+
+# An earlier failure stays reported until that instance is upgraded or found current.
+with tempfile.TemporaryDirectory() as home:
+    log = Path(home) / "installed"
+    state = Path(home) / "state"; state.mkdir()
+    (state / "auto-update-last.json").write_text(json.dumps({"at": 1, "latest": "0.6.0", "ok": False, "instances": [
+        {"instance": "ix", "from": "0.5.4", "to": "0.5.4", "ok": False, "error": "still 0.5.4 after the install"}]}))
+    servers = {"default": StatusServer(base, marker=f"{log}.default", after_version="0.6.0"),
+               "ix": StatusServer({**base, "owner": "agent"})}
+    write_plist(home, "com.leeguoo.iphone-use", servers["default"].port)
+    write_plist(home, "com.leeguoo.iphone-use.ix", servers["ix"].port)
+    try:
+        rc, err = run("v0.6.0", home=home, installed_log=log)
+    finally:
+        for srv in servers.values(): srv.close()
+    out = outcome(home) or {}
+    rows = {r["instance"]: r["ok"] for r in out.get("instances", [])}
+    report("a run that skipped a failed instance keeps its failure", out.get("ok") is False and rows == {"default": True, "ix": False},
+           f"outcome={out} err={err.strip()[-200:]}")
+    srv = StatusServer({**base, "version": "0.6.0"})
+    write_plist(home, "com.leeguoo.iphone-use.ix", srv.port)
+    (Path(home) / "Library/LaunchAgents/com.leeguoo.iphone-use.plist").unlink()
+    try:
+        rc, err = run("v0.6.0", home=home, installed_log=log)
+    finally:
+        srv.close()
+    out = outcome(home) or {}
+    report("a failed instance found current clears the failure", out.get("ok") is True
+           and all(r["instance"] != "ix" or r["ok"] for r in out.get("instances", [])),
+           f"outcome={out} err={err.strip()[-200:]}")
 
 # Success is the version the restarted daemon reports, not the installer's exit.
 with tempfile.TemporaryDirectory() as home:

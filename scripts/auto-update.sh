@@ -97,7 +97,9 @@ daemon_env() {  # print "port token host" from a daemon LaunchAgent plist
 import plistlib, sys
 env = plistlib.load(open(sys.argv[1], 'rb')).get('EnvironmentVariables', {})
 get = lambda name, default: env.get('IPHONE_USE_' + name, env.get('PHONE_REMOTE_' + name, default))  # older plists
-print(get('PORT', '44321'), get('AGENT_TOKEN', '') or '-', get('HOST', '127.0.0.1'))
+# Without an agent token the daemon takes its password as the bearer; a default
+# install has only the password.
+print(get('PORT', '44321'), get('AGENT_TOKEN', '') or get('PASSWORD', '') or '-', get('HOST', '127.0.0.1'))
 PY
 }
 
@@ -211,22 +213,40 @@ settled_version() {  # settled_version <instance> <plist> <latest>
 }
 
 OUTCOME_ROWS=""
+CURRENT_INSTANCES=" "  # found up to date this run: an earlier failure there is resolved
 record() {  # record <instance> <from> <to> <ok 0|1> <error>
     OUTCOME_ROWS="${OUTCOME_ROWS}$1"$'\t'"$2"$'\t'"$3"$'\t'"$4"$'\t'"$5"$'\n'
 }
 
 # Through a temp file and a rename, so the daemon never reads half of it.
 write_outcome() {  # write_outcome <latest>
-    [ -n "$OUTCOME_ROWS" ] || return 0
+    # Nothing attempted: rewrite only to clear failures now found current.
+    if [ -z "$OUTCOME_ROWS" ]; then
+        [ -f "$OUTCOME" ] && [ "$CURRENT_INSTANCES" != " " ] || return 0
+        python3 - "$OUTCOME" "$CURRENT_INSTANCES" <<'PY' || return 0
+import json, sys
+last = json.load(open(sys.argv[1]))
+current = set(sys.argv[2].split())
+sys.exit(0 if any(not r.get('ok') and r.get('instance') in current for r in last.get('instances') or []) else 1)
+PY
+    fi
     local tmp
     tmp="$(mktemp "$STATE_DIR/.auto-update-last.XXXXXX")" || return 0
-    if ROWS="$OUTCOME_ROWS" LATEST="$1" python3 - >"$tmp" <<'PY'
+    if ROWS="$OUTCOME_ROWS" LATEST="$1" PREVIOUS="$OUTCOME" CURRENT="$CURRENT_INSTANCES" python3 - >"$tmp" <<'PY'
 import json, os, time
 rows = []
 for line in os.environ['ROWS'].splitlines():
     instance, frm, to, ok, error = (line.split('\t') + [''] * 5)[:5]
     rows.append({'instance': instance, 'from': frm or None, 'to': to or None,
                  'ok': ok == '1', 'error': error or None})
+# An earlier failure stays reported until a run upgrades that instance or finds
+# it current; a run that only reached the other instances does not clear it.
+seen = {r['instance'] for r in rows} | set(os.environ['CURRENT'].split())
+try:
+    previous = json.load(open(os.environ['PREVIOUS'])).get('instances') or []
+except (OSError, ValueError, AttributeError):
+    previous = []
+rows += [r for r in previous if isinstance(r, dict) and not r.get('ok') and r.get('instance') not in seen]
 print(json.dumps({'at': int(time.time()), 'latest': os.environ['LATEST'].lstrip('v'),
                   'ok': all(r['ok'] for r in rows), 'instances': rows}, indent=1))
 PY
@@ -319,6 +339,7 @@ cmd_run() {
         log "decision[$instance]: $decision"
         case "$decision" in
             upgrade*) ;;
+            skip:up_to_date*) CURRENT_INSTANCES="$CURRENT_INSTANCES$instance "; continue ;;
             *) [ "$drc" = 0 ] || rc=$drc; continue ;;
         esac
         if [ "$dry" = 1 ]; then log "dry-run: would run the installer now for $instance"; continue; fi
@@ -344,7 +365,7 @@ cmd_run() {
             record "$instance" "$before" "$after" 0 "$why"
         fi
     done <<<"$list"
-    write_outcome "$latest"
+    [ "$dry" = 1 ] || write_outcome "$latest"
     [ "$upgraded" = 0 ] || refresh_self "$latest"
     [ "$failed" = 0 ] || return 1
     return "$rc"
