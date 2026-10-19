@@ -614,6 +614,10 @@ static NSMutableDictionary *IPURSerialize(
   // only hasKeyboardFocus (hardware: Settings' search field, iOS 27).
   BOOL focused = [IPURKVC(snapshot, @"hasFocus") boolValue] || [IPURKVC(snapshot, @"hasKeyboardFocus") boolValue];
   node[@"isFocused"] = focused ? @"1" : @"0";
+  // Selected (a picked photo in select mode, the current tab, a chosen segment). The attribute was
+  // already fetched with the snapshot; only a selected node carries the key, so the common case
+  // costs no bytes.
+  if ([IPURKVC(snapshot, @"selected") boolValue]) node[@"isSelected"] = @"1";
   if (walk->includeElements) {
     id element = IPURKVC(snapshot, @"accessibilityElement");
     if (element != nil) node[IPURNodeAXElementKey] = element;

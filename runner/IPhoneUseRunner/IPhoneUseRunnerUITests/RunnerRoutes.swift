@@ -85,10 +85,7 @@ extension RunnerTests {
         return .value(try freshNode(id).isVisible(screen: windowSizePoints()))
       }
       if let id = match(parts, "element/:id/enabled")?.first { return .value(try freshNode(id).isEnabled) }
-      if let id = match(parts, "element/:id/selected")?.first {
-        _ = try freshNode(id)
-        return .value(false)
-      }
+      if let id = match(parts, "element/:id/selected")?.first { return .value(try freshNode(id).isSelected) }
       if let id = match(parts, "element/:id/name")?.first { return .value(try freshNode(id).type) }
       return nil
 
@@ -309,7 +306,7 @@ extension RunnerTests {
       return .value(node.isVisible(screen: screen))
     case "accessible", "wdAccessible", "isAccessible": return .value(true)
     case "focused", "hasFocus", "wdFocused", "isFocused": return .value(node.isFocused)
-    case "selected", "wdSelected", "isSelected": return .value(false)
+    case "selected", "wdSelected", "isSelected": return .value(node.isSelected)
     case "rect", "wdRect", "frame": return .value(rectValue(node.rect))
     default: return .value(orNull(node.predicateObject(screen: screen)[name]))
     }

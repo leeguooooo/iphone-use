@@ -144,6 +144,11 @@ let screen = CGSize(width: 390, height: 844)
 let tree = UINode(raw: node("Application", label: "Settings", rect: [0, 0, 390, 844], children: [
   node("Window", rect: [0, 0, 390, 844], children: [
     node("Button", label: "Done", rect: [300, 40, 60, 30]),
+    {
+      var picked = node("Image", label: "截屏, 10月19日, 上午9:09", rect: [0, 200, 128, 128])
+      picked["isSelected"] = "1"
+      return picked
+    }(),
     node("Button", label: "OK", id: "ok-button", rect: [20, 40, 60, 30]),
     node("TextField", label: "SpotlightSearchField", placeholder: "Search", rect: [10, 100, 300, 40], focused: true),
     node("Picker", rect: [0, 600, 390, 200], children: [
@@ -184,6 +189,8 @@ do {
         "spotlight predicate")
   check(try Locator.find(using: "predicate string", value: "focused == 1", root: tree, screen: screen).count == 1,
         "focused == 1")
+  check(labels(try Locator.find(using: "predicate string", value: "selected == 1", root: tree, screen: screen))
+          == ["截屏, 10月19日, 上午9:09"], "selected == 1 reads isSelected; unselected nodes carry no key")
   check(labels(try Locator.find(using: "predicate string", value: "type == 'XCUIElementTypeStaticText' AND visible == 0",
                                 root: tree, screen: screen)) == ["Offscreen"], "geometric visible")
   check(try Locator.find(using: "predicate string", value: "(label == 'OK' OR name == 'OK') AND enabled == 1",

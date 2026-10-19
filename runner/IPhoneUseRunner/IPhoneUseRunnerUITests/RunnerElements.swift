@@ -34,6 +34,8 @@ final class UINode {
   var placeholder: String? { nonEmpty(attributes["placeholderValue"]) }
   var isEnabled: Bool { attributes["isEnabled"] as? String != "0" }
   var isFocused: Bool { attributes["isFocused"] as? String == "1" }
+  /// Only selected nodes carry the key (see IPURSerialize).
+  var isSelected: Bool { attributes["isSelected"] as? String == "1" }
 
   var rect: CGRect {
     let r = attributes["rect"] as? [String: Any] ?? [:]
@@ -78,7 +80,7 @@ final class UINode {
       "visible": visible, "isVisible": visible, "wdVisible": visible,
       "accessible": true, "isAccessible": true, "wdAccessible": true,
       "focused": isFocused, "hasFocus": isFocused, "isFocused": isFocused, "wdFocused": isFocused,
-      "selected": false, "isSelected": false, "wdSelected": false,
+      "selected": isSelected, "isSelected": isSelected, "wdSelected": isSelected,
       "rect": rectDictionary, "wdRect": rectDictionary, "frame": rectDictionary,
       "hittable": visible, "isHittable": visible, "wdHittable": visible,
     ]

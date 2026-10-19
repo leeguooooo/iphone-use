@@ -2545,8 +2545,9 @@ pub struct ElementRow {
     /// emit nothing and the default JSON stays byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actions: Option<Vec<String>>,
-    /// From the `Selected` accessibility trait (tab bars, segmented controls,
-    /// filter chips); only `true` is emitted. Affordances flag only.
+    /// Selected (a picked photo in select mode, the current tab, a chosen
+    /// segment): the runner's `isSelected` attribute, or with the affordances
+    /// flag the `Selected` trait; only `true` is emitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<bool>,
     /// Slider/Stepper range, parsed from runner's `minValue`/`maxValue` strings.
@@ -2903,6 +2904,9 @@ fn flatten_node(
         } else {
             Vec::new()
         };
+        // The runner marks only selected nodes (`isSelected:"1"`): a picked
+        // photo in select mode, the current tab. Read on every tree.
+        let selected_attribute = runner_bool(node, "isSelected").filter(|value| *value);
         let (actions, selected, min, max) = if options.affordances {
             let min = runner_number(node, "minValue");
             let max = runner_number(node, "maxValue");
@@ -2915,6 +2919,7 @@ fn flatten_node(
         } else {
             (None, None, None, None)
         };
+        let selected = selected_attribute.or(selected);
         let traits = (options.raw_traits && !traits.is_empty()).then_some(traits);
         out.push(ElementRow {
             kind,
@@ -4607,6 +4612,30 @@ mod tests {
 
         // Raw traits stay behind their own flag.
         assert!(rows.iter().all(|row| row.traits.is_none()));
+    }
+
+    /// Photos select mode: the picked thumbnails carry `isSelected:"1"` and
+    /// read as `selected` with no flag; the others carry nothing.
+    #[test]
+    fn flatten_reads_the_selected_attribute_by_default() {
+        let tree = serde_json::json!({
+            "type": "XCUIElementTypeApplication", "label": "照片",
+            "rect": {"x": 0, "y": 0, "width": 390, "height": 844},
+            "children": [
+                {"type": "XCUIElementTypeImage", "label": "截屏, 10月19日, 上午9:09",
+                 "rect": {"x": 0, "y": 100, "width": 128, "height": 128}, "isSelected": "1"},
+                {"type": "XCUIElementTypeImage", "label": "截屏, 10月19日, 上午9:10",
+                 "rect": {"x": 130, "y": 100, "width": 128, "height": 128}, "isSelected": "0"},
+                {"type": "XCUIElementTypeImage", "label": "截屏, 10月19日, 上午9:11",
+                 "rect": {"x": 260, "y": 100, "width": 128, "height": 128}}
+            ]
+        });
+        let mut rows = Vec::new();
+        flatten_tree_with(&tree, 0, &mut rows, FlattenOptions::default());
+        let selected: Vec<Option<bool>> = rows.iter().skip(1).map(|row| row.selected).collect();
+        assert_eq!(selected, [Some(true), None, None]);
+        let json = serde_json::to_string(&rows[1..]).unwrap();
+        assert_eq!(json.matches("\"selected\"").count(), 1, "{json}");
     }
 
     #[test]
