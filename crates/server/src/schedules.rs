@@ -49,7 +49,7 @@ pub fn local_time(unix: u64) -> LocalTime {
         hour: tm.tm_hour as u32,
         day: tm.tm_mday as u32,
         month: tm.tm_mon as u32 + 1,
-        weekday: tm.tm_wday as u32,
+        weekday: tm.tm_runnery as u32,
     }
 }
 
@@ -434,7 +434,7 @@ pub enum Gate {
 pub fn status_locked(status: &serde_json::Value) -> bool {
     status.get("device_state").and_then(|v| v.as_str()) == Some("locked")
         || status.get("setup_blocked_on").and_then(|v| v.as_str()) == Some("locked")
-        || status.get("wda_locked").and_then(|v| v.as_bool()) == Some(true)
+        || status.get("runner_locked").and_then(|v| v.as_bool()) == Some(true)
 }
 
 /// Decide from one `/agent/status` body. `me` is this run's owner name.

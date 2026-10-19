@@ -176,7 +176,7 @@ final class ConnectionPresentationTests: XCTestCase {
         let tooOld = present(.connected, #"{"setup_blocked_on":"ios_too_old","device_state":"blocked"}"#)
         XCTAssertEqual(tooOld.title, String(localized: "iPhone 系统太旧"))
         XCTAssertNil(tooOld.primary)
-        let runner = present(.connected, #"{"setup_blocked_on":"wda","device_state":"blocked","recovery_owner":"daemon"}"#)
+        let runner = present(.connected, #"{"setup_blocked_on":"runner","device_state":"blocked","recovery_owner":"daemon"}"#)
         XCTAssertEqual(runner.primary, .wakePhone)
     }
 
@@ -220,7 +220,7 @@ final class ConnectionPresentationTests: XCTestCase {
     }
 
     func testLockedAndHandedBack() {
-        XCTAssertEqual(present(.connected, #"{"wda_locked":true,"wda":true}"#).symbol, "lock")
+        XCTAssertEqual(present(.connected, #"{"runner_locked":true,"runner":true}"#).symbol, "lock")
         XCTAssertEqual(present(.connected, #"{"released":true,"human_handoff":true}"#).primary, .wakePhone)
     }
 

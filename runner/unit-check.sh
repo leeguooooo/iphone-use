@@ -1,5 +1,5 @@
 #!/bin/bash
-# Mac-side unit check of the runner's device-independent Swift logic (HTTP parsing, WDA locator
+# Mac-side unit check of the runner's device-independent Swift logic (HTTP parsing, runner locator
 # strategies, W3C pointer actions, screenshot sizing). Compiles those sources with a stub
 # IPURBridge for macOS and runs them; needs no device and no signing.
 #   --bench   also measure full PNG vs scaled JPEG bytes/time on the repo's phone screenshots.

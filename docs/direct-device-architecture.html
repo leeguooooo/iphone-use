@@ -508,7 +508,7 @@
       <p class="eyebrow">iphone-use / Architecture &amp; Acceptance</p>
       <h1>Direct Device 架构与真机验收</h1>
       <p class="lede">
-        链路只有一条：WebDriverAgent 输入加 WDA MJPEG 画面。浏览器通过守护进程控制手机，
+        链路只有一条：WebDriverAgent 输入加 runner MJPEG 画面。浏览器通过守护进程控制手机，
         不读取 Mac 屏幕，也不向 Mac 注入事件。本文记录现有实现、接入顺序和可执行的验收条件。
       </p>
       <div class="meta" aria-label="文档状态">
@@ -541,8 +541,8 @@
       <section id="decision">
         <h2>决策边界</h2>
         <div class="decision">
-          <strong>WDA 不可用就如实失败。</strong>
-          WDA 不可用、请求无效或设备已释放时，服务直接返回失败并说明原因；
+          <strong>runner 不可用就如实失败。</strong>
+          runner 不可用、请求无效或设备已释放时，服务直接返回失败并说明原因；
           任何情况下都不去碰 Mac 的屏幕、光标和焦点。
         </div>
 
@@ -563,7 +563,7 @@
               </tr>
               <tr>
                 <td>画面与输入</td>
-                <td>Phase 1 使用 WDA 的 MJPEG 与 WDA actions。画面与控制共享同一台手机，但经不同的 loopback relay。</td>
+                <td>Phase 1 使用 runner 的 MJPEG 与 runner actions。画面与控制共享同一台手机，但经不同的 loopback relay。</td>
                 <td><code>127.0.0.1:8100/status</code> 可用；<code>/agent/mjpeg</code> 持续返回 multipart 帧；控制请求收到 ACK。</td>
               </tr>
               <tr>
@@ -591,7 +591,7 @@
         <h2>当前架构</h2>
 
         <figure class="architecture">
-          <figcaption>Phase 1：浏览器只连接 iphone-use daemon；WDA 端口不暴露给 LAN。</figcaption>
+          <figcaption>Phase 1：浏览器只连接 iphone-use daemon；runner 端口不暴露给 LAN。</figcaption>
           <div class="flow" aria-label="画面链路">
             <div class="node">
               <b>iPhone Safari</b>
@@ -604,7 +604,7 @@
             </div>
             <div class="arrow" aria-hidden="true">→</div>
             <div class="node">
-              <b>WDA on iPhone</b>
+              <b>runner on iPhone</b>
               <span>设备端 MJPEG :9100<br>Mac loopback relay :9100</span>
             </div>
           </div>
@@ -620,7 +620,7 @@
             </div>
             <div class="arrow" aria-hidden="true">→</div>
             <div class="node">
-              <b>WDA actions</b>
+              <b>runner actions</b>
               <span>设备坐标、文字、按键、手势<br>Mac loopback relay :8100</span>
             </div>
           </div>
@@ -633,11 +633,11 @@
           <article class="card">
             <h3>画面</h3>
             <p>
-              默认画面来自 WDA MJPEG。<code>setup-wda.sh</code> 把设备端 :9100 转发到
+              默认画面来自 runner MJPEG。<code>setup-runner.sh</code> 把设备端 :9100 转发到
               <code>127.0.0.1:9100</code>，daemon 再通过 <code>/agent/mjpeg</code> 代理给浏览器。
             </p>
             <p>
-              MJPEG relay 是 best-effort。它失效时，浏览器每 2.5 秒请求一次 WDA PNG 截图；
+              MJPEG relay 是 best-effort。它失效时，浏览器每 2.5 秒请求一次 runner PNG 截图；
               控制链路可以继续工作。降级画面不能冒充实时画面。
             </p>
           </article>
@@ -648,7 +648,7 @@
             </p>
             <p>
               tap、longpress、swipe、drag、text、key、keyboard、Home、Back 和 Spotlight
-              走 WDA。服务端不接受逐点发送的 down/move/up 流。
+              走 runner。服务端不接受逐点发送的 down/move/up 流。
             </p>
           </article>
         </div>
@@ -659,7 +659,7 @@
         <h2>浏览器控制契约</h2>
         <p>
           浏览器发出的 direct 控制必须满足四个条件：同源登录 cookie 有效、请求头
-          <code>X-Phone-Control: 1</code> 存在、backend 是 direct、WDA 成功执行动作。
+          <code>X-Phone-Control: 1</code> 存在、backend 是 direct、runner 成功执行动作。
           客户端只有在 HTTP 成功且 JSON 为 <code>{"ok":true}</code> 时才能展示成功反馈。
         </p>
 
@@ -676,7 +676,7 @@
               <tr>
                 <td class="nowrap"><code>200</code></td>
                 <td><code>{"ok":true}</code></td>
-                <td>WDA 调用返回成功。客户端可给出成功反馈；端到端验收还要观察手机界面发生预期变化。</td>
+                <td>runner 调用返回成功。客户端可给出成功反馈；端到端验收还要观察手机界面发生预期变化。</td>
               </tr>
               <tr>
                 <td><code>400</code></td>
@@ -701,12 +701,12 @@
               <tr>
                 <td><code>422</code></td>
                 <td><code>unsupported_control</code></td>
-                <td>WDA 可操作，但动作不支持。Switcher 属于这一类。</td>
+                <td>runner 可操作，但动作不支持。Switcher 属于这一类。</td>
               </tr>
               <tr>
                 <td><code>503</code></td>
-                <td><code>released</code>、<code>wda_not_configured</code> 或 <code>wda_unavailable</code></td>
-                <td>停止成功提示。released 由用户点「连接手机」；其余检查 WDA runner、relay、锁屏与签名。</td>
+                <td><code>released</code>、<code>runner_not_configured</code> 或 <code>runner_unavailable</code></td>
+                <td>停止成功提示。released 由用户点「连接手机」；其余检查 runner、relay、锁屏与签名。</td>
               </tr>
             </tbody>
           </table>
@@ -724,7 +724,7 @@
         <p>
           backend、device、screen 和 control 要分开记录。任意一轴正常都不能替其他轴背书。
           当前 <code>/agent/status</code> 已输出前三轴的一部分；control 没有独立字段，必须由
-          <code>wda_actionable</code>、<code>drivable</code> 和单次 ACK 推导。
+          <code>runner_actionable</code>、<code>drivable</code> 和单次 ACK 推导。
         </p>
 
         <div class="table-wrap">
@@ -742,22 +742,22 @@
                 <td>backend</td>
                 <td><code>backend: direct</code></td>
                 <td>固定值，不随健康探测变化。</td>
-                <td><code>direct</code> 不代表 WDA 或画面在线。</td>
+                <td><code>direct</code> 不代表 runner 或画面在线。</td>
               </tr>
               <tr>
                 <td>device</td>
                 <td><code>device_state: ready | locked | blocked | offline | released</code></td>
                 <td>
-                  released 优先；之后依次看 <code>wda_actionable</code>、<code>wda_locked</code>、
-                  <code>wda</code>。<code>mode=agent</code> 只说明 WDA runner 可达，不保证它能操作。
+                  released 优先；之后依次看 <code>runner_actionable</code>、<code>runner_locked</code>、
+                  <code>runner</code>。<code>mode=agent</code> 只说明 runner 可达，不保证它能操作。
                 </td>
-                <td><code>wda=true</code> 可能是 locked 或 zombie ready。</td>
+                <td><code>runner=true</code> 可能是 locked 或 zombie ready。</td>
               </tr>
               <tr>
                 <td>screen</td>
                 <td>Direct 当前只返回 <code>screen_state: waiting | offline</code></td>
                 <td>
-                  WDA 可达时是 waiting，否则 offline。真实画面要看 MJPEG 是否持续出帧；
+                  runner 可达时是 waiting，否则 offline。真实画面要看 MJPEG 是否持续出帧；
                   MJPEG 失败而 PNG 可用时，验收记录为 degraded。
                 </td>
                 <td><code>waiting</code> 不是 live 证明，也不表示帧在更新。</td>
@@ -766,7 +766,7 @@
                 <td>control</td>
                 <td>当前没有 <code>control_state</code> 字段</td>
                 <td>
-                  候选 ready 条件是 direct、未 released、<code>wda_actionable=true</code>；
+                  候选 ready 条件是 direct、未 released、<code>runner_actionable=true</code>；
                   最终以每次 <code>POST /control</code> 的 <code>{"ok":true}</code> 和手机可见结果为准。
                 </td>
                 <td><code>drivable=true</code> 不能证明某个具体动作已执行。</td>
@@ -796,32 +796,32 @@
                 <td>显示「连接手机」，由用户重新连接。</td>
               </tr>
               <tr>
-                <td><code>wda_actionable=true</code></td>
+                <td><code>runner_actionable=true</code></td>
                 <td>ready</td>
                 <td>waiting</td>
                 <td>按动作 ACK 判定</td>
                 <td>连接 MJPEG；成功出帧后才算 screen live。</td>
               </tr>
               <tr>
-                <td><code>wda_locked=true</code></td>
+                <td><code>runner_locked=true</code></td>
                 <td>locked</td>
                 <td>waiting</td>
                 <td>503 或动作失败</td>
                 <td>要求解锁并保持唤醒。</td>
               </tr>
               <tr>
-                <td><code>wda=true</code>，但不可操作</td>
+                <td><code>runner=true</code>，但不可操作</td>
                 <td>blocked</td>
                 <td>waiting</td>
-                <td>503 wda_unavailable</td>
+                <td>503 runner_unavailable</td>
                 <td>重启 direct device service，检查 Code=41、CoreDevice tunnel。</td>
               </tr>
               <tr>
-                <td><code>wda=false</code></td>
+                <td><code>runner=false</code></td>
                 <td>offline</td>
                 <td>offline</td>
                 <td>503</td>
-                <td>检查 WDA、8100/9100 relay 与签名。</td>
+                <td>检查 runner、8100/9100 relay 与签名。</td>
               </tr>
             </tbody>
           </table>
@@ -846,11 +846,11 @@
                 <td>启动或使用中出现任何 macOS 隐私权限提示都算回归。</td>
               </tr>
               <tr>
-                <td>WDA 暴露面</td>
+                <td>runner 暴露面</td>
                 <td>
                   Mac 的 8100/9100 <code>iproxy</code> relay 必须只绑定
-                  <code>127.0.0.1</code>，且都指向同一 UDID。WDA 自身没有鉴权；
-                  loopback relay 不能阻止同一可路由网络上的主机直连手机端 WDA。
+                  <code>127.0.0.1</code>，且都指向同一 UDID。runner 自身没有鉴权；
+                  loopback relay 不能阻止同一可路由网络上的主机直连手机端 runner。
                 </td>
                 <td>
                   发现 relay 监听 <code>0.0.0.0</code>、控制/画面目标不一致，或手机处于不可信网络时停止验收。
@@ -869,14 +869,14 @@
               </tr>
               <tr>
                 <td>空闲释放</td>
-                <td>默认空闲 600 秒后停止 WDA，把手机交还用户（<code>IPHONE_USE_IDLE_RELEASE_SECS</code>，0 表示一直保持）；有 live stream 时不释放。下一个 agent 请求会重新拉起 WDA。</td>
+                <td>默认空闲 600 秒后停止 runner，把手机交还用户（<code>IPHONE_USE_IDLE_RELEASE_SECS</code>，0 表示一直保持）；有 live stream 时不释放。下一个 agent 请求会重新拉起 runner。</td>
                 <td>released 状态下控制必须 503，不能在后台悄悄重启或注入。</td>
               </tr>
               <tr>
-                <td>WDA 所有权</td>
+                <td>runner 所有权</td>
                 <td>
                   只有 installer 管理的 loopback supervisor 可设置
-                  <code>IPHONE_USE_WDA_MANAGED=true</code>。自定义或远程 WDA 是 external。
+                  <code>IPHONE_USE_RUNNER_MANAGED=true</code>。自定义或远程 runner 是 external。
                 </td>
                 <td>external endpoint 不得触发本机 stop、idle release 或 bootstrap；状态要明确由操作者恢复。</td>
               </tr>
@@ -892,20 +892,20 @@
           <li>
             <b>准备目标设备</b>
             在 Xcode 登录 Apple ID；完成配对、Developer Mode 和开发者信任。第一次设置保持 USB、解锁和亮屏，并明确
-            <code>WDA_UDID</code>，避免多设备自动选择。
+            <code>IPU_RUNNER_UDID</code>，避免多设备自动选择。
           </li>
           <li>
             <b>安装 daemon</b>
             <pre><code>curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh</code></pre>
-            安装器会停止旧 daemon、保留密码和受支持的配置，并写入 loopback WDA endpoints。WDA 尚未验证时，
-            daemon 仍启动其 HTTP/登录/状态控制面，但明确报告设备层 offline；不会假装 WDA 已就绪。
+            安装器会停止旧 daemon、保留密码和受支持的配置，并写入 loopback runner endpoints。runner 尚未验证时，
+            daemon 仍启动其 HTTP/登录/状态控制面，但明确报告设备层 offline；不会假装 runner 已就绪。
           </li>
           <li>
-            <b>建立 WDA 与两条 relay</b>
-            <pre><code>~/.iphone-use/setup-wda.sh doctor
-~/.iphone-use/setup-wda.sh</code></pre>
+            <b>建立 runner 与两条 relay</b>
+            <pre><code>~/.iphone-use/setup-runner.sh doctor
+~/.iphone-use/setup-runner.sh</code></pre>
             setup 必须验证 8100 控制 relay，把 runner 交给独立的
-            <code>com.leeguoo.iphone-use.wda</code> LaunchAgent，再启动产品 daemon。9100 MJPEG relay
+            <code>com.leeguoo.iphone-use.runner</code> LaunchAgent，再启动产品 daemon。9100 MJPEG relay
             也必须由本次进程持有、绑定 loopback，并指向同一 UDID；失败时不得把任意已有 listener
             写成可用画面 URL。运行中断流时，浏览器才降级为静帧并退避重试实时流。
           </li>
@@ -943,26 +943,26 @@
                 <td>升级</td>
                 <td>
                   配置优先级保持“显式环境变量 &gt; 现有 plist &gt; 默认值”；不能轮换既有密码，不能丢失
-                  UDID、WDA endpoints 或 agent token。每次升级刷新
-                  <code>~/.iphone-use/setup-wda.sh</code>。
+                  UDID、runner endpoints 或 agent token。每次升级刷新
+                  <code>~/.iphone-use/setup-runner.sh</code>。
                 </td>
-                <td>升级前后 status 中设备一致；新二进制版本正确；WDA supervisor 接管后的替代 runner 可用。</td>
+                <td>升级前后 status 中设备一致；新二进制版本正确；runner supervisor 接管后的替代 runner 可用。</td>
               </tr>
               <tr>
                 <td>签名续期</td>
-                <td>免费 Apple ID profile 可能约 7 天到期。WDA 失效时重新运行 setup。</td>
-                <td>WDA app 能启动，8100 status 和 action-level probe 都成功。</td>
+                <td>免费 Apple ID profile 可能约 7 天到期。runner 失效时重新运行 setup。</td>
+                <td>runner app 能启动，8100 status 和 action-level probe 都成功。</td>
               </tr>
               <tr>
                 <td>停止</td>
-                <td><code>setup-wda.sh stop</code> 要停 WDA supervisor、runner、8100/9100 relay；daemon 单独 bootout。</td>
+                <td><code>setup-runner.sh stop</code> 要停 runner supervisor、runner、8100/9100 relay；daemon 单独 bootout。</td>
                 <td>两个 launchd job 不存在，相关进程与监听端口消失。</td>
               </tr>
               <tr>
                 <td>完整卸载</td>
                 <td>
                   移除两个 LaunchAgent plist、<code>iPhoneUse.app</code>、产品日志和
-                  <code>~/.iphone-use</code>。如不再需要，在手机上删除 WDA runner。共享的 Xcode、
+                  <code>~/.iphone-use</code>。如不再需要，在手机上删除 runner。共享的 Xcode、
                   Homebrew 和 iproxy 不应自动删除；操作者自行安装的实验性 socat 也不在卸载范围。
                 </td>
                 <td>重登后 job 不复活；44321/8100/9100 不监听；手机端 runner 按用户选择清除。</td>
@@ -975,7 +975,7 @@
           <strong>安装包现在包含 ownership-gated、幂等的完整卸载器。</strong>
           它只删除能够证明属于 iphone-use 的 LaunchAgent、PID 记录、应用、日志和状态；
           遇到进程身份、路径或仓库状态不明时会保留恢复证据并以非零状态退出。
-          默认不会动手机上的 WDA runner，也不会删除 Xcode、Homebrew、iproxy 或 socat。
+          默认不会动手机上的 runner，也不会删除 Xcode、Homebrew、iproxy 或 socat。
         </aside>
 
         <h3>完整卸载</h3>
@@ -990,7 +990,7 @@
   --udid '&lt;exact-iphone-udid&gt;' \
   --bundle-id '&lt;installed-runner-bundle-id&gt;'</code></pre>
         <p class="small">
-          卸载器拒绝 root、非规范 HOME、符号链接命名空间、脏的 WDA checkout 和无法核验的活动 PID。
+          卸载器拒绝 root、非规范 HOME、符号链接命名空间、脏的 runner checkout 和无法核验的活动 PID。
           失败时不要手动批量删除保留文件；先按错误输出核对进程与归属，再重试。
         </p>
       </section>
@@ -1018,7 +1018,7 @@
                 <td>D01</td>
                 <td>不碰 Mac</td>
                 <td>在未授予任何 macOS 隐私权限的测试机上启动 daemon，用浏览器看和控制手机。</td>
-                <td>无权限提示；画面和 WDA 控制可用；Mac 光标、焦点和屏幕内容不受影响。</td>
+                <td>无权限提示；画面和 runner 控制可用；Mac 光标、焦点和屏幕内容不受影响。</td>
                 <td>status JSON、启动日志、Mac 屏幕录像。</td>
               </tr>
               <tr>
@@ -1032,7 +1032,7 @@
                 <td>D03</td>
                 <td>升级</td>
                 <td>从上一个版本运行安装命令和 setup。</td>
-                <td>旧 daemon 停止；WDA 验证后新 daemon 加载；密码、UDID 与 WDA endpoints 不变。</td>
+                <td>旧 daemon 停止；runner 验证后新 daemon 加载；密码、UDID 与 runner endpoints 不变。</td>
                 <td>升级前后 plist 摘要、launchctl、登录验证。</td>
               </tr>
               <tr>
@@ -1072,8 +1072,8 @@
               </tr>
               <tr>
                 <td>D09</td>
-                <td>WDA 不可用</td>
-                <td>停 WDA supervisor 后发送控制。</td>
+                <td>runner 不可用</td>
+                <td>停 runner supervisor 后发送控制。</td>
                 <td>503；Mac 光标、焦点、屏幕采集均无变化；backend 仍是 direct。</td>
                 <td>HTTP、status、Mac 屏幕录像。</td>
               </tr>
@@ -1088,7 +1088,7 @@
                 <td>D11</td>
                 <td>空闲释放</td>
                 <td>按配置时长停止操作且关闭 live stream。</td>
-                <td><code>released=true</code>；控制 503；点「连接手机」后 WDA 恢复。</td>
+                <td><code>released=true</code>；控制 503；点「连接手机」后 runner 恢复。</td>
                 <td>释放前后 status、launchctl、恢复录像。</td>
               </tr>
               <tr>
@@ -1108,7 +1108,7 @@
               <tr>
                 <td>D14</td>
                 <td>多设备稳定性</td>
-                <td>连接两台已配对设备，重启 WDA 和 daemon。</td>
+                <td>连接两台已配对设备，重启 runner 和 daemon。</td>
                 <td>始终使用已固定 UDID；不因重连静默换手机。</td>
                 <td>配置 UDID、两次 status 与设备画面。</td>
               </tr>
@@ -1128,7 +1128,7 @@
         <h2>现场检查命令</h2>
         <p>以下命令不打印 token。运行结束后清空 shell 变量和临时 cookie。</p>
 
-        <h3>1. 后端、设备与 WDA</h3>
+        <h3>1. 后端、设备与 runner</h3>
         <pre><code>DAEMON_PLIST="$HOME/Library/LaunchAgents/com.leeguoo.iphone-use.plist"
 TOKEN="$(/usr/libexec/PlistBuddy \
   -c 'Print :EnvironmentVariables:IPHONE_USE_AGENT_TOKEN' \
@@ -1139,12 +1139,12 @@ TOKEN="$(/usr/libexec/PlistBuddy \
 
 curl -fsS -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:44321/agent/status |
-  jq '{backend,mode,device_state,screen_state,wda,wda_actionable,wda_locked,
+  jq '{backend,mode,device_state,screen_state,runner,runner_actionable,runner_locked,
        drivable,released,hint}'
 
 curl -fsS http://127.0.0.1:8100/status &gt;/dev/null
 launchctl print "gui/$(id -u)/com.leeguoo.iphone-use"
-launchctl print "gui/$(id -u)/com.leeguoo.iphone-use.wda"</code></pre>
+launchctl print "gui/$(id -u)/com.leeguoo.iphone-use.runner"</code></pre>
 
         <h3>2. 浏览器 cookie 与控制 ACK</h3>
         <pre><code>COOKIE_JAR="$(mktemp)"
@@ -1197,28 +1197,28 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
             <tbody>
               <tr>
                 <td>App Switcher</td>
-                <td>WDA 无法合成 home-indicator 系统手势，也没有可点的 WDA element。不支持。</td>
+                <td>runner 无法合成 home-indicator 系统手势，也没有可点的 runner element。不支持。</td>
                 <td>工具栏不提供 Switcher，用 Spotlight 打开其他 App；不得返回假成功。</td>
               </tr>
               <tr>
                 <td>锁屏与休眠</td>
                 <td>runner 可能仍回答 status，但所有 action 失败。</td>
-                <td>看 <code>wda_actionable</code> 和 <code>wda_locked</code>，不要只看 <code>wda</code>。</td>
+                <td>看 <code>runner_actionable</code> 和 <code>runner_locked</code>，不要只看 <code>runner</code>。</td>
               </tr>
               <tr>
                 <td>签名有效期</td>
-                <td>免费 Apple ID 的 WDA profile 可能约 7 天到期。</td>
+                <td>免费 Apple ID 的 runner profile 可能约 7 天到期。</td>
                 <td>重跑 setup；发布/长期设备使用稳定签名配置。</td>
               </tr>
               <tr>
                 <td>MJPEG relay</td>
                 <td>setup 必须证明 9100 listener 属于本次受管进程、只绑定 loopback、并与 8100 指向同一 UDID。</td>
-                <td>setup 失败时不得继续发布错误 URL；运行期断流时页面降级到 2.5 秒 WDA PNG，并退避重试实时流。</td>
+                <td>setup 失败时不得继续发布错误 URL；运行期断流时页面降级到 2.5 秒 runner PNG，并退避重试实时流。</td>
               </tr>
               <tr>
                 <td>CoreDevice tunnel</td>
                 <td>睡眠、USB 抖动或 VPN/WARP 可能让 devicectl 卡住或产生 zombie session。</td>
-                <td>setup 对 devicectl 有超时；由 WDA supervisor 重建，验收记录恢复时间。</td>
+                <td>setup 对 devicectl 有超时；由 runner supervisor 重建，验收记录恢复时间。</td>
               </tr>
               <tr>
                 <td>screen_state 粒度</td>
@@ -1239,7 +1239,7 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
         <h2>Phase 2：iOS ScreenCaptureKit companion app 研究闸门</h2>
         <div class="decision">
           <strong>当前状态：未实现，也未承诺可行。</strong>
-          Phase 2 只研究新的设备端画面来源。WDA input 继续保留，除非另一个独立项目证明了可替代的输入方案。
+          Phase 2 只研究新的设备端画面来源。runner input 继续保留，除非另一个独立项目证明了可替代的输入方案。
         </div>
 
         <p>
@@ -1284,7 +1284,7 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
               </tr>
               <tr>
                 <td>P2-5 性能</td>
-                <td>延迟、帧率、功耗、温升和内存是否比 WDA MJPEG 有明确收益？</td>
+                <td>延迟、帧率、功耗、温升和内存是否比 runner MJPEG 有明确收益？</td>
                 <td>同设备、同场景 A/B 数据，包含持续运行与旋转。</td>
                 <td>收益不成立时继续使用 Phase 1。</td>
               </tr>
@@ -1296,7 +1296,7 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
               </tr>
               <tr>
                 <td>P2-7 集成</td>
-                <td>新画面源如何映射 backend/device/screen/control，如何与 WDA input 共存？</td>
+                <td>新画面源如何映射 backend/device/screen/control，如何与 runner input 共存？</td>
                 <td>独立 feature flag、状态契约、回滚方案和端到端测试。</td>
                 <td>失败时回到 Phase 1 direct。</td>
               </tr>
@@ -1306,7 +1306,7 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
 
         <aside class="note">
           <strong>Phase 2 的“可行”定义不是能抓到一帧。</strong>
-          entitlement 可交付、用户授权清楚、持续帧稳定、状态可观测、传输有鉴权、升级可回滚，缺一项都不能替换 WDA MJPEG。
+          entitlement 可交付、用户授权清楚、持续帧稳定、状态可观测、传输有鉴权、升级可回滚，缺一项都不能替换 runner MJPEG。
         </aside>
       </section>
 
@@ -1324,31 +1324,31 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
             <tbody>
               <tr>
                 <td><code>crates/server/src/config.rs</code></td>
-                <td>持久设备 UDID 与 WDA endpoint 配置。</td>
+                <td>持久设备 UDID 与 runner endpoint 配置。</td>
               </tr>
               <tr>
                 <td><code>crates/server/src/main.rs</code></td>
-                <td>daemon 启动与 WDA 默认 loopback endpoints；不加载任何 Mac 屏幕采集或输入注入。</td>
+                <td>daemon 启动与 runner 默认 loopback endpoints；不加载任何 Mac 屏幕采集或输入注入。</td>
               </tr>
               <tr>
                 <td><code>crates/server/src/http.rs</code></td>
-                <td><code>/control</code> ACK/error 契约、WDA action dispatcher、status 字段、MJPEG proxy、idle release。</td>
+                <td><code>/control</code> ACK/error 契约、runner action dispatcher、status 字段、MJPEG proxy、idle release。</td>
               </tr>
               <tr>
                 <td><code>web/index.html</code></td>
                 <td>MJPEG/PNG、HTTP control、gesture 聚合、fail-closed status handling、「连接手机」与「交还」控件。</td>
               </tr>
               <tr>
-                <td><code>crates/server/src/wda.rs</code></td>
-                <td>WDA session、健康探测、设备坐标、文字、按键、手势、截图与 MJPEG 设置。</td>
+                <td><code>crates/server/src/runner.rs</code></td>
+                <td>runner session、健康探测、设备坐标、文字、按键、手势、截图与 MJPEG 设置。</td>
               </tr>
               <tr>
                 <td><code>install.sh</code></td>
-                <td>固定 release 事务、配置保留、原子替换、离线控制面与首次 WDA 设置。</td>
+                <td>固定 release 事务、配置保留、原子替换、离线控制面与首次 runner 设置。</td>
               </tr>
               <tr>
-                <td><code>scripts/setup-wda.sh</code></td>
-                <td>WDA build/sign/install、8100/9100 relay、独立 supervisor、daemon handoff、stop/status/doctor。</td>
+                <td><code>scripts/setup-runner.sh</code></td>
+                <td>runner build/sign/install、8100/9100 relay、独立 supervisor、daemon handoff、stop/status/doctor。</td>
               </tr>
               <tr>
                 <td>
@@ -1372,7 +1372,7 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
                     Appium XCUITest driver capabilities
                   </a>
                 </td>
-                <td>真实设备不能依赖 simulator-only 的 WDA bind-address 能力；Phase 1 因此把 Mac relay 固定在 USB loopback，并把手机网络视为独立风险面。</td>
+                <td>真实设备不能依赖 simulator-only 的 runner bind-address 能力；Phase 1 因此把 Mac relay 固定在 USB loopback，并把手机网络视为独立风险面。</td>
               </tr>
             </tbody>
           </table>
@@ -1383,7 +1383,7 @@ unset TOKEN PASSWORD COOKIE_JAR</code></pre>
           <li>全新安装与从上一版本升级都成功。</li>
           <li>D01–D15 在目标设备组合上全部有证据；不适用项写明原因和替代验证，不能留空。</li>
           <li>不授予任何 macOS 隐私权限即通过画面和控制验收。</li>
-          <li>WDA、MJPEG、status、网络或控制失败时均 fail-closed，不向 Mac 注入任何输入。</li>
+          <li>runner、MJPEG、status、网络或控制失败时均 fail-closed，不向 Mac 注入任何输入。</li>
           <li>安装、升级、停止和完整卸载都在真实 GUI 用户环境跑过。</li>
           <li>Switcher 以 unsupported 交付，不隐藏成“偶发失效”。</li>
         </ul>

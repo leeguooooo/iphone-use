@@ -112,7 +112,7 @@ impl FailureClass {
             "value_not_applied" => Self::ValueNotApplied,
             "expectation_timeout" => Self::ExpectationTimeout,
             "phone_owned" => Self::PhoneOwned,
-            "not_drivable" | "wda_unavailable_or_unsupported" => Self::NotDrivable,
+            "not_drivable" | "runner_unavailable_or_unsupported" => Self::NotDrivable,
             "transport_error" => Self::Transport,
             _ => Self::Other,
         }

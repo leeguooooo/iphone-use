@@ -34,7 +34,7 @@ pub fn instance_context(ctx: &Ctx) -> i32 {
     if daemon_port.is_empty() {
         daemon_port = if ctx.instance.is_default() {
             "44321".into()
-        } else if first.1.to_string() == ctx.wda_port && first.2.to_string() == ctx.mjpeg_port {
+        } else if first.1.to_string() == ctx.runner_port && first.2.to_string() == ctx.mjpeg_port {
             first.0.to_string()
         } else {
             match super::ctx::derive_ports(ctx, true) {
@@ -46,19 +46,19 @@ pub fn instance_context(ctx: &Ctx) -> i32 {
     println!("name={}", ctx.instance.name);
     println!("state_dir={}", ctx.state_dir().display());
     println!("daemon_label={}", ctx.instance.daemon_label);
-    println!("wda_label={}", ctx.instance.wda_label);
+    println!("runner_label={}", ctx.instance.runner_label);
     println!("daemon_plist={}", ctx.daemon_plist.display());
-    println!("wda_plist={}", ctx.wda_agent_plist.display());
-    println!("wda_dir={}", ctx.wda_dir.display());
+    println!("runner_plist={}", ctx.runner_agent_plist.display());
+    println!("runner_dir={}", ctx.runner_dir.display());
     println!("runner_src={}", ctx.runner_src.display());
     println!("daemon_port={daemon_port}");
-    println!("wda_port={}", ctx.wda_port);
+    println!("runner_port={}", ctx.runner_port);
     println!("mjpeg_port={}", ctx.mjpeg_port);
     println!("udid={}", ctx.udid);
     println!("first_slot_ports={} {} {}", first.0, first.1, first.2);
     let ports = [
         daemon_port.as_str(),
-        ctx.wda_port.as_str(),
+        ctx.runner_port.as_str(),
         ctx.mjpeg_port.as_str(),
     ];
     match super::ctx::check_bindings(ctx, &ports) {
@@ -79,7 +79,7 @@ pub fn stop(ctx: &Ctx) -> i32 {
         return 1;
     }
     info("Stopping the dedicated runner supervisor and its managed processes");
-    let label = &ctx.instance.wda_label;
+    let label = &ctx.instance.runner_label;
     launchd::bootout(ctx, label);
     let mut failed = !launchd::wait_gone(ctx, label);
     if !stop_all(ctx, &legacy(ctx)) {
@@ -106,7 +106,7 @@ pub fn pause(ctx: &Ctx) -> i32 {
         return 1;
     }
     info("Pausing the managed device runner and giving the phone back to the user");
-    let label = &ctx.instance.wda_label;
+    let label = &ctx.instance.runner_label;
     // Disable before bootout so KeepAlive cannot race the shutdown.
     let mut failed = !launchd::disable(ctx, label);
     launchd::bootout(ctx, label);
@@ -141,7 +141,7 @@ pub fn resume(ctx: &Ctx) -> i32 {
         ));
         return 1;
     }
-    let plist = &ctx.wda_agent_plist;
+    let plist = &ctx.runner_agent_plist;
     if !sys::marker_file_secure(plist) || !super::flow::plist_lints(plist) {
         warn(&format!(
             "managed runner supervisor plist is missing or unsafe: {}; run setup again",
@@ -149,7 +149,7 @@ pub fn resume(ctx: &Ctx) -> i32 {
         ));
         return 1;
     }
-    let label = &ctx.instance.wda_label;
+    let label = &ctx.instance.runner_label;
     let identity_ok = sys::plist_top(plist, "Label") == *label
         && sys::plist_program_argument(plist, 0) == "/bin/bash"
         && sys::plist_program_argument(plist, 1) == ctx.self_install.to_string_lossy()
@@ -181,7 +181,7 @@ pub fn resume(ctx: &Ctx) -> i32 {
     }
     ok("device runner resume requested; lock-screen failures will retry with quiet backoff");
     println!("  Status: {} status", ctx.self_install.display());
-    println!("  Log   : {}", ctx.wda_agent_log.display());
+    println!("  Log   : {}", ctx.runner_agent_log.display());
     0
 }
 
@@ -193,17 +193,17 @@ pub fn status(ctx: &Ctx) -> i32 {
         ));
         return 1;
     }
-    let (Some(wda_port), Some(mjpeg_port)) =
-        (valid_port(&ctx.wda_port), valid_port(&ctx.mjpeg_port))
+    let (Some(runner_port), Some(mjpeg_port)) =
+        (valid_port(&ctx.runner_port), valid_port(&ctx.mjpeg_port))
     else {
-        warn("WDA_PORT and MJPEG_PORT must be distinct decimal TCP ports from 1 to 65535");
+        warn("IPU_RUNNER_PORT and MJPEG_PORT must be distinct decimal TCP ports from 1 to 65535");
         return 1;
     };
-    if wda_port == mjpeg_port {
-        warn("WDA_PORT and MJPEG_PORT must be distinct decimal TCP ports from 1 to 65535");
+    if runner_port == mjpeg_port {
+        warn("IPU_RUNNER_PORT and MJPEG_PORT must be distinct decimal TCP ports from 1 to 65535");
         return 1;
     }
-    let label = &ctx.instance.wda_label;
+    let label = &ctx.instance.runner_label;
     if launchd::disabled_state(ctx, label) == Some(true) {
         warn(&format!(
             "the device runner is paused; run {} resume before the next agent session",
@@ -244,9 +244,9 @@ pub fn status(ctx: &Ctx) -> i32 {
         &ctx.relay_pid_file,
         &legacy.relay,
         Role::Relay,
-        wda_port,
+        runner_port,
     ) {
-        ok(&format!("control relay PID owns only 127.0.0.1:{wda_port}"));
+        ok(&format!("control relay PID owns only 127.0.0.1:{runner_port}"));
     } else {
         warn("control relay ownership/bind could not be verified");
         failed = true;
@@ -264,7 +264,7 @@ pub fn status(ctx: &Ctx) -> i32 {
         failed = true;
     }
     if sys::runner_ok(
-        &format!("http://127.0.0.1:{wda_port}/status"),
+        &format!("http://127.0.0.1:{runner_port}/status"),
         Duration::from_secs(4),
         &ctx.runner_auth(),
     ) {

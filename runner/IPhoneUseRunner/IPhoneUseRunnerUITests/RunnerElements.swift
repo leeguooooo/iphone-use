@@ -1,12 +1,12 @@
-// Element lookup for the WDA-compatible routes: an in-memory tree built from the private AX
-// snapshot (the same read /source serves), WDA's locator strategies evaluated against it, and an
+// Element lookup for the WebDriverAgent-compatible routes: an in-memory tree built from the private AX
+// snapshot (the same read /source serves), runner's locator strategies evaluated against it, and an
 // id -> element registry. Finding elements this way costs one tree read instead of an XCUI query
 // resolution per call, and it sees exactly what /source shows.
 
 import CoreGraphics
 import Foundation
 
-/// One accessibility node. `attributes` holds the WDA /source keys (no children); `axElement` is
+/// One accessibility node. `attributes` holds the runner /source keys (no children); `axElement` is
 /// the live XCAccessibilityElement, used to re-snapshot just this element later.
 final class UINode {
   let attributes: [String: Any]
@@ -43,7 +43,7 @@ final class UINode {
 
   var center: CGPoint { CGPoint(x: rect.midX, y: rect.midY) }
 
-  /// WDA has no cheap visibility either way; the runner answers geometrically: a non-empty frame
+  /// runner has no cheap visibility either way; the runner answers geometrically: a non-empty frame
   /// that intersects the screen.
   func isVisible(screen: CGSize) -> Bool {
     let frame = rect
@@ -64,7 +64,7 @@ final class UINode {
     return out
   }
 
-  /// The object NSPredicate locators are evaluated against: WDA's predicate attribute names
+  /// The object NSPredicate locators are evaluated against: runner's predicate attribute names
   /// (and their wd*/is* aliases) mapped onto this node.
   func predicateObject(screen: CGSize) -> NSDictionary {
     let visible = isVisible(screen: screen)
@@ -112,13 +112,13 @@ enum RunnerElementTypes {
 // MARK: - Locators
 
 enum Locator {
-  /// Evaluates one WDA locator strategy below `root` (the root itself never matches).
+  /// Evaluates one runner locator strategy below `root` (the root itself never matches).
   static func find(using: String, value: String, root: UINode, screen: CGSize) throws -> [UINode] {
     switch using {
     case "accessibility id", "id", "name":
-      // WDA matches the element's name: its identifier when it has one, else its label. Matching
+      // runner matches the element's name: its identifier when it has one, else its label. Matching
       // identifier-or-label on every node also returned labelled containers' children (iOS 26
-      // SpringBoard: the "spotlight-pill" plus its "搜索" image and text), so lookups WDA
+      // SpringBoard: the "spotlight-pill" plus its "搜索" image and text), so lookups runner
       // answered with one element came back ambiguous.
       return root.descendants().filter { $0.name == value }
     case "class name":
@@ -165,10 +165,10 @@ enum Locator {
   }
 }
 
-/// WDA's class chain locator: `/`-separated steps, each `**` (any depth) or a type / `*`, with
+/// runner's class chain locator: `/`-separated steps, each `**` (any depth) or a type / `*`, with
 /// `[n]` (1-based, negative from the end), `` [`predicate`] `` and `[$predicate$]` (has a matching
 /// descendant) filters. An index applies to everything the step matched so far, like the XCUI
-/// query WDA builds.
+/// query runner builds.
 struct ClassChain {
   struct Step {
     var anyDepth = false
@@ -240,7 +240,7 @@ struct ClassChain {
       guard rest.first == "[" else { throw RunnerError.invalidSelector("unexpected '\(rest)' in class chain") }
       rest = rest.dropFirst()
       if let quote = rest.first, quote == "`" || quote == "$" {
-        // Doubled quote characters are literal ones, as in WDA.
+        // Doubled quote characters are literal ones, as in runner.
         var body = ""
         var index = rest.index(after: rest.startIndex)
         var closed = false
@@ -310,7 +310,7 @@ struct ClassChain {
 
 // MARK: - Registry
 
-/// Element ids handed out by the find routes, WDA style. Entries keep the node they were found
+/// Element ids handed out by the find routes, runner style. Entries keep the node they were found
 /// as; reads re-snapshot the live element so rects and values are fresh. Each node retains its
 /// whole tree (parents, AX elements), so entries are bounded by count and dropped by age when the
 /// screen may have changed.

@@ -19,15 +19,15 @@ pub struct StatusResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     /// WebDriverAgent's HTTP service is reachable. This alone does not mean it
-    /// can perform actions; use `wda_actionable` / `drivable` for that.
+    /// can perform actions; use `runner_actionable` / `drivable` for that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wda: Option<bool>,
+    pub runner: Option<bool>,
     /// A real device-side action probe succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wda_actionable: Option<bool>,
-    /// Device lock state. The daemon currently emits this as `wda_locked`; the
+    pub runner_actionable: Option<bool>,
+    /// Device lock state. The daemon currently emits this as `runner_locked`; the
     /// MCP surface exposes the shorter `locked` name while accepting either.
-    #[serde(default, alias = "wda_locked", skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "runner_locked", skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
     /// Whether an input command can be delivered right now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,12 +45,12 @@ pub struct StatusResponse {
     /// Whether setup persisted one canonical iPhone UDID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_configured: Option<bool>,
-    /// Whether the daemon owns the local WDA supervisor/relay lifecycle.
+    /// Whether the daemon owns the local runner supervisor/relay lifecycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed_wda: Option<bool>,
+    pub managed_runner: Option<bool>,
     /// First-run local management intent is waiting for a canonical target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed_wda_pending: Option<bool>,
+    pub managed_runner_pending: Option<bool>,
     /// Component responsible for recovery (`daemon`, `unconfigured`, or
     /// `external`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,13 +61,13 @@ pub struct StatusResponse {
     /// Seconds left on that lease (0 when nobody holds it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_lease_remaining_secs: Option<u64>,
-    /// True when the daemon intentionally stopped WDA after an idle period.
+    /// True when the daemon intentionally stopped runner after an idle period.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released: Option<bool>,
-    /// True while the daemon is actively stopping WDA for idle release.
+    /// True while the daemon is actively stopping runner for idle release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub releasing: Option<bool>,
-    /// True while a managed WDA supervisor is being bootstrapped.
+    /// True while a managed runner supervisor is being bootstrapped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnecting: Option<bool>,
     /// True while a reconnect the daemon started ahead of time (pre-warm,
@@ -77,10 +77,10 @@ pub struct StatusResponse {
     /// Human-readable recovery guidance from the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
-    /// Current WDA setup blocker (`warp`, `usb`, `trust`, `ddi`, or empty).
+    /// Current runner setup blocker (`warp`, `usb`, `trust`, `ddi`, or empty).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup_blocked_on: Option<String>,
-    /// Current managed-WDA setup phase, such as `prereq`, `building`, or
+    /// Current managed-runner setup phase, such as `prereq`, `building`, or
     /// `ready`. Empty when no fresh helper progress is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup_phase: Option<String>,
@@ -116,7 +116,7 @@ pub enum InputMsg {
     /// Device-native named key press.
     Key { name: String },
     /// Supported iOS system shortcut: `home | spotlight`. App Switcher is not
-    /// available through WDA and must not be advertised as supported.
+    /// available through runner and must not be advertised as supported.
     Shortcut { name: String },
     /// Begin a long-press at normalized coordinates.  Pair with an `Up` event
     /// to release.
@@ -180,16 +180,16 @@ mod tests {
             "ok": true,
             "backend": "direct",
             
-            "wda": true,
-            "wda_actionable": false,
-            "wda_locked": true,
+            "runner": true,
+            "runner_actionable": false,
+            "runner_locked": true,
             "drivable": false,
             "device_state": "locked",
             "screen_state": "waiting",
             "mode": "agent",
             "target_configured": true,
-            "managed_wda": true,
-            "managed_wda_pending": false,
+            "managed_runner": true,
+            "managed_runner_pending": false,
             "recovery_owner": "daemon",
             "releasing": false,
             "reconnecting": false,
@@ -203,14 +203,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(status.backend.as_deref(), Some("direct"));
-        assert_eq!(status.wda_actionable, Some(false));
+        assert_eq!(status.runner_actionable, Some(false));
         assert_eq!(status.locked, Some(true));
         assert_eq!(status.drivable, Some(false));
         assert_eq!(status.device_state.as_deref(), Some("locked"));
         assert_eq!(status.screen_state.as_deref(), Some("waiting"));
         assert_eq!(status.target_configured, Some(true));
-        assert_eq!(status.managed_wda, Some(true));
-        assert_eq!(status.managed_wda_pending, Some(false));
+        assert_eq!(status.managed_runner, Some(true));
+        assert_eq!(status.managed_runner_pending, Some(false));
         assert_eq!(status.recovery_owner.as_deref(), Some("daemon"));
         assert_eq!(status.released, Some(false));
         assert_eq!(status.releasing, Some(false));
@@ -224,11 +224,11 @@ mod tests {
         );
 
         // MCP callers get the normalized field name instead of the daemon's
-        // historical `wda_locked` spelling.
+        // historical `runner_locked` spelling.
         let output = serde_json::to_value(&status).unwrap();
         assert_eq!(output["locked"], true);
         assert_eq!(output["viewer_count"], 2);
-        assert!(output.get("wda_locked").is_none());
+        assert!(output.get("runner_locked").is_none());
     }
 
     #[test]
@@ -236,20 +236,20 @@ mod tests {
         let status: StatusResponse = serde_json::from_value(json!({
             "ok": true,
             
-            "wda": false
+            "runner": false
         }))
         .unwrap();
 
         assert_eq!(status.backend, None);
         assert_eq!(status.device_state, None);
         assert_eq!(status.screen_state, None);
-        assert_eq!(status.wda_actionable, None);
+        assert_eq!(status.runner_actionable, None);
         assert_eq!(status.locked, None);
         assert_eq!(status.drivable, None);
         assert_eq!(status.released, None);
         assert_eq!(status.releasing, None);
         assert_eq!(status.reconnecting, None);
-        assert_eq!(status.managed_wda, None);
+        assert_eq!(status.managed_runner, None);
         assert_eq!(status.recovery_owner, None);
         assert_eq!(status.hint, None);
         assert_eq!(status.setup_blocked_on, None);

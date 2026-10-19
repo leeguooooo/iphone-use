@@ -90,7 +90,7 @@ Do this:
 
 1. Read each open issue with \`gh issue view <n> --comments\`. Decide whether it
    is fixable from source alone. SKIP anything that needs physical hardware to
-   reproduce or verify (a real iPhone, a live WDA session, a
+   reproduce or verify (a real iPhone, a live runner session, a
    signing keychain) — you have none of that. Skip anything that needs a
    product decision. Skipping is a fine outcome; a wrong guess shipped to
    users is not.
@@ -100,7 +100,7 @@ Do this:
    review comment if something is wrong. Do NOT merge any PR.
 4. Commit each fix separately on main. Match the repository commit style — run
    \`git log --oneline -15\` and follow it (English, Conventional Commits,
-   e.g. \`fix(wda): ...\`). Reference the issue as "(#N)" in the subject.
+   e.g. \`fix(runner): ...\`). Reference the issue as "(#N)" in the subject.
    Do NOT tag, do NOT bump any version, do NOT push. A release script handles
    that after you exit.
 5. Run \`cargo test --workspace\` and make sure it passes before you finish.

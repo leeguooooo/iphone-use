@@ -159,18 +159,18 @@ def status_json():
     s = {
         "ok": True, "backend": "direct", "instance": "default", "udid": "00008110-MOCK",
         "owner": None, "owner_lease_remaining_secs": None,
-        "target_configured": True, "managed_wda": True, "managed_wda_pending": False,
-        "recovery_owner": "daemon", "wda": True, "wda_actionable": True, "wda_locked": False,
+        "target_configured": True, "managed_runner": True, "managed_runner_pending": False,
+        "recovery_owner": "daemon", "runner": True, "runner_actionable": True, "runner_locked": False,
         "drivable": True, "mode": "agent", "device_state": "ready", "screen_state": "unlocked",
         "releasing": False, "reconnecting": False, "warming": False, "released": False,
         "human_handoff": False, "hold_remaining_secs": None, "idle_secs": 3,
         "hint": None, "next_step": None, "setup_blocked_on": "", "setup_phase": None,
-        "setup_message": None, "wda_build": None, "wda_died_reason": "", "wda_died_at": None,
+        "setup_message": None, "runner_build": None, "runner_died_reason": "", "runner_died_at": None,
         "viewer_count": 1, "mjpeg_viewer_count": 1,
         "mjpeg_stream_fresh": fresh_age is not None and fresh_age < 8000,
         "mjpeg_stream_age_ms": fresh_age,
         "capture_redacted": sc == "redacted", "version": "0.17.10", "latest": None,
-        "update_available": False, "transport": "usb", "wda_rtt_ms": STATE["rtt"],
+        "update_available": False, "transport": "usb", "runner_rtt_ms": STATE["rtt"],
         "transport_hint": None, "wifi_start_refused": False, "keep_runner_alive": None, "legacy_ios": None,
         "lock_readiness": {
             "passcode_protected": True, "auto_lock_secs": 0,
@@ -186,7 +186,7 @@ def status_json():
                      "en": "This iPhone has a passcode and auto-locks after 30 seconds; a person must unlock it."},
         })
     elif sc == "locked":
-        s.update(drivable=False, wda_actionable=False, wda_locked=True, screen_state="locked",
+        s.update(drivable=False, runner_actionable=False, runner_locked=True, screen_state="locked",
                  device_state="locked", next_step={"zh": "请解锁 iPhone 并保持亮屏，连接会自动恢复", "en": "Unlock the iPhone."})
     elif sc == "released":
         s.update(released=True, drivable=False, device_state="released", idle_secs=900)
@@ -195,22 +195,22 @@ def status_json():
     elif sc == "reconnecting":
         s.update(reconnecting=True, drivable=False, device_state="reconnecting")
     elif sc == "usb":
-        s.update(reconnecting=True, drivable=False, wda=False, setup_blocked_on="usb")
+        s.update(reconnecting=True, drivable=False, runner=False, setup_blocked_on="usb")
     elif sc == "passcode":
-        s.update(reconnecting=True, drivable=False, wda=False, wda_actionable=False,
+        s.update(reconnecting=True, drivable=False, runner=False, runner_actionable=False,
                  device_state="blocked", setup_blocked_on="needs_passcode_on_phone",
                  next_step={"zh": "手机设了锁屏密码：这次启动需要有人在手机上输入密码，允许 UI 自动化。之后保持连接就不会再问。",
                             "en": "This iPhone has a passcode: this start needs someone at the phone to enter it."})
     elif sc == "restart-locked":
-        s.update(reconnecting=True, drivable=False, wda=False, wda_actionable=False,
+        s.update(reconnecting=True, drivable=False, runner=False, runner_actionable=False,
                  device_state="blocked", setup_blocked_on="locked_after_restart",
                  next_step={"zh": "这台 iPhone 重启后还没解锁过：需要有人在手机上输入一次密码，之后会自动连上。",
                             "en": "This iPhone restarted and has not been unlocked since: someone needs to enter the passcode on the phone once, then it connects on its own."})
     elif sc == "offline":
-        s.update(drivable=False, wda=False, wda_actionable=False, mode="agent", device_state="offline",
+        s.update(drivable=False, runner=False, runner_actionable=False, mode="agent", device_state="offline",
                  next_step={"zh": "设备服务没有响应；正在自动重启，若一直这样请在 Mac 上运行 iphone-use doctor", "en": "Device service unreachable."})
     elif sc == "unconfigured":
-        s.update(drivable=False, wda=False, recovery_owner="unconfigured", target_configured=False, device=None)
+        s.update(drivable=False, runner=False, recovery_owner="unconfigured", target_configured=False, device=None)
     elif sc == "owned":
         s.update(owner=STATE["owner"], owner_lease_remaining_secs=212)
     return s

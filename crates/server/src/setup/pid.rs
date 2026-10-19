@@ -6,7 +6,7 @@
 //! match, and the command line has the exact shape setup itself launches.
 //! A PID-only file from an old release is matched against a legacy contract
 //! (`legacy-runner:<udid>:<team>:<bundle>`, `legacy-relay:<port>:<dport>:<udid>`).
-//! Same format and rules as `setup-wda.sh`, so either can read the other's
+//! Same format and rules as `setup-runner.sh`, so either can read the other's
 //! records, and uninstall.sh keeps working.
 
 use std::path::Path;
@@ -79,7 +79,7 @@ impl Legacy {
                 or(team, "__missing_team__"),
                 or(bundle, "__missing_bundle__")
             ),
-            relay: format!("legacy-relay:{}:8100:{udid}", ctx.wda_port),
+            relay: format!("legacy-relay:{}:8100:{udid}", ctx.runner_port),
             mjpeg: format!("legacy-mjpeg:{}:9100:{udid}", ctx.mjpeg_port),
         }
     }
@@ -188,7 +188,7 @@ fn strip_xcodebuild(command: &str) -> Option<&str> {
 /// The argv shapes setup has launched a runner with: the device runner
 /// (test-without-building its .xctestrun), and the two WebDriverAgent forms
 /// releases before it used, so the first run after an upgrade can still stop
-/// a WDA runner the previous release left. The optional ASC suffix must be
+/// a runner the previous release left. The optional ASC suffix must be
 /// complete and in the order setup emits it.
 pub fn runner_signature_valid(signature: &str) -> bool {
     if !safe_expected(signature) {
@@ -425,10 +425,10 @@ pub fn command_matches(command: &str, expected: &str) -> bool {
 }
 
 fn legacy_runner_cwd_ok(ctx: &Ctx, pid: u32) -> bool {
-    if sys::which("lsof").is_none() || !ctx.wda_dir.is_dir() {
+    if sys::which("lsof").is_none() || !ctx.runner_dir.is_dir() {
         return false;
     }
-    let Ok(expected) = ctx.wda_dir.canonicalize() else {
+    let Ok(expected) = ctx.runner_dir.canonicalize() else {
         return false;
     };
     let pid = pid.to_string();
@@ -537,8 +537,8 @@ pub fn legacy_migration_hint(ctx: &Ctx) {
     warn(&format!(
         "legacy pid-only state was found but could not be proven safe to stop automatically.
    Retry with the exact old values (do not guess):
-     WDA_UDID=<old-device-udid> WDA_TEAM_ID=<10-char-team> \\
-     WDA_BUNDLE_ID=<old-runner-bundle-id> WDA_DIR=<old-wda-checkout> \\
+     IPU_RUNNER_UDID=<old-device-udid> IPU_RUNNER_TEAM_ID=<10-char-team> \\
+     IPU_RUNNER_BUNDLE_ID=<old-runner-bundle-id> IPU_RUNNER_DIR=<old-runner-checkout> \\
        {} stop
    If the old relay used socat, inspect its numeric PID with both:
      ps -ww -p <pid> -o uid=,lstart=,command=
@@ -756,18 +756,18 @@ mod tests {
             "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
             "xcodebuild"
         )));
-        let wda = "xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=00008110-0002346211A0401E -allowProvisioningUpdates DEVELOPMENT_TEAM=6ZPXG4KVVS PRODUCT_BUNDLE_IDENTIFIER=com.x.wda test";
-        assert!(runner_signature_valid(wda));
+        let runner = "xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=00008110-0002346211A0401E -allowProvisioningUpdates DEVELOPMENT_TEAM=6ZPXG4KVVS PRODUCT_BUNDLE_IDENTIFIER=com.x.runner test";
+        assert!(runner_signature_valid(runner));
         assert!(!runner_signature_valid(
-            &wda.replace("6ZPXG4KVVS", "6zpxg4kvvs")
+            &runner.replace("6ZPXG4KVVS", "6zpxg4kvvs")
         ));
-        let wda_run = "/usr/bin/xcodebuild -destination platform=iOS,id=0000 test-without-building -xctestrun /tmp/d/WebDriverAgentRunner_iphoneos17.0-arm64.xctestrun";
-        assert!(runner_signature_valid(wda_run));
+        let runner_run = "/usr/bin/xcodebuild -destination platform=iOS,id=0000 test-without-building -xctestrun /tmp/d/WebDriverAgentRunner_iphoneos17.0-arm64.xctestrun";
+        assert!(runner_signature_valid(runner_run));
     }
 
     #[test]
     fn the_legacy_launcher_is_a_runner_and_a_lan_relay_is_a_relay() {
-        let usb = "/Users/leo/.iphone-use/instances/i12/runtime/iPhoneUse.app/Contents/MacOS/iphone-use-legacy-launch launch --udid 00008101-000409443404001E --bundle-id com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner";
+        let usb = "/Users/leo/.iphone-use/instances/i12/runtime/iPhoneUse.app/Contents/MacOS/iphone-use-legacy-launch launch --udid 00008101-000409443404001E --bundle-id com.leeguoo.iphone-use.runner.6zpxg4kvvs.xctrunner";
         assert!(runner_signature_valid(usb));
         assert!(command_matches(usb, &format!("runner:{usb}")));
         let wifi = usb.replace(" --bundle-id", " --host 192.168.0.59 --bundle-id");
@@ -821,14 +821,14 @@ mod tests {
             "iproxy 8100 8100 -u 0000AB",
             "legacy-relay:8100:8100:__missing_udid__"
         ));
-        let legacy = "xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=0000AB -allowProvisioningUpdates DEVELOPMENT_TEAM=6ZPXG4KVVS PRODUCT_BUNDLE_IDENTIFIER=com.x.wda test";
+        let legacy = "xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=0000AB -allowProvisioningUpdates DEVELOPMENT_TEAM=6ZPXG4KVVS PRODUCT_BUNDLE_IDENTIFIER=com.x.runner test";
         assert!(command_matches(
             legacy,
-            "legacy-runner:0000AB:6ZPXG4KVVS:com.x.wda"
+            "legacy-runner:0000AB:6ZPXG4KVVS:com.x.runner"
         ));
         assert!(!command_matches(
             legacy,
-            "legacy-runner:0000AC:6ZPXG4KVVS:com.x.wda"
+            "legacy-runner:0000AC:6ZPXG4KVVS:com.x.runner"
         ));
         assert!(command_matches(RUNNER, &format!("runner:{RUNNER}")));
         assert!(!command_matches(RUNNER, "runner:/bin/sh -c x"));

@@ -38,7 +38,7 @@ pub struct Config {
     /// When absent (the default), the existing behavior is preserved: the password
     /// is also accepted as a bearer, and open mode (no password) passes everything.
     pub agent_token: Option<String>,
-    /// Persistent target device identifier for WDA bring-up and recovery.
+    /// Persistent target device identifier for runner bring-up and recovery.
     ///
     /// Without this, an idle restart or browser reconnect re-ran auto-detection
     /// and could silently select a different iPhone on a multi-device Mac.

@@ -12,7 +12,7 @@
 #   curl -fsSL .../install.sh | sh -s -- --instance NAME --udid <UDID>
 # A named instance gets its own copy of the app, state dir
 # (~/.iphone-use/instances/NAME), launchd labels, token and ports. It never
-# touches the default instance or the shared app; then run its setup-wda.sh.
+# touches the default instance or the shared app; then run its setup-runner.sh.
 #
 # Requirements:
 #   • Must run as the LOGGED-IN GUI user (not root, not over a bare SSH session).
@@ -67,8 +67,8 @@ PLIST_LABEL="com.leeguoo.iphone-use"
 PLIST_DST="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 OLD_PLIST_LABEL="work.pwtk.iphone-remote"
 OLD_PLIST="$HOME/Library/LaunchAgents/${OLD_PLIST_LABEL}.plist"
-WDA_PLIST_LABEL="${PLIST_LABEL}.wda"
-WDA_PLIST_DST="$HOME/Library/LaunchAgents/${WDA_PLIST_LABEL}.plist"
+IPU_RUNNER_PLIST_LABEL="${PLIST_LABEL}.runner"
+IPU_RUNNER_PLIST_DST="$HOME/Library/LaunchAgents/${IPU_RUNNER_PLIST_LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/iPhoneUse"
 REPO="leeguooooo/iphone-use"
 BINARY_INSIDE_APP="Contents/MacOS/iphone-use"
@@ -167,22 +167,22 @@ PLIST_BACKUP=""
 PLIST_HAD_EXISTING=0
 PLIST_REPLACED=0
 PLIST_COMMITTED=0
-SETUP_WDA_STAGE=""
-SETUP_WDA_DL=""
-SETUP_WDA_BACKUP=""
-SETUP_WDA_HAD_EXISTING=0
-SETUP_WDA_REPLACED=0
-SETUP_WDA_COMMITTED=0
+SETUP_RUNNER_STAGE=""
+SETUP_RUNNER_DL=""
+SETUP_RUNNER_BACKUP=""
+SETUP_RUNNER_HAD_EXISTING=0
+SETUP_RUNNER_REPLACED=0
+SETUP_RUNNER_COMMITTED=0
 UNINSTALL_STAGE=""
 UNINSTALL_DL=""
 UNINSTALL_BACKUP=""
 UNINSTALL_HAD_EXISTING=0
 UNINSTALL_REPLACED=0
 UNINSTALL_COMMITTED=0
-WDA_RUNTIME_TOUCHED=0
-WDA_TRANSITION_COMMITTED=0
-PREINSTALL_WDA_LOADED=0
-PREINSTALL_WDA_DISABLED=0
+IPU_RUNNER_RUNTIME_TOUCHED=0
+IPU_RUNNER_TRANSITION_COMMITTED=0
+PREINSTALL_RUNNER_LOADED=0
+PREINSTALL_RUNNER_DISABLED=0
 DAEMON_RUNTIME_TOUCHED=0
 DAEMON_RUNTIME_COMMITTED=0
 PREINSTALL_DAEMON_LOADED=0
@@ -262,23 +262,23 @@ _restore_daemon_plist() {
     fi
 }
 
-_restore_setup_wda() {
-    [ "$SETUP_WDA_REPLACED" = "1" ] || return 0
-    [ "$SETUP_WDA_COMMITTED" = "0" ] || return 0
-    if [ "$SETUP_WDA_HAD_EXISTING" = "1" ] && [ -f "$SETUP_WDA_BACKUP" ]; then
+_restore_setup_runner() {
+    [ "$SETUP_RUNNER_REPLACED" = "1" ] || return 0
+    [ "$SETUP_RUNNER_COMMITTED" = "0" ] || return 0
+    if [ "$SETUP_RUNNER_HAD_EXISTING" = "1" ] && [ -f "$SETUP_RUNNER_BACKUP" ]; then
         local restore_tmp
-        restore_tmp="${SETUP_WDA_DST}.restore.$$"
-        if cp -p "$SETUP_WDA_BACKUP" "$restore_tmp" 2>/dev/null \
-            && mv -f "$restore_tmp" "$SETUP_WDA_DST" 2>/dev/null; then
-            rm -f "$SETUP_WDA_BACKUP" 2>/dev/null || true
-            SETUP_WDA_BACKUP=""
-            warn "Restored the previous setup-wda.sh after an incomplete install."
+        restore_tmp="${SETUP_RUNNER_DST}.restore.$$"
+        if cp -p "$SETUP_RUNNER_BACKUP" "$restore_tmp" 2>/dev/null \
+            && mv -f "$restore_tmp" "$SETUP_RUNNER_DST" 2>/dev/null; then
+            rm -f "$SETUP_RUNNER_BACKUP" 2>/dev/null || true
+            SETUP_RUNNER_BACKUP=""
+            warn "Restored the previous setup-runner.sh after an incomplete install."
         else
             rm -f "$restore_tmp" 2>/dev/null || true
-            warn "Could not restore the previous setup-wda.sh from $SETUP_WDA_BACKUP"
+            warn "Could not restore the previous setup-runner.sh from $SETUP_RUNNER_BACKUP"
         fi
     else
-        rm -f "$SETUP_WDA_DST" 2>/dev/null || true
+        rm -f "$SETUP_RUNNER_DST" 2>/dev/null || true
     fi
 }
 
@@ -650,16 +650,16 @@ _restore_daemon_runtime() {
     fi
 }
 
-_restore_wda_transition() {
-    [ "$WDA_RUNTIME_TOUCHED" = "1" ] || return 0
-    [ "$WDA_TRANSITION_COMMITTED" = "0" ] || return 0
+_restore_runner_transition() {
+    [ "$IPU_RUNNER_RUNTIME_TOUCHED" = "1" ] || return 0
+    [ "$IPU_RUNNER_TRANSITION_COMMITTED" = "0" ] || return 0
 
-    if _restore_launchd_job "$WDA_PLIST_LABEL" "$WDA_PLIST_DST" \
-        "$PREINSTALL_WDA_LOADED" "$PREINSTALL_WDA_DISABLED"; then
-        WDA_RUNTIME_TOUCHED=0
+    if _restore_launchd_job "$IPU_RUNNER_PLIST_LABEL" "$IPU_RUNNER_PLIST_DST" \
+        "$PREINSTALL_RUNNER_LOADED" "$PREINSTALL_RUNNER_DISABLED"; then
+        IPU_RUNNER_RUNTIME_TOUCHED=0
         warn "Restored the previous device runner supervisor enabled/loaded state after an incomplete install."
     else
-        warn "WDA supervisor rollback was incomplete; recovery plist retained at $WDA_PLIST_DST"
+        warn "runner supervisor rollback was incomplete; recovery plist retained at $IPU_RUNNER_PLIST_DST"
         return 1
     fi
 }
@@ -681,10 +681,10 @@ _installer_cleanup() {
         _restore_daemon_plist
         _restore_old_daemon_plist
         _restore_uninstall
-        _restore_setup_wda
+        _restore_setup_runner
         _restore_runner_sources
         _restore_app
-        _restore_wda_transition || true
+        _restore_runner_transition || true
         _restore_daemon_runtime
         if [ "$PREINSTALL_MANUAL_DAEMON_STOPPED" = "1" ]; then
             warn "The previously manual daemon was safely stopped for LaunchAgent takeover and was not restarted after rollback. Rerun the installer after fixing the reported error."
@@ -693,8 +693,8 @@ _installer_cleanup() {
     [ -z "$APP_STAGE" ] || rm -rf "$APP_STAGE" 2>/dev/null || true
     [ -z "$PLIST_STAGE" ] || rm -f "$PLIST_STAGE" 2>/dev/null || true
     [ -z "$SIGN_SH_DL" ] || rm -f "$SIGN_SH_DL" 2>/dev/null || true
-    [ -z "$SETUP_WDA_STAGE" ] || rm -f "$SETUP_WDA_STAGE" 2>/dev/null || true
-    [ -z "$SETUP_WDA_DL" ] || rm -f "$SETUP_WDA_DL" 2>/dev/null || true
+    [ -z "$SETUP_RUNNER_STAGE" ] || rm -f "$SETUP_RUNNER_STAGE" 2>/dev/null || true
+    [ -z "$SETUP_RUNNER_DL" ] || rm -f "$SETUP_RUNNER_DL" 2>/dev/null || true
     [ -z "$UNINSTALL_STAGE" ] || rm -f "$UNINSTALL_STAGE" 2>/dev/null || true
     [ -z "$UNINSTALL_DL" ] || rm -f "$UNINSTALL_DL" 2>/dev/null || true
     [ -z "$RUNNER_SRC_STAGE" ] || rm -rf "$RUNNER_SRC_STAGE" 2>/dev/null || true
@@ -707,8 +707,8 @@ _installer_cleanup() {
         || warn "App recovery backup retained at: $APP_BACKUP"
     [ -z "$PLIST_BACKUP" ] \
         || warn "LaunchAgent recovery backup retained at: $PLIST_BACKUP"
-    [ -z "$SETUP_WDA_BACKUP" ] \
-        || warn "setup-wda.sh recovery backup retained at: $SETUP_WDA_BACKUP"
+    [ -z "$SETUP_RUNNER_BACKUP" ] \
+        || warn "setup-runner.sh recovery backup retained at: $SETUP_RUNNER_BACKUP"
     [ -z "$UNINSTALL_BACKUP" ] \
         || warn "uninstall.sh recovery backup retained at: $UNINSTALL_BACKUP"
     [ -z "$RUNNER_SRC_BACKUP" ] || [ ! -d "$RUNNER_SRC_BACKUP" ] \
@@ -1028,7 +1028,7 @@ validate_release_commit() {
 
 # macOS before Sonoma prints `=> true`; current releases print `=> disabled`.
 # Matching only `true` read every disabled label as enabled, so upgrades
-# re-enabled a parked WDA supervisor and rollback restored the wrong state.
+# re-enabled a parked runner supervisor and rollback restored the wrong state.
 launchd_label_is_disabled() {
     local label="$1"
     printf '%s\n' "$LAUNCHD_DISABLED_SNAPSHOT" \
@@ -1108,7 +1108,7 @@ probe_daemon_control_plane() {
     DAEMON_PID="$PROBED_DAEMON_PID"
 }
 
-is_loopback_wda_url() {
+is_loopback_runner_url() {
     local url="$1"
     local port
     printf '%s' "$url" \
@@ -1118,7 +1118,7 @@ is_loopback_wda_url() {
     [ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null
 }
 
-is_network_wda_url() {
+is_network_runner_url() {
     local url="$1"
     local port
     printf '%s' "$url" \
@@ -1282,7 +1282,7 @@ download_verified_release_app() {
 }
 
 # ── Device runner sources ─────────────────────────────────────────────────────
-# setup-wda.sh builds the iphone-use device runner (an XCTest UI-test bundle)
+# setup-runner.sh builds the iphone-use device runner (an XCTest UI-test bundle)
 # from sources at ~/.iphone-use/runner. They come from the same local checkout
 # or exact release as this installer: a local `runner/` directory, or the
 # release asset iphone-use-runner.tar.gz verified against its .sha256 file.
@@ -2106,10 +2106,10 @@ _commit_daemon_transaction() {
     # commit flag or follows a fully committed daemon transaction.
     APP_COMMITTED=1
     PLIST_COMMITTED=1
-    SETUP_WDA_COMMITTED=1
+    SETUP_RUNNER_COMMITTED=1
     UNINSTALL_COMMITTED=1
     RUNNER_SRC_COMMITTED=1
-    WDA_TRANSITION_COMMITTED=1
+    IPU_RUNNER_TRANSITION_COMMITTED=1
     DAEMON_RUNTIME_COMMITTED=1
     OLD_PLIST_COMMITTED=1
     INSTALL_DAEMON_COMMITTED=1
@@ -2168,22 +2168,22 @@ bootstrap_pinned_installer() {
     curl -fsSL "$raw_base/install.sh" -o "$helper_dir/install.sh"
     curl -fsSL "$raw_base/uninstall.sh" -o "$helper_dir/uninstall.sh"
     curl -fsSL "$raw_base/scripts/sign.sh" -o "$helper_dir/scripts/sign.sh"
-    curl -fsSL "$raw_base/scripts/setup-wda.sh" -o "$helper_dir/scripts/setup-wda.sh"
+    curl -fsSL "$raw_base/scripts/setup-runner.sh" -o "$helper_dir/scripts/setup-runner.sh"
     [ -s "$helper_dir/install.sh" ] \
         && [ -s "$helper_dir/uninstall.sh" ] \
         && [ -s "$helper_dir/scripts/sign.sh" ] \
-        && [ -s "$helper_dir/scripts/setup-wda.sh" ] \
+        && [ -s "$helper_dir/scripts/setup-runner.sh" ] \
         || die "Release $ref is incomplete; refusing a mixed-version install."
     if ! /bin/bash -n "$helper_dir/install.sh" \
         || ! /bin/bash -n "$helper_dir/uninstall.sh" \
         || ! /bin/bash -n "$helper_dir/scripts/sign.sh" \
-        || ! /bin/bash -n "$helper_dir/scripts/setup-wda.sh"; then
+        || ! /bin/bash -n "$helper_dir/scripts/setup-runner.sh"; then
         die "Release $ref contains a shell script that failed syntax validation."
     fi
     download_verified_release_app "$ref" "$asset_dir"
-    # A release whose setup-wda.sh builds the device runner ships its sources
+    # A release whose setup-runner.sh builds the device runner ships its sources
     # as a verified asset; the inner installer then finds them next to itself.
-    if grep -q 'IPhoneUseRunner' "$helper_dir/scripts/setup-wda.sh"; then
+    if grep -q 'IPhoneUseRunner' "$helper_dir/scripts/setup-runner.sh"; then
         download_verified_release_runner "$ref" "$helper_dir" \
             || die "Release $ref is missing $RUNNER_ASSET_NAME; refusing a mixed-version install."
     fi
@@ -2299,7 +2299,7 @@ fi
 # A second phone gets a second daemon. Everything below writes only that
 # instance's plist, its private app copy and its state directory; the default
 # instance's app, plists and runtime are read (signing policy) but never
-# changed. Paths, labels and ports come from setup-wda.sh `instance-context`
+# changed. Paths, labels and ports come from setup-runner.sh `instance-context`
 # (the setup engine in the app being installed).
 named_plist_env() {
     plist_env_get_from "$1" "$2"
@@ -2307,10 +2307,10 @@ named_plist_env() {
 
 install_named_instance() {
     local app_src="${1:-$INSTALL_DIR/$APP_NAME}"
-    local setup_src="$SCRIPT_DIR/scripts/setup-wda.sh"
+    local setup_src="$SCRIPT_DIR/scripts/setup-runner.sh"
     local uninstall_src="$SCRIPT_DIR/uninstall.sh"
-    local default_wda_plist="$WDA_PLIST_DST"
-    local ctx state_dir label plist wda_label daemon_port wda_port mjpeg_port udid
+    local default_runner_plist="$IPU_RUNNER_PLIST_DST"
+    local ctx state_dir label plist runner_label daemon_port runner_port mjpeg_port udid
     local runtime app_dst app_stage app_backup="" plist_stage plist_backup=""
     local binary token key value probe code i was_loaded=0
     local -a env_keys env_values
@@ -2318,7 +2318,7 @@ install_named_instance() {
     [ "$SCRIPT_IS_LOCAL" = "1" ] \
         || die "Named instances install from a local or release-pinned installer."
     [ -f "$setup_src" ] && [ -f "$uninstall_src" ] \
-        || die "setup-wda.sh/uninstall.sh are missing next to this installer."
+        || die "setup-runner.sh/uninstall.sh are missing next to this installer."
     [ "$#" -le 1 ] || die "Only one app path may be given."
 
     # Resolve and check the instance before touching anything: an invalid
@@ -2326,7 +2326,7 @@ install_named_instance() {
     # all fail here.
     if ! ctx="$(env IPHONE_USE_INSTANCE="$INSTANCE_NAME" \
         IPHONE_USE_SETUP_BIN="$app_src/Contents/MacOS/iphone-use" \
-        ${INSTANCE_UDID:+WDA_UDID="$INSTANCE_UDID"} \
+        ${INSTANCE_UDID:+IPU_RUNNER_UDID="$INSTANCE_UDID"} \
         ${INSTANCE_PORT:+IPHONE_USE_PORT="$INSTANCE_PORT"} \
         /bin/bash "$setup_src" instance-context 2>&1)"; then
         die "Instance $INSTANCE_NAME cannot be installed: $(printf '%s' "$ctx" | tail -1)"
@@ -2334,25 +2334,25 @@ install_named_instance() {
     ctx_get() { printf '%s\n' "$ctx" | sed -n "s/^$1=//p" | head -1; }
     state_dir="$(ctx_get state_dir)"
     label="$(ctx_get daemon_label)"
-    wda_label="$(ctx_get wda_label)"
+    runner_label="$(ctx_get runner_label)"
     plist="$(ctx_get daemon_plist)"
     daemon_port="$(ctx_get daemon_port)"
-    wda_port="$(ctx_get wda_port)"
+    runner_port="$(ctx_get runner_port)"
     mjpeg_port="$(ctx_get mjpeg_port)"
     udid="$(ctx_get udid)"
     [ "$(ctx_get name)" = "$INSTANCE_NAME" ] && [ -n "$state_dir" ] && [ -n "$label" ] \
         && [ "$label" != "$PLIST_LABEL" ] \
-        || die "setup-wda.sh resolved an unexpected instance context."
+        || die "setup-runner.sh resolved an unexpected instance context."
     [ -n "$udid" ] \
         || die "A new instance needs its iPhone: --udid <UDID> (see: xcrun devicectl list devices)."
     printf '%s' "$udid" | LC_ALL=C grep -Eq '^[0-9A-Fa-f-]+$' \
         || die "--udid must be hex digits and dashes."
-    for value in "$daemon_port" "$wda_port" "$mjpeg_port"; do
+    for value in "$daemon_port" "$runner_port" "$mjpeg_port"; do
         printf '%s' "$value" | grep -Eq '^[0-9]{1,5}$' && [ "$value" -ge 1 ] && [ "$value" -le 65535 ] \
             || die "Instance ports must be TCP ports (got '$value')."
     done
-    [ "$daemon_port" != "$wda_port" ] && [ "$daemon_port" != "$mjpeg_port" ] \
-        && [ "$wda_port" != "$mjpeg_port" ] \
+    [ "$daemon_port" != "$runner_port" ] && [ "$daemon_port" != "$mjpeg_port" ] \
+        && [ "$runner_port" != "$mjpeg_port" ] \
         || die "Daemon, runner control and video ports must differ."
 
     runtime="$state_dir/runtime"
@@ -2378,7 +2378,7 @@ install_named_instance() {
         || die "$app_src predates named instances (no instance-context); install a newer release."
 
     # Settings: explicit environment > this instance's plist > the default
-    # instance's WDA supervisor, which holds the signing policy that works on
+    # instance's runner supervisor, which holds the signing policy that works on
     # this Mac. The three ASC keys travel as a set.
     env_keys=(); env_values=()
     add_env() { [ -z "$2" ] || { env_keys+=("$1"); env_values+=("$2"); }; }
@@ -2386,7 +2386,7 @@ install_named_instance() {
         local v
         v="$(printenv "$1" 2>/dev/null || true)"
         [ -n "$v" ] || v="$(named_plist_env "$plist" "$1")"
-        [ -n "$v" ] || [ "${2:-}" != inherit ] || v="$(named_plist_env "$default_wda_plist" "$1")"
+        [ -n "$v" ] || [ "${2:-}" != inherit ] || v="$(named_plist_env "$default_runner_plist" "$1")"
         printf '%s' "$v"
     }
     token="$(pick IPHONE_USE_AGENT_TOKEN)"
@@ -2403,31 +2403,31 @@ install_named_instance() {
     add_env IPHONE_USE_AGENT_TOKEN "$token"
     add_env IPHONE_USE_BACKEND direct
     add_env IPHONE_USE_UDID "$udid"
-    add_env IPHONE_USE_WDA_MANAGED true
-    add_env IPHONE_USE_WDA_URL "http://127.0.0.1:$wda_port"
-    add_env IPHONE_USE_WDA_MJPEG_URL "http://127.0.0.1:$mjpeg_port"
-    add_env WDA_PORT "$wda_port"
+    add_env IPHONE_USE_RUNNER_MANAGED true
+    add_env IPHONE_USE_RUNNER_URL "http://127.0.0.1:$runner_port"
+    add_env IPHONE_USE_RUNNER_MJPEG_URL "http://127.0.0.1:$mjpeg_port"
+    add_env IPU_RUNNER_PORT "$runner_port"
     add_env MJPEG_PORT "$mjpeg_port"
     add_env RUST_LOG "$(pick RUST_LOG)"
     [ -n "$(pick RUST_LOG)" ] || add_env RUST_LOG warn
     for key in IPHONE_USE_IDLE_RELEASE_SECS IPHONE_USE_IDLE_RELEASE IPHONE_USE_PASSWORD IPHONE_USE_NO_UPDATE_CHECK IPHONE_USE_BASE_PATH; do
         add_env "$key" "$(pick "$key")"
     done
-    for key in WDA_TEAM_ID WDA_BUNDLE_ID WDA_ALLOW_LAN WDA_TRANSPORT IPU_RUNNER_SRC; do
+    for key in IPU_RUNNER_TEAM_ID IPU_RUNNER_BUNDLE_ID IPU_RUNNER_ALLOW_LAN IPU_RUNNER_TRANSPORT IPU_RUNNER_SRC; do
         add_env "$key" "$(pick "$key" inherit)"
     done
-    if [ -n "${WDA_ASC_KEY_PATH:-}${WDA_ASC_KEY_ID:-}${WDA_ASC_ISSUER_ID:-}" ]; then
-        [ -n "${WDA_ASC_KEY_PATH:-}" ] && [ -n "${WDA_ASC_KEY_ID:-}" ] && [ -n "${WDA_ASC_ISSUER_ID:-}" ] \
-            || die "Set all three of WDA_ASC_KEY_PATH, WDA_ASC_KEY_ID and WDA_ASC_ISSUER_ID, or none."
-        add_env WDA_ASC_KEY_PATH "$WDA_ASC_KEY_PATH"
-        add_env WDA_ASC_KEY_ID "$WDA_ASC_KEY_ID"
-        add_env WDA_ASC_ISSUER_ID "$WDA_ASC_ISSUER_ID"
+    if [ -n "${IPU_RUNNER_ASC_KEY_PATH:-}${IPU_RUNNER_ASC_KEY_ID:-}${IPU_RUNNER_ASC_ISSUER_ID:-}" ]; then
+        [ -n "${IPU_RUNNER_ASC_KEY_PATH:-}" ] && [ -n "${IPU_RUNNER_ASC_KEY_ID:-}" ] && [ -n "${IPU_RUNNER_ASC_ISSUER_ID:-}" ] \
+            || die "Set all three of IPU_RUNNER_ASC_KEY_PATH, IPU_RUNNER_ASC_KEY_ID and IPU_RUNNER_ASC_ISSUER_ID, or none."
+        add_env IPU_RUNNER_ASC_KEY_PATH "$IPU_RUNNER_ASC_KEY_PATH"
+        add_env IPU_RUNNER_ASC_KEY_ID "$IPU_RUNNER_ASC_KEY_ID"
+        add_env IPU_RUNNER_ASC_ISSUER_ID "$IPU_RUNNER_ASC_ISSUER_ID"
     else
-        for value in "$plist" "$default_wda_plist"; do
-            if [ -n "$(named_plist_env "$value" WDA_ASC_KEY_PATH)" ] \
-                && [ -n "$(named_plist_env "$value" WDA_ASC_KEY_ID)" ] \
-                && [ -n "$(named_plist_env "$value" WDA_ASC_ISSUER_ID)" ]; then
-                for key in WDA_ASC_KEY_PATH WDA_ASC_KEY_ID WDA_ASC_ISSUER_ID; do
+        for value in "$plist" "$default_runner_plist"; do
+            if [ -n "$(named_plist_env "$value" IPU_RUNNER_ASC_KEY_PATH)" ] \
+                && [ -n "$(named_plist_env "$value" IPU_RUNNER_ASC_KEY_ID)" ] \
+                && [ -n "$(named_plist_env "$value" IPU_RUNNER_ASC_ISSUER_ID)" ]; then
+                for key in IPU_RUNNER_ASC_KEY_PATH IPU_RUNNER_ASC_KEY_ID IPU_RUNNER_ASC_ISSUER_ID; do
                     add_env "$key" "$(named_plist_env "$value" "$key")"
                 done
                 break
@@ -2510,8 +2510,8 @@ install_named_instance() {
     fi
     mv -f "$plist_stage" "$plist" || named_rollback "Could not install $plist"
     plist_replaced=1
-    for value in setup-wda.sh uninstall.sh; do
-        if [ "$value" = setup-wda.sh ]; then key="$setup_src"; else key="$uninstall_src"; fi
+    for value in setup-runner.sh uninstall.sh; do
+        if [ "$value" = setup-runner.sh ]; then key="$setup_src"; else key="$uninstall_src"; fi
         cp -f "$key" "$state_dir/$value.new.$$" && chmod 700 "$state_dir/$value.new.$$" \
             && mv -f "$state_dir/$value.new.$$" "$state_dir/$value" \
             || named_rollback "Could not install $state_dir/$value"
@@ -2546,7 +2546,7 @@ install_named_instance() {
     echo ""
     info "iPhone      : $udid"
     info "Daemon      : http://127.0.0.1:$daemon_port   (launchd $label)"
-    info "Relays      : 127.0.0.1:$wda_port control, 127.0.0.1:$mjpeg_port video (launchd $wda_label)"
+    info "Relays      : 127.0.0.1:$runner_port control, 127.0.0.1:$mjpeg_port video (launchd $runner_label)"
     info "Token       : EnvironmentVariables:IPHONE_USE_AGENT_TOKEN in $plist"
     info "State       : $state_dir"
     echo ""
@@ -2775,11 +2775,11 @@ fi
 if launchd_label_is_disabled "$OLD_PLIST_LABEL"; then
     PREINSTALL_OLD_DAEMON_DISABLED=1
 fi
-if launchctl print "gui/$UID_NUM/$WDA_PLIST_LABEL" >/dev/null 2>&1; then
-    PREINSTALL_WDA_LOADED=1
+if launchctl print "gui/$UID_NUM/$IPU_RUNNER_PLIST_LABEL" >/dev/null 2>&1; then
+    PREINSTALL_RUNNER_LOADED=1
 fi
-if launchd_label_is_disabled "$WDA_PLIST_LABEL"; then
-    PREINSTALL_WDA_DISABLED=1
+if launchd_label_is_disabled "$IPU_RUNNER_PLIST_LABEL"; then
+    PREINSTALL_RUNNER_DISABLED=1
 fi
 [ "$PREINSTALL_DAEMON_LOADED" = "0" ] || [ -f "$PLIST_DST" ] \
     || die "The current product daemon is loaded but its expected plist is missing: $PLIST_DST"
@@ -2822,11 +2822,11 @@ env_or_existing() {
 }
 
 # The iPhone Mirroring backend was removed in v0.9; every install serves the
-# phone over WDA. An older plist may still say mirror: say so and move on.
+# phone over runner. An older plist may still say mirror: say so and move on.
 if [ "${IPHONE_USE_BACKEND:-$(plist_env_get IPHONE_USE_BACKEND)}" = "mirror" ] \
     || [ "${IPHONE_USE_BACKEND:-$(plist_env_get IPHONE_USE_BACKEND)}" = "legacy-mirror" ]; then
     warn "The iPhone Mirroring backend was removed in v0.9; this install serves the phone over the device runner."
-    warn "  Run setup-wda.sh once if this Mac has never set the device runner up."
+    warn "  Run setup-runner.sh once if this Mac has never set the device runner up."
 fi
 
 # ── Step 1 — Obtain the .app ──────────────────────────────────────────────────
@@ -2918,15 +2918,15 @@ ok "Log directory: $LOG_DIR"
 # explicit environment > current plist > pre-rename plist > documented default.
 # The old job is evicted only after these values have been copied into, and the
 # generated replacement has passed plutil validation.
-wda_env_or_existing() {
+runner_env_or_existing() {
     local key="$1"
     local fallback="${2:-}"
     local value
     value="$(printenv "$key" 2>/dev/null || true)"
     [ -n "$value" ] || value="$(plist_env_get "$key")"
-    if [ -z "$value" ] && [ -f "$WDA_PLIST_DST" ]; then
+    if [ -z "$value" ] && [ -f "$IPU_RUNNER_PLIST_DST" ]; then
         value="$(/usr/libexec/PlistBuddy \
-            -c "Print :EnvironmentVariables:$key" "$WDA_PLIST_DST" 2>/dev/null || true)"
+            -c "Print :EnvironmentVariables:$key" "$IPU_RUNNER_PLIST_DST" 2>/dev/null || true)"
     fi
     [ -n "$value" ] || value="$fallback"
     printf '%s' "$value"
@@ -3001,144 +3001,144 @@ esac
 LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
 [ -n "$LAN_IP" ] || LAN_IP="<this-mac-LAN-ip>"
 
-# Direct mode defaults to deterministic localhost endpoints. setup-wda.sh owns
+# Direct mode defaults to deterministic localhost endpoints. setup-runner.sh owns
 # the relays (`iphone-use relay`) behind these URLs: over USB, or off the cable
-# through CoreDevice's encrypted Wi-Fi tunnel (WDA_TRANSPORT=auto, the default;
-# unset counts as auto, so an existing install with WDA_ALLOW_LAN=0 gets the
-# tunnel on upgrade; WDA_TRANSPORT=usb requires the cable). A plain LAN/socat
+# through CoreDevice's encrypted Wi-Fi tunnel (IPU_RUNNER_TRANSPORT=auto, the default;
+# unset counts as auto, so an existing install with IPU_RUNNER_ALLOW_LAN=0 gets the
+# tunnel on upgrade; IPU_RUNNER_TRANSPORT=usb requires the cable). A plain LAN/socat
 # relay to the phone's address is available only through the explicit
-# WDA_ALLOW_LAN=1 escape hatch: it is unencrypted (and an old runner without
+# IPU_RUNNER_ALLOW_LAN=1 escape hatch: it is unencrypted (and an old runner without
 # request signing accepts anyone), so that one belongs on a trusted, isolated
 # network only. An iOS 15/16 phone whose runner signs gets its LAN path anyway.
-WDA_URL="$(env_or_existing IPHONE_USE_WDA_URL)"
-WDA_MJPEG_URL="$(env_or_existing IPHONE_USE_WDA_MJPEG_URL)"
-if [ -z "$WDA_URL" ] && [ -z "$WDA_MJPEG_URL" ]; then
-    WDA_URL="http://127.0.0.1:8100"
-    WDA_MJPEG_URL="http://127.0.0.1:9100"
-elif [ -z "$WDA_URL" ]; then
-    if is_loopback_wda_url "$WDA_MJPEG_URL"; then
-        WDA_URL="http://127.0.0.1:8100"
+IPU_RUNNER_URL="$(env_or_existing IPHONE_USE_RUNNER_URL)"
+IPU_RUNNER_MJPEG_URL="$(env_or_existing IPHONE_USE_RUNNER_MJPEG_URL)"
+if [ -z "$IPU_RUNNER_URL" ] && [ -z "$IPU_RUNNER_MJPEG_URL" ]; then
+    IPU_RUNNER_URL="http://127.0.0.1:8100"
+    IPU_RUNNER_MJPEG_URL="http://127.0.0.1:9100"
+elif [ -z "$IPU_RUNNER_URL" ]; then
+    if is_loopback_runner_url "$IPU_RUNNER_MJPEG_URL"; then
+        IPU_RUNNER_URL="http://127.0.0.1:8100"
     else
-        die "External Direct WDA requires both IPHONE_USE_WDA_URL and IPHONE_USE_WDA_MJPEG_URL; refusing a remote/local split."
+        die "External Direct runner requires both IPHONE_USE_RUNNER_URL and IPHONE_USE_RUNNER_MJPEG_URL; refusing a remote/local split."
     fi
-elif [ -z "$WDA_MJPEG_URL" ]; then
-    if is_loopback_wda_url "$WDA_URL"; then
-        WDA_MJPEG_URL="http://127.0.0.1:9100"
+elif [ -z "$IPU_RUNNER_MJPEG_URL" ]; then
+    if is_loopback_runner_url "$IPU_RUNNER_URL"; then
+        IPU_RUNNER_MJPEG_URL="http://127.0.0.1:9100"
     else
-        die "External Direct WDA requires both IPHONE_USE_WDA_URL and IPHONE_USE_WDA_MJPEG_URL; refusing a remote/local split."
+        die "External Direct runner requires both IPHONE_USE_RUNNER_URL and IPHONE_USE_RUNNER_MJPEG_URL; refusing a remote/local split."
     fi
 fi
-is_network_wda_url "$WDA_URL" \
-    || die "IPHONE_USE_WDA_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
-is_network_wda_url "$WDA_MJPEG_URL" \
-    || die "IPHONE_USE_WDA_MJPEG_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
-if is_loopback_wda_url "$WDA_URL"; then
-    WDA_CONTROL_LOOPBACK=1
+is_network_runner_url "$IPU_RUNNER_URL" \
+    || die "IPHONE_USE_RUNNER_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
+is_network_runner_url "$IPU_RUNNER_MJPEG_URL" \
+    || die "IPHONE_USE_RUNNER_MJPEG_URL must be an explicit HTTP(S) host and port without credentials, query, or fragment."
+if is_loopback_runner_url "$IPU_RUNNER_URL"; then
+    IPU_RUNNER_CONTROL_LOOPBACK=1
 else
-    WDA_CONTROL_LOOPBACK=0
+    IPU_RUNNER_CONTROL_LOOPBACK=0
 fi
-if is_loopback_wda_url "$WDA_MJPEG_URL"; then
-    WDA_MJPEG_LOOPBACK=1
+if is_loopback_runner_url "$IPU_RUNNER_MJPEG_URL"; then
+    IPU_RUNNER_MJPEG_LOOPBACK=1
 else
-    WDA_MJPEG_LOOPBACK=0
+    IPU_RUNNER_MJPEG_LOOPBACK=0
 fi
-[ "$WDA_CONTROL_LOOPBACK" = "$WDA_MJPEG_LOOPBACK" ] \
+[ "$IPU_RUNNER_CONTROL_LOOPBACK" = "$IPU_RUNNER_MJPEG_LOOPBACK" ] \
     || die "Direct control and MJPEG endpoints must both be loopback or both be external; mixed routing is unsafe."
-ok "WDA control endpoint: $WDA_URL"
-ok "WDA video endpoint: $WDA_MJPEG_URL"
+ok "runner control endpoint: $IPU_RUNNER_URL"
+ok "runner video endpoint: $IPU_RUNNER_MJPEG_URL"
 
 # Recognize the product-owned supervisor shipped before
-# IPHONE_USE_WDA_MANAGED existed. Exact label + exact fixed setup-script path
-# avoids claiming an unrelated/custom WDA service merely because a plist exists.
-legacy_product_wda_supervisor_owned() {
+# IPHONE_USE_RUNNER_MANAGED existed. Exact label + exact fixed setup-script path
+# avoids claiming an unrelated/custom runner service merely because a plist exists.
+legacy_product_runner_supervisor_owned() {
     local label
     local program
-    [ -f "$WDA_PLIST_DST" ] || return 1
-    label="$(/usr/libexec/PlistBuddy -c "Print :Label" "$WDA_PLIST_DST" 2>/dev/null || true)"
-    program="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:1" "$WDA_PLIST_DST" 2>/dev/null || true)"
-    [ "$label" = "$WDA_PLIST_LABEL" ] \
-        && [ "$program" = "$HOME/.iphone-use/setup-wda.sh" ]
+    [ -f "$IPU_RUNNER_PLIST_DST" ] || return 1
+    label="$(/usr/libexec/PlistBuddy -c "Print :Label" "$IPU_RUNNER_PLIST_DST" 2>/dev/null || true)"
+    program="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:1" "$IPU_RUNNER_PLIST_DST" 2>/dev/null || true)"
+    [ "$label" = "$IPU_RUNNER_PLIST_LABEL" ] \
+        && [ "$program" = "$HOME/.iphone-use/setup-runner.sh" ]
 }
 
 # The installer owns the default loopback supervisor/relay pair. A custom or
-# remote WDA URL is external by default and must never be stopped or rewritten
+# remote runner URL is external by default and must never be stopped or rewritten
 # as though this installer owned it. An explicit value always wins.
-PRODUCT_WDA_SUPERVISOR_OWNED=0
-if legacy_product_wda_supervisor_owned; then
-    PRODUCT_WDA_SUPERVISOR_OWNED=1
+PRODUCT_RUNNER_SUPERVISOR_OWNED=0
+if legacy_product_runner_supervisor_owned; then
+    PRODUCT_RUNNER_SUPERVISOR_OWNED=1
 fi
-WDA_MANAGED="$(env_or_existing IPHONE_USE_WDA_MANAGED)"
-if [ -z "$WDA_MANAGED" ]; then
-    if [ "$PRODUCT_WDA_SUPERVISOR_OWNED" = "1" ]; then
-        WDA_MANAGED="true"
-        [ -n "$WDA_URL" ] || WDA_URL="http://127.0.0.1:8100"
-        [ -n "$WDA_MJPEG_URL" ] || WDA_MJPEG_URL="http://127.0.0.1:9100"
+IPU_RUNNER_MANAGED="$(env_or_existing IPHONE_USE_RUNNER_MANAGED)"
+if [ -z "$IPU_RUNNER_MANAGED" ]; then
+    if [ "$PRODUCT_RUNNER_SUPERVISOR_OWNED" = "1" ]; then
+        IPU_RUNNER_MANAGED="true"
+        [ -n "$IPU_RUNNER_URL" ] || IPU_RUNNER_URL="http://127.0.0.1:8100"
+        [ -n "$IPU_RUNNER_MJPEG_URL" ] || IPU_RUNNER_MJPEG_URL="http://127.0.0.1:9100"
         info "Legacy product-owned runner supervisor detected; migrating lifecycle ownership."
-    elif [ "$WDA_URL" = "http://127.0.0.1:8100" ] \
-        && [ "$WDA_MJPEG_URL" = "http://127.0.0.1:9100" ]; then
-        WDA_MANAGED="true"
+    elif [ "$IPU_RUNNER_URL" = "http://127.0.0.1:8100" ] \
+        && [ "$IPU_RUNNER_MJPEG_URL" = "http://127.0.0.1:9100" ]; then
+        IPU_RUNNER_MANAGED="true"
     else
-        WDA_MANAGED="false"
+        IPU_RUNNER_MANAGED="false"
     fi
 fi
-case "$WDA_MANAGED" in
-    1|true|TRUE|yes|YES) WDA_MANAGED="true" ;;
-    0|false|FALSE|no|NO) WDA_MANAGED="false" ;;
-    *) die "IPHONE_USE_WDA_MANAGED must be true or false (got '$WDA_MANAGED')." ;;
+case "$IPU_RUNNER_MANAGED" in
+    1|true|TRUE|yes|YES) IPU_RUNNER_MANAGED="true" ;;
+    0|false|FALSE|no|NO) IPU_RUNNER_MANAGED="false" ;;
+    *) die "IPHONE_USE_RUNNER_MANAGED must be true or false (got '$IPU_RUNNER_MANAGED')." ;;
 esac
-if [ "$WDA_MANAGED" = "true" ] \
-    && { ! is_loopback_wda_url "$WDA_URL" \
-        || ! is_loopback_wda_url "$WDA_MJPEG_URL"; }; then
-    die "IPHONE_USE_WDA_MANAGED=true requires loopback HTTP control and MJPEG URLs (127.0.0.1 or localhost). Set it to false for external WDA."
+if [ "$IPU_RUNNER_MANAGED" = "true" ] \
+    && { ! is_loopback_runner_url "$IPU_RUNNER_URL" \
+        || ! is_loopback_runner_url "$IPU_RUNNER_MJPEG_URL"; }; then
+    die "IPHONE_USE_RUNNER_MANAGED=true requires loopback HTTP control and MJPEG URLs (127.0.0.1 or localhost). Set it to false for external runner."
 fi
-ok "WDA lifecycle managed by iphone-use: $WDA_MANAGED"
+ok "runner lifecycle managed by iphone-use: $IPU_RUNNER_MANAGED"
 
 # Persist one explicit device target across browser reconnects, idle release,
-# daemon upgrades, and multi-device Macs. Accept WDA_UDID as a first-install
+# daemon upgrades, and multi-device Macs. Accept IPU_RUNNER_UDID as a first-install
 # convenience, but store the daemon's canonical IPHONE_USE_UDID key.
-DEVICE_UDID="$(env_or_existing IPHONE_USE_UDID "${WDA_UDID:-}")"
+DEVICE_UDID="$(env_or_existing IPHONE_USE_UDID "${IPU_RUNNER_UDID:-}")"
 if [ -n "$DEVICE_UDID" ] && ! printf '%s' "$DEVICE_UDID" | grep -Eq '^[0-9A-Fa-f-]+$'; then
     die "IPHONE_USE_UDID contains invalid characters (expected hex and dashes)."
 fi
 [ -z "$DEVICE_UDID" ] || ok "Target iPhone fixed to UDID: $DEVICE_UDID"
 
-# Keep ~/.iphone-use/setup-wda.sh fresh on EVERY install. The daemon's
-# POST /agent/mode runs this copy to build/relaunch WDA (and relay its MJPEG
+# Keep ~/.iphone-use/setup-runner.sh fresh on EVERY install. The daemon's
+# POST /agent/mode runs this copy to build/relaunch runner (and relay its MJPEG
 # video port). Without this step the script only ever self-installs the OLD copy
-# the daemon re-spawns, so setup-wda.sh fixes never reach upgraders. Prefer a
+# the daemon re-spawns, so setup-runner.sh fixes never reach upgraders. Prefer a
 # local checkout, else fetch from the exact release commit selected above.
-SETUP_WDA_DST="$HOME/.iphone-use/setup-wda.sh"
+SETUP_RUNNER_DST="$HOME/.iphone-use/setup-runner.sh"
 mkdir -p "$HOME/.iphone-use" 2>/dev/null || true
-SETUP_WDA_SRC=""
-if [ "$SCRIPT_IS_LOCAL" = "1" ] && [ -f "$SCRIPT_DIR/scripts/setup-wda.sh" ]; then
-    SETUP_WDA_SRC="$SCRIPT_DIR/scripts/setup-wda.sh"
+SETUP_RUNNER_SRC=""
+if [ "$SCRIPT_IS_LOCAL" = "1" ] && [ -f "$SCRIPT_DIR/scripts/setup-runner.sh" ]; then
+    SETUP_RUNNER_SRC="$SCRIPT_DIR/scripts/setup-runner.sh"
 else
     ensure_release_commit
-    SETUP_WDA_DL="$(mktemp)"
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/$RELEASE_COMMIT/scripts/setup-wda.sh" \
-        -o "$SETUP_WDA_DL" \
-        || die "Could not fetch setup-wda.sh from release $RELEASE_REF commit $RELEASE_COMMIT."
-    [ -s "$SETUP_WDA_DL" ] \
-        || die "Release $RELEASE_REF contains an empty setup-wda.sh."
-    SETUP_WDA_SRC="$SETUP_WDA_DL"
+    SETUP_RUNNER_DL="$(mktemp)"
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$RELEASE_COMMIT/scripts/setup-runner.sh" \
+        -o "$SETUP_RUNNER_DL" \
+        || die "Could not fetch setup-runner.sh from release $RELEASE_REF commit $RELEASE_COMMIT."
+    [ -s "$SETUP_RUNNER_DL" ] \
+        || die "Release $RELEASE_REF contains an empty setup-runner.sh."
+    SETUP_RUNNER_SRC="$SETUP_RUNNER_DL"
 fi
 
 # Stage and syntax-check before touching the fixed hand-off path. Keep a backup
 # until the app and generated daemon plist have both passed validation.
-SETUP_WDA_STAGE="$(mktemp "$HOME/.iphone-use/setup-wda.sh.new.XXXXXX")"
-cp -f "$SETUP_WDA_SRC" "$SETUP_WDA_STAGE"
-chmod 700 "$SETUP_WDA_STAGE"
-/bin/bash -n "$SETUP_WDA_STAGE" \
-    || die "The release-matched setup-wda.sh failed Bash syntax validation."
-if [ -f "$SETUP_WDA_DST" ]; then
-    SETUP_WDA_HAD_EXISTING=1
-    SETUP_WDA_BACKUP="$(mktemp "$HOME/.iphone-use/setup-wda.sh.backup.XXXXXX")"
-    cp -p "$SETUP_WDA_DST" "$SETUP_WDA_BACKUP"
+SETUP_RUNNER_STAGE="$(mktemp "$HOME/.iphone-use/setup-runner.sh.new.XXXXXX")"
+cp -f "$SETUP_RUNNER_SRC" "$SETUP_RUNNER_STAGE"
+chmod 700 "$SETUP_RUNNER_STAGE"
+/bin/bash -n "$SETUP_RUNNER_STAGE" \
+    || die "The release-matched setup-runner.sh failed Bash syntax validation."
+if [ -f "$SETUP_RUNNER_DST" ]; then
+    SETUP_RUNNER_HAD_EXISTING=1
+    SETUP_RUNNER_BACKUP="$(mktemp "$HOME/.iphone-use/setup-runner.sh.backup.XXXXXX")"
+    cp -p "$SETUP_RUNNER_DST" "$SETUP_RUNNER_BACKUP"
 fi
-mv -f "$SETUP_WDA_STAGE" "$SETUP_WDA_DST"
-SETUP_WDA_STAGE=""
-SETUP_WDA_REPLACED=1
-ok "WDA setup script atomically updated: $SETUP_WDA_DST"
+mv -f "$SETUP_RUNNER_STAGE" "$SETUP_RUNNER_DST"
+SETUP_RUNNER_STAGE=""
+SETUP_RUNNER_REPLACED=1
+ok "runner setup script atomically updated: $SETUP_RUNNER_DST"
 
 # Install the standalone uninstaller from the same local checkout or exact
 # release commit as this installer. It participates in the same rollback transaction
@@ -3172,13 +3172,13 @@ UNINSTALL_STAGE=""
 UNINSTALL_REPLACED=1
 ok "Uninstaller atomically updated: $UNINSTALL_DST"
 
-# Device runner sources for setup-wda.sh, from the same checkout or release.
+# Device runner sources for setup-runner.sh, from the same checkout or release.
 if resolve_runner_source; then
     install_runner_sources "$RUNNER_SOURCE_DIR"
 elif runner_tree_valid "$RUNNER_SRC_DST"; then
     warn "Release ${RELEASE_REF:-?} ships no device runner sources; keeping the existing $RUNNER_SRC_DST."
 else
-    warn "Release ${RELEASE_REF:-?} ships no device runner sources; setup-wda.sh will report them missing until a release that has them is installed."
+    warn "Release ${RELEASE_REF:-?} ships no device runner sources; setup-runner.sh will report them missing until a release that has them is installed."
 fi
 
 info "For cross-network access, put an authenticated HTTPS reverse proxy or a trusted VPN/tunnel in front of the daemon; never expose the device runner ports."
@@ -3191,9 +3191,9 @@ append_plist_env IPHONE_USE_HOST "$HOST"
 append_plist_env IPHONE_USE_PORT "$PORT"
 append_plist_env IPHONE_USE_PASSWORD "$PASSWORD"
 append_plist_env IPHONE_USE_UDID "$DEVICE_UDID"
-append_plist_env IPHONE_USE_WDA_URL "$WDA_URL"
-append_plist_env IPHONE_USE_WDA_MJPEG_URL "$WDA_MJPEG_URL"
-append_plist_env IPHONE_USE_WDA_MANAGED "$WDA_MANAGED"
+append_plist_env IPHONE_USE_RUNNER_URL "$IPU_RUNNER_URL"
+append_plist_env IPHONE_USE_RUNNER_MJPEG_URL "$IPU_RUNNER_MJPEG_URL"
+append_plist_env IPHONE_USE_RUNNER_MANAGED "$IPU_RUNNER_MANAGED"
 for ENV_KEY in \
     IPHONE_USE_AGENT_TOKEN \
     IPHONE_USE_NO_UPDATE_CHECK \
@@ -3206,7 +3206,7 @@ do
     append_plist_env "$ENV_KEY" "$(env_or_existing "$ENV_KEY")"
 done
 # Unset means the daemon's default: release the phone after 600 idle seconds
-# and bring WDA up again on the next request. A stored value (including 0,
+# and bring runner up again on the next request. A stored value (including 0,
 # "keep the runner up") is the operator's choice and is carried forward.
 IDLE_RELEASE_SECS="$(env_or_existing IPHONE_USE_IDLE_RELEASE_SECS)"
 append_plist_env IPHONE_USE_IDLE_RELEASE_SECS "$IDLE_RELEASE_SECS"
@@ -3214,32 +3214,32 @@ append_plist_env IPHONE_USE_IDLE_RELEASE_SECS "$IDLE_RELEASE_SECS"
 # person (a passcode phone); carried forward like the window.
 append_plist_env IPHONE_USE_IDLE_RELEASE "$(env_or_existing IPHONE_USE_IDLE_RELEASE)"
 for ENV_KEY in \
-    WDA_TEAM_ID \
-    WDA_BUNDLE_ID \
+    IPU_RUNNER_TEAM_ID \
+    IPU_RUNNER_BUNDLE_ID \
     IPU_RUNNER_SRC \
-    WDA_PORT \
+    IPU_RUNNER_PORT \
     MJPEG_PORT \
-    WDA_ALLOW_LAN \
-    WDA_TRANSPORT
+    IPU_RUNNER_ALLOW_LAN \
+    IPU_RUNNER_TRANSPORT
 do
-    append_plist_env "$ENV_KEY" "$(wda_env_or_existing "$ENV_KEY")"
+    append_plist_env "$ENV_KEY" "$(runner_env_or_existing "$ENV_KEY")"
 done
 # App Store Connect API-key signing only works with all three keys, and a
 # partial set must never mix with a different saved key: carry them as one
 # set from the first source that has all three (#67: an upgrade dropped them).
 ASC_SET_SOURCE=""
-if [ -n "${WDA_ASC_KEY_PATH:-}${WDA_ASC_KEY_ID:-}${WDA_ASC_ISSUER_ID:-}" ]; then
-    [ -n "${WDA_ASC_KEY_PATH:-}" ] && [ -n "${WDA_ASC_KEY_ID:-}" ] && [ -n "${WDA_ASC_ISSUER_ID:-}" ] \
-        || die "Set all three of WDA_ASC_KEY_PATH, WDA_ASC_KEY_ID and WDA_ASC_ISSUER_ID, or none."
-    for ENV_KEY in WDA_ASC_KEY_PATH WDA_ASC_KEY_ID WDA_ASC_ISSUER_ID; do
+if [ -n "${IPU_RUNNER_ASC_KEY_PATH:-}${IPU_RUNNER_ASC_KEY_ID:-}${IPU_RUNNER_ASC_ISSUER_ID:-}" ]; then
+    [ -n "${IPU_RUNNER_ASC_KEY_PATH:-}" ] && [ -n "${IPU_RUNNER_ASC_KEY_ID:-}" ] && [ -n "${IPU_RUNNER_ASC_ISSUER_ID:-}" ] \
+        || die "Set all three of IPU_RUNNER_ASC_KEY_PATH, IPU_RUNNER_ASC_KEY_ID and IPU_RUNNER_ASC_ISSUER_ID, or none."
+    for ENV_KEY in IPU_RUNNER_ASC_KEY_PATH IPU_RUNNER_ASC_KEY_ID IPU_RUNNER_ASC_ISSUER_ID; do
         append_plist_env "$ENV_KEY" "$(printenv "$ENV_KEY")"
     done
 else
-    for ASC_SET_SOURCE in "$PLIST_DST" "$WDA_PLIST_DST"; do
-        if [ -n "$(plist_env_get_from "$ASC_SET_SOURCE" WDA_ASC_KEY_PATH)" ] \
-            && [ -n "$(plist_env_get_from "$ASC_SET_SOURCE" WDA_ASC_KEY_ID)" ] \
-            && [ -n "$(plist_env_get_from "$ASC_SET_SOURCE" WDA_ASC_ISSUER_ID)" ]; then
-            for ENV_KEY in WDA_ASC_KEY_PATH WDA_ASC_KEY_ID WDA_ASC_ISSUER_ID; do
+    for ASC_SET_SOURCE in "$PLIST_DST" "$IPU_RUNNER_PLIST_DST"; do
+        if [ -n "$(plist_env_get_from "$ASC_SET_SOURCE" IPU_RUNNER_ASC_KEY_PATH)" ] \
+            && [ -n "$(plist_env_get_from "$ASC_SET_SOURCE" IPU_RUNNER_ASC_KEY_ID)" ] \
+            && [ -n "$(plist_env_get_from "$ASC_SET_SOURCE" IPU_RUNNER_ASC_ISSUER_ID)" ]; then
+            for ENV_KEY in IPU_RUNNER_ASC_KEY_PATH IPU_RUNNER_ASC_KEY_ID IPU_RUNNER_ASC_ISSUER_ID; do
                 append_plist_env "$ENV_KEY" "$(plist_env_get_from "$ASC_SET_SOURCE" "$ENV_KEY")"
             done
             break
@@ -3312,35 +3312,35 @@ PLIST_STAGE=""
 
 ok "LaunchAgent plist written: $PLIST_DST"
 
-# Settle the WDA supervisor's enabled state before committing the artifact
+# Settle the runner supervisor's enabled state before committing the artifact
 # backups, so a failure here restores the previous install.
-if [ "$PRODUCT_WDA_SUPERVISOR_OWNED" = "1" ] \
-    && [ "$WDA_MANAGED" = "true" ]; then
-    if [ "$PREINSTALL_WDA_DISABLED" = "1" ] && [ "${IDLE_RELEASE_SECS:-}" != "0" ]; then
+if [ "$PRODUCT_RUNNER_SUPERVISOR_OWNED" = "1" ] \
+    && [ "$IPU_RUNNER_MANAGED" = "true" ]; then
+    if [ "$PREINSTALL_RUNNER_DISABLED" = "1" ] && [ "${IDLE_RELEASE_SECS:-}" != "0" ]; then
         # A disabled supervisor in Direct mode is a released phone, parked on
         # purpose. Enabling it here made the next login start the runner, and
         # iOS then asked for the passcode on a phone nobody had asked for. The
         # daemon enables it again on the next agent request.
         ok "Device runner supervisor stays parked; the daemon starts it on the next agent request"
     else
-        if [ "$PREINSTALL_WDA_DISABLED" = "1" ]; then
-            WDA_RUNTIME_TOUCHED=1
+        if [ "$PREINSTALL_RUNNER_DISABLED" = "1" ]; then
+            IPU_RUNNER_RUNTIME_TOUCHED=1
         fi
-        launchctl enable "gui/$UID_NUM/$WDA_PLIST_LABEL" 2>/dev/null \
+        launchctl enable "gui/$UID_NUM/$IPU_RUNNER_PLIST_LABEL" 2>/dev/null \
             || die "Could not re-enable the device runner supervisor"
         ok "Device runner supervisor enabled"
     fi
 fi
 
 # ── Step 8 — Start or restart the LaunchAgent (no sudo; gui/$UID) ─────────────
-# The daemon intentionally starts while WDA is down: its HTTP/UI control plane
+# The daemon intentionally starts while runner is down: its HTTP/UI control plane
 # explains the missing prerequisite and offers recovery. Keep the product
 # reachable instead of turning setup state into a connection-refused page.
 DAEMON_SHOULD_START=1
-WDA_READY=0
+IPU_RUNNER_READY=0
 if command -v curl >/dev/null 2>&1 \
-    && curl -fsS --noproxy '*' -m 4 "${WDA_URL%/}/status" >/dev/null 2>&1; then
-    WDA_READY=1
+    && curl -fsS --noproxy '*' -m 4 "${IPU_RUNNER_URL%/}/status" >/dev/null 2>&1; then
+    IPU_RUNNER_READY=1
     ok "Existing device runner endpoint verified; the direct daemon can start now"
     if [ "$RUNNER_SRC_CHANGED" = "1" ] && [ "$RUNNER_SRC_HAD_EXISTING" = "1" ]; then
         # The reachable runner predates this install: reusing it is fine for
@@ -3348,10 +3348,10 @@ if command -v curl >/dev/null 2>&1 \
         warn "The device runner on the phone was built from the previous runner sources."
         warn "Run 'iphone-use setup' to rebuild it now (it is also rebuilt the next time the runner restarts)."
     fi
-elif launchctl print "gui/$UID_NUM/$WDA_PLIST_LABEL" >/dev/null 2>&1; then
+elif launchctl print "gui/$UID_NUM/$IPU_RUNNER_PLIST_LABEL" >/dev/null 2>&1; then
     info "Existing device runner supervisor found; it can recover the device layer."
 else
-    info "Direct control plane will start offline; run setup-wda.sh to connect the device layer."
+    info "Direct control plane will start offline; run setup-runner.sh to connect the device layer."
 fi
 
 info "Updating LaunchAgent (gui/$UID_NUM) ..."
@@ -3467,7 +3467,7 @@ fi
     || die "The new LaunchAgent was not loaded; the previous install and daemon state were restored."
 
 # A loaded KeepAlive job can still be crash-looping or unable to bind its port.
-# The browser control plane is designed to work while WDA is offline, so
+# The browser control plane is designed to work while runner is offline, so
 # require that local HTTP endpoint before discarding the previous install.
 case "$HOST" in
     0.0.0.0) DAEMON_PROBE_HOST="127.0.0.1" ;;
@@ -3494,12 +3494,12 @@ if [ "$DAEMON_HTTP_READY" != "1" ]; then
 fi
 ok "Daemon identity, listener, and HTTP control plane verified (pid $DAEMON_PID): $DAEMON_PROBE_URL"
 
-# A newly-started daemon begins with a conservative cached WDA health
+# A newly-started daemon begins with a conservative cached runner health
 # value and refreshes it in the background. If the installer already proved the
-# WDA endpoint itself, do not report a ready device layer while the product API
-# still says `drivable:false` (the same cold-cache boundary setup-wda.sh gates).
+# runner endpoint itself, do not report a ready device layer while the product API
+# still says `drivable:false` (the same cold-cache boundary setup-runner.sh gates).
 DAEMON_PRODUCT_READY=0
-if [ "$WDA_READY" = "1" ] \
+if [ "$IPU_RUNNER_READY" = "1" ] \
     && [ "$DAEMON_HTTP_READY" = "1" ]; then
     DAEMON_AGENT_SECRET="$(plist_env_get IPHONE_USE_AGENT_TOKEN)"
     [ -n "$DAEMON_AGENT_SECRET" ] || DAEMON_AGENT_SECRET="$PASSWORD"
@@ -3529,7 +3529,7 @@ if [ "$WDA_READY" = "1" ] \
 fi
 
 # Commit only after launchd accepts the new definition and the local HTTP
-# control plane answers. WDA may still be a first-run prerequisite, but a
+# control plane answers. runner may still be a first-run prerequisite, but a
 # broken daemon bootstrap/control plane is an install failure and must never
 # be reported as success.
 INSTALL_COMMIT_SIGNAL_PENDING=0
@@ -3545,8 +3545,8 @@ fi
 APP_BACKUP=""
 [ -z "$PLIST_BACKUP" ] || rm -f "$PLIST_BACKUP" 2>/dev/null || true
 PLIST_BACKUP=""
-[ -z "$SETUP_WDA_BACKUP" ] || rm -f "$SETUP_WDA_BACKUP" 2>/dev/null || true
-SETUP_WDA_BACKUP=""
+[ -z "$SETUP_RUNNER_BACKUP" ] || rm -f "$SETUP_RUNNER_BACKUP" 2>/dev/null || true
+SETUP_RUNNER_BACKUP=""
 [ -z "$UNINSTALL_BACKUP" ] || rm -f "$UNINSTALL_BACKUP" 2>/dev/null || true
 UNINSTALL_BACKUP=""
 _finish_runner_sources
@@ -3561,29 +3561,29 @@ install_cli_link "$DEST/$BINARY_INSIDE_APP"
 echo ""
 printf '%b━━━ Device layer (iphone-use device runner) ━━━%b\n' "$BOLD" "$RESET"
 echo ""
-if [ "$WDA_MANAGED" = "true" ]; then
+if [ "$IPU_RUNNER_MANAGED" = "true" ]; then
     printf "  What the iPhone needs (once):\n"
     printf "    • Xcode installed and signed in to an Apple ID (Xcode → Settings → Accounts; a free one works).\n"
     printf "    • Developer Mode on (iPhone Settings → Privacy & Security → Developer Mode).\n"
     printf "    • Plugged in with a cable, unlocked, and this Mac trusted.\n"
     printf "  %biphone-use doctor%b says what is missing; %biphone-use setup%b does the rest.\n" "$BOLD" "$RESET" "$BOLD" "$RESET"
-    [ -x "$SETUP_WDA_DST" ] \
-        || warn "The setup script disappeared after commit; rerun install.sh to restore $SETUP_WDA_DST."
+    [ -x "$SETUP_RUNNER_DST" ] \
+        || warn "The setup script disappeared after commit; rerun install.sh to restore $SETUP_RUNNER_DST."
 else
     info "Using an externally managed device runner endpoint:"
-    printf "    control: %s\n" "$WDA_URL"
-    printf "    video  : %s\n" "$WDA_MJPEG_URL"
+    printf "    control: %s\n" "$IPU_RUNNER_URL"
+    printf "    video  : %s\n" "$IPU_RUNNER_MJPEG_URL"
     printf "  The installer will not start, stop, or rewrite that service.\n"
 fi
 echo ""
-if [ "$WDA_READY" = "1" ] && [ "$RUNNER_SRC_CHANGED" = "1" ] && [ "$RUNNER_SRC_HAD_EXISTING" = "1" ]; then
+if [ "$IPU_RUNNER_READY" = "1" ] && [ "$RUNNER_SRC_CHANGED" = "1" ] && [ "$RUNNER_SRC_HAD_EXISTING" = "1" ]; then
     warn "The device runner was reachable, but it is the previous build; run 'iphone-use setup' to rebuild it from the new sources."
-elif [ "$WDA_READY" = "1" ]; then
+elif [ "$IPU_RUNNER_READY" = "1" ]; then
     ok "The device runner was already reachable during this install."
-elif [ "$WDA_MANAGED" = "false" ]; then
+elif [ "$IPU_RUNNER_MANAGED" = "false" ]; then
     warn "The external device runner endpoint was not reachable; verify it independently."
 else
-    warn "The phone is not reported ready yet; completion is intentionally deferred to setup-wda.sh."
+    warn "The phone is not reported ready yet; completion is intentionally deferred to setup-runner.sh."
 fi
 printf "\n"
 printf '%bNOTE (headless):%b LaunchAgents run only after a desktop login (Aqua session).\n' "$YELLOW" "$RESET"
@@ -3616,8 +3616,8 @@ info "Check: iphone-use upgrade --check    Upgrade: iphone-use upgrade"
 
 # ── Step 10 — Print current status ───────────────────────────────────────────
 if command -v curl >/dev/null 2>&1 \
-    && curl -fsS --noproxy '*' -m 4 "${WDA_URL%/}/status" >/dev/null 2>&1; then
-    WDA_READY=1
+    && curl -fsS --noproxy '*' -m 4 "${IPU_RUNNER_URL%/}/status" >/dev/null 2>&1; then
+    IPU_RUNNER_READY=1
 fi
 
 echo ""
@@ -3627,10 +3627,10 @@ if launchctl print "gui/$UID_NUM/$PLIST_LABEL" >/dev/null 2>&1; then
 else
     info "Daemon job is staged but not loaded."
 fi
-if [ "$WDA_MANAGED" = "false" ]; then
+if [ "$IPU_RUNNER_MANAGED" = "false" ]; then
     info "The device runner endpoint is externally managed; no local supervisor status is asserted."
-elif launchctl print "gui/$UID_NUM/$WDA_PLIST_LABEL" >/dev/null 2>&1; then
-    ok "Device runner supervisor loaded: gui/$UID_NUM/$WDA_PLIST_LABEL"
+elif launchctl print "gui/$UID_NUM/$IPU_RUNNER_PLIST_LABEL" >/dev/null 2>&1; then
+    ok "Device runner supervisor loaded: gui/$UID_NUM/$IPU_RUNNER_PLIST_LABEL"
 else
     info "Device runner supervisor is parked or not set up yet (it starts on the next agent request)."
 fi
@@ -3644,15 +3644,15 @@ printf "  Sign in   : iphone-use login          (one-time link + QR code for the
 printf "  Password  : IPHONE_USE_PASSWORD in %s\n" "$PLIST_DST"
 printf "  Restart   : launchctl kickstart -k gui/%s/%s\n" "$UID_NUM" "$PLIST_LABEL"
 printf "  Uninstall : %s\n" "$UNINSTALL_DST"
-printf "  Logs      : %s/iphone-use.log, %s/.iphone-use/wda-agent.log\n" "$LOG_DIR" "$HOME"
+printf "  Logs      : %s/iphone-use.log, %s/.iphone-use/runner-agent.log\n" "$LOG_DIR" "$HOME"
 echo ""
 if [ "$DAEMON_HTTP_READY" = "1" ] \
-    && [ "$WDA_READY" = "1" ] \
+    && [ "$IPU_RUNNER_READY" = "1" ] \
     && [ "$DAEMON_PRODUCT_READY" = "1" ]; then
     ok "Installed; the daemon and the device runner are up, and the iPhone is drivable."
 else
     ok "Installed; daemon HTTP control plane verified."
-    if [ "$WDA_MANAGED" = "true" ]; then
+    if [ "$IPU_RUNNER_MANAGED" = "true" ]; then
         info "The device runner is parked or not set up yet."
     fi
 fi
@@ -3662,7 +3662,7 @@ fi
 # runner on someone's phone (each launch can ask for the passcode) or open
 # browser windows from the auto-update job.
 if [ "$PLIST_HAD_EXISTING" = "0" ] && first_run_interactive; then
-    if [ "$WDA_MANAGED" = "true" ] && [ "$WDA_READY" != "1" ]; then
+    if [ "$IPU_RUNNER_MANAGED" = "true" ] && [ "$IPU_RUNNER_READY" != "1" ]; then
         first_run_setup "$DEST/$BINARY_INSIDE_APP" ""
     fi
     [ "$DAEMON_HTTP_READY" != "1" ] || first_run_login "$DEST/$BINARY_INSIDE_APP"

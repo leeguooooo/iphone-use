@@ -14,7 +14,7 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda, mock_wda_with_apps};
+use support::{block, build_state_with_runner, mock_runner_with_apps};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 
@@ -53,7 +53,7 @@ fn blocked_apps_and_the_run_budget_refuse_before_anything_is_sent() {
         let sent: Arc<Mutex<Vec<String>>> = Arc::default();
         let log = sent.clone();
         // The blocked app is in front for the whole test.
-        let wda = mock_wda_with_apps(r#"[{"bundleId":"com.example.bank"}]"#, move |request, _| {
+        let runner = mock_runner_with_apps(r#"[{"bundleId":"com.example.bank"}]"#, move |request, _| {
             log.lock()
                 .unwrap()
                 .push(request.lines().next().unwrap_or("").to_string());
@@ -62,7 +62,7 @@ fn blocked_apps_and_the_run_budget_refuse_before_anything_is_sent() {
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
         let launches = |sent: &Arc<Mutex<Vec<String>>>| {
             sent.lock()
                 .unwrap()

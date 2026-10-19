@@ -20,10 +20,10 @@ if mode == "unsigned":
 else:
     args.append("-allowProvisioningUpdates")
     env = {}
-    profile = Path(os.environ.get("WDA_PLIST", str(Path.home()/"Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist")))
+    profile = Path(os.environ.get("IPU_RUNNER_PLIST", str(Path.home()/"Library/LaunchAgents/com.leeguoo.iphone-use.runner.plist")))
     if profile.exists():
         env = plistlib.loads(profile.read_bytes()).get("EnvironmentVariables", {})
-    keys = ["WDA_ASC_KEY_PATH", "WDA_ASC_KEY_ID", "WDA_ASC_ISSUER_ID"]
+    keys = ["IPU_RUNNER_ASC_KEY_PATH", "IPU_RUNNER_ASC_KEY_ID", "IPU_RUNNER_ASC_ISSUER_ID"]
     values = [os.environ.get(key) or env.get(key) for key in keys]
     if all(values):
         for flag, value in zip(["-authenticationKeyPath", "-authenticationKeyID", "-authenticationKeyIssuerID"], values):

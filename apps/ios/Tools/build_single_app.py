@@ -40,14 +40,14 @@ def asc_auth(team):
 
     setup-app passes the phone's key in the environment. Only our own team falls
     back to the default runner's key: another team's build must not carry it."""
-    profile = Path.home() / "Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist"
+    profile = Path.home() / "Library/LaunchAgents/com.leeguoo.iphone-use.runner.plist"
     env = {}
     if team == DEFAULT_TEAM and profile.exists():
         env = plistlib.loads(profile.read_bytes()).get("EnvironmentVariables", {})
     auth = ["-allowProvisioningUpdates"]
-    for key, flag in [("WDA_ASC_KEY_PATH", "-authenticationKeyPath"),
-                      ("WDA_ASC_KEY_ID", "-authenticationKeyID"),
-                      ("WDA_ASC_ISSUER_ID", "-authenticationKeyIssuerID")]:
+    for key, flag in [("IPU_RUNNER_ASC_KEY_PATH", "-authenticationKeyPath"),
+                      ("IPU_RUNNER_ASC_KEY_ID", "-authenticationKeyID"),
+                      ("IPU_RUNNER_ASC_ISSUER_ID", "-authenticationKeyIssuerID")]:
         value = os.environ.get(key) or env.get(key)
         if value:
             auth.extend([flag, value])

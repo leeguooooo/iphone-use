@@ -15,7 +15,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use server::redaction::Image;
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 const TREE: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"设置","rect":{"x":0,"y":0,"width":440,"height":956},"children":[
 {"type":"XCUIElementTypeButton","label":"Sign In","rect":{"x":20,"y":100,"width":200,"height":44},"isEnabled":"1"},
@@ -72,7 +72,7 @@ fn overlay_numbers_elements_and_ocr_fills_in_for_an_unusable_tree() {
         );
         let opaque = Arc::new(AtomicBool::new(false));
         let tree_is_opaque = opaque.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             let body = if request.starts_with("POST /session ") {
                 r#"{"value":{"sessionId":"SESSION"}}"#.to_string()
             } else if request.contains("/source") {
@@ -87,7 +87,7 @@ fn overlay_numbers_elements_and_ocr_fills_in_for_an_unusable_tree() {
             };
             Some((Duration::ZERO, body))
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
 
         // The plain picture is untouched.
         let response = get(&state, "/agent/screenshot").await;

@@ -54,8 +54,8 @@ def count_nodes(node):
     return 1 + sum(count_nodes(child) for child in node.get("children") or [])
 
 
-def check_wda_shape(node):
-    """Problems with the root node's WDA /source shape (empty list = fine)."""
+def check_runner_shape(node):
+    """Problems with the root node's runner /source shape (empty list = fine)."""
     problems = []
     for key in ("type", "label", "name", "value", "rawIdentifier", "placeholderValue", "rect", "isEnabled", "isFocused"):
         if key not in node:
@@ -133,7 +133,7 @@ def main():
               f"ext={headers.get('X-IPU-Extension-Calls')} truncated={headers.get('X-IPU-Truncated')} "
               f"pid={headers.get('X-IPU-Pid')} bytes={headers.get('Content-Length')}")
         if run == 0:
-            for problem in check_wda_shape(root):
+            for problem in check_runner_shape(root):
                 fail(f"/source shape: {problem}")
     print(f"/source wall   {summary(samples)}")
     print(f"/source server {summary(server_samples)}")

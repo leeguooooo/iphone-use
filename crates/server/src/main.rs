@@ -108,21 +108,21 @@ fn http_authority(host: &str, port: u16) -> String {
     }
 }
 
-fn resolve_managed_wda(
+fn resolve_managed_runner(
     endpoints_are_local: bool,
     target_udid: Option<&str>,
     configured: Option<bool>,
 ) -> Result<bool> {
     // Auto-ownership is safe only when the daemon can restart the exact device
     // it stopped. A hand-run daemon with loopback defaults but no persisted
-    // target may use an already-running WDA, but must never idle-stop it.
+    // target may use an already-running runner, but must never idle-stop it.
     let requested = configured.unwrap_or(endpoints_are_local && target_udid.is_some());
     if !requested {
         return Ok(false);
     }
     if !endpoints_are_local {
         anyhow::bail!(
-            "IPHONE_USE_WDA_MANAGED=true requires loopback WDA and MJPEG endpoints; \
+            "IPHONE_USE_RUNNER_MANAGED=true requires loopback runner and MJPEG endpoints; \
              remote device services are externally managed"
         );
     }
@@ -132,7 +132,7 @@ fn resolve_managed_wda(
     Ok(target_udid.is_some())
 }
 
-fn wda_management_pending(
+fn runner_management_pending(
     endpoints_are_local: bool,
     target_udid: Option<&str>,
     configured: Option<bool>,
@@ -174,7 +174,7 @@ enum Command {
     ///
     /// Read-only: derives the instance from IPHONE_USE_INSTANCE / HOME /
     /// IPHONE_USE_STATE_DIR (+ IPHONE_USE_UDID) without opening a socket,
-    /// touching launchd, or starting WDA. Installers run this on a staged
+    /// touching launchd, or starting runner. Installers run this on a staged
     /// binary before switching services over: a binary that predates
     /// instances rejects the subcommand outright, so it can never be started
     /// against the wrong phone (#67).
@@ -206,7 +206,7 @@ enum Command {
         #[command(subcommand)]
         query: DeviceQuery,
     },
-    /// The device-layer setup engine `setup-wda.sh` hands its commands to
+    /// The device-layer setup engine `setup-runner.sh` hands its commands to
     /// (same environment, same files). Not for direct use.
     #[command(hide = true, disable_help_flag = true)]
     SetupNative {
@@ -574,8 +574,8 @@ fn instance_context() -> Result<()> {
         "name": instance.name,
         "state_dir": instance.state_dir,
         "daemon_label": instance.daemon_label,
-        "wda_label": instance.wda_label,
-        "wda_plist": instance.wda_plist(),
+        "runner_label": instance.runner_label,
+        "runner_plist": instance.runner_plist(),
         "udid": udid,
         "state_dir_ok": state_dir_ok.is_ok(),
         "state_dir_error": state_dir_ok.err(),
@@ -996,19 +996,19 @@ fn serve() -> Result<()> {
         .verify_on_disk()
         .map_err(|error| anyhow::anyhow!(error))?;
     tracing::info!(
-        "instance {} (state_dir={}, wda_label={})",
+        "instance {} (state_dir={}, runner_label={})",
         instance.name,
         instance.state_dir.display(),
-        instance.wda_label
+        instance.runner_label
     );
 
     // The iPhone Mirroring backend was removed in v0.9. An old plist may still
-    // ask for it; say so once and serve the phone over WDA as usual.
+    // ask for it; say so once and serve the phone over runner as usual.
     if std::env::var("IPHONE_USE_BACKEND")
         .is_ok_and(|v| matches!(v.trim(), "mirror" | "legacy-mirror"))
     {
         tracing::warn!(
-            "IPHONE_USE_BACKEND=mirror is no longer supported (iPhone Mirroring was removed in v0.9); serving over WDA"
+            "IPHONE_USE_BACKEND=mirror is no longer supported (iPhone Mirroring was removed in v0.9); serving over runner"
         );
     }
 
@@ -1019,17 +1019,17 @@ fn serve() -> Result<()> {
     let secret = load_or_make_secret(&dir, &server::instance::current().state_dir, &cfg)?;
 
     // Direct mode has stable localhost relay defaults. The setup script creates
-    // these relays; keeping the client configured while WDA is down lets the web
+    // these relays; keeping the client configured while runner is down lets the web
     // UI report setup/recovery state instead of crash-looping the daemon.
-    let configured_wda_url = std::env::var("IPHONE_USE_WDA_URL")
+    let configured_runner_url = std::env::var("IPHONE_USE_RUNNER_URL")
         .ok()
         .filter(|s| !s.trim().is_empty());
-    let wda_url = configured_wda_url.unwrap_or_else(|| "http://127.0.0.1:8100".to_string());
-    let mjpeg_url = std::env::var("IPHONE_USE_WDA_MJPEG_URL")
+    let runner_url = configured_runner_url.unwrap_or_else(|| "http://127.0.0.1:8100".to_string());
+    let mjpeg_url = std::env::var("IPHONE_USE_RUNNER_MJPEG_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "http://127.0.0.1:9100".to_string());
-    let endpoints_are_local = endpoint_is_loopback(&wda_url) && endpoint_is_loopback(&mjpeg_url);
+    let endpoints_are_local = endpoint_is_loopback(&runner_url) && endpoint_is_loopback(&mjpeg_url);
     // A simulator (IPHONE_USE_SIMULATOR, preview): device services go through
     // simctl, and its runner is started by `iphone-use simulator start`, never
     // by this daemon's launchd supervisor.
@@ -1037,14 +1037,14 @@ fn serve() -> Result<()> {
     let managed_setting = if simulator.is_some() {
         Some(false)
     } else {
-        optional_env_bool("IPHONE_USE_WDA_MANAGED")?
+        optional_env_bool("IPHONE_USE_RUNNER_MANAGED")?
     };
-    let managed_wda_pending = wda_management_pending(
+    let managed_runner_pending = runner_management_pending(
         endpoints_are_local,
         cfg.device_udid.as_deref(),
         managed_setting,
     );
-    let managed_wda = resolve_managed_wda(
+    let managed_runner = resolve_managed_runner(
         endpoints_are_local,
         cfg.device_udid.as_deref(),
         managed_setting,
@@ -1061,10 +1061,10 @@ fn serve() -> Result<()> {
     let state = server::boot::app_state(server::boot::StateInputs {
         cfg: &cfg,
         secret,
-        wda_url: &wda_url,
+        runner_url: &runner_url,
         mjpeg_url,
-        managed_wda,
-        managed_wda_pending,
+        managed_runner,
+        managed_runner_pending,
         simulator: simulator.clone(),
     });
 
@@ -1200,10 +1200,10 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
             false,
         );
 
-        // Idle auto-release owns only the local supervisor. Remote WDA
+        // Idle auto-release owns only the local supervisor. Remote runner
         // endpoints are externally managed and must never trigger local
         // launchctl/setup commands.
-        if state.managed_wda {
+        if state.managed_runner {
             http::spawn_idle_release_watchdog(state.clone());
         }
         if let Some(simulator) = state.simulator.clone() {
@@ -1762,8 +1762,8 @@ fn stop() -> Result<()> {
 mod tests {
     use super::{
         atomic_replace_private, current_euid, endpoint_is_loopback, gen_secret, http_authority,
-        load_or_make_secret, persist_generated_secret, read_process_identity, resolve_managed_wda,
-        socket_host, validate_pid_identity, wda_management_pending, Config, PidRecord,
+        load_or_make_secret, persist_generated_secret, read_process_identity, resolve_managed_runner,
+        socket_host, validate_pid_identity, runner_management_pending, Config, PidRecord,
         ProcessIdentity, SECRET_FILE,
     };
 
@@ -1783,12 +1783,12 @@ mod tests {
     }
 
     #[test]
-    fn managed_wda_endpoint_must_be_loopback() {
+    fn managed_runner_endpoint_must_be_loopback() {
         assert!(endpoint_is_loopback("http://127.0.0.1:8100"));
         assert!(endpoint_is_loopback("http://localhost:9100"));
         assert!(endpoint_is_loopback("http://[::1]:8100"));
         assert!(!endpoint_is_loopback("http://192.168.1.20:8100"));
-        assert!(!endpoint_is_loopback("https://wda.example.com"));
+        assert!(!endpoint_is_loopback("https://runner.example.com"));
         assert!(!endpoint_is_loopback("ftp://127.0.0.1:8100"));
         assert!(!endpoint_is_loopback("http://127.0.0.1"));
         assert!(!endpoint_is_loopback("http://user@127.0.0.1:8100"));
@@ -1811,18 +1811,18 @@ mod tests {
     }
 
     #[test]
-    fn managed_wda_requires_both_loopback_relays_and_a_target() {
+    fn managed_runner_requires_both_loopback_relays_and_a_target() {
         let udid = Some("00008110-001234567890001E");
-        assert!(resolve_managed_wda(true, udid, None).unwrap());
-        assert!(!resolve_managed_wda(true, None, None).unwrap());
-        assert!(!resolve_managed_wda(true, udid, Some(false)).unwrap());
-        assert!(resolve_managed_wda(false, udid, Some(true)).is_err());
-        assert!(!resolve_managed_wda(true, None, Some(true)).unwrap());
+        assert!(resolve_managed_runner(true, udid, None).unwrap());
+        assert!(!resolve_managed_runner(true, None, None).unwrap());
+        assert!(!resolve_managed_runner(true, udid, Some(false)).unwrap());
+        assert!(resolve_managed_runner(false, udid, Some(true)).is_err());
+        assert!(!resolve_managed_runner(true, None, Some(true)).unwrap());
 
-        assert!(wda_management_pending(true, None, None));
-        assert!(wda_management_pending(true, None, Some(true)));
-        assert!(!wda_management_pending(true, None, Some(false)));
-        assert!(!wda_management_pending(false, None, Some(true)));
+        assert!(runner_management_pending(true, None, None));
+        assert!(runner_management_pending(true, None, Some(true)));
+        assert!(!runner_management_pending(true, None, Some(false)));
+        assert!(!runner_management_pending(false, None, Some(true)));
     }
 
     #[test]

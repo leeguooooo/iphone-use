@@ -13,10 +13,10 @@ use crate::http::{self, AppState};
 pub struct StateInputs<'a> {
     pub cfg: &'a Config,
     pub secret: Vec<u8>,
-    pub wda_url: &'a str,
+    pub runner_url: &'a str,
     pub mjpeg_url: String,
-    pub managed_wda: bool,
-    pub managed_wda_pending: bool,
+    pub managed_runner: bool,
+    pub managed_runner_pending: bool,
     /// `IPHONE_USE_SIMULATOR`: the simulator this daemon drives (preview).
     pub simulator: Option<Arc<crate::simulator::Simulator>>,
 }
@@ -40,40 +40,40 @@ pub fn app_state(inputs: StateInputs<'_>) -> Arc<AppState> {
         device_udid: inputs.cfg.device_udid.clone(),
         simulator: inputs.simulator,
         inbox: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-        wda: match crate::wda::WdaClient::new(inputs.wda_url) {
+        runner: match crate::runner::RunnerClient::new(inputs.runner_url) {
             Ok(c) => {
-                tracing::info!("device control via WDA at {}", inputs.wda_url);
+                tracing::info!("device control via runner at {}", inputs.runner_url);
                 Some(Arc::new(tokio::sync::Mutex::new(c)))
             }
             Err(e) => {
-                tracing::warn!("IPHONE_USE_WDA_URL set but client failed: {e:#}");
+                tracing::warn!("IPHONE_USE_RUNNER_URL set but client failed: {e:#}");
                 None
             }
         },
-        managed_wda: inputs.managed_wda,
-        managed_wda_pending: inputs.managed_wda_pending,
+        managed_runner: inputs.managed_runner,
+        managed_runner_pending: inputs.managed_runner_pending,
         latest_release: Arc::new(Mutex::new(None)),
-        // WDA's MJPEG stream (see /agent/mjpeg); the relay forwards it to
-        // 127.0.0.1:9100 (override with IPHONE_USE_WDA_MJPEG_URL).
+        // runner's MJPEG stream (see /agent/mjpeg); the relay forwards it to
+        // 127.0.0.1:9100 (override with IPHONE_USE_RUNNER_MJPEG_URL).
         video: crate::video::VideoHub::supported()
             .then(|| crate::video::VideoHub::new(inputs.mjpeg_url.clone())),
         mjpeg_url: Some(inputs.mjpeg_url),
-        wda_actionable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        wda_read_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        runner_actionable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        runner_read_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pairing: Arc::new(
             crate::pairing::Pairing::new(!crate::pairing::is_loopback_host(&inputs.cfg.host))
                 .with_port(inputs.cfg.port),
         ),
-        wda_health: Arc::new(Mutex::new(crate::wda::WdaHealth::down())),
-        wda_death: Arc::new(Mutex::new(Default::default())),
-        wda_health_probe: Arc::new(Mutex::new(None)),
+        runner_health: Arc::new(Mutex::new(crate::runner::RunnerHealth::down())),
+        runner_death: Arc::new(Mutex::new(Default::default())),
+        runner_health_probe: Arc::new(Mutex::new(None)),
         settled_frame_prefetch: Arc::new(Mutex::new(None)),
-        wda_control_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        runner_control_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         // Idle auto-release: start the clock now so a daemon that boots with no
         // one driving releases the phone after the first idle window.
         last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
         released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        wda_lifecycle: Arc::new(http::WdaLifecycle::new()),
+        runner_lifecycle: Arc::new(http::RunnerLifecycle::new()),
         live_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         mjpeg_stream_activity: Arc::new(Mutex::new(std::collections::HashMap::new())),
         element_snapshots: Arc::new(Mutex::new(std::collections::VecDeque::new())),
@@ -86,7 +86,7 @@ pub fn app_state(inputs: StateInputs<'_>) -> Arc<AppState> {
         private_until: Arc::new(Mutex::new(None)),
         owner: Arc::new(Mutex::new(None)),
         owner_lease_secs: inputs.cfg.owner_lease_secs,
-        wda_bootstrap: crate::http::write_and_bootstrap_wda_agent,
+        runner_bootstrap: crate::http::write_and_bootstrap_runner_agent,
     })
 }
 
@@ -99,7 +99,7 @@ pub struct EmbeddedOptions {
     /// The runner's command and MJPEG ports, on the same phone.
     pub runner_port: u16,
     pub runner_mjpeg_port: u16,
-    /// The runner's per-launch request-signing token, written where `WdaClient`
+    /// The runner's per-launch request-signing token, written where `RunnerClient`
     /// reads it so the daemon's calls to its own runner are signed.
     pub runner_token: Option<String>,
     /// Bearer token for `/agent/*` (the on-phone app sends it).
@@ -143,14 +143,14 @@ pub fn serve_embedded(options: EmbeddedOptions) -> Result<()> {
     crate::metrics::set_runs_log(instance.state_dir.join("agent-runs.jsonl"));
 
     let secret = embedded_secret(&instance.state_dir)?;
-    let wda_url = format!("http://127.0.0.1:{}", options.runner_port);
+    let runner_url = format!("http://127.0.0.1:{}", options.runner_port);
     let state = app_state(StateInputs {
         cfg: &cfg,
         secret,
-        wda_url: &wda_url,
+        runner_url: &runner_url,
         mjpeg_url: format!("http://127.0.0.1:{}", options.runner_mjpeg_port),
-        managed_wda: false,
-        managed_wda_pending: false,
+        managed_runner: false,
+        managed_runner_pending: false,
         simulator: None,
     });
 
@@ -169,7 +169,7 @@ pub fn serve_embedded(options: EmbeddedOptions) -> Result<()> {
             .await
             .with_context(|| format!("bind {}:{}", cfg.host, cfg.port))?;
         tracing::info!(
-            "embedded daemon on {}:{} → runner {wda_url}",
+            "embedded daemon on {}:{} → runner {runner_url}",
             cfg.host,
             cfg.port
         );

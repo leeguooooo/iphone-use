@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::http::AppState;
-use crate::wda::{KeepAwakeError, KeepAwakeReport};
+use crate::runner::{KeepAwakeError, KeepAwakeReport};
 
 /// Seconds after the last driving request the phone stays awake.
 pub const DEFAULT_WINDOW_SECS: u64 = 120;
@@ -145,7 +145,7 @@ pub fn spawn(state: Arc<AppState>) {
         tracing::info!("keep-awake off (IPHONE_USE_KEEP_AWAKE_SECS=0): Auto-Lock applies while the phone is driven");
         return;
     };
-    let Some(wda) = state.wda.clone() else {
+    let Some(runner) = state.runner.clone() else {
         return;
     };
     ENABLED.store(true, Ordering::Release);
@@ -154,7 +154,7 @@ pub fn spawn(state: Arc<AppState>) {
         window.as_secs()
     );
     tokio::spawn(async move {
-        let endpoint = wda.lock().await.keep_awake_endpoint();
+        let endpoint = runner.lock().await.keep_awake_endpoint();
         let mut active = false;
         let mut unsupported_until: Option<tokio::time::Instant> = None;
         loop {
@@ -165,7 +165,7 @@ pub fn spawn(state: Arc<AppState>) {
             let want = wanted(
                 state.phone_in_use(window),
                 state.released.load(Ordering::Acquire),
-                state.wda_lifecycle.is_transitioning(),
+                state.runner_lifecycle.is_transitioning(),
                 crate::http::human_handoff_active(),
             );
             if !want && !active {

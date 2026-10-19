@@ -10,11 +10,11 @@ README 是精简版，这里是全部细节。
 Agent  ── /agent/* ──────────> iphone-use daemon ── 127.0.0.1:8100 ──┘
 ```
 
-- `scripts/setup-wda.sh` 编译并签名 iphone-use 的**设备 runner**（`runner/IPhoneUseRunner`，一个 XCTest UI 测试包，取代了 WebDriverAgent，HTTP 接口与它兼容），在手机上启动它，用内置的 `iphone-use relay`（走 macOS 自带的 usbmuxd）建两条固定的 loopback 中继：`8100` 控制，`9100` MJPEG 画面。daemon 只和 localhost 说话，后台进程手里不会攥着一个会变的手机 IP。手机插着线时优先走 USB；拔线后，setup、重新拉起和转发都自动走 CoreDevice 的加密 Wi-Fi 隧道，不需要任何开关（`WDA_TRANSPORT=auto` 为默认；`WDA_TRANSPORT=usb` 表示必须插线）。到手机局域网地址的明文 `socat` 中继（`WDA_ALLOW_LAN=1`）只是显式的最后手段：runner 没有鉴权，不可信的网络里不安全。
+- `scripts/setup-runner.sh` 编译并签名 iphone-use 的**设备 runner**（`runner/IPhoneUseRunner`，一个 XCTest UI 测试包，取代了 WebDriverAgent，HTTP 接口与它兼容），在手机上启动它，用内置的 `iphone-use relay`（走 macOS 自带的 usbmuxd）建两条固定的 loopback 中继：`8100` 控制，`9100` MJPEG 画面。daemon 只和 localhost 说话，后台进程手里不会攥着一个会变的手机 IP。手机插着线时优先走 USB；拔线后，setup、重新拉起和转发都自动走 CoreDevice 的加密 Wi-Fi 隧道，不需要任何开关（`IPU_RUNNER_TRANSPORT=auto` 为默认；`IPU_RUNNER_TRANSPORT=usb` 表示必须插线）。到手机局域网地址的明文 `socat` 中继（`IPU_RUNNER_ALLOW_LAN=1`）只是显式的最后手段：runner 没有鉴权，不可信的网络里不安全。
 - 浏览器从 `/agent/mjpeg` 拿实时画面（失败时退回 PNG 静帧），通过 `POST /control` 发输入，每条命令都返回成功或失败，不会把一个可能已经断掉的通道当成功。
 - agent 用 `/agent/elements` 读文本形式的辅助功能树，用 `/agent/screenshot` 拿 PNG，用 `/agent/input` 做单步动作，或用 `/agent/actions` 跑一批带检查点的步骤。
 - daemon 负责 runner 的生命周期：空闲后释放手机、带退避地重建 runner、把每个状态写进 `/agent/status`。
-- 下文、状态字段（`wda`、`wda_actionable` 等）和环境变量（`WDA_*`、`IPHONE_USE_WDA_*`）里的 “WDA” 沿用旧名，指的就是这个设备 runner。
+- 下文、状态字段（`runner`、`runner_actionable` 等）和环境变量（`IPU_RUNNER_*`、`IPHONE_USE_RUNNER_*`）里的 “runner” 沿用旧名，指的就是这个设备 runner。
 
 设计、生命周期、失败状态和安全边界见 **[`docs/direct-device-architecture.html`](direct-device-architecture.html)**。
 
@@ -22,7 +22,7 @@ Agent  ── /agent/* ──────────> iphone-use daemon ── 
 
 ### 前置条件
 
-- macOS 15 或更高，装**完整 Xcode.app**（只有 Command Line Tools 不够）。在 Xcode → Settings → Accounts 登录并选一个开发团队；免费 Personal Team 能用，但 runner 的描述文件要定期续。也可以用 App Store Connect API key（`WDA_ASC_KEY_PATH`、`WDA_ASC_KEY_ID`、`WDA_ASC_ISSUER_ID`）签名，不需要 Xcode 账号。
+- macOS 15 或更高，装**完整 Xcode.app**（只有 Command Line Tools 不够）。在 Xcode → Settings → Accounts 登录并选一个开发团队；免费 Personal Team 能用，但 runner 的描述文件要定期续。也可以用 App Store Connect API key（`IPU_RUNNER_ASC_KEY_PATH`、`IPU_RUNNER_ASC_KEY_ID`、`IPU_RUNNER_ASC_ISSUER_ID`）签名，不需要 Xcode 账号。
 - iPhone 开启**开发者模式**，通过 USB 与 Mac 配对并点过信任。
 - 编译、启动、使用 runner 期间手机保持**解锁、亮屏**。它过不了 Face ID 和密码。
 - 不需要装任何 Homebrew 包：USB 中继内置在 App 里（`iphone-use relay`）；只有 App 版本太旧时才会退回 Homebrew 的 `iproxy`。USB 连接时，setup 直接从手机读取名称、iOS 版本、开发者磁盘映像状态和 runner 是否就绪（`iphone-use device info|ddi|runner-status`，输出 JSON），不再调用 `devicectl`；只有锁屏检查和只走 Wi‑Fi 的手机还用 `devicectl`。
@@ -52,14 +52,14 @@ iphone-use try       # 再跑一次无害的首次体验
 iphone-use login     # 新的一次性浏览器登录链接和手机二维码
 ```
 
-`iphone-use setup` 运行的是 `~/.iphone-use/setup-wda.sh`，它还接受 `status`、`pause`、`resume`、`stop`（如 `iphone-use setup status`）。控制页在 **`http://<Mac局域网IP>:44321/phone`**；**`/setup`** 把 `/agent/status` 翻译成当前的阻塞项（USB、信任、开发者服务、runner、外部主机），它不会改你的 VPN，也不会替你跑 setup。
+`iphone-use setup` 运行的是 `~/.iphone-use/setup-runner.sh`，它还接受 `status`、`pause`、`resume`、`stop`（如 `iphone-use setup status`）。控制页在 **`http://<Mac局域网IP>:44321/phone`**；**`/setup`** 把 `/agent/status` 翻译成当前的阻塞项（USB、信任、开发者服务、runner、外部主机），它不会改你的 VPN，也不会替你跑 setup。
 
 配对了多台 iPhone？两处固定同一个 classic UDID：
 
 ```bash
 export IPHONE_USE_UDID=00008…
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-WDA_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-wda.sh
+IPU_RUNNER_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-runner.sh
 ```
 
 ### 把手机还给自己
@@ -67,8 +67,8 @@ WDA_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-wda.sh
 runner 运行期间会占着手机。想自己用手机，先暂停它，下次 agent 用之前再恢复：
 
 ```bash
-~/.iphone-use/setup-wda.sh pause     # 禁用 launchd job，只停 PID 校验通过的进程
-~/.iphone-use/setup-wda.sh resume
+~/.iphone-use/setup-runner.sh pause     # 禁用 launchd job，只停 PID 校验通过的进程
+~/.iphone-use/setup-runner.sh resume
 ```
 
 更省事的是网页控制栏里的 **交还** 按钮（或 `POST /agent/mode {"mode":"human"}`）：daemon 停掉 runner，手机归拿着它的人用，状态里 `human_handoff:true`。这期间 agent 的输入请求一律 409 `phone_handed_to_human`，不会在你用着的时候把手机抢回去。交还之后同一个按钮变成 **交给 agent**，点它（或 `{"mode":"agent"}`）手机重新交给远程控制。
@@ -83,7 +83,7 @@ daemon 也会自己交还：5 分钟没有 agent 活动（释放后很快又被�
 
 ### 升级
 
-> v0.9 移除了 iPhone 镜像后端；原来设了 `IPHONE_USE_BACKEND=mirror` 的安装，升级后一律走 WDA。
+> v0.9 移除了 iPhone 镜像后端；原来设了 `IPHONE_USE_BACKEND=mirror` 的安装，升级后一律走 runner。
 
 ```bash
 iphone-use upgrade            # 装最新 release（daemon + skill），再刷新其他地方的 skill
@@ -140,13 +140,13 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| `GET` | `/agent/status` | 就绪与生命周期：`backend`、`device_state`、`drivable`、`wda_actionable`、`recovery_owner`、`setup_blocked_on` / `setup_phase` / `setup_message`、`hint`、viewer 计数、`instance`、`udid`、`owner` / `owner_lease_remaining_secs`、`hold_remaining_secs`、`screen_private_secs`（私密 hold：有人正在手机上验证身份，这段时间不读屏幕）、`idle_secs`（距上一次 agent 请求的秒数，轮询状态不算）、`capture_redacted`（正在看的画面因为 App 禁止截屏而是空白的）、`version` / `latest`。 |
+| `GET` | `/agent/status` | 就绪与生命周期：`backend`、`device_state`、`drivable`、`runner_actionable`、`recovery_owner`、`setup_blocked_on` / `setup_phase` / `setup_message`、`hint`、viewer 计数、`instance`、`udid`、`owner` / `owner_lease_remaining_secs`、`hold_remaining_secs`、`screen_private_secs`（私密 hold：有人正在手机上验证身份，这段时间不读屏幕）、`idle_secs`（距上一次 agent 请求的秒数，轮询状态不算）、`capture_redacted`（正在看的画面因为 App 禁止截屏而是空白的）、`version` / `latest`。 |
 | `GET` | `/agent/screenshot` | 当前屏幕 PNG，来自手机。遇到 App 禁止截屏的界面，返回的是把控件树画在空白处的线框图，响应头带 `X-Capture-Redacted: 1`；`?raw=1` 返回原始截图。 |
-| `GET` | `/agent/elements` | 扁平化的辅助功能树，带一次性 `snapshot` 令牌、`ax_stats` 可用性块，以及系统弹窗在场时的 `alert` 块。`?since=<snapshot>` 只返回 `delta`。WDA 缺失或繁忙 `503`，source 失败 `502`，不会用空数组伪装 `200`。 |
+| `GET` | `/agent/elements` | 扁平化的辅助功能树，带一次性 `snapshot` 令牌、`ax_stats` 可用性块，以及系统弹窗在场时的 `alert` 块。`?since=<snapshot>` 只返回 `delta`。runner 缺失或繁忙 `503`，source 失败 `502`，不会用空数组伪装 `200`。 |
 | `GET` | `/agent/mjpeg` | 鉴权后的实时 MJPEG。 |
 | `POST` | `/agent/input` | 一个动作：点按、拖动、长按、滚动、文字、按键、`home` / `spotlight`、`launch_app`、`set_value`、`perform`、`alert`。`?return=delta` 会在动作后于预算内反复采样元素树并返回其变化，以及一个 `settle` 块（`settled`、`reason`：`stable` / `budget_exhausted` / `observation_failed`、`waited_ms`、`captures`、`budget_ms`，必要时还有 `sparse` / `stale`）。观察是尽力而为的：读取慢或失败绝不会把已经生效的动作降级成未知结果。树已稳定、且没有任何行新增、变化或消失时，还会带上 `no_visible_change: true`（滚动或点按没碰到会响应的东西）。 |
-| `POST` | `/agent/actions` | 最多 24 个 `action` / `wait_for` / `pause` 步骤，整批预校验，一把 WDA 锁，首个失败即停。返回 `completed`、`applied_actions`、`failed_step`、`outcome`（失败步骤的结果）、`failed_step_outcome`、`batch_outcome`（`nothing_applied` / `partially_applied` / `unknown`）、`retry_safe`（整批语义，也是唯一授权重跑的字段）。 |
-| `POST` | `/agent/mode` | `{"mode":"agent"}` 在已配置的手机上拉起 WDA，不换 UDID。`{"mode":"human"}` 停掉 WDA，把手机交还给持有人；之后 agent 输入返回 `409 phone_handed_to_human`，直到 `agent` 把手机要回来。 |
+| `POST` | `/agent/actions` | 最多 24 个 `action` / `wait_for` / `pause` 步骤，整批预校验，一把 runner 锁，首个失败即停。返回 `completed`、`applied_actions`、`failed_step`、`outcome`（失败步骤的结果）、`failed_step_outcome`、`batch_outcome`（`nothing_applied` / `partially_applied` / `unknown`）、`retry_safe`（整批语义，也是唯一授权重跑的字段）。 |
+| `POST` | `/agent/mode` | `{"mode":"agent"}` 在已配置的手机上拉起 runner，不换 UDID。`{"mode":"human"}` 停掉 runner，把手机交还给持有人；之后 agent 输入返回 `409 phone_handed_to_human`，直到 `agent` 把手机要回来。 |
 | `POST` | `/agent/hold` | `{"secs":N}`（0 清除，上限 14400）在人工暂停期间阻止空闲释放。释放已经开始时返回 `503 device_release_in_progress`。 |
 | `POST` | `/agent/owner` | `{"release":true}` 提前归还 owner 租约。 |
 | `POST` | `/agent/login` | 用用户自己密码库（bitwarden-use）里的条目填写并提交 App 的登录表单（`{"item"?, "user"?, "submit"?}`）。账号密码在 daemon 内部从密码库直接写进手机，返回里只有条目名和打码后的账号。命令行：`iphone-use auth login --bwu`。 |
@@ -159,16 +159,16 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 ### agent 必须遵守的语义
 
-- **只看 `drivable:true`**（以及 `wda_actionable:true`）。`device_state` 取值：`ready`、`locked`、`blocked`、`offline`、`releasing`、`released`、`reconnecting`；`mode` 是 `agent` 或 `offline`。
+- **只看 `drivable:true`**（以及 `runner_actionable:true`）。`device_state` 取值：`ready`、`locked`、`blocked`、`offline`、`releasing`、`released`、`reconnecting`；`mode` 是 `agent` 或 `offline`。
 - **至多送达一次。** 派发前过期返回 `408 not_sent`，`retry_safe:true`。派发后传输失败 `502`，派发后超时 `504`，两者都是 `outcome_unknown`、`retry_safe:false`：先看屏幕，再决定要不要再来一次。设备 runner 在触屏前就拒绝的动作返回 `422 runner_rejected`（`not_sent`，`retry_safe:true`）；`runner_error` 带着 runner 自己给的原因。
 - **目标绑定快照。** 元素索引只在同一次 `/agent/elements` 返回的 `snapshot` 下有效，树变了就 `409 stale_element_snapshot`。精确标签点按在零匹配或多匹配时都不动作。脚本里存标签、identifier、locator，不存索引和快照令牌。
-- **元素级动作。** `set_value` 直接写字段（先清再填），带 `element` 的 `scroll` 把手势限制在该元素内，`perform` 调用命名能力（`increment`、`decrement`、`adjust`、`toggle`、`menu`、`double_tap`、`two_finger_tap`、`scroll_to_visible`、`pinch`、`rotate`、`force_press`）。`force_press` 需要 3D Touch：iPhone XR / 11 之后的机型上 WDA 在触屏前就拒绝，daemon 返回 `422 force_press_unsupported`（`not_sent`，`retry_safe:true`），改用 `menu`（长按）。`{"type":"scroll","page":true,"dy":N}` 滚动页面本身：daemon 找到页面的滚动视图，从避开输入框、按钮、内层滚动区和工具栏的位置起手（找不到时返回 `422 no_page_scroller`）。盖在 app 上的系统层（通知横幅、灵动岛、锁屏）里的行带 `overlay` 字段（`notification`、`dynamic_island`、`cover_sheet`）。`IPHONE_USE_ELEMENTS_AFFORDANCES=1` 让树上标出每行支持哪些动作。
-- **会点歪的点击直接拒绝。** 要点的元素中心被别的控件盖住（固定标题栏、键盘、悬浮按钮）时，返回 `409 element_occluded`、`not_sent`：先用 `perform` 的 `scroll_to_visible` 把它滚出来，重新读一次再点；目标被 WDA 标成 `visible:false`（在树里但没画出来，比如 Chrome 压在网页后面的标签页网格）时返回 `409 element_not_visible`。确实要点那个位置就加 `"allow_occluded":true`。按文字点击可以加 `"kind":"Button"` 限定类型，屏幕外的行不会和屏幕上的同名行抢匹配。
+- **元素级动作。** `set_value` 直接写字段（先清再填），带 `element` 的 `scroll` 把手势限制在该元素内，`perform` 调用命名能力（`increment`、`decrement`、`adjust`、`toggle`、`menu`、`double_tap`、`two_finger_tap`、`scroll_to_visible`、`pinch`、`rotate`、`force_press`）。`force_press` 需要 3D Touch：iPhone XR / 11 之后的机型上 runner 在触屏前就拒绝，daemon 返回 `422 force_press_unsupported`（`not_sent`，`retry_safe:true`），改用 `menu`（长按）。`{"type":"scroll","page":true,"dy":N}` 滚动页面本身：daemon 找到页面的滚动视图，从避开输入框、按钮、内层滚动区和工具栏的位置起手（找不到时返回 `422 no_page_scroller`）。盖在 app 上的系统层（通知横幅、灵动岛、锁屏）里的行带 `overlay` 字段（`notification`、`dynamic_island`、`cover_sheet`）。`IPHONE_USE_ELEMENTS_AFFORDANCES=1` 让树上标出每行支持哪些动作。
+- **会点歪的点击直接拒绝。** 要点的元素中心被别的控件盖住（固定标题栏、键盘、悬浮按钮）时，返回 `409 element_occluded`、`not_sent`：先用 `perform` 的 `scroll_to_visible` 把它滚出来，重新读一次再点；目标被 runner 标成 `visible:false`（在树里但没画出来，比如 Chrome 压在网页后面的标签页网格）时返回 `409 element_not_visible`。确实要点那个位置就加 `"allow_occluded":true`。按文字点击可以加 `"kind":"Button"` 限定类型，屏幕外的行不会和屏幕上的同名行抢匹配。
 - **`set_value` 写完会读回核对。** 字段没变（网页输入框常常不认直接写入）就返回 `409 value_not_applied`、`outcome:"no_effect"`，改成先点输入框再用 `text` 输入。输入框自己加的格式（分隔符、空格）算写入成功。
 - **禁止截屏的界面**（PayPay、银行、钱包）从 `/agent/screenshot` 拿到的是线框图，响应头带 `X-Capture-Redacted: 1`。在这类界面上按元素操作，不要对着空白截图做视觉识别。
-- **每个 `/agent/*` 响应都带耗时**：JSON 里有 `timing`（`total_ms`、`wda_ms`、`daemon_ms`，以及每个 WDA 调用的次数、毫秒和字节数），另有 `Server-Timing` 响应头；每个请求还会在 `~/.iphone-use/agent-timing.jsonl` 里记一行（只有路径、owner 和耗时，从不记请求内容或屏幕内容）。
+- **每个 `/agent/*` 响应都带耗时**：JSON 里有 `timing`（`total_ms`、`runner_ms`、`daemon_ms`，以及每个 runner 调用的次数、毫秒和字节数），另有 `Server-Timing` 响应头；每个请求还会在 `~/.iphone-use/agent-timing.jsonl` 里记一行（只有路径、owner 和耗时，从不记请求内容或屏幕内容）。
 - 不认识的动作 `type` 返回 `400 invalid_action` 和支持的类型列表；常见的猜测（`scroll_into_view`、`click`、`fill` 等）还会直接给出该发的请求。
-- **系统弹窗是另一层。** 点它的按钮会被确认但不生效。用 `{"type":"alert","button":"…"}` 或 `{"action":"accept"|"dismiss"}`。App Switcher 和控制中心是系统手势，WDA 够不着。
+- **系统弹窗是另一层。** 点它的按钮会被确认但不生效。用 `{"type":"alert","button":"…"}` 或 `{"action":"accept"|"dismiss"}`。App Switcher 和控制中心是系统手势，runner 够不着。
 - **`/agent/actions`** 只要有动作已落地，就不会把整批重放标成安全。`tap_locator` 与 `wait_for` 用同一套精确的 label / identifier / kind / value / 状态字段，要求当前唯一命中。
 
 ```bash
@@ -184,7 +184,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -H "$OWNER" -X POST "$HOST/agent/actions" \
 
 ### 语义意图（手机端快捷指令）
 
-界面够不着、或点起来太慢的事（电量、健康样本、带原生确认的发消息），走一组精选的 **verb**，由一个桥接快捷指令执行。daemon 通过 WDA 在手机上打开 `shortcuts://run-shortcut`，不经过 Spotlight 和剪贴板；快捷指令把结果 POST 回 `/agent/inbox`。
+界面够不着、或点起来太慢的事（电量、健康样本、带原生确认的发消息），走一组精选的 **verb**，由一个桥接快捷指令执行。daemon 通过 runner 在手机上打开 `shortcuts://run-shortcut`，不经过 Spotlight 和剪贴板；快捷指令把结果 POST 回 `/agent/inbox`。
 
 ```bash
 python3 deploy/make-bridge-shortcut.py --token "$IPHONE_USE_AGENT_TOKEN" \
@@ -309,7 +309,7 @@ agent 不靠记性去查源，而是被推着走：`phone_elements` 直接列出
 2. 为模拟器构建 runner，不签名，使用独立的 derived data：在仓库里用 `runner/build.sh --simulator`，否则直接对安装程序放在 `~/.iphone-use/runner` 的 Xcode 工程执行 `xcodebuild build-for-testing`。也可以用 `IPU_RUNNER_SRC` 指向仓库的 `runner/`，或用 `--xctestrun` 传入现成的模拟器构建。
 3. 用 `xcodebuild test-without-building -destination id=<udid>` 启动 runner。
 4. 等 runner 在 `127.0.0.1:<端口>` 上应答。默认端口从 8200 起取第一个空闲的，视频端口是该端口加 1000。
-5. 在后台为这台模拟器启动 daemon（端口从 44331 起取第一个空闲的），等它开始监听。日志在实例目录的 `simulator-daemon.log`。加 `--no-serve` 则只打印 daemon 的启动命令（`IPHONE_USE_INSTANCE=sim IPHONE_USE_SIMULATOR=<udid> IPHONE_USE_WDA_URL=http://127.0.0.1:<端口> … iphone-use serve`）。
+5. 在后台为这台模拟器启动 daemon（端口从 44331 起取第一个空闲的），等它开始监听。日志在实例目录的 `simulator-daemon.log`。加 `--no-serve` 则只打印 daemon 的启动命令（`IPHONE_USE_INSTANCE=sim IPHONE_USE_SIMULATOR=<udid> IPHONE_USE_RUNNER_URL=http://127.0.0.1:<端口> … iphone-use serve`）。
 
 开发时整个流程就是：
 
@@ -342,9 +342,9 @@ claude mcp add iphone-sim -e IPHONE_USE_INSTANCE=sim -- iphone-use-mcp   # 只�
 
 ### 生命周期与恢复
 
-`/agent/status` 是唯一事实来源。`recovery_owner` 在托管 loopback WDA 下是 `daemon`，首次接入尚未持久化目标时是 `unconfigured`，不托管的端点是 `external`。启动 WDA 之前，daemon 会先问手机是否锁屏：锁着的手机在连接后几秒内就显示 `setup_blocked_on:"locked"`（以前要等 Xcode 约 70 秒超时），连续两次读到解锁才启动。仍然因锁屏失败的，从 5 秒到 1 分钟安静重试；其他失败从 5 秒退避到 5 分钟；一次成功恢复清零两种退避。交互式 setup 最多等 5 分钟解锁。
+`/agent/status` 是唯一事实来源。`recovery_owner` 在托管 loopback runner 下是 `daemon`，首次接入尚未持久化目标时是 `unconfigured`，不托管的端点是 `external`。启动 runner 之前，daemon 会先问手机是否锁屏：锁着的手机在连接后几秒内就显示 `setup_blocked_on:"locked"`（以前要等 Xcode 约 70 秒超时），连续两次读到解锁才启动。仍然因锁屏失败的，从 5 秒到 1 分钟安静重试；其他失败从 5 秒退避到 5 分钟；一次成功恢复清零两种退避。交互式 setup 最多等 5 分钟解锁。
 
-在 iPhone 17 Pro Max（iOS 27）上实测：手机解锁时冷连接 13–22 秒可操作；锁着时约 4 秒提示解锁，解锁后约 14 秒可操作；按编号点击并等画面稳定（`?return=delta`）约 4 秒。`POST /agent/mode {"mode":"agent"}`（MCP 里是 `phone_reconnect`）只重启一次已配置的目标，不要循环调；先读 `hint` 和 `setup_blocked_on`（`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|xcode_too_old|ios_too_old|ddi_needs_reboot|legacy_needs_usb|locked`）。iOS 15 和 16 的手机不用升级系统：Xcode 26 起根本看不到这类手机，setup 会走自己的旧系统路径——为通用 iOS 设备构建 runner、换上自带的测试宿主、用 App Store Connect API 注册手机并生成开发描述文件、下载对应版本的开发者磁盘映像（doronz88/DeveloperDiskImage，固定版本并校验 sha256，缓存在 `~/.iphone-use/ddi/`，只下载不分发），再用随 iphone-use 一起发布的 `iphone-use-legacy-launch`（crates/legacy-launch，基于 MIT 许可的 idevice）挂载映像、安装并启动 runner。runner 的寿命等于启动它的 testmanagerd 会话；只要手机的 lockdownd 能通过局域网地址连上（第一次插线时 setup 会打开 Wi-Fi 调试连接，地址取自 runner、上次记录或 Bonjour），setup 就通过 Wi-Fi 启动，之后可以拔线，空闲释放后再启动也走 Wi-Fi；否则走 USB，拔线 runner 就停。通过 Wi-Fi 启动是 `WDA_TRANSPORT=auto`（默认）对这类手机的含义，`usb` 则只用数据线。拔线后要控制它只能走局域网：iOS 15/16 没有 CoreDevice 隧道，usbmuxd 的 Wi-Fi 通道也到不了 runner 的端口（实测拔线后 runner 仍在局域网地址上应答，转发却连不上）。runner 只接受用本次启动的令牌签名的请求，setup 确认它拒绝未签名请求（未签名的 `/status` 得到 401）后，默认就打开这条局域网转发；还不支持签名的旧 runner 仍需 `WDA_ALLOW_LAN=1`。这条路有签名但不加密：能看到这段 Wi-Fi 流量的人能看到屏幕，但操作不了手机；`/agent/status` 里 `legacy_ios.unplug_ok` 表示能否拔线。这需要付费开发者账号的 App Store Connect API 密钥（`WDA_ASC_KEY_PATH`、`WDA_ASC_KEY_ID`、`WDA_ASC_ISSUER_ID`），没有密钥或系统是 iOS 14 及更早时报 `ios_too_old`。`ddi_needs_reboot` 表示手机上残留了旧的磁盘映像（重新挂载后所有开发者服务仍然 `InvalidService`），重启一次手机即可；`legacy_needs_usb` 表示手机既没插线、Wi-Fi 也连不到，插一次线并解锁。`automation_mode_disabled` 表示手机已解锁但 iOS 未开启 UI 自动化：在手机上打开“设置 › 开发者 › 启用 UI 自动化”，并在解锁状态下确认密码或“允许自动化”提示。
+在 iPhone 17 Pro Max（iOS 27）上实测：手机解锁时冷连接 13–22 秒可操作；锁着时约 4 秒提示解锁，解锁后约 14 秒可操作；按编号点击并等画面稳定（`?return=delta`）约 4 秒。`POST /agent/mode {"mode":"agent"}`（MCP 里是 `phone_reconnect`）只重启一次已配置的目标，不要循环调；先读 `hint` 和 `setup_blocked_on`（`warp|proxy|usb|trust|ddi|account|automation_mode_disabled|xcode_too_old|ios_too_old|ddi_needs_reboot|legacy_needs_usb|locked`）。iOS 15 和 16 的手机不用升级系统：Xcode 26 起根本看不到这类手机，setup 会走自己的旧系统路径——为通用 iOS 设备构建 runner、换上自带的测试宿主、用 App Store Connect API 注册手机并生成开发描述文件、下载对应版本的开发者磁盘映像（doronz88/DeveloperDiskImage，固定版本并校验 sha256，缓存在 `~/.iphone-use/ddi/`，只下载不分发），再用随 iphone-use 一起发布的 `iphone-use-legacy-launch`（crates/legacy-launch，基于 MIT 许可的 idevice）挂载映像、安装并启动 runner。runner 的寿命等于启动它的 testmanagerd 会话；只要手机的 lockdownd 能通过局域网地址连上（第一次插线时 setup 会打开 Wi-Fi 调试连接，地址取自 runner、上次记录或 Bonjour），setup 就通过 Wi-Fi 启动，之后可以拔线，空闲释放后再启动也走 Wi-Fi；否则走 USB，拔线 runner 就停。通过 Wi-Fi 启动是 `IPU_RUNNER_TRANSPORT=auto`（默认）对这类手机的含义，`usb` 则只用数据线。拔线后要控制它只能走局域网：iOS 15/16 没有 CoreDevice 隧道，usbmuxd 的 Wi-Fi 通道也到不了 runner 的端口（实测拔线后 runner 仍在局域网地址上应答，转发却连不上）。runner 只接受用本次启动的令牌签名的请求，setup 确认它拒绝未签名请求（未签名的 `/status` 得到 401）后，默认就打开这条局域网转发；还不支持签名的旧 runner 仍需 `IPU_RUNNER_ALLOW_LAN=1`。这条路有签名但不加密：能看到这段 Wi-Fi 流量的人能看到屏幕，但操作不了手机；`/agent/status` 里 `legacy_ios.unplug_ok` 表示能否拔线。这需要付费开发者账号的 App Store Connect API 密钥（`IPU_RUNNER_ASC_KEY_PATH`、`IPU_RUNNER_ASC_KEY_ID`、`IPU_RUNNER_ASC_ISSUER_ID`），没有密钥或系统是 iOS 14 及更早时报 `ios_too_old`。`ddi_needs_reboot` 表示手机上残留了旧的磁盘映像（重新挂载后所有开发者服务仍然 `InvalidService`），重启一次手机即可；`legacy_needs_usb` 表示手机既没插线、Wi-Fi 也连不到，插一次线并解锁。`automation_mode_disabled` 表示手机已解锁但 iOS 未开启 UI 自动化：在手机上打开“设置 › 开发者 › 启用 UI 自动化”，并在解锁状态下确认密码或“允许自动化”提示。
 
 **谁有权结束一次重连。** 一次启动归发起它的任务所有，只有这个所有者能结束它。每次开始都会生成一个代次，所以迟到的任务无法结束接替它的那一轮；`GET /agent/status` 也永远不会结束重连——读状态会刷新健康缓存，但不移动生命周期。一次等待只以一个原因结束：手机可驱动了、锁屏了、setup 报出了前置阻塞、预算用尽、或被另一轮接管，每种都有日志。整个等待受预算约束：探针由绝对截止时间掐断而不是它自己的上限，超过截止时间才返回的证据一律丢弃，被取消的等待（进程关闭、future 被 drop）会释放自己那一轮而不是把 `reconnecting` 永久留下。启动之前缓存的证据，永远不算作这次启动已完成的证明。
 
@@ -354,7 +354,7 @@ claude mcp add iphone-sim -e IPHONE_USE_INSTANCE=sim -- iphone-use-mcp   # 只�
 iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
-安装器把 release tag 解析成一个确定的 commit，helper 和 skill 都钉在上面；daemon app 取对应 Release asset 并校验 SHA-256；先把 skill 安装到 `~/.agents/skills/iphone-use`、逐字节校验落盘内容和 Claude Code 发现链接，再替换 daemon。skill 失败中止升级；之后 daemon 失败则恢复旧 skill。`IPHONE_USE_SKIP_SKILL=1` 保留现有 skill，这是降级安装，安装器不保证新 daemon 和旧 skill 兼容。已有的配置（`IPHONE_USE_WDA_URL`、密码、token、UDID）原样保留。`IPHONE_USE_NO_UPDATE_CHECK=1`（或 `IPHONE_USE_NO_UPDATE_CHECK=1` / `USE_NO_UPDATE_CHECK=1`）关掉每日检查。
+安装器把 release tag 解析成一个确定的 commit，helper 和 skill 都钉在上面；daemon app 取对应 Release asset 并校验 SHA-256；先把 skill 安装到 `~/.agents/skills/iphone-use`、逐字节校验落盘内容和 Claude Code 发现链接，再替换 daemon。skill 失败中止升级；之后 daemon 失败则恢复旧 skill。`IPHONE_USE_SKIP_SKILL=1` 保留现有 skill，这是降级安装，安装器不保证新 daemon 和旧 skill 兼容。已有的配置（`IPHONE_USE_RUNNER_URL`、密码、token、UDID）原样保留。`IPHONE_USE_NO_UPDATE_CHECK=1`（或 `IPHONE_USE_NO_UPDATE_CHECK=1` / `USE_NO_UPDATE_CHECK=1`）关掉每日检查。
 
 安装时保留有效的现有签名，签名无效就用不动 keychain 的 ad-hoc 签名补上；daemon 不持有任何 macOS 授权，换签名不会让什么失效。
 
@@ -367,20 +367,20 @@ iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/le
 | `IPHONE_USE_HOST` / `IPHONE_USE_PORT` | `127.0.0.1` / `44321` | 监听地址和端口（局域网用 `0.0.0.0`，此时必须设密码）。 |
 | `IPHONE_USE_PASSWORD` | 无 | 浏览器登录密码；没设 agent token 时兼作 bearer。 |
 | `IPHONE_USE_AGENT_TOKEN` | 无 | 专用 agent bearer。设了以后是**唯一**接受的 bearer。 |
-| `IPHONE_USE_UDID` | 安装器识别并持久化 | 托管 WDA 和破坏性命令使用的 canonical iPhone。请求不能临时换机，要改就改部署并重启。setup 时传同值 `WDA_UDID`。 |
-| `IPHONE_USE_WDA_URL` / `IPHONE_USE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | WDA 控制和 MJPEG 的 loopback。不可达时控制请求直接失败。 |
-| `IPHONE_USE_WDA_MANAGED` | loopback 端点默认开 | daemon 是否负责 WDA supervisor / 中继的生命周期。 |
+| `IPHONE_USE_UDID` | 安装器识别并持久化 | 托管 runner 和破坏性命令使用的 canonical iPhone。请求不能临时换机，要改就改部署并重启。setup 时传同值 `IPU_RUNNER_UDID`。 |
+| `IPHONE_USE_RUNNER_URL` / `IPHONE_USE_RUNNER_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | runner 控制和 MJPEG 的 loopback。不可达时控制请求直接失败。 |
+| `IPHONE_USE_RUNNER_MANAGED` | loopback 端点默认开 | daemon 是否负责 runner supervisor / 中继的生命周期。 |
 | `IPHONE_USE_PREWARM` | 开 | `0` 关闭预热。`IPHONE_USE_PREWARM_RECENT_SECS`（默认 `3600`）是多久内用过才预热，`IPHONE_USE_PREWARM_INTERVAL_SECS`（默认 `600`）限制每种触发的频率。 |
 | `IPHONE_USE_IDLE_RELEASE_SECS` | `300` | 空闲多少秒后停 runner 并停放 supervisor，下一次 agent 请求再拉起；`0` 表示常驻，代价是 iOS 每杀一次 runner 就弹一次密码。 |
 | `IPHONE_USE_KEEP_AWAKE_SECS` | `120` | 有人在操作手机时、以及最后一次请求之后这么多秒内，不让手机自动锁屏（hold、实时画面、owner 租约期间也一样）。runner 每 10 秒按一下 iOS 不响应的 F13 键，已锁屏的手机不碰。`0` 关闭。 |
 | `IPHONE_USE_OWNER_LEASE_SECS` | `300` | `X-Phone-Owner` 租约在没有请求刷新时的存活时间。 |
-| `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | setup 编译的设备 runner 源码（仓库里的 `scripts/setup-wda.sh` 用仓库自己的 `runner/`）。只有不是默认值时才持久化。 |
-| `WDA_RUNNER_REBUILD` | 关 | `1` 让下一次 setup 忽略记录的 runner 产物、重新编译。 |
+| `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | setup 编译的设备 runner 源码（仓库里的 `scripts/setup-runner.sh` 用仓库自己的 `runner/`）。只有不是默认值时才持久化。 |
+| `IPU_RUNNER_REBUILD` | 关 | `1` 让下一次 setup 忽略记录的 runner 产物、重新编译。 |
 | `IPU_EMBED` | 开 | `0` 编译不带手机端 daemon 的设备 runner。会写进 supervisor。 |
 | `IPU_EMBED_LIB` | `~/.iphone-use/runner/embed/libipu_embed.a` | setup 链接进 runner 的手机端 daemon 库（绝对路径）。仓库里用 `scripts/build-ios-embed.sh` 现编；都找不到就编普通 runner。会写进 supervisor。 |
 | `IPU_DAEMON_HOST` | `127.0.0.1` | runner 里的 daemon 在手机上监听的地址；`0.0.0.0` 让别的设备也能通过它操作这台手机（仍要 token）。会写进 supervisor。 |
-| `IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH` | runner 默认 64 | 只对外部 WebDriverAgent 生效；设备 runner 自己限制读树（深度阶梯、5000 个节点）。 |
-| `IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S` | — | 同上，只对 WebDriverAgent 生效。 |
+| `IPHONE_USE_RUNNER_SNAPSHOT_MAX_DEPTH` | runner 默认 64 | 只对外部 WebDriverAgent 生效；设备 runner 自己限制读树（深度阶梯、5000 个节点）。 |
+| `IPHONE_USE_RUNNER_SNAPSHOT_TIMEOUT_S` | — | 同上，只对 WebDriverAgent 生效。 |
 | `IPHONE_USE_ELEMENTS_AFFORDANCES` | 关 | `1` 给 `/agent/elements` 的行加稀疏的 `actions`、`selected`、`min` / `max`。 |
 | `IPHONE_USE_ELEMENTS_TRAITS` | 关 | `1` 再输出原始的辅助功能 trait 名。 |
 | `IPHONE_USE_NO_UPDATE_CHECK` | 关 | 跳过每日 release 检查。 |
@@ -390,15 +390,15 @@ iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/le
 daemon 把手机的实时控制放到了网络上，它的 URL 和密码要当凭据对待。
 
 - 密码 / cookie / bearer 保护 `44321`。手机上 runner 的 `8100` 和 `9100` 监听所有网卡，但不带本次启动令牌签名的请求一律 401、不做任何事：签名是 HMAC-SHA256，覆盖方法、路径、请求体、时间戳和一次性 nonce。令牌只存在 Mac 上（状态目录里的 `runner-token`，权限 0600）和 runner 的测试环境里，从不在网络上传输，所以截获的请求既不能重放也不能篡改。没拿到令牌就启动的 runner 拒绝一切请求。
-- 签名不等于加密。USB 和 CoreDevice 隧道只通到这台 Mac；iOS 15/16 的局域网转发和 `WDA_ALLOW_LAN=1` 都是明文 HTTP，截图、元素树、视频对能看到这段 Wi-Fi 流量的人可见。能读你这个用户文件的人也能读到令牌。
-- **Wi-Fi**：usbmuxd 对 Wi-Fi 手机的网络连接只能到 lockdownd，到不了 runner 的端口，所以 `iphone-use relay` 改走 CoreDevice 的隧道（`devicectl list devices` 里 `tunnelState` 为 `connected` 时的 `tunnelIPAddress`）。这条隧道是加密的、只有这台 Mac 能走，比局域网 `socat`（`WDA_ALLOW_LAN=1`）安全，所以默认就开：已配对、没插线但隧道在线的手机，setup 和重新拉起都直接走隧道（`WDA_TRANSPORT=auto`；没设 `WDA_UDID` 又没插线时，只在恰好一台手机有隧道时选它，多台就拒绝猜）。插着线时仍然走 USB；隧道上一次点击约 330–380 ms，USB 约 280 ms。状态里 `transport` 显示 `wifi-tunnel`。`WDA_TRANSPORT=usb` 恢复「setup 必须插线」的旧规则。`WDA_ALLOW_LAN=1` 是另一个独立的、不安全的开关，只管明文局域网中继（`transport` 为 `wifi`）；plist 里写着 `WDA_ALLOW_LAN=0` 的老安装升级后会走隧道，但不会因此打开局域网中继。不少手机在 Wi-Fi 下也能重新启动 runner（iOS 27.0 的 iPhone 17 Pro Max 几秒就起来）；但有的 iOS 不允许通过 Wi-Fi 启动 UI 自动化（`wifi_automation_refused`，在 iOS 27.2 beta 的 iPhone 14 上遇到：没有密码提示，「启用 UI 自动化」已打开，Xcode 27.0 和 27.2 beta 都一样，手机上没有能点的选项）。这种手机插一次线启动，之后拔掉可以一直用 Wi-Fi，直到设备服务重启（比如手机重启）时再插一次。为此 setup 会在实例目录留下 `wifi-start-refused` 标记（下次在 Wi-Fi 下启动成功就删掉），标记存在且手机走 Wi-Fi 隧道时，空闲释放不再停 runner，状态里 `wifi_start_refused` 为 true；代价是空闲时手机一直处于自动化状态。走 USB 时照常空闲释放。
+- 签名不等于加密。USB 和 CoreDevice 隧道只通到这台 Mac；iOS 15/16 的局域网转发和 `IPU_RUNNER_ALLOW_LAN=1` 都是明文 HTTP，截图、元素树、视频对能看到这段 Wi-Fi 流量的人可见。能读你这个用户文件的人也能读到令牌。
+- **Wi-Fi**：usbmuxd 对 Wi-Fi 手机的网络连接只能到 lockdownd，到不了 runner 的端口，所以 `iphone-use relay` 改走 CoreDevice 的隧道（`devicectl list devices` 里 `tunnelState` 为 `connected` 时的 `tunnelIPAddress`）。这条隧道是加密的、只有这台 Mac 能走，比局域网 `socat`（`IPU_RUNNER_ALLOW_LAN=1`）安全，所以默认就开：已配对、没插线但隧道在线的手机，setup 和重新拉起都直接走隧道（`IPU_RUNNER_TRANSPORT=auto`；没设 `IPU_RUNNER_UDID` 又没插线时，只在恰好一台手机有隧道时选它，多台就拒绝猜）。插着线时仍然走 USB；隧道上一次点击约 330–380 ms，USB 约 280 ms。状态里 `transport` 显示 `wifi-tunnel`。`IPU_RUNNER_TRANSPORT=usb` 恢复「setup 必须插线」的旧规则。`IPU_RUNNER_ALLOW_LAN=1` 是另一个独立的、不安全的开关，只管明文局域网中继（`transport` 为 `wifi`）；plist 里写着 `IPU_RUNNER_ALLOW_LAN=0` 的老安装升级后会走隧道，但不会因此打开局域网中继。不少手机在 Wi-Fi 下也能重新启动 runner（iOS 27.0 的 iPhone 17 Pro Max 几秒就起来）；但有的 iOS 不允许通过 Wi-Fi 启动 UI 自动化（`wifi_automation_refused`，在 iOS 27.2 beta 的 iPhone 14 上遇到：没有密码提示，「启用 UI 自动化」已打开，Xcode 27.0 和 27.2 beta 都一样，手机上没有能点的选项）。这种手机插一次线启动，之后拔掉可以一直用 Wi-Fi，直到设备服务重启（比如手机重启）时再插一次。为此 setup 会在实例目录留下 `wifi-start-refused` 标记（下次在 Wi-Fi 下启动成功就删掉），标记存在且手机走 Wi-Fi 隧道时，空闲释放不再停 runner，状态里 `wifi_start_refused` 为 true；代价是空闲时手机一直处于自动化状态。走 USB 时照常空闲释放。
 - 从局域网外访问时，经由带鉴权的 HTTPS 反向代理，或可信的 VPN / 隧道（比如 Tailscale）连到 `44321`，绝不要把 runner 的端口暴露出去。daemon 只提供明文 HTTP，识别 `X-Forwarded-Proto`，session cookie 是 `HttpOnly` + `SameSite=Lax`。
 - owner 租约（`X-Phone-Owner`）是协作会话之间的协调机制，不是安全边界。
 - 开放访问期间不要停在支付、私聊或 2FA 画面。不用时停掉 LaunchAgent。
 
 ### WARP / VPN
 
-WARP 一类 VPN 会切断 WDA 依赖的 CoreDevice 隧道。`setup-wda.sh doctor` 能检测到，`/agent/status` 会报 `device_state:"blocked"`、`setup_blocked_on:"warp"`；两者都不会去改你的 VPN，那是操作者的决定，公司电脑需要管理员配 split tunnel。
+WARP 一类 VPN 会切断 runner 依赖的 CoreDevice 隧道。`setup-runner.sh doctor` 能检测到，`/agent/status` 会报 `device_state:"blocked"`、`setup_blocked_on:"warp"`；两者都不会去改你的 VPN，那是操作者的决定，公司电脑需要管理员配 split tunnel。
 
 ## 开发
 
@@ -408,8 +408,8 @@ cargo build --release --bin iphone-use --bin iphone-use-mcp
 ./install.sh ./iPhoneUse.app           # 签名、安装、写 LaunchAgent（使用工作树里的 skill）
 
 # 或者不安装直接跑 daemon
-IPHONE_USE_WDA_URL=http://127.0.0.1:8100 \
-IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9100 \
+IPHONE_USE_RUNNER_URL=http://127.0.0.1:8100 \
+IPHONE_USE_RUNNER_MJPEG_URL=http://127.0.0.1:9100 \
 IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use serve
 ```
 
@@ -428,7 +428,7 @@ IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use s
 
 ### 路线
 
-- [x] Direct/WDA 元素树控制、Unicode 文字、标签点按、手机端截图（iPhone 17 / iOS 27 上有组件级记录，见 [`docs/wda-setup.html`](wda-setup.html)）。
+- [x] Direct/runner 元素树控制、Unicode 文字、标签点按、手机端截图（iPhone 17 / iOS 27 上有组件级记录，见 [`docs/runner-setup.html`](runner-setup.html)）。
 - [x] MCP server；CI 出 release 二进制，一行命令安装。
 - [x] 确定性 flow、官方 flow 源，以及 publish / report 两条回路。
 - [ ] 记完下面的浏览器整链路真机验收矩阵。
@@ -443,12 +443,12 @@ IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use s
 
 下面各项都在真实 iPhone 上观察到，浏览器这条路径才算验收：
 
-1. Mac 不给 app 任何 macOS 隐私授权，安装并跑 WDA setup，WDA 持续在线。
-2. `/agent/status` 对目标 UDID 报 `backend:"direct"`、`wda:true`、`wda_actionable:true`、`drivable:true`。
+1. Mac 不给 app 任何 macOS 隐私授权，安装并跑 runner setup，runner 持续在线。
+2. `/agent/status` 对目标 UDID 报 `backend:"direct"`、`runner:true`、`runner_actionable:true`、`drivable:true`。
 3. 另一台设备打开 `/phone` 画面持续更新；停掉 9100 中继后界面报降级 / 离线，而不是装作正常。
 4. `/control` 的点按、拖动、长按、滚动、ASCII 和中文各执行一次，都有确认且只落地一次。
-5. `/agent/elements`、`/agent/screenshot`、`/agent/input` 走 bearer 鉴权正常，WDA 故障时也符合文档；任何命令都不动 Mac 光标。
-6. 观察到 `releasing → released → reconnecting → ready`，并覆盖锁屏 / 解锁、USB 重连、Mac 重启、WDA 重签重装，多设备 Mac 上目标不串。
+5. `/agent/elements`、`/agent/screenshot`、`/agent/input` 走 bearer 鉴权正常，runner 故障时也符合文档；任何命令都不动 Mac 光标。
+6. 观察到 `releasing → released → reconnecting → ready`，并覆盖锁屏 / 解锁、USB 重连、Mac 重启、runner 重签重装，多设备 Mac 上目标不串。
 7. 在隔离网络里记录手机 IP 是否暴露无鉴权的 `8100/9100`。
 
 ## 反馈

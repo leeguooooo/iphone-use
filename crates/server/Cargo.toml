@@ -34,7 +34,7 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "process"] }
 axum = "0.7"
 
-# HTTP client for WDA and the release check. rustls-tls: no native-tls/openssl.
+# HTTP client for runner and the release check. rustls-tls: no native-tls/openssl.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Lockdown sessions with the iPhone (device facts without devicectl). Same
@@ -50,14 +50,14 @@ futures-util = "0.3"
 # running it, so a failed download is reported instead of piped into `sh`.
 tempfile = "3"
 
-# WDA (L2 element-tree control): screenshots arrive base64-encoded.
+# runner (L2 element-tree control): screenshots arrive base64-encoded.
 base64 = "0.22"
 sha2 = "0.10"
 # ES256 tokens for the App Store Connect API (legacy iOS signing) and the
 # SHA-1 codesign takes; already in the tree through rustls.
 ring = "0.17"
 
-# Live video as H.264: WDA's MJPEG frames are decoded (zune-jpeg) and
+# Live video as H.264: runner's MJPEG frames are decoded (zune-jpeg) and
 # re-encoded on the Mac's hardware encoder (VideoToolbox), cutting a remote
 # viewer's bandwidth ~10x versus forwarding the JPEGs.
 zune-jpeg = "0.4"

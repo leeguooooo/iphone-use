@@ -10,7 +10,7 @@ Browser ── POST /control ─────> iphone-use daemon ── 127.0.0.1
 Agent   ── /agent/* ──────────> iphone-use daemon ── 127.0.0.1:8100 ──┘
 ```
 
-- `iphone-use setup` (entry point `scripts/setup-wda.sh`, engine `iphone-use setup-native`
+- `iphone-use setup` (entry point `scripts/setup-runner.sh`, engine `iphone-use setup-native`
   in `crates/server/src/setup`) builds and signs the iphone-use **device runner**
   (`runner/IPhoneUseRunner`, an XCTest UI-test bundle that replaced WebDriverAgent and
   speaks the same HTTP API), starts it on the phone, and pins two loopback relays
@@ -18,12 +18,12 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
   The daemon only ever talks to localhost, so a background process never holds the
   phone's changing IP. USB is preferred when the phone is plugged in. Off the cable, setup,
   relaunch and the same relays reach the phone through CoreDevice's encrypted Wi-Fi tunnel
-  with no flag (`WDA_TRANSPORT=auto`, the default; `WDA_TRANSPORT=usb` requires the cable;
+  with no flag (`IPU_RUNNER_TRANSPORT=auto`, the default; `IPU_RUNNER_TRANSPORT=usb` requires the cable;
   see *Wi-Fi* below). An iOS 15/16 phone has no such tunnel: `auto` starts its runner over
   lockdown's TLS session on Wi-Fi instead, and driving it off the cable goes over a LAN
   relay that setup turns on by default once the runner proves it enforces request signing
   (see the iOS 15/16 section). Otherwise a plain LAN `socat` relay to the phone's address
-  (`WDA_ALLOW_LAN=1`, also what a runner older than request signing needs) is only an
+  (`IPU_RUNNER_ALLOW_LAN=1`, also what a runner older than request signing needs) is only an
   explicit last resort: it is unencrypted, so it is unsafe on an untrusted network.
 - The browser gets the live picture from `/agent/mjpeg` (PNG stills as fallback) and
   sends input through `POST /control`, which answers success or failure for every
@@ -32,8 +32,8 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
   and act through `/agent/input` or a guarded multi-step batch (`/agent/actions`).
 - The daemon owns the runner lifecycle: it releases the phone after idle time, rebuilds
   the runner with backoff, and reports every state in `/agent/status`.
-- "WDA" below, in status fields (`wda`, `wda_actionable`, …) and in environment
-  variables (`WDA_*`, `IPHONE_USE_WDA_*`) is the historical name and now means this
+- "runner" below, in status fields (`runner`, `runner_actionable`, …) and in environment
+  variables (`IPU_RUNNER_*`, `IPHONE_USE_RUNNER_*`) is the historical name and now means this
   device runner.
 
 Design, lifecycle, failure states, and security boundaries:
@@ -46,7 +46,7 @@ Design, lifecycle, failure states, and security boundaries:
 - macOS 15 or later, with **full Xcode.app** (Command Line Tools alone are not enough).
   Sign in under Xcode → Settings → Accounts and pick a development team; a free
   Personal Team works, but its runner profile needs periodic renewal. An App Store
-  Connect API key (`WDA_ASC_KEY_PATH`, `WDA_ASC_KEY_ID`, `WDA_ASC_ISSUER_ID`) signs
+  Connect API key (`IPU_RUNNER_ASC_KEY_PATH`, `IPU_RUNNER_ASC_KEY_ID`, `IPU_RUNNER_ASC_ISSUER_ID`) signs
   without an Xcode account.
 - An iPhone with **Developer Mode** on, paired with and trusted by the Mac over USB.
 - The phone **unlocked and awake** while the runner is built, launched, and used. It
@@ -96,7 +96,7 @@ iphone-use try       # the harmless first run again
 iphone-use login     # a new one-time browser sign-in and phone QR code
 ```
 
-`iphone-use setup` runs `~/.iphone-use/setup-wda.sh`, which also takes `status`, `pause`,
+`iphone-use setup` runs `~/.iphone-use/setup-runner.sh`, which also takes `status`, `pause`,
 `resume` and `stop` (`iphone-use setup status`). The control page is
 **`http://<mac-lan-ip>:44321/phone`**; **`/setup`** translates `/agent/status` into the
 current blocker (USB, trust, developer service, runner, external host) without changing
@@ -107,7 +107,7 @@ More than one iPhone paired? Pin the same classic UDID in both places:
 ```bash
 export IPHONE_USE_UDID=00008…
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-WDA_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-wda.sh
+IPU_RUNNER_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-runner.sh
 ```
 
 ### Hand the phone back to yourself
@@ -116,8 +116,8 @@ The runner occupies the phone while it runs. To use the phone by hand, pause it 
 resume it before the next agent session:
 
 ```bash
-~/.iphone-use/setup-wda.sh pause     # disables the launchd job, stops only PID-verified processes
-~/.iphone-use/setup-wda.sh resume
+~/.iphone-use/setup-runner.sh pause     # disables the launchd job, stops only PID-verified processes
+~/.iphone-use/setup-runner.sh resume
 ```
 
 Simpler still is the **交还 (hand back)** button in the web toolbar, or
@@ -169,7 +169,7 @@ never against a hand-off, a setup blocker or another session, and at most once p
 ### Upgrade
 
 > v0.9 removed the iPhone Mirroring backend; installs that had
-> `IPHONE_USE_BACKEND=mirror` are served over WDA after upgrading.
+> `IPHONE_USE_BACKEND=mirror` are served over runner after upgrading.
 
 ```bash
 iphone-use upgrade            # install the latest release (daemon + skill), then refresh other skill copies
@@ -204,7 +204,7 @@ Each run resolves the latest release and upgrades only when it is newer *and* no
 is using the phone: no `X-Phone-Owner` lease, no hold, the daemon is not
 releasing/reconnecting, no live viewer, and no agent request in the last 15 minutes
 (`idle_secs` on `/agent/status`; override with `AUTO_UPDATE_IDLE_SECS`). A connected
-phone with WDA up but nobody driving it counts as idle. Otherwise it logs one line to
+phone with runner up but nobody driving it counts as idle. Otherwise it logs one line to
 `~/Library/Logs/iPhoneUse/auto-update.log` and tries again tomorrow. The upgrade itself is
 `install.sh` with its SHA-256 checks and rollback, after which the script refreshes its
 own installed copy from the new release. `run --force` skips the idle gate;
@@ -325,13 +325,13 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/agent/status` | Readiness and lifecycle: `backend`, `device_state`, `drivable`, `wda_actionable`, `recovery_owner`, `setup_blocked_on` / `setup_phase` / `setup_message`, `hint`, viewer counts, `instance`, `udid`, `owner` / `owner_lease_remaining_secs`, `hold_remaining_secs`, `screen_private_secs` (a private hold: the person is signing in and the screen is not read), `idle_secs` (since the last agent request; status polls do not count), `capture_redacted` (the watched picture is blank because the app hides it from capture), `version` / `latest`. |
+| `GET` | `/agent/status` | Readiness and lifecycle: `backend`, `device_state`, `drivable`, `runner_actionable`, `recovery_owner`, `setup_blocked_on` / `setup_phase` / `setup_message`, `hint`, viewer counts, `instance`, `udid`, `owner` / `owner_lease_remaining_secs`, `hold_remaining_secs`, `screen_private_secs` (a private hold: the person is signing in and the screen is not read), `idle_secs` (since the last agent request; status polls do not count), `capture_redacted` (the watched picture is blank because the app hides it from capture), `version` / `latest`. |
 | `GET` | `/agent/screenshot` | Current screen as PNG, from the phone. On a screen the app hides from capture, the accessibility tree drawn as a labelled wireframe over the blank area, with `X-Capture-Redacted: 1`; `?raw=1` returns the capture untouched. |
-| `GET` | `/agent/elements` | Flattened accessibility tree with an ephemeral `snapshot` token, an `ax_stats` usability block, and a sparse `alert` block when a system alert is up. `?since=<snapshot>` returns a `delta` instead of the full tree. WDA missing/busy → `503`; failed source → `502`, never a fake empty `200`. |
+| `GET` | `/agent/elements` | Flattened accessibility tree with an ephemeral `snapshot` token, an `ax_stats` usability block, and a sparse `alert` block when a system alert is up. `?since=<snapshot>` returns a `delta` instead of the full tree. runner missing/busy → `503`; failed source → `502`, never a fake empty `200`. |
 | `GET` | `/agent/mjpeg` | Authenticated live MJPEG stream. |
 | `POST` | `/agent/input` | One action: tap, drag, long-press, scroll, text, key, `home`/`spotlight`, `launch_app`, `set_value`, `perform`, `alert`. `?return=delta` also attempts a post-action tree read and returns the change plus a `settle` block (`settled`, `reason`: `stable` / `budget_exhausted` / `observation_failed`, `waited_ms`, `captures`, `budget_ms`, and `sparse` / `stale` when they apply). Observation is best-effort: a slow or failed read never downgrades an applied action to an unknown outcome. A settled delta with no row added, changed or removed also carries `no_visible_change: true` (a scroll or tap that hit nothing responsive). |
-| `POST` | `/agent/actions` | Up to 24 `action` / `wait_for` / `pause` steps validated as a whole, run under one WDA lock, stopped at the first failure. Response: `completed`, `applied_actions`, `failed_step`, `outcome` (the failed step), `failed_step_outcome`, `batch_outcome` (`nothing_applied` / `partially_applied` / `unknown`), `retry_safe` (the whole batch, and the only field that authorises a replay). |
-| `POST` | `/agent/mode` | `{"mode":"agent"}` brings WDA up on the configured target (never changes the UDID). `{"mode":"human"}` stops WDA and hands the phone to its holder; agent input then answers `409 phone_handed_to_human` until `agent` takes it back. |
+| `POST` | `/agent/actions` | Up to 24 `action` / `wait_for` / `pause` steps validated as a whole, run under one runner lock, stopped at the first failure. Response: `completed`, `applied_actions`, `failed_step`, `outcome` (the failed step), `failed_step_outcome`, `batch_outcome` (`nothing_applied` / `partially_applied` / `unknown`), `retry_safe` (the whole batch, and the only field that authorises a replay). |
+| `POST` | `/agent/mode` | `{"mode":"agent"}` brings runner up on the configured target (never changes the UDID). `{"mode":"human"}` stops runner and hands the phone to its holder; agent input then answers `409 phone_handed_to_human` until `agent` takes it back. |
 | `POST` | `/agent/hold` | `{"secs":N}` (0 clears, max 14400) keeps the phone from idle release around a human pause. `503 device_release_in_progress` if release already started. |
 | `POST` | `/agent/owner` | `{"release":true}` hands the owner lease back early. |
 | `POST` | `/agent/login` | Fill and submit the app's login form from the user's own bitwarden-use vault entry (`{"item"?, "user"?, "submit"?}`). The values go from the vault to the phone inside the daemon; the answer names the entry and a masked account only. CLI: `iphone-use auth login --bwu`. |
@@ -344,7 +344,7 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
 
 ### Semantics an agent must respect
 
-- **Gate on `drivable:true`** (and `wda_actionable:true`). `device_state` is one of
+- **Gate on `drivable:true`** (and `runner_actionable:true`). `device_state` is one of
   `ready`, `locked`, `blocked`, `offline`, `releasing`, `released`, `reconnecting`;
   `mode` is `agent` or `offline`.
 - **At-most-once delivery.** Expiry before dispatch → `408 not_sent`, `retry_safe:true`.
@@ -360,7 +360,7 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
   `element` keeps the gesture inside that element, `perform` invokes a named affordance
   (`increment`, `decrement`, `adjust`, `toggle`, `menu`, `double_tap`, `two_finger_tap`,
   `scroll_to_visible`, `pinch`, `rotate`, `force_press`). `force_press` needs 3D Touch:
-  on every iPhone since the XR / 11 WDA refuses it before touching the screen, and the
+  on every iPhone since the XR / 11 runner refuses it before touching the screen, and the
   daemon answers `422 force_press_unsupported` (`not_sent`, `retry_safe:true`); use
   `menu` (long press) instead. `{"type":"scroll","page":true,"dy":N}`
   scrolls the page itself: the daemon finds the page scroller and starts the drag clear
@@ -372,7 +372,7 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
 - **Taps that would land elsewhere are refused.** An element tap whose centre is covered
   by another control (a fixed header, the keyboard, a floating button) answers
   `409 element_occluded`, `not_sent`: scroll it clear (`perform` `scroll_to_visible`)
-  and read again. A target WDA reports as `visible:false` (in the tree but not drawn, like
+  and read again. A target runner reports as `visible:false` (in the tree but not drawn, like
   Chrome's tab grid behind the page) answers `409 element_not_visible`.
   `"allow_occluded":true` overrides both. Label taps take an optional
   `"kind":"Button"`, and rows outside the screen never compete with a visible match.
@@ -382,15 +382,15 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
 - **Screens hidden from capture** (PayPay, banks, wallets) come back from
   `/agent/screenshot` as a wireframe with `X-Capture-Redacted: 1`. Drive them by
   elements; never run vision on a blank capture.
-- **Every `/agent/*` answer is timed**: a `timing` object (`total_ms`, `wda_ms`,
-  `daemon_ms`, and each WDA call with count, ms and bytes) in JSON bodies, a
+- **Every `/agent/*` answer is timed**: a `timing` object (`total_ms`, `runner_ms`,
+  `daemon_ms`, and each runner call with count, ms and bytes) in JSON bodies, a
   `Server-Timing` header, and one line per request in `~/.iphone-use/agent-timing.jsonl`
   (route, owner and timings only — never request or screen content).
 - An unknown action `type` answers `400 invalid_action` with the supported list, and a
   common guess (`scroll_into_view`, `click`, `fill`, …) also gets the exact request to send.
 - **System alerts** are a separate surface: taps on their buttons are acknowledged
   without effect. Use `{"type":"alert","button":"…"}` or `{"action":"accept"|"dismiss"}`.
-  App Switcher and Control Center are system gestures WDA cannot reach.
+  App Switcher and Control Center are system gestures runner cannot reach.
 - **`/agent/actions`** never reports a replay as safe once any action applied.
   `tap_locator` uses the same exact label/identifier/kind/value/state fields as
   `wait_for` and requires one unique match.
@@ -410,7 +410,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -H "$OWNER" -X POST "$HOST/agent/actions" \
 
 For things the UI cannot reach efficiently (battery level, Health samples, sending a
 message with a native confirmation), a curated set of **verbs** runs through one bridge
-shortcut. The daemon opens `shortcuts://run-shortcut` on the phone via WDA — no Spotlight
+shortcut. The daemon opens `shortcuts://run-shortcut` on the phone via runner — no Spotlight
 or clipboard — and the shortcut posts its result back to `/agent/inbox`.
 
 ```bash
@@ -608,9 +608,9 @@ iphone-use setup --instance lab                # what the installer runs when th
 The instance gets its own copy of the app, state directory
 (`~/.iphone-use/instances/lab`, including its own runner build products under
 `runner-build/`; the sources at `~/.iphone-use/runner` are shared), launchd labels (`com.leeguoo.iphone-use.lab`,
-`com.leeguoo.iphone-use.wda.lab`), loopback-only daemon, agent token and ports. Ports
+`com.leeguoo.iphone-use.runner.lab`), loopback-only daemon, agent token and ports. Ports
 are derived from the name and persisted. The installer prints them, and
-`IPHONE_USE_INSTANCE=lab setup-wda.sh instance-context` shows them later. Signing
+`IPHONE_USE_INSTANCE=lab setup-runner.sh instance-context` shows them later. Signing
 (team, bundle ID, App Store Connect key) is inherited from the default instance's runner
 supervisor unless set explicitly. A phone that another instance already drives, or a port
 another instance owns, is refused before anything changes. Agents target the instance
@@ -671,7 +671,7 @@ way: run `iphone-use-mcp` with `IPHONE_USE_INSTANCE=sim`.
 
 ```bash
 IPHONE_USE_INSTANCE=sim IPHONE_USE_SIMULATOR=<udid> \
-  IPHONE_USE_WDA_URL=http://127.0.0.1:8200 IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9200 \
+  IPHONE_USE_RUNNER_URL=http://127.0.0.1:8200 IPHONE_USE_RUNNER_MJPEG_URL=http://127.0.0.1:9200 \
   IPHONE_USE_PORT=44331 iphone-use serve
 ```
 
@@ -719,8 +719,8 @@ The preview doesn't cover these yet:
 ### Lifecycle and recovery
 
 `/agent/status` is the source of truth. `recovery_owner` is `daemon` for managed
-loopback WDA, `unconfigured` until a first-run target is persisted, `external` for an
-unmanaged endpoint. Before launching WDA the daemon asks the phone whether it is locked: a
+loopback runner, `unconfigured` until a first-run target is persisted, `external` for an
+unmanaged endpoint. Before launching runner the daemon asks the phone whether it is locked: a
 locked phone shows `setup_blocked_on:"locked"` within seconds of connecting (instead of
 after a ~70 s Xcode timeout), and the runner starts once two consecutive readings say it
 is unlocked. A lock-screen failure that still slips through retries quietly from 5 s to
@@ -775,20 +775,20 @@ cable the first time, and finds the address from the runner, its last run, or Bo
 restarts (idle release, a crash) go over Wi-Fi too. Otherwise it starts over USB and ends
 when the cable is pulled. Setup also answers the phone's local-network / "wireless data"
 prompt so the runner is reachable on the network. Starting over Wi-Fi is the
-`WDA_TRANSPORT=auto` default for these phones (`usb` keeps them on the cable). Driving
+`IPU_RUNNER_TRANSPORT=auto` default for these phones (`usb` keeps them on the cable). Driving
 the runner off the cable goes over the LAN: an iOS 15/16 phone has no CoreDevice
 tunnel, and usbmuxd's Wi-Fi attachment does not carry the runner's port (measured: the
 runner kept answering on its LAN address while the relay could not reach it). Setup
 turns that LAN relay on by default once the runner proves it refuses unsigned requests;
-a runner older than request signing still needs `WDA_ALLOW_LAN=1`. The LAN path is
+a runner older than request signing still needs `IPU_RUNNER_ALLOW_LAN=1`. The LAN path is
 signed, not encrypted: someone watching the Wi-Fi can see the screen, but cannot drive
 the phone. `legacy_ios.unplug_ok` in `/agent/status` says whether the cable can be
 pulled.
 On an iPhone X (iOS 16.5) a setup that rebuilt the runner took 141 s (80 s of it the
 build; DDI check 3.7 s, install 12.9 s and launch 7.5 s, all over Wi-Fi); a warm restart
 of an iPhone 12 mini (iOS 15.4.1) takes about 12 s.
-This needs a paid developer account's App Store Connect API key (`WDA_ASC_KEY_PATH`,
-`WDA_ASC_KEY_ID`, `WDA_ASC_ISSUER_ID`); without one setup stops with `ios_too_old` and
+This needs a paid developer account's App Store Connect API key (`IPU_RUNNER_ASC_KEY_PATH`,
+`IPU_RUNNER_ASC_KEY_ID`, `IPU_RUNNER_ASC_ISSUER_ID`); without one setup stops with `ios_too_old` and
 says so, and iOS 14 or older stops there too (below the runner's floor).
 `ddi_needs_reboot` means a stale Developer Disk Image is stuck on such a phone (every
 developer service answers `InvalidService` even after a remount): restart the iPhone
@@ -821,13 +821,13 @@ runner's port, so `iphone-use relay` dials the phone's CoreDevice tunnel instead
 `tunnelIPAddress` that `devicectl list devices` reports while `tunnelState` is `connected`).
 That tunnel is encrypted and routed by this Mac only, unlike a LAN `socat` relay, so it
 needs no opt-in: a paired phone that is off USB but has a live tunnel is set up and
-relaunched over it (`WDA_TRANSPORT=auto`, the default; with no `WDA_UDID` and no cable,
+relaunched over it (`IPU_RUNNER_TRANSPORT=auto`, the default; with no `IPU_RUNNER_UDID` and no cable,
 setup takes the one phone with a live tunnel and refuses to guess among several). USB
 still wins whenever the phone is plugged in; a tap costs about 330–380 ms over the tunnel
 against about 280 ms over USB. Status then reports `transport: "wifi-tunnel"`.
-`WDA_TRANSPORT=usb` restores the old rule that setup needs the cable. `WDA_ALLOW_LAN=1`
+`IPU_RUNNER_TRANSPORT=usb` restores the old rule that setup needs the cable. `IPU_RUNNER_ALLOW_LAN=1`
 is a separate, unsafe opt-in for the plain (unencrypted) LAN relay (`transport: "wifi"`); upgrading an
-install whose plists say `WDA_ALLOW_LAN=0` turns on the tunnel without opening the LAN
+install whose plists say `IPU_RUNNER_ALLOW_LAN=0` turns on the tunnel without opening the LAN
 relay. Many phones start a new runner over Wi-Fi (an iOS 27.0 iPhone 17 Pro Max does, in
 a few seconds; an iOS 27.0 iPhone 13 came up drivable in about 45 s with no cable); a phone
 whose iOS refuses that (`wifi_automation_refused`) needs the cable again whenever its
@@ -858,7 +858,7 @@ byte-verifies the skill at `~/.agents/skills/iphone-use` plus its Claude Code di
 link, and only then replaces the daemon. A skill failure aborts the upgrade; a later
 daemon failure restores the previous skill. `IPHONE_USE_SKIP_SKILL=1` leaves the skill
 untouched (a degraded install with no compatibility claim). Existing settings
-(`IPHONE_USE_WDA_URL`, password, token, UDID) carry over.
+(`IPHONE_USE_RUNNER_URL`, password, token, UDID) carry over.
 `IPHONE_USE_NO_UPDATE_CHECK=1` (or `USE_NO_UPDATE_CHECK=1`) disables the daily check.
 
 On install the app keeps a valid existing signature and repairs an invalid one with
@@ -876,21 +876,21 @@ environment and in an existing LaunchAgent plist; when both are set,
 | `IPHONE_USE_HOST` / `IPHONE_USE_PORT` | `127.0.0.1` / `44321` | Listen address and port (`0.0.0.0` for LAN; a password is then mandatory). |
 | `IPHONE_USE_PASSWORD` | *(none)* | Browser login; doubles as the agent bearer only when no agent token is set. |
 | `IPHONE_USE_AGENT_TOKEN` | *(none)* | Dedicated agent bearer. When set, it is the **only** accepted bearer. |
-| `IPHONE_USE_UDID` | detected and persisted by the installer | Canonical iPhone for the managed runner and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `WDA_UDID` to setup. |
-| `IPHONE_USE_WDA_URL` / `IPHONE_USE_WDA_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | Runner control and MJPEG loopbacks (any WebDriverAgent-compatible endpoint works). Control fails closed when unreachable. |
-| `IPHONE_USE_WDA_MANAGED` | on for loopback endpoints | Whether this daemon owns the runner supervisor/relay lifecycle. |
+| `IPHONE_USE_UDID` | detected and persisted by the installer | Canonical iPhone for the managed runner and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `IPU_RUNNER_UDID` to setup. |
+| `IPHONE_USE_RUNNER_URL` / `IPHONE_USE_RUNNER_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | Runner control and MJPEG loopbacks (any WebDriverAgent-compatible endpoint works). Control fails closed when unreachable. |
+| `IPHONE_USE_RUNNER_MANAGED` | on for loopback endpoints | Whether this daemon owns the runner supervisor/relay lifecycle. |
 | `IPHONE_USE_PREWARM` | on | `0` turns pre-warm off (see Lifecycle). `IPHONE_USE_PREWARM_RECENT_SECS` (default `3600`) is how recently an agent must have driven the phone; `IPHONE_USE_PREWARM_INTERVAL_SECS` (default `600`) limits each trigger. |
 | `IPHONE_USE_IDLE_RELEASE_SECS` | `300` | Stop the runner and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
 | `IPHONE_USE_IDLE_RELEASE` | *(unset)* | `force` releases idle runners even on a phone whose next start needs a person (a passcode phone, or one that cannot start over Wi-Fi); see `keep_runner_alive` in Lifecycle. |
 | `IPHONE_USE_KEEP_AWAKE_SECS` | `120` | Keep the phone from auto-locking while it is driven and for this many seconds after the last request (a hold, a live view or an owner lease also keep it awake). The runner presses F13, a key iOS ignores, every 10 s and never touches a locked phone. `0` turns it off. |
 | `IPHONE_USE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
-| `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | Device runner sources setup builds (a repo checkout's `scripts/setup-wda.sh` uses its own `runner/`). Persisted only when not the default. |
-| `WDA_RUNNER_REBUILD` | off | `1` makes the next setup ignore the recorded runner product and build again. |
+| `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | Device runner sources setup builds (a repo checkout's `scripts/setup-runner.sh` uses its own `runner/`). Persisted only when not the default. |
+| `IPU_RUNNER_REBUILD` | off | `1` makes the next setup ignore the recorded runner product and build again. |
 | `IPU_EMBED` | on | `0` builds the device runner without the on-phone daemon. Persisted for the supervisor. |
 | `IPU_EMBED_LIB` | `~/.iphone-use/runner/embed/libipu_embed.a` | The on-phone daemon library setup links into the runner (absolute path). A repo checkout builds it with `scripts/build-ios-embed.sh`; none found builds the plain runner. Persisted for the supervisor. |
 | `IPU_DAEMON_HOST` | `127.0.0.1` | Where the daemon inside the runner listens on the phone; `0.0.0.0` lets other devices drive this phone through it (its token is still required). Persisted for the supervisor. |
-| `IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH` | runner default 64 | Applies to an external WebDriverAgent only; the device runner bounds its own tree reads (depth ladder, 5000 nodes). |
-| `IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S` | — | Same: WebDriverAgent only. |
+| `IPHONE_USE_RUNNER_SNAPSHOT_MAX_DEPTH` | runner default 64 | Applies to an external WebDriverAgent only; the device runner bounds its own tree reads (depth ladder, 5000 nodes). |
+| `IPHONE_USE_RUNNER_SNAPSHOT_TIMEOUT_S` | — | Same: WebDriverAgent only. |
 | `IPHONE_USE_ELEMENTS_AFFORDANCES` | off | `1` adds sparse `actions`, `selected`, `min`/`max` to `/agent/elements` rows. |
 | `IPHONE_USE_ELEMENTS_TRAITS` | off | `1` also emits raw accessibility trait names. |
 | `IPHONE_USE_NO_UPDATE_CHECK` | off | Skip the daily release check. |
@@ -908,7 +908,7 @@ credentials.
   never sent, so a captured request can be neither replayed nor altered. A runner
   launched without a token refuses everything.
 - What signing does not do: encrypt. USB and the CoreDevice tunnel are private to this
-  Mac; the iOS 15/16 LAN relay and `WDA_ALLOW_LAN=1` are plain HTTP, so screenshots,
+  Mac; the iOS 15/16 LAN relay and `IPU_RUNNER_ALLOW_LAN=1` are plain HTTP, so screenshots,
   element trees and video are readable by anyone who can see that Wi-Fi traffic. Anyone
   who can read your user's files on the Mac can read the token.
 - From outside the LAN, reach `44321` through an authenticated HTTPS reverse proxy or a
@@ -922,7 +922,7 @@ credentials.
 
 ### WARP / VPN
 
-WARP and similar VPNs break the CoreDevice tunnel WDA needs. `setup-wda.sh doctor`
+WARP and similar VPNs break the CoreDevice tunnel runner needs. `setup-runner.sh doctor`
 detects it and `/agent/status` reports `device_state:"blocked"`,
 `setup_blocked_on:"warp"`; neither changes your VPN — that is an operator decision, and
 managed Macs need an administrator split-tunnel rule.
@@ -935,8 +935,8 @@ cargo build --release --bin iphone-use --bin iphone-use-mcp
 ./install.sh ./iPhoneUse.app           # sign, install, write the LaunchAgent (uses the worktree skill)
 
 # or run the daemon without installing
-IPHONE_USE_WDA_URL=http://127.0.0.1:8100 \
-IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9100 \
+IPHONE_USE_RUNNER_URL=http://127.0.0.1:8100 \
+IPHONE_USE_RUNNER_MJPEG_URL=http://127.0.0.1:9100 \
 IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use serve
 ```
 
@@ -945,7 +945,7 @@ Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's te
 | Path | What lives there |
 |---|---|
 | `crates/server` | daemon: device control (WebDriverAgent protocol), MJPEG proxy, browser `/control`, agent API |
-| `crates/server/src/setup` | the device-layer setup engine (`iphone-use setup-native`): doctor, build/sign/launch, relays, the launchd supervisor, status protocol. `scripts/setup-wda.sh` is only its entry point for launchd, the daemon and the installers |
+| `crates/server/src/setup` | the device-layer setup engine (`iphone-use setup-native`): doctor, build/sign/launch, relays, the launchd supervisor, status protocol. `scripts/setup-runner.sh` is only its entry point for launchd, the daemon and the installers |
 | `runner/` | the device runner: XCTest UI-test bundle serving the control API and MJPEG on the phone |
 | `crates/mcp` | `iphone-use-mcp`: MCP server, flow runner, registry client, `flow publish` / `report` |
 | `crates/core` | shared auth helpers |
@@ -956,7 +956,7 @@ Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's te
 
 ### Roadmap
 
-- [x] Direct/WDA element-tree control, Unicode text, label taps, on-device screenshots (component-validated on iPhone 17 / iOS 27; see [`docs/wda-setup.html`](wda-setup.html)).
+- [x] Direct/runner element-tree control, Unicode text, label taps, on-device screenshots (component-validated on iPhone 17 / iOS 27; see [`docs/runner-setup.html`](runner-setup.html)).
 - [x] MCP server; release binaries in CI with a one-line installer.
 - [x] Deterministic flows, the official flow registry, publish/report loop.
 - [ ] Record the direct-browser hardware acceptance matrix below.
@@ -972,12 +972,12 @@ Release: `scripts/release.sh 0.6.8` bumps the crates, runs the release gate's te
 The direct browser default is accepted only after all of these are observed on a real
 iPhone:
 
-1. On a Mac with no macOS privacy grants for the app, install, run WDA setup, and keep WDA up.
-2. `/agent/status` reports `backend:"direct"`, `wda:true`, `wda_actionable:true`, `drivable:true` for the intended UDID.
+1. On a Mac with no macOS privacy grants for the app, install, run runner setup, and keep runner up.
+2. `/agent/status` reports `backend:"direct"`, `runner:true`, `runner_actionable:true`, `drivable:true` for the intended UDID.
 3. `/phone` from another device shows a continuously updating picture; stopping the 9100 relay makes the UI report degraded/offline, not success.
 4. Tap, drag, long-press, scroll, ASCII and CJK text through `/control` are each acknowledged and land exactly once.
-5. `/agent/elements`, `/agent/screenshot`, `/agent/input` work through bearer auth, including with a failed WDA endpoint; no command ever moves the Mac cursor.
-6. `releasing → released → reconnecting → ready` is observed, plus lock/unlock, USB reconnect, Mac restart, WDA renew/reinstall, and no silent target change on a multi-device Mac.
+5. `/agent/elements`, `/agent/screenshot`, `/agent/input` work through bearer auth, including with a failed runner endpoint; no command ever moves the Mac cursor.
+6. `releasing → released → reconnecting → ready` is observed, plus lock/unlock, USB reconnect, Mac restart, runner renew/reinstall, and no silent target change on a multi-device Mac.
 7. On an isolated network, record whether the phone's IP exposes unauthenticated `8100/9100`.
 
 ## Feedback

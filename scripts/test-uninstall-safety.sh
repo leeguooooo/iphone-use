@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Focused macOS mocks for uninstall PID identity and WDA checkout ownership.
+# Focused macOS mocks for uninstall PID identity and runner checkout ownership.
 set -euo pipefail
 umask 077
 
@@ -55,17 +55,17 @@ run_uninstall() {
 }
 
 git_init_checkout() {
-    WDA_DIR="$TEST_HOME/.iphone-use/WebDriverAgent"
-    mkdir -p "$WDA_DIR"
-    git -C "$WDA_DIR" init -q
-    git -C "$WDA_DIR" config user.name "Safety Test"
-    git -C "$WDA_DIR" config user.email "safety@example.invalid"
-    git -C "$WDA_DIR" remote add origin https://github.com/appium/WebDriverAgent.git
-    printf 'fixture\n' > "$WDA_DIR/fixture.txt"
-    git -C "$WDA_DIR" add fixture.txt
-    git -C "$WDA_DIR" commit -qm fixture
-    WDA_HEAD="$(git -C "$WDA_DIR" rev-parse HEAD)"
-    WDA_UDID="00008110-001234567890001E"
+    IPU_RUNNER_DIR="$TEST_HOME/.iphone-use/WebDriverAgent"
+    mkdir -p "$IPU_RUNNER_DIR"
+    git -C "$IPU_RUNNER_DIR" init -q
+    git -C "$IPU_RUNNER_DIR" config user.name "Safety Test"
+    git -C "$IPU_RUNNER_DIR" config user.email "safety@example.invalid"
+    git -C "$IPU_RUNNER_DIR" remote add origin https://github.com/appium/WebDriverAgent.git
+    printf 'fixture\n' > "$IPU_RUNNER_DIR/fixture.txt"
+    git -C "$IPU_RUNNER_DIR" add fixture.txt
+    git -C "$IPU_RUNNER_DIR" commit -qm fixture
+    IPU_RUNNER_HEAD="$(git -C "$IPU_RUNNER_DIR" rev-parse HEAD)"
+    IPU_RUNNER_UDID="00008110-001234567890001E"
 }
 
 digest_text() {
@@ -74,22 +74,22 @@ digest_text() {
 
 write_marker() {
     local refs reflog worktrees objects marker
-    refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$WDA_DIR" \
+    refs="$(GIT_OPTIONAL_LOCKS=0 git -C "$IPU_RUNNER_DIR" \
         for-each-ref --format='%(refname) %(objectname)')"
-    reflog="$(GIT_OPTIONAL_LOCKS=0 git -C "$WDA_DIR" \
+    reflog="$(GIT_OPTIONAL_LOCKS=0 git -C "$IPU_RUNNER_DIR" \
         reflog show --all --format='%H %gD %gs')"
-    worktrees="$(GIT_OPTIONAL_LOCKS=0 git -C "$WDA_DIR" \
+    worktrees="$(GIT_OPTIONAL_LOCKS=0 git -C "$IPU_RUNNER_DIR" \
         worktree list --porcelain)"
-    objects="$(GIT_OPTIONAL_LOCKS=0 git -C "$WDA_DIR" \
+    objects="$(GIT_OPTIONAL_LOCKS=0 git -C "$IPU_RUNNER_DIR" \
         cat-file --batch-all-objects --batch-check='%(objectname)')"
     objects="$(printf '%s\n' "$objects" | LC_ALL=C sort)"
-    marker="$TEST_HOME/.iphone-use/wda-checkout-owner.v1"
+    marker="$TEST_HOME/.iphone-use/runner-checkout-owner.v1"
     printf '%s\n' \
         "version=1" \
-        "path=$WDA_DIR" \
+        "path=$IPU_RUNNER_DIR" \
         "origin=https://github.com/appium/WebDriverAgent.git" \
-        "head=$WDA_HEAD" \
-        "udid=$WDA_UDID" \
+        "head=$IPU_RUNNER_HEAD" \
+        "udid=$IPU_RUNNER_UDID" \
         "refs_sha256=$(digest_text "$refs")" \
         "reflog_sha256=$(digest_text "$reflog")" \
         "worktrees_sha256=$(digest_text "$worktrees")" \
@@ -97,20 +97,20 @@ write_marker() {
     chmod 600 "$marker"
 }
 
-write_wda_plist() {
-    local plist="$TEST_HOME/Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist"
+write_runner_plist() {
+    local plist="$TEST_HOME/Library/LaunchAgents/com.leeguoo.iphone-use.runner.plist"
     cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.leeguoo.iphone-use.wda</string>
+  <key>Label</key><string>com.leeguoo.iphone-use.runner</string>
   <key>ProgramArguments</key>
-  <array><string>/bin/bash</string><string>$TEST_HOME/.iphone-use/setup-wda.sh</string></array>
+  <array><string>/bin/bash</string><string>$TEST_HOME/.iphone-use/setup-runner.sh</string></array>
   <key>EnvironmentVariables</key><dict>
-    <key>WDA_DIR</key><string>$WDA_DIR</string>
-    <key>WDA_REF</key><string>$WDA_HEAD</string>
-    <key>WDA_UDID</key><string>$WDA_UDID</string>
-    <key>WDA_BUNDLE_ID</key><string>com.example.iphoneuse.wda</string>
+    <key>IPU_RUNNER_DIR</key><string>$IPU_RUNNER_DIR</string>
+    <key>IPU_RUNNER_REF</key><string>$IPU_RUNNER_HEAD</string>
+    <key>IPU_RUNNER_UDID</key><string>$IPU_RUNNER_UDID</string>
+    <key>IPU_RUNNER_BUNDLE_ID</key><string>com.example.iphoneuse.runner</string>
   </dict>
 </dict></plist>
 PLIST
@@ -121,7 +121,7 @@ expect_preserved_checkout() {
     if run_uninstall >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"; then
         fail_test "unsafe checkout case unexpectedly returned success"
     fi
-    [ -d "$WDA_DIR/.git" ] || fail_test "unsafe checkout was deleted"
+    [ -d "$IPU_RUNNER_DIR/.git" ] || fail_test "unsafe checkout was deleted"
 }
 
 new_home "empty-idempotent"
@@ -139,20 +139,20 @@ victim_command="$(LC_ALL=C /bin/ps -ww -p "$victim_pid" -o command= \
     | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 printf '%s|%s|runner:%s\n' \
     "$victim_pid" "$victim_lstart" "$victim_command" \
-    > "$TEST_HOME/.iphone-use/wda-runner.pid"
-chmod 600 "$TEST_HOME/.iphone-use/wda-runner.pid"
+    > "$TEST_HOME/.iphone-use/runner.pid"
+chmod 600 "$TEST_HOME/.iphone-use/runner.pid"
 if run_uninstall --dry-run >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"; then
     fail_test "arbitrary PID record unexpectedly passed dry-run"
 fi
 kill -0 "$victim_pid" 2>/dev/null || fail_test "arbitrary process was signalled"
 grep -q "non-product runner command contract" "$TEST_ROOT/err" \
     || fail_test "arbitrary PID rejection reason missing"
-pass "arbitrary same-uid command is never accepted as a WDA runner"
+pass "arbitrary same-uid command is never accepted as a runner"
 
 new_home "valid-runner-contract"
-WDA_DIR="$TEST_HOME/.iphone-use/WebDriverAgent"
-mkdir -p "$WDA_DIR"
-runner_command="/usr/bin/xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=00008110-001234567890001E -allowProvisioningUpdates DEVELOPMENT_TEAM=ABCD123456 PRODUCT_BUNDLE_IDENTIFIER=com.example.iphoneuse.wda test"
+IPU_RUNNER_DIR="$TEST_HOME/.iphone-use/WebDriverAgent"
+mkdir -p "$IPU_RUNNER_DIR"
+runner_command="/usr/bin/xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination platform=iOS,id=00008110-001234567890001E -allowProvisioningUpdates DEVELOPMENT_TEAM=ABCD123456 PRODUCT_BUNDLE_IDENTIFIER=com.example.iphoneuse.runner test"
 cat > "$TEST_BIN/ps" <<SH
 #!/bin/sh
 case " \$* " in
@@ -165,12 +165,12 @@ esac
 SH
 cat > "$TEST_BIN/lsof" <<SH
 #!/bin/sh
-printf 'p4242\\nn%s\\n' "$WDA_DIR"
+printf 'p4242\\nn%s\\n' "$IPU_RUNNER_DIR"
 SH
 chmod 700 "$TEST_BIN/ps" "$TEST_BIN/lsof"
 printf '%s\n' "4242|Mon Jul 28 00:00:00 2026|runner:$runner_command" \
-    > "$TEST_HOME/.iphone-use/wda-runner.pid"
-chmod 600 "$TEST_HOME/.iphone-use/wda-runner.pid"
+    > "$TEST_HOME/.iphone-use/runner.pid"
+chmod 600 "$TEST_HOME/.iphone-use/runner.pid"
 if env HOME="$TEST_HOME" \
     IPHONE_USE_LAUNCHCTL="$TEST_BIN/launchctl" \
     IPHONE_USE_PS="$TEST_BIN/ps" \
@@ -180,11 +180,11 @@ if env HOME="$TEST_HOME" \
 fi
 grep -q "send SIGTERM to PID-verified runner process 4242" "$TEST_ROOT/out" \
     || fail_test "valid runner contract did not reach the dry-run signal plan"
-pass "valid WDA runner command plus canonical cwd reaches the signal plan"
+pass "valid runner command plus canonical cwd reaches the signal plan"
 
 new_home "wrong-runner-cwd"
-WDA_DIR="$TEST_HOME/.iphone-use/WebDriverAgent"
-mkdir -p "$WDA_DIR" "$TEST_ROOT/not-wda"
+IPU_RUNNER_DIR="$TEST_HOME/.iphone-use/WebDriverAgent"
+mkdir -p "$IPU_RUNNER_DIR" "$TEST_ROOT/not-runner"
 cat > "$TEST_BIN/ps" <<SH
 #!/bin/sh
 case " \$* " in
@@ -197,12 +197,12 @@ esac
 SH
 cat > "$TEST_BIN/lsof" <<SH
 #!/bin/sh
-printf 'p4242\\nn%s\\n' "$TEST_ROOT/not-wda"
+printf 'p4242\\nn%s\\n' "$TEST_ROOT/not-runner"
 SH
 chmod 700 "$TEST_BIN/ps" "$TEST_BIN/lsof"
 printf '%s\n' "4242|Mon Jul 28 00:00:00 2026|runner:$runner_command" \
-    > "$TEST_HOME/.iphone-use/wda-runner.pid"
-chmod 600 "$TEST_HOME/.iphone-use/wda-runner.pid"
+    > "$TEST_HOME/.iphone-use/runner.pid"
+chmod 600 "$TEST_HOME/.iphone-use/runner.pid"
 if env HOME="$TEST_HOME" \
     IPHONE_USE_LAUNCHCTL="$TEST_BIN/launchctl" \
     IPHONE_USE_PS="$TEST_BIN/ps" \
@@ -214,7 +214,7 @@ grep -q "not a runner rooted in its expected directory" "$TEST_ROOT/err" \
     || fail_test "wrong runner cwd rejection reason missing"
 ! grep -q "send SIGTERM" "$TEST_ROOT/out" \
     || fail_test "wrong-cwd runner reached a signal plan"
-pass "WDA-shaped xcodebuild outside the configured checkout is rejected"
+pass "runner-shaped xcodebuild outside the configured checkout is rejected"
 
 new_home "relay-listener-owner"
 relay_command="/usr/local/bin/iproxy -s 127.0.0.1 8100:8100 -u 00008110-001234567890001E"
@@ -234,8 +234,8 @@ printf 'p9999\n'
 SH
 chmod 700 "$TEST_BIN/ps" "$TEST_BIN/lsof"
 printf '%s\n' "4243|Mon Jul 28 00:00:01 2026|relay:$relay_command" \
-    > "$TEST_HOME/.iphone-use/wda-relay.pid"
-chmod 600 "$TEST_HOME/.iphone-use/wda-relay.pid"
+    > "$TEST_HOME/.iphone-use/runner-relay.pid"
+chmod 600 "$TEST_HOME/.iphone-use/runner-relay.pid"
 if env HOME="$TEST_HOME" \
     IPHONE_USE_LAUNCHCTL="$TEST_BIN/launchctl" \
     IPHONE_USE_PS="$TEST_BIN/ps" \
@@ -247,7 +247,7 @@ grep -q "does not exclusively own 127.0.0.1:8100" "$TEST_ROOT/err" \
     || fail_test "relay listener ownership rejection reason missing"
 ! grep -q "send SIGTERM" "$TEST_ROOT/out" \
     || fail_test "foreign-listener relay reached a signal plan"
-pass "WDA relay must exclusively own its exact loopback listener"
+pass "runner relay must exclusively own its exact loopback listener"
 
 # The built-in usbmux relay (`iphone-use relay`) is held to the same rules,
 # with its listen port read from --listen.
@@ -267,8 +267,8 @@ SH
     printf '#!/bin/sh\nprintf '"'"'p%s\\nn127.0.0.1:8100\\n'"'"'\n' "$2" > "$TEST_BIN/lsof"
     chmod 700 "$TEST_BIN/ps" "$TEST_BIN/lsof"
     printf '%s\n' "4243|Mon Jul 28 00:00:01 2026|relay:$relay_command" \
-        > "$TEST_HOME/.iphone-use/wda-relay.pid"
-    chmod 600 "$TEST_HOME/.iphone-use/wda-relay.pid"
+        > "$TEST_HOME/.iphone-use/runner-relay.pid"
+    chmod 600 "$TEST_HOME/.iphone-use/runner-relay.pid"
     env HOME="$TEST_HOME" \
         IPHONE_USE_LAUNCHCTL="$TEST_BIN/launchctl" \
         IPHONE_USE_PS="$TEST_BIN/ps" \
@@ -297,8 +297,8 @@ victim_command="$(LC_ALL=C /bin/ps -ww -p "$victim_pid" -o command= \
     | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 printf '%s|%s|runner:%s\n' \
     "$victim_pid" "$victim_lstart" "$victim_command" \
-    > "$TEST_HOME/.iphone-use/wda-runner.pid"
-chmod 644 "$TEST_HOME/.iphone-use/wda-runner.pid"
+    > "$TEST_HOME/.iphone-use/runner.pid"
+chmod 644 "$TEST_HOME/.iphone-use/runner.pid"
 if run_uninstall --dry-run >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"; then
     fail_test "world-readable PID record unexpectedly passed dry-run"
 fi
@@ -317,11 +317,11 @@ pass "state namespace must be current-uid mode 700"
 new_home "transient-symlink"
 printf 'keep\n' > "$TEST_ROOT/outside"
 ln -s "$TEST_ROOT/outside" \
-    "$TEST_HOME/.iphone-use/wda-checkout-owner.v1.new.attacker"
+    "$TEST_HOME/.iphone-use/runner-checkout-owner.v1.new.attacker"
 if run_uninstall >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"; then
     fail_test "known-name transient symlink unexpectedly returned success"
 fi
-[ -L "$TEST_HOME/.iphone-use/wda-checkout-owner.v1.new.attacker" ] \
+[ -L "$TEST_HOME/.iphone-use/runner-checkout-owner.v1.new.attacker" ] \
     || fail_test "transient symlink itself was removed"
 [ "$(sed -n '1p' "$TEST_ROOT/outside")" = "keep" ] \
     || fail_test "transient symlink target was changed"
@@ -339,15 +339,15 @@ pass "legacy/unmarked checkout is preserved"
 new_home "marked-checkout"
 git_init_checkout
 write_marker
-write_wda_plist
+write_runner_plist
 run_uninstall --dry-run >"$TEST_ROOT/dry-out" 2>"$TEST_ROOT/dry-err" \
     || fail_test "fully marked pristine checkout failed dry-run"
-[ -d "$WDA_DIR/.git" ] || fail_test "dry-run deleted the marked checkout"
-[ -f "$TEST_HOME/.iphone-use/wda-checkout-owner.v1" ] \
+[ -d "$IPU_RUNNER_DIR/.git" ] || fail_test "dry-run deleted the marked checkout"
+[ -f "$TEST_HOME/.iphone-use/runner-checkout-owner.v1" ] \
     || fail_test "dry-run deleted the ownership marker"
 run_uninstall >"$TEST_ROOT/out" 2>"$TEST_ROOT/err" \
     || fail_test "fully marked pristine checkout did not uninstall"
-[ ! -e "$WDA_DIR" ] || fail_test "marked pristine checkout remains"
+[ ! -e "$IPU_RUNNER_DIR" ] || fail_test "marked pristine checkout remains"
 [ ! -e "$TEST_HOME/.iphone-use" ] || fail_test "empty state directory remains"
 run_uninstall >/dev/null
 pass "marked checkout dry-run is non-mutating and actual uninstall is idempotent"
@@ -355,12 +355,12 @@ pass "marked checkout dry-run is non-mutating and actual uninstall is idempotent
 new_home "local-commit"
 git_init_checkout
 write_marker
-write_wda_plist
-git -C "$WDA_DIR" switch -qc local-safety
-printf 'local commit\n' >> "$WDA_DIR/fixture.txt"
-git -C "$WDA_DIR" add fixture.txt
-git -C "$WDA_DIR" commit -qm local-only
-git -C "$WDA_DIR" checkout -q --detach "$WDA_HEAD"
+write_runner_plist
+git -C "$IPU_RUNNER_DIR" switch -qc local-safety
+printf 'local commit\n' >> "$IPU_RUNNER_DIR/fixture.txt"
+git -C "$IPU_RUNNER_DIR" add fixture.txt
+git -C "$IPU_RUNNER_DIR" commit -qm local-only
+git -C "$IPU_RUNNER_DIR" checkout -q --detach "$IPU_RUNNER_HEAD"
 expect_preserved_checkout
 grep -q "Git refs changed" "$TEST_ROOT/err" || fail_test "local-ref rejection reason missing"
 pass "local unpushed commits/branches after marker are preserved"
@@ -368,9 +368,9 @@ pass "local unpushed commits/branches after marker are preserved"
 new_home "stash"
 git_init_checkout
 write_marker
-write_wda_plist
-printf 'stashed change\n' >> "$WDA_DIR/fixture.txt"
-git -C "$WDA_DIR" stash push -qm local-safety
+write_runner_plist
+printf 'stashed change\n' >> "$IPU_RUNNER_DIR/fixture.txt"
+git -C "$IPU_RUNNER_DIR" stash push -qm local-safety
 expect_preserved_checkout
 grep -q "Git refs changed" "$TEST_ROOT/err" || fail_test "stash rejection reason missing"
 pass "Git stashes after marker are preserved"
@@ -378,8 +378,8 @@ pass "Git stashes after marker are preserved"
 new_home "reflog"
 git_init_checkout
 write_marker
-write_wda_plist
-git -C "$WDA_DIR" update-ref -m local-safety HEAD "$WDA_HEAD" "$WDA_HEAD"
+write_runner_plist
+git -C "$IPU_RUNNER_DIR" update-ref -m local-safety HEAD "$IPU_RUNNER_HEAD" "$IPU_RUNNER_HEAD"
 expect_preserved_checkout
 grep -q "Git reflog changed" "$TEST_ROOT/err" || fail_test "reflog rejection reason missing"
 pass "reflog-only history after marker is preserved"
@@ -387,8 +387,8 @@ pass "reflog-only history after marker is preserved"
 new_home "unreferenced-object"
 git_init_checkout
 write_marker
-write_wda_plist
-printf 'unpublished object\n' | git -C "$WDA_DIR" hash-object -w --stdin >/dev/null
+write_runner_plist
+printf 'unpublished object\n' | git -C "$IPU_RUNNER_DIR" hash-object -w --stdin >/dev/null
 expect_preserved_checkout
 grep -q "object database changed" "$TEST_ROOT/err" \
     || fail_test "unreferenced-object rejection reason missing"
@@ -396,13 +396,13 @@ pass "unreferenced unpublished Git objects after marker are preserved"
 
 new_home "ignored-data"
 git_init_checkout
-printf 'ignored.dat\n' > "$WDA_DIR/.gitignore"
-git -C "$WDA_DIR" add .gitignore
-git -C "$WDA_DIR" commit -qm ignore-rule
-WDA_HEAD="$(git -C "$WDA_DIR" rev-parse HEAD)"
+printf 'ignored.dat\n' > "$IPU_RUNNER_DIR/.gitignore"
+git -C "$IPU_RUNNER_DIR" add .gitignore
+git -C "$IPU_RUNNER_DIR" commit -qm ignore-rule
+IPU_RUNNER_HEAD="$(git -C "$IPU_RUNNER_DIR" rev-parse HEAD)"
 write_marker
-write_wda_plist
-printf 'private fixture\n' > "$WDA_DIR/ignored.dat"
+write_runner_plist
+printf 'private fixture\n' > "$IPU_RUNNER_DIR/ignored.dat"
 expect_preserved_checkout
 grep -q "ignored" "$TEST_ROOT/err" || fail_test "ignored-data rejection reason missing"
 pass "ignored checkout data is preserved"
@@ -410,8 +410,8 @@ pass "ignored checkout data is preserved"
 new_home "linked-worktree"
 git_init_checkout
 write_marker
-write_wda_plist
-git -C "$WDA_DIR" worktree add -q -b linked-safety "$TEST_ROOT/linked" "$WDA_HEAD"
+write_runner_plist
+git -C "$IPU_RUNNER_DIR" worktree add -q -b linked-safety "$TEST_ROOT/linked" "$IPU_RUNNER_HEAD"
 expect_preserved_checkout
 grep -Eq "Git refs changed|worktree" "$TEST_ROOT/err" \
     || fail_test "linked-worktree rejection reason missing"
@@ -434,8 +434,8 @@ esac
 SH
     chmod 700 "$TEST_BIN/ps"
     printf '%s\n' "4343|Mon Jul 28 00:00:00 2026|runner:$device_runner_command" \
-        > "$TEST_HOME/.iphone-use/wda-runner.pid"
-    chmod 600 "$TEST_HOME/.iphone-use/wda-runner.pid"
+        > "$TEST_HOME/.iphone-use/runner.pid"
+    chmod 600 "$TEST_HOME/.iphone-use/runner.pid"
 }
 
 device_runner_fixture "device-runner-contract"
@@ -476,9 +476,9 @@ runner_state_fixture() {
     mkdir -p "$state/runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj" \
         "$state/runner-build/Build/Products/Debug-iphoneos/iPhoneUse-Runner.app"
     printf '{}\n' > "$state/runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj/project.pbxproj"
-    for name in wda-runner-product.json wda-runner-product-build.log \
-        wda-runner-product-build.repair.log wda-retry-state.v1 \
-        wda-xcode-compat.xcconfig wda-setup-status.json wda-setup-status.json.lock; do
+    for name in runner-product.json runner-product-build.log \
+        runner-product-build.repair.log runner-retry-state.v1 \
+        runner-xcode-compat.xcconfig runner-setup-status.json runner-setup-status.json.lock; do
         printf 'x\n' > "$state/$name"
         chmod 600 "$state/$name"
     done

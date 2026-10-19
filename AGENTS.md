@@ -22,4 +22,4 @@
 ## Shared worktree discipline
 
 Several agent sessions commit from this one checkout. Before every commit:
-`git status` and `git diff --cached --stat`, stage **by file** (`git add <path>`), and never use `git add -A` / `git commit -a`. A file you did not edit that shows as modified belongs to another session — leave it. On 2026-09-05 a `git add` of `scripts/setup-wda.sh` swept another session's half-finished multi-instance rewrite into v0.6.1 and broke the release gate. Attribution: read the `Claude-Session:` trailer, not the author name (all sessions share it).
+`git status` and `git diff --cached --stat`, stage **by file** (`git add <path>`), and never use `git add -A` / `git commit -a`. A file you did not edit that shows as modified belongs to another session — leave it. On 2026-09-05 a `git add` of `scripts/setup-runner.sh` swept another session's half-finished multi-instance rewrite into v0.6.1 and broke the release gate. Attribution: read the `Claude-Session:` trailer, not the author name (all sessions share it).

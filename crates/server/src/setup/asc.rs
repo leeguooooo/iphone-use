@@ -2,13 +2,13 @@
 //!
 //! From Xcode 26 on, Xcode cannot see an iOS 15/16 phone, so it never
 //! registers it or puts it in a provisioning profile. Setup does both itself
-//! with the same API key `WDA_ASC_*` signing already uses: register the
+//! with the same API key `IPU_RUNNER_ASC_*` signing already uses: register the
 //! phone's UDID (`POST /v1/devices`) and keep one development profile of its
 //! own for the runner (`POST /v1/profiles`), recreated whenever it lacks this
 //! phone or the signing certificate, or is close to expiring. A profile cannot
 //! be edited, only replaced.
 //!
-//! The key is read from `WDA_ASC_KEY_PATH` and never logged; requests carry a
+//! The key is read from `IPU_RUNNER_ASC_KEY_PATH` and never logged; requests carry a
 //! 20-minute ES256 token.
 
 use std::path::Path;

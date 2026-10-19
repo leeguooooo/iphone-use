@@ -3,7 +3,7 @@
 //! Xcode synthesises the runner app (`iPhoneUse-Runner.app`, the .xctrunner)
 //! from a template, so a target asset catalog lands inside the nested .xctest
 //! and the Home Screen shows a blank placeholder. After the product is built
-//! and validated, the installed iPhoneUse app's icon (`WDA_RUNNER_ICON=auto`,
+//! and validated, the installed iPhoneUse app's icon (`IPU_RUNNER_ICON=auto`,
 //! the default; `none` keeps the placeholder; or a local .png/.icns) is
 //! compiled with actool, merged into the runner's Info.plist
 //! (CFBundleIcons › CFBundlePrimaryIcon › CFBundleIconName = AppIcon), and the
@@ -30,13 +30,13 @@ use super::term::{ok, warn};
 /// product (the next build must start from a pristine one, #75).
 pub const INJECTED_MARKER: &str = "AppIcon60x60@2x.png";
 
-/// Where the icon comes from, resolved from `WDA_RUNNER_ICON`.
+/// Where the icon comes from, resolved from `IPU_RUNNER_ICON`.
 pub fn source(ctx: &Ctx) -> Option<PathBuf> {
-    let setting = std::env::var("WDA_RUNNER_ICON")
+    let setting = std::env::var("IPU_RUNNER_ICON")
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| {
-            let persisted = sys::plist_env(&ctx.wda_agent_plist, "WDA_RUNNER_ICON");
+            let persisted = sys::plist_env(&ctx.runner_agent_plist, "IPU_RUNNER_ICON");
             if persisted.is_empty() {
                 "auto".into()
             } else {
@@ -45,7 +45,7 @@ pub fn source(ctx: &Ctx) -> Option<PathBuf> {
         });
     match setting.as_str() {
         "none" => {
-            ok("Runner icon injection disabled (WDA_RUNNER_ICON=none)");
+            ok("Runner icon injection disabled (IPU_RUNNER_ICON=none)");
             None
         }
         "auto" => {
@@ -77,7 +77,7 @@ pub fn source(ctx: &Ctx) -> Option<PathBuf> {
                 Ok(canonical) if canonical.is_file() => Some(canonical),
                 _ => {
                     warn(&format!(
-                        "WDA_RUNNER_ICON does not name a readable file: {}; continuing with the runner's placeholder icon",
+                        "IPU_RUNNER_ICON does not name a readable file: {}; continuing with the runner's placeholder icon",
                         path.display()
                     ));
                     None
@@ -188,7 +188,7 @@ impl Drop for Work {
 /// carries it and verifies; on any failure the pristine app is restored and
 /// `false` is returned (setup continues without an icon).
 pub fn inject(ctx: &Ctx, app: &Path, source: &Path) -> bool {
-    let log = ctx.state_dir().join("wda-runner-icon.log");
+    let log = ctx.state_dir().join("runner-icon.log");
     let _ = std::fs::write(&log, b"");
     match try_inject(ctx, app, source, &log) {
         Ok(()) => {
@@ -221,7 +221,7 @@ fn try_inject(ctx: &Ctx, app: &Path, source: &Path, log: &Path) -> Result<(), Fa
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     if extension != "icns" && extension != "png" {
-        return fail("WDA_RUNNER_ICON must name a .png or .icns file");
+        return fail("IPU_RUNNER_ICON must name a .png or .icns file");
     }
     for tool in ["sips", "codesign", "iconutil"] {
         if sys::which(tool).is_none() && (tool != "iconutil" || extension == "icns") {
@@ -235,7 +235,7 @@ fn try_inject(ctx: &Ctx, app: &Path, source: &Path, log: &Path) -> Result<(), Fa
         return fail("Xcode actool is unavailable");
     }
     let dir = tempfile::Builder::new()
-        .prefix("wda-runner-icon.")
+        .prefix("runner-icon.")
         .tempdir_in(ctx.state_dir())
         .map_err(|_| {
             (

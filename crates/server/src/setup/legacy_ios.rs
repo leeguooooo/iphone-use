@@ -782,7 +782,7 @@ pub struct Record {
     #[serde(default)]
     pub wifi_mac: Option<String>,
     /// The relays fall back to the phone's LAN address off the cable
-    /// (WDA_ALLOW_LAN=1). Without it nothing on this Mac reaches an iOS
+    /// (IPU_RUNNER_ALLOW_LAN=1). Without it nothing on this Mac reaches an iOS
     /// 15/16 runner off the cable: it has no CoreDevice tunnel, and usbmuxd's
     /// Wi-Fi attachment does not carry the runner's port (iPhone X, iOS 16.5).
     #[serde(default)]
@@ -911,8 +911,8 @@ mod tests {
 
     #[test]
     fn launch_argv_picks_wifi_with_a_host() {
-        let usb = launch_argv("00008101-000409443404001E", None, "com.leeguoo.iphone-use.wda.6zpxg4kvvs");
-        assert_eq!(usb, ["launch", "--udid", "00008101-000409443404001E", "--bundle-id", "com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner"]);
+        let usb = launch_argv("00008101-000409443404001E", None, "com.leeguoo.iphone-use.runner.6zpxg4kvvs");
+        assert_eq!(usb, ["launch", "--udid", "00008101-000409443404001E", "--bundle-id", "com.leeguoo.iphone-use.runner.6zpxg4kvvs.xctrunner"]);
         let wifi = launch_argv("U", Some("192.168.0.59"), "b");
         assert_eq!(wifi, ["launch", "--udid", "U", "--host", "192.168.0.59", "--bundle-id", "b.xctrunner"]);
     }
@@ -1061,7 +1061,7 @@ mod tests {
         let record = Record {
             ios: "16.5".into(),
             udid: "63f53bbb05918cbf4154ba9d1d1f95b28e532597".into(),
-            bundle: "com.example.wda".into(),
+            bundle: "com.example.runner".into(),
             launcher: "/x/iphone-use-legacy-launch".into(),
             launch_transport: "wifi".into(),
             wifi_mac: Some("9c:e3:3f:8d:d9:bd".into()),

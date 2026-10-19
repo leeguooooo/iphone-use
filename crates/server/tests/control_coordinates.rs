@@ -1,7 +1,7 @@
 //! Point-sized coordinates on a coordinate action.
 //!
 //! Found on hardware: `{"type":"tap","x":82.5,"y":738}` (points, not
-//! fractions) came back as 503 `wda_unavailable_or_unsupported`, which reads as
+//! fractions) came back as 503 `runner_unavailable_or_unsupported`, which reads as
 //! "the phone is down" and sends an agent off to reconnect a phone that is
 //! fine. It is the caller's mistake, nothing was sent, and the answer must say
 //! how to fix it.
@@ -16,13 +16,13 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 const WINDOW: &str = r#"{"value":{"width":390,"height":844}}"#;
 
 async fn post_input(base: &str, body: &str) -> (StatusCode, serde_json::Value) {
-    let app = server::http::router(build_state_with_wda(base));
+    let app = server::http::router(build_state_with_runner(base));
     let request = Request::builder()
         .method("POST")
         .uri("/agent/input")
@@ -36,8 +36,8 @@ async fn post_input(base: &str, body: &str) -> (StatusCode, serde_json::Value) {
     (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
 }
 
-fn scripted(seen: Arc<Mutex<Vec<String>>>) -> support::MockWda {
-    mock_wda(move |request, _| {
+fn scripted(seen: Arc<Mutex<Vec<String>>>) -> support::MockRunner {
+    mock_runner(move |request, _| {
         seen.lock().unwrap().push(request.lines().next().unwrap_or("").to_string());
         if request.starts_with("POST /session ") {
             return Some((Duration::ZERO, SESSION.to_string()));
@@ -63,8 +63,8 @@ fn point_sized_coordinates_are_the_callers_mistake_not_an_unavailable_phone() {
             r#"{"type":"scroll","x":200,"y":0.5,"dy":100}"#,
         ] {
             let seen = Arc::new(Mutex::new(Vec::new()));
-            let wda = scripted(seen.clone());
-            let (status, json) = post_input(wda.url(), body).await;
+            let runner = scripted(seen.clone());
+            let (status, json) = post_input(runner.url(), body).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {json}");
             assert_eq!(json["error"], "invalid_value", "{body}: {json}");
             assert_eq!(json["outcome"], "not_sent", "{body}: {json}");
@@ -79,8 +79,8 @@ fn point_sized_coordinates_are_the_callers_mistake_not_an_unavailable_phone() {
 fn fractional_coordinates_still_tap() {
     block(async {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let wda = scripted(seen.clone());
-        let (status, json) = post_input(wda.url(), r#"{"type":"tap","x":0.21,"y":0.87}"#).await;
+        let runner = scripted(seen.clone());
+        let (status, json) = post_input(runner.url(), r#"{"type":"tap","x":0.21,"y":0.87}"#).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert!(sent_a_gesture(&seen), "an in-range tap reaches the phone");
     });

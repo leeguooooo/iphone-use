@@ -248,7 +248,7 @@ fn an_explicit_refusal_is_reported_as_the_daemons_own_result() {
     script.push(("200 OK", Some(STATUS)));
     script.push((
         "500 Internal Server Error",
-        Some(r#"{"ok":false,"error":"wda_source_failed","outcome":"not_sent","retry_safe":true}"#),
+        Some(r#"{"ok":false,"error":"runner_source_failed","outcome":"not_sent","retry_safe":true}"#),
     ));
     script.push(("200 OK", Some(r#"{"ok":true,"elements":[]}"#)));
     let (url, _requests) = mock_daemon(&script);
@@ -257,7 +257,7 @@ fn an_explicit_refusal_is_reported_as_the_daemons_own_result() {
 
     assert_eq!(run.code, Some(1));
     let json = run.json.as_ref().expect("stdout is parseable JSON");
-    assert_eq!(json["error"], "wda_source_failed", "{json}");
+    assert_eq!(json["error"], "runner_source_failed", "{json}");
     assert_eq!(json["outcome"], "not_sent");
     assert_eq!(json["retry_safe"], true, "the daemon's own judgement is kept");
 }

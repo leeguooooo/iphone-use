@@ -10,7 +10,7 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 
@@ -61,13 +61,13 @@ fn launches_name_flows_offer_a_draft_and_flow_runs_stay_out_of_it() {
     std::env::remove_var("IPHONE_USE_FLOWS_NO_SUGGEST");
 
     block(async {
-        let wda = mock_wda(|request, _| {
+        let runner = mock_runner(|request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
 
         // Entering an app that has flows names them in the same response.
         let (status, json) = call(&state, "POST", "/agent/actions", &batch("com.example.notes", 0), false).await;

@@ -256,7 +256,7 @@
               <td><a href="https://github.com/mobile-next/mobilewright">Mobilewright</a></td>
               <td>确定性 locator runner</td>
               <td>lazy locator、每步重新解析、自动等待、稳定 bounds、严格断言、失败留证</td>
-              <td>建立在 mobilecli 生态；直接接入会绕开现有 daemon、浏览器和 WDA 生命周期</td>
+              <td>建立在 mobilecli 生态；直接接入会绕开现有 daemon、浏览器和 runner 生命周期</td>
             </tr>
             <tr>
               <td><a href="https://docs.maestro.dev/maestro-flows/flow-control-and-logic/flow-control-and-logic-overview">Maestro Flows</a></td>
@@ -345,7 +345,7 @@
         <table class="priority">
           <tbody>
             <tr><td>可以长期保存</td><td>bundle/app 身份、参数、语义 locator、timeout、断言、风险策略、有限分支和有限循环</td></tr>
-            <tr><td>只能当前快照使用</td><td>元素 index、snapshot token、WDA element id、临时坐标框</td></tr>
+            <tr><td>只能当前快照使用</td><td>元素 index、snapshot token、runner element id、临时坐标框</td></tr>
             <tr><td>默认不保存</td><td>密码、验证码、Cookie、会话 token、用户私密内容、截图中的敏感像素</td></tr>
             <tr><td>只能作兜底</td><td>绝对坐标、归一化坐标、纯视觉点击；必须有紧邻的状态断言</td></tr>
           </tbody>
@@ -491,7 +491,7 @@ on_failure:
             </tr>
             <tr>
               <td>P2</td>
-              <td><strong>已完成第一版：</strong><code>POST /agent/actions</code> + MCP <code>phone_run_steps</code>；整批预校验、单 WDA 锁、最多 24 step、wait/assert、失败即停</td>
+              <td><strong>已完成第一版：</strong><code>POST /agent/actions</code> + MCP <code>phone_run_steps</code>；整批预校验、单 runner 锁、最多 24 step、wait/assert、失败即停</td>
               <td>覆盖最常见重复任务，同时保持安全面可审计</td>
             </tr>
             <tr>
@@ -531,7 +531,7 @@ on_failure:
         </ul>
         <aside>
           <strong>当前证据结论</strong>
-          仓库已经有真实 iPhone WDA、元素树、snapshot 防旧引用能力，以及严格唯一的
+          仓库已经有真实 iPhone runner、元素树、snapshot 防旧引用能力，以及严格唯一的
           label tap / snapshot-bound element tap；现在也有了有界多步 runner，
           支持 durable <code>tap_locator</code>、整批预校验、semantic wait/assert、
           首错停止、已完成 step 证据与整批重放安全标记。release-matched MCP binary

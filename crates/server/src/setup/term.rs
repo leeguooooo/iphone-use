@@ -1,5 +1,5 @@
-//! Setup's terminal output: the same four line shapes `setup-wda.sh` printed,
-//! so `wda-agent.log` keeps reading the same way (the daemon finds rounds by
+//! Setup's terminal output: the same four line shapes `setup-runner.sh` printed,
+//! so `runner-agent.log` keeps reading the same way (the daemon finds rounds by
 //! the `== Checking prerequisites` text, and operators grep for `✓`/`⚠`/`✗`).
 
 use std::io::Write as _;

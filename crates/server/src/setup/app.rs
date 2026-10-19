@@ -41,7 +41,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
 }
 
 /// The app's bundle identifier for `team`, beside the runner's
-/// `com.leeguoo.iphone-use.wda.<team>`: only our team can sign the bare one.
+/// `com.leeguoo.iphone-use.runner.<team>`: only our team can sign the bare one.
 pub fn app_bundle_id(team: &str) -> String {
     format!("com.leeguoo.iphone-use.remote.{}", team.to_ascii_lowercase())
 }
@@ -138,9 +138,9 @@ fn install(ctx: &Ctx, options: &Options) -> Result<(), String> {
         build.arg("--remote-only");
     }
     for (key, value) in [
-        ("WDA_ASC_KEY_PATH", &ctx.asc_key_path),
-        ("WDA_ASC_KEY_ID", &ctx.asc_key_id),
-        ("WDA_ASC_ISSUER_ID", &ctx.asc_issuer_id),
+        ("IPU_RUNNER_ASC_KEY_PATH", &ctx.asc_key_path),
+        ("IPU_RUNNER_ASC_KEY_ID", &ctx.asc_key_id),
+        ("IPU_RUNNER_ASC_ISSUER_ID", &ctx.asc_issuer_id),
     ] {
         if !value.is_empty() {
             build.env(key, value);

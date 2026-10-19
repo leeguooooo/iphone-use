@@ -52,26 +52,26 @@
 
 <p>
   An agent drives the iPhone by talking to the <strong>already-running daemon</strong> over
-  HTTP. The daemon serves the phone only over WebDriverAgent (WDA): input is performed by
-  on-device WDA actions and video is WDA's MJPEG stream. It never touches the Mac's screen,
+  HTTP. The daemon serves the phone only over WebDriverAgent (runner): input is performed by
+  on-device runner actions and video is runner's MJPEG stream. It never touches the Mac's screen,
   cursor, or focus, and needs no macOS permission grants.
 </p>
 <aside class="note">
-  <strong>Failures are closed, not substituted.</strong> A request that WDA cannot
+  <strong>Failures are closed, not substituted.</strong> A request that runner cannot
   perform returns an explicit error; there is no other input or capture path to fall
   back to.
 </aside>
 <aside class="note">
-  <strong>Control requires completed WDA setup.</strong> Installing or starting the daemon
-  does not make the phone ready. Run <code>~/.iphone-use/setup-wda.sh doctor</code>,
-  <code>~/.iphone-use/setup-wda.sh</code>, and
-  <code>~/.iphone-use/setup-wda.sh status</code> with the pinned iPhone connected,
+  <strong>Control requires completed runner setup.</strong> Installing or starting the daemon
+  does not make the phone ready. Run <code>~/.iphone-use/setup-runner.sh doctor</code>,
+  <code>~/.iphone-use/setup-runner.sh</code>, and
+  <code>~/.iphone-use/setup-runner.sh status</code> with the pinned iPhone connected,
   trusted, unlocked, and awake. Human operators can open <code>/setup</code> for the
   auth-gated live connection guide; it reads status only and enables <code>/phone</code>
   when <code>backend:"direct"</code> and <code>drivable:true</code>.
 </aside>
 <aside class="note">
-  <strong>Phase 1 network boundary:</strong> daemon auth protects port 44321, not WDA's
+  <strong>Phase 1 network boundary:</strong> daemon auth protects port 44321, not runner's
   unauthenticated device-side 8100/9100 services. USB <code>iproxy</code> pins the Mac
   relay to a device but does not block direct LAN access to the phone. Use a trusted,
   isolated network until a Phase 2 companion or controlled tunnel supplies authenticated
@@ -123,20 +123,20 @@
 
 <table>
   <tr><th>Method</th><th>Path</th><th>Purpose</th></tr>
-  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/status</td><td>WDA reachability/actionability, device lifecycle, and recovery hints.</td></tr>
-  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/input</td><td>Bearer-authenticated control with the mutation header. Routes to WDA and fails closed.</td></tr>
-  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/actions</td><td>Bounded multi-step WDA execution with full-batch validation, semantic waits, one control lock, and first-failure stop.</td></tr>
-  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/screenshot</td><td>Current target screen as PNG, read from WDA. <code>?overlay=elements</code> numbers each interactive element on it.</td></tr>
-  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/mjpeg</td><td>Live WDA MJPEG stream; accepts bearer auth or a logged-in browser cookie.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/status</td><td>runner reachability/actionability, device lifecycle, and recovery hints.</td></tr>
+  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/input</td><td>Bearer-authenticated control with the mutation header. Routes to runner and fails closed.</td></tr>
+  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/actions</td><td>Bounded multi-step runner execution with full-batch validation, semantic waits, one control lock, and first-failure stop.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/screenshot</td><td>Current target screen as PNG, read from runner. <code>?overlay=elements</code> numbers each interactive element on it.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/mjpeg</td><td>Live runner MJPEG stream; accepts bearer auth or a logged-in browser cookie.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/h264</td><td>The same live screen as H.264 (~10× less bandwidth); same auth and viewer accounting as <code>/agent/mjpeg</code>.</td></tr>
-  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/elements</td><td>Snapshot-bound, flattened WDA element list with sparse locator/state fields and screen dimensions.</td></tr>
+  <tr><td><span class="method get">GET</span></td><td class="ep">/agent/elements</td><td>Snapshot-bound, flattened runner element list with sparse locator/state fields and screen dimensions.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/activity</td><td>What agents did, in plain words (<code>Tapped “Wi-Fi”</code>), newest last; <code>?since=&lt;next&gt;</code> for newer lines. Typed text is never kept. Bearer or a logged-in browser cookie.</td></tr>
   <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/logs</td><td>Capture the phone's system log (<code>{"action":"start"|"stop"|"clear"}</code>) and read it with filters.</td></tr>
   <tr><td><span class="method get">GET</span></td><td class="ep">/agent/crashes[/:name]</td><td>The phone's crash reports, newest first; one report's text.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/location</td><td>Simulated GPS position (<code>{"lat","lon"}</code>) or <code>{"clear":true}</code>.</td></tr>
   <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/record</td><td>Record the live view to an MP4 (<code>{"action":"start"|"stop"}</code>); GET shows the running recording.</td></tr>
   <tr><td><span class="method get">GET</span> / <span class="method put">PUT</span></td><td class="ep">/agent/app-notes</td><td>Per-app markdown notes (<code>?bundle=</code>), also shown in the <code>registry</code> block when an agent enters the app.</td></tr>
-  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/mode</td><td><code>mode=agent</code> brings WDA up; <code>mode=human</code> stops WDA and hands the phone back to the person holding it. It never changes the persisted target.</td></tr>
+  <tr><td><span class="method post">POST</span></td><td class="ep">/agent/mode</td><td><code>mode=agent</code> brings runner up; <code>mode=human</code> stops runner and hands the phone back to the person holding it. It never changes the persisted target.</td></tr>
   <tr><td><span class="method get">GET</span> / <span class="method post">POST</span></td><td class="ep">/agent/inbox</td><td>Legacy Shortcuts-bridge result queue. GET is always a read-only peek; POST appends and requires the mutation header.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/agent/inbox/drain</td><td>Atomically return and clear the inbox; requires bearer auth and the mutation header.</td></tr>
   <tr><td><span class="method post">POST</span></td><td class="ep">/control</td><td>Browser-only direct control: session cookie + mutation header, with an explicit HTTP acknowledgement.</td></tr>
@@ -150,12 +150,12 @@
   "ok": true,
   "backend": "direct",
   "target_configured": true,
-  "managed_wda": true,
-  "managed_wda_pending": false,
+  "managed_runner": true,
+  "managed_runner_pending": false,
   "recovery_owner": "daemon",
-  "wda": true,
-  "wda_actionable": true,
-  "wda_locked": false,
+  "runner": true,
+  "runner_actionable": true,
+  "runner_locked": false,
   "drivable": true,
   "mode": "agent",
   "device_state": "ready",
@@ -167,10 +167,10 @@
   "hint": "",
   "setup_blocked_on": "",
   "setup_phase": "ready",
-  "setup_message": "direct WDA backend and launchd supervisor verified",
-  "wda_build": { "state": "ready", "phase": "ready", "since": 1765000000, "age_secs": 12, "log_tail": "" },
-  "wda_died_reason": "",
-  "wda_died_at": 0,
+  "setup_message": "direct runner backend and launchd supervisor verified",
+  "runner_build": { "state": "ready", "phase": "ready", "since": 1765000000, "age_secs": 12, "log_tail": "" },
+  "runner_died_reason": "",
+  "runner_died_at": 0,
   "viewer_count": 0,
   "mjpeg_viewer_count": 0,
   "version": "&lt;running version&gt;",
@@ -180,37 +180,37 @@
 
 <table>
   <tr><th>Field</th><th>Meaning</th></tr>
-  <tr><td><code>backend</code></td><td>Always <code>direct</code> (the phone is driven over WDA). Kept for client compatibility.</td></tr>
+  <tr><td><code>backend</code></td><td>Always <code>direct</code> (the phone is driven over runner). Kept for client compatibility.</td></tr>
   <tr><td><code>target_configured</code></td><td>Whether a persistent <code>IPHONE_USE_UDID</code> is configured.</td></tr>
-  <tr><td><code>managed_wda</code></td><td><code>true</code> when this daemon owns the local loopback WDA supervisor and relay lifecycle; remote endpoints are externally managed.</td></tr>
-  <tr><td><code>managed_wda_pending</code></td><td><code>true</code> during first-run local setup when managed Direct was requested but no canonical device target has been persisted yet. In this state the daemon will not stop or bootstrap WDA.</td></tr>
-  <tr><td><code>recovery_owner</code></td><td><code>daemon</code> for managed Direct, <code>unconfigured</code> while first-run local management is waiting for a persistent target, and <code>external</code> for a remote or explicitly unmanaged WDA endpoint.</td></tr>
-  <tr><td><code>wda</code></td><td>WDA HTTP is reachable. This alone is not proof that it can act.</td></tr>
-  <tr><td><code>wda_actionable</code></td><td>A real device-side action probe succeeded.</td></tr>
-  <tr><td><code>wda_locked</code></td><td><code>true</code>, <code>false</code>, or <code>null</code> when lock state cannot be determined.</td></tr>
-  <tr><td><code>drivable</code></td><td>The control-readiness gate: actionable WDA with no release or reconnect transition in progress.</td></tr>
+  <tr><td><code>managed_runner</code></td><td><code>true</code> when this daemon owns the local loopback runner supervisor and relay lifecycle; remote endpoints are externally managed.</td></tr>
+  <tr><td><code>managed_runner_pending</code></td><td><code>true</code> during first-run local setup when managed Direct was requested but no canonical device target has been persisted yet. In this state the daemon will not stop or bootstrap runner.</td></tr>
+  <tr><td><code>recovery_owner</code></td><td><code>daemon</code> for managed Direct, <code>unconfigured</code> while first-run local management is waiting for a persistent target, and <code>external</code> for a remote or explicitly unmanaged runner endpoint.</td></tr>
+  <tr><td><code>runner</code></td><td>runner HTTP is reachable. This alone is not proof that it can act.</td></tr>
+  <tr><td><code>runner_actionable</code></td><td>A real device-side action probe succeeded.</td></tr>
+  <tr><td><code>runner_locked</code></td><td><code>true</code>, <code>false</code>, or <code>null</code> when lock state cannot be determined.</td></tr>
+  <tr><td><code>drivable</code></td><td>The control-readiness gate: actionable runner with no release or reconnect transition in progress.</td></tr>
   <tr><td><code>device_state</code></td><td><code>ready</code>, <code>locked</code>, <code>blocked</code>, <code>offline</code>, <code>releasing</code>, <code>released</code>, or <code>reconnecting</code>.</td></tr>
   <tr><td><code>screen_state</code></td><td>Coarse transport lifecycle (<code>waiting</code>/<code>offline</code>); it is not a frame-level MJPEG health check.</td></tr>
-  <tr><td><code>releasing</code></td><td>The managed local WDA service is being stopped after idle timeout.</td></tr>
-  <tr><td><code>reconnecting</code></td><td>The daemon is bootstrapping its managed WDA supervisor. If <code>setup_blocked_on</code> is non-empty, follow <code>hint</code> first; otherwise wait for this to clear. In every case, require <code>wda_actionable</code> and <code>drivable</code> before acting.</td></tr>
-  <tr><td><code>released</code></td><td>WDA was intentionally stopped — after the idle period (<code>IPHONE_USE_IDLE_RELEASE_SECS</code>, default 600, <code>0</code> keeps it up) or by a human hand-off. The parked state survives daemon restarts and logins; the next agent request brings WDA back up. A completed health probe that finds a replacement/self-healed runner clears this guard; clients do not need a redundant reconnect.</td></tr>
+  <tr><td><code>releasing</code></td><td>The managed local runner service is being stopped after idle timeout.</td></tr>
+  <tr><td><code>reconnecting</code></td><td>The daemon is bootstrapping its managed runner supervisor. If <code>setup_blocked_on</code> is non-empty, follow <code>hint</code> first; otherwise wait for this to clear. In every case, require <code>runner_actionable</code> and <code>drivable</code> before acting.</td></tr>
+  <tr><td><code>released</code></td><td>runner was intentionally stopped — after the idle period (<code>IPHONE_USE_IDLE_RELEASE_SECS</code>, default 600, <code>0</code> keeps it up) or by a human hand-off. The parked state survives daemon restarts and logins; the next agent request brings runner back up. A completed health probe that finds a replacement/self-healed runner clears this guard; clients do not need a redundant reconnect.</td></tr>
   <tr><td><code>human_handoff</code></td><td><code>true</code> while the phone has been handed back to its holder with <code>{"mode":"human"}</code>. Agent input answers <code>409 phone_handed_to_human</code> until <code>{"mode":"agent"}</code> takes it back.</td></tr>
   <tr><td><code>viewer_count</code></td><td>Open live <code>/agent/mjpeg</code> streams (same number as <code>mjpeg_viewer_count</code>; kept for older clients).</td></tr>
   <tr><td><code>mjpeg_viewer_count</code></td><td>Open live <code>/agent/mjpeg</code> streams.</td></tr>
-  <tr><td><code>setup_blocked_on</code></td><td>Fresh daemon-owned managed-Direct setup blocker: <code>warp</code>, <code>proxy</code>, <code>usb</code>, <code>trust</code>, <code>ddi</code>, <code>wda</code>, or empty. KeepAlive preserves the last blocker while the next preflight pass checks it, then clears or replaces it only after evidence; it is deliberately empty for unconfigured and externally managed targets.</td></tr>
+  <tr><td><code>setup_blocked_on</code></td><td>Fresh daemon-owned managed-Direct setup blocker: <code>warp</code>, <code>proxy</code>, <code>usb</code>, <code>trust</code>, <code>ddi</code>, <code>runner</code>, or empty. KeepAlive preserves the last blocker while the next preflight pass checks it, then clears or replaces it only after evidence; it is deliberately empty for unconfigured and externally managed targets.</td></tr>
   <tr><td><code>setup_phase</code></td><td>Fresh managed-Direct helper phase such as <code>prereq</code>, <code>ddi-wait</code>, <code>building</code>, <code>serving</code>, or <code>ready</code>. During a long first build, this distinguishes progress from a silent hang.</td></tr>
-  <tr><td><code>setup_message</code></td><td>Bounded, JSON-escaped detail for <code>setup_phase</code>, including periodically refreshed WDA build elapsed time. It is progress context, not actionability proof.</td></tr>
-  <tr><td><code>wda_build</code></td><td>Bring-up progress as <code>{state, phase, since, age_secs, log_tail}</code>. <code>state</code> is <code>building</code> (working — keep waiting), <code>failed</code> (the helper gave up — read <code>log_tail</code>), <code>stalled</code> (no status write for over 5 minutes, so the helper died without reporting), <code>ready</code>, or <code>unknown</code> (no managed setup has run). This is the distinction <code>setup_blocked_on</code> cannot make: a slow first build and a dead build both leave it empty. <code>since</code> is the helper's last status write in Unix seconds and <code>age_secs</code> how long the state has held. <code>log_tail</code> carries the last lines of <code>~/.iphone-use/wda-runner.log</code>, and is populated only for <code>failed</code> and <code>stalled</code> so a routine poll stays small.</td></tr>
-  <tr><td><code>wda_died_reason</code></td><td>Why WDA last stopped being drivable, recorded at the transition and reported only while it is still down: <code>idle_release</code> (the daemon stopped it on purpose — nothing is broken), <code>device_locked</code>, <code>session_severed</code> (the runner still answers <code>/status</code> but its test session was torn down — a WARP/VPN reconnect, Mac sleep, or a lock), <code>unreachable</code> (nothing answers: runner exited, relay died, or the phone's Wi-Fi address changed), or empty. Attribution is by observed signature, not by probing the VPN — a WARP reconnect and a Mac sleep are indistinguishable to the daemon, so <code>session_severed</code> names both. It exists so a mid-session <code>wda:true → false</code> is not mistaken for a human picking the phone up.</td></tr>
-  <tr><td><code>wda_died_at</code></td><td>Unix seconds of that transition; <code>0</code> when WDA is healthy or has never gone down.</td></tr>
-  <tr><td><code>hint</code></td><td>Concrete recovery guidance for locked, severed, released, or unreachable WDA. When a death was observed, this is the reason-specific guidance for <code>wda_died_reason</code>.</td></tr>
+  <tr><td><code>setup_message</code></td><td>Bounded, JSON-escaped detail for <code>setup_phase</code>, including periodically refreshed runner build elapsed time. It is progress context, not actionability proof.</td></tr>
+  <tr><td><code>runner_build</code></td><td>Bring-up progress as <code>{state, phase, since, age_secs, log_tail}</code>. <code>state</code> is <code>building</code> (working — keep waiting), <code>failed</code> (the helper gave up — read <code>log_tail</code>), <code>stalled</code> (no status write for over 5 minutes, so the helper died without reporting), <code>ready</code>, or <code>unknown</code> (no managed setup has run). This is the distinction <code>setup_blocked_on</code> cannot make: a slow first build and a dead build both leave it empty. <code>since</code> is the helper's last status write in Unix seconds and <code>age_secs</code> how long the state has held. <code>log_tail</code> carries the last lines of <code>~/.iphone-use/runner.log</code>, and is populated only for <code>failed</code> and <code>stalled</code> so a routine poll stays small.</td></tr>
+  <tr><td><code>runner_died_reason</code></td><td>Why runner last stopped being drivable, recorded at the transition and reported only while it is still down: <code>idle_release</code> (the daemon stopped it on purpose — nothing is broken), <code>device_locked</code>, <code>session_severed</code> (the runner still answers <code>/status</code> but its test session was torn down — a WARP/VPN reconnect, Mac sleep, or a lock), <code>unreachable</code> (nothing answers: runner exited, relay died, or the phone's Wi-Fi address changed), or empty. Attribution is by observed signature, not by probing the VPN — a WARP reconnect and a Mac sleep are indistinguishable to the daemon, so <code>session_severed</code> names both. It exists so a mid-session <code>runner:true → false</code> is not mistaken for a human picking the phone up.</td></tr>
+  <tr><td><code>runner_died_at</code></td><td>Unix seconds of that transition; <code>0</code> when runner is healthy or has never gone down.</td></tr>
+  <tr><td><code>hint</code></td><td>Concrete recovery guidance for locked, severed, released, or unreachable runner. When a death was observed, this is the reason-specific guidance for <code>runner_died_reason</code>.</td></tr>
 </table>
 <aside class="note">
-  <strong>Readiness rule:</strong> require <code>wda_actionable:true</code> and
+  <strong>Readiness rule:</strong> require <code>runner_actionable:true</code> and
   <code>drivable:true</code> before acting.
 </aside>
 <p class="muted">
-  <code>mode</code> is a lifecycle field: <code>agent</code> while WDA is reachable,
+  <code>mode</code> is a lifecycle field: <code>agent</code> while runner is reachable,
   <code>offline</code> otherwise.
   <code>version</code> is the running daemon; <code>latest</code> is the newest GitHub
   release tag (refreshed daily; <code>null</code> until first fetch / offline;
@@ -249,8 +249,8 @@
     "evidence": "cache",
     "detail": {
       "released": false, "releasing": false, "reconnecting": false,
-      "human_handoff": false, "wda_up": true, "wda_actionable": false,
-      "wda_locked": true, "ownership": "free", "needs_owner_identity": false
+      "human_handoff": false, "runner_up": true, "runner_actionable": false,
+      "runner_locked": true, "ownership": "free", "needs_owner_identity": false
     }
   }
 }</code></pre>
@@ -258,7 +258,7 @@
   <code>supported</code> is static for this build.
   <code>modes</code> lists only values this daemon would accept — an externally
   managed endpoint lists none, because it answers
-  <code>wda_is_externally_managed</code> to both.
+  <code>runner_is_externally_managed</code> to both.
   <code>perform_actions</code> is the closed set checked before the device is
   touched; an unlisted name is refused without reaching the phone.
 </p>
@@ -300,8 +300,8 @@
 <h3><span class="method post">POST</span> <span class="ep">/agent/mode</span></h3>
 <p>
   Moves the phone between remote control and the person holding it.
-  <code>{"mode":"agent"}</code> brings daemon-managed WDA up;
-  <code>{"mode":"human"}</code> stops WDA so the holder has the phone to themselves, and
+  <code>{"mode":"agent"}</code> brings daemon-managed runner up;
+  <code>{"mode":"human"}</code> stops runner so the holder has the phone to themselves, and
   agent input then answers <code>409 phone_handed_to_human</code> until
   <code>{"mode":"agent"}</code> takes it back. Any other value returns <code>400</code>;
   <code>{"mode":"mirror"}</code> returns <code>410 {"error":"mirror_removed"}</code>.
@@ -311,16 +311,16 @@
 <pre><code>MUTATION="X-Phone-Control: 1"
 # first require target_configured:true in /agent/status
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"agent"}'
-# poll /agent/status until wda_actionable:true and drivable:true
+# poll /agent/status until runner_actionable:true and drivable:true
 
 # a different request-scoped udid returns HTTP 409 target_change_requires_restart
 
-# give the phone back to the person holding it (stops WDA)
+# give the phone back to the person holding it (stops runner)
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"}'
 # {"ok":true,"mode":"human","released":true,"hint":"…"}</code></pre>
 <p class="muted">
-  <code>mode=agent</code> works only when <code>managed_wda:true</code>, requires
-  <code>~/.iphone-use/setup-wda.sh</code> and an unlocked, awake phone, and is
+  <code>mode=agent</code> works only when <code>managed_runner:true</code>, requires
+  <code>~/.iphone-use/setup-runner.sh</code> and an unlocked, awake phone, and is
   asynchronous. During startup, status reports <code>reconnecting:true</code>. A concrete
   setup prerequisite failure takes precedence: <code>device_state</code> becomes
   <code>"blocked"</code>, <code>setup_blocked_on</code> names the cause, and
@@ -329,30 +329,30 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   live build stage; clients must keep treating <code>drivable:true</code> as the only
   permission to act.
   When <code>recovery_owner:"external"</code>,
-  the endpoint returns <code>409 wda_is_externally_managed</code> for both modes; recover
+  the endpoint returns <code>409 runner_is_externally_managed</code> for both modes; recover
   the service on its owning host.
 </p>
 <p class="muted">
   The MCP <code>phone_reconnect</code> tool is a constrained wrapper around
   <code>{"mode":"agent"}</code>. It takes no arguments, never accepts a UDID, and never
-  changes the configured device. For managed WDA it waits up to roughly 120
-  seconds for the persisted canonical target; an externally managed WDA endpoint returns
+  changes the configured device. For managed runner it waits up to roughly 120
+  seconds for the persisted canonical target; an externally managed runner endpoint returns
   an operator-owned recovery error instead.
 </p>
 
 <h3><span class="method post">POST</span> <span class="ep">/agent/input</span></h3>
 <p>
   Body is one JSON control message. Coordinates are normalized
-  <span class="pill">[0,1]</span> over the WDA window
+  <span class="pill">[0,1]</span> over the runner window
   (<code>0,0</code> = top-left, <code>1,1</code> = bottom-right). Gestures are
   atomic: use tap, long-press, swipe, or drag rather than
   <code>down</code>/<code>move</code>/<code>up</code> streams.
 </p>
 
 <table>
-  <tr><th>Message</th><th>Direct/WDA effect</th></tr>
+  <tr><th>Message</th><th>Direct/runner effect</th></tr>
   <tr><td><code>{"type":"tap","x":0.5,"y":0.5}</code></td><td>Tap normalized coordinates on-device.</td></tr>
-  <tr><td><code>{"type":"tap","label":"新备忘录"}</code></td><td>Tap only when the exact visible label has one match in a fresh element tree. Zero, multiple, or non-actionable matches return <code>422</code> with <code>outcome:"not_sent"</code>. Optional <code>"kind":"Button"</code> narrows matches by element type; rows outside the application frame never compete with an on-screen match. Any element tap whose centre is covered by another control (fixed bar, keyboard, floating button) returns <code>409 element_occluded</code>, <code>outcome:"not_sent"</code>; a target WDA reports as <code>visible:false</code> (in the tree but not drawn, such as Chrome's tab grid behind the page) returns <code>409 element_not_visible</code>. <code>"allow_occluded":true</code> overrides both.</td></tr>
+  <tr><td><code>{"type":"tap","label":"新备忘录"}</code></td><td>Tap only when the exact visible label has one match in a fresh element tree. Zero, multiple, or non-actionable matches return <code>422</code> with <code>outcome:"not_sent"</code>. Optional <code>"kind":"Button"</code> narrows matches by element type; rows outside the application frame never compete with an on-screen match. Any element tap whose centre is covered by another control (fixed bar, keyboard, floating button) returns <code>409 element_occluded</code>, <code>outcome:"not_sent"</code>; a target runner reports as <code>visible:false</code> (in the tree but not drawn, such as Chrome's tab grid behind the page) returns <code>409 element_not_visible</code>. <code>"allow_occluded":true</code> overrides both.</td></tr>
   <tr><td><code>{"type":"tap_locator","locator":{"identifier":"new-note-button","kind":"Button","enabled":true}}</code></td><td>Re-read the current tree and tap only when every supplied exact locator field resolves to one unique actionable element. Supported fields match <code>wait_for</code>: label, identifier, kind, value, focused, enabled, and visible.</td></tr>
   <tr><td><code>{"type":"tap","element":3,"snapshot":"…"}</code></td><td>Tap the centre of element index 3 only if the current tree still matches the ephemeral <code>snapshot</code> returned by the same <code>/agent/elements</code> response.</td></tr>
   <tr><td><code>{"type":"longpress","x":0.4,"y":0.6,"duration_ms":700}</code></td><td>One complete long-press; default duration is 600 ms. No matching <code>up</code> is needed.</td></tr>
@@ -361,15 +361,15 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   <tr><td><code>{"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":60}</code></td><td><strong>Positive <code>dy</code> scrolls down (reveals content farther down); negative <code>dy</code> scrolls up.</strong> Positive <code>dx</code> reveals content to the right. The anchor defaults to screen centre.</td></tr>
   <tr><td><code>{"type":"text","text":"你好","clear":true}</code></td><td>Send Unicode to the focused field. <code>clear:true</code> best-effort clears it first.</td></tr>
   <tr><td><code>{"type":"set_value","element":5,"snapshot":"…","value":"你好"}</code></td><td>Write a field directly (clear, then type). The field is read back; a value that did not stick (web views often ignore direct writes) returns <code>409 value_not_applied</code> with <code>outcome:"no_effect"</code>. Formatting the field adds itself (separators, spaces) still counts as applied.</td></tr>
-  <tr><td><code>{"type":"key","name":"return"}</code></td><td>Named WDA key: <code>return</code>/<code>enter</code>, <code>escape</code>, <code>space</code>, <code>tab</code>, <code>delete</code>/<code>backspace</code>, or an arrow <code>left</code>/<code>up</code>/<code>right</code>/<code>down</code>.</td></tr>
+  <tr><td><code>{"type":"key","name":"return"}</code></td><td>Named runner key: <code>return</code>/<code>enter</code>, <code>escape</code>, <code>space</code>, <code>tab</code>, <code>delete</code>/<code>backspace</code>, or an arrow <code>left</code>/<code>up</code>/<code>right</code>/<code>down</code>.</td></tr>
   <tr><td><code>{"type":"keyboard"}</code></td><td>Dismiss the on-screen keyboard. <code>{"type":"key","name":"dismiss"}</code> and <code>hide</code> are aliases.</td></tr>
-  <tr><td><code>{"type":"shortcut","name":"home"}</code></td><td>Supported through WDA. <code>{"type":"home"}</code> is also accepted.</td></tr>
+  <tr><td><code>{"type":"shortcut","name":"home"}</code></td><td>Supported through runner. <code>{"type":"home"}</code> is also accepted.</td></tr>
   <tr><td><code>{"type":"shortcut","name":"spotlight"}</code></td><td>Supported: go Home, then tap the SpringBoard Search pill.</td></tr>
-  <tr><td><code>{"type":"shortcut","name":"switcher"}</code></td><td><strong>Unsupported.</strong> WDA cannot synthesize the App Switcher system gesture; the request fails instead of pretending success.</td></tr>
+  <tr><td><code>{"type":"shortcut","name":"switcher"}</code></td><td><strong>Unsupported.</strong> runner cannot synthesize the App Switcher system gesture; the request fails instead of pretending success.</td></tr>
   <tr><td><code>{"type":"back"}</code></td><td>Navigate back with an on-device left-edge swipe.</td></tr>
   <tr><td><code>{"type":"launch_app","bundle":"com.apple.Preferences"}</code></td><td>Launch/foreground an app by bundle id. A limited known-name mapping is also accepted.</td></tr>
-  <tr><td><code>{"type":"open_url","url":"https://example.com/page"}</code></td><td>Open a link through WDA (<code>POST /session/:sid/url</code>): Safari, or the app that owns the scheme. The <code>url</code> needs a scheme and at most 2048 bytes (else <code>400 invalid_value</code>, nothing sent). <code>http</code>/<code>https</code> always open; any other scheme (<code>tel:</code>, <code>sms:</code>, <code>facetime:</code>, <code>mailto:</code>, <code>itms-services:</code>, app schemes such as <code>weixin://</code>) is refused with <code>403 url_scheme_not_allowed</code>, <code>outcome:"not_sent"</code>, unless the owner lists it in <code>IPHONE_USE_ALLOW_URL_SCHEMES</code> (comma list, <code>*</code> = any). Counts as one action against <code>IPHONE_USE_MAX_ACTIONS</code>, and leaves the app, so it is allowed while a blocked app is in front. The activity feed shows the host only.</td></tr>
-  <tr><td><code>{"type":"picker","column":0,"value":"March"}</code></td><td>Set a WDA PickerWheel value.</td></tr>
+  <tr><td><code>{"type":"open_url","url":"https://example.com/page"}</code></td><td>Open a link through runner (<code>POST /session/:sid/url</code>): Safari, or the app that owns the scheme. The <code>url</code> needs a scheme and at most 2048 bytes (else <code>400 invalid_value</code>, nothing sent). <code>http</code>/<code>https</code> always open; any other scheme (<code>tel:</code>, <code>sms:</code>, <code>facetime:</code>, <code>mailto:</code>, <code>itms-services:</code>, app schemes such as <code>weixin://</code>) is refused with <code>403 url_scheme_not_allowed</code>, <code>outcome:"not_sent"</code>, unless the owner lists it in <code>IPHONE_USE_ALLOW_URL_SCHEMES</code> (comma list, <code>*</code> = any). Counts as one action against <code>IPHONE_USE_MAX_ACTIONS</code>, and leaves the app, so it is allowed while a blocked app is in front. The activity feed shows the host only.</td></tr>
+  <tr><td><code>{"type":"picker","column":0,"value":"March"}</code></td><td>Set a runner PickerWheel value.</td></tr>
   <tr><td><code>{"type":"install","path":"/abs/App.ipa"}</code></td><td>Install an <code>.ipa</code> or built <code>.app</code> from the daemon's Mac through CoreDevice (<code>xcrun devicectl device install app</code>; macOS only, else <code>501 install_needs_macos</code>). Or <code>"url":"https://…/App.ipa"</code>: https only, at most 2 GB, downloaded to a temporary folder removed afterwards. <code>"fresh":true</code> uninstalls the bundle first. The bundle id is read from the app's <code>Info.plist</code> (<code>Payload/&lt;App&gt;.app/Info.plist</code> in an <code>.ipa</code>); a bundle in <code>IPHONE_USE_BLOCKED_APPS</code> is <code>403 blocked_app</code>, and an unreadable one is <code>403 install_unverified</code> while any app is blocked. Answers <code>{ok, bundle, installed:true}</code>; a bad request is <code>400 invalid_install</code>, nothing run. Never batched; one action against the budget.</td></tr>
 </table>
 <h4><code>?return=delta</code> — the post-action observation</h4>
@@ -411,15 +411,15 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 </p>
 
 <p>
-  <code>/agent/input</code> returns <code>200</code> only after the WDA action succeeds.
+  <code>/agent/input</code> returns <code>200</code> only after the runner action succeeds.
   <code>/agent/input</code> adds no deadline field to the action payload; the server
-  applies a fixed 15-second total deadline from request receipt, including WDA mutex
+  applies a fixed 15-second total deadline from request receipt, including runner mutex
   waiting and execution.
   Invalid JSON returns <code>400</code>; a wrong bearer returns <code>401</code>;
-  auth lockout returns <code>429</code>; an unsupported atomic WDA command can return
-  <code>422</code>; a down, missing, or unsupported WDA path returns
+  auth lockout returns <code>429</code>; an unsupported atomic runner command can return
+  <code>422</code>; a down, missing, or unsupported runner path returns
   <code>503</code> with <code>"fallback":"disabled"</code>. An idle-released device also
-  returns <code>503</code> plus <code>Retry-After: 5</code> while WDA restarts.
+  returns <code>503</code> plus <code>Retry-After: 5</code> while runner restarts.
 </p>
 <aside class="note">
   <strong>Snapshot refs are intentionally short-lived.</strong>
@@ -451,7 +451,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   Use this endpoint after a flow segment is understood and its stable locators and
   postconditions are known. One request can contain at most 24 steps. The daemon validates
   the <em>entire</em> JSON sequence before dispatching the first mutation, then holds one
-  WDA control lock so another daemon client cannot interleave gestures. The first failed
+  runner control lock so another daemon client cannot interleave gestures. The first failed
   action, expectation, read, lifecycle transition, or deadline stops the sequence; every
   later action remains unsent.
 </p>
@@ -486,7 +486,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 }</code></pre>
 <table>
   <tr><th>Step kind</th><th>Contract</th></tr>
-  <tr><td><code>action</code></td><td>One supported Direct/WDA input payload, including strict <code>tap_locator</code> and validated bundle-id <code>launch_app</code>. Optional <code>after_ms</code> is capped at 3000 ms and is only an animation settle. Destructive <code>uninstall</code> is never accepted in a batch.</td></tr>
+  <tr><td><code>action</code></td><td>One supported Direct/runner input payload, including strict <code>tap_locator</code> and validated bundle-id <code>launch_app</code>. Optional <code>after_ms</code> is capped at 3000 ms and is only an animation settle. Destructive <code>uninstall</code> is never accepted in a batch.</td></tr>
   <tr><td><code>wait_for</code></td><td>Polls the current element tree. <code>application</code> is an exact Application label; every <code>present</code> locator must match and every <code>absent</code> locator must not match. Locator fields are exact <code>label</code>, <code>identifier</code>, <code>kind</code>, <code>value</code>, <code>focused</code>, <code>enabled</code>, and <code>visible</code>. Timeout is 1–30000 ms (default 15000); poll interval is 50–1000 ms. The
     per-wait ceiling leaves room for several polls even when an element read is
     slow; the cumulative declared wait (60000 ms) and the batch deadline are
@@ -501,7 +501,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   completed <code>steps</code>, the last failed wait <code>observation</code> when
   available, <code>outcome</code>, <code>failed_step_outcome</code>,
   <code>batch_outcome</code>, and <code>retry_safe</code>. A read-only
-  <code>wait_for</code> rebuilds one stale WDA source session within its existing
+  <code>wait_for</code> rebuilds one stale runner source session within its existing
   deadline. <code>retry_safe</code> describes replaying the <em>whole batch</em>:
   once an earlier action landed it is false, even when the step that failed was
   itself never sent.
@@ -587,12 +587,12 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 
 <h3><span class="method post">POST</span> <span class="ep">/control</span> <span class="muted">(browser)</span></h3>
 <p>
-  The browser uses the same WDA dispatcher through a separate cookie-authenticated
+  The browser uses the same runner dispatcher through a separate cookie-authenticated
   endpoint. Requests must include <code>X-Phone-Control: 1</code>; successful commands
   return only <code>{"ok":true}</code>. Every message must also include a positive
   <code>ttl_ms</code> from 1 through 2500; optional <code>issued_at_ms</code> is audit
   metadata, while freshness is enforced with the server's monotonic deadline. Missing
-  login, missing control header/deadline, invalid JSON, WDA failure, expiry, and lifecycle
+  login, missing control header/deadline, invalid JSON, runner failure, expiry, and lifecycle
   transitions are explicit HTTP errors, so the UI must not clear input or show success
   until the response is successful.
 </p>
@@ -606,17 +606,17 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 <table>
   <tr><th>When the deadline fires</th><th>Response</th><th>Caller action</th></tr>
   <tr>
-    <td>Before the WDA action is dispatched</td>
+    <td>Before the runner action is dispatched</td>
     <td><code>408</code><br><code>{"ok":false,"error":"not_sent","outcome":"not_sent","retry_safe":true}</code></td>
     <td>The daemon confirms nothing was sent. A caller may retry if the action is still wanted.</td>
   </tr>
   <tr>
-    <td>After dispatch, WDA reports an error or transport failure but cannot prove the action did not land</td>
+    <td>After dispatch, runner reports an error or transport failure but cannot prove the action did not land</td>
     <td><code>502</code><br><code>{"ok":false,"error":"outcome_unknown","outcome":"unknown","retry_safe":false}</code></td>
     <td>Inspect status and phone state. Treat the command as possibly applied; do not replay it blindly.</td>
   </tr>
   <tr>
-    <td>After the WDA future has started, but completion cannot be confirmed</td>
+    <td>After the runner future has started, but completion cannot be confirmed</td>
     <td><code>504</code><br><code>{"ok":false,"error":"outcome_unknown","outcome":"unknown","retry_safe":false}</code></td>
     <td>Read <code>/agent/status</code> and then elements/screenshot before deciding what happened. Do not blindly replay text, scroll, Back, taps, or other non-idempotent input.</td>
   </tr>
@@ -630,12 +630,12 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 
 <h3><span class="method get">GET</span> <span class="ep">/agent/mjpeg</span></h3>
 <p>
-  Proxies WDA's on-device MJPEG service
-  (<code>IPHONE_USE_WDA_MJPEG_URL</code>, normally
+  Proxies runner's on-device MJPEG service
+  (<code>IPHONE_USE_RUNNER_MJPEG_URL</code>, normally
   <code>http://127.0.0.1:9100</code>) as
   <code>multipart/x-mixed-replace</code>. It accepts either the agent bearer or a valid
   browser session cookie. An open stream counts as activity so idle release does not stop
-  WDA while somebody is watching.
+  runner while somebody is watching.
 </p>
 <p class="muted">
   The daemon allows at most four simultaneous live streams. A missing MJPEG endpoint
@@ -663,9 +663,9 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 <h3>Timing on every answer</h3>
 <p>
   Every <code>/agent/*</code> answer carries a <code>Server-Timing</code> header (<code>total</code>,
-  <code>wda</code>, and one metric per WDA route such as <code>wda-get-source</code>). A JSON answer that
-  reached WDA also gets a <code>timing</code> object: <code>{total_ms, wda_ms, daemon_ms, wda:[{call, count,
-  ms, bytes}]}</code>, where <code>ms</code> is the time until WDA's response headers (WDA builds the whole
+  <code>runner</code>, and one metric per runner route such as <code>runner-get-source</code>). A JSON answer that
+  reached runner also gets a <code>timing</code> object: <code>{total_ms, runner_ms, daemon_ms, runner:[{call, count,
+  ms, bytes}]}</code>, where <code>ms</code> is the time until runner's response headers (runner builds the whole
   answer before sending) and <code>bytes</code> its declared size. Live streams are not timed.
 </p>
 <p>
@@ -706,16 +706,16 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   600 KB are never checked (protected screens compress far below that).
 </p>
 <p>
-  Returns a validated <code>image/png</code> of the selected phone, read from WDA: if WDA
+  Returns a validated <code>image/png</code> of the selected phone, read from runner: if runner
   is down or returns an invalid frame, the endpoint returns an error. An invalid
-  PNG, WDA error, or timeout immediately revokes cached actionability before the response
+  PNG, runner error, or timeout immediately revokes cached actionability before the response
   returns.
 </p>
 
 <h3><span class="method get">GET</span> <span class="ep">/agent/elements</span></h3>
 <p>
-  <strong>Requires actionable WDA.</strong> The phone's current UI is flattened to
-  agent-friendly rows in document order, accompanied by WDA screen dimensions:
+  <strong>Requires actionable runner.</strong> The phone's current UI is flattened to
+  agent-friendly rows in document order, accompanied by runner screen dimensions:
 </p>
 <pre><code>{
   "screen": { "width": 440, "height": 956 },
@@ -737,7 +737,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
   <code>{"type":"tap","label":…}</code>, and array indexes feed
   <code>{"type":"tap","element":N,"snapshot":"…"}</code> using the token from the same
   response. Failures keep a parseable JSON body but never
-  masquerade as a successful empty tree: transition, missing-WDA, or busy states return
+  masquerade as a successful empty tree: transition, missing-runner, or busy states return
   <code>503</code>; a failed source fetch after one stale-session retry returns
   <code>502</code>. Clients must reject non-2xx responses and then inspect
   <code>error</code>, <code>transitioning</code>, and <code>/agent/status</code>.
@@ -746,9 +746,9 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 </p>
 <p class="muted">
   Rows stay sparse for low-token callers. <code>enabled:false</code> and
-  <code>visible:false</code> appear only when WDA explicitly reports a node as disabled
+  <code>visible:false</code> appear only when runner explicitly reports a node as disabled
   or hidden; <code>accessible:true</code> and <code>focused:true</code> appear only when
-  WDA explicitly reports them true. An absent state field is therefore not a positive
+  runner explicitly reports them true. An absent state field is therefore not a positive
   assertion when an upstream source omitted that attribute. <code>identifier</code> and
   <code>placeholder</code> appear only when the application supplies them.
 </p>
@@ -829,7 +829,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/mode" -d '{"mode":"human"
 </p>
 <aside class="note">
   The inbox endpoint remains available, but launching the Shortcuts bridge from the agent
-  side is not a promised WDA capability; treat the bridge as legacy.
+  side is not a promised runner capability; treat the bridge as legacy.
 </aside>
 
 <h2>Example — a see-decide-act loop</h2>
@@ -840,13 +840,13 @@ MUTATION="X-Phone-Control: 1"
 
 # 1. require the configured target to be actionable
 curl -s -H "$AUTH" "$HOST/agent/status"
-# continue only with wda_actionable=true, drivable=true
+# continue only with runner_actionable=true, drivable=true
 curl -s -H "$AUTH" "$HOST/agent/elements"
 
 # 2. see
 curl -s -H "$AUTH" "$HOST/agent/screenshot" -o screen.png
 
-# 3. act — Home and Spotlight are supported by WDA
+# 3. act — Home and Spotlight are supported by runner
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"shortcut","name":"home"}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"shortcut","name":"spotlight"}'
 curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"text","text":"Notes"}'
@@ -855,21 +855,21 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scrol
 
 <h2>Behaviour notes</h2>
 <aside class="note">
-  <strong>No Mac cursor.</strong> WDA synthesizes input on the phone; the Mac's screen,
+  <strong>No Mac cursor.</strong> runner synthesizes input on the phone; the Mac's screen,
   cursor, and focus are never touched.
 </aside>
 <aside class="note">
-  <strong>Unicode text.</strong> WDA sends text through <code>/wda/keys</code>, so CJK
+  <strong>Unicode text.</strong> runner sends text through <code>/wda/keys</code>, so CJK
   text is typed as-is rather than through keycodes and the phone's input method.
 </aside>
 <aside class="note">
   <strong>Video and screenshots are distinct health layers.</strong>
   <code>/agent/mjpeg</code> proves the 9100 live-video relay; a successful
-  <code>/agent/screenshot</code> proves a single WDA PNG. Neither alone proves that input is
+  <code>/agent/screenshot</code> proves a single runner PNG. Neither alone proves that input is
   actionable — keep gating actions on status.
 </aside>
 <aside class="note">
-  <strong>System-command boundary.</strong> WDA supports Home, Spotlight, Back, keyboard
+  <strong>System-command boundary.</strong> runner supports Home, Spotlight, Back, keyboard
   dismissal, and the documented named keys. App Switcher is unsupported. Launching the
   Shortcuts bridge, Control Center, and other system gestures are out of scope until they
   gain a device-side implementation and hardware acceptance.
@@ -882,11 +882,11 @@ curl -s -H "$AUTH" -H "$MUTATION" -X POST "$HOST/agent/input" -d '{"type":"scrol
 </p>
 <ol>
   <li>the daemon runs without any macOS permission grant and never touches the Mac's screen or cursor;</li>
-  <li>status identifies the pinned device and reports actionable/drivable WDA;</li>
+  <li>status identifies the pinned device and reports actionable/drivable runner;</li>
   <li>managed recovery reports <code>releasing → released → reconnecting → ready</code>, while an external endpoint remains owned by <code>recovery_owner:"external"</code>;</li>
   <li>MJPEG updates continuously and a stopped 9100 relay is reported as failure;</li>
   <li>tap, long-press, swipe, drag, both scroll directions, CJK text, named keys, Home, and Spotlight each land once;</li>
-  <li>Switcher fails honestly and WDA loss is reported as an error, never as a stale or substitute frame;</li>
+  <li>Switcher fails honestly and runner loss is reported as an error, never as a stale or substitute frame;</li>
   <li>lock/unlock, USB reconnect, daemon/Mac restart, and a multi-device host recover the same canonical target;</li>
   <li>8100/9100 exposure is measured on an isolated network rather than assumed safe because the Mac relay is loopback-only.</li>
 </ol>

@@ -7,7 +7,7 @@
 //! phone answers on its `tunnelIPAddress` (an IPv6 address that only this Mac
 //! routes) on every port. That is how a runner launched over USB keeps
 //! working after the cable is pulled, without exposing it on the LAN the way
-//! the old `WDA_ALLOW_LAN` socat relay did.
+//! the old `IPU_RUNNER_ALLOW_LAN` socat relay did.
 
 use std::collections::HashMap;
 use std::net::Ipv6Addr;

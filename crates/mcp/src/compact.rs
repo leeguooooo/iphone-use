@@ -963,7 +963,7 @@ mod tests {
     #[test]
     fn an_error_answer_keeps_its_json() {
         assert_eq!(
-            elements(&json!({"elements": [], "error": "wda_source_failed"})),
+            elements(&json!({"elements": [], "error": "runner_source_failed"})),
             None
         );
     }
@@ -1055,7 +1055,7 @@ mod tests {
 
     #[test]
     fn a_bare_ok_is_not_rewritten() {
-        assert_eq!(observed(&json!({"ok": true, "transport": "wda"})), None);
+        assert_eq!(observed(&json!({"ok": true, "transport": "runner"})), None);
     }
 
     /// The shape `POST /agent/actions` answers on i13 for Settings → 蓝牙.
@@ -1066,7 +1066,7 @@ mod tests {
             "applied_actions": 1,
             "snapshot": "S9",
             "settle": {"reason": "stable", "waited_ms": 812, "captures": 2},
-            "timing": {"total_ms": 1900, "wda_ms": 1500, "wda": [{"call": "GET /source", "count": 2, "ms": 400}]},
+            "timing": {"total_ms": 1900, "runner_ms": 1500, "runner": [{"call": "GET /source", "count": 2, "ms": 400}]},
             "steps": [
                 {"index": 1, "kind": "tap_label", "ok": true},
                 {"index": 2, "kind": "wait_for", "ok": true, "attempts": 1, "probe_misses": 1,

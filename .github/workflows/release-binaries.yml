@@ -44,7 +44,7 @@ jobs:
           bash scripts/test-install-release-transaction.sh
           bash scripts/test-install-runner-sources.sh
           bash scripts/test-install-client-config.sh
-          bash scripts/test-setup-wda-shim.sh
+          bash scripts/test-setup-runner-shim.sh
           python3 scripts/test-auto-update.py
           python3 -I scripts/test-agent-bench.py
 
@@ -84,7 +84,7 @@ jobs:
           fi
 
       # ── Device runner ───────────────────────────────────────────────────────
-      # setup-wda.sh builds runner/IPhoneUseRunner on each user's Mac, so a
+      # setup-runner.sh builds runner/IPhoneUseRunner on each user's Mac, so a
       # release must prove it compiles (unsigned, no device), that its
       # device-free logic passes, and that the names setup and uninstall rely
       # on still match the project.
@@ -451,7 +451,7 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
           COPYFILE_DISABLE=1 tar --exclude xcuserdata --exclude .DS_Store \
-            -czf iphone-use-runner.tar.gz runner/IPhoneUseRunner runner/README.md runner/embed
+            -czf iphone-use-runner.tar.gz runner/IPhoneUseRunner/README.md runner/embed
           # (`! pipeline` would not stop the step under `set -e`; test explicitly.)
           if tar -tzf iphone-use-runner.tar.gz | grep -v '^runner/'; then
             echo "runner archive has entries outside runner/" >&2; exit 1

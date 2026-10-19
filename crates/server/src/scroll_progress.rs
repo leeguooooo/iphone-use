@@ -8,7 +8,7 @@
 //! that appeared or disappeared, a label swapped for different text, as when a
 //! feed or carousel pages) counts as possible progress.
 
-use crate::wda::ElementRow;
+use crate::runner::ElementRow;
 use std::collections::HashMap;
 
 /// Origins within this many points on both axes are "the same place".

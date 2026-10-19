@@ -84,7 +84,7 @@ enum W3CActions {
   }
 }
 
-/// WDA / W3C element reference objects.
+/// runner / W3C element reference objects.
 enum ElementReference {
   static let w3cKey = "element-6066-11e4-a52e-4f735466cecf"
 

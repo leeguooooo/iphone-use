@@ -14,7 +14,7 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use support::mock_wda;
+use support::mock_runner;
 
 const TOKEN: &str = "e2e-agent-token-0123456789";
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
@@ -84,9 +84,9 @@ fn spawn_daemon_with(
         .env("IPHONE_USE_STATE_DIR", state)
         .env("IPHONE_USE_INSTANCE", "e2e")
         .env("IPHONE_USE_BACKEND", "direct")
-        .env("IPHONE_USE_WDA_URL", runner)
-        .env("IPHONE_USE_WDA_MJPEG_URL", runner)
-        .env("IPHONE_USE_WDA_MANAGED", "0")
+        .env("IPHONE_USE_RUNNER_URL", runner)
+        .env("IPHONE_USE_RUNNER_MJPEG_URL", runner)
+        .env("IPHONE_USE_RUNNER_MANAGED", "0")
         .env("IPHONE_USE_UDID", "00000000-0000000000000000")
         .env("IPHONE_USE_AGENT_TOKEN", TOKEN)
         // With no password, reads are open to the browser by design; set one
@@ -179,7 +179,7 @@ fn wait_drivable(port: u16) {
     }
 }
 
-fn runner() -> support::MockWda {
+fn runner() -> support::MockRunner {
     runner_with(TREE)
 }
 
@@ -187,8 +187,8 @@ fn runner() -> support::MockWda {
 const SPARSE_TREE: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"游戏","rect":{"x":0,"y":0,"width":390,"height":844},"children":[
     {"type":"XCUIElementTypeOther","label":"","rect":{"x":0,"y":0,"width":390,"height":844}}]}}"#;
 
-fn runner_with(tree: &'static str) -> support::MockWda {
-    mock_wda(move |request, _| {
+fn runner_with(tree: &'static str) -> support::MockRunner {
+    mock_runner(move |request, _| {
         let line = request.lines().next().unwrap_or("");
         let body = if line.starts_with("POST /session ") {
             SESSION.to_string()
@@ -678,7 +678,7 @@ fn mode_a_images_are_fresh_labelled_and_budgeted() {
     assert_eq!(status, 200, "{read}");
     let image = &read["image"];
     assert!(image["png_base64"].is_string(), "{read}");
-    assert_eq!(image["source"], "wda-capture", "fresh, not the settled frame: {image}");
+    assert_eq!(image["source"], "runner-capture", "fresh, not the settled frame: {image}");
     let tree = read["tree_returned_at_ms"].as_u64().unwrap();
     let requested = image["requested_at_ms"].as_u64().unwrap();
     let received = image["received_at_ms"].as_u64().unwrap();
@@ -974,7 +974,7 @@ fn mcp_mode_a_images_are_fresh_once_and_budgeted() {
         .filter_map(|c| c["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("source wda-capture"), "a fresh capture, not the settled frame: {text}");
+    assert!(text.contains("source runner-capture"), "a fresh capture, not the settled frame: {text}");
     assert!(!text.contains("iVBOR"), "no base64 in the text");
     let structured = response["result"]["structuredContent"].to_string();
     assert!(!structured.contains("png_base64"), "no base64 in the structured copy");
@@ -1005,8 +1005,8 @@ fn mcp_mode_a_images_are_fresh_once_and_budgeted() {
 }
 
 /// A runner whose tree read starts failing once `fail` is set.
-fn runner_failing(fail: std::sync::Arc<std::sync::atomic::AtomicBool>) -> support::MockWda {
-    mock_wda(move |request, _| {
+fn runner_failing(fail: std::sync::Arc<std::sync::atomic::AtomicBool>) -> support::MockRunner {
+    mock_runner(move |request, _| {
         let line = request.lines().next().unwrap_or("");
         let body = if line.starts_with("POST /session ") {
             SESSION.to_string()

@@ -435,7 +435,7 @@ pub enum Converted {
 /// Translate one `/agent/input` action into a flow step. `rows` is the element
 /// tree the action's `snapshot` token referred to, so a snapshot-index tap
 /// becomes a durable locator instead of an index that means nothing tomorrow.
-pub fn convert_action(action: &Value, rows: Option<&[crate::wda::ElementRow]>) -> Converted {
+pub fn convert_action(action: &Value, rows: Option<&[crate::runner::ElementRow]>) -> Converted {
     let typ = action.get("type").and_then(Value::as_str).unwrap_or("");
     let num = |k: &str| action.get(k).and_then(Value::as_f64);
     let copy = |kind: &str, keys: &[&str]| {
@@ -489,12 +489,12 @@ pub fn convert_action(action: &Value, rows: Option<&[crate::wda::ElementRow]>) -
 
 /// A durable locator for a tree row. Never the snapshot index.
 ///
-/// An identifier stands ALONE: `tap_locator` re-resolves through WDA, which
+/// An identifier stands ALONE: `tap_locator` re-resolves through runner, which
 /// can query an identifier only by itself (accessibility id) — paired with
 /// `kind` it degrades to a kind-only query and every key on a keypad matches
 /// (hardware: Calculator `{identifier:"One",kind:"Key"}` → ambiguous).
 /// Without one, label + kind.
-pub fn locator_for_row(row: &crate::wda::ElementRow) -> Option<Value> {
+pub fn locator_for_row(row: &crate::runner::ElementRow) -> Option<Value> {
     if let Some(identifier) = row.identifier.as_deref().filter(|s| !s.trim().is_empty()) {
         return Some(json!({ "identifier": identifier }));
     }
@@ -937,8 +937,8 @@ pub fn mcp_binary() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn row(kind: &str, label: &str, identifier: Option<&str>) -> crate::wda::ElementRow {
-        crate::wda::ElementRow {
+    fn row(kind: &str, label: &str, identifier: Option<&str>) -> crate::runner::ElementRow {
+        crate::runner::ElementRow {
             kind: kind.into(),
             label: label.into(),
             identifier: identifier.map(str::to_string),
@@ -946,8 +946,8 @@ mod tests {
         }
     }
 
-    fn at(kind: &str, label: &str, rect: [f64; 4]) -> crate::wda::ElementRow {
-        crate::wda::ElementRow { rect, ..row(kind, label, None) }
+    fn at(kind: &str, label: &str, rect: [f64; 4]) -> crate::runner::ElementRow {
+        crate::runner::ElementRow { rect, ..row(kind, label, None) }
     }
 
     #[test]
@@ -956,7 +956,7 @@ mod tests {
             at("Cell", "电池", [0.0, 100.0, 400.0, 44.0]),
             at("StaticText", "电池", [16.0, 110.0, 40.0, 20.0]),
             at("Button", "", [300.0, 100.0, 100.0, 44.0]),
-            crate::wda::ElementRow { visible: Some(false), ..at("Button", "隐藏", [0.0, 100.0, 10.0, 10.0]) },
+            crate::runner::ElementRow { visible: Some(false), ..at("Button", "隐藏", [0.0, 100.0, 10.0, 10.0]) },
         ];
         // On the text: the text (smallest) wins.
         assert_eq!(locator_at(&rows, 20.0, 115.0).unwrap()["label"], "电池");
@@ -1239,7 +1239,7 @@ const TAPPABLE: [&str; 15] = [
 /// What a person's tap at `(x, y)` (points) hit, as a durable locator: the
 /// smallest visible, tappable element under the point that has a label or an
 /// identifier. `None` falls back to recording the coordinate.
-pub fn locator_at(rows: &[crate::wda::ElementRow], x: f64, y: f64) -> Option<Value> {
+pub fn locator_at(rows: &[crate::runner::ElementRow], x: f64, y: f64) -> Option<Value> {
     rows.iter()
         .filter(|row| TAPPABLE.contains(&row.kind.as_str()))
         .filter(|row| row.visible != Some(false))

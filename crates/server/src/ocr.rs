@@ -30,7 +30,7 @@ const COMPILE_TIMEOUT: Duration = Duration::from_secs(180);
 
 const HELPER_NAME: &str = "iphone-use-ocr";
 
-/// One recognized line of text, in WDA points.
+/// One recognized line of text, in runner points.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct OcrRow {
     pub text: String,
@@ -111,7 +111,7 @@ pub async fn recognize(png: &[u8], scale: f64) -> Result<Vec<OcrRow>> {
 pub fn rows_for_elements(ocr: &[OcrRow]) -> Vec<Value> {
     ocr.iter()
         .map(|row| {
-            let element = crate::wda::ElementRow {
+            let element = crate::runner::ElementRow {
                 kind: "OCRText".to_string(),
                 label: row.text.clone(),
                 rect: row.rect,

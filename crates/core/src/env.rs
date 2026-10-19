@@ -57,8 +57,8 @@ mod tests {
     fn an_old_name_fills_the_new_one_unless_the_new_one_is_set() {
         let renamed = legacy_renames(pairs(&[
             ("PHONE_REMOTE_PORT", "45432"),
-            ("PHONE_REMOTE_WDA_URL", "http://old"),
-            ("IPHONE_USE_WDA_URL", "http://new"),
+            ("PHONE_REMOTE_RUNNER_URL", "http://old"),
+            ("IPHONE_USE_RUNNER_URL", "http://new"),
             ("PHONE_REMOTE_", "nothing after the prefix"),
             ("HOME", "/Users/x"),
         ]));
@@ -68,6 +68,6 @@ mod tests {
             "the new name wins; a bare prefix and other variables are left alone"
         );
         assert_eq!(legacy_name("IPHONE_USE_AGENT_TOKEN").as_deref(), Some("PHONE_REMOTE_AGENT_TOKEN"));
-        assert_eq!(legacy_name("WDA_PORT"), None);
+        assert_eq!(legacy_name("IPU_RUNNER_PORT"), None);
     }
 }

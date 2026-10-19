@@ -10,9 +10,9 @@ REPO = ROOT.parents[1]
 lib = Path(os.environ.get("IPU_EMBED_LIB", str(REPO/"target/aarch64-apple-ios/release/libipu_embed.a"))).resolve()
 if not lib.exists():
     raise SystemExit("Build scripts/build-ios-embed.sh first")
-profile = Path(os.environ.get("WDA_PLIST", str(Path.home()/"Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist")))
+profile = Path(os.environ.get("IPU_RUNNER_PLIST", str(Path.home()/"Library/LaunchAgents/com.leeguoo.iphone-use.runner.plist")))
 env = plistlib.loads(profile.read_bytes()).get("EnvironmentVariables", {}) if profile.exists() else {}
-keys = ["WDA_ASC_KEY_PATH", "WDA_ASC_KEY_ID", "WDA_ASC_ISSUER_ID"]
+keys = ["IPU_RUNNER_ASC_KEY_PATH", "IPU_RUNNER_ASC_KEY_ID", "IPU_RUNNER_ASC_ISSUER_ID"]
 values = [os.environ.get(key) or env.get(key) for key in keys]
 args = ["xcodebuild", "-project", str(REPO/"runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj"),
         "-scheme", "IPhoneUseRunner", "-configuration", "Debug", "-destination", "generic/platform=iOS",

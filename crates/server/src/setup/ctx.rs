@@ -1,6 +1,6 @@
 //! What one setup run resolves before it does anything: the instance, its
 //! files and launchd labels, the ports, the target iPhone, and the signing
-//! policy. Same precedence as `setup-wda.sh` always had: explicit environment
+//! policy. Same precedence as `setup-runner.sh` always had: explicit environment
 //! > the runner supervisor's persisted plist > the daemon's plist > default.
 
 use std::path::{Path, PathBuf};
@@ -11,10 +11,10 @@ use super::sys;
 
 pub const LABEL_PREFIX: &str = "com.leeguoo.iphone-use";
 /// Names whose label is another product LaunchAgent's (see instance.rs).
-pub const RESERVED_NAMES: &[&str] = &["wda", "autoupdate", "daily-maintenance", "flow-reverify"];
+pub const RESERVED_NAMES: &[&str] = &["runner", "autoupdate", "daily-maintenance", "flow-reverify"];
 pub const PORT_SLOTS: u32 = 500;
 pub const DAEMON_PORT_BASE: u32 = 45500;
-pub const WDA_PORT_BASE: u32 = 8200;
+pub const RUNNER_PORT_BASE: u32 = 8200;
 pub const MJPEG_PORT_BASE: u32 = 9200;
 
 pub const RUNNER_SCHEME: &str = "IPhoneUseRunner";
@@ -27,18 +27,18 @@ pub const XCODE_APP_STORE_URL: &str = "https://apps.apple.com/app/xcode/id497799
 pub const XCODE_CHOICE_FILE: &str = "xcode-developer-dir";
 pub const SUPERVISOR_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin";
 
-/// `WDA_TRANSPORT` default: USB when the phone is on the cable, otherwise its
+/// `IPU_RUNNER_TRANSPORT` default: USB when the phone is on the cable, otherwise its
 /// encrypted CoreDevice Wi-Fi tunnel.
 pub const TRANSPORT_AUTO: &str = "auto";
-/// `WDA_TRANSPORT=usb`: setup and relaunch require the cable.
+/// `IPU_RUNNER_TRANSPORT=usb`: setup and relaunch require the cable.
 pub const TRANSPORT_USB: &str = "usb";
 
-/// `WDA_TRANSPORT` as configured (unset or empty = `auto`).
+/// `IPU_RUNNER_TRANSPORT` as configured (unset or empty = `auto`).
 pub fn resolve_transport(raw: &str) -> Result<&'static str, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "" | TRANSPORT_AUTO => Ok(TRANSPORT_AUTO),
         TRANSPORT_USB => Ok(TRANSPORT_USB),
-        other => Err(format!("WDA_TRANSPORT must be auto or usb (got '{other}')")),
+        other => Err(format!("IPU_RUNNER_TRANSPORT must be auto or usb (got '{other}')")),
     }
 }
 
@@ -49,8 +49,8 @@ pub struct Ctx {
     pub uid: u32,
     pub gui_domain: String,
     pub daemon_plist: PathBuf,
-    pub wda_agent_plist: PathBuf,
-    /// The installed copy of the setup script (`<state>/setup-wda.sh`): what the
+    pub runner_agent_plist: PathBuf,
+    /// The installed copy of the setup script (`<state>/setup-runner.sh`): what the
     /// supervisor plist runs and what messages tell people to run.
     pub self_install: PathBuf,
     /// The script that started this run, when a script did (the shim passes
@@ -60,7 +60,7 @@ pub struct Ctx {
     pub runner_pid_file: PathBuf,
     pub relay_pid_file: PathBuf,
     pub mjpeg_relay_pid_file: PathBuf,
-    pub wda_agent_log: PathBuf,
+    pub runner_agent_log: PathBuf,
     pub retry_state: PathBuf,
     pub status_file: PathBuf,
     pub xcconfig_file: PathBuf,
@@ -72,9 +72,9 @@ pub struct Ctx {
     pub runner_project: PathBuf,
     /// The WebDriverAgent checkout older releases built from; only matched
     /// against a PID-only record's cwd now.
-    pub wda_dir: PathBuf,
+    pub runner_dir: PathBuf,
     /// Raw, as configured; validated where they are used.
-    pub wda_port: String,
+    pub runner_port: String,
     pub mjpeg_port: String,
     pub bundle_id: String,
     pub team_id: String,
@@ -86,12 +86,12 @@ pub struct Ctx {
     /// that predates request signing (unsafe on an untrusted network). A
     /// signing runner on iOS 15/16 gets its LAN fallback without it.
     pub allow_lan: String,
-    /// `WDA_TRANSPORT`: `auto` (default) sets up and relaunches a phone that
+    /// `IPU_RUNNER_TRANSPORT`: `auto` (default) sets up and relaunches a phone that
     /// is off the cable through CoreDevice's encrypted Wi-Fi tunnel, USB
     /// preferred when both are there; `usb` requires the cable for that.
     pub transport: String,
     pub udid: String,
-    /// `WDA_KEEPALIVE=1`: the launchd supervisor's run.
+    /// `IPU_RUNNER_KEEPALIVE=1`: the launchd supervisor's run.
     pub keepalive: bool,
     /// This phone's own Xcode (`iphone-use setup --xcode`), persisted as
     /// DEVELOPER_DIR in its plists and exported to every xcodebuild, xcrun
@@ -120,7 +120,7 @@ fn env_is_set(key: &str) -> bool {
 
 impl Ctx {
     /// Resolve from the environment. `Err` carries the message and exit code
-    /// `setup-wda.sh` used (2 for an unusable instance, 1 otherwise).
+    /// `setup-runner.sh` used (2 for an unusable instance, 1 otherwise).
     pub fn resolve() -> Result<Ctx, (String, i32)> {
         let instance = Instance::from_env().map_err(|message| (message, 2))?;
         Self::resolve_for(instance)
@@ -133,29 +133,29 @@ impl Ctx {
         let daemon_plist = home
             .join("Library/LaunchAgents")
             .join(format!("{}.plist", instance.daemon_label));
-        let wda_agent_plist = instance.wda_plist();
+        let runner_agent_plist = instance.runner_plist();
         let runner_derived_data = state.join("runner-build");
         let runner_default_src = home.join(".iphone-use/runner");
         let uid = sys::uid();
         Ctx {
             gui_domain: format!("gui/{uid}"),
-            self_install: state.join("setup-wda.sh"),
-            run_log: state.join("wda-runner.log"),
-            runner_pid_file: state.join("wda-runner.pid"),
-            relay_pid_file: state.join("wda-relay.pid"),
-            mjpeg_relay_pid_file: state.join("wda-mjpeg-relay.pid"),
-            wda_agent_log: state.join("wda-agent.log"),
-            retry_state: state.join("wda-retry-state.v1"),
-            status_file: state.join("wda-setup-status.json"),
-            xcconfig_file: state.join("wda-xcode-compat.xcconfig"),
-            runner_cache: state.join("wda-runner-product.json"),
+            self_install: state.join("setup-runner.sh"),
+            run_log: state.join("runner.log"),
+            runner_pid_file: state.join("runner.pid"),
+            relay_pid_file: state.join("runner-relay.pid"),
+            mjpeg_relay_pid_file: state.join("runner-mjpeg-relay.pid"),
+            runner_agent_log: state.join("runner-agent.log"),
+            retry_state: state.join("runner-retry-state.v1"),
+            status_file: state.join("runner-setup-status.json"),
+            xcconfig_file: state.join("runner-xcode-compat.xcconfig"),
+            runner_cache: state.join("runner-product.json"),
             runner_products_dir: runner_derived_data.join("Build/Products/Debug-iphoneos"),
             runner_derived_data,
             runner_src: runner_default_src.clone(),
             runner_project: runner_default_src.join("IPhoneUseRunner/IPhoneUseRunner.xcodeproj"),
             runner_default_src,
-            wda_dir: state.join("WebDriverAgent"),
-            wda_port: String::new(),
+            runner_dir: state.join("WebDriverAgent"),
+            runner_port: String::new(),
             mjpeg_port: String::new(),
             bundle_id: String::new(),
             team_id: String::new(),
@@ -176,7 +176,7 @@ impl Ctx {
             home,
             uid,
             daemon_plist,
-            wda_agent_plist,
+            runner_agent_plist,
         }
     }
 
@@ -184,19 +184,19 @@ impl Ctx {
         let state = instance.state_dir.clone();
         let mut ctx = Ctx::paths(instance);
         ctx.script = env("IPHONE_USE_SETUP_SCRIPT").map(PathBuf::from);
-        ctx.keepalive = std::env::var("WDA_KEEPALIVE").is_ok_and(|v| v == "1");
+        ctx.keepalive = std::env::var("IPU_RUNNER_KEEPALIVE").is_ok_and(|v| v == "1");
         let runner_default_src = ctx.runner_default_src.clone();
-        let wda_env = |key: &str| sys::plist_env(&ctx.wda_agent_plist, key);
+        let runner_env = |key: &str| sys::plist_env(&ctx.runner_agent_plist, key);
         let daemon_env = |key: &str| sys::plist_env(&ctx.daemon_plist, key);
 
-        let wda_dir = env("WDA_DIR").unwrap_or_else(|| wda_env("WDA_DIR"));
-        let wda_dir = if wda_dir.is_empty() {
+        let runner_dir = env("IPU_RUNNER_DIR").unwrap_or_else(|| runner_env("IPU_RUNNER_DIR"));
+        let runner_dir = if runner_dir.is_empty() {
             state.join("WebDriverAgent")
         } else {
-            PathBuf::from(wda_dir)
+            PathBuf::from(runner_dir)
         };
 
-        let mut runner_src = env("IPU_RUNNER_SRC").unwrap_or_else(|| wda_env("IPU_RUNNER_SRC"));
+        let mut runner_src = env("IPU_RUNNER_SRC").unwrap_or_else(|| runner_env("IPU_RUNNER_SRC"));
         if runner_src.is_empty() {
             runner_src = repo_runner_src(ctx.script.as_deref(), &ctx.home)
                 .map(|path| path.to_string_lossy().into_owned())
@@ -209,40 +209,40 @@ impl Ctx {
         let runner_project = runner_src.join("IPhoneUseRunner/IPhoneUseRunner.xcodeproj");
 
         let port_from_url = |key: &str| port_from_loopback_url(&daemon_env(key));
-        let mut wda_port = env("WDA_PORT").unwrap_or_else(|| wda_env("WDA_PORT"));
-        if wda_port.is_empty() {
-            wda_port = port_from_url("IPHONE_USE_WDA_URL");
+        let mut runner_port = env("IPU_RUNNER_PORT").unwrap_or_else(|| runner_env("IPU_RUNNER_PORT"));
+        if runner_port.is_empty() {
+            runner_port = port_from_url("IPHONE_USE_RUNNER_URL");
         }
-        let mut mjpeg_port = env("MJPEG_PORT").unwrap_or_else(|| wda_env("MJPEG_PORT"));
+        let mut mjpeg_port = env("MJPEG_PORT").unwrap_or_else(|| runner_env("MJPEG_PORT"));
         if mjpeg_port.is_empty() {
-            mjpeg_port = port_from_url("IPHONE_USE_WDA_MJPEG_URL");
+            mjpeg_port = port_from_url("IPHONE_USE_RUNNER_MJPEG_URL");
         }
         if ctx.instance.is_default() {
-            if wda_port.is_empty() {
-                wda_port = "8100".into();
+            if runner_port.is_empty() {
+                runner_port = "8100".into();
             }
             if mjpeg_port.is_empty() {
                 mjpeg_port = "9100".into();
             }
-        } else if wda_port.is_empty() || mjpeg_port.is_empty() {
-            if wda_port.is_empty() {
-                wda_port = daemon_env("WDA_PORT");
+        } else if runner_port.is_empty() || mjpeg_port.is_empty() {
+            if runner_port.is_empty() {
+                runner_port = daemon_env("IPU_RUNNER_PORT");
             }
             if mjpeg_port.is_empty() {
                 mjpeg_port = daemon_env("MJPEG_PORT");
             }
-            if wda_port.is_empty() || mjpeg_port.is_empty() {
+            if runner_port.is_empty() || mjpeg_port.is_empty() {
                 let Some(slot) = derive_ports(&ctx, true) else {
                     return Err((
                         format!(
-                            "no free port slot for instance \"{}\"; set WDA_PORT and MJPEG_PORT",
+                            "no free port slot for instance \"{}\"; set IPU_RUNNER_PORT and MJPEG_PORT",
                             ctx.instance.name
                         ),
                         1,
                     ));
                 };
-                if wda_port.is_empty() {
-                    wda_port = slot.1.to_string();
+                if runner_port.is_empty() {
+                    runner_port = slot.1.to_string();
                 }
                 if mjpeg_port.is_empty() {
                     mjpeg_port = slot.2.to_string();
@@ -250,69 +250,69 @@ impl Ctx {
             }
         }
 
-        let mut bundle_id = env("WDA_BUNDLE_ID").unwrap_or_else(|| wda_env("WDA_BUNDLE_ID"));
-        let mut team_id = env("WDA_TEAM_ID").unwrap_or_else(|| wda_env("WDA_TEAM_ID"));
+        let mut bundle_id = env("IPU_RUNNER_BUNDLE_ID").unwrap_or_else(|| runner_env("IPU_RUNNER_BUNDLE_ID"));
+        let mut team_id = env("IPU_RUNNER_TEAM_ID").unwrap_or_else(|| runner_env("IPU_RUNNER_TEAM_ID"));
         let (mut asc_path, mut asc_id, mut asc_issuer) = (
-            std::env::var("WDA_ASC_KEY_PATH").unwrap_or_default(),
-            std::env::var("WDA_ASC_KEY_ID").unwrap_or_default(),
-            std::env::var("WDA_ASC_ISSUER_ID").unwrap_or_default(),
+            std::env::var("IPU_RUNNER_ASC_KEY_PATH").unwrap_or_default(),
+            std::env::var("IPU_RUNNER_ASC_KEY_ID").unwrap_or_default(),
+            std::env::var("IPU_RUNNER_ASC_ISSUER_ID").unwrap_or_default(),
         );
         // The saved trio comes back only when no ASC override was supplied: a
         // partial explicit override must not combine with a different saved key.
-        if !env_is_set("WDA_ASC_KEY_PATH")
-            && !env_is_set("WDA_ASC_KEY_ID")
-            && !env_is_set("WDA_ASC_ISSUER_ID")
+        if !env_is_set("IPU_RUNNER_ASC_KEY_PATH")
+            && !env_is_set("IPU_RUNNER_ASC_KEY_ID")
+            && !env_is_set("IPU_RUNNER_ASC_ISSUER_ID")
         {
-            asc_path = wda_env("WDA_ASC_KEY_PATH");
-            asc_id = wda_env("WDA_ASC_KEY_ID");
-            asc_issuer = wda_env("WDA_ASC_ISSUER_ID");
+            asc_path = runner_env("IPU_RUNNER_ASC_KEY_PATH");
+            asc_id = runner_env("IPU_RUNNER_ASC_KEY_ID");
+            asc_issuer = runner_env("IPU_RUNNER_ASC_ISSUER_ID");
         }
-        let mut allow_lan = env("WDA_ALLOW_LAN").unwrap_or_default();
-        let mut transport = env("WDA_TRANSPORT").unwrap_or_default();
+        let mut allow_lan = env("IPU_RUNNER_ALLOW_LAN").unwrap_or_default();
+        let mut transport = env("IPU_RUNNER_TRANSPORT").unwrap_or_default();
         // A named instance's first setup has no supervisor yet: its signing
         // policy is what `install.sh --instance` persisted in the daemon plist.
         if !ctx.instance.is_default() {
             if bundle_id.is_empty() {
-                bundle_id = daemon_env("WDA_BUNDLE_ID");
+                bundle_id = daemon_env("IPU_RUNNER_BUNDLE_ID");
             }
             if team_id.is_empty() {
-                team_id = daemon_env("WDA_TEAM_ID");
+                team_id = daemon_env("IPU_RUNNER_TEAM_ID");
             }
             if allow_lan.is_empty() {
-                allow_lan = daemon_env("WDA_ALLOW_LAN");
+                allow_lan = daemon_env("IPU_RUNNER_ALLOW_LAN");
             }
             if transport.is_empty() {
-                transport = daemon_env("WDA_TRANSPORT");
+                transport = daemon_env("IPU_RUNNER_TRANSPORT");
             }
             if asc_path.is_empty() && asc_id.is_empty() && asc_issuer.is_empty() {
-                asc_path = daemon_env("WDA_ASC_KEY_PATH");
-                asc_id = daemon_env("WDA_ASC_KEY_ID");
-                asc_issuer = daemon_env("WDA_ASC_ISSUER_ID");
+                asc_path = daemon_env("IPU_RUNNER_ASC_KEY_PATH");
+                asc_id = daemon_env("IPU_RUNNER_ASC_KEY_ID");
+                asc_issuer = daemon_env("IPU_RUNNER_ASC_ISSUER_ID");
             }
         }
         if allow_lan.is_empty() {
-            allow_lan = wda_env("WDA_ALLOW_LAN");
+            allow_lan = runner_env("IPU_RUNNER_ALLOW_LAN");
         }
         if allow_lan.is_empty() {
             allow_lan = "0".into();
         }
         if allow_lan != "0" && allow_lan != "1" {
-            return Err(("WDA_ALLOW_LAN must be 0 or 1".into(), 1));
+            return Err(("IPU_RUNNER_ALLOW_LAN must be 0 or 1".into(), 1));
         }
         if transport.is_empty() {
-            transport = wda_env("WDA_TRANSPORT");
+            transport = runner_env("IPU_RUNNER_TRANSPORT");
         }
         let transport = resolve_transport(&transport)
             .map_err(|message| (message, 1))?
             .to_string();
-        let mut udid = env("WDA_UDID")
+        let mut udid = env("IPU_RUNNER_UDID")
             .or_else(|| env("IPHONE_USE_UDID"))
             .unwrap_or_default();
         if udid.is_empty() {
             udid = daemon_env("IPHONE_USE_UDID");
         }
         if udid.is_empty() {
-            udid = wda_env("WDA_UDID");
+            udid = runner_env("IPU_RUNNER_UDID");
         }
 
         // This phone's own Xcode; the order is in `choose_xcode`.
@@ -321,20 +321,20 @@ impl Ctx {
             environment: env("DEVELOPER_DIR"),
             keepalive: ctx.keepalive,
             remembered: read_xcode_choice(&ctx.instance.state_dir),
-            supervisor_plist: wda_env("DEVELOPER_DIR"),
+            supervisor_plist: runner_env("DEVELOPER_DIR"),
             daemon_plist: daemon_env("DEVELOPER_DIR"),
         })
         .map_err(|message| (message, 2))?;
         // The on-phone daemon's build and listen settings; the supervisor
         // persists them so its relaunches build the same product.
-        ctx.embed = env("IPU_EMBED").unwrap_or_else(|| wda_env("IPU_EMBED"));
-        ctx.embed_lib = env("IPU_EMBED_LIB").unwrap_or_else(|| wda_env("IPU_EMBED_LIB"));
+        ctx.embed = env("IPU_EMBED").unwrap_or_else(|| runner_env("IPU_EMBED"));
+        ctx.embed_lib = env("IPU_EMBED_LIB").unwrap_or_else(|| runner_env("IPU_EMBED_LIB"));
         ctx.daemon_host = env(crate::phone_daemon::HOST_ENV)
-            .unwrap_or_else(|| wda_env(crate::phone_daemon::HOST_ENV));
-        ctx.wda_dir = wda_dir;
+            .unwrap_or_else(|| runner_env(crate::phone_daemon::HOST_ENV));
+        ctx.runner_dir = runner_dir;
         ctx.runner_src = runner_src;
         ctx.runner_project = runner_project;
-        ctx.wda_port = wda_port;
+        ctx.runner_port = runner_port;
         ctx.mjpeg_port = mjpeg_port;
         ctx.bundle_id = bundle_id;
         ctx.team_id = team_id;
@@ -382,8 +382,8 @@ impl Ctx {
         }
     }
 
-    pub fn wda_port_number(&self) -> Option<u16> {
-        valid_port(&self.wda_port)
+    pub fn runner_port_number(&self) -> Option<u16> {
+        valid_port(&self.runner_port)
     }
 
     pub fn mjpeg_port_number(&self) -> Option<u16> {
@@ -511,7 +511,7 @@ pub fn port_from_loopback_url(url: &str) -> String {
 }
 
 /// `<repo>/runner` when the script that started this run sits in a checkout
-/// (`<repo>/scripts/setup-wda.sh` next to `crates/server` and the runner
+/// (`<repo>/scripts/setup-runner.sh` next to `crates/server` and the runner
 /// project). The installed copy under ~/.iphone-use never looks next to itself.
 fn repo_runner_src(script: Option<&Path>, home: &Path) -> Option<PathBuf> {
     let script = script?;
@@ -554,9 +554,9 @@ pub fn other_instance_plists(ctx: &Ctx) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     for plist in plists {
         let label = sys::plist_top(&plist, "Label");
-        let name = if label == LABEL_PREFIX || label == format!("{LABEL_PREFIX}.wda") {
+        let name = if label == LABEL_PREFIX || label == format!("{LABEL_PREFIX}.runner") {
             "default".to_string()
-        } else if let Some(name) = label.strip_prefix(&format!("{LABEL_PREFIX}.wda.")) {
+        } else if let Some(name) = label.strip_prefix(&format!("{LABEL_PREFIX}.runner.")) {
             name.to_string()
         } else if let Some(name) = label.strip_prefix(&format!("{LABEL_PREFIX}.")) {
             name.to_string()
@@ -581,10 +581,10 @@ pub fn claimed_ports(ctx: &Ctx) -> Vec<u32> {
     for (_, plist) in other_instance_plists(ctx) {
         for key in [
             "IPHONE_USE_PORT",
-            "WDA_PORT",
+            "IPU_RUNNER_PORT",
             "MJPEG_PORT",
-            "IPHONE_USE_WDA_URL",
-            "IPHONE_USE_WDA_MJPEG_URL",
+            "IPHONE_USE_RUNNER_URL",
+            "IPHONE_USE_RUNNER_MJPEG_URL",
         ] {
             let value = sys::plist_env(&plist, key);
             let port = if value.bytes().all(|b| b.is_ascii_digit()) {
@@ -607,7 +607,7 @@ pub fn udid_owner(ctx: &Ctx, udid: &str) -> Option<String> {
         return None;
     }
     for (name, plist) in other_instance_plists(ctx) {
-        for key in ["IPHONE_USE_UDID", "WDA_UDID"] {
+        for key in ["IPHONE_USE_UDID", "IPU_RUNNER_UDID"] {
             let value = sys::plist_env(&plist, key).to_ascii_uppercase();
             if !value.is_empty() && value == wanted {
                 return Some(name);
@@ -667,7 +667,7 @@ pub fn derive_ports(ctx: &Ctx, probe: bool) -> Option<(u32, u32, u32)> {
         let offset = (slot + attempt) % PORT_SLOTS;
         let ports = (
             DAEMON_PORT_BASE + offset,
-            WDA_PORT_BASE + offset,
+            RUNNER_PORT_BASE + offset,
             MJPEG_PORT_BASE + offset,
         );
         if !probe {
@@ -771,7 +771,7 @@ pub mod tests_support {
             std::env::temp_dir().join(format!("iphone-use-setup-test-{}", std::process::id()));
         let instance = Instance::derive("", &home, None).expect("default instance");
         let mut ctx = Ctx::paths(instance);
-        ctx.wda_port = "8100".into();
+        ctx.runner_port = "8100".into();
         ctx.mjpeg_port = "9100".into();
         ctx
     }
@@ -981,12 +981,12 @@ mod tests {
         let instance = Instance::derive("lab", home.path(), None).unwrap();
         let mut ctx = Ctx::paths(instance);
         std::fs::create_dir_all(ctx.state_dir()).unwrap();
-        ctx.wda_port = "8601".into();
+        ctx.runner_port = "8601".into();
         ctx.mjpeg_port = "9601".into();
         let other = agents.join("com.leeguoo.iphone-use.other.plist");
         let plist = |port: &str| {
             format!(
-                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Label</key><string>com.leeguoo.iphone-use.other</string><key>EnvironmentVariables</key><dict><key>WDA_PORT</key><string>{port}</string></dict></dict></plist>"
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Label</key><string>com.leeguoo.iphone-use.other</string><key>EnvironmentVariables</key><dict><key>IPU_RUNNER_PORT</key><string>{port}</string></dict></dict></plist>"
             )
         };
         std::fs::write(&other, plist("8700")).unwrap();
@@ -1028,14 +1028,14 @@ mod tests {
             .join("runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("project.pbxproj"), "").unwrap();
-        let script = repo.path().join("scripts/setup-wda.sh");
+        let script = repo.path().join("scripts/setup-runner.sh");
         std::fs::write(&script, "").unwrap();
         let found = repo_runner_src(Some(&script), home.path()).unwrap();
         assert_eq!(found, repo.path().canonicalize().unwrap().join("runner"));
         let installed = home.path().join(".iphone-use");
         std::fs::create_dir_all(&installed).unwrap();
         assert_eq!(
-            repo_runner_src(Some(&installed.join("setup-wda.sh")), home.path()),
+            repo_runner_src(Some(&installed.join("setup-runner.sh")), home.path()),
             None
         );
         assert_eq!(repo_runner_src(None, home.path()), None);

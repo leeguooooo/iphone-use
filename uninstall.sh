@@ -2,8 +2,8 @@
 # uninstall.sh — safely remove iphone-use's per-user macOS installation.
 #
 # The default is deliberately local-only: it stops and removes product-owned
-# LaunchAgents, PID-verified WDA processes, apps, logs, and ~/.iphone-use state.
-# It never removes Xcode, Homebrew, a legacy iproxy, socat, or the WDA runner installed on
+# LaunchAgents, PID-verified runner processes, apps, logs, and ~/.iphone-use state.
+# It never removes Xcode, Homebrew, a legacy iproxy, socat, or the runner installed on
 # the phone. Removing the phone runner requires explicit target identifiers.
 set -u
 umask 077
@@ -22,13 +22,13 @@ Usage:
   ./uninstall.sh --remove-phone-runner --udid <UDID> --bundle-id <bundle-id> [--dry-run]
 
 Options:
-  --instance NAME         Remove only this named instance (its daemon, WDA
+  --instance NAME         Remove only this named instance (its daemon, runner
                           supervisor, relays, runtime app copy and state under
                           ~/.iphone-use/instances/NAME). Without it, the
                           default instance and the shared app are removed,
                           which is refused while named instances remain.
   --dry-run               Show owned artifacts and actions without changing anything.
-  --remove-phone-runner   Also uninstall one explicitly identified WDA runner app.
+  --remove-phone-runner   Also uninstall one explicitly identified runner app.
   --udid VALUE            Exact configured iPhone UDID for --remove-phone-runner.
   --bundle-id VALUE       Configured runner id or installed .xctrunner bundle id.
   -h, --help              Show this help.
@@ -157,10 +157,10 @@ SHASUM_BIN="${IPHONE_USE_SHASUM:-$(command -v shasum 2>/dev/null || true)}"
 [ -x "$STAT_BIN" ] \
     || { printf 'ERROR: stat is unavailable: %s\n' "$STAT_BIN" >&2; exit 1; }
 
-# Instance derivation mirrors scripts/setup-wda.sh and
+# Instance derivation mirrors scripts/setup-runner.sh and
 # crates/server/src/instance.rs (scripts/fixtures/instance-derivation.json).
 INSTANCE_LABEL_PREFIX="com.leeguoo.iphone-use"
-INSTANCE_RESERVED_NAMES="wda autoupdate daily-maintenance flow-reverify"
+INSTANCE_RESERVED_NAMES="runner autoupdate daily-maintenance flow-reverify"
 instance_name_valid() {
     local reserved
     printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z][a-z0-9-]{0,31}$' || return 1
@@ -179,7 +179,7 @@ LEGACY_LABEL="work.pwtk.iphone-remote"
 INSTANCES_DIR="$HOME/.iphone-use/instances"
 if [ "$INSTANCE_NAME" = default ]; then
     DAEMON_LABEL="$INSTANCE_LABEL_PREFIX"
-    WDA_LABEL="$INSTANCE_LABEL_PREFIX.wda"
+    IPU_RUNNER_LABEL="$INSTANCE_LABEL_PREFIX.runner"
     STATE_DIR="$HOME/.iphone-use"
     APP_PARENT="$HOME/Applications"
     LOG_DIR="$HOME/Library/Logs/iPhoneUse"
@@ -188,7 +188,7 @@ else
     # A named instance owns its own copy of the app and its logs, both inside
     # its state directory; the shared app, CLI link and logs are untouched.
     DAEMON_LABEL="$INSTANCE_LABEL_PREFIX.$INSTANCE_NAME"
-    WDA_LABEL="$INSTANCE_LABEL_PREFIX.wda.$INSTANCE_NAME"
+    IPU_RUNNER_LABEL="$INSTANCE_LABEL_PREFIX.runner.$INSTANCE_NAME"
     STATE_DIR="$INSTANCES_DIR/$INSTANCE_NAME"
     APP_PARENT="$STATE_DIR/runtime"
     LOG_DIR="$STATE_DIR/logs"
@@ -197,7 +197,7 @@ fi
 
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 DAEMON_PLIST="$LAUNCH_AGENTS_DIR/$DAEMON_LABEL.plist"
-WDA_PLIST="$LAUNCH_AGENTS_DIR/$WDA_LABEL.plist"
+IPU_RUNNER_PLIST="$LAUNCH_AGENTS_DIR/$IPU_RUNNER_LABEL.plist"
 LEGACY_PLIST="$LAUNCH_AGENTS_DIR/$LEGACY_LABEL.plist"
 LEGACY_DISABLED_PLIST="$LEGACY_PLIST.disabled"
 
@@ -207,9 +207,9 @@ LEGACY_APP_PATH="$HOME/Applications/iPhoneRemote.app"
 LEGACY_APP_BINARY="$LEGACY_APP_PATH/Contents/MacOS/iphone-remote"
 
 LEGACY_LOG_DIR="$HOME/Library/Logs/iPhoneRemote"
-FIXED_SETUP="$STATE_DIR/setup-wda.sh"
-WDA_CHECKOUT="$STATE_DIR/WebDriverAgent"
-WDA_CHECKOUT_MARKER="$STATE_DIR/wda-checkout-owner.v1"
+FIXED_SETUP="$STATE_DIR/setup-runner.sh"
+IPU_RUNNER_CHECKOUT="$STATE_DIR/WebDriverAgent"
+IPU_RUNNER_CHECKOUT_MARKER="$STATE_DIR/runner-checkout-owner.v1"
 LAUNCH_AGENTS_SAFE=1
 STATE_SAFE=1
 
@@ -307,8 +307,8 @@ remaining_named_instances() {
         [ -f "$plist" ] || continue
         label="$("$PLISTBUDDY_BIN" -c 'Print :Label' "$plist" 2>/dev/null || true)"
         case "$label" in
-            "$INSTANCE_LABEL_PREFIX.wda") continue ;;
-            "$INSTANCE_LABEL_PREFIX.wda."*) name="${label#"$INSTANCE_LABEL_PREFIX.wda."}" ;;
+            "$INSTANCE_LABEL_PREFIX.runner") continue ;;
+            "$INSTANCE_LABEL_PREFIX.runner."*) name="${label#"$INSTANCE_LABEL_PREFIX.runner."}" ;;
             "$INSTANCE_LABEL_PREFIX."*) name="${label#"$INSTANCE_LABEL_PREFIX."}" ;;
             *) continue ;;
         esac
@@ -391,9 +391,9 @@ plist_owned() {
                 && [ "$arg0" = "$APP_BINARY" ] \
                 && [ "$arg1" = "serve" ]
             ;;
-        wda)
+        runner)
             [ "$STATE_SAFE" = "1" ] \
-                && [ "$label" = "$WDA_LABEL" ] \
+                && [ "$label" = "$IPU_RUNNER_LABEL" ] \
                 && [ "$arg0" = "/bin/bash" ] \
                 && [ "$arg1" = "$FIXED_SETUP" ]
             ;;
@@ -432,7 +432,7 @@ loaded_job_owned() {
             snapshot_has_exact_value "$snapshot" "$APP_BINARY" \
                 && snapshot_has_exact_value "$snapshot" "serve"
             ;;
-        wda)
+        runner)
             snapshot_has_exact_value "$snapshot" "/bin/bash" \
                 && snapshot_has_exact_value "$snapshot" "$FIXED_SETUP"
             ;;
@@ -541,7 +541,7 @@ expected_role_valid() {
 }
 
 # Keep the uninstaller's process identity contract in lockstep with
-# scripts/setup-wda.sh. A PID record is evidence, not authority: the command it
+# scripts/setup-runner.sh. A PID record is evidence, not authority: the command it
 # contains must still have one of the exact runner/relay shapes that setup writes.
 # The device runner is launched from its built product; the WebDriverAgent form
 # is what releases before it wrote, and stays recognised for their leftovers.
@@ -675,14 +675,14 @@ verify_loopback_listener() {
     [ -z "$unexpected" ]
 }
 
-# setup-wda.sh starts the device runner from the state directory, and a
+# setup-runner.sh starts the device runner from the state directory, and a
 # WebDriverAgent runner (earlier releases) from its configured checkout.
 verify_runner_cwd() {
     local pid="$1"
     local command="${2:-}"
-    local configured="${CONFIGURED_WDA_DIR:-}"
+    local configured="${CONFIGURED_RUNNER_DIR:-}"
     local expected_dir cwd_data process_cwd
-    [ -n "$configured" ] || configured="$WDA_CHECKOUT"
+    [ -n "$configured" ] || configured="$IPU_RUNNER_CHECKOUT"
     if printf '%s\n' "$command" | LC_ALL=C grep -Eq "$RUNNER_ARGV_PATTERN"; then
         configured="$STATE_DIR"
     fi
@@ -1097,22 +1097,22 @@ git_metadata_digests() {
     return 0
 }
 
-read_wda_checkout_marker() {
-    local marker="$WDA_CHECKOUT_MARKER"
+read_runner_checkout_marker() {
+    local marker="$IPU_RUNNER_CHECKOUT_MARKER"
     local count
     if [ -L "$marker" ] || [ ! -f "$marker" ]; then
-        WDA_CHECKOUT_REASON="dedicated setup ownership marker is missing or unsafe"
+        IPU_RUNNER_CHECKOUT_REASON="dedicated setup ownership marker is missing or unsafe"
         return 1
     fi
     if ! read_uid_mode "$marker" \
         || [ "$PATH_UID" != "$UID_NUM" ] \
         || [ "$PATH_MODE" != "600" ]; then
-        WDA_CHECKOUT_REASON="ownership marker must be a current-uid regular file with mode 600"
+        IPU_RUNNER_CHECKOUT_REASON="ownership marker must be a current-uid regular file with mode 600"
         return 1
     fi
     count="$(awk 'END { print NR }' "$marker" 2>/dev/null)" || return 1
     if [ "$count" != "9" ]; then
-        WDA_CHECKOUT_REASON="ownership marker has an unexpected schema"
+        IPU_RUNNER_CHECKOUT_REASON="ownership marker has an unexpected schema"
         return 1
     fi
     MARKER_VERSION="$(sed -n '1s/^version=//p' "$marker")"
@@ -1133,68 +1133,68 @@ read_wda_checkout_marker() {
         && [ "${#MARKER_WORKTREES_DIGEST}" -eq 64 ] \
         && [ "${#MARKER_OBJECTS_DIGEST}" -eq 64 ] \
         || {
-            WDA_CHECKOUT_REASON="ownership marker contains incomplete identity fields"
+            IPU_RUNNER_CHECKOUT_REASON="ownership marker contains incomplete identity fields"
             return 1
         }
     case "$MARKER_HEAD$MARKER_REFS_DIGEST$MARKER_REFLOG_DIGEST$MARKER_WORKTREES_DIGEST$MARKER_OBJECTS_DIGEST" in
         *[!0-9A-Fa-f]*)
-            WDA_CHECKOUT_REASON="ownership marker contains malformed Git identity digests"
+            IPU_RUNNER_CHECKOUT_REASON="ownership marker contains malformed Git identity digests"
             return 1
             ;;
     esac
     case "$MARKER_UDID" in
         ''|*[!0-9A-Fa-f-]*)
-            WDA_CHECKOUT_REASON="ownership marker contains a malformed device UDID"
+            IPU_RUNNER_CHECKOUT_REASON="ownership marker contains a malformed device UDID"
             return 1
             ;;
     esac
     return 0
 }
 
-wda_checkout_owned() {
+runner_checkout_owned() {
     local origin status head top git_dir configured_dir worktree_count worktree_path
-    WDA_CHECKOUT_REASON=""
+    IPU_RUNNER_CHECKOUT_REASON=""
     [ "$STATE_SAFE" = "1" ] || {
-        WDA_CHECKOUT_REASON="state namespace ownership/mode was not verified"
+        IPU_RUNNER_CHECKOUT_REASON="state namespace ownership/mode was not verified"
         return 1
     }
-    read_wda_checkout_marker || return 1
-    if [ -L "$WDA_CHECKOUT/.git" ] || [ ! -d "$WDA_CHECKOUT/.git" ]; then
-        WDA_CHECKOUT_REASON="missing or symlinked .git ownership metadata"
+    read_runner_checkout_marker || return 1
+    if [ -L "$IPU_RUNNER_CHECKOUT/.git" ] || [ ! -d "$IPU_RUNNER_CHECKOUT/.git" ]; then
+        IPU_RUNNER_CHECKOUT_REASON="missing or symlinked .git ownership metadata"
         return 1
     fi
     if ! command -v git >/dev/null 2>&1; then
-        WDA_CHECKOUT_REASON="git is unavailable for ownership/status verification"
+        IPU_RUNNER_CHECKOUT_REASON="git is unavailable for ownership/status verification"
         return 1
     fi
-    configured_dir="${CONFIGURED_WDA_DIR:-}"
+    configured_dir="${CONFIGURED_RUNNER_DIR:-}"
     if [ -z "$configured_dir" ] || [ -L "$configured_dir" ] || [ ! -d "$configured_dir" ]; then
-        WDA_CHECKOUT_REASON="owned supervisor does not configure a real WDA_DIR"
+        IPU_RUNNER_CHECKOUT_REASON="owned supervisor does not configure a real IPU_RUNNER_DIR"
         return 1
     fi
     configured_dir="$(cd -P "$configured_dir" 2>/dev/null && pwd)" || {
-        WDA_CHECKOUT_REASON="configured WDA_DIR cannot be resolved"
+        IPU_RUNNER_CHECKOUT_REASON="configured IPU_RUNNER_DIR cannot be resolved"
         return 1
     }
-    if [ "$configured_dir" != "$WDA_CHECKOUT" ] || [ "$MARKER_PATH" != "$WDA_CHECKOUT" ]; then
-        WDA_CHECKOUT_REASON="marker/supervisor path does not bind the fixed managed checkout"
+    if [ "$configured_dir" != "$IPU_RUNNER_CHECKOUT" ] || [ "$MARKER_PATH" != "$IPU_RUNNER_CHECKOUT" ]; then
+        IPU_RUNNER_CHECKOUT_REASON="marker/supervisor path does not bind the fixed managed checkout"
         return 1
     fi
-    top="$(GIT_OPTIONAL_LOCKS=0 git -C "$WDA_CHECKOUT" \
+    top="$(GIT_OPTIONAL_LOCKS=0 git -C "$IPU_RUNNER_CHECKOUT" \
         rev-parse --show-toplevel 2>/dev/null)" || {
-        WDA_CHECKOUT_REASON="Git top-level cannot be resolved"
+        IPU_RUNNER_CHECKOUT_REASON="Git top-level cannot be resolved"
         return 1
     }
-    git_dir="$(GIT_OPTIONAL_LOCKS=0 git -C "$WDA_CHECKOUT" \
+    git_dir="$(GIT_OPTIONAL_LOCKS=0 git -C "$IPU_RUNNER_CHECKOUT" \
         rev-parse --absolute-git-dir 2>/dev/null)" || {
-        WDA_CHECKOUT_REASON="Git common directory cannot be resolved"
+        IPU_RUNNER_CHECKOUT_REASON="Git common directory cannot be resolved"
         return 1
     }
-    if [ "$top" != "$WDA_CHECKOUT" ] || [ "$git_dir" != "$WDA_CHECKOUT/.git" ]; then
-        WDA_CHECKOUT_REASON="Git top-level/common-dir escapes the managed checkout"
+    if [ "$top" != "$IPU_RUNNER_CHECKOUT" ] || [ "$git_dir" != "$IPU_RUNNER_CHECKOUT/.git" ]; then
+        IPU_RUNNER_CHECKOUT_REASON="Git top-level/common-dir escapes the managed checkout"
         return 1
     fi
-    origin="$(git -C "$WDA_CHECKOUT" config --get remote.origin.url 2>/dev/null || true)"
+    origin="$(git -C "$IPU_RUNNER_CHECKOUT" config --get remote.origin.url 2>/dev/null || true)"
     case "$origin" in
         https://github.com/appium/WebDriverAgent|\
         https://github.com/appium/WebDriverAgent.git|\
@@ -1202,64 +1202,64 @@ wda_checkout_owned() {
         ssh://git@github.com/appium/WebDriverAgent.git)
             ;;
         *)
-            WDA_CHECKOUT_REASON="remote.origin is not the official appium/WebDriverAgent repository"
+            IPU_RUNNER_CHECKOUT_REASON="remote.origin is not the official appium/WebDriverAgent repository"
             return 1
             ;;
     esac
     if [ "$origin" != "$MARKER_ORIGIN" ]; then
-        WDA_CHECKOUT_REASON="remote.origin differs from the setup ownership marker"
+        IPU_RUNNER_CHECKOUT_REASON="remote.origin differs from the setup ownership marker"
         return 1
     fi
-    if ! status="$(GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false -C "$WDA_CHECKOUT" \
+    if ! status="$(GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false -C "$IPU_RUNNER_CHECKOUT" \
         status --porcelain=v1 --untracked-files=all --ignored=matching \
         --ignore-submodules=none 2>/dev/null)"; then
-        WDA_CHECKOUT_REASON="Git status (including ignored files/submodules) failed"
+        IPU_RUNNER_CHECKOUT_REASON="Git status (including ignored files/submodules) failed"
         return 1
     fi
     if [ -n "$status" ]; then
-        WDA_CHECKOUT_REASON="checkout has tracked, untracked, ignored, or submodule data"
+        IPU_RUNNER_CHECKOUT_REASON="checkout has tracked, untracked, ignored, or submodule data"
         return 1
     fi
-    head="$(git -C "$WDA_CHECKOUT" rev-parse HEAD 2>/dev/null || true)"
-    if [ -z "${CONFIGURED_WDA_REF:-}" ] \
+    head="$(git -C "$IPU_RUNNER_CHECKOUT" rev-parse HEAD 2>/dev/null || true)"
+    if [ -z "${CONFIGURED_RUNNER_REF:-}" ] \
         || [ "$(printf '%s' "$head" | tr 'A-F' 'a-f')" \
-            != "$(printf '%s' "$CONFIGURED_WDA_REF" | tr 'A-F' 'a-f')" ] \
+            != "$(printf '%s' "$CONFIGURED_RUNNER_REF" | tr 'A-F' 'a-f')" ] \
         || [ "$(printf '%s' "$head" | tr 'A-F' 'a-f')" \
             != "$(printf '%s' "$MARKER_HEAD" | tr 'A-F' 'a-f')" ]; then
-        WDA_CHECKOUT_REASON="HEAD, supervisor WDA_REF, and ownership marker do not match"
+        IPU_RUNNER_CHECKOUT_REASON="HEAD, supervisor IPU_RUNNER_REF, and ownership marker do not match"
         return 1
     fi
-    if [ -z "${CONFIGURED_WDA_UDID:-}" ] \
-        || [ "$CONFIGURED_WDA_UDID" != "$MARKER_UDID" ]; then
-        WDA_CHECKOUT_REASON="supervisor device and ownership-marker device do not match"
+    if [ -z "${CONFIGURED_RUNNER_UDID:-}" ] \
+        || [ "$CONFIGURED_RUNNER_UDID" != "$MARKER_UDID" ]; then
+        IPU_RUNNER_CHECKOUT_REASON="supervisor device and ownership-marker device do not match"
         return 1
     fi
-    if ! git_metadata_digests "$WDA_CHECKOUT"; then
-        WDA_CHECKOUT_REASON="could not fingerprint Git refs/reflog/worktrees"
+    if ! git_metadata_digests "$IPU_RUNNER_CHECKOUT"; then
+        IPU_RUNNER_CHECKOUT_REASON="could not fingerprint Git refs/reflog/worktrees"
         return 1
     fi
     if [ "$GIT_REFS_DIGEST" != "$MARKER_REFS_DIGEST" ]; then
-        WDA_CHECKOUT_REASON="Git refs changed after setup (local commits/branches/stashes are preserved)"
+        IPU_RUNNER_CHECKOUT_REASON="Git refs changed after setup (local commits/branches/stashes are preserved)"
         return 1
     fi
     if [ "$GIT_REFLOG_DIGEST" != "$MARKER_REFLOG_DIGEST" ]; then
-        WDA_CHECKOUT_REASON="Git reflog changed after setup (local history is preserved)"
+        IPU_RUNNER_CHECKOUT_REASON="Git reflog changed after setup (local history is preserved)"
         return 1
     fi
     if [ "$GIT_WORKTREES_DIGEST" != "$MARKER_WORKTREES_DIGEST" ]; then
-        WDA_CHECKOUT_REASON="Git worktree topology changed after setup"
+        IPU_RUNNER_CHECKOUT_REASON="Git worktree topology changed after setup"
         return 1
     fi
     if [ "$GIT_OBJECTS_DIGEST" != "$MARKER_OBJECTS_DIGEST" ]; then
-        WDA_CHECKOUT_REASON="Git object database changed after setup (unpublished objects are preserved)"
+        IPU_RUNNER_CHECKOUT_REASON="Git object database changed after setup (unpublished objects are preserved)"
         return 1
     fi
     worktree_count="$(printf '%s\n' "$GIT_WORKTREES_SNAPSHOT" \
         | awk '$1 == "worktree" { count++ } END { print count + 0 }')"
     worktree_path="$(printf '%s\n' "$GIT_WORKTREES_SNAPSHOT" \
         | awk '$1 == "worktree" { sub(/^worktree /, ""); print; exit }')"
-    if [ "$worktree_count" != "1" ] || [ "$worktree_path" != "$WDA_CHECKOUT" ]; then
-        WDA_CHECKOUT_REASON="linked or non-canonical Git worktrees exist"
+    if [ "$worktree_count" != "1" ] || [ "$worktree_path" != "$IPU_RUNNER_CHECKOUT" ]; then
+        IPU_RUNNER_CHECKOUT_REASON="linked or non-canonical Git worktrees exist"
         return 1
     fi
     return 0
@@ -1273,27 +1273,27 @@ remove_state_transients() {
         [ "$FAILED" = "0" ] || break
     done < <(
         find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type f \
-            \( -name 'setup-wda.sh.new.*' \
-            -o -name 'setup-wda.sh.backup.*' \
-            -o -name 'setup-wda.rollback.*.sh' \
-            -o -name 'setup-wda.install.*' \
-            -o -name 'setup-wda.restore.*' \
-            -o -name 'setup-wda.sh.restore.*' \
-            -o -name 'wda-supervisor.rollback.*.plist' \
-            -o -name 'wda-supervisor.restore.*' \
+            \( -name 'setup-runner.sh.new.*' \
+            -o -name 'setup-runner.sh.backup.*' \
+            -o -name 'setup-runner.rollback.*.sh' \
+            -o -name 'setup-runner.install.*' \
+            -o -name 'setup-runner.restore.*' \
+            -o -name 'setup-runner.sh.restore.*' \
+            -o -name 'runner-supervisor.rollback.*.plist' \
+            -o -name 'runner-supervisor.restore.*' \
             -o -name 'daemon.rollback.*.plist' \
             -o -name 'daemon.restore.*' \
             -o -name 'uninstall.sh.new.*' \
             -o -name 'uninstall.sh.backup.*' \
             -o -name 'uninstall.sh.restore.*' \
-            -o -name 'wda-checkout-owner.v1.new.*' \
-            -o -name 'wda-checkout-owner.v1.restore.*' \
-            -o -name '.wda-runner-product.*' \
-            -o -name 'wda-retry-state.v1.new.*' \
-            -o -name 'wda-xcode-compat.xcconfig.new.*' \
-            -o -name 'wda-setup-status.json.?*' \
+            -o -name 'runner-checkout-owner.v1.new.*' \
+            -o -name 'runner-checkout-owner.v1.restore.*' \
+            -o -name '.runner-product.*' \
+            -o -name 'runner-retry-state.v1.new.*' \
+            -o -name 'runner-xcode-compat.xcconfig.new.*' \
+            -o -name 'runner-setup-status.json.?*' \
             -o -name '.lsof-error.*' \
-            -o -name '.wda-mjpeg-probe.*' \) \
+            -o -name '.runner-mjpeg-probe.*' \) \
             -print0 2>/dev/null
     )
 }
@@ -1317,35 +1317,35 @@ state_unknown_entries() {
                 fi
                 ;;
             uninstall.sh|\
-            setup-wda.sh|\
-            setup-wda.rollback.sh|\
-            setup-wda.sh.new.*|\
-            setup-wda.sh.backup.*|\
-            setup-wda.rollback.*.sh|\
-            setup-wda.install.*|\
-            setup-wda.restore.*|\
-            setup-wda.sh.restore.*|\
-            wda-supervisor.rollback.plist|\
-            wda-supervisor.rollback.*.plist|\
-            wda-supervisor.restore.*|\
+            setup-runner.sh|\
+            setup-runner.rollback.sh|\
+            setup-runner.sh.new.*|\
+            setup-runner.sh.backup.*|\
+            setup-runner.rollback.*.sh|\
+            setup-runner.install.*|\
+            setup-runner.restore.*|\
+            setup-runner.sh.restore.*|\
+            runner-supervisor.rollback.plist|\
+            runner-supervisor.rollback.*.plist|\
+            runner-supervisor.restore.*|\
             daemon.rollback.*.plist|\
             daemon.restore.*|\
             uninstall.sh.new.*|\
             uninstall.sh.backup.*|\
             uninstall.sh.restore.*|\
-            wda-checkout-owner.v1|\
-            wda-checkout-owner.v1.new.*|\
-            wda-checkout-owner.v1.restore.*|\
-            wda-runner.log|wda-runner.pid|\
-            wda-relay.log|wda-relay.pid|\
-            wda-mjpeg-relay.log|wda-mjpeg-relay.pid|\
-            wda-agent.log|wda-setup-status.json|wda-setup-status.json.lock|\
-            wda-runner-product.json|wda-runner-product-build.log|\
-            wda-runner-product-build.repair.log|wda-retry-state.v1|\
-            wda-xcode-compat.xcconfig|wda-relay.log.?*|\
-            .wda-runner-product.*|wda-retry-state.v1.new.*|\
-            wda-xcode-compat.xcconfig.new.*|wda-setup-status.json.?*|\
-            .lsof-error.*|.wda-mjpeg-probe.*)
+            runner-checkout-owner.v1|\
+            runner-checkout-owner.v1.new.*|\
+            runner-checkout-owner.v1.restore.*|\
+            runner.log|runner.pid|\
+            runner-relay.log|runner-relay.pid|\
+            runner-mjpeg-relay.log|runner-mjpeg-relay.pid|\
+            runner-agent.log|runner-setup-status.json|runner-setup-status.json.lock|\
+            runner-product.json|runner-product-build.log|\
+            runner-product-build.repair.log|runner-retry-state.v1|\
+            runner-xcode-compat.xcconfig|runner-relay.log.?*|\
+            .runner-product.*|runner-retry-state.v1.new.*|\
+            runner-xcode-compat.xcconfig.new.*|runner-setup-status.json.?*|\
+            .lsof-error.*|.runner-mjpeg-probe.*)
                 if [ -L "$entry" ] || [ ! -f "$entry" ]; then
                     printf '%s\n' "$entry"
                 fi
@@ -1386,7 +1386,7 @@ PY
 remove_phone_runner() {
     local devicectl_bin status
     if [ "$REMOVE_PHONE_RUNNER" != "1" ]; then
-        info "phone WDA runner kept (default)"
+        info "phone runner kept (default)"
         printf '%s\n' \
             "   To remove it later, pass --remove-phone-runner with the exact --udid and installed --bundle-id."
         return 0
@@ -1439,7 +1439,7 @@ remove_phone_runner() {
 }
 
 preflight_phone_target() {
-    local daemon_udid="" wda_udid="" daemon_bundle="" wda_bundle=""
+    local daemon_udid="" runner_udid="" daemon_bundle="" runner_bundle=""
     local canonical_udid="" canonical_bundle=""
     [ "$REMOVE_PHONE_RUNNER" = "1" ] || return 0
 
@@ -1447,22 +1447,22 @@ preflight_phone_target() {
         daemon_udid="$(plist_get "$DAEMON_PLIST" EnvironmentVariables:IPHONE_USE_UDID)"
         # A plist written before the rename spells it PHONE_REMOTE_UDID.
         [ -n "$daemon_udid" ] || daemon_udid="$(plist_get "$DAEMON_PLIST" EnvironmentVariables:PHONE_REMOTE_UDID)"
-        daemon_bundle="$(plist_get "$DAEMON_PLIST" EnvironmentVariables:WDA_BUNDLE_ID)"
+        daemon_bundle="$(plist_get "$DAEMON_PLIST" EnvironmentVariables:IPU_RUNNER_BUNDLE_ID)"
     fi
-    if plist_owned wda "$WDA_PLIST"; then
-        wda_udid="$(plist_get "$WDA_PLIST" EnvironmentVariables:WDA_UDID)"
-        wda_bundle="$(plist_get "$WDA_PLIST" EnvironmentVariables:WDA_BUNDLE_ID)"
+    if plist_owned runner "$IPU_RUNNER_PLIST"; then
+        runner_udid="$(plist_get "$IPU_RUNNER_PLIST" EnvironmentVariables:IPU_RUNNER_UDID)"
+        runner_bundle="$(plist_get "$IPU_RUNNER_PLIST" EnvironmentVariables:IPU_RUNNER_BUNDLE_ID)"
     fi
 
-    if [ -n "$daemon_udid" ] && [ -n "$wda_udid" ] \
-        && [ "$daemon_udid" != "$wda_udid" ]; then
-        printf 'ERROR: daemon and WDA supervisor disagree on the canonical iPhone target; no phone app was removed.\n' >&2
+    if [ -n "$daemon_udid" ] && [ -n "$runner_udid" ] \
+        && [ "$daemon_udid" != "$runner_udid" ]; then
+        printf 'ERROR: daemon and runner supervisor disagree on the canonical iPhone target; no phone app was removed.\n' >&2
         return 1
     fi
-    canonical_udid="${daemon_udid:-$wda_udid}"
+    canonical_udid="${daemon_udid:-$runner_udid}"
     if [ -z "$canonical_udid" ]; then
         printf 'ERROR: no ownership-verified canonical iPhone UDID is configured; refusing phone removal.\n' >&2
-        printf '       Configure IPHONE_USE_UDID/WDA_UDID first, or use devicectl manually after verification.\n' >&2
+        printf '       Configure IPHONE_USE_UDID/IPU_RUNNER_UDID first, or use devicectl manually after verification.\n' >&2
         return 1
     fi
     if [ "$PHONE_UDID" != "$canonical_udid" ]; then
@@ -1471,20 +1471,20 @@ preflight_phone_target() {
         return 1
     fi
 
-    if [ -n "$daemon_bundle" ] && [ -n "$wda_bundle" ] \
-        && [ "$daemon_bundle" != "$wda_bundle" ]; then
-        printf 'ERROR: daemon and WDA supervisor disagree on the configured WDA bundle id; no phone app was removed.\n' >&2
+    if [ -n "$daemon_bundle" ] && [ -n "$runner_bundle" ] \
+        && [ "$daemon_bundle" != "$runner_bundle" ]; then
+        printf 'ERROR: daemon and runner supervisor disagree on the configured runner bundle id; no phone app was removed.\n' >&2
         return 1
     fi
-    canonical_bundle="${daemon_bundle:-$wda_bundle}"
+    canonical_bundle="${daemon_bundle:-$runner_bundle}"
     if [ -z "$canonical_bundle" ]; then
-        printf 'ERROR: no ownership-verified WDA bundle id is configured; refusing phone removal.\n' >&2
+        printf 'ERROR: no ownership-verified runner bundle id is configured; refusing phone removal.\n' >&2
         return 1
     fi
     case "$PHONE_BUNDLE_ID" in
         "$canonical_bundle"|"$canonical_bundle.xctrunner") ;;
         *)
-            printf 'ERROR: requested runner bundle does not match the configured WDA identity.\n' >&2
+            printf 'ERROR: requested runner bundle does not match the configured runner identity.\n' >&2
             printf '       requested: %s\n       configured base: %s\n' \
                 "$PHONE_BUNDLE_ID" "$canonical_bundle" >&2
             return 1
@@ -1495,34 +1495,34 @@ preflight_phone_target() {
 
 preflight_phone_target || exit 2
 
-CONFIGURED_WDA_REF=""
-CONFIGURED_WDA_DIR=""
-CONFIGURED_WDA_UDID=""
-if plist_owned wda "$WDA_PLIST"; then
-    CONFIGURED_WDA_REF="$(plist_get "$WDA_PLIST" EnvironmentVariables:WDA_REF)"
-    CONFIGURED_WDA_DIR="$(plist_get "$WDA_PLIST" EnvironmentVariables:WDA_DIR)"
-    CONFIGURED_WDA_UDID="$(plist_get "$WDA_PLIST" EnvironmentVariables:WDA_UDID)"
-    if [ -n "$CONFIGURED_WDA_REF" ] \
-        && { [ "${#CONFIGURED_WDA_REF}" -ne 40 ] \
-            || printf '%s' "$CONFIGURED_WDA_REF" | grep -Eq '[^0-9A-Fa-f]'; }; then
-        fail "configured WDA_REF is malformed; the checkout will be preserved"
+CONFIGURED_RUNNER_REF=""
+CONFIGURED_RUNNER_DIR=""
+CONFIGURED_RUNNER_UDID=""
+if plist_owned runner "$IPU_RUNNER_PLIST"; then
+    CONFIGURED_RUNNER_REF="$(plist_get "$IPU_RUNNER_PLIST" EnvironmentVariables:IPU_RUNNER_REF)"
+    CONFIGURED_RUNNER_DIR="$(plist_get "$IPU_RUNNER_PLIST" EnvironmentVariables:IPU_RUNNER_DIR)"
+    CONFIGURED_RUNNER_UDID="$(plist_get "$IPU_RUNNER_PLIST" EnvironmentVariables:IPU_RUNNER_UDID)"
+    if [ -n "$CONFIGURED_RUNNER_REF" ] \
+        && { [ "${#CONFIGURED_RUNNER_REF}" -ne 40 ] \
+            || printf '%s' "$CONFIGURED_RUNNER_REF" | grep -Eq '[^0-9A-Fa-f]'; }; then
+        fail "configured IPU_RUNNER_REF is malformed; the checkout will be preserved"
     fi
-    case "$CONFIGURED_WDA_UDID" in
+    case "$CONFIGURED_RUNNER_UDID" in
         ''|*[!0-9A-Fa-f-]*)
-            fail "configured WDA_UDID is malformed; the checkout will be preserved"
+            fail "configured IPU_RUNNER_UDID is malformed; the checkout will be preserved"
             ;;
     esac
 fi
-WDA_CHECKOUT_REASON=""
-WDA_CHECKOUT_PRESENT=0
-WDA_CHECKOUT_REMOVABLE=1
-if path_exists "$WDA_CHECKOUT"; then
-    WDA_CHECKOUT_PRESENT=1
-    if [ -L "$WDA_CHECKOUT" ]; then
-        WDA_CHECKOUT_REASON="checkout path is a symlink"
-        WDA_CHECKOUT_REMOVABLE=0
-    elif ! wda_checkout_owned; then
-        WDA_CHECKOUT_REMOVABLE=0
+IPU_RUNNER_CHECKOUT_REASON=""
+IPU_RUNNER_CHECKOUT_PRESENT=0
+IPU_RUNNER_CHECKOUT_REMOVABLE=1
+if path_exists "$IPU_RUNNER_CHECKOUT"; then
+    IPU_RUNNER_CHECKOUT_PRESENT=1
+    if [ -L "$IPU_RUNNER_CHECKOUT" ]; then
+        IPU_RUNNER_CHECKOUT_REASON="checkout path is a symlink"
+        IPU_RUNNER_CHECKOUT_REMOVABLE=0
+    elif ! runner_checkout_owned; then
+        IPU_RUNNER_CHECKOUT_REMOVABLE=0
     fi
 fi
 
@@ -1537,19 +1537,19 @@ if [ "$INSTANCE_NAME" = default ]; then
     stop_owned_job legacy "$LEGACY_LABEL" "$LEGACY_PLIST" || LEGACY_RUNTIME_CLEAN=0
 fi
 
-info "2/5 stopping the product-owned WDA supervisor and PID-verified processes"
-WDA_RUNTIME_CLEAN=1
-stop_owned_job wda "$WDA_LABEL" "$WDA_PLIST" || WDA_RUNTIME_CLEAN=0
+info "2/5 stopping the product-owned runner supervisor and PID-verified processes"
+IPU_RUNNER_RUNTIME_CLEAN=1
+stop_owned_job runner "$IPU_RUNNER_LABEL" "$IPU_RUNNER_PLIST" || IPU_RUNNER_RUNTIME_CLEAN=0
 if [ "$STATE_SAFE" = "1" ]; then
-    stop_pid_record "$STATE_DIR/wda-runner.pid" runner || WDA_RUNTIME_CLEAN=0
-    stop_pid_record "$STATE_DIR/wda-relay.pid" relay || WDA_RUNTIME_CLEAN=0
-    stop_pid_record "$STATE_DIR/wda-mjpeg-relay.pid" mjpeg || WDA_RUNTIME_CLEAN=0
+    stop_pid_record "$STATE_DIR/runner.pid" runner || IPU_RUNNER_RUNTIME_CLEAN=0
+    stop_pid_record "$STATE_DIR/runner-relay.pid" relay || IPU_RUNNER_RUNTIME_CLEAN=0
+    stop_pid_record "$STATE_DIR/runner-mjpeg-relay.pid" mjpeg || IPU_RUNNER_RUNTIME_CLEAN=0
 else
-    warn "skipping WDA PID records because $STATE_DIR failed the namespace guard"
-    WDA_RUNTIME_CLEAN=0
+    warn "skipping runner PID records because $STATE_DIR failed the namespace guard"
+    IPU_RUNNER_RUNTIME_CLEAN=0
 fi
-if [ "$WDA_RUNTIME_CLEAN" != "1" ]; then
-    warn "WDA shutdown was not fully ownership-verified; preserving its plist, PID records, logs, setup script, and checkout."
+if [ "$IPU_RUNNER_RUNTIME_CLEAN" != "1" ]; then
+    warn "runner shutdown was not fully ownership-verified; preserving its plist, PID records, logs, setup script, and checkout."
     warn "For each preserved *.pid, compare its first field with:"
     warn "  ps -ww -p <PID> -o uid=,lstart=,command="
     warn "Only after the UID/start-time/command identify this product, send 'kill -TERM <PID>' and rerun the uninstaller."
@@ -1603,36 +1603,36 @@ elif [ "$LEGACY_RUNTIME_CLEAN" = "1" ]; then
 else
     warn "preserved legacy daemon plist, app, and logs because its shutdown/ownership was not verified"
 fi
-if [ "$WDA_RUNTIME_CLEAN" != "1" ] \
-    || [ "$WDA_CHECKOUT_REMOVABLE" != "1" ] \
+if [ "$IPU_RUNNER_RUNTIME_CLEAN" != "1" ] \
+    || [ "$IPU_RUNNER_CHECKOUT_REMOVABLE" != "1" ] \
     || [ "$FAILED" != "0" ]; then
-    warn "preserved WDA supervisor plist for recovery: $WDA_PLIST"
+    warn "preserved runner supervisor plist for recovery: $IPU_RUNNER_PLIST"
 fi
 
-info "5/5 removing iphone-use-owned runner builds, WDA checkout and state"
+info "5/5 removing iphone-use-owned runner builds, runner checkout and state"
 STATE_TREE_REMOVABLE=1
-if [ "$WDA_RUNTIME_CLEAN" != "1" ]; then
-    warn "preserved $STATE_DIR because a WDA process/supervisor could still be active"
+if [ "$IPU_RUNNER_RUNTIME_CLEAN" != "1" ]; then
+    warn "preserved $STATE_DIR because a runner process/supervisor could still be active"
     STATE_TREE_REMOVABLE=0
-elif [ "$STATE_SAFE" = "1" ] && [ "$WDA_CHECKOUT_PRESENT" = "1" ]; then
-    if [ "$WDA_CHECKOUT_REMOVABLE" = "1" ]; then
+elif [ "$STATE_SAFE" = "1" ] && [ "$IPU_RUNNER_CHECKOUT_PRESENT" = "1" ]; then
+    if [ "$IPU_RUNNER_CHECKOUT_REMOVABLE" = "1" ]; then
         # The first proof happened before process shutdown and optional device
         # work. Re-run the full marker/Git proof immediately before rm -rf so a
         # checkout that became dirty or gained refs/worktrees is preserved.
-        if wda_checkout_owned; then
-            remove_tree "$WDA_CHECKOUT" "$STATE_DIR/WebDriverAgent" "$STATE_DIR"
+        if runner_checkout_owned; then
+            remove_tree "$IPU_RUNNER_CHECKOUT" "$STATE_DIR/WebDriverAgent" "$STATE_DIR"
         else
-            fail "preserving WDA checkout after final ownership recheck: ${WDA_CHECKOUT_REASON:-ownership changed}: $WDA_CHECKOUT"
+            fail "preserving runner checkout after final ownership recheck: ${IPU_RUNNER_CHECKOUT_REASON:-ownership changed}: $IPU_RUNNER_CHECKOUT"
             STATE_TREE_REMOVABLE=0
         fi
     else
-        fail "preserving WDA checkout: ${WDA_CHECKOUT_REASON:-ownership could not be verified}: $WDA_CHECKOUT"
+        fail "preserving runner checkout: ${IPU_RUNNER_CHECKOUT_REASON:-ownership could not be verified}: $IPU_RUNNER_CHECKOUT"
         STATE_TREE_REMOVABLE=0
     fi
 fi
 
 if [ "$FAILED" = "0" ] \
-    && [ "$WDA_RUNTIME_CLEAN" = "1" ] \
+    && [ "$IPU_RUNNER_RUNTIME_CLEAN" = "1" ] \
     && [ "$STATE_SAFE" = "1" ]; then
     # Device runner build products (per instance). Only reached once the
     # runner itself is verified stopped.
@@ -1648,24 +1648,24 @@ if [ "$FAILED" = "0" ] \
         fi
     fi
     for state_name in \
-        wda-runner-product.json \
-        wda-runner-product-build.log \
-        wda-runner-product-build.repair.log \
-        wda-retry-state.v1 \
-        wda-xcode-compat.xcconfig \
-        wda-setup-status.json.lock \
-        wda-runner.log \
-        wda-runner.pid \
-        wda-relay.log \
-        wda-relay.pid \
-        wda-mjpeg-relay.log \
-        wda-mjpeg-relay.pid \
-        wda-agent.log \
-        wda-setup-status.json \
-        wda-checkout-owner.v1 \
-        setup-wda.rollback.sh \
-        wda-supervisor.rollback.plist \
-        setup-wda.sh
+        runner-product.json \
+        runner-product-build.log \
+        runner-product-build.repair.log \
+        runner-retry-state.v1 \
+        runner-xcode-compat.xcconfig \
+        runner-setup-status.json.lock \
+        runner.log \
+        runner.pid \
+        runner-relay.log \
+        runner-relay.pid \
+        runner-mjpeg-relay.log \
+        runner-mjpeg-relay.pid \
+        runner-agent.log \
+        runner-setup-status.json \
+        runner-checkout-owner.v1 \
+        setup-runner.rollback.sh \
+        runner-supervisor.rollback.plist \
+        setup-runner.sh
     do
         remove_file "$STATE_DIR/$state_name" "$STATE_DIR/$state_name"
         [ "$FAILED" = "0" ] || break
@@ -1676,7 +1676,7 @@ fi
 FINALIZE_STATE=0
 STATE_UNKNOWN=""
 if [ "$FAILED" = "0" ] \
-    && [ "$WDA_RUNTIME_CLEAN" = "1" ] \
+    && [ "$IPU_RUNNER_RUNTIME_CLEAN" = "1" ] \
     && [ "$STATE_SAFE" = "1" ] \
     && [ "$STATE_TREE_REMOVABLE" = "1" ]; then
     if [ ! -d "$STATE_DIR" ]; then
@@ -1692,9 +1692,9 @@ if [ "$FAILED" = "0" ] \
 fi
 
 if [ "$FINALIZE_STATE" = "1" ]; then
-    # Keep both WDA configuration and the retry entrypoint until every earlier
+    # Keep both runner configuration and the retry entrypoint until every earlier
     # process/file operation has succeeded.
-    remove_owned_plist wda "$WDA_PLIST"
+    remove_owned_plist runner "$IPU_RUNNER_PLIST"
     if [ "$FAILED" = "0" ] && [ -d "$STATE_DIR" ]; then
         if [ "$DRY_RUN" = "1" ]; then
             plan "remove file $STATE_DIR/uninstall.sh last (if installed)"

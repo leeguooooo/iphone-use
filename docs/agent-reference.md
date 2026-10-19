@@ -30,7 +30,7 @@ reconnect, hold, or poll screenshots/elements to keep it ready — idle release
 is intentional, and every runner launch can make the operator type the
 passcode.
 
-`GET /agent/status` (MCP `phone_status`; MCP renames `wda_locked` → `locked`):
+`GET /agent/status` (MCP `phone_status`; MCP renames `runner_locked` → `locked`):
 
 | `device_state` | Meaning | What to do |
 |---|---|---|
@@ -40,7 +40,7 @@ passcode.
 | `releasing` | Release in progress | Do not reconnect or hold. Wait, then reassess, only if the task still needs it. |
 | reconnecting (`reconnecting:true`) | Bring-up running | If `setup_blocked_on` is set, follow `hint`; else report `setup_phase`/`setup_message` and poll. A first build after an Xcode update can take minutes. |
 | `blocked` / `offline` | Something stands in the way | Read `hint` and `setup_blocked_on` (see [Setup blockers](#setup-blockers)); resolve it first. When the person has to act, relay `next_step` (`{zh,en}`, the same line the web page and iOS app show) instead of paraphrasing `hint`. |
-| `degraded` | WDA answers but the last read/action did not complete (heavy page, stalled app) | **Not** a blocker; `setup_blocked_on` is empty. Wait `retry_after_secs` (3s) and read again; do not restart anything. |
+| `degraded` | runner answers but the last read/action did not complete (heavy page, stalled app) | **Not** a blocker; `setup_blocked_on` is empty. Wait `retry_after_secs` (3s) and read again; do not restart anything. |
 | `released` + `human_handoff:true` | The operator handed the phone to a person | Input answers `409 phone_handed_to_human`. Ask the operator before sending `{"mode":"agent"}`. |
 
 **Lock readiness.** `lock_readiness` says whether the phone will lock on its
@@ -122,7 +122,7 @@ abandoned. Release yours when done: `POST /agent/owner {"release":true}` / MCP
 **Hold.** For a human-in-the-loop pause inside a task (operator types a PIN,
 approves a prompt, fetches a code): `POST /agent/hold {"secs":600}` / MCP
 `phone_hold(secs)` (max 14400; 0 clears). Clear it when the pause ends. A hold
-prevents idle release; it does not start WDA or prove readiness. Never use it
+prevents idle release; it does not start runner or prove readiness. Never use it
 to keep the phone ready without a task. Taking a hold extends your owner
 lease to cover it, so no other session can drive the phone during the pause.
 A live owner lease also prevents idle release; the idle window starts when you
@@ -146,7 +146,7 @@ for it explicitly; the answer is `started` or `skipped` with a reason
 `setup_blocked_on` is one of `warp | proxy | not_connected | usb | trust | ddi | account |
 automation_mode_disabled | needs_passcode_on_phone | locked_after_restart | automation_not_allowed |
 wifi_automation_refused | xcode_too_old | ios_too_old |
-ddi_needs_reboot | legacy_needs_usb | locked | wda` (empty = known prerequisites passed;
+ddi_needs_reboot | legacy_needs_usb | locked | runner` (empty = known prerequisites passed;
 KeepAlive keeps the last concrete blocker while it re-checks).
 
 - **`warp`** (the #1 blocker): Cloudflare WARP or another VPN wedges the
@@ -185,8 +185,8 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   15 minutes between attempts; do not reconnect.
 - **`ios_too_old`**: this Mac cannot drive the phone's iOS yet. iOS 15 and 16
   are driven without an iOS update through the legacy path (below), which
-  needs App Store Connect API-key signing (`WDA_ASC_KEY_PATH`, `WDA_ASC_KEY_ID`,
-  `WDA_ASC_ISSUER_ID` of a paid developer account): the selected Xcode cannot
+  needs App Store Connect API-key signing (`IPU_RUNNER_ASC_KEY_PATH`, `IPU_RUNNER_ASC_KEY_ID`,
+  `IPU_RUNNER_ASC_ISSUER_ID` of a paid developer account): the selected Xcode cannot
   see the phone, so only the API can register it and provision the runner.
   iOS 14 and older are below the runner's floor and need an iOS update.
   `setup_message` says which case it is. A cable, WARP or a retry does not
@@ -221,10 +221,10 @@ when idle release keeps a runner that is up because starting it again would need
 person (a passcode phone, or the Wi-Fi case above). The screen still auto-locks; only
 the runner process stays. `IPHONE_USE_IDLE_RELEASE=force` on the daemon turns it off.
 - **`usb`**: the configured iPhone is neither on USB nor on its encrypted
-  CoreDevice Wi-Fi tunnel (or `WDA_TRANSPORT=usb` requires the cable). Off the
+  CoreDevice Wi-Fi tunnel (or `IPU_RUNNER_TRANSPORT=usb` requires the cable). Off the
   cable, setup and relaunch go through that tunnel on their own, with no flag;
   ask the operator to plug the phone in or keep it unlocked on the Mac's network.
-- **`locked`**: unlock the phone. **`ddi` / `account` / `wda`**: follow `hint`.
+- **`locked`**: unlock the phone. **`ddi` / `account` / `runner`**: follow `hint`.
 
 ### iOS 15 and 16 (the legacy path)
 
@@ -244,15 +244,15 @@ The runner lives as long as the launcher's testmanagerd session. Setup launches
 over Wi-Fi (lockdown at the phone's LAN address, heartbeat held) whenever that
 answers, so `unplug_ok: true` means the cable can be pulled and restarts also go
 over Wi-Fi; `launch_transport: "usb"` means pulling the cable ends the runner.
-This Wi-Fi start is what `WDA_TRANSPORT=auto` (the default) means for iOS 15/16,
+This Wi-Fi start is what `IPU_RUNNER_TRANSPORT=auto` (the default) means for iOS 15/16,
 which has no CoreDevice tunnel: lockdown's TLS session with this Mac's pair record,
-not a plain LAN relay. `WDA_TRANSPORT=usb` turns it off (cable only). Controlling
+not a plain LAN relay. `IPU_RUNNER_TRANSPORT=usb` turns it off (cable only). Controlling
 the runner off the cable is a separate question: usbmuxd's Wi-Fi attachment does not
 carry the runner's port (measured on an iPhone X, iOS 16.5: runner alive on its LAN
 address, relay dead), so only a LAN relay reaches it. The runner refuses requests
 not signed with its per-launch token, so setup enables that relay by default once the
 runner has proved it (an unsigned `/status` gets 401); a runner older than request
-signing still needs `WDA_ALLOW_LAN=1`. The LAN path is signed but not encrypted:
+signing still needs `IPU_RUNNER_ALLOW_LAN=1`. The LAN path is signed but not encrypted:
 screen contents cross the Wi-Fi in the clear. `unplug_ok` is true for a Wi-Fi start
 with that relay; otherwise keep the cable in. Idle release
 works as usual; the next request starts the runner again in ~8–12 s.
@@ -265,18 +265,18 @@ HMAC-SHA256 over method, target, body, timestamp and a one-time nonce, so a capt
 request cannot be replayed or altered). Daemon bearer auth protects `/agent/*`.
 The Mac's relays listen on loopback only
 and reach the phone over USB or, off the cable, through CoreDevice's encrypted
-Wi-Fi tunnel (`transport: "wifi-tunnel"`, the default `WDA_TRANSPORT=auto`;
-`WDA_TRANSPORT=usb` requires the cable). A LAN relay to the phone's address
+Wi-Fi tunnel (`transport: "wifi-tunnel"`, the default `IPU_RUNNER_TRANSPORT=auto`;
+`IPU_RUNNER_TRANSPORT=usb` requires the cable). A LAN relay to the phone's address
 (`transport: "wifi"`) is used by default only for an iOS 15/16 runner that enforces
 request signing; anything else (the socat relay, a runner older than request
-signing) needs the explicit `WDA_ALLOW_LAN=1`. The LAN path is unencrypted: use it
+signing) needs the explicit `IPU_RUNNER_ALLOW_LAN=1`. The LAN path is unencrypted: use it
 only on a trusted network.
 
 ## HTTP API
 
 | Call | Purpose |
 |---|---|
-| `GET /agent/status` | `{ok, backend, device_state, screen_state, wda, wda_actionable, wda_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, keep_runner_alive, device, …}` — gate on `drivable` |
+| `GET /agent/status` | `{ok, backend, device_state, screen_state, runner, runner_actionable, runner_locked, drivable, released, owner, hint, setup_blocked_on, setup_phase, setup_message, version, latest, update_available, lock_readiness, keep_runner_alive, device, …}` — gate on `drivable` |
 | `GET /agent/capabilities` | What this build supports + whether the phone is drivable now (`blocked_by`); touches nothing |
 | `GET /agent/elements` | UI as text: `{snapshot, elements:[{kind,label,identifier?,rect,depth,value?,enabled?,visible?,accessible?,focused?,placeholder?}], ax_stats, alert?, registry?}`. `?since=<snapshot>` returns a `delta` `{added,changed,removed,unchanged}` (+ `app_changed`) instead of the full tree. With `IPHONE_USE_ELEMENTS_AFFORDANCES=1` rows also carry `actions`, `selected`, `min`/`max`. `?scope=`, `?query=` and `?limit=` filter the same read ([below](#scoped-and-searched-reads)). `?ocr=auto` adds `ocr:{rows,source}` text rows when the tree is unusable, `?ocr=force` always ([below](#vision-fallback)) |
 | `GET /agent/screenshot` | Device PNG. `?max_side=1200` shrinks it (~0.9k image tokens instead of ~1.5k; MCP's default) and lets a current live frame answer while someone watches. `X-Capture-Redacted: 1` = wireframe of a protected screen ([below](#screens-hidden-from-capture)); `?raw=1` untouched. A sized request is shrunk and JPEG-encoded on the phone, so a slow link carries ~50–100 KB instead of a multi-MB PNG. A capture the link cuts or times out is retried once smaller (`X-Screenshot-Degraded: max_side=N`); a failure is JSON with `cause` (`timeout`, `body_truncated`, `connection_lost`, `connect`, `runner_error`), `transport` and `attempts` (504 on timeout, else 502). `?overlay=elements` numbers each interactive element on the picture ([below](#vision-fallback)) |
@@ -1089,7 +1089,7 @@ flow covers, **ask the user** whether to keep it. Only if they agree:
    tasks: `flow add` instead.
 
 Authoring rules: prefer an accessibility identifier, then unique kind + label,
-over coordinates; never persist snapshot indexes, WDA element ids or snapshot
+over coordinates; never persist snapshot indexes, runner element ids or snapshot
 tokens; wait for states, not fixed sleeps (`pause`/`after_ms` cap at 3s); never
 make passwords, codes, private content, or payment/send/publish/delete targets
 into inputs. The browser's **流程** panel can also record v1 JSON.
@@ -1125,10 +1125,10 @@ AX first; vision only when the tree is unusable.
   `labeled_frac < 0.3` or (`coverage < 0.3` and not `container_only`) → hybrid;
   otherwise stay AX.
 - **Mode B — reading the tree kills the runner** (KakaoTalk, #44): elements
-  returns 502 `wda_source_failed` / 504 `wda_source_timeout` twice in the same app
+  returns 502 `runner_source_failed` / 504 `runner_source_timeout` twice in the same app
   while screenshots work. Remember that per app for the session. Huge trees
   (WeChat's chat list: 3,400 nodes) no longer cause this: above 1,000 nodes the
-  daemon reads without WDA's per-node `isVisible` (~5 s instead of a runner
+  daemon reads without runner's per-node `isVisible` (~5 s instead of a runner
   kill) and says so with `ax_stats.visibility: "geometric"`. On such a tree
   `visible:false` only marks rows outside the screen; a row hidden inside it is
   not flagged, so read rects with care before tapping by element.

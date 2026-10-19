@@ -16,7 +16,7 @@
 // Kept in `tests/` on purpose: nothing here is compiled into the shipped
 // binary, and no test-only constructor is exposed from production code.
 
-/// A minimal state with no WDA client attached.
+/// A minimal state with no runner client attached.
 #[allow(dead_code)]
 fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
     Arc::new(AppState {
@@ -30,23 +30,23 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
         device_udid: None,
         simulator: None,
         inbox: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-        wda: None,
-        managed_wda: false,
-        managed_wda_pending: false,
+        runner: None,
+        managed_runner: false,
+        managed_runner_pending: false,
         latest_release: std::sync::Arc::new(std::sync::Mutex::new(None)),
         mjpeg_url: None,
         video: None,
-        wda_actionable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        wda_read_degraded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        runner_actionable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        runner_read_degraded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pairing: std::sync::Arc::new(srv::pairing::Pairing::new(true)),
-        wda_health: std::sync::Arc::new(std::sync::Mutex::new(srv::wda::WdaHealth::down())),
-        wda_death: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
-        wda_health_probe: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        runner_health: std::sync::Arc::new(std::sync::Mutex::new(srv::runner::RunnerHealth::down())),
+        runner_death: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+        runner_health_probe: std::sync::Arc::new(std::sync::Mutex::new(None)),
         settled_frame_prefetch: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        wda_control_pending: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        runner_control_pending: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         last_activity: std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
         released: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        wda_lifecycle: std::sync::Arc::new(srv::http::WdaLifecycle::new()),
+        runner_lifecycle: std::sync::Arc::new(srv::http::RunnerLifecycle::new()),
         live_streams: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         mjpeg_stream_activity: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
@@ -68,6 +68,6 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
         owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
         owner_lease_secs: 300,
         // Never launchd: a test that reconnects swaps in its own fake.
-        wda_bootstrap: |_, _, _| false,
+        runner_bootstrap: |_, _, _| false,
     })
 }

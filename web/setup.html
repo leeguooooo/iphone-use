@@ -355,8 +355,8 @@
       '安装支持这台 iPhone 系统版本的 Xcode（测试版 iOS 需要测试版 Xcode）；在那之前自动重试也不会成功。':
         'Install an Xcode that supports this iPhone’s iOS version (beta iOS needs beta Xcode); automatic retries won’t succeed until then.',
       '这台 Mac 还驱动不了这台 iPhone 的系统': 'This Mac can’t drive this iPhone’s iOS yet',
-      'iOS 15 和 16 不用升级：配置付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），再重新运行设置命令。iOS 14 及更早的系统只能升级手机。':
-        'iOS 15 and 16 don’t need an update: set up an App Store Connect API key from a paid developer account (WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID), then run the setup command again. iOS 14 and earlier can only be fixed by updating the phone.',
+      'iOS 15 和 16 不用升级：配置付费开发者账号的 App Store Connect API 密钥（IPU_RUNNER_ASC_KEY_PATH / IPU_RUNNER_ASC_KEY_ID / IPU_RUNNER_ASC_ISSUER_ID），再重新运行设置命令。iOS 14 及更早的系统只能升级手机。':
+        'iOS 15 and 16 don’t need an update: set up an App Store Connect API key from a paid developer account (IPU_RUNNER_ASC_KEY_PATH / IPU_RUNNER_ASC_KEY_ID / IPU_RUNNER_ASC_ISSUER_ID), then run the setup command again. iOS 14 and earlier can only be fixed by updating the phone.',
       '配置 App Store Connect API 密钥（iOS 15/16），或升级 iPhone（iOS 14 及更早）；在那之前自动重试也不会成功，换线也没用。':
         'Set up an App Store Connect API key (iOS 15/16) or update the iPhone (iOS 14 and earlier); automatic retries won’t succeed until then, and a different cable won’t help.',
       '请重启一次 iPhone': 'Restart the iPhone once',
@@ -370,8 +370,8 @@
       '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，服务会立刻接着连接；之后只要手机和这台 Mac 在同一网络就可以拔线。':
         'This iOS 15/16 iPhone is not plugged in and this Mac can’t reach it over Wi-Fi: plug it in once and keep it unlocked, and the service connects right away. After that you can unplug it as long as the phone and this Mac share a network.',
       '设备服务启动失败': 'The device service failed to start',
-      '保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。':
-        'Keep the phone unlocked and run the setup command again; if it still fails, check the setup-wda errors in the terminal.',
+      '保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-runner 的终端错误。':
+        'Keep the phone unlocked and run the setup command again; if it still fails, check the setup-runner errors in the terminal.',
       // live state
       'iPhone 已连接，可以开始控制': 'iPhone connected and ready to control',
       '设备控制服务已通过检查，可以进入控制页。': 'The device service passed its checks; you can open the controls.',
@@ -523,7 +523,7 @@
       },
       ios_too_old: {
         title: t('这台 Mac 还驱动不了这台 iPhone 的系统'),
-        setup: t('iOS 15 和 16 不用升级：配置付费开发者账号的 App Store Connect API 密钥（WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID），再重新运行设置命令。iOS 14 及更早的系统只能升级手机。'),
+        setup: t('iOS 15 和 16 不用升级：配置付费开发者账号的 App Store Connect API 密钥（IPU_RUNNER_ASC_KEY_PATH / IPU_RUNNER_ASC_KEY_ID / IPU_RUNNER_ASC_ISSUER_ID），再重新运行设置命令。iOS 14 及更早的系统只能升级手机。'),
         retry: t('配置 App Store Connect API 密钥（iOS 15/16），或升级 iPhone（iOS 14 及更早）；在那之前自动重试也不会成功，换线也没用。'),
       },
       ddi_needs_reboot: {
@@ -536,10 +536,10 @@
         setup: t('这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，再重新运行设置命令；之后只要手机和这台 Mac 在同一网络就可以拔线。'),
         retry: t('这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，服务会立刻接着连接；之后只要手机和这台 Mac 在同一网络就可以拔线。'),
       },
-      wda: {
+      runner: {
         title: t('设备服务启动失败'),
-        setup: t('保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。'),
-        retry: t('保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-wda 的终端错误。'),
+        setup: t('保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-runner 的终端错误。'),
+        retry: t('保持手机解锁，重新运行设置命令；若仍失败，再查看 setup-runner 的终端错误。'),
       },
     };
     const managedRetryBlockers = new Set(['warp', 'proxy', 'not_connected', 'usb', 'trust', 'ddi', 'automation_mode_disabled', 'automation_not_allowed', 'needs_passcode_on_phone', 'locked_after_restart']);
@@ -553,14 +553,14 @@
     function managedSetupWillRetry(status) {
       return status?.backend === 'direct' &&
         status?.recovery_owner === 'daemon' &&
-        status?.managed_wda === true &&
+        status?.managed_runner === true &&
         managedRetryBlockers.has(status?.setup_blocked_on);
     }
 
     function showBlocker(code, managedRetry = false) {
       const blockerCopy = blockers[code];
       blocker.hidden = !blockerCopy;
-      blocker.className = `callout${blockerCopy ? ((code === 'wda' || code === 'xcode_too_old' || code === 'ios_too_old') ? ' danger' : ' warn') : ''}`;
+      blocker.className = `callout${blockerCopy ? ((code === 'runner' || code === 'xcode_too_old' || code === 'ios_too_old') ? ' danger' : ' warn') : ''}`;
       if (blockerCopy) {
         blockerTitle.textContent = blockerCopy.title;
         blockerDetail.textContent = managedRetry ? blockerCopy.retry : blockerCopy.setup;
@@ -572,7 +572,7 @@
       const external = status?.recovery_owner === 'external';
       const setupRequired =
         status?.recovery_owner === 'unconfigured' ||
-        status?.managed_wda_pending === true;
+        status?.managed_runner_pending === true;
       const managedRetry = managedSetupWillRetry(status);
       localSetup.hidden = ready || external || !setupRequired;
       externalHelp.hidden = !external || ready;
@@ -615,7 +615,7 @@
         setState(t('还差一次真机设置'), t('完成下面四步后，状态会自动变绿。'));
         return;
       }
-      if (status?.wda_locked === true) {
+      if (status?.runner_locked === true) {
         setState(t('iPhone 当前不可操作'), t('解锁并保持亮屏，连接会自动恢复。'), 'danger');
         return;
       }

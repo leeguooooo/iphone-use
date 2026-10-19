@@ -1,6 +1,6 @@
 //! `perform force_press` on an iPhone without 3D Touch (issue #90).
 //!
-//! WDA checks `XCUIDevice.supportsPressureInteraction` before it synthesizes
+//! runner checks `XCUIDevice.supportsPressureInteraction` before it synthesizes
 //! any touch and answers 400 "Force press is not supported on this device".
 //! That is a refusal, not a lost acknowledgement: the daemon must say nothing
 //! was sent (`retry_safe:true`) and point at `menu`, instead of the
@@ -17,11 +17,11 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use server::http::AppState;
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 
-/// WDA 9.15.3's answer, captured verbatim from an iPhone 17 Pro Max on iOS 27.0.
+/// runner 9.15.3's answer, captured verbatim from an iPhone 17 Pro Max on iOS 27.0.
 const REFUSAL: &str = r#"{
   "value" : {
     "error" : "invalid element state",
@@ -50,8 +50,8 @@ fn http_400(body: &str) -> String {
     )
 }
 
-fn scripted_wda(force_touches: Arc<Mutex<usize>>) -> support::MockWda {
-    mock_wda(move |request, _| {
+fn scripted_runner(force_touches: Arc<Mutex<usize>>) -> support::MockRunner {
+    mock_runner(move |request, _| {
         let line = request.lines().next().unwrap_or("");
         let reply = |s: String| Some((Duration::ZERO, s));
         if line.starts_with("POST /session ") {
@@ -97,8 +97,8 @@ async fn request_json(
 
 async fn force_press(extra: serde_json::Value) -> (StatusCode, serde_json::Value, usize) {
     let force_touches = Arc::new(Mutex::new(0_usize));
-    let wda = scripted_wda(force_touches.clone());
-    let state = build_state_with_wda(wda.url());
+    let runner = scripted_runner(force_touches.clone());
+    let state = build_state_with_runner(runner.url());
     let (status, elements) = request_json(&state, "GET", "/agent/elements", None).await;
     assert_eq!(status, StatusCode::OK, "{elements}");
     let snapshot = elements["snapshot"].as_str().unwrap().to_string();
@@ -135,7 +135,7 @@ fn assert_unsupported(status: StatusCode, json: &serde_json::Value) {
 fn force_press_without_3d_touch_is_a_clear_not_sent_error() {
     block(async {
         let (status, json, sent) = force_press(serde_json::json!({})).await;
-        assert_eq!(sent, 1, "the request must have reached WDA once");
+        assert_eq!(sent, 1, "the request must have reached runner once");
         assert_unsupported(status, &json);
     });
 }
@@ -153,8 +153,8 @@ fn explicit_pressure_and_duration_get_the_same_answer() {
 fn delta_mode_reports_the_same_error() {
     block(async {
         let force_touches = Arc::new(Mutex::new(0_usize));
-        let wda = scripted_wda(force_touches);
-        let state = build_state_with_wda(wda.url());
+        let runner = scripted_runner(force_touches);
+        let state = build_state_with_runner(runner.url());
         let (_, elements) = request_json(&state, "GET", "/agent/elements", None).await;
         let snapshot = elements["snapshot"].as_str().unwrap();
         let index = elements["elements"]

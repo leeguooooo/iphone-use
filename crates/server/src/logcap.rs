@@ -1,6 +1,6 @@
 //! Size caps for the logs launchd and the supervisor point at our stdio.
 //!
-//! Nothing ever rotated `iphone-use.log/.err`, `wda-agent.log` or the relay
+//! Nothing ever rotated `iphone-use.log/.err`, `runner-agent.log` or the relay
 //! logs: a supervisor stuck in a crash loop grew them to gigabytes. Each
 //! long-running process now caps the files behind its own stdout/stderr, found
 //! with `F_GETPATH`, so it works for every path the installer or the supervisor
@@ -8,7 +8,7 @@
 //! (older copies shift to `.2`, `.3`), and the live file keeps only its last
 //! [`KEEP_TAIL`] bytes, cut at a line start: writers hold it open with
 //! `O_APPEND`, so they keep appending, and readers of the latest round (the
-//! daemon parses `wda-agent.log`) still find it.
+//! daemon parses `runner-agent.log`) still find it.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};

@@ -153,7 +153,7 @@ pub(crate) fn observe_screen(tree: &Value) -> Screen {
         if name.is_empty() {
             continue;
         }
-        // WDA trees repeat some controls (a Button and its own StaticText,
+        // runner trees repeat some controls (a Button and its own StaticText,
         // or the same key twice); one entry per kind, name and frame.
         let key = (kind.to_string(), name.clone(), row.get("rect").map(Value::to_string).unwrap_or_default());
         if seen.contains(&key) {

@@ -1239,8 +1239,8 @@ impl PhoneHandler {
         session currently driving the phone (this session presents IPHONE_USE_OWNER, \
         else mcp-<pid>); if it is someone else, do not drive the phone — control calls \
         will be refused with phone_owned. The JSON preserves \
-        backend, target_configured, managed_wda, managed_wda_pending, recovery_owner, \
-        device_state, screen_state, wda, wda_actionable, locked, drivable, released, \
+        backend, target_configured, managed_runner, managed_runner_pending, recovery_owner, \
+        device_state, screen_state, runner, runner_actionable, locked, drivable, released, \
         hint, setup_blocked_on, setup_phase, and setup_message. Gate actions on drivable=true. \
         `lock_readiness` says whether the phone locks on its own when idle (passcode_protected, \
         auto_lock_secs, keep_awake, verdict, hint): will_lock_needs_person means a person must \
@@ -3852,7 +3852,7 @@ mod tests {
     fn an_observed_tap_returns_the_whole_observation_not_a_truncated_preview() {
         let filler = "x".repeat(64 * 1024);
         let body = format!(
-            r#"{{"ok":true,"transport":"wda","tree":"{filler}","snapshot":"snap-1","settle":{{"settled":true,"reason":"stable","captures":2}},"delta":{{"added":["搜索"]}}}}"#
+            r#"{{"ok":true,"transport":"runner","tree":"{filler}","snapshot":"snap-1","settle":{{"settled":true,"reason":"stable","captures":2}},"delta":{{"added":["搜索"]}}}}"#
         );
         assert!(body.len() > 64 * 1024);
         let (url, task) = scripted_daemon("200 OK", body.into_bytes());
@@ -3882,7 +3882,7 @@ mod tests {
     fn an_unobserved_tap_keeps_its_plain_result() {
         let (url, task) = scripted_daemon(
             "200 OK",
-            br#"{"ok":true,"transport":"wda"}"#.to_vec(),
+            br#"{"ok":true,"transport":"runner"}"#.to_vec(),
         );
         let handler = handler_for(&url);
 

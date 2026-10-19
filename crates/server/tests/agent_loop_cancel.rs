@@ -13,13 +13,13 @@ use axum::body::Body;
 use axum::http::Request;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 #[test]
 fn a_cancelled_request_is_counted_cancelled_not_left_in_flight() {
     block(async {
         // The tree read takes far longer than the client is willing to wait.
-        let wda = mock_wda(|request, _| {
+        let runner = mock_runner(|request, _| {
             let line = request.lines().next().unwrap_or("");
             if line.starts_with("POST /session ") {
                 return Some((Duration::ZERO, r#"{"value":{"sessionId":"S"}}"#.to_string()));
@@ -29,7 +29,7 @@ fn a_cancelled_request_is_counted_cancelled_not_left_in_flight() {
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
-        let app = server::http::router(build_state_with_wda(wda.url()));
+        let app = server::http::router(build_state_with_runner(runner.url()));
         let request = Request::builder()
             .uri("/agent/elements")
             .header("x-phone-owner", "cancel-owner")

@@ -15,7 +15,7 @@
 //! cancelled the round half-way: it had taken the lifecycle (`reconnecting`)
 //! but never spawned the readiness wait that ends it. While reconnecting,
 //! status answers from a health cache only that wait refreshes, so every
-//! runner setup brought up afterwards was reported `wda:false`, setup failed
+//! runner setup brought up afterwards was reported `runner:false`, setup failed
 //! each verified handoff with `daemon-fail`, and only restarting the daemon
 //! ended the loop.
 //!
@@ -45,13 +45,13 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// The instance state dir: a temp dir pinned through `IPHONE_USE_STATE_DIR`
-/// before anything resolves the instance, holding the `setup-wda.sh` the
+/// before anything resolves the instance, holding the `setup-runner.sh` the
 /// reconnect handler insists on (never run: the bootstrap is faked).
 fn state_dir() -> &'static std::path::Path {
     static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("setup-wda.sh"), "#!/bin/bash\nexit 0\n").unwrap();
+        std::fs::write(dir.path().join("setup-runner.sh"), "#!/bin/bash\nexit 0\n").unwrap();
         std::env::set_var("IPHONE_USE_STATE_DIR", dir.path());
         std::env::remove_var("IPHONE_USE_INSTANCE");
         assert_eq!(server::instance::current().state_dir, dir.path());
@@ -92,7 +92,7 @@ impl FakeRunner {
     }
 }
 
-fn wda(body: &str) -> axum::response::Response {
+fn runner(body: &str) -> axum::response::Response {
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -101,7 +101,7 @@ fn wda(body: &str) -> axum::response::Response {
         .into_response()
 }
 
-fn wda_error(status: StatusCode, code: &str, message: &str) -> axum::response::Response {
+fn runner_error(status: StatusCode, code: &str, message: &str) -> axum::response::Response {
     (
         status,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -143,7 +143,7 @@ async fn runner_answer(
         runner
             .refused
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        return wda_error(
+        return runner_error(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "request not signed with this launch's token",
@@ -152,27 +152,27 @@ async fn runner_answer(
     let session = format!("L{}", launch.number);
     let path = uri.path();
     match (method.as_str(), path) {
-        ("GET", "/status") => wda(r#"{"value":{"ready":true}}"#),
-        ("GET", "/wda/locked") => wda(r#"{"value":false}"#),
-        ("POST", "/session") => wda(&format!(
+        ("GET", "/status") => runner(r#"{"value":{"ready":true}}"#),
+        ("GET", "/wda/locked") => runner(r#"{"value":false}"#),
+        ("POST", "/session") => runner(&format!(
             r#"{{"value":{{"sessionId":"{session}"}},"sessionId":"{session}"}}"#
         )),
         _ => {
             let Some(rest) = path.strip_prefix("/session/") else {
-                return wda_error(StatusCode::NOT_FOUND, "unknown command", path);
+                return runner_error(StatusCode::NOT_FOUND, "unknown command", path);
             };
             let (sid, route) = rest.split_once('/').unwrap_or((rest, ""));
             if sid != session {
                 // A relaunched runner knows nothing of the last one's session.
-                return wda_error(StatusCode::NOT_FOUND, "invalid session id", sid);
+                return runner_error(StatusCode::NOT_FOUND, "invalid session id", sid);
             }
             match route {
-                "appium/settings" => wda(r#"{"value":{}}"#),
-                "wda/locked" => wda(r#"{"value":false}"#),
+                "appium/settings" => runner(r#"{"value":{}}"#),
+                "wda/locked" => runner(r#"{"value":false}"#),
                 "wda/apps/list" => {
-                    wda(r#"{"value":[{"pid":1,"bundleId":"com.apple.springboard"}]}"#)
+                    runner(r#"{"value":[{"pid":1,"bundleId":"com.apple.springboard"}]}"#)
                 }
-                _ => wda_error(StatusCode::NOT_FOUND, "unknown command", route),
+                _ => runner_error(StatusCode::NOT_FOUND, "unknown command", route),
             }
         }
     }
@@ -228,13 +228,13 @@ fn daemon_state(runner: &FakeRunner) -> Arc<AppState> {
         Ok(state) => state,
         Err(_) => unreachable!("fresh fixture"),
     };
-    state.managed_wda = true;
+    state.managed_runner = true;
     state.device_udid = Some(UDID.to_string());
     // The instance's token source: the daemon reads `<state dir>/runner-token`.
-    state.wda = Some(Arc::new(tokio::sync::Mutex::new(
-        server::wda::WdaClient::new(&runner.url).unwrap(),
+    state.runner = Some(Arc::new(tokio::sync::Mutex::new(
+        server::runner::RunnerClient::new(&runner.url).unwrap(),
     )));
-    state.wda_bootstrap = slow_bootstrap;
+    state.runner_bootstrap = slow_bootstrap;
     Arc::new(state)
 }
 
@@ -249,13 +249,13 @@ async fn wait_drivable(base: &str, within: Duration) -> serde_json::Value {
     let deadline = Instant::now() + within;
     loop {
         let answer = status(base).await;
-        if answer["drivable"] == true && answer["wda"] == true {
+        if answer["drivable"] == true && answer["runner"] == true {
             return answer;
         }
         if Instant::now() >= deadline {
             panic!(
-                "the daemon never reached the relaunched runner within {within:?}: wda={} reconnecting={} released={} drivable={}",
-                answer["wda"], answer["reconnecting"], answer["released"], answer["drivable"]
+                "the daemon never reached the relaunched runner within {within:?}: runner={} reconnecting={} released={} drivable={}",
+                answer["runner"], answer["reconnecting"], answer["released"], answer["drivable"]
             );
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -366,7 +366,7 @@ fn a_verified_handoff_reaches_each_relaunch_and_names_why_it_cannot() {
             runner.refused.load(std::sync::atomic::Ordering::SeqCst) >= refused_before + 2,
             "probed, reset, probed again"
         );
-        assert_eq!(status(&daemon).await["wda"], false);
+        assert_eq!(status(&daemon).await["runner"], false);
 
         // Setup writes the token it launched with: the next handoff reaches it.
         runner.relaunch();

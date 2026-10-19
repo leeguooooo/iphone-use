@@ -2,7 +2,7 @@
 """Shell side of the instance derivation (#67), against the shared fixture.
 
 scripts/fixtures/instance-derivation.json pins what crates/server/src/instance.rs
-derives; this checks that setup-wda.sh `instance-context` and uninstall.sh
+derives; this checks that setup-runner.sh `instance-context` and uninstall.sh
 --instance agree with it, and that the script-only rules hold: per-name port
 slots, skipping ports another instance claims, refusing to bind one phone to
 two daemons, and an installed copy refusing to run as another instance.
@@ -20,11 +20,11 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SETUP = ROOT / "scripts" / "setup-wda.sh"
+SETUP = ROOT / "scripts" / "setup-runner.sh"
 UNINSTALL = ROOT / "uninstall.sh"
 FIXTURE = json.loads((ROOT / "scripts" / "fixtures" / "instance-derivation.json").read_text())
 FIXTURE_HOME = "/Users/leo"
-# setup-wda.sh hands instance-context to the setup engine; use this
+# setup-runner.sh hands instance-context to the setup engine; use this
 # workspace's build of it.
 BIN = ROOT / "target" / "debug" / "iphone-use"
 if not BIN.exists():
@@ -42,7 +42,7 @@ def check(cond, message):
 
 def run(script, args, home, env_extra=None, unset=()):
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("IPHONE_USE_", "PHONE_REMOTE_", "WDA_", "MJPEG_"))}
+           if not k.startswith(("IPHONE_USE_", "PHONE_REMOTE_", "IPU_RUNNER_", "MJPEG_"))}
     env["HOME"] = str(home)
     env["IPHONE_USE_SETUP_BIN"] = str(BIN)
     for key in unset:
@@ -92,13 +92,13 @@ def main():
             result, got = context(home, case["name"], extra)
             label = case["name"] or "<empty>"
             check(result.returncode == 0, f"{label}: instance-context failed: {result.stderr.strip()}")
-            for key in ("state_dir", "daemon_label", "wda_label", "wda_plist"):
+            for key in ("state_dir", "daemon_label", "runner_label", "runner_plist"):
                 want = case[key].replace(FIXTURE_HOME, str(home), 1)
                 check(got.get(key) == want, f"{label}: {key} = {got.get(key)!r}, want {want!r}")
 
         for bad in FIXTURE["invalid_names"]:
             result, _ = context(home, bad)
-            check(result.returncode == 2, f"setup-wda.sh accepted invalid name {bad!r}")
+            check(result.returncode == 2, f"setup-runner.sh accepted invalid name {bad!r}")
             result = run(UNINSTALL, ["--instance", bad, "--dry-run"], home)
             check(result.returncode == 2, f"uninstall.sh accepted invalid name {bad!r}")
         for reserved in FIXTURE["reserved_names"]:
@@ -119,7 +119,7 @@ def main():
             check(got.get(key) == str(want), f"default {key} = {got.get(key)}, want {want}")
         for name, want in ports["first_slot"].items():
             _, got = context(home, name)
-            first = " ".join(str(want[k]) for k in ("daemon_port", "wda_port", "mjpeg_port"))
+            first = " ".join(str(want[k]) for k in ("daemon_port", "runner_port", "mjpeg_port"))
             check(got.get("first_slot_ports") == first,
                   f"{name}: first slot {got.get('first_slot_ports')!r}, want {first!r}")
             # Nothing else is configured, so the first slot is the one taken
@@ -132,8 +132,8 @@ def main():
         lab = ports["first_slot"]["lab"]
         write_plist(home, "com.leeguoo.iphone-use", {
             "IPHONE_USE_PORT": "45432", "IPHONE_USE_UDID": "00008150-AAAA"})
-        write_plist(home, "com.leeguoo.iphone-use.wda", {
-            "WDA_UDID": "00008150-AAAA", "WDA_PORT": "8100", "MJPEG_PORT": "9100"})
+        write_plist(home, "com.leeguoo.iphone-use.runner", {
+            "IPU_RUNNER_UDID": "00008150-AAAA", "IPU_RUNNER_PORT": "8100", "MJPEG_PORT": "9100"})
         write_plist(home, "com.leeguoo.iphone-use.other", {
             "IPHONE_USE_INSTANCE": "other", "IPHONE_USE_PORT": str(lab["daemon_port"]),
             "IPHONE_USE_UDID": "00008110-BBBB"})
@@ -142,15 +142,15 @@ def main():
         _, got = context(home, "lab")
         check(got.get("daemon_port") == str(lab["daemon_port"] + 1),
               f"lab did not skip the slot instance 'other' claims: {got.get('daemon_port')}")
-        result, _ = context(home, "lab", {"WDA_UDID": "00008150-aaaa"})
+        result, _ = context(home, "lab", {"IPU_RUNNER_UDID": "00008150-aaaa"})
         check(result.returncode == 1 and 'instance "default"' in result.stderr,
               f"binding the default phone to lab was not refused: {result.returncode} {result.stderr.strip()}")
-        result, _ = context(home, "lab", {"WDA_UDID": "00008110-BBBB"})
+        result, _ = context(home, "lab", {"IPU_RUNNER_UDID": "00008110-BBBB"})
         check(result.returncode == 1 and 'instance "other"' in result.stderr,
               "binding other's phone to lab was not refused")
-        result, _ = context(home, "lab", {"WDA_UDID": "00008110-CCCC", "WDA_PORT": "8100"})
+        result, _ = context(home, "lab", {"IPU_RUNNER_UDID": "00008110-CCCC", "IPU_RUNNER_PORT": "8100"})
         check(result.returncode == 1 and "TCP 8100" in result.stderr,
-              "a named instance was allowed the default instance's WDA port")
+              "a named instance was allowed the default instance's runner port")
         result, _ = context(home, "default", {"IPHONE_USE_PORT": str(lab["daemon_port"])})
         check(result.returncode == 1, "the default instance was allowed a port 'other' owns")
         result, got = context(home, "default")
@@ -158,7 +158,7 @@ def main():
               f"the default instance's own config was disturbed: {result.stderr.strip()}")
 
         # 4. An installed copy is its instance's, whatever the environment says.
-        installed = home / ".iphone-use" / "instances" / "lab" / "setup-wda.sh"
+        installed = home / ".iphone-use" / "instances" / "lab" / "setup-runner.sh"
         installed.parent.mkdir(parents=True)
         shutil.copy(SETUP, installed)
         result, got = context(home, None, script=installed)
@@ -166,7 +166,7 @@ def main():
               f"installed lab copy did not resolve as lab: {got.get('name')} {result.stderr.strip()}")
         result, _ = context(home, "default", script=installed)
         check(result.returncode == 2, "installed lab copy ran as the default instance")
-        default_copy = home / ".iphone-use" / "setup-wda.sh"
+        default_copy = home / ".iphone-use" / "setup-runner.sh"
         shutil.copy(SETUP, default_copy)
         result, _ = context(home, "lab", script=default_copy)
         check(result.returncode == 2, "the default installed copy ran as instance lab")

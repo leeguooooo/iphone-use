@@ -498,16 +498,16 @@ grep -q 'archive contains a symlink' "$TEST_ROOT/err" \
 pass "release archive rejects symlink-based extraction escapes"
 
 # The disabled-label parser must read both launchctl spellings, or upgrades
-# re-enable a parked WDA supervisor (it then starts at the next login and
+# re-enable a parked runner supervisor (it then starts at the next login and
 # iOS asks for the passcode).
 eval "$(sed -n '/^launchd_label_is_disabled() {$/,/^}$/p' "$INSTALLER")"
 LAUNCHD_DISABLED_SNAPSHOT='disabled services = {
-		"com.leeguoo.iphone-use.wda" => disabled
+		"com.leeguoo.iphone-use.runner" => disabled
 		"com.leeguoo.iphone-use" => enabled
 		"com.example.legacy" => true
 		"com.example.on" => false
 	}'
-launchd_label_is_disabled com.leeguoo.iphone-use.wda \
+launchd_label_is_disabled com.leeguoo.iphone-use.runner \
     || fail_test "a label printed as 'disabled' was read as enabled"
 launchd_label_is_disabled com.example.legacy \
     || fail_test "a label printed as 'true' was read as enabled"

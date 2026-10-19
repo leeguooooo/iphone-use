@@ -809,7 +809,7 @@ pub async fn ensure_drivable(daemon: &DaemonClient) -> std::result::Result<(), S
 pub fn is_locked(status: &serde_json::Value) -> bool {
     status.get("device_state").and_then(|v| v.as_str()) == Some("locked")
         || status.get("setup_blocked_on").and_then(|v| v.as_str()) == Some("locked")
-        || status.get("wda_locked").and_then(|v| v.as_bool()) == Some(true)
+        || status.get("runner_locked").and_then(|v| v.as_bool()) == Some(true)
 }
 
 /// Run a validated suite. The caller has already checked `--confirm` and

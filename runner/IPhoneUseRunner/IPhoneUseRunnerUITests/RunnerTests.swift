@@ -1,4 +1,4 @@
-// iphone-use native runner: a single long-running XCTest method that serves a small WDA-shaped
+// iphone-use native runner: a single long-running XCTest method that serves a small runner-shaped
 // HTTP API for the iphone-use daemon.
 //
 // The overall shape (one test method hosting an NWListener, blocking in XCTWaiter, swallowing
@@ -11,7 +11,7 @@ import XCTest
 
 final class RunnerTests: XCTestCase {
   static let springBoardBundleID = "com.apple.springboard"
-  /// WDA's ports, so existing relays and daemon config work unchanged.
+  /// runner's ports, so existing relays and daemon config work unchanged.
   static let defaultPort: UInt16 = 8100
   static let defaultMJPEGPort: UInt16 = 9100
   static let defaultMaxDepth = 64
@@ -30,14 +30,14 @@ final class RunnerTests: XCTestCase {
   /// Issues XCTest recorded while the current request ran (fallback XCUI paths report through here).
   var recordedIssues: [String] = []
 
-  // WDA-compatible surface (RunnerWDA.swift).
+  // WebDriverAgent-compatible surface (RunnerRoutes.swift).
   /// The one session id this runner hands out; any id is accepted in session paths.
   static let sessionID = UUID().uuidString
   static let systemVersion = UIDevice.current.systemVersion
   let elements = ElementRegistry()
   /// Holds off Auto-Lock while the daemon says the phone is in use (`POST /wda/keepawake`).
   let keepAwake = KeepAwake()
-  /// Last alert scan and when it ran; reused for a second while nothing was POSTed (WdaClient asks
+  /// Last alert scan and when it ran; reused for a second while nothing was POSTed (RunnerClient asks
   /// /alert/text and /wda/alert/buttons back to back).
   var alertCache: (at: Date, alert: FoundAlert?)?
   /// Where a request's time went, by part (ms and call count), sent back as X-IPU-<Part>-Ms and
@@ -54,7 +54,7 @@ final class RunnerTests: XCTestCase {
     return try body()
   }
   /// appium/settings values, accepted and echoed (the runner never waits for idle anyway).
-  var wdaSettings: [String: Any] = ["waitForIdleTimeout": 0, "animationCoolOffTimeout": 0]
+  var runnerSettings: [String: Any] = ["waitForIdleTimeout": 0, "animationCoolOffTimeout": 0]
 
   override func setUp() {
     continueAfterFailure = true
@@ -171,14 +171,14 @@ final class RunnerTests: XCTestCase {
     if request.path == "/status" {
       return .value(statusValue(), sessionId: Self.sessionID)
     }
-    // WDA serves the lock state without a session; the daemon reads it first precisely because a
+    // runner serves the lock state without a session; the daemon reads it first precisely because a
     // locked phone stalls everything else, so it must not queue behind main either.
     if request.path == "/wda/locked"
       || (request.path.hasPrefix("/session/") && request.path.hasSuffix("/wda/locked")) {
       var known = ObjCBool(false)
       let locked = IPURBridge.isScreenLocked(&known)
       if known.boolValue { return .value(locked) }
-      return nil  // unknown: answered on main (see RunnerWDA.locked)
+      return nil  // unknown: answered on main (see RunnerRoutes.locked)
     }
     return nil
   }
@@ -323,7 +323,7 @@ final class RunnerTests: XCTestCase {
   }
 
   func route(_ request: HTTPRequest) throws -> HTTPResponse {
-    if let response = try routeWDA(request) { return response }
+    if let response = try routeRunner(request) { return response }
     switch (request.method, request.path) {
     case ("GET", "/source"): return try source(request)
     case ("POST", "/tap"): return try tap(request)
@@ -428,7 +428,7 @@ final class RunnerTests: XCTestCase {
 
     var privateError: String?
     if !forceXCUI, let element = target.element {
-      let tree = IPURBridge.wdaTree(
+      let tree = IPURBridge.runnerTree(
         forAXElement: element,
         maxDepth: maxDepth,
         maxNodes: maxNodes,
@@ -463,7 +463,7 @@ final class RunnerTests: XCTestCase {
       let reason = snapshotError.map { String(describing: $0) } ?? recordedIssues.last ?? "snapshot unavailable"
       throw RunnerError.failed("source failed (private AX: \(privateError ?? "skipped"); XCUI: \(reason))")
     }
-    let tree = IPURBridge.wdaTree(forSnapshot: snapshot as AnyObject, maxNodes: maxNodes)
+    let tree = IPURBridge.runnerTree(forSnapshot: snapshot as AnyObject, maxNodes: maxNodes)
     guard (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] else {
       throw RunnerError.failed(tree[IPURTreeErrorKey] as? String ?? "snapshot serialization failed")
     }
@@ -537,7 +537,7 @@ final class RunnerTests: XCTestCase {
   /// `.some(nil)`: read, no alert; `nil`: unreadable.
   func alertInTree(_ element: AnyObject, pid: Int32) -> FoundAlert?? {
     func read(_ depth: Int) -> [String: Any]? {
-      let tree = IPURBridge.wdaTree(
+      let tree = IPURBridge.runnerTree(
         forAXElement: element, maxDepth: depth, maxNodes: Self.defaultMaxNodes,
         extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
       guard (tree[IPURTreeOkKey] as? Bool) == true else { return nil }
@@ -784,7 +784,7 @@ final class RunnerTests: XCTestCase {
   /// A Safari dialog anywhere in the target's tree (AlertScan.webDialog), read at full depth.
   func webDialogAtFullDepth(_ element: AnyObject, pid: Int32) -> FoundAlert? {
     let tree = timed("AlertWebDialogRead") {
-      IPURBridge.wdaTree(
+      IPURBridge.runnerTree(
         forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
         extensionCallLimit: 0, rememberKey: pid > 0 ? String(pid) : nil)
     }

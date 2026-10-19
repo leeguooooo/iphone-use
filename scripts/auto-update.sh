@@ -18,8 +18,8 @@
 # phone task is exactly the kind of interruption #72 was filed about — so when
 # the phone is busy we log one line and try again tomorrow.
 #
-# WDA being up (device_state "ready") is deliberately NOT "in use". Since v0.6.3
-# the daemon no longer idle-releases WDA, so a connected phone is "ready" around
+# runner being up (device_state "ready") is deliberately NOT "in use". Since v0.6.3
+# the daemon no longer idle-releases runner, so a connected phone is "ready" around
 # the clock and a gate on it never upgraded anything. Daemons older than
 # `idle_secs` expose activity only through the owner lease (it outlives a named
 # client's last request by 300s); unnamed clients are invisible to them.
@@ -115,7 +115,7 @@ if not force:
     if s.get('releasing') or s.get('reconnecting'):
         print('skip:transitioning'); sys.exit(0)
     # The hand-off lives in the daemon's memory: a restart would forget the
-    # phone is a person's, and the next agent request would start WDA under them.
+    # phone is a person's, and the next agent request would start runner under them.
     if s.get('human_handoff'):
         print('skip:handed_to_person'); sys.exit(0)
     viewers = (s.get('viewer_count') or 0) + (s.get('mjpeg_viewer_count') or 0)

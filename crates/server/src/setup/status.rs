@@ -1,4 +1,4 @@
-//! The setup status protocol (v1): `wda-setup-status.json`, which the daemon
+//! The setup status protocol (v1): `runner-setup-status.json`, which the daemon
 //! and the web client read to show what setup is doing and what blocks it.
 //!
 //! One owner per attempt. Every writer — the setup run itself, its heartbeat
@@ -35,7 +35,7 @@ const STICKY_ON_BEGIN: &[&str] = &[
     "ddi_needs_reboot",
     "legacy_needs_usb",
     "not_connected",
-    "wda",
+    "runner",
 ];
 
 #[derive(Debug, Clone)]
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn begin_keeps_only_sticky_blockers() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wda-setup-status.json");
+        let path = dir.path().join("runner-setup-status.json");
         std::fs::write(&path, r#"{"blocked_on":"trust","run_id":"old"}"#).unwrap();
         assert!(publish(&owner(&path, "a"), &Op::Begin).unwrap());
         let value = read(&path);

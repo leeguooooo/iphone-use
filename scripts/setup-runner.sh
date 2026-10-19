@@ -1,34 +1,34 @@
 #!/usr/bin/env bash
-# scripts/setup-wda.sh — the entry point of the device-layer setup (the
+# scripts/setup-runner.sh — the entry point of the device-layer setup (the
 # iphone-use device runner, runner/IPhoneUseRunner).
 #
 # The setup itself is `iphone-use setup-native <command>` (Rust,
 # crates/server/src/setup): it builds the runner, installs and launches it on
 # the iPhone, relays it to loopback, points the daemon at it, and — run by
-# launchd with WDA_KEEPALIVE=1 — supervises it. This script stays the entry
+# launchd with IPU_RUNNER_KEEPALIVE=1 — supervises it. This script stays the entry
 # point because launchd's runner supervisor, the daemon (reconnect, idle
 # release), the installers and existing installs all address the device
-# layer through it, its name, its WDA_* environment variables, its launchd
+# layer through it, its name, its IPU_RUNNER_* environment variables, its launchd
 # label and its status file. It only finds the iphone-use binary and hands
 # the command over with the same environment.
 #
 # Usage:
-#   ./scripts/setup-wda.sh            # full setup (interactive prompts as needed)
-#   ./scripts/setup-wda.sh status     # is the runner + relay up?
-#   ./scripts/setup-wda.sh stop       # stop the runner + relays
-#   ./scripts/setup-wda.sh pause      # give the phone back; disable auto-restart
-#   ./scripts/setup-wda.sh resume     # re-enable the managed runner supervisor
-#   ./scripts/setup-wda.sh doctor     # read-only preflight checklist
-#   ./scripts/setup-wda.sh instance-context  # read-only: resolved paths/ports
+#   ./scripts/setup-runner.sh            # full setup (interactive prompts as needed)
+#   ./scripts/setup-runner.sh status     # is the runner + relay up?
+#   ./scripts/setup-runner.sh stop       # stop the runner + relays
+#   ./scripts/setup-runner.sh pause      # give the phone back; disable auto-restart
+#   ./scripts/setup-runner.sh resume     # re-enable the managed runner supervisor
+#   ./scripts/setup-runner.sh doctor     # read-only preflight checklist
+#   ./scripts/setup-runner.sh instance-context  # read-only: resolved paths/ports
 #
 # Env overrides:
-#   WDA_UDID=...        target device UDID (default: the one USB iPhone)
-#   WDA_TEAM_ID=...     Apple dev team (default: Xcode's last-selected team)
-#   WDA_ASC_KEY_PATH=... absolute .p8 path; with both IDs, use ASC API key signing
-#   WDA_ASC_KEY_ID=...  App Store Connect key ID (all three WDA_ASC_* required)
-#   WDA_ASC_ISSUER_ID=... App Store Connect issuer ID
-#   WDA_BUNDLE_ID=...   runner bundle id (default: derived from validated Team ID)
-#   WDA_RUNNER_ICON=... the runner's Home Screen icon: auto, none, or a .png/.icns
+#   IPU_RUNNER_UDID=...        target device UDID (default: the one USB iPhone)
+#   IPU_RUNNER_TEAM_ID=...     Apple dev team (default: Xcode's last-selected team)
+#   IPU_RUNNER_ASC_KEY_PATH=... absolute .p8 path; with both IDs, use ASC API key signing
+#   IPU_RUNNER_ASC_KEY_ID=...  App Store Connect key ID (all three IPU_RUNNER_ASC_* required)
+#   IPU_RUNNER_ASC_ISSUER_ID=... App Store Connect issuer ID
+#   IPU_RUNNER_BUNDLE_ID=...   runner bundle id (default: derived from validated Team ID)
+#   IPU_RUNNER_ICON=... the runner's Home Screen icon: auto, none, or a .png/.icns
 #   IPU_RUNNER_SRC=...  device runner sources (default: ~/.iphone-use/runner; a
 #                       repo checkout uses its own runner/)
 #   IPU_EMBED=0         build the runner without the on-phone daemon
@@ -36,21 +36,21 @@
 #                       <runner sources>/embed/libipu_embed.a; a checkout builds it)
 #   IPU_DAEMON_HOST=... where the on-phone daemon listens (default: 127.0.0.1)
 #   IPHONE_USE_XCODE=... this phone's own Xcode (`iphone-use setup --xcode`)
-#   WDA_PORT=...        control relay port (default: 8100; named instances: derived)
+#   IPU_RUNNER_PORT=...        control relay port (default: 8100; named instances: derived)
 #   MJPEG_PORT=...      video relay port (default: 9100; named instances: derived)
 #   IPHONE_USE_INSTANCE=... which daemon/phone pair (default: default)
-#   WDA_TRANSPORT=...   auto (default): off USB, set up and relaunch through the
+#   IPU_RUNNER_TRANSPORT=...   auto (default): off USB, set up and relaunch through the
 #                       phone's encrypted CoreDevice Wi-Fi tunnel (USB preferred);
 #                       usb: require the cable
-#   WDA_ALLOW_LAN=1     also permit a plain, unencrypted LAN socat relay to the
+#   IPU_RUNNER_ALLOW_LAN=1     also permit a plain, unencrypted LAN socat relay to the
 #                       phone's address, and the LAN path to an iOS 15/16 runner
 #                       older than request signing (unsafe on untrusted networks;
 #                       default off)
-#   WDA_RUNNER_REBUILD=1 ignore the recorded runner product and build again
+#   IPU_RUNNER_REBUILD=1 ignore the recorded runner product and build again
 #   IPHONE_USE_SETUP_BIN=... the iphone-use binary to hand over to (default: the
 #                       daemon's own, then ~/Applications, then /Applications)
 #
-# Requirements: Xcode (an Apple ID in Settings → Accounts, or WDA_ASC_* signing),
+# Requirements: Xcode (an Apple ID in Settings → Accounts, or IPU_RUNNER_ASC_* signing),
 # the iPhone paired + Developer Mode on, and the iPhoneUse app (install.sh).
 set -eu
 umask 077
@@ -73,11 +73,11 @@ esac
 SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 INSTALLED=""
 case "$SELF" in
-    "$HOME/.iphone-use/instances/"*/setup-wda.sh)
+    "$HOME/.iphone-use/instances/"*/setup-runner.sh)
         INSTALLED="${SELF#"$HOME/.iphone-use/instances/"}"
-        INSTALLED="${INSTALLED%/setup-wda.sh}"
+        INSTALLED="${INSTALLED%/setup-runner.sh}"
         ;;
-    "$HOME/.iphone-use/setup-wda.sh") INSTALLED=default ;;
+    "$HOME/.iphone-use/setup-runner.sh") INSTALLED=default ;;
 esac
 # Installs made before the rename set PHONE_REMOTE_*; read them as IPHONE_USE_*
 # (the new name wins). Names are [A-Z0-9_], so the eval is safe.
@@ -90,11 +90,11 @@ REQUESTED="${IPHONE_USE_INSTANCE-}"
 if [ -n "$INSTALLED" ] && [ "$INSTALLED" != "$REQUESTED" ] \
     && [ -z "${IPHONE_USE_STATE_DIR:-}" ]; then
     if [ "$REQUESTED" = default ]; then
-        OTHER="$HOME/.iphone-use/setup-wda.sh"
+        OTHER="$HOME/.iphone-use/setup-runner.sh"
     else
-        OTHER="$HOME/.iphone-use/instances/$REQUESTED/setup-wda.sh"
+        OTHER="$HOME/.iphone-use/instances/$REQUESTED/setup-runner.sh"
     fi
-    printf 'this setup-wda.sh belongs to instance "%s" but IPHONE_USE_INSTANCE is "%s"; run %s instead\n' \
+    printf 'this setup-runner.sh belongs to instance "%s" but IPHONE_USE_INSTANCE is "%s"; run %s instead\n' \
         "$INSTALLED" "$REQUESTED" "$OTHER" >&2
     exit 2
 fi

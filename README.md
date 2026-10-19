@@ -272,7 +272,7 @@ Through the full agent API, a tap by label that returns the settled change takes
 ## More
 
 - [Full guide](docs/guide.md): browser and iOS app, flows and the flow registry, Wi-Fi and iOS 15/16, lifecycle, configuration, security, development.
-- [Agent API reference](docs/agent-api.html) · [MCP tools](crates/mcp/README.md) · [Architecture](docs/direct-device-architecture.html) · [Device setup pitfalls](docs/wda-setup.html) · [Device runner](runner/README.md) · [Privacy](docs/privacy.md)
+- [Agent API reference](docs/agent-api.html) · [MCP tools](crates/mcp/README.md) · [Architecture](docs/direct-device-architecture.html) · [Device setup pitfalls](docs/runner-setup.html) · [Device runner](runner/README.md) · [Privacy](docs/privacy.md)
 - [Product guide](https://blog.leeguoo.com/en/posts/iphone-use/): installation, MCP setup, flows and how it compares.
 - Issues and ideas: [GitHub issues](https://github.com/leeguooooo/iphone-use/issues).
 

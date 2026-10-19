@@ -1,5 +1,5 @@
 //! The KeepAlive retry schedule, persisted across supervisor restarts in
-//! `wda-retry-state.v1` (four `key=value` lines, mode 0600). launchd relaunches
+//! `runner-retry-state.v1` (four `key=value` lines, mode 0600). launchd relaunches
 //! the supervisor every few seconds; this file is what turns that into a
 //! backoff. The daemon deletes it when someone explicitly asks for the phone.
 
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn round_trip_and_escalation() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wda-retry-state.v1");
+        let path = dir.path().join("runner-retry-state.v1");
         assert_eq!(read(&path), Ok(None));
         assert_eq!(record_failure(&path, Kind::Generic).unwrap(), (1, 5, None));
         assert_eq!(

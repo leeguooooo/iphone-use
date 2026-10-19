@@ -214,7 +214,7 @@ pub fn frame_message(frame: &H264Frame) -> Bytes {
 
 /// Splits a `multipart/x-mixed-replace` MJPEG byte stream into JPEG frames.
 ///
-/// WDA labels every part with `Content-Length`, which is the exact and cheap
+/// runner labels every part with `Content-Length`, which is the exact and cheap
 /// path. A part without one falls back to scanning for the JPEG end marker
 /// (`FF D9`), which entropy-coded data cannot contain because every `FF` there
 /// is followed by a stuffed `00`.
@@ -399,8 +399,8 @@ impl VideoHub {
         self.verdict_running.store(false, Ordering::Release);
     }
 
-    /// The live frame, when it is current enough to stand in for a WDA
-    /// screenshot: it arrived within the last half second (WDA streams even a
+    /// The live frame, when it is current enough to stand in for a runner
+    /// screenshot: it arrived within the last half second (runner streams even a
     /// still screen), and later than `not_before` — the last action sent, plus
     /// the stream's own lag — so it shows the screen after that action.
     /// `None` while nobody watches, and for a blank picture, which the

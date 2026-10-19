@@ -89,9 +89,9 @@ mod tests {
 
     #[test]
     fn print_disabled_parsing() {
-        let text = "disabled services = {\n\t\"com.leeguoo.iphone-use.wda\" => disabled\n\t\"com.leeguoo.iphone-use.wda.i13\" => enabled\n\t\"old\" => true\n}\n";
-        assert!(disabled_in(text, "com.leeguoo.iphone-use.wda"));
-        assert!(!disabled_in(text, "com.leeguoo.iphone-use.wda.i13"));
+        let text = "disabled services = {\n\t\"com.leeguoo.iphone-use.runner\" => disabled\n\t\"com.leeguoo.iphone-use.runner.i13\" => enabled\n\t\"old\" => true\n}\n";
+        assert!(disabled_in(text, "com.leeguoo.iphone-use.runner"));
+        assert!(!disabled_in(text, "com.leeguoo.iphone-use.runner.i13"));
         assert!(disabled_in(text, "old"));
         assert!(!disabled_in(text, "missing"));
     }

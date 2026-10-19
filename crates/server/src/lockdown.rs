@@ -897,7 +897,7 @@ mod tests {
 
     #[test]
     fn runner_status_yields_the_session_and_state() {
-        // The shape the runner serves (RunnerWDA.swift: `.value(statusValue(), sessionId:)`).
+        // The shape the runner serves (RunnerRoutes.swift: `.value(statusValue(), sessionId:)`).
         let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
             {\"sessionId\":\"328381F5-0604\",\"value\":{\"state\":\"success\",\"ready\":true}}";
         assert_eq!(

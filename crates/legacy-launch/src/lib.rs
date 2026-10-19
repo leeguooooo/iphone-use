@@ -47,7 +47,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub const DEFAULT_BUNDLE: &str = "com.leeguoo.iphone-use.wda.6zpxg4kvvs.xctrunner";
+pub const DEFAULT_BUNDLE: &str = "com.leeguoo.iphone-use.runner.6zpxg4kvvs.xctrunner";
 const LABEL: &str = "iphone-use-legacy-launch";
 const WIRELESS_DOMAIN: &str = "com.apple.mobile.wireless_lockdown";
 

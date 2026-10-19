@@ -1,5 +1,5 @@
 //! `{"type":"open_url","url":…}` on `/agent/input` and `/agent/actions`: a
-//! web link reaches WDA's `POST /session/:sid/url`; a scheme the owner has not
+//! web link reaches runner's `POST /session/:sid/url`; a scheme the owner has not
 //! allowed (`IPHONE_USE_ALLOW_URL_SCHEMES`, unset here) is refused with 403
 //! before anything is sent.
 
@@ -13,7 +13,7 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 async fn call(
     state: &Arc<server::http::AppState>,
@@ -46,7 +46,7 @@ fn web_links_open_and_other_schemes_never_reach_the_phone() {
     block(async {
         let opened: Arc<Mutex<Vec<String>>> = Arc::default();
         let log = opened.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if request.starts_with("POST /session ") {
                 return Some((
                     Duration::ZERO,
@@ -59,7 +59,7 @@ fn web_links_open_and_other_schemes_never_reach_the_phone() {
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
         let bodies = || opened.lock().unwrap().clone();
 
         let (status, json) = call(
@@ -120,7 +120,7 @@ fn web_links_open_and_other_schemes_never_reach_the_phone() {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
         assert_eq!(json["outcome"], "not_sent", "{json}");
-        assert_eq!(bodies().len(), 1, "only the web link reached WDA");
+        assert_eq!(bodies().len(), 1, "only the web link reached runner");
 
         // A batch step opens it too.
         let (status, json) = call(

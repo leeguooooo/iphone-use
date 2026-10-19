@@ -56,9 +56,9 @@ case("newer + idle → upgrade", base, "v0.6.0", expect_install=True, expect_dec
 case("newer + owner → skip", {**base, "owner": "bank-flow", "owner_lease_remaining_secs": 120}, "v0.6.0", expect_install=False, expect_decision="skip:phone_owned owner=bank-flow")
 case("newer + hold → skip", {**base, "hold_remaining_secs": 300}, "v0.6.0", expect_install=False, expect_decision="skip:held")
 case("newer + handed to a person → skip", {**base, "human_handoff": True}, "v0.6.0", expect_install=False, expect_decision="skip:handed_to_person")
-# A connected, drivable phone is not "in use": since v0.6.3 WDA stays up, and
+# A connected, drivable phone is not "in use": since v0.6.3 runner stays up, and
 # this rule kept a connected phone from ever auto-upgrading.
-case("newer + ready (WDA up), idle → upgrade", {**base, "device_state": "ready"}, "v0.6.0", expect_install=True, expect_decision="upgrade current=0.5.4 latest=0.6.0")
+case("newer + ready (runner up), idle → upgrade", {**base, "device_state": "ready"}, "v0.6.0", expect_install=True, expect_decision="upgrade current=0.5.4 latest=0.6.0")
 case("newer + agent request 2 min ago → skip", {**base, "device_state": "ready", "idle_secs": 120}, "v0.6.0", expect_install=False, expect_decision="skip:in_use idle_secs=120 (<900)")
 case("idle window is configurable", {**base, "device_state": "ready", "idle_secs": 120}, "v0.6.0", expect_install=True, expect_decision="upgrade", extra_env={"AUTO_UPDATE_IDLE_SECS": "60"})
 case("newer + live viewer → skip", {**base, "device_state": "ready", "mjpeg_viewer_count": 1}, "v0.6.0", expect_install=False, expect_decision="skip:watched viewers=1")

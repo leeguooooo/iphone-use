@@ -1,19 +1,19 @@
 # iphone-use device runner
 
-The runner is the iphone-use device service. It replaces WebDriverAgent: `scripts/setup-wda.sh`
+The runner is the iphone-use device service. It replaces WebDriverAgent: `scripts/setup-runner.sh`
 builds it, installs it on the phone, keeps it running under the KeepAlive supervisor and points the
-daemon at it (see [Managed by setup-wda.sh](#managed-by-setup-wdash)). It is a lean XCTest
+daemon at it (see [Managed by setup-runner.sh](#managed-by-setup-runnersh)). It is a lean XCTest
 runner that runs as one long-lived XCTest method (`RunnerTests.testServe`) and serves two things
 on the phone:
 
-- **port 8100**: an HTTP/1.1 API. It answers every WebDriverAgent route the daemon's `WdaClient`
-  (`crates/server/src/wda.rs`) uses, with the same shapes, so `IPHONE_USE_WDA_URL` can point at
+- **port 8100**: an HTTP/1.1 API. It answers every WebDriverAgent route the daemon's `RunnerClient`
+  (`crates/server/src/runner.rs`) uses, with the same shapes, so `IPHONE_USE_RUNNER_URL` can point at
   it unchanged. It also has a few native routes.
-- **port 9100**: an MJPEG screen stream in WDA's wire format, read by the daemon's `MjpegSplitter`.
+- **port 9100**: an MJPEG screen stream in runner's wire format, read by the daemon's `MjpegSplitter`.
 
-Both ports are WDA's, so existing relays (`iproxy`, socat) and daemon config work as they are.
+Both ports are runner's, so existing relays (`iproxy`, socat) and daemon config work as they are.
 
-What makes it faster than WDA:
+What makes it faster than runner:
 
 - **Tree reads ask for less.** `/source` and every element find call the private `XCAXClient_iOS
   requestSnapshotForElement:attributes:parameters:error:` with only nine attributes: ElementType,
@@ -22,7 +22,7 @@ What makes it faster than WDA:
   - When the AX server rejects a deep request, it retries down a depth ladder (64, 56, 40, 24, 12)
     and remembers the depth that worked for each pid.
   - Nodes cut off by the depth cap are fetched again from their own root, up to 8 extra requests.
-- **Element lookups need no XCUI queries.** Finds evaluate WDA's locator strategies against that
+- **Element lookups need no XCUI queries.** Finds evaluate runner's locator strategies against that
   same tree. Element reads re-snapshot just the one element, through the live accessibility
   element kept for it.
 - **No quiescence.** Every XCTest idle wait is turned into a no-op when the runner starts:
@@ -45,20 +45,20 @@ runner/
   IPhoneUseRunner/IPhoneUseRunner.xcodeproj
   IPhoneUseRunner/IPhoneUseRunnerUITests/  the UI-test bundle (no host app), product name iPhoneUse
     RunnerTests.swift    testServe, dispatch, native routes
-    RunnerWDA.swift      WDA-compatible routes
+    RunnerRoutes.swift      WebDriverAgent-compatible routes
     RunnerElements.swift element tree, locators (predicate / class chain / …), id registry
     RunnerActions.swift  W3C pointer actions → touch paths
     RunnerMJPEG.swift    MJPEG server
     RunnerHTTP.swift     HTTP/1.1 server (NWListener), envelopes, errors
     IPURBridge.h/.m      private XCTest API (AX snapshot, event synthesis, screenshots, lock state)
     IPURImageCodec.h     screenshot resize + re-encode (ImageIO; also compiled by unit-check.sh)
-scripts/runner-compat.py           host-side WDA compatibility check (every WdaClient route + MJPEG)
+scripts/runner-compat.py           host-side runner compatibility check (every RunnerClient route + MJPEG)
 scripts/runner-smoke.py            host-side smoke test / benchmark of the native routes
 scripts/runner-home-check.py       device regression: Home must foreground SpringBoard, preserving the app
 ```
 
 The phone gets exactly one app, **iPhoneUse-Runner** (bundle id `<PRODUCT_BUNDLE_IDENTIFIER>.xctrunner`;
-`com.leeguoo.iphone-use.runner.xctrunner` for `build.sh`, the team-derived `WDA_BUNDLE_ID` for setup).
+`com.leeguoo.iphone-use.runner.xctrunner` for `build.sh`, the team-derived `IPU_RUNNER_BUNDLE_ID` for setup).
 It is the process that serves both ports. When the ready listener comes up it logs
 `ServerURLHere->http://<wifi-ip>:8100<-ServerURLHere`, the marker setup waits for.
 
@@ -80,18 +80,18 @@ It is the process that serves both ports. When the ready listener comes up it lo
 - `GET /status` and `GET /wda/locked` (with or without a session) are answered on the transport
   queue instead. The daemon's health probes therefore never wait behind a slow command. `/status`
   reports `busy` / `busyMs` while a command runs.
-- Success: `200 {"value": <result>}`, WDA's envelope. `/status` and `POST /session` also carry a
+- Success: `200 {"value": <result>}`, runner's envelope. `/status` and `POST /session` also carry a
   top-level `sessionId`.
-- Error: `4xx/5xx {"value": {"error": "<code>", "message": "<text>"}}`, using WDA/W3C codes:
+- Error: `4xx/5xx {"value": {"error": "<code>", "message": "<text>"}}`, using runner/W3C codes:
   - `invalid argument`, `invalid selector` (400)
   - `no such element`, `stale element reference`, `no such alert`, `unknown command` (404)
   - `unknown error` (500)
 
-  WdaClient detects missing alerts and elements by the `404 Not Found` status.
+  RunnerClient detects missing alerts and elements by the `404 Not Found` status.
 - Every response carries `Server-Timing: runner;dur=<ms>` (time spent in the runner).
-- Coordinates are screen points, the same space as WDA `rect` values.
+- Coordinates are screen points, the same space as runner `rect` values.
 
-### WDA-compatible routes
+### WebDriverAgent-compatible routes
 
 Every route works with or without a `/session/:sid` prefix, and any `:sid` is accepted. The runner
 has one fixed session id per launch.
@@ -102,7 +102,7 @@ has one fixed session id per launch.
 | POST | `/session` | `{value: {sessionId, capabilities}, sessionId}`. Capabilities are ignored, except `bundleId`, which activates that app. |
 | GET, DELETE | `/session/:sid` | session info / no-op |
 | GET, POST | `/session/:sid/appium/settings` | Accepted and echoed. `mjpegServerFramerate`, `mjpegScalingFactor` and `mjpegServerScreenshotQuality` drive the MJPEG stream. |
-| GET | `/source?format=json[&excluded_attributes=…]` | WDA node shape; `excluded_attributes` is ignored, since the expensive attributes are never computed |
+| GET | `/source?format=json[&excluded_attributes=…]` | runner node shape; `excluded_attributes` is ignored, since the expensive attributes are never computed |
 | GET | `/screenshot` | base64 PNG. `?max_side=<px>&format=jpeg&quality=0.7` shrinks and encodes on the phone (off main); the `X-IPU-Image-{Width,Height,Source-Width,Source-Height,Scale,Format}` headers describe the result, and their absence means a runner without this support |
 | GET | `/session/:sid/window/size`, `/window/rect` | points |
 | POST | `/session/:sid/actions` | W3C actions, details below |
@@ -112,7 +112,7 @@ has one fixed session id per launch.
 | GET | `/session/:sid/element/:id/rect` | fresh frame |
 | GET | `/session/:sid/element/:id/attribute/:name` | `value`, `label`, `name`, `type`, `rawIdentifier`, `placeholderValue`, `enabled`, `visible`, `focused`, `accessible`, `selected`, `rect`, plus the `wd*` aliases |
 | GET | `/session/:sid/element/:id/{text,displayed,enabled,selected,name}` | |
-| POST | `/session/:sid/element/:id/value` | Body is `{text}` or `{value: […]}`. Bare `value` on a PickerWheel or Slider adjusts it, as WDA does; otherwise the runner focuses the element and types. |
+| POST | `/session/:sid/element/:id/value` | Body is `{text}` or `{value: […]}`. Bare `value` on a PickerWheel or Slider adjusts it, as runner does; otherwise the runner focuses the element and types. |
 | POST | `/session/:sid/element/:id/clear` | focuses the element, then deletes its value's length in characters |
 | GET | `/session/:sid/element/active` | focused element, or 404 `no such element` |
 | POST | `/session/:sid/wda/element/:id/{touchAndHold,doubleTap,twoFingerTap,tap,pinch,rotate,scrollTo,forceTouch,swipe,scroll}` | synthesized; see the notes below |
@@ -125,7 +125,7 @@ has one fixed session id per launch.
 | POST | `/session/:sid/wda/keys` | `{value: [text]}` into the focused element |
 | POST | `/session/:sid/wda/keyboard/dismiss` | `{keyNames}`: taps the first matching key on the keyboard; no keyboard is a no-op |
 | POST | `/session/:sid/url` | `{url}`. iOS 16.4+ uses `XCUIDevice.system.open`; older versions type it into Safari. |
-| GET | `/wda/locked`, `/session/:sid/wda/locked` | `SBGetScreenLockStatus` (as WDA), answered off-main |
+| GET | `/wda/locked`, `/session/:sid/wda/locked` | `SBGetScreenLockStatus` (as runner), answered off-main |
 | POST | `/session/:sid/wda/lock`, `/wda/unlock` | lock button / Home presses until open; 409 `passcode_required` (nothing pressed) when a passcode is set |
 | GET | `/session/:sid/alert/text`, `/wda/alert/buttons` | 404 `no such alert` when no alert is open |
 | POST | `/session/:sid/alert/accept`, `/alert/dismiss` | `{name?}`. Without a name, accept presses the last button and dismiss the first. |
@@ -155,7 +155,7 @@ has one fixed session id per launch.
   SpringBoard is also active (a banner, a system sheet), SpringBoard's tree is searched too.
 - **`accessibility id` / `id` / `name`** match the identifier or the label, like XCUI identifier
   matching.
-- **`predicate string`** is an `NSPredicate` evaluated per node. It accepts WDA's attribute names:
+- **`predicate string`** is an `NSPredicate` evaluated per node. It accepts runner's attribute names:
   - `type`, `name`, `label`, `value`, `identifier`/`rawIdentifier`, `placeholderValue`
   - `enabled`, `visible`, `accessible`, `focused`, `selected`, `hittable`
   - `rect`/`frame`/`wdRect`
@@ -168,7 +168,7 @@ has one fixed session id per launch.
   - `[n]` and `[-n]`
   - `` [`predicate`] `` and `[$descendant predicate$]`
 
-  An index applies to the whole step's match list, as in the XCUI query WDA builds.
+  An index applies to the whole step's match list, as in the XCUI query runner builds.
 - `xpath` is not supported and answers 400 `invalid selector`. The daemon never sends it.
 
 #### Element ids
@@ -182,7 +182,7 @@ has one fixed session id per launch.
 
 | Method | Path | Body / query | `value` |
 |---|---|---|---|
-| GET | `/source` | `?max_depth=N` `?max_nodes=N` (default 5000) `?extension_calls=N` `?backend=xcui` | foreground tree, WDA node shape |
+| GET | `/source` | `?max_depth=N` `?max_nodes=N` (default 5000) `?extension_calls=N` `?backend=xcui` | foreground tree, runner node shape |
 | POST | `/tap` | `{x, y}` | `null` |
 | POST | `/swipe` | `{x1, y1, x2, y2, duration_ms?}` (default 300) | `null` |
 | POST | `/longpress` | `{x, y, duration_ms?}` (default 1000) | `null` |
@@ -230,7 +230,7 @@ The foreground app is picked from the AX client's `activeApplications`:
 
 ## MJPEG stream (port 9100)
 
-The format is WDA's:
+The format is runner's:
 
 - The server answers any request with `HTTP/1.0 200 OK` and `Content-Type:
   multipart/x-mixed-replace; boundary=--BoundaryString`.
@@ -239,7 +239,7 @@ The format is WDA's:
 
 How it captures:
 
-- **Settings.** The defaults are WDA's: 10 fps, 100 % scale, quality 25.
+- **Settings.** The defaults are runner's: 10 fps, 100 % scale, quality 25.
   `POST /appium/settings` changes `mjpegServerFramerate` (1–60), `mjpegScalingFactor` (% of native
   pixels) and `mjpegServerScreenshotQuality` (%). The daemon sets 30 / 50 / 60.
 - **Only while watched.** Capture runs only while at least one client is connected. The capture
@@ -250,7 +250,7 @@ How it captures:
 - **Capture path, fastest first:**
   1. `XCUIDevice.screenDataSource requestScreenshotWithRequest:withReply:` with an
      `XCTScreenshotRequest` that asks testmanagerd for a JPEG at the requested quality. This is the
-     path WDA's `FBScreenshot` uses. The device has no scaled-capture API, so scaling happens next.
+     path runner's `FBScreenshot` uses. The device has no scaled-capture API, so scaling happens next.
   2. `XCUIScreen screenshotWithEncoding:options:` with the same JPEG encoding.
   3. The public `XCUIScreen.main.screenshot()` PNG, re-encoded.
 
@@ -348,8 +348,8 @@ runner/unit-check.sh                                 # Mac-side unit check, no d
 Signing:
 
 - The build signs with team `6ZPXG4KVVS`, automatic signing, through the App Store Connect API key.
-- The key comes from `WDA_ASC_KEY_PATH`, `WDA_ASC_KEY_ID` and `WDA_ASC_ISSUER_ID`. If those are
-  unset, the script reads them from `~/Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist`.
+- The key comes from `IPU_RUNNER_ASC_KEY_PATH`, `IPU_RUNNER_ASC_KEY_ID` and `IPU_RUNNER_ASC_ISSUER_ID`. If those are
+  unset, the script reads them from `~/Library/LaunchAgents/com.leeguoo.iphone-use.runner.plist`.
 - Without them it falls back to an unsigned compile check.
 - `--device` adds `-allowProvisioningDeviceRegistration`, so the provisioning profile includes
   that phone. It builds only; nothing is installed or launched.
@@ -360,31 +360,31 @@ Signing:
 After editing `project.yml`, regenerate the project with
 `(cd runner/IPhoneUseRunner && xcodegen generate)` and commit the result.
 
-## Managed by setup-wda.sh
+## Managed by setup-runner.sh
 
 This is how every install runs the runner; the manual steps below are for development.
 
 - **Sources.** `install.sh` lays `runner/` down at `~/.iphone-use/runner` (from a local checkout,
   or the release asset `iphone-use-runner.tar.gz`, checked against its `.sha256`). A repo
-  checkout's `scripts/setup-wda.sh` builds its own `runner/`; `IPU_RUNNER_SRC` overrides both.
+  checkout's `scripts/setup-runner.sh` builds its own `runner/`; `IPU_RUNNER_SRC` overrides both.
   Sources must be owned by the user and not writable by others.
 - **Build.** `xcodebuild -project …/IPhoneUseRunner.xcodeproj -scheme IPhoneUseRunner
   -destination platform=iOS,id=<udid> -derivedDataPath <state>/runner-build
-  DEVELOPMENT_TEAM=<team> PRODUCT_BUNDLE_IDENTIFIER=<WDA_BUNDLE_ID> build-for-testing`, signed
-  through the Xcode account or the `WDA_ASC_*` API key, exactly as WebDriverAgent was. Each
+  DEVELOPMENT_TEAM=<team> PRODUCT_BUNDLE_IDENTIFIER=<IPU_RUNNER_BUNDLE_ID> build-for-testing`, signed
+  through the Xcode account or the `IPU_RUNNER_ASC_*` API key, exactly as WebDriverAgent was. Each
   instance has its own `runner-build/`.
 - **Launch.** `xcodebuild -destination platform=iOS,id=<udid> test-without-building -xctestrun
   <state>/runner-build/Build/Products/IPhoneUseRunner_iphoneos<sdk>-arm64.xctestrun
   -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe`, from the state directory. That
   argv is the runner's process identity for stop/pause/status and uninstall.
-- **Reuse.** The verified product is recorded in `<state>/wda-runner-product.json`, keyed on the
+- **Reuse.** The verified product is recorded in `<state>/runner-product.json`, keyed on the
   source hash, signing identity, device and Xcode/SDK; a matching reconnect skips the build.
-  `WDA_RUNNER_REBUILD=1` forces one.
+  `IPU_RUNNER_REBUILD=1` forces one.
 - **On-phone daemon.** When a `libipu_embed.a` is found, the build adds
   `OTHER_LDFLAGS=$(inherited) -force_load <lib> -framework Security -framework SystemConfiguration`
   (see [The on-phone daemon](#the-on-phone-daemon)); the library's sha256 is part of the reuse key.
 - **Unchanged.** Relays (8100/9100, now `iphone-use relay`), the KeepAlive supervisor and its label, lock wait and
-  backoff, trust/DDI/automation blockers, the status file the daemon reads, and every `WDA_*`
+  backoff, trust/DDI/automation blockers, the status file the daemon reads, and every `IPU_RUNNER_*`
   variable keep their names and behaviour.
 
 ## The on-phone daemon
@@ -429,12 +429,12 @@ export IPU_RUNNER_TOKEN="$(openssl rand -hex 32)"   # the scripts sign with it
 TEST_RUNNER_IPU_RUNNER_TOKEN="$IPU_RUNNER_TOKEN" \
 xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "id=<udid>" \
   -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe
-iproxy 8100 8100 & iproxy 9100 9100 &      # host → device; or the existing WDA relays
-python3 scripts/runner-compat.py           # every WdaClient route + MJPEG; read-only by default
+iproxy 8100 8100 & iproxy 9100 9100 &      # host → device; or the existing runner relays
+python3 scripts/runner-compat.py           # every RunnerClient route + MJPEG; read-only by default
 python3 scripts/runner-smoke.py --runs 5   # timing of the native routes
 ```
 
-- **Pointing the daemon at it.** Set `IPHONE_USE_WDA_URL=http://127.0.0.1:8100`. The MJPEG URL
+- **Pointing the daemon at it.** Set `IPHONE_USE_RUNNER_URL=http://127.0.0.1:8100`. The MJPEG URL
   stays `:9100`.
 - **Other ports.** Set `TEST_RUNNER_IPU_RUNNER_PORT=…` and `TEST_RUNNER_IPU_RUNNER_MJPEG_PORT=…` on
   the `xcodebuild` command. xcodebuild strips the `TEST_RUNNER_` prefix. MJPEG port `0` turns the
@@ -451,26 +451,26 @@ python3 scripts/runner-smoke.py --runs 5   # timing of the native routes
   Foreground lookup failures during a switch are polled for up to four seconds; actions
   are never retried. Run `python3 scripts/test-runner-home-check.py` for device-free
   regression tests of polling, timeouts and error handling (also included in `ci-check.sh`).
-- **Unlock first.** The phone must be unlocked when the runner starts, as with WDA.
+- **Unlock first.** The phone must be unlocked when the runner starts, as with runner.
 - **No test timeouts.** Do not pass `-test-timeouts-enabled YES`.
 - **One automation session.** iOS gives one XCTest automation session at a time, so a managed
   runner (or WebDriverAgent) and a manual one cannot both run on one phone; pause the managed
-  one first (`~/.iphone-use/setup-wda.sh pause`). Both also want ports 8100 and 9100.
+  one first (`~/.iphone-use/setup-runner.sh pause`). Both also want ports 8100 and 9100.
 - **Stopping.** `POST /shutdown` ends `testServe` cleanly.
 - **Logs.** Device log lines are prefixed `ipu-runner:`.
 
-## Approximations (not exact WDA behaviour)
+## Approximations (not exact runner behaviour)
 
 - **`scrollTo`** drags the screen toward the element's frame, up to 12 drags, until its centre is
-  inside the middle band of the screen. WDA scrolls the element's scroll-view ancestor.
+  inside the middle band of the screen. runner scrolls the element's scroll-view ancestor.
 - **`pinch` and `rotate`** are two synthesized fingers. Duration is derived from `velocity`:
   |scale−1|/velocity, and rotation/velocity, clamped to 0.25–3 s.
 - **`doubleTap`** is two 50 ms taps 150 ms apart. **`twoFingerTap`** is two fingers ±(width/6) at
   the centre.
-- **`forceTouch`** answers WDA's 400 "Force press is not supported on this device" when
+- **`forceTouch`** answers runner's 400 "Force press is not supported on this device" when
   `XCUIDevice.supportsPressureInteraction` is false, which is every current iPhone. Otherwise it
   calls `forcePress` on an XCUI coordinate.
-- **`visible` / `displayed` / `hittable`** are geometric (frame intersects the screen), not WDA's
+- **`visible` / `displayed` / `hittable`** are geometric (frame intersects the screen), not runner's
   occlusion check.
 - **`selected`** is always false. The attribute is fetched but not yet serialized.
 - **Picker wheel and slider adjustment** are the only operations that resolve an `XCUIElement`.
@@ -479,7 +479,7 @@ python3 scripts/runner-smoke.py --runs 5   # timing of the native routes
 - **`/wda/unlock`** presses Home, up to three times: a dark Face ID phone without a passcode
   needs two presses (wake, then open), and it stops as soon as the phone is open. With a passcode
   set it presses nothing and answers 409 `passcode_required`. It cannot enter a passcode, and
-  neither can WDA.
+  neither can runner.
 - **`/wda/keepawake`** holds off Auto-Lock until the deadline by pressing F13 (HID keyboard page
   0x07, usage 0x68, which iOS maps to nothing) every 10 s, on main between commands, skipping a
   beat when an input command ran in the last 10 s. It never presses on a locked phone. Each press
@@ -512,22 +512,22 @@ hardware verification:
   320×480 on a larger phone (#257). A missing or invalid system frame falls back to UIKit, and
   a valid frame is read once per runner launch (the fallback is retried on the next request). Never the physical `XCUIDevice.orientation`: a
   phone lying on its side reads landscape while its UI stays portrait. No target pid is set, so
-  events go to whatever is on screen, as with WDA.
+  events go to whatever is on screen, as with runner.
 - **Screen capture.** The `XCTScreenshotRequest` is built with `CGRectNull` as the full-screen rect.
   If testmanagerd rejects that, the next capture path takes over.
 - **Lock state.** `SBGetScreenLockStatus` / `SBSSpringBoardServerPort` are loaded with
-  `dlopen`/`dlsym` from SpringBoardServices, as WDA does.
+  `dlopen`/`dlsym` from SpringBoardServices, as runner does.
 - **Quiescence.** The bypass applies to the whole process. `activate()` and `press(.home)` return
   without waiting for the app to settle, so callers poll.
 - **Deployment target.** Xcode 27's XCTest is built for iOS 17. The iOS 15.0 deployment target only
   sets the minimum for the host app.
 - **Benchmark fairness.** The generated `.xctestrun` includes Xcode's default
-  `DYLD_INSERT_LIBRARIES=/usr/lib/libRPAC.dylib`, as WDA's does. Remove it from both for a fair
+  `DYLD_INSERT_LIBRARIES=/usr/lib/libRPAC.dylib`, as runner's does. Remove it from both for a fair
   benchmark, or from neither.
 
 ## Attribution
 
-The WDA-compatible routes, envelopes and MJPEG framing reproduce
+The WebDriverAgent-compatible routes, envelopes and MJPEG framing reproduce
 [appium/WebDriverAgent](https://github.com/appium/WebDriverAgent)'s wire behaviour, written fresh
 against the daemon's client. The same goes for the lock-state call and the screenshot-request path.
 No WebDriverAgent source is copied.

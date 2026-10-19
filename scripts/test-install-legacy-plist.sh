@@ -26,7 +26,7 @@ cat > "$TMP/old.plist" <<'PLIST'
 <key>PHONE_REMOTE_PORT</key><string>45432</string>
 <key>PHONE_REMOTE_PASSWORD</key><string>old-password</string>
 <key>PHONE_REMOTE_AGENT_TOKEN</key><string>old-token</string>
-<key>PHONE_REMOTE_WDA_URL</key><string>http://127.0.0.1:8100</string>
+<key>PHONE_REMOTE_RUNNER_URL</key><string>http://127.0.0.1:8100</string>
 <key>IPHONE_USE_UDID</key><string>new-udid</string>
 <key>PHONE_REMOTE_UDID</key><string>old-udid</string>
 </dict></dict></plist>
@@ -46,7 +46,7 @@ ok_t "an old plist's settings are carried forward under the new names"
 [ "$(read_key IPHONE_USE_UDID)" = new-udid ] || bad "the old key won over the new one"
 ok_t "a new key wins over the old one"
 
-[ -z "$(read_key WDA_URL)" ] || bad "WDA_URL borrowed PHONE_REMOTE_WDA_URL"
+[ -z "$(read_key IPU_RUNNER_URL)" ] || bad "IPU_RUNNER_URL borrowed PHONE_REMOTE_RUNNER_URL"
 [ -z "$(read_key IPHONE_USE_MISSING)" ] || bad "a missing key read as non-empty"
 ok_t "names outside the prefix and missing keys stay empty"
 

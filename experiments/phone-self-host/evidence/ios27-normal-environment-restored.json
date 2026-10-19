@@ -4,7 +4,7 @@
   "device_state": "ready",
   "owner": null,
   "human_handoff": false,
-  "managed_wda": true,
+  "managed_runner": true,
   "phone_daemon": {
     "linked": true,
     "port": 8787,

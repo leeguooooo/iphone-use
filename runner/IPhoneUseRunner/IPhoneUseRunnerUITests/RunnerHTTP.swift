@@ -109,7 +109,7 @@ struct HTTPResponse {
   var body: Data
   var headers: [String: String] = [:]
 
-  /// WDA-style success envelope: `{"value": <value>}`.
+  /// runner-style success envelope: `{"value": <value>}`.
   static func value(_ value: Any, headers: [String: String] = [:], sessionId: String? = nil) -> HTTPResponse {
     var envelope: [String: Any] = ["value": value]
     if let sessionId { envelope["sessionId"] = sessionId }
@@ -120,7 +120,7 @@ struct HTTPResponse {
     return HTTPResponse(status: 200, body: body, headers: headers)
   }
 
-  /// WDA-style error envelope: `{"value": {"error": code, "message": message}}`.
+  /// runner-style error envelope: `{"value": {"error": code, "message": message}}`.
   static func error(_ status: Int, _ code: String, _ message: String) -> HTTPResponse {
     HTTPResponse(status: status, body: encode(["value": ["error": code, "message": message]]))
   }
@@ -181,8 +181,8 @@ struct HTTPResponse {
   }
 }
 
-/// A failed request, carried to the WDA error envelope `{"value":{"error":code,"message":...}}`.
-/// The codes are WDA's / W3C's, so the daemon's 404 checks ("no such alert", stale elements) hold.
+/// A failed request, carried to the runner error envelope `{"value":{"error":code,"message":...}}`.
+/// The codes are runner's / W3C's, so the daemon's 404 checks ("no such alert", stale elements) hold.
 struct RunnerError: Error {
   let status: Int
   let code: String
@@ -544,7 +544,7 @@ final class RunnerHTTPServer {
       case .ready:
         let port = Int(self?.listener.port?.rawValue ?? 0)
         NSLog("ipu-runner: listening on port %d", port)
-        // The line setup-wda.sh waits for (WebDriverAgent's marker, kept so the relay logic and
+        // The line setup-runner.sh waits for (WebDriverAgent's marker, kept so the relay logic and
         // its LAN fallback read the device address the same way).
         NSLog("ServerURLHere->http://%@:%d<-ServerURLHere", RunnerHTTPServer.deviceAddress(), port)
       case .failed(let error):

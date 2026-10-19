@@ -1,7 +1,7 @@
 //! Screens an app hides from capture.
 //!
 //! Apps such as PayPay mark their content as protected: iOS hands every
-//! capture path (WDA screenshots, the MJPEG/H.264 view, Mirroring) a blank
+//! capture path (runner screenshots, the MJPEG/H.264 view, Mirroring) a blank
 //! area there, while the same screen's accessibility tree stays complete. A
 //! blank image let agents conclude "still loading" or fall back to vision on
 //! nothing. When a screenshot's content band is one flat colour while the tree
@@ -9,7 +9,7 @@
 //! instead: outlines, kinds and labels, with a banner saying so. The pixels
 //! themselves cannot and should not be recovered.
 
-use crate::wda::ElementRow;
+use crate::runner::ElementRow;
 
 /// Fraction of the screen height kept clear of the analysis at the top
 /// (status bar, navigation) and bottom (tab bar, home indicator): apps leave

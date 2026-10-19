@@ -1,11 +1,11 @@
-//! Device control via WebDriverAgent (WDA).
+//! Device control via WebDriverAgent (runner).
 //!
-//! WDA runs *on the phone* (Appium's runner, default `http://<phone>:8100`),
+//! runner runs *on the phone* (Appium's runner, default `http://<phone>:8100`),
 //! drives iOS's own accessibility tree, and synthesizes the events itself — so
 //! nothing touches the Mac's cursor, coordinates do not drift, and text goes in
 //! as a real string (no keycode / Pinyin-IME caveat).
 //!
-//! This module is the daemon-side HTTP client for WDA's (W3C-ish) API. Browser
+//! This module is the daemon-side HTTP client for runner's (W3C-ish) API. Browser
 //! and agent input route here and fail closed when the device service is
 //! unavailable.
 //! Request shapes follow Appium WebDriverAgent, and response parsers reject
@@ -19,19 +19,19 @@ fn bounded_move_duration_ms(duration_ms: u64) -> u64 {
     duration_ms.clamp(80, 2_000)
 }
 
-/// Budget for the actionability half of [`WdaClient::probe_health`]. Every
+/// Budget for the actionability half of [`RunnerClient::probe_health`]. Every
 /// caller wraps the whole probe in a 15–20s timeout; a locked phone can stall
 /// `POST /session` for the reqwest client's full 20s, which used to make the
-/// *entire* observation vanish — a reachable runner then reported `wda:false`
-/// for the whole reconnect and setup-wda.sh's hand-off verdict failed on it.
+/// *entire* observation vanish — a reachable runner then reported `runner:false`
+/// for the whole reconnect and setup-runner.sh's hand-off verdict failed on it.
 const ACTIONABILITY_PROBE_BUDGET: Duration = Duration::from_secs(10);
 
 /// Budget for the session-less `GET /wda/locked` that precedes session
 /// creation in `probe_health`. It is a plain in-process read on the runner.
 const UNATTACHED_LOCK_BUDGET: Duration = Duration::from_secs(3);
 
-/// A WDA endpoint plus a lazily-created session id.
-pub struct WdaClient {
+/// A runner endpoint plus a lazily-created session id.
+pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
     http: reqwest::Client,
     /// Signs every request with the device runner's per-launch token.
@@ -42,7 +42,7 @@ pub struct WdaClient {
     /// ~180 ms on a real phone — more than a third of a tap. A short TTL keeps
     /// a burst of gestures on one read and still notices a rotation.
     window: Option<((f64, f64), std::time::Instant)>,
-    /// When anything was last POSTed to WDA (every gesture, key, value write,
+    /// When anything was last POSTed to runner (every gesture, key, value write,
     /// launch — and harmless lookups too: over-counting only skips a cache).
     posted_at: Option<std::time::Instant>,
     /// When the alert probe last found no alert. A tree read from the native
@@ -79,27 +79,27 @@ pub struct WdaClient {
     actionability_budget: Duration,
 }
 
-/// Smoothed round trip of WDA's no-op `/status`, in ms (0 = not measured).
-static WDA_RTT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Smoothed round trip of runner's no-op `/status`, in ms (0 = not measured).
+static RUNNER_RTT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn record_rtt(elapsed: Duration) {
     use std::sync::atomic::Ordering;
     let sample = elapsed.as_millis().min(60_000) as u64;
-    let previous = WDA_RTT_MS.load(Ordering::Relaxed);
+    let previous = RUNNER_RTT_MS.load(Ordering::Relaxed);
     // Exponential smoothing: one Wi-Fi hiccup should not swing the reading.
     let next = if previous == 0 { sample } else { (previous * 3 + sample) / 4 };
-    WDA_RTT_MS.store(next.max(1), Ordering::Relaxed);
+    RUNNER_RTT_MS.store(next.max(1), Ordering::Relaxed);
 }
 
-/// The transport's round trip to WDA as last measured, if it has been.
-pub fn wda_rtt_ms() -> Option<u64> {
-    match WDA_RTT_MS.load(std::sync::atomic::Ordering::Relaxed) {
+/// The transport's round trip to runner as last measured, if it has been.
+pub fn runner_rtt_ms() -> Option<u64> {
+    match RUNNER_RTT_MS.load(std::sync::atomic::Ordering::Relaxed) {
         0 => None,
         ms => Some(ms),
     }
 }
 
-/// What a screenshot asks the runner for (see [`WdaClient::screenshot_sized`]).
+/// What a screenshot asks the runner for (see [`RunnerClient::screenshot_sized`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShotRequest {
     /// Longest side in pixels; `None` = full resolution.
@@ -279,8 +279,8 @@ pub fn screenshot_failure_retryable(cause: &str) -> bool {
     matches!(cause, "timeout" | "body_truncated" | "connection_lost")
 }
 
-impl WdaClient {
-    /// `base_url` is the WDA server root, e.g. `http://<phone-ip>:8100` (LAN) or
+impl RunnerClient {
+    /// `base_url` is the runner server root, e.g. `http://<phone-ip>:8100` (LAN) or
     /// `http://127.0.0.1:8100` when tunneled over USB with `iproxy 8100 8100`.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
         let http = Self::build_http()?;
@@ -308,7 +308,7 @@ impl WdaClient {
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(20))
             .build()
-            .context("build reqwest client for WDA")
+            .context("build reqwest client for runner")
     }
 
     /// Forget everything learned from the runner that was serving until now:
@@ -336,8 +336,8 @@ impl WdaClient {
     }
 
     /// `GET /status` — health/liveness probe (no session required).
-    /// Returns true when WDA answers with a ready state. Each answer also
-    /// feeds [`wda_rtt_ms`]: `/status` does no work on the phone, so its time
+    /// Returns true when runner answers with a ready state. Each answer also
+    /// feeds [`runner_rtt_ms`]: `/status` does no work on the phone, so its time
     /// is the transport's round trip.
     pub async fn is_up(&self) -> bool {
         self.status_probe().await.is_ok()
@@ -387,7 +387,7 @@ impl WdaClient {
     }
 
     /// Device screen lock state (`GET /wda/locked`). XCUITest cannot drive a
-    /// locked phone, so this disambiguates a "ready but won't act" WDA (locked,
+    /// locked phone, so this disambiguates a "ready but won't act" runner (locked,
     /// recoverable by unlocking) from a genuinely wedged one.
     pub async fn locked(&mut self) -> Result<bool> {
         let sid = self.ensure_session().await?.to_string();
@@ -402,14 +402,14 @@ impl WdaClient {
             .text()
             .await
             .context("parse /wda/locked")?;
-        parse_wda_value(&body, "GET /wda/locked")?
+        parse_runner_value(&body, "GET /wda/locked")?
             .as_bool()
             .ok_or_else(|| {
                 anyhow!("GET /wda/locked returned a non-boolean value ({})", body_summary(&body))
             })
     }
 
-    /// Session-less `GET /wda/locked`. WDA serves this route `withoutSession`
+    /// Session-less `GET /wda/locked`. runner serves this route `withoutSession`
     /// (FBCustomCommands), so it answers even while a locked phone would stall
     /// `POST /session` — which is exactly when the answer matters most.
     pub async fn locked_unattached(&self) -> Result<bool> {
@@ -424,7 +424,7 @@ impl WdaClient {
             .text()
             .await
             .context("parse /wda/locked (unattached)")?;
-        parse_wda_value(&body, "GET /wda/locked (unattached)")?
+        parse_runner_value(&body, "GET /wda/locked (unattached)")?
             .as_bool()
             .ok_or_else(|| {
                 anyhow!("GET /wda/locked returned a non-boolean value ({})", body_summary(&body))
@@ -441,7 +441,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /wda/unlock")?;
-        ensure_wda_success(response, "POST /wda/unlock").await?;
+        ensure_runner_success(response, "POST /wda/unlock").await?;
         Ok(())
     }
 
@@ -465,7 +465,7 @@ impl WdaClient {
         }
     }
 
-    /// Probe WDA at the ACTION level, not just `/status`. `GET /status` lies:
+    /// Probe runner at the ACTION level, not just `/status`. `GET /status` lies:
     /// it keeps reporting `ready` even when every UI action fails Code=41 "Not
     /// authorized for performing UI testing actions" — the "zombie ready" state
     /// caused by a locked phone, sleep, or a severed testmanagerd/CoreDevice
@@ -473,28 +473,28 @@ impl WdaClient {
     /// cheap real action (`wda/apps/list`, which needs the live test connection);
     /// only if THAT succeeds is the runner actually drivable.
     ///
-    /// Do not use `wda/activeAppInfo` here. WDA implements that route by
+    /// Do not use `wda/activeAppInfo` here. runner implements that route by
     /// resolving the current application object, which can request a full
     /// accessibility snapshot. Large views such as WeChat's chat list can make
     /// that supposedly cheap health probe hang until the daemon marks an
     /// otherwise healthy runner unavailable. `wda/apps/list` asks
     /// testmanagerd for the active process list without traversing the
     /// foreground app's element tree, and is also safe on the Home screen.
-    pub async fn probe_health(&mut self) -> WdaHealth {
+    pub async fn probe_health(&mut self) -> RunnerHealth {
         self.probe_health_detailed().await.0
     }
 
     /// [`Self::probe_health`] plus, when the runner did not answer `/status`,
     /// why (see [`Self::status_probe`]).
-    pub async fn probe_health_detailed(&mut self) -> (WdaHealth, Option<String>) {
+    pub async fn probe_health_detailed(&mut self) -> (RunnerHealth, Option<String>) {
         if let Err(error) = self.status_probe().await {
-            return (WdaHealth::down(), Some(error));
+            return (RunnerHealth::down(), Some(error));
         }
         (self.probe_reachable_health().await, None)
     }
 
     /// The rest of [`Self::probe_health`] once `/status` answered.
-    async fn probe_reachable_health(&mut self) -> WdaHealth {
+    async fn probe_reachable_health(&mut self) -> RunnerHealth {
         // Reachability is settled here; everything below only decides
         // actionability. Read the lock state without a session first: a
         // locked phone stalls `POST /session`, so asking after would mean
@@ -507,7 +507,7 @@ impl WdaClient {
                 .and_then(Result::ok);
         if unattached_locked == Some(true) {
             self.invalidate_session();
-            return WdaHealth {
+            return RunnerHealth {
                 up: true,
                 actionable: false,
                 locked: Some(true),
@@ -520,7 +520,7 @@ impl WdaClient {
             Ok(health) => health,
             Err(_) => {
                 self.invalidate_session();
-                WdaHealth {
+                RunnerHealth {
                     up: true,
                     actionable: false,
                     locked: unattached_locked,
@@ -531,11 +531,11 @@ impl WdaClient {
 
     /// The session-scoped half of [`Self::probe_health`]: lock state plus a
     /// real testmanagerd-backed action. Always reports `up: true`.
-    async fn probe_actionability(&mut self) -> WdaHealth {
+    async fn probe_actionability(&mut self) -> RunnerHealth {
         let sid = match self.ensure_session().await {
             Ok(s) => s.to_string(),
             Err(_) => {
-                return WdaHealth {
+                return RunnerHealth {
                     up: true,
                     actionable: false,
                     locked: None,
@@ -549,13 +549,13 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
         {
-            Ok(response) => ensure_wda_success(response, "GET /wda/apps/list")
+            Ok(response) => ensure_runner_success(response, "GET /wda/apps/list")
                 .await
                 .is_ok(),
             Err(_) => false,
         };
         // A live testmanagerd connection is necessary but not sufficient:
-        // WDA can still answer apps/list while the iPhone is locked. Treat an
+        // runner can still answer apps/list while the iPhone is locked. Treat an
         // unreadable or positive lock state as non-actionable so callers never
         // inject a gesture into the lock screen after the phone sleeps.
         let actionable = locked == Some(false) && active_apps_actionable;
@@ -563,14 +563,14 @@ impl WdaClient {
             // Drop the severed session so the next caller re-creates one.
             self.invalidate_session();
         }
-        WdaHealth {
+        RunnerHealth {
             up: true,
             actionable,
             locked,
         }
     }
 
-    /// Ensure a session exists, creating one if needed. WDA accepts an empty
+    /// Ensure a session exists, creating one if needed. runner accepts an empty
     /// capabilities match and returns a session id (mirrored at top level and
     /// under `value.sessionId` across versions — we accept either).
     pub async fn ensure_session(&mut self) -> Result<&str> {
@@ -618,19 +618,19 @@ impl WdaClient {
                 match result {
                     Ok(response) => {
                         if let Err(error) =
-                            ensure_wda_success(response, "POST /appium/settings (idle)").await
+                            ensure_runner_success(response, "POST /appium/settings (idle)").await
                         {
-                            tracing::debug!("could not disable WDA idle waits: {error:#}");
+                            tracing::debug!("could not disable runner idle waits: {error:#}");
                         }
                     }
-                    Err(error) => tracing::debug!("could not disable WDA idle waits: {error:#}"),
+                    Err(error) => tracing::debug!("could not disable runner idle waits: {error:#}"),
                 }
             }
             // Opt-in bounded-snapshot settings (issue #44): apps with an
             // enormous accessibility tree (hardware-reported with KakaoTalk)
-            // can make WDA's hierarchy snapshot run so long that testmanagerd
+            // can make runner's hierarchy snapshot run so long that testmanagerd
             // kills the whole runner (`** BUILD INTERRUPTED **`) and the
-            // device goes blocked. WDA's `snapshotMaxDepth` /
+            // device goes blocked. runner's `snapshotMaxDepth` /
             // `customSnapshotTimeout` settings live in its process-global
             // configuration, so applying them once per session also bounds the
             // session-less `/source` reads behind `/agent/elements`. Off by
@@ -647,12 +647,12 @@ impl WdaClient {
                 match result {
                     Ok(response) => {
                         if let Err(error) =
-                            ensure_wda_success(response, "POST /appium/settings (snapshot)").await
+                            ensure_runner_success(response, "POST /appium/settings (snapshot)").await
                         {
-                            tracing::warn!("apply WDA snapshot settings: {error:#}");
+                            tracing::warn!("apply runner snapshot settings: {error:#}");
                         }
                     }
-                    Err(error) => tracing::warn!("apply WDA snapshot settings: {error:#}"),
+                    Err(error) => tracing::warn!("apply runner snapshot settings: {error:#}"),
                 }
             }
         }
@@ -661,7 +661,7 @@ impl WdaClient {
 
     /// Session-less `GET /source?format=json` — the active UI tree as JSON.
     ///
-    /// WDA explicitly exposes this route without a session and resolves the
+    /// runner explicitly exposes this route without a session and resolves the
     /// current active application itself. That matters for system-owned remote
     /// views such as the document picker: an app-scoped session can go stale or
     /// stay bound to the presenting app while the visible picker is elsewhere.
@@ -678,8 +678,8 @@ impl WdaClient {
         self.source_excluding(Some("visible,accessible")).await.is_ok()
     }
 
-    /// [`Self::source`] with WDA's `excluded_attributes` (comma-separated
-    /// attribute names such as `visible`), which WDA then never computes.
+    /// [`Self::source`] with runner's `excluded_attributes` (comma-separated
+    /// attribute names such as `visible`), which runner then never computes.
     async fn source_excluding(&mut self, excluded: Option<&str>) -> Result<serde_json::Value> {
         let mut url = match excluded {
             Some(names) => format!("{}/source?format=json&excluded_attributes={names}", self.base),
@@ -709,7 +709,7 @@ impl WdaClient {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let body = response.text().await.context("parse /source")?;
-        let value = parse_wda_value(&body, "GET /source")?;
+        let value = parse_runner_value(&body, "GET /source")?;
         match alert.as_deref() {
             Some("0") => self.no_alert_at = Some(asked_at),
             Some("1") => self.no_alert_at = None,
@@ -746,10 +746,10 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await;
         let value = match response {
-            Ok(response) => match ensure_wda_success(response, "GET /wda/settle").await {
+            Ok(response) => match ensure_runner_success(response, "GET /wda/settle").await {
                 Ok(value) => value,
                 Err(error) => {
-                    if wda_error_is_not_found(&error)
+                    if runner_error_is_not_found(&error)
                         || format!("{error:#}").contains("unknown command")
                     {
                         self.device_settle = Some(false);
@@ -789,7 +789,7 @@ impl WdaClient {
         })
     }
 
-    /// Find one element. `using` is a WDA locator strategy — "accessibility id"
+    /// Find one element. `using` is a runner locator strategy — "accessibility id"
     /// (the iOS accessibility label, e.g. a button's title), "class chain",
     /// "predicate string", "name", or "xpath". Returns the element id.
     pub async fn find_element(&mut self, using: &str, value: &str) -> Result<String> {
@@ -820,7 +820,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /elements")?;
-        let value = ensure_wda_success(response, "POST /elements").await?;
+        let value = ensure_runner_success(response, "POST /elements").await?;
         let elements = value
             .as_array()
             .ok_or_else(|| anyhow!("POST /elements returned non-array value: {value}"))?;
@@ -837,7 +837,7 @@ impl WdaClient {
 
     /// Set a date/option PickerWheel to a target value (issue #23). A `scroll`
     /// gesture doesn't reach the wheel's recognizer; the reliable path is
-    /// XCUITest's `adjustToPickerWheelValue:`, which WDA triggers when you POST
+    /// XCUITest's `adjustToPickerWheelValue:`, which runner triggers when you POST
     /// a value to the wheel element. `column` selects which wheel (0-based, the
     /// order they appear — e.g. month=0, day=1, year=2). On-device, so no
     /// cursor/frontmost requirement.
@@ -852,7 +852,7 @@ impl WdaClient {
             )
         })?;
         // POST a BARE value array (not type_into's {value,text} — the extra
-        // `text` makes WDA keyboard-type instead of calling
+        // `text` makes runner keyboard-type instead of calling
         // adjustToPickerWheelValue, so the wheel reported ok but never moved).
         let sid = self.ensure_session().await?.to_string();
         let response = self
@@ -864,7 +864,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST pickerwheel value")?;
-        ensure_wda_success(response, "POST pickerwheel value").await?;
+        ensure_runner_success(response, "POST pickerwheel value").await?;
         Ok(())
     }
 
@@ -881,12 +881,12 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST element/click")?;
-        ensure_wda_success(response, "POST element/click").await?;
+        ensure_runner_success(response, "POST element/click").await?;
         Ok(())
     }
 
     /// Type a literal string into an element (`POST .../element/:id/value`).
-    /// WDA sends it through the on-device text input, so **CJK goes in directly**
+    /// runner sends it through the on-device text input, so **CJK goes in directly**
     /// — no keycode mapping, no input-method interference.
     pub async fn type_into(&mut self, element_id: &str, text: &str) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
@@ -895,12 +895,12 @@ impl WdaClient {
                 "{}/session/{}/element/{}/value",
                 self.base, sid, element_id
             ))
-            // WDA accepts both `value: [chars]` (W3C) and `text: "..."`; send text.
+            // runner accepts both `value: [chars]` (W3C) and `text: "..."`; send text.
             .json(&serde_json::json!({ "value": [text], "text": text }))
             .send_signed(&self.auth)
             .await
             .context("POST element/value")?;
-        ensure_wda_success(response, "POST element/value").await?;
+        ensure_runner_success(response, "POST element/value").await?;
         Ok(())
     }
 
@@ -915,14 +915,14 @@ impl WdaClient {
                 "{}/session/{}/element/{}/clear",
                 self.base, sid, element_id
             ))
-            // A bodyless POST is rejected with 400 by current WDA builds
+            // A bodyless POST is rejected with 400 by current runner builds
             // (hardware-hit on 9.15.3 during the set_value("") validation);
             // send the same empty JSON object every other element POST sends.
             .json(&serde_json::json!({}))
             .send_signed(&self.auth)
             .await
             .context("POST element/clear")?;
-        ensure_wda_success(response, "POST element/clear").await?;
+        ensure_runner_success(response, "POST element/clear").await?;
         Ok(())
     }
 
@@ -946,7 +946,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST element/elements")?;
-        let value = ensure_wda_success(response, "POST element/elements").await?;
+        let value = ensure_runner_success(response, "POST element/elements").await?;
         let elements = value
             .as_array()
             .ok_or_else(|| anyhow!("POST element/elements returned non-array value: {value}"))?;
@@ -963,7 +963,7 @@ impl WdaClient {
 
     /// POST one element-scoped `/wda/element/:id/<command>` gesture. Every
     /// call sends a JSON body (at least `{}`) because a bodyless POST is
-    /// rejected with 400 by current WDA builds (see [`Self::clear_element`]).
+    /// rejected with 400 by current runner builds (see [`Self::clear_element`]).
     async fn post_element_gesture(
         &mut self,
         element_id: &str,
@@ -982,7 +982,7 @@ impl WdaClient {
             .await
             .with_context(|| operation.clone())?;
         if response.status().is_client_error() {
-            // Keep WDA's own explanation: `error_for_status` drops the body,
+            // Keep runner's own explanation: `error_for_status` drops the body,
             // and for a refused gesture the body is the only place that says
             // why (issue #90).
             let status = response.status();
@@ -992,12 +992,12 @@ impl WdaClient {
             }
             return Err(anyhow!("{operation} HTTP status: {status}: {text}"));
         }
-        ensure_wda_success(response, &operation).await?;
+        ensure_runner_success(response, &operation).await?;
         Ok(())
     }
 
     /// Long-press an element (`POST .../wda/element/:id/touchAndHold`) — the
-    /// element-scoped context-menu ("secondary action") gesture. WDA computes
+    /// element-scoped context-menu ("secondary action") gesture. runner computes
     /// the geometry, so this is immune to stale source-tree rectangles.
     pub async fn touch_and_hold_element(
         &mut self,
@@ -1062,9 +1062,9 @@ impl WdaClient {
         .await
     }
 
-    /// Force-press an element (`POST .../wda/element/:id/forceTouch`). WDA
+    /// Force-press an element (`POST .../wda/element/:id/forceTouch`). runner
     /// treats `pressure` and `duration` as a required pair: an empty body is
-    /// answered with `400 Bad Request` on WDA 9.15.3 (issue #57), so a caller
+    /// answered with `400 Bad Request` on runner 9.15.3 (issue #57), so a caller
     /// that omits either — or both — still gets explicit defaults
     /// (pressure 1.0, duration 0.5 s) on the wire.
     pub async fn force_touch_element(
@@ -1083,7 +1083,7 @@ impl WdaClient {
 
     /// Move a picker wheel one notch (`POST .../wda/pickerwheel/:id/select`).
     /// `order` is `"next"` (increment) or `"previous"` (decrement); `offset`
-    /// is WDA's tap offset from the wheel's center (0.2 is its documented
+    /// is runner's tap offset from the wheel's center (0.2 is its documented
     /// sweet spot for one-notch moves).
     pub async fn pickerwheel_select(
         &mut self,
@@ -1101,13 +1101,13 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST wda/pickerwheel/select")?;
-        ensure_wda_success(response, "POST wda/pickerwheel/select").await?;
+        ensure_runner_success(response, "POST wda/pickerwheel/select").await?;
         Ok(())
     }
 
     /// Adjust a wheel/slider by POSTing a BARE `{"value":[…]}` to
     /// `element/:id/value` — no `text` key, exactly like [`Self::set_picker`]:
-    /// the extra `text` makes WDA keyboard-type instead of calling
+    /// the extra `text` makes runner keyboard-type instead of calling
     /// `adjustToPickerWheelValue:` / `adjustToNormalizedSliderPosition:`.
     pub async fn adjust_element_value(&mut self, element_id: &str, value: &str) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
@@ -1120,17 +1120,17 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST element/value (adjust)")?;
-        ensure_wda_success(response, "POST element/value (adjust)").await?;
+        ensure_runner_success(response, "POST element/value (adjust)").await?;
         Ok(())
     }
 
     /// Coordinate tap via the W3C Actions API (`POST /session/<id>/actions`, a
     /// touch down-up at the point). Useful when there's no addressable element;
     /// still synthesized on the phone, so no host-cursor contention. Coords are
-    /// WDA points (top-left origin), NOT our normalized [0,1] — convert via
+    /// runner points (top-left origin), NOT our normalized [0,1] — convert via
     /// window size first.
     ///
-    /// The older `/wda/tap/0` helper 404s on current WDA builds (verified on
+    /// The older `/wda/tap/0` helper 404s on current runner builds (verified on
     /// 14.1.1 / iOS 27): the route was element-scoped (`/wda/tap/<element>`) and
     /// element `0` no longer resolves. `/actions` is the W3C-standard path and is
     /// present across builds.
@@ -1153,7 +1153,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /actions")?;
-        ensure_wda_success(response, "POST /actions").await?;
+        ensure_runner_success(response, "POST /actions").await?;
         Ok(())
     }
 
@@ -1182,7 +1182,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /actions (long press)")?;
-        ensure_wda_success(response, "POST /actions (long press)").await?;
+        ensure_runner_success(response, "POST /actions (long press)").await?;
         Ok(())
     }
 
@@ -1221,13 +1221,13 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /actions (drag)")?;
-        ensure_wda_success(response, "POST /actions (drag)").await?;
+        ensure_runner_success(response, "POST /actions (drag)").await?;
         Ok(())
     }
 
     /// Swipe/scroll gesture via the W3C Actions API — a single touch that
     /// presses at `(x1,y1)`, drags to `(x2,y2)` over `duration_ms`, and lifts.
-    /// Synthesized on the phone like [`Self::tap_point`]. Coords are WDA points
+    /// Synthesized on the phone like [`Self::tap_point`]. Coords are runner points
     /// (top-left origin), NOT normalized — convert via [`Self::window_size`].
     ///
     /// A short press-pause before the move makes XCUITest register a drag
@@ -1265,7 +1265,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /actions (swipe)")?;
-        ensure_wda_success(response, "POST /actions (swipe)").await?;
+        ensure_runner_success(response, "POST /actions (swipe)").await?;
         Ok(())
     }
 
@@ -1279,7 +1279,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /wda/pressButton home")?;
-        ensure_wda_success(response, "POST /wda/pressButton home").await?;
+        ensure_runner_success(response, "POST /wda/pressButton home").await?;
         Ok(())
     }
 
@@ -1297,7 +1297,7 @@ impl WdaClient {
 
     /// Open Spotlight from SpringBoard through its accessibility element.
     ///
-    /// A coordinate tap on the Search pill can be acknowledged by WDA without
+    /// A coordinate tap on the Search pill can be acknowledged by runner without
     /// changing the screen. Resolve the localized accessibility element and
     /// click it instead, then verify that Spotlight's text field appeared
     /// before reporting success.
@@ -1307,7 +1307,7 @@ impl WdaClient {
         // Poll rather than sleep a fixed 450 ms, but only once SpringBoard is
         // the ONLY active app: until then the app being left may still answer
         // for a "搜索" button of its own, and while a notification banner is up
-        // SpringBoard is listed next to that app in no fixed order. A WDA
+        // SpringBoard is listed next to that app in no fixed order. A runner
         // without `apps/list` gets the old fixed wait; one that answers but
         // never shows SpringBoard alone is an error, not a search in the app.
         // Every query is bounded by what is left of its phase's deadline.
@@ -1466,16 +1466,16 @@ impl WdaClient {
                 "{}/session/{}/element/{}/clear",
                 self.base, sid, id
             ))
-            // Same bodyless-POST 400 as clear_element on current WDA builds.
+            // Same bodyless-POST 400 as clear_element on current runner builds.
             .json(&serde_json::json!({}))
             .send_signed(&self.auth)
             .await
             .context("POST /element/clear")?;
-        ensure_wda_success(response, "POST /element/clear").await?;
+        ensure_runner_success(response, "POST /element/clear").await?;
         Ok(())
     }
 
-    /// Tune WDA's built-in MJPEG screen stream (`POST /appium/settings`). The
+    /// Tune runner's built-in MJPEG screen stream (`POST /appium/settings`). The
     /// defaults cap at ~9 fps; bumping `mjpegServerFramerate` and shrinking the
     /// frame (`mjpegScalingFactor` %, `mjpegServerScreenshotQuality` %) lifts it
     /// to ~28 fps with a still-legible image. The stream itself is served on the
@@ -1497,17 +1497,17 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /appium/settings (mjpeg)")?;
-        ensure_wda_success(response, "POST /appium/settings (mjpeg)").await?;
+        ensure_runner_success(response, "POST /appium/settings (mjpeg)").await?;
         Ok(())
     }
 
-    /// Window (screen) size in WDA points — needed to map our normalized
+    /// Window (screen) size in runner points — needed to map our normalized
     /// `[0,1]` agent coordinates onto [`Self::tap_point`]'s absolute points.
     pub async fn window_size(&mut self) -> Result<(f64, f64)> {
         // Every tree read refreshes this from the Application frame (see
         // `elements`), so the TTL only matters between reads; a rotation shows
         // up in the next read. Measured on real sessions: the 3 s TTL re-read
-        // the size on almost every request (~0.24 s each, 6.8 % of WDA time).
+        // the size on almost every request (~0.24 s each, 6.8 % of runner time).
         const WINDOW_SIZE_TTL: Duration = Duration::from_secs(30);
         if let Some((size, at)) = self.window {
             if at.elapsed() < WINDOW_SIZE_TTL {
@@ -1527,7 +1527,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("GET /window/size")?;
-        let value = ensure_wda_success(response, "GET /window/size").await?;
+        let value = ensure_runner_success(response, "GET /window/size").await?;
         let w = value.get("width").and_then(|x| x.as_f64());
         let h = value.get("height").and_then(|x| x.as_f64());
         match (w, h) {
@@ -1550,7 +1550,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /wda/apps/launch")?;
-        ensure_wda_success(response, "POST /wda/apps/launch").await?;
+        ensure_runner_success(response, "POST /wda/apps/launch").await?;
         Ok(())
     }
 
@@ -1565,7 +1565,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /wda/apps/terminate")?;
-        let value = ensure_wda_success(response, "POST /wda/apps/terminate").await?;
+        let value = ensure_runner_success(response, "POST /wda/apps/terminate").await?;
         Ok(value.get("value").and_then(serde_json::Value::as_bool).unwrap_or(true))
     }
 
@@ -1586,8 +1586,8 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("GET /wda/apps/list")?;
-        // ensure_wda_success already unwraps the W3C `value`.
-        let apps = ensure_wda_success(response, "GET /wda/apps/list").await?;
+        // ensure_runner_success already unwraps the W3C `value`.
+        let apps = ensure_runner_success(response, "GET /wda/apps/list").await?;
         Ok(apps
             .as_array()
             .map(|apps| {
@@ -1599,20 +1599,20 @@ impl WdaClient {
             .unwrap_or_default())
     }
 
-    /// Open a URL on the device via WDA's **session-scoped** `POST /session/:sid/url`.
+    /// Open a URL on the device via runner's **session-scoped** `POST /session/:sid/url`.
     ///
     /// appium-webdriveragent registers this route both with and without a
     /// session (`FBSessionCommands.m`), and the handler uses the modern
     /// system `open` path — no Safari detour. The sessionless form is the one
     /// the design originally reached for (a deep link such as
     /// `shortcuts://run-shortcut?...` for the semantic intents channel would
-    /// then fire without establishing a session), but it 404s on WDA 9.15.3
+    /// then fire without establishing a session), but it 404s on runner 9.15.3
     /// — hardware-verified — so this takes the session out first. The JSON
-    /// body is required: current WDA rejects bodyless POSTs with a 400, so
+    /// body is required: current runner rejects bodyless POSTs with a 400, so
     /// the URL always rides in `{"url": ...}`.
     pub async fn open_url(&mut self, url: &str) -> Result<()> {
         // Session-scoped route: the sessionless `POST /url` the design
-        // expected 404s on WDA 9.15.3 (hardware-verified); the W3C
+        // expected 404s on runner 9.15.3 (hardware-verified); the W3C
         // `POST /session/:sid/url` opens the deep link fine.
         let sid = self.ensure_session().await?.to_string();
         let response = self
@@ -1621,7 +1621,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /session/:sid/url")?;
-        ensure_wda_success(response, "POST /session/:sid/url").await?;
+        ensure_runner_success(response, "POST /session/:sid/url").await?;
         Ok(())
     }
 
@@ -1636,7 +1636,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /wda/keys")?;
-        ensure_wda_success(response, "POST /wda/keys").await?;
+        ensure_runner_success(response, "POST /wda/keys").await?;
         Ok(())
     }
 
@@ -1652,11 +1652,11 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /wda/keys")?;
-        ensure_wda_success(response, "POST /wda/keys").await?;
+        ensure_runner_success(response, "POST /wda/keys").await?;
         Ok(())
     }
 
-    /// Send one named WebDriver key through WDA.
+    /// Send one named WebDriver key through runner.
     ///
     /// WebDriver represents non-text keys with Unicode code points in the
     /// private-use range.  Keeping the mapping here gives HTTP, MCP, and the web
@@ -1667,7 +1667,7 @@ impl WdaClient {
     /// with a **key input source**, NOT through [`Self::keys`]. `/wda/keys`
     /// bottoms out in `FBKeyboard typeText:`, which is literal text entry: it
     /// never interprets the private-use code points, so it *typed* them into the
-    /// focused field while WDA still answered `{"ok":true}` (issue #42 —
+    /// focused field while runner still answered `{"ok":true}` (issue #42 —
     /// `return` left the search unsubmitted, `delete` made the text longer).
     /// Only the Actions key source translates `\u{E007}` &co. into real key
     /// events. Plain text keeps using [`Self::keys`], which is correct for it.
@@ -1705,7 +1705,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /actions (key)")?;
-        ensure_wda_success(response, "POST /actions").await?;
+        ensure_runner_success(response, "POST /actions").await?;
         Ok(())
     }
 
@@ -1714,13 +1714,13 @@ impl WdaClient {
     ///
     /// For a web keyboard the dismiss affordance is the **form-assistant-bar
     /// button** ("Hide keyboard" / CN "隐藏键盘"), which lives *outside* the
-    /// `XCUIElementTypeKeyboard` subtree — so WDA's own `POST
+    /// `XCUIElementTypeKeyboard` subtree — so runner's own `POST
     /// /wda/keyboard/dismiss` (it only taps keyboard *keys*) is a no-op here.
     /// Hardware-verified: tapping that accessory button is what actually works.
     /// So we find a Button whose name/label is one of the locale-specific
     /// dismiss labels and tap it; if none is present we fall back to the native
     /// `/wda/keyboard/dismiss` (covers system keyboards that do have a Done key).
-    /// If no keyboard is present, WDA treats the native dismiss request as a
+    /// If no keyboard is present, runner treats the native dismiss request as a
     /// successful no-op (the desired postcondition already holds). Transport
     /// failures and W3C error envelopes are returned to the caller, so an HTTP
     /// ACK never claims that an unconfirmed click landed.
@@ -1754,7 +1754,7 @@ impl WdaClient {
                 .await
                 .context("dismiss keyboard accessory click");
         }
-        // No accessory button (native keyboard or already gone) — ask WDA to
+        // No accessory button (native keyboard or already gone) — ask runner to
         // establish the same postcondition with its native dismiss endpoint.
         let response = self
             .post_req(format!(
@@ -1765,7 +1765,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /wda/keyboard/dismiss")?;
-        ensure_wda_success(response, "POST /wda/keyboard/dismiss").await?;
+        ensure_runner_success(response, "POST /wda/keyboard/dismiss").await?;
         Ok(())
     }
 
@@ -1788,7 +1788,7 @@ impl WdaClient {
             .await
             .context("GET /screenshot")?;
         let headers = response.headers().clone();
-        let value = ensure_wda_success(response, "GET /screenshot").await?;
+        let value = ensure_runner_success(response, "GET /screenshot").await?;
         let encoded = value
             .as_str()
             .ok_or_else(|| anyhow!("GET /screenshot returned non-string value"))?;
@@ -1809,7 +1809,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("GET /screenshot")?;
-        let value = ensure_wda_success(response, "GET /screenshot").await?;
+        let value = ensure_runner_success(response, "GET /screenshot").await?;
         let encoded = value
             .as_str()
             .ok_or_else(|| anyhow!("GET /screenshot returned non-string value"))?;
@@ -1851,17 +1851,17 @@ impl WdaClient {
         Ok(rows)
     }
 
-    /// The tree for [`Self::elements`], never asking WDA for a read that can
+    /// The tree for [`Self::elements`], never asking runner for a read that can
     /// outlive the runner. Returns the tree and whether it is the lite one.
     ///
-    /// WDA's `isVisible` costs a hit-test per node. On a screen whose tree is
+    /// runner's `isVisible` costs a hit-test per node. On a screen whose tree is
     /// huge that is fatal: WeChat's chat list exposes every conversation
     /// (hardware: 637 Cells, 3450 nodes), the full JSON read ran past 35 s,
     /// and testmanagerd killed the runner — the "Mode B" of the agent
     /// reference. The same screen without `visible` reads in ~5 s, and a
     /// normal screen in ~0.3 s instead of ~1.5 s. So: read without
     /// `visible` first; when that tree is small, read again with it, so
-    /// normal screens keep WDA's exact occlusion answer; when it is large,
+    /// normal screens keep runner's exact occlusion answer; when it is large,
     /// keep the lite tree and judge visibility by geometry instead.
     /// Probing every read (not once per app) matters: one app can hold both
     /// kinds of screen, and backing out of a WeChat chat lands on the list.
@@ -1888,7 +1888,7 @@ impl WdaClient {
             .probe
             .small_tree_at
             .is_some_and(|at| self.posted_at.is_none_or(|posted| posted < at));
-        // After an app switch, ask WDA which app is in front (~20 ms) rather
+        // After an app switch, ask runner which app is in front (~20 ms) rather
         // than probe (~150 ms): a known-small app reads in full at once.
         if self.probe.app_switched && !untouched && !self.lite_source {
             // Bounded: a slow answer must not hold up the read it is meant
@@ -1930,7 +1930,7 @@ impl WdaClient {
             return Ok((lite, true));
         }
         self.lite_source = false;
-        // A small tree whose full read still fails points at WDA itself, not
+        // A small tree whose full read still fails points at runner itself, not
         // at the tree: report it like any failed read rather than hide it
         // behind the probe.
         let full = self.source().await?;
@@ -1938,12 +1938,12 @@ impl WdaClient {
     }
 
     /// Whether the last [`Self::elements`] judged `visible` by geometry
-    /// rather than by WDA (a tree above the node limit).
+    /// rather than by runner (a tree above the node limit).
     pub fn visibility_is_geometric(&self) -> bool {
         self.lite_source
     }
 
-    /// The last tree read, if nothing has been POSTed to WDA since and it is
+    /// The last tree read, if nothing has been POSTed to runner since and it is
     /// younger than `max_age`. The screen can still have changed on its own
     /// (a timer, a network load, a person's finger); callers must verify the
     /// element live before acting on it.
@@ -1980,7 +1980,7 @@ impl WdaClient {
         self.last_tree = None;
     }
 
-    /// Drop a reused "no alert" answer so the next probe asks WDA.
+    /// Drop a reused "no alert" answer so the next probe asks runner.
     pub fn forget_alert_probe(&mut self) {
         self.no_alert_at = None;
     }
@@ -2042,7 +2042,7 @@ impl WdaClient {
         Err(last_err.unwrap_or_else(|| anyhow!("element not found: {label}")))
     }
 
-    /// One element's frame in WDA points (`GET .../element/:id/rect`).
+    /// One element's frame in runner points (`GET .../element/:id/rect`).
     /// Used to match a semantic-less source-tree row onto its live XCUIElement
     /// when nothing but geometry identifies it (e.g. a bare `UISwitch`).
     pub async fn element_rect(&mut self, element_id: &str) -> Result<[f64; 4]> {
@@ -2056,7 +2056,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("GET element/rect")?;
-        let value = ensure_wda_success(response, "GET element/rect").await?;
+        let value = ensure_runner_success(response, "GET element/rect").await?;
         let g = |k: &str| value.get(k).and_then(serde_json::Value::as_f64);
         match (g("x"), g("y"), g("width"), g("height")) {
             (Some(x), Some(y), Some(w), Some(h)) => Ok([x, y, w, h]),
@@ -2066,7 +2066,7 @@ impl WdaClient {
 
     /// An element's current `value` attribute (`GET .../element/:id/attribute/value`):
     /// a picker wheel's selected option, a slider's percent, a field's text.
-    /// `None` when WDA reports no value.
+    /// `None` when runner reports no value.
     pub async fn element_value(&mut self, element_id: &str) -> Result<Option<String>> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
@@ -2078,7 +2078,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("GET element/attribute/value")?;
-        let value = ensure_wda_success(response, "GET element/attribute/value").await?;
+        let value = ensure_runner_success(response, "GET element/attribute/value").await?;
         Ok(match value {
             serde_json::Value::String(s) => Some(s),
             serde_json::Value::Number(n) => Some(n.to_string()),
@@ -2088,14 +2088,14 @@ impl WdaClient {
     }
 
     /// The system alert (`UIAlertController`) currently on screen, through
-    /// WDA's native alert routes: `(text, button names)`; `None` when no alert
+    /// runner's native alert routes: `(text, button names)`; `None` when no alert
     /// is up. Alerts are the one UI layer the flattened `/source` tree handles
     /// badly (hardware-hit on stock Settings: the alert was absent from the
     /// tree, and an element click on its button was ACKed without effect), so
     /// agents get them as a first-class block instead.
     /// A "no alert" answer stays true until something is sent to the phone:
     /// reads in a row (settle polling, wait_for, repeated elements) skip the
-    /// two WDA round trips. Anything POSTed since, or 2 s passing, asks again.
+    /// two runner round trips. Anything POSTed since, or 2 s passing, asks again.
     fn no_alert_known(&self) -> bool {
         const NO_ALERT_REUSE: Duration = Duration::from_secs(2);
         self.no_alert_at.is_some_and(|at| {
@@ -2115,10 +2115,10 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("GET /alert/text")?;
-        let text = match ensure_wda_success(response, "GET /alert/text").await {
+        let text = match ensure_runner_success(response, "GET /alert/text").await {
             Ok(value) => value.as_str().unwrap_or("").to_string(),
             // W3C maps "no such alert" to HTTP 404.
-            Err(error) if wda_error_is_not_found(&error) => {
+            Err(error) if runner_error_is_not_found(&error) => {
                 self.no_alert_at = Some(asked_at);
                 return Ok(None);
             }
@@ -2130,7 +2130,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("GET /wda/alert/buttons")?;
-        let buttons = match ensure_wda_success(response, "GET /wda/alert/buttons").await {
+        let buttons = match ensure_runner_success(response, "GET /wda/alert/buttons").await {
             Ok(value) => value
                 .as_array()
                 .map(|items| {
@@ -2159,7 +2159,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /alert/accept")?;
-        ensure_wda_success(response, "POST /alert/accept").await?;
+        ensure_runner_success(response, "POST /alert/accept").await?;
         Ok(())
     }
 
@@ -2173,7 +2173,7 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST /alert/dismiss")?;
-        ensure_wda_success(response, "POST /alert/dismiss").await?;
+        ensure_runner_success(response, "POST /alert/dismiss").await?;
         Ok(())
     }
 
@@ -2194,7 +2194,7 @@ impl WdaClient {
 
     /// `POST /session/:id/wda/lock` — lock the phone's screen.
     ///
-    /// This is a generic WDA primitive. Backend selection is persisted at
+    /// This is a generic runner primitive. Backend selection is persisted at
     /// daemon startup and this method must not be used as a runtime mode switch.
     pub async fn lock(&mut self) -> Result<()> {
         let sid = self.ensure_session().await?.to_string();
@@ -2204,12 +2204,12 @@ impl WdaClient {
             .send_signed(&self.auth)
             .await
             .context("POST wda/lock")?;
-        ensure_wda_success(response, "POST wda/lock").await?;
+        ensure_runner_success(response, "POST wda/lock").await?;
         Ok(())
     }
 }
 
-/// Node count above which [`WdaClient::bounded_source`] keeps the tree read
+/// Node count above which [`RunnerClient::bounded_source`] keeps the tree read
 /// without `isVisible`. 1000 is about a quarter of the WeChat list that
 /// killed the runner; `IPHONE_USE_SOURCE_MAX_NODES` overrides it.
 fn full_source_max_nodes() -> usize {
@@ -2220,13 +2220,13 @@ fn full_source_max_nodes() -> usize {
         .unwrap_or(1000)
 }
 
-/// `IPHONE_USE_SOURCE_VISIBLE=1`: read trees with WDA's `isVisible` again
+/// `IPHONE_USE_SOURCE_VISIBLE=1`: read trees with runner's `isVisible` again
 /// (size-probed, as before every read went lite).
 fn full_visibility_requested() -> bool {
     std::env::var("IPHONE_USE_SOURCE_VISIBLE").is_ok_and(|value| value.trim() == "1")
 }
 
-/// WDA attributes the size probe does not compute: the two per-node
+/// runner attributes the size probe does not compute: the two per-node
 /// accessibility queries that make a huge tree's read outlive the runner.
 const PROBE_EXCLUDED_ATTRIBUTES: &str = "visible,accessible";
 
@@ -2235,7 +2235,7 @@ const PROBE_EXCLUDED_ATTRIBUTES: &str = "visible,accessible";
 /// back out into its huge list on a full read before it was ever measured.
 const PROBE_WARMUP_READS: u32 = 6;
 
-/// What [`WdaClient::bounded_source`] has seen of tree sizes. The probe costs
+/// What [`RunnerClient::bounded_source`] has seen of tree sizes. The probe costs
 /// a second `/source` on every small screen (bench: tap label 0.9 s -> 1.15 s,
 /// Settings observed step 5.4 s -> 6.8 s), so it runs only when the next
 /// tree could plausibly be huge. Everything here lives for the daemon run:
@@ -2246,7 +2246,7 @@ struct ProbeMemory {
     /// Something that changes app (launch, activate, Home, open URL) was
     /// sent since the last read.
     app_switched: bool,
-    /// After a switch: the frontmost bundle, when WDA could name it.
+    /// After a switch: the frontmost bundle, when runner could name it.
     switched_bundle: Option<String>,
     /// Root `Application` label of the last tree read.
     current: Option<String>,
@@ -2330,7 +2330,7 @@ impl ProbeMemory {
 /// Read mode with hysteresis: a tree above `limit` keeps the lite read, and
 /// once lite it stays lite until the tree drops below 80% of `limit`. Settle
 /// and `wait_for` compare snapshot ids, which hash `visible`; a screen near
-/// the limit must not alternate between WDA's and the geometric answer, or
+/// the limit must not alternate between runner's and the geometric answer, or
 /// two reads of an unchanged screen would never match. The band is below
 /// the limit only: going above it would send a full read to a bigger tree.
 fn keep_lite_source(nodes: usize, limit: usize, was_lite: bool) -> bool {
@@ -2344,9 +2344,9 @@ fn count_nodes(node: &serde_json::Value) -> usize {
         .map_or(0, |children| children.iter().map(count_nodes).sum())
 }
 
-/// Geometric stand-in for WDA's `isVisible` on a lite tree: a row lying
+/// Geometric stand-in for runner's `isVisible` on a lite tree: a row lying
 /// wholly outside the root's frame (a list cell scrolled away) or with no
-/// area is `visible:false`; everything else stays unknown (`None`), as WDA's
+/// area is `visible:false`; everything else stays unknown (`None`), as runner's
 /// own answer would have been omitted for a visible row.
 fn mark_rows_outside_root(tree: &serde_json::Value, rows: &mut [ElementRow]) {
     let field = |name: &str| {
@@ -2446,18 +2446,18 @@ fn mark_rows_clipped_by_scroll_containers(tree: &serde_json::Value, rows: &mut [
     }
 }
 
-/// Bounded-snapshot WDA settings from the environment (issue #44), applied
-/// once per created session. `IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH` maps to
-/// WDA's `snapshotMaxDepth` (tree levels; WDA's own default is 50) and
-/// `IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S` to `customSnapshotTimeout` (seconds;
-/// WDA's default 15). Unset or unparseable values are simply omitted, so the
+/// Bounded-snapshot runner settings from the environment (issue #44), applied
+/// once per created session. `IPHONE_USE_RUNNER_SNAPSHOT_MAX_DEPTH` maps to
+/// runner's `snapshotMaxDepth` (tree levels; runner's own default is 50) and
+/// `IPHONE_USE_RUNNER_SNAPSHOT_TIMEOUT_S` to `customSnapshotTimeout` (seconds;
+/// runner's default 15). Unset or unparseable values are simply omitted, so the
 /// default daemon applies no settings at all.
 fn snapshot_settings_from_env() -> Option<serde_json::Map<String, serde_json::Value>> {
     snapshot_settings(
-        std::env::var("IPHONE_USE_WDA_SNAPSHOT_MAX_DEPTH")
+        std::env::var("IPHONE_USE_RUNNER_SNAPSHOT_MAX_DEPTH")
             .ok()
             .as_deref(),
-        std::env::var("IPHONE_USE_WDA_SNAPSHOT_TIMEOUT_S")
+        std::env::var("IPHONE_USE_RUNNER_SNAPSHOT_TIMEOUT_S")
             .ok()
             .as_deref(),
     )
@@ -2468,7 +2468,7 @@ fn snapshot_settings_from_env() -> Option<serde_json::Map<String, serde_json::Va
 /// [`crate::macos::front_deadline`]'s split).
 ///
 /// A rejected value must be *omitted*, never sent as a degenerate setting: a
-/// `snapshotMaxDepth` of 0 would ask WDA for an empty tree, and a 0s
+/// `snapshotMaxDepth` of 0 would ask runner for an empty tree, and a 0s
 /// `customSnapshotTimeout` would fail every snapshot — both are worse than
 /// the unbounded default this is meant to protect against.
 fn snapshot_settings(
@@ -2500,15 +2500,15 @@ fn snapshot_settings(
 pub struct ElementRow {
     /// Element type without the `XCUIElementType` prefix (e.g. `Button`).
     pub kind: String,
-    /// User-facing accessibility label. When WDA has no label, this falls back
+    /// User-facing accessibility label. When runner has no label, this falls back
     /// to its name so existing label-based clients keep a useful target.
     pub label: String,
-    /// Stable accessibility identifier (`rawIdentifier` in WDA JSON), when the
+    /// Stable accessibility identifier (`rawIdentifier` in runner JSON), when the
     /// application supplies one. This is a durable locator candidate; unlike a
-    /// snapshot index or WDA element id it may be persisted in a flow.
+    /// snapshot index or runner element id it may be persisted in a flow.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identifier: Option<String>,
-    /// Position + size in WDA points: `[x, y, w, h]`.
+    /// Position + size in runner points: `[x, y, w, h]`.
     pub rect: [f64; 4],
     /// Tree depth (purely presentational).
     pub depth: u32,
@@ -2519,7 +2519,7 @@ pub struct ElementRow {
     /// switches / sliders drivable without vision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
-    /// WDA emits these flags for every source node. Keep the common healthy
+    /// runner emits these flags for every source node. Keep the common healthy
     /// state sparse to avoid inflating every MCP response: `enabled:false` and
     /// `visible:false` are emitted only for exceptional nodes.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2532,7 +2532,7 @@ pub struct ElementRow {
     pub accessible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focused: Option<bool>,
-    /// Text-input placeholder when WDA exposes it.
+    /// Text-input placeholder when runner exposes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
     /// Derived non-default affordances (`IPHONE_USE_ELEMENTS_AFFORDANCES=1`
@@ -2547,7 +2547,7 @@ pub struct ElementRow {
     /// filter chips); only `true` is emitted. Affordances flag only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<bool>,
-    /// Slider/Stepper range, parsed from WDA's `minValue`/`maxValue` strings.
+    /// Slider/Stepper range, parsed from runner's `minValue`/`maxValue` strings.
     /// Affordances flag only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
@@ -2603,7 +2603,7 @@ pub struct ElementRowJson {
     overlay: Option<String>,
 }
 
-/// A point coordinate: an integer when it is whole, else as WDA gave it.
+/// A point coordinate: an integer when it is whole, else as runner gave it.
 struct Coordinate(f64);
 
 impl serde::Serialize for Coordinate {
@@ -2661,7 +2661,7 @@ fn overlay_kind(identifier: &str) -> Option<&'static str> {
 }
 
 
-fn wda_bool(node: &serde_json::Value, key: &str) -> Option<bool> {
+fn runner_bool(node: &serde_json::Value, key: &str) -> Option<bool> {
     match node.get(key)? {
         serde_json::Value::Bool(value) => Some(*value),
         serde_json::Value::Number(value) => value.as_i64().and_then(|value| match value {
@@ -2703,9 +2703,9 @@ pub const INTERACTIVE_KINDS: [&str; 11] = [
     "Stepper",
 ];
 
-/// A finite number WDA emits either natively or as an `NSNumber.stringValue`
+/// A finite number runner emits either natively or as an `NSNumber.stringValue`
 /// string (`minValue`/`maxValue` arrive as strings on v9.15.3).
-fn wda_number(node: &serde_json::Value, key: &str) -> Option<f64> {
+fn runner_number(node: &serde_json::Value, key: &str) -> Option<f64> {
     match node.get(key)? {
         serde_json::Value::Number(value) => value.as_f64(),
         serde_json::Value::String(value) => value.trim().parse::<f64>().ok(),
@@ -2714,7 +2714,7 @@ fn wda_number(node: &serde_json::Value, key: &str) -> Option<f64> {
     .filter(|value| value.is_finite())
 }
 
-/// The node's `UIAccessibilityTraits` names, from WDA's comma-separated
+/// The node's `UIAccessibilityTraits` names, from runner's comma-separated
 /// `traits` string (e.g. `"Button, Selected"`).
 fn node_traits(node: &serde_json::Value) -> Vec<String> {
     node.get("traits")
@@ -2733,7 +2733,7 @@ fn node_traits(node: &serde_json::Value) -> Vec<String> {
 /// Derive the sparse non-default `perform` affordances for one element.
 ///
 /// Only kinds the daemon can actually drive are listed (a bare `Adjustable`
-/// trait on an `Other` row has no reachable WDA increment path, so emitting
+/// trait on an `Other` row has no reachable runner increment path, so emitting
 /// it would advertise an action `perform` must refuse). Universal gestures
 /// (tap, longpress/menu, double_tap, swipes) are deliberately NOT listed per
 /// row — `perform` still accepts them everywhere.
@@ -2779,7 +2779,7 @@ fn flatten_options_from_env() -> FlattenOptions {
     }
 }
 
-/// Recursively flatten a WDA `/source?format=json` tree, keeping only rows an
+/// Recursively flatten a runner `/source?format=json` tree, keeping only rows an
 /// agent can act on or learn from: anything with a non-empty label, or an
 /// interactive type. Order is document order (roughly top-to-bottom).
 fn flatten_tree(node: &serde_json::Value, depth: u32, out: &mut Vec<ElementRow>) {
@@ -2866,7 +2866,7 @@ fn flatten_node(
     if !label.is_empty() || INTERACTIVE_KINDS.contains(&kind.as_str()) {
         let r = node.get("rect").cloned().unwrap_or_default();
         let g = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
-        // Current value/state (issue #20). WDA reports `value` as a string
+        // Current value/state (issue #20). runner reports `value` as a string
         // ("1"/"0" for a Switch), a number (Slider fraction), or a bool —
         // normalize to a non-empty string, else None.
         let value = node.get("value").and_then(|v| match v {
@@ -2890,10 +2890,10 @@ fn flatten_node(
         } else {
             value
         };
-        let enabled = wda_bool(node, "isEnabled").filter(|value| !value);
-        let visible = wda_bool(node, "isVisible").filter(|value| !value);
-        let accessible = wda_bool(node, "isAccessible").filter(|value| *value);
-        let focused = wda_bool(node, "isFocused").filter(|value| *value);
+        let enabled = runner_bool(node, "isEnabled").filter(|value| !value);
+        let visible = runner_bool(node, "isVisible").filter(|value| !value);
+        let accessible = runner_bool(node, "isAccessible").filter(|value| *value);
+        let focused = runner_bool(node, "isFocused").filter(|value| *value);
         // Affordance extras (both env-gated; the default daemon parses none of
         // this and every field stays None → byte-identical serialized rows).
         let traits = if options.affordances || options.raw_traits {
@@ -2902,8 +2902,8 @@ fn flatten_node(
             Vec::new()
         };
         let (actions, selected, min, max) = if options.affordances {
-            let min = wda_number(node, "minValue");
-            let max = wda_number(node, "maxValue");
+            let min = runner_number(node, "minValue");
+            let max = runner_number(node, "maxValue");
             (
                 derived_actions(&kind, &traits, min, max),
                 traits.iter().any(|name| name == "Selected").then_some(true),
@@ -2987,7 +2987,7 @@ impl KeepAwakeEndpoint {
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Err(KeepAwakeError::Unsupported);
         }
-        let value = ensure_wda_success(response, "POST /wda/keepawake")
+        let value = ensure_runner_success(response, "POST /wda/keepawake")
             .await
             .map_err(KeepAwakeError::Failed)?;
         Ok(parse_keep_awake(&value))
@@ -3007,7 +3007,7 @@ impl KeepAwakeEndpoint {
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Err(KeepAwakeError::Unsupported);
         }
-        let value = ensure_wda_success(response, "GET /wda/keepawake")
+        let value = ensure_runner_success(response, "GET /wda/keepawake")
             .await
             .map_err(KeepAwakeError::Failed)?;
         Ok(parse_keep_awake(&value))
@@ -3035,10 +3035,10 @@ fn parse_keep_awake(value: &serde_json::Value) -> KeepAwakeReport {
     }
 }
 
-/// Action-level WDA health (see [`WdaClient::probe_health`]). Distinguishes a
+/// Action-level runner health (see [`RunnerClient::probe_health`]). Distinguishes a
 /// runner that merely answers `/status` from one that can actually act.
 #[derive(Debug, Clone, Copy)]
-pub struct WdaHealth {
+pub struct RunnerHealth {
     /// `/status` answered 2xx (runner process + HTTP server alive).
     pub up: bool,
     /// A real UI-test action succeeded — the testmanagerd connection is live.
@@ -3049,8 +3049,8 @@ pub struct WdaHealth {
     pub locked: Option<bool>,
 }
 
-impl WdaHealth {
-    /// Nothing reachable — WDA not configured or `/status` down.
+impl RunnerHealth {
+    /// Nothing reachable — runner not configured or `/status` down.
     pub fn down() -> Self {
         Self {
             up: false,
@@ -3060,13 +3060,13 @@ impl WdaHealth {
     }
 }
 
-/// WDA answers 404 for W3C "no such alert" / "no such element" conditions;
-/// `ensure_wda_success` surfaces that as an HTTP-status error.
-pub fn wda_error_is_not_found(error: &anyhow::Error) -> bool {
+/// runner answers 404 for W3C "no such alert" / "no such element" conditions;
+/// `ensure_runner_success` surfaces that as an HTTP-status error.
+pub fn runner_error_is_not_found(error: &anyhow::Error) -> bool {
     format!("{error:#}").contains("404 Not Found")
 }
 
-/// What the runner's on-device settle saw (see [`WdaClient::device_settle`]).
+/// What the runner's on-device settle saw (see [`RunnerClient::device_settle`]).
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceSettle {
     /// The screen stayed unchanged for the quiet window within the budget.
@@ -3080,10 +3080,10 @@ pub struct DeviceSettle {
 
 /// Require both HTTP success and a successful W3C `value` envelope.
 ///
-/// WDA commonly reports command failures as HTTP 200 with
+/// runner commonly reports command failures as HTTP 200 with
 /// `{"value":{"error":...}}`. Every action that can produce a user-facing ACK
 /// must consume and validate the body rather than trusting the status code.
-async fn ensure_wda_success(
+async fn ensure_runner_success(
     response: reqwest::Response,
     operation: &str,
 ) -> Result<serde_json::Value> {
@@ -3101,7 +3101,7 @@ async fn ensure_wda_success(
         .text()
         .await
         .with_context(|| format!("{operation} response body"))?;
-    parse_wda_value(&body, operation)
+    parse_runner_value(&body, operation)
 }
 
 /// The longest runner error message carried into logs and responses.
@@ -3200,10 +3200,10 @@ fn body_summary(body: &str) -> String {
     format!("{} bytes", body.len())
 }
 
-/// Parse a W3C response value while preserving error semantics. WDA sometimes
+/// Parse a W3C response value while preserving error semantics. runner sometimes
 /// returns a JSON error envelope that still has a decodable `value`; treating
 /// that object as a successful source tree or `false` lock state is unsafe.
-fn parse_wda_value(body: &str, operation: &str) -> Result<serde_json::Value> {
+fn parse_runner_value(body: &str, operation: &str) -> Result<serde_json::Value> {
     let root: serde_json::Value = serde_json::from_str(body)
         .with_context(|| format!("{operation} response is not JSON ({})", body_summary(body)))?;
     let value = root
@@ -3220,7 +3220,7 @@ fn parse_wda_value(body: &str, operation: &str) -> Result<serde_json::Value> {
 }
 
 /// Pull the session id out of a `POST /session` response, accepting both the
-/// top-level `sessionId` (older WDA) and `value.sessionId` (W3C) placements.
+/// top-level `sessionId` (older runner) and `value.sessionId` (W3C) placements.
 fn parse_session_id(body: &str) -> Result<String> {
     let v: serde_json::Value =
         serde_json::from_str(body).with_context(|| format!("session resp not JSON ({})", body_summary(body)))?;
@@ -3246,10 +3246,10 @@ fn parse_session_id(body: &str) -> Result<String> {
     {
         return Ok(s.to_string());
     }
-    Err(anyhow!("no sessionId in WDA response ({})", body_summary(body)))
+    Err(anyhow!("no sessionId in runner response ({})", body_summary(body)))
 }
 
-/// Pull an element id out of a find/`POST element` response. WDA returns it
+/// Pull an element id out of a find/`POST element` response. runner returns it
 /// under `value.ELEMENT` (legacy) and the W3C key
 /// `element-6066-11e4-a52e-4f735466cecf`; accept either.
 fn parse_element_id(body: &str) -> Result<String> {
@@ -3262,11 +3262,11 @@ fn parse_element_id(body: &str) -> Result<String> {
             return Ok(s.to_string());
         }
     }
-    Err(anyhow!("no element id in WDA response ({})", body_summary(body)))
+    Err(anyhow!("no element id in runner response ({})", body_summary(body)))
 }
 
-/// WDA refused a force press because the device has no pressure-sensitive
-/// touch (no 3D Touch: every iPhone since the XR / 11). WDA checks
+/// runner refused a force press because the device has no pressure-sensitive
+/// touch (no 3D Touch: every iPhone since the XR / 11). runner checks
 /// `XCUIDevice.supportsPressureInteraction` and answers 400 before it
 /// synthesizes any touch, so nothing reached the screen (issue #90).
 #[derive(Debug)]
@@ -3274,20 +3274,20 @@ pub struct ForcePressUnsupported;
 
 impl std::fmt::Display for ForcePressUnsupported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("WDA refused force press: this device has no pressure-sensitive touch")
+        f.write_str("runner refused force press: this device has no pressure-sensitive touch")
     }
 }
 
 impl std::error::Error for ForcePressUnsupported {}
 
-/// Is this WDA error body the "no pressure touch" refusal from
-/// `XCUIElement+FBForceTouch.m`? Matched on WDA's fixed English message.
+/// Is this runner error body the "no pressure touch" refusal from
+/// `XCUIElement+FBForceTouch.m`? Matched on runner's fixed English message.
 fn force_press_refused(body: &str) -> bool {
     body.contains("Force press is not supported on this device")
 }
 
-/// The body a force press puts on the wire. WDA 9.15.3 rejects `{}` outright,
-/// so both fields are always present; an omitted one falls back to WDA's own
+/// The body a force press puts on the wire. runner 9.15.3 rejects `{}` outright,
+/// so both fields are always present; an omitted one falls back to runner's own
 /// documented default rather than to no field at all.
 fn force_touch_body(pressure: Option<f64>, duration_s: Option<f64>) -> serde_json::Value {
     serde_json::json!({
@@ -3345,7 +3345,7 @@ mod tests {
         );
         assert_eq!(raw.to_string(), "GET /source HTTP status 404 Not Found");
         // The 404 checks read the status text.
-        assert!(wda_error_is_not_found(&anyhow::Error::new(raw)));
+        assert!(runner_error_is_not_found(&anyhow::Error::new(raw)));
         let long = RunnerHttpError::from_body(
             "POST /x",
             reqwest::StatusCode::BAD_REQUEST,
@@ -3358,7 +3358,7 @@ mod tests {
     }
 
     // Issue #57: a force press with no explicit pressure/duration used to send
-    // an empty body, which WDA 9.15.3 answers with 400 Bad Request.
+    // an empty body, which runner 9.15.3 answers with 400 Bad Request.
     #[test]
     fn force_touch_always_sends_pressure_and_duration() {
         assert_eq!(
@@ -3379,7 +3379,7 @@ mod tests {
     fn force_touch_request_body_is_never_empty() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let recorder = std::sync::Arc::clone(&seen);
-        let (base, task) = mock_wda(3, move |request| {
+        let (base, task) = mock_runner(3, move |request| {
             if request.starts_with("POST /session ") {
                 return r#"{"sessionId":"S-1","value":{}}"#.to_string();
             }
@@ -3392,7 +3392,7 @@ mod tests {
             }
             r#"{"value":null}"#.to_string()
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         block(client.force_touch_element("42", None, None)).unwrap();
         task.join().unwrap();
         let body = seen.lock().unwrap().clone();
@@ -3402,7 +3402,7 @@ mod tests {
         );
     }
 
-    /// WDA 9.15.3's answer to a force press on an iPhone without 3D Touch,
+    /// runner 9.15.3's answer to a force press on an iPhone without 3D Touch,
     /// captured verbatim from an iPhone 17 Pro Max on iOS 27.0 (issue #90).
     pub(crate) const FORCE_PRESS_UNSUPPORTED_BODY: &str = r#"{
   "value" : {
@@ -3420,12 +3420,12 @@ mod tests {
         )
     }
 
-    // Issue #90: the 400 WDA sends when the device has no pressure touch is a
+    // Issue #90: the 400 runner sends when the device has no pressure touch is a
     // refusal before any touch, and must come back as a typed error the
     // router can map to "not sent", not as an opaque transport failure.
     #[test]
     fn force_press_refusal_is_a_typed_error() {
-        let (base, task) = mock_wda(3, |request| {
+        let (base, task) = mock_runner(3, |request| {
             if request.starts_with("POST /session ") {
                 return r#"{"sessionId":"S-1","value":{}}"#.to_string();
             }
@@ -3434,7 +3434,7 @@ mod tests {
             }
             http_400(FORCE_PRESS_UNSUPPORTED_BODY)
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         let error = block(client.force_touch_element("42", None, None)).unwrap_err();
         task.join().unwrap();
         assert!(
@@ -3443,11 +3443,11 @@ mod tests {
         );
     }
 
-    // Any other 4xx keeps WDA's body in the message, and a 404 still reads as
+    // Any other 4xx keeps runner's body in the message, and a 404 still reads as
     // a missing element to the router's `404 Not Found` check.
     #[test]
     fn other_gesture_client_errors_keep_status_and_body() {
-        let (base, task) = mock_wda(3, |request| {
+        let (base, task) = mock_runner(3, |request| {
             if request.starts_with("POST /session ") {
                 return r#"{"sessionId":"S-1","value":{}}"#.to_string();
             }
@@ -3460,7 +3460,7 @@ mod tests {
                 body.len()
             )
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         let error = block(client.force_touch_element("42", None, None)).unwrap_err();
         task.join().unwrap();
         let text = format!("{error:#}");
@@ -3477,7 +3477,7 @@ mod tests {
         assert_eq!(bounded_move_duration_ms(u64::MAX), 2_000);
     }
 
-    fn mock_wda(
+    fn mock_runner(
         requests: usize,
         responder: impl Fn(&str) -> String + Send + 'static,
     ) -> (String, std::thread::JoinHandle<()>) {
@@ -3601,14 +3601,14 @@ mod tests {
         let (base, acted, task) = signing_runner(&token, 7);
 
         // No token (an unconfigured client): refused, nothing done.
-        let unsigned = WdaClient::new(base.clone())
+        let unsigned = RunnerClient::new(base.clone())
             .unwrap()
             .with_runner_auth(crate::runner_token::TokenSource::none());
         assert!(!block(unsigned.is_up()));
         // Another launch's token: refused.
         let other = tempfile::tempdir().unwrap();
         crate::runner_token::rotate(other.path()).unwrap();
-        let stale = WdaClient::new(base.clone())
+        let stale = RunnerClient::new(base.clone())
             .unwrap()
             .with_runner_auth(crate::runner_token::TokenSource::at(other.path()));
         assert!(!block(stale.is_up()));
@@ -3616,7 +3616,7 @@ mod tests {
 
         // This launch's token: GET and a POST with a body both verify, and so
         // does the keep-awake lease (its own request path).
-        let mut ours = WdaClient::new(base.clone())
+        let mut ours = RunnerClient::new(base.clone())
             .unwrap()
             .with_runner_auth(crate::runner_token::TokenSource::at(dir.path()));
         assert!(block(ours.is_up()));
@@ -3666,11 +3666,11 @@ mod tests {
     #[test]
     fn active_bundles_lists_every_active_app_in_order() {
         // Hardware shape while SpringBoard shows a banner over Shortcuts.
-        let (base, server) = mock_wda(1, |request| {
+        let (base, server) = mock_runner(1, |request| {
             assert!(request.contains("/wda/apps/list"), "unexpected: {request}");
             r#"{"value":[{"pid":11146,"bundleId":"com.apple.shortcuts"},{"pid":37,"bundleId":"com.apple.springboard"}],"sessionId":"SESSION"}"#.to_string()
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.session = Some("SESSION".to_string());
         let active = block(client.active_bundles()).unwrap();
         assert_eq!(active, ["com.apple.shortcuts", "com.apple.springboard"]);
@@ -3678,14 +3678,14 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_read_refreshes_the_window_size_without_asking_wda() {
+    fn a_tree_read_refreshes_the_window_size_without_asking_runner() {
         // Only the two source reads (probe + full). A GET /window/size would
         // hang the test.
-        let (base, server) = mock_wda(2, |request| {
+        let (base, server) = mock_runner(2, |request| {
             assert!(request.contains("/source"), "unexpected: {request}");
             r#"{"value":{"type":"XCUIElementTypeApplication","rect":{"x":0,"y":0,"width":440,"height":956},"children":[]}}"#.to_string()
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.full_visibility = true; // these cases test the size probe
         client.session = Some("SESSION".to_string());
         block(async {
@@ -3711,7 +3711,7 @@ mod tests {
 
     #[test]
     fn a_small_tree_is_read_again_with_visibility() {
-        let (base, server) = mock_wda(2, |request| {
+        let (base, server) = mock_runner(2, |request| {
             if request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible&alert_scan=1 ") {
                 tree_with_cells(3, "far")
             } else {
@@ -3724,11 +3724,11 @@ mod tests {
                     .to_string()
             }
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.full_visibility = true; // these cases test the size probe
         let rows = block(client.elements()).unwrap();
         server.join().unwrap();
-        // WDA's own occlusion answer survives for a normal screen.
+        // runner's own occlusion answer survives for a normal screen.
         let behind = rows.iter().find(|row| row.label == "behind").unwrap();
         assert_eq!(behind.visible, Some(false));
         assert!(rows.iter().all(|row| row.label != "far"), "the probe tree must not be used");
@@ -3738,14 +3738,14 @@ mod tests {
     fn a_huge_tree_is_never_read_with_visibility() {
         // Hardware: WeChat's chat list, 3450 nodes; with isVisible the read
         // outlived the runner. One request only — a second would hang.
-        let (base, server) = mock_wda(1, |request| {
+        let (base, server) = mock_runner(1, |request| {
             assert!(
                 request.starts_with("GET /source?format=json&excluded_attributes=visible,accessible&alert_scan=1 "),
                 "{request}"
             );
             tree_with_cells(1_200, "scrolled away")
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.full_visibility = true; // these cases test the size probe
         let rows = block(client.elements()).unwrap();
         server.join().unwrap();
@@ -3757,7 +3757,7 @@ mod tests {
 
     #[test]
     fn by_default_a_tree_is_read_once_without_visibility_and_clipped_by_geometry() {
-        let (base, server) = mock_wda(1, |request| {
+        let (base, server) = mock_runner(1, |request| {
             assert!(
                 request
                     .starts_with("GET /source?format=json&excluded_attributes=visible,accessible&alert_scan=1 "),
@@ -3771,7 +3771,7 @@ mod tests {
                  {"type":"XCUIElementTypeButton","label":"屏幕外","rect":{"x":0,"y":2000,"width":40,"height":40}}]}}"#
                 .to_string()
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.full_visibility = false;
         let rows = block(client.elements()).unwrap();
         server.join().unwrap();
@@ -3804,7 +3804,7 @@ mod tests {
         // then 500 (clearly smaller: probe + full read).
         let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = probes.clone();
-        let (base, server) = mock_wda(4, move |request| {
+        let (base, server) = mock_runner(4, move |request| {
             if !request.contains("excluded_attributes=visible") {
                 return tree_with_cells(10, "far");
             }
@@ -3814,7 +3814,7 @@ mod tests {
                 _ => tree_with_cells(500, "far"),
             }
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.full_visibility = true; // these cases test the size probe
         block(async {
             client.elements().await.unwrap();
@@ -3833,7 +3833,7 @@ mod tests {
         // read: probe + full · read again: full only · tap · read: probe + full.
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = order.clone();
-        let (base, server) = mock_wda(6, move |request| {
+        let (base, server) = mock_runner(6, move |request| {
             let what = if request.contains("excluded_attributes=visible") {
                 "probe"
             } else if request.contains("/source") {
@@ -3848,7 +3848,7 @@ mod tests {
                 tree_with_cells(3, "far")
             }
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.full_visibility = true; // these cases test the size probe
         client.session = Some("SESSION".to_string());
         block(async {
@@ -3899,7 +3899,7 @@ mod tests {
 
     #[test]
     fn an_app_switch_probes_unless_the_frontmost_app_is_known_small() {
-        // A switch to an app WDA cannot name, or a bundle never read: probe.
+        // A switch to an app runner cannot name, or a bundle never read: probe.
         let mut memory = ProbeMemory {
             app_switched: true,
             ..ProbeMemory::default()
@@ -3929,7 +3929,7 @@ mod tests {
 
     #[test]
     fn an_app_switch_post_marks_the_next_read_for_a_probe() {
-        let mut client = WdaClient::new("http://127.0.0.1:9").unwrap();
+        let mut client = RunnerClient::new("http://127.0.0.1:9").unwrap();
         let _ = client.post_req("http://127.0.0.1:9/session/S/actions".to_string());
         assert!(!client.probe.app_switched);
         let _ = client.post_req("http://127.0.0.1:9/session/S/wda/apps/launch".to_string());
@@ -3953,14 +3953,14 @@ mod tests {
 
     #[test]
     fn a_no_alert_answer_is_reused_until_something_is_sent() {
-        let (base, server) = mock_wda(3, |request| {
+        let (base, server) = mock_runner(3, |request| {
             if request.contains("/alert/text") {
                 "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 37\r\nConnection: close\r\n\r\n{\"value\":{\"error\":\"no such alert\"}}  ".to_string()
             } else {
                 r#"{"value":null}"#.to_string()
             }
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.session = Some("SESSION".to_string());
         block(async {
             assert!(client.alert_summary().await.unwrap().is_none()); // asks (1)
@@ -4019,9 +4019,9 @@ mod tests {
     }
 
     #[test]
-    fn wda_value_rejects_w3c_error_envelope() {
+    fn runner_value_rejects_w3c_error_envelope() {
         let body = r#"{"value":{"error":"invalid element state","message":"device is locked"}}"#;
-        let error = parse_wda_value(body, "GET /source")
+        let error = parse_runner_value(body, "GET /source")
             .unwrap_err()
             .to_string();
         assert!(error.contains("invalid element state"));
@@ -4029,9 +4029,9 @@ mod tests {
     }
 
     #[test]
-    fn wda_value_returns_success_payload() {
+    fn runner_value_returns_success_payload() {
         let body = r#"{"value":{"type":"XCUIElementTypeApplication","children":[]}}"#;
-        let value = parse_wda_value(body, "GET /source").unwrap();
+        let value = parse_runner_value(body, "GET /source").unwrap();
         assert_eq!(
             value.get("type").and_then(serde_json::Value::as_str),
             Some("XCUIElementTypeApplication")
@@ -4040,7 +4040,7 @@ mod tests {
 
     #[test]
     fn source_uses_sessionless_active_application_endpoint() {
-        let (base, server) = mock_wda(1, |request| {
+        let (base, server) = mock_runner(1, |request| {
             // A fresh client has no "no alert" answer yet: the read asks
                 // the runner for one beside the tree.
                 assert!(request.starts_with("GET /source?format=json&alert_scan=1 "), "{request}");
@@ -4048,7 +4048,7 @@ mod tests {
             r#"{"value":{"type":"XCUIElementTypeApplication","label":"Files","children":[]}}"#
                 .to_string()
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.session = Some("STALE-APP-SCOPED-SESSION".to_string());
 
         let source = block(client.source()).unwrap();
@@ -4063,10 +4063,10 @@ mod tests {
 
     #[test]
     fn action_rejects_http_200_w3c_error_envelope() {
-        let (base, server) = mock_wda(1, |_| {
+        let (base, server) = mock_runner(1, |_| {
             r#"{"value":{"error":"invalid session id","message":"response lost"}}"#.to_string()
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.session = Some("SESSION".to_string());
 
         let error = block(client.tap_point(10.0, 20.0)).unwrap_err().to_string();
@@ -4077,11 +4077,11 @@ mod tests {
     }
 
     #[test]
-    fn named_key_uses_actions_key_source_not_wda_keys() {
+    fn named_key_uses_actions_key_source_not_runner_keys() {
         // issue #42: /wda/keys goes through `FBKeyboard typeText:`, which typed
         // the private-use code point into the field instead of pressing the key.
         // Only a key input source on /actions produces a real key event.
-        let (base, server) = mock_wda(1, |request| {
+        let (base, server) = mock_runner(1, |request| {
             assert!(
                 request.starts_with("POST /session/SESSION/actions "),
                 "{request}"
@@ -4095,7 +4095,7 @@ mod tests {
             assert!(request.contains('\u{E007}'), "{request}");
             r#"{"value":null}"#.to_string()
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.session = Some("SESSION".to_string());
 
         let sent = block(client.named_key("return"));
@@ -4112,7 +4112,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_settings_carry_each_knob_under_wdas_own_name() {
+    fn snapshot_settings_carry_each_knob_under_runners_own_name() {
         let depth = snapshot_settings(Some("8"), None).expect("depth alone opts in");
         assert_eq!(depth.get("snapshotMaxDepth"), Some(&serde_json::json!(8)));
         assert!(depth.get("customSnapshotTimeout").is_none());
@@ -4132,7 +4132,7 @@ mod tests {
         );
     }
 
-    // A degenerate value must be dropped, not forwarded: depth 0 asks WDA for
+    // A degenerate value must be dropped, not forwarded: depth 0 asks runner for
     // an empty tree and a 0s timeout fails every snapshot — each is worse than
     // the unbounded default these knobs exist to bound.
     #[test]
@@ -4164,12 +4164,12 @@ mod tests {
         // ACKs but does not submit; `send`/`go`/`search` must map to the real
         // Return key event (U+E007) so a chat/search actually fires.
         for name in ["send", "go", "search"] {
-            let (base, server) = mock_wda(1, |request| {
+            let (base, server) = mock_runner(1, |request| {
                 assert!(request.contains(r#""type":"key""#), "{request}");
                 assert!(request.contains('\u{E007}'), "{request}");
                 r#"{"value":null}"#.to_string()
             });
-            let mut client = WdaClient::new(base).unwrap();
+            let mut client = RunnerClient::new(base).unwrap();
             client.session = Some("SESSION".to_string());
             let sent = block(client.named_key(name));
             server.join().unwrap();
@@ -4179,7 +4179,7 @@ mod tests {
 
     #[test]
     fn named_key_rejects_unsupported_name() {
-        let mut client = WdaClient::new("http://127.0.0.1:1".to_string()).unwrap();
+        let mut client = RunnerClient::new("http://127.0.0.1:1".to_string()).unwrap();
         client.session = Some("SESSION".to_string());
 
         let error = block(client.named_key("f13")).unwrap_err().to_string();
@@ -4189,7 +4189,7 @@ mod tests {
     #[test]
     fn health_rejects_active_apps_http_200_error_envelope() {
         // /status, unattached /wda/locked, session /wda/locked, /wda/apps/list
-        let (base, server) = mock_wda(4, |request| {
+        let (base, server) = mock_runner(4, |request| {
             if request.contains("/wda/locked") {
                 r#"{"value":false}"#.to_string()
             } else if request.contains("/wda/apps/list") {
@@ -4199,7 +4199,7 @@ mod tests {
                 r#"{"value":{"ready":true}}"#.to_string()
             }
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.session = Some("SESSION".to_string());
 
         let health = block(client.probe_health());
@@ -4212,7 +4212,7 @@ mod tests {
 
     #[test]
     fn health_reads_lock_state_without_a_session_and_skips_session_creation() {
-        let (base, server) = mock_wda(2, |request| {
+        let (base, server) = mock_runner(2, |request| {
             assert!(!request.starts_with("POST /session "), "{request}");
             if request.starts_with("GET /wda/locked ") {
                 r#"{"value":true}"#.to_string()
@@ -4220,7 +4220,7 @@ mod tests {
                 r#"{"value":{"ready":true}}"#.to_string()
             }
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
 
         let health = block(client.probe_health());
         server.join().unwrap();
@@ -4238,7 +4238,7 @@ mod tests {
         // `actionable:false`, lock state unknown — and the probe must return
         // within its own budget so callers never discard the observation.
         // /status, unattached /wda/locked (non-boolean → unknown), POST /session
-        let (base, server) = mock_wda(3, |request| {
+        let (base, server) = mock_runner(3, |request| {
             if request.starts_with("POST /session ") {
                 std::thread::sleep(std::time::Duration::from_millis(600));
                 r#"{"sessionId":"LATE","value":{}}"#.to_string()
@@ -4246,7 +4246,7 @@ mod tests {
                 r#"{"value":{"ready":true}}"#.to_string()
             }
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.actionability_budget = std::time::Duration::from_millis(150);
 
         let started = std::time::Instant::now();
@@ -4268,7 +4268,7 @@ mod tests {
     fn health_rejects_locked_device_even_when_active_apps_succeeds() {
         // The unattached lock read answers `true`, so the probe stops after
         // /status + /wda/locked — no session traffic against a locked phone.
-        let (base, server) = mock_wda(2, |request| {
+        let (base, server) = mock_runner(2, |request| {
             if request.contains("/wda/locked") {
                 r#"{"value":true}"#.to_string()
             } else if request.contains("/wda/apps/list") {
@@ -4277,7 +4277,7 @@ mod tests {
                 r#"{"value":{"ready":true}}"#.to_string()
             }
         });
-        let mut client = WdaClient::new(base).unwrap();
+        let mut client = RunnerClient::new(base).unwrap();
         client.session = Some("SESSION".to_string());
 
         let health = block(client.probe_health());
@@ -4598,7 +4598,7 @@ mod tests {
         assert_eq!(mute.actions.as_deref(), Some(&["toggle".to_string()][..]));
         assert_eq!(mute.selected, None);
 
-        // Bare Adjustable on an untyped row has no reachable WDA increment
+        // Bare Adjustable on an untyped row has no reachable runner increment
         // path — advertise nothing rather than an action perform must refuse.
         let custom = by_kind("Other");
         assert_eq!(custom.actions, None);
@@ -4634,18 +4634,18 @@ mod tests {
     }
 
     #[test]
-    fn wda_number_parses_nsnumber_strings_and_numbers() {
+    fn runner_number_parses_nsnumber_strings_and_numbers() {
         let node = serde_json::json!({
             "minValue": "0.25",
             "maxValue": 10,
             "bad": "wide open",
             "inf": "inf"
         });
-        assert_eq!(wda_number(&node, "minValue"), Some(0.25));
-        assert_eq!(wda_number(&node, "maxValue"), Some(10.0));
-        assert_eq!(wda_number(&node, "bad"), None);
-        assert_eq!(wda_number(&node, "inf"), None);
-        assert_eq!(wda_number(&node, "missing"), None);
+        assert_eq!(runner_number(&node, "minValue"), Some(0.25));
+        assert_eq!(runner_number(&node, "maxValue"), Some(10.0));
+        assert_eq!(runner_number(&node, "bad"), None);
+        assert_eq!(runner_number(&node, "inf"), None);
+        assert_eq!(runner_number(&node, "missing"), None);
     }
 }
 
@@ -4756,11 +4756,11 @@ mod body_summary_tests {
     fn malformed_responses_never_quote_the_body() {
         let secret = "hunter2-sentinel";
         let not_json = format!("<html>{secret}</html>");
-        let error = parse_wda_value(&not_json, "source").unwrap_err();
+        let error = parse_runner_value(&not_json, "source").unwrap_err();
         assert!(!format!("{error:#}").contains(secret), "{error:#}");
 
         let no_value = format!(r#"{{"tree":"{secret}"}}"#);
-        let error = parse_wda_value(&no_value, "source").unwrap_err();
+        let error = parse_runner_value(&no_value, "source").unwrap_err();
         assert!(!format!("{error:#}").contains(secret), "{error:#}");
 
         let error = parse_element_id(&no_value).unwrap_err();

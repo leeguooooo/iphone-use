@@ -1,5 +1,5 @@
 // Mac-side unit check of the runner's device-independent logic: HTTP parsing and error envelopes,
-// WDA locator strategies (accessibility id, class name, predicate string, class chain) and W3C
+// runner locator strategies (accessibility id, class name, predicate string, class chain) and W3C
 // pointer-action parsing. Run with runner/unit-check.sh.
 
 import CoreGraphics
@@ -95,7 +95,7 @@ do {
   let value = body?["value"] as? [String: Any]
   check(response.status == 404 && value?["error"] as? String == "no such alert", "no such alert envelope")
   check(String(decoding: response.serialized().prefix(24), as: UTF8.self).hasPrefix("HTTP/1.1 404 Not Found"),
-        "404 status line (WdaClient matches '404 Not Found')")
+        "404 status line (RunnerClient matches '404 Not Found')")
   let session = HTTPResponse.value(["sessionId": "S"], sessionId: "S")
   let sessionBody = try JSONSerialization.jsonObject(with: session.body) as? [String: Any]
   check(sessionBody?["sessionId"] as? String == "S", "top-level sessionId")
@@ -168,10 +168,10 @@ do {
   check(labels(try Locator.find(using: "accessibility id", value: "Done", root: tree, screen: screen)) == ["Done"],
         "accessibility id matches label")
   check(try Locator.find(using: "accessibility id", value: "OK", root: tree, screen: screen).isEmpty,
-        "accessibility id ignores the label of an element that has an identifier (WDA name)")
+        "accessibility id ignores the label of an element that has an identifier (runner name)")
   let pillText = try Locator.find(using: "accessibility id", value: "搜索", root: tree, screen: screen)
   check(pillText.count == 1 && pillText.first?.type == "XCUIElementTypeStaticText",
-        "accessibility id 搜索 names only the pill's text, as on WDA")
+        "accessibility id 搜索 names only the pill's text, as on runner")
   check(try Locator.find(using: "accessibility id", value: "spotlight-pill", root: tree, screen: screen).count == 1,
         "accessibility id finds the pill by its identifier")
   check(try Locator.find(using: "class name", value: "XCUIElementTypePickerWheel", root: tree, screen: screen).count == 3,
@@ -831,7 +831,7 @@ do {
   let refused = RunnerAuth.refusalResponse(.missing)
   let refusedBody = (try? JSONSerialization.jsonObject(with: refused.body)) as? [String: Any]
   check(refused.status == 401 && (refusedBody?["value"] as? [String: Any])?["error"] as? String == "unauthorized",
-        "a refusal is a 401 in the WDA error envelope")
+        "a refusal is a 401 in the runner error envelope")
   check(String(decoding: refused.serialized().prefix(25), as: UTF8.self) == "HTTP/1.1 401 Unauthorized",
         "with the right status line")
   check(!String(decoding: refused.serialized(), as: UTF8.self).contains(token), "and never echoes a token")

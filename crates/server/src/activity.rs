@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Value};
 
-use crate::wda::ElementRow;
+use crate::runner::ElementRow;
 
 pub const CAPACITY: usize = 50;
 /// Longest label kept in a line, in characters.

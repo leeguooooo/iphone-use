@@ -5,8 +5,8 @@
   "device_model": "iPhone 17 Pro Max",
   "ios": "27.0",
   "drivable": true,
-  "wda_actionable": true,
+  "runner_actionable": true,
   "transport": "usb",
-  "managed_wda": true,
+  "managed_runner": true,
   "setup_blocked_on": ""
 }

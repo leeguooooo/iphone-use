@@ -969,7 +969,7 @@ pub fn pick_ports(requested: Option<u16>, free: impl Fn(u16) -> bool) -> Result<
 /// The shell line that runs a daemon instance against the started runner.
 pub fn daemon_command(instance: &str, udid: &str, port: u16, mjpeg_port: u16, daemon_port: u16) -> String {
     format!(
-        "IPHONE_USE_INSTANCE={instance} {ENV}={udid} IPHONE_USE_WDA_URL=http://127.0.0.1:{port} IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:{mjpeg_port} IPHONE_USE_PORT={daemon_port} iphone-use serve"
+        "IPHONE_USE_INSTANCE={instance} {ENV}={udid} IPHONE_USE_RUNNER_URL=http://127.0.0.1:{port} IPHONE_USE_RUNNER_MJPEG_URL=http://127.0.0.1:{mjpeg_port} IPHONE_USE_PORT={daemon_port} iphone-use serve"
     )
 }
 
@@ -1223,8 +1223,8 @@ pub fn daemon_env(instance: &str, udid: &str, port: u16, mjpeg_port: u16, daemon
     vec![
         ("IPHONE_USE_INSTANCE", instance.to_string()),
         (ENV, udid.to_string()),
-        ("IPHONE_USE_WDA_URL", format!("http://127.0.0.1:{port}")),
-        ("IPHONE_USE_WDA_MJPEG_URL", format!("http://127.0.0.1:{mjpeg_port}")),
+        ("IPHONE_USE_RUNNER_URL", format!("http://127.0.0.1:{port}")),
+        ("IPHONE_USE_RUNNER_MJPEG_URL", format!("http://127.0.0.1:{mjpeg_port}")),
         ("IPHONE_USE_PORT", daemon_port.to_string()),
     ]
 }
@@ -2190,8 +2190,8 @@ pub mod tests {
         let get = |key: &str| env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str());
         assert_eq!(get("IPHONE_USE_INSTANCE"), Some("sim"));
         assert_eq!(get(ENV), Some(UDID));
-        assert_eq!(get("IPHONE_USE_WDA_URL"), Some("http://127.0.0.1:8200"));
-        assert_eq!(get("IPHONE_USE_WDA_MJPEG_URL"), Some("http://127.0.0.1:9200"));
+        assert_eq!(get("IPHONE_USE_RUNNER_URL"), Some("http://127.0.0.1:8200"));
+        assert_eq!(get("IPHONE_USE_RUNNER_MJPEG_URL"), Some("http://127.0.0.1:9200"));
         assert_eq!(get("IPHONE_USE_PORT"), Some("44331"));
         // The printed --no-serve command carries the same settings.
         let line = daemon_command("sim", UDID, 8200, 9200, 44331);
@@ -2253,7 +2253,7 @@ pub mod tests {
 
         assert_eq!(
             daemon_command("sim-8a1bc3d4", UDID, 8200, 9200, 44331),
-            format!("IPHONE_USE_INSTANCE=sim-8a1bc3d4 IPHONE_USE_SIMULATOR={UDID} IPHONE_USE_WDA_URL=http://127.0.0.1:8200 IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9200 IPHONE_USE_PORT=44331 iphone-use serve")
+            format!("IPHONE_USE_INSTANCE=sim-8a1bc3d4 IPHONE_USE_SIMULATOR={UDID} IPHONE_USE_RUNNER_URL=http://127.0.0.1:8200 IPHONE_USE_RUNNER_MJPEG_URL=http://127.0.0.1:9200 IPHONE_USE_PORT=44331 iphone-use serve")
         );
     }
 

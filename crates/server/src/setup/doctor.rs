@@ -91,21 +91,21 @@ pub fn run(ctx: &Ctx) -> i32 {
             fail = true;
         }
     }
-    if ctx.wda_dir.join(".git").is_dir() {
+    if ctx.runner_dir.join(".git").is_dir() {
         warn(&format!(
             "~ a WebDriverAgent checkout from an earlier release is still at {}; nothing uses it any more (uninstall.sh removes it when it can prove ownership)",
-            ctx.wda_dir.display()
+            ctx.runner_dir.display()
         ));
     }
     let ports_ok =
-        matches!((ctx.wda_port_number(), ctx.mjpeg_port_number()), (Some(a), Some(b)) if a != b);
+        matches!((ctx.runner_port_number(), ctx.mjpeg_port_number()), (Some(a), Some(b)) if a != b);
     if ports_ok {
         ok(&format!(
             "Loopback ports: control {}, video {}",
-            ctx.wda_port, ctx.mjpeg_port
+            ctx.runner_port, ctx.mjpeg_port
         ));
     } else {
-        warn("X WDA_PORT and MJPEG_PORT must be distinct TCP ports from 1 to 65535");
+        warn("X IPU_RUNNER_PORT and MJPEG_PORT must be distinct TCP ports from 1 to 65535");
         fail = true;
     }
     match checks::warp_preflight() {
@@ -133,7 +133,7 @@ pub fn run(ctx: &Ctx) -> i32 {
     // What the USB layer says when usbmuxd cannot give us a usable phone.
     let diagnosis = usbdiag::probe(&usb, &ctx.udid);
     // Off the cable, the encrypted CoreDevice Wi-Fi tunnel is a supported
-    // transport unless WDA_TRANSPORT=usb (the target, or the one phone that
+    // transport unless IPU_RUNNER_TRANSPORT=usb (the target, or the one phone that
     // has a live tunnel when no target is set).
     let target_off_usb = !ctx.udid.is_empty() && !checks::on_usb(&ctx.udid, &usb);
     let tunnel = !ctx.lan()
@@ -159,7 +159,7 @@ pub fn run(ctx: &Ctx) -> i32 {
         if ctx.wifi_tunnel_allowed() {
             warn("X no iPhone on USB or on a CoreDevice Wi-Fi tunnel — plug one in, or keep a paired phone unlocked on this Mac's network");
         } else {
-            warn("X WDA_TRANSPORT=usb requires an iPhone connected over USB");
+            warn("X IPU_RUNNER_TRANSPORT=usb requires an iPhone connected over USB");
         }
         if let Some(diagnosis) = &diagnosis {
             warn(&format!("  USB: {}", diagnosis.message()));
@@ -170,7 +170,7 @@ pub fn run(ctx: &Ctx) -> i32 {
         fail = true;
     } else if !ctx.lan() && usb.len() > 1 && ctx.udid.is_empty() {
         warn(&format!(
-            "X multiple USB iPhones found ({usb_list}); set WDA_UDID=<one exact UDID>"
+            "X multiple USB iPhones found ({usb_list}); set IPU_RUNNER_UDID=<one exact UDID>"
         ));
         fail = true;
     } else if !ctx.lan() && target_off_usb {
@@ -180,14 +180,14 @@ pub fn run(ctx: &Ctx) -> i32 {
             if ctx.wifi_tunnel_allowed() {
                 " and has no CoreDevice Wi-Fi tunnel"
             } else {
-                " (WDA_TRANSPORT=usb)"
+                " (IPU_RUNNER_TRANSPORT=usb)"
             }
         ));
         fail = true;
     } else if !usb.is_empty() {
         ok(&format!("iPhone on USB: {usb_list}"));
     } else {
-        warn("~ WDA_ALLOW_LAN=1: no USB iPhone; setup will require one unambiguous paired destination");
+        warn("~ IPU_RUNNER_ALLOW_LAN=1: no USB iPhone; setup will require one unambiguous paired destination");
     }
     // Informational, never a failure: Xcode usually drives an iOS one minor
     // release ahead of its SDK, so only the runner's own refusal is decisive.
@@ -279,7 +279,7 @@ pub fn run(ctx: &Ctx) -> i32 {
         fail = true;
     }
     if ctx.lan() && sys::which("socat").is_none() && relay.is_none() && iproxy.is_none() {
-        warn("X WDA_ALLOW_LAN=1 needs a USB relay or socat");
+        warn("X IPU_RUNNER_ALLOW_LAN=1 needs a USB relay or socat");
         fail = true;
     }
     if relay.is_some()
@@ -292,7 +292,7 @@ pub fn run(ctx: &Ctx) -> i32 {
             println!("  ~ Wi-Fi: no CoreDevice tunnel to this iPhone right now; over Wi-Fi the relay needs one (Xcode or devicectl opens it while the phone is on the same network)");
         }
     }
-    if let Some(port) = ctx.wda_port_number() {
+    if let Some(port) = ctx.runner_port_number() {
         // Any complete answer counts here (`curl -s`, not `-f`).
         if sys::runner_get(
             &format!("http://127.0.0.1:{port}/status"),
@@ -314,9 +314,9 @@ pub fn run(ctx: &Ctx) -> i32 {
     println!(
         "    for the passcode to allow UI automation, and cannot show that prompt over Wi-Fi)."
     );
-    println!("    Setup and relaunch use the tunnel on their own when the cable is out (WDA_TRANSPORT=usb turns that off).");
+    println!("    Setup and relaunch use the tunnel on their own when the cable is out (IPU_RUNNER_TRANSPORT=usb turns that off).");
     println!("    An iOS 15/16 phone (no tunnel) is relayed to its LAN address off the cable, signed but unencrypted.");
-    println!("    WDA_ALLOW_LAN=1 (a plain socat relay to the phone's LAN address; also the LAN fallback for a runner");
+    println!("    IPU_RUNNER_ALLOW_LAN=1 (a plain socat relay to the phone's LAN address; also the LAN fallback for a runner");
     println!("    older than request signing) is an explicit, unsafe last resort for a trusted, isolated network only.");
     println!("  • Cloudflare WARP or another tunnel VPN can break Xcode's connection to the phone; disconnect it during setup if setup stalls.");
     if fail {

@@ -2,7 +2,7 @@
 //! evidence that something is gone.
 //!
 //! `wait_for`'s `absent` expectation is the dangerous one: an empty or
-//! container-only tree satisfies it vacuously. WDA hands back exactly such a
+//! container-only tree satisfies it vacuously. runner hands back exactly such a
 //! tree mid-transition and whenever the read path is degraded, so the endpoint
 //! has to tell "I looked and it is not there" apart from "I could not see".
 
@@ -15,7 +15,7 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 
@@ -66,7 +66,7 @@ const WAIT_FOR_ABSENT: &str = r#"{"steps":[
 ]}"#;
 
 async fn run_actions(base: &str, body: &str) -> (StatusCode, serde_json::Value) {
-    let app = server::http::router(build_state_with_wda(base));
+    let app = server::http::router(build_state_with_runner(base));
     let response = app
         .oneshot(
             Request::builder()
@@ -87,8 +87,8 @@ async fn run_actions(base: &str, body: &str) -> (StatusCode, serde_json::Value) 
     )
 }
 
-fn scripted(tree: &'static str) -> support::MockWda {
-    mock_wda(move |request, _| {
+fn scripted(tree: &'static str) -> support::MockRunner {
+    mock_runner(move |request, _| {
         if request.starts_with("POST /session ") {
             return Some((Duration::ZERO, SESSION.to_string()));
         }
@@ -102,8 +102,8 @@ fn scripted(tree: &'static str) -> support::MockWda {
 #[test]
 fn a_container_only_tree_never_proves_an_element_is_absent() {
     block(async {
-        let wda = scripted(CONTAINER_ONLY);
-        let (status, json) = run_actions(wda.url(), WAIT_FOR_ABSENT).await;
+        let runner = scripted(CONTAINER_ONLY);
+        let (status, json) = run_actions(runner.url(), WAIT_FOR_ABSENT).await;
 
         assert_eq!(status, StatusCode::CONFLICT, "{json}");
         assert_eq!(json["ok"], false);
@@ -124,8 +124,8 @@ fn a_container_only_tree_never_proves_an_element_is_absent() {
 #[test]
 fn a_real_screen_without_the_element_does_satisfy_absent() {
     block(async {
-        let wda = scripted(OTHER_SCREEN);
-        let (status, json) = run_actions(wda.url(), WAIT_FOR_ABSENT).await;
+        let runner = scripted(OTHER_SCREEN);
+        let (status, json) = run_actions(runner.url(), WAIT_FOR_ABSENT).await;
 
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["ok"], true);
@@ -142,13 +142,13 @@ fn a_real_screen_without_the_element_does_satisfy_absent() {
 #[test]
 fn a_tree_that_never_reads_says_so_instead_of_reporting_nothing() {
     block(async {
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
             None // every source read loses the connection
         });
-        let (status, json) = run_actions(wda.url(), WAIT_FOR_ABSENT).await;
+        let (status, json) = run_actions(runner.url(), WAIT_FOR_ABSENT).await;
 
         // Whether the window ends on a failed read or on the deadline is a
         // race; both are honest. What must NOT vary is the evidence.
@@ -157,7 +157,7 @@ fn a_tree_that_never_reads_says_so_instead_of_reporting_nothing() {
             "{status} {json}"
         );
         assert!(
-            json["error"] == "wda_source_failed" || json["error"] == "expectation_timeout",
+            json["error"] == "runner_source_failed" || json["error"] == "expectation_timeout",
             "{json}"
         );
         assert_eq!(json["outcome"], "not_sent");
@@ -183,7 +183,7 @@ fn a_tree_that_never_reads_says_so_instead_of_reporting_nothing() {
 fn one_good_read_survives_a_failing_tail() {
     block(async {
         let reads = std::sync::atomic::AtomicUsize::new(0);
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -198,7 +198,7 @@ fn one_good_read_survives_a_failing_tail() {
             }
             None
         });
-        let (status, json) = run_actions(wda.url(), WAIT_FOR_ABSENT).await;
+        let (status, json) = run_actions(runner.url(), WAIT_FOR_ABSENT).await;
 
         assert!(
             status == StatusCode::BAD_GATEWAY || status == StatusCode::CONFLICT,
@@ -225,7 +225,7 @@ fn one_good_read_survives_a_failing_tail() {
 fn a_good_read_followed_by_a_hanging_one_is_reported_stale() {
     block(async {
         let reads = std::sync::atomic::AtomicUsize::new(0);
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -239,7 +239,7 @@ fn a_good_read_followed_by_a_hanging_one_is_reported_stale() {
             }
             None
         });
-        let (status, json) = run_actions(wda.url(), WAIT_FOR_ABSENT).await;
+        let (status, json) = run_actions(runner.url(), WAIT_FOR_ABSENT).await;
 
         assert_eq!(status, StatusCode::CONFLICT, "{json}");
         assert_eq!(json["error"], "expectation_timeout");
@@ -259,7 +259,7 @@ fn a_good_read_followed_by_a_hanging_one_is_reported_stale() {
 #[test]
 fn a_first_read_that_hangs_reports_never_read_with_a_timeout_reason() {
     block(async {
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -268,7 +268,7 @@ fn a_first_read_that_hangs_reports_never_read_with_a_timeout_reason() {
             }
             None
         });
-        let (status, json) = run_actions(wda.url(), WAIT_FOR_ABSENT).await;
+        let (status, json) = run_actions(runner.url(), WAIT_FOR_ABSENT).await;
 
         assert_eq!(status, StatusCode::CONFLICT, "{json}");
         let observation = &json["observation"];
@@ -291,11 +291,11 @@ fn a_first_read_that_hangs_reports_never_read_with_a_timeout_reason() {
 #[test]
 fn a_single_wait_may_now_be_thirty_seconds_but_the_batch_cap_holds() {
     block(async {
-        let wda = scripted(OTHER_SCREEN);
+        let runner = scripted(OTHER_SCREEN);
 
         // 30s exactly: accepted.
         let (status, json) = run_actions(
-            wda.url(),
+            runner.url(),
             r#"{"steps":[{"kind":"wait_for",
                 "expect":{"absent":[{"kind":"Button","label":"搜索"}]},
                 "timeout_ms":30000,"poll_ms":100}]}"#,
@@ -305,7 +305,7 @@ fn a_single_wait_may_now_be_thirty_seconds_but_the_batch_cap_holds() {
 
         // One millisecond over: refused, and nothing is sent.
         let (status, json) = run_actions(
-            wda.url(),
+            runner.url(),
             r#"{"steps":[{"kind":"wait_for",
                 "expect":{"absent":[{"kind":"Button","label":"搜索"}]},
                 "timeout_ms":30001,"poll_ms":100}]}"#,
@@ -316,7 +316,7 @@ fn a_single_wait_may_now_be_thirty_seconds_but_the_batch_cap_holds() {
 
         // Three 30s waits declare 90s, over the unchanged 60s cumulative cap.
         let (status, json) = run_actions(
-            wda.url(),
+            runner.url(),
             r#"{"steps":[
                 {"kind":"wait_for","expect":{"present":[{"kind":"Button"}]},"timeout_ms":30000,"poll_ms":100},
                 {"kind":"wait_for","expect":{"present":[{"kind":"Button"}]},"timeout_ms":30000,"poll_ms":100},
@@ -333,7 +333,7 @@ fn a_single_wait_may_now_be_thirty_seconds_but_the_batch_cap_holds() {
     });
 }
 
-/// A `present` wait polls WDA for just its targets while they are missing,
+/// A `present` wait polls runner for just its targets while they are missing,
 /// and reads the whole tree once they appear — the verdict still comes from
 /// that full read.
 #[test]
@@ -344,7 +344,7 @@ fn a_present_wait_polls_the_target_not_the_whole_tree() {
         let probes = Arc::new(AtomicUsize::new(0));
         let sources = Arc::new(AtomicUsize::new(0));
         let (p, s) = (Arc::clone(&probes), Arc::clone(&sources));
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -364,7 +364,7 @@ fn a_present_wait_polls_the_target_not_the_whole_tree() {
             None
         });
         let (status, json) = run_actions(
-            wda.url(),
+            runner.url(),
             r#"{"steps":[{"kind":"wait_for",
                 "expect":{"present":[{"kind":"Button","label":"搜索"}]},
                 "timeout_ms":5000,"poll_ms":50}]}"#,

@@ -40,7 +40,7 @@ class HomeCheckTests(unittest.TestCase):
                 """关闭本地服务的访问日志，保留测试结果。"""
 
             def respond(self, status, value):
-                """发送与运行器一致的 WDA JSON 包装。"""
+                """发送与运行器一致的 runner JSON 包装。"""
                 data = json.dumps({"value": value}).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")

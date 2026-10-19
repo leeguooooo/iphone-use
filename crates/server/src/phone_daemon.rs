@@ -182,8 +182,8 @@ pub fn status_json(runner_up: bool) -> String {
 
 // ── pairing ─────────────────────────────────────────────────────────────────
 
-/// The runner's address and signing, detached from the `WdaClient` lock (see
-/// [`crate::wda::WdaClient::phone_daemon_endpoint`]).
+/// The runner's address and signing, detached from the `RunnerClient` lock (see
+/// [`crate::runner::RunnerClient::phone_daemon_endpoint`]).
 pub struct Endpoint {
     pub(crate) base: String,
     pub(crate) http: reqwest::Client,
@@ -302,14 +302,14 @@ pub async fn pair(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Res
     if let Err(response) = authorize_extension(&state, &headers, true) {
         return response;
     }
-    let Some(wda) = state.wda.clone() else {
+    let Some(runner) = state.runner.clone() else {
         return refusal(
             StatusCode::SERVICE_UNAVAILABLE,
             "no_runner",
             "this daemon has no device runner configured",
         );
     };
-    let endpoint = match tokio::time::timeout(Duration::from_secs(5), wda.lock()).await {
+    let endpoint = match tokio::time::timeout(Duration::from_secs(5), runner.lock()).await {
         Ok(client) => client.phone_daemon_endpoint(),
         Err(_) => {
             return refusal(

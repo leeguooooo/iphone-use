@@ -250,7 +250,7 @@ pub enum ImageOutcome {
         /// exact instant.
         requested_ms: u64,
         received_ms: u64,
-        /// `wda-capture`, or the daemon's own source label.
+        /// `runner-capture`, or the daemon's own source label.
         source: String,
         max_side: u32,
         /// This capture's own `x-capture-redacted`: a wireframe, not pixels.
@@ -402,7 +402,7 @@ mod tests {
                 png: b"png".to_vec(),
                 requested_ms: 5,
                 received_ms: 7,
-                source: "wda-capture".into(),
+                source: "runner-capture".into(),
                 max_side: 800,
                 redacted: false,
             },

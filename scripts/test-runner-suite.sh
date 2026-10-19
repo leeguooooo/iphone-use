@@ -13,7 +13,7 @@ for test in \
     scripts/test-install-cli-link.sh \
     scripts/test-install-runner-sources.sh \
     scripts/test-uninstall-safety.sh \
-    scripts/test-setup-wda-shim.sh \
+    scripts/test-setup-runner-shim.sh \
     scripts/test-instance-context.py \
     scripts/test-auto-update.py
 do

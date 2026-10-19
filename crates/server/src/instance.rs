@@ -1,8 +1,8 @@
 //! Which daemon this is.
 //!
 //! One daemon drives one phone. Everything that names *this* daemon on the
-//! Mac — its state directory, the launchd labels it and its WDA supervisor
-//! run under, the files it shares with `setup-wda.sh` — derives from one
+//! Mac — its state directory, the launchd labels it and its runner supervisor
+//! run under, the files it shares with `setup-runner.sh` — derives from one
 //! instance name, so a second daemon for a second phone (#67) cannot collide
 //! with the first. The default instance keeps every path and label the
 //! single-phone install has always used.
@@ -16,9 +16,9 @@ use std::sync::OnceLock;
 pub const DEFAULT_NAME: &str = "default";
 const DAEMON_LABEL: &str = "com.leeguoo.iphone-use";
 /// Names whose daemon label would collide with another product LaunchAgent:
-/// the default instance's WDA supervisor and the maintenance jobs that share
+/// the default instance's runner supervisor and the maintenance jobs that share
 /// the `com.leeguoo.iphone-use.` prefix.
-const RESERVED_NAMES: &[&str] = &["wda", "autoupdate", "daily-maintenance", "flow-reverify"];
+const RESERVED_NAMES: &[&str] = &["runner", "autoupdate", "daily-maintenance", "flow-reverify"];
 const NAME_MAX_LEN: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,12 +26,12 @@ pub struct Instance {
     /// `default`, or the validated name.
     pub name: String,
     pub home: PathBuf,
-    /// Where status, logs, the helper script, and the WDA checkout live.
+    /// Where status, logs, the helper script, and the runner checkout live.
     pub state_dir: PathBuf,
     /// launchd label of the daemon itself.
     pub daemon_label: String,
-    /// launchd label of the dedicated WDA supervisor.
-    pub wda_label: String,
+    /// launchd label of the dedicated runner supervisor.
+    pub runner_label: String,
 }
 
 /// `[a-z][a-z0-9-]{0,31}`, not reserved.
@@ -61,13 +61,13 @@ impl Instance {
             ));
         }
         let base = home.join(".iphone-use");
-        let (state_dir, daemon_label, wda_label) = if name == DEFAULT_NAME {
-            (base, DAEMON_LABEL.to_string(), format!("{DAEMON_LABEL}.wda"))
+        let (state_dir, daemon_label, runner_label) = if name == DEFAULT_NAME {
+            (base, DAEMON_LABEL.to_string(), format!("{DAEMON_LABEL}.runner"))
         } else {
             (
                 base.join("instances").join(name),
                 format!("{DAEMON_LABEL}.{name}"),
-                format!("{DAEMON_LABEL}.wda.{name}"),
+                format!("{DAEMON_LABEL}.runner.{name}"),
             )
         };
         let state_dir = match state_dir_override {
@@ -82,7 +82,7 @@ impl Instance {
             home,
             state_dir,
             daemon_label,
-            wda_label,
+            runner_label,
         })
     }
 
@@ -152,26 +152,26 @@ impl Instance {
         self.name == DEFAULT_NAME
     }
     pub fn setup_sh(&self) -> PathBuf {
-        self.state_dir.join("setup-wda.sh")
+        self.state_dir.join("setup-runner.sh")
     }
     pub fn agent_log(&self) -> PathBuf {
-        self.state_dir.join("wda-agent.log")
+        self.state_dir.join("runner-agent.log")
     }
     pub fn runner_log(&self) -> PathBuf {
-        self.state_dir.join("wda-runner.log")
+        self.state_dir.join("runner.log")
     }
     pub fn status_file(&self) -> PathBuf {
-        self.state_dir.join("wda-setup-status.json")
+        self.state_dir.join("runner-setup-status.json")
     }
     pub fn intents_registry(&self) -> PathBuf {
         self.state_dir.join("intents-registry.json")
     }
     /// The supervisor's LaunchAgent plist. LaunchAgents always live under the
     /// home directory, never under an overridden state dir.
-    pub fn wda_plist(&self) -> PathBuf {
+    pub fn runner_plist(&self) -> PathBuf {
         self.home
             .join("Library/LaunchAgents")
-            .join(format!("{}.plist", self.wda_label))
+            .join(format!("{}.plist", self.runner_label))
     }
     /// Path helper for callers that still work in strings.
     pub fn path_str(path: &Path) -> String {
@@ -249,8 +249,8 @@ mod tests {
             let instance = Instance::derive(name, home, over).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(instance.state_dir, PathBuf::from(case["state_dir"].as_str().unwrap()), "{name}: state_dir");
             assert_eq!(instance.daemon_label, case["daemon_label"].as_str().unwrap(), "{name}: daemon_label");
-            assert_eq!(instance.wda_label, case["wda_label"].as_str().unwrap(), "{name}: wda_label");
-            assert_eq!(instance.wda_plist(), PathBuf::from(case["wda_plist"].as_str().unwrap()), "{name}: wda_plist");
+            assert_eq!(instance.runner_label, case["runner_label"].as_str().unwrap(), "{name}: runner_label");
+            assert_eq!(instance.runner_plist(), PathBuf::from(case["runner_plist"].as_str().unwrap()), "{name}: runner_plist");
         }
         let reserved: Vec<&str> = golden["reserved_names"]
             .as_array()
@@ -269,12 +269,12 @@ mod tests {
     fn the_default_instance_keeps_every_legacy_path_and_label() {
         let d = Instance::derive("", "/Users/leo", None).unwrap();
         assert!(d.is_default());
-        assert_eq!(d.setup_sh(), PathBuf::from("/Users/leo/.iphone-use/setup-wda.sh"));
-        assert_eq!(d.agent_log(), PathBuf::from("/Users/leo/.iphone-use/wda-agent.log"));
-        assert_eq!(d.runner_log(), PathBuf::from("/Users/leo/.iphone-use/wda-runner.log"));
-        assert_eq!(d.status_file(), PathBuf::from("/Users/leo/.iphone-use/wda-setup-status.json"));
+        assert_eq!(d.setup_sh(), PathBuf::from("/Users/leo/.iphone-use/setup-runner.sh"));
+        assert_eq!(d.agent_log(), PathBuf::from("/Users/leo/.iphone-use/runner-agent.log"));
+        assert_eq!(d.runner_log(), PathBuf::from("/Users/leo/.iphone-use/runner.log"));
+        assert_eq!(d.status_file(), PathBuf::from("/Users/leo/.iphone-use/runner-setup-status.json"));
         assert_eq!(d.intents_registry(), PathBuf::from("/Users/leo/.iphone-use/intents-registry.json"));
-        assert_eq!(d.wda_label, "com.leeguoo.iphone-use.wda");
+        assert_eq!(d.runner_label, "com.leeguoo.iphone-use.runner");
     }
 
     #[test]
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn a_state_dir_override_never_moves_the_launch_agent() {
         let i = Instance::derive("lab", "/Users/leo", Some(PathBuf::from("/Volumes/fast/iu-lab"))).unwrap();
-        assert_eq!(i.status_file(), PathBuf::from("/Volumes/fast/iu-lab/wda-setup-status.json"));
-        assert_eq!(i.wda_plist(), PathBuf::from("/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.wda.lab.plist"));
+        assert_eq!(i.status_file(), PathBuf::from("/Volumes/fast/iu-lab/runner-setup-status.json"));
+        assert_eq!(i.runner_plist(), PathBuf::from("/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.runner.lab.plist"));
     }
 }

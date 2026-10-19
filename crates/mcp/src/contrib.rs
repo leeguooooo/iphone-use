@@ -453,13 +453,13 @@ const DAEMON_ERROR_CODES: &[&str] = &[
     "unauthorized",
     "unsupported_control",
     "unsupported_perform_action",
-    "wda_batch_failed",
-    "wda_is_externally_managed",
-    "wda_not_configured",
-    "wda_pre_dispatch_failed",
-    "wda_source_failed",
-    "wda_source_timeout",
-    "wda_unavailable_or_unsupported",
+    "runner_batch_failed",
+    "runner_is_externally_managed",
+    "runner_not_configured",
+    "runner_pre_dispatch_failed",
+    "runner_source_failed",
+    "runner_source_timeout",
+    "runner_unavailable_or_unsupported",
 ];
 
 /// Stand-in for an `error` code that is not (yet) in [`DAEMON_ERROR_CODES`].
@@ -556,7 +556,7 @@ fn project_settle(value: &serde_json::Value) -> Option<serde_json::Value> {
                 ("sparse", flag),
                 ("stale", flag),
                 // NOTE: `settle.error` is deliberately absent. It is
-                // `format!("{error:#}")` of a WDA failure and embeds URLs,
+                // `format!("{error:#}")` of a runner failure and embeds URLs,
                 // hosts and ports. The structured `reason` says everything a
                 // public report needs.
             ],
@@ -600,7 +600,7 @@ fn project_steps(value: &serde_json::Value) -> Option<serde_json::Value> {
 ///   from a report until someone adds it here. Forgetting costs a diagnostic;
 ///   with a deny-list, forgetting publishes private screen content.
 /// * **Path- and type-aware.** `error` at the top level is a machine code;
-///   `settle.error` is free text holding a WDA URL. A key-name rule cannot
+///   `settle.error` is free text holding a runner URL. A key-name rule cannot
 ///   tell them apart, so every field is projected at its own path and checked
 ///   for its own type. Strings survive only where the value is a machine code
 ///   or a known enum — never as free text.
@@ -724,7 +724,7 @@ pub fn issue_body(
             "device_state",
             "backend",
             "mode",
-            "wda_actionable",
+            "runner_actionable",
         ] {
             if let Some(value) = status.get(key) {
                 body.push_str(&format!("- {key}: `{value}`\n"));
@@ -916,13 +916,13 @@ mod tests {
     }
 
     /// `error` means different things at different paths: a machine code at
-    /// the top, free text holding a WDA URL under `settle`. A key-name filter
+    /// the top, free text holding a runner URL under `settle`. A key-name filter
     /// cannot tell them apart — this projection must.
     #[test]
     fn free_text_error_fields_never_survive_at_any_depth() {
         let redacted = redact_result(&serde_json::json!({
             "ok": true,
-            "error": "wda_source_failed",
+            "error": "runner_source_failed",
             "settle": {
                 "settled": false,
                 "reason": "observation_failed",
@@ -941,7 +941,7 @@ mod tests {
         let text = serde_json::to_string(&redacted).unwrap();
 
         // Machine codes and structure survive.
-        assert!(text.contains("wda_source_failed"), "{text}");
+        assert!(text.contains("runner_source_failed"), "{text}");
         assert!(text.contains("observation_failed"), "{text}");
         assert!(text.contains("wait_for"), "{text}");
         assert!(text.contains("missing_present"), "{text}");

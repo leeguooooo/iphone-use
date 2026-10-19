@@ -1,12 +1,12 @@
 #!/bin/bash
-# setup-wda.sh is a thin entry point: it finds the iphone-use binary and hands
+# setup-runner.sh is a thin entry point: it finds the iphone-use binary and hands
 # every command to `iphone-use setup-native <command>` with the same
 # environment. This checks the hand-over, the instance guard, and the
 # messages when no capable binary is installed — with a fake binary, so no
 # phone, Xcode or launchd is touched.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SETUP="$ROOT/scripts/setup-wda.sh"
+SETUP="$ROOT/scripts/setup-runner.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 n=0; failed=0
@@ -29,7 +29,7 @@ fi
     echo "args=$*"
     echo "instance=${IPHONE_USE_INSTANCE:-}"
     echo "script=${IPHONE_USE_SETUP_SCRIPT:-}"
-    echo "udid=${WDA_UDID:-}"
+    echo "udid=${IPU_RUNNER_UDID:-}"
 } > "$FAKE_LOG"
 exit 7
 FAKE_BIN
@@ -42,7 +42,7 @@ run() { env -i HOME="$HOME_DIR" PATH=/usr/bin:/bin FAKE_LOG="$TMP/log" "$@"; }
 for command in setup status stop pause resume doctor instance-context; do
     rm -f "$TMP/log"
     if [ "$command" = setup ]; then args=(); else args=("$command"); fi
-    run IPHONE_USE_SETUP_BIN="$FAKE" WDA_UDID=0000AB /bin/bash "$SETUP" ${args[@]+"${args[@]}"}
+    run IPHONE_USE_SETUP_BIN="$FAKE" IPU_RUNNER_UDID=0000AB /bin/bash "$SETUP" ${args[@]+"${args[@]}"}
     code=$?
     check "$command is handed to setup-native with its exit code" \
         "[ $code = 7 ] && grep -qx 'args=setup-native $command' '$TMP/log'"
@@ -55,7 +55,7 @@ run IPHONE_USE_SETUP_BIN="$FAKE" IPHONE_USE_INSTANCE=lab /bin/bash "$SETUP" stat
 check "IPHONE_USE_INSTANCE is passed through" "grep -qx 'instance=lab' '$TMP/log'"
 
 # An installed copy belongs to its instance.
-COPY="$HOME_DIR/.iphone-use/instances/lab/setup-wda.sh"
+COPY="$HOME_DIR/.iphone-use/instances/lab/setup-runner.sh"
 mkdir -p "$(dirname "$COPY")"; cp "$SETUP" "$COPY"
 rm -f "$TMP/log"
 run IPHONE_USE_SETUP_BIN="$FAKE" /bin/bash "$COPY" status

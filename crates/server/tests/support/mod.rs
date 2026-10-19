@@ -1,6 +1,6 @@
 //! Shared integration-test fixtures.
 //!
-//! Lets a test binary drive the real router against a scripted WDA. The
+//! Lets a test binary drive the real router against a scripted runner. The
 //! `AppState` itself comes from the single shared fixture
 //! (`tests/fixtures/app_state.rs`), which `http_auth.rs` includes too — there
 //! is one builder, not one per test binary.
@@ -35,19 +35,19 @@ pub fn build_state(password: Option<&str>) -> Arc<AppState> {
     fixture_app_state(password)
 }
 
-pub fn build_state_with_wda(base_url: &str) -> Arc<AppState> {
+pub fn build_state_with_runner(base_url: &str) -> Arc<AppState> {
     let state = build_state(None);
     let mut state = match Arc::try_unwrap(state) {
         Ok(state) => state,
         Err(_) => panic!("test state unexpectedly shared"),
     };
-    state.wda = Some(Arc::new(tokio::sync::Mutex::new(
-        server::wda::WdaClient::new(base_url).unwrap(),
+    state.runner = Some(Arc::new(tokio::sync::Mutex::new(
+        server::runner::RunnerClient::new(base_url).unwrap(),
     )));
     Arc::new(state)
 }
 
-/// A scripted WDA that can be stopped.
+/// A scripted runner that can be stopped.
 ///
 /// The responder picks the body and an artificial delay per request; returning
 /// `None` closes the connection without a response (ambiguous transport loss).
@@ -56,20 +56,20 @@ pub fn build_state_with_wda(base_url: &str) -> Arc<AppState> {
 /// and dropping the handle stops and JOINS the thread. A panic inside the
 /// responder (a server-side assertion) is captured and re-raised on drop, so a
 /// server-side failure fails the test instead of vanishing.
-pub struct MockWda {
+pub struct MockRunner {
     url: String,
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
     failure: Arc<Mutex<Option<String>>>,
 }
 
-impl MockWda {
+impl MockRunner {
     pub fn url(&self) -> &str {
         &self.url
     }
 }
 
-impl Drop for MockWda {
+impl Drop for MockRunner {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Release);
         if let Some(thread) = self.thread.take() {
@@ -79,7 +79,7 @@ impl Drop for MockWda {
         }
         if let Some(failure) = self.failure.lock().unwrap().take() {
             if !std::thread::panicking() {
-                panic!("scripted WDA failed: {failure}");
+                panic!("scripted runner failed: {failure}");
             }
         }
     }
@@ -101,29 +101,29 @@ fn interruptible_sleep(total: std::time::Duration, stop: &std::sync::atomic::Ato
     }
 }
 
-pub fn mock_wda(
+pub fn mock_runner(
     responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)>
         + Send
         + std::panic::RefUnwindSafe
         + 'static,
-) -> MockWda {
-    mock_wda_with_apps("[]", responder)
+) -> MockRunner {
+    mock_runner_with_apps("[]", responder)
 }
 
-/// [`mock_wda`] whose `/wda/apps/list` answers `apps` (a JSON array) instead
+/// [`mock_runner`] whose `/wda/apps/list` answers `apps` (a JSON array) instead
 /// of the default empty list, for flows that wait on the front app.
 #[allow(dead_code)]
-pub fn mock_wda_with_apps(
+pub fn mock_runner_with_apps(
     apps: &'static str,
     responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)>
         + Send
         + std::panic::RefUnwindSafe
         + 'static,
-) -> MockWda {
-    mock_wda_inner(apps, false, responder)
+) -> MockRunner {
+    mock_runner_inner(apps, false, responder)
 }
 
-/// [`mock_wda`] for the native runner: `GET /wda/settle` (on-device settle)
+/// [`mock_runner`] for the native runner: `GET /wda/settle` (on-device settle)
 /// reaches the script like any other request. Plain mocks answer it the way
 /// WebDriverAgent does — 404, outside the script — so their scripts only see
 /// the old settle traffic.
@@ -133,18 +133,18 @@ pub fn mock_native_runner(
         + Send
         + std::panic::RefUnwindSafe
         + 'static,
-) -> MockWda {
-    mock_wda_inner("[]", true, responder)
+) -> MockRunner {
+    mock_runner_inner("[]", true, responder)
 }
 
-fn mock_wda_inner(
+fn mock_runner_inner(
     apps: &'static str,
     native: bool,
     responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)>
         + Send
         + std::panic::RefUnwindSafe
         + 'static,
-) -> MockWda {
+) -> MockRunner {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -171,7 +171,7 @@ fn mock_wda_inner(
                 continue;
             };
             let request = String::from_utf8_lossy(&request[..read]).to_string();
-            // Session setup writes WDA's idle-wait settings. Answer them here,
+            // Session setup writes runner's idle-wait settings. Answer them here,
             // outside the script and its request index, so each test scripts
             // only the traffic it is about.
             if request.starts_with("POST ") && request.contains("/appium/settings") {
@@ -240,7 +240,7 @@ fn mock_wda_inner(
             let _ = stream.write_all(response.as_bytes());
         }
     });
-    MockWda {
+    MockRunner {
         url: format!("http://{address}"),
         stop,
         thread: Some(thread),

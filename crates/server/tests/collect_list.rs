@@ -13,7 +13,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use server::http::AppState;
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 
@@ -43,8 +43,8 @@ fn screen(cells: &[&str], extra: &str) -> String {
 
 /// A runner serving `pages[swipes]` (the last page once swipes run out),
 /// counting the swipes it was sent.
-fn list_runner(pages: Vec<String>, swipes: Arc<AtomicUsize>) -> support::MockWda {
-    mock_wda(move |request, _| {
+fn list_runner(pages: Vec<String>, swipes: Arc<AtomicUsize>) -> support::MockRunner {
+    mock_runner(move |request, _| {
         let line = request.lines().next().unwrap_or("");
         let reply = |s: String| Some((Duration::ZERO, s));
         if line.starts_with("POST /session ") {
@@ -103,7 +103,7 @@ fn collect_dedupes_across_pages_and_stops_when_the_list_stops_moving() {
             screen(&["B", "C", "D"], ""),
         ];
         let runner = list_runner(pages, swipes.clone());
-        let state = build_state_with_wda(runner.url());
+        let state = build_state_with_runner(runner.url());
         let (status, json) = post(&state, "/agent/collect", "{}").await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(labels(&json), ["A", "B", "C", "D"], "{json}");
@@ -126,7 +126,7 @@ fn collect_is_complete_only_when_the_end_label_shows() {
         let end = r#"{"type":"XCUIElementTypeStaticText","label":"没有更多了","rect":{"x":100,"y":700,"width":190,"height":30},"isEnabled":"1","isVisible":"1"}"#;
         let pages = vec![screen(&["A", "B"], ""), screen(&["C"], end)];
         let runner = list_runner(pages, swipes.clone());
-        let state = build_state_with_wda(runner.url());
+        let state = build_state_with_runner(runner.url());
         let (status, json) = post(
             &state,
             "/agent/collect",
@@ -145,7 +145,7 @@ fn collect_refuses_a_bad_request_without_touching_the_phone() {
     block(async {
         let swipes = Arc::new(AtomicUsize::new(0));
         let runner = list_runner(vec![screen(&["A"], "")], swipes.clone());
-        let state = build_state_with_wda(runner.url());
+        let state = build_state_with_runner(runner.url());
         let (status, json) = post(&state, "/agent/collect", r#"{"max_pages":50}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
         assert_eq!(json["error"], "invalid_request");
@@ -170,7 +170,7 @@ fn scroll_find_swipes_once_and_finds_the_row() {
         let swipes = Arc::new(AtomicUsize::new(0));
         let pages = vec![screen(&["A", "B"], ""), screen(&["C", "目标"], "")];
         let runner = list_runner(pages, swipes.clone());
-        let state = build_state_with_wda(runner.url());
+        let state = build_state_with_runner(runner.url());
         let (status, json) = post(&state, "/agent/scroll_find", r#"{"label":"目标"}"#).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["found"], true, "{json}");
@@ -185,7 +185,7 @@ fn scroll_find_stops_at_once_on_an_ambiguous_label() {
     block(async {
         let swipes = Arc::new(AtomicUsize::new(0));
         let runner = list_runner(vec![screen(&["同名", "同名"], "")], swipes.clone());
-        let state = build_state_with_wda(runner.url());
+        let state = build_state_with_runner(runner.url());
         let (status, json) = post(
             &state,
             "/agent/scroll_find",
@@ -210,7 +210,7 @@ fn scroll_find_gives_up_after_its_swipe_budget_with_near_misses() {
         let swipes = Arc::new(AtomicUsize::new(0));
         let pages = vec![screen(&["设置"], ""), screen(&["通用设置"], "")];
         let runner = list_runner(pages, swipes.clone());
-        let state = build_state_with_wda(runner.url());
+        let state = build_state_with_runner(runner.url());
         let (status, json) = post(&state, "/agent/scroll_find", r#"{"label":"设"}"#).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["found"], false);

@@ -2,7 +2,7 @@
 """The nightly canary must not answer a question the night never asked.
 
 A run that never happened — the phone was locked, someone else held the owner
-lease, WDA was down, the daemon could not determine the outcome — says nothing
+lease, runner was down, the daemon could not determine the outcome — says nothing
 about the flow. Recording it as a failure files a `flow-broken` issue against a
 flow that is probably fine and tags it `needs-verification`, which stops the
 registry recommending it. Recording it as a pass is worse: it would refresh
@@ -97,7 +97,7 @@ def main():
         "device_locked",
         "phone_owned",
         "phone_handed_to_human",
-        "wda_source_failed",
+        "runner_source_failed",
         "device_transition_in_progress",
     ):
         verdict, reason = reverify.classify(1, {"ok": False, "error": error})

@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use crate::http::AppState;
 use crate::keep_awake::KeepAwakeStatus;
-use crate::wda::{KeepAwakeError, KeepAwakeReport};
+use crate::runner::{KeepAwakeError, KeepAwakeReport};
 
 /// Refresh at least this often.
 const REFRESH_EVERY: Duration = Duration::from_secs(300);
@@ -383,10 +383,10 @@ async fn refresh(state: &AppState) {
     if !runner_readable(state) {
         return;
     }
-    let Some(wda) = state.wda.clone() else {
+    let Some(runner) = state.runner.clone() else {
         return;
     };
-    let endpoint = wda.lock().await.keep_awake_endpoint();
+    let endpoint = runner.lock().await.keep_awake_endpoint();
     match endpoint.read().await {
         Ok(report) => {
             crate::keep_awake::note_supported(true);
@@ -405,7 +405,7 @@ fn known_lock_state(state: &AppState) -> Option<bool> {
         return None;
     }
     state
-        .wda_health
+        .runner_health
         .lock()
         .ok()
         .and_then(|health| health.locked)
@@ -413,11 +413,11 @@ fn known_lock_state(state: &AppState) -> Option<bool> {
 
 /// Only ask a runner that is up and not being started, stopped or handed over.
 fn runner_readable(state: &AppState) -> bool {
-    !state.managed_wda_pending
+    !state.managed_runner_pending
         && !state.released.load(Ordering::Acquire)
-        && !state.wda_lifecycle.is_transitioning()
+        && !state.runner_lifecycle.is_transitioning()
         && state
-            .wda_health
+            .runner_health
             .lock()
             .map(|health| health.up)
             .unwrap_or(false)

@@ -1,12 +1,12 @@
-//! The device-layer setup, in Rust: what `scripts/setup-wda.sh` did, moving
-//! over phase by phase. `setup-wda.sh` stays the entry point launchd, the
+//! The device-layer setup, in Rust: what `scripts/setup-runner.sh` did, moving
+//! over phase by phase. `setup-runner.sh` stays the entry point launchd, the
 //! daemon and the installer know; for every command this binary implements,
 //! the script execs `iphone-use setup-native <command>` with the same
 //! environment, so file names, launchd labels, the status file and every
-//! `WDA_*` variable keep working unchanged.
+//! `IPU_RUNNER_*` variable keep working unchanged.
 //!
 //! Implemented here so far: `doctor`, `status`, `stop`, `pause`, `resume`,
-//! and `setup` as the launchd supervisor runs it (`WDA_KEEPALIVE=1`), plus
+//! and `setup` as the launchd supervisor runs it (`IPU_RUNNER_KEEPALIVE=1`), plus
 //! the setup status protocol (`status-watch` is a run's heartbeat watcher).
 
 pub mod app;

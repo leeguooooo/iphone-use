@@ -333,7 +333,7 @@ mod tests {
     /// `changed` is given.
     fn answer(baseline: &str, snapshot: &str, changed: Option<Value>) -> Value {
         let changed = changed.map_or_else(Vec::new, |row| vec![row]);
-        let mut body = json!({"ok": true, "transport": "wda", "snapshot": snapshot,
+        let mut body = json!({"ok": true, "transport": "runner", "snapshot": snapshot,
             "baseline": baseline,
             "delta": {"added": [], "removed": [], "changed": changed},
             "settle": {"settled": true, "reason": "stable", "captures": 2, "waited_ms": 600}});

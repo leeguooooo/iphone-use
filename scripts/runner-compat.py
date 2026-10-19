@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""WDA-compatibility check for the native iphone-use runner (runner/).
+"""runner-compatibility check for the native iphone-use runner (runner/).
 
-Exercises every WebDriverAgent route the daemon's WdaClient (crates/server/src/wda.rs) uses,
-with the same request bodies, and checks the response shapes WdaClient parses. Also reads the
-MJPEG stream (WDA's multipart format, port 9100) and reports the achieved frame rate.
+Exercises every WebDriverAgent route the daemon's RunnerClient (crates/server/src/runner.rs) uses,
+with the same request bodies, and checks the response shapes RunnerClient parses. Also reads the
+MJPEG stream (runner's multipart format, port 9100) and reports the achieved frame rate.
 
     python3 scripts/runner-compat.py [--base http://127.0.0.1:8100] [--mjpeg http://127.0.0.1:9100]
 
@@ -68,7 +68,7 @@ class Checker:
         print(f"{mark} {label:<48} {elapsed:7.0f} ms  {detail}"[:220])
 
     def expect(self, label, method, path, body=None, status=200, check=None, timeout=60.0):
-        """Calls a route; checks the HTTP status, the WDA envelope, and `check(value)`."""
+        """Calls a route; checks the HTTP status, the runner envelope, and `check(value)`."""
         code, payload, headers, elapsed = self.call(method, path, body, timeout)
         value = (payload or {}).get("value") if isinstance(payload, dict) else None
         ok = code == status and isinstance(payload, dict) and "value" in payload
@@ -89,7 +89,7 @@ class Checker:
         return value, headers
 
     def expect_either(self, label, method, path, body=None, check=None, missing_code="no such element"):
-        """200 with `check`, or 404 with WDA's `missing_code` error (both are valid answers)."""
+        """200 with `check`, or 404 with runner's `missing_code` error (both are valid answers)."""
         code, payload, _, elapsed = self.call(method, path, body)
         value = (payload or {}).get("value") if isinstance(payload, dict) else None
         if code == 404:
@@ -116,7 +116,7 @@ def is_rect(value):
 
 def tree_shape(root):
     if not isinstance(root, dict) or not str(root.get("type", "")).startswith("XCUIElementType"):
-        return "root is not a WDA node"
+        return "root is not a runner node"
     for key in ("label", "name", "value", "rawIdentifier", "placeholderValue", "rect", "isEnabled", "isFocused"):
         if key not in root:
             return f"root lacks {key}"

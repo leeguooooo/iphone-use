@@ -1,8 +1,8 @@
 {
-  "_comment": "Golden cases for instance derivation. crates/server/src/instance.rs, scripts/setup-wda.sh and uninstall.sh must agree on every row (#67); scripts/test-instance-context.sh checks the shell side. state_dir_override must be absolute, free of . and .., not / or HOME, and neither equal to, inside, nor an ancestor of ~/.iphone-use; on-disk it must be a real directory (no symlink) owned by HOME's owner.",
+  "_comment": "Golden cases for instance derivation. crates/server/src/instance.rs, scripts/setup-runner.sh and uninstall.sh must agree on every row (#67); scripts/test-instance-context.sh checks the shell side. state_dir_override must be absolute, free of . and .., not / or HOME, and neither equal to, inside, nor an ancestor of ~/.iphone-use; on-disk it must be a real directory (no symlink) owned by HOME's owner.",
   "name_pattern": "^[a-z][a-z0-9-]{0,31}$",
   "reserved_names": [
-    "wda",
+    "runner",
     "autoupdate",
     "daily-maintenance",
     "flow-reverify"
@@ -13,16 +13,16 @@
       "home": "/Users/leo",
       "state_dir": "/Users/leo/.iphone-use",
       "daemon_label": "com.leeguoo.iphone-use",
-      "wda_label": "com.leeguoo.iphone-use.wda",
-      "wda_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist"
+      "runner_label": "com.leeguoo.iphone-use.runner",
+      "runner_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.runner.plist"
     },
     {
       "name": "",
       "home": "/Users/leo",
       "state_dir": "/Users/leo/.iphone-use",
       "daemon_label": "com.leeguoo.iphone-use",
-      "wda_label": "com.leeguoo.iphone-use.wda",
-      "wda_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist",
+      "runner_label": "com.leeguoo.iphone-use.runner",
+      "runner_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.runner.plist",
       "_note": "unset or empty means default"
     },
     {
@@ -30,16 +30,16 @@
       "home": "/Users/leo",
       "state_dir": "/Users/leo/.iphone-use/instances/lab",
       "daemon_label": "com.leeguoo.iphone-use.lab",
-      "wda_label": "com.leeguoo.iphone-use.wda.lab",
-      "wda_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.wda.lab.plist"
+      "runner_label": "com.leeguoo.iphone-use.runner.lab",
+      "runner_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.runner.lab.plist"
     },
     {
       "name": "iphone-14",
       "home": "/Users/leo",
       "state_dir": "/Users/leo/.iphone-use/instances/iphone-14",
       "daemon_label": "com.leeguoo.iphone-use.iphone-14",
-      "wda_label": "com.leeguoo.iphone-use.wda.iphone-14",
-      "wda_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.wda.iphone-14.plist"
+      "runner_label": "com.leeguoo.iphone-use.runner.iphone-14",
+      "runner_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.runner.iphone-14.plist"
     },
     {
       "name": "lab",
@@ -47,13 +47,13 @@
       "state_dir_override": "/Volumes/fast/iu-lab",
       "state_dir": "/Volumes/fast/iu-lab",
       "daemon_label": "com.leeguoo.iphone-use.lab",
-      "wda_label": "com.leeguoo.iphone-use.wda.lab",
-      "wda_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.wda.lab.plist",
+      "runner_label": "com.leeguoo.iphone-use.runner.lab",
+      "runner_plist": "/Users/leo/Library/LaunchAgents/com.leeguoo.iphone-use.runner.lab.plist",
       "_note": "IPHONE_USE_STATE_DIR overrides the derived state dir only"
     }
   ],
   "invalid_names": [
-    "wda",
+    "runner",
     "Lab",
     "lab.1",
     "lab/1",
@@ -61,7 +61,7 @@
     "1lab",
     "-lab",
     "a-very-long-instance-name-that-exceeds-thirty-two",
-    "default.wda",
+    "default.runner",
     "autoupdate",
     "daily-maintenance",
     "flow-reverify"
@@ -77,30 +77,30 @@
     "/Volumes/fast/../iu-lab"
   ],
   "port_derivation": {
-    "_comment": "Shell-only (setup-wda.sh instance-context; install.sh persists the result). The default instance keeps 44321/8100/9100. A named instance's first-choice slot is cksum(name) % slots added to each base; a slot whose ports another instance's plist claims, or that something listens on, is skipped for the next one. Ports already persisted in the instance's plists always win.",
+    "_comment": "Shell-only (setup-runner.sh instance-context; install.sh persists the result). The default instance keeps 44321/8100/9100. A named instance's first-choice slot is cksum(name) % slots added to each base; a slot whose ports another instance's plist claims, or that something listens on, is skipped for the next one. Ports already persisted in the instance's plists always win.",
     "slots": 500,
     "daemon_base": 45500,
-    "wda_base": 8200,
+    "runner_base": 8200,
     "mjpeg_base": 9200,
     "default": {
       "daemon_port": 44321,
-      "wda_port": 8100,
+      "runner_port": 8100,
       "mjpeg_port": 9100
     },
     "first_slot": {
       "lab": {
         "daemon_port": 45827,
-        "wda_port": 8527,
+        "runner_port": 8527,
         "mjpeg_port": 9527
       },
       "iphone-14": {
         "daemon_port": 45515,
-        "wda_port": 8215,
+        "runner_port": 8215,
         "mjpeg_port": 9215
       },
       "guouli": {
         "daemon_port": 45929,
-        "wda_port": 8629,
+        "runner_port": 8629,
         "mjpeg_port": 9629
       }
     }

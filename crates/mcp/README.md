@@ -8,7 +8,7 @@ on it.
 ## Prerequisites
 
 The `iphone-use` daemon must already be running on the Mac connected to the
-configured iPhone. Direct also requires WDA and its USB loopback relays:
+configured iPhone. Direct also requires runner and its USB loopback relays:
 
 ```bash
 iphone-use serve
@@ -484,7 +484,7 @@ the current stage (for example an Xcode build after an update).
   caps waits and step count, excludes uninstall, and reports `retry_safe=false`
   whenever replaying the entire sequence could duplicate an applied action.
   Completed step results and the last failed wait observation are returned for
-  repair. A transient stale WDA source session is rebuilt once within the same
+  repair. A transient stale runner source session is rebuilt once within the same
   wait deadline.
   A `502`/`504` `outcome_unknown` may already have executed on the phone, so
   inspect the current screen before deciding whether to retry.

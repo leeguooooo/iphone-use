@@ -16,7 +16,7 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda, mock_wda_with_apps};
+use support::{block, build_state_with_runner, mock_runner_with_apps};
 
 const PASSWORD: &str = "SENTINEL_PASS_9zz";
 const USERNAME: &str = "SENTINEL_USER_7fq@x.com";
@@ -143,7 +143,7 @@ impl Phone {
     }
 }
 
-fn wda_value(text: &str) -> String {
+fn runner_value(text: &str) -> String {
     format!(r#"{{"value":{}}}"#, serde_json::to_string(text).unwrap())
 }
 
@@ -160,8 +160,8 @@ fn tapped_y(body: &str) -> Option<f64> {
         .and_then(|step| step["y"].as_f64())
 }
 
-fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockWda {
-    mock_wda_with_apps(r#"[{"bundleId":"com.example.shop"}]"#, move |request, _| {
+fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockRunner {
+    mock_runner_with_apps(r#"[{"bundleId":"com.example.shop"}]"#, move |request, _| {
         let line = request.lines().next().unwrap_or("");
         let body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
         let reply = |s: String| Some((Duration::ZERO, s));
@@ -241,7 +241,7 @@ fn scripted_runner(mode: Runner, phone: Arc<Mutex<Phone>>) -> support::MockWda {
                 // Web inputs read back their placeholder while empty; a
                 // password field reads back bullets.
                 let now = phone.field(id).clone();
-                return reply(wda_value(match (now.is_empty(), id) {
+                return reply(runner_value(match (now.is_empty(), id) {
                     (true, _) => placeholder,
                     (false, "pw") => "•••••••••••••••••",
                     (false, _) => &now,
@@ -426,8 +426,8 @@ fn assert_side_channels_clean() {
 fn credentials_reach_the_phone_and_nothing_else() {
     harness();
     let phone = Arc::new(Mutex::new(Phone::default()));
-    let wda = scripted_runner(Runner::Native, phone.clone());
-    let state = build_state_with_wda(wda.url());
+    let runner = scripted_runner(Runner::Native, phone.clone());
+    let state = build_state_with_runner(runner.url());
     // The worst case for a read: the runner reporting a password field's
     // contents verbatim.
     phone.lock().unwrap().password = PASSWORD.to_string();
@@ -506,8 +506,8 @@ fn credentials_reach_the_phone_and_nothing_else() {
 fn a_web_form_is_filled_by_typing_into_the_focused_field() {
     harness();
     let phone = Arc::new(Mutex::new(Phone::default()));
-    let wda = scripted_runner(Runner::Web, phone.clone());
-    let state = build_state_with_wda(wda.url());
+    let runner = scripted_runner(Runner::Web, phone.clone());
+    let state = build_state_with_runner(runner.url());
     block(async {
         let (status, login) = call(&state, "POST", "/agent/login", "{}").await;
         assert_eq!(status, StatusCode::OK, "{login}");
@@ -536,8 +536,8 @@ fn a_page_that_zooms_after_the_account_still_gets_its_password() {
         zoom_on_account: true,
         ..Phone::default()
     }));
-    let wda = scripted_runner(Runner::Native, phone.clone());
-    let state = build_state_with_wda(wda.url());
+    let runner = scripted_runner(Runner::Native, phone.clone());
+    let state = build_state_with_runner(runner.url());
     block(async {
         let (status, login) = call(&state, "POST", "/agent/login", "{}").await;
         assert_eq!(status, StatusCode::OK, "{login}");
@@ -567,8 +567,8 @@ fn a_code_login_fills_the_account_and_presses_nothing() {
         code_form: true,
         ..Phone::default()
     }));
-    let wda = scripted_runner(Runner::Native, phone.clone());
-    let state = build_state_with_wda(wda.url());
+    let runner = scripted_runner(Runner::Native, phone.clone());
+    let state = build_state_with_runner(runner.url());
     block(async {
         let (status, login) = call(&state, "POST", "/agent/login", "{}").await;
         assert_eq!(status, StatusCode::OK, "{login}");
@@ -596,8 +596,8 @@ fn a_code_login_fills_the_account_and_presses_nothing() {
 fn a_value_that_lands_in_another_field_is_cleared() {
     harness();
     let phone = Arc::new(Mutex::new(Phone::default()));
-    let wda = scripted_runner(Runner::Stray, phone.clone());
-    let state = build_state_with_wda(wda.url());
+    let runner = scripted_runner(Runner::Stray, phone.clone());
+    let state = build_state_with_runner(runner.url());
     block(async {
         let (status, login) = call(&state, "POST", "/agent/login", "{}").await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{login}");
@@ -625,8 +625,8 @@ fn a_value_that_lands_in_several_fields_is_cleared_from_all() {
         echo: true,
         ..Phone::default()
     }));
-    let wda = scripted_runner(Runner::Stray, phone.clone());
-    let state = build_state_with_wda(wda.url());
+    let runner = scripted_runner(Runner::Stray, phone.clone());
+    let state = build_state_with_runner(runner.url());
     block(async {
         let (status, login) = call(&state, "POST", "/agent/login", "{}").await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{login}");
@@ -653,8 +653,8 @@ fn a_value_that_lands_in_several_fields_is_cleared_from_all() {
 /// docs for a person; the `phone_owned` answer does not suggest it.
 #[test]
 fn a_phone_owned_refusal_suggests_no_takeover() {
-    let wda = support::mock_wda(|_, _| Some((Duration::ZERO, SESSION.to_string())));
-    let state = build_state_with_wda(wda.url());
+    let runner = support::mock_runner(|_, _| Some((Duration::ZERO, SESSION.to_string())));
+    let state = build_state_with_runner(runner.url());
     block(async {
         let claim = |owner: &'static str| {
             Request::builder()

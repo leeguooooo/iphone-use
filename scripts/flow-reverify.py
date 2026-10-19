@@ -15,7 +15,7 @@ so a human reviews what the night changed. Nothing is merged automatically.
 
 Preconditions (checked, never forced): daemon reachable, `drivable:true`, nobody else owns
 the phone, no hold active, not handed to a person. Otherwise it logs one line and exits 0 —
-tomorrow is fine. A parked (released/offline) phone is left alone: bringing WDA up makes
+tomorrow is fine. A parked (released/offline) phone is left alone: bringing runner up makes
 iOS ask for the passcode, and at 03:30 nobody is there to answer. Set
 FLOW_REVERIFY_BRING_UP=1 to request one bring-up anyway.
 
@@ -180,11 +180,11 @@ ENVIRONMENT_ERRORS = {
     "lifecycle_busy",
     "phone_owned",
     "phone_handed_to_human",
-    "wda_not_configured",
-    "wda_unavailable_or_unsupported",
-    "wda_pre_dispatch_failed",
-    "wda_source_failed",
-    "wda_source_timeout",
+    "runner_not_configured",
+    "runner_unavailable_or_unsupported",
+    "runner_pre_dispatch_failed",
+    "runner_source_failed",
+    "runner_source_timeout",
     "mirror_removed",
     "target_not_configured",
 }

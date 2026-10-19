@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WDA 接入与真机验收 · iphone-use</title>
+<title>runner 接入与真机验收 · iphone-use</title>
 <style>
   :root {
     --fg: #1a1a1a; --muted: #6b6b6b; --bg: #fbfbfa; --card: #ffffff;
@@ -41,27 +41,27 @@
 </head>
 <body>
 <header>
-  <h1>WDA 接入 — 边界与真机验收</h1>
+  <h1>runner 接入 — 边界与真机验收</h1>
   <p class="lede">iphone-use 只通过 WebDriverAgent 连接 iPhone：控制走
   <code>127.0.0.1:8100</code>，手机端 MJPEG 画面走 <code>127.0.0.1:9100</code>。
   浏览器看 <code>/agent/mjpeg</code>、控 <code>/control</code>，agent 走 <code>/agent/*</code>。
   daemon 不碰 Mac 的屏幕、光标和焦点，也不需要任何 macOS 权限授权。</p>
   <p class="lede"><strong>更新：</strong>iphone-use 已用自己的设备 runner
-  （<code>runner/IPhoneUseRunner</code>，基于 XCTest，接口与 WDA 兼容，见
+  （<code>runner/IPhoneUseRunner</code>，基于 XCTest，接口与 runner 兼容，见
   <a href="../runner/README.md">runner/README.md</a>）取代 WebDriverAgent。
-  <code>setup-wda.sh</code> 不再拉取、钉版或改图标 WDA，而是编译安装目录里的
+  <code>setup-runner.sh</code> 不再拉取、钉版或改图标 runner，而是编译安装目录里的
   <code>~/.iphone-use/runner</code>；端口、中继、签名、锁屏、信任、DDI、WARP 等
-  下面记录的坑全部照旧适用，文中的 “WDA” 读作 “设备 runner” 即可。</p>
+  下面记录的坑全部照旧适用，文中的 “runner” 读作 “设备 runner” 即可。</p>
 </header>
 
 <h2>工作原理</h2>
-<p>WebDriverAgent（WDA，Appium 的 iOS 底座）作为 XCUITest runner 跑在<strong>手机上</strong>：
-能读 iOS 元素树、直接送 Unicode 文本，并由手机合成点按和手势。画面来自同一个 WDA 会话的
-MJPEG 服务。WDA 不可达时请求会明确失败，没有别的路径可以兜底。</p>
+<p>WebDriverAgent（runner，Appium 的 iOS 底座）作为 XCUITest runner 跑在<strong>手机上</strong>：
+能读 iOS 元素树、直接送 Unicode 文本，并由手机合成点按和手势。画面来自同一个 runner 会话的
+MJPEG 服务。runner 不可达时请求会明确失败，没有别的路径可以兜底。</p>
 
 <table>
   <tr><th>能力</th><th>实现</th></tr>
-  <tr><td>画面</td><td>WDA MJPEG → <code>/agent/mjpeg</code>；失败时可降级 PNG 静帧（<code>/agent/screenshot</code>）</td></tr>
+  <tr><td>画面</td><td>runner MJPEG → <code>/agent/mjpeg</code>；失败时可降级 PNG 静帧（<code>/agent/screenshot</code>）</td></tr>
   <tr><td>浏览器控制</td><td><code>POST /control</code>，每条命令有成功/失败响应</td></tr>
   <tr><td>Agent 控制</td><td><code>/agent/input</code>、<code>/agent/actions</code>、<code>/agent/elements</code>、<code>/agent/screenshot</code></td></tr>
   <tr><td>Mac 权限</td><td>不需要</td></tr>
@@ -72,20 +72,20 @@ MJPEG 服务。WDA 不可达时请求会明确失败，没有别的路径可以�
 <pre><code>curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 
 # 保持手机 USB 连接、已信任、已解锁且亮屏
-~/.iphone-use/setup-wda.sh doctor
-~/.iphone-use/setup-wda.sh
-~/.iphone-use/setup-wda.sh status
+~/.iphone-use/setup-runner.sh doctor
+~/.iphone-use/setup-runner.sh
+~/.iphone-use/setup-runner.sh status
 </code></pre>
-<p><code>install.sh</code> 负责 daemon、LaunchAgent 和 WDA 相关配置；它<strong>不等于真机已跑通</strong>。
-<code>setup-wda.sh</code> 才负责 WDA 编译/签名/装机、runner、8100 控制中继和 9100 MJPEG 中继。
+<p><code>install.sh</code> 负责 daemon、LaunchAgent 和 runner 相关配置；它<strong>不等于真机已跑通</strong>。
+<code>setup-runner.sh</code> 才负责 runner 编译/签名/装机、runner、8100 控制中继和 9100 MJPEG 中继。
 浏览器打开 <code>/setup</code> 可看到产品内的四步连接向导和实时首要阻塞项；只有
 <code>drivable:true</code> 时才开放进入控制页。
 向导只读状态，不会替操作者修改 VPN/代理、选择设备、绕过系统信任或执行设置脚本。
 <code>doctor</code> 会检查 Xcode、开发团队、WARP/VPN、macOS 系统代理、设备、信任和中继工具。
 它只报告网络阻塞，不会自动断开 WARP/VPN，也不会修改 HTTP/HTTPS/SOCKS 代理。
-进度写入 <code>~/.iphone-use/wda-setup-status.json</code>，daemon 通过
+进度写入 <code>~/.iphone-use/runner-setup-status.json</code>，daemon 通过
 <code>/agent/status</code> 的 <code>setup_blocked_on</code> 暴露
-<code>warp|proxy|usb|trust|ddi|automation_mode_disabled|xcode_too_old|ios_too_old|ddi_needs_reboot|legacy_needs_usb|wda</code> 等首要阻塞点。iOS 15/16 的手机不用升级：Xcode 26 起列不出这类手机，setup 改走旧系统路径（自带测试宿主、App Store Connect API 注册手机和生成描述文件、下载并校验开发者磁盘映像、用 iphone-use-legacy-launch 挂载、安装并通过 Wi-Fi 启动 runner），通过 Wi-Fi 启动后可以拔线。<code>ios_too_old</code> 表示这台 Mac 还驱动不了手机的系统：iOS 15/16 缺 App Store Connect API 密钥（<code>WDA_ASC_*</code>），或系统是 iOS 14 及更早。<code>ddi_needs_reboot</code> 表示手机上卡着旧的磁盘映像，重启一次手机；<code>legacy_needs_usb</code> 表示这类手机既没插线、Wi-Fi 也连不到。<code>xcode_too_old</code> 表示 runner 以 code 74 退出、且手机的 iOS 比所选 Xcode 的 SDK 新：安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），KeepAlive 此时每 15 分钟才重试一次。<code>automation_mode_disabled</code> 表示手机已解锁但 iOS 未开启 UI 自动化（runner 日志 <code>Timed out while enabling automation mode</code>）：打开“设置 › 开发者 › 启用 UI 自动化”，并在解锁状态下确认密码或“允许自动化”提示。KeepAlive 下一次重试开始时
+<code>warp|proxy|usb|trust|ddi|automation_mode_disabled|xcode_too_old|ios_too_old|ddi_needs_reboot|legacy_needs_usb|runner</code> 等首要阻塞点。iOS 15/16 的手机不用升级：Xcode 26 起列不出这类手机，setup 改走旧系统路径（自带测试宿主、App Store Connect API 注册手机和生成描述文件、下载并校验开发者磁盘映像、用 iphone-use-legacy-launch 挂载、安装并通过 Wi-Fi 启动 runner），通过 Wi-Fi 启动后可以拔线。<code>ios_too_old</code> 表示这台 Mac 还驱动不了手机的系统：iOS 15/16 缺 App Store Connect API 密钥（<code>IPU_RUNNER_ASC_*</code>），或系统是 iOS 14 及更早。<code>ddi_needs_reboot</code> 表示手机上卡着旧的磁盘映像，重启一次手机；<code>legacy_needs_usb</code> 表示这类手机既没插线、Wi-Fi 也连不到。<code>xcode_too_old</code> 表示 runner 以 code 74 退出、且手机的 iOS 比所选 Xcode 的 SDK 新：安装支持该 iOS 的 Xcode（测试版 iOS 需要测试版 Xcode），KeepAlive 此时每 15 分钟才重试一次。<code>automation_mode_disabled</code> 表示手机已解锁但 iOS 未开启 UI 自动化（runner 日志 <code>Timed out while enabling automation mode</code>）：打开“设置 › 开发者 › 启用 UI 自动化”，并在解锁状态下确认密码或“允许自动化”提示。KeepAlive 下一次重试开始时
 保留上一次 blocker，直到对应检查确实通过或被新的原因替换，避免状态在真实故障与空值之间闪烁。</p>
 
 <h2>前置条件</h2>
@@ -94,12 +94,12 @@ MJPEG 服务。WDA 不可达时请求会明确失败，没有别的路径可以�
   <em>Xcode → Settings → Accounts</em> 登录 Apple ID 并选定 Apple 开发团队（免费 Personal Team 可用，但签名通常需周期性续装）。</li>
   <li>iPhone：开启<strong>开发者模式</strong>（设置 → 隐私与安全性 → 开发者模式 → 开 → 重启）。</li>
   <li>连接：首次优先 USB；Mac 与 iPhone 已配对，手机上点过<strong>信任</strong>。</li>
-  <li>运行：编译、启动和控制期间保持手机<strong>解锁、亮屏、唤醒</strong>；WDA 不能绕过 Face ID/密码。</li>
+  <li>运行：编译、启动和控制期间保持手机<strong>解锁、亮屏、唤醒</strong>；runner 不能绕过 Face ID/密码。</li>
   <li>中继工具：普通路径使用 USB <code>iproxy</code>，安装命令为
   <code>brew install libimobiledevice</code>。脚本不会在 USB 不可用时自动切到 Wi-Fi/
   <code>socat</code>；后者只属于操作者明确配置的手动实验。</li>
   <li>多设备 Mac：daemon 固定 <code>IPHONE_USE_UDID</code>，运行 setup 时把同一个 classic UDID 传为
-  <code>WDA_UDID</code>，避免恢复时换错手机。</li>
+  <code>IPU_RUNNER_UDID</code>，避免恢复时换错手机。</li>
 </ul>
 
 <h2>手动跑(理解原理用)</h2>
@@ -108,32 +108,32 @@ xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
   -destination "platform=iOS,id=&lt;设备UDID&gt;" \
   -allowProvisioningUpdates \
   DEVELOPMENT_TEAM=&lt;你的TeamID&gt; \
-  PRODUCT_BUNDLE_IDENTIFIER=com.leeguoo.iphone-use.wda \
+  PRODUCT_BUNDLE_IDENTIFIER=com.leeguoo.iphone-use.runner \
   test
 # 成功标志:日志出现 ServerURLHere -&gt; http://&lt;phone-ip&gt;:8100/
-# 注意 xcodebuild 不能退出 —— 它退了 WDA 就死(setup-wda.sh 帮你守护)。</code></pre>
+# 注意 xcodebuild 不能退出 —— 它退了 runner 就死(setup-runner.sh 帮你守护)。</code></pre>
 
 <h2>API：同一条手机端链路</h2>
 <p>安装时默认配置
-<code>IPHONE_USE_WDA_URL=http://127.0.0.1:8100</code> 和
-<code>IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9100</code>。
+<code>IPHONE_USE_RUNNER_URL=http://127.0.0.1:8100</code> 和
+<code>IPHONE_USE_RUNNER_MJPEG_URL=http://127.0.0.1:9100</code>。
 两者都由 setup 脚本建立本地中继；控制失败直接报错。</p>
 <table>
   <tr><th>调用</th><th>路由</th><th>说明</th></tr>
   <tr><td><code>GET /agent/mjpeg</code></td><td>9100 → daemon → 浏览器</td><td>手机端实时画面；中继失败时 UI 应明确降级或离线</td></tr>
-  <tr><td><code>POST /control</code></td><td>浏览器 → 8100 WDA</td><td>cookie 鉴权 + <code>X-Phone-Control: 1</code>；每条命令返回确认</td></tr>
-  <tr><td><code>POST /agent/input {"type":"text","text":"你好"}</code></td><td>8100 WDA</td><td><strong>中文直通</strong>（Unicode 进入文本框，不被 Mac 键码/IME 吃）</td></tr>
-  <tr><td><code>POST /agent/input {"type":"tap","label":"新备忘录"}</code></td><td>8100 WDA</td><td>精确标签唯一时才点；零匹配或重名返回 422 且不发送动作</td></tr>
-  <tr><td><code>POST /agent/input {"type":"tap","x":0.5,"y":0.5}</code></td><td>8100 WDA</td><td>归一化坐标，由手机合成</td></tr>
-  <tr><td>Home / Spotlight / named key</td><td>8100 WDA</td><td>设备端按钮、主屏幕 Search 入口和 WebDriver key；不触发 Mac 键码</td></tr>
-  <tr><td>long-press / swipe / drag</td><td>8100 WDA Actions</td><td>完整手势一次提交并等待 HTTP 确认</td></tr>
-  <tr><td><code>GET /agent/elements</code></td><td>8100 WDA</td><td>带 snapshot 的扁平元素树；包含 label、identifier、kind、rect 和稀疏状态字段</td></tr>
-  <tr><td><code>GET /agent/screenshot</code></td><td>8100 WDA</td><td>手机端 PNG 截图</td></tr>
-  <tr><td>App Switcher / Control Center / Shortcuts bridge</td><td>暂不支持</td><td>WDA 合成不了这些系统手势；有设备端实现并真机验收之前不宣称支持</td></tr>
+  <tr><td><code>POST /control</code></td><td>浏览器 → 8100 runner</td><td>cookie 鉴权 + <code>X-Phone-Control: 1</code>；每条命令返回确认</td></tr>
+  <tr><td><code>POST /agent/input {"type":"text","text":"你好"}</code></td><td>8100 runner</td><td><strong>中文直通</strong>（Unicode 进入文本框，不被 Mac 键码/IME 吃）</td></tr>
+  <tr><td><code>POST /agent/input {"type":"tap","label":"新备忘录"}</code></td><td>8100 runner</td><td>精确标签唯一时才点；零匹配或重名返回 422 且不发送动作</td></tr>
+  <tr><td><code>POST /agent/input {"type":"tap","x":0.5,"y":0.5}</code></td><td>8100 runner</td><td>归一化坐标，由手机合成</td></tr>
+  <tr><td>Home / Spotlight / named key</td><td>8100 runner</td><td>设备端按钮、主屏幕 Search 入口和 WebDriver key；不触发 Mac 键码</td></tr>
+  <tr><td>long-press / swipe / drag</td><td>8100 runner Actions</td><td>完整手势一次提交并等待 HTTP 确认</td></tr>
+  <tr><td><code>GET /agent/elements</code></td><td>8100 runner</td><td>带 snapshot 的扁平元素树；包含 label、identifier、kind、rect 和稀疏状态字段</td></tr>
+  <tr><td><code>GET /agent/screenshot</code></td><td>8100 runner</td><td>手机端 PNG 截图</td></tr>
+  <tr><td>App Switcher / Control Center / Shortcuts bridge</td><td>暂不支持</td><td>runner 合成不了这些系统手势；有设备端实现并真机验收之前不宣称支持</td></tr>
 </table>
 <p>自动化应以 <code>GET /agent/status</code> 的
-<code>wda:true</code>、
-<code>wda_actionable:true</code>、<code>drivable:true</code> 为门槛。
+<code>runner:true</code>、
+<code>runner_actionable:true</code>、<code>drivable:true</code> 为门槛。
 <code>device_state</code> 还会暴露 <code>releasing</code> 和
 <code>reconnecting</code>，调用方应等待它回到 <code>ready</code>。</p>
 
@@ -144,7 +144,7 @@ xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
   <p>开发服务起不来时报 <code>"Developer Disk Image is not mounted… Ensure that the device is unlocked"</code>,<code>devicectl</code> 显示 <code>ddiServicesAvailable: false</code>。**最常见的真实原因是手机锁屏 / 刚连上还没握手完**,不是版本问题。修复:**解锁手机、保持亮屏不锁、保持连接(USB 最稳)**,等 <code>ddiServicesAvailable</code> 翻成 true 再 build。可以轮询等:</p>
   <pre><code>until xcrun devicectl device info details --device &lt;UUID&gt; \
   | grep -q "ddiServicesAvailable: true"; do sleep 4; done</code></pre>
-  <aside><strong>更正一个曾经的误判:</strong> 一度以为「设备 iOS 大版本必须 ≤ Xcode 的 DDI」是硬性卡点(iOS 27 设备 + Xcode 26.5)。真机验证<strong>推翻了它</strong> —— Xcode 26.5(DDI build 17F42 = iOS 26.5)成功把 WDA 装上了 <strong>iOS 27.0</strong> 的设备并尝试启动。所以「版本差一截」往往能用,真正卡住的是<strong>解锁/连接</strong>(本坑)和<strong>证书信任</strong>(见「手机上要信任开发者证书」一节)。只有当 DDI 比设备老很多、确实拒绝挂载时才需要升 Xcode。</aside>
+  <aside><strong>更正一个曾经的误判:</strong> 一度以为「设备 iOS 大版本必须 ≤ Xcode 的 DDI」是硬性卡点(iOS 27 设备 + Xcode 26.5)。真机验证<strong>推翻了它</strong> —— Xcode 26.5(DDI build 17F42 = iOS 26.5)成功把 runner 装上了 <strong>iOS 27.0</strong> 的设备并尝试启动。所以「版本差一截」往往能用,真正卡住的是<strong>解锁/连接</strong>(本坑)和<strong>证书信任</strong>(见「手机上要信任开发者证书」一节)。只有当 DDI 比设备老很多、确实拒绝挂载时才需要升 Xcode。</aside>
 </div>
 
 <div class="pit">
@@ -165,39 +165,39 @@ xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
 
 <div class="pit">
   <h3>⑤ 不能用 <code>PRODUCT_NAME</code> 改显示名(会搞坏构建)</h3>
-  <p>想把手机上的 app 名从 WebDriverAgentRunner 换成自己的品牌,<strong>千万别在命令行传 <code>PRODUCT_NAME=…</code></strong> —— 它是<strong>全局</strong>覆盖,会把 WDA 的内部框架 <code>WebDriverAgentLib</code> 也改名,导致它自身的 <code>#import &lt;WebDriverAgentLib/FBElement.h&gt;</code> 全部找不到、编译失败。<strong>安全的只有 <code>PRODUCT_BUNDLE_IDENTIFIER</code></strong>(全局覆盖无害)。干净改显示名要改单个 target 的设置(放进 setup 脚本),不能粗暴全局覆盖。</p>
+  <p>想把手机上的 app 名从 WebDriverAgentRunner 换成自己的品牌,<strong>千万别在命令行传 <code>PRODUCT_NAME=…</code></strong> —— 它是<strong>全局</strong>覆盖,会把 runner 的内部框架 <code>WebDriverAgentLib</code> 也改名,导致它自身的 <code>#import &lt;WebDriverAgentLib/FBElement.h&gt;</code> 全部找不到、编译失败。<strong>安全的只有 <code>PRODUCT_BUNDLE_IDENTIFIER</code></strong>(全局覆盖无害)。干净改显示名要改单个 target 的设置(放进 setup 脚本),不能粗暴全局覆盖。</p>
 </div>
 
 <div class="pit">
   <h3>⑥ 免费账号签名 7 天过期</h3>
-  <p>免费 Personal Team 签出来的 WDA 7 天失效,要每周重装;付费开发者账号(¥688/年)签名一年有效。长期部署建议付费账号。</p>
+  <p>免费 Personal Team 签出来的 runner 7 天失效,要每周重装;付费开发者账号(¥688/年)签名一年有效。长期部署建议付费账号。</p>
 </div>
 
 <div class="pit">
   <h3>⑦ macOS「本地网络」隐私会静默拦截 daemon 直连手机 <span class="tag block">必须走 localhost 中继</span></h3>
   <p>真机实测:终端里 <code>curl http://&lt;phone-ip&gt;:8100/status</code> 通,但 <strong>daemon(后台 LaunchAgent)发同样的请求失败</strong>、不弹任何授权框 —— macOS 15+/26 的「本地网络」隐私对后台进程访问私网地址是<strong>静默拒绝</strong>。</p>
   <p>普通路径让 daemon 只访问 <strong><code>127.0.0.1</code></strong>，由 USB
-  <code>iproxy</code> 把 8100/9100 固定转发到 <code>WDA_UDID</code>。这样能稳定选择目标，
+  <code>iproxy</code> 把 8100/9100 固定转发到 <code>IPU_RUNNER_UDID</code>。这样能稳定选择目标，
   也不依赖变化的手机 IP。脚本不会自动改用 Wi-Fi/<code>socat</code>；需要那条路径时，
   操作者必须自己评估网络和暴露面后手动配置。</p>
-  <aside><strong>loopback 不是认证或防火墙。</strong> WDA 在 iPhone 上的 8100/9100
+  <aside><strong>loopback 不是认证或防火墙。</strong> runner 在 iPhone 上的 8100/9100
   没有认证。<code>iproxy</code> 只保护 Mac 侧 relay 的目标选择，不能阻止同一局域网里的机器
-  直接访问手机 IP 上的 WDA。Phase 1 只适合可信、隔离网络；真正的设备传输认证要由 Phase 2
+  直接访问手机 IP 上的 runner。Phase 1 只适合可信、隔离网络；真正的设备传输认证要由 Phase 2
   companion app 或受控 tunnel 提供。</aside>
 </div>
 
 <div class="pit">
-  <h3>⑧ WDA 端口会暴露到可路由网络；锁屏也会阻断操作</h3>
-  <p>WDA 监听手机的 <code>0.0.0.0:8100</code>，MJPEG 使用 9100，二者都无认证。
+  <h3>⑧ runner 端口会暴露到可路由网络；锁屏也会阻断操作</h3>
+  <p>runner 监听手机的 <code>0.0.0.0:8100</code>，MJPEG 使用 9100，二者都无认证。
   日志打印 <code>ServerURLHere-&gt;http://&lt;phone-ip&gt;:8100&lt;-ServerURLHere</code>。
-  只要网络可路由，同 LAN/跨子网主机可能绕过 daemon 登录直接访问 WDA。不要在访客 Wi-Fi、
+  只要网络可路由，同 LAN/跨子网主机可能绕过 daemon 登录直接访问 runner。不要在访客 Wi-Fi、
   公共网络或不受控办公网运行 Phase 1；用 USB 时可关闭手机 Wi-Fi。</p>
   <p>很多操作（启动 App、输入）要求手机解锁。默认自动锁定会反复打断，长时间测试可在
-  <em>设置 → 显示与亮度 → 自动锁定</em> 调整；首次解锁仍需真人，WDA 不能绕过 Face ID/密码。</p>
+  <em>设置 → 显示与亮度 → 自动锁定</em> 调整；首次解锁仍需真人，runner 不能绕过 Face ID/密码。</p>
 </div>
 
 <div class="pit">
-  <h3>⑨ WARP / 任何 VPN 会卡死 CoreDevice 设备隧道 → WDA 根本装不上 <span class="tag block">#1 头号坑(真因)</span></h3>
+  <h3>⑨ WARP / 任何 VPN 会卡死 CoreDevice 设备隧道 → runner 根本装不上 <span class="tag block">#1 头号坑(真因)</span></h3>
   <p>这是花了<strong>整整一晚</strong>才揪出来的真凶。症状极具迷惑性:<code>xcodebuild</code> 永远
   <code>Device is busy (Connecting to iPhone)</code>、<code>devicectl device info details</code> 永久挂起、
   设备隧道死在 <code>connecting</code> 不肯到 <code>available</code>。试遍重插 USB、kickstart usbd/usbmuxd/remoted、
@@ -210,7 +210,7 @@ xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
   <p><strong>解法:</strong></p>
   <ul>
     <li><strong>临时</strong>:由操作者决定是否执行 <code>warp-cli disconnect</code>。
-    <code>setup-wda.sh doctor</code> 只检测并说明问题，脚本不会自动断开或恢复 WARP/VPN。
+    <code>setup-runner.sh doctor</code> 只检测并说明问题，脚本不会自动断开或恢复 WARP/VPN。
     若组织策略是 <code>Always On: true</code>，交给管理员处理，不要让安装脚本绕过策略。</li>
     <li><strong>永久（只访问少量目标时优先）</strong>:让 Zero Trust 管理员创建匹配该用户或设备组的配置，
     将 Service mode 设为 <strong>Traffic only</strong>、Split Tunnels 设为 <strong>Include</strong>，
@@ -223,9 +223,9 @@ xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
     加上 <strong>CoreDevice 设备隧道的 IPv6 段</strong>（<code>fe80::/10</code> 链路本地 +
     <code>fd00::/8</code> 设备 RSD ULA）。以 <code>warp-cli tunnel dump</code> 的
     <strong>Excluded</strong> 有效路由为准，不要只看较短的策略摘要。
-    这样 CoreDevice 不走 WARP,WDA 就能在 WARP 开着时跑——真正做到「办公 VPN + 操作手机」两不误。</li>
+    这样 CoreDevice 不走 WARP,runner 就能在 WARP 开着时跑——真正做到「办公 VPN + 操作手机」两不误。</li>
   </ul>
-  <p>排障速记：WDA / 真机装不上时先看 <code>setup-wda.sh doctor</code>、<code>warp-cli settings</code> 和
+  <p>排障速记：runner / 真机装不上时先看 <code>setup-runner.sh doctor</code>、<code>warp-cli settings</code> 和
   <code>warp-cli status</code>。脚本会验证 Traffic only / Include 的有效排除路由，并将 Local proxy mode
   视为路由安全；是否切换 VPN 状态或组织策略由操作者或管理员决定。</p>
   <p>Zero Trust 的 <em>Always On</em> 策略会自动把 WARP 连回来，手动断开只顶一时，
@@ -233,26 +233,26 @@ xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
 </div>
 
 <div class="pit">
-  <h3>⑩ 升级 Xcode 之后 WDA 编不过 / 起不来</h3>
-  <p><strong>部署版本：</strong>Xcode 27 只接受 iOS 15.0 起的部署版本，而固定版本的 WDA 工程写的是 12.0，
+  <h3>⑩ 升级 Xcode 之后 runner 编不过 / 起不来</h3>
+  <p><strong>部署版本：</strong>Xcode 27 只接受 iOS 15.0 起的部署版本，而固定版本的 runner 工程写的是 12.0，
   <code>xcodebuild</code> 直接报 <code>IPHONEOS_DEPLOYMENT_TARGET … is set to 12.0</code>。
   runner 的命令行是 PID 身份校验的一部分，不能往里加构建参数；setup 会读所选 SDK 的最低部署版本，
-  需要时写 <code>~/.iphone-use/wda-xcode-compat.xcconfig</code> 并导出 <code>XCODE_XCCONFIG_FILE</code>，
-  取值为 max(工程里的最高值, SDK 最低值)。WDA 源码不改；旧 Xcode 上不生成这个文件。</p>
+  需要时写 <code>~/.iphone-use/runner-xcode-compat.xcconfig</code> 并导出 <code>XCODE_XCCONFIG_FILE</code>，
+  取值为 max(工程里的最高值, SDK 最低值)。runner 源码不改；旧 Xcode 上不生成这个文件。</p>
   <p><strong>多份 .xctestrun：</strong>每个 SDK 都会在 <code>Build/Products</code> 留一份
   <code>WebDriverAgentRunner_iphoneosX.Y-arm64.xctestrun</code>，旧 Xcode 那份不会被删。
   setup 取本次构建所用 SDK 对应的那份；仍然对不上唯一一份时照旧拒绝用普通 test 动作跑手工签名的 runner。
-  <code>setup-wda.sh doctor</code> 会报出这两种情况。</p>
+  <code>setup-runner.sh doctor</code> 会报出这两种情况。</p>
 </div>
 
 <h2>已有真机证据（组件级）</h2>
-<p>在 iPhone 17 / iOS 27 真机（2026-06-11）上，以下 WDA 组件能力曾经通过 daemon API 实测：</p>
+<p>在 iPhone 17 / iOS 27 真机（2026-06-11）上，以下 runner 组件能力曾经通过 daemon API 实测：</p>
 <ul>
   <li><code>GET /source</code> — 元素树<strong>直接读到中文 UI</strong>(设置项、日期标签)。</li>
   <li>按元素 label 定位 + 点击 — <strong>无坐标漂移、不碰 Mac 光标</strong>(用它驱动设置把自动锁定设成「永不」,人没动电脑)。</li>
-  <li><code>POST /wda/keys</code> 送字符串 — <strong>中文一次到位</strong>:在备忘录里干净打出整段中文。WDA 直接把 Unicode 送进文本框,不经过键码和拼音输入法,不会被候选词吃掉。</li>
+  <li><code>POST /wda/keys</code> 送字符串 — <strong>中文一次到位</strong>:在备忘录里干净打出整段中文。runner 直接把 Unicode 送进文本框,不经过键码和拼音输入法,不会被候选词吃掉。</li>
 </ul>
-<p>这些证据证明 WDA 组件可行，<strong>不等于</strong>当前的安装器、MJPEG、
+<p>这些证据证明 runner 组件可行，<strong>不等于</strong>当前的安装器、MJPEG、
 浏览器手势、故障恢复和多设备选择已经完整验收。</p>
 
 <h2>真机验收</h2>
@@ -261,23 +261,23 @@ daemon 在线、历史组件测试都不能替代：</p>
 <table>
   <tr><th>层级</th><th>必须观察</th><th>失败时不能怎么做</th></tr>
   <tr><td>权限边界</td><td>没有任何 macOS 权限授权时 daemon 仍可启动并控制手机，Mac 屏幕和光标不受影响</td><td>不能为了“跑通”临时补系统授权</td></tr>
-  <tr><td>目标与状态</td><td>目标 UDID 正确、<code>wda_actionable:true</code>、<code>drivable:true</code></td><td>不能只看 <code>ok:true</code> 或 launchd loaded</td></tr>
+  <tr><td>目标与状态</td><td>目标 UDID 正确、<code>runner_actionable:true</code>、<code>drivable:true</code></td><td>不能只看 <code>ok:true</code> 或 launchd loaded</td></tr>
   <tr><td>实时画面</td><td>另一台设备打开 <code>/phone</code>，<code>/agent/mjpeg</code> 连续更新；停 9100 后 UI 诚实降级</td><td>不能把一张 PNG 静帧当直播</td></tr>
   <tr><td>浏览器控制</td><td>点按、拖动、长按、滚动、ASCII/CJK 文本各执行一次且收到确认</td><td>不能在请求失败后仍 toast 成功</td></tr>
   <tr><td>Agent API</td><td>elements/screenshot/input 通过 bearer 鉴权；断开 8100 时明确失败</td><td>不能吞掉错误、假装成功</td></tr>
-  <tr><td>读路径失效</td><td>elements/source 或 screenshot 失败后立即撤销缓存 actionability，后续状态不得继续声称 <code>drivable:true</code></td><td>下一次健康探测负责区分短暂 WebView 变化与 WDA 真正掉线</td></tr>
-  <tr><td>恢复</td><td>观察 <code>releasing → released → reconnecting → ready</code>，并覆盖锁屏/解锁、USB 重连、daemon/Mac 重启、WDA 重签</td><td>多设备环境不能静默换目标</td></tr>
-  <tr><td>网络暴露</td><td>在隔离网络检查手机 IP 的 8100/9100 是否可直连，并记录结果</td><td>不能把 USB loopback relay 当成 WDA 认证</td></tr>
+  <tr><td>读路径失效</td><td>elements/source 或 screenshot 失败后立即撤销缓存 actionability，后续状态不得继续声称 <code>drivable:true</code></td><td>下一次健康探测负责区分短暂 WebView 变化与 runner 真正掉线</td></tr>
+  <tr><td>恢复</td><td>观察 <code>releasing → released → reconnecting → ready</code>，并覆盖锁屏/解锁、USB 重连、daemon/Mac 重启、runner 重签</td><td>多设备环境不能静默换目标</td></tr>
+  <tr><td>网络暴露</td><td>在隔离网络检查手机 IP 的 8100/9100 是否可直连，并记录结果</td><td>不能把 USB loopback relay 当成 runner 认证</td></tr>
 </table>
 <p>记录每次验收的 iPhone/iOS、Mac/macOS、Xcode、开发团队类型、USB 传输、网络隔离方式和逐项结果。</p>
 
 <aside>
-  <strong>能力边界：</strong>Home、Spotlight、named key、长按与拖动都走 WDA；
+  <strong>能力边界：</strong>Home、Spotlight、named key、长按与拖动都走 runner；
   App Switcher、Control Center 和 Shortcuts bridge 暂不属于已承诺的能力。
 </aside>
 
 <footer>
-  iphone-use · WDA 接入与验收边界 · 历史组件证据：macOS 26 /
+  iphone-use · runner 接入与验收边界 · 历史组件证据：macOS 26 /
   Xcode 26.5（DDI 17F42=iOS 26.5）/ iPhone 17（iOS 27.0）。完整浏览器链路待按本页矩阵记录。
 </footer>
 </body>

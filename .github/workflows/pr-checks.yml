@@ -106,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p iphone-use-mcp --locked
-          # setup-wda.sh hands its commands to this binary (shim + instance-context tests).
+          # setup-runner.sh hands its commands to this binary (shim + instance-context tests).
           cargo build -p server --bin iphone-use --locked
 
       # Discovery over the real protocol, against the binary this PR builds.
@@ -210,7 +210,7 @@ jobs:
           # $(...) broke the runner supervisor once).
           /bin/bash -n install.sh
           /bin/bash -n uninstall.sh
-          /bin/bash -n scripts/setup-wda.sh
+          /bin/bash -n scripts/setup-runner.sh
           bash scripts/test-install-release-transaction.sh
           bash scripts/test-install-cli-link.sh
           bash scripts/test-install-runner-sources.sh
@@ -219,7 +219,7 @@ jobs:
           bash scripts/test-install-args.sh
           bash scripts/test-install-adhoc-signing.sh
           bash scripts/test-uninstall-safety.sh
-          bash scripts/test-setup-wda-shim.sh
+          bash scripts/test-setup-runner-shim.sh
           python3 scripts/test-auto-update.py
           python3 scripts/test-instance-context.py
           # The nightly re-verification canary decides whether an installed

@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use crate::wda::ElementRow;
+use crate::runner::ElementRow;
 
 pub const DEFAULT_ROW_KIND: &str = "Cell";
 pub const DEFAULT_MAX_PAGES: u32 = 6;

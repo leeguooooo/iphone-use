@@ -21,7 +21,7 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state, build_state_with_wda, mock_wda, mock_wda_with_apps};
+use support::{block, build_state, build_state_with_runner, mock_runner, mock_runner_with_apps};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 
@@ -35,7 +35,7 @@ const BARE_TREE: &str = r#"{"value":{
 
 async fn post_actions(base: Option<&str>, body: &str) -> (StatusCode, serde_json::Value) {
     let state = match base {
-        Some(base) => build_state_with_wda(base),
+        Some(base) => build_state_with_runner(base),
         None => build_state(None),
     };
     let app = server::http::router(state);
@@ -57,7 +57,7 @@ async fn post_actions(base: Option<&str>, body: &str) -> (StatusCode, serde_json
 #[test]
 fn an_applied_action_before_a_failed_expectation_is_a_partial_batch() {
     block(async {
-        let wda = mock_wda(|request, _| {
+        let runner = mock_runner(|request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -67,7 +67,7 @@ fn an_applied_action_before_a_failed_expectation_is_a_partial_batch() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (_, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[
                 {"kind":"action","action":{"type":"home"}},
                 {"kind":"wait_for","expect":{"present":[{"label":"nothing here"}]},
@@ -101,7 +101,7 @@ fn an_applied_action_before_a_failed_expectation_is_a_partial_batch() {
 #[test]
 fn an_unknown_step_makes_the_whole_batch_unknown() {
     block(async {
-        let wda = mock_wda(|request, index| {
+        let runner = mock_runner(|request, index| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -112,7 +112,7 @@ fn an_unknown_step_makes_the_whole_batch_unknown() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (_, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[
                 {"kind":"action","action":{"type":"home"}},
                 {"kind":"action","action":{"type":"home"}}
@@ -171,7 +171,7 @@ fn a_locally_refused_batch_applied_nothing() {
 #[test]
 fn zero_applied_actions_with_an_unknown_first_step_is_still_unknown() {
     block(async {
-        let wda = mock_wda(|request, _| {
+        let runner = mock_runner(|request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -179,7 +179,7 @@ fn zero_applied_actions_with_an_unknown_first_step_is_still_unknown() {
             None
         });
         let (_, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"home"}}]}"#,
         )
         .await;
@@ -201,7 +201,7 @@ fn zero_applied_actions_with_an_unknown_first_step_is_still_unknown() {
 #[test]
 fn a_batch_refused_before_it_starts_reports_nothing_applied() {
     block(async {
-        // The fixture state has no WDA configured, so a well-formed batch is
+        // The fixture state has no runner configured, so a well-formed batch is
         // refused after validation and before the first step.
         let (status, json) = post_actions(
             None,
@@ -210,7 +210,7 @@ fn a_batch_refused_before_it_starts_reports_nothing_applied() {
         .await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
-        assert_eq!(json["error"], "wda_not_configured", "{json}");
+        assert_eq!(json["error"], "runner_not_configured", "{json}");
         assert_eq!(json["outcome"], "not_sent", "{json}");
         assert_eq!(json["failed_step_outcome"], "not_sent", "{json}");
         assert_eq!(json["batch_outcome"], "nothing_applied", "{json}");
@@ -223,7 +223,7 @@ fn a_batch_refused_before_it_starts_reports_nothing_applied() {
 #[test]
 fn an_observed_batch_returns_the_screen_it_ended_on() {
     block(async {
-        let wda = mock_wda(|request, _| {
+        let runner = mock_runner(|request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -233,7 +233,7 @@ fn an_observed_batch_returns_the_screen_it_ended_on() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"home"}}],"observe":true}"#,
         )
         .await;
@@ -244,7 +244,7 @@ fn an_observed_batch_returns_the_screen_it_ended_on() {
         assert!(json["settle"].is_object(), "{json}");
 
         let (_, plain) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"home"}}]}"#,
         )
         .await;
@@ -258,12 +258,12 @@ fn an_observed_batch_returns_the_screen_it_ended_on() {
 #[test]
 fn an_optional_alert_step_passes_when_no_alert_is_up() {
     block(async {
-        let wda = mock_wda(|request, _| {
+        let runner = mock_runner(|request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
             if request.contains("/alert/text") {
-                // Real WDA answers "no such alert" with HTTP 404.
+                // Real runner answers "no such alert" with HTTP 404.
                 let body = r#"{"value":{"error":"no such alert","message":"no modal dialog is open"}}"#;
                 return Some((
                     Duration::ZERO,
@@ -276,7 +276,7 @@ fn an_optional_alert_step_passes_when_no_alert_is_up() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[
                 {"kind":"action","action":{"type":"alert","button":"允许粘贴","if_present":true}},
                 {"kind":"action","action":{"type":"home"}}
@@ -289,7 +289,7 @@ fn an_optional_alert_step_passes_when_no_alert_is_up() {
         assert_eq!(json["steps"][0]["skipped"], "no_alert", "{json}");
 
         let (_, strict) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"alert","button":"允许粘贴"}}]}"#,
         )
         .await;
@@ -304,7 +304,7 @@ fn an_optional_tap_passes_when_its_element_is_absent() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let record = seen.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             record.lock().unwrap().push(request.to_string());
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
@@ -318,7 +318,7 @@ fn an_optional_tap_passes_when_its_element_is_absent() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[
                 {"kind":"action","action":{"type":"tap_locator","locator":{"label":"以后再说","kind":"Button"},"if_present":true}},
                 {"kind":"action","action":{"type":"home"}}
@@ -334,14 +334,14 @@ fn an_optional_tap_passes_when_its_element_is_absent() {
         );
 
         let (_, strict) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"以后再说","kind":"Button"}}}]}"#,
         )
         .await;
         assert_eq!(strict["error"], "element_not_found", "{strict}");
 
         let (status, bad) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"x"},"if_present":"yes"}}]}"#,
         )
         .await;
@@ -359,7 +359,7 @@ fn a_covered_locator_tap_reveals_before_clicking() {
         let record = seen.clone();
         let scrolled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let moved = scrolled.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             record.lock().unwrap().push(request.to_string());
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
@@ -386,7 +386,7 @@ fn a_covered_locator_tap_reveals_before_clicking() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"通用","kind":"Button"}}}]}"#,
         )
         .await;
@@ -418,7 +418,7 @@ fn a_label_tap_still_covered_after_the_reveal_taps_the_clear_part() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let record = seen.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             record.lock().unwrap().push(request.to_string());
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
@@ -442,7 +442,7 @@ fn a_label_tap_still_covered_after_the_reveal_taps_the_clear_part() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap","label":"通用"}}]}"#,
         )
         .await;
@@ -481,7 +481,7 @@ fn a_locator_tap_fully_covered_after_the_reveal_is_refused_unsent() {
         let record = seen.clone();
         let scrolled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let moved = scrolled.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             record.lock().unwrap().push(request.to_string());
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
@@ -513,7 +513,7 @@ fn a_locator_tap_fully_covered_after_the_reveal_is_refused_unsent() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (_, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"通用","kind":"Button"}}}]}"#,
         )
         .await;
@@ -546,13 +546,13 @@ fn safari_sheet_with_link_at(link_y: u32) -> String {
 
 /// A mock runner serving `tree(scrolled)` for reads and E1's frame from
 /// `rect(scrolled)`, where `scrolled` turns true at the first scrollTo.
-fn sheet_wda(
+fn sheet_runner(
     seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     tree: fn(bool) -> String,
     rect: fn(bool) -> String,
-) -> support::MockWda {
+) -> support::MockRunner {
     let scrolled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    mock_wda(move |request, _| {
+    mock_runner(move |request, _| {
         seen.lock().unwrap().push(request.to_string());
         if request.starts_with("POST /session ") {
             return Some((Duration::ZERO, SESSION.to_string()));
@@ -585,13 +585,13 @@ fn sheet_wda(
 fn an_off_screen_locator_tap_the_reveal_cannot_bring_on_screen_is_refused_unsent() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let wda = sheet_wda(
+        let runner = sheet_runner(
             seen.clone(),
             |_| safari_sheet_with_link_at(1500),
             |_| r#"{"value":{"x":20,"y":1500,"width":120,"height":20}}"#.to_string(),
         );
         let (_, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"Acceptable Use","kind":"Link"}}}]}"#,
         )
         .await;
@@ -617,7 +617,7 @@ fn an_off_screen_locator_tap_the_reveal_cannot_bring_on_screen_is_refused_unsent
 fn an_off_screen_locator_tap_is_revealed_then_clicked() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let wda = sheet_wda(
+        let runner = sheet_runner(
             seen.clone(),
             |moved| safari_sheet_with_link_at(if moved { 500 } else { 1500 }),
             |moved| {
@@ -628,7 +628,7 @@ fn an_off_screen_locator_tap_is_revealed_then_clicked() {
             },
         );
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"Acceptable Use","kind":"Link"}}}]}"#,
         )
         .await;
@@ -653,7 +653,7 @@ fn an_off_screen_locator_tap_is_revealed_then_clicked() {
 fn an_off_screen_label_tap_is_revealed_then_clicked() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let wda = sheet_wda(
+        let runner = sheet_runner(
             seen.clone(),
             |moved| safari_sheet_with_link_at(if moved { 500 } else { 1500 }),
             |moved| {
@@ -664,7 +664,7 @@ fn an_off_screen_label_tap_is_revealed_then_clicked() {
             },
         );
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap","label":"Acceptable Use"}}]}"#,
         )
         .await;
@@ -688,13 +688,13 @@ fn an_off_screen_label_tap_is_revealed_then_clicked() {
 fn a_sheet_close_button_under_the_address_bar_edge_is_clicked() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let wda = sheet_wda(
+        let runner = sheet_runner(
             seen.clone(),
             |_| safari_sheet_with_link_at(500),
             |_| r#"{"value":{"x":16,"y":65,"width":44,"height":44}}"#.to_string(),
         );
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"关闭","kind":"Button"}}}]}"#,
         )
         .await;
@@ -717,7 +717,7 @@ fn a_screen_read_that_keeps_failing_backs_off_and_stops() {
     block(async {
         let sources = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = sources.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -742,7 +742,7 @@ fn a_screen_read_that_keeps_failing_backs_off_and_stops() {
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
-        let app = server::http::router(build_state_with_wda(wda.url()));
+        let app = server::http::router(build_state_with_runner(runner.url()));
         let started = std::time::Instant::now();
         let response = app
             .oneshot(
@@ -758,7 +758,7 @@ fn a_screen_read_that_keeps_failing_backs_off_and_stops() {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
-        assert_eq!(json["error"], "wda_source_failed", "{json}");
+        assert_eq!(json["error"], "runner_source_failed", "{json}");
         assert_eq!(json["source_attempts"], 8, "{json}");
         assert!(
             json["hint"]
@@ -786,7 +786,7 @@ fn spotlight_opens_through_the_pill_identifier() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let record = seen.clone();
         let springboard = r#"[{"bundleId":"com.apple.springboard"}]"#;
-        let wda = mock_wda_with_apps(springboard, move |request, _| {
+        let runner = mock_runner_with_apps(springboard, move |request, _| {
             record.lock().unwrap().push(request.to_string());
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
@@ -814,7 +814,7 @@ fn spotlight_opens_through_the_pill_identifier() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"shortcut","name":"spotlight"}}]}"#,
         )
         .await;
@@ -831,7 +831,7 @@ fn a_clear_locator_tap_does_not_scroll() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let record = seen.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             record.lock().unwrap().push(request.to_string());
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
@@ -851,7 +851,7 @@ fn a_clear_locator_tap_does_not_scroll() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"电池","kind":"Button"}}}]}"#,
         )
         .await;
@@ -870,7 +870,7 @@ fn a_point_locator_tap_hits_the_live_frame_centre() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let record = seen.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             record.lock().unwrap().push(request.to_string());
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, SESSION.to_string()));
@@ -892,7 +892,7 @@ fn a_point_locator_tap_hits_the_live_frame_centre() {
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"返回","kind":"Button"},"via":"point"}}]}"#,
         )
         .await;
@@ -914,7 +914,7 @@ fn a_point_locator_tap_hits_the_live_frame_centre() {
         }
 
         let (bad, json) = post_actions(
-            Some(wda.url()),
+            Some(runner.url()),
             r#"{"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"返回"},"via":"elsewhere"}}]}"#,
         )
         .await;

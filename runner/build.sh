@@ -3,7 +3,7 @@
 # produced .xctestrun path on the last line of stdout.
 #
 # Signing:
-#   - WDA_ASC_KEY_PATH / WDA_ASC_KEY_ID / WDA_ASC_ISSUER_ID set (or readable from the WDA
+#   - IPU_RUNNER_ASC_KEY_PATH / IPU_RUNNER_ASC_KEY_ID / IPU_RUNNER_ASC_ISSUER_ID set (or readable from the runner
 #     LaunchAgent plist) → automatic signing for team 6ZPXG4KVVS through the App Store Connect
 #     API key (-allowProvisioningUpdates -authenticationKey*).
 #   - otherwise, or with --unsigned / IPU_RUNNER_UNSIGNED=1 → CODE_SIGNING_ALLOWED=NO (compile check;
@@ -35,7 +35,7 @@ SCHEME="IPhoneUseRunner"
 DERIVED_DATA="${IPU_RUNNER_DERIVED_DATA:-$SCRIPT_DIR/build/DerivedData}"
 TEAM_ID="${IPU_RUNNER_TEAM_ID:-6ZPXG4KVVS}"
 XCODEBUILD_BIN="${XCODEBUILD:-xcodebuild}"
-WDA_PLIST="$HOME/Library/LaunchAgents/com.leeguoo.iphone-use.wda.plist"
+IPU_RUNNER_PLIST="$HOME/Library/LaunchAgents/com.leeguoo.iphone-use.runner.plist"
 
 unsigned="${IPU_RUNNER_UNSIGNED:-0}"
 simulator="${IPU_RUNNER_SIMULATOR:-0}"
@@ -73,14 +73,14 @@ if [ "$simulator" = "1" ]; then
 fi
 
 _plist_env() {
-    [ -f "$WDA_PLIST" ] || return 0
-    plutil -extract "EnvironmentVariables.$1" raw -o - "$WDA_PLIST" 2>/dev/null || true
+    [ -f "$IPU_RUNNER_PLIST" ] || return 0
+    plutil -extract "EnvironmentVariables.$1" raw -o - "$IPU_RUNNER_PLIST" 2>/dev/null || true
 }
 
 if [ "$unsigned" != "1" ] && [ "$simulator" != "1" ]; then
-    : "${WDA_ASC_KEY_PATH:=$(_plist_env WDA_ASC_KEY_PATH)}"
-    : "${WDA_ASC_KEY_ID:=$(_plist_env WDA_ASC_KEY_ID)}"
-    : "${WDA_ASC_ISSUER_ID:=$(_plist_env WDA_ASC_ISSUER_ID)}"
+    : "${IPU_RUNNER_ASC_KEY_PATH:=$(_plist_env IPU_RUNNER_ASC_KEY_PATH)}"
+    : "${IPU_RUNNER_ASC_KEY_ID:=$(_plist_env IPU_RUNNER_ASC_KEY_ID)}"
+    : "${IPU_RUNNER_ASC_ISSUER_ID:=$(_plist_env IPU_RUNNER_ASC_ISSUER_ID)}"
 fi
 
 args=(
@@ -95,18 +95,18 @@ if [ "$simulator" = "1" ]; then
     echo "ipu-runner build: iOS Simulator (CODE_SIGNING_ALLOWED=NO)" >&2
     args+=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="")
     mode=simulator
-elif [ "$unsigned" != "1" ] && [ -n "${WDA_ASC_KEY_PATH:-}" ] && [ -n "${WDA_ASC_KEY_ID:-}" ] \
-    && [ -n "${WDA_ASC_ISSUER_ID:-}" ]; then
-    if [ ! -f "$WDA_ASC_KEY_PATH" ]; then
-        echo "ipu-runner build: WDA_ASC_KEY_PATH does not point at a file" >&2
+elif [ "$unsigned" != "1" ] && [ -n "${IPU_RUNNER_ASC_KEY_PATH:-}" ] && [ -n "${IPU_RUNNER_ASC_KEY_ID:-}" ] \
+    && [ -n "${IPU_RUNNER_ASC_ISSUER_ID:-}" ]; then
+    if [ ! -f "$IPU_RUNNER_ASC_KEY_PATH" ]; then
+        echo "ipu-runner build: IPU_RUNNER_ASC_KEY_PATH does not point at a file" >&2
         exit 1
     fi
     echo "ipu-runner build: signed (team $TEAM_ID, App Store Connect API key)" >&2
     args+=(
         -allowProvisioningUpdates
-        -authenticationKeyPath "$WDA_ASC_KEY_PATH"
-        -authenticationKeyID "$WDA_ASC_KEY_ID"
-        -authenticationKeyIssuerID "$WDA_ASC_ISSUER_ID"
+        -authenticationKeyPath "$IPU_RUNNER_ASC_KEY_PATH"
+        -authenticationKeyID "$IPU_RUNNER_ASC_KEY_ID"
+        -authenticationKeyIssuerID "$IPU_RUNNER_ASC_ISSUER_ID"
         DEVELOPMENT_TEAM="$TEAM_ID"
         CODE_SIGN_STYLE=Automatic
     )

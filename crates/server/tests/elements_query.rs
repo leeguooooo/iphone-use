@@ -11,7 +11,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 const TREE: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"设置","rect":{"x":0,"y":0,"width":440,"height":956},"children":[
 {"type":"XCUIElementTypeButton","label":"Sign In","rect":{"x":20,"y":100,"width":200,"height":44},"isEnabled":"1"},
@@ -48,7 +48,7 @@ fn indexes(json: &serde_json::Value) -> Vec<u64> {
 #[test]
 fn query_and_limit_filter_one_read_and_keep_its_indexes() {
     block(async {
-        let wda = mock_wda(|request, _| {
+        let runner = mock_runner(|request, _| {
             if request.starts_with("POST /session ") {
                 return Some((
                     Duration::ZERO,
@@ -60,7 +60,7 @@ fn query_and_limit_filter_one_read_and_keep_its_indexes() {
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
 
         let (status, full) = get(&state, "/agent/elements").await;
         assert_eq!(status, StatusCode::OK, "{full}");

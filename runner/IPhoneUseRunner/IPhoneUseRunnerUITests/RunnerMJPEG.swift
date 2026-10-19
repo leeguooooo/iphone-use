@@ -5,7 +5,7 @@
 //   --BoundaryString\r\nContent-type: image/jpg\r\nContent-Length: N\r\n\r\n<jpeg>\r\n  (per frame)
 //
 // Frames are captured on a dedicated thread, never on main, and only while a client is
-// connected. Framerate / scaling / quality follow WDA's appium settings (mjpegServerFramerate,
+// connected. Framerate / scaling / quality follow runner's appium settings (mjpegServerFramerate,
 // mjpegScalingFactor %, mjpegServerScreenshotQuality %).
 
 import Foundation
@@ -13,7 +13,7 @@ import Network
 
 final class RunnerMJPEGServer {
   struct Settings {
-    var framerate = 10  // WDA's defaults
+    var framerate = 10  // runner's defaults
     var scalingPercent = 100
     var qualityPercent = 25
   }

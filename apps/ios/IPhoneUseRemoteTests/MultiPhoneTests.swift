@@ -107,8 +107,8 @@ final class DeliveryOutcomeTests: XCTestCase {
     func testNotSent() {
         XCTAssertEqual(classify(408, #"{"ok":false,"error":"not_sent","outcome":"not_sent","retry_safe":true}"#),
                        .notSent(reason: "not_sent"))
-        XCTAssertEqual(classify(502, #"{"ok":false,"error":"wda_pre_dispatch_failed","outcome":"not_sent"}"#),
-                       .notSent(reason: "wda_pre_dispatch_failed"))
+        XCTAssertEqual(classify(502, #"{"ok":false,"error":"runner_pre_dispatch_failed","outcome":"not_sent"}"#),
+                       .notSent(reason: "runner_pre_dispatch_failed"))
         XCTAssertEqual(classify(503, #"{"ok":false,"error":"released","reconnecting":false}"#),
                        .notSent(reason: "released"))
         XCTAssertEqual(classify(400, #"{"ok":false,"error":"invalid_control_deadline"}"#),

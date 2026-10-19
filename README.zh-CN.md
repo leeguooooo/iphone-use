@@ -270,7 +270,7 @@ iphone-use 用自研的 XCTest runner（[`runner/`](runner/README.md)）操作�
 ## 更多
 
 - [完整指南](docs/guide.zh-CN.md)：网页和 iOS App、flow 与官方 flow 源、Wi-Fi 和 iOS 15/16、生命周期、配置、安全、开发。
-- [Agent API 参考](docs/agent-api.html) · [MCP 工具](crates/mcp/README.md) · [架构](docs/direct-device-architecture.html) · [设备设置常见坑](docs/wda-setup.html) · [设备 runner](runner/README.md) · [隐私](docs/privacy.zh-CN.md)
+- [Agent API 参考](docs/agent-api.html) · [MCP 工具](crates/mcp/README.md) · [架构](docs/direct-device-architecture.html) · [设备设置常见坑](docs/runner-setup.html) · [设备 runner](runner/README.md) · [隐私](docs/privacy.zh-CN.md)
 - [产品指南](https://blog.leeguoo.com/zh/posts/iphone-use/)：安装、MCP 接入、flow 和选型对比。
 - 问题和建议：[GitHub issues](https://github.com/leeguooooo/iphone-use/issues)。
 

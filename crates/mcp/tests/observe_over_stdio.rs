@@ -182,7 +182,7 @@ impl Drop for McpChild {
 fn the_default_structured_payload_is_the_verdict_and_the_summary() {
     let filler = "x".repeat(64 * 1024);
     let body = format!(
-        r#"{{"ok":true,"transport":"wda","tree":"{filler}","snapshot":"snap-1","settle":{{"settled":true,"reason":"stable","captures":2}},"delta":{{"added":["搜索"]}}}}"#
+        r#"{{"ok":true,"transport":"runner","tree":"{filler}","snapshot":"snap-1","settle":{{"settled":true,"reason":"stable","captures":2}},"delta":{{"added":["搜索"]}}}}"#
     );
     let daemon = ScriptedDaemon::start("200 OK", body.into_bytes());
     let mut mcp = McpChild::start_with(&daemon.url, "slim");
@@ -208,7 +208,7 @@ fn the_default_structured_payload_is_the_verdict_and_the_summary() {
 /// `IPHONE_USE_MCP_STRUCTURED=off` sends the text alone.
 #[test]
 fn structured_off_sends_the_text_alone() {
-    let body = r#"{"ok":true,"transport":"wda","snapshot":"snap-1","settle":{"settled":true,"reason":"stable","captures":2},"delta":{"added":["a"]}}"#;
+    let body = r#"{"ok":true,"transport":"runner","snapshot":"snap-1","settle":{"settled":true,"reason":"stable","captures":2},"delta":{"added":["a"]}}"#;
     let daemon = ScriptedDaemon::start("200 OK", body.as_bytes().to_vec());
     let mut mcp = McpChild::start_with(&daemon.url, "off");
 
@@ -232,7 +232,7 @@ fn structured_off_sends_the_text_alone() {
 fn an_observed_tap_puts_the_whole_observation_on_the_wire() {
     let filler = "x".repeat(64 * 1024);
     let body = format!(
-        r#"{{"ok":true,"transport":"wda","tree":"{filler}","snapshot":"snap-1","settle":{{"settled":true,"reason":"stable","captures":2}},"delta":{{"added":["搜索"]}}}}"#
+        r#"{{"ok":true,"transport":"runner","tree":"{filler}","snapshot":"snap-1","settle":{{"settled":true,"reason":"stable","captures":2}},"delta":{{"added":["搜索"]}}}}"#
     );
     let daemon = ScriptedDaemon::start("200 OK", body.into_bytes());
     let mut mcp = McpChild::start(&daemon.url);
@@ -260,7 +260,7 @@ fn an_observed_tap_puts_the_whole_observation_on_the_wire() {
 /// already parse, and no structured payload appearing out of nowhere.
 #[test]
 fn an_unobserved_tap_is_unchanged_on_the_wire() {
-    let daemon = ScriptedDaemon::start("200 OK", br#"{"ok":true,"transport":"wda"}"#.to_vec());
+    let daemon = ScriptedDaemon::start("200 OK", br#"{"ok":true,"transport":"runner"}"#.to_vec());
     let mut mcp = McpChild::start(&daemon.url);
 
     // Observation is on by default; `observe:false` keeps the bare action.

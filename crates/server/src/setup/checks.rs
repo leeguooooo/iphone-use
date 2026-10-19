@@ -396,7 +396,7 @@ pub fn resolve_signing(ctx: &Ctx) -> Result<Signing, String> {
             }
             _ => {
                 return Err(format!(
-                    "Xcode is signed in to several teams ({}); pick one: export WDA_TEAM_ID=<one of them>, then rerun.",
+                    "Xcode is signed in to several teams ({}); pick one: export IPU_RUNNER_TEAM_ID=<one of them>, then rerun.",
                     teams.join(" ")
                 ))
             }
@@ -404,12 +404,12 @@ pub fn resolve_signing(ctx: &Ctx) -> Result<Signing, String> {
     }
     if !valid_team_id(&team) {
         return Err(format!(
-            "Invalid WDA_TEAM_ID '{team}'. Expected exactly 10 uppercase ASCII letters/digits, e.g. ABCD123456."
+            "Invalid IPU_RUNNER_TEAM_ID '{team}'. Expected exactly 10 uppercase ASCII letters/digits, e.g. ABCD123456."
         ));
     }
     let (bundle, derived) = if ctx.bundle_id.is_empty() {
         (
-            format!("com.leeguoo.iphone-use.wda.{}", team.to_ascii_lowercase()),
+            format!("com.leeguoo.iphone-use.runner.{}", team.to_ascii_lowercase()),
             true,
         )
     } else {
@@ -417,7 +417,7 @@ pub fn resolve_signing(ctx: &Ctx) -> Result<Signing, String> {
     };
     if !valid_bundle_id(&bundle) {
         return Err(format!(
-            "Invalid WDA_BUNDLE_ID '{bundle}'. Use dot-separated ASCII letters, digits, dots, and hyphens only."
+            "Invalid IPU_RUNNER_BUNDLE_ID '{bundle}'. Use dot-separated ASCII letters, digits, dots, and hyphens only."
         ));
     }
     Ok(Signing {
@@ -1555,7 +1555,7 @@ attributes:
         assert!(valid_team_id("6ZPXG4KVVS"));
         assert!(!valid_team_id("6zpxg4kvvs"));
         assert!(!valid_team_id("6ZPXG4KVV"));
-        assert!(valid_bundle_id("com.leeguoo.iphone-use.wda.6zpxg4kvvs"));
+        assert!(valid_bundle_id("com.leeguoo.iphone-use.runner.6zpxg4kvvs"));
         assert!(!valid_bundle_id("com"));
         assert!(!valid_bundle_id("com..x"));
         assert!(!valid_bundle_id("com.-x"));
@@ -1656,7 +1656,7 @@ attributes:
         assert_ne!(runner_source_hash(dir.path()).unwrap(), first);
     }
 
-    /// The hash must equal what `setup-wda.sh` computed, or an upgrade would
+    /// The hash must equal what `setup-runner.sh` computed, or an upgrade would
     /// throw away every recorded runner product.
     #[test]
     fn source_hash_matches_the_python_definition() {

@@ -16,9 +16,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Result keys of +wdaTreeForAXElement:… / +wdaTreeForSnapshot:….
+/// Result keys of +runnerTreeForAXElement:… / +runnerTreeForSnapshot:….
 FOUNDATION_EXPORT NSString *const IPURTreeOkKey;         // NSNumber(BOOL)
-FOUNDATION_EXPORT NSString *const IPURTreeRootKey;       // NSDictionary, WDA /source JSON shape
+FOUNDATION_EXPORT NSString *const IPURTreeRootKey;       // NSDictionary, runner /source JSON shape
 FOUNDATION_EXPORT NSString *const IPURTreeErrorKey;      // NSString
 FOUNDATION_EXPORT NSString *const IPURTreeNodeCountKey;  // NSNumber
 FOUNDATION_EXPORT NSString *const IPURTreeDepthKey;      // NSNumber: the accepted request depth
@@ -105,9 +105,9 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// Snapshots `axElement` through XCAXClient_iOS requestSnapshotForElement:attributes:parameters:error:
 /// with only nine attributes, walking a depth ladder on kAXErrorIllegalArgument and re-rooting
 /// depth-capped frontier nodes (bounded by `extensionCallLimit`). The root is serialized into
-/// WDA's /source JSON node shape. `rememberKey` (e.g. the pid) remembers the accepted depth so
+/// runner's /source JSON node shape. `rememberKey` (e.g. the pid) remembers the accepted depth so
 /// later captures of the same process skip known-rejected rungs; pass nil to always probe.
-+ (NSDictionary<NSString *, id> *)wdaTreeForAXElement:(id)axElement
++ (NSDictionary<NSString *, id> *)runnerTreeForAXElement:(id)axElement
                                              maxDepth:(NSInteger)maxDepth
                                              maxNodes:(NSInteger)maxNodes
                                    extensionCallLimit:(NSInteger)extensionCallLimit
@@ -115,7 +115,7 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 
 /// Same as above; with `includeElements` every node also carries its live accessibility element
 /// under IPURNodeAXElementKey, so it can be re-snapshotted later (element registry).
-+ (NSDictionary<NSString *, id> *)wdaTreeForAXElement:(id)axElement
++ (NSDictionary<NSString *, id> *)runnerTreeForAXElement:(id)axElement
                                              maxDepth:(NSInteger)maxDepth
                                              maxNodes:(NSInteger)maxNodes
                                    extensionCallLimit:(NSInteger)extensionCallLimit
@@ -123,13 +123,13 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                       includeElements:(BOOL)includeElements;
 
 /// Serializes an already-taken snapshot (public XCUIElementSnapshot or private XCElementSnapshot)
-/// into WDA's /source node shape.
-+ (NSDictionary<NSString *, id> *)wdaTreeForSnapshot:(id)snapshot maxNodes:(NSInteger)maxNodes;
-+ (NSDictionary<NSString *, id> *)wdaTreeForSnapshot:(id)snapshot
+/// into runner's /source node shape.
++ (NSDictionary<NSString *, id> *)runnerTreeForSnapshot:(id)snapshot maxNodes:(NSInteger)maxNodes;
++ (NSDictionary<NSString *, id> *)runnerTreeForSnapshot:(id)snapshot
                                             maxNodes:(NSInteger)maxNodes
                                      includeElements:(BOOL)includeElements;
 
-/// WDA's "XCUIElementType…" name for an element type raw value.
+/// runner's "XCUIElementType…" name for an element type raw value.
 + (NSString *)elementTypeName:(NSInteger)elementType;
 
 // MARK: - Event synthesis (all coordinates are screen points)
@@ -191,7 +191,7 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 
 /// One JPEG of the main screen, safe to call off the main thread. Tries, fastest first:
 /// 1. `XCUIDevice.screenDataSource requestScreenshotWithRequest:withReply:` with an
-///    XCTScreenshotRequest asking testmanagerd for JPEG at `quality` (what WDA's MJPEG server uses);
+///    XCTScreenshotRequest asking testmanagerd for JPEG at `quality` (what runner's MJPEG server uses);
 /// 2. `XCUIScreen screenshotWithEncoding:options:` with the same JPEG encoding;
 /// 3. the public `XCUIScreen.mainScreen.screenshot` PNG, re-encoded.
 /// `scale` (0 < scale ≤ 1) downsizes with ImageIO and re-encodes at `quality` (0…1).
@@ -227,7 +227,7 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 
 // MARK: - Device
 
-/// Screen lock state from SpringBoardServices (SBGetScreenLockStatus), like WDA. Writes NO into
+/// Screen lock state from SpringBoardServices (SBGetScreenLockStatus), like runner. Writes NO into
 /// `known` when the private function is unavailable (the return value is then NO).
 + (BOOL)isScreenLocked:(BOOL *)known;
 

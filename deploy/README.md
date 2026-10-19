@@ -1,22 +1,22 @@
 # iphone-use — Deployment Operator Notes
 
-## Default deployment: direct WDA
+## Default deployment: direct runner
 
 `IPHONE_USE_BACKEND=direct` is the product default. The daemon talks to services on the
 iPhone through localhost relays:
 
-- WDA control: `IPHONE_USE_WDA_URL=http://127.0.0.1:8100`
-- WDA video: `IPHONE_USE_WDA_MJPEG_URL=http://127.0.0.1:9100`
+- runner control: `IPHONE_USE_RUNNER_URL=http://127.0.0.1:8100`
+- runner video: `IPHONE_USE_RUNNER_MJPEG_URL=http://127.0.0.1:9100`
 - browser video: authenticated `GET /agent/mjpeg`
 - browser input: cookie-authenticated `POST /control`
 - agent input: bearer-authenticated `POST /agent/input`
 
 Direct mode needs neither iPhone Mirroring nor macOS Screen Recording/Accessibility
-permission. If WDA is unavailable, commands fail closed; operators must not configure a
+permission. If runner is unavailable, commands fail closed; operators must not configure a
 Mac-side cursor injector as an automatic fallback.
 
 The packaged daemon is still a per-user LaunchAgent (`com.leeguoo.iphone-use`). This keeps
-configuration, logs, app signing, and the WDA supervisor in one user-owned installation.
+configuration, logs, app signing, and the runner supervisor in one user-owned installation.
 Clients connect to that already-running daemon; do not start competing copies.
 
 ## First-device prerequisites
@@ -29,11 +29,11 @@ Before treating a host as ready:
 4. Pair the iPhone with the Mac, accept **Trust** on the phone, and use USB for initial
    setup. Install `libimobiledevice` (`iproxy`); the supported path binds both Mac-side
    relays to `127.0.0.1`. There is no automatic Wi-Fi/`socat` fallback.
-5. Keep the target iPhone unlocked, awake, and connected while WDA builds and starts.
+5. Keep the target iPhone unlocked, awake, and connected while runner builds and starts.
 6. On multi-device Macs, set `IPHONE_USE_UDID` for the daemon and the same classic UDID
-   as `WDA_UDID` when running the setup helper.
+   as `IPU_RUNNER_UDID` when running the setup helper.
 
-WDA cannot unlock a phone or bypass Face ID/passcode. A free Personal Team profile may
+runner cannot unlock a phone or bypass Face ID/passcode. A free Personal Team profile may
 need periodic renewal.
 
 ## Auto-login requirement for unattended machines
@@ -69,16 +69,16 @@ For local / dev installs (pre-built .app):
 ./install.sh /path/to/iPhoneUse.app
 ```
 
-`install.sh` installs/configures the daemon and copies the WDA helper; it does not prove
-that Xcode signing, the selected device, WDA, both relays, and the browser path work on
+`install.sh` installs/configures the daemon and copies the runner helper; it does not prove
+that Xcode signing, the selected device, runner, both relays, and the browser path work on
 real hardware. The same atomic app replacement also installs the release-matched MCP
 bridge at `~/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp`; configure MCP
 clients with that absolute path. Complete device setup separately:
 
 ```sh
-~/.iphone-use/setup-wda.sh doctor
-~/.iphone-use/setup-wda.sh
-~/.iphone-use/setup-wda.sh status
+~/.iphone-use/setup-runner.sh doctor
+~/.iphone-use/setup-runner.sh
+~/.iphone-use/setup-runner.sh status
 ```
 
 For multiple paired iPhones, persist a target before installing and pass the same value
@@ -87,7 +87,7 @@ to setup:
 ```sh
 export IPHONE_USE_UDID=00008…
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
-WDA_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-wda.sh
+IPU_RUNNER_UDID="$IPHONE_USE_UDID" ~/.iphone-use/setup-runner.sh
 ```
 
 Only a deliberate mirror deployment should grant Screen Recording and Accessibility.
@@ -97,14 +97,14 @@ Only a deliberate mirror deployment should grant Screen Recording and Accessibil
 | Variable | Direct default | Operator responsibility |
 |---|---:|---|
 | `IPHONE_USE_BACKEND` | `direct` | Use `mirror` only for explicit legacy compatibility. |
-| `IPHONE_USE_UDID` | auto-detect | Pin the classic UDID on multi-device hosts; keep it aligned with setup's `WDA_UDID`. |
-| `IPHONE_USE_WDA_URL` | `http://127.0.0.1:8100` | The control relay must answer `/status`. |
-| `IPHONE_USE_WDA_MJPEG_URL` | `http://127.0.0.1:9100` | The MJPEG relay must remain reachable for live browser video. |
-| `IPHONE_USE_WDA_MANAGED` | `true` for installer-owned loopback WDA | Keep `false` for external/custom WDA; the daemon must not stop or rebootstrap a service it does not own. |
-| `IPHONE_USE_IDLE_RELEASE_SECS` | `300` | `0` disables release; otherwise ensure reconnect can restart WDA with the phone unlocked. |
+| `IPHONE_USE_UDID` | auto-detect | Pin the classic UDID on multi-device hosts; keep it aligned with setup's `IPU_RUNNER_UDID`. |
+| `IPHONE_USE_RUNNER_URL` | `http://127.0.0.1:8100` | The control relay must answer `/status`. |
+| `IPHONE_USE_RUNNER_MJPEG_URL` | `http://127.0.0.1:9100` | The MJPEG relay must remain reachable for live browser video. |
+| `IPHONE_USE_RUNNER_MANAGED` | `true` for installer-owned loopback runner | Keep `false` for external/custom runner; the daemon must not stop or rebootstrap a service it does not own. |
+| `IPHONE_USE_IDLE_RELEASE_SECS` | `300` | `0` disables release; otherwise ensure reconnect can restart runner with the phone unlocked. |
 
-WDA itself does not authenticate `8100/9100`. Loopback-bound `iproxy` prevents exposing
-the Mac relays, but it does not firewall the WDA listener on the iPhone. Use this Phase 1
+runner itself does not authenticate `8100/9100`. Loopback-bound `iproxy` prevents exposing
+the Mac relays, but it does not firewall the runner listener on the iPhone. Use this Phase 1
 backend only on a trusted, isolated network (or turn off iPhone Wi-Fi while using USB).
 
 ## Useful launchctl commands
@@ -140,14 +140,14 @@ healthy launchd job alone. On the intended physical phone:
 
 1. With iPhone Mirroring closed and iPhoneUse absent from Screen Recording and
    Accessibility, verify `/agent/status` reports `backend:"direct"`, the pinned target,
-   `wda:true`, `wda_actionable:true`, and `drivable:true`.
+   `runner:true`, `runner_actionable:true`, and `drivable:true`.
 2. From a second browser/device, verify `/phone` receives a continuously updating
    `/agent/mjpeg` stream and that the UI reports a stopped `9100` relay honestly.
 3. Verify tap, drag, long-press, scroll, ASCII, and CJK input through `/control`, including
-   explicit failure when WDA is stopped. Confirm the Mac cursor never moves.
+   explicit failure when runner is stopped. Confirm the Mac cursor never moves.
 4. Verify bearer-authenticated `/agent/elements`, `/agent/screenshot`, and `/agent/input`.
 5. Exercise idle release/reconnect, phone lock/unlock, USB removal/reconnect, daemon
-   restart, Mac reboot, and WDA re-sign/reinstall.
+   restart, Mac reboot, and runner re-sign/reinstall.
 6. On a multi-device Mac, prove recovery never switches to another paired phone.
 
 Record the device model/iOS, Mac/macOS, Xcode version, development-team type, transport,
@@ -165,28 +165,28 @@ actions first:
 ```
 
 It verifies LaunchAgent labels and `ProgramArguments`, validates stored PID/start-time
-metadata before signalling WDA processes, and deletes only fixed iphone-use paths. It
-removes the current daemon and WDA supervisor plists, verified legacy daemon artifacts,
-`iPhoneUse.app`, product logs, the official WDA checkout, and product state under
+metadata before signalling runner processes, and deletes only fixed iphone-use paths. It
+removes the current daemon and runner supervisor plists, verified legacy daemon artifacts,
+`iPhoneUse.app`, product logs, the official runner checkout, and product state under
 `~/.iphone-use`. Unknown files and ownership mismatches are preserved and reported.
 Shared Xcode/Homebrew installations, `iproxy`, and `socat` are never removed.
-An official WDA checkout with tracked changes or untracked files is also preserved.
+An official runner checkout with tracked changes or untracked files is also preserved.
 If any supervisor/process cannot be ownership-verified and stopped, its plist, PID
 records, logs, setup checkout, and the uninstaller itself remain available for recovery
 and the command exits nonzero.
 
-The WDA runner app on the iPhone is retained by default. To remove it too, first get the
+The runner app on the iPhone is retained by default. To remove it too, first get the
 canonical device UDID already stored by iphone-use and the exact installed runner bundle
 identifier (the installed test runner often ends in `.xctrunner`), then opt in explicitly:
 
 ```sh
 ~/.iphone-use/uninstall.sh --remove-phone-runner \
   --udid 00008110-001234567890001E \
-  --bundle-id com.example.iphone-use.wda.xctrunner
+  --bundle-id com.example.iphone-use.runner.xctrunner
 ```
 
 Phone removal first requires the supplied UDID and bundle identity to match the
-ownership-verified daemon/WDA configuration; it cannot be used to switch to another
+ownership-verified daemon/runner configuration; it cannot be used to switch to another
 connected phone during uninstall. It then uses a bounded `devicectl` operation against
 that one explicit device and bundle. If the phone is unavailable or the deadline expires,
 local cleanup continues and the script prints the exact command to retry.
@@ -208,7 +208,7 @@ There are two separate signatures:
 
 CI uses Developer ID when secrets are configured; otherwise `install.sh` creates/reuses
 the local `"iPhoneUse Local Signing"` identity and re-signs the downloaded app. This does
-not sign, trust, start, or hardware-validate WDA.
+not sign, trust, start, or hardware-validate runner.
 
 ## Secrets for CI (optional — only needed for Developer ID signing + notarization)
 

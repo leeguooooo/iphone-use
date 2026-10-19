@@ -1,6 +1,6 @@
-// WebDriverAgent-compatible routes, so the iphone-use daemon's WdaClient (crates/server/src/wda.rs)
-// can point IPHONE_USE_WDA_URL at this runner unchanged. Request and response shapes follow
-// what WdaClient sends and parses; element finds run over the private AX tree (RunnerElements.swift).
+// WebDriverAgent-compatible routes, so the iphone-use daemon's RunnerClient (crates/server/src/runner.rs)
+// can point IPHONE_USE_RUNNER_URL at this runner unchanged. Request and response shapes follow
+// what RunnerClient sends and parses; element finds run over the private AX tree (RunnerElements.swift).
 
 import Foundation
 import UIKit
@@ -29,9 +29,9 @@ extension RunnerTests {
     return captures
   }
 
-  /// Answers WDA routes, with or without a `/session/:sid` prefix (any sid is accepted).
-  /// Returns nil for paths that are not WDA routes, so the native routes get them.
-  func routeWDA(_ request: HTTPRequest) throws -> HTTPResponse? {
+  /// Answers runner routes, with or without a `/session/:sid` prefix (any sid is accepted).
+  /// Returns nil for paths that are not runner routes, so the native routes get them.
+  func routeRunner(_ request: HTTPRequest) throws -> HTTPResponse? {
     var parts = request.path.split(separator: "/").map(String.init)
     let method = request.method
 
@@ -60,7 +60,7 @@ extension RunnerTests {
         let size = windowSizePoints()
         return .value(["x": 0, "y": 0, "width": size.width, "height": size.height])
       }
-      if match(parts, "appium/settings") != nil { return .value(wdaSettings) }
+      if match(parts, "appium/settings") != nil { return .value(runnerSettings) }
       if match(parts, "wda/locked") != nil {
         guard let locked = lockedOnMain() else {
           throw RunnerError.failed("the lock state could not be read")
@@ -112,7 +112,7 @@ extension RunnerTests {
         return try launchApp(request)
       }
       if match(parts, "wda/apps/terminate") != nil { return try terminateApp(request) }
-      if match(parts, "wda/keys") != nil { return try wdaKeys(request) }
+      if match(parts, "wda/keys") != nil { return try runnerKeys(request) }
       if match(parts, "wda/keyboard/dismiss") != nil { return try dismissKeyboard(request) }
       if match(parts, "url") != nil { return try openURL(request) }
       if match(parts, "wda/lock") != nil { return try lockScreen() }
@@ -158,10 +158,10 @@ extension RunnerTests {
     let body = try request.jsonObject()
     let settings = body["settings"] as? [String: Any] ?? [:]
     for (key, value) in settings {
-      wdaSettings[key] = value
+      runnerSettings[key] = value
     }
     mjpeg?.apply(settings)
-    return .value(wdaSettings)
+    return .value(runnerSettings)
   }
 
   // MARK: - Trees
@@ -170,7 +170,7 @@ extension RunnerTests {
   func foregroundTree(_ target: Foreground? = nil) throws -> UINode {
     let target = target ?? foreground()
     if let element = target.element {
-      let tree = IPURBridge.wdaTree(
+      let tree = IPURBridge.runnerTree(
         forAXElement: element, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
         extensionCallLimit: Self.defaultExtensionCalls,
         rememberKey: target.pid > 0 ? String(target.pid) : nil, includeElements: true)
@@ -188,7 +188,7 @@ extension RunnerTests {
     guard let snapshot else {
       throw RunnerError.failed("cannot read the foreground tree: \(failure.map { String(describing: $0) } ?? "no snapshot")")
     }
-    let tree = IPURBridge.wdaTree(forSnapshot: snapshot as AnyObject, maxNodes: Self.defaultMaxNodes, includeElements: true)
+    let tree = IPURBridge.runnerTree(forSnapshot: snapshot as AnyObject, maxNodes: Self.defaultMaxNodes, includeElements: true)
     guard let root = tree[IPURTreeRootKey] as? [String: Any] else {
       throw RunnerError.failed(tree[IPURTreeErrorKey] as? String ?? "snapshot serialization failed")
     }
@@ -203,7 +203,7 @@ extension RunnerTests {
     guard pid > 0, pid != foregroundPID,
           IPURBridge.activeApplicationPIDs().contains(NSNumber(value: pid))
     else { return nil }
-    let tree = IPURBridge.wdaTree(
+    let tree = IPURBridge.runnerTree(
       forAXElement: springBoard, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
       extensionCallLimit: 0, rememberKey: String(pid), includeElements: true)
     guard let root = tree[IPURTreeRootKey] as? [String: Any] else { return nil }
@@ -212,11 +212,11 @@ extension RunnerTests {
 
   /// Re-snapshots a registered element. `depth` 1 reads the element alone (fresh rect/value);
   /// larger depths read its subtree. Elements without a live AX element answer from the stored
-  /// node. A live element that cannot be read any more is stale (404, as WDA).
+  /// node. A live element that cannot be read any more is stale (404, as runner).
   func freshNode(_ id: String, depth: Int = 1) throws -> UINode {
     guard let stored = elements.node(id) else { throw RunnerError.staleElement(id) }
     guard let axElement = stored.axElement else { return stored }
-    let tree = IPURBridge.wdaTree(
+    let tree = IPURBridge.runnerTree(
       forAXElement: axElement, maxDepth: depth, maxNodes: Self.defaultMaxNodes,
       extensionCallLimit: depth > 1 ? Self.defaultExtensionCalls : 0, rememberKey: nil,
       includeElements: true)
@@ -448,7 +448,7 @@ extension RunnerTests {
     return out
   }
 
-  /// Joins WDA's `value` (array of strings/characters, or a string) and `text` body forms.
+  /// Joins runner's `value` (array of strings/characters, or a string) and `text` body forms.
   private func textArgument(_ body: [String: Any], preferText: Bool) -> String? {
     if preferText, let text = body["text"] as? String { return text }
     if let array = body["value"] as? [Any] { return array.map { "\($0)" }.joined() }
@@ -459,7 +459,7 @@ extension RunnerTests {
   private func setElementValue(_ id: String, _ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     let node = try freshNode(id)
-    // Like WDA: a bare `value` on a picker wheel or slider adjusts it; `text` always types.
+    // Like runner: a bare `value` on a picker wheel or slider adjusts it; `text` always types.
     if body["text"] == nil, let value = textArgument(body, preferText: false) {
       if node.type == "XCUIElementTypePickerWheel" {
         try adjust(node, id) { $0.adjust(toPickerWheelValue: value) }
@@ -619,7 +619,7 @@ extension RunnerTests {
       guard XCUIDevice.shared.responds(to: NSSelectorFromString("supportsPressureInteraction")),
             (XCUIDevice.shared.value(forKey: "supportsPressureInteraction") as? Bool) == true
       else {
-        // WDA's exact refusal, which WdaClient maps to ForcePressUnsupported.
+        // runner's exact refusal, which RunnerClient maps to ForcePressUnsupported.
         throw RunnerError(status: 400, code: "invalid argument", message: "Force press is not supported on this device")
       }
       let element = try xcuiElement(for: node)
@@ -674,7 +674,7 @@ extension RunnerTests {
     return [touch(first), touch(second)]
   }
 
-  /// Approximates WDA's scrollTo: drags the screen toward the element until its frame sits inside
+  /// Approximates runner's scrollTo: drags the screen toward the element until its frame sits inside
   /// the visible band, re-reading the element after each drag.
   private func scrollIntoView(_ id: String) throws {
     let screen = windowSizePoints()
@@ -723,7 +723,7 @@ extension RunnerTests {
     let frame = node.rect
     let dy = frame.height * CGFloat(offset) * (order == "next" ? 1 : -1)
     try tapPoint(CGPoint(x: frame.midX, y: frame.midY + dy))
-    // WDA reports an error when the wheel did not move; poll the value briefly.
+    // runner reports an error when the wheel did not move; poll the value briefly.
     let deadline = Date().addingTimeInterval(1.5)
     while Date() < deadline {
       RunLoop.current.run(until: Date().addingTimeInterval(0.1))
@@ -784,7 +784,7 @@ extension RunnerTests {
 
   // MARK: - Device and apps
 
-  /// 处理 WDA 按键请求；Home 复用桌面激活逻辑，其余按键沿用设备事件。
+  /// 处理 runner 按键请求；Home 复用桌面激活逻辑，其余按键沿用设备事件。
   private func pressButton(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     let name = (body["name"] as? String ?? "").lowercased()
@@ -822,7 +822,7 @@ extension RunnerTests {
     return IPURBridge.pid(for: application)
   }
 
-  /// WDA's `apps/terminate`: quit the app, so the next launch starts on its first screen instead
+  /// runner's `apps/terminate`: quit the app, so the next launch starts on its first screen instead
   /// of the page it was left on. Answers whether it was running.
   private func terminateApp(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
@@ -850,7 +850,7 @@ extension RunnerTests {
     return .value(NSNull())
   }
 
-  /// Active apps as WDA lists them, the foreground app first (WdaClient reads the first entry as
+  /// Active apps as runner lists them, the foreground app first (RunnerClient reads the first entry as
   /// the frontmost bundle, and "only SpringBoard" as the Home Screen).
   private func appsList() -> HTTPResponse {
     let target = foreground()
@@ -875,7 +875,7 @@ extension RunnerTests {
     ])
   }
 
-  private func wdaKeys(_ request: HTTPRequest) throws -> HTTPResponse {
+  private func runnerKeys(_ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
     guard let text = textArgument(body, preferText: false) else {
       throw RunnerError.invalidArgument("'value' must be an array of strings")
@@ -945,7 +945,7 @@ extension RunnerTests {
     let locked = IPURBridge.isScreenLocked(&known)
     if known.boolValue { return locked }
     guard let springBoard = IPURBridge.systemApplicationElement() else { return nil }
-    let tree = IPURBridge.wdaTree(
+    let tree = IPURBridge.runnerTree(
       forAXElement: springBoard, maxDepth: 6, maxNodes: 500, extensionCallLimit: 0, rememberKey: nil)
     guard let root = tree[IPURTreeRootKey] as? [String: Any] else { return nil }
     let node = UINode(raw: root, parent: nil, pid: 0)
@@ -959,7 +959,7 @@ extension RunnerTests {
   }
 
   private func unlockScreen() throws -> HTTPResponse {
-    // With a passcode a Home press only shows the passcode pad (WDA cannot type it either).
+    // With a passcode a Home press only shows the passcode pad (runner cannot type it either).
     switch lockedOnMain() {
     case false?: return .value(NSNull())
     case nil: throw RunnerError.failed("the lock state could not be read; nothing was pressed")
@@ -1120,7 +1120,7 @@ extension RunnerTests {
     return .value(alert.buttons.map(\.label))
   }
 
-  /// WDA picks the last button to accept and the first to dismiss when no name is given.
+  /// runner picks the last button to accept and the first to dismiss when no name is given.
   private func alertPress(_ request: HTTPRequest, accept: Bool) throws -> HTTPResponse {
     let body = (try? request.jsonObject()) ?? [:]
     alertCache = nil

@@ -1,12 +1,12 @@
 //! Per-request timing for the agent API.
 //!
-//! Every WDA call made while serving an `/agent/*` request is recorded —
-//! which route, how long until WDA answered, how many bytes it sent — and the
+//! Every runner call made while serving an `/agent/*` request is recorded —
+//! which route, how long until runner answered, how many bytes it sent — and the
 //! sum is returned with the response: a `timing` object in JSON bodies (agents
 //! read bodies through curl/jq, not headers) and a `Server-Timing` header.
-//! With it, a slow step can be split into WDA building the answer (time to
-//! the response headers: WDA serialises the whole tree before sending),
-//! transfer (bytes), and the daemon's own work (total minus WDA).
+//! With it, a slow step can be split into runner building the answer (time to
+//! the response headers: runner serialises the whole tree before sending),
+//! transfer (bytes), and the daemon's own work (total minus runner).
 //!
 //! The daemon also appends one JSON line per request to
 //! `<state dir>/agent-timing.jsonl` (see [`set_log_path`]) — timings, route
@@ -79,7 +79,7 @@ pub fn note(key: &str, value: serde_json::Value) {
     });
 }
 
-/// Record one WDA call. A no-op outside a timed request.
+/// Record one runner call. A no-op outside a timed request.
 pub fn record(route: String, elapsed: Duration, bytes: Option<u64>) {
     record_call(route, elapsed, bytes, false);
 }
@@ -99,7 +99,7 @@ fn record_call(route: String, elapsed: Duration, bytes: Option<u64>, cancelled: 
     });
 }
 
-/// A WDA call in flight: recorded as cancelled if its future is dropped
+/// A runner call in flight: recorded as cancelled if its future is dropped
 /// before [`InFlight::finish`].
 struct InFlight {
     route: Option<String>,
@@ -194,7 +194,7 @@ async fn execute_timed(
 }
 
 /// `/session/<id>/element/<id>/rect` → `/element/:id/rect`: one bucket per
-/// WDA route, not per session or element.
+/// runner route, not per session or element.
 pub fn normalize_route(path: &str) -> String {
     let mut out = Vec::new();
     let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
@@ -349,8 +349,8 @@ pub async fn layer(request: Request, next: Next) -> Response {
         tracing::info!(
             path = %path,
             total_ms = summary.total_ms,
-            wda_ms = summary.wda_ms,
-            wda_calls = summary.calls,
+            runner_ms = summary.runner_ms,
+            runner_calls = summary.calls,
             slowest = %summary.slowest(),
             "agent request timing"
         );
@@ -444,7 +444,7 @@ fn classify(
 
 struct Summary {
     total_ms: u64,
-    wda_ms: u64,
+    runner_ms: u64,
     calls: usize,
     /// Calls a deadline dropped before they answered.
     cancelled: usize,
@@ -455,10 +455,10 @@ struct Summary {
 impl Summary {
     fn new(recorder: &Recorder, total: Duration) -> Self {
         let mut routes: Vec<(String, usize, u64, u64)> = Vec::new();
-        let mut wda_ms = 0;
+        let mut runner_ms = 0;
         for call in &recorder.calls {
             let ms = call.elapsed.as_millis() as u64;
-            wda_ms += ms;
+            runner_ms += ms;
             match routes.iter_mut().find(|r| r.0 == call.route) {
                 Some(r) => {
                     r.1 += 1;
@@ -470,7 +470,7 @@ impl Summary {
         }
         Summary {
             total_ms: total.as_millis() as u64,
-            wda_ms,
+            runner_ms,
             calls: recorder.calls.len(),
             cancelled: recorder.calls.iter().filter(|call| call.cancelled).count(),
             routes,
@@ -488,27 +488,27 @@ impl Summary {
     fn json(&self) -> serde_json::Value {
         let mut json = serde_json::json!({
             "total_ms": self.total_ms,
-            "wda_ms": self.wda_ms,
-            "daemon_ms": self.total_ms.saturating_sub(self.wda_ms),
-            "wda": self.routes.iter().map(|(route, count, ms, bytes)| serde_json::json!({
+            "runner_ms": self.runner_ms,
+            "daemon_ms": self.total_ms.saturating_sub(self.runner_ms),
+            "runner": self.routes.iter().map(|(route, count, ms, bytes)| serde_json::json!({
                 "call": route, "count": count, "ms": ms, "bytes": bytes,
             })).collect::<Vec<_>>(),
         });
         if self.cancelled > 0 {
-            json["wda_cancelled"] = serde_json::json!(self.cancelled);
+            json["runner_cancelled"] = serde_json::json!(self.cancelled);
         }
         json
     }
 
-    /// `total;dur=…, wda;dur=…, wda-get-source;dur=…;desc="1x 812345B"`.
+    /// `total;dur=…, runner;dur=…, runner-get-source;dur=…;desc="1x 812345B"`.
     fn server_timing(&self) -> String {
         let mut parts = vec![
             format!("total;dur={}", self.total_ms),
-            format!("wda;dur={}", self.wda_ms),
+            format!("runner;dur={}", self.runner_ms),
         ];
         for (route, count, ms, bytes) in &self.routes {
             let mut name = String::new();
-            for c in format!("wda-{route}").to_ascii_lowercase().chars() {
+            for c in format!("runner-{route}").to_ascii_lowercase().chars() {
                 let c = if c.is_ascii_alphanumeric() { c } else { '-' };
                 if !(c == '-' && name.ends_with('-')) {
                     name.push(c);
@@ -523,7 +523,7 @@ impl Summary {
     }
 }
 
-/// Add the timing header (and, for a JSON body that reached WDA, the timing
+/// Add the timing header (and, for a JSON body that reached runner, the timing
 /// field), and hand back the parsed body for the task metrics. A body that
 /// is not JSON, too large, or of unknown size passes through unread.
 async fn attach(response: Response, summary: &Summary) -> (Response, Option<serde_json::Value>) {
@@ -558,7 +558,7 @@ async fn attach(response: Response, summary: &Summary) -> (Response, Option<serd
         }
     };
     let json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-    // A request that never reached WDA keeps its body byte for byte; the
+    // A request that never reached runner keeps its body byte for byte; the
     // header still carries its total.
     if summary.calls == 0 {
         return (Response::from_parts(parts, Body::from(bytes)), json);
@@ -645,16 +645,16 @@ mod tests {
             ..Recorder::default()
         };
         let s = Summary::new(&recorder, Duration::from_millis(11_500));
-        assert_eq!(s.wda_ms, 11_180);
+        assert_eq!(s.runner_ms, 11_180);
         assert_eq!(s.calls, 3);
         assert_eq!(s.routes[0], ("GET /source".into(), 2, 11_000, 1_500_000));
         let json = s.json();
         assert_eq!(json["daemon_ms"], 320);
-        assert_eq!(json["wda"][0]["count"], 2);
+        assert_eq!(json["runner"][0]["count"], 2);
         let header = s.server_timing();
         assert!(
             header.starts_with(
-                "total;dur=11500, wda;dur=11180, wda-get-source;dur=11000;desc=\"2x 1500000B\""
+                "total;dur=11500, runner;dur=11180, runner-get-source;dur=11000;desc=\"2x 1500000B\""
             ),
             "{header}"
         );
@@ -704,7 +704,7 @@ mod tests {
         base
     }
 
-    /// A WDA call is timed to the last byte of its body, and one a deadline
+    /// A runner call is timed to the last byte of its body, and one a deadline
     /// drops is still recorded (as cancelled) instead of vanishing into
     /// `daemon_ms`.
     #[test]
@@ -747,7 +747,7 @@ mod tests {
                 assert_eq!(cut.route, "GET /source");
                 assert!(cut.cancelled);
                 let summary = Summary::new(&recorder, Duration::from_millis(500));
-                assert_eq!(summary.json()["wda_cancelled"], 1);
+                assert_eq!(summary.json()["runner_cancelled"], 1);
             });
     }
 

@@ -257,7 +257,7 @@ pub fn due(since_last: Option<Duration>, last_ok: bool, runner_up: bool, was_up:
 
 fn runner_up(state: &AppState) -> bool {
     state
-        .wda_health
+        .runner_health
         .lock()
         .map(|health| health.up)
         .unwrap_or(false)

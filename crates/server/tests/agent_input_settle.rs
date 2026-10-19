@@ -1,7 +1,7 @@
 //! `POST /agent/input?return=delta` — the action result and the post-action
 //! observation are separate things.
 //!
-//! The contract these tests pin: once the mutation is dispatched and WDA
+//! The contract these tests pin: once the mutation is dispatched and runner
 //! reports it applied, NOTHING that happens during the follow-up observation
 //! may downgrade that result to an unknown outcome, and the mutation is never
 //! sent twice. Observation quality is reported in the additive `settle` block.
@@ -18,7 +18,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use server::http::AppState;
-use support::{block, build_state_with_wda, mock_native_runner, mock_wda};
+use support::{block, build_state_with_runner, mock_native_runner, mock_runner};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 
@@ -94,7 +94,7 @@ async fn request_json(
 /// Drive one `home` press through the real router and return
 /// (status, json, elapsed).
 async fn press_home(base: &str, query: &str) -> (StatusCode, serde_json::Value, Duration) {
-    let state = build_state_with_wda(base);
+    let state = build_state_with_runner(base);
     request_json(
         &state,
         "POST",
@@ -110,7 +110,7 @@ fn settle_reports_stable_on_a_minimal_but_readable_screen() {
         let mutations = Arc::new(AtomicUsize::new(0));
         let sources = Arc::new(AtomicUsize::new(0));
         let (seen_mutations, seen_sources) = (mutations.clone(), sources.clone());
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -125,7 +125,7 @@ fn settle_reports_stable_on_a_minimal_but_readable_screen() {
             None // alert probe: no alert
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["settled"], true);
@@ -144,7 +144,7 @@ fn a_screen_that_keeps_changing_is_reported_unsettled_not_failed() {
         let mutations = Arc::new(AtomicUsize::new(0));
         let seen_mutations = mutations.clone();
         let reads = AtomicUsize::new(0);
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -162,7 +162,7 @@ fn a_screen_that_keeps_changing_is_reported_unsettled_not_failed() {
         // Every read differs, so no budget ever settles; 1500 ms leaves room
         // for two samples after a Home press, whose first read also asks
         // which app is in front and probes the tree size.
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=1500").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta&settle_ms=1500").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["settled"], false);
@@ -182,7 +182,7 @@ fn a_zero_settle_budget_reads_no_source_at_all() {
         let mutations = Arc::new(AtomicUsize::new(0));
         let sources = Arc::new(AtomicUsize::new(0));
         let (seen_mutations, seen_sources) = (mutations.clone(), sources.clone());
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -197,7 +197,7 @@ fn a_zero_settle_budget_reads_no_source_at_all() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=0").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta&settle_ms=0").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["reason"], "budget_exhausted");
@@ -224,7 +224,7 @@ fn a_budget_smaller_than_the_settle_delay_reads_no_source_either() {
         let mutations = Arc::new(AtomicUsize::new(0));
         let sources = Arc::new(AtomicUsize::new(0));
         let (seen_mutations, seen_sources) = (mutations.clone(), sources.clone());
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -239,7 +239,7 @@ fn a_budget_smaller_than_the_settle_delay_reads_no_source_either() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=1").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta&settle_ms=1").await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true, "the action itself must still succeed: {json}");
@@ -269,7 +269,7 @@ fn a_hung_source_read_never_downgrades_an_applied_action_to_unknown() {
     block(async {
         let mutations = Arc::new(AtomicUsize::new(0));
         let seen_mutations = mutations.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -284,7 +284,7 @@ fn a_hung_source_read_never_downgrades_an_applied_action_to_unknown() {
             None
         });
 
-        let (status, json, elapsed) = press_home(wda.url(), "?return=delta&settle_ms=300").await;
+        let (status, json, elapsed) = press_home(runner.url(), "?return=delta&settle_ms=300").await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["settled"], false);
@@ -310,7 +310,7 @@ fn a_failing_source_read_is_reported_beside_the_applied_action() {
     block(async {
         let mutations = Arc::new(AtomicUsize::new(0));
         let seen_mutations = mutations.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -324,7 +324,7 @@ fn a_failing_source_read_is_reported_beside_the_applied_action() {
         // Same reasoning as the stale case: every read fails immediately, so a
         // generous budget costs nothing and keeps the test from turning into
         // `budget_exhausted` under load.
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=5000").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta&settle_ms=5000").await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["reason"], "observation_failed");
@@ -339,7 +339,7 @@ fn a_hung_alert_probe_does_not_hold_up_the_applied_action() {
     block(async {
         let mutations = Arc::new(AtomicUsize::new(0));
         let seen_mutations = mutations.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -358,7 +358,7 @@ fn a_hung_alert_probe_does_not_hold_up_the_applied_action() {
             Some((Duration::from_secs(20), r#"{"value":"确认"}"#.to_string()))
         });
 
-        let (status, json, elapsed) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, elapsed) = press_home(runner.url(), "?return=delta").await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["reason"], "stable");
@@ -381,7 +381,7 @@ fn a_hung_mutation_still_reports_an_unknown_outcome() {
     block(async {
         let mutations = Arc::new(AtomicUsize::new(0));
         let seen_mutations = mutations.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -392,7 +392,7 @@ fn a_hung_mutation_still_reports_an_unknown_outcome() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{json}");
         assert_eq!(json["outcome"], "unknown");
         assert_eq!(json["retry_safe"], false);
@@ -412,7 +412,7 @@ fn a_hung_session_handshake_sends_no_mutation() {
     block(async {
         let mutations = Arc::new(AtomicUsize::new(0));
         let seen_mutations = mutations.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::from_secs(20), SESSION.to_string()));
             }
@@ -423,7 +423,7 @@ fn a_hung_session_handshake_sends_no_mutation() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
         assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{json}");
         assert_eq!(json["error"], "not_sent", "{json}");
         assert_eq!(json["retry_safe"], true, "{json}");
@@ -439,7 +439,7 @@ fn a_hung_session_handshake_sends_no_mutation() {
 #[test]
 fn two_identical_container_only_trees_are_not_called_stable() {
     block(async {
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -452,7 +452,7 @@ fn two_identical_container_only_trees_are_not_called_stable() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=700").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta&settle_ms=700").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["settled"], false);
@@ -467,7 +467,7 @@ fn two_identical_container_only_trees_are_not_called_stable() {
 fn a_live_baseline_still_produces_a_delta_not_a_full_tree() {
     block(async {
         let reads = AtomicUsize::new(0);
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -483,7 +483,7 @@ fn a_live_baseline_still_produces_a_delta_not_a_full_tree() {
             }
             None
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
 
         let (status, baseline, _) = request_json(&state, "GET", "/agent/elements", None).await;
         assert_eq!(status, StatusCode::OK, "{baseline}");
@@ -515,7 +515,7 @@ fn an_action_that_changed_nothing_is_flagged_and_one_that_did_is_not() {
     for changes in [false, true] {
         block(async move {
             let reads = AtomicUsize::new(0);
-            let wda = mock_wda(move |request, _| {
+            let runner = mock_runner(move |request, _| {
                 if is_session(request) {
                     return Some((Duration::ZERO, SESSION.to_string()));
                 }
@@ -529,7 +529,7 @@ fn an_action_that_changed_nothing_is_flagged_and_one_that_did_is_not() {
                 }
                 None
             });
-            let state = build_state_with_wda(wda.url());
+            let state = build_state_with_runner(runner.url());
             let (_, baseline, _) = request_json(&state, "GET", "/agent/elements", None).await;
             let since = baseline["snapshot"].as_str().unwrap().to_string();
 
@@ -556,7 +556,7 @@ fn an_action_that_changed_nothing_is_flagged_and_one_that_did_is_not() {
 #[test]
 fn a_sparse_observation_never_claims_no_visible_change() {
     block(async {
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -568,7 +568,7 @@ fn a_sparse_observation_never_claims_no_visible_change() {
             }
             None
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
         let (_, baseline, _) = request_json(&state, "GET", "/agent/elements", None).await;
         let since = baseline["snapshot"].as_str().unwrap().to_string();
         let (status, json, _) = request_json(
@@ -588,7 +588,7 @@ fn a_sparse_observation_never_claims_no_visible_change() {
 #[test]
 fn an_unknown_baseline_falls_back_to_the_full_tree() {
     block(async {
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -602,7 +602,7 @@ fn an_unknown_baseline_falls_back_to_the_full_tree() {
         });
 
         let (status, json, _) =
-            press_home(wda.url(), "?return=delta&since=not-a-cached-snapshot").await;
+            press_home(runner.url(), "?return=delta&since=not-a-cached-snapshot").await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert!(json["elements"].is_array(), "{json}");
         assert!(json["baseline"].is_null());
@@ -618,7 +618,7 @@ fn the_default_response_reads_nothing_extra() {
     block(async {
         let sources = Arc::new(AtomicUsize::new(0));
         let seen_sources = sources.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -632,7 +632,7 @@ fn the_default_response_reads_nothing_extra() {
             None
         });
 
-        let (status, json, elapsed) = press_home(wda.url(), "").await;
+        let (status, json, elapsed) = press_home(runner.url(), "").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
         assert!(
@@ -651,7 +651,7 @@ fn the_default_response_reads_nothing_extra() {
 fn a_read_that_fails_after_a_good_one_returns_a_stale_observation() {
     block(async {
         let reads = AtomicUsize::new(0);
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -678,7 +678,7 @@ fn a_read_that_fails_after_a_good_one_returns_a_stale_observation() {
         // which is exactly the pair of meanings this file exists to keep apart.
         // A test that silently changes which scenario it exercises is worse
         // than one that fails.
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=5000").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta&settle_ms=5000").await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["reason"], "observation_failed");
@@ -706,7 +706,7 @@ fn a_read_that_fails_after_a_good_one_returns_a_stale_observation() {
 fn a_slow_first_read_still_ends_on_the_failure_not_the_budget() {
     block(async {
         let reads = AtomicUsize::new(0);
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -724,7 +724,7 @@ fn a_slow_first_read_still_ends_on_the_failure_not_the_budget() {
             None
         });
 
-        let (status, json, elapsed) = press_home(wda.url(), "?return=delta&settle_ms=5000").await;
+        let (status, json, elapsed) = press_home(runner.url(), "?return=delta&settle_ms=5000").await;
 
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["ok"], true);
@@ -749,7 +749,7 @@ fn a_slow_first_read_still_ends_on_the_failure_not_the_budget() {
 fn a_sample_cut_off_by_the_budget_marks_the_returned_tree_stale() {
     block(async {
         let reads = AtomicUsize::new(0);
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -770,7 +770,7 @@ fn a_sample_cut_off_by_the_budget_marks_the_returned_tree_stale() {
         // off; 1500 ms leaves the first sample (a size probe plus the read)
         // room to finish on a loaded machine, where 600 ms sometimes ran out
         // before the second sample even started.
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=1500").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta&settle_ms=1500").await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["reason"], "budget_exhausted", "{json}");
@@ -795,7 +795,7 @@ fn a_sample_cut_off_by_the_budget_marks_the_returned_tree_stale() {
 #[test]
 fn a_seven_second_read_still_settles_on_the_default_budget() {
     block(async {
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -810,7 +810,7 @@ fn a_seven_second_read_still_settles_on_the_default_budget() {
         });
 
         let started = std::time::Instant::now();
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
         let elapsed = started.elapsed();
 
         assert_eq!(status, StatusCode::OK, "{json}");
@@ -833,7 +833,7 @@ fn a_seven_second_read_still_settles_on_the_default_budget() {
 #[test]
 fn a_slow_action_still_gets_its_own_observation_window() {
     block(async {
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -847,7 +847,7 @@ fn a_slow_action_still_gets_its_own_observation_window() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
 
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["ok"], true);
@@ -863,7 +863,7 @@ fn a_slow_action_still_gets_its_own_observation_window() {
 // Settled by identical frames around one tree read
 // ---------------------------------------------------------------------------
 
-/// Press home with ?return=delta against a WDA whose frames are `frame(n)` for
+/// Press home with ?return=delta against a runner whose frames are `frame(n)` for
 /// the n-th screenshot and whose tree is `tree`. Returns (json, source reads).
 fn settle_with_frames(
     tree: String,
@@ -873,7 +873,7 @@ fn settle_with_frames(
         let sources = Arc::new(AtomicUsize::new(0));
         let frames = Arc::new(AtomicUsize::new(0));
         let (seen_sources, seen_frames) = (sources.clone(), frames.clone());
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -893,7 +893,7 @@ fn settle_with_frames(
                 r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string(),
             ))
         });
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
         assert_eq!(status, StatusCode::OK, "{json}");
         (json, sources.load(Ordering::Acquire))
     })
@@ -975,7 +975,7 @@ fn the_settled_screen_answers_the_next_screenshot_without_a_capture() {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
         let frames = Arc::new(AtomicUsize::new(0));
         let seen_frames = frames.clone();
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -994,7 +994,7 @@ fn the_settled_screen_answers_the_next_screenshot_without_a_capture() {
                 r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string(),
             ))
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
         let screenshot = |uri: &'static str| {
             let state = state.clone();
             async move {
@@ -1050,7 +1050,7 @@ fn the_settled_screen_answers_the_next_screenshot_without_a_capture() {
 #[test]
 fn an_observed_action_diffs_against_the_owners_last_read() {
     block(async {
-        let wda = mock_wda(move |request, _| {
+        let runner = mock_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -1065,7 +1065,7 @@ fn an_observed_action_diffs_against_the_owners_last_read() {
                 r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string(),
             ))
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
         let send = |method: &'static str, uri: &'static str, owner: Option<&'static str>| {
             let state = state.clone();
             async move {
@@ -1123,7 +1123,7 @@ fn the_native_runner_settles_on_the_phone_and_the_tree_is_read_once() {
             AtomicUsize::new(0), // alert
         ]);
         let seen = counts.clone();
-        let wda = mock_native_runner(move |request, _| {
+        let runner = mock_native_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -1151,7 +1151,7 @@ fn the_native_runner_settles_on_the_phone_and_the_tree_is_read_once() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
         assert_eq!(json["settle"]["settled"], true, "{json}");
@@ -1176,7 +1176,7 @@ fn a_blank_capture_settles_the_old_way() {
     block(async {
         let sources = Arc::new(AtomicUsize::new(0));
         let seen_sources = sources.clone();
-        let wda = mock_native_runner(move |request, _| {
+        let runner = mock_native_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -1196,7 +1196,7 @@ fn a_blank_capture_settles_the_old_way() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["settle"]["reason"], "stable", "{json}");
         assert_eq!(
@@ -1212,7 +1212,7 @@ fn a_runner_without_on_device_settle_is_asked_once() {
     block(async {
         let settles = Arc::new(AtomicUsize::new(0));
         let seen_settles = settles.clone();
-        let wda = mock_native_runner(move |request, _| {
+        let runner = mock_native_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -1236,7 +1236,7 @@ fn a_runner_without_on_device_settle_is_asked_once() {
             None
         });
 
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
         for _ in 0..2 {
             let (status, json, _) = request_json(
                 &state,
@@ -1255,7 +1255,7 @@ fn a_runner_without_on_device_settle_is_asked_once() {
 #[test]
 fn an_on_device_settle_that_compared_no_frames_falls_back() {
     block(async {
-        let wda = mock_native_runner(move |request, _| {
+        let runner = mock_native_runner(move |request, _| {
             if is_session(request) {
                 return Some((Duration::ZERO, SESSION.to_string()));
             }
@@ -1276,7 +1276,7 @@ fn an_on_device_settle_that_compared_no_frames_falls_back() {
             None
         });
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             json["settle"]["reason"], "stable",
@@ -1291,7 +1291,7 @@ fn an_on_device_settle_that_compared_no_frames_falls_back() {
 fn moving_screen_runner(
     delay: Duration,
     settle_urls: Arc<std::sync::Mutex<Vec<String>>>,
-) -> support::MockWda {
+) -> support::MockRunner {
     mock_native_runner(move |request, _| {
         if is_session(request) {
             return Some((Duration::ZERO, SESSION.to_string()));
@@ -1319,9 +1319,9 @@ fn moving_screen_runner(
 fn a_moving_screen_stops_the_default_on_phone_settle_at_the_cap() {
     block(async {
         let urls = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let wda = moving_screen_runner(Duration::ZERO, urls.clone());
+        let runner = moving_screen_runner(Duration::ZERO, urls.clone());
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["settle"]["settled"], false, "{json}");
         assert_eq!(json["settle"]["reason"], "budget_exhausted");
@@ -1337,9 +1337,9 @@ fn a_moving_screen_stops_the_default_on_phone_settle_at_the_cap() {
 fn an_explicit_settle_ms_lifts_the_on_phone_cap() {
     block(async {
         let urls = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let wda = moving_screen_runner(Duration::ZERO, urls.clone());
+        let runner = moving_screen_runner(Duration::ZERO, urls.clone());
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=8000").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta&settle_ms=8000").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["settle"]["reason"], "budget_exhausted", "{json}");
         assert!(json["settle"].get("capped_ms").is_none(), "{json}");
@@ -1360,9 +1360,9 @@ fn an_explicit_settle_ms_lifts_the_on_phone_cap() {
 fn a_hung_on_phone_settle_ends_at_the_observation_deadline() {
     block(async {
         let urls = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let wda = moving_screen_runner(Duration::from_secs(10), urls.clone());
+        let runner = moving_screen_runner(Duration::from_secs(10), urls.clone());
 
-        let (status, json, _) = press_home(wda.url(), "?return=delta&settle_ms=1500").await;
+        let (status, json, _) = press_home(runner.url(), "?return=delta&settle_ms=1500").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true, "{json}");
         assert_eq!(json["settle"]["settled"], false, "{json}");
@@ -1456,7 +1456,7 @@ fn the_next_action_cancels_the_background_capture_of_the_settled_screen() {
             }
             reply(r#"{"value":null}"#)
         });
-        let state = build_state_with_wda(&base);
+        let state = build_state_with_runner(&base);
 
         let (status, json, _) = request_json(
             &state,

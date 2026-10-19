@@ -47,7 +47,7 @@
 
     <!--
       Aqua: install as the signed-in user's LaunchAgent, not a system daemon.
-      Direct/WDA itself does not need WindowServer capture; the explicit legacy
+      Direct/runner itself does not need WindowServer capture; the explicit legacy
       mirror backend still requires this session for ScreenCaptureKit.
     -->
     <key>LimitLoadToSessionType</key>
@@ -66,15 +66,15 @@
         <string>44321</string>
         <key>IPHONE_USE_PASSWORD</key>
         <string>__PASSWORD__</string>
-        <!-- Direct/WDA is the default. The installer owns these loopback USB
-             relays; custom or remote WDA endpoints must set managed=false. -->
+        <!-- Direct/runner is the default. The installer owns these loopback USB
+             relays; custom or remote runner endpoints must set managed=false. -->
         <key>IPHONE_USE_BACKEND</key>
         <string>direct</string>
-        <key>IPHONE_USE_WDA_URL</key>
+        <key>IPHONE_USE_RUNNER_URL</key>
         <string>http://127.0.0.1:8100</string>
-        <key>IPHONE_USE_WDA_MJPEG_URL</key>
+        <key>IPHONE_USE_RUNNER_MJPEG_URL</key>
         <string>http://127.0.0.1:9100</string>
-        <key>IPHONE_USE_WDA_MANAGED</key>
+        <key>IPHONE_USE_RUNNER_MANAGED</key>
         <string>true</string>
     </dict>
 </dict>

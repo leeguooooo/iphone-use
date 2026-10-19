@@ -1907,7 +1907,7 @@ mod tests {
     /// reader hunting for a difference that does not exist.
     #[test]
     fn absent_boolean_fields_match_the_daemons_defaults() {
-        // A row as WDA actually serialises it: nothing but identity.
+        // A row as runner actually serialises it: nothing but identity.
         let sparse = serde_json::json!({"index": 0, "kind": "Button", "label": "搜索"});
 
         let (matched, differed) = candidate_basis(
@@ -2013,7 +2013,7 @@ mod tests {
         fs::write(&path, valid_flow()).unwrap();
         let flow = load_flow(&path).unwrap();
         let (url, task, _requests) =
-            mock_daemon_sequence(&[("502 Bad Gateway", r#"{"error":"wda_source_failed"}"#)]);
+            mock_daemon_sequence(&[("502 Bad Gateway", r#"{"error":"runner_source_failed"}"#)]);
 
         let result = failing_result(3);
         let steps = ran_steps(&flow, &BTreeMap::new());

@@ -12,12 +12,12 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 #[test]
 fn a_blocking_alert_is_named_instead_of_timing_out() {
     block(async {
-        let wda = mock_wda(|request, _| {
+        let runner = mock_runner(|request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, r#"{"value":{"sessionId":"SESSION"}}"#.to_string()));
             }
@@ -35,7 +35,7 @@ fn a_blocking_alert_is_named_instead_of_timing_out() {
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
         let started = Instant::now();
         let response = server::http::router(state)
             .oneshot(Request::builder().uri("/agent/elements").body(Body::empty()).unwrap())
@@ -74,7 +74,7 @@ fn an_alert_action_asks_again_after_a_read_said_no_alert() {
         let pressed = Arc::new(AtomicUsize::new(0));
         let (asked_in, pressed_in) = (asked.clone(), pressed.clone());
         let tree = r#"{"value":{"type":"XCUIElementTypeApplication","label":"SafariViewService","rect":{"x":0,"y":0,"width":440,"height":956},"children":[{"type":"XCUIElementTypeButton","label":"关闭","rect":{"x":16,"y":65,"width":44,"height":44},"isEnabled":"1"}]}}"#;
-        let wda = support::mock_native_runner(move |request, _| {
+        let runner = support::mock_native_runner(move |request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, r#"{"value":{"sessionId":"SESSION"}}"#.to_string()));
             }
@@ -94,7 +94,7 @@ fn an_alert_action_asks_again_after_a_read_said_no_alert() {
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
-        let state = build_state_with_wda(wda.url());
+        let state = build_state_with_runner(runner.url());
         let read = server::http::router(state.clone())
             .oneshot(Request::builder().uri("/agent/elements").body(Body::empty()).unwrap())
             .await

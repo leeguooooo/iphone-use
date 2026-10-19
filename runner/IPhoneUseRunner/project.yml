@@ -3,7 +3,7 @@
 # XcodeGen. Regenerate after editing this file:  (cd runner/IPhoneUseRunner && xcodegen generate)
 #
 # One UI-test bundle and no host app, like WebDriverAgent: the phone gets exactly one app,
-# "iPhoneUse-Runner" (bundle id <PRODUCT_BUNDLE_IDENTIFIER>.xctrunner). setup-wda.sh passes
+# "iPhoneUse-Runner" (bundle id <PRODUCT_BUNDLE_IDENTIFIER>.xctrunner). setup-runner.sh passes
 # DEVELOPMENT_TEAM and a team-specific PRODUCT_BUNDLE_IDENTIFIER on the xcodebuild command line.
 name: IPhoneUseRunner
 options:

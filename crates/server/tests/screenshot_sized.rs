@@ -2,7 +2,7 @@
 //! the runner for a JPEG shrunk on the phone, an old runner's full PNG still
 //! works, and a capture the link cuts mid-body is retried once, smaller.
 //!
-//! The runner here is a raw TCP script (not `support::mock_wda`) because these
+//! The runner here is a raw TCP script (not `support::mock_runner`) because these
 //! tests need response headers and bodies cut short.
 
 mod support;
@@ -16,7 +16,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state_with_wda};
+use support::{block, build_state_with_runner};
 
 /// A 236×512 JPEG of a Settings screen, standing in for what a runner sizes
 /// on the phone.
@@ -50,7 +50,7 @@ fn sized_headers(width: u32, height: u32) -> Vec<String> {
 }
 
 /// Serves `/screenshot` from `replies` in order and records each request
-/// target; anything else gets a WDA error envelope.
+/// target; anything else gets a runner error envelope.
 fn scripted_runner(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -121,7 +121,7 @@ struct Shot {
 }
 
 fn screenshot(base: &str, uri: &str) -> Shot {
-    let state = build_state_with_wda(base);
+    let state = build_state_with_runner(base);
     let uri = uri.to_string();
     block(async move {
         let response = server::http::router(state)
@@ -291,7 +291,7 @@ fn two_cut_captures_fail_with_a_structured_cause() {
 
 #[test]
 fn a_runner_error_is_not_retried() {
-    // The runner refuses the capture: a WDA error envelope, not a link fault.
+    // The runner refuses the capture: a runner error envelope, not a link fault.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let count = Arc::new(Mutex::new(0));

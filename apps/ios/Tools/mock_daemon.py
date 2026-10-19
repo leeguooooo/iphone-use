@@ -2,7 +2,7 @@
 """A stand-in iphone-use daemon for checking the iOS remote in the Simulator.
 
 It speaks just enough of the daemon's HTTP contract for the app to log in,
-stream video and send gestures, without a phone, a Mac service or WDA:
+stream video and send gestures, without a phone, a Mac service or runner:
 
   POST /login, POST /pair            -> session cookie (any password / code)
   GET  /agent/status                 -> a scripted status (see SCENARIOS)
@@ -62,7 +62,7 @@ SCENARIOS = {
     "stall": {},
     "released": {"released": True, "drivable": False, "device_state": "released"},
     "starting": {"reconnecting": True, "drivable": False, "device_state": "starting"},
-    "locked": {"wda_locked": True, "drivable": False, "device_state": "locked",
+    "locked": {"runner_locked": True, "drivable": False, "device_state": "locked",
                "setup_blocked_on": "locked"},
     "handoff": {"human_handoff": True, "drivable": False, "mode": "human"},
     # A start on a passcode phone with nobody there to enter it.
@@ -82,10 +82,10 @@ BASE_STATUS = {
     "ok": True, "backend": "direct", "drivable": True, "mode": "agent",
     "device_state": "ready", "released": False, "reconnecting": False,
     "releasing": False, "warming": False, "human_handoff": False,
-    "wda_locked": False, "hint": "", "next_step": {}, "setup_blocked_on": "",
+    "runner_locked": False, "hint": "", "next_step": {}, "setup_blocked_on": "",
     "recovery_owner": "", "version": "0.17.12-mock", "capture_redacted": False,
     "owner": None, "owner_lease_remaining_secs": 0, "transport": "usb",
-    "wda_rtt_ms": 18,
+    "runner_rtt_ms": 18,
     "lock_readiness": {"verdict": "ready", "passcode_protected": True, "auto_lock_secs": "never"},
 }
 

@@ -119,7 +119,7 @@ const ELEMENTS_TIMEOUT: Duration = Duration::from_secs(45);
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(45);
 const ACTIONS_TIMEOUT: Duration = Duration::from_secs(90);
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(120);
-/// One live-panel frame: a WDA capture takes 0.5–1.5 s, the cached paths
+/// One live-panel frame: a runner capture takes 0.5–1.5 s, the cached paths
 /// milliseconds; anything slower is skipped and the next poll tries again.
 const SCREEN_FRAME_TIMEOUT: Duration = Duration::from_secs(6);
 /// App lookup by name may read the phone's inventory cold: two devicectl
@@ -829,11 +829,11 @@ impl DaemonClient {
     }
 
     async fn elements_at(&self, path: &str) -> anyhow::Result<String> {
-        // A cold WDA call may create a session and then request the source tree;
+        // A cold runner call may create a session and then request the source tree;
         // each upstream step is bounded by the daemon, but together can exceed
         // the generic 30-second MCP timeout. Wait long enough for the daemon to
         // return its authoritative success/error instead of abandoning the
-        // request while it still owns the WDA lock.
+        // request while it still owns the runner lock.
         let req = self
             .auth(self.http().get(self.url(path)))
             .timeout(ELEMENTS_TIMEOUT);
@@ -852,7 +852,7 @@ impl DaemonClient {
     }
 
     /// `POST /agent/mode {"mode":"agent"}` — reconnect the configured,
-    /// canonical Direct/WDA target. Target changes are deliberately not exposed
+    /// canonical Direct/runner target. Target changes are deliberately not exposed
     /// here; they require persistent configuration plus a daemon restart.
     pub async fn reconnect(&self) -> anyhow::Result<String> {
         let req = self
@@ -1676,9 +1676,9 @@ mod tests {
             "ok": true,
             "backend": "direct",
             
-            "wda": true,
-            "wda_actionable": false,
-            "wda_locked": true,
+            "runner": true,
+            "runner_actionable": false,
+            "runner_locked": true,
             "drivable": false,
             "device_state": "locked",
             "screen_state": "waiting",
@@ -1696,7 +1696,7 @@ mod tests {
         assert_eq!(status.backend.as_deref(), Some("direct"));
         assert_eq!(status.device_state.as_deref(), Some("locked"));
         assert_eq!(status.screen_state.as_deref(), Some("waiting"));
-        assert_eq!(status.wda_actionable, Some(false));
+        assert_eq!(status.runner_actionable, Some(false));
         assert_eq!(status.locked, Some(true));
         assert_eq!(status.drivable, Some(false));
         assert_eq!(status.released, Some(false));
@@ -1864,7 +1864,7 @@ mod tests {
     #[tokio::test]
     async fn an_unreadable_tree_fails_before_any_tap() {
         let (url, task, requests) =
-            mock_daemon_sequence(&[("502 Bad Gateway", r#"{"error":"wda_source_failed"}"#)]);
+            mock_daemon_sequence(&[("502 Bad Gateway", r#"{"error":"runner_source_failed"}"#)]);
 
         let failure = DaemonClient::new(url, None)
             .tap_label_observed("发布", false)

@@ -10,7 +10,7 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use support::{block, build_state, build_state_with_wda, mock_wda};
+use support::{block, build_state, build_state_with_runner, mock_runner};
 
 async fn call(
     state: &std::sync::Arc<server::http::AppState>,
@@ -97,13 +97,13 @@ fn notes_are_read_written_and_shown_when_the_agent_enters_the_app() {
         let (status, _) = call(&state, "PUT", other, true, "Log in with the test account.").await;
         assert_eq!(status, StatusCode::OK);
 
-        let wda = mock_wda(|request, _| {
+        let runner = mock_runner(|request, _| {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, r#"{"value":{"sessionId":"SESSION"}}"#.to_string()));
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
-        let driving = build_state_with_wda(wda.url());
+        let driving = build_state_with_runner(runner.url());
         let (status, json) = call(&driving, "POST", "/agent/actions", true, &launch("com.example.notes")).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["registry"]["flows"][0]["id"], "notes/new", "{json}");

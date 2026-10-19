@@ -3,7 +3,7 @@
 
 The daemon dispatches a verb by opening
 ``shortcuts://run-shortcut?name=<bridge>&input=text&text=<{verb,id,args} JSON>``
-on the phone through WDA. This script builds the other half: the shortcut that
+on the phone through runner. This script builds the other half: the shortcut that
 parses that request, runs the native action for the verb, and POSTs
 ``{id, verb, ok, data}`` back to ``/agent/inbox`` so the daemon can match it to
 the dispatch id.

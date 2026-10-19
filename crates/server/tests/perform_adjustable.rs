@@ -1,8 +1,8 @@
 //! `perform increment|decrement` on the two adjustable controls #57 fixed from
-//! hardware findings, driven through the real router against a scripted WDA.
+//! hardware findings, driven through the real router against a scripted runner.
 //!
 //! The unit tests pin the pieces (`stepper_increment_is_second`, the force
-//! press body); these pin what actually reaches WDA, end to end:
+//! press body); these pin what actually reaches runner, end to end:
 //! - a label-less PickerWheel (the stock Clock timer) still resolves by frame
 //!   and moves ONE notch: `order` next/previous with `offset` 0.1, not 0.2;
 //! - a Stepper on a non-English phone, whose child buttons are not labelled
@@ -20,7 +20,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use server::http::AppState;
-use support::{block, build_state_with_wda, mock_wda};
+use support::{block, build_state_with_runner, mock_runner};
 
 const SESSION: &str = r#"{"value":{"sessionId":"SESSION"}}"#;
 const WHEEL_RECT: [f64; 4] = [170.0, 197.0, 105.0, 292.0];
@@ -63,12 +63,12 @@ fn rect(r: [f64; 4]) -> String {
     )
 }
 
-/// Every mutation-shaped request WDA received, as `path body`.
+/// Every mutation-shaped request runner received, as `path body`.
 type Seen = Arc<Mutex<Vec<String>>>;
 
-fn scripted_wda(seen: Seen) -> support::MockWda {
+fn scripted_runner(seen: Seen) -> support::MockRunner {
     let child_queries = Arc::new(Mutex::new(0_usize));
-    mock_wda(move |request, _| {
+    mock_runner(move |request, _| {
         let line = request.lines().next().unwrap_or("");
         let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
         let reply = |s: String| Some((Duration::ZERO, s));
@@ -144,8 +144,8 @@ async fn request_json(
 /// Read the tree, then `perform` `action` on the first row of `kind`.
 async fn perform_on(kind: &str, action: &str) -> Vec<String> {
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
-    let wda = scripted_wda(seen.clone());
-    let state = build_state_with_wda(wda.url());
+    let runner = scripted_runner(seen.clone());
+    let state = build_state_with_runner(runner.url());
     let (status, elements) = request_json(&state, "GET", "/agent/elements", None).await;
     assert_eq!(status, StatusCode::OK, "{elements}");
     let snapshot = elements["snapshot"].as_str().unwrap().to_string();

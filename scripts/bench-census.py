@@ -2,7 +2,7 @@
 """Latency census of iphone-use primitives on a real phone — the shared yardstick.
 
 Run before and after a performance change, on the same screen, and paste both
-tables into the PR. It goes through the daemon only (never WDA :8100 directly,
+tables into the PR. It goes through the daemon only (never runner :8100 directly,
 which bypasses the owner lease and is not counted as activity), takes the
 phone with an owner name and a hold, and releases both at the end.
 
@@ -10,7 +10,7 @@ phone with an owner name and a hold, and releases both at the end.
         python3 scripts/bench-census.py [--runs 3] [--app com.apple.calculator]
 
 Each row: wall-clock ms per run, then the daemon's own timing split of the last
-run (daemon vs WDA, per WDA call). Taps use Calculator's keypad identifiers, so
+run (daemon vs runner, per runner call). Taps use Calculator's keypad identifiers, so
 keep --app at the default for comparable numbers.
 """
 
@@ -102,11 +102,11 @@ def main() -> int:
                 wall, last = op()
                 walls.append(wall)
             timing = last.get("timing") or {}
-            calls = ", ".join(f"{c['call']}×{c.get('count', 1)}={c['ms']}" for c in timing.get("wda", []))
+            calls = ", ".join(f"{c['call']}×{c.get('count', 1)}={c['ms']}" for c in timing.get("runner", []))
             error = f" ERR {last.get('error')}" if last.get("ok") is False else ""
             print(
                 f"{name:24s} wall ms: {', '.join(f'{w:.0f}' for w in walls):18s} "
-                f"| daemon={timing.get('daemon_ms')} wda={timing.get('wda_ms')} [{calls}]{error}",
+                f"| daemon={timing.get('daemon_ms')} runner={timing.get('runner_ms')} [{calls}]{error}",
                 flush=True,
             )
     finally:

@@ -52,7 +52,7 @@ t bash -n install.sh
 t bash scripts/test-install-release-transaction.sh
 t bash scripts/test-install-runner-sources.sh
 t bash scripts/test-install-client-config.sh
-t bash scripts/test-setup-wda-shim.sh
+t bash scripts/test-setup-runner-shim.sh
 t bash runner/ci-check.sh
 t python3 scripts/test-auto-update.py
 t python3 -I scripts/test-agent-bench.py
