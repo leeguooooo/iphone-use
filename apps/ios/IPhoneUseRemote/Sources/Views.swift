@@ -117,9 +117,9 @@ struct IPhoneUseRemoteApp: App {
                     if DeviceStore.isThisPhone(link.base.absoluteString) {
                         Text("配对这台 iPhone 自己的 agent。只在你刚刚在自己 Mac 上点了「配对本机 Agent」时才点「连接」。")
                     } else if let name = app.savedName(for: link) {
-                        Text("\(link.base.host ?? link.base.absoluteString)\n已保存为「\(name)」，会刷新它的配对。只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
+                        Text("\(DeviceStore.defaultName(for: link.base.absoluteString))\n已保存为「\(name)」，会刷新它的配对。只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
                     } else {
-                        Text("\(link.base.host ?? link.base.absoluteString)\n只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
+                        Text("\(DeviceStore.defaultName(for: link.base.absoluteString))\n只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
                     }
                 }
         }

@@ -192,8 +192,10 @@ enum DeviceStore {
     static func defaultName(for address: String) -> String {
         if isThisPhone(address) { return String(localized: "本机") }
         guard let url = URL(string: address), let host = url.host else { return address }
-        if let port = url.port { return "\(host):\(port)" }
-        return host
+        // The path tells apart daemons that share a host (`host/ix`).
+        let path = url.path == "/" ? "" : url.path
+        if let port = url.port { return "\(host):\(port)\(path)" }
+        return host + path
     }
 }
 
