@@ -78,6 +78,13 @@ OLD_PLIST_LABEL="work.pwtk.iphone-remote"
 OLD_PLIST="$HOME/Library/LaunchAgents/${OLD_PLIST_LABEL}.plist"
 IPU_RUNNER_PLIST_LABEL="${PLIST_LABEL}.runner"
 IPU_RUNNER_PLIST_DST="$HOME/Library/LaunchAgents/${IPU_RUNNER_PLIST_LABEL}.plist"
+# Before v0.20 the supervisor was ${PLIST_LABEL}.wda; retire_pre_rename_runner
+# moves it once the install commits, so its settings are read from there until then.
+PRE_RENAME_RUNNER_PLIST="$HOME/Library/LaunchAgents/${PLIST_LABEL}.wda.plist"
+RUNNER_SETTINGS_PLIST="$IPU_RUNNER_PLIST_DST"
+if [ ! -f "$RUNNER_SETTINGS_PLIST" ] && [ -f "$PRE_RENAME_RUNNER_PLIST" ]; then
+    RUNNER_SETTINGS_PLIST="$PRE_RENAME_RUNNER_PLIST"
+fi
 LOG_DIR="$HOME/Library/Logs/iPhoneUse"
 REPO="leeguooooo/iphone-use"
 BINARY_INSIDE_APP="Contents/MacOS/iphone-use"
@@ -2396,6 +2403,33 @@ fi
 # instance's app, plists and runtime are read (signing policy) but never
 # changed. Paths, labels and ports come from setup-runner.sh `instance-context`
 # (the setup engine in the app being installed).
+# Defined here, before the named-instance install below runs: that path
+# reads its old plist through it.
+plist_env_get_from() {
+    local plist="$1"
+    local key="$2"
+    [ -f "$plist" ] || { printf ''; return; }
+    /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null && return
+    # Older installers wrote IPHONE_USE_X as PHONE_REMOTE_X, IPHONE_USE_RUNNER_X
+    # as IPHONE_USE_WDA_X, and IPU_RUNNER_X as WDA_X.
+    local old
+    for old in $(legacy_env_names "$key"); do
+        /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$old" "$plist" 2>/dev/null && return
+    done
+    printf ''
+}
+
+# The older spellings of a setting, most recent first (core::env::legacy_names).
+legacy_env_names() {
+    case "$1" in
+        IPU_RUNNER_?*) printf '%s\n' "WDA_${1#IPU_RUNNER_}" ;;
+        IPHONE_USE_RUNNER_?*)
+            printf '%s\n' "IPHONE_USE_WDA_${1#IPHONE_USE_RUNNER_}" \
+                "PHONE_REMOTE_${1#IPHONE_USE_}" "PHONE_REMOTE_WDA_${1#IPHONE_USE_RUNNER_}" ;;
+        IPHONE_USE_?*) printf '%s\n' "PHONE_REMOTE_${1#IPHONE_USE_}" ;;
+    esac
+}
+
 named_plist_env() {
     plist_env_get_from "$1" "$2"
 }
@@ -2404,7 +2438,7 @@ install_named_instance() {
     local app_src="${1:-$INSTALL_DIR/$APP_NAME}"
     local setup_src="$SCRIPT_DIR/scripts/setup-runner.sh"
     local uninstall_src="$SCRIPT_DIR/uninstall.sh"
-    local default_runner_plist="$IPU_RUNNER_PLIST_DST"
+    local default_runner_plist="$RUNNER_SETTINGS_PLIST"
     local ctx state_dir label plist runner_label daemon_port runner_port mjpeg_port udid
     local runtime app_dst app_stage app_backup="" plist_stage plist_backup=""
     local binary token key value probe code i was_loaded=0
@@ -2452,10 +2486,6 @@ install_named_instance() {
 
     retire_pre_rename_runner "$state_dir" "${PLIST_LABEL}.wda.$INSTANCE_NAME" "$runner_label" \
         || die "Instance $INSTANCE_NAME: the pre-rename runner supervisor could not be migrated."
-    # Inherit the default instance's signing from its pre-rename supervisor
-    # while the default instance itself has not been upgraded yet.
-    [ -f "$default_runner_plist" ] \
-        || default_runner_plist="$HOME/Library/LaunchAgents/${PLIST_LABEL}.wda.plist"
 
     runtime="$state_dir/runtime"
     app_dst="$runtime/$APP_NAME"
@@ -2483,7 +2513,15 @@ install_named_instance() {
     # instance's runner supervisor, which holds the signing policy that works on
     # this Mac. The three ASC keys travel as a set.
     env_keys=(); env_values=()
-    add_env() { [ -z "$2" ] || { env_keys+=("$1"); env_values+=("$2"); }; }
+    add_env() {
+        local value="$2"
+        # The runner's identifier before v0.20 (setup removes that app).
+        case "$1:$value" in
+            IPU_RUNNER_BUNDLE_ID:com.leeguoo.iphone-use.wda.?*)
+                value="com.leeguoo.iphone-use.runner.${value#com.leeguoo.iphone-use.wda.}" ;;
+        esac
+        [ -z "$value" ] || { env_keys+=("$1"); env_values+=("$value"); }
+    }
     pick() {
         local v
         v="$(printenv "$1" 2>/dev/null || true)"
@@ -2891,30 +2929,6 @@ fi
 # Read installer-owned values before signing: the selected backend determines
 # whether a stable local signing identity is useful at all. Keep this as the
 # single backend-resolution path for both signing and plist generation.
-plist_env_get_from() {
-    local plist="$1"
-    local key="$2"
-    [ -f "$plist" ] || { printf ''; return; }
-    /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null && return
-    # Older installers wrote IPHONE_USE_X as PHONE_REMOTE_X, IPHONE_USE_RUNNER_X
-    # as IPHONE_USE_WDA_X, and IPU_RUNNER_X as WDA_X.
-    local old
-    for old in $(legacy_env_names "$key"); do
-        /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$old" "$plist" 2>/dev/null && return
-    done
-    printf ''
-}
-
-# The older spellings of a setting, most recent first (core::env::legacy_names).
-legacy_env_names() {
-    case "$1" in
-        IPU_RUNNER_?*) printf '%s\n' "WDA_${1#IPU_RUNNER_}" ;;
-        IPHONE_USE_RUNNER_?*)
-            printf '%s\n' "IPHONE_USE_WDA_${1#IPHONE_USE_RUNNER_}" \
-                "PHONE_REMOTE_${1#IPHONE_USE_}" "PHONE_REMOTE_WDA_${1#IPHONE_USE_RUNNER_}" ;;
-        IPHONE_USE_?*) printf '%s\n' "PHONE_REMOTE_${1#IPHONE_USE_}" ;;
-    esac
-}
 
 plist_env_get() {
     local key="$1"
@@ -3037,10 +3051,7 @@ runner_env_or_existing() {
     local value
     value="$(printenv "$key" 2>/dev/null || true)"
     [ -n "$value" ] || value="$(plist_env_get "$key")"
-    if [ -z "$value" ] && [ -f "$IPU_RUNNER_PLIST_DST" ]; then
-        value="$(/usr/libexec/PlistBuddy \
-            -c "Print :EnvironmentVariables:$key" "$IPU_RUNNER_PLIST_DST" 2>/dev/null || true)"
-    fi
+    [ -n "$value" ] || value="$(plist_env_get_from "$RUNNER_SETTINGS_PLIST" "$key")"
     [ -n "$value" ] || value="$fallback"
     printf '%s' "$value"
 }
@@ -3166,11 +3177,11 @@ ok "runner video endpoint: $IPU_RUNNER_MJPEG_URL"
 legacy_product_runner_supervisor_owned() {
     local label
     local program
-    [ -f "$IPU_RUNNER_PLIST_DST" ] || return 1
-    label="$(/usr/libexec/PlistBuddy -c "Print :Label" "$IPU_RUNNER_PLIST_DST" 2>/dev/null || true)"
-    program="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:1" "$IPU_RUNNER_PLIST_DST" 2>/dev/null || true)"
-    [ "$label" = "$IPU_RUNNER_PLIST_LABEL" ] \
-        && [ "$program" = "$HOME/.iphone-use/setup-runner.sh" ]
+    [ -f "$RUNNER_SETTINGS_PLIST" ] || return 1
+    label="$(/usr/libexec/PlistBuddy -c "Print :Label" "$RUNNER_SETTINGS_PLIST" 2>/dev/null || true)"
+    program="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:1" "$RUNNER_SETTINGS_PLIST" 2>/dev/null || true)"
+    { [ "$label" = "$IPU_RUNNER_PLIST_LABEL" ] && [ "$program" = "$HOME/.iphone-use/setup-runner.sh" ]; } \
+        || { [ "$label" = "${PLIST_LABEL}.wda" ] && [ "$program" = "$HOME/.iphone-use/setup-wda.sh" ]; }
 }
 
 # The installer owns the default loopback supervisor/relay pair. A custom or
@@ -3348,7 +3359,7 @@ if [ -n "${IPU_RUNNER_ASC_KEY_PATH:-}${IPU_RUNNER_ASC_KEY_ID:-}${IPU_RUNNER_ASC_
         append_plist_env "$ENV_KEY" "$(printenv "$ENV_KEY")"
     done
 else
-    for ASC_SET_SOURCE in "$PLIST_DST" "$IPU_RUNNER_PLIST_DST"; do
+    for ASC_SET_SOURCE in "$PLIST_DST" "$RUNNER_SETTINGS_PLIST"; do
         if [ -n "$(plist_env_get_from "$ASC_SET_SOURCE" IPU_RUNNER_ASC_KEY_PATH)" ] \
             && [ -n "$(plist_env_get_from "$ASC_SET_SOURCE" IPU_RUNNER_ASC_KEY_ID)" ] \
             && [ -n "$(plist_env_get_from "$ASC_SET_SOURCE" IPU_RUNNER_ASC_ISSUER_ID)" ]; then
