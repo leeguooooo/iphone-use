@@ -1569,7 +1569,7 @@ retire_pre_rename_runner() {
         case "${file##*/}" in
             wda-runner.log) new_file="$STATE_DIR/runner.log" ;;
             wda-runner.pid) new_file="$STATE_DIR/runner.pid" ;;
-            wda-runner-product*) new_file="$STATE_DIR/runner-product${file##*/wda-runner-product}" ;;
+            wda-runner-*) new_file="$STATE_DIR/runner-${file##*/wda-runner-}" ;;
             wda.lock*) new_file="$STATE_DIR/runner.lock${file##*/wda.lock}" ;;
             wda-*) new_file="$STATE_DIR/runner-${file##*/wda-}" ;;
         esac
