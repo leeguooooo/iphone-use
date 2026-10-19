@@ -2784,15 +2784,11 @@ async fn agent_status(
     // rebuild after an idle release, an upgrade rebuild): it is a reconnect
     // in progress whatever the daemon's own lifecycle says, or a person sees
     // "paused after inactivity" through minutes of building.
-    let setup_working = if state.managed_runner && !runner_actionable && !releasing && !reconnecting
-    {
-        setup_status
-            .as_ref()
-            .and_then(|status| setup_working_advice(&status.phase, &status.message))
-            .filter(|_| setup_in_flight(&crate::instance::current().state_dir))
-    } else {
-        None
-    };
+    let setup_working = setup_working(
+        state.managed_runner && !runner_actionable && !releasing && !reconnecting,
+        setup_status.as_ref(),
+        || setup_in_flight(&crate::instance::current().state_dir),
+    );
     let reconnecting = reconnecting || setup_working.is_some();
     // Death attribution (#26 §2). Only meaningful while runner is actually down;
     // a stale cause next to a healthy runner would read as a live problem.
@@ -3330,6 +3326,23 @@ fn parse_setup_log_blocked_on(txt: &str) -> String {
 /// page and the iOS app show this verbatim, so all three surfaces say the same
 /// thing; `hint` stays the diagnostic text for agents. `None` when there is
 /// nothing to do.
+/// The advice for a setup attempt bringing the runner up, when the daemon
+/// would otherwise not call it a reconnect (`eligible`: managed, runner not
+/// actionable, no release or reconnect of its own) and the attempt is alive
+/// (`in_flight`, checked last: it runs `ps`).
+fn setup_working(
+    eligible: bool,
+    status: Option<&RunnerSetupStatus>,
+    in_flight: impl FnOnce() -> bool,
+) -> Option<(&'static str, &'static str)> {
+    if !eligible {
+        return None;
+    }
+    status
+        .and_then(|status| setup_working_advice(&status.phase, &status.message))
+        .filter(|_| in_flight())
+}
+
 /// A setup attempt at work, by its published phase and message: the advice
 /// [`human_next_step`] words for a person, and the hint for agents. `None`
 /// for a phase that is not work in progress (ready, failed, backing off,
@@ -22133,6 +22146,31 @@ mod tests {
             ts,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_live_setup_at_work_is_a_reconnect_and_nothing_else_is() {
+        let building = RunnerSetupStatus {
+            message: "building the device runner".into(),
+            ..build_status("building", 1)
+        };
+        let alive = || true;
+        assert_eq!(
+            setup_working(true, Some(&building), alive).map(|a| a.0),
+            Some("setting_up_build")
+        );
+        // A dead owner, an ineligible daemon state, no status, a finished run.
+        assert_eq!(setup_working(true, Some(&building), || false), None);
+        assert_eq!(
+            setup_working(false, Some(&building), || panic!("not asked")),
+            None
+        );
+        assert_eq!(setup_working(true, None, alive), None);
+        assert_eq!(setup_working(true, Some(&build_status("ready", 1)), alive), None);
+        assert_eq!(
+            setup_working(true, Some(&build_status("building-fail", 1)), alive),
+            None
+        );
     }
 
     #[test]
