@@ -64,6 +64,9 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         case device
         case transport
         case phoneRttMs = "runner_rtt_ms"
+        // The same fields from daemons before v0.20 (runner named after WebDriverAgent).
+        case preRenameLocked = "wda_locked"
+        case preRenamePhoneRttMs = "wda_rtt_ms"
     }
 
     init(from decoder: Decoder) throws {
@@ -75,6 +78,7 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         releasing = try c.decodeIfPresent(Bool.self, forKey: .releasing) ?? false
         humanHandoff = try c.decodeIfPresent(Bool.self, forKey: .humanHandoff) ?? false
         locked = try c.decodeIfPresent(Bool.self, forKey: .locked)
+            ?? c.decodeIfPresent(Bool.self, forKey: .preRenameLocked)
         hint = try c.decodeIfPresent(String.self, forKey: .hint) ?? ""
         let steps = try c.decodeIfPresent([String: String].self, forKey: .nextStep) ?? [:]
         nextStep = AppLanguage.pick(steps)
@@ -89,7 +93,8 @@ struct PhoneStatus: Decodable, Equatable, Sendable {
         let identity = (try? c.decodeIfPresent(PhoneIdentity.self, forKey: .device)) ?? nil
         device = identity?.label == nil ? nil : identity
         transport = (try? c.decodeIfPresent(String.self, forKey: .transport)) ?? ""
-        phoneRttMs = (try? c.decodeIfPresent(Int.self, forKey: .phoneRttMs)) ?? nil
+        phoneRttMs = (try? c.decodeIfPresent(Int.self, forKey: .phoneRttMs))
+            ?? (try? c.decodeIfPresent(Int.self, forKey: .preRenamePhoneRttMs)) ?? nil
     }
 
     /// The Mac-to-phone link in a person's words.

@@ -2967,11 +2967,40 @@ async fn agent_status(
         state.managed_runner,
         state.managed_runner_pending,
     );
+    let body = with_pre_rename_status_fields(body);
     let resp = Response::builder()
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     with_security_headers(resp)
+}
+
+/// Status fields under the names clients released before v0.20 read, when
+/// the runner was named after WebDriverAgent: an iPhone app or an MCP client
+/// installed then keeps working against this daemon. Remove once those
+/// clients are gone.
+const PRE_RENAME_STATUS_FIELDS: &[(&str, &str)] = &[
+    ("runner", "wda"),
+    ("runner_actionable", "wda_actionable"),
+    ("runner_locked", "wda_locked"),
+    ("runner_build", "wda_build"),
+    ("runner_died_reason", "wda_died_reason"),
+    ("runner_died_at", "wda_died_at"),
+    ("runner_rtt_ms", "wda_rtt_ms"),
+    ("managed_runner", "managed_wda"),
+    ("managed_runner_pending", "managed_wda_pending"),
+];
+
+fn with_pre_rename_status_fields(body: String) -> String {
+    let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_str(&body) else {
+        return body;
+    };
+    for (name, old) in PRE_RENAME_STATUS_FIELDS {
+        if let Some(value) = fields.get(*name).cloned() {
+            fields.insert((*old).to_string(), value);
+        }
+    }
+    serde_json::Value::Object(fields).to_string()
 }
 
 /// How control reaches the managed runner right now (`usb`, `wifi-tunnel`,
@@ -21497,14 +21526,11 @@ mod tests {
             for_instance("run iphone-use setup, then iphone-use doctor", &second),
             "run iphone-use setup --instance i13, then iphone-use doctor --instance i13"
         );
-        // No next step sends a person to a script path or calls the runner.
+        // No next step sends a person to a script path.
         for advice in ["unconfigured", "offline", "external", "died"] {
             let (zh, en) = human_next_step(advice, "", "unreachable").unwrap();
             for text in [zh, en] {
-                assert!(
-                    !text.contains("setup-runner.sh") && !text.contains("runner"),
-                    "{text}"
-                );
+                assert!(!text.contains("setup-runner.sh"), "{text}");
             }
         }
     }

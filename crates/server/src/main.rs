@@ -636,9 +636,11 @@ fn open_console() -> Result<()> {
 /// One value from the installed LaunchAgent's EnvironmentVariables, which a
 /// Finder launch does not inherit.
 fn launch_agent_env(label: &str, key: &str) -> Option<String> {
-    // A plist written before the rename spells the key PHONE_REMOTE_*.
+    // A plist written before a rename spells the key the old way.
     launch_agent_env_as(label, key).or_else(|| {
-        core::env::legacy_name(key).and_then(|old| launch_agent_env_as(label, &old))
+        core::env::legacy_names(key)
+            .into_iter()
+            .find_map(|old| launch_agent_env_as(label, &old))
     })
 }
 

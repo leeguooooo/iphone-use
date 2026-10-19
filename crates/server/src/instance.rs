@@ -16,9 +16,10 @@ use std::sync::OnceLock;
 pub const DEFAULT_NAME: &str = "default";
 const DAEMON_LABEL: &str = "com.leeguoo.iphone-use";
 /// Names whose daemon label would collide with another product LaunchAgent:
-/// the default instance's runner supervisor and the maintenance jobs that share
-/// the `com.leeguoo.iphone-use.` prefix.
-const RESERVED_NAMES: &[&str] = &["runner", "autoupdate", "daily-maintenance", "flow-reverify"];
+/// the default instance's runner supervisor (and its pre-v0.20 label, still on
+/// Macs that have not upgraded) and the maintenance jobs that share the
+/// `com.leeguoo.iphone-use.` prefix.
+const RESERVED_NAMES: &[&str] = &["runner", "wda", "autoupdate", "daily-maintenance", "flow-reverify"];
 const NAME_MAX_LEN: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

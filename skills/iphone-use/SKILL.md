@@ -8,7 +8,7 @@ description: Use when a task needs a real iPhone — operating iOS apps that hav
 The [iphone-use](https://github.com/leeguooooo/iphone-use) daemon drives a
 physical iPhone through its own XCTest device runner. This runner replaced
 WebDriverAgent in v0.14.0; it does not use iPhone Mirroring. The HTTP interface
-is WebDriverAgent-compatible, and legacy "runner" field names refer to this runner. It never touches the Mac's screen or
+is WebDriverAgent-compatible (its `/wda/...` routes). It never touches the Mac's screen or
 cursor. Use the HTTP API below or the bundled MCP server (`phone_*` tools); the
 loop is the same. Details live in the reference: `curl -s -H "$AUTH"
 "$HOST/agent/reference"` serves the copy that matches the running daemon

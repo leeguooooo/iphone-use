@@ -3,6 +3,7 @@
   "name_pattern": "^[a-z][a-z0-9-]{0,31}$",
   "reserved_names": [
     "runner",
+    "wda",
     "autoupdate",
     "daily-maintenance",
     "flow-reverify"
@@ -54,6 +55,7 @@
   ],
   "invalid_names": [
     "runner",
+    "wda",
     "Lab",
     "lab.1",
     "lab/1",

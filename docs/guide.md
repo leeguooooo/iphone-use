@@ -32,9 +32,12 @@ Agent   ── /agent/* ──────────> iphone-use daemon ──
   and act through `/agent/input` or a guarded multi-step batch (`/agent/actions`).
 - The daemon owns the runner lifecycle: it releases the phone after idle time, rebuilds
   the runner with backoff, and reports every state in `/agent/status`.
-- "runner" below, in status fields (`runner`, `runner_actionable`, …) and in environment
-  variables (`IPU_RUNNER_*`, `IPHONE_USE_RUNNER_*`) is the historical name and now means this
-  device runner.
+- Before v0.20 the runner's settings, status fields and files were named after
+  WebDriverAgent (`WDA_*`, `IPHONE_USE_WDA_*`, `wda`, `wda_actionable`,
+  `com.leeguoo.iphone-use.wda`). Those names are still read, and the installer moves an
+  existing setup to the current ones (`IPU_RUNNER_*`, `IPHONE_USE_RUNNER_*`, `runner`,
+  `runner_actionable`, `com.leeguoo.iphone-use.runner`); the phone gets the runner under
+  `com.leeguoo.iphone-use.runner.<team>` and the old app is removed.
 
 Design, lifecycle, failure states, and security boundaries:
 **[`docs/direct-device-architecture.html`](direct-device-architecture.html)**.

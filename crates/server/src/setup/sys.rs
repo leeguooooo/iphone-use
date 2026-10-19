@@ -404,10 +404,14 @@ pub fn plist_env(path: &Path, key: &str) -> String {
         .map(|suffix| format!("IPHONE_USE_{suffix}"))
         .unwrap_or_else(|| key.to_owned());
     let value = read(&canonical);
-    match core::env::legacy_name(&canonical) {
-        Some(old) if value.is_empty() => read(&old),
-        _ => value,
+    if !value.is_empty() {
+        return value;
     }
+    core::env::legacy_names(&canonical)
+        .into_iter()
+        .map(|old| read(&old))
+        .find(|old| !old.is_empty())
+        .unwrap_or_default()
 }
 
 /// A top-level scalar (`Label`) or `ProgramArguments` item of a plist.

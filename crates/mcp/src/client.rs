@@ -53,9 +53,11 @@ fn daemon_target(
 
 /// One `EnvironmentVariables` value from `~/Library/LaunchAgents/<label>.plist`.
 fn launch_agent_env(label: &str, key: &str) -> Option<String> {
-    // A plist written before the rename spells the key PHONE_REMOTE_*.
+    // A plist written before a rename spells the key the old way.
     launch_agent_env_as(label, key).or_else(|| {
-        iu_core::env::legacy_name(key).and_then(|old| launch_agent_env_as(label, &old))
+        iu_core::env::legacy_names(key)
+            .into_iter()
+            .find_map(|old| launch_agent_env_as(label, &old))
     })
 }
 
@@ -574,8 +576,8 @@ impl DaemonClient {
         let req = self.auth(self.http().get(self.url("/agent/status")));
         let resp = req.send().await?;
         let resp = check_status(resp).await?;
-        let body: StatusResponse = resp.json().await?;
-        Ok(body)
+        let body: serde_json::Value = resp.json().await?;
+        Ok(crate::types::status_from_any_release(body)?)
     }
 
     /// `GET /agent/capabilities` — what this build supports and whether the

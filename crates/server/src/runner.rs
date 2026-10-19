@@ -1,14 +1,16 @@
-//! Device control via WebDriverAgent (runner).
+//! Device control through the iphone-use device runner.
 //!
-//! runner runs *on the phone* (Appium's runner, default `http://<phone>:8100`),
-//! drives iOS's own accessibility tree, and synthesizes the events itself — so
-//! nothing touches the Mac's cursor, coordinates do not drift, and text goes in
-//! as a real string (no keycode / Pinyin-IME caveat).
+//! The runner (`runner/IPhoneUseRunner`) is an XCTest bundle that runs *on the
+//! phone* (default `http://127.0.0.1:8100` through the relay), reads iOS's own
+//! accessibility tree and synthesizes the events itself — so nothing touches
+//! the Mac's cursor, coordinates do not drift, and text goes in as a real
+//! string (no keycode / Pinyin-IME caveat).
 //!
-//! This module is the daemon-side HTTP client for runner's (W3C-ish) API. Browser
-//! and agent input route here and fail closed when the device service is
-//! unavailable.
-//! Request shapes follow Appium WebDriverAgent, and response parsers reject
+//! This module is the daemon-side HTTP client for the runner's (W3C-ish) API.
+//! Browser and agent input route here and fail closed when the device service
+//! is unavailable.
+//! Request shapes follow WebDriverAgent's routes (`/wda/...`), which the runner
+//! serves for compatibility, and response parsers reject
 //! both HTTP failures and W3C error envelopes.
 
 use crate::timing::SendTimed as _;

@@ -78,9 +78,12 @@ impl Target {
 }
 
 fn plist_env(label: &str, key: &str) -> Option<String> {
-    // A plist written before the rename spells the key PHONE_REMOTE_*.
-    plist_env_as(label, key)
-        .or_else(|| core::env::legacy_name(key).and_then(|old| plist_env_as(label, &old)))
+    // A plist written before a rename spells the key the old way.
+    plist_env_as(label, key).or_else(|| {
+        core::env::legacy_names(key)
+            .into_iter()
+            .find_map(|old| plist_env_as(label, &old))
+    })
 }
 
 fn plist_env_as(label: &str, key: &str) -> Option<String> {

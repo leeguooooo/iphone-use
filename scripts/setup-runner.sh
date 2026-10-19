@@ -85,6 +85,15 @@ for _legacy in $(env | sed -n 's/^PHONE_REMOTE_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p')
     eval "[ -n \"\${IPHONE_USE_${_legacy}+x}\" ] || export IPHONE_USE_${_legacy}=\"\$PHONE_REMOTE_${_legacy}\""
 done
 unset _legacy
+# The runner was WebDriverAgent once: IPHONE_USE_WDA_X is now
+# IPHONE_USE_RUNNER_X and WDA_X is IPU_RUNNER_X (the new name wins).
+for _legacy in $(env | sed -n 's/^IPHONE_USE_WDA_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p'); do
+    eval "[ -n \"\${IPHONE_USE_RUNNER_${_legacy}+x}\" ] || export IPHONE_USE_RUNNER_${_legacy}=\"\$IPHONE_USE_WDA_${_legacy}\""
+done
+for _legacy in $(env | sed -n 's/^WDA_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p'); do
+    eval "[ -n \"\${IPU_RUNNER_${_legacy}+x}\" ] || export IPU_RUNNER_${_legacy}=\"\$WDA_${_legacy}\""
+done
+unset _legacy
 REQUESTED="${IPHONE_USE_INSTANCE-}"
 [ -n "$REQUESTED" ] || REQUESTED="${INSTALLED:-default}"
 if [ -n "$INSTALLED" ] && [ "$INSTALLED" != "$REQUESTED" ] \

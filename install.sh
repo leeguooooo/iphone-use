@@ -36,6 +36,15 @@ for _legacy in $(env | sed -n 's/^PHONE_REMOTE_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p')
     eval "[ -n \"\${IPHONE_USE_${_legacy}+x}\" ] || export IPHONE_USE_${_legacy}=\"\$PHONE_REMOTE_${_legacy}\""
 done
 unset _legacy
+# The runner was WebDriverAgent once: IPHONE_USE_WDA_X is now
+# IPHONE_USE_RUNNER_X and WDA_X is IPU_RUNNER_X (the new name wins).
+for _legacy in $(env | sed -n 's/^IPHONE_USE_WDA_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p'); do
+    eval "[ -n \"\${IPHONE_USE_RUNNER_${_legacy}+x}\" ] || export IPHONE_USE_RUNNER_${_legacy}=\"\$IPHONE_USE_WDA_${_legacy}\""
+done
+for _legacy in $(env | sed -n 's/^WDA_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p'); do
+    eval "[ -n \"\${IPU_RUNNER_${_legacy}+x}\" ] || export IPU_RUNNER_${_legacy}=\"\$WDA_${_legacy}\""
+done
+unset _legacy
 
 # ── Inline ad-hoc signer ──────────────────────────────────────────────────────
 # Direct mode uses this only when the supplied app has no valid signature. It
@@ -1044,6 +1053,92 @@ wait_label_gone() {
     while launchctl print "$1" >/dev/null 2>&1 && [ "$i" -lt 50 ]; do
         sleep 0.2
         i=$((i + 1))
+    done
+}
+
+# retire_pre_rename_runner <state dir> <old supervisor label> <new label>
+# Before v0.20 the runner was named after WebDriverAgent: its supervisor ran
+# as com.leeguoo.iphone-use.wda[.<name>] with WDA_* settings, and its state
+# files were wda-*.log, wda-runner.pid, wda-setup-status.json and
+# setup-wda.sh. Two supervisors would race for one phone, so stop the old job,
+# carry its plist over to the new label and settings names, and move the
+# state files to their new names. The carried-over job stays unloaded: the
+# daemon starts it on the next agent request, as after an idle release.
+retire_pre_rename_runner() {
+    local state_dir="$1" old_label="$2" new_label="$3"
+    local old_plist="$HOME/Library/LaunchAgents/$old_label.plist"
+    local new_plist="$HOME/Library/LaunchAgents/$new_label.plist"
+    local stage key value new_key i file new_file
+    if launchctl print "gui/$UID_NUM/$old_label" >/dev/null 2>&1; then
+        launchctl bootout "gui/$UID_NUM/$old_label" 2>/dev/null || true
+        wait_label_gone "gui/$UID_NUM/$old_label"
+        launchctl print "gui/$UID_NUM/$old_label" >/dev/null 2>&1 \
+            && { warn "Could not stop the pre-rename runner supervisor $old_label."; return 1; }
+    fi
+    if [ -f "$old_plist" ]; then
+        if [ ! -e "$new_plist" ]; then
+            stage="$(mktemp "$HOME/Library/LaunchAgents/.$new_label.migrate.XXXXXX")" \
+                || { warn "Could not stage the runner supervisor plist."; return 1; }
+            cp -p "$old_plist" "$stage" || { warn "Could not copy $old_plist."; return 1; }
+            /usr/libexec/PlistBuddy -c "Set :Label $new_label" "$stage" >/dev/null \
+                || { warn "Could not relabel the runner supervisor plist."; return 1; }
+            for key in $(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables" "$stage" 2>/dev/null \
+                | sed -n 's/^    \([A-Z0-9_][A-Z0-9_]*\) = .*/\1/p'); do
+                case "$key" in
+                    WDA_?*) new_key="IPU_RUNNER_${key#WDA_}" ;;
+                    IPHONE_USE_WDA_?*) new_key="IPHONE_USE_RUNNER_${key#IPHONE_USE_WDA_}" ;;
+                    PHONE_REMOTE_WDA_?*) new_key="IPHONE_USE_RUNNER_${key#PHONE_REMOTE_WDA_}" ;;
+                    *) continue ;;
+                esac
+                value="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$stage")"
+                case "$new_key:$value" in
+                    IPU_RUNNER_BUNDLE_ID:com.leeguoo.iphone-use.wda.?*)
+                        value="com.leeguoo.iphone-use.runner.${value#com.leeguoo.iphone-use.wda.}" ;;
+                esac
+                /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:$key" "$stage" >/dev/null
+                /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$new_key" "$stage" >/dev/null 2>&1 \
+                    || /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:$new_key string $value" "$stage" >/dev/null \
+                    || { warn "Could not carry $key over to $new_key."; return 1; }
+            done
+            i=0
+            while value="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:$i" "$stage" 2>/dev/null)"; do
+                case "$value" in
+                    */setup-wda.sh)
+                        /usr/libexec/PlistBuddy -c "Set :ProgramArguments:$i ${value%setup-wda.sh}setup-runner.sh" "$stage" >/dev/null ;;
+                esac
+                i=$((i + 1))
+            done
+            for key in StandardOutPath StandardErrorPath; do
+                value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$stage" 2>/dev/null)" || continue
+                case "$value" in
+                    */wda-runner.log) value="${value%wda-runner.log}runner.log" ;;
+                    */wda-*) value="${value%/wda-*}/runner-${value##*/wda-}" ;;
+                    *) continue ;;
+                esac
+                /usr/libexec/PlistBuddy -c "Set :$key $value" "$stage" >/dev/null
+            done
+            /usr/bin/plutil -lint "$stage" >/dev/null || { warn "The carried-over runner supervisor plist is invalid."; return 1; }
+            chmod 600 "$stage"
+            mv "$stage" "$new_plist" || { warn "Could not install $new_plist."; return 1; }
+            ok "Runner supervisor renamed: $old_label → $new_label"
+        fi
+        rm -f "$old_plist"
+    fi
+    launchctl enable "gui/$UID_NUM/$old_label" 2>/dev/null || true
+    # State files: wda-runner.log → runner.log, wda-X → runner-X; the old
+    # setup-wda.sh goes (the installer lays down setup-runner.sh).
+    [ -d "$state_dir" ] || return 0
+    rm -f "$state_dir/setup-wda.sh"
+    for file in "$state_dir"/wda-* "$state_dir"/wda.lock "$state_dir"/wda.lock.*; do
+        [ -e "$file" ] || continue
+        case "${file##*/}" in
+            wda-runner.log) new_file="$state_dir/runner.log" ;;
+            wda-runner.pid) new_file="$state_dir/runner.pid" ;;
+            wda-runner-product*) new_file="$state_dir/runner-product${file##*/wda-runner-product}" ;;
+            wda.lock*) new_file="$state_dir/runner.lock${file##*/wda.lock}" ;;
+            wda-*) new_file="$state_dir/runner-${file##*/wda-}" ;;
+        esac
+        [ -e "$new_file" ] || mv "$file" "$new_file"
     done
 }
 
@@ -2355,6 +2450,13 @@ install_named_instance() {
         && [ "$runner_port" != "$mjpeg_port" ] \
         || die "Daemon, runner control and video ports must differ."
 
+    retire_pre_rename_runner "$state_dir" "${PLIST_LABEL}.wda.$INSTANCE_NAME" "$runner_label" \
+        || die "Instance $INSTANCE_NAME: the pre-rename runner supervisor could not be migrated."
+    # Inherit the default instance's signing from its pre-rename supervisor
+    # while the default instance itself has not been upgraded yet.
+    [ -f "$default_runner_plist" ] \
+        || default_runner_plist="$HOME/Library/LaunchAgents/${PLIST_LABEL}.wda.plist"
+
     runtime="$state_dir/runtime"
     app_dst="$runtime/$APP_NAME"
     binary="$app_dst/$BINARY_INSIDE_APP"
@@ -2794,12 +2896,23 @@ plist_env_get_from() {
     local key="$2"
     [ -f "$plist" ] || { printf ''; return; }
     /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null && return
-    # An older installer wrote IPHONE_USE_X as PHONE_REMOTE_X.
-    case "$key" in
-        IPHONE_USE_?*)
-            /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:PHONE_REMOTE_${key#IPHONE_USE_}" "$plist" 2>/dev/null \
-                || printf '' ;;
-        *) printf '' ;;
+    # Older installers wrote IPHONE_USE_X as PHONE_REMOTE_X, IPHONE_USE_RUNNER_X
+    # as IPHONE_USE_WDA_X, and IPU_RUNNER_X as WDA_X.
+    local old
+    for old in $(legacy_env_names "$key"); do
+        /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$old" "$plist" 2>/dev/null && return
+    done
+    printf ''
+}
+
+# The older spellings of a setting, most recent first (core::env::legacy_names).
+legacy_env_names() {
+    case "$1" in
+        IPU_RUNNER_?*) printf '%s\n' "WDA_${1#IPU_RUNNER_}" ;;
+        IPHONE_USE_RUNNER_?*)
+            printf '%s\n' "IPHONE_USE_WDA_${1#IPHONE_USE_RUNNER_}" \
+                "PHONE_REMOTE_${1#IPHONE_USE_}" "PHONE_REMOTE_WDA_${1#IPHONE_USE_RUNNER_}" ;;
+        IPHONE_USE_?*) printf '%s\n' "PHONE_REMOTE_${1#IPHONE_USE_}" ;;
     esac
 }
 
@@ -3552,6 +3665,10 @@ UNINSTALL_BACKUP=""
 _finish_runner_sources
 [ -z "$OLD_DISABLED_BACKUP" ] || rm -f "$OLD_DISABLED_BACKUP" 2>/dev/null || true
 OLD_DISABLED_BACKUP=""
+# After the commit, so a rolled-back install keeps the previous release's
+# supervisor exactly as it was.
+retire_pre_rename_runner "$HOME/.iphone-use" "${PLIST_LABEL}.wda" "$IPU_RUNNER_PLIST_LABEL" \
+    || warn "The pre-rename runner supervisor was not fully migrated; rerun install.sh."
 
 # ── Step 8b — Command-line entrypoint (`iphone-use upgrade`) ──────────────────
 echo ""

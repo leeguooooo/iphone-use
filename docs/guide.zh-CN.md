@@ -14,7 +14,7 @@ Agent  ── /agent/* ──────────> iphone-use daemon ── 
 - 浏览器从 `/agent/mjpeg` 拿实时画面（失败时退回 PNG 静帧），通过 `POST /control` 发输入，每条命令都返回成功或失败，不会把一个可能已经断掉的通道当成功。
 - agent 用 `/agent/elements` 读文本形式的辅助功能树，用 `/agent/screenshot` 拿 PNG，用 `/agent/input` 做单步动作，或用 `/agent/actions` 跑一批带检查点的步骤。
 - daemon 负责 runner 的生命周期：空闲后释放手机、带退避地重建 runner、把每个状态写进 `/agent/status`。
-- 下文、状态字段（`runner`、`runner_actionable` 等）和环境变量（`IPU_RUNNER_*`、`IPHONE_USE_RUNNER_*`）里的 “runner” 沿用旧名，指的就是这个设备 runner。
+- v0.20 之前，runner 的设置、状态字段和文件沿用 WebDriverAgent 的名字（`WDA_*`、`IPHONE_USE_WDA_*`、`wda`、`wda_actionable`、`com.leeguoo.iphone-use.wda`）。这些旧名仍然能读；安装器会把已有安装改成现在的名字（`IPU_RUNNER_*`、`IPHONE_USE_RUNNER_*`、`runner`、`runner_actionable`、`com.leeguoo.iphone-use.runner`），手机上的 runner 换成 `com.leeguoo.iphone-use.runner.<team>`，旧的 App 会被删掉。
 
 设计、生命周期、失败状态和安全边界见 **[`docs/direct-device-architecture.html`](direct-device-architecture.html)**。
 

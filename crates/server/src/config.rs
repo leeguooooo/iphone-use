@@ -75,7 +75,11 @@ impl Config {
     /// &str>` (or similar) to avoid side-effects on the real environment.
     pub fn from_map(lookup: impl Fn(&str) -> Option<String>) -> Config {
         let get = |key: &str| {
-            lookup(key).or_else(|| core::env::legacy_name(key).and_then(|old| lookup(&old)))
+            lookup(key).or_else(|| {
+                core::env::legacy_names(key)
+                    .into_iter()
+                    .find_map(|old| lookup(&old))
+            })
         };
         let host = get("IPHONE_USE_HOST")
             .filter(|s| !s.is_empty())

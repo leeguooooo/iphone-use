@@ -160,7 +160,7 @@ SHASUM_BIN="${IPHONE_USE_SHASUM:-$(command -v shasum 2>/dev/null || true)}"
 # Instance derivation mirrors scripts/setup-runner.sh and
 # crates/server/src/instance.rs (scripts/fixtures/instance-derivation.json).
 INSTANCE_LABEL_PREFIX="com.leeguoo.iphone-use"
-INSTANCE_RESERVED_NAMES="runner autoupdate daily-maintenance flow-reverify"
+INSTANCE_RESERVED_NAMES="runner wda autoupdate daily-maintenance flow-reverify"
 instance_name_valid() {
     local reserved
     printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z][a-z0-9-]{0,31}$' || return 1
@@ -372,7 +372,15 @@ assert_real_parent() {
 plist_get() {
     local plist="$1"
     local key="$2"
-    "$PLISTBUDDY_BIN" -c "Print :$key" "$plist" 2>/dev/null || printf ''
+    local old
+    "$PLISTBUDDY_BIN" -c "Print :$key" "$plist" 2>/dev/null && return
+    # A plist written before a rename spells the setting the old way.
+    case "$key" in
+        EnvironmentVariables:IPU_RUNNER_?*) old="WDA_${key#EnvironmentVariables:IPU_RUNNER_}" ;;
+        EnvironmentVariables:IPHONE_USE_RUNNER_?*) old="IPHONE_USE_WDA_${key#EnvironmentVariables:IPHONE_USE_RUNNER_}" ;;
+        *) printf ''; return ;;
+    esac
+    "$PLISTBUDDY_BIN" -c "Print :EnvironmentVariables:$old" "$plist" 2>/dev/null || printf ''
 }
 
 plist_owned() {
@@ -1429,6 +1437,13 @@ remove_phone_runner() {
     if run_with_deadline 25 "$devicectl_bin" device uninstall app \
         --device "$PHONE_UDID" "$PHONE_BUNDLE_ID" --timeout 20; then
         ok "removed phone runner $PHONE_BUNDLE_ID from $PHONE_UDID"
+        # The same runner under its pre-v0.20 (WebDriverAgent-era) identifier.
+        case "$PHONE_BUNDLE_ID" in
+            com.leeguoo.iphone-use.runner.?*)
+                run_with_deadline 25 "$devicectl_bin" device uninstall app --device "$PHONE_UDID" \
+                    "com.leeguoo.iphone-use.wda.${PHONE_BUNDLE_ID#com.leeguoo.iphone-use.runner.}" --timeout 20 \
+                    >/dev/null 2>&1 || true ;;
+        esac
     else
         status=$?
         fail "phone runner removal did not complete within the deadline (exit $status)"
@@ -1492,6 +1507,74 @@ preflight_phone_target() {
     esac
     return 0
 }
+
+# Before v0.20 the runner supervisor was com.leeguoo.iphone-use.wda[.<name>],
+# running setup-wda.sh, with wda-* state files. Carry an install that was
+# never upgraded over to the current names first, so everything below finds
+# and removes it the usual way.
+PRE_RENAME_RUNNER_LABEL="${IPU_RUNNER_LABEL%.runner*}.wda${IPU_RUNNER_LABEL#*.runner}"
+PRE_RENAME_RUNNER_PLIST="$LAUNCH_AGENTS_DIR/$PRE_RENAME_RUNNER_LABEL.plist"
+retire_pre_rename_runner() {
+    local stage key value new_key i file new_file
+    if [ "$DRY_RUN" = "1" ]; then
+        if path_exists "$PRE_RENAME_RUNNER_PLIST" || launchctl_snapshot "$PRE_RENAME_RUNNER_LABEL" >/dev/null; then
+            plan "stop $PRE_RENAME_RUNNER_LABEL and carry it over to $IPU_RUNNER_LABEL before removing it"
+        fi
+        return 0
+    fi
+    if launchctl_snapshot "$PRE_RENAME_RUNNER_LABEL" >/dev/null; then
+        if snapshot_has_exact_value "$(launchctl_snapshot "$PRE_RENAME_RUNNER_LABEL")" "$STATE_DIR/setup-wda.sh"; then
+            "$LAUNCHCTL_BIN" bootout "$GUI_DOMAIN/$PRE_RENAME_RUNNER_LABEL" 2>/dev/null || true
+            wait_job_gone "$PRE_RENAME_RUNNER_LABEL" || { fail "LaunchAgent did not stop: $PRE_RENAME_RUNNER_LABEL"; return 1; }
+            ok "stopped LaunchAgent $PRE_RENAME_RUNNER_LABEL"
+        else
+            fail "loaded job $GUI_DOMAIN/$PRE_RENAME_RUNNER_LABEL does not run $STATE_DIR/setup-wda.sh"
+            return 1
+        fi
+    fi
+    if [ -f "$PRE_RENAME_RUNNER_PLIST" ] && [ ! -L "$PRE_RENAME_RUNNER_PLIST" ]; then
+        if [ "$(plist_get "$PRE_RENAME_RUNNER_PLIST" Label)" != "$PRE_RENAME_RUNNER_LABEL" ] \
+            || [ "$(plist_get "$PRE_RENAME_RUNNER_PLIST" ProgramArguments:1)" != "$STATE_DIR/setup-wda.sh" ]; then
+            fail "refusing to claim LaunchAgent plist with unexpected Label/ProgramArguments: $PRE_RENAME_RUNNER_PLIST"
+            return 1
+        fi
+        if ! path_exists "$IPU_RUNNER_PLIST"; then
+            stage="$(mktemp "$LAUNCH_AGENTS_DIR/.$IPU_RUNNER_LABEL.migrate.XXXXXX")" || return 1
+            cp -p "$PRE_RENAME_RUNNER_PLIST" "$stage" || return 1
+            "$PLISTBUDDY_BIN" -c "Set :Label $IPU_RUNNER_LABEL" "$stage" >/dev/null || return 1
+            for key in $("$PLISTBUDDY_BIN" -c "Print :EnvironmentVariables" "$stage" 2>/dev/null \
+                | sed -n 's/^    \([A-Z0-9_][A-Z0-9_]*\) = .*/\1/p'); do
+                case "$key" in
+                    WDA_?*) new_key="IPU_RUNNER_${key#WDA_}" ;;
+                    IPHONE_USE_WDA_?*) new_key="IPHONE_USE_RUNNER_${key#IPHONE_USE_WDA_}" ;;
+                    *) continue ;;
+                esac
+                value="$("$PLISTBUDDY_BIN" -c "Print :EnvironmentVariables:$key" "$stage")"
+                "$PLISTBUDDY_BIN" -c "Delete :EnvironmentVariables:$key" "$stage" >/dev/null
+                "$PLISTBUDDY_BIN" -c "Add :EnvironmentVariables:$new_key string $value" "$stage" >/dev/null 2>&1 || true
+            done
+            "$PLISTBUDDY_BIN" -c "Set :ProgramArguments:1 $FIXED_SETUP" "$stage" >/dev/null || return 1
+            chmod 600 "$stage"
+            mv "$stage" "$IPU_RUNNER_PLIST" || return 1
+        fi
+        rm -f "$PRE_RENAME_RUNNER_PLIST"
+        ok "carried $PRE_RENAME_RUNNER_LABEL over to $IPU_RUNNER_LABEL"
+    fi
+    [ "$STATE_SAFE" = "1" ] && [ -d "$STATE_DIR" ] || return 0
+    rm -f "$STATE_DIR/setup-wda.sh"
+    for file in "$STATE_DIR"/wda-* "$STATE_DIR"/wda.lock "$STATE_DIR"/wda.lock.*; do
+        [ -e "$file" ] || continue
+        case "${file##*/}" in
+            wda-runner.log) new_file="$STATE_DIR/runner.log" ;;
+            wda-runner.pid) new_file="$STATE_DIR/runner.pid" ;;
+            wda-runner-product*) new_file="$STATE_DIR/runner-product${file##*/wda-runner-product}" ;;
+            wda.lock*) new_file="$STATE_DIR/runner.lock${file##*/wda.lock}" ;;
+            wda-*) new_file="$STATE_DIR/runner-${file##*/wda-}" ;;
+        esac
+        [ -e "$new_file" ] || mv "$file" "$new_file"
+    done
+}
+retire_pre_rename_runner || exit 2
 
 preflight_phone_target || exit 2
 

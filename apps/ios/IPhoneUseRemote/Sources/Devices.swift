@@ -235,7 +235,7 @@ enum DeliveryOutcome: Equatable, Sendable {
         }
         // Lifecycle refusals (released/reconnecting/releasing) and malformed
         // requests are turned away before anything is dispatched.
-        if status == 503, let error, ["released", "reconnecting", "releasing", "runner_not_configured"].contains(error) {
+        if status == 503, let error, ["released", "reconnecting", "releasing", "runner_not_configured", "wda_not_configured"].contains(error) {
             return .notSent(reason: error)
         }
         if status == 400 { return .notSent(reason: error ?? "bad_request") }

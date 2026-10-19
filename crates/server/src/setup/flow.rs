@@ -474,6 +474,7 @@ impl Setup {
             legacy_ios::clear_record(self.ctx.state_dir());
             self.wait_for_developer_services()?;
             self.wait_for_unlock()?;
+            self.remove_pre_rename_runner();
         }
         self.phase(
             "building",
@@ -691,6 +692,33 @@ impl Setup {
         self.ctx.bundle_id = signing.bundle.clone();
         self.signing = Some(signing);
         Ok(())
+    }
+
+    /// A phone set up before v0.20 still has the runner under its old,
+    /// WebDriverAgent-era identifier: the renamed one is a second app, and a
+    /// free team has three app slots. Remove the old one once per phone,
+    /// before the renamed runner is installed; best effort, never fatal.
+    fn remove_pre_rename_runner(&self) {
+        let Some(old) = checks::pre_rename_bundle(&self.ctx.bundle_id) else {
+            return;
+        };
+        let marker = self
+            .ctx
+            .state_dir()
+            .join(format!("pre-rename-runner-removed.{}", self.ctx.udid));
+        if self.ctx.udid.is_empty() || marker.exists() {
+            return;
+        }
+        let app = format!("{old}.xctrunner");
+        let out = sys::devicectl(
+            30,
+            &["device", "uninstall", "app", "--device", &self.ctx.udid, &app],
+        );
+        // devicectl answers this for an app that was never installed too.
+        if out.contains("App uninstalled") {
+            info(&format!("Pre-rename runner app is gone from the phone: {app}"));
+            let _ = std::fs::write(&marker, b"");
+        }
     }
 
     fn resolve_device(&mut self) -> Step {

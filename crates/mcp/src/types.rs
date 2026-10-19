@@ -10,6 +10,34 @@ use std::collections::BTreeMap;
 // Daemon → MCP types
 // ---------------------------------------------------------------------------
 
+/// Status fields as daemons before v0.20 name them (the runner was named
+/// after WebDriverAgent), paired with their current names. Newer daemons send
+/// both, so these cannot be serde aliases (a duplicate field is an error).
+const PRE_RENAME_STATUS_FIELDS: &[(&str, &str)] = &[
+    ("runner", "wda"),
+    ("runner_actionable", "wda_actionable"),
+    ("runner_locked", "wda_locked"),
+    ("runner_build", "wda_build"),
+    ("runner_died_reason", "wda_died_reason"),
+    ("runner_died_at", "wda_died_at"),
+    ("runner_rtt_ms", "wda_rtt_ms"),
+    ("managed_runner", "managed_wda"),
+    ("managed_runner_pending", "managed_wda_pending"),
+];
+
+/// Read a status from any daemon release: each pre-rename field fills its
+/// current name when that is missing, and is dropped either way.
+pub fn status_from_any_release(mut body: serde_json::Value) -> serde_json::Result<StatusResponse> {
+    if let Some(fields) = body.as_object_mut() {
+        for (name, old) in PRE_RENAME_STATUS_FIELDS {
+            if let Some(value) = fields.remove(*old) {
+                fields.entry(name.to_string()).or_insert(value);
+            }
+        }
+    }
+    serde_json::from_value(body)
+}
+
 /// Response body from `GET /agent/status`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StatusResponse {
@@ -18,7 +46,7 @@ pub struct StatusResponse {
     /// `mirror`). Optional for compatibility with older daemon releases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
-    /// WebDriverAgent's HTTP service is reachable. This alone does not mean it
+    /// The runner's HTTP service is reachable. This alone does not mean it
     /// can perform actions; use `runner_actionable` / `drivable` for that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<bool>,
@@ -142,6 +170,30 @@ impl InputMsg {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn status_reads_daemons_from_before_and_after_the_runner_rename() {
+        let old = status_from_any_release(json!({
+            "ok": true, "wda": true, "wda_actionable": false, "wda_locked": true,
+            "managed_wda": true
+        }))
+        .unwrap();
+        // A current daemon sends both spellings; that must not be a duplicate.
+        let both = status_from_any_release(json!({
+            "ok": true, "runner": true, "runner_actionable": false, "runner_locked": true,
+            "managed_runner": true, "wda": true, "wda_actionable": false, "wda_locked": true,
+            "managed_wda": true
+        }))
+        .unwrap();
+        for status in [old, both] {
+            assert_eq!(status.runner, Some(true));
+            assert_eq!(status.runner_actionable, Some(false));
+            assert_eq!(status.locked, Some(true));
+            assert_eq!(status.managed_runner, Some(true));
+            let out = serde_json::to_value(&status).unwrap();
+            assert!(out.get("wda").is_none() && out.get("managed_wda").is_none(), "{out}");
+        }
+    }
 
     #[test]
     fn status_keeps_lock_readiness() {

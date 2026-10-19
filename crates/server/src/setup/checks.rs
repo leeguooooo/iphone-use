@@ -409,9 +409,12 @@ pub fn resolve_signing(ctx: &Ctx) -> Result<Signing, String> {
     }
     let (bundle, derived) = if ctx.bundle_id.is_empty() {
         (
-            format!("com.leeguoo.iphone-use.runner.{}", team.to_ascii_lowercase()),
+            format!("{RUNNER_BUNDLE_PREFIX}{}", team.to_ascii_lowercase()),
             true,
         )
+    } else if let Some(rest) = ctx.bundle_id.strip_prefix(PRE_RENAME_BUNDLE_PREFIX) {
+        // Persisted before the runner stopped being named after WebDriverAgent.
+        (format!("{RUNNER_BUNDLE_PREFIX}{rest}"), true)
     } else {
         (ctx.bundle_id.clone(), false)
     };
@@ -425,6 +428,19 @@ pub fn resolve_signing(ctx: &Ctx) -> Result<Signing, String> {
         bundle,
         derived,
     })
+}
+
+/// The runner's bundle identifier is this prefix plus the team, lowercased.
+pub const RUNNER_BUNDLE_PREFIX: &str = "com.leeguoo.iphone-use.runner.";
+/// The same runner's identifier before v0.20, when it was named after
+/// WebDriverAgent; setup migrates it and removes that app from the phone.
+pub const PRE_RENAME_BUNDLE_PREFIX: &str = "com.leeguoo.iphone-use.wda.";
+
+/// The pre-rename identifier of the runner signed as `bundle`, if it had one.
+pub fn pre_rename_bundle(bundle: &str) -> Option<String> {
+    bundle
+        .strip_prefix(RUNNER_BUNDLE_PREFIX)
+        .map(|rest| format!("{PRE_RENAME_BUNDLE_PREFIX}{rest}"))
 }
 
 /// Interactive runs only: put Xcode in front so the person can add an

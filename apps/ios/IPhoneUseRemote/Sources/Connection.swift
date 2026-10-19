@@ -571,7 +571,7 @@ struct ConnectionPresentation: Equatable {
         case "ddi":
             title = String(localized: "Mac 正在准备设备")
             symbol = "hourglass"
-        case "runner":
+        case "runner", "wda":  // "wda": daemons before v0.20
             title = String(localized: "设备服务启动失败")
         default:
             title = String(localized: "需要处理一下")
