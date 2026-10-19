@@ -134,15 +134,16 @@ impl Config {
     }
 }
 
-/// First path segments the daemon serves itself: a base path starting with
-/// one would shadow those routes.
+/// Path segments the daemon serves itself: a base path starting with one
+/// would shadow those routes, and one ending with a page name would read as
+/// a pasted page address in the app.
 const ROUTE_SEGMENTS: &[&str] = &[
     "phone", "setup", "login", "logout", "pair", "browser", "control", "agent", "schedules",
 ];
 
 /// `"ix"`, `"/ix/"` → `"/ix"`; empty, `/`, anything outside
-/// `[A-Za-z0-9._~-]` segments, or a prefix that collides with the daemon's
-/// own routes (`/agent`, `/phone`, …) → `""` (no prefix).
+/// `[A-Za-z0-9._~-]` segments, or a segment named like one of the daemon's
+/// own routes (`/agent`, `/ix/phone`, …) → `""` (no prefix).
 pub fn normalize_base_path(raw: &str) -> String {
     let segments: Vec<&str> = raw.split('/').filter(|s| !s.is_empty()).collect();
     let valid = segments.iter().all(|seg| {
@@ -151,7 +152,9 @@ pub fn normalize_base_path(raw: &str) -> String {
             && *seg != "."
             && *seg != ".."
     });
-    if segments.is_empty() || !valid || ROUTE_SEGMENTS.contains(&segments[0]) {
+    // No segment may be a route name: clients drop a trailing page name
+    // (`…/ix/phone` → `…/ix`) from a pasted address.
+    if segments.is_empty() || !valid || segments.iter().any(|seg| ROUTE_SEGMENTS.contains(seg)) {
         if !segments.is_empty() {
             tracing::warn!("ignoring IPHONE_USE_BASE_PATH={raw:?}: not a usable path prefix");
         }
@@ -320,6 +323,8 @@ mod tests {
         assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/../x")]).base_path, "");
         assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/phone")]).base_path, "");
         assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "agent/x")]).base_path, "");
+        assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/ix/phone")]).base_path, "");
+        assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/lab/one")]).base_path, "/lab/one");
     }
 
     #[test]

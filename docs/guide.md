@@ -624,8 +624,8 @@ refuses while named instances remain.
 
 **Several phones on one domain.** Give each named instance a path with
 `IPHONE_USE_BASE_PATH=/lab` (set it when running `./install.sh --instance lab`; a
-reinstall keeps it; a path that starts with one of the daemon's own routes, such as
-`/agent` or `/phone`, is ignored). The daemon then serves its pages under `/lab` (`/lab/phone`,
+reinstall keeps it; a path with a segment named like one of the daemon's own routes, such as
+`/agent` or `/ix/phone`, is ignored). The daemon then serves its pages under `/lab` (`/lab/phone`,
 `/lab/login`), scopes its session cookie to that path, and sends unprefixed page
 requests there. The API also stays at the unprefixed paths, so MCP, the iOS app and
 LAN clients that know only the port keep working. Route the paths in the tunnel; the
