@@ -130,8 +130,15 @@ impl Config {
     }
 }
 
-/// `"ix"`, `"/ix/"` → `"/ix"`; empty, `/` or anything outside
-/// `[A-Za-z0-9._~-]` segments → `""` (no prefix).
+/// First path segments the daemon serves itself: a base path starting with
+/// one would shadow those routes.
+const ROUTE_SEGMENTS: &[&str] = &[
+    "phone", "setup", "login", "logout", "pair", "browser", "control", "agent", "schedules",
+];
+
+/// `"ix"`, `"/ix/"` → `"/ix"`; empty, `/`, anything outside
+/// `[A-Za-z0-9._~-]` segments, or a prefix that collides with the daemon's
+/// own routes (`/agent`, `/phone`, …) → `""` (no prefix).
 pub fn normalize_base_path(raw: &str) -> String {
     let segments: Vec<&str> = raw.split('/').filter(|s| !s.is_empty()).collect();
     let valid = segments.iter().all(|seg| {
@@ -140,7 +147,10 @@ pub fn normalize_base_path(raw: &str) -> String {
             && *seg != "."
             && *seg != ".."
     });
-    if segments.is_empty() || !valid {
+    if segments.is_empty() || !valid || ROUTE_SEGMENTS.contains(&segments[0]) {
+        if !segments.is_empty() {
+            tracing::warn!("ignoring IPHONE_USE_BASE_PATH={raw:?}: not a usable path prefix");
+        }
         return String::new();
     }
     format!("/{}", segments.join("/"))
@@ -304,6 +314,8 @@ mod tests {
         assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/")]).base_path, "");
         assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/a b")]).base_path, "");
         assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/../x")]).base_path, "");
+        assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "/phone")]).base_path, "");
+        assert_eq!(map_cfg(&[("IPHONE_USE_BASE_PATH", "agent/x")]).base_path, "");
     }
 
     #[test]
