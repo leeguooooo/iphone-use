@@ -554,9 +554,17 @@ pub fn other_instance_plists(ctx: &Ctx) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     for plist in plists {
         let label = sys::plist_top(&plist, "Label");
-        let name = if label == LABEL_PREFIX || label == format!("{LABEL_PREFIX}.runner") {
+        // `.wda` / `.wda.<name>`: the runner supervisor's label before v0.20,
+        // still on a Mac whose instance has not been upgraded.
+        let name = if label == LABEL_PREFIX
+            || label == format!("{LABEL_PREFIX}.runner")
+            || label == format!("{LABEL_PREFIX}.wda")
+        {
             "default".to_string()
-        } else if let Some(name) = label.strip_prefix(&format!("{LABEL_PREFIX}.runner.")) {
+        } else if let Some(name) = label
+            .strip_prefix(&format!("{LABEL_PREFIX}.runner."))
+            .or_else(|| label.strip_prefix(&format!("{LABEL_PREFIX}.wda.")))
+        {
             name.to_string()
         } else if let Some(name) = label.strip_prefix(&format!("{LABEL_PREFIX}.")) {
             name.to_string()

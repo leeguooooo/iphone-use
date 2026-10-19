@@ -307,8 +307,10 @@ remaining_named_instances() {
         [ -f "$plist" ] || continue
         label="$("$PLISTBUDDY_BIN" -c 'Print :Label' "$plist" 2>/dev/null || true)"
         case "$label" in
-            "$INSTANCE_LABEL_PREFIX.runner") continue ;;
+            "$INSTANCE_LABEL_PREFIX.runner"|"$INSTANCE_LABEL_PREFIX.wda") continue ;;
             "$INSTANCE_LABEL_PREFIX.runner."*) name="${label#"$INSTANCE_LABEL_PREFIX.runner."}" ;;
+            # The same supervisor before v0.20.
+            "$INSTANCE_LABEL_PREFIX.wda."*) name="${label#"$INSTANCE_LABEL_PREFIX.wda."}" ;;
             "$INSTANCE_LABEL_PREFIX."*) name="${label#"$INSTANCE_LABEL_PREFIX."}" ;;
             *) continue ;;
         esac
