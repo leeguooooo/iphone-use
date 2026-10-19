@@ -614,6 +614,9 @@ pub struct UpgradeReport {
     pub latest: Option<String>,
     pub update_available: bool,
     pub skills: Vec<SkillInstall>,
+    /// The daily auto-update job; set by the caller, which knows `$HOME`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<AutoUpdateState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -628,6 +631,7 @@ impl UpgradeReport {
                 latest: Some(display_version(tag).to_string()),
                 current,
                 skills,
+                auto_update: None,
                 error: None,
             },
             Err(error) => Self {
@@ -636,6 +640,7 @@ impl UpgradeReport {
                 latest: None,
                 update_available: false,
                 skills,
+                auto_update: None,
                 error: Some(format!("{error:#}")),
             },
         }
@@ -661,6 +666,9 @@ impl UpgradeReport {
     /// Human output for `--check`: the verdict, then one line per skill copy.
     pub fn write_text(&self, out: &mut dyn Write) -> std::io::Result<()> {
         writeln!(out, "{}", self.summary())?;
+        if let Some(auto_update) = &self.auto_update {
+            writeln!(out, "  {}", auto_update.summary())?;
+        }
         for skill in &self.skills {
             let channel = serde_json::to_value(skill.channel)
                 .ok()
@@ -673,6 +681,102 @@ impl UpgradeReport {
             )?;
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Automatic upgrades (scripts/auto-update.sh)
+// ---------------------------------------------------------------------------
+
+/// The daily auto-update job's label; install.sh turns it on by default.
+pub const AUTO_UPDATE_LABEL: &str = "com.leeguoo.iphone-use.autoupdate";
+
+/// One instance in the job's last upgrade (`~/.iphone-use/auto-update-last.json`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AutoUpdateInstance {
+    pub instance: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// The job's last upgrade. Written only when it upgraded something; `ok` is
+/// the version each restarted daemon reported, not the installer's exit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AutoUpdateRun {
+    /// Seconds since the epoch.
+    pub at: u64,
+    pub latest: String,
+    pub ok: bool,
+    pub instances: Vec<AutoUpdateInstance>,
+}
+
+/// `auto_update` on `/agent/status`, also shown by `doctor` and `upgrade --check`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AutoUpdateState {
+    /// The job is registered and the user has not turned it off.
+    pub enabled: bool,
+    pub last: Option<AutoUpdateRun>,
+}
+
+impl AutoUpdateState {
+    /// The job's files sit under `$HOME`, whatever IPHONE_USE_STATE_DIR says:
+    /// one job serves every instance on the Mac.
+    pub fn read_in(home: &Path) -> Self {
+        let plist = home
+            .join("Library/LaunchAgents")
+            .join(format!("{AUTO_UPDATE_LABEL}.plist"));
+        let state = home.join(".iphone-use");
+        Self {
+            enabled: plist.is_file() && !state.join("auto-update.disabled").exists(),
+            last: std::fs::read(state.join("auto-update-last.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
+        }
+    }
+
+    pub fn read() -> Option<Self> {
+        let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
+        Some(Self::read_in(Path::new(&home)))
+    }
+
+    /// One line about a last upgrade that did not land, if it did not.
+    pub fn failure(&self) -> Option<String> {
+        let last = self.last.as_ref().filter(|last| !last.ok)?;
+        let failed: Vec<String> = last
+            .instances
+            .iter()
+            .filter(|instance| !instance.ok)
+            .map(|instance| match &instance.error {
+                Some(error) => format!("{}: {error}", instance.instance),
+                None => instance.instance.clone(),
+            })
+            .collect();
+        Some(format!(
+            "the automatic upgrade to {} failed ({}); run: iphone-use upgrade",
+            display_version(&last.latest),
+            failed.join("; ")
+        ))
+    }
+
+    /// The `upgrade --check` / `doctor` line.
+    pub fn summary(&self) -> String {
+        if let Some(failure) = self.failure() {
+            return failure;
+        }
+        let state = if self.enabled {
+            "on (daily, when the phone is idle; off: ~/.iphone-use/auto-update.sh disable)"
+        } else {
+            "off (on: ~/.iphone-use/auto-update.sh enable)"
+        };
+        match &self.last {
+            Some(last) => format!(
+                "automatic upgrades: {state}; last upgraded to {}",
+                display_version(&last.latest)
+            ),
+            None => format!("automatic upgrades: {state}"),
+        }
     }
 }
 
@@ -695,6 +799,67 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         move |name| map.get(name).cloned()
+    }
+
+    // --- automatic upgrades -----------------------------------------------
+
+    fn auto_update_home(plist: bool, disabled: bool, last: Option<&str>) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("Library/LaunchAgents");
+        let state = home.path().join(".iphone-use");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        if plist {
+            std::fs::write(agents.join(format!("{AUTO_UPDATE_LABEL}.plist")), "").unwrap();
+        }
+        if disabled {
+            std::fs::write(state.join("auto-update.disabled"), "").unwrap();
+        }
+        if let Some(last) = last {
+            std::fs::write(state.join("auto-update-last.json"), last).unwrap();
+        }
+        home
+    }
+
+    #[test]
+    fn auto_update_is_on_only_while_registered_and_not_disabled() {
+        assert!(AutoUpdateState::read_in(auto_update_home(true, false, None).path()).enabled);
+        assert!(!AutoUpdateState::read_in(auto_update_home(true, true, None).path()).enabled);
+        assert!(!AutoUpdateState::read_in(auto_update_home(false, false, None).path()).enabled);
+    }
+
+    #[test]
+    fn a_failed_automatic_upgrade_is_reported() {
+        let home = auto_update_home(
+            true,
+            false,
+            Some(
+                r#"{"at": 1, "latest": "0.21.0", "ok": false, "instances": [
+                {"instance": "default", "from": "0.20.2", "to": "0.21.0", "ok": true, "error": null},
+                {"instance": "ix", "from": "0.20.2", "to": "0.20.2", "ok": false, "error": "still 0.20.2 after the install"}]}"#,
+            ),
+        );
+        let state = AutoUpdateState::read_in(home.path());
+        assert_eq!(state.last.as_ref().map(|last| last.instances.len()), Some(2));
+        let failure = state.failure().expect("a failure");
+        assert!(failure.contains("0.21.0"), "{failure}");
+        assert!(failure.contains("ix: still 0.20.2 after the install"), "{failure}");
+        assert!(!failure.contains("default"), "{failure}");
+        assert_eq!(state.summary(), failure);
+    }
+
+    #[test]
+    fn a_good_or_unreadable_last_upgrade_is_not_a_failure() {
+        let ok = auto_update_home(
+            true,
+            false,
+            Some(r#"{"at": 1, "latest": "0.21.0", "ok": true, "instances": []}"#),
+        );
+        let state = AutoUpdateState::read_in(ok.path());
+        assert!(state.failure().is_none());
+        assert!(state.summary().contains("last upgraded to 0.21.0"), "{}", state.summary());
+        let garbled = auto_update_home(true, false, Some("{half"));
+        assert_eq!(AutoUpdateState::read_in(garbled.path()).last, None);
     }
 
     // --- version comparison ------------------------------------------------

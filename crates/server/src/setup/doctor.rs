@@ -306,6 +306,15 @@ pub fn run(ctx: &Ctx) -> i32 {
             ));
         }
     }
+    // A failed automatic upgrade leaves the old daemon serving; say so rather
+    // than let it fail silently every night.
+    if let Some(auto_update) = crate::update::AutoUpdateState::read() {
+        if auto_update.failure().is_some() || !auto_update.enabled {
+            warn(&format!("~ {}", auto_update.summary()));
+        } else {
+            ok(&auto_update.summary());
+        }
+    }
     // Caveats that matter only when something above goes wrong.
     println!("{BOLD}Notes{RST}");
     println!("  • The device runner on the iPhone refuses any request not signed with its per-launch token (state dir:");

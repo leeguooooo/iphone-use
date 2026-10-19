@@ -492,7 +492,8 @@ fn upgrade(check_only: bool, json: bool) -> i32 {
         .as_deref()
         .map(update::find_skills)
         .unwrap_or_default();
-    let report = update::UpgradeReport::new(current, &fetched, skills);
+    let mut report = update::UpgradeReport::new(current, &fetched, skills);
+    report.auto_update = home.as_deref().map(update::AutoUpdateState::read_in);
 
     if json {
         println!(
