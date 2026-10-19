@@ -1827,7 +1827,15 @@ async fn pair_submit(
             .and_then(|v| v.to_str().ok())
             .unwrap_or(""),
     );
-    body["lan_urls"] = state.pairing.lan_urls(request_port).into();
+    // Under a base path the app must keep it on the LAN too: its login and
+    // pairing pages answer there, not at the bare port.
+    body["lan_urls"] = state
+        .pairing
+        .lan_urls(request_port)
+        .into_iter()
+        .map(|url| format!("{url}{}", state.base_path))
+        .collect::<Vec<_>>()
+        .into();
     // The app checks a LAN address with this before trusting it (see `pair_probe`).
     body["lan_key"] = base64::Engine::encode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,

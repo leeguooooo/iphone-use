@@ -25,9 +25,11 @@ struct PairLink: Equatable {
                   let base = DaemonClient.parse(address: u) else { return nil }
             return PairLink(base: base, code: code)
         case "http", "https":
-            guard components.path == "/pair", components.host != nil else { return nil }
+            // `/pair`, or `<base path>/pair` for a daemon under a prefix.
+            guard components.path == "/pair" || components.path.hasSuffix("/pair"),
+                  components.host != nil else { return nil }
             var root = components
-            root.path = ""
+            root.path = String(components.path.dropLast("/pair".count))
             root.queryItems = nil
             root.fragment = nil
             guard let rootURL = root.url, let base = DaemonClient.parse(address: rootURL.absoluteString) else {

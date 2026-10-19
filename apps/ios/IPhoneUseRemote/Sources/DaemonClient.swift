@@ -247,9 +247,12 @@ final class DaemonClient: @unchecked Sendable {
 
     /// The daemon's base URL for whatever a person typed or pasted:
     /// `192.168.1.11`, `192.168.1.11:44321`, `http://…`, `https://…`, a
-    /// tunnel host, `mac.local`, with or without a path or full-width
+    /// tunnel host, `mac.local`, with or without a page path or full-width
     /// punctuation. A bare LAN host gets the daemon's port 44321; a bare
     /// public name is a tunnel and gets https on 443.
+    /// The daemon's own pages, which a pasted address may end with.
+    private static let pageNames: Set<String> = ["phone", "login", "logout", "setup", "pair", "schedules"]
+
     static func parse(address: String) -> URL? {
         var text = AddressInput.clean(address)
         if text.isEmpty { return nil }
@@ -266,7 +269,12 @@ final class DaemonClient: @unchecked Sendable {
         } else if components.port == nil, scheme == "http" {
             components.port = 44321
         }
-        components.path = ""
+        // Keep a base path: several daemons can share one host, each under
+        // its own prefix (`…/ix`, IPHONE_USE_BASE_PATH). A page name pasted
+        // with the address (`…/phone`, `…/ix/login`) is not part of it.
+        var segments = components.path.split(separator: "/").map(String.init)
+        if let last = segments.last, pageNames.contains(last) { segments.removeLast() }
+        components.path = segments.isEmpty ? "" : "/" + segments.joined(separator: "/")
         components.query = nil
         components.fragment = nil
         components.user = nil
