@@ -57,8 +57,8 @@ env_or_existing IPHONE_USE_PORT")"
 [ "$got" = 1 ] || bad "an old environment variable did not override the plist (got $got)"
 ok_t "an old environment variable still overrides the plist"
 
-got="$(DAEMON_PLIST="$TMP/old.plist" bash -c "$DAEMON_ENV
-daemon_env")"
+got="$(bash -c "$DAEMON_ENV
+daemon_env '$TMP/old.plist'")"
 [ "$got" = "45432 old-token 0.0.0.0" ] || bad "auto-update read '$got' from an old plist"
 ok_t "auto-update reads port, token and host from an old plist"
 

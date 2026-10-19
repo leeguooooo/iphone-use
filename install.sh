@@ -124,6 +124,10 @@ while [ "$#" -gt 0 ]; do
             export IPHONE_USE_NO_SETUP=1
             shift
             ;;
+        --no-auto-update)
+            export IPHONE_USE_AUTO_UPDATE=0
+            shift
+            ;;
         -*)
             # Not an app path. The common way to get here is a caller that
             # kept options in one variable and expanded it unquoted under
@@ -137,7 +141,7 @@ while [ "$#" -gt 0 ]; do
                     printf '       zsh does not word-split $var: use ${=var}, an array, or write the options out.\n' >&2
                     ;;
                 *)
-                    printf "ERROR: unknown option '%s' (accepted: --instance NAME, --udid UDID, --port N, --simulator NAME, --no-setup, [app path]).\n" "$1" >&2
+                    printf "ERROR: unknown option '%s' (accepted: --instance NAME, --udid UDID, --port N, --simulator NAME, --no-setup, --no-auto-update, [app path]).\n" "$1" >&2
                     ;;
             esac
             exit 2
@@ -2282,6 +2286,11 @@ bootstrap_pinned_installer() {
         || ! /bin/bash -n "$helper_dir/scripts/setup-runner.sh"; then
         die "Release $ref contains a shell script that failed syntax validation."
     fi
+    # Optional: without it the inner installer leaves automatic upgrades as they are.
+    if ! curl -fsSL "$raw_base/scripts/auto-update.sh" -o "$helper_dir/scripts/auto-update.sh" \
+        || ! /bin/bash -n "$helper_dir/scripts/auto-update.sh"; then
+        rm -f "$helper_dir/scripts/auto-update.sh"
+    fi
     download_verified_release_app "$ref" "$asset_dir"
     # A release whose setup-runner.sh builds the device runner ships its sources
     # as a verified asset; the inner installer then finds them next to itself.
@@ -2434,6 +2443,74 @@ named_plist_env() {
     plist_env_get_from "$1" "$2"
 }
 
+# Our settings in a daemon plist, one name per line: everything spelled
+# IPHONE_USE_* or IPU_RUNNER_*. An upgrade carries forward the ones it does not
+# set itself, so a setting added by hand (or one this installer does not know)
+# survives the nightly auto-update. IPHONE_USE_BACKEND is left behind on
+# purpose (the mirror backend is gone), as are test hooks.
+plist_own_env_keys() {
+    [ -f "$1" ] || return 0
+    /usr/bin/plutil -extract EnvironmentVariables xml1 -o - "$1" 2>/dev/null \
+        | sed -n 's:^[[:space:]]*<key>\([A-Z][A-Z0-9_]*\)</key>.*:\1:p' \
+        | while IFS= read -r key; do
+            case "$key" in
+                IPHONE_USE_BACKEND|IPHONE_USE_INTERNAL_TEST_*|IPHONE_USE_WDA_*) ;;
+                IPHONE_USE_?*|IPU_RUNNER_?*) printf '%s\n' "$key" ;;
+            esac
+        done
+}
+
+# The daily auto-update job (scripts/auto-update.sh): on by default, so installs
+# that predate a fix still get it. Off when the user said so, persistently
+# (`auto-update.sh disable`, --no-auto-update, IPHONE_USE_AUTO_UPDATE=0), and
+# left alone in CI or with the update check turned off. Never fails the install.
+setup_auto_update() {
+    local src="" dl="" marker="$HOME/.iphone-use/auto-update.disabled"
+    # Running under the job: reloading it would kill this very upgrade, and the
+    # job refreshes its own script once the upgrade lands.
+    if [ "${IPHONE_USE_AUTO_UPDATE_JOB:-}" = 1 ] || [ "${IPHONE_USE_AUTO_UPDATE:-}" = 1 ]; then
+        return 0
+    fi
+    if [ -n "${CI:-}" ] || [ -n "${IPHONE_USE_NO_UPDATE_CHECK:-}" ] || [ -n "${USE_NO_UPDATE_CHECK:-}" ]; then
+        info "Automatic upgrades: left as they are (CI or the update check is off)."
+        return 0
+    fi
+    if [ "$SCRIPT_IS_LOCAL" = "1" ] && [ -f "$SCRIPT_DIR/scripts/auto-update.sh" ]; then
+        src="$SCRIPT_DIR/scripts/auto-update.sh"
+    elif [ -n "${RELEASE_COMMIT:-}" ]; then
+        dl="$(mktemp)"
+        if curl -fsSL "https://raw.githubusercontent.com/$REPO/$RELEASE_COMMIT/scripts/auto-update.sh" -o "$dl" \
+            && /bin/bash -n "$dl"; then
+            src="$dl"
+        fi
+    fi
+    if [ -z "$src" ]; then
+        warn "Automatic upgrades: this release ships no auto-update.sh; left as they are."
+        [ -z "$dl" ] || rm -f "$dl"
+        return 0
+    fi
+    case "${IPHONE_USE_AUTO_UPDATE:-}" in
+        0|false|no|off)
+            if env -u IPHONE_USE_STATE_DIR /bin/bash "$src" disable >/dev/null 2>&1; then
+                info "Automatic upgrades: off (turn on with: ~/.iphone-use/auto-update.sh enable)."
+            else
+                warn "Automatic upgrades: could not turn them off; run: $src disable"
+            fi
+            ;;
+        *)
+            if [ -f "$marker" ]; then
+                info "Automatic upgrades: off ($marker; turn on with: ~/.iphone-use/auto-update.sh enable)."
+            elif env -u IPHONE_USE_STATE_DIR /bin/bash "$src" enable >/dev/null 2>&1; then
+                ok "Automatic upgrades: on, daily at 04:30 when the phone is idle (off: ~/.iphone-use/auto-update.sh disable)."
+            else
+                warn "Automatic upgrades could not be turned on; see $LOG_DIR/auto-update.log."
+            fi
+            ;;
+    esac
+    [ -z "$dl" ] || rm -f "$dl"
+    return 0
+}
+
 install_named_instance() {
     local app_src="${1:-$INSTALL_DIR/$APP_NAME}"
     local setup_src="$SCRIPT_DIR/scripts/setup-runner.sh"
@@ -2574,6 +2651,10 @@ install_named_instance() {
             fi
         done
     fi
+    for key in $(plist_own_env_keys "$plist"); do
+        case " ${env_keys[*]-} " in *" $key "*) continue ;; esac
+        add_env "$key" "$(named_plist_env "$plist" "$key")"
+    done
 
     info "Installing instance $INSTANCE_NAME for iPhone $udid"
     for value in "$HOME/.iphone-use" "$HOME/.iphone-use/instances" "$state_dir" "$runtime" "$state_dir/logs" "$state_dir/tmp"; do
@@ -2706,6 +2787,8 @@ install_named_instance() {
         echo ""
         info "Set up or repair this phone with: iphone-use setup --instance $INSTANCE_NAME"
     fi
+    echo ""
+    setup_auto_update
     exit 0
 }
 
@@ -3320,6 +3403,7 @@ append_plist_env IPHONE_USE_RUNNER_MJPEG_URL "$IPU_RUNNER_MJPEG_URL"
 append_plist_env IPHONE_USE_RUNNER_MANAGED "$IPU_RUNNER_MANAGED"
 for ENV_KEY in \
     IPHONE_USE_AGENT_TOKEN \
+    IPHONE_USE_BASE_PATH \
     IPHONE_USE_NO_UPDATE_CHECK \
     IPHONE_USE_SECRET \
     IPHONE_USE_SESSION_TTL \
@@ -3370,6 +3454,12 @@ else
         fi
     done
 fi
+
+# The rest of our settings in the previous plist, as they were.
+for ENV_KEY in $(plist_own_env_keys "$PLIST_DST"); do
+    case "$PLIST_ENV_BLOCK" in *"<key>${ENV_KEY}</key>"*) continue ;; esac
+    append_plist_env "$ENV_KEY" "$(plist_env_get_from "$PLIST_DST" "$ENV_KEY")"
+done
 
 # ── Step 7 — Write the LaunchAgent plist ─────────────────────────────────────
 mkdir -p "$HOME/Library/LaunchAgents"
@@ -3741,6 +3831,7 @@ info "Other MCP clients: command $DEST/$MCP_BINARY_INSIDE_APP (no env needed on 
 echo ""
 printf '%b━━━ Upgrade ━━━%b\n' "$BOLD" "$RESET"
 info "Check: iphone-use upgrade --check    Upgrade: iphone-use upgrade"
+setup_auto_update
 
 # ── Step 10 — Print current status ───────────────────────────────────────────
 if command -v curl >/dev/null 2>&1 \

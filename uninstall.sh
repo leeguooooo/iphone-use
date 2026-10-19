@@ -1319,6 +1319,12 @@ state_unknown_entries() {
                     printf '%s\n' "$entry"
                 fi
                 ;;
+            auto-update.lock)
+                # A run's lock directory, left behind if the run was killed.
+                if [ -L "$entry" ] || [ ! -d "$entry" ]; then
+                    printf '%s\n' "$entry"
+                fi
+                ;;
             runner)
                 # The installer-owned runner sources live in the default
                 # instance's state directory only.
@@ -1355,7 +1361,9 @@ state_unknown_entries() {
             runner-xcode-compat.xcconfig|runner-relay.log.?*|\
             .runner-product.*|runner-retry-state.v1.new.*|\
             runner-xcode-compat.xcconfig.new.*|runner-setup-status.json.?*|\
-            .lsof-error.*|.runner-mjpeg-probe.*)
+            .lsof-error.*|.runner-mjpeg-probe.*|\
+            auto-update.sh|auto-update.sh.*|auto-update.disabled|\
+            auto-update-last.json|.auto-update-last.*)
                 if [ -L "$entry" ] || [ ! -f "$entry" ]; then
                     printf '%s\n' "$entry"
                 fi
@@ -1620,6 +1628,39 @@ LEGACY_RUNTIME_CLEAN=1
 stop_owned_job daemon "$DAEMON_LABEL" "$DAEMON_PLIST" || DAEMON_RUNTIME_CLEAN=0
 if [ "$INSTANCE_NAME" = default ]; then
     stop_owned_job legacy "$LEGACY_LABEL" "$LEGACY_PLIST" || LEGACY_RUNTIME_CLEAN=0
+fi
+
+# The daily auto-update job (scripts/auto-update.sh) serves every instance, so
+# it goes with the default one. Ours only when it runs ~/.iphone-use/auto-update.sh.
+if [ "$INSTANCE_NAME" = default ]; then
+    AUTO_UPDATE_LABEL="com.leeguoo.iphone-use.autoupdate"
+    AUTO_UPDATE_PLIST="$HOME/Library/LaunchAgents/$AUTO_UPDATE_LABEL.plist"
+    if [ -f "$AUTO_UPDATE_PLIST" ] && [ ! -L "$AUTO_UPDATE_PLIST" ]; then
+        if [ "$("$PLISTBUDDY_BIN" -c 'Print :Label' "$AUTO_UPDATE_PLIST" 2>/dev/null)" = "$AUTO_UPDATE_LABEL" ] \
+            && [ "$("$PLISTBUDDY_BIN" -c 'Print :ProgramArguments:1' "$AUTO_UPDATE_PLIST" 2>/dev/null)" = "$HOME/.iphone-use/auto-update.sh" ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                plan "launchctl bootout $GUI_DOMAIN/$AUTO_UPDATE_LABEL; remove $AUTO_UPDATE_PLIST"
+            else
+                "$LAUNCHCTL_BIN" bootout "$GUI_DOMAIN/$AUTO_UPDATE_LABEL" 2>/dev/null || true
+                rm -f "$AUTO_UPDATE_PLIST" && ok "removed the auto-update job $AUTO_UPDATE_LABEL"
+            fi
+        else
+            warn "preserving $AUTO_UPDATE_PLIST: it does not run $HOME/.iphone-use/auto-update.sh"
+        fi
+    fi
+    if [ "$STATE_SAFE" = "1" ] && [ -d "$STATE_DIR" ]; then
+        for AUTO_UPDATE_FILE in auto-update.sh auto-update.disabled auto-update-last.json; do
+            [ ! -f "$STATE_DIR/$AUTO_UPDATE_FILE" ] \
+                || remove_file "$STATE_DIR/$AUTO_UPDATE_FILE" "$STATE_DIR/$AUTO_UPDATE_FILE"
+        done
+        if [ -d "$STATE_DIR/auto-update.lock" ] && [ ! -L "$STATE_DIR/auto-update.lock" ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                plan "remove empty directory $STATE_DIR/auto-update.lock"
+            else
+                rmdir "$STATE_DIR/auto-update.lock" 2>/dev/null || true
+            fi
+        fi
+    fi
 fi
 
 info "2/5 stopping the product-owned runner supervisor and PID-verified processes"
