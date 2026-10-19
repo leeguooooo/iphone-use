@@ -93,6 +93,9 @@ pub struct Setup {
     /// This run builds only because an upgrade changed the product
     /// ([`runner::upgrade_rebuild`]).
     upgrade_rebuild: bool,
+    /// The control relay reaches the phone through CoreDevice's Wi-Fi
+    /// tunnel, not usbmuxd (only for what the log calls it).
+    relay_over_tunnel: bool,
 }
 
 /// A phone on the legacy (iOS 15/16) path: see `legacy_ios`.
@@ -168,6 +171,7 @@ impl Setup {
             embed: None,
             prebuild_only: false,
             upgrade_rebuild: false,
+            relay_over_tunnel: false,
         }
     }
 
@@ -2252,7 +2256,7 @@ impl Setup {
                     "--device-port".into(),
                     device_port.to_string(),
                 ];
-                let mut desc = format!("USB relay (usbmuxd) on 127.0.0.1:{local}");
+                let mut desc = native_relay_desc(local, self.relay_over_tunnel);
                 if let Some(ip) = self.legacy_lan_host() {
                     let why = if self.legacy_ios.as_ref().is_some_and(|l| l.auth_enforced) {
                         "signed requests only"
@@ -2360,6 +2364,7 @@ impl Setup {
         // address behind IPU_RUNNER_ALLOW_LAN=1).
         let legacy = self.legacy_ios.is_some();
         let wifi_tunnel = !legacy && !target_is_usb && checks::wifi_tunnel(&self.ctx.udid);
+        self.relay_over_tunnel = wifi_tunnel;
         if wifi_tunnel {
             ok("the iPhone is off USB; relaying through its CoreDevice Wi-Fi tunnel");
         }
@@ -2482,11 +2487,50 @@ impl Setup {
         // failed round that relaunches the runner.
         spawn_video_first_frame_check(mjpeg_port, mjpeg_log.clone(), self.ctx.runner_auth());
         let target_url = format!("http://127.0.0.1:{runner_port}");
-        if !sys::runner_ok(
-            &format!("{target_url}/status"),
-            Duration::from_secs(5),
-            &self.ctx.runner_auth(),
-        ) {
+        // The runner already answered on the phone; a relay that cannot reach
+        // it yet is usually the tunnel switching paths (usbmuxd <-> network).
+        // Probe again and restart the relay once before giving up: failing
+        // here relaunches the runner, and on a passcode phone every launch
+        // needs a person to type the passcode.
+        let status_url = format!("{target_url}/status");
+        let auth = self.ctx.runner_auth();
+        let mut failures = 0u32;
+        let answered = recover_relay(
+            || {
+                let answered = sys::runner_ok(&status_url, Duration::from_secs(5), &auth);
+                if !answered {
+                    failures += 1;
+                    if failures == 1 {
+                        warn("the device runner is serving but did not answer through the relay yet; retrying (the tunnel may be switching between USB and network)");
+                    }
+                }
+                Ok(answered)
+            },
+            || {
+                if !pid::stop(
+                    &self.ctx,
+                    &self.ctx.relay_pid_file,
+                    &self.legacy.relay,
+                    Role::Relay,
+                ) || !pid::assert_port_free(&self.ctx, runner_port)
+                {
+                    return Ok(false);
+                }
+                let (relay_pid, desc) = self.start_relay(
+                    Role::Relay,
+                    runner_port,
+                    device_port,
+                    &phone_ip,
+                    &tool,
+                    &relay_pid_file,
+                    &relay_log,
+                )?;
+                ok(&format!("Restarted the control relay {relay_pid}: {desc}"));
+                Ok(true)
+            },
+            proc::sleep,
+        )?;
+        if !answered {
             return die(format!(
                 "relay up but the device runner is not answering through it — check {}",
                 relay_log.display()
@@ -3531,6 +3575,88 @@ fn handoff_daemon_ready(body: &[u8], expected: bool) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_relay_that_answers_late_is_kept_and_the_runner_is_not_relaunched() {
+        use std::cell::Cell;
+        // Answers on the third probe: after one relay restart, no failure.
+        let (probes, restarts, slept) = (Cell::new(0), Cell::new(0), Cell::new(0u64));
+        let answered = super::recover_relay(
+            || {
+                probes.set(probes.get() + 1);
+                Ok(probes.get() >= 3)
+            },
+            || {
+                restarts.set(restarts.get() + 1);
+                Ok(true)
+            },
+            |wait| {
+                slept.set(slept.get() + wait.as_secs());
+                Ok(())
+            },
+        );
+        assert_eq!(answered.ok(), Some(true));
+        assert_eq!((probes.get(), restarts.get(), slept.get()), (3, 1, 5));
+
+        // A first answer needs no wait and no restart.
+        let restarts = Cell::new(0);
+        let answered = super::recover_relay(
+            || Ok(true),
+            || {
+                restarts.set(restarts.get() + 1);
+                Ok(true)
+            },
+            |_| panic!("no wait"),
+        );
+        assert_eq!(answered.ok(), Some(true));
+        assert_eq!(restarts.get(), 0);
+    }
+
+    #[test]
+    fn a_relay_that_never_answers_gives_up_within_the_window() {
+        use std::cell::Cell;
+        let (probes, restarts, slept) = (Cell::new(0), Cell::new(0), Cell::new(0u64));
+        let answered = super::recover_relay(
+            || {
+                probes.set(probes.get() + 1);
+                Ok(false)
+            },
+            || {
+                restarts.set(restarts.get() + 1);
+                Ok(true)
+            },
+            |wait| {
+                slept.set(slept.get() + wait.as_secs());
+                Ok(())
+            },
+        );
+        assert_eq!(answered.ok(), Some(false));
+        assert_eq!((probes.get(), restarts.get()), (5, 1), "one restart, bounded probes");
+        assert!(slept.get() <= 20, "bounded backoff: {}s", slept.get());
+
+        // A relay that cannot be replaced safely ends the attempt.
+        let probes = Cell::new(0);
+        let answered = super::recover_relay(
+            || {
+                probes.set(probes.get() + 1);
+                Ok(false)
+            },
+            || Ok(false),
+            |_| Ok(()),
+        );
+        assert_eq!(answered.ok(), Some(false));
+        assert_eq!(probes.get(), 2);
+    }
+
+    #[test]
+    fn the_relay_says_which_path_it_takes() {
+        assert_eq!(
+            super::native_relay_desc(8100, false),
+            "USB relay (usbmuxd) on 127.0.0.1:8100"
+        );
+        let tunnel = super::native_relay_desc(8100, true);
+        assert!(tunnel.contains("Wi-Fi tunnel") && !tunnel.contains("usbmuxd"), "{tunnel}");
+    }
+
+    #[test]
     fn handoff_requires_the_linked_daemon_to_be_serving() {
         use super::handoff_daemon_ready as ready;
         assert!(ready(
@@ -4519,6 +4645,50 @@ fn xml_escape(text: &str) -> String {
 
 /// Warn, on a background thread, when the video relay has not delivered its
 /// first byte within 8 s. Never fails setup: control is what agents need.
+/// What the control relay is, for the log: the native relay follows the
+/// phone over usbmuxd on the cable, or over CoreDevice's Wi-Fi tunnel off it.
+fn native_relay_desc(local: u16, over_tunnel: bool) -> String {
+    if over_tunnel {
+        format!("Wi-Fi tunnel relay (CoreDevice) on 127.0.0.1:{local}")
+    } else {
+        format!("USB relay (usbmuxd) on 127.0.0.1:{local}")
+    }
+}
+
+/// Pauses between control-relay probes after a failure (about 15 s in all,
+/// on top of the probes' own 5 s limits) …
+const RELAY_RETRY_PAUSES: [Duration; 4] = [
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+];
+/// … and after how many failed probes the relay is restarted, once.
+const RELAY_RESTART_AFTER: usize = 2;
+
+/// Whether the runner answers through the control relay, probing again on
+/// the schedule above and restarting the relay once. `restart` returning
+/// false (the relay could not be replaced safely) ends the attempt.
+fn recover_relay(
+    mut probe: impl FnMut() -> Step<bool>,
+    mut restart: impl FnMut() -> Step<bool>,
+    mut pause: impl FnMut(Duration) -> Step,
+) -> Step<bool> {
+    if probe()? {
+        return Ok(true);
+    }
+    for (index, wait) in RELAY_RETRY_PAUSES.iter().enumerate() {
+        pause(*wait)?;
+        if index + 1 == RELAY_RESTART_AFTER && !restart()? {
+            return Ok(false);
+        }
+        if probe()? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn spawn_video_first_frame_check(
     mjpeg_port: u16,
     mjpeg_log: PathBuf,
