@@ -220,3 +220,119 @@ fn scroll_find_gives_up_after_its_swipe_budget_with_near_misses() {
         assert_eq!(json["candidates"][0]["label"], "通用设置", "{json}");
     });
 }
+
+/// [`list_runner`] whose `fail_at`-th swipe (1-based) still moves the list but
+/// answers 500, the way a gesture that timed out on the runner side can land.
+fn flaky_swipe_runner(
+    pages: Vec<String>,
+    swipes: Arc<AtomicUsize>,
+    fail_at: usize,
+) -> support::MockRunner {
+    mock_runner(move |request, _| {
+        let line = request.lines().next().unwrap_or("");
+        let reply = |s: String| Some((Duration::ZERO, s));
+        if line.starts_with("POST /session ") {
+            return reply(SESSION.to_string());
+        }
+        if line.contains("/source") {
+            let at = swipes.load(Ordering::SeqCst).min(pages.len() - 1);
+            return reply(pages[at].clone());
+        }
+        if line.starts_with("POST /session/SESSION/actions") {
+            let n = swipes.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == fail_at {
+                let body = r#"{"value":{"error":"unknown error","message":"gesture timed out"}}"#;
+                return reply(format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ));
+            }
+        }
+        if line.contains("/window/size") || line.contains("/window/rect") {
+            return reply(r#"{"value":{"width":390,"height":844}}"#.to_string());
+        }
+        reply(r#"{"value":null}"#.to_string())
+    })
+}
+
+/// Hardware, Photos › 相簿: the third swipe "failed", the call answered
+/// not_found, and the next read showed the target on screen. A failed swipe
+/// is followed by one more read, judged like any other.
+#[test]
+fn scroll_find_reads_again_after_a_failed_swipe_and_finds_the_row() {
+    block(async {
+        let swipes = Arc::new(AtomicUsize::new(0));
+        let pages = vec![
+            screen(&["A", "B"], ""),
+            screen(&["C", "D"], ""),
+            screen(&["E", "F"], ""),
+            screen(&["G", "截图整理相簿，9个资源。"], ""),
+        ];
+        let runner = flaky_swipe_runner(pages, swipes.clone(), 3);
+        let state = build_state_with_runner(runner.url());
+        let (status, json) = post(
+            &state,
+            "/agent/scroll_find",
+            r#"{"label":"截图整理相簿，9个资源。","max_swipes":5}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["found"], true, "{json}");
+        assert_eq!(json["stop_reason"], "found", "{json}");
+        assert_eq!(json["target"]["label"], "截图整理相簿，9个资源。", "{json}");
+        assert!(json["stop_error"].is_string(), "the failure is still reported: {json}");
+        assert!(json["snapshot"].is_string(), "the read after the swipe is the screen: {json}");
+        assert_eq!(swipes.load(Ordering::SeqCst), 3, "no swipe after the failed one");
+    });
+}
+
+/// A failed swipe whose re-read still lacks the label stops as swipe_failed,
+/// but the re-read is current, so it comes with a snapshot and candidates.
+#[test]
+fn scroll_find_after_a_failed_swipe_reports_the_screen_it_left() {
+    block(async {
+        let swipes = Arc::new(AtomicUsize::new(0));
+        let pages = vec![screen(&["A"], ""), screen(&["目标相簿"], "")];
+        let runner = flaky_swipe_runner(pages, swipes.clone(), 1);
+        let state = build_state_with_runner(runner.url());
+        let (status, json) = post(
+            &state,
+            "/agent/scroll_find",
+            r#"{"label":"目标","max_swipes":3}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["found"], false, "{json}");
+        assert_eq!(json["stop_reason"], "swipe_failed", "{json}");
+        assert_eq!(json["candidates"][0]["label"], "目标相簿", "{json}");
+        assert!(json["snapshot"].is_string(), "{json}");
+    });
+}
+
+/// A label that is only part of a row's label: a near miss the swipes carried
+/// off the screen is still named, with the page it was seen on.
+#[test]
+fn scroll_find_names_near_misses_scrolled_off_the_screen() {
+    block(async {
+        let swipes = Arc::new(AtomicUsize::new(0));
+        let pages = vec![
+            screen(&["最近项目"], ""),
+            screen(&["截图整理相簿，9个资源。"], ""),
+            screen(&["其他"], ""),
+        ];
+        let runner = list_runner(pages, swipes.clone());
+        let state = build_state_with_runner(runner.url());
+        let (status, json) = post(
+            &state,
+            "/agent/scroll_find",
+            r#"{"label":"截图整理","max_swipes":2}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["found"], false, "{json}");
+        assert_eq!(json["stop_reason"], "not_found", "{json}");
+        assert_eq!(json["candidates"].as_array().unwrap().len(), 0, "{json}");
+        assert_eq!(json["seen_earlier"][0]["label"], "截图整理相簿，9个资源。", "{json}");
+        assert_eq!(json["seen_earlier"][0]["page"], 2, "{json}");
+    });
+}

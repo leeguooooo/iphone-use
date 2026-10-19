@@ -798,6 +798,17 @@ pub fn found_label(json: &Value) -> Option<String> {
         out.push("candidates:".to_string());
         out.extend(candidates.iter().map(|row| format!("  {}", found_row(row))));
     }
+    if let Some(seen) = json.get("seen_earlier").and_then(Value::as_array).filter(|s| !s.is_empty()) {
+        out.push("seen earlier, scrolled off:".to_string());
+        out.extend(seen.iter().map(|row| {
+            format!(
+                "  page {} {} \"{}\"",
+                text(row, "page").unwrap_or_else(|| "?".to_string()),
+                text(row, "kind").unwrap_or_default(),
+                clip(&text(row, "label").unwrap_or_default())
+            )
+        }));
+    }
     if let Some(hint) = text(json, "hint") {
         out.push(format!("hint: {hint}"));
     }
@@ -879,6 +890,17 @@ mod tests {
         let text = found_label(&body).unwrap();
         assert!(text.starts_with("found=false stop_reason=ambiguous swipes=0 error=ambiguous_element_label"), "{text}");
         assert!(text.contains("  [3] StaticText \"\" @16,100,300,40"), "{text}");
+    }
+
+    #[test]
+    fn a_find_miss_names_near_misses_a_swipe_carried_off() {
+        let body = json!({
+            "ok": false, "found": false, "stop_reason": "not_found", "swipes": 2,
+            "error": "element_not_found", "candidates": [],
+            "seen_earlier": [{"kind": "Button", "label": "截图整理相簿，9个资源。", "page": 2}]
+        });
+        let text = found_label(&body).unwrap();
+        assert!(text.contains("seen earlier, scrolled off:\n  page 2 Button \"截图整理相簿，9个资源。\""), "{text}");
     }
 
     #[test]
