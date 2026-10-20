@@ -2791,7 +2791,7 @@ async fn agent_status(
             && !runner_actionable
             && !releasing
             && !reconnecting
-            && !(runner && runner_locked == "true"),
+            && (!runner || runner_locked != "true"),
         setup_status.as_ref(),
         || setup_in_flight(&crate::instance::current().state_dir),
     );
