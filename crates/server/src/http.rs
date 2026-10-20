@@ -18973,8 +18973,10 @@ async fn agent_screenshot(
     let count = marks.len();
     let snapshot = element_snapshot_id(&rows).ok();
     if let Some(snapshot) = &snapshot {
+        // Not the owner's delta baseline: the caller gets the picture, not
+        // these rows, so a later batch diffed against them could not be
+        // rebuilt into a screen.
         remember_element_snapshot(&state, snapshot, &Arc::new(rows));
-        note_owner_snapshot(&state, &headers, snapshot);
     }
     let source = png.clone();
     let drawn = tokio::task::spawn_blocking(move || {
