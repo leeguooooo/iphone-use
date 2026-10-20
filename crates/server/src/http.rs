@@ -2783,9 +2783,15 @@ async fn agent_status(
     // A setup attempt bringing the runner up right now (the supervisor's
     // rebuild after an idle release, an upgrade rebuild): it is a reconnect
     // in progress whatever the daemon's own lifecycle says, or a person sees
-    // "paused after inactivity" through minutes of building.
+    // "paused after inactivity" through minutes of building. A runner that
+    // answers but reports the phone locked is waiting on a person, not on
+    // setup: the unlock advice below must win.
     let setup_working = setup_working(
-        state.managed_runner && !runner_actionable && !releasing && !reconnecting,
+        state.managed_runner
+            && !runner_actionable
+            && !releasing
+            && !reconnecting
+            && !(runner && runner_locked == "true"),
         setup_status.as_ref(),
         || setup_in_flight(&crate::instance::current().state_dir),
     );

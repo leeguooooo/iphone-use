@@ -85,7 +85,23 @@ case "$SETTLE_SECS" in ''|*[!0-9]*) SETTLE_SECS=60 ;; esac
 PREBUILD_TIMEOUT="${AUTO_UPDATE_PREBUILD_TIMEOUT:-1800}"
 case "$PREBUILD_TIMEOUT" in ''|*[!0-9]*) PREBUILD_TIMEOUT=1800 ;; esac
 
-log() { mkdir -p "$LOG_DIR"; printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "$LOG" >&2; }
+# Under launchd stderr already is $LOG; teeing there too wrote every line twice.
+# (`-ef` cannot tell: /dev/fd/2 stats on its own device, so compare inodes.)
+stderr_is_log() {
+    local fd file
+    fd="$(stat -L -f %i /dev/fd/3 3>&2 2>/dev/null)" || return 1
+    file="$(stat -f %i "$LOG" 2>/dev/null)" || return 1
+    [ -n "$fd" ] && [ "$fd" = "$file" ]
+}
+log() {
+    mkdir -p "$LOG_DIR"
+    local line; line="$(date '+%Y-%m-%dT%H:%M:%S%z') $*"
+    if stderr_is_log; then
+        printf '%s\n' "$line" >&2
+    else
+        printf '%s\n' "$line" | tee -a "$LOG" >&2
+    fi
+}
 die() { log "ERROR: $*"; exit 1; }
 
 # --- daemon access ----------------------------------------------------------
@@ -243,6 +259,13 @@ prebuild_runner() {  # prebuild_runner <instance>
         if [ "$waited" -ge "$PREBUILD_TIMEOUT" ]; then
             kill -TERM "$pid" 2>/dev/null || true
             log "prebuild[$1]: stopped after ${PREBUILD_TIMEOUT}s; the next connect builds"
+            # TERM is a request; the run holds auto-update.lock, so do not
+            # wait on a build that ignores it.
+            waited=0
+            while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
+                sleep 1; waited=$((waited + 1))
+            done
+            kill -KILL "$pid" 2>/dev/null || true
             break
         fi
         sleep 1; waited=$((waited + 1))

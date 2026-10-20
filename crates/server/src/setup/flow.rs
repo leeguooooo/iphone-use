@@ -1415,8 +1415,10 @@ impl Setup {
     fn build_lock(&mut self) -> Step<runner::BuildLock> {
         let mut announced = false;
         loop {
-            if let Some(lock) = runner::try_build_lock(&self.ctx) {
-                return Ok(lock);
+            match runner::try_build_lock(&self.ctx) {
+                Ok(Some(lock)) => return Ok(lock),
+                Ok(None) => {}
+                Err(why) => return die(why),
             }
             if !announced {
                 announced = true;
@@ -4093,8 +4095,10 @@ impl Setup {
             sdk.as_deref(),
             &deployment_override,
         );
-        let Some(_lock) = runner::try_build_lock(&self.ctx) else {
-            return skip("another runner build is running");
+        let _lock = match runner::try_build_lock(&self.ctx) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return skip("another runner build is running"),
+            Err(why) => return skip(&why),
         };
         if runner::cache_read(&self.ctx, &key).is_some() {
             ok("Runner product is already current; nothing to prebuild");

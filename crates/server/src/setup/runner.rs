@@ -491,27 +491,35 @@ pub struct BuildLock {
     _file: std::fs::File,
 }
 
-/// Take the build lock without waiting; `None` while another process holds
-/// it (or the lock file is unsafe to use).
-pub fn try_build_lock(ctx: &Ctx) -> Option<BuildLock> {
+/// Take the build lock without waiting: `Ok(None)` while another process
+/// holds it, `Err` when the lock file itself is unusable (a symlink, not a
+/// regular file, another user's) — waiting would never end then.
+pub fn try_build_lock(ctx: &Ctx) -> Result<Option<BuildLock>, String> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let path = ctx.state_dir().join("runner-build.lock");
-    let file = std::fs::OpenOptions::new()
+    let unusable = |why: &str| Err(format!("the runner build lock {} {why}", path.display()));
+    let file = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
-        .ok()?;
-    let meta = file.metadata().ok()?;
+    {
+        Ok(file) => file,
+        Err(e) => return unusable(&format!("cannot be opened ({e}); remove it")),
+    };
+    let meta = match file.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return unusable(&format!("cannot be read ({e}); remove it")),
+    };
     if !meta.file_type().is_file() || meta.uid() != sys::uid() {
-        return None;
+        return unusable("is not a regular file owned by this user; remove it");
     }
     let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
     // SAFETY: flock on a descriptor this function owns.
-    (unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0)
-        .then_some(BuildLock { _file: file })
+    Ok((unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0)
+        .then_some(BuildLock { _file: file }))
 }
 
 // ── the post-upgrade prebuild ───────────────────────────────────────────────
@@ -886,10 +894,23 @@ mod tests {
             crate::instance::Instance::derive("", home.path(), None).expect("default instance");
         let ctx = Ctx::paths(instance);
         std::fs::create_dir_all(ctx.state_dir()).unwrap();
-        let held = try_build_lock(&ctx).expect("a free lock is taken");
-        assert!(try_build_lock(&ctx).is_none(), "a held lock is refused");
+        let held = try_build_lock(&ctx).unwrap().expect("a free lock is taken");
+        assert!(try_build_lock(&ctx).unwrap().is_none(), "a held lock is refused");
         drop(held);
-        assert!(try_build_lock(&ctx).is_some(), "released on drop");
+        assert!(try_build_lock(&ctx).unwrap().is_some(), "released on drop");
+    }
+
+    #[test]
+    fn an_unusable_build_lock_is_an_error_not_a_wait() {
+        let home = tempfile::tempdir().unwrap();
+        let instance =
+            crate::instance::Instance::derive("", home.path(), None).expect("default instance");
+        let ctx = Ctx::paths(instance);
+        std::fs::create_dir_all(ctx.state_dir()).unwrap();
+        let elsewhere = home.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, ctx.state_dir().join("runner-build.lock")).unwrap();
+        assert!(try_build_lock(&ctx).is_err(), "a symlinked lock is refused, not waited on");
     }
 
     #[test]
