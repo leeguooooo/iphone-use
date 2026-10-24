@@ -958,7 +958,7 @@ mod tests {
             ),
             ("200 OK", r#"{"unexpected":true}"#, "unknown"),
         ] {
-            let (url, server, _) = crate::client::tests::mock_daemon_sequence(&[(status, body)]);
+            let (url, server, _requests) = crate::client::tests::mock_daemon_sequence(&[(status, body)]);
             let result = super::act(
                 &crate::client::DaemonClient::new(url, None),
                 serde_json::json!({"type":"tap","x":0.5,"y":0.5}),
