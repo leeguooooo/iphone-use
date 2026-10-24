@@ -31,6 +31,23 @@ class VerdictTests(unittest.TestCase):
                            ("began_editing", True), ("selections", [3]), ("run_id", "old")]:
             self.assertTrue(check.judge_input(dict(record, **{key: value}), "fresh", "typing", 3))
 
+    def test_multi_hold_requires_three_simultaneous_stationary_full_duration_touches(self):
+        record = {"run_id": "fresh", "down_count": 3, "up_count": 3, "cancel_count": 0,
+                  "max_fingers": 3, "holds": [{"start": [x, 0.4], "end": [x, 0.4], "duration_ms": 1500}
+                                              for x in (0.3, 0.5, 0.7)]}
+        self.assertEqual(check.judge(record, "fresh", False, "multi-flow"), [])
+        for key, value in [("max_fingers", 1), ("up_count", 1), ("cancel_count", 1),
+                           ("run_id", "old"), ("holds", [])]:
+            self.assertTrue(check.judge(dict(record, **{key: value}), "fresh", False, "multi-flow"))
+        for key, value in [("duration_ms", 50), ("duration_ms", True), ("end", [0.5, 0.4]),
+                           ("start", [float("nan"), 0.4])]:
+            bad = copy.deepcopy(record)
+            bad["holds"][0][key] = value
+            self.assertTrue(check.judge(bad, "fresh", False, "multi-single"))
+        bad = copy.deepcopy(record)
+        bad["holds"][1] = bad["holds"][0]
+        self.assertTrue(check.judge(bad, "fresh", False, "multi-batch"))
+
     def record(self):
         return {"run_id": "fresh", "down_count": 1, "up_count": 1, "cancel_count": 0,
                 "max_fingers": 1, "hover_ms": 900, "duration_ms": 1900, "initial_hold_ms": 400,

@@ -12,6 +12,8 @@ final class TouchPad: UIView {
   private var hover: TimeInterval = 0
   private var elapsed: TimeInterval = 0
   private var visits: [String] = []
+  private var touchStarts: [ObjectIdentifier: (CGPoint, TimeInterval)] = [:]
+  private var observedHolds: [[String: Any]] = []
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -64,7 +66,7 @@ final class TouchPad: UIView {
   }
   private func publish() {
     let record: [String: Any] = [
-      "run_id": runID, "down_count": downs, "up_count": ups,
+      "run_id": runID, "down_count": downs, "up_count": ups, "holds": observedHolds,
       "cancel_count": cancels, "max_fingers": maxFingers,
       "hover_ms": Int(hover * 1000), "duration_ms": Int(elapsed * 1000),
       "initial_hold_ms": firstMotionAt.map { Int(($0 - (beganAt ?? $0)) * 1000) } as Any? ?? NSNull(),
@@ -87,6 +89,7 @@ final class TouchPad: UIView {
     downs += touches.count
     maxFingers = max(maxFingers, event?.allTouches?.filter { ![.ended, .cancelled].contains($0.phase) }.count ?? touches.count)
     for touch in touches {
+      touchStarts[ObjectIdentifier(touch)] = (touch.location(in: self), touch.timestamp)
       if beganAt == nil { beganAt = touch.timestamp; start = touch.location(in: self) }
       sample(touch)
     }
@@ -100,7 +103,13 @@ final class TouchPad: UIView {
   }
   override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
     ups += touches.count
-    for touch in touches { sample(touch, ending: true) }
+    for touch in touches {
+      if let (origin, began) = touchStarts.removeValue(forKey: ObjectIdentifier(touch)) {
+        observedHolds.append(["start": normalize(origin), "end": normalize(touch.location(in: self)),
+                              "duration_ms": Int((touch.timestamp - began) * 1000)])
+      }
+      sample(touch, ending: true)
+    }
     publish()
   }
   override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {

@@ -33,8 +33,41 @@ def command(argv, env=None, check=True, timeout=180):
     return result
 
 
+def judge_multi_hold(value, nonce):
+    if not isinstance(value, dict) or value.get("run_id") != nonce:
+        return ["no fresh independent multi-finger result"]
+    errors = []
+    for key, expected in [("down_count", 3), ("up_count", 3), ("cancel_count", 0), ("max_fingers", 3)]:
+        if type(value.get(key)) is not int or value[key] != expected:
+            errors.append(f"{key} must be {expected}")
+    holds = value.get("holds")
+    if not isinstance(holds, list) or len(holds) != 3:
+        return errors + ["three independent completed holds are required"]
+    remaining = [(0.3, 0.4), (0.5, 0.4), (0.7, 0.4)]
+    for hold in holds:
+        if not isinstance(hold, dict):
+            errors.append("invalid finger record")
+            continue
+        duration = hold.get("duration_ms")
+        if type(duration) is not int or not 1350 <= duration <= 2500:
+            errors.append("each finger must hold for the requested duration")
+        def close(point, expected):
+            return isinstance(point, list) and len(point) == 2 and all(
+                type(v) in (int, float) and math.isfinite(v) and abs(v - wanted) <= 0.015
+                for v, wanted in zip(point, expected))
+        match = next((point for point in remaining if close(hold.get("start"), point)
+                      and close(hold.get("end"), point)), None)
+        if match is None:
+            errors.append("finger moved, repeated a point, or touched the wrong position")
+        else:
+            remaining.remove(match)
+    return errors
+
+
 def judge(value, nonce, hover, kind="path"):
     """Transport success is insufficient: every assertion comes from UIKit."""
+    if kind.startswith("multi-"):
+        return judge_multi_hold(value, nonce)
     stationary, native = kind == "longpress", kind == "native"
     errors = []
     if not isinstance(value, dict):
@@ -226,6 +259,10 @@ def case(daemon, args, label, carrier, hover):
     action["points"].append({"x": 0.5, "y": 0.4})
     if carrier == "longpress":
         action = {"type": "longpress", "x": 0.3, "y": 0.4, "duration_ms": 600}
+    if carrier.startswith("multi-"):
+        action = {"type": "multi_longpress", "duration_ms": 1500,
+                  "points": [{"x": x, "y": 0.4} for x in (0.3, 0.5, 0.7)]}
+    transport = carrier.removeprefix("multi-")
     daemon.require_simulator(args.udid)
     reply, reply_error = None, None
     # One send only, even on a lost reply. The observation below may still
@@ -233,9 +270,9 @@ def case(daemon, args, label, carrier, hover):
     try:
         if carrier == "native":
             reply, action = native_swipe(args, before)
-        elif carrier == "flow":
+        elif transport == "flow":
             step = {k: v for k, v in action.items() if k != "type"}
-            step["kind"] = "drag"
+            step["kind"] = action["type"]
             flow = out / "drag.json"
             flow.write_text(json.dumps({"version": 1, "name": "Fixture drag", "risk": "navigation", "steps": [step]}))
             child = {k: v for k, v in os.environ.items() if not k.startswith(("IPHONE_USE_", "PHONE_REMOTE_", "IPU_"))}
@@ -248,8 +285,8 @@ def case(daemon, args, label, carrier, hover):
             if ran.returncode:
                 reply_error = f"flow exit {ran.returncode}"
         else:
-            reply = daemon.call("/agent/input" if carrier in ("single", "longpress") else "/agent/actions",
-                                action if carrier in ("single", "longpress") else {"steps": [{"kind": "action", "action": action}]})
+            reply = daemon.call("/agent/input" if transport in ("single", "longpress") else "/agent/actions",
+                                action if transport in ("single", "longpress") else {"steps": [{"kind": "action", "action": action}]})
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         reply_error = str(error)
     after = daemon.wait_metrics(nonce, ended=True)
@@ -361,19 +398,22 @@ def main():
     try:
         for label, carrier, hover in [("longpress-regression", "longpress", False),
                                       ("native-swipe-regression", "native", False),
+                                      ("multi-single", "multi-single", False),
+                                      ("multi-batch", "multi-batch", False),
+                                      ("multi-flow", "multi-flow", False),
                                       ("single-hover", "single", True), ("batch-hover", "batch", True),
                                       ("flow-hover", "flow", True), ("slow-drift-control", "batch", False)]:
             reports.append(case(daemon, args, label, carrier, hover))
             if not reports[-1]["passed"]:
                 break
-        if len(reports) == 6 and all(r["passed"] for r in reports) and args.input_readiness:
+        if len(reports) == 9 and all(r["passed"] for r in reports) and args.input_readiness:
             for label, kind in [("settled-row-control", "tap"),
                                 *[(f"scroll-then-tap-{i}", "scroll") for i in range(3)],
                                 *[(f"first-focus-typing-{i}", "typing") for i in range(3)]]:
                 reports.append(input_case(daemon, args, label, kind))
                 if not reports[-1]["passed"]:
                     break
-        expected_cases = 13 if args.input_readiness else 6
+        expected_cases = 16 if args.input_readiness else 9
         if len(reports) == expected_cases and all(r["passed"] for r in reports) and args.settings_suite:
             settings_binding = localized_settings_suite(daemon, args)
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
@@ -398,7 +438,7 @@ def main():
                   "source_sha256": {name:digest(ROOT/name) for name in source_files},
                   "mcp_sha256":digest(args.mcp), "device":status.get("device"),
                   "scope":"iOS Simulator touch delivery; not physical iPhone or SpringBoard folder acceptance"}
-    result = {"provenance":provenance, "passed": len(reports) == (13 if args.input_readiness else 6) and all(r["passed"] for r in reports) and not harness_error and not cleanup_error,
+    result = {"provenance":provenance, "passed": len(reports) == (16 if args.input_readiness else 9) and all(r["passed"] for r in reports) and not harness_error and not cleanup_error,
               "udid": args.udid, "cases": reports, "settings_binding": settings_binding, "harness_error": harness_error, "cleanup_error": cleanup_error}
     (args.out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({key: result[key] for key in ["passed", "harness_error", "cleanup_error", "settings_binding"]}), flush=True)
