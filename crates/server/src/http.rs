@@ -5235,6 +5235,7 @@ const CAPABILITY_SINGLE_STEP_ACTIONS: &[&str] = &[
     "home",
     "key",
     "keyboard",
+    "keyboard_dismiss_only",
     "launch_app",
     "longpress",
     "multi_longpress",
@@ -5324,6 +5325,7 @@ const CAPABILITY_BATCH_ACTIONS: &[&str] = &[
     "home",
     "key",
     "keyboard",
+    "keyboard_dismiss_only",
     "launch_app",
     "longpress",
     "multi_longpress",
@@ -10885,11 +10887,8 @@ fn validate_agent_action_value(
                 return invalid("key name is unsupported");
             }
         }
-        "keyboard" => {
-            if action.get("dismiss_only").is_some_and(|v| !v.is_boolean()) {
-                return invalid("keyboard dismiss_only must be true or false");
-            }
-        }
+        "keyboard" => w.dismiss_keyboard().await,
+        "keyboard_dismiss_only" => w.dismiss_keyboard_only().await,
         "home" | "back" => {}
         "shortcut" => {
             if !action
