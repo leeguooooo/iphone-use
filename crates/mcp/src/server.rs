@@ -2512,7 +2512,7 @@ impl PhoneHandler {
     #[tool(
         annotations(
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = false,
         ),
@@ -2959,12 +2959,19 @@ impl ServerHandler for PhoneHandler {
                  2. Look for a saved flow FIRST. Responses that enter an app (launch_app, the first \
                  phone_elements in a new app) carry a `registry` block: if a listed flow does the task, \
                  phone_flow_run it — one call instead of dozens. phone_flow_list shows all of them. No flow but a \
-                 clear goal: phone_jev_run hands the whole goal to a fast on-phone agent (~1–2 s/step).\n\
+                 clear goal: use phone_jev_run only when its model credentials are configured and the user \
+                 authorized the whole goal; otherwise plan bounded phone_run_steps batches.\n\
                  3. Otherwise read phone_elements and act on what it names (phone_tap_element, \
                  phone_tap_label for a unique label) only to explore; as soon as you know the next few steps, send \
                  them as ONE phone_run_steps batch (wait_for between screens) — it returns the resulting \
                  screen, so a task takes a few turns, not one per tap. \
-                 Screenshots only when pixels matter.\n\
+                 Tool routing: phone_tap_label resolves one unique visible label from a fresh read; \
+                 phone_tap_element uses an index and token from the same snapshot for ambiguous controls; \
+                 phone_tap is for pixel-only targets. phone_scroll moves one viewport, phone_scroll_find \
+                 finds one label, and phone_collect_list reads several pages. phone_screen is the person's \
+                 live panel; phone_screenshot is one model-visible image; phone_screen_frame belongs only to \
+                 the panel. Screenshots only when pixels matter. Diagnostic/install/recording tools are for \
+                 tasks that request those capabilities, not ordinary navigation.\n\
                  4. Verify each step; `retry_safe:false` means never replay.\n\
                  5. A response carrying `flow_suggestion`, or any finished multi-step task with no flow: \
                  ASK THE USER whether to save it. Only if they agree: phone_flow_draft, fix its todo list, \
