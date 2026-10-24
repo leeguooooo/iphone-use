@@ -1605,6 +1605,9 @@ pub(crate) mod tests {
                         Err(e) => panic!("mock daemon did not receive the expected request: {e}"),
                     }
                 };
+                // Accepted sockets can inherit O_NONBLOCK on macOS; the framed
+                // reader below uses a bounded blocking read.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
