@@ -11352,10 +11352,10 @@ async fn agent_wait_alert(
     w: &mut crate::runner::RunnerClient,
     deadline: tokio::time::Instant,
 ) -> Result<Vec<crate::runner::ElementRow>, AgentWaitReadError> {
-    match tokio::time::timeout_at(deadline, w.alert_summary_fresh()).await {
+    match tokio::time::timeout_at(deadline, w.alert_text_fresh()).await {
         Ok(Ok(alert)) => Ok(alert
             .into_iter()
-            .map(|(text, _)| crate::runner::ElementRow {
+            .map(|text| crate::runner::ElementRow {
                 kind: "Alert".into(),
                 label: text,
                 ..Default::default()
@@ -11500,6 +11500,15 @@ async fn agent_actions(
     agent_actions_inner(state, headers, body).await
 }
 
+/// No screen text survives a privacy refusal, but prior dispatch counts and
+/// retry safety remain visible so an interrupted batch cannot be replayed.
+fn private_batch_refusal(index: usize, completed: usize, applied: usize) -> Response {
+    agent_actions_failure(
+        StatusCode::LOCKED, index, completed, applied, "screen_private",
+        "not_sent", applied == 0, &[], None,
+    )
+}
+
 async fn agent_actions_inner(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -11537,6 +11546,12 @@ async fn agent_actions_inner(
     };
     if let Err(error) = validate_agent_actions(&request) {
         return agent_actions_invalid(error);
+    }
+    let observes_screen = request.observe || request.steps.iter().any(|step| {
+        matches!(step, AgentActionStep::WaitFor { .. })
+    });
+    if observes_screen && state.screen_private_secs() > 0 {
+        return private_batch_refusal(0, 0, 0);
     }
     // `launch_app {"app": …}` becomes a bundle before the first step runs, so
     // a name that does not resolve refuses the whole batch with nothing sent.
@@ -11637,6 +11652,9 @@ async fn agent_actions_inner(
     let mut applied_actions = 0_usize;
     let mut step_results = Vec::with_capacity(request.steps.len());
     for (index, step) in request.steps.iter().enumerate() {
+        if observes_screen && state.screen_private_secs() > 0 {
+            return private_batch_refusal(index, completed, applied_actions);
+        }
         if state.runner_lifecycle.is_transitioning()
             || state.released.load(std::sync::atomic::Ordering::Acquire)
         {
@@ -11999,6 +12017,9 @@ async fn agent_actions_inner(
                 let probes = if alert_only { None } else { wait_probe_predicates(expect) };
                 let mut probe_misses = 0_u64;
                 loop {
+                    if state.screen_private_secs() > 0 {
+                        return private_batch_refusal(index, completed, applied_actions);
+                    }
                     attempts += 1;
                     // While the targets are not there yet, ask runner for just
                     // them (~0.3 s) instead of the whole tree (~0.9–3 s). A
@@ -12021,6 +12042,9 @@ async fn agent_actions_inner(
                     } else {
                         agent_wait_elements(&mut w, wait_deadline).await
                     };
+                    if state.screen_private_secs() > 0 {
+                        return private_batch_refusal(index, completed, applied_actions);
+                    }
                     let rows = match read {
                         Ok(rows) => rows,
                         Err(AgentWaitReadError::Failed(error)) => {
@@ -12152,13 +12176,16 @@ async fn agent_actions_inner(
         completed += 1;
     }
 
+    if observes_screen && state.screen_private_secs() > 0 {
+        return private_batch_refusal(completed, completed, applied_actions);
+    }
     state.touch_activity();
-    let locked = recover(state.runner_health.lock()).locked;
-    *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
-        up: true,
-        actionable: true,
-        locked,
-    };
+    // A read-only wait (including /alert/text) proves no input capability.
+    if applied_actions > 0 {
+        let mut health = recover(state.runner_health.lock());
+        health.up = true;
+        health.actionable = true;
+    }
     let mut result = serde_json::json!({
         "ok": true,
         "completed": completed,
@@ -12170,6 +12197,9 @@ async fn agent_actions_inner(
         let budget = std::time::Duration::from_millis(AGENT_INPUT_SETTLE_DEFAULT_MS);
         let (observed, report) =
             settle_and_read_elements(&mut w, budget, DEVICE_SETTLE_DEFAULT_CAP).await;
+        if state.screen_private_secs() > 0 {
+            return private_batch_refusal(completed, completed, applied_actions);
+        }
         if let Some((snapshot, rows)) = observed {
             let rows = Arc::new(rows);
             remember_element_snapshot(&state, &snapshot, &rows);
@@ -12212,6 +12242,11 @@ async fn agent_actions_inner(
     }
     if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
         result["agent_focus"] = block;
+    }
+    // A person can start a private hold while a read is in flight. Discard
+    // every observation, including earlier step text, before returning it.
+    if observes_screen && state.screen_private_secs() > 0 {
+        return private_batch_refusal(completed, completed, applied_actions);
     }
     agent_actions_json(StatusCode::OK, result)
 }

@@ -2323,11 +2323,20 @@ impl RunnerClient {
         })
     }
 
-    /// A semantic wait needs a fresh absence/presence observation on each poll,
-    /// rather than the negative cache used to decorate ordinary screen reads.
-    pub async fn alert_summary_fresh(&mut self) -> Result<Option<(String, Vec<String>)>> {
+    /// Fresh text only: semantic alert waits must neither reuse a negative
+    /// observation nor wait for the independent buttons endpoint.
+    pub async fn alert_text_fresh(&mut self) -> Result<Option<String>> {
         self.no_alert_at = None;
-        self.alert_summary().await
+        let sid = self.ensure_session().await?.to_string();
+        let response = self.http
+            .get(format!("{}/session/{}/alert/text", self.base, sid))
+            .send_signed(&self.auth).await.context("GET /alert/text")?;
+        match ensure_runner_success(response, "GET /alert/text").await {
+            Ok(value) => value.as_str().map(|text| Some(text.to_string()))
+                .context("GET /alert/text returned a non-string value"),
+            Err(error) if runner_error_is_not_found(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn alert_summary(&mut self) -> Result<Option<(String, Vec<String>)>> {
