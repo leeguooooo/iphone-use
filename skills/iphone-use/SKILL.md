@@ -231,3 +231,18 @@ phone), stop and re-read before continuing the old plan. If the skill
 disagrees with the live API, it is probably stale; see
 reference: *Upgrade*. If something in iphone-use itself is broken or
 confusing, offer to file an issue (reference: *Filing issues*).
+
+
+### Multi-finger hold and recoverable observations
+
+For a simultaneous hold use `phone_run_steps` with
+`{"kind":"multi_longpress","points":[{"x":0.3,"y":0.5},{"x":0.5,"y":0.5},{"x":0.7,"y":0.5}],"duration_ms":1500}`.
+The 2–5 distinct normalized points determine the finger count. Duration is
+1–10000 ms (default 1000). HTTP action bodies use `type:"multi_longpress"`;
+saved flows use `kind`. Never send `fingers:3` with ordinary `longpress`.
+App-specific gesture recognition requires real-device verification.
+
+Jev retries only one observation on HTTP 504 `runner_source_timeout`, after
+the server's 1–60 second `retry_after_secs`. It never replays the preceding
+action. If post-action observation recovery fails, inspect `status:"blocked"`,
+`history`, and `last_successful_action`, then read before acting again.

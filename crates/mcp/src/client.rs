@@ -1157,6 +1157,29 @@ fn body_says_ok(text: &str) -> bool {
         == Some(true)
 }
 
+/// Preserve structured failure metadata for bounded read recovery, without parsing display text.
+#[derive(Debug)]
+pub(crate) struct DaemonHttpError {
+    pub status: reqwest::StatusCode,
+    pub body: String,
+}
+
+impl std::fmt::Display for DaemonHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hint = if self.status == reqwest::StatusCode::UNAUTHORIZED {
+            " — check IPHONE_USE_TOKEN"
+        } else {
+            ""
+        };
+        write!(
+            f,
+            "daemon returned HTTP {}{hint}: {}",
+            self.status, self.body
+        )
+    }
+}
+impl std::error::Error for DaemonHttpError {}
+
 /// Turn a non-2xx status into an `anyhow::Error` that includes the status code
 /// and response body (useful for surfacing daemon error messages to the MCP
 /// caller).
@@ -1183,12 +1206,11 @@ async fn check_status(resp: reqwest::Response) -> anyhow::Result<reqwest::Respon
     } else {
         &body
     };
-    let auth_hint = if status == reqwest::StatusCode::UNAUTHORIZED {
-        " — check IPHONE_USE_TOKEN"
-    } else {
-        ""
-    };
-    anyhow::bail!("daemon returned HTTP {status}{auth_hint}: {body}")
+    Err(DaemonHttpError {
+        status,
+        body: body.to_string(),
+    }
+    .into())
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,7 +1264,7 @@ pub(crate) fn query_path(path: &str, params: &[(&str, String)]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -1557,11 +1579,12 @@ mod tests {
         );
     }
 
-    fn mock_daemon_sequence(
+    pub(crate) fn mock_daemon_sequence(
         responses: &[(&str, &str)],
     ) -> (String, JoinHandle<()>, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
         let responses = responses
             .iter()
             .map(|(status, body)| (status.to_string(), body.to_string()))
@@ -1569,7 +1592,22 @@ mod tests {
         let (request_tx, request_rx) = mpsc::channel();
         let task = std::thread::spawn(move || {
             for (status, body) in responses {
-                let (mut stream, _) = listener.accept().unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("mock daemon did not receive the expected request: {e}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 request_tx.send(read_http_request(&mut stream)).unwrap();
                 let response = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

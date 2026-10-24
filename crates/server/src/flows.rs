@@ -479,6 +479,7 @@ pub fn convert_action(action: &Value, rows: Option<&[crate::runner::ElementRow]>
         "swipe" => copy("swipe", &["x1", "y1", "x2", "y2", "duration_ms"]),
         "drag" => copy("drag", &["x1", "y1", "x2", "y2", "points", "hold_ms", "duration_ms"]),
         "longpress" => copy("longpress", &["x", "y", "duration_ms"]),
+        "multi_longpress" => copy("multi_longpress", &["points", "duration_ms"]),
         "alert" => copy("alert", &["button", "action"]),
         "picker" => copy("picker", &["column", "value"]),
         other => Converted::Unsupported(format!(
@@ -1255,6 +1256,17 @@ pub fn locator_at(rows: &[crate::runner::ElementRow], x: f64, y: f64) -> Option<
 #[cfg(test)]
 mod drag_path_tests {
     use super::*;
+    #[test]
+    fn multi_hold_recording_preserves_every_finger_and_duration() {
+        let action = json!({"type":"multi_longpress","points":[{"x":0.3,"y":0.4},{"x":0.5,"y":0.4},{"x":0.7,"y":0.4}],"duration_ms":1500});
+        let Converted::Step(step) = convert_action(&action, None) else {
+            panic!("multi hold must be recordable")
+        };
+        assert_eq!(step["kind"], "multi_longpress");
+        assert_eq!(step["points"], action["points"]);
+        assert_eq!(step["duration_ms"], action["duration_ms"]);
+    }
+
     #[test]
     fn drag_recording_preserves_waypoints_and_dwell_for_replay() {
         let action = json!({"type":"drag","points":[{"x":0.3,"y":0.4},{"x":0.13,"y":0.5,"dwell_ms":900},{"x":0.5,"y":0.4}],"hold_ms":400,"duration_ms":300});

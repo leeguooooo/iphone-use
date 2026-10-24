@@ -246,6 +246,14 @@ pub struct PhoneDragPoint {
     pub dwell_ms: u64,
 }
 
+/// One independently placed finger in a simultaneous hold.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneHoldPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
 /// One step in a bounded multi-step sequence.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -262,6 +270,14 @@ pub enum PhoneStep {
     Longpress {
         x: f64,
         y: f64,
+        #[serde(default = "default_phone_longpress_ms")]
+        duration_ms: u64,
+        #[serde(default)]
+        after_ms: u64,
+    },
+    /// Hold 2–5 distinct normalized points simultaneously; array length is finger count.
+    MultiLongpress {
+        points: Vec<PhoneHoldPoint>,
         #[serde(default = "default_phone_longpress_ms")]
         duration_ms: u64,
         #[serde(default)]
@@ -1199,7 +1215,7 @@ impl PhoneHandler {
         sequence first, holds one control lock, and stops at the first failure. Use it as soon as a \
         segment is understood; keep single-action tools for exploring an unknown screen. Step kinds: \
         launch_app, open_url, tap_locator, tap_label, tap, type, key, shortcut, scroll, swipe, drag, \
-        longpress, back, alert (system alerts; taps on them do not act), picker, perform (toggle a \
+        longpress, multi_longpress (2–5 explicit normalized points held simultaneously), back, alert (system alerts; taps on them do not act), picker, perform (toggle a \
         switch, adjust a slider: element+snapshot from phone_elements), wait_for, pause. Drag points can dwell at an edge while keeping one finger down. Guard every \
         screen change with wait_for; never batch an irreversible step you have not verified. These \
         step objects are exactly a saved flow's `steps` — when the response carries \
@@ -3089,6 +3105,29 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                     after_ms,
                 )
             }
+            PhoneStep::MultiLongpress {
+                points,
+                duration_ms,
+                after_ms,
+            } => {
+                validate_after(after_ms)?;
+                if !(2..=5).contains(&points.len())
+                    || !(1..=10_000).contains(&duration_ms)
+                    || points.iter().enumerate().any(|(i, p)| {
+                        !p.x.is_finite()
+                            || !p.y.is_finite()
+                            || !(0.0..=1.0).contains(&p.x)
+                            || !(0.0..=1.0).contains(&p.y)
+                            || points[..i].iter().any(|q| q.x == p.x && q.y == p.y)
+                    })
+                {
+                    return Err(format!("steps[{index}] multi_longpress needs 2–5 distinct normalized points and duration_ms from 1 to 10000; no action was sent"));
+                }
+                action_step(
+                    serde_json::json!({"type":"multi_longpress", "points":points, "duration_ms":duration_ms}),
+                    after_ms,
+                )
+            }
             PhoneStep::Swipe {
                 x1,
                 y1,
@@ -3748,6 +3787,28 @@ async fn send_input_observed(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn multi_hold_steps_validate_all_fingers_before_dispatch() {
+        let encode = |v| phone_steps_request(vec![serde_json::from_value::<PhoneStep>(v).unwrap()]);
+        let action = serde_json::json!({"kind":"multi_longpress", "points":[
+            {"x":0.3,"y":0.4},{"x":0.5,"y":0.4},{"x":0.7,"y":0.4}],"duration_ms":2500});
+        let request = encode(action.clone()).unwrap();
+        assert_eq!(request["steps"][0]["action"]["type"], "multi_longpress");
+        assert_eq!(request["steps"][0]["action"]["duration_ms"], 2500);
+        for points in [
+            serde_json::json!([]),
+            serde_json::json!([{"x":0.3,"y":0.4}]),
+            serde_json::json!([{"x":0.3,"y":0.4},{"x":0.3,"y":0.4}]),
+            serde_json::json!([{"x":0.3,"y":0.4},{"x":1.1,"y":0.4}]),
+        ] {
+            let mut bad = action.clone();
+            bad["points"] = points;
+            assert!(encode(bad).is_err());
+        }
+        let mut bad = action;
+        bad["duration_ms"] = serde_json::json!(10001);
+        assert!(encode(bad).is_err());
+    }
 
     fn image_verdict_result() -> CallToolResult {
         let mut result = CallToolResult::error(vec![

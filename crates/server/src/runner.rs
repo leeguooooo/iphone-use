@@ -1275,26 +1275,40 @@ impl RunnerClient {
     /// `longpress` to [`Self::tap_point`], so context menus and edit affordances
     /// never appeared even though the UI claimed success.
     pub async fn longpress_point(&mut self, x: f64, y: f64, duration_ms: u64) -> Result<()> {
+        self.hold_points(&[(x, y)], duration_ms.clamp(1, 10_000))
+            .await
+    }
+
+    /// Simultaneous touches, dispatched once; never fall back to a single touch.
+    pub async fn hold_points(&mut self, points: &[(f64, f64)], duration_ms: u64) -> Result<()> {
+        anyhow::ensure!(
+            (1..=5).contains(&points.len()) && (1..=10_000).contains(&duration_ms),
+            "hold needs 1–5 points and duration_ms from 1 to 10000"
+        );
+        let actions: Vec<_> = points
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| {
+                serde_json::json!({
+                    "type":"pointer", "id":format!("finger{}", i + 1),
+                    "parameters":{"pointerType":"touch"},
+                    "actions":[
+                        {"type":"pointerMove", "duration":0, "x":x, "y":y},
+                        {"type":"pointerDown", "button":0},
+                        {"type":"pause", "duration":duration_ms},
+                        {"type":"pointerUp", "button":0}
+                    ]
+                })
+            })
+            .collect();
         let sid = self.ensure_session().await?.to_string();
         let response = self
             .post_req(format!("{}/session/{}/actions", self.base, sid))
-            .json(&serde_json::json!({
-                "actions": [{
-                    "type": "pointer",
-                    "id": "finger1",
-                    "parameters": { "pointerType": "touch" },
-                    "actions": [
-                        { "type": "pointerMove", "duration": 0, "x": x, "y": y },
-                        { "type": "pointerDown", "button": 0 },
-                        { "type": "pause", "duration": duration_ms.clamp(300, 2_000) },
-                        { "type": "pointerUp", "button": 0 }
-                    ]
-                }]
-            }))
+            .json(&serde_json::json!({"actions":actions}))
             .send_signed(&self.auth)
             .await
-            .context("POST /actions (long press)")?;
-        ensure_runner_success(response, "POST /actions (long press)").await?;
+            .context("POST /actions (hold)")?;
+        ensure_runner_success(response, "POST /actions (hold)").await?;
         Ok(())
     }
 

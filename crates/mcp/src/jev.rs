@@ -560,8 +560,34 @@ fn parse_field_text(content: &str) -> Option<Option<String>> {
 // The loop
 // ---------------------------------------------------------------------------
 
+fn source_recovery_delay(error: &anyhow::Error) -> Option<Duration> {
+    let error = error.downcast_ref::<crate::client::DaemonHttpError>()?;
+    if error.status != reqwest::StatusCode::GATEWAY_TIMEOUT {
+        return None;
+    }
+    let body: Value = serde_json::from_str(&error.body).ok()?;
+    if body["error"] != "runner_source_timeout" {
+        return None;
+    }
+    // Never shorten an oversized backoff. Refuse recovery outside this bounded budget.
+    let seconds = body["retry_after_secs"].as_u64()?;
+    (1..=60)
+        .contains(&seconds)
+        .then(|| Duration::from_secs(seconds))
+}
+
 pub(crate) async fn read_screen(daemon: &DaemonClient) -> Result<Screen> {
-    let body = daemon.elements().await.context("read the phone screen")?;
+    let body = match daemon.elements().await {
+        Ok(body) => body,
+        Err(error) => {
+            let Some(delay) = source_recovery_delay(&error) else {
+                return Err(error).context("read the phone screen");
+            };
+            tokio::time::sleep(delay).await;
+            // Only retry the observation, once. The preceding action is never replayed.
+            daemon.elements().await.context("screen recovery failed after runner_source_timeout; previous action was not replayed")?
+        }
+    };
     let tree: Value = serde_json::from_str(&body).context("parse the element tree")?;
     if tree.get("error").is_some() && tree.get("elements").and_then(Value::as_array).is_none_or(Vec::is_empty) {
         bail!("the phone screen could not be read: {}", tree["error"]);
@@ -779,6 +805,7 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
             Executed::Acted(result) => result,
         };
         act_ms += t.elapsed().as_millis();
+        entry["applied"] = json!(result.is_ok());
         if let Err(e) = result {
             // A refused or failed step is not retried blindly: the next
             // decision is made from a fresh read of what is actually there.
@@ -792,9 +819,12 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
         let next = match next {
             Ok(next) => next,
             Err(e) => {
+                entry["observation_failed"] = json!(true);
                 history.push(entry);
-                outcome = "error";
-                reason = json!(format!("{e:#}"));
+                outcome = "blocked";
+                reason = json!(format!(
+                    "Could not observe after the last action; it was not replayed: {e:#}"
+                ));
                 break;
             }
         };
@@ -811,6 +841,7 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
         "elapsed_ms": started.elapsed().as_millis() as u64,
         "timing": {"jev_ms": jev_ms, "act_ms": act_ms, "observe_ms": observe_ms, "text_ms": text_ms},
         "final_app": screen.app,
+        "last_successful_action": history.iter().rev().find(|e| e["applied"] == true),
         "history": history,
         "next": if outcome == "done" {
             "The goal looks done; check the screen yourself before telling the user. If this is a task someone will repeat, the daemon's draft (phone_flow_draft) holds these steps — ask the user whether to save it as a flow."
@@ -846,6 +877,93 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn source_timeout_retries_only_the_read_once() {
+        let (url, server, requests) = crate::client::tests::mock_daemon_sequence(&[
+            ("200 OK", r#"{"ok":true,"outcome":"applied"}"#),
+            (
+                "504 Gateway Timeout",
+                r#"{"error":"runner_source_timeout","retry_after_secs":1}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"snapshot":"bounded","partial":true,"elements":[{"kind":"Button","label":"Recovered"}]}"#,
+            ),
+        ]);
+        let daemon = crate::client::DaemonClient::new(url, None);
+        super::act(&daemon, serde_json::json!({"type":"tap","x":0.5,"y":0.5}))
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let screen = super::read_screen(&daemon).await.unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+        assert_eq!(screen.snapshot, "bounded");
+        server.join().unwrap();
+        let requests: Vec<_> = requests.try_iter().collect();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("POST /agent/input "));
+        assert!(requests[1..]
+            .iter()
+            .all(|r| r.starts_with("GET /agent/elements ")));
+    }
+
+    #[tokio::test]
+    async fn source_recovery_stops_after_one_retry() {
+        let failure = r#"{"error":"runner_source_timeout","retry_after_secs":1}"#;
+        let (url, server, requests) = crate::client::tests::mock_daemon_sequence(&[
+            ("504 Gateway Timeout", failure),
+            ("504 Gateway Timeout", failure),
+        ]);
+        let error = super::read_screen(&crate::client::DaemonClient::new(url, None))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("screen recovery failed"));
+        server.join().unwrap();
+        assert_eq!(requests.try_iter().count(), 2);
+    }
+
+    #[test]
+    fn recovery_requires_exact_error_status_and_bounded_backoff() {
+        for (status, body, expected) in [
+            (
+                504,
+                r#"{"error":"runner_source_timeout","retry_after_secs":26}"#,
+                Some(26),
+            ),
+            (
+                502,
+                r#"{"error":"runner_source_timeout","retry_after_secs":26}"#,
+                None,
+            ),
+            (
+                504,
+                r#"{"error":"outcome_unknown","retry_after_secs":1}"#,
+                None,
+            ),
+            (
+                504,
+                r#"{"error":"runner_source_timeout","retry_after_secs":61}"#,
+                None,
+            ),
+            (
+                504,
+                r#"{"error":"runner_source_timeout","retry_after_secs":-1}"#,
+                None,
+            ),
+            (504, r#"{"error":"runner_source_timeout"}"#, None),
+        ] {
+            let error = anyhow::Error::new(crate::client::DaemonHttpError {
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                body: body.into(),
+            })
+            .context("read");
+            assert_eq!(
+                super::source_recovery_delay(&error).map(|d| d.as_secs()),
+                expected
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -242,7 +242,7 @@ verb 定义在 `~/.iphone-use/intents-registry.json`（从 [`deploy/intents-regi
 |---|---|
 | 看 | `phone_status`、`phone_capabilities`（这个版本支持什么，以及此刻能不能用；不唤醒手机、不占租约）、`phone_screenshot`、`phone_elements`（带 `registry` 块，列出当前屏幕上这个 app 已安装的 flow） |
 | 动 | `phone_tap`、`phone_tap_element`（绑定快照）、`phone_tap_label`（精确标签唯一）、`phone_scroll`、`phone_type`（中文无损）、`phone_key`、`phone_shortcut`（`home` / `spotlight`）——每个都可选传 `observe` |
-| 批 | `phone_run_steps`：最多 24 步，含 `tap_locator`、`launch_app`、`picker`、`alert`、`perform`（切换开关、调节滑块）、长按 / 滑动 / 拖动、`wait_for`；`phone_jev_run`：把整个目标交给手机上的快速 agent |
+| 批 | `phone_run_steps`：最多 24 步，含 `tap_locator`、`launch_app`、`picker`、`alert`、`perform`（切换开关、调节滑块）、长按 / 多指长按 / 滑动 / 拖动、`wait_for`；`phone_jev_run`：把整个目标交给手机上的快速 agent |
 | 生命周期 | `phone_reconnect`（在已配置的手机上重启设备运行器，不换 UDID）、`phone_hold`、`phone_release_owner`、`phone_login`（在 daemon 内用用户自己的密码库登录 app） |
 | Flow | `phone_flow_list`、`phone_flow_info`、`phone_flow_run`、`phone_flow_draft`、`phone_flow_update`、`phone_flow_publish`、`phone_flow_report` |
 | 统计 | `phone_run_start`、`phone_run_end`（精确统计一次任务的调用） |
@@ -505,3 +505,23 @@ IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use s
 ## 许可证
 
 [PolyForm Shield 1.0.0](../LICENSE)。本项目采用源码可见许可，允许符合条款的非竞争用途、修改和分发；禁止使用本软件提供竞争产品或服务，包括免费竞品。详见[许可范围与第三方声明](../LICENSING.md)。
+
+
+### 多指长按与 Jev 读取恢复
+
+`phone_run_steps` 和保存的 flow 支持 `kind:"multi_longpress"`：
+
+```json
+{"kind":"multi_longpress","points":[{"x":0.3,"y":0.5},{"x":0.5,"y":0.5},{"x":0.7,"y":0.5}],"duration_ms":1500}
+```
+
+`points` 包含 2–5 个互不重复的归一化坐标，数组长度就是手指数。
+HTTP `/agent/input` 或 `/agent/actions` 使用 `type:"multi_longpress"`。
+时长默认 1000 ms，范围 1–10000 ms；发送前检查全部坐标，失败时不会降级为单指。
+普通 `longpress` 收到 `fingers:3` 会拒绝执行。协议与批处理已有自动化测试，
+具体 App 能否识别这一手势仍需真机验证。
+
+Jev 遇到 HTTP 504 `runner_source_timeout` 时，会按响应中的
+`retry_after_secs` 等待 1–60 秒，仅重试一次读取，让服务端返回有界树。
+不会重放前一步点击。操作后的读取恢复失败时返回 `status:"blocked"`，
+保留 `history` 和 `last_successful_action`，供后续接手核验。

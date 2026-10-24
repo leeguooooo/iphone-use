@@ -133,7 +133,29 @@ fn http(
     request.push_str(body);
     stream.write_all(request.as_bytes()).unwrap();
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).unwrap();
+    if let Err(error) = stream.read_to_end(&mut raw) {
+        // Auth/rate-limit middleware can close without draining an unauthorized body,
+        // causing a TCP reset after its complete HTTP response. Accept only a framed
+        // complete response; a truncated response still fails, and no request is replayed.
+        let complete = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .is_some_and(|end| {
+                String::from_utf8_lossy(&raw[..end])
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .is_some_and(|len| raw.len() >= end + 4 + len)
+            });
+        assert!(
+            error.kind() == std::io::ErrorKind::ConnectionReset && complete,
+            "incomplete HTTP response: {error}"
+        );
+    }
     let text = String::from_utf8_lossy(&raw).to_string();
     let status = text
         .split_whitespace()

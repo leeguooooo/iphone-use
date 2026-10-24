@@ -5237,6 +5237,7 @@ const CAPABILITY_SINGLE_STEP_ACTIONS: &[&str] = &[
     "keyboard",
     "launch_app",
     "longpress",
+    "multi_longpress",
     "open_url",
     "perform",
     "picker",
@@ -5325,6 +5326,7 @@ const CAPABILITY_BATCH_ACTIONS: &[&str] = &[
     "keyboard",
     "launch_app",
     "longpress",
+    "multi_longpress",
     "open_url",
     "perform",
     "picker",
@@ -9053,6 +9055,37 @@ async fn runner_control_with_client(
                 _ => return RunnerControlOutcome::Unsupported,
             }
         }
+        "multi_longpress" => {
+            let Some(points) = multi_hold_points(v) else {
+                return RunnerControlOutcome::InvalidValue("multi_longpress needs 2–5 distinct normalized points and duration_ms from 1 to 10000; fingers is the points array length");
+            };
+            async {
+                let (sw, sh) = w.window_size().await?;
+                let points = points
+                    .into_iter()
+                    .map(|(x, y)| {
+                        Ok((
+                            normalized_runner_axis(x, sw)?,
+                            normalized_runner_axis(y, sh)?,
+                        ))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                w.hold_points(
+                    &points,
+                    v.get("duration_ms")
+                        .and_then(|d| d.as_u64())
+                        .unwrap_or(1000),
+                )
+                .await
+            }
+            .await
+        }
+        "longpress"
+            if v.get("fingers").is_some_and(|f| f.as_u64() != Some(1))
+                || v.get("points").is_some() =>
+        {
+            return RunnerControlOutcome::InvalidValue("longpress is one finger; use multi_longpress with explicit points for multiple fingers");
+        }
         "longpress" => match (
             v.get("x").and_then(|x| x.as_f64()),
             v.get("y").and_then(|y| y.as_f64()),
@@ -10595,6 +10628,41 @@ fn finite_unit(value: Option<f64>) -> bool {
     value.is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(&value))
 }
 
+/// Parse every finger before acquiring or dispatching the gesture.
+fn multi_hold_points(v: &serde_json::Value) -> Option<Vec<(f64, f64)>> {
+    let points = v.get("points")?.as_array()?;
+    if !(2..=5).contains(&points.len())
+        || v.get("fingers").is_some()
+        || v.get("x").is_some()
+        || v.get("y").is_some()
+    {
+        return None;
+    }
+    if v.get("duration_ms")
+        .is_some_and(|d| d.as_u64().is_none_or(|n| !(1..=10_000).contains(&n)))
+    {
+        return None;
+    }
+    let mut parsed = Vec::new();
+    for point in points {
+        let obj = point.as_object()?;
+        if obj.len() != 2 {
+            return None;
+        }
+        let (x, y) = (point.get("x")?.as_f64()?, point.get("y")?.as_f64()?);
+        if !x.is_finite()
+            || !y.is_finite()
+            || !(0.0..=1.0).contains(&x)
+            || !(0.0..=1.0).contains(&y)
+            || parsed.contains(&(x, y))
+        {
+            return None;
+        }
+        parsed.push((x, y));
+    }
+    Some(parsed)
+}
+
 fn validate_agent_action_value(
     action: &serde_json::Map<String, serde_json::Value>,
     index: usize,
@@ -10673,7 +10741,19 @@ fn validate_agent_action_value(
                 return invalid("tap_locator if_present must be true or false");
             }
         }
+        "multi_longpress" => {
+            if multi_hold_points(&serde_json::Value::Object(action.clone())).is_none() {
+                return invalid("multi_longpress needs 2–5 distinct normalized points and duration_ms from 1 to 10000");
+            }
+        }
         "longpress" => {
+            if action.get("fingers").is_some_and(|f| f.as_u64() != Some(1))
+                || action.get("points").is_some()
+            {
+                return invalid(
+                    "longpress is one finger; use multi_longpress with explicit points",
+                );
+            }
             if !finite_unit(action.get("x").and_then(serde_json::Value::as_f64))
                 || !finite_unit(action.get("y").and_then(serde_json::Value::as_f64))
                 || action
