@@ -13,6 +13,7 @@ Claude Code、Codex 或任何 MCP 客户端都能用它把屏幕读成文字，�
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm_Shield_1.0.0-blue.svg" alt="许可证：PolyForm Shield 1.0.0"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="平台：macOS 15+">
   <img src="https://img.shields.io/badge/iPhone-iOS%2015%2B-black" alt="iPhone：iOS 15+">
+  <a href="https://glama.ai/mcp/servers/leeguooooo/iphone-use"><img src="https://glama.ai/mcp/servers/leeguooooo/iphone-use/badges/score.svg" alt="Glama MCP server ratings"></a>
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="使用 Rust 构建">
   <img src="https://img.shields.io/badge/MCP-server-success" alt="MCP server">
 </p>
@@ -273,6 +274,13 @@ iphone-use 用自研的 XCTest runner（[`runner/`](runner/README.md)）操作�
 - [Agent API 参考](docs/agent-api.html) · [MCP 工具](crates/mcp/README.md) · [架构](docs/direct-device-architecture.html) · [设备设置常见坑](docs/runner-setup.html) · [设备 runner](runner/README.md) · [隐私](docs/privacy.zh-CN.md)
 - [产品指南](https://blog.leeguoo.com/zh/posts/iphone-use/)：安装、MCP 接入、flow 和选型对比。
 - 问题和建议：[GitHub issues](https://github.com/leeguooooo/iphone-use/issues)。
+
+## 相关 MCP 服务
+
+- [iPhone MCP](https://glama.ai/mcp/servers/blitzdotdev/iPhone-mcp)：通过 macOS 操作真实 iPhone 和模拟器的另一种 MCP 实现。
+- [ios-mcp](https://glama.ai/mcp/servers/emazaheri/ios-agent)：以观察、操作、验证循环控制 iPhone 和 iOS 模拟器。
+
+iphone-use 侧重真机 runner、明确的动作结果和确定性流程回放。以上是独立项目，不是依赖或背书。
 
 ## 许可证
 

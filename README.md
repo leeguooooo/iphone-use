@@ -13,6 +13,7 @@ Claude Code, Codex or any MCP client reads the screen as text, taps, types and s
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm_Shield_1.0.0-blue.svg" alt="License: PolyForm Shield 1.0.0"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey" alt="Platform: macOS 15+">
   <img src="https://img.shields.io/badge/iPhone-iOS%2015%2B-black" alt="iPhone: iOS 15+">
+  <a href="https://glama.ai/mcp/servers/leeguooooo/iphone-use"><img src="https://glama.ai/mcp/servers/leeguooooo/iphone-use/badges/score.svg" alt="Glama MCP server ratings"></a>
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="Built with Rust">
   <img src="https://img.shields.io/badge/MCP-server-success" alt="MCP server">
 </p>
@@ -281,6 +282,13 @@ Through the full agent API, a tap by label that returns the settled change takes
 - [Agent API reference](docs/agent-api.html) · [MCP tools](crates/mcp/README.md) · [Architecture](docs/direct-device-architecture.html) · [Device setup pitfalls](docs/runner-setup.html) · [Device runner](runner/README.md) · [Privacy](docs/privacy.md)
 - [Product guide](https://blog.leeguoo.com/en/posts/iphone-use/): installation, MCP setup, flows and how it compares.
 - Issues and ideas: [GitHub issues](https://github.com/leeguooooo/iphone-use/issues).
+
+## Related MCP servers
+
+- [iPhone MCP](https://glama.ai/mcp/servers/blitzdotdev/iPhone-mcp): another macOS MCP server for real iPhones and simulators.
+- [ios-mcp](https://glama.ai/mcp/servers/emazaheri/ios-agent): iPhone and iOS Simulator automation through an observe/act/verify loop.
+
+iphone-use focuses on a real device runner, explicit action outcomes and deterministic flow replay. These are independent alternatives, not dependencies or endorsements.
 
 ## License
 

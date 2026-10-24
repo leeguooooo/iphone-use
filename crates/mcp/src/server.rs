@@ -34,8 +34,10 @@ use crate::{client::DaemonClient, types::InputMsg};
 #[serde(deny_unknown_fields)]
 pub struct TapParams {
     /// Horizontal position, normalized 0–1 (0 = left edge, 1 = right edge).
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub x: f64,
     /// Vertical position, normalized 0–1 (0 = top edge, 1 = bottom edge).
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub y: f64,
     /// On by default: the result carries what the screen settled to — what
     /// changed since your last look (`delta`), or the whole tree the first
@@ -52,8 +54,10 @@ pub struct TapParams {
 #[serde(deny_unknown_fields)]
 pub struct ScrollParams {
     /// Horizontal anchor position, normalized 0–1.
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub x: f64,
     /// Vertical anchor position, normalized 0–1.
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub y: f64,
     /// Horizontal scroll delta. Positive reveals content to the right.
     pub dx: f64,
@@ -75,6 +79,7 @@ pub struct TypeParams {
     /// text over 200 is typed in chunks (about a minute per 3000 characters),
     /// and a failure part-way reports `characters_confirmed` and
     /// `remaining_text` with retry_safe=false — then type only the rest.
+    #[schemars(length(max = 20000))]
     pub text: String,
     /// Default true: return what the screen settled to (as on phone_tap).
     /// `false` for the fastest bare action.
@@ -907,17 +912,13 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "What this iphone-use build supports, and whether the phone can be \
-        driven right now. Read-only: it opens no device connection, wakes nothing, and \
-        takes no owner lease, so it is safe to call before deciding what to do. \
-        `supported` is static for the configured backend (single-step and batch action \
-        vocabularies, the closed `perform` set, whether the element tree and post-action \
-        observation exist, and which `mode` values would be accepted). `available` is a \
-        cached snapshot with `blocked_by` naming what stands in the way \
-        (locked, released, reconnecting, human_handoff, owned_by_other, offline); \
-        `ok:null` means the daemon has no evidence either way, not that it is fine. \
-        Scope is UI control and observation only — it says nothing about app \
-        install/uninstall or other management surfaces."
+        description = "Inspect supported UI operations and cached readiness before choosing an action. Unlike phone_status \
+        (device/setup/owner diagnostics), this names the backend's single-step, batch and perform \
+        vocabularies, observation support and accepted modes. Read-only: no device connection, wake or owner \
+        lease. supported is static; available is cached with blocked_by naming locked, released, \
+        reconnecting, human_handoff, owned_by_other or offline. ok:null is unknown, never proof of \
+        readiness. This describes UI control only, not app installation or other device management. If \
+        blocked, follow phone_status guidance instead of probing with actions."
     )]
     async fn phone_capabilities(&self) -> CallToolResult {
         match self.daemon.capabilities().await {
@@ -988,13 +989,13 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "Capture the current iPhone screen through the device runner and \
-        return it as an image/png content block (1200 px on the long side unless max_side \
-        says otherwise). Right after an observed action this is instant: the screen as it \
-        settled was already captured. overlay=true draws each interactive element's frame and \
-        phone_elements index on it. Capture only when a current user-requested task \
-        needs phone pixels, never for health checks. If the phone is released or offline, \
-        follow phone_status's guidance before reconnecting."
+        description = "Read one iPhone screen as an image/png content block when pixels matter; use phone_elements for text \
+        and semantic targets, or phone_screen to let the person watch a live MCP Apps panel. It reuses the \
+        captured settled frame after an observed action. max_side defaults to 1200; 0 requests full \
+        resolution. overlay=true draws interactive frames and their phone_elements indexes. Capture only for \
+        the current user task; private holds or offline devices can refuse it. Follow phone_status guidance \
+        instead of reconnecting for health checks. An image alone does not prove an action succeeded; check \
+        the target state or receipt."
     )]
     async fn phone_screenshot(
         &self,
@@ -1035,11 +1036,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Tap the iPhone screen at a normalized position. \
-        x and y are in the range 0–1 where (0,0) is the top-left corner and \
-        (1,1) is the bottom-right corner. Prefer phone_elements + \
-        phone_tap_element for semantic controls; use phone_screenshot for \
-        pixel-only targets."
+        description = "Tap a pixel target using normalized x,y from 0–1, with (0,0) at top-left. Prefer phone_tap_element \
+        for an accessible control; use phone_screenshot to locate a pixel-only target. Requires \
+        phone_status.drivable=true and current screen evidence: a tap may send, buy, delete or toggle \
+        whatever occupies that point, so authorize its actual effect first. observe defaults on and returns \
+        the settled screen change. Read outcome/retry_safe; if delivery is unknown, inspect the current \
+        state or receipt before considering another tap."
     )]
     async fn phone_tap(
         &self,
@@ -1061,11 +1063,13 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Scroll with a device-side swipe. x,y = normalized anchor (0–1); \
-        keep it away from text fields and screen edges. Positive dy reveals content farther \
-        down, negative dy content above; dx likewise to the right/left. The swipe travels \
-        1.5×|dy| points, clamped to 15–75% of the screen: dy≈80 moves about 15% of a screen, \
-        dy≈400 about 75%."
+        description = "Move the current viewport with one device-side swipe; use phone_scroll_find to locate a known label, \
+        or phone_collect_list to read multiple pages. x,y are a normalized anchor in the intended scrollable \
+        region. Avoid text fields, sliders and screen edges: a misplaced gesture can edit a control or \
+        navigate away. Positive dy reveals content below, negative above; dx reveals right/left. Travel is \
+        1.5 times each delta in points, clamped to 15–75% of that screen dimension. Requires \
+        phone_status.drivable=true. observe defaults on and returns the settled screen change; inspect it \
+        before repeating a swipe."
     )]
     async fn phone_scroll(
         &self,
@@ -1088,9 +1092,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Type Unicode text into the currently focused iPhone field \
-        through the device runner. Check phone_status.drivable and verify the focused element \
-        before typing; text lands in whichever field currently owns keyboard focus."
+        description = "Insert literal Unicode text into the currently focused iPhone field. Use phone_tap_element to focus \
+        the intended field first; use phone_key for a navigation or editing key. Requires \
+        phone_status.drivable=true. Text can replace a selection or reach the wrong field if focus changed. \
+        Long text is chunked; on partial failure inspect characters_confirmed and remaining_text and never \
+        resend the whole value blindly. observe defaults on and returns the settled screen change. Verify \
+        the resulting field before submitting; an unknown outcome is not evidence that nothing was typed."
     )]
     async fn phone_type(
         &self,
@@ -1111,9 +1118,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Send a device-native named key. Supported names: \
-        return/enter, escape, space, tab, delete/backspace, up, down, left, right. \
-        Other names return an explicit unsupported error."
+        description = "Press a navigation or editing key in the foreground app, acting on its current focus. Use phone_type \
+        for literal text and phone_tap_element to focus a field first. Check phone_status.drivable and the \
+        focused control: delete/backspace can erase content, and return/enter may submit or send it. The \
+        schema lists accepted names; unsupported names fail before input is sent. observe defaults on and \
+        returns the settled screen change. On an unknown outcome, inspect the screen before another key; \
+        repeating a key can change or submit content twice."
     )]
     async fn phone_key(
         &self,
@@ -1144,12 +1154,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Trigger a supported iOS system shortcut. \
-        Supported names: \
-        'home' — go to the iOS Home Screen; \
-        'spotlight' — open Spotlight search. \
-        'switcher' is explicitly unsupported because the device runner cannot synthesize the \
-        system App Switcher gesture."
+        description = "Navigate to the iOS Home Screen (home) or Spotlight search (spotlight), leaving the current app or \
+        changing its visible state. Use this for system navigation, phone_key for field keys, or \
+        phone_run_steps with launch_app for a specific app. Requires phone_status.drivable=true. Names are \
+        trimmed and case-insensitive. switcher and other names fail before input is sent; the runner cannot \
+        synthesize the App Switcher gesture. observe defaults on and returns the settled screen change. \
+        Verify it before another action; repeating system navigation may lose the current context."
     )]
     async fn phone_shortcut(
         &self,
@@ -1347,8 +1357,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "Internal: one frame for the iphone-use screen panel. Called by the \
-        panel itself (MCP Apps visibility [\"app\"]); models use phone_screenshot instead."
+        description = "Internal frame transport for the iphone-use MCP Apps panel; models use phone_screenshot for a still \
+        image and phone_elements for text. Returns structuredContent with status, frame (mime_type=image/png \
+        and base64 data), ok and error. A private hold returns frame=null; an empty or failed capture is \
+        reported rather than invented pixels. max_side is clamped to 200–1000; fresh bypasses the reusable \
+        frame. The panel calls this with visibility app; do not poll it from model turns or use it for \
+        health checks."
     )]
     async fn phone_screen_frame(
         &self,
@@ -1648,10 +1662,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = false,
         ),
-        description = "Mark the start of one task for the daemon's task metrics: every \
-        later call of this session counts toward this run until phone_run_end. Optional \
-        — without it, runs are inferred from idle gaps. Set complete_trace only if you \
-        will hand every model turn id to phone_run_end."
+        description = "Open a task boundary for this session's daemon metrics; pair with phone_run_end, not phone_record \
+        (video). Later session calls count toward this run; this does not drive or reserve the phone. \
+        Optional: without it, idle gaps infer runs. Use a fresh run_id for each task; starting the same \
+        still-open id resumes that run rather than resetting its counts. complete_trace is valid only before \
+        its first counted call and commits you to supply every model turn id at run_end. Returns a start \
+        acknowledgement; report errors rather than claiming metrics were recorded."
     )]
     async fn phone_run_start(
         &self,
@@ -1675,10 +1691,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = false,
         ),
-        description = "Close the task opened with phone_run_start and get its summary: \
-        tool calls (HTTP calls, not model turns), batches, observed actions, flow calls, \
-        stale/unknown outcomes, failures and p50/p95 call time. Pass turn_ids only if \
-        phone_run_start declared complete_trace."
+        description = "Close a live task opened with phone_run_start and return its metrics: HTTP calls (not model turns), \
+        batches, observed actions, flows, stale/unknown outcomes, failures and p50/p95 call time. Use the \
+        same run_id and session; a missing or already-closed run cannot produce a new live summary. Supply \
+        turn_ids only for a complete_trace declaration, including every model generation; otherwise \
+        model_round_trips remains unknown. This ends accounting only, not a video recording or the owner \
+        lease: use phone_record(stop) and phone_release_owner for those."
     )]
     async fn phone_run_end(&self, Parameters(params): Parameters<RunEndParams>) -> CallToolResult {
         self.progress_reset();
@@ -1783,9 +1801,11 @@ impl PhoneHandler {
             idempotent_hint = true,
             open_world_hint = false,
         ),
-        description = "Hand the phone lease back when this session's phone task is \
-        finished, so another session may drive it without waiting for the lease \
-        to lapse. Only the current owner can release."
+        description = "Release this session's phone lease when its task ends, so another session can drive immediately. \
+        Unlike phone_hold(secs=0), this gives up ownership rather than merely clearing a pause. It sends no \
+        phone input and returns ok with owner=null; releasing an already-unowned phone succeeds. A different \
+        session's active lease returns phone_owned and is never taken over. Authentication/transport \
+        failures are errors; check phone_status.owner before assuming the lease was released."
     )]
     async fn phone_release_owner(&self) -> CallToolResult {
         // A released lease is a run boundary.
@@ -1845,15 +1865,13 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "List installed registry flows: reviewed, deterministic per-app \
-        scripts (id like `health/export-all`) that replay a whole task with NO model \
-        and NO screenshots. CHECK THIS FIRST before driving an app step by step: if a \
-        flow matches the task, call phone_flow_run instead of exploring. Each row \
-        reports id, description, risk (read_only|navigation|side_effect|unknown), \
-        verified (has a recorded hardware run), compat against the app version installed on THIS phone \
-        (verified|untested-newer|incompatible|broken|needs-verification|draft|unknown), and inputs, \
-        one row per flow (detail=true for every field). Empty store: \
-        call phone_flow_update once. Filter with `app` for the app you are about to open."
+        description = "Find installed deterministic per-app flows before exploring a task: a matching phone_flow_run can \
+        replay it without model decisions or screenshots. Filters category, app and verified combine; app is \
+        a registry app directory or bundle id, not a display-name search. Compact rows report id, \
+        description, inputs, risk and compatibility with this phone's app version; detail=true returns full \
+        JSON. verified means a recorded hardware run, not a guarantee for every current version. Use \
+        phone_flow_info to inspect effects before running. An empty store needs phone_flow_update once; a \
+        filter with no matches is not proof that the whole store is empty."
     )]
     async fn phone_flow_list(
         &self,
@@ -1890,10 +1908,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "Show one installed registry flow: metadata, declared inputs, and \
-        its step templates (tap_label/tap_locator/wait_for/... with input placeholders, \
-        never values). Use it to check preconditions (which app, which locale, verified \
-        or not) and the exact side effects before phone_flow_run."
+        description = "Inspect an installed flow before phone_flow_run: returns metadata, declared inputs and step \
+        templates with placeholders, never runtime input values. Use an id from phone_flow_list, such as \
+        health/export-all: exactly two lowercase app/flow slugs, not a local file path. Check app, locale, \
+        verification and side effects before execution. Invalid or missing ids return an error without \
+        running or downloading anything; use phone_flow_update if the registry store is empty. To inspect a \
+        new local draft, validate its file instead of guessing a registry id."
     )]
     async fn phone_flow_info(
         &self,
@@ -2106,7 +2126,12 @@ impl PhoneHandler {
     }
 
     #[tool(
-        annotations(read_only_hint = true, open_world_hint = false),
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        ),
         description = "Turn what you just did on the phone into a flow. The daemon records \
         every action it applied in the current app (single actions and phone_run_steps \
         batches, not flow runs); this returns that trail as a flow v1 document (snapshot \
@@ -2161,14 +2186,13 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Contribute a working flow to the official registry: fork if needed, add the \
-        file (+ app.json for a new app), rebuild index.json, push a branch, and open a pull \
-        request via the user's GitHub CLI login. OUTWARD-FACING: requires confirm=true, which \
-        you may set only after the user agreed to publish. Use after a flow you compiled has \
-        run successfully on the phone; put device/iOS/date in the file's verified_on first \
-        (an unverified file opens as a draft PR). `source` is a flow file path or an id you \
-        installed with `flow add`; `aliases` are the foreground-app labels (per language) that \
-        should surface this app's flows from phone_elements."
+        description = "Publish a working flow to the official registry through the user's GitHub CLI login: forks if \
+        needed, writes the flow and any new app.json, rebuilds index.json, pushes a branch and opens a \
+        public pull request. Requires confirm=true only after the user agrees to that publication. First \
+        create a draft with phone_flow_draft and prove it with phone_flow_run; use phone_flow_report to \
+        report an existing flow problem. Put device/iOS/date in verified_on; unverified flows open a draft \
+        PR. source is a local file or installed flow id; aliases are foreground-app labels by language. \
+        Returns id, repo, branch, head and pr_url; inspect the URL before retrying a failed publication."
     )]
     async fn phone_flow_publish(
         &self,
@@ -2313,11 +2337,13 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "The phone's system log, for debugging an app: action=start begins \
-        capturing, reproduce the problem, then action=read (the default) with process, \
-        contains, level (error = errors and faults) and limit; pass the answer's `next` as \
-        `since` to read only newer lines. stop ends the capture, clear empties the buffer. \
-        One line per log line: #seq time process[pid] level: message."
+        description = "Capture and read the paired phone's live system log for app debugging; use phone_crashes for saved \
+        crash reports instead. Start capture, reproduce the issue, then read (the default); stop releases \
+        the relay, while clear discards the in-memory buffer. Requires a reachable, paired device; \
+        connection/auth failures are errors, not an empty log. Capture self-stops after 15 minutes without \
+        reads. Filters apply to read results; pass the returned next cursor as since for incremental reads. \
+        Output lines are #seq time process[pid] level: message; error includes faults. Logs can contain \
+        private app data: collect only what the task needs."
     )]
     async fn phone_logs(&self, Parameters(params): Parameters<LogsParams>) -> CallToolResult {
         let filter = crate::device::LogsFilter {
@@ -2379,9 +2405,12 @@ impl PhoneHandler {
             idempotent_hint = true,
             open_world_hint = true,
         ),
-        description = "Simulate the phone's GPS location (lat, lon in decimal degrees) for \
-        testing location-aware apps; every app sees it until you call again with clear=true, \
-        which restores the real location. Counts as one action against the daemon's budget."
+        description = "Simulate GPS for testing location-aware apps. Supply both lat (-90–90) and lon (-180–180), in finite \
+        decimal degrees, or clear=true without coordinates to restore real location; combining clear with coordinates is refused. \
+        Every app sees the simulated position until cleared; it is not a navigation or address lookup tool. \
+        Counts as one daemon action and requires authorized device control. Returns the applied \
+        location/clear status; on a transport failure the effect is unknown. Inspect the result before \
+        proceeding and clear the simulation when the test ends."
     )]
     async fn phone_set_location(
         &self,
@@ -2412,10 +2441,13 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Record the phone screen to an MP4 on the daemon's Mac: action=start, \
-        do the task, action=stop returns the saved file's path, length and size. \
-        action=status says whether a recording runs. A recording stops by itself after 10 \
-        minutes or 200 MB (`ended` says so)."
+        description = "Record the iPhone screen to an MP4 on the daemon's Mac: start, perform the requested task, then stop \
+        to get path, duration and size. status checks the recording without starting one. Unlike \
+        phone_screenshot (one image) or phone_screen (live panel), this persists video under the instance \
+        state directory's runs/recordings. Requires a usable device video stream and a writable output \
+        directory. Auto-stops after 10 minutes or 200 MB; ended explains why. Video can contain private \
+        screens: record only the authorized task, stop when done, and do not treat the returned Mac path as \
+        an upload."
     )]
     async fn phone_record(
         &self,
@@ -2484,10 +2516,12 @@ impl PhoneHandler {
             idempotent_hint = true,
             open_world_hint = false,
         ),
-        description = "Notes about one app that persist across sessions — where things are, \
-        quirks, what worked: without `text`, read them; with `text`, replace them (Markdown, \
-        at most 16 KB; read first and keep what still holds). The first read in an app also \
-        shows them in its `registry` block. Never store passwords or personal data."
+        description = "Read or replace persistent notes for one bundle id about app navigation and quirks. Resolve bundle \
+        with phone_apps; without text, read the existing Markdown. With text, replace it entirely (not \
+        append), at most 16 KiB UTF-8; read first to preserve useful notes. An empty text clears the notes. \
+        The first screen read in an app also includes them in its registry block. Use phone_flow_draft for \
+        executable task replay, not these notes. Writes affect future sessions; never store passwords, codes \
+        or personal data. Errors do not prove a write was delivered: read back before retrying."
     )]
     async fn phone_app_notes(
         &self,
@@ -2608,6 +2642,20 @@ fn listed_tools(profile: &ToolProfile) -> Vec<rmcp::model::Tool> {
         .list_all()
         .into_iter()
         .filter(|tool| profile.allows(tool))
+        .map(|mut tool| {
+            if *profile == ToolProfile::ReadOnly && tool.name == "phone_flow_draft" {
+                let annotations = tool.annotations.as_mut().expect("draft annotations");
+                annotations.read_only_hint = Some(true);
+                annotations.idempotent_hint = Some(true);
+                let mut schema = (*tool.input_schema).clone();
+                if let Some(properties) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
+                    properties.remove("save_as");
+                }
+                tool.input_schema = std::sync::Arc::new(schema);
+                tool.description = Some("Read the current app's applied-action trail as a flow v1 draft and todo list; never executes the flow. Typed values are replaced with named inputs. In this read-only profile no file is written and save_as is unavailable. Inspect and fix the draft before using phone_flow_run in an action-enabled session.".into());
+            }
+            tool
+        })
         .collect();
     crate::screen::decorate_tools(slim_tools(tools))
 }
@@ -2685,11 +2733,12 @@ impl ToolProfile {
     fn allows(&self, tool: &rmcp::model::Tool) -> bool {
         match self {
             Self::All => true,
-            Self::ReadOnly => tool
-                .annotations
-                .as_ref()
-                .and_then(|annotations| annotations.read_only_hint)
-                == Some(true),
+            Self::ReadOnly => {
+                // The handler refuses save_as in this profile; discovery below
+                // advertises only the side-effect-free draft operation.
+                tool.name == "phone_flow_draft"
+                    || tool.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true)
+            }
             Self::Allow(names) => names.contains(tool.name.as_ref()),
         }
     }
@@ -4357,7 +4406,13 @@ mod tests {
             }
         }
         read_only.sort_unstable();
-        assert_eq!(read_only, READ_ONLY_TOOLS);
+        assert_eq!(
+            read_only,
+            READ_ONLY_TOOLS
+                .into_iter()
+                .filter(|name| *name != "phone_flow_draft")
+                .collect::<Vec<_>>()
+        );
 
         // Anything that sends input to the phone or publishes is destructive.
         for name in [
@@ -4423,6 +4478,36 @@ mod tests {
         assert!(text.contains("phone_tap"), "{text}");
         // A name that is no tool at all is left to the router's own error.
         assert!(profile.refusal("phone_nonexistent").is_none());
+    }
+
+    #[test]
+    fn draft_discovery_matches_profile_write_permissions() {
+        for (profile, read_only) in [
+            (ToolProfile::All, false),
+            (ToolProfile::ReadOnly, true),
+            (
+                ToolProfile::Allow(["phone_flow_draft".to_string()].into()),
+                false,
+            ),
+        ] {
+            let tool = listed_tools(&profile)
+                .into_iter()
+                .find(|tool| tool.name == "phone_flow_draft")
+                .expect("draft remains available in each profile");
+            let wire = serde_json::to_value(tool).unwrap();
+            assert_eq!(wire["annotations"]["readOnlyHint"], read_only);
+            assert_eq!(wire["annotations"]["destructiveHint"], false);
+            assert_eq!(
+                wire["inputSchema"]["properties"].get("save_as").is_none(),
+                read_only
+            );
+            if read_only {
+                assert!(wire["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no file is written"));
+            }
+        }
     }
 
     #[test]
