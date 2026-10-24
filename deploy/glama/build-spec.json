@@ -1,0 +1,28 @@
+{
+  "baseImage": "debian:trixie-slim",
+  "nodeVersion": "26",
+  "pythonVersion": "3.15",
+  "buildSteps": [
+    "apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*",
+    "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal",
+    "/root/.cargo/bin/cargo build --release --locked -p iphone-use-mcp",
+    "install -m 755 target/release/iphone-use-mcp /usr/local/bin/iphone-use-mcp",
+    "/usr/local/bin/iphone-use-mcp flow update"
+  ],
+  "cmdArguments": [
+    "iphone-use-mcp"
+  ],
+  "argumentsJsonSchema": {
+    "type": "object",
+    "properties": {
+      "IPHONE_USE_MCP_TOOLS": {
+        "type": "string",
+        "default": "all",
+        "description": "Tool profile: all (full server), readonly (12 observation and registry tools), or a comma-separated allowlist. Use readonly for browser-only registry inspection. Device actions require a separately configured macOS daemon and iPhone."
+      }
+    },
+    "required": []
+  },
+  "placeholderArguments": {},
+  "pinnedCommit": null
+}
