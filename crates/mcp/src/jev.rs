@@ -595,11 +595,58 @@ pub(crate) async fn read_screen(daemon: &DaemonClient) -> Result<Screen> {
     Ok(observe_screen(&tree))
 }
 
+#[derive(Debug)]
+struct ActionFailure {
+    not_sent: bool,
+    detail: String,
+}
+impl std::fmt::Display for ActionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+impl std::error::Error for ActionFailure {}
+
+/// A lost reply is not proof that nothing happened. WAIT sends no mutation.
+fn record_action_outcome(entry: &mut Value, operation: &str, result: &Result<()>) {
+    let (outcome, applied) = if operation == "WAIT" {
+        ("no_action", json!(false))
+    } else {
+        match result {
+            Ok(()) => ("applied", json!(true)),
+            Err(error)
+                if error
+                    .downcast_ref::<ActionFailure>()
+                    .is_some_and(|e| e.not_sent) =>
+            {
+                ("not_sent", json!(false))
+            }
+            Err(_) => ("unknown", Value::Null),
+        }
+    };
+    entry["action_outcome"] = json!(outcome);
+    entry["applied"] = applied;
+}
+
 pub(crate) async fn act(daemon: &DaemonClient, action: Value) -> Result<Value> {
     let response = daemon.input_value(&action).await?;
     let body = response.json.clone().unwrap_or_else(|| json!({"raw": response.body()}));
     if !response.confirms_action() {
-        bail!("the phone refused {}: {}", action["type"], body);
+        let not_sent = response.explicit_refusal() && response.outcome() == Some("not_sent");
+        return Err(ActionFailure {
+            not_sent,
+            detail: format!(
+                "the phone {} {}: {}",
+                if not_sent {
+                    "refused"
+                } else {
+                    "did not confirm"
+                },
+                action["type"],
+                body
+            ),
+        }
+        .into());
     }
     Ok(body)
 }
@@ -805,7 +852,7 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
             Executed::Acted(result) => result,
         };
         act_ms += t.elapsed().as_millis();
-        entry["applied"] = json!(result.is_ok());
+        record_action_outcome(&mut entry, &decision.operation, &result);
         if let Err(e) = result {
             // A refused or failed step is not retried blindly: the next
             // decision is made from a fresh read of what is actually there.
@@ -877,6 +924,54 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn history_preserves_unknown_outcomes_and_wait_is_not_an_applied_action() {
+        let mut click = serde_json::json!({"action":"CLICK"});
+        super::record_action_outcome(&mut click, "CLICK", &Ok(()));
+        let mut wait = serde_json::json!({"action":"WAIT"});
+        super::record_action_outcome(&mut wait, "WAIT", &Ok(()));
+        assert_eq!(wait["action_outcome"], "no_action");
+        assert_eq!(wait["applied"], false);
+        let mut unknown = serde_json::json!({"action":"CLICK"});
+        super::record_action_outcome(&mut unknown, "CLICK", &Err(anyhow::anyhow!("reply lost")));
+        assert_eq!(unknown["action_outcome"], "unknown");
+        assert!(unknown["applied"].is_null());
+        let history = [click.clone(), wait, unknown];
+        assert_eq!(
+            history.iter().rev().find(|e| e["applied"] == true),
+            Some(&click)
+        );
+    }
+
+    #[tokio::test]
+    async fn action_history_distinguishes_refusal_from_ambiguous_failure() {
+        for (status, body, expected) in [
+            (
+                "422 Unprocessable Entity",
+                r#"{"ok":false,"outcome":"not_sent"}"#,
+                "not_sent",
+            ),
+            (
+                "504 Gateway Timeout",
+                r#"{"ok":false,"outcome":"unknown","retry_safe":false}"#,
+                "unknown",
+            ),
+            ("200 OK", r#"{"unexpected":true}"#, "unknown"),
+        ] {
+            let (url, server, _) = crate::client::tests::mock_daemon_sequence(&[(status, body)]);
+            let result = super::act(
+                &crate::client::DaemonClient::new(url, None),
+                serde_json::json!({"type":"tap","x":0.5,"y":0.5}),
+            )
+            .await
+            .map(drop);
+            let mut entry = serde_json::json!({});
+            super::record_action_outcome(&mut entry, "CLICK", &result);
+            assert_eq!(entry["action_outcome"], expected);
+            server.join().unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn source_timeout_retries_only_the_read_once() {
         let (url, server, requests) = crate::client::tests::mock_daemon_sequence(&[

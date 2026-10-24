@@ -1275,7 +1275,7 @@ impl RunnerClient {
     /// `longpress` to [`Self::tap_point`], so context menus and edit affordances
     /// never appeared even though the UI claimed success.
     pub async fn longpress_point(&mut self, x: f64, y: f64, duration_ms: u64) -> Result<()> {
-        self.hold_points(&[(x, y)], duration_ms.clamp(1, 10_000))
+        self.hold_points(&[(x, y)], duration_ms.clamp(300, 2_000))
             .await
     }
 

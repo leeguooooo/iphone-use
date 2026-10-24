@@ -845,7 +845,9 @@ update / publish / report`, and the device tools `phone_logs`, `phone_crashes`,
   on a narrowed read. `ocr` (`auto` | `force` | `off`, default off) maps to
   `?ocr=1` / `?ocr=force`; OCR rows are printed under the tree with their
   centre as `phone_tap` x/y, and an `ocr_error` never fails the read.
-  `phone_screenshot overlay=true` is `?overlay=elements`.
+  `include_hidden:true` expands off-screen/not-drawn rows within the normal
+  row/byte budgets, preserving indexes and their hidden status; it does not
+  make a hidden row safe to tap. `phone_screenshot overlay=true` is `?overlay=elements`.
 - Device tools map one-to-one onto the daemon routes: `phone_logs` →
   `POST/GET /agent/logs`, `phone_crashes` → `GET /agent/crashes[/:name]`,
   `phone_set_location` → `POST /agent/location`, `phone_record` →

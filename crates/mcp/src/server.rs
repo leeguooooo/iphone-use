@@ -278,7 +278,7 @@ pub enum PhoneStep {
     /// Hold 2–5 distinct normalized points simultaneously; array length is finger count.
     MultiLongpress {
         points: Vec<PhoneHoldPoint>,
-        #[serde(default = "default_phone_longpress_ms")]
+        #[serde(default = "default_phone_multi_longpress_ms")]
         duration_ms: u64,
         #[serde(default)]
         after_ms: u64,
@@ -488,6 +488,10 @@ fn default_phone_wait_ms() -> u64 {
 
 fn default_phone_longpress_ms() -> u64 {
     600
+}
+
+fn default_phone_multi_longpress_ms() -> u64 {
+    1000
 }
 
 fn default_phone_swipe_ms() -> u64 {
@@ -3805,6 +3809,12 @@ mod tests {
             bad["points"] = points;
             assert!(encode(bad).is_err());
         }
+        let mut defaulted = action.clone();
+        defaulted.as_object_mut().unwrap().remove("duration_ms");
+        assert_eq!(
+            encode(defaulted).unwrap()["steps"][0]["action"]["duration_ms"],
+            1000
+        );
         let mut bad = action;
         bad["duration_ms"] = serde_json::json!(10001);
         assert!(encode(bad).is_err());
