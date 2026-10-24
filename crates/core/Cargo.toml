@@ -2,7 +2,7 @@
 name = "core"
 version = "0.22.4"
 edition = "2021"
-license = "PolyForm-Shield-1.0.0"
+license-file = "../../LICENSE"
 
 [dependencies]
 hmac = "0.12"

@@ -2,7 +2,7 @@
 name = "iphone-use-mcp"
 version = "0.22.4"
 edition = "2021"
-license = "PolyForm-Shield-1.0.0"
+license-file = "../../LICENSE"
 description = "MCP stdio server that wraps the iphone-use daemon's agent HTTP API"
 
 [lib]

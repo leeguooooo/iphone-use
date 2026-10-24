@@ -2,7 +2,7 @@
   "name": "iphone-use",
   "private": true,
   "description": "MCP server and macOS daemon for real iPhone automation over USB or Wi-Fi.",
-  "license": "PolyForm-Shield-1.0.0",
+  "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/leeguooooo/iphone-use",
   "repository": {
     "type": "git",

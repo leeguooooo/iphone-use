@@ -11,6 +11,12 @@ all commercial use. Its competition restriction includes free competing products
 For uses outside that grant, request separate permission from the copyright holder
 through the [project repository](https://github.com/leeguooooo/iphone-use).
 
+## License metadata
+
+PolyForm Shield 1.0.0 is not in the [SPDX License List](https://github.com/spdx/license-list-data/blob/main/json/licenses.json) (checked October 24, 2026). The listed PolyForm Noncommercial and Small Business licenses have different terms and must not be substituted as identifiers for Shield.
+
+Rust manifests therefore use `license-file` to reference this repository's LICENSE. The private root package metadata uses `SEE LICENSE IN LICENSE`. These file references do not change the license grant.
+
 ## Third-party material
 
 Third-party material retains its existing licenses and copyright notices. This
