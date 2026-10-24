@@ -370,7 +370,7 @@ handler. Neither mode sends phone input.
 | Value | Listed and callable |
 |---|---|
 | `all` (default) | every tool |
-| `readonly` | only the read-only set above: an observer that can never act on the phone |
+| `readonly` | the read-only set above plus `phone_flow_draft` without `save_as`: observation and draft reads, with no phone actions or file writes |
 | `phone_status,phone_elements,phone_tap` | exactly the named tools (`phone_screen` brings `phone_screen_frame` along for the panel); unknown names are reported on stderr and ignored |
 
 A hidden tool is left out of `tools/list`, and a call to it anyway is refused
