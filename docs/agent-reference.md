@@ -489,6 +489,14 @@ is no longer cached). The action result and the observation are separate facts:
   your tap. Stop, `{"type":"home"}`, re-enter the intended app.
 - Rows with `overlay` (`notification`, `dynamic_island`, `cover_sheet`) belong to
   a system layer: never tap them; wait and re-read.
+- A `wait_for` containing only `present` locators with `kind:"Alert"` and
+  optional exact `label` reads the system alert directly, even when the app's
+  tree is blocked. Its observation says `source:"alert"` and includes the alert
+  text. It does not accept/dismiss the alert or establish app identity, absence,
+  identifiers or element state. Combined conditions still need the full tree.
+- Keep `pause` for short animation gaps (maximum 3000 ms). For a slow page such
+  as iPhone Storage, use a semantic `wait_for` with `timeout_ms:30000` on the
+  expected result instead of chaining pauses.
 - A failed `wait_for` carries `observation`: `read:false` proves nothing;
   `read:true, stale:true` is the last valid view; plain `read:true` means the
   condition really was not met. Locators an empty tree would have "satisfied" are

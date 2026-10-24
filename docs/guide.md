@@ -954,6 +954,34 @@ detects it and `/agent/status` reports `device_state:"blocked"`,
 `setup_blocked_on:"warp"`; neither changes your VPN — that is an operator decision, and
 managed Macs need an administrator split-tunnel rule.
 
+### CoreDevice proxy diagnostic
+
+A responding SOCKS proxy can still interfere with a **new Wi-Fi tunnel**.
+Issue [#313](https://github.com/leeguooooo/iphone-use/issues/313) reports one
+macOS 27.0.1 / Xcode 27.0 / iOS 27.0.1 case; the comparison also involved a
+current-user device-service refresh and USB bootstrap, so it does not isolate
+SOCKS as the cause in every environment. A phone-specific DIRECT bypass did
+not recover that case.
+
+If USB works but unplugged fresh reads fail, an operator can make a bounded
+comparison in System Settings → Network → each active service → Details →
+Proxies: record the original settings, disable **only SOCKS**, keep HTTP/HTTPS
+unchanged, and start the existing runner over USB with the phone unlocked.
+Unplug and verify a fresh screen read and the expected screen after an action.
+Restore every original proxy setting immediately after the comparison, even
+if it failed, then repeat those unplugged checks. Do not delete pairing records,
+restart root services, or leave proxies disabled as a presumed fix. These tools
+do not change proxy/VPN settings automatically.
+
+`drivable` and `transport` are cached observations, not proof that a new action
+or unplugged tunnel works. A health refresh that exceeds its 15 s deadline now
+revokes actionability without declaring the runner down or restarting it;
+a completed probe can restore readiness. Code 74 alone proves neither an
+unanswered passcode prompt nor a permanent Wi-Fi restriction. Keep the phone
+unlocked, handle a prompt if one appears, and inspect the tunnel and runner log
+if it is already authorized. Cold Wi-Fi startup in the reported environment
+and an isolated SOCKS-only reproduction remain unverified.
+
 ## Development
 
 ```bash

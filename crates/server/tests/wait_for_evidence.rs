@@ -475,3 +475,95 @@ fn a_probe_hit_cannot_satisfy_a_wait_the_full_tree_does_not_confirm() {
         assert_eq!(json["observation"]["missing_present"], serde_json::json!([0]));
     });
 }
+
+#[test]
+fn alert_wait_uses_alert_text_when_the_app_tree_is_unreadable() {
+    block(async {
+        let runner = mock_runner(|request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.into()));
+            }
+            if request.contains("/alert/text") {
+                return Some((
+                    Duration::ZERO,
+                    serde_json::json!({"value":"Delete “SoundCloud”?"}).to_string(),
+                ));
+            }
+            if request.contains("/wda/alert/buttons") {
+                return Some((Duration::ZERO, r#"{"value":["Cancel","Delete"]}"#.into()));
+            }
+            assert!(
+                !request.contains("/source"),
+                "alert-only waits must not queue behind a blocked app tree"
+            );
+            assert!(!request.contains("/alert/accept") && !request.contains("/alert/dismiss"));
+            None
+        });
+        let body = serde_json::json!({"steps":[{"kind":"wait_for","expect":{"present":[{"kind":"Alert","label":"Delete “SoundCloud”?"}]},"timeout_ms":2000}]}).to_string();
+        let (status, json) = run_actions(runner.url(), &body).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["applied_actions"], 0);
+        assert_eq!(json["steps"][0]["observation"]["source"], "alert");
+    });
+}
+
+#[test]
+fn alert_text_cannot_prove_other_labels_app_identity_or_absence() {
+    block(async {
+        let runner = mock_runner(|request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.into()));
+            }
+            if request.contains("/alert/text") {
+                return Some((Duration::ZERO, r#"{"value":"Different alert"}"#.into()));
+            }
+            if request.contains("/wda/alert/buttons") {
+                return Some((Duration::ZERO, r#"{"value":["Cancel"]}"#.into()));
+            }
+            if request.contains("/source?format=json") {
+                return Some((Duration::ZERO, CONTAINER_ONLY.into()));
+            }
+            None
+        });
+        for expect in [
+            serde_json::json!({"present":[{"kind":"Alert","label":"Expected alert"}]}),
+            serde_json::json!({"application":"Another app","present":[{"kind":"Alert","label":"Different alert"}]}),
+            serde_json::json!({"present":[{"kind":"Alert","label":"Different alert"}],"absent":[{"label":"Delete"}]}),
+            serde_json::json!({"present":[{"kind":"Alert","label":"Different alert","identifier":"secret-id"}]}),
+        ] {
+            let body = serde_json::json!({"steps":[{"kind":"wait_for","expect":expect,"timeout_ms":500,"poll_ms":100}]}).to_string();
+            let (status, json) = run_actions(runner.url(), &body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{json}");
+            assert_eq!(json["error"], "expectation_timeout", "{json}");
+        }
+    });
+}
+
+#[test]
+fn alert_wait_does_not_reuse_the_negative_alert_cache() {
+    block(async {
+        // The mock callback is Fn; the count is shared across fresh polls.
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = seen.clone();
+        let runner = mock_runner(move |request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.into()));
+            }
+            if request.contains("/alert/text") {
+                if count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                    let body = r#"{"value":{"error":"no such alert"}}"#;
+                    return Some((Duration::ZERO, format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())));
+                }
+                return Some((Duration::ZERO, r#"{"value":"Now present"}"#.into()));
+            }
+            if request.contains("/wda/alert/buttons") {
+                return Some((Duration::ZERO, r#"{"value":["OK"]}"#.into()));
+            }
+            None
+        });
+        let body = serde_json::json!({"steps":[{"kind":"wait_for","expect":{"present":[{"kind":"Alert","label":"Now present"}]},"timeout_ms":1500,"poll_ms":100}]}).to_string();
+        let (status, json) = run_actions(runner.url(), &body).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(seen.load(std::sync::atomic::Ordering::Relaxed) >= 2);
+    });
+}

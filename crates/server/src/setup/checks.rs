@@ -876,7 +876,7 @@ pub fn system_proxy_check() -> Result<(), String> {
         );
         return Err(error);
     }
-    warn("~ Active system proxies are not automatically treated as a blocker. If CoreDevice/DDI stalls, retry after bypassing or disabling them.");
+    warn("~ Active system proxies are not automatically treated as a blocker. If Wi-Fi bootstrap stalls with SOCKS enabled, compare once with only SOCKS disabled on the active network services; keep HTTP/HTTPS unchanged, then restore SOCKS and verify fresh unplugged reads. See the guide's CoreDevice proxy diagnostic. No proxy settings were changed.");
     Ok(())
 }
 

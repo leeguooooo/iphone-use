@@ -2323,6 +2323,13 @@ impl RunnerClient {
         })
     }
 
+    /// A semantic wait needs a fresh absence/presence observation on each poll,
+    /// rather than the negative cache used to decorate ordinary screen reads.
+    pub async fn alert_summary_fresh(&mut self) -> Result<Option<(String, Vec<String>)>> {
+        self.no_alert_at = None;
+        self.alert_summary().await
+    }
+
     pub async fn alert_summary(&mut self) -> Result<Option<(String, Vec<String>)>> {
         if self.no_alert_known() {
             return Ok(None);

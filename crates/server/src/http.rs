@@ -2188,9 +2188,13 @@ async fn cached_runner_health(state: &AppState) -> crate::runner::RunnerHealth {
                 );
             }
             Err(_) => {
-                // Preserve the last completed observation. A timeout is not an
-                // authoritative "down", and the next status poll may retry.
-                tracing::warn!("runner health probe timed out; retaining cached health");
+                // A timeout does not prove the runner is down or locked, but
+                // old actionability is no longer evidence that inputs work.
+                // Do not release or restart it; the next completed probe can
+                // restore readiness (#313).
+                recover(health_cache.lock()).actionable = false;
+                actionable.store(false, std::sync::atomic::Ordering::Release);
+                tracing::warn!("runner health probe timed out; actionability is unverified");
             }
         }
     }));
@@ -11327,6 +11331,41 @@ async fn wait_probe_missed(
     false
 }
 
+/// Only an alert's presence and exact text can be established by /alert/text.
+/// Never use this sparse observation to prove app identity, absence, buttons,
+/// identifiers, or element state.
+fn alert_only_expectation(expect: &AgentUiExpectation) -> bool {
+    expect.application.is_none()
+        && expect.absent.is_empty()
+        && !expect.present.is_empty()
+        && expect.present.iter().all(|locator| {
+            locator.kind.as_deref() == Some("Alert")
+                && locator.identifier.is_none()
+                && locator.value.is_none()
+                && locator.focused.is_none()
+                && locator.enabled.is_none()
+                && locator.visible.is_none()
+        })
+}
+
+async fn agent_wait_alert(
+    w: &mut crate::runner::RunnerClient,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<crate::runner::ElementRow>, AgentWaitReadError> {
+    match tokio::time::timeout_at(deadline, w.alert_summary_fresh()).await {
+        Ok(Ok(alert)) => Ok(alert
+            .into_iter()
+            .map(|(text, _)| crate::runner::ElementRow {
+                kind: "Alert".into(),
+                label: text,
+                ..Default::default()
+            })
+            .collect()),
+        Ok(Err(error)) => Err(AgentWaitReadError::Failed(error)),
+        Err(_) => Err(AgentWaitReadError::TimedOut),
+    }
+}
+
 async fn agent_wait_elements(
     w: &mut crate::runner::RunnerClient,
     deadline: tokio::time::Instant,
@@ -11956,7 +11995,8 @@ async fn agent_actions_inner(
                 // from "saw it, then lost the read" — a late failure must not
                 // erase history.
                 let mut reads = 0_u64;
-                let probes = wait_probe_predicates(expect);
+                let alert_only = alert_only_expectation(expect);
+                let probes = if alert_only { None } else { wait_probe_predicates(expect) };
                 let mut probe_misses = 0_u64;
                 loop {
                     attempts += 1;
@@ -11976,7 +12016,12 @@ async fn agent_actions_inner(
                             continue;
                         }
                     }
-                    let rows = match agent_wait_elements(&mut w, wait_deadline).await {
+                    let read = if alert_only {
+                        agent_wait_alert(&mut w, wait_deadline).await
+                    } else {
+                        agent_wait_elements(&mut w, wait_deadline).await
+                    };
+                    let rows = match read {
                         Ok(rows) => rows,
                         Err(AgentWaitReadError::Failed(error)) => {
                             last_read_error = Some(format!("{error:#}"));
@@ -12055,7 +12100,11 @@ async fn agent_actions_inner(
                         }
                     };
                     reads += 1;
-                    let (matches, observation) = agent_expectation_observation(&rows, expect);
+                    let (matches, mut observation) = agent_expectation_observation(&rows, expect);
+                    if alert_only {
+                        observation["source"] = serde_json::json!("alert");
+                        observation["alert"] = rows.first().map(|row| row.label.clone()).into();
+                    }
                     last_observation = observation;
                     if matches {
                         step_results.push(serde_json::json!({

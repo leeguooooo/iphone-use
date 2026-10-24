@@ -428,6 +428,25 @@ daemon 把手机的实时控制放到了网络上，它的 URL 和密码要当�
 
 WARP 一类 VPN 会切断 runner 依赖的 CoreDevice 隧道。`setup-runner.sh doctor` 能检测到，`/agent/status` 会报 `device_state:"blocked"`、`setup_blocked_on:"warp"`；两者都不会去改你的 VPN，那是操作者的决定，公司电脑需要管理员配 split tunnel。
 
+### CoreDevice 代理诊断
+
+SOCKS 代理即使能连通，也可能影响**新建 Wi-Fi 隧道**。[#313](https://github.com/leeguooooo/iphone-use/issues/313)
+记录了 macOS 27.0.1、Xcode 27.0、iOS 27.0.1 的一个案例；当时也刷新了当前用户的
+设备服务、通过 USB 启动 runner，因此还不能把原因单独归结为 SOCKS。该案例中，
+给手机配置 DIRECT 绕过没有恢复连接。
+
+若 USB 正常、拔线后新读屏失败，操作者可做一次有时间限制的对照：在“系统设置 →
+网络 → 各个活动服务 → 详细信息 → 代理”记录原设置，**只关闭 SOCKS**，保留 HTTP/HTTPS；
+手机解锁并插线启动现有 runner，拔线后用新读屏、动作后的目标画面核验。对照结束立即
+恢复全部原设置，失败时也要恢复，再做一次拔线核验。不要删除配对记录、重启 root
+服务或把长期关闭代理当作修复。工具不会自动改代理或 VPN。
+
+`drivable`、`transport` 是缓存观察，不能证明下一次操作或拔线隧道正常。健康探测超过
+15 秒后会撤销可操作状态，但不会据此认定 runner 已停、也不会重启它；后续完成的探测
+可恢复就绪。code 74 本身不能证明用户漏输密码，也不能证明 Wi-Fi 永远无法启动。
+保持手机解锁，有提示时处理；已经授权则检查隧道和 runner 日志。该环境的纯 Wi-Fi
+冷启动、隔离其他变量的 SOCKS 对照仍未验证。
+
 ## 开发
 
 ```bash

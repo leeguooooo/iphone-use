@@ -19,10 +19,10 @@ pub enum Kind {
     /// Another session holds the phone and its runner is alive.
     Owned,
     /// The phone refused the UI-automation session (code 74, matching
-    /// versions): a person has to allow it on the phone.
+    /// versions): authorization or the device connection needs inspection.
     Automation,
-    /// The same refusal over Wi-Fi: iOS cannot show the authorization there,
-    /// so retrying over the network never helps; only USB does.
+    /// The same refusal over Wi-Fi. Back off repeated launches; a wired
+    /// bootstrap can recover it, but code 74 alone does not prove the cause.
     WifiAutomation,
     /// The phone is not connected to this Mac at all. The next attempt
     /// waits in place for it, so this only spaces out supervisor restarts.
@@ -84,10 +84,9 @@ impl Kind {
             Kind::XcodeTooOld | Kind::IosTooOld => (900, 900),
             // Re-check the lease soon; never replace the live runner meanwhile.
             Kind::Owned => (15, 60),
-            // Like a lock: quiet retries until a person allows it.
+            // Quiet retries while the operator checks authorization/connection.
             Kind::Automation => (5, 60),
-            // Every attempt launches the runner on the phone and waits 30 s
-            // for an authorization Wi-Fi never delivers; the supervisor cuts
+            // Avoid repeated failed Wi-Fi launches. The supervisor cuts
             // this short as soon as the phone is plugged in.
             Kind::WifiAutomation => (900, 900),
             Kind::NotConnected => (3, 10),
