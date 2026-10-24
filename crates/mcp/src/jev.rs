@@ -805,12 +805,18 @@ pub(crate) async fn execute_operation(
         "SCROLL_DOWN" => act(daemon, json!({"type": "scroll", "x": 0.5, "y": 0.6, "dx": 0, "dy": 300})).await.map(drop),
         "SCROLL_UP" => act(daemon, json!({"type": "scroll", "x": 0.5, "y": 0.4, "dx": 0, "dy": -300})).await.map(drop),
         "BACK" => act(daemon, json!({"type": "back"})).await.map(drop),
-        "HOME" => act(daemon, json!({"type": "shortcut", "name": "home"})).await.map(drop),
-        "SPOTLIGHT" => {
-            act(daemon, json!({"type": "shortcut", "name": "spotlight"})).await.map(drop)
-        }
-        "DISMISS_KEYBOARD" => act(daemon, json!({"type":"keyboard"})).await.map(drop),
-        "PRESS_RETURN" => act(daemon, json!({"type": "key", "name": "return"})).await.map(drop),
+        "HOME" => act(daemon, json!({"type": "shortcut", "name": "home"}))
+            .await
+            .map(drop),
+        "SPOTLIGHT" => act(daemon, json!({"type": "shortcut", "name": "spotlight"}))
+            .await
+            .map(drop),
+        "DISMISS_KEYBOARD" => act(daemon, json!({"type":"keyboard","dismiss_only":true}))
+            .await
+            .map(drop),
+        "PRESS_RETURN" => act(daemon, json!({"type": "key", "name": "return"}))
+            .await
+            .map(drop),
         "WAIT" => {
             tokio::time::sleep(Duration::from_millis(1000)).await;
             Ok(())
@@ -1059,7 +1065,10 @@ mod tests {
         assert_eq!(sent.len(), 1);
         let body: serde_json::Value =
             serde_json::from_str(sent[0].split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(body, serde_json::json!({"type":"keyboard"}));
+        assert_eq!(
+            body,
+            serde_json::json!({"type":"keyboard","dismiss_only":true})
+        );
     }
 
     #[test]
