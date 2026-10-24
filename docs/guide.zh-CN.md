@@ -528,7 +528,8 @@ Jev 遇到 HTTP 504 `runner_source_timeout` 时，会按响应中的
 
 
 Jev 收到确认未发送的 `element_occluded`，且当前读屏中键盘可见时，会尝试一次
-`DISMISS_KEYBOARD` 并重新读屏。该动作使用 `dismiss_only:true`，只匹配明确的
+`DISMISS_KEYBOARD` 并重新读屏。该动作使用独立的 `keyboard_dismiss_only`，只匹配明确的
 “隐藏键盘”按钮，不按 Done、Return 或 Search；没有这种按钮时返回 blocked。
+旧 daemon 会拒绝这个独立动作，不会忽略保护参数后按下 Search。
 它不清空搜索词、不提交，也不绕过遮挡保护。
 键盘仍在或再次遇到遮挡时返回 blocked；动作结果未知时不触发这条自动恢复路径。

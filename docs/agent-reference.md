@@ -435,9 +435,12 @@ HTTP failures, missing/invalid backoff, and action failures are not retried by
 this recovery path.
 
 For a confirmed `not_sent` / `element_occluded` refusal with a visible keyboard,
-Jev attempts one `DISMISS_KEYBOARD` action (`type:"keyboard", dismiss_only:true`)
+Jev attempts one `DISMISS_KEYBOARD` action (`type:"keyboard_dismiss_only"`)
 and observes again. This mode permits only explicit Hide Keyboard affordances,
-never Done/Return/Search; a keyboard without a safe dismiss affordance blocks. It does not clear
+never Done/Return/Search; a keyboard without a safe dismiss affordance blocks.
+This uses a distinct action name so an older daemon rejects it instead of
+silently ignoring a protection flag. Ordinary `keyboard` retains its manual
+behavior and may press Done/Return/Search. It does not clear
 the search, submit it, or bypass the occlusion guard. If the keyboard remains
 or covered targets fail again after dismissal, it returns a precise blocked
 result. Unknown action outcomes do not trigger this automatic dismissal.

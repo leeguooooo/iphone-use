@@ -9152,15 +9152,8 @@ async fn runner_control_with_client(
             Some(name) => w.named_key(name).await,
             None => return RunnerControlOutcome::Unsupported,
         },
-        "keyboard" => match v.get("dismiss_only") {
-            Some(serde_json::Value::Bool(true)) => w.dismiss_keyboard_only().await,
-            Some(serde_json::Value::Bool(false)) | None => w.dismiss_keyboard().await,
-            _ => {
-                return RunnerControlOutcome::InvalidValue(
-                    "keyboard dismiss_only must be true or false",
-                )
-            }
-        },
+        "keyboard" => w.dismiss_keyboard().await,
+        "keyboard_dismiss_only" => w.dismiss_keyboard_only().await,
         "home" => w.press_home().await,
         "back" => w.back().await,
         "shortcut" => match v.get("name").and_then(|n| n.as_str()) {
@@ -10887,9 +10880,7 @@ fn validate_agent_action_value(
                 return invalid("key name is unsupported");
             }
         }
-        "keyboard" => w.dismiss_keyboard().await,
-        "keyboard_dismiss_only" => w.dismiss_keyboard_only().await,
-        "home" | "back" => {}
+        "keyboard" | "keyboard_dismiss_only" | "home" | "back" => {}
         "shortcut" => {
             if !action
                 .get("name")

@@ -811,7 +811,7 @@ pub(crate) async fn execute_operation(
         "SPOTLIGHT" => act(daemon, json!({"type": "shortcut", "name": "spotlight"}))
             .await
             .map(drop),
-        "DISMISS_KEYBOARD" => act(daemon, json!({"type":"keyboard","dismiss_only":true}))
+        "DISMISS_KEYBOARD" => act(daemon, json!({"type":"keyboard_dismiss_only"}))
             .await
             .map(drop),
         "PRESS_RETURN" => act(daemon, json!({"type": "key", "name": "return"}))
@@ -858,7 +858,7 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
         let decision = match keyboard_recovery(&screen, &history) {
             KeyboardRecovery::Blocked => {
                 outcome = "blocked";
-                reason = json!("Keyboard dismissal did not resolve the occlusion. No covered tap was forced or replayed; inspect a fresh screen before continuing.");
+                reason = json!("Safe keyboard dismissal was unavailable or did not resolve the occlusion. No covered tap was forced or replayed; inspect a fresh screen before continuing.");
                 break;
             }
             KeyboardRecovery::Dismiss => Decision {
@@ -1065,10 +1065,7 @@ mod tests {
         assert_eq!(sent.len(), 1);
         let body: serde_json::Value =
             serde_json::from_str(sent[0].split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(
-            body,
-            serde_json::json!({"type":"keyboard","dismiss_only":true})
-        );
+        assert_eq!(body, serde_json::json!({"type":"keyboard_dismiss_only"}));
     }
 
     #[test]
