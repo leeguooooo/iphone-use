@@ -434,6 +434,12 @@ reports `last_successful_action`; it never repeats the preceding click. Other
 HTTP failures, missing/invalid backoff, and action failures are not retried by
 this recovery path.
 
+For a confirmed `not_sent` / `element_occluded` refusal with a visible keyboard,
+Jev attempts one `DISMISS_KEYBOARD` action and observes again. It does not clear
+the search, submit it, or bypass the occlusion guard. If the keyboard remains
+or covered targets fail again after dismissal, it returns a precise blocked
+result. Unknown action outcomes do not trigger this automatic dismissal.
+
 ## Batches first
 
 A task should take a few turns, not one per tap. `POST /agent/actions`

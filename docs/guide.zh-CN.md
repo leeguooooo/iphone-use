@@ -525,3 +525,8 @@ Jev 遇到 HTTP 504 `runner_source_timeout` 时，会按响应中的
 `retry_after_secs` 等待 1–60 秒，仅重试一次读取，让服务端返回有界树。
 不会重放前一步点击。操作后的读取恢复失败时返回 `status:"blocked"`，
 保留 `history` 和 `last_successful_action`，供后续接手核验。
+
+
+Jev 收到确认未发送的 `element_occluded`，且当前读屏中键盘可见时，会尝试一次
+`DISMISS_KEYBOARD` 并重新读屏。它不清空搜索词、不提交，也不绕过遮挡保护。
+键盘仍在或再次遇到遮挡时返回 blocked；动作结果未知时不触发这条自动恢复路径。

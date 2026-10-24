@@ -34,7 +34,7 @@ tap its result; HOME returns to the home screen. BACK never leaves an app. Spotl
 (聚焦 / Spotlight) is where you type that name: once its search field shows, TYPE_TEXT the app's
 name there instead of pressing HOME or SPOTLIGHT again. A tap refused as element_occluded means a
 search overlay, sheet or keyboard covers what you aimed at: if its results do not serve the goal,
-close it first with its own 关闭 / 取消 / Cancel / Close button (or BACK), not by tapping what is under it.
+use DISMISS_KEYBOARD when a visible keyboard covers it; otherwise close the overlay with its own 关闭 / 取消 / Cancel / Close button (or BACK). Never bypass occlusion guards.
 DONE requires visible evidence that ALL requirements are satisfied. BLOCKED means no supported
 operation can make progress, or the next step would send, pay, delete or share something the goal
 did not explicitly ask for.";
@@ -112,7 +112,7 @@ pub(crate) fn observe_screen(tree: &Value) -> Screen {
         if kind == "Application" && app.is_empty() {
             app = str_of(row, "label").trim().to_string();
         }
-        if kind == "Keyboard" {
+        if kind == "Keyboard" && row.get("visible") != Some(&json!(false)) {
             keyboard = true;
         }
         if kind == "NavigationBar" && page.is_empty() {
@@ -231,7 +231,14 @@ pub(crate) fn controls(screen: &Screen) -> Vec<(&'static str, &'static str)> {
         ("SPOTLIGHT", "Open Spotlight search to find and open another app."),
     ];
     if screen.keyboard {
-        list.push(("PRESS_RETURN", "Press the keyboard's Return/Search/Go key to submit the focused field."));
+        list.push((
+            "DISMISS_KEYBOARD",
+            "Dismiss the visible keyboard without submitting, clearing text, or changing settings.",
+        ));
+        list.push((
+            "PRESS_RETURN",
+            "Press the keyboard's Return/Search/Go key to submit the focused field.",
+        ));
     }
     list.push(("WAIT", "Wait briefly for content that is visibly still loading."));
     list
@@ -273,6 +280,36 @@ pub(crate) fn stuck_actions(history: &[Value]) -> Vec<(String, Value)> {
         }
     }
     avoid
+}
+
+#[derive(Debug, PartialEq)]
+enum KeyboardRecovery {
+    None,
+    Dismiss,
+    Blocked,
+}
+
+/// A refused covered tap may recover once by dismissing a visible keyboard.
+/// Unknown mutation outcomes never authorize another action through this path.
+fn keyboard_recovery(screen: &Screen, history: &[Value]) -> KeyboardRecovery {
+    if !screen.keyboard {
+        return KeyboardRecovery::None;
+    }
+    let Some(last) = history.last() else {
+        return KeyboardRecovery::None;
+    };
+    if last["action"] == "DISMISS_KEYBOARD" {
+        return KeyboardRecovery::Blocked;
+    }
+    if last["action_outcome"] == "not_sent" && last["error_code"] == "element_occluded" {
+        if history.iter().any(|h| h["action"] == "DISMISS_KEYBOARD") {
+            KeyboardRecovery::Blocked
+        } else {
+            KeyboardRecovery::Dismiss
+        }
+    } else {
+        KeyboardRecovery::None
+    }
 }
 
 pub(crate) struct Decision {
@@ -598,6 +635,7 @@ pub(crate) async fn read_screen(daemon: &DaemonClient) -> Result<Screen> {
 #[derive(Debug)]
 struct ActionFailure {
     not_sent: bool,
+    code: Option<String>,
     detail: String,
 }
 impl std::fmt::Display for ActionFailure {
@@ -624,6 +662,11 @@ fn record_action_outcome(entry: &mut Value, operation: &str, result: &Result<()>
             Err(_) => ("unknown", Value::Null),
         }
     };
+    if let Err(error) = result {
+        if let Some(failure) = error.downcast_ref::<ActionFailure>() {
+            entry["error_code"] = json!(failure.code);
+        }
+    }
     entry["action_outcome"] = json!(outcome);
     entry["applied"] = applied;
 }
@@ -635,6 +678,7 @@ pub(crate) async fn act(daemon: &DaemonClient, action: Value) -> Result<Value> {
         let not_sent = response.explicit_refusal() && response.outcome() == Some("not_sent");
         return Err(ActionFailure {
             not_sent,
+            code: response.error_code().map(str::to_string),
             detail: format!(
                 "the phone {} {}: {}",
                 if not_sent {
@@ -765,6 +809,7 @@ pub(crate) async fn execute_operation(
         "SPOTLIGHT" => {
             act(daemon, json!({"type": "shortcut", "name": "spotlight"})).await.map(drop)
         }
+        "DISMISS_KEYBOARD" => act(daemon, json!({"type":"keyboard"})).await.map(drop),
         "PRESS_RETURN" => act(daemon, json!({"type": "key", "name": "return"})).await.map(drop),
         "WAIT" => {
             tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -804,13 +849,25 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
     let mut screen = read_screen(daemon).await?;
     observe_ms += t.elapsed().as_millis();
     for _ in 0..opts.max_steps.max(1) {
-        let decision = match models.choose(&screen, &goal, &history).await {
-            Ok(d) => d,
-            Err(e) => {
-                outcome = "error";
-                reason = json!(format!("{e:#}"));
+        let decision = match keyboard_recovery(&screen, &history) {
+            KeyboardRecovery::Blocked => {
+                outcome = "blocked";
+                reason = json!("Keyboard dismissal did not resolve the occlusion. No covered tap was forced or replayed; inspect a fresh screen before continuing.");
                 break;
             }
+            KeyboardRecovery::Dismiss => Decision {
+                operation: "DISMISS_KEYBOARD".into(),
+                target: None,
+                latency_ms: 0,
+            },
+            KeyboardRecovery::None => match models.choose(&screen, &goal, &history).await {
+                Ok(d) => d,
+                Err(e) => {
+                    outcome = "error";
+                    reason = json!(format!("{e:#}"));
+                    break;
+                }
+            },
         };
         jev_ms += decision.latency_ms;
         let target = decision.target.map(|i| screen.targets[i].clone());
@@ -924,6 +981,87 @@ pub async fn run(daemon: &DaemonClient, opts: Options) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keyboard_occlusion_recovers_once_without_forcing_unknown_or_hidden_targets() {
+        let screen = super::observe_screen(
+            &serde_json::json!({"elements":[{"kind":"Keyboard","visible":true}]}),
+        );
+        let refused = serde_json::json!({"action":"CLICK","action_outcome":"not_sent","error_code":"element_occluded"});
+        assert_eq!(
+            super::keyboard_recovery(&screen, &[refused.clone()]),
+            super::KeyboardRecovery::Dismiss
+        );
+        let dismissal = serde_json::json!({"action":"DISMISS_KEYBOARD"});
+        assert_eq!(
+            super::keyboard_recovery(&screen, &[refused.clone(), dismissal.clone()]),
+            super::KeyboardRecovery::Blocked
+        );
+        assert_eq!(
+            super::keyboard_recovery(&screen, &[dismissal, refused.clone()]),
+            super::KeyboardRecovery::Blocked
+        );
+        let mut unknown = refused.clone();
+        unknown["action_outcome"] = serde_json::json!("unknown");
+        assert_eq!(
+            super::keyboard_recovery(&screen, &[unknown]),
+            super::KeyboardRecovery::None
+        );
+        let hidden = super::observe_screen(
+            &serde_json::json!({"elements":[{"kind":"Keyboard","visible":false}]}),
+        );
+        assert_eq!(
+            super::keyboard_recovery(&hidden, &[refused]),
+            super::KeyboardRecovery::None
+        );
+        assert!(!super::controls(&hidden)
+            .iter()
+            .any(|(id, _)| *id == "DISMISS_KEYBOARD"));
+        assert!(super::controls(&screen)
+            .iter()
+            .any(|(id, _)| *id == "DISMISS_KEYBOARD"));
+    }
+
+    #[tokio::test]
+    async fn keyboard_recovery_sends_only_a_dismissal_without_guard_overrides() {
+        let (url, server, requests) = crate::client::tests::mock_daemon_sequence(&[(
+            "200 OK",
+            r#"{"ok":true,"outcome":"applied"}"#,
+        )]);
+        let daemon = crate::client::DaemonClient::new(url, None);
+        let models = super::Models {
+            http: reqwest::Client::new(),
+            typesafe_key: "unused".into(),
+            typesafe_model: "unused".into(),
+            typesafe_base: "http://127.0.0.1:1".into(),
+            text_key: None,
+            text_base: "http://127.0.0.1:1".into(),
+            text_model: "unused".into(),
+        };
+        let screen = super::observe_screen(&serde_json::json!({"elements":[]}));
+        let mut entry = serde_json::json!({});
+        let result = super::execute_operation(
+            &daemon,
+            &models,
+            &screen,
+            "DISMISS_KEYBOARD",
+            None,
+            "read Settings",
+            &[],
+            &mut entry,
+            &mut 0,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, super::Executed::Acted(Ok(()))));
+        server.join().unwrap();
+        let sent: Vec<_> = requests.try_iter().collect();
+        assert_eq!(sent.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_str(sent[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body, serde_json::json!({"type":"keyboard"}));
+    }
+
     #[test]
     fn history_preserves_unknown_outcomes_and_wait_is_not_an_applied_action() {
         let mut click = serde_json::json!({"action":"CLICK"});
