@@ -23,6 +23,7 @@ new_home() {
     TEST_HOME="$(cd -P "$TEST_HOME" && pwd)"
     touch "$TEST_HOME/.iphone-use-installer-test-root"
     CURSOR="$TEST_HOME/.cursor/mcp.json"
+    WORKBUDDY="$TEST_HOME/.workbuddy/mcp.json"
     DESKTOP="$TEST_HOME/Library/Application Support/Claude/claude_desktop_config.json"
     MCP="$TEST_HOME/Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
 }
@@ -40,6 +41,7 @@ jq_py() {  # jq_py <file> <python expression over cfg>
 # ── no client installed: nothing is created ─────────────────────────────────
 new_home absent
 run_hook
+[ ! -e "$TEST_HOME/.workbuddy" ] || fail_test "created WorkBuddy config although absent"
 [ ! -e "$TEST_HOME/.cursor" ] || fail_test "created ~/.cursor although Cursor is absent"
 [ ! -e "$TEST_HOME/Library" ] || fail_test "created the Claude Desktop folder although it is absent"
 if grep -Eq 'Cursor|Claude Desktop' "$TEST_HOME/out"; then
@@ -109,6 +111,39 @@ mkdir -p "$(dirname "$CURSOR")"
 run_hook IPHONE_USE_NO_CLIENT_SETUP=1
 [ ! -e "$CURSOR" ] || fail_test "wrote Cursor's config despite IPHONE_USE_NO_CLIENT_SETUP=1"
 pass "IPHONE_USE_NO_CLIENT_SETUP=1 skips the desktop clients"
+
+# WorkBuddy needs its explicit adapter, retains other entries and supports instances.
+new_home workbuddy
+mkdir -p "$(dirname "$WORKBUDDY")"
+printf '{"mcpServers":{"other":{"command":"/bin/other"}},"theme":"dark"}\n' >"$WORKBUDDY"
+cp "$WORKBUDDY" "$TEST_HOME/w.orig"
+run_hook IPHONE_USE_INTERNAL_TEST_MCP_NAME=iphone-use-work IPHONE_USE_INTERNAL_TEST_MCP_INSTANCE=work
+[ "$(jq_py "$WORKBUDDY" 'cfg["mcpServers"]["iphone-use-work"]["env"]["IPHONE_USE_MCP_HOST"]')" = workbuddy ] || fail_test "host adapter missing"
+[ "$(jq_py "$WORKBUDDY" 'cfg["mcpServers"]["iphone-use-work"]["env"]["IPHONE_USE_INSTANCE"]')" = work ] || fail_test "instance missing"
+[ "$(jq_py "$WORKBUDDY" 'cfg["mcpServers"]["other"]["command"]')" = /bin/other ] || fail_test "lost another connector"
+cmp -s "$WORKBUDDY.iphone-use.bak" "$TEST_HOME/w.orig" || fail_test "WorkBuddy backup missing"
+cp "$WORKBUDDY" "$TEST_HOME/w.after"
+run_hook IPHONE_USE_INTERNAL_TEST_MCP_NAME=iphone-use-work IPHONE_USE_INTERNAL_TEST_MCP_INSTANCE=work
+cmp -s "$WORKBUDDY" "$TEST_HOME/w.after" || fail_test "WorkBuddy rerun changed config"
+pass "WorkBuddy adapter preserves config, backup, instance and idempotency"
+
+new_home workbuddy_foreign
+mkdir -p "$(dirname "$WORKBUDDY")"
+printf '{"mcpServers":{"iphone-use":{"command":"/foreign"}}}\n' >"$WORKBUDDY"
+cp "$WORKBUDDY" "$TEST_HOME/w.orig"
+run_hook
+cmp -s "$WORKBUDDY" "$TEST_HOME/w.orig" || fail_test "replaced foreign WorkBuddy entry"
+printf 'not json\n' >"$WORKBUDDY"
+cp "$WORKBUDDY" "$TEST_HOME/w.orig"
+run_hook
+cmp -s "$WORKBUDDY" "$TEST_HOME/w.orig" || fail_test "replaced invalid WorkBuddy config"
+pass "WorkBuddy foreign and invalid configs remain unchanged"
+
+new_home workbuddy_optout
+mkdir -p "$(dirname "$WORKBUDDY")"
+run_hook IPHONE_USE_NO_CLIENT_SETUP=1
+[ ! -e "$WORKBUDDY" ] || fail_test "WorkBuddy ignored opt-out"
+pass "WorkBuddy honors client setup opt-out"
 
 # ── the hook needs the sentinel ─────────────────────────────────────────────
 new_home nosentinel

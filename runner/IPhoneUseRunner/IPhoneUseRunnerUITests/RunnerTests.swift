@@ -37,6 +37,9 @@ final class RunnerTests: XCTestCase {
   static let sessionID = UUID().uuidString
   static let systemVersion = UIDevice.current.systemVersion
   let elements = ElementRegistry()
+  /// One current input binding. Native commands outside this bound input invalidate it too,
+  /// including commands from another daemon or controller sharing the runner.
+  var inputBinding: String?
   /// Holds off Auto-Lock while the daemon says the phone is in use (`POST /wda/keepawake`).
   let keepAwake = KeepAwake()
   /// Last alert scan and when it ran; reused for a second while nothing was POSTed (RunnerClient asks
@@ -298,6 +301,10 @@ final class RunnerTests: XCTestCase {
     IPURBridge.setRequestCacheEnabled(true)
     defer { IPURBridge.setRequestCacheEnabled(false) }
     if request.method != "GET", Self.mayChangeScreen(request.path) {
+      if !InputTargetCheck.preservesBinding(path: request.path, binding: inputBinding,
+                                           body: (try? request.jsonObject()) ?? [:]) {
+        inputBinding = nil
+      }
       alertCache = nil
       elements.prune()
     }

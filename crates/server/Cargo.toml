@@ -82,6 +82,7 @@ objc2-core-video = "0.3.2"
 objc2-video-toolbox = "0.3.2"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

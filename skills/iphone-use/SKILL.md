@@ -98,7 +98,8 @@ it off again.
 | Tap a unique label | `tap` + `label` | `phone_tap_label` | `tap_label` |
 | Tap by locator | `tap_locator` + `locator` | `phone_run_steps` step | `tap_locator` |
 | Tap a point | `tap` + `x`,`y` | `phone_tap` | `tap` |
-| Type | `text` (into the focused field; up to 20000 chars — on `text_partially_typed` send only `remaining_text` with `clear:false`) | `phone_type` | `type` (`input` names a runtime value) |
+| Type | `text` (`clear:true` explicitly replaces the focused field; up to 20000 chars — on a safe partial use `continue_token` alone; unknown delivery requires inspecting the original field) | `phone_type` | `type` (`input` names a runtime value) |
+| Replace a selected field | `set_value` + `element`, `snapshot`, `value` (up to 1000 chars, empty clears) | `phone_set_value` | — |
 | Key | `key` `return`… | `phone_key` | `key` |
 | Home / Spotlight | `shortcut` | `phone_shortcut` | `shortcut` |
 | Scroll | `scroll` `dy` (80 ≈ 15% of a screen, 400 ≈ 75%) | `phone_scroll` (`x`, `y`, `dx`, `dy` required) | `scroll` (`x`, `y`, `dx`, `dy` required in MCP batches) |
@@ -113,7 +114,12 @@ the current screen. The same finger stays down through each dwell;
 Flow drafts retain the full path. Verify the end screen before the next action.
 
 All actions, including swipe, drag, picker, set_value and the scroll variants,
-are listed in the reference: *Actions catalogue*.
+are listed in the reference: *Actions catalogue*. `set_value` replaces one fresh
+snapshot-bound nonsecure field. Supporting native runners bind its clear and
+all text chunks to the selected field; old runners stop if clearing fails.
+A failed/partial/unknown replacement is not safe to replay wholesale. Read the
+original field and current status first. Secure fields require human input;
+newlines in a single-line replacement refuse before clearing.
 
 HTTP `/agent/input` supplies defaults for omitted scroll anchors and `dx`.
 MCP `phone_scroll` and `phone_run_steps` scroll steps require all four fields.
@@ -151,6 +157,41 @@ curl -s -H "$AUTH" -H "$MUTATION" -H "$OWNER" -X POST "$HOST/agent/actions" -d '
 | Type without checking focus | Confirm the foreground app and focused field, then type |
 | Repeat a label that was not found | Use the `did you mean` label the error offers, or re-read |
 
+Selected replacement: read `phone_elements`, then call `phone_set_value` with
+that exact `snapshot`, the field's zero-based `element` index, and its complete
+`value` (up to 1000 Unicode characters; empty clears). This selects the field
+even when another field has focus. Verify the resulting original field; unknown
+delivery can include partial edits and must not trigger a replay. Original-field
+binding during clear/chunks requires a supporting native Runner; older Runners
+retain their existing clear/type behavior.
+
+For an App known to move focus when a field becomes empty, explicitly set
+`recover_focus_after_clear:true` on `phone_set_value`. Default false stops on
+focus loss. Supporting native Runners verify the original field's identity,
+foreground process, binding, empty value/selection, hit-test target and complete
+AX scene without an overlapping actionable control at the touch point;
+they may tap it once, then verify empty content again before typing. Unsupported
+recovery refuses before replacement input. Empty replacements verify the clear
+without restoring focus. This policy never recovers a focus change during
+typing or replays deletion/text. Keep it off when a focus change should stop the
+operation; inspect the original field after an unknown result.
+
+Bounded long input: `phone_type {"text":"…","budget_ms":15000}` can return a
+single-use `continue_token` at a safe chunk boundary. Continue with
+`phone_type {"continue_token":"…"}` only, without text or budget. Keep the same
+owner; an intervening action or owner/session/field change invalidates it.
+`retry_safe:false` forbids replaying the original text. No token is issued for
+unknown delivery. If continuation is refused, inspect the original field;
+never rebind to the current focus or resend the full text.
+
+Visual failures may include a fresh recovery image with source/time/size metadata.
+Inspect that image before another lookup, coordinate guess or scroll. Its screen
+is later than the failed operation; it is not proof the operation succeeded.
+Original `outcome`/`retry_safe` and batch counts stay authoritative. Capture withheld
+for ownership/privacy means re-read status and coordinate with the current owner;
+do not bypass the hold with another screenshot. Unavailable capture is not a reason
+to replay the failed mutation.
+
 Task metrics: `iphone-use metrics` / `GET /agent/metrics` count HTTP calls, not
 model turns. To count one task exactly, wrap it in `phone_run_start` /
 `phone_run_end` (HTTP: `POST /agent/run`). `GET /agent/elements?scope=app`
@@ -159,6 +200,13 @@ same read; `?image=auto` adds a screenshot only when the tree is unusable.
 MCP screen text includes at most 200 rows and 32 KiB of row text. When it
 reports omitted rows, narrow `phone_elements` with `query`/`limit`; an omitted
 target is not proven absent and a truncated list is not proven complete.
+A field marked `value_truncated` is only a snapshot preview. When the task needs
+its full value, use `phone_read_value` with one exact identifier or label from a
+fresh screen, optionally kind. It reads without focusing or taking a lease;
+secure/ambiguous/unsupported reads refuse. Check complete/truncated and source:
+complete AX value is not proof the app exposed its full document. max_utf16 bounds
+output without splitting an emoji; no value is silently promoted from a preview.
+
 Use the displayed `#N` with its snapshot: it is the original full-tree index.
 To inspect off-screen/not-drawn rows beyond the five-label summary, call
 `phone_elements` with `include_hidden: true` (combine with `query`/`limit`
@@ -221,7 +269,9 @@ reference: *Flows*.
    `phone_hold(secs, private=true)` so nothing reads the screen meanwhile, ask the
    user with the host's question tool (plain text if there is none or it is
    unavailable right now) and wait, then clear the hold and re-read the screen. → reference:
-   *When the person has to sign in*
+   *When the person has to sign in*. A private hold stops later text chunks and
+   invalidates earlier continuation tokens even after it ends; never reuse that
+   token or replay the original input.
 7. **Saving and publishing are the user's call.** Ask before saving a flow, and
    ask again before publishing it or filing an issue. Both use their GitHub
    account.

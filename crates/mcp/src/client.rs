@@ -67,6 +67,17 @@ fn daemon_target(
     (base_url, token)
 }
 
+/// Classify the parsed authority, not a URL prefix: loopback traffic must not
+/// leave the Mac through a GUI proxy, and remote URLs must not inherit a local token.
+fn loopback_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else { return false; };
+    if !matches!(url.scheme(), "http" | "https") { return false; }
+    let Some(host) = url.host_str() else { return false; };
+    host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+        || host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>()
+            .is_ok_and(|address|address.is_loopback())
+}
+
 /// One `EnvironmentVariables` value from `~/Library/LaunchAgents/<label>.plist`.
 fn launch_agent_env(label: &str, key: &str) -> Option<String> {
     // A plist written before a rename spells the key the old way.
@@ -360,17 +371,14 @@ impl DaemonClient {
 
     fn http(&self) -> &Client {
         self.client.get_or_init(|| {
-            let builder = Client::builder()
+            let mut builder = Client::builder()
                 .connect_timeout(self.connect_timeout)
                 .timeout(self.request_timeout);
-            // Installed daemon credentials must stay on this Mac even when
-            // the MCP host supplies HTTP_PROXY / ALL_PROXY.
-            let builder = if loopback_daemon_url(&self.base_url).is_some() {
-                builder.no_proxy()
-            } else {
-                builder
-            };
-            builder.build().expect("reqwest client construction is infallible")
+            if loopback_url(&self.base_url) {
+                builder = builder.no_proxy();
+            }
+            builder.build()
+                .expect("reqwest client construction is infallible")
         })
     }
 
@@ -664,12 +672,26 @@ impl DaemonClient {
     /// `POST /agent/input` with an arbitrary action body (element taps,
     /// set_value, …), keeping the daemon's structured result.
     pub async fn input_value(&self, action: &serde_json::Value) -> anyhow::Result<DaemonResponse> {
-        let req = self
-            .auth(self.http().post(self.url("/agent/input")))
+        self.input_value_observed(action, false).await
+    }
+
+    /// Structured text/continuation actions use the same observation and transport budgets as
+    /// ordinary input. A continuation has a daemon-side budget of at most 15 seconds.
+    pub async fn input_value_observed(&self, action: &serde_json::Value, observe: bool) -> anyhow::Result<DaemonResponse> {
+        let path = if observe { self.observed_input_path() } else { "/agent/input".into() };
+        let text = match action.get("type").and_then(serde_json::Value::as_str) {
+            Some("set_value") => action.get("value"),
+            _ => action.get("text"),
+        };
+        let typing = text.and_then(serde_json::Value::as_str).map(text_allowance).unwrap_or_default();
+        let req = self.auth(self.http().post(self.url(&path)))
             .header("x-phone-control", "1")
             .header(header::CONTENT_TYPE, "application/json")
+            .timeout(if observe { OBSERVE_TIMEOUT + typing } else { REQUEST_TIMEOUT + typing })
             .body(action.to_string());
-        read_response(req.send().await?).await
+        let response = read_response(req.send().await?).await?;
+        self.remember_snapshot(response.json.as_ref());
+        Ok(response)
     }
 
     /// `POST /agent/actions`, keeping the response rather than raising it.
@@ -767,6 +789,12 @@ impl DaemonClient {
         read_response(req.send().await?).await
     }
 
+    /// Metadata POST for a read; deliberately carries no control header.
+    pub async fn read_value(&self, body: &serde_json::Value) -> anyhow::Result<DaemonResponse> {
+        let request=self.auth(self.http().post(self.url("/agent/value"))).timeout(Duration::from_secs(20)).json(body);
+        read_response(request.send().await?).await
+    }
+
     /// A swiping list call (`/agent/collect`, `/agent/scroll_find`): several
     /// reads and swipes in one request, so it gets the batch budget — the
     /// daemon answers within its own 80 s deadline.
@@ -834,6 +862,26 @@ impl DaemonClient {
             .timeout(SCREEN_FRAME_TIMEOUT);
         let resp = check_status(req.send().await?).await?;
         Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// A bounded native video connection for the panel relay. Credentials remain
+    /// here, never in iframe data or URLs. The global request deadline also
+    /// bounds an abandoned viewer; reconnecting requires a new keyframe.
+    pub async fn screen_video(&self) -> anyhow::Result<reqwest::Response> {
+        let response = self.auth(self.http().get(self.url("/agent/h264?mode=performance")))
+            .timeout(Duration::from_secs(15)).send().await?;
+        check_status(response).await
+    }
+
+    /// Read-only privacy incarnation. Older daemons without this fence must
+    /// use screenshot transport instead of retaining encoded video.
+    pub async fn screen_scope(&self) -> anyhow::Result<String> {
+        let response = check_status(self.auth(self.http().get(self.url("/agent/status")))
+            .timeout(SCREEN_FRAME_TIMEOUT).send().await?).await?;
+        let scope = response.headers().get("x-ipu-screen-scope")
+            .and_then(|value| value.to_str().ok()).filter(|value| !value.is_empty() && value.len() <= 96)
+            .context("daemon does not support scoped panel video")?.to_string();
+        Ok(scope)
     }
 
     /// The `X-Phone-Owner` this client presents, so a status reader can tell
@@ -1101,14 +1149,30 @@ impl DaemonResponse {
                 DAEMON_RESPONSE_READ_LIMIT
             );
         }
-        if self.body.len() <= DAEMON_RESPONSE_PREVIEW_BYTES {
-            return self.body.clone();
+        // Images belong in one MCP image block, never in a text preview. Retain the raw body
+        // for parsers/evidence, but suppress payloads even when the image itself is malformed.
+        let sanitized = self.json
+            .as_ref()
+            .filter(|json| json.pointer("/image/png_base64").is_some())
+            .map(|json| {
+                let mut json = json.clone();
+                if let Some(image) = json
+                    .get_mut("image")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    image.remove("png_base64");
+                }
+                json.to_string()
+            });
+        let body = sanitized.as_deref().unwrap_or(&self.body);
+        if body.len() <= DAEMON_RESPONSE_PREVIEW_BYTES {
+            return body.to_string();
         }
         let mut end = DAEMON_RESPONSE_PREVIEW_BYTES;
-        while end > 0 && !self.body.is_char_boundary(end) {
+        while end > 0 && !body.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}…", &self.body[..end])
+        format!("{}…", &body[..end])
     }
 
     /// One line for an error message: status, error code, outcome and whether
@@ -1291,6 +1355,16 @@ pub(crate) fn query_path(path: &str, params: &[(&str, String)]) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn loopback_proxy_and_token_boundary_uses_the_parsed_authority() {
+        for url in ["http://127.0.0.1:44321", "http://127.12.3.4:9", "https://localhost", "http://LOCALHOST.:9", "http://[::1]:9"] {
+            assert!(super::loopback_url(url), "{url}");
+        }
+        for url in ["http://127.0.0.1:9@evil.example", "http://localhost.evil.example:9", "http://192.168.1.2:44321", "https://example.com", "file://localhost/tmp", "bad"] {
+            assert!(!super::loopback_url(url), "{url}");
+        }
+    }
+
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};

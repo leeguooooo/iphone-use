@@ -141,6 +141,51 @@ screenshots, `/agent/elements` and live video answer `423 screen_private`, open
 streams end, and status shows `screen_private_secs`. A later hold without
 `private` lifts it.
 
+**Native sub-operations.** Scoped non-text input rechecks owner/privacy before
+each signed runner send, including after session/lookup/retry work. Metadata
+setup may be cancelled; an approved native mutation may finish and its valid
+acknowledgement remains authoritative. A logical action interrupted after a
+known native prefix reports `action_interrupted`, `outcome:partial`,
+`retry_safe:false` and `native_mutations_confirmed`/`native_mutations_uncertain`.
+These count native request acknowledgements, not app postconditions. Zero native
+mutation approvals can be refused as not_sent; uncertain delivery stays unknown.
+Never replay the whole interrupted action. Separate flow/suite requests and
+non-runner service/intent/vault paths require their own scope acceptance.
+
+**Action observations across handoff/privacy.** Input/actions requests retain
+entry owner/privacy scope for final observations, semantic waits and publication.
+A completed mutation keeps its original acknowledgement when its observation is
+withheld (`observation_omitted:true`, `scope_changed`). No screen absence or goal
+completion follows from the missing view. A wait or pacing step interrupted
+before completion stops later steps while retaining prior applied counts and
+retry safety. Check status and coordinate with the current owner before new
+work; never replay already-applied or uncertain steps. UI-derived diagnostics,
+prior wait results and queued observation bodies are omitted after scope loss.
+This is per API request; separate flow/suite requests and opaque action internals
+need their own scope acceptance.
+
+**Text across private holds.** Agent `text` requests retain the privacy generation
+and authenticated owner incarnation from entry, before waiting for the runner.
+An owner name returning to the same name after handoff does not revive queued
+input or let its completion renew the new incarnation's lease. An active private hold or a change
+while queued, discovering the session, binding or clearing refuses new text with
+`input_privacy_changed`. No later native text chunk is dispatched. A chunk or
+atomic short request already dispatched can finish; its acknowledgement remains
+authoritative. Confirmed characters stay confirmed. If clearing already applied,
+the result is partial with `detail.clear_applied:true`, not a safe whole replay.
+
+A prior `continue_token` expires across a private hold, including when it is
+lifted or expires before reuse. A private interruption issues no replacement
+token; check status and inspect the original field before starting new work.
+Ordinary holds without `private:true` retain continuation, including fresh work
+started after a previous private deadline expired; cleaning up that inactive
+deadline is not another private transition. Compatible short
+input keeps its existing failure/deadline behavior and also rechecks between
+active-field lookup, clearing and typing. Snapshot-bound replacement on
+`ipu:elementReplace` also retains one native target across clear, prefix and
+subsequent chunks; other action/key and mutation-observation paths still require
+separate acceptance.
+
 Standalone `/agent/screenshot` and `/agent/elements` reads carry the privacy
 generation from their start through response-body publication. A private hold
 invalidates in-flight reads, queued bodies and settled-frame caches even if the
@@ -337,7 +382,7 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"tap_locator","locator":{"identifier":"save"}}  // label/identifier/kind/value/focused/enabled/visible
 {"type":"tap","x":0.5,"y":0.3}                          // last resort
 {"type":"text","text":"Health"}                         // into the FOCUSED field; up to 20000 chars (see long text below)
-{"type":"set_value","element":5,"snapshot":"…","value":"你好"}  // write a field directly; 409 value_not_applied → tap + text instead (web views)
+{"type":"set_value","element":5,"snapshot":"…","value":"你好"}  // replace a selected field; inspect any failure before retrying
 {"type":"key","name":"return"}                          // return|enter|send|go|search fire Return; escape, space, tab, delete/backspace, arrows
 {"type":"keyboard"}                                     // dismiss the keyboard
 {"type":"shortcut","name":"home"}                       // home | spotlight (switcher is unsupported)
@@ -373,6 +418,50 @@ hovering at an edge to flip a folder page. Use coordinates observed on the
 current screen, then verify the end screen. Flow drafts preserve all points and
 dwells. `supported.drag_path` in `/agent/capabilities` advertises this format.
 
+**Visual recovery.** Scoped failures such as missing/covered targets, no scroll
+progress, failed waits and an observed input-target change can include one fresh
+`image` and a `recovery` next step. HTTP status, error, outcome, retry safety and
+prior dispatch counts retain their original meanings. The image is requested
+after the failure response was formed; its source, request/receive interval and
+`pixel_size` describe a later screen, not the failure instant. Coordinate taps
+use pixel x/y divided by that image's width/height to obtain normalized 0..1.
+Use a fresh visible target; never replay an uncertain input or the whole batch.
+
+Automatic capture requires the original named owner's live lease and unchanged
+owner/privacy generations. Privacy holds, human handoff, release or transitions
+withhold it. Capture has a two-second total budget and a bounded response size;
+no cached-frame fallback is used. Unavailable/omitted images do not replace the
+original failure. `X-Phone-Recovery-Image: none` skips this behavior; operators may
+set `IPHONE_USE_RECOVERY_IMAGES=0` on the daemon. MCP lifts PNG data into one image
+content block and keeps only metadata in text/structured content.
+
+**Short text and replacement.** A runner advertising `ipu:atomicText` handles
+up to 200 Unicode scalars in one native request: bind the focused nonsecure
+field, optionally clear it, type, then recheck the same field and app. No
+separate host-side field lookup is needed. `phone_type` also accepts explicit
+`clear:true`; omit it to append. A failed clear stops new text, including on
+older compatible `text` routes. A changed target after clearing is an unknown
+compound outcome, never safe to replay. This binding captures the field at
+dispatch; it does not assert that a caller's earlier screen snapshot is current.
+On current runners, newlines require a TextView and are checked before clearing;
+use an explicit key for submission. Secure fields require the person to act.
+Older runners without the capability retain their ordinary keyboard route and
+must not be described as providing the atomic field contract.
+
+**Focused text preparation.** Text requests, including short text, preserve
+already-focused input: they do not run Focus shortcuts or unlock the phone.
+A locked-field refusal stops without unlock or replay. A batch starting with
+text defers Focus for that batch; any later launch runs only after the preceding
+text succeeds. Prepare and verify the intended field before requesting text.
+
+**Cancelling a foreground MCP call.** `notifications/cancelled` is connected
+to the tool request's cancellation token. Before dispatch it reports `not_sent`;
+after dispatch it reports `unknown` and closes the foreground HTTP request,
+without replaying it. A device-side chunk already sent may still finish;
+this is not an immediate per-character stop guarantee. Background task tools
+have their own task cancellation API. Stop latency still needs per-transport
+and physical-device acceptance.
+
 **Long text.** Text over 200 characters is typed in chunks of about 200 (never
 splitting an emoji, flag, or combining mark), roughly 60 characters a second;
 the request's deadline grows with the text. If typing stops part-way the answer
@@ -381,6 +470,30 @@ values from the start), `characters_uncertain`, `remaining_text`, and
 `retry_safe:false`: read the field, then send only what is missing with
 `clear:false` — never the whole text again. One batch types at most 20000
 characters in total.
+With a current native runner advertising `ipu:inputContinuation`, a named
+`X-Phone-Owner` may optionally set `budget_ms` from 6000 to 15000. This caps
+typing time after the read-only target lookup; the endpoint's outer deadline
+still bounds the whole request. A safe stop between chunks returns
+`continue_token`, `continuation_safe:true` and a 60-second expiry alongside
+`text_partially_typed`. Continue with the same owner and daemon:
+
+```json
+{"type":"text","text":"the full draft","budget_ms":15000}
+{"type":"text","continue_token":"<64 lowercase hex characters from the response>"}
+```
+
+Pass the token alone with `type:text`; never add text, clear or a new budget.
+Each token is consumed before dispatch and a later safe stop issues a new one.
+`retry_safe:false` still forbids replaying the original request. The token
+resumes only unsent text in the original field and App. Read-only inspection
+preserves it; an intervening device command, ownership release/takeover,
+runner session change, eviction or expiry invalidates it. Field/App changes
+are checked on the phone. A rejected or consumed token never rebinds to the
+current field. Unknown delivery never issues a continuation. Older runners
+can keep ordinary input but refuse bounded input; they are not described as
+having this protection. A flow draft containing a continuation needs a reviewed
+replacement for the entire original type step, including its clear behavior.
+
 To check a long text, look at a screenshot of its end. Do not compare
 `value`: iOS cuts a text field's or text view's accessibility value at 512
 UTF-16 code units (an emoji counts two to four). On an iPhone 17 Pro Max
@@ -826,7 +939,7 @@ worked example below.
 
 ## MCP specifics
 
-39 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
+41 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_reconnect`, `phone_hold`,
 `phone_release_owner`, `phone_login`, `phone_apps`, `phone_screenshot`, `phone_elements`, `phone_home_layout`, `phone_instances`, `phone_tap`,
 `phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_scroll_find`, `phone_collect_list`, `phone_type`,
 `phone_key`, `phone_shortcut`, `phone_run_steps`, `phone_jev_run`,
@@ -1177,6 +1290,25 @@ on the wrong app.
 
 ## Screens hidden from capture
 
+**Privacy transitions.** A screenshot (including overlay/re-encoding) and an
+element/OCR response are discarded if a private hold starts or changes during
+that read, even if it is lifted before completion. Before response commitment,
+active privacy returns `423 screen_private`; a completed on/off transition returns
+`423 screen_privacy_changed`. A body queued after headers is fenced again when
+published and closes with a read error if privacy changed. In-flight work is
+cancelled without retry; a native capture already sent may still finish.
+Check status before requesting a new observation;
+these refusals never authorize replay of a mutation. Snapshot baselines and
+settled image caches are invalidated across the transition.
+
+An existing MJPEG/H.264 feed ends across a privacy generation change. A new
+viewer after unhide uses a new producer generation; delayed native packets,
+VideoToolbox callbacks and stale subscribers cannot publish into it or keep
+capture running. Data already delivered before the transition cannot be
+withdrawn. MCP panels clear their last image when capture returns 423, including
+when a concurrent status request still reported the screen open.
+
+
 Payment and bank apps (PayPay, wallets) mark content as protected; every
 capture path gets a blank area. `GET /agent/screenshot` detects it and returns
 `X-Capture-Redacted: 1` with a **wireframe** of the accessibility tree (blue
@@ -1308,6 +1440,145 @@ not pixel coordinates or a restore format. Read again after moving an icon and
 resolve live UI elements before sending a gesture. An unavailable service returns
 `503 home_layout_unavailable`, never a successful empty layout. Simulator targets
 are explicitly unsupported. No endpoint changes the saved layout.
+
+### Native video in the screen panel
+
+The panel requests bounded H.264 access-unit batches through the existing
+app-only `phone_screen_frame` tool (`video:true`, `reset:true` to reconnect).
+WorkBuddy uses the read-only `ui://iphone-use/video-v1/{0|1}/{nonce}` resource.
+Named panels use `ui://iphone-use/instance-v1/{instance}/video-v1/{0|1}/{nonce}`
+(and the corresponding `frame-v1` path). Invalid or unavailable targets fail
+without reading the configured daemon.
+Credentials and daemon URLs stay in the MCP process; the iframe has no network
+permissions. Hosts with WebCodecs decode Annex-B data into a canvas. Unsupported
+video or a failed stream clears the canvas and falls back to ordinary PNG reads;
+video is retried after 30 seconds. PNG fallback retains its 2 fps ceiling.
+
+The relay checks an opaque daemon-process/privacy incarnation before opening
+and after reading every batch. Scope changes discard buffered packets and
+require a new keyframe. Its parser bounds packet and buffered sizes; reads stop
+after 150 ms or 16 packets. Inactive subscriptions close after two seconds;
+HTTP connections have a 15-second lifetime and rotate after ten seconds, with
+a new keyframe, before expiry can trigger screenshot fallback. The relay refuses
+three seconds without a packet. A cancelled poll owns and drops its
+transport. Hidden or disposed panels clear decoded pixels and reject late
+decoder callbacks. The canvas has a three-second decoded-frame watchdog; codec
+configuration is time-bounded. Same-scope transport renewal retains the last
+permitted pixels until the new decoder produces a frame. Acknowledged controls
+remain separate from viewing.
+
+This transport does not establish a frame-rate, bandwidth or end-to-end latency
+claim. Actual host WebCodecs support, frame presentation and physical-device
+performance still require acceptance.
+
+### List traversal scope and visual diagnostics
+
+`phone_scroll_find` and `phone_collect_list` retain the owner/privacy incarnation
+captured at request entry, including runner queue waits, metadata retries and
+each native request. Revoked read-only work is cancelled; a current swipe may
+finish and its acknowledgement is preserved. `swipes` counts acknowledged whole
+gestures separately from `native_mutations_confirmed` / `native_mutations_uncertain`
+(which can include preparatory controls). Scope loss removes rows, targets,
+candidates, snapshots and recovery images; queued response bodies recheck before
+publication. A prior owner cannot regain authority through an A-to-B-to-A name
+round trip. Permission loss does not mark the device broken.
+
+Selected missing/ambiguous/blocked lookups and incomplete no-row/no-progress,
+duplicate-page or failed traversals can include a fresh bounded recovery image.
+The existing verdict, partial rows, coverage and native delivery counts remain
+unchanged; a picture never proves full list coverage or authorizes whole-call
+replay. A found target, successful end marker and intentional page-budget stop
+do not request a diagnostic capture. Capture stays in the original owner/private
+scope, uses the existing two-second/image-size limits, and can be disabled with
+`X-Phone-Recovery-Image: none`. MCP lifts the PNG into one image block in all
+output modes, preserving unknown-dispatch/replay advice in text.
+
+### List execution deadline
+
+List handlers use one 80-second execution deadline from handler entry. Queue,
+preparation, traversal and optional recovery capture share it; a fresh deadline
+is not created after obtaining the runner lock. Native admission checks it too.
+On expiry, `list_deadline` returns HTTP 504: zero sent mutations are not_sent,
+confirmed prefixes are partial, and unacknowledged sends remain unknown.
+A current operation may still finish on the phone; no automatic replay occurs.
+
+A collection retains completed-page rows and page counts as historical partial
+results, with complete:false and no actionable snapshot. These are not claims
+about the current viewport or full coverage. A late privacy/owner change still
+withholds them at body publication. Optional recovery images cannot extend the
+execution deadline; budget exhaustion omits the image without replacing a
+lookup result that already completed. Server-side cancellation on client
+transport disconnect remains a separate contract.
+
+### Full selected AX values
+
+Bulk elements remain snapshots. A provider-reported `value_truncated:true` marks
+an incomplete preview; absence of a marker on an older runner does not prove
+full text. `phone_read_value` / `POST /agent/value` reads one element by exactly
+one `identifier` or exact `label`, optionally `kind`, without tapping/focusing,
+activating an app, reconnecting or taking an owner lease. Ambiguity refuses.
+
+The request can name `max_utf16` (1–65536, default 8192). The result names the
+full AX attribute source, original and returned UTF-16 lengths, complete and
+truncated. Output clips at Unicode scalar boundaries, so an emoji is not split.
+Complete describes that AX attribute, not the application's full document or
+hidden data; the app can expose a summarized accessibility value. Secure fields
+refuse. Older runners lacking ipu:valueRead refuse rather than present a preview
+as a full value. Current owner/privacy generations govern the read and its body
+publication; no native mutation is issued or replayed.
+
+The MCP result places the bounded value exactly once in its text JSON; structured
+content holds metadata only, in all output modes. Native clients can use
+GET /session/:sid/element/:id/value?max_utf16=... for the structured contract.
+The compatible attribute/value route uses the full AX attribute when its
+snapshot was truncated and reports X-Value-Complete / X-Value-Source headers.
+
+### Snapshot-bound text replacement
+
+MCP `phone_run_steps` also accepts `{"kind":"set_value","element":N,
+"snapshot":"ORIGINAL","value":"complete replacement"}`. It uses the same
+original-observation contract as `phone_set_value`; optional
+`recover_focus_after_clear` and `after_ms` retain their normal semantics.
+All step shapes and value limits are checked before the batch is sent. Put
+snapshot-bound replacement before any other modifying action: a prior mutation
+invalidates the observation even if the page looks similar. The daemon refuses instead of
+substituting another snapshot. Any failed replacement stops later steps,
+including an unsent Return. Snapshot-bound actions are for the current batch;
+use durable locators when designing a saved flow.
+
+`set_value` replaces a nonsecure TextField, SearchField or TextView selected by a
+fresh element/snapshot. Secure fields require human input. A newline in a
+single-line target refuses before clearing; use an explicit key to submit.
+On runners advertising `ipu:elementReplace`, the daemon sends a single native
+request that focuses that selected element once, binds it, clears it and writes
+at most 200 Unicode scalars. Remaining text is split at conservative grapheme
+boundaries into bounded chunks using the same native target token. Every chunk
+checks identity, foreground and focus. Owner/privacy admission is rechecked at
+each subsequent request. No text or clear is retried through the legacy route.
+
+Focus/clear/prefix uncertainty is terminal, even when a later value resembles
+the requested text. An acknowledged prefix remains a confirmed native request;
+scope loss before the tail preserves that acknowledgement and refuses later
+requests. This is not per-character interruption: the already dispatched native
+prefix or chunk can finish. The server does not expose a replacement continuation
+token for automatic retries; inspect the original field before a new replacement.
+Replacement delivery errors report `replacement_incomplete` with
+`characters_confirmed`, `characters_uncertain`, `characters_unsent` and
+`characters_total` in Unicode scalars, plus `clear_outcome` (`confirmed` or
+`unknown`). Counts describe native request acknowledgements, not independent
+App postconditions. A later connection failure retains earlier confirmed chunks;
+it cannot make the whole replacement `not_sent` or retry-safe. An invalid/missing
+prefix target token confirms neither that prefix nor its clear. `retry_safe` is
+false and no continuation token or automatic append advice is issued. Ownership
+or privacy revocation can instead retain the existing `action_interrupted`
+receipt with native request counts. Legacy clear/type replacements also retain
+an acknowledged clear when their later type request fails. A batch
+preserves these fields and its completed steps, then stops before later actions.
+Older runners keep their existing clear/type behavior, but a clear failure now
+stops immediately instead of appending. They do not gain native target binding.
+A changed unexpected or unavailable final readback is unknown, never retry-safe
+no_effect. An acknowledged write with an unchanged original value reports
+value_not_applied; inspect status and the field before starting new work.
 
 When `runner_parked=true` (or legacy `ended_on_phone=true`), automatic schedules remain postponed. An explicitly
 requested manual schedule run may reconnect, but it still respects human handoff,

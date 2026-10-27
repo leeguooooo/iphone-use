@@ -467,6 +467,8 @@ pub fn convert_action(action: &Value, rows: Option<&[crate::runner::ElementRow]>
             _ => Converted::Unsupported("a tap without coordinates".into()),
         },
         "tap_locator" => copy("tap_locator", &["locator", "via", "if_present"]),
+        "text" if action.get("continue_token").is_some() => Converted::Unsupported(
+            "continued a partially completed text input; replace the entire original input with one reviewed type step (including its clear behavior)".into()),
         "text" => Converted::Typed {
             clear: action.get("clear").and_then(Value::as_bool).unwrap_or(false),
         },
@@ -1077,6 +1079,17 @@ mod tests {
         assert!(!draft.to_string().contains("secret"));
         assert_eq!(draft["flow"]["steps"][0], json!({"kind":"type","input":"text1","clear":true}));
         assert_eq!(draft["flow"]["inputs"]["text1"]["type"], "string");
+    }
+
+    #[test]
+    fn continuations_require_flow_review_and_never_record_a_runtime_token() {
+        let mut trail = FlowTrail::default();
+        let token = "a".repeat(64);
+        trail.record(convert_action(&json!({"type":"text","continue_token":token}),None),Instant::now());
+        let draft = draft_json(&trail.current,"current");
+        assert!(!draft.to_string().contains(&token));
+        assert!(draft["flow"]["steps"].as_array().unwrap().is_empty());
+        assert!(!draft["todo"].as_array().unwrap().is_empty());
     }
 
     #[test]

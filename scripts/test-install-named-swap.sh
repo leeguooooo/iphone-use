@@ -18,24 +18,25 @@ bad()  { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 # --- structure of install_named_instance -----------------------------------
 FN="$(sed -n '/^install_named_instance() {$/,/^}$/p' "$ROOT/install.sh")"
 [ -n "$FN" ] || bad "install_named_instance not found"
-first_bootout="$(printf '%s\n' "$FN" | grep -n 'launchctl bootout' | head -1 | cut -d: -f1)"
-rollback_def="$(printf '%s\n' "$FN" | grep -n '^    named_rollback() {' | head -1 | cut -d: -f1)"
+first_bootout="$(awk '/launchctl bootout/ {print NR; exit}' <<< "$FN")"
+rollback_def="$(awk '/^    named_rollback\(\) \{/ {print NR; exit}' <<< "$FN")"
 [ -n "$rollback_def" ] && [ -n "$first_bootout" ] || bad "missing rollback or bootout"
 [ "$rollback_def" -lt "$first_bootout" ] \
     || bad "named_rollback is defined after the first bootout (line $rollback_def >= $first_bootout)"
 ok_t "named_rollback is defined before the first launchctl bootout"
 
-ok_line="$(printf '%s\n' "$FN" | grep -n 'ok "Instance \$INSTANCE_NAME daemon is up' | cut -d: -f1)"
+ok_line="$(grep -n 'ok "Instance \$INSTANCE_NAME daemon is up' <<< "$FN" | cut -d: -f1)"
 # From the old job's bootout (after the rollback body) up to success, a plain
 # `die` would strand a booted-out instance with half-installed files.
-after_def="$(printf '%s\n' "$FN" | awk -v s="$rollback_def" 'NR>s && /^    }$/ {print NR; exit}')"
-stray="$(printf '%s\n' "$FN" | sed -n "${after_def},${ok_line}p" | grep -n '[^_]die ' || true)"
+after_def="$(awk -v s="$rollback_def" 'NR>s && /^    }$/ {print NR; exit}' <<< "$FN")"
+stray="$(sed -n "${after_def},${ok_line}p" <<< "$FN" | grep -n '[^_]die ' || true)"
 [ -z "$stray" ] || bad "plain die between bootout and success: $stray"
 ok_t "no plain die between the bootout and the success line"
 
-printf '%s\n' "$FN" | grep 'wait_label_gone "gui/\$UID_NUM/\$label"' >/dev/null \
+# A here-string has no upstream writer for grep -q to break under pipefail.
+grep -q 'wait_label_gone "gui/\$UID_NUM/\$label"' <<< "$FN" \
     || bad "no wait after bootout"
-printf '%s\n' "$FN" | grep 'probe_launchd_daemon "gui/\$UID_NUM/\$label" "\$binary"' >/dev/null \
+grep -q 'probe_launchd_daemon "gui/\$UID_NUM/\$label" "\$binary"' <<< "$FN" \
     || bad "readiness does not use probe_launchd_daemon"
 ok_t "waits for the old job to go and probes identity + authenticated status"
 

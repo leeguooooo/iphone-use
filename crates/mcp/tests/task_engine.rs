@@ -23,8 +23,7 @@ fn serve(respond: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static) -
             let mut data = Vec::new();
             let mut buffer = [0u8; 65536];
             // Read headers, then the body by Content-Length.
-            loop {
-                let Ok(n) = stream.read(&mut buffer) else { break };
+            while let Ok(n) = stream.read(&mut buffer) {
                 if n == 0 {
                     break;
                 }

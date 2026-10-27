@@ -2290,8 +2290,8 @@ mod tests {
     /// as an error, `run_command` returned early, and the diagnosis and the
     /// evidence file never happened at all — on precisely the runs they exist
     /// for.
-    #[tokio::test]
-    async fn a_failing_run_still_reports_diagnoses_and_records() {
+    #[test]
+    fn a_failing_run_still_reports_diagnoses_and_records() {
         let home = tempfile::tempdir().unwrap();
         let flow_path = home.path().join("flow.json");
         fs::write(&flow_path, valid_flow()).unwrap();
@@ -2320,15 +2320,17 @@ mod tests {
         std::env::set_var("IPHONE_USE_URL", &url);
         std::env::set_var(registry::STORE_ENV, store.path());
 
-        let error = run_command(
+        // Keep environment serialization outside the async runtime so this
+        // synchronous guard is never carried by a suspended test future.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let error = runtime.block_on(run_command(
             flow_path.to_str().unwrap(),
             &[],
             false,
             true, // --force: compat is not what this test is about
             Some(&runs),
             None,
-        )
-        .await
+        ))
         .expect_err("a failed flow must still exit non-zero");
         task.join().unwrap();
         std::env::remove_var("IPHONE_USE_URL");

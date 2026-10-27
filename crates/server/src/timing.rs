@@ -135,30 +135,33 @@ pub trait SendTimed {
     fn send_signed(
         self,
         auth: &crate::runner_token::TokenSource,
-    ) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<reqwest::Response>> + Send;
 }
 
 impl SendTimed for reqwest::RequestBuilder {
     async fn send_timed(self) -> reqwest::Result<reqwest::Response> {
         let (client, request) = self.build_split();
-        execute_timed(client, request?).await
+        execute_timed(client, request?, false).await
     }
 
     async fn send_signed(
         self,
         auth: &crate::runner_token::TokenSource,
-    ) -> reqwest::Result<reqwest::Response> {
+    ) -> anyhow::Result<reqwest::Response> {
         let (client, request) = self.build_split();
         let mut request = request?;
         crate::runner_token::sign_request(auth, &mut request);
-        execute_timed(client, request).await
+        crate::native_scope::admit(&request)?;
+        Ok(execute_timed(client, request, true).await?)
     }
 }
 
 async fn execute_timed(
     client: reqwest::Client,
     request: reqwest::Request,
+    native: bool,
 ) -> reqwest::Result<reqwest::Response> {
+    let mutation=native&&crate::native_scope::is_mutation(request.method(),request.url().path());
     let route = format!(
         "{} {}",
         request.method(),
@@ -185,6 +188,7 @@ async fn execute_timed(
             return Err(error);
         }
     };
+    if native {crate::native_scope::reply(mutation,status,&body);}
     call.finish(Some(body.len() as u64));
     let mut buffered = axum::http::Response::new(body);
     *buffered.status_mut() = status;

@@ -5,6 +5,9 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const html = fs.readFileSync(path.join(__dirname, '../crates/mcp/src/screen.html'), 'utf8');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1]
+  .replaceAll('__IU_RESOURCE_FRAMES__', 'false')
+  .replaceAll('__IU_FRAME_RESOURCE__', 'ui://iphone-use/frame-v1/')
+  .replaceAll('__IU_VIDEO_RESOURCE__', 'ui://iphone-use/video-v1/')
   .replaceAll('__IU_FRAME_TOOL__', 'phone_screen_frame').replaceAll('__IU_VERSION__', 'test');
 function panel(body={released:true,drivable:false,phone:'mock'}) {
   const elements = new Map();

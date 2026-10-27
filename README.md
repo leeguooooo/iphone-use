@@ -27,6 +27,8 @@ Claude Code, Codex or any MCP client reads the screen as text, taps, types and s
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
+WorkBuddy / Doubao: [candidate host adapters and setup](docs/mcp-hosts.md) (live host acceptance pending).
+
 https://github.com/user-attachments/assets/ee298774-bf3e-4fd0-9a08-481b20904f61
 
 <sub>1-minute demo, real iPhone recordings · [中文版](https://github.com/user-attachments/assets/6192e8a6-ab2d-4dfc-b2e9-2c971f527d55)</sub>

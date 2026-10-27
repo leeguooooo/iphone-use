@@ -321,6 +321,8 @@ pub struct Page {
 /// What the collection loop needs from a phone.
 pub(crate) trait Pager {
     async fn read(&mut self) -> anyhow::Result<Page>;
+    /// Optional owner-scoped checkpoint for a hard deadline while a later IO is pending.
+    fn checkpoint(&mut self, _rows: &[CollectedRow], _pages: &[PageReport]) {}
     /// One page-sized swipe inside `region` (whole screen when `None`).
     async fn swipe(&mut self, region: Option<Region>, direction: Direction) -> anyhow::Result<()>;
 }
@@ -554,6 +556,7 @@ pub(crate) async fn collect<P: Pager>(
             rows_seen: current.len(),
             new_rows,
         });
+        pager.checkpoint(&rows, &pages);
         if let Some(label) = &request.end_label {
             if end_label_on_screen(&page.rows, page.screen, request.region, label) {
                 end_label_seen = true;

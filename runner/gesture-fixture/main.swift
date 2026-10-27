@@ -189,11 +189,15 @@ final class InputController: UIViewController, UITableViewDataSource, UITableVie
     publish()
   }
   private func publish() {
+    let windowRect = view.window?.bounds ?? view.bounds
+    let tableRect = table.convert(table.bounds, to: view.window)
     let record: [String: Any] = [
       "run_id": runID, "selections": selections, "text": search.searchBar.text ?? "",
       "edits": edits, "began_editing": beganEditing,
       "offset_y": Double(table.contentOffset.y),
       "decelerating": table.isDecelerating, "dragging": table.isDragging,
+      "window_size": [Double(windowRect.width), Double(windowRect.height)],
+      "table_rect": [Double(tableRect.minX), Double(tableRect.minY), Double(tableRect.width), Double(tableRect.height)],
     ]
     if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
        let text = String(data: data, encoding: .utf8) {

@@ -95,6 +95,16 @@ python3 "$ROOT/scripts/test-drag-simulator.py" --base "$B" --udid "$SIM" \
     --out "$STATE/gesture-acceptance" --settings-suite "$STATE/gesture-acceptance/settings-suite.json" || bad "OS-delivered drag/hover checks failed"
 ok_t "single, batch, Flow and native input satisfy the fixture's UIKit postconditions"
 
+# Same disposable managed Simulator/Runner; the harness refuses a phone and
+# requires our existing nonprivate owner lease. Expected stops retain field
+# hashes/fault counters; an error acknowledgement alone cannot pass a case.
+curl -fsS -m 30 "${H[@]}" -X POST "$B/agent/hold" -d '{"secs":300}' >/dev/null \
+    || bad "claim the disposable simulator lease for recovery checks"
+python3 "$ROOT/scripts/test-replacement-recovery-simulator.py" --base "$B" --udid "$SIM" \
+    --owner smoke --mcp "$BIN/iphone-use-mcp" --runner-record "$STATE/simulator.json" \
+    --out "$STATE/replacement-recovery" || bad "selected replacement recovery checks failed"
+ok_t "selected replacement recovery preserves the original field and refuses injected hazards"
+
 # Give the owner lease back, so the MCP client (another owner) may drive.
 curl -fsS -m 30 "${H[@]}" -X POST "$B/agent/owner" -d '{"release":true}' >/dev/null || bad "release the owner lease"
 

@@ -83,6 +83,14 @@ pub struct RunnerClient {
     /// Signs every request with the device runner's per-launch token.
     auth: std::sync::Arc<crate::runner_token::TokenSource>,
     session: Option<String>,
+    /// Negotiated per session; old runners retain their existing input path.
+    guarded_input: bool,
+    continuation_input: bool,
+    atomic_text: bool,
+    value_read: bool,
+    element_replace: bool,
+    replace_focus_recovery: bool,
+    input_continuation: crate::input_continuation::Store,
     /// Last `GET /window/size` answer and when it was read. Every coordinate
     /// gesture needs the size to map normalized points, and the read costs
     /// ~180 ms on a real phone — more than a third of a tap. A short TTL keeps
@@ -340,6 +348,13 @@ impl RunnerClient {
             http,
             auth: std::sync::Arc::new(crate::runner_token::TokenSource::instance()),
             session: None,
+            guarded_input: false,
+            continuation_input: false,
+            atomic_text: false,
+            value_read: false,
+            element_replace: false,
+            replace_focus_recovery: false,
+            input_continuation: Default::default(),
             window: None,
             posted_at: None,
             no_alert_at: None,
@@ -697,6 +712,21 @@ impl RunnerClient {
                 .await
                 .context("POST /session body")?;
             self.session = Some(parse_session_id(&text)?);
+            self.guarded_input = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/value/capabilities/ipu:guardedInput")
+                        .and_then(serde_json::Value::as_bool)
+                })
+                == Some(true);
+            self.continuation_input = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|v| v.pointer("/value/capabilities/ipu:inputContinuation").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.atomic_text = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|v| v.pointer("/value/capabilities/ipu:atomicText").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.element_replace = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v|v.pointer("/value/capabilities/ipu:elementReplace").and_then(serde_json::Value::as_bool))==Some(true);
+            self.replace_focus_recovery = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v|v.pointer("/value/capabilities/ipu:replaceFocusRecovery").and_then(serde_json::Value::as_bool))==Some(true);
+            self.value_read = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v|v.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool))==Some(true);
             self.window = None;
             self.no_alert_at = None;
             self.device_settle = None;
@@ -949,6 +979,16 @@ impl RunnerClient {
             .collect())
     }
 
+    /// One explicitly selected element's full AX value. Older runners refuse;
+    /// their bounded snapshot string is never promoted to a complete value.
+    pub async fn read_element_value(&mut self, id: &str, max_utf16: u32) -> Result<serde_json::Value> {
+        let sid=self.ensure_session().await?.to_string();
+        if !self.value_read {anyhow::bail!("runner lacks ipu:valueRead");}
+        let response=self.http.get(format!("{}/session/{}/element/{}/value",self.base,sid,id))
+            .query(&[("max_utf16",max_utf16)]).send_signed(&self.auth).await?;
+        ensure_runner_success(response,"GET element value").await
+    }
+
     /// Set a date/option PickerWheel to a target value (issue #23). A `scroll`
     /// gesture doesn't reach the wheel's recognizer; the reliable path is
     /// XCUITest's `adjustToPickerWheelValue:`, which runner triggers when you POST
@@ -1016,6 +1056,61 @@ impl RunnerClient {
             .context("POST element/value")?;
         ensure_runner_success(response, "POST element/value").await?;
         Ok(())
+    }
+
+    /// This opt-in needs both replacement and verified clear-time recovery support.
+    pub async fn supports_replace_focus_recovery(&mut self) -> Result<bool> {
+        self.ensure_session().await?;
+        Ok(self.element_replace && self.replace_focus_recovery)
+    }
+
+    /// False is capability absence only. Once dispatched, never use the legacy
+    /// clear/type path after a failure or replay an uncertain prefix.
+    pub async fn replace_element_if_supported(&mut self, id: &str, text: &str, recover_focus_after_clear: bool) -> Result<bool> {
+        let sid = self.ensure_session().await?.to_string();
+        anyhow::ensure!(!recover_focus_after_clear || (self.element_replace && self.replace_focus_recovery),
+            "replacement focus recovery unsupported; no replacement input sent");
+        if !self.element_replace { return Ok(false); }
+        anyhow::ensure!(text.chars().count() <= 1000, "replacement exceeds 1000 Unicode scalars");
+        let pieces = crate::text_input::split(text, crate::text_input::CHUNK_CHARS);
+        anyhow::ensure!(pieces.iter().all(|piece|piece.chars().count() <= 200), "replacement grapheme exceeds the bounded native chunk; nothing sent");
+        let prefix = pieces.first().copied().unwrap_or("");
+        let mut body = serde_json::json!({"text":prefix});
+        if recover_focus_after_clear { body["recoverFocusAfterClear"] = serde_json::Value::Bool(true); }
+        let total = text.chars().count();
+        let prefix_len = prefix.chars().count();
+        let prefix_result = async {
+            let response = self.post_req(format!("{}/session/{}/ipu/element/{}/replace",self.base,sid,id))
+                .json(&body).send_signed(&self.auth).await?;
+            ensure_runner_success(response,"POST bound element replacement").await
+        }.await;
+        let result = match prefix_result {
+            Ok(result) => result,
+            // No mutation preceded the first request: a connect failure is still
+            // a true not-sent. Later connect failures must preserve the prefix.
+            Err(error) if error.chain().any(|e| e.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_connect)) => return Err(error),
+            Err(error) => return Err(ReplacementDeliveryError::wrap(error, 0, prefix_len, total-prefix_len, false)),
+        };
+        let token = match result.get("inputTarget").and_then(serde_json::Value::as_str)
+            .filter(|token| !token.is_empty() && token.len() <= 128) {
+            Some(token) => token,
+            None => return Err(ReplacementDeliveryError::wrap(
+                anyhow!("replacement acknowledged without an input target; no further text sent"),
+                0, prefix_len, total-prefix_len, false)),
+        };
+        let mut confirmed = prefix_len;
+        for chunk in pieces.iter().skip(1) {
+            let count = chunk.chars().count();
+            if let Err(error) = self.keys_to_target(chunk,token,Duration::from_secs(20)).await {
+                let not_sent = error.chain().any(|e| e.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_connect))
+                    || runner_http_error(&error).is_some_and(RunnerHttpError::nothing_sent)
+                    || crate::native_scope::is_revoked(&error);
+                let uncertain = if not_sent { 0 } else { count };
+                return Err(ReplacementDeliveryError::wrap(error, confirmed, uncertain, total-confirmed-uncertain, true));
+            }
+            confirmed += count;
+        }
+        Ok(true)
     }
 
     /// Clear a specific element's text (`POST .../element/:id/clear`). Unlike
@@ -1657,6 +1752,12 @@ impl RunnerClient {
     /// `POST /element/:id/clear`). Lets `text` REPLACE a field's contents
     /// instead of appending to stale text (the "ClaudeClaude" search-box bug).
     pub async fn clear_active(&mut self) -> Result<()> {
+        self.clear_active_checked(|| true).await.map(|_| ())
+    }
+
+    /// The focused-element lookup is read-only; an agent may revoke the
+    /// compound clear before its first mutation, after that lookup completes.
+    pub(crate) async fn clear_active_checked(&mut self, allowed: impl Fn() -> bool) -> Result<bool> {
         let sid = self.ensure_session().await?.to_string();
         let body = self
             .http
@@ -1670,6 +1771,7 @@ impl RunnerClient {
             .await
             .context("/element/active body")?;
         let id = parse_element_id(&body)?;
+        if !allowed() { return Ok(false); }
         let response = self
             .post_req(format!(
                 "{}/session/{}/element/{}/clear",
@@ -1681,7 +1783,7 @@ impl RunnerClient {
             .await
             .context("POST /element/clear")?;
         ensure_runner_success(response, "POST /element/clear").await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Tune runner's built-in MJPEG screen stream (`POST /appium/settings`). The
@@ -1846,6 +1948,102 @@ impl RunnerClient {
             .await
             .context("POST /wda/keys")?;
         ensure_runner_success(response, "POST /wda/keys").await?;
+        Ok(())
+    }
+
+    /// A current runner binds and verifies short input inside one native request. An older
+    /// runner keeps its compatible routes, but failed clearing never falls through to typing.
+    pub(crate) async fn short_agent_text(&mut self, text: &str, clear: bool) -> Result<()> {
+        let sid = self.ensure_session().await?.to_string();
+        if self.atomic_text {
+            let response = self.post_req(format!("{}/session/{}/ipu/text", self.base, sid))
+                .json(&serde_json::json!({"text":text,"clear":clear}))
+                .send_signed(&self.auth).await.context("POST /ipu/text")?;
+            ensure_runner_success(response, "POST /ipu/text").await?;
+            return Ok(());
+        }
+        if clear { self.clear_active().await?; }
+        self.keys(text).await
+    }
+
+    pub(crate) fn save_input_continuation(&mut self, scope: crate::input_continuation::Scope,
+        target: String, remaining: String, budget_ms: u64) -> Option<String> {
+        if !self.continuation_input { return None; }
+        self.input_continuation.issue(scope, self.session.clone()?, target, remaining, budget_ms, std::time::Instant::now())
+    }
+
+    pub(crate) fn supports_input_continuation(&self) -> bool { self.continuation_input }
+    pub(crate) fn supports_atomic_text(&self) -> bool { self.atomic_text }
+
+    pub(crate) fn discard_input_continuation(&mut self) { self.input_continuation.clear(); }
+
+
+    pub(crate) fn take_input_continuation(&mut self, token: &str, scope: &crate::input_continuation::Scope)
+        -> Option<crate::input_continuation::Pending> {
+        self.input_continuation.take(token, scope, self.session.as_deref()?, std::time::Instant::now())
+    }
+
+    /// Bind a long text to the live focused field on a supporting runner. Once advertised,
+    /// failure to bind is an error, never permission to fall back to unguarded typing.
+    pub async fn input_target(&mut self) -> Result<Option<String>> {
+        self.input_target_for_text("").await
+    }
+
+    pub(crate) async fn input_target_for_text(&mut self, text: &str) -> Result<Option<String>> {
+        let sid = self.ensure_session().await?.to_string();
+        if !self.guarded_input {
+            return Ok(None);
+        }
+        let response = self
+            .http
+            .get(format!("{}/session/{}/wda/input-target{}", self.base, sid,
+                if self.atomic_text && (text.contains('\n') || text.contains('\r')) { "?multiline=1" } else { "" }))
+            .send_signed(&self.auth)
+            .await
+            .context("GET /wda/input-target")?;
+        let value = ensure_runner_success(response, "GET /wda/input-target").await?;
+        let token = value
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| !token.is_empty() && token.len() <= 128
+                && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+            .context("input target response missing or invalid token")?;
+        Ok(Some(token.to_string()))
+    }
+
+    /// Clear only the bound field; the runner checks focus without tapping to regain it.
+    pub async fn clear_input_target(&mut self, token: &str) -> Result<()> {
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .post_req(format!(
+                "{}/session/{}/element/{}/clear",
+                self.base, sid, token
+            ))
+            .json(&serde_json::json!({"inputTarget":token}))
+            .send_signed(&self.auth)
+            .await
+            .context("POST guarded element/clear")?;
+        ensure_runner_success(response, "POST guarded element/clear").await?;
+        Ok(())
+    }
+
+    /// Each chunk is checked on the phone immediately before dispatch. A rejection must not
+    /// trigger target reselection, refocusing or fallback to ordinary keys.
+    pub async fn keys_to_target(
+        &mut self,
+        text: &str,
+        token: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .post_req(format!("{}/session/{}/wda/keys", self.base, sid))
+            .timeout(timeout)
+            .json(&serde_json::json!({"value":[text],"inputTarget":token}))
+            .send_signed(&self.auth)
+            .await
+            .context("POST guarded /wda/keys")?;
+        ensure_runner_success(response, "POST guarded /wda/keys").await?;
         Ok(())
     }
 
@@ -2268,6 +2466,7 @@ impl RunnerClient {
             || path.ends_with("/elements")
             || path.ends_with("/element");
         if !read_only {
+            self.input_continuation.clear();
             // A new app or the Home Screen is a screen of unknown size.
             if path.ends_with("/wda/apps/launch")
                 || path.ends_with("/wda/apps/activate")
@@ -2349,7 +2548,8 @@ impl RunnerClient {
             serde_json::Value::String(s) => Some(s),
             serde_json::Value::Number(n) => Some(n.to_string()),
             serde_json::Value::Bool(b) => Some(b.to_string()),
-            _ => None,
+            serde_json::Value::Null => None,
+            _ => anyhow::bail!("GET element/attribute/value returned a nonscalar value"),
         })
     }
 
@@ -2462,7 +2662,14 @@ impl RunnerClient {
     /// Drop the cached session (e.g. after an error that suggests it went
     /// stale); the next call re-creates one via [`Self::ensure_session`].
     pub fn invalidate_session(&mut self) {
+        self.input_continuation.clear();
         self.session = None;
+        self.guarded_input = false;
+        self.continuation_input = false;
+        self.atomic_text = false;
+        self.value_read = false;
+        self.element_replace = false;
+        self.replace_focus_recovery = false;
         self.window = None;
         self.no_alert_at = None;
         self.last_tree = None;
@@ -2801,6 +3008,9 @@ pub struct ElementRow {
     /// switches / sliders drivable without vision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// Provider explicitly reported a truncated snapshot value; absence is not proof of completeness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_truncated: Option<bool>,
     /// runner emits these flags for every source node. Keep the common healthy
     /// state sparse to avoid inflating every MCP response: `enabled:false` and
     /// `visible:false` are emitted only for exceptional nodes.
@@ -2863,6 +3073,8 @@ pub struct ElementRowJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    value_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     visible: Option<bool>,
@@ -2908,6 +3120,7 @@ impl From<ElementRow> for ElementRowJson {
             rect: row.rect.map(Coordinate),
             depth: row.depth,
             value: row.value,
+            value_truncated: row.value_truncated,
             enabled: row.enabled,
             visible: row.visible,
             accessible: row.accessible,
@@ -3201,12 +3414,14 @@ fn flatten_node(
         };
         let selected = selected_attribute.or(selected);
         let traits = (options.raw_traits && !traits.is_empty()).then_some(traits);
+        let value_truncated = (kind != "SecureTextField").then(||runner_bool(node,"value_truncated").filter(|flag|*flag)).flatten();
         out.push(ElementRow {
             kind,
             label,
             identifier: non_empty_string(node, "rawIdentifier"),
             rect: [g("x"), g("y"), g("width"), g("height")],
             depth,
+            value_truncated,
             value,
             enabled,
             visible,
@@ -3391,6 +3606,35 @@ async fn ensure_runner_success(
     parse_runner_value(&body, operation)
 }
 
+/// Delivery counts for one selected-field replacement. A failed later request
+/// cannot erase earlier acknowledged chunks or turn the whole action into a
+/// retryable not-sent. No requested field content is stored in this error.
+#[derive(Debug)]
+pub struct ReplacementDeliveryError {
+    pub confirmed: usize,
+    pub uncertain: usize,
+    pub unsent: usize,
+    pub clear_confirmed: bool,
+    source: anyhow::Error,
+}
+
+impl ReplacementDeliveryError {
+    pub(crate) fn wrap(source: anyhow::Error, confirmed: usize, uncertain: usize, unsent: usize, clear_confirmed: bool) -> anyhow::Error {
+        anyhow::Error::new(Self { confirmed, uncertain, unsent, clear_confirmed, source })
+    }
+}
+
+impl std::fmt::Display for ReplacementDeliveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "replacement stopped: {} confirmed, {} uncertain, {} unsent Unicode scalars",
+            self.confirmed, self.uncertain, self.unsent)
+    }
+}
+
+impl std::error::Error for ReplacementDeliveryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.source.as_ref()) }
+}
+
 /// The longest runner error message carried into logs and responses.
 const RUNNER_MESSAGE_MAX_CHARS: usize = 300;
 
@@ -3460,6 +3704,12 @@ impl RunnerHttpError {
 
 impl std::fmt::Display for RunnerHttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // An error inside HTTP 200 is still a W3C failure. Keep its bounded
+        // typed reason without changing the existing human-readable spelling.
+        if self.status.is_success() {
+            return write!(f, "{} failed ({}): {}", self.operation,
+                self.code.as_deref().unwrap_or("unknown error"), self.message.as_deref().unwrap_or("no message"));
+        }
         // "HTTP status 404 Not Found": callers match the status text.
         write!(f, "{} HTTP status {}", self.operation, self.status)?;
         if let Some(code) = &self.code {
@@ -3496,12 +3746,8 @@ fn parse_runner_value(body: &str, operation: &str) -> Result<serde_json::Value> 
     let value = root
         .get("value")
         .ok_or_else(|| anyhow!("{operation} response has no value ({})", body_summary(body)))?;
-    if let Some(code) = value.get("error").and_then(serde_json::Value::as_str) {
-        let message = value
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("no message");
-        return Err(anyhow!("{operation} failed ({code}): {message}"));
+    if value.get("error").and_then(serde_json::Value::as_str).is_some() {
+        return Err(anyhow::Error::new(RunnerHttpError::from_body(operation, reqwest::StatusCode::OK, body)));
     }
     Ok(value.clone())
 }
@@ -3599,7 +3845,217 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
+    #[test]
+    fn explicit_replacement_focus_recovery_requires_the_negotiated_capability() {
+        let mut client = RunnerClient::new("http://127.0.0.1:1").unwrap();
+        client.session=Some("existing".into());
+        client.element_replace=true;
+        assert!(!block(client.supports_replace_focus_recovery()).unwrap());
+        let error=block(client.replace_element_if_supported("original","new",true)).unwrap_err();
+        assert!(error.to_string().contains("unsupported"),"{error:#}");
+        client.replace_focus_recovery=true;
+        assert!(block(client.supports_replace_focus_recovery()).unwrap());
+        client.invalidate_session();
+        assert!(!client.element_replace && !client.replace_focus_recovery);
+    }
+
+    #[test]
+    fn explicit_replacement_focus_recovery_is_sent_only_with_the_original_prefix() {
+        let (base,server)=mock_runner(3,|request| {
+            let body:serde_json::Value=serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            if request.starts_with("POST /session/s/ipu/element/original/replace ") {
+                assert_eq!(body["recoverFocusAfterClear"],true);
+                assert_eq!(body["text"].as_str().unwrap().chars().count(),200);
+                r#"{"value":{"inputTarget":"retained-original","focusRestoredAfterClear":true}}"#.into()
+            } else {
+                assert!(request.starts_with("POST /session/s/wda/keys "),"{request}");
+                assert_eq!(body["inputTarget"],"retained-original");
+                assert!(body.get("recoverFocusAfterClear").is_none());
+                r#"{"value":null}"#.into()
+            }
+        });
+        let mut client=RunnerClient::new(base).unwrap();client.session=Some("s".into());
+        client.element_replace=true;client.replace_focus_recovery=true;
+        assert!(block(client.replace_element_if_supported("original",&"字".repeat(501),true)).unwrap());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn replacement_failure_keeps_confirmed_prefix_and_unsent_tail() {
+        for status in [200, 400, 500] {
+            let (base, server) = mock_runner(2, move |request| {
+                if request.contains("/ipu/element/original/replace ") {
+                    return r#"{"value":{"inputTarget":"original-token"}}"#.into();
+                }
+                assert!(request.contains("/wda/keys "));
+                let body = r#"{"value":{"error":"invalid argument","message":"focus changed; nothing was sent"}}"#;
+                format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            client.session = Some("s".into()); client.element_replace = true;
+            let error = block(client.replace_element_if_supported("original", &"字".repeat(501), false)).unwrap_err();
+            let progress = error.downcast_ref::<ReplacementDeliveryError>().unwrap();
+            assert_eq!(progress.confirmed, 200);
+            assert_eq!(progress.uncertain, if status == 400 {0} else {200});
+            assert_eq!(progress.unsent, if status == 400 {301} else {101});
+            assert!(progress.clear_confirmed);
+            assert!(runner_http_error(&error).is_some(), "original runner error must survive");
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn replacement_later_connect_failure_keeps_effects_from_first_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Close the listener before acknowledging the prefix: the next
+            // request deterministically fails to connect, rather than resets.
+            drop(listener);
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut data = Vec::new();
+            loop {
+                let mut buffer = [0u8;2048]; let n = stream.read(&mut buffer).unwrap();
+                assert!(n > 0); data.extend_from_slice(&buffer[..n]); assert!(data.len() < 8192);
+                if let Some(end) = data.windows(4).position(|x| x == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&data[..end]).to_ascii_lowercase();
+                    let size: usize = headers.lines().find_map(|l| l.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
+                    if data.len() >= end+4+size { break; }
+                }
+            }
+            let body = r#"{"value":{"inputTarget":"original-token"}}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        client.session = Some("s".into()); client.element_replace = true;
+        let error = block(client.replace_element_if_supported("original", &"字".repeat(501), false)).unwrap_err();
+        let progress = error.downcast_ref::<ReplacementDeliveryError>().unwrap();
+        assert_eq!((progress.confirmed, progress.uncertain, progress.unsent), (200,0,301));
+        assert!(progress.clear_confirmed);
+        assert!(error.chain().any(|e| e.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_connect)));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn replacement_malformed_prefix_ack_does_not_confirm_its_text_or_clear() {
+        let (base, server) = mock_runner(1, |_| r#"{"value":{}}"#.into());
+        let mut client = RunnerClient::new(base).unwrap();
+        client.session = Some("s".into()); client.element_replace = true;
+        let error = block(client.replace_element_if_supported("original", &"字".repeat(501), false)).unwrap_err();
+        let progress = error.downcast_ref::<ReplacementDeliveryError>().unwrap();
+        assert_eq!((progress.confirmed, progress.uncertain, progress.unsent), (0,200,301));
+        assert!(!progress.clear_confirmed);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn explicit_replacement_focus_recovery_failure_never_replays_a_prefix() {
+        use std::sync::{Arc,atomic::{AtomicBool,AtomicUsize,Ordering}};
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let base=format!("http://{}",listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let stop=Arc::new(AtomicBool::new(false));let seen=Arc::new(AtomicUsize::new(0));
+        let stopping=stop.clone();let count=seen.clone();
+        // Initialize the client AND runtime before measuring the request.
+        // The mock remains alive until that bounded request finishes: a
+        // separate server wall clock can expire under parallel CI scheduling.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all().build().unwrap();
+        let mut client=RunnerClient::new(base).unwrap();client.session=Some("s".into());
+        client.element_replace=true;client.replace_focus_recovery=true;
+        let server=std::thread::spawn(move || {
+            while !stopping.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream,_)) => {
+                        // Socket readiness is not request arrival. A one-second
+                        // read deadline can close an accepted socket while a
+                        // parallel CI worker has not scheduled its sender yet.
+                        // Poll until the complete request or the client-owned
+                        // bound ends; never create a second mock wall clock.
+                        stream.set_nonblocking(true).unwrap();
+                        let mut raw = Vec::new();
+                        let mut bytes = [0u8; 8192];
+                        let complete = loop {
+                            if stopping.load(Ordering::Acquire) { break false; }
+                            match stream.read(&mut bytes) {
+                                Ok(0) => break false,
+                                Ok(n) => raw.extend_from_slice(&bytes[..n]),
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    std::thread::sleep(Duration::from_millis(2));
+                                    continue;
+                                }
+                                Err(_) => break false,
+                            }
+                            let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else { continue; };
+                            let head = String::from_utf8_lossy(&raw[..end]);
+                            let length = head.lines().find_map(|line| {
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            }).unwrap_or(0);
+                            if raw.len() >= end + 4 + length {
+                                assert!(head.starts_with("POST /session/s/ipu/element/original/replace "));
+                                let body: serde_json::Value = serde_json::from_slice(&raw[end+4..end+4+length]).unwrap();
+                                assert_eq!(body["recoverFocusAfterClear"], true);
+                                break true;
+                            }
+                        };
+                        if !complete { continue; }
+                        count.fetch_add(1,Ordering::AcqRel);
+                        let body=r#"{"value":{"error":"unknown error","message":"clear or focus uncertain"}}"#;
+                        let response=format!("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+                        let _=stream.write_all(response.as_bytes());
+                    }
+                    Err(ref error) if error.kind()==std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(2)),
+                    Err(error) => panic!("{error}"),
+                }
+            }
+        });
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(async {
+            // Keep the existing client's 20-second bound, and distinguish a
+            // request timeout from the deliberately returned delivery error.
+            tokio::time::timeout(Duration::from_secs(20),
+                client.replace_element_if_supported("original",&"字".repeat(501),true)).await
+        })));
+        stop.store(true,Ordering::Release);server.join().unwrap();
+        let outcome=result.unwrap().expect("the bounded request must reach the mock and return");
+        let error = outcome.unwrap_err();
+        assert!(format!("{error:#}").contains("clear or focus uncertain"),
+            "must observe the scripted runner failure, not a connection/timeout failure: {error:#}");
+        assert_eq!(seen.load(Ordering::Acquire),1,"no fallback, replay or tail after uncertain prefix");
+    }
+
+    #[test]
+    fn explicit_replacement_focus_recovery_capability_is_strictly_negotiated() {
+        for advertised in [serde_json::json!(true),serde_json::json!(false),serde_json::json!("true"),serde_json::Value::Null] {
+            let expected=advertised==serde_json::json!(true);
+            let (base,server)=mock_runner(2,move |request| {
+                if request.starts_with("POST /session ") {
+                    serde_json::json!({"sessionId":"s","value":{"capabilities":{"ipu:elementReplace":true,"ipu:replaceFocusRecovery":advertised}}}).to_string()
+                } else {
+                    assert!(request.starts_with("POST /session/s/appium/settings "),"{request}");
+                    r#"{"value":null}"#.into()
+                }
+            });
+            let mut client=RunnerClient::new(base).unwrap();
+            assert_eq!(block(client.supports_replace_focus_recovery()).unwrap(),expected);
+            server.join().unwrap();
+        }
+    }
+
     // Issue #257: a runner's error status keeps its own reason.
+    #[test]
+    fn value_truncation_survives_flattening_without_password_length_metadata() {
+        let source=serde_json::json!({"type":"XCUIElementTypeApplication","label":"Fixture","children":[
+            {"type":"XCUIElementTypeTextField","label":"Draft","value":"PREFIX","value_truncated":true},
+            {"type":"XCUIElementTypeSecureTextField","label":"Password","value":"secret","value_truncated":true}]});
+        let mut rows=Vec::new();flatten_tree(&source,0,&mut rows);
+        let field=rows.iter().find(|row|row.kind=="TextField").unwrap();assert_eq!(field.value_truncated,Some(true));
+        assert_eq!(serde_json::to_value(field).unwrap()["value_truncated"],true);
+        let secure=rows.iter().find(|row|row.kind=="SecureTextField").unwrap();assert_eq!(secure.value_truncated,None);
+        assert!(!serde_json::to_value(secure).unwrap().to_string().contains("secret"));
+    }
+
     #[test]
     fn runner_http_errors_keep_the_envelope_reason_and_status_text() {
         let refused = RunnerHttpError::from_body(
@@ -4313,6 +4769,17 @@ mod tests {
             .to_string();
         assert!(error.contains("invalid element state"));
         assert!(error.contains("device is locked"));
+    }
+
+    #[test]
+    fn runner_value_error_in_http_200_keeps_a_bounded_typed_reason_only() {
+        let body = serde_json::json!({"value":{"error":"unknown error","message":"x".repeat(1000),"screen":"SCREEN-CANARY"}}).to_string();
+        let error = parse_runner_value(&body,"POST guarded /wda/keys").unwrap_err();
+        let typed = runner_http_error(&error).unwrap();
+        assert_eq!(typed.status,reqwest::StatusCode::OK);
+        assert!(!typed.nothing_sent());
+        assert!(typed.message.as_ref().unwrap().chars().count() <= RUNNER_MESSAGE_MAX_CHARS+1);
+        assert!(!format!("{error:#}").contains("SCREEN-CANARY"));
     }
 
     #[test]

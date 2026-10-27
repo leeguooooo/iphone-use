@@ -15,6 +15,50 @@ spec.loader.exec_module(check)
 
 
 class VerdictTests(unittest.TestCase):
+    def test_preparation_timeout_records_a_failed_case_without_sending_input(self):
+        with tempfile.TemporaryDirectory() as root:
+            args = SimpleNamespace(out=Path(root), udid="owned-simulator")
+            daemon = unittest.mock.Mock()
+            daemon.wait_metrics.side_effect = TimeoutError("AX preparation timed out")
+            with patch.object(check, "command"):
+                report = check.input_case(daemon, args, "first-focus-typing-0", "typing")
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["attempt"]["phase"], "fixture_readiness")
+            self.assertFalse(report["attempt"]["input_attempted"])
+            daemon.call.assert_not_called()
+            self.assertEqual(json.loads((args.out/"first-focus-typing-0/result.json").read_text()), report)
+
+    def test_postcondition_timeout_keeps_one_uncertain_dispatch_without_replay(self):
+        with tempfile.TemporaryDirectory() as root:
+            args = SimpleNamespace(out=Path(root), udid="owned-simulator")
+            daemon = unittest.mock.Mock()
+            daemon.wait_metrics.return_value = {"selections": [], "text": ""}
+            daemon.call.side_effect = TimeoutError("input response lost")
+            daemon.metrics.side_effect = TimeoutError("postcondition read failed")
+            with patch.object(check, "command"):
+                report = check.input_case(daemon, args, "first-focus-typing-0", "typing")
+            self.assertFalse(report["passed"])
+            self.assertTrue(report["attempt"]["input_attempted"])
+            self.assertEqual(report["attempt"]["phase"], "input_postcondition")
+            self.assertEqual(report["attempt"]["reply_error"], "input response lost")
+            daemon.call.assert_called_once()
+            self.assertEqual(daemon.call.call_args.args[0], "/agent/actions")
+            self.assertEqual(json.loads((args.out/"first-focus-typing-0/result.json").read_text()), report)
+
+    def test_scroll_touch_down_uses_independent_table_geometry_without_reducing_travel(self):
+        record={"window_size":[402,874],"table_rect":[0,246,402,542]}
+        x,y=check.input_scroll_anchor(record)
+        travel=300*1.5
+        start=y*874+travel/2
+        end=y*874-travel/2
+        self.assertEqual(x,.5)
+        self.assertTrue(246<start<788)
+        self.assertGreaterEqual(end,44)
+        self.assertEqual(start-end,travel)
+        self.assertGreater(.65*874+travel/2,788)
+        for bad in [{},dict(record,table_rect=[0,0,10,10]),dict(record,window_size=[402,float('nan')])]:
+            with self.assertRaises(RuntimeError):check.input_scroll_anchor(bad)
+
     def test_scroll_ack_without_the_right_selection_is_not_a_pass(self):
         record = {"run_id": "fresh", "selections": [8], "offset_y": 439}
         self.assertEqual(check.judge_input(record, "fresh", "scroll", 8), [])

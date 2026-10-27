@@ -75,6 +75,8 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 
 /// Pid of an XCAccessibilityElement, or 0.
 + (int)pidForAXElement:(id)element;
+/// Identity of retained AX handles, independent of label/frame matching.
++ (BOOL)sameAXElement:(id)left other:(id)right NS_SWIFT_NAME(sameAXElement(_:_:));
 
 /// Bundle id of a running process, via XCUIDevice.applicationMonitor
 /// monitoredApplicationWithProcessIdentifier:. Cached per pid.
@@ -101,6 +103,33 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 + (int)pidForApplication:(XCUIApplication *)application;
 
 // MARK: - Accessibility tree
+
+/// Fetches the full AX Value attribute rather than the snapshot's truncated value.
+/// Returned strings are clipped only at scalar boundaries; metadata uses UTF-16 units.
++ (nullable NSDictionary<NSString *, id> *)readValueForAXElement:(id)element
+                                               maxUTF16Length:(NSUInteger)limit
+                                                  placeholder:(nullable NSString *)placeholder
+                                                        error:(NSString *_Nullable *_Nullable)error
+  NS_SWIFT_NAME(readValue(for:maxUTF16:placeholder:error:));
+
+/// Read the live value length and selected UTF-16 range, without changing selection.
++ (nullable NSDictionary<NSString *, NSNumber *> *)textSelectionForAXElement:(id)element
+                                                                    error:(NSString *_Nullable *_Nullable)error
+    NS_SWIFT_NAME(textSelection(for:error:));
+/// A bounded deletion plan for the current AX selection/value (100 UTF-16 units max).
+/// Returns only deletion keys, never field text. Nil selects no mutation path.
++ (nullable NSString *)shortClearKeysForAXElement:(id)element
+                                           error:(NSString *_Nullable *_Nullable)error
+    NS_SWIFT_NAME(shortClearKeys(for:error:));
+/// Target Select All at the original process, then verify its AX value/range.
+/// Acknowledged no-effect returns private retry state; synthesis/read errors do not.
+/// Retry state is internal only and must never be serialized or logged.
++ (nullable NSDictionary<NSString *, id> *)selectAllTextForAXElement:(id)element
+                                                               pid:(int)pid
+                                                        retryState:(nullable NSDictionary<NSString *, id> *)retryState
+                                                             error:(NSString *_Nullable *_Nullable)error
+    NS_SWIFT_NAME(selectAllText(for:pid:retryState:error:));
+
 
 /// Snapshots `axElement` through XCAXClient_iOS requestSnapshotForElement:attributes:parameters:error:
 /// with only nine attributes, walking a depth ladder on kAXErrorIllegalArgument and re-rooting
@@ -136,8 +165,15 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 
 /// Whether the private event-synthesis classes and selectors are present.
 + (BOOL)eventSynthesisAvailable;
+/// Whether this runtime can perform a PID-targeted, original-element hit-tested focus tap.
++ (BOOL)focusRecoveryAvailable;
 
 + (nullable NSString *)synthesizeTapAt:(CGPoint)point pid:(int)pid;
+/// No fallback: require the original AX process and an exact hit-test match
+/// after record/orientation setup, immediately before dispatching the focus tap.
++ (nullable NSString *)synthesizeFocusTapForAXElement:(id)element atPoint:(CGPoint)point pid:(int)pid
+                                    allowDispatch:(BOOL (NS_NOESCAPE ^)(void))allowDispatch
+  NS_SWIFT_NAME(synthesizeFocusTap(forAXElement:at:pid:allowDispatch:));
 + (nullable NSString *)synthesizeLongPressAt:(CGPoint)point duration:(NSTimeInterval)duration pid:(int)pid;
 /// Linear drag interpolated by XCTest; finger lifts at `duration`.
 + (nullable NSString *)synthesizeDragFrom:(CGPoint)start

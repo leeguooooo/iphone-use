@@ -5,9 +5,12 @@
 //!   `text/html;profile=mcp-app` (a self-contained page, no network);
 //! - `phone_screen` and `phone_status` carry `_meta.ui.resourceUri`, so a host
 //!   that renders apps opens the panel on them;
-//! - the page polls `phone_screen_frame`, which `_meta.ui.visibility: ["app"]`
+//! - the page requests bounded native video batches, with PNG fallback, through
+//!   `phone_screen_frame`, which `_meta.ui.visibility: ["app"]`
 //!   keeps out of the model's tool list in such hosts.
 //!
+//! WorkBuddy uses a read-only resource frame transport selected explicitly by
+//! `IPHONE_USE_MCP_HOST=workbuddy`; Doubao keeps tools/call and one panel opener.
 //! A host without MCP Apps ignores every `_meta` key here; it only sees two
 //! more tools.
 
@@ -31,9 +34,147 @@ const PANEL_TOOLS: [&str; 2] = [SCREEN_TOOL, "phone_status"];
 /// the model opens it.
 const WIDGET_SESSION_ID: &str = "iphone-use-screen";
 /// The panel's frame size when it does not ask: legible in a sidebar, and a
-/// PNG small enough to poll twice a second.
+/// PNG fallback small enough to poll twice a second.
 pub const DEFAULT_FRAME_SIDE: u32 = 600;
 
+/// Explicit host adaptation. Generic clients keep the standard tool transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Host {
+    #[default]
+    Generic,
+    WorkBuddy,
+    Doubao,
+}
+
+impl Host {
+    pub fn from_env() -> Self {
+        match std::env::var("IPHONE_USE_MCP_HOST")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "generic" => Self::Generic,
+            "workbuddy" => Self::WorkBuddy,
+            "doubao" => Self::Doubao,
+            _ => {
+                eprintln!("iphone-use-mcp: unknown IPHONE_USE_MCP_HOST; using generic transport");
+                Self::Generic
+            }
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::WorkBuddy => "workbuddy",
+            Self::Doubao => "doubao",
+        }
+    }
+
+    pub fn screen_uri(self) -> String {
+        if self == Self::Generic {
+            return screen_uri();
+        }
+        format!(
+            "ui://iphone-use/screen-{}-{}.html",
+            self.name(),
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+}
+
+/// No control operation is addressable through this resource namespace. The last
+/// component is only a cache nonce for hosts that cache resources by URI.
+pub const FRAME_RESOURCE_PREFIX: &str = "ui://iphone-use/frame-v1/";
+
+pub const VIDEO_RESOURCE_PREFIX: &str = "ui://iphone-use/video-v1/";
+
+/// Named frame resources carry their own target, including across concurrent panels.
+/// Malformed names and non-frame resources never fall back to the startup daemon.
+pub fn resource_route(host: Host, uri: &str) -> Result<(Option<&str>, String), &'static str> {
+    let Some(tail) = uri.strip_prefix("ui://iphone-use/instance-v1/") else {
+        return Ok((None, uri.to_string()));
+    };
+    let (name, resource) = tail.split_once('/').ok_or("missing instance resource")?;
+    if !crate::instances::valid_name(name) { return Err("invalid instance resource target"); }
+    let base = format!("ui://iphone-use/{resource}");
+    if resource_video_reset(host, &base).is_none() && resource_frame_side(host, &base).is_none() {
+        return Err("only frame resources may select an instance");
+    }
+    Ok((Some(name), base))
+}
+
+pub fn resource_video_reset(host: Host, uri: &str) -> Option<bool> {
+    if host != Host::WorkBuddy {return None;}
+    let (reset,nonce)=uri.strip_prefix(VIDEO_RESOURCE_PREFIX)?.split_once('/')?;
+    if nonce.is_empty() || nonce.len()>20 || !nonce.bytes().all(|v|v.is_ascii_digit()) {return None;}
+    nonce.parse::<u64>().ok()?;
+    match reset {"0"=>Some(false),"1"=>Some(true),_=>None}
+}
+
+pub fn resource_frame_side(host: Host, uri: &str) -> Option<u32> {
+    if host != Host::WorkBuddy {
+        return None;
+    }
+    let (side, nonce) = uri.strip_prefix(FRAME_RESOURCE_PREFIX)?.split_once('/')?;
+    if side.is_empty()
+        || nonce.is_empty()
+        || nonce.len() > 20
+        || !side.bytes().all(|v| v.is_ascii_digit())
+        || !nonce.bytes().all(|v| v.is_ascii_digit())
+    {
+        return None;
+    }
+    nonce.parse::<u64>().ok()?;
+    let side = side.parse::<u32>().ok()?;
+    (200..=1000).contains(&side).then_some(side)
+}
+
+pub fn adapt_tools(mut tools: Vec<Tool>, host: Host) -> Vec<Tool> {
+    if host == Host::Generic {
+        return tools;
+    }
+    for tool in &mut tools {
+        if PANEL_TOOLS.contains(&tool.name.as_ref()) {
+            let meta = tool.meta.get_or_insert_with(Meta::new);
+            meta.0.remove("ui");
+            meta.0.remove("openai/ui");
+            if tool.name == SCREEN_TOOL {
+                meta.0
+                    .insert("ui".into(), json!({"resourceUri":host.screen_uri()}));
+                if host == Host::WorkBuddy {
+                    meta.0
+                        .insert("workbuddy".into(), json!({"ui":{"launchSurface":"panel"}}));
+                    tool.description = Some("Open or reuse the read-only iPhone screen panel. Frame reads take no owner lease and wake nothing. Use normal agent tools in the conversation for Home, refresh or control; the panel does not send control through resources.".into());
+                }
+            } else if let Some(description) = &mut tool.description {
+                description.to_mut().push_str(" To watch the phone, open phone_screen once; status does not open a second panel in this host.");
+            }
+        }
+    }
+    tools
+}
+
+pub fn resources_for(host: Host) -> Vec<Resource> {
+    let mut listed = resources();
+    listed[0].raw.uri = host.screen_uri();
+    if host == Host::WorkBuddy {
+        listed[0].raw.description = Some(
+            "Read-only iPhone screen. Control remains in the conversation's normal tools.".into(),
+        );
+    }
+    listed
+}
+
+pub fn read_for(host: Host, uri: &str) -> Option<ResourceContents> {
+    (uri == host.screen_uri()).then(|| ResourceContents::TextResourceContents {
+        uri: uri.to_string(),
+        mime_type: Some(MIME.into()),
+        text: html_for(host),
+        meta: Some(resource_meta()),
+    })
+}
 const HTML: &str = include_str!("screen.html");
 
 /// Versioned so a host that caches resources by URI picks up a new page after
@@ -50,9 +191,14 @@ fn meta(value: Value) -> Meta {
 }
 
 /// The page itself, with the build's version and tool name filled in.
-pub fn html() -> String {
+pub fn html() -> String { html_for(Host::Generic) }
+
+pub fn html_for(host: Host) -> String {
     HTML.replace("__IU_VERSION__", env!("CARGO_PKG_VERSION"))
         .replace("__IU_FRAME_TOOL__", FRAME_TOOL)
+        .replace("__IU_RESOURCE_FRAMES__", if host == Host::WorkBuddy { "true" } else { "false" })
+        .replace("__IU_FRAME_RESOURCE__", FRAME_RESOURCE_PREFIX)
+        .replace("__IU_VIDEO_RESOURCE__", VIDEO_RESOURCE_PREFIX)
 }
 
 /// `_meta` on the resource and its contents. No `csp`: the host default
@@ -207,6 +353,26 @@ pub fn frame_result(
 mod tests {
     use super::*;
 
+    #[test]
+    fn named_resources_require_valid_explicit_targets() {
+        assert_eq!(resource_route(Host::WorkBuddy, "ui://iphone-use/instance-v1/i13/video-v1/1/42").unwrap(),
+            (Some("i13"), "ui://iphone-use/video-v1/1/42".into()));
+        assert_eq!(resource_route(Host::WorkBuddy, "ui://iphone-use/instance-v1/default/frame-v1/600/42").unwrap().0, Some("default"));
+        for suffix in ["runner/video-v1/0/1", "i13/../frame-v1/600/1", "i13/frame-v1/600/no", "i13/screen.html", "i13"] {
+            assert!(resource_route(Host::WorkBuddy, &format!("ui://iphone-use/instance-v1/{suffix}")).is_err());
+        }
+        assert!(resource_route(Host::Generic, "ui://iphone-use/instance-v1/i13/video-v1/0/1").is_err());
+    }
+
+    #[test]
+    fn native_video_resources_are_read_only_and_bounded() {
+        assert_eq!(resource_video_reset(Host::WorkBuddy,"ui://iphone-use/video-v1/1/42"),Some(true));
+        assert_eq!(resource_video_reset(Host::WorkBuddy,"ui://iphone-use/video-v1/0/42"),Some(false));
+        for host in [Host::Generic,Host::Doubao] {assert_eq!(resource_video_reset(host,"ui://iphone-use/video-v1/0/42"),None);}
+        for suffix in ["2/42","0/","0/-1","0/18446744073709551616","0/42/home","0/home","home/42"] {
+            assert_eq!(resource_video_reset(Host::WorkBuddy,&format!("ui://iphone-use/video-v1/{suffix}")),None);
+        }
+    }
     #[test]
     fn a_blocked_phone_says_what_a_person_has_to_do() {
         let status: StatusResponse = serde_json::from_value(json!({

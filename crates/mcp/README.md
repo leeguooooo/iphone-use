@@ -36,6 +36,7 @@ cargo build --release -p iphone-use-mcp
 |---|---|---|
 | `IPHONE_USE_URL` | `http://127.0.0.1:44321` | Base URL of the daemon |
 | `IPHONE_USE_TOKEN` | _(none)_ | Bearer token / password (omit for open-mode daemons) |
+| `IPHONE_USE_MCP_HOST` | `generic` | Explicit host adapter: `workbuddy` uses a read-only frame resource and one panel opener; `doubao` keeps tool frames and one opener. [Candidate setup and acceptance limits](../../docs/mcp-hosts.md). |
 | `IPHONE_USE_MCP_TOOLS` | `all` | Which tools are listed and callable: `all`, `readonly`, or a comma list of tool names (see [Tool profiles](#tool-profiles-and-annotations)) |
 | `IPHONE_USE_MCP_TOKEN` | _(none)_ | With `--listen`: the bearer token HTTP clients must send; required for a non-loopback address (see [MCP over HTTP](#mcp-over-http)) |
 | `IPHONE_USE_MCP_PREWARM` | `0` | Set `1` to opt into phone pre-warming on MCP startup/status. Discovery does not contact the daemon by default. |
@@ -326,12 +327,14 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 | `phone_screenshot` | `max_side?`, `overlay?` | Capture current screen → PNG image content; `overlay=true` draws each interactive element's frame and `phone_elements` index on it |
 | `phone_instances` | — | List installed local instances and bounded read-only status; never reconnects or claims a phone. |
 | `phone_home_layout` | `page?` | Read all home pages, Dock, folder pages and widget stacks without UI input. `page` selects one zero-based page. Page indexes include hidden/Focus-filtered pages and differ from visible page-control numbers. Grid positions are derived from reported icon order and widget spans; `positions_complete=false` / null positions mean unknown. No pixel coordinates or layout restore. Requires a paired physical target reachable through usbmuxd; obeys private holds. |
+| `phone_read_value` | `identifier?` xor `label?`, `kind?`, `max_utf16?` | Read exactly one full AX value without focusing, waking or taking a lease. Explicit completeness/UTF-16 budget, secure-field refusal and scope withholding; long value appears once in text, metadata in structured output. |
 | `phone_elements` | `query?`, `limit?`, `ocr?`, `include_hidden?` | The UI as a flattened element list — prefer over screenshots for reasoning. `query` keeps rows whose label/identifier/value/placeholder contain the text; `limit` caps the rows. Kept rows keep their index and the snapshot, so taps still work. `include_hidden=true` expands off-screen/not-drawn rows with original indexes and a `hidden` marker instead of the five-label summary; scroll them into view and read again before acting. The 200-row / 32 KiB text budget still applies. `ocr=auto` adds text read from pixels (Vision) when the tree has no interactive rows, `ocr=force` always; those rows are listed under the tree with `phone_tap` coordinates |
 | `phone_tap` | `x`, `y` (0–1), `observe?` | Single tap at normalized position |
 | `phone_tap_element` | `element`, `snapshot`, `observe?` | Snapshot-bound indexed tap; stale trees are rejected without tapping |
 | `phone_tap_label` | `label`, `observe?` | Exact-label tap; requires one unique match and sends nothing on ambiguity |
 | `phone_scroll` | `x`, `y`, `dx`, `dy`, `observe?` | Scroll-wheel gesture; negative `dy` scrolls content up |
-| `phone_type` | `text`, `observe?` | Type text; any Unicode (incl. CJK) lands cleanly |
+| `phone_type` | `text` or `continue_token`, `clear?`, `budget_ms?`, `observe?` | Type Unicode text. Optional 6000–15000 ms budget returns a single-use token only at a safe chunk boundary; resume with that token alone and the same owner. Unknown delivery has no safe token. |
+| `phone_set_value` | `element`, `snapshot`, `value`, `recover_focus_after_clear?`, `observe?` | Replace the exact selected field, up to 1000 characters; empty clears. Recovery defaults off. Opt in only to restore a verified cleared original field before text starts; requires the native recovery capability. Unknown input is never replayed. |
 | `phone_key` | `name`, `observe?` | Named key: `return`, `escape`, `space`, `tab`, `delete`, `up`, `down`, `left`, `right` |
 | `phone_shortcut` | `name`, `observe?` | iOS system shortcut: `home` or `spotlight`; App Switcher is unsupported |
 | `phone_run_steps` | `steps`, `observe?` | Run up to 24 guarded action/wait steps in one MCP call; includes long-press/swipe/drag (`points` supports 2–16 stops with `dwell_ms`, travel `duration_ms` per segment, total hold/travel/dwell <= 10s), strict `tap_locator`, bundle-id `launch_app`, `open_url` (links; non-http schemes need `IPHONE_USE_ALLOW_URL_SCHEMES` on the daemon), `alert`, `picker`, `perform` (toggle a switch, adjust a slider), full preflight, one device lock, and first-failure stop |
@@ -358,7 +361,7 @@ Every tool carries MCP `annotations`: `readOnlyHint`, `openWorldHint`, and for
 tools that act, `destructiveHint` and `idempotentHint`. Clients that honour
 them can auto-approve the read-only ones and confirm the rest. The read-only
 set is `phone_status`, `phone_capabilities`, `phone_apps`, `phone_screen`,
-`phone_screen_frame`, `phone_screenshot`, `phone_elements`, `phone_home_layout`, `phone_crashes`,
+`phone_screen_frame`, `phone_screenshot`, `phone_elements`, `phone_read_value`, `phone_home_layout`, `phone_crashes`,
 `phone_flow_list` and `phone_flow_info`. `phone_flow_draft` is non-read-only in
 normal discovery because its optional `save_as` writes a new local file. The
 `readonly` profile retains its read-only draft mode: discovery marks it read-only
@@ -494,6 +497,11 @@ the current stage (for example an Xcode build after an update).
 - Logs to **stderr** at `INFO` level by default; set `RUST_LOG=debug` for
   verbose output.  Stderr is forwarded to the MCP client's diagnostics view
   and never mixed with the stdio protocol stream.
+
+Visual mutation failures can carry a fresh recovery screenshot. The server emits
+one image block, retaining only source/time/dimension metadata in text and
+structured output; error, outcome, retry safety and batch progress are unchanged.
+An unavailable or privacy-withheld image never turns a failed action into a success.
 
 ### Selecting an installed instance per call
 

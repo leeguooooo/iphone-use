@@ -35,9 +35,11 @@
   #screen { position: relative; border-radius: 19px; overflow: hidden; background: #000;
     aspect-ratio: 9 / 19.5; display: flex; align-items: center; justify-content: center; }
   #image { width: 100%; height: 100%; object-fit: contain; display: block; }
-  #image[hidden] { display: none; }
+  #image[hidden], #video[hidden] { display: none; }
+  #video { width:100%; height:100%; object-fit:contain; display:block; }
   #empty { color: #bbbbbb; padding: 16px; text-align: center; }
   #empty[hidden] { display: none; }
+  #toolbar[hidden] { display: none; }
   #toolbar { display: flex; gap: 8px; }
   button { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line);
     border-radius: 6px; padding: 4px 12px; cursor: pointer; }
@@ -50,6 +52,7 @@
 <div id="app">
   <div id="status"><span id="dot"></span><span id="status-text">connecting…</span></div>
   <div id="device"><div id="screen">
+    <canvas id="video" hidden></canvas>
     <img id="image" alt="iPhone screen" hidden>
     <div id="empty">waiting for the first frame…</div>
   </div></div>
@@ -65,6 +68,10 @@
   // MCP Apps (SEP-1865) view: JSON-RPC 2.0 over postMessage with the host.
   const FRAME_TOOL = "__IU_FRAME_TOOL__";
   const VERSION = "__IU_VERSION__";
+  const RESOURCE_FRAMES = __IU_RESOURCE_FRAMES__;
+  const FRAME_RESOURCE = "__IU_FRAME_RESOURCE__";
+  const VIDEO_RESOURCE = "__IU_VIDEO_RESOURCE__";
+  let frameNonce = Date.now() * 1000;
   const PROTOCOL = "2026-01-26";
   const FRAME_INTERVAL_MS = 500;   // at most 2 frames a second
   const IDLE_INTERVAL_MS = 2000;   // released / offline phone
@@ -102,6 +109,8 @@
     "ask the agent to open this phone's screen again": "请让 agent 重新打开这台手机的画面",
     "panel has ended": "画面已关闭",
     "empty frame": "没有收到画面",
+    "Control the phone through the conversation.": "通过对话操作手机。",
+    "Video stalled; using screenshots.": "视频已停滞，正在切换截图。",
   };
   const ZH = (() => {
     const first = (navigator.languages && navigator.languages[0]) || navigator.language || "en";
@@ -125,8 +134,13 @@
 
   const $ = (id) => document.getElementById(id);
   const image = $("image"), empty = $("empty"), dot = $("dot");
+  const videoCanvas = $("video");
   const statusText = $("status-text"), note = $("note");
   const homeButton = $("home"), refreshButton = $("refresh");
+  if (RESOURCE_FRAMES) {
+    $("toolbar").hidden = true;
+    note.textContent = t("Control the phone through the conversation.");
+  }
 
   let nextId = 1;
   const pending = new Map();
@@ -168,7 +182,7 @@
 
   function dispose() {
     disposed = true;
-    stop();
+    stop();clearVideo();
   }
 
   window.addEventListener("message", (event) => {
@@ -242,7 +256,103 @@
     return parts.join(" · ");
   }
 
+  let videoDecoder = null, videoScope = null, videoGeneration = 0, videoConfig = null;
+  let videoRetryAt = 0, videoWatchdog = null;
+  const canVideo = typeof VideoDecoder !== "undefined" && typeof EncodedVideoChunk !== "undefined";
+  function clearVideo(keepPixels = false) {
+    videoGeneration++;
+    if (videoWatchdog) {clearTimeout(videoWatchdog);videoWatchdog=null;}
+    if (videoDecoder) { try { videoDecoder.close(); } catch (_) {} }
+    videoDecoder = null; videoScope = null; videoConfig = null;
+    if (!keepPixels) { videoCanvas.hidden = true; videoCanvas.width = 1; videoCanvas.height = 1; }
+  }
+  function armVideoWatchdog() {
+    if (videoWatchdog) clearTimeout(videoWatchdog);
+    const generation=videoGeneration;
+    videoWatchdog=setTimeout(()=>{
+      if (generation!==videoGeneration) return;
+      clearVideo();videoRetryAt=performance.now()+30000;
+      image.hidden=true;image.removeAttribute("src");
+      empty.textContent=t("Video stalled; using screenshots.");empty.hidden=false;
+      stop();kick(0);
+    },3000);
+  }
+  function configOf(bytes) {
+    const starts=[];
+    for(let i=0;i+3<bytes.length;i++) {
+      const prefix=bytes[i]===0&&bytes[i+1]===0&&bytes[i+2]===1?3:
+        bytes[i]===0&&bytes[i+1]===0&&bytes[i+2]===0&&bytes[i+3]===1?4:0;
+      if(prefix){if(starts.length>=256)throw new Error("too many video units");starts.push({at:i,payload:i+prefix});i+=prefix-1;}
+    }
+    let codec=null;const parameters=[];
+    for(let i=0;i<starts.length;i++) {
+      const start=starts[i].payload,end=i+1<starts.length?starts[i+1].at:bytes.length;
+      const type=bytes[start]&31;
+      if(type!==7&&type!==8)continue;
+      if(end-start>4096||parameters.length>=16)throw new Error("oversized video parameters");
+      if(type===7&&end-start>=4)codec="avc1."+Array.from(bytes.slice(start+1,start+4),v=>v.toString(16).padStart(2,"0")).join("");
+      parameters.push(type+":"+Array.from(bytes.slice(start,end),v=>v.toString(16).padStart(2,"0")).join(""));
+    }
+    return codec?{codec,signature:parameters.sort().join("|")}:null;
+  }
+  async function decoderRoom(decoder,generation) {
+    const deadline=performance.now()+1000;
+    while(decoder.decodeQueueSize>6) {
+      if(!visible()||generation!==videoGeneration||videoDecoder!==decoder)return false;
+      if(performance.now()>=deadline)throw new Error("video decoder fell behind");
+      // Yield to the real decoder: a bounded batch can contain more than six packets.
+      await new Promise(resolve=>setTimeout(resolve,5));
+    }
+    return visible()&&generation===videoGeneration&&videoDecoder===decoder;
+  }
+  async function showVideo(video) {
+    if (!video || video.format!=="iphone-use-h264-annexb-v1" || typeof video.scope!=="string" || !Array.isArray(video.packets)) throw new Error("invalid video batch");
+    if (video.reset || videoScope!==video.scope) {
+      const keepPixels=videoScope===video.scope && !videoCanvas.hidden;
+      clearVideo(keepPixels);videoScope=video.scope;armVideoWatchdog();
+    }
+    const generation=videoGeneration;
+    for (const packet of video.packets) {
+      if (!visible() || generation!==videoGeneration) return;
+      const bytes=Uint8Array.from(atob(packet.data),v=>v.charCodeAt(0));
+      if (packet.keyframe) {
+        const parameters=configOf(bytes);
+        if (!parameters) throw new Error("video keyframe has no SPS");
+        if (!videoDecoder || videoConfig!==parameters.signature) {
+          const config={codec:parameters.codec,optimizeForLatency:true};
+          let codecTimer;
+          const support=await Promise.race([
+            VideoDecoder.isConfigSupported(config),
+            new Promise((_,reject)=>{codecTimer=setTimeout(()=>reject(new Error("video codec timed out")),2500);}),
+          ]).finally(()=>clearTimeout(codecTimer));
+          if (!visible() || generation!==videoGeneration) return;
+          if (!support.supported) throw new Error("unsupported video codec");
+          if (videoDecoder) videoDecoder.close();
+          const decoder=new VideoDecoder({
+            output(frame) {
+              try {
+                if (generation!==videoGeneration || videoDecoder!==decoder || !visible()) return;
+                if (videoCanvas.width!==frame.displayWidth || videoCanvas.height!==frame.displayHeight) {
+                  videoCanvas.width=frame.displayWidth; videoCanvas.height=frame.displayHeight;
+                }
+                videoCanvas.getContext("2d").drawImage(frame,0,0,videoCanvas.width,videoCanvas.height);
+                videoCanvas.hidden=false;image.hidden=true;image.removeAttribute("src");empty.hidden=true;
+                armVideoWatchdog();
+              } finally { frame.close(); }
+            },
+            error() { if (videoDecoder!==decoder || generation!==videoGeneration) return; clearVideo();videoRetryAt=performance.now()+1000; },
+          });
+          videoDecoder=decoder;videoConfig=parameters.signature;videoDecoder.configure(config);
+        }
+      }
+      if (!videoDecoder) continue;
+      if (!await decoderRoom(videoDecoder,generation)) return;
+      videoDecoder.decode(new EncodedVideoChunk({type:packet.keyframe?"key":"delta",timestamp:packet.pts_micros,data:bytes}));
+    }
+  }
+
   function clearFrame(message) {
+    clearVideo();
     image.hidden = true;
     image.removeAttribute("src");
     empty.textContent = message;
@@ -270,10 +380,11 @@
     const frame = body.frame;
     if (frame && typeof frame.data === "string" && frame.data.length > 0
         && /^image\/(png|jpeg|webp)$/.test(frame.mime_type)) {
+      clearVideo();
       image.src = "data:" + frame.mime_type + ";base64," + frame.data;
       image.hidden = false;
       empty.hidden = true;
-    } else if (image.hidden) {
+    } else if (image.hidden && videoCanvas.hidden) {
       empty.textContent = body.released ? t("phone released — the agent reconnects it when needed")
         : t("no frame yet");
       empty.hidden = false;
@@ -314,13 +425,38 @@
     inFlight = true;
     const started = performance.now();
     let delay = FRAME_INTERVAL_MS;
+    const wantsVideo = canVideo && !fresh && performance.now()>=videoRetryAt;
+    const expectedVideoGeneration=videoGeneration;
     try {
-      const result = await callTool(FRAME_TOOL, fresh ? { fresh: true } : {});
-      if (result && result.isError) throw new Error("frame tool failed");
-      const live = show(result && result.structuredContent);
+      let body;
+      if (RESOURCE_FRAMES) {
+        if (!ready) await connect();
+        const baseUri=wantsVideo ? VIDEO_RESOURCE + (videoScope?"0/":"1/") + (++frameNonce) : FRAME_RESOURCE + "600/" + (++frameNonce);
+        const uri = routingInstance === null ? baseUri : baseUri.replace(
+          "ui://iphone-use/", "ui://iphone-use/instance-v1/" + routingInstance + "/");
+        const result = await request("resources/read", { uri });
+        const item = result && result.contents && result.contents.find((item) => typeof item.text === "string");
+        if (!item) throw new Error("empty frame");
+        body = JSON.parse(item.text);
+      } else {
+        const result = await callTool(FRAME_TOOL, wantsVideo ? {video:true,reset:!videoScope} : fresh ? { fresh: true } : {});
+        if (result && result.isError) throw new Error("frame tool failed");
+        body = result && result.structuredContent;
+      }
+      if (!visible()) {clearVideo();return;}
+      if (wantsVideo && expectedVideoGeneration!==videoGeneration) {delay=0;return;}
+      const live = show(body);
+      // A private hold is not a codec/transport failure. Resume video promptly when public.
+      if (body.private_secs) {videoRetryAt=0;failures=0;delay=IDLE_INTERVAL_MS;return;}
+      if (body.video && !body.private_secs && !body.clear_frame) {
+        await showVideo(body.video);
+        failures=0;delay=0;return;
+      }
+      if (wantsVideo) {clearVideo();videoRetryAt=performance.now()+30000;delay=0;return;}
       failures = 0;
       delay = live ? Math.max(0, FRAME_INTERVAL_MS - (performance.now() - started)) : IDLE_INTERVAL_MS;
     } catch (error) {
+      if (wantsVideo) { videoRetryAt=performance.now()+30000; }
       clearFrame(t("Waiting for a new permitted frame."));
       failures += 1;
       delay = Math.min(5000, 1000 * failures);
@@ -332,6 +468,7 @@
   }
 
   async function home() {
+    if (RESOURCE_FRAMES) return;
     homeButton.disabled = true;
     try {
       const result = await callTool("phone_shortcut", { name: "home", observe: false });
@@ -351,6 +488,7 @@
   }
 
   async function refresh() {
+    if (RESOURCE_FRAMES) return;
     refreshButton.disabled = true;
     stop();
     try { await poll(true); } finally { refreshButton.disabled = false; }
@@ -359,9 +497,9 @@
   homeButton.addEventListener("click", home);
   refreshButton.addEventListener("click", refresh);
 
-  function visibilityChanged() { if (visible()) kick(0); else stop(); }
+  function visibilityChanged() { if (visible()) kick(0); else {stop();clearVideo();} }
   document.addEventListener("visibilitychange", visibilityChanged);
-  window.addEventListener("pagehide", () => { onScreen = false; stop(); });
+  window.addEventListener("pagehide", () => { onScreen = false; stop();clearVideo(); });
   window.addEventListener("pageshow", () => { onScreen = true; visibilityChanged(); });
   if ("IntersectionObserver" in window) {
     new IntersectionObserver((entries) => {

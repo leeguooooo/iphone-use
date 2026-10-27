@@ -69,17 +69,35 @@ mod tests {
     fn a_spawned_child_does_not_keep_the_parent_guard_alive() {
         let dir = tempfile::tempdir().unwrap();
         let guard = try_acquire(dir.path()).unwrap().unwrap();
+        // SAFETY: the guard owns this live descriptor.
+        let flags = unsafe { libc::fcntl(guard._file.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
         let mut child = std::process::Command::new("sleep")
             .arg("10")
             .spawn()
             .unwrap();
         assert!(child.try_wait().unwrap().is_none());
         drop(guard);
-        let acquired = try_acquire(dir.path()).unwrap().is_some();
+        // Another parallel test can be between fork and exec and temporarily
+        // hold our descriptor. CLOEXEC closes it at exec, not at fork. Require
+        // release while our already-exec'd 10-second child is still alive;
+        // never accept release caused by that child's exit.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let acquired = loop {
+            assert!(child.try_wait().unwrap().is_none());
+            if try_acquire(dir.path()).unwrap().is_some() {
+                break true;
+            }
+            if std::time::Instant::now() >= until {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let child_still_alive = child.try_wait().unwrap().is_none();
         let _ = child.kill();
         let _ = child.wait();
         assert!(
-            acquired,
+            acquired && child_still_alive,
             "launchd/helper children must not inherit the interactive lock"
         );
     }

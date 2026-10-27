@@ -966,13 +966,13 @@ print("%s\t%s" % (t.get("command") or "", (t.get("env") or {}).get("IPHONE_USE_I
 # <file>.iphone-use.bak, and an unreadable file or a same-named entry with
 # another command is left alone. IPHONE_USE_NO_CLIENT_SETUP=1 skips it.
 register_json_mcp() {
-    local client="$1" file="$2" mcp="$3" name="$4" instance="${5:-}" rc=0
+    local client="$1" file="$2" mcp="$3" name="$4" instance="${5:-}" host="${6:-}" rc=0
     [ "${IPHONE_USE_NO_CLIENT_SETUP:-0}" = "1" ] && return 0
     [ -d "$(dirname "$file")" ] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
-    python3 - "$file" "$mcp" "$name" "$instance" 2>/dev/null <<'PY' || rc=$?
+    python3 - "$file" "$mcp" "$name" "$instance" "$host" 2>/dev/null <<'PY' || rc=$?
 import json, os, shutil, sys, tempfile
-path, mcp, name, instance = sys.argv[1:5]
+path, mcp, name, instance, host = sys.argv[1:6]
 path = os.path.realpath(path)  # a symlinked config keeps its link
 cfg = {}
 if os.path.exists(path):
@@ -990,10 +990,13 @@ if not isinstance(servers, dict):
 entry = {"command": mcp, "args": []}
 if instance:
     entry["env"] = {"IPHONE_USE_INSTANCE": instance}
+if host:
+    entry.setdefault("env", {})["IPHONE_USE_MCP_HOST"] = host
 old = servers.get(name)
 if old is not None:
     same = isinstance(old, dict) and old.get("command") == mcp \
-        and ((old.get("env") or {}).get("IPHONE_USE_INSTANCE") or "") == instance
+        and ((old.get("env") or {}).get("IPHONE_USE_INSTANCE") or "") == instance \
+        and (not host or (old.get("env") or {}).get("IPHONE_USE_MCP_HOST") == host)
     sys.exit(3 if same else 4)
 servers[name] = entry
 if os.path.exists(path):
@@ -1019,10 +1022,11 @@ PY
     esac
 }
 
-# register_desktop_mcp <mcp-binary> <server-name> [instance]: Cursor and Claude Desktop.
+# register_desktop_mcp <mcp-binary> <server-name> [instance]: installed desktop clients.
 register_desktop_mcp() {
     register_json_mcp "Cursor" "$HOME/.cursor/mcp.json" "$@"
     register_json_mcp "Claude Desktop" "$HOME/Library/Application Support/Claude/claude_desktop_config.json" "$@"
+    register_json_mcp "WorkBuddy" "$HOME/.workbuddy/mcp.json" "$1" "$2" "${3:-}" workbuddy
 }
 
 # first_run_login <cli> [--instance NAME]: one-time browser sign-in + phone QR.

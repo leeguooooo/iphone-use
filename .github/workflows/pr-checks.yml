@@ -109,6 +109,29 @@ jobs:
           # setup-runner.sh hands its commands to this binary (shim + instance-context tests).
           cargo build -p server --bin iphone-use --locked
 
+      - name: Gesture delivery over HTTP and actual stdio MCP
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          for mode in default full; do
+            python3 scripts/test-gesture-delivery-entry.py \
+              --daemon target/debug/iphone-use --mcp target/debug/iphone-use-mcp \
+              --structured "$mode" \
+              --out "$RUNNER_TEMP/gesture-delivery-entry-$GITHUB_RUN_ATTEMPT-$mode"
+          done
+
+      - name: Preserve gesture delivery entry evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: gesture-delivery-entry
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/gesture-delivery-entry-${{ github.run_attempt }}-*/result.json
+            ${{ runner.temp }}/gesture-delivery-entry-${{ github.run_attempt }}-*/daemon.log
+            ${{ runner.temp }}/gesture-delivery-entry-${{ github.run_attempt }}-*/mcp.log
+
       # Discovery over the real protocol, against the binary this PR builds.
       # A documented tool count can drift from what the server exposes; this
       # cannot.
@@ -161,6 +184,7 @@ jobs:
               "phone_instances",
               "phone_status",
               "phone_run_steps",
+              "phone_set_value",
               "phone_hold",
               "phone_release_owner",
           ):
@@ -177,6 +201,7 @@ jobs:
               "phone_tap",
               "phone_scroll",
               "phone_type",
+              "phone_set_value",
               "phone_key",
               "phone_shortcut",
               "phone_tap_element",
@@ -210,6 +235,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/test-drag-simulator-verdict.py
+          python3 scripts/test-replacement-recovery-verdict.py
+          python3 scripts/test-agent-bench.py
           # Same gate as release-binaries.yml: the installer ships SKILL.md
           # alone, so the skill directory must hold exactly that one file
           # (agent reference lives in docs/agent-reference.md).
@@ -223,6 +250,9 @@ jobs:
           /bin/bash -n scripts/setup-runner.sh
           bash scripts/test-install-release-transaction.sh
           bash scripts/test-install-cli-link.sh
+          bash scripts/test-install-client-config.sh
+          node scripts/test-mcp-screen-hosts.mjs
+          node scripts/test-mcp-screen-video.mjs
           bash scripts/test-install-runner-sources.sh
           bash scripts/test-install-named-swap.sh
           bash scripts/test-install-legacy-plist.sh

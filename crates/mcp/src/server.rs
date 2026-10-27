@@ -74,15 +74,18 @@ pub struct ScrollParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TypeParams {
-    /// Unicode text to send through the device-side input service. Focus the
-    /// intended field and verify it before typing. Up to 20000 characters;
-    /// text over 200 is typed in chunks (about a minute per 3000 characters),
-    /// and a failure part-way reports `characters_confirmed` and
-    /// `remaining_text` with retry_safe=false — then type only the rest.
+    /// New Unicode text, up to 20000 characters. Omit when resuming with continue_token.
     #[schemars(length(max = 20000))]
-    pub text: String,
+    pub text: Option<String>,
+    /// Resume only the original unsent text using the token from a safe partial response.
+    /// Pass without text or budget_ms. A changed owner, field, app or session refuses it.
+    pub continue_token: Option<String>,
+    /// Optional per-call typing budget, 6000..15000 ms. Requires a named owner and a current
+    /// native runner. A safe boundary returns continue_token; never resend the whole text.
+    pub budget_ms: Option<u64>,
+    /// Explicitly replace the current field before typing. Omit to append; never combine with a continuation.
+    pub clear: Option<bool>,
     /// Default true: return what the screen settled to (as on phone_tap).
-    /// `false` for the fastest bare action.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -164,6 +167,26 @@ pub struct TapElementParams {
     pub observe: Option<bool>,
 }
 
+/// Replace the field selected in the caller's exact observation.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetValueParams {
+    /// Zero-based field index from phone_elements.
+    pub element: usize,
+    /// Token from that same phone_elements response. Never substitute another snapshot.
+    pub snapshot: String,
+    /// Complete replacement, up to 1000 Unicode characters. Empty clears the field.
+    #[schemars(length(max = 1000))]
+    pub value: String,
+    /// Default false. Explicitly permit one original-field refocus only after
+    /// its clear is verified and before text starts; needs a supporting native Runner.
+    #[serde(default)]
+    pub recover_focus_after_clear: Option<bool>,
+    /// Default true: return the resulting screen change.
+    #[serde(default)]
+    pub observe: Option<bool>,
+}
+
 /// `phone_screenshot`'s default size: legible, and ~40 % fewer image tokens
 /// than a full-resolution capture.
 const DEFAULT_SCREENSHOT_MAX_SIDE: u32 = 1200;
@@ -193,6 +216,27 @@ pub struct ScreenFrameParams {
     /// Capture now instead of reusing the settled or live frame.
     #[serde(default)]
     pub fresh: Option<bool>,
+    /// Request bounded native H.264 access units instead of a PNG.
+    #[serde(default)]
+    pub video: Option<bool>,
+    /// Drop the old encoded subscription and wait for a new keyframe.
+    #[serde(default)]
+    pub reset: Option<bool>,
+}
+
+/// Select exactly one current field without focusing it or changing the app.
+#[derive(Debug,Default,Deserialize,Serialize,JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadValueParams {
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub identifier:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub label:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub kind:Option<String>,
+    /// Maximum UTF-16 units returned (1–65536, default 8192); emoji may use two.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub max_utf16:Option<u32>,
 }
 
 /// Parameters for [`phone_key`].
@@ -339,6 +383,19 @@ pub enum PhoneStep {
         text: String,
         #[serde(default)]
         clear: bool,
+        #[serde(default)]
+        after_ms: u64,
+    },
+    /// Replace the field from the caller's original observation. A screen
+    /// change can stale this snapshot; the daemon refuses rather than rebinding.
+    SetValue {
+        element: usize,
+        #[schemars(length(min = 1, max = 200))]
+        snapshot: String,
+        #[schemars(length(max = 1000))]
+        value: String,
+        #[serde(default)]
+        recover_focus_after_clear: Option<bool>,
         #[serde(default)]
         after_ms: u64,
     },
@@ -632,6 +689,8 @@ pub struct FlowReportParams {
 #[derive(Clone)]
 pub struct PhoneHandler {
     daemon: DaemonClient,
+    host: crate::screen::Host,
+    video: crate::screen_video::Relay,
     /// The most recent failed `phone_flow_run`, kept so `phone_flow_report`
     /// can file an issue with the real failure instead of a retelling.
     last_flow_failure: std::sync::Arc<std::sync::Mutex<Option<crate::contrib::ReportContext>>>,
@@ -858,6 +917,8 @@ impl PhoneHandler {
     ) -> Self {
         Self {
             daemon,
+            host: crate::screen::Host::from_env(),
+            video: crate::screen_video::Relay::default(),
             last_flow_failure: std::sync::Arc::new(std::sync::Mutex::new(None)),
             progress: std::sync::Arc::default(),
             profile,
@@ -878,7 +939,8 @@ impl PhoneHandler {
         if let Some(handler) = instances.get(name).filter(|handler| handler.daemon.same_target(&daemon)) {
             return Ok(handler.clone());
         }
-        let handler = Self::with_shared_profile(daemon, self.profile.clone());
+        let mut handler = Self::with_shared_profile(daemon, self.profile.clone());
+        handler.host = self.host;
         instances.insert(name.to_string(), handler.clone());
         Ok(handler)
     }
@@ -1165,18 +1227,75 @@ impl PhoneHandler {
             open_world_hint = true,
         ),
         description = "Insert literal Unicode text into the currently focused iPhone field. Use phone_tap_element to focus \
-        the intended field first; use phone_key for a navigation or editing key. Requires \
+        the intended field first; clear:true explicitly replaces its contents and must stop if clearing fails. Use phone_key for a navigation or editing key. Requires \
         phone_status.drivable=true. Text can replace a selection or reach the wrong field if focus changed. \
-        Long text is chunked; on partial failure inspect characters_confirmed and remaining_text and never \
+        Long text is chunked. Optional budget_ms (6000..15000) stops at a safe chunk boundary. If a response has continue_token, resume with only that token and optional observe; any other action, private hold, or owner/session/field change invalidates it. Private holds stop later chunks; an already dispatched native chunk may finish. On uncertain input no safe token is issued; inspect characters_confirmed and remaining_text and never \
         resend the whole value blindly. observe defaults on and returns the settled screen change. Verify \
         the resulting field before submitting; an unknown outcome is not evidence that nothing was typed."
     )]
     async fn phone_type(
         &self,
-        Parameters(TypeParams { text, observe }): Parameters<TypeParams>,
+        Parameters(TypeParams { text, continue_token, budget_ms, clear, observe }): Parameters<TypeParams>,
     ) -> CallToolResult {
+        let action = match (text, continue_token, budget_ms, clear) {
+            (Some(text), None, budget, clear) if text.chars().count() <= 20000
+                && budget.is_none_or(|ms| (6000..=15000).contains(&ms)) => {
+                    let mut action = serde_json::json!({"type":"text","text":text});
+                    if let Some(ms) = budget { action["budget_ms"] = ms.into(); }
+                    if let Some(clear) = clear { action["clear"] = clear.into(); }
+                    action
+                }
+            (None, Some(token), None, None) if token.len()==64 && token.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) =>
+                serde_json::json!({"type":"text","continue_token":token}),
+            _ => return CallToolResult::error(vec![Content::text("Pass text (up to 20000 characters) with optional clear and budget_ms 6000..15000, or continue_token alone; no input was sent")]),
+        };
         self.progress_reset();
-        send_input_observed(&self.daemon, &InputMsg::Text { text }, observe).await
+        let observe = observe.unwrap_or(true);
+        match self.daemon.input_value_observed(&action, observe).await {
+            Ok(response) => daemon_action_result(&response, observe, "ok"),
+            Err(error) => unknown_action_result("transport_error", format!("the call failed: {error:#}.")),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // phone_set_value
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+        description = "Replace one explicitly selected nonsecure text field, rather than the current focus. Read \
+        phone_elements first and pass its exact snapshot and field index with the complete value (up to 1000 \
+        Unicode characters); an empty value clears it. Requires phone_status.drivable=true. The daemon checks \
+        the caller's observation and focuses the selected field. Supporting native runners bind clear and \
+        subsequent chunks to that original field; older runners use their existing clear/type path. Clearing \
+        failure stops input. recover_focus_after_clear defaults false: explicitly opt in to one original-field \
+        refocus only after empty value/selection and original identity/app/binding are verified, before text starts. \
+        Requires a supporting native Runner; unsupported recovery refuses before replacement input. Empty clears \
+        never restore focus after clearing. It does not recover a focus change during typing. Newlines require a multiline field, \
+        and secure fields refuse. An unknown outcome \
+        may include partial changes: inspect the original field and never replay the whole value automatically. \
+        Use phone_type for appending to current focus. observe defaults true; verify the resulting value."
+    )]
+    async fn phone_set_value(
+        &self,
+        Parameters(SetValueParams { element, snapshot, value, recover_focus_after_clear, observe }): Parameters<SetValueParams>,
+    ) -> CallToolResult {
+        if snapshot.trim().is_empty() || snapshot.chars().count() > 200 || value.chars().count() > 1000 {
+            return not_sent_result("invalid_replacement", "No request was sent: supply the original snapshot (1..200 characters), its field index and a value of at most 1000 characters".into());
+        }
+        self.progress_reset();
+        let observe = observe.unwrap_or(true);
+        let mut action = serde_json::json!({"type":"set_value","element":element,"snapshot":snapshot,"value":value});
+        if let Some(recover) = recover_focus_after_clear { action["recover_focus_after_clear"] = serde_json::Value::Bool(recover); }
+        match self.daemon.input_value_observed(&action, observe).await {
+            Ok(response) => daemon_action_result(&response, observe, "replaced the selected field"),
+            Err(error) => unknown_action_result("transport_error", format!("the call failed: {error:#}.")),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1271,10 +1390,10 @@ impl PhoneHandler {
         sequence first, holds one control lock, and stops at the first failure. Use it as soon as a \
         segment is understood; keep single-action tools for exploring an unknown screen. Step kinds: \
         launch_app, open_url, tap_locator, tap_label, tap, type, key, shortcut, scroll, swipe, drag, \
-        longpress, multi_longpress (2–5 explicit normalized points held simultaneously), back, alert (system alerts; taps on them do not act), picker, perform (toggle a \
+        set_value (element+original snapshot, up to 1000 value characters; optional recover_focus_after_clear), longpress, multi_longpress (2–5 explicit normalized points held simultaneously), back, alert (system alerts; taps on them do not act), picker, perform (toggle a \
         switch, adjust a slider: element+snapshot from phone_elements), wait_for, pause. Drag points can dwell at an edge while keeping one finger down. Guard every \
         screen change with wait_for; never batch an irreversible step you have not verified. These \
-        step objects are exactly a saved flow's `steps` — when the response carries \
+        step objects follow the saved-flow vocabulary; snapshot-bound actions need the caller's original observation. When the response carries \
         `flow_suggestion`, ask the user whether to keep the task as a flow (phone_flow_draft). \
         The result names completed/applied counts and the failed step; retry_safe=false means \
         DO NOT replay."
@@ -1419,7 +1538,7 @@ impl PhoneHandler {
         let text = match self.daemon.status().await {
             Ok(status) => {
                 let mut summary = crate::screen::status_summary(&status, self.daemon.owner());
-                summary["panel"] = serde_json::json!(crate::screen::screen_uri());
+                summary["panel"] = serde_json::json!(self.host.screen_uri());
                 summary.to_string()
             }
             Err(e) => format!("panel opened; status failed: {e:#}"),
@@ -1433,13 +1552,16 @@ impl PhoneHandler {
         image and phone_elements for text. Returns structuredContent with status, frame (mime_type=image/png \
         and base64 data), ok and error. A private hold returns frame=null; an empty or failed capture is \
         reported rather than invented pixels. max_side is clamped to 200–1000; fresh bypasses the reusable \
-        frame. The panel calls this with visibility app; do not poll it from model turns or use it for \
+        frame. video=true requests bounded native H.264 batches with reset=true for a new keyframe; unavailable video clears old pixels and the panel falls back to PNG. The panel calls this with visibility app; do not poll it from model turns or use it for \
         health checks."
     )]
     async fn phone_screen_frame(
         &self,
-        Parameters(ScreenFrameParams { max_side, fresh }): Parameters<ScreenFrameParams>,
+        Parameters(ScreenFrameParams { max_side, fresh, video, reset }): Parameters<ScreenFrameParams>,
     ) -> CallToolResult {
+        if video == Some(true) {
+            return self.video.frame(&self.daemon, reset.unwrap_or(false)).await;
+        }
         let side = max_side
             .unwrap_or(crate::screen::DEFAULT_FRAME_SIDE)
             .clamp(200, 1000);
@@ -1463,6 +1585,24 @@ impl PhoneHandler {
         result
     }
 
+    #[tool(
+        annotations(read_only_hint=true,open_world_hint=true),
+        description="Read one current element's AX value without tapping, focusing, waking or taking an owner lease. Give exactly one identifier or exact label from a fresh screen, optionally kind; ambiguity refuses. Use this when phone_elements marks value_truncated or the task needs full field text. Returns one bounded value in text with source/completeness metadata; complete means the AX attribute was not cut by this API, not that the app exposes its full document. A smaller max_utf16 returns truncated:true. Secure fields refuse; old runners without ipu:valueRead refuse rather than promote a preview. Owner/privacy changes withhold the value."
+    )]
+    async fn phone_read_value(&self,Parameters(params):Parameters<ReadValueParams>)->CallToolResult {
+        let body=serde_json::to_value(params).unwrap_or_else(|_|serde_json::json!({}));
+        match self.daemon.read_value(&body).await {
+            Ok(response)=>{
+                let Some(body)=response.json.as_ref().filter(|body|response.ok()&&body.get("value").is_some()) else{return daemon_read_result(&response);};
+                // One copy of the potentially long value in text; structured output is metadata only.
+                let mut metadata=body.clone();metadata.as_object_mut().unwrap().remove("value");
+                let mut result=CallToolResult::success(vec![Content::text(body.to_string())]);
+                result.structured_content=Some(metadata);result
+            }
+            Err(_)=>CallToolResult::error(vec![Content::text("value read failed; no input was sent and no preview was promoted to a complete value")]),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // phone_elements (L2)
     // -----------------------------------------------------------------------
@@ -1483,7 +1623,7 @@ impl PhoneHandler {
         block means a system alert is up: answer it with an `alert` step, taps on alerts do not act. \
         ocr=auto adds text read from pixels when the tree has no interactive rows (games, \
         canvases), ocr=force always; such rows have no element, tap their x/y with phone_tap. \
-        Requires phone_status drivable=true."
+        value_truncated marks an incomplete field preview; use phone_read_value for its bounded full AX value. Requires phone_status drivable=true."
     )]
     async fn phone_elements(
         &self,
@@ -1800,7 +1940,7 @@ impl PhoneHandler {
         reached. Rows are deduplicated on (kind, label, value): identical-looking rows \
         collapse, so reconcile counts the user cares about. `complete` is true ONLY when \
         end_label was seen; no_progress or duplicate_page is not proof the list ended. Only \
-        what the accessibility tree exposes is collected. It swipes the live list, so the \
+        what the accessibility tree exposes is collected. Selected incomplete outcomes include a fresh bounded recovery image when permitted, without changing rows or coverage. It swipes the live list, so the \
         screen is left where the last page was; `snapshot` is that last page. \
         Optional `snapshot` (from a read of the target app; never filled in for you): a known \
         foreground app mismatch refuses before any swipe (app_changed, not_sent, retry_safe). \
@@ -1831,7 +1971,7 @@ impl PhoneHandler {
         is ambiguous (several on-screen matches: `candidates` with index and frame), covered \
         by another control, or not drawn. Found: `target` (index, kind, frame) plus a \
         `snapshot` for phone_tap_element. Not found: on-screen labels containing the text \
-        as `candidates`. No screenshot is taken; absence after the budget is not proof — \
+        as `candidates`. Selected lookup failures include a fresh bounded recovery image when permitted; absence after the budget is not proof — \
         look at the screen before swiping further. Optional `snapshot` (from a read of the \
         target app; never filled in for you): a known foreground app mismatch refuses before \
         any swipe (app_changed, not_sent, retry_safe). Results name the app. Requires \
@@ -2707,12 +2847,52 @@ fn slim_tools(tools: Vec<rmcp::model::Tool>) -> Vec<rmcp::model::Tool> {
 /// [`shape_structured`] for every tool but the panel's frame tool: a frame
 /// is read by the panel, never the model, and its base64 image must reach
 /// `structuredContent` whole.
-fn finish_result(tool: &str, result: CallToolResult, mode: StructuredMode) -> CallToolResult {
+fn finish_result(tool: &str, mut result: CallToolResult, mode: StructuredMode) -> CallToolResult {
     if tool == crate::screen::FRAME_TOOL {
-        result
-    } else {
-        shape_structured(result, mode)
+        return result;
     }
+    if result.structured_content.as_ref().is_some_and(|json|json.get("observation_omitted")==Some(&serde_json::Value::Bool(true)) && json.get("scope_changed").is_some()) {
+        result.content.push(Content::text("UI observation withheld after an owner/privacy scope change. The original action delivery verdict is unchanged. Check phone_status and coordinate with the current owner before new work; never replay already applied or uncertain steps"));
+    }
+
+    let payload = result
+        .structured_content
+        .as_mut()
+        .and_then(|json| json.get_mut("image"))
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|image| image.remove("png_base64"));
+    if let Some(payload) = payload {
+        let png = payload.as_str().filter(|b64| {
+            B64.decode(b64)
+                .ok()
+                .is_some_and(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+        });
+        if let Some(png) = png {
+            if let Some(image) = result
+                .structured_content
+                .as_ref()
+                .and_then(|json| json.get("image"))
+            {
+                let redaction_note = if image["capture_redacted"] == serde_json::Value::Bool(true) {
+                    " This is an accessibility wireframe, not app pixels."
+                } else {
+                    ""
+                };
+                result.content.push(Content::text(format!(
+                    "Recovery image: source {}, requested {} and received {} (ms); it shows a later screen. Inspect it before selecting a new action.{}",
+                    image["source"].as_str().unwrap_or("?"),
+                    image["requested_at_ms"], image["received_at_ms"], redaction_note,
+                )));
+            }
+            result
+                .content
+                .push(Content::image(png.to_string(), "image/png"));
+        } else if let Some(json) = result.structured_content.as_mut() {
+            json["image_unavailable"] = true.into();
+            json["image_omitted"] = "invalid_png_payload".into();
+        }
+    }
+    shape_structured(result, mode)
 }
 
 /// What `tools/list` answers under `profile`: the tools it exposes, with
@@ -2993,14 +3173,26 @@ impl ServerHandler for PhoneHandler {
             .peer
             .peer_info()
             .is_some_and(|info| is_codex_client(&info.client_info.name));
+        let cancellation = context.ct.clone();
+        if cancellation.is_cancelled() {
+            let mut result = CallToolResult::error(vec![Content::text("tool cancelled before dispatch; no action was sent")]);
+            result.structured_content = Some(serde_json::json!({"ok":false,"error":"cancelled_before_dispatch","outcome":"not_sent","retry_safe":true}));
+            return Ok(keep_codex_images(finish_result(&name, result, StructuredMode::from_env()), codex_client));
+        }
         let selected = match instance.as_deref() {
             Some(name) => Some(self.for_instance(name).map_err(|_| rmcp::ErrorData::invalid_params(
                 "installed instance unavailable or unsafe; no action sent and no other phone selected", None))?),
             None => None,
         };
         let handler = selected.as_ref().unwrap_or(self);
+        let router = Self::tool_router();
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(handler, request, context);
-        let mut result = Self::tool_router().call(tcc).await?;
+        let mut result = tokio::select! {
+            biased;
+            result = router.call(tcc) => result?,
+            _ = cancellation.cancelled() => unknown_action_result("cancelled",
+                "the running tool was cancelled; some input may already have reached the phone. Inspect the original field or receipt before planning further work; no action was retried".into()),
+        };
         result.meta.get_or_insert_with(rmcp::model::Meta::new).0
             .insert("iphone-use/instance".into(), serde_json::json!(instance));
         if let Some(instance) = &instance {
@@ -3025,7 +3217,7 @@ impl ServerHandler for PhoneHandler {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult {
-            tools: listed_tools(&self.profile),
+            tools: crate::screen::adapt_tools(listed_tools(&self.profile), self.host),
             meta: None,
             next_cursor: None,
         })
@@ -3037,20 +3229,59 @@ impl ServerHandler for PhoneHandler {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListResourcesResult::with_all_items(
-            crate::screen::resources(),
+            crate::screen::resources_for(self.host),
         ))
     }
 
     async fn read_resource(
         &self,
         request: rmcp::model::ReadResourceRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ReadResourceResult, rmcp::ErrorData> {
-        match crate::screen::read(&request.uri) {
+        let (instance, uri) = crate::screen::resource_route(self.host, &request.uri)
+            .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
+        let selected = match instance {
+            Some(name) => Some(self.for_instance(name).map_err(|_| rmcp::ErrorData::invalid_params(
+                "instance resource unavailable or unsafe; no other phone selected", None))?),
+            None => None,
+        };
+        let handler = selected.as_ref().unwrap_or(self);
+        if let Some(reset) = crate::screen::resource_video_reset(self.host, &uri) {
+            if self.profile.refusal(crate::screen::FRAME_TOOL).is_some() {
+                return Err(rmcp::ErrorData::resource_not_found("video access is disabled by IPHONE_USE_MCP_TOOLS",None));
+            }
+            let frame = tokio::select! {
+                biased;
+                _ = context.ct.cancelled()=>return Err(rmcp::ErrorData::internal_error("video read cancelled",None)),
+                frame = tokio::time::timeout(std::time::Duration::from_secs(8),handler.phone_screen_frame(Parameters(ScreenFrameParams {video:Some(true),reset:Some(reset),..Default::default()})))=>frame.map_err(|_|rmcp::ErrorData::internal_error("video read timed out",None))?,
+            };
+            return Ok(rmcp::model::ReadResourceResult::new(vec![rmcp::model::ResourceContents::TextResourceContents {
+                uri:request.uri,mime_type:Some("application/json".into()),text:frame.structured_content.unwrap_or_else(||serde_json::json!({"ok":false,"clear_frame":true,"video_unavailable":true})).to_string(),meta:None,
+            }]));
+        }
+        if let Some(side) = crate::screen::resource_frame_side(self.host, &uri) {
+            if self.profile.refusal(crate::screen::FRAME_TOOL).is_some() {
+                return Err(rmcp::ErrorData::resource_not_found("frame access is disabled by IPHONE_USE_MCP_TOOLS", None));
+            }
+            // This shares the exact read-only frame path and privacy checks used by
+            // tools/call. A new MCP process reads the existing daemon; it never
+            // starts a worker or changes the current owner.
+            let frame = tokio::select! {
+                biased;
+                _ = context.ct.cancelled() => return Err(rmcp::ErrorData::internal_error("frame read cancelled", None)),
+                frame = tokio::time::timeout(std::time::Duration::from_secs(8), handler.phone_screen_frame(
+                    Parameters(ScreenFrameParams {max_side:Some(side), fresh:Some(false), ..Default::default()}))) => frame
+                    .map_err(|_| rmcp::ErrorData::internal_error("frame read timed out", None))?,
+            };
+            return Ok(rmcp::model::ReadResourceResult::new(vec![rmcp::model::ResourceContents::TextResourceContents {
+                uri:request.uri, mime_type:Some("application/json".into()),
+                text:frame.structured_content.unwrap_or_else(||serde_json::json!({"ok":false,"frame":null,"error":"frame unavailable"})).to_string(), meta:None,
+            }]));
+        }
+        match crate::screen::read_for(self.host, &request.uri) {
             Some(contents) => Ok(rmcp::model::ReadResourceResult::new(vec![contents])),
             None => Err(rmcp::ErrorData::resource_not_found(
-                format!("unknown resource {}", request.uri),
-                None,
+                format!("unknown resource {}", request.uri), None,
             )),
         }
     }
@@ -3358,6 +3589,15 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                     serde_json::json!({"type":"text","text":text,"clear":clear}),
                     after_ms,
                 )
+            }
+            PhoneStep::SetValue { element, snapshot, value, recover_focus_after_clear, after_ms } => {
+                validate_after(after_ms)?;
+                if snapshot.trim().is_empty() || snapshot.chars().count() > 200 || value.chars().count() > 1000 {
+                    return Err(format!("steps[{index}] set_value needs the original snapshot (1..200 characters), its field index and at most 1000 value characters; no action was sent"));
+                }
+                let mut action = serde_json::json!({"type":"set_value","element":element,"snapshot":snapshot,"value":value});
+                if let Some(recover) = recover_focus_after_clear { action["recover_focus_after_clear"] = recover.into(); }
+                action_step(action, after_ms)
             }
             PhoneStep::Key { name, after_ms } => {
                 validate_after(after_ms)?;
@@ -3836,7 +4076,7 @@ fn list_result(
                     .as_ref()
                     .and_then(|body| body.get("error"))
                     .and_then(serde_json::Value::as_str)
-                    == Some("app_changed") =>
+                    .is_some_and(|error|matches!(error,"app_changed"|"list_deadline")) =>
         {
             let result = if response.ok() {
                 CallToolResult::success(vec![Content::text(text)])
@@ -4284,7 +4524,10 @@ mod tests {
         // The request stays small (the scripted daemon reads one 8 KiB
         // buffer); the answer is what is under test.
         let result = block(handler.phone_type(Parameters(TypeParams {
-            text: "x".repeat(600),
+            text: Some("x".repeat(600)),
+            continue_token: None,
+            budget_ms: None,
+            clear: None,
             observe: Some(false),
         })));
         task.join().unwrap();
@@ -4470,6 +4713,8 @@ mod tests {
             "phone_release_owner",
             "phone_collect_list",
             "phone_scroll_find",
+            "phone_read_value",
+            "phone_set_value",
             "phone_logs",
             "phone_crashes",
             "phone_set_location",
@@ -4502,6 +4747,7 @@ mod tests {
             "phone_tap",
             "phone_scroll",
             "phone_type",
+            "phone_set_value",
             "phone_key",
             "phone_shortcut",
             "phone_tap_element",
@@ -4535,7 +4781,7 @@ mod tests {
 
     /// The tools that only read: no phone input, no outward-facing writes.
     /// `IPHONE_USE_MCP_TOOLS=readonly` exposes exactly these.
-    const READ_ONLY_TOOLS: [&str; 13] = [
+    const READ_ONLY_TOOLS: [&str; 14] = [
         "phone_apps",
         "phone_capabilities",
         "phone_crashes",
@@ -4545,6 +4791,7 @@ mod tests {
         "phone_flow_list",
         "phone_home_layout",
         "phone_instances",
+        "phone_read_value",
         "phone_screen",
         "phone_screen_frame",
         "phone_screenshot",
@@ -4786,6 +5033,35 @@ mod tests {
                     .unwrap();
             let error = phone_steps_request(steps).unwrap_err();
             assert!(error.contains("no action was sent"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn batch_set_value_preserves_original_snapshot_value_and_explicit_recovery() {
+        for recover in [None,Some(false),Some(true)] {
+            let request=phone_steps_request(vec![PhoneStep::SetValue {element:3,snapshot:"ORIGINAL".into(),
+                value:"🙂".repeat(1000),recover_focus_after_clear:recover,after_ms:25},
+                PhoneStep::Key{name:"return".into(),after_ms:0}]).unwrap();
+            let action=&request["steps"][0]["action"];
+            assert_eq!(action["type"],"set_value"); assert_eq!(action["snapshot"],"ORIGINAL");
+            assert_eq!(action["element"],3); assert_eq!(action["value"].as_str().unwrap().chars().count(),1000);
+            assert_eq!(request["steps"][0]["after_ms"],25);
+            assert_eq!(action.get("recover_focus_after_clear").cloned(),recover.map(serde_json::Value::Bool));
+            assert_eq!(request["steps"][1]["action"]["type"],"key");
+        }
+    }
+
+    #[test]
+    fn invalid_batch_set_value_rejects_before_any_request_is_built() {
+        for (snapshot,value) in [("".into(),"x".into()),(" ".into(),"x".into()),
+            ("x".repeat(201),"x".into()),("ORIGINAL".into(),"字".repeat(1001))] {
+            let error=phone_steps_request(vec![PhoneStep::Tap{x:0.5,y:0.5,after_ms:0},
+                PhoneStep::SetValue{element:1,snapshot,value,recover_focus_after_clear:None,after_ms:0}]).unwrap_err();
+            assert!(error.contains("steps[1]")&&error.contains("no action was sent"),"{error}");
+        }
+        for bad in [serde_json::json!({"kind":"set_value","element":1,"snapshot":"S","value":"x","recover_focus_after_clear":"true"}),
+            serde_json::json!({"kind":"set_value","element":1,"snapshot":"S","value":"x","unexpected":true})] {
+            assert!(serde_json::from_value::<PhoneStep>(bad).is_err());
         }
     }
 

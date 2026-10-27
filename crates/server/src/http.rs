@@ -466,6 +466,7 @@ pub struct AppState {
     /// and the element tree are refused and open streams end. Ends with the
     /// hold. See [`AppState::screen_private_secs`].
     pub private_until: Arc<Mutex<Option<Instant>>>,
+    /// Fences captures across an explicit private-hold toggle, even if it is lifted before capture completes.
     pub privacy_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Who is driving the phone right now (issue #72). A client that names
     /// itself with `X-Phone-Owner` takes this lease on its first control
@@ -476,6 +477,9 @@ pub struct AppState {
     pub owner: Arc<Mutex<Option<PhoneOwner>>>,
     /// How long an owner's lease outlives its last control request.
     pub owner_lease_secs: u64,
+    /// Changes under the owner lock on acquisition, handoff or release; a name alone is not
+    /// an ownership incarnation (a -> b -> a must not revive a continuation).
+    pub owner_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// How a reconnect brings the managed supervisor up: `(setup_sh, log,
     /// udid) -> started`. Blocking. The daemon uses
     /// [`write_and_bootstrap_runner_agent`]; tests substitute a fake so a
@@ -627,6 +631,11 @@ fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<bool, Resp
     let mut slot = recover(state.owner.lock());
     let previous = slot.clone();
     let outcome = arbitrate_owner(&mut slot, claim, now, lease);
+    if outcome.is_ok() {
+        let before = previous.as_ref().filter(|o| now.saturating_duration_since(o.last_seen) < lease).map(|o| &o.name);
+        let after = slot.as_ref().map(|o| &o.name);
+        if before != after { state.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel); }
+    }
     drop(slot);
     match outcome {
         Ok(()) => {
@@ -744,7 +753,7 @@ async fn agent_owner_inner(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         );
     }
-    *recover(state.owner.lock()) = None;
+    state.release_owner_lease();
     // While a lease is live the idle watchdog leaves the phone alone; the
     // idle window starts when it is given back, not at the last action.
     state.touch_activity();
@@ -766,6 +775,12 @@ pub type ElementSnapshotCache =
     std::collections::VecDeque<(String, Arc<Vec<crate::runner::ElementRow>>)>;
 
 impl AppState {
+    fn release_owner_lease(&self) {
+        let mut owner = recover(self.owner.lock());
+        *owner = None;
+        self.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
     /// Stamp "remote driving happened just now" for the idle-release watchdog.
     /// Called by every `/agent` action and live-view request (NOT `/agent/status`,
     /// which the web client polls constantly — counting it would pin the phone
@@ -1022,6 +1037,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/agent/h264/keyframe", post(agent_h264_keyframe))
         .route("/agent/elements", get(agent_elements))
         .route("/agent/activity", get(agent_activity))
+        .route("/agent/value", post(agent_value))
         .route("/agent/collect", post(agent_collect))
         .route("/agent/scroll_find", post(agent_scroll_find))
         .route("/agent/flow/draft", get(agent_flow_draft))
@@ -3022,6 +3038,7 @@ async fn agent_status(
     );
     let body = with_pre_rename_status_fields(body);
     let resp = Response::builder()
+        .header("x-ipu-screen-scope", screen_stream_scope(state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire)))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
@@ -4824,7 +4841,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                     *recover(state.runner_health.lock()) = crate::runner::RunnerHealth::down();
                     state.released.store(true, Ordering::Release);
                     recover(state.flow_trail.lock()).reset();
-                    *recover(state.owner.lock()) = None;
+                    state.release_owner_lease();
                     note_idle_release();
                     release_backoff_until = None;
                     release_failures = 0;
@@ -4938,7 +4955,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 *recover(state.runner_health.lock()) = crate::runner::RunnerHealth::down();
                 state.released.store(true, Ordering::Release);
                 recover(state.flow_trail.lock()).reset();
-                *recover(state.owner.lock()) = None;
+                state.release_owner_lease();
                 note_idle_release();
                 was_up = false;
                 release_backoff_until = None;
@@ -5309,7 +5326,7 @@ fn spawn_phone_exit_watch(state: Arc<AppState>) {
                 *recover(state.runner_health.lock()) = crate::runner::RunnerHealth::down();
                 state.released.store(true, Ordering::Release);
                 recover(state.flow_trail.lock()).reset();
-                *recover(state.owner.lock()) = None;
+                state.release_owner_lease();
                 tracing::info!("the session was ended on the iPhone; phone released until the next request");
             }
             state.runner_lifecycle.finish_releasing(release_token);
@@ -6171,7 +6188,7 @@ async fn agent_mode_inner(
                 state
                     .released
                     .store(true, std::sync::atomic::Ordering::Release);
-                *recover(state.owner.lock()) = None;
+                state.release_owner_lease();
                 if let Err(error) = persist_human_handoff(true) {
                     tracing::error!(%error, "phone stopped but human handoff could not be persisted");
                     persisted = false;
@@ -6563,6 +6580,8 @@ enum RunnerControlOutcome {
     /// ones were sent without an acknowledgement and may be partly typed.
     /// Never replayed — the caller appends only the rest.
     TextPartial { confirmed: usize, uncertain: usize },
+    NativePartial { confirmed: u64 },
+    ReplacementPartial { confirmed: usize, uncertain: usize, unsent: usize, clear_confirmed: bool },
     /// The runner refused the request and said nothing reached the screen
     /// (issue #257: a scroll point outside the runner's screen). Its reason
     /// is in the `runner_error` detail.
@@ -6903,6 +6922,7 @@ enum SnapshotElementTapError {
 /// was actually safe, retrying. Only a *connect* failure qualifies; anything
 /// after the request was sent (timeout, reset mid-body) stays unknown.
 fn error_never_reached_runner(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<crate::runner::ReplacementDeliveryError>().is_some() { return false; }
     error
         .chain()
         .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_connect))
@@ -7237,8 +7257,8 @@ async fn tap_snapshot_element(
 }
 
 /// `{"type":"set_value","element":N,"snapshot":"…","value":"…"}` — write a text
-/// field's contents directly through runner's `element/:id/value` instead of the
-/// focus-tap-then-type dance. Clears first so the value REPLACES stale text;
+/// field's contents using a bound native prefix/chunks when supported, or the
+/// legacy clear/type path. A clear failure always stops;
 /// an empty string means "clear the field".
 /// Text inputs that `set_value` may resolve by frame when the row carries no
 /// label and no identifier.
@@ -7247,13 +7267,26 @@ async fn set_value_snapshot_element(
     w: &mut crate::runner::RunnerClient,
     value: &serde_json::Value,
 ) -> Result<(), SnapshotElementTapError> {
+    let recover_focus = match value.get("recover_focus_after_clear") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        _ => return Err(SnapshotElementTapError::InvalidValue("recover_focus_after_clear must be a boolean")),
+    };
     let text = value
         .get("value")
         .and_then(serde_json::Value::as_str)
         .ok_or(SnapshotElementTapError::Invalid)?
         .to_string();
+    if text.chars().count() > 1_000 { return Err(SnapshotElementTapError::InvalidValue("replacement value exceeds 1000 Unicode characters")); }
     let (rows, index, reused) = fetch_snapshot_row_reusing(w, value).await?;
     let row = &rows[index];
+    if row.kind == "SecureTextField" {
+        return Err(SnapshotElementTapError::Refused("secure_value_requires_human", "Replace secure fields manually; nothing was sent"));
+    }
+    if !TEXT_INPUT_KINDS.contains(&row.kind.as_str()) { return Err(SnapshotElementTapError::InvalidTarget); }
+    if row.kind != "TextView" && (text.contains('\n') || text.contains('\r')) {
+        return Err(SnapshotElementTapError::Refused("newline_requires_multiline_field", "Use a multiline field or an explicit submit key; nothing was sent"));
+    }
     let element_id = if snapshot_row_locator(row).is_some() {
         let element_id = resolve_snapshot_row_element(w, &rows, index).await?;
         if reused && !verify_reused_row(w, &element_id, row).await? {
@@ -7268,62 +7301,50 @@ async fn set_value_snapshot_element(
     } else {
         return Err(SnapshotElementTapError::InvalidTarget);
     };
-    if text.is_empty() {
-        // Clearing IS the requested mutation — report its real outcome.
-        return w.clear_element(&element_id).await.map_err(|error| {
-            if runner_error_is_missing_element(&error) {
-                SnapshotElementTapError::NotFound
-            } else {
-                SnapshotElementTapError::AfterDispatch(error)
+    if recover_focus && !w.supports_replace_focus_recovery().await.map_err(SnapshotElementTapError::BeforeDispatch)? {
+        return Err(SnapshotElementTapError::Refused("replacement_focus_recovery_unsupported",
+            "This Runner cannot verify and restore a cleared original field. Update the Runner or omit recover_focus_after_clear; no replacement input was sent"));
+    }
+    let before = w.element_value(&element_id).await.ok().map(|value|value.unwrap_or_default());
+    let typed = match w.replace_element_if_supported(&element_id, &text, recover_focus).await {
+        Ok(true) => Ok(()),
+        Err(error) => return Err(SnapshotElementTapError::AfterDispatch(error)),
+        Ok(false) => {
+            // The legacy clear may already have changed focus or text. Any failure is terminal:
+            // a replacement must never silently turn into an append or retry a different field.
+            let total = text.chars().count();
+            if let Err(error) = w.clear_element(&element_id).await {
+                let error = if error_never_reached_runner(&error) { error } else {
+                    crate::runner::ReplacementDeliveryError::wrap(error,0,0,total,false)
+                };
+                return Err(SnapshotElementTapError::AfterDispatch(error));
             }
-        });
-    }
-    let secure = row.kind == "SecureTextField";
-    let before = if secure {
-        None
-    } else {
-        w.element_value(&element_id).await.ok().flatten()
+            if text.is_empty() { return Ok(()); }
+            w.type_into(&element_id, &text).await.map_err(|error| {
+                let not_sent = error_never_reached_runner(&error)
+                    || crate::runner::runner_http_error(&error).is_some_and(crate::runner::RunnerHttpError::nothing_sent)
+                    || crate::native_scope::is_revoked(&error);
+                let uncertain = if not_sent {0} else {total};
+                crate::runner::ReplacementDeliveryError::wrap(error,0,uncertain,total-uncertain,true)
+            })
+        }
     };
-    // Clear-then-type is one intentional compound action (same contract as
-    // `text` with `clear:true`): the clear is best-effort, the type is still
-    // dispatched at most once.
-    if let Err(error) = w.clear_element(&element_id).await {
-        tracing::warn!("runner clear_element before set_value: {error:#}");
-    }
-    let typed = w.type_into(&element_id, &text).await;
-    if secure {
-        // A secure field reads back as bullets; nothing to compare.
-        return typed.map_err(set_value_dispatch_error);
-    }
-    // Read the field back. Web inputs (WKWebView, Chrome) and some custom
-    // fields acknowledge a direct value write and keep their old contents
-    // (hardware-reported: a PayPay chat textarea answered ok, a Rakuten
-    // e-NAVI number field answered outcome_unknown, neither changed).
-    let after = w.element_value(&element_id).await.ok().flatten();
-    match (&typed, after.as_deref()) {
-        (_, Some(now)) if same_text(now, &text) => Ok(()),
-        // The write failed and the field still holds what it held: not applied.
-        (Err(_), Some(now)) if before.as_deref().is_some_and(|was| was == now) => Err(
+    // An uncertain write must never be promoted by a later read of only this field:
+    // another field may have received part of the text. No fallback or automatic replay.
+    typed.map_err(SnapshotElementTapError::AfterDispatch)?;
+    let after = w.element_value(&element_id).await;
+    match after {
+        Ok(Some(ref now)) if same_text(now, &text) => Ok(()),
+        Ok(None) if text.is_empty() => Ok(()),
+        Ok(ref value) if before.as_deref().is_some_and(|was| was == value.as_deref().unwrap_or_default()) => Err(
             SnapshotElementTapError::NoEffect("value_not_applied", SET_VALUE_NOT_APPLIED_HINT),
         ),
-        (Ok(()), Some(_)) => Err(SnapshotElementTapError::NoEffect(
-            "value_not_applied",
-            SET_VALUE_NOT_APPLIED_HINT,
-        )),
-        // No readback: keep the dispatch outcome as runner reported it.
-        _ => typed.map_err(set_value_dispatch_error),
+        _ => Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!(
+            "replacement acknowledged but final value changed unexpectedly or is unavailable; inspect the original field; do not replay wholesale"))),
     }
 }
 
-const SET_VALUE_NOT_APPLIED_HINT: &str = "runner acknowledged the write but the field reads back a different value — web inputs and some custom fields ignore direct value writes, and autocorrect can rewrite text. Tap the field to focus it, send {\"type\":\"text\",\"text\":…}, then read the field again";
-
-fn set_value_dispatch_error(error: anyhow::Error) -> SnapshotElementTapError {
-    if runner_error_is_missing_element(&error) {
-        SnapshotElementTapError::NotFound
-    } else {
-        SnapshotElementTapError::AfterDispatch(error)
-    }
-}
+const SET_VALUE_NOT_APPLIED_HINT: &str = "the write was acknowledged but the original field still reads as before. Inspect the original field and current status before a new replacement or focused text with clear:true; do not replay automatically";
 
 /// Field contents equal up to formatting the field adds itself: spacing and
 /// separators the caller did not type (a phone field that shows 090-1234-5678
@@ -9394,6 +9415,19 @@ fn runner_failure_outcome(
     detail: &mut Option<serde_json::Value>,
 ) -> RunnerControlOutcome {
     use std::sync::atomic::Ordering;
+    // Permission loss retains the existing scope-level receipt and must not
+    // mark the device itself broken merely because the owner/private epoch changed.
+    if crate::native_scope::is_revoked(error) { return RunnerControlOutcome::Failed; }
+    if let Some(progress) = error.downcast_ref::<crate::runner::ReplacementDeliveryError>() {
+        if let Some(runner) = crate::runner::runner_http_error(error) {
+            *detail = Some(serde_json::json!({"runner_error":runner.to_json()}));
+        }
+        actionable.store(false, Ordering::Release);
+        w.invalidate_session();
+        tracing::warn!("runner control ({typ}): {error:#}");
+        return RunnerControlOutcome::ReplacementPartial { confirmed:progress.confirmed,
+            uncertain:progress.uncertain, unsent:progress.unsent, clear_confirmed:progress.clear_confirmed };
+    }
     let runner = crate::runner::runner_http_error(error);
     if let Some(runner) = runner {
         *detail = Some(serde_json::json!({ "runner_error": runner.to_json() }));
@@ -9490,17 +9524,11 @@ fn runner_failed_after_dispatch_response() -> Response {
 /// `outcome_unknown`, carrying the runner's own reason (`runner_error`) when
 /// it answered with an error status (issue #257).
 fn runner_failed_after_dispatch_response_with(detail: Option<&serde_json::Value>) -> Response {
-    let Some(runner_error) = detail.and_then(|d| d.get("runner_error")) else {
-        return runner_failed_after_dispatch_response();
-    };
-    let body = serde_json::json!({
-        "ok": false,
-        "error": "outcome_unknown",
-        "outcome": "unknown",
-        "retry_safe": false,
-        "runner_error": runner_error,
-    });
-    with_security_headers((StatusCode::BAD_GATEWAY, axum::Json(body)).into_response())
+    let Some(detail)=detail else{return runner_failed_after_dispatch_response();};
+    if detail.get("runner_error").is_none()&&detail.get("native_mutations_confirmed").is_none(){return runner_failed_after_dispatch_response();}
+    let mut body=serde_json::json!({"ok":false,"error":"outcome_unknown","outcome":"unknown","retry_safe":false});
+    for key in ["runner_error","native_mutations_confirmed","native_mutations_uncertain"]{if let Some(value)=detail.get(key){body[key]=value.clone();}}
+    with_security_headers((StatusCode::BAD_GATEWAY,axum::Json(body)).into_response())
 }
 
 const RUNNER_REJECTED_HINT: &str = "the device runner refused this action before touching the screen (see runner_error); nothing was sent, so fix what it names and send it again";
@@ -9731,35 +9759,187 @@ async fn type_text_chunked(
     text: &str,
     clear: bool,
     deadline: tokio::time::Instant,
+    detail: &mut Option<serde_json::Value>,
+) -> RunnerControlOutcome {
+    type_text_chunked_bound(w, actionable, text, clear, deadline, detail, None, None, None).await
+}
+
+fn capture_input_scope(state: &AppState, headers: &HeaderMap, privacy_epoch: u64,
+    recovery: Option<&RecoveryScope>) -> Option<crate::input_continuation::Scope> {
+    if named_owner(headers).is_some() {
+        return recovery.map(|scope| crate::input_continuation::Scope {
+            owner:scope.owner.clone(), epoch:scope.epoch, privacy_epoch,
+        });
+    }
+    let owner = recover(state.owner.lock());
+    owner.is_none().then(|| crate::input_continuation::Scope {
+        owner:String::new(), epoch:state.owner_epoch.load(std::sync::atomic::Ordering::Acquire), privacy_epoch,
+    })
+}
+
+fn request_scope_refusal(state: &AppState, scope: Option<&crate::input_continuation::Scope>) -> Option<(&'static str,&'static str)> {
+    let Some(scope)=scope else{return Some(("input_owner_changed","ownership changed before dispatch; no further input was sent"));};
+    InputContext{scope,owner_epoch:&state.owner_epoch,privacy_epoch:&state.privacy_epoch,private_until:&state.private_until}.refusal()
+}
+
+async fn in_request_scope<T>(state:&AppState, scope:Option<&crate::input_continuation::Scope>, work:impl std::future::Future<Output=T>)->Option<T>{
+    let scope=scope?;
+    in_input_context(InputContext{scope,owner_epoch:&state.owner_epoch,privacy_epoch:&state.privacy_epoch,private_until:&state.private_until},work).await
+}
+async fn in_input_context<T>(context:InputContext<'_>,work:impl std::future::Future<Output=T>)->Option<T>{
+    tokio::pin!(work);
+    loop {
+        if context.refusal().is_some(){return None;}
+        if let Ok(value)=tokio::time::timeout(std::time::Duration::from_millis(250),&mut work).await{
+            return context.refusal().is_none().then_some(value);
+        }
+    }
+}
+
+fn batch_scope_refusal(state:&AppState,scope:Option<&crate::input_continuation::Scope>,index:usize,completed:usize,applied:usize,steps:&[serde_json::Value],observes_screen:bool)->Response {
+    let (reason,_)=request_scope_refusal(state,scope).unwrap_or(("input_privacy_changed","observation permission changed"));
+    let private_read=observes_screen&&screen_private_now(&state.private_until);
+    let error=if private_read {"screen_private"}else{reason};
+    let body=agent_actions_failure_body(index,completed,applied,error,"not_sent",applied==0,steps,None);
+    agent_actions_json(if private_read {StatusCode::LOCKED}else{StatusCode::CONFLICT},crate::observation::redact(body,reason))
+}
+
+#[derive(Clone)]
+struct MutationObservationFence {state:Arc<AppState>,scope:Option<crate::input_continuation::Scope>}
+
+/// The request's privacy generation is fixed before waiting for the runner;
+/// never refresh it merely because the same owner still holds the phone.
+#[derive(Clone, Copy)]
+struct InputContext<'a> {
+    scope: &'a crate::input_continuation::Scope,
+    owner_epoch: &'a std::sync::atomic::AtomicU64,
+    privacy_epoch: &'a std::sync::atomic::AtomicU64,
+    private_until: &'a Mutex<Option<Instant>>,
+}
+
+impl InputContext<'_> {
+    fn refusal(self) -> Option<(&'static str, &'static str)> {
+        use std::sync::atomic::Ordering;
+        if self.scope.epoch != self.owner_epoch.load(Ordering::Acquire) {
+            return Some(("input_owner_changed", "phone ownership changed; inspect the original field before continuing"));
+        }
+        if self.scope.privacy_epoch != self.privacy_epoch.load(Ordering::Acquire) || screen_private_now(self.private_until) {
+            return Some(("input_privacy_changed", "screen privacy changed or is active; no further input was sent. Check status and inspect the original field before starting new work"));
+        }
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn type_text_chunked_bound(
+    w: &mut crate::runner::RunnerClient,
+    actionable: &std::sync::atomic::AtomicBool,
+    text: &str,
+    clear: bool,
+    deadline: tokio::time::Instant,
+    detail: &mut Option<serde_json::Value>,
+    bound_target: Option<String>,
+    context: Option<InputContext<'_>>,
+    budget_ms: Option<u64>,
 ) -> RunnerControlOutcome {
     use crate::text_input::{char_count, chunk_timeout, split, typing_time, CHUNK_CHARS};
-    use std::sync::atomic::Ordering;
-    let deadline = deadline
-        .checked_sub(TEXT_CHUNK_DEADLINE_MARGIN)
-        .unwrap_or(deadline);
-    if clear {
-        // As for short text: the clear is best-effort, the text is sent once.
-        if let Err(error) = w.clear_active().await {
-            tracing::warn!("runner clear_active before chunked text: {error:#}");
+    if let Some((error, hint)) = context.and_then(InputContext::refusal) {
+        return RunnerControlOutcome::Refused(error, hint);
+    }
+    let target = match bound_target {
+        Some(target) => Some(target),
+        None => match w.input_target_for_text(text).await {
+        Ok(target) => target,
+        Err(error) => {
+            if let Some(runner) = crate::runner::runner_http_error(&error) {
+                *detail = Some(serde_json::json!({"runner_error":runner.to_json()}));
+                if runner.nothing_sent() { return RunnerControlOutcome::RunnerRejected; }
+            }
+            tracing::warn!("long text target binding failed before dispatch: {error:#}");
+            return RunnerControlOutcome::NotSent;
+        }
+    }};
+    if budget_ms.is_some() && (target.is_none() || !w.supports_input_continuation()) {
+        return RunnerControlOutcome::Refused("input_continuation_unsupported", "bounded input requires a runner with ipu:inputContinuation; upgrade the runner before trying again");
+    }
+    // budget_ms limits typing, not the read-only target lookup. The entry point still bounds
+    // binding and typing together by its outer request deadline.
+    let deadline = budget_ms.map(|ms| deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(ms))).unwrap_or(deadline);
+    let deadline = deadline.checked_sub(TEXT_CHUNK_DEADLINE_MARGIN).unwrap_or(deadline);
+    if let Some((error, hint)) = context.and_then(InputContext::refusal) {
+        return RunnerControlOutcome::Refused(error, hint);
+    }
+    if clear && target.is_some() {
+        if let Err(error) = w.clear_input_target(target.as_deref().unwrap()).await {
+            return runner_failure_outcome(w, actionable, &error, "text", detail);
+        }
+    } else if clear {
+        // The compatible route must stop on a failed clear too.
+        let mark = w.last_post();
+        match w.clear_active_checked(|| context.and_then(InputContext::refusal).is_none()).await {
+            Ok(true) => {},
+            Ok(false) => {
+                let (error,hint) = context.and_then(InputContext::refusal).unwrap_or(("input_privacy_changed", "input permission changed before clearing; no input was sent"));
+                return RunnerControlOutcome::Refused(error,hint);
+            },
+            Err(error) => {
+                if w.last_post() == mark { return RunnerControlOutcome::NotSent; }
+                return runner_failure_outcome(w, actionable, &error, "text", detail);
+            },
         }
     }
     let mut confirmed = 0;
     for piece in split(text, CHUNK_CHARS) {
+        if let Some((error, hint)) = context.and_then(InputContext::refusal) {
+            w.discard_input_continuation();
+            *detail = Some(serde_json::json!({"input_error":error,"clear_applied":clear}));
+            if confirmed == 0 && !clear { return RunnerControlOutcome::Refused(error, hint); }
+            return RunnerControlOutcome::TextPartial { confirmed, uncertain: 0 };
+        }
         let n = char_count(piece);
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         if left < typing_time(n) + std::time::Duration::from_millis(500) {
             // Not enough time to type this chunk: stop before sending it.
             tracing::warn!("chunked text stopped at the deadline after {confirmed} characters");
             if confirmed == 0 && !clear {
-                return RunnerControlOutcome::NotSent;
+                return if budget_ms.is_some() {
+                    RunnerControlOutcome::Refused("input_budget_exhausted", "no chunk fit in the typing budget; no text was sent. Inspect the original field and increase budget_ms before starting a new input")
+                } else { RunnerControlOutcome::NotSent };
             }
-            return RunnerControlOutcome::TextPartial {
-                confirmed,
-                uncertain: 0,
-            };
+            if let (Some(target), Some(context)) = (target.as_ref(), context) {
+                if context.refusal().is_none() {
+                    let remaining: String = text.chars().skip(confirmed).collect();
+                    if let Some(token) = w.save_input_continuation(context.scope.clone(), target.clone(), remaining, budget_ms.unwrap_or(15000)) {
+                        if context.refusal().is_none() {
+                            let body = detail.get_or_insert_with(|| serde_json::json!({}));
+                            body["continue_token"] = token.into();
+                        } else { w.discard_input_continuation(); }
+                    }
+                }
+            }
+            return RunnerControlOutcome::TextPartial { confirmed, uncertain: 0 };
         }
-        if let Err(error) = w.keys_with_timeout(piece, chunk_timeout(n).min(left)).await {
-            actionable.store(false, Ordering::Release);
+        let result = if let Some(token) = target.as_deref() {
+            w.keys_to_target(piece, token, chunk_timeout(n).min(left))
+                .await
+        } else {
+            w.keys_with_timeout(piece, chunk_timeout(n).min(left)).await
+        };
+        if let Err(error) = result {
+            if let Some(runner) = crate::runner::runner_http_error(&error) {
+                *detail = Some(serde_json::json!({"runner_error":runner.to_json()}));
+                if runner.nothing_sent() {
+                    // Earlier chunks (and a clear) may have landed. The rejected chunk did not.
+                    if confirmed == 0 && !clear {
+                        return RunnerControlOutcome::RunnerRejected;
+                    }
+                    return RunnerControlOutcome::TextPartial {
+                        confirmed,
+                        uncertain: 0,
+                    };
+                }
+            }
+            actionable.store(false, std::sync::atomic::Ordering::Release);
             w.invalidate_session();
             tracing::warn!("chunked text failed after {confirmed} characters: {error:#}");
             return RunnerControlOutcome::TextPartial {
@@ -9769,7 +9949,7 @@ async fn type_text_chunked(
         }
         confirmed += n;
     }
-    actionable.store(true, Ordering::Release);
+    actionable.store(true, std::sync::atomic::Ordering::Release);
     RunnerControlOutcome::Applied
 }
 
@@ -9795,23 +9975,243 @@ fn text_partial_body(
         "characters_total": crate::text_input::char_count(text),
         "remaining_text": remaining,
         "hint": if uncertain == 0 {
-            "the deadline stopped typing between chunks: the first characters_confirmed characters are typed, nothing after them was sent. Send remaining_text as a new text action with clear=false; never resend the whole text"
+            "typing stopped between chunks: the first characters_confirmed characters are typed, nothing after them was sent. Locate the original intended field and confirm its current text and focus before appending remaining_text with clear=false; never resend the whole text"
         } else {
             "typing failed part-way: the first characters_confirmed characters are typed; the next characters_uncertain may be partly on screen. Read the field's value, then send only what is missing (from remaining_text) with clear=false; never resend the whole text"
         },
     })
 }
 
+fn replacement_partial_body(confirmed: usize, uncertain: usize, unsent: usize,
+    clear_confirmed: bool, detail: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "ok":false, "error":"replacement_incomplete",
+        "outcome":if uncertain == 0 && clear_confirmed && detail.and_then(|d|d.get("native_mutations_uncertain")).and_then(serde_json::Value::as_u64).unwrap_or(0)==0 {"partial"} else {"unknown"}, "retry_safe":false,
+        "characters_confirmed":confirmed, "characters_uncertain":uncertain,
+        "characters_unsent":unsent, "characters_total":confirmed+uncertain+unsent,
+        "clear_outcome":if clear_confirmed {"confirmed"} else {"unknown"},
+        "hint":"Replacement stopped. Clearing or part of the requested value may already be applied. Inspect the original field and current app/focus before deciding what is missing; never repeat the whole replacement automatically.",
+    });
+    if let Some(detail) = detail {
+        body["detail"] = detail.clone();
+        for key in ["runner_error", "native_mutations_confirmed", "native_mutations_uncertain"] {
+            if let Some(value) = detail.get(key) { body[key] = value.clone(); }
+        }
+    }
+    body
+}
+
+fn replacement_partial_response(confirmed: usize, uncertain: usize, unsent: usize,
+    clear_confirmed: bool, detail: Option<&serde_json::Value>) -> Response {
+    let body = replacement_partial_body(confirmed, uncertain, unsent, clear_confirmed, detail);
+    with_security_headers((if body["outcome"]=="partial" {StatusCode::CONFLICT} else {StatusCode::BAD_GATEWAY}, axum::Json(body)).into_response())
+}
+
+fn text_partial_with_detail(action: &serde_json::Value, confirmed: usize, uncertain: usize,
+    detail: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut body = text_partial_body(action, confirmed, uncertain);
+    if let Some(detail) = detail {
+        let mut extra = detail.clone();
+        if let Some(token) = extra.as_object_mut().and_then(|d| d.remove("continue_token")) {
+            body["continue_token"] = token;
+            body["continuation_safe"] = true.into();
+            body["continuation_expires_in_ms"] = crate::input_continuation::TTL_MS.into();
+            body["hint"] = "only unsent text remains. Continue with type:text and continue_token alone; do not resend text or clear the field. Any intervening action, ownership handoff, private hold or session change invalidates continuation".into();
+        }
+        if extra.as_object().is_some_and(|d| !d.is_empty()) { body["detail"] = extra; }
+    }
+    body
+}
+
+fn is_input_continuation(action: &serde_json::Value) -> bool {
+    action.get("type").and_then(serde_json::Value::as_str) == Some("text") && action.get("continue_token").is_some()
+}
+
+fn validate_text_request(action: &serde_json::Map<String, serde_json::Value>) -> Result<(), &'static str> {
+    if let Some(token) = action.get("continue_token") {
+        if action.len() != 2 || !token.as_str().is_some_and(|v| v.len()==64 && v.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())) {
+            return Err("continue_token must be 64 lowercase hex characters and passed alone with type:text");
+        }
+        return Ok(());
+    }
+    if action.get("text").and_then(serde_json::Value::as_str).is_none_or(|t| crate::text_input::char_count(t)>crate::text_input::MAX_TEXT_CHARS)
+        || action.get("clear").is_some_and(|v| !v.is_boolean())
+        || action.get("budget_ms").is_some_and(|v| v.as_u64().is_none_or(|ms| !(6000..=15000).contains(&ms))) {
+        return Err("text needs a string up to 20000 characters, optional bool clear and optional budget_ms from 6000 to 15000");
+    }
+    Ok(())
+}
+
+fn native_guard(
+    state: &AppState,
+    scope: &crate::input_continuation::Scope,
+) -> Arc<crate::native_scope::Guard> {
+    native_guard_until(state, scope, None)
+}
+fn native_guard_until(
+    state: &AppState,
+    scope: &crate::input_continuation::Scope,
+    deadline: Option<tokio::time::Instant>,
+) -> Arc<crate::native_scope::Guard> {
+    let scope = scope.clone();
+    let owner = state.owner_epoch.clone();
+    let privacy = state.privacy_epoch.clone();
+    let until = state.private_until.clone();
+    crate::native_scope::Guard::new(move || {
+        InputContext {
+            scope: &scope,
+            owner_epoch: &owner,
+            privacy_epoch: &privacy,
+            private_until: &until,
+        }
+        .refusal()
+        .map(|v| v.0)
+        .or_else(|| {
+            deadline
+                .filter(|time| tokio::time::Instant::now() >= *time)
+                .map(|_| "list_deadline")
+        })
+    })
+}
+
+fn native_partial_body(confirmed:u64)->serde_json::Value {
+    serde_json::json!({"ok":false,"error":"action_interrupted","outcome":"partial","retry_safe":false,
+        "native_mutations_confirmed":confirmed,"native_mutations_uncertain":0,
+        "hint":"Some native sub-operations were acknowledged before scope changed; the logical action did not complete. Inspect current state with the current owner, and never replay the whole action"})
+}
+fn native_partial_response(confirmed:u64)->Response {
+    with_security_headers((StatusCode::CONFLICT,axum::Json(native_partial_body(confirmed))).into_response())
+}
+
+/// Production entry points carry the current ownership incarnation. The legacy dispatcher
+/// remains useful for native actions and device-free tests; it cannot resume token-only input.
+#[allow(clippy::too_many_arguments)]
+async fn owned_agent_action(
+    state: &AppState, headers: &HeaderMap, w: &mut crate::runner::RunnerClient,
+    action: &serde_json::Value, detail: &mut Option<serde_json::Value>, deadline: tokio::time::Instant,
+    request_scope: Option<&crate::input_continuation::Scope>,
+    unlock: bool,
+) -> (RunnerControlOutcome, Option<serde_json::Value>) {
+    let resume = is_input_continuation(action);
+    let text = action.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
+    let budget = action.get("budget_ms").and_then(serde_json::Value::as_u64);
+    let scope = request_scope;
+    if action.get("type").and_then(serde_json::Value::as_str)==Some("text") && named_owner(headers).is_none() && (resume || budget.is_some()) {
+        return (RunnerControlOutcome::Refused("input_owner_required", "bounded input and continuation require the same named X-Phone-Owner"), None);
+    }
+    if scope.is_none() {
+        return (RunnerControlOutcome::Refused("input_owner_changed", "phone ownership changed while this input waited; no text was sent"), None);
+    }
+    let context = InputContext { scope:scope.unwrap(), owner_epoch:&state.owner_epoch,
+        privacy_epoch:&state.privacy_epoch, private_until:&state.private_until };
+    if let Some((error,hint)) = context.refusal() { return (RunnerControlOutcome::Refused(error,hint),None); }
+    if action.get("type").and_then(serde_json::Value::as_str)!=Some("text") {
+        let guard=native_guard(state,context.scope);
+        let outcome=guard.run(async {
+            if unlock {unlock_before_action(state,w,deadline).await;}
+            direct_agent_action(w,&state.runner_actionable,action,detail,deadline).await
+        }).await;
+        let counts=guard.counts();
+        if guard.denied() || (counts.approved>0 && outcome.as_ref().is_some_and(|result|*result!=RunnerControlOutcome::Applied)) {
+            let metadata=detail.get_or_insert_with(||serde_json::json!({}));
+            metadata["native_mutations_confirmed"]=counts.confirmed.into();
+            metadata["native_mutations_uncertain"]=counts.uncertain().into();
+        }
+        if guard.denied() {
+            if outcome==Some(RunnerControlOutcome::Applied)&&counts.confirmed>0&&counts.uncertain()==0 {
+                return (RunnerControlOutcome::Applied,None);
+            }
+            if counts.uncertain()>0 {return (RunnerControlOutcome::Failed,None);}
+            if counts.confirmed>0 {return (RunnerControlOutcome::NativePartial{confirmed:counts.confirmed},None);}
+            return (RunnerControlOutcome::Refused(guard.reason(),"scope changed before native input; nothing was sent. Check status and coordinate with the current owner before new work"),None);
+        }
+        // A refused later request cannot erase an acknowledged/unknown native prefix.
+        if matches!(outcome.as_ref(),Some(RunnerControlOutcome::RunnerRejected|RunnerControlOutcome::NotSent)) {
+            if counts.uncertain()>0 {return (RunnerControlOutcome::Failed,None);}
+            if counts.confirmed>0 {return (RunnerControlOutcome::NativePartial{confirmed:counts.confirmed},None);}
+        }
+        return (outcome.unwrap_or(RunnerControlOutcome::NotSent),None);
+    }
+    if !resume && budget.is_none() && text.chars().count() <= crate::text_input::CHUNK_CHARS {
+        // Capability discovery may await a new session. Recheck before sending
+        // the atomic transaction; a cached session adds no native round trip.
+        if w.ensure_session().await.is_err() {
+            state.runner_actionable.store(false, std::sync::atomic::Ordering::Release);
+            w.invalidate_session();
+            return (RunnerControlOutcome::NotSent,None);
+        }
+        if let Some((error,hint)) = context.refusal() { return (RunnerControlOutcome::Refused(error,hint),None); }
+        if w.supports_atomic_text() {
+            return (direct_agent_action(w, &state.runner_actionable, action, detail, deadline).await, None);
+        }
+        // Keep the legacy short route's original deadline and failure grammar,
+        // with a revocation check after its read-only active-field lookup.
+        let clear = action.get("clear").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let mark = w.last_post();
+        if clear {
+            match w.clear_active_checked(|| context.refusal().is_none()).await {
+                Ok(true) => {},
+                Ok(false) => {
+                    let (error,hint)=context.refusal().unwrap_or(("input_privacy_changed","input permission changed before clearing; no input was sent"));
+                    return (RunnerControlOutcome::Refused(error,hint),None);
+                },
+                Err(error) => {
+                    let outcome=if w.last_post()==mark {RunnerControlOutcome::NotSent}
+                        else {runner_failure_outcome(w,&state.runner_actionable,&error,"text",detail)};
+                    return (outcome,None);
+                },
+            }
+        }
+        if let Some((error,hint))=context.refusal() {
+            if clear {
+                *detail=Some(serde_json::json!({"input_error":error,"clear_applied":true}));
+                return (RunnerControlOutcome::TextPartial{confirmed:0,uncertain:0},None);
+            }
+            return (RunnerControlOutcome::Refused(error,hint),None);
+        }
+        let outcome=match w.keys(text).await {
+            Ok(()) => {state.runner_actionable.store(true,std::sync::atomic::Ordering::Release);RunnerControlOutcome::Applied},
+            Err(error) => runner_failure_outcome(w,&state.runner_actionable,&error,"text",detail),
+        };
+        return (outcome,None);
+    }
+    let mut effective = None;
+    let (target, budget) = if resume {
+        let scope = scope.as_ref().unwrap();
+        let token = action["continue_token"].as_str().unwrap_or_default();
+        let Some(pending) = w.take_input_continuation(token, scope) else {
+            return (RunnerControlOutcome::Refused("input_continuation_expired", "continuation is expired, consumed or belongs to another owner/session/privacy generation; nothing was typed now. Read the original field before planning any further input"), None);
+        };
+        effective = Some(serde_json::json!({"type":"text","text":pending.remaining}));
+        (Some(pending.target), Some(pending.budget_ms))
+    } else { (None, budget) };
+    let value = effective.as_ref().unwrap_or(action);
+    let outcome = type_text_chunked_bound(w, &state.runner_actionable, value["text"].as_str().unwrap_or_default(),
+        value.get("clear").and_then(serde_json::Value::as_bool).unwrap_or(false), deadline, detail,
+        target, Some(context), budget).await;
+    (outcome, effective)
+}
+
 /// Typing a long text can outlast the owner lease and the idle-release
 /// window, both measured from when the request arrived. Count its end as
 /// activity and renew the caller's lease, so the follow-up (an append of the
 /// rest, a tap on Send) is not refused or met by a released phone.
-fn renew_after_long_text(state: &AppState, headers: &HeaderMap, action: &serde_json::Value) {
+fn renew_after_long_text(state: &AppState, headers: &HeaderMap, action: &serde_json::Value, scope: Option<&crate::input_continuation::Scope>) {
     if crate::text_input::action_allowance(action).is_zero() {
         return;
     }
+    let Some(scope) = scope else { return; };
+    if scope.epoch != state.owner_epoch.load(std::sync::atomic::Ordering::Acquire)
+        || scope.privacy_epoch != state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire) { return; }
     state.touch_activity();
-    let _ = claim_phone_owner(state, headers);
+    // This is a renewal of an in-flight request, never a fresh claim. Reusing its takeover
+    // header could steal the phone back after another owner (or a human release) won meanwhile.
+    if let Some(name) = named_owner(headers) {
+        let mut slot = recover(state.owner.lock());
+        if let Some(owner) = slot.as_mut().filter(|owner| owner.name == name) {
+            owner.last_seen = owner.last_seen.max(Instant::now());
+        }
+    }
 }
 
 /// A `text` action longer than the daemon types, refused before anything is
@@ -10074,7 +10474,7 @@ async fn direct_agent_action(
             Some(w.set_picker(column, target).await)
         }
         // Long text goes out in chunks so a failure can say how much landed.
-        // Text up to one chunk takes the paths below, unchanged.
+        // Short text uses an atomic native transaction when advertised.
         "text"
             if value
                 .get("text")
@@ -10091,29 +10491,24 @@ async fn direct_agent_action(
                 .get("clear")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            return type_text_chunked(w, actionable, text, clear, deadline).await;
+            return type_text_chunked(w, actionable, text, clear, deadline, detail).await;
         }
-        "text"
-            if value
-                .get("clear")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false) =>
-        {
+        "text" => {
             let Some(text) = value.get("text").and_then(serde_json::Value::as_str) else {
                 return RunnerControlOutcome::Unsupported;
             };
-            Some(
-                async {
-                    // Clearing and typing are one intentional compound action.
-                    // A clear error is best-effort, but the text insertion is
-                    // still dispatched at most once.
-                    if let Err(error) = w.clear_active().await {
-                        tracing::warn!("runner clear_active before text: {error:#}");
+            let clear = value.get("clear").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let mark = w.last_post();
+            match w.short_agent_text(text, clear).await {
+                Ok(()) => Some(Ok(())),
+                Err(error) if w.last_post() == mark => {
+                    if let Some(runner) = crate::runner::runner_http_error(&error) {
+                        *detail = Some(serde_json::json!({"runner_error":runner.to_json()}));
                     }
-                    w.keys(text).await
+                    return RunnerControlOutcome::NotSent;
                 }
-                .await,
-            )
+                Err(error) => Some(Err(error)),
+            }
         }
         _ => None,
     };
@@ -10317,6 +10712,11 @@ async fn direct_control(
         );
     }
 
+    if let RunnerControlOutcome::ReplacementPartial { confirmed, uncertain, unsent, clear_confirmed } = outcome {
+        mark_runner_read_path_unactionable(&state);
+        record_partial_text_activity(&headers, confirmed, uncertain);
+        return replacement_partial_response(confirmed, uncertain, unsent, clear_confirmed, detail.as_ref());
+    }
     if outcome == RunnerControlOutcome::Failed {
         let locked = recover(state.runner_health.lock()).locked;
         *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
@@ -10940,28 +11340,14 @@ fn validate_agent_action_value(
                     .get("value")
                     .and_then(serde_json::Value::as_str)
                     .is_none_or(|value| value.chars().count() > 1_000)
+                || action.get("recover_focus_after_clear").is_some_and(|value| !value.is_boolean())
             {
                 return invalid(
-                    "set_value needs element, snapshot, and a string value up to 1000 characters",
+                    "set_value needs element, snapshot, a string value up to 1000 characters, and an optional boolean recover_focus_after_clear",
                 );
             }
         }
-        "text" => {
-            if action
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|text| {
-                    crate::text_input::char_count(text) > crate::text_input::MAX_TEXT_CHARS
-                })
-                || action
-                    .get("clear")
-                    .is_some_and(|clear| clear.as_bool().is_none())
-            {
-                return invalid(
-                    "text needs a string up to 20000 characters and optional bool clear",
-                );
-            }
-        }
+        "text" => { validate_text_request(action).map_err(|error| format!("steps[{index}].action {error}"))?; }
         "key" => {
             if !action
                 .get("name")
@@ -11688,7 +12074,8 @@ async fn agent_actions(
     if let Some(owner) = trusted_bearer_owner(&state, &headers) {
         crate::advice::reset(&owner);
     }
-    agent_actions_inner(state, headers, body).await
+    let response = agent_actions_inner(state.clone(), headers.clone(), body).await;
+    attach_failure_recovery(&state, &headers, response).await
 }
 
 /// No screen text survives a privacy refusal, but prior dispatch counts and
@@ -11705,6 +12092,7 @@ async fn agent_actions_inner(
     headers: HeaderMap,
     body: String,
 ) -> Response {
+    let privacy_generation = state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire);
     match agent_auth(&state, &headers) {
         AgentAuth::Locked => {
             return with_security_headers(
@@ -11726,6 +12114,23 @@ async fn agent_actions_inner(
         Ok(true) => prewarm_on_new_lease(&state, &headers),
         Ok(false) => {}
     }
+    let scope = capture_recovery_scope(&state, &headers);
+    let text_scope = capture_input_scope(&state, &headers, privacy_generation, scope.as_ref());
+    let fence=MutationObservationFence{state:state.clone(),scope:text_scope.clone()};
+    let mut response = agent_actions_claimed(State(state), headers, body, text_scope).await;
+    response.extensions_mut().insert(fence);
+    if let Some(scope) = scope {
+        response.extensions_mut().insert(scope);
+    }
+    response
+}
+
+async fn agent_actions_claimed(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+    request_scope: Option<crate::input_continuation::Scope>,
+) -> Response {
     if body.len() > AGENT_ACTIONS_MAX_BODY_BYTES {
         return agent_actions_invalid(format!(
             "request body exceeds {AGENT_ACTIONS_MAX_BODY_BYTES} bytes"
@@ -11737,6 +12142,10 @@ async fn agent_actions_inner(
     };
     if let Err(error) = validate_agent_actions(&request) {
         return agent_actions_invalid(error);
+    }
+    if named_owner(&headers).is_none() && request.steps.iter().any(|step| matches!(step,
+        AgentActionStep::Action {action,..} if is_input_continuation(action) || action.get("budget_ms").is_some())) {
+        return agent_actions_invalid("bounded text and continuation require a named X-Phone-Owner");
     }
     let observes_screen = request.observe || request.steps.iter().any(|step| {
         matches!(step, AgentActionStep::WaitFor { .. })
@@ -11800,6 +12209,7 @@ async fn agent_actions_inner(
         }
     }
 
+    if request_scope_refusal(&state,request_scope.as_ref()).is_some(){return batch_scope_refusal(&state,request_scope.as_ref(),0,0,0,&[],observes_screen);}
     state.touch_activity();
     state.cancel_settled_frame_prefetch();
     // Do Not Disturb at a quiet moment; a batch that opens with launch_app
@@ -11811,7 +12221,13 @@ async fn agent_actions_inner(
     // Control priority first: a health probe must not hold the runner while
     // the focus step (or the action after it) waits for it.
     let _priority = state.begin_runner_control();
-    engage_agent_focus(&state, runner, first_launch.flatten(), true).await;
+    let starts_with_text = request.steps.iter().find_map(|step| match step {
+        AgentActionStep::Action { action, .. } => Some(action.get("type").and_then(serde_json::Value::as_str) == Some("text")),
+        _ => None,
+    }).unwrap_or(false);
+    if !starts_with_text && !request.steps.iter().any(|step| matches!(step, AgentActionStep::Action {action,..} if is_input_continuation(action))) {
+        if let Some(scope)=request_scope.as_ref(){native_guard(&state,scope).scoped(engage_agent_focus(&state,runner,first_launch.flatten(),true)).await;}
+    }
     // Long text steps add their typing time (zero for text up to one chunk).
     let typing_allowance: std::time::Duration = request
         .steps
@@ -11843,6 +12259,7 @@ async fn agent_actions_inner(
     let mut applied_actions = 0_usize;
     let mut step_results = Vec::with_capacity(request.steps.len());
     for (index, step) in request.steps.iter().enumerate() {
+        if request_scope_refusal(&state,request_scope.as_ref()).is_some(){return batch_scope_refusal(&state,request_scope.as_ref(),index,completed,applied_actions,&step_results,observes_screen);}
         if observes_screen && state.screen_private_secs() > 0 {
             return private_batch_refusal(index, completed, applied_actions);
         }
@@ -11905,19 +12322,14 @@ async fn agent_actions_inner(
                 // not be replayed automatically.
                 let post_mark = w.last_post();
                 let mut step_detail = None;
+                let effective;
                 let outcome = match tokio::time::timeout_at(
                     batch_deadline,
-                    direct_agent_action(
-                        &mut w,
-                        &state.runner_actionable,
-                        action,
-                        &mut step_detail,
-                        batch_deadline,
-                    ),
+                    owned_agent_action(&state, &headers, &mut w, action, &mut step_detail, batch_deadline, request_scope.as_ref(), false),
                 )
                 .await
                 {
-                    Ok(outcome) => outcome,
+                    Ok((outcome, resumed)) => { effective = resumed; outcome },
                     Err(_) => {
                         mark_runner_read_path_unactionable(&state);
                         // Only lookups ran: this step was never sent, so the
@@ -11974,7 +12386,23 @@ async fn agent_actions_inner(
                     completed += 1;
                     continue;
                 }
-                renew_after_long_text(&state, &headers, action);
+                renew_after_long_text(&state, &headers, action, request_scope.as_ref());
+                if let RunnerControlOutcome::NativePartial{confirmed}=outcome {
+                    let mut body=agent_actions_failure_body(index,completed,applied_actions,"action_interrupted","partial",false,&step_results,None);
+                    body["native_mutations_confirmed"]=confirmed.into();body["native_mutations_uncertain"]=0.into();
+                    return agent_actions_json(StatusCode::CONFLICT,body);
+                }
+                if let RunnerControlOutcome::ReplacementPartial { confirmed, uncertain, unsent, clear_confirmed } = outcome {
+                    mark_runner_read_path_unactionable(&state);
+                    record_partial_text_activity(&headers, confirmed, uncertain);
+                    let partial = replacement_partial_body(confirmed, uncertain, unsent, clear_confirmed, step_detail.as_ref());
+                    let mut body = agent_actions_failure_body(index, completed, applied_actions,
+                        "replacement_incomplete", partial["outcome"].as_str().unwrap_or("unknown"), false, &step_results, None);
+                    for key in ["characters_confirmed", "characters_uncertain", "characters_unsent", "characters_total", "clear_outcome", "hint", "detail", "runner_error", "native_mutations_confirmed", "native_mutations_uncertain"] {
+                        if let Some(value) = partial.get(key) { body[key] = value.clone(); }
+                    }
+                    return agent_actions_json(if partial["outcome"]=="partial" {StatusCode::CONFLICT} else {StatusCode::BAD_GATEWAY}, body);
+                }
                 if let RunnerControlOutcome::TextPartial {
                     confirmed,
                     uncertain,
@@ -11983,7 +12411,8 @@ async fn agent_actions_inner(
                     if uncertain > 0 {
                         mark_runner_read_path_unactionable(&state);
                     }
-                    let partial = text_partial_body(action, confirmed, uncertain);
+                    record_partial_text_activity(&headers, confirmed, uncertain);
+                    let partial = text_partial_with_detail(effective.as_ref().unwrap_or(action), confirmed, uncertain, step_detail.as_ref());
                     let mut body = agent_actions_failure_body(
                         index,
                         completed,
@@ -11999,9 +12428,9 @@ async fn agent_actions_inner(
                         "characters_uncertain",
                         "characters_total",
                         "remaining_text",
-                        "hint",
+                        "hint", "continue_token", "continuation_safe", "continuation_expires_in_ms", "detail",
                     ] {
-                        body[key] = partial[key].clone();
+                        if let Some(value) = partial.get(key) { body[key] = value.clone(); }
                     }
                     return agent_actions_json(StatusCode::BAD_GATEWAY, body);
                 }
@@ -12070,6 +12499,7 @@ async fn agent_actions_inner(
                         RunnerControlOutcome::NoEffect(error, _) => {
                             (StatusCode::CONFLICT, error, "no_effect", true)
                         }
+                        RunnerControlOutcome::NativePartial{..} => (StatusCode::CONFLICT,"action_interrupted","partial",false),
                         RunnerControlOutcome::Refused(error, _) => {
                             (StatusCode::CONFLICT, error, "not_sent", true)
                         }
@@ -12094,7 +12524,7 @@ async fn agent_actions_inner(
                         RunnerControlOutcome::Failed => {
                             (StatusCode::BAD_GATEWAY, "outcome_unknown", "unknown", false)
                         }
-                        RunnerControlOutcome::Applied | RunnerControlOutcome::TextPartial { .. } => {
+                        RunnerControlOutcome::Applied | RunnerControlOutcome::TextPartial { .. } | RunnerControlOutcome::ReplacementPartial { .. } => {
                             unreachable!()
                         }
                     };
@@ -12115,6 +12545,9 @@ async fn agent_actions_inner(
                         None,
                     );
                     // The runner's own reason for a refused or failed step.
+                    for key in ["native_mutations_confirmed","native_mutations_uncertain"]{
+                        if let Some(value)=step_detail.as_ref().and_then(|detail|detail.get(key)){body[key]=value.clone();}
+                    }
                     if let Some(runner_error) =
                         step_detail.as_ref().and_then(|d| d.get("runner_error"))
                     {
@@ -12128,25 +12561,16 @@ async fn agent_actions_inner(
                 }
                 applied_actions += 1;
                 record_activity(&state, &headers, action);
-                if *after_ms > 0
-                    && tokio::time::timeout_at(
-                        batch_deadline,
-                        tokio::time::sleep(std::time::Duration::from_millis(*after_ms)),
-                    )
-                    .await
-                    .is_err()
-                {
-                    return agent_actions_failure(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        index,
-                        completed,
-                        applied_actions,
-                        "batch_deadline_after_action",
-                        "applied",
-                        false,
-                        &step_results,
-                        None,
-                    );
+                if *after_ms > 0 {
+                    match in_request_scope(&state,request_scope.as_ref(),tokio::time::timeout_at(batch_deadline,
+                        tokio::time::sleep(std::time::Duration::from_millis(*after_ms)))).await {
+                        Some(Ok(()))=>{},
+                        None=>{
+                            let (reason,_)=request_scope_refusal(&state,request_scope.as_ref()).unwrap_or(("input_privacy_changed","scope changed"));
+                            return agent_actions_json(StatusCode::CONFLICT,crate::observation::redact(agent_actions_failure_body(index,completed,applied_actions,reason,"applied",false,&step_results,None),reason));
+                        },
+                        Some(Err(_))=>return agent_actions_failure(StatusCode::GATEWAY_TIMEOUT,index,completed,applied_actions,"batch_deadline_after_action","applied",false,&step_results,None),
+                    }
                 }
                 step_results.push(serde_json::json!({
                     "index": index,
@@ -12155,24 +12579,11 @@ async fn agent_actions_inner(
                 }));
             }
             AgentActionStep::Pause { ms } => {
-                if tokio::time::timeout_at(
-                    batch_deadline,
-                    tokio::time::sleep(std::time::Duration::from_millis(*ms)),
-                )
-                .await
-                .is_err()
-                {
-                    return agent_actions_failure(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        index,
-                        completed,
-                        applied_actions,
-                        "batch_deadline",
-                        "not_sent",
-                        applied_actions == 0,
-                        &step_results,
-                        None,
-                    );
+                match in_request_scope(&state,request_scope.as_ref(),tokio::time::timeout_at(batch_deadline,
+                    tokio::time::sleep(std::time::Duration::from_millis(*ms)))).await {
+                    None=>return batch_scope_refusal(&state,request_scope.as_ref(),index,completed,applied_actions,&step_results,observes_screen),
+                    Some(Err(_))=>return agent_actions_failure(StatusCode::GATEWAY_TIMEOUT,index,completed,applied_actions,"batch_deadline","not_sent",applied_actions==0,&step_results,None),
+                    Some(Ok(()))=>{},
                 }
                 step_results.push(serde_json::json!({
                     "index": index,
@@ -12208,6 +12619,7 @@ async fn agent_actions_inner(
                 let probes = if alert_only { None } else { wait_probe_predicates(expect) };
                 let mut probe_misses = 0_u64;
                 loop {
+                    if request_scope_refusal(&state,request_scope.as_ref()).is_some(){return batch_scope_refusal(&state,request_scope.as_ref(),index,completed,applied_actions,&step_results,observes_screen);}
                     if state.screen_private_secs() > 0 {
                         return private_batch_refusal(index, completed, applied_actions);
                     }
@@ -12219,7 +12631,10 @@ async fn agent_actions_inner(
                     if let Some(probes) = &probes {
                         let poll = std::time::Duration::from_millis(*poll_ms);
                         if tokio::time::Instant::now() + poll < probe_deadline
-                            && wait_probe_missed(&mut w, probes, probe_deadline).await
+                            && match in_request_scope(&state,request_scope.as_ref(),wait_probe_missed(&mut w, probes, probe_deadline)).await {
+                                Some(missed)=>missed,
+                                None=>return batch_scope_refusal(&state,request_scope.as_ref(),index,completed,applied_actions,&step_results,observes_screen),
+                            }
                         {
                             probe_misses += 1;
                             let remaining = probe_deadline
@@ -12228,11 +12643,9 @@ async fn agent_actions_inner(
                             continue;
                         }
                     }
-                    let read = if alert_only {
-                        agent_wait_alert(&mut w, wait_deadline).await
-                    } else {
-                        agent_wait_elements(&mut w, wait_deadline).await
-                    };
+                    let Some(read)=in_request_scope(&state,request_scope.as_ref(),async {
+                        if alert_only {agent_wait_alert(&mut w,wait_deadline).await} else {agent_wait_elements(&mut w,wait_deadline).await}
+                    }).await else {return batch_scope_refusal(&state,request_scope.as_ref(),index,completed,applied_actions,&step_results,observes_screen);};
                     if state.screen_private_secs() > 0 {
                         return private_batch_refusal(index, completed, applied_actions);
                     }
@@ -12367,9 +12780,7 @@ async fn agent_actions_inner(
         completed += 1;
     }
 
-    if observes_screen && state.screen_private_secs() > 0 {
-        return private_batch_refusal(completed, completed, applied_actions);
-    }
+
     state.touch_activity();
     // A read-only wait (including /alert/text) proves no input capability.
     if applied_actions > 0 {
@@ -12386,11 +12797,11 @@ async fn agent_actions_inner(
     if request.observe {
         // Observation only: the batch's verdict is already fixed above.
         let budget = std::time::Duration::from_millis(AGENT_INPUT_SETTLE_DEFAULT_MS);
-        let (observed, report) =
-            settle_and_read_elements(&mut w, budget, DEVICE_SETTLE_DEFAULT_CAP).await;
-        if state.screen_private_secs() > 0 {
-            return private_batch_refusal(completed, completed, applied_actions);
-        }
+        if let Some(((observed,report),observed_alert))=in_request_scope(&state,request_scope.as_ref(),async {
+            let data=settle_and_read_elements(&mut w,budget,DEVICE_SETTLE_DEFAULT_CAP).await;
+            let observed_alert=probe_alert(&mut w).await;
+            (data,observed_alert)
+        }).await {
         if let Some((snapshot, rows)) = observed {
             let rows = Arc::new(rows);
             remember_element_snapshot(&state, &snapshot, &rows);
@@ -12424,22 +12835,189 @@ async fn agent_actions_inner(
             }
         }
         result["settle"] = report.to_json();
-        if let Some(alert) = alert_json(probe_alert(&mut w).await) {
-            result["alert"] = alert;
+        if let Some(alert) = alert_json(observed_alert) {result["alert"]=alert;}
         }
     }
-    for (key, block) in flow_after_actions(&state, &headers, &recorded_body) {
-        result[key] = block;
-    }
-    if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
-        result["agent_focus"] = block;
+    if request_scope_refusal(&state,request_scope.as_ref()).is_none(){
+        for (key,block) in flow_after_actions(&state,&headers,&recorded_body){result[key]=block;}
+        if let Some(block)=recover(state.agent_focus.lock()).take_notice(){result["agent_focus"]=block;}
     }
     // A person can start a private hold while a read is in flight. Discard
     // every observation, including earlier step text, before returning it.
-    if observes_screen && state.screen_private_secs() > 0 {
-        return private_batch_refusal(completed, completed, applied_actions);
-    }
+
     agent_actions_json(StatusCode::OK, result)
+}
+
+fn value_predicate_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+#[derive(Clone)]
+struct ValueReadFence {
+    state: Arc<AppState>,
+    scope: crate::input_continuation::Scope,
+}
+fn value_scope_failure() -> serde_json::Value {
+    serde_json::json!({"ok":false,"error":"value_read_scope_changed","value_omitted":true,"hint":"The value was withheld after owner/privacy changed; check current status before a fresh read"})
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValueReadRequest {
+    identifier: Option<String>,
+    label: Option<String>,
+    kind: Option<String>,
+    max_utf16: Option<u32>,
+}
+fn valid_value_contract(value: &serde_json::Value, limit: u32) -> bool {
+    let Some(text) = value.get("value") else {
+        return false;
+    };
+    if !text.is_null() && !text.is_string() {
+        return false;
+    }
+    let returned = text.as_str().map_or(0, |v| v.encode_utf16().count()) as u64;
+    let Some(total) = value
+        .get("utf16_length")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return false;
+    };
+    returned <= limit as u64
+        && total >= returned
+        && value["source"] == "ax_value_attribute"
+        && value["limit_utf16"] == limit
+        && value["returned_utf16_length"] == returned
+        && value["complete"] == (returned == total)
+        && value["truncated"] == (returned < total)
+}
+async fn agent_value(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let scope = crate::input_continuation::Scope {
+        owner: String::new(),
+        epoch: state.owner_epoch.load(std::sync::atomic::Ordering::Acquire),
+        privacy_epoch: state
+            .privacy_epoch
+            .load(std::sync::atomic::Ordering::Acquire),
+    };
+    match agent_auth(&state, &headers) {
+        AgentAuth::Ok => {}
+        AgentAuth::Denied => {
+            return with_security_headers(
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            )
+        }
+        AgentAuth::Locked => {
+            return with_security_headers(
+                (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),
+            )
+        }
+    }
+    if let Some(refused) = screen_private_refusal(&state) {
+        return refused;
+    }
+    if state.released.load(std::sync::atomic::Ordering::Acquire)
+        || state.runner_lifecycle.is_transitioning()
+    {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"ok":false,"error":"device_unavailable"}),
+        );
+    }
+    let request = match serde_json::from_str::<ValueReadRequest>(&body) {
+        Ok(request) => request,
+        Err(_) => return invalid_list_request("invalid value-read request".into()),
+    };
+    let selector = match (request.identifier.as_deref(), request.label.as_deref()) {
+        (Some(id), None) if !id.is_empty() && id.chars().count() <= 512 => {
+            format!("identifier == {}", value_predicate_literal(id))
+        }
+        (None, Some(label)) if !label.is_empty() && label.chars().count() <= 512 => {
+            format!("label == {}", value_predicate_literal(label))
+        }
+        _ => {
+            return invalid_list_request(
+                "give exactly one nonempty identifier or label, at most 512 characters".into(),
+            )
+        }
+    };
+    let limit = request.max_utf16.unwrap_or(8192);
+    if !(1..=65536).contains(&limit) {
+        return invalid_list_request("max_utf16 must be 1...65536".into());
+    }
+    let selector = if let Some(kind) = request.kind {
+        if kind.is_empty() || kind.len() > 80 {
+            return invalid_list_request("invalid kind".into());
+        }
+        format!(
+            "({selector}) AND type == {}",
+            value_predicate_literal(&format!(
+                "XCUIElementType{}",
+                kind.trim_start_matches("XCUIElementType")
+            ))
+        )
+    } else {
+        selector
+    };
+    let Some(runner) = &state.runner else {
+        return ControlRefusal::runner_not_configured().into_response();
+    };
+    state.touch_activity();
+    let guard = native_guard(&state, &scope);
+    let work = guard.run(async {
+        let _priority = state.begin_runner_control();
+        let mut client = runner.lock().await;
+        let ids = client.find_elements("predicate string", &selector).await?;
+        if ids.len() != 1 {
+            return Ok::<_, anyhow::Error>(Err(if ids.is_empty() {
+                "element_not_found"
+            } else {
+                "ambiguous_element"
+            }));
+        }
+        client.read_element_value(&ids[0], limit).await.map(Ok)
+    });
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), work).await;
+    let current = || request_scope_refusal(&state, Some(&scope)).is_none();
+    let mut response = if !current() {
+        json_response(StatusCode::CONFLICT, value_scope_failure())
+    } else {
+        match outcome {
+            Ok(Some(Ok(Ok(mut value)))) if valid_value_contract(&value, limit) => {
+                value["ok"] = true.into();
+                json_response(StatusCode::OK, value)
+            }
+            Ok(Some(Ok(Err(error)))) => json_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                serde_json::json!({"ok":false,"error":error}),
+            ),
+            Err(_) => json_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                serde_json::json!({"ok":false,"error":"value_read_timeout"}),
+            ),
+            Ok(Some(Err(error)))
+                if crate::runner::runner_http_error(&error).is_some_and(|e| {
+                    e.message
+                        .as_deref()
+                        .is_some_and(|message| message.contains("secure_value_read_requires_human"))
+                }) =>
+            {
+                json_response(
+                    StatusCode::FORBIDDEN,
+                    serde_json::json!({"ok":false,"error":"secure_value_read_requires_human"}),
+                )
+            }
+            _ => json_response(
+                StatusCode::NOT_IMPLEMENTED,
+                serde_json::json!({"ok":false,"error":"full_value_unavailable","hint":"The runner did not supply a complete-value contract; upgrade it or use a permitted alternative read. No preview was promoted to a full value"}),
+            ),
+        }
+    };
+    response
+        .extensions_mut()
+        .insert(ValueReadFence { state, scope });
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -12447,35 +13025,58 @@ async fn agent_actions_inner(
 // for one label, swiping on the agent's behalf (see `crate::collect`).
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
+struct ListProgress {
+    swipes: std::sync::atomic::AtomicU64,
+    checkpoint: Mutex<Option<serde_json::Value>>,
+}
+
 /// The runner as a [`crate::collect::Pager`]: a page is the element tree, a
 /// swipe is the coordinate scroll `/agent/input` sends (`runner_scroll`).
 struct RunnerPager<'a> {
     w: &'a mut crate::runner::RunnerClient,
     screen: Option<(f64, f64)>,
     first_page: Option<crate::collect::Page>,
+    progress: Arc<ListProgress>,
 }
 
 impl crate::collect::Pager for RunnerPager<'_> {
+    fn checkpoint(
+        &mut self,
+        rows: &[crate::collect::CollectedRow],
+        pages: &[crate::collect::PageReport],
+    ) {
+        *recover(self.progress.checkpoint.lock()) =
+            Some(serde_json::json!({"rows":rows,"row_count":rows.len(),"pages":pages}));
+    }
+
     async fn read(&mut self) -> anyhow::Result<crate::collect::Page> {
-        if let Some(page) = self.first_page.take() {
-            return Ok(page);
-        }
-        // Source reads are idempotent: one more try on a fresh session, as a
-        // failed read on /agent/elements gets.
-        let rows = match self.w.elements().await {
-            Ok(rows) => rows,
-            Err(_) => {
-                self.w.invalidate_session();
-                self.w.elements().await?
+        crate::native_scope::read(async {
+            if let Some(page) = self.first_page.take() {
+                return Ok(page);
             }
-        };
-        if self.screen.is_none() {
-            self.screen = self.w.window_size().await.ok();
-        }
-        Ok(crate::collect::Page {
-            rows,
-            screen: self.screen,
+            // Source reads are idempotent: one more try on a fresh session, as a
+            // failed read on /agent/elements gets.
+            let rows = match self.w.elements().await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    if crate::native_scope::is_revoked(&error) {
+                        return Err(error);
+                    }
+                    crate::native_scope::ensure_current()?;
+                    self.w.invalidate_session();
+                    self.w.elements().await?
+                }
+            };
+            if self.screen.is_none() {
+                self.screen = self.w.window_size().await.ok();
+            }
+            Ok(crate::collect::Page {
+                rows,
+                screen: self.screen,
+            })
         })
+        .await
     }
 
     async fn swipe(
@@ -12485,13 +13086,21 @@ impl crate::collect::Pager for RunnerPager<'_> {
     ) -> anyhow::Result<()> {
         let (_, height) = match self.screen {
             Some(screen) => screen,
-            None => self.w.window_size().await?,
+            None => crate::native_scope::read(self.w.window_size()).await?,
         };
         let region = region.unwrap_or(crate::collect::Region::FULL);
         let (x, y) = region.center();
         let dy = crate::collect::page_dy(region.h * height, direction);
         runner_scroll(self.w, x, y, 0.0, dy).await?;
-        tokio::time::sleep(crate::collect::SWIPE_SETTLE).await;
+        self.progress
+            .swipes
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // The swipe ACK remains confirmed if a later read-only settle is revoked.
+        let _ = crate::native_scope::read(async {
+            tokio::time::sleep(crate::collect::SWIPE_SETTLE).await;
+            Ok(())
+        })
+        .await;
         Ok(())
     }
 }
@@ -12527,7 +13136,7 @@ async fn begin_list_control<'a>(
     runner: &'a tokio::sync::Mutex<crate::runner::RunnerClient>,
     deadline: tokio::time::Instant,
 ) -> Result<tokio::sync::MutexGuard<'a, crate::runner::RunnerClient>, Response> {
-    claim_phone_owner(state, headers)?;
+    crate::native_scope::ensure_current().map_err(|_| list_scope_error())?;
     if let Some(refusal) = control_readiness_refusal(state) {
         return Err(refusal.into_response());
     }
@@ -12549,7 +13158,9 @@ async fn begin_list_control<'a>(
             serde_json::json!({"ok": false, "error": "device_transition_in_progress", "transitioning": true, "retry_safe": true}),
         ));
     }
+    crate::native_scope::ensure_current().map_err(|_| list_scope_error())?;
     unlock_before_action(state, &mut w, deadline).await;
+    crate::native_scope::ensure_current().map_err(|_| list_scope_error())?;
     // Owner limits (`crate::guard`): these calls swipe inside the app in
     // front, and count as one action.
     let policy = crate::guard::Policy::get();
@@ -12573,6 +13184,7 @@ fn remember_page(
     headers: &HeaderMap,
     rows: Vec<crate::runner::ElementRow>,
 ) -> Option<String> {
+    if crate::native_scope::ensure_current().is_err() {return None;}
     let snapshot = element_snapshot_id(&rows).ok()?;
     let rows = Arc::new(rows);
     remember_element_snapshot(state, &snapshot, &rows);
@@ -12581,6 +13193,7 @@ fn remember_page(
 }
 
 fn first_read_failed(state: &AppState, error: &anyhow::Error) -> Response {
+    if crate::native_scope::is_revoked(error) {return list_scope_error();}
     tracing::warn!("list read failed before any swipe: {error:#}");
     mark_runner_read_path_unactionable(state);
     json_response(
@@ -12631,18 +13244,219 @@ fn list_app_refusal(
     Some(json_response(StatusCode::CONFLICT, body))
 }
 
+fn list_scope_error() -> Response {
+    json_response(
+        StatusCode::CONFLICT,
+        serde_json::json!({"ok":false,"error":"input_scope_changed","outcome":"not_sent","retry_safe":true}),
+    )
+}
+
+async fn agent_collect(state: State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    scoped_list(state, headers, body, false).await
+}
+async fn agent_scroll_find(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    scoped_list(state, headers, body, true).await
+}
+
+async fn scoped_list(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+    find: bool,
+) -> Response {
+    let deadline = tokio::time::Instant::now() + crate::collect::COLLECT_DEADLINE;
+    let generation = state
+        .privacy_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
+    if let Err(refused) = authorize_list_call(&state, &headers) {
+        return refused;
+    }
+    if let Err(refused) = claim_phone_owner(&state, &headers) {
+        return refused;
+    }
+    let recovery = capture_recovery_scope(&state, &headers);
+    let scope = capture_input_scope(&state, &headers, generation, recovery.as_ref());
+    let progress = Arc::new(ListProgress::default());
+    let fence = MutationObservationFence {
+        state: state.clone(),
+        scope: scope.clone(),
+    };
+    let guard = scope
+        .as_ref()
+        .map(|scope| native_guard_until(&state, scope, Some(deadline)));
+    let mut timed_out = false;
+    let response = if request_scope_refusal(&state, scope.as_ref()).is_some() {
+        None
+    } else if let Some(guard) = &guard {
+        match tokio::time::timeout_at(
+            deadline,
+            guard.run(async {
+                if find {
+                    agent_scroll_find_claimed(
+                        State(state.clone()),
+                        headers.clone(),
+                        body,
+                        progress.clone(),
+                        deadline,
+                    )
+                    .await
+                } else {
+                    agent_collect_claimed(
+                        State(state.clone()),
+                        headers.clone(),
+                        body,
+                        progress.clone(),
+                        deadline,
+                    )
+                    .await
+                }
+            }),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                timed_out = true;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let counts = guard
+        .as_ref()
+        .map(|guard| guard.counts())
+        .unwrap_or_default();
+    let confirmed_swipes = progress.swipes.load(std::sync::atomic::Ordering::Acquire);
+    timed_out |= tokio::time::Instant::now() >= deadline;
+    timed_out |= guard
+        .as_ref()
+        .is_some_and(|guard| guard.denied() && guard.reason() == "list_deadline");
+    let interrupted = request_scope_refusal(&state, scope.as_ref()).is_some()
+        || guard
+            .as_ref()
+            .is_some_and(|guard| guard.denied() && guard.reason() != "list_deadline");
+    let mut response = if interrupted {
+        recover(state.element_snapshots.lock()).clear();
+        recover(state.owner_snapshots.lock()).clear();
+        let reason = request_scope_refusal(&state, scope.as_ref())
+            .map(|v| v.0)
+            .unwrap_or("input_privacy_changed");
+        let sent = counts.confirmed > 0 || counts.uncertain() > 0;
+        let status = if counts.uncertain() > 0 {
+            StatusCode::BAD_GATEWAY
+        } else if !sent && screen_private_now(&state.private_until) {
+            StatusCode::LOCKED
+        } else {
+            StatusCode::CONFLICT
+        };
+        let error = if counts.uncertain() > 0 {
+            "outcome_unknown"
+        } else if sent {
+            "action_interrupted"
+        } else if status == StatusCode::LOCKED {
+            "screen_private"
+        } else {
+            reason
+        };
+        let body = serde_json::json!({"ok":false,"error":error,"outcome":if counts.uncertain()>0{"unknown"}else if sent{"partial"}else{"not_sent"},"retry_safe":!sent,
+            "swipes":confirmed_swipes,"native_mutations_confirmed":counts.confirmed,"native_mutations_uncertain":counts.uncertain()});
+        json_response(status, crate::observation::redact(body, reason))
+    } else if timed_out {
+        let sent = counts.confirmed > 0 || counts.uncertain() > 0;
+        let mut body = recover(progress.checkpoint.lock())
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if find {
+            body["found"] = false.into();
+        } else {
+            body["rows"] = body
+                .get("rows")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            body["pages"] = body
+                .get("pages")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            body["row_count"] = body["rows"].as_array().map_or(0, Vec::len).into();
+            body["complete"] = false.into();
+            body["coverage"]="Only rows observed before the deadline are retained. Rows are deduplicated on kind/label/value and limited to accessibility data. Coverage is incomplete and later gestures may have moved the page; read again before acting on a row".into();
+        }
+        body["ok"] = false.into();
+        body["error"] = "list_deadline".into();
+        body["stop_reason"] = "deadline".into();
+        body["outcome"] = if counts.uncertain() > 0 {
+            "unknown"
+        } else if sent {
+            "partial"
+        } else {
+            "not_sent"
+        }
+        .into();
+        body["retry_safe"] = (!sent).into();
+        body["swipes"] = confirmed_swipes.into();
+        body["native_mutations_confirmed"] = counts.confirmed.into();
+        body["native_mutations_uncertain"] = counts.uncertain().into();
+        body["recovery"] = serde_json::json!({"visual_check_required":true,"replay_action":false,"image_omitted":"request_deadline"});
+        body["hint"] = if sent {
+            "The request time budget ended; input may still finish on the phone. Observe fresh state before planning remaining work; never replay applied or uncertain input or the whole call"
+        } else {
+            "No input was sent before the time budget ended. Check whether another operation is still running before starting fresh work"
+        }.into();
+        json_response(StatusCode::GATEWAY_TIMEOUT, body)
+    } else {
+        let response = response.unwrap_or_else(list_scope_error);
+        let (response, body) = read_json_response(response).await;
+        if let Some(mut body) = body.filter(serde_json::Value::is_object) {
+            body["native_mutations_confirmed"] = counts.confirmed.into();
+            body["native_mutations_uncertain"] = counts.uncertain().into();
+            body["swipes"] = confirmed_swipes.into();
+            if counts.confirmed > 0 || counts.uncertain() > 0 {
+                body["retry_safe"] = false.into();
+            }
+            let (mut parts, _) = response.into_parts();
+            parts.headers.remove(header::CONTENT_LENGTH);
+            Response::from_parts(parts, Body::from(body.to_string()))
+        } else {
+            response
+        }
+    };
+    response.extensions_mut().insert(fence);
+    if let Some(recovery) = recovery {
+        response.extensions_mut().insert(recovery);
+    }
+    if timed_out {
+        response
+    } else if let Some(guard) = guard {
+        guard
+            .scoped(attach_visual_recovery(
+                &state,
+                &headers,
+                response,
+                crate::recovery::list_advice,
+                Some(deadline),
+            ))
+            .await
+    } else {
+        response
+    }
+}
+
 /// `POST /agent/collect` — read rows of one kind across pages:
 /// `{"row_kind":"Cell","region":[x,y,w,h],"max_pages":6,"end_label":"…","direction":"down"}`
 /// (all optional). See [`crate::collect`] for the stop rules; `complete` is
 /// true only when `end_label` was seen.
-async fn agent_collect(
+async fn agent_collect_claimed(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
+    progress: Arc<ListProgress>,
+    deadline: tokio::time::Instant,
 ) -> Response {
-    if let Err(refused) = authorize_list_call(&state, &headers) {
-        return refused;
-    }
     let parsed = if body.trim().is_empty() {
         Ok(serde_json::Value::Null)
     } else {
@@ -12656,7 +13470,6 @@ async fn agent_collect(
     let Some(runner) = state.runner.clone() else {
         return ControlRefusal::runner_not_configured().into_response();
     };
-    let deadline = tokio::time::Instant::now() + crate::collect::COLLECT_DEADLINE;
     let _priority = state.begin_runner_control();
     let mut w = match begin_list_control(&state, &headers, &runner, deadline).await {
         Ok(w) => w,
@@ -12666,6 +13479,7 @@ async fn agent_collect(
         w: &mut w,
         screen: None,
         first_page: None,
+        progress,
     };
     use crate::collect::Pager as _;
     let page = match pager.read().await {
@@ -12885,14 +13699,13 @@ async fn run_scroll_find<P: crate::collect::Pager>(
 /// "direction":"down","region":[x,y,w,h]}`: is the label on screen and
 /// tappable? If not, swipe (at most `max_swipes`, default 1) and look again.
 /// An ambiguous, covered or undrawn match stops at once, before any swipe.
-async fn agent_scroll_find(
+async fn agent_scroll_find_claimed(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
+    progress: Arc<ListProgress>,
+    deadline: tokio::time::Instant,
 ) -> Response {
-    if let Err(refused) = authorize_list_call(&state, &headers) {
-        return refused;
-    }
     let request = match serde_json::from_str::<serde_json::Value>(&body)
         .map_err(|e| format!("body is not JSON: {e}"))
         .and_then(|value| crate::collect::FindRequest::from_json(&value))
@@ -12904,7 +13717,6 @@ async fn agent_scroll_find(
     let Some(runner) = state.runner.clone() else {
         return ControlRefusal::runner_not_configured().into_response();
     };
-    let deadline = tokio::time::Instant::now() + crate::collect::COLLECT_DEADLINE;
     let _priority = state.begin_runner_control();
     let mut w = match begin_list_control(&state, &headers, &runner, deadline).await {
         Ok(w) => w,
@@ -12914,6 +13726,7 @@ async fn agent_scroll_find(
         w: &mut w,
         screen: None,
         first_page: None,
+        progress,
     };
     use crate::collect::Pager as _;
     let page = match pager.read().await {
@@ -13240,7 +14053,11 @@ fn capture_settled_frame_later(
     state: &AppState,
     runner: Arc<tokio::sync::Mutex<crate::runner::RunnerClient>>,
     post_mark: Option<std::time::Instant>,
+    scope: Option<&crate::input_continuation::Scope>,
 ) {
+    let Some(scope)=scope.cloned() else{return;};
+    if request_scope_refusal(state,Some(&scope)).is_some(){return;}
+    let owner_epoch=state.owner_epoch.clone();
     let mut slot = recover(state.settled_frame_prefetch.lock());
     if let Some(previous) = slot.take() {
         previous.abort();
@@ -13248,9 +14065,11 @@ fn capture_settled_frame_later(
     if screen_private_now(&state.private_until) { return; }
     let privacy_epoch = state.privacy_epoch.clone();
     let private_until = state.private_until.clone();
-    let generation = privacy_epoch.load(std::sync::atomic::Ordering::Acquire);
+    let generation = scope.privacy_epoch;
     let task = tokio::spawn(async move {
+        let context=InputContext{scope:&scope,owner_epoch:&owner_epoch,privacy_epoch:&privacy_epoch,private_until:&private_until};
         let mut w = runner.lock().await;
+        if context.refusal().is_some(){return;}
         if privacy_epoch.load(std::sync::atomic::Ordering::Acquire) != generation || screen_private_now(&private_until) { return; }
         w.fence_settled_frame(generation);
         if w.last_post() != post_mark || w.settled_frame(SETTLED_FRAME_MAX_AGE).is_some() {
@@ -13261,9 +14080,9 @@ fn capture_settled_frame_later(
         // is megabytes the 3 s budget may not carry.
         let shot = crate::runner::ShotRequest::jpeg(Some(SETTLED_FRAME_MAX_SIDE));
         let budget = std::time::Duration::from_secs(3);
-        if let Ok(Ok(frame)) = tokio::time::timeout(budget, w.screenshot_sized(shot, budget)).await
+        if let Some(Ok(Ok(frame))) = in_input_context(context,tokio::time::timeout(budget, w.screenshot_sized(shot, budget))).await
         {
-            if w.last_post() == post_mark && is_valid_capture(&frame)
+            if context.refusal().is_none() && w.last_post() == post_mark && is_valid_capture(&frame)
                 && privacy_epoch.load(std::sync::atomic::Ordering::Acquire) == generation && !screen_private_now(&private_until) {
                 w.remember_settled_frame(frame);
             }
@@ -13526,6 +14345,198 @@ async fn read_json_response(response: Response) -> (Response, Option<serde_json:
     }
 }
 
+#[derive(Clone)]
+struct RecoveryScope {
+    owner: String,
+    epoch: u64,
+    privacy_epoch: u64,
+}
+
+fn capture_recovery_scope(state: &AppState, headers: &HeaderMap) -> Option<RecoveryScope> {
+    let name = named_owner(headers)?;
+    let owner = recover(state.owner.lock());
+    owner
+        .as_ref()
+        .filter(|owner| owner.name == name)
+        .map(|_| RecoveryScope {
+            owner: name.into(),
+            epoch: state.owner_epoch.load(std::sync::atomic::Ordering::Acquire),
+            privacy_epoch: state
+                .privacy_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+        })
+}
+
+fn recovery_scope_current(state: &AppState, scope: &RecoveryScope) -> bool {
+    let owner = recover(state.owner.lock());
+    state.owner_epoch.load(std::sync::atomic::Ordering::Acquire) == scope.epoch
+        && state
+            .privacy_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+            == scope.privacy_epoch
+        && owner.as_ref().is_some_and(|owner| {
+            owner.name == scope.owner
+                && Instant::now().saturating_duration_since(owner.last_seen)
+                    < std::time::Duration::from_secs(state.owner_lease_secs)
+        })
+        && !screen_private_now(&state.private_until)
+        && !human_handoff_active()
+        && !state.released.load(std::sync::atomic::Ordering::Acquire)
+        && !state.runner_lifecycle.is_transitioning()
+}
+
+/// Preserve status and every fate/count field even when capture fails. No cached frame fallback.
+async fn attach_failure_recovery(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    response: Response,
+) -> Response {
+    attach_visual_recovery(state, headers, response, crate::recovery::advice, None).await
+}
+
+async fn attach_visual_recovery(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    response: Response,
+    advice: fn(&serde_json::Value) -> Option<&'static str>,
+    deadline: Option<tokio::time::Instant>,
+) -> Response {
+    if headers
+        .get("x-phone-recovery-image")
+        .is_some_and(|v| v.as_bytes() == b"none")
+        || std::env::var("IPHONE_USE_RECOVERY_IMAGES")
+            .is_ok_and(|v| matches!(v.as_str(), "0" | "false" | "off"))
+    {
+        return response;
+    }
+    let Some(scope) = response.extensions().get::<RecoveryScope>().cloned() else {
+        return response;
+    };
+    let (response, json) = read_json_response(response).await;
+    let Some(mut json) = json.filter(serde_json::Value::is_object) else {
+        return response;
+    };
+    let Some(advice) = advice(&json) else {
+        return response;
+    };
+    json["recovery"] =
+        serde_json::json!({"visual_check_required":true,"replay_action":false,"next_step":advice});
+    if deadline.is_some_and(|time| tokio::time::Instant::now() >= time) {
+        json["recovery"]["image_omitted"] = "request_deadline".into();
+    } else if !recovery_scope_current(state, &scope) {
+        json["recovery"]["image_omitted"] = "owner_or_privacy_changed".into();
+    } else {
+        let budget =
+            crate::scope::image_budget_bytes().min(crate::scope::DEFAULT_IMAGE_BUDGET_BYTES);
+        let capture = async {
+            let mut outcome = crate::scope::ImageOutcome::Unavailable;
+            for side in crate::scope::IMAGE_SIDES {
+                if deadline.is_some_and(|time| tokio::time::Instant::now() >= time)
+                    || !recovery_scope_current(state, &scope)
+                {
+                    break;
+                }
+                let requested_ms = crate::metrics::now_ms();
+                let shot = agent_screenshot(
+                    State(state.clone()),
+                    headers.clone(),
+                    Query(ScreenshotQuery {
+                        raw: None,
+                        max_side: Some(side),
+                        fresh: Some("1".into()),
+                        overlay: None,
+                    }),
+                )
+                .await;
+                if !shot.status().is_success() {
+                    break;
+                }
+                let source = shot
+                    .headers()
+                    .get("x-screenshot-source")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("runner-capture")
+                    .to_string();
+                let redacted = shot
+                    .headers()
+                    .get("x-capture-redacted")
+                    .is_some_and(|v| v.as_bytes() == b"1");
+                let Ok(png) = axum::body::to_bytes(shot.into_body(), 32 << 20).await else {
+                    break;
+                };
+                let received_ms = crate::metrics::now_ms();
+                if png.len() < 24 || &png[..8] != b"\x89PNG\r\n\x1a\n" {
+                    break;
+                }
+                if json.to_string().len() + png.len().div_ceil(3) * 4 + 1024 > budget {
+                    outcome = crate::scope::ImageOutcome::TooLarge;
+                    continue;
+                }
+                outcome = crate::scope::ImageOutcome::Attached {
+                    png: png.to_vec(),
+                    requested_ms,
+                    received_ms,
+                    source,
+                    max_side: side,
+                    redacted,
+                };
+                break;
+            }
+            outcome
+        };
+        let capture_end = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let capture_end = deadline.map_or(capture_end, |time| time.min(capture_end));
+        match tokio::time::timeout_at(capture_end, capture).await {
+            Ok(_) if deadline.is_some_and(|time| tokio::time::Instant::now() >= time) => {
+                json["recovery"]["image_omitted"] = "request_deadline".into();
+            }
+            Ok(outcome) if recovery_scope_current(state, &scope) => {
+                let dimensions = match &outcome {
+                    crate::scope::ImageOutcome::Attached { png, .. } if png.len() >= 24 => Some([
+                        u32::from_be_bytes(png[16..20].try_into().unwrap()),
+                        u32::from_be_bytes(png[20..24].try_into().unwrap()),
+                    ]),
+                    _ => None,
+                };
+                crate::scope::attach_image(&mut json, outcome);
+                if let Some(image) = json.get_mut("image") {
+                    if let Some(dimensions) = dimensions {
+                        image["pixel_size"] = serde_json::json!(dimensions);
+                    }
+                    image["relation"]="fresh capture requested after the failure response; not the failure instant".into();
+                    image["coordinates"] =
+                        "normalized_0_1: divide pixel x/y by this image's width/height".into();
+                }
+            }
+            Ok(_) => json["recovery"]["image_omitted"] = "owner_or_privacy_changed".into(),
+            Err(_) => {
+                json["image_unavailable"] = true.into();
+                json["recovery"]["image_omitted"] =
+                    if deadline.is_some_and(|time| tokio::time::Instant::now() >= time) {
+                        "request_deadline"
+                    } else {
+                        "capture_timeout"
+                    }
+                    .into();
+            }
+        }
+    }
+    if json.get("image").is_none() {
+        let withheld = json
+            .pointer("/recovery/image_omitted")
+            .and_then(serde_json::Value::as_str)
+            == Some("owner_or_privacy_changed");
+        json["recovery"]["next_step"] = if withheld {
+            "Recovery capture was withheld because ownership/privacy changed. Re-read current status and coordinate with the current owner before proceeding; do not replay this operation".into()
+        } else {
+            "The original failure is unchanged; recovery capture was unavailable or over budget. Check current owner/privacy and, only if the task still needs it, request one fresh screenshot before choosing a new action. Never replay an uncertain operation".into()
+        };
+    }
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(json.to_string()))
+}
+
 fn refused_as_unauthenticated(response: &Response) -> bool {
     matches!(response.status().as_u16(), 401 | 403 | 429)
 }
@@ -13540,7 +14551,8 @@ async fn agent_input(
     body: String,
 ) -> Response {
     let Some(owner) = trusted_bearer_owner(&state, &headers) else {
-        return agent_input_inner(state, Query(query), headers, body).await;
+        let response = agent_input_inner(state.clone(), Query(query), headers.clone(), body).await;
+        return attach_failure_recovery(&state, &headers, response).await;
     };
     let observed = query.return_mode.as_deref() == Some("delta");
     let action = serde_json::from_str::<serde_json::Value>(&body)
@@ -13555,7 +14567,8 @@ async fn agent_input(
             None
         }
     };
-    let response = agent_input_inner(state, Query(query), headers, body).await;
+    let response = agent_input_inner(state.clone(), Query(query), headers.clone(), body).await;
+    let response = attach_failure_recovery(&state, &headers, response).await;
     let Some(guard) = guard else {
         return response;
     };
@@ -13578,6 +14591,7 @@ async fn agent_input_inner(
     headers: HeaderMap,
     body: String,
 ) -> Response {
+    let privacy_generation = state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire);
     match agent_auth(&state, &headers) {
         AgentAuth::Locked => {
             return with_security_headers(
@@ -13597,6 +14611,24 @@ async fn agent_input_inner(
     if let Err(refused) = claim_phone_owner(&state, &headers) {
         return refused;
     }
+    let scope = capture_recovery_scope(&state, &headers);
+    let text_scope = capture_input_scope(&state, &headers, privacy_generation, scope.as_ref());
+    let fence=MutationObservationFence{state:state.clone(),scope:text_scope.clone()};
+    let mut response = agent_input_claimed(State(state), Query(query), headers, body, text_scope).await;
+    response.extensions_mut().insert(fence);
+    if let Some(scope) = scope {
+        response.extensions_mut().insert(scope);
+    }
+    response
+}
+
+async fn agent_input_claimed(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AgentInputQuery>,
+    headers: HeaderMap,
+    body: String,
+    request_scope: Option<crate::input_continuation::Scope>,
+) -> Response {
     // App install via CoreDevice (`agent_install`): checked on every
     // platform, installed on macOS.
     if body.contains("install") {
@@ -13761,6 +14793,14 @@ async fn agent_input_inner(
     if let Err(response) = reject_oversized_text(&value) {
         return response;
     }
+    if value.get("type").and_then(serde_json::Value::as_str)==Some("text") {
+        if let Err(error) = validate_text_request(value.as_object().unwrap()) {
+            return ControlRefusal::new(StatusCode::BAD_REQUEST, "invalid_text_request", false).with("hint", error.into()).into_response();
+        }
+        if (is_input_continuation(&value) || value.get("budget_ms").is_some()) && named_owner(&headers).is_none() {
+            return ControlRefusal::new(StatusCode::BAD_REQUEST, "input_owner_required", false).into_response();
+        }
+    }
     if let Err(response) = reject_invalid_open_url(&value) {
         return response;
     }
@@ -13797,7 +14837,10 @@ async fn agent_input_inner(
     // the focus step (or the action after it) waits for it.
     let _priority = state.begin_runner_control();
     let focus_started = tokio::time::Instant::now();
-    engage_agent_focus(&state, runner, crate::focus::launch_bundle(&value), true).await;
+    // Typing relies on an already-focused field. A DND shortcut must not replace that app.
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("text") {
+        if let Some(scope)=request_scope.as_ref(){native_guard(&state,scope).scoped(engage_agent_focus(&state,runner,crate::focus::launch_bundle(&value),true)).await;}
+    }
     // A long text gets its typing time on top (zero for text up to one chunk),
     // so the per-chunk timeouts, not this deadline, decide how it ends.
     let agent_runner_deadline = agent_runner_deadline
@@ -13851,21 +14894,16 @@ async fn agent_input_inner(
         {
             return None;
         }
-        unlock_before_action(&state, &mut client, agent_runner_deadline).await;
+        if let Some((error,hint))=request_scope_refusal(&state,request_scope.as_ref()) {
+            return Some((client,RunnerControlOutcome::Refused(error,hint),None,None));
+        }
         *recover(dispatch_marker.lock()) = Some(client.last_post());
         let mut detail = None;
-        let outcome = direct_agent_action(
-            &mut client,
-            &state.runner_actionable,
-            &value,
-            &mut detail,
-            agent_runner_deadline,
-        )
-        .await;
-        Some((client, outcome, detail))
+        let (outcome, effective) = owned_agent_action(&state, &headers, &mut client, &value, &mut detail, agent_runner_deadline, request_scope.as_ref(), true).await;
+        Some((client, outcome, detail, effective))
     })
     .await;
-    let (mut client, outcome, detail) = match dispatch {
+    let (mut client, outcome, detail, effective) = match dispatch {
         Ok(Some(dispatched)) => dispatched,
         Ok(None) => return runner_deadline_response(false),
         Err(_) => {
@@ -13873,7 +14911,8 @@ async fn agent_input_inner(
             return runner_deadline_response(posted_since(runner, mark).await);
         }
     };
-    renew_after_long_text(&state, &headers, &value);
+    let value = effective.unwrap_or(value);
+    renew_after_long_text(&state, &headers, &value, request_scope.as_ref());
     // Post-action observation (`?return=delta`), still holding the SAME
     // guard so no other control interleaves between the action and its
     // read — but on its own budget, bounded by both the caller's
@@ -13899,27 +14938,24 @@ async fn agent_input_inner(
         } else {
             DEVICE_SETTLE_DEFAULT_CAP
         };
-        let (observed, report) = settle_and_read_elements(&mut client, budget, device_cap).await;
-        settled = Some((
-            observed.map(|(snapshot, rows)| (snapshot, Arc::new(rows))),
-            report,
-        ));
-        // A system alert is the one thing the settled tree may not show;
-        // report it alongside so the agent never has to screenshot for it.
-        // Bounded by its own hard 1.5s cap (see `probe_alert`), which is
-        // what the client's timeout budgets for on top of the action
-        // deadline and the observation budget.
-        alert = probe_alert(&mut client).await;
+        if let Some(((observed,report),observed_alert))=in_request_scope(&state,request_scope.as_ref(),async {
+            let data=settle_and_read_elements(&mut client,budget,device_cap).await;
+            let observed_alert=probe_alert(&mut client).await;
+            (data,observed_alert)
+        }).await {
+            settled=Some((observed.map(|(snapshot,rows)|(snapshot,Arc::new(rows))),report));
+            alert=observed_alert;
+        }
     }
     // The settled screen is ready for a screenshot request without a capture:
     // the settle check kept its frame, or — when it judged by the tree (a
     // focused text field, a screen that kept moving) — one is taken now, after
     // the response is on its way, while the agent reads it.
-    let frame_needed = settled.is_some() && client.settled_frame(SETTLED_FRAME_MAX_AGE).is_none();
+    let frame_needed = request_scope_refusal(&state,request_scope.as_ref()).is_none() && settled.is_some() && client.settled_frame(SETTLED_FRAME_MAX_AGE).is_none();
     let post_mark = client.last_post();
     drop(client);
     if frame_needed {
-        capture_settled_frame_later(&state, Arc::clone(runner), post_mark);
+        capture_settled_frame_later(&state, Arc::clone(runner), post_mark, request_scope.as_ref());
     }
     match outcome {
         RunnerControlOutcome::Applied => {
@@ -14003,9 +15039,10 @@ async fn agent_input_inner(
                 }
             };
             let body = attach_alert(body, alert);
-            let mut blocks = flow_after_input(&state, &headers, &value);
-            if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
-                blocks.push(("agent_focus", block));
+            let mut blocks=Vec::new();
+            if request_scope_refusal(&state,request_scope.as_ref()).is_none(){
+                blocks=flow_after_input(&state,&headers,&value);
+                if let Some(block)=recover(state.agent_focus.lock()).take_notice(){blocks.push(("agent_focus",block));}
             }
             let body = attach_flow_blocks(body, blocks);
             with_security_headers(
@@ -14058,6 +15095,7 @@ async fn agent_input_inner(
         RunnerControlOutcome::NoAlert => no_alert_response(),
         RunnerControlOutcome::ForcePressUnsupported => force_press_unsupported_response(),
         RunnerControlOutcome::NoPageScroller(hint) => no_page_scroller_response(hint),
+        RunnerControlOutcome::NativePartial{confirmed} => native_partial_response(confirmed),
         RunnerControlOutcome::TextPartial {
             confirmed,
             uncertain,
@@ -14065,13 +15103,19 @@ async fn agent_input_inner(
             if uncertain > 0 {
                 mark_runner_read_path_unactionable(&state);
             }
+            record_partial_text_activity(&headers, confirmed, uncertain);
             with_security_headers(
                 (
                     StatusCode::BAD_GATEWAY,
-                    axum::Json(text_partial_body(&value, confirmed, uncertain)),
+                    axum::Json(text_partial_with_detail(&value, confirmed, uncertain, detail.as_ref())),
                 )
                     .into_response(),
             )
+        }
+        RunnerControlOutcome::ReplacementPartial { confirmed, uncertain, unsent, clear_confirmed } => {
+            mark_runner_read_path_unactionable(&state);
+            record_partial_text_activity(&headers, confirmed, uncertain);
+            replacement_partial_response(confirmed, uncertain, unsent, clear_confirmed, detail.as_ref())
         }
         RunnerControlOutcome::RunnerRejected => runner_rejected_response(detail.as_ref()),
         RunnerControlOutcome::Failed => runner_failed_after_dispatch_response_with(detail.as_ref()),
@@ -14475,6 +15519,14 @@ fn record_flow_action(state: &AppState, action: &serde_json::Value, now: Instant
         trail.record(crate::flows::convert_action(action, rows.as_deref().map(Vec::as_slice)), now);
     }
     bundle
+}
+
+/// Record only bounded delivery counts, never the requested text.
+fn record_partial_text_activity(headers: &HeaderMap, confirmed: usize, uncertain: usize) {
+    crate::activity::record(named_owner(headers), crate::activity::Line {
+        en: format!("Text input stopped: {confirmed} characters confirmed, {uncertain} uncertain"),
+        zh: format!("输入已暂停：已确认 {confirmed} 个字，另有 {uncertain} 个字结果未知"),
+    }, crate::metrics::now_ms());
 }
 
 /// One applied action on the activity feed, in plain words (`crate::activity`).
@@ -15695,6 +16747,35 @@ struct ReadPrivacyFence {
 /// fence or lose its fixed-size timing/metrics enrichment before it is installed.
 async fn privacy_read_body_layer(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let response = next.run(request).await;
+    if let Some(fence)=response.extensions().get::<ValueReadFence>().cloned(){
+        let (mut parts,body)=response.into_parts();
+        let bytes=match axum::body::to_bytes(body,1<<20).await{Ok(bytes)=>bytes,Err(_)=>return json_response(StatusCode::BAD_GATEWAY,value_scope_failure())};
+        parts.headers.remove(header::CONTENT_LENGTH);
+        let stream=futures_util::stream::once(async move{
+            let bytes=if request_scope_refusal(&fence.state,Some(&fence.scope)).is_some(){bytes::Bytes::from(value_scope_failure().to_string())}else{bytes};
+            Ok::<_,std::io::Error>(bytes)
+        });
+        return Response::from_parts(parts,Body::from_stream(stream));
+    }
+    if let Some(fence)=response.extensions().get::<MutationObservationFence>().cloned(){
+        let is_json=response.headers().get(header::CONTENT_TYPE).and_then(|v|v.to_str().ok()).is_some_and(|v|v.starts_with("application/json"));
+        if is_json && axum::body::HttpBody::size_hint(response.body()).exact().is_some(){
+            let (mut parts,body)=response.into_parts();
+            let bytes=match axum::body::to_bytes(body,usize::MAX).await{Ok(bytes)=>bytes,Err(_)=>return Response::from_parts(parts,Body::from(crate::timing::UNKNOWN_BODY))};
+            parts.headers.remove(header::CONTENT_LENGTH);
+            let deferred=futures_util::stream::once(async move {
+                let output=if let Some((reason,_))=request_scope_refusal(&fence.state,fence.scope.as_ref()){
+                    recover(fence.state.element_snapshots.lock()).clear();
+                    recover(fence.state.owner_snapshots.lock()).clear();
+                    let value=serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or(serde_json::Value::Null);
+                    bytes::Bytes::from(serde_json::to_vec(&crate::observation::redact(value,reason)).unwrap_or_else(|_|crate::timing::UNKNOWN_BODY.as_bytes().to_vec()))
+                }else{bytes};
+                Ok::<_,std::io::Error>(output)
+            });
+            return Response::from_parts(parts,Body::from_stream(deferred));
+        }
+        return response;
+    }
     let Some(fence) = response.extensions().get::<ReadPrivacyFence>().cloned() else { return response; };
     // The response can sit queued before the HTTP writer first polls its body.
     use futures_util::StreamExt;
@@ -16625,6 +17706,7 @@ async fn agent_screenshot_capture(
             .await
         }
         Err(failure) => {
+            if failure.cause=="scope_revoked" {return list_scope_error();}
             tracing::warn!(
                 "agent screenshot: failed after {} attempt(s) ({}): {}",
                 failure.attempts,
@@ -16729,6 +17811,9 @@ async fn attempt_capture(
     request: crate::runner::ShotRequest,
     budget: std::time::Duration,
 ) -> Result<crate::runner::Capture, (&'static str, String)> {
+    if let Err(error) = crate::native_scope::ensure_current() {
+        return Err(("scope_revoked", error.to_string()));
+    }
     let started = tokio::time::Instant::now();
     // The lock wait counts against the budget, the request gets what is left.
     let captured = tokio::time::timeout(budget, async {
@@ -16738,10 +17823,17 @@ async fn attempt_capture(
             .await
     })
     .await;
+    if let Err(error) = crate::native_scope::ensure_current() {
+        return Err(("scope_revoked", error.to_string()));
+    }
     match captured {
         Ok(Ok(capture)) => Ok(capture),
         Ok(Err(error)) => Err((
-            crate::runner::screenshot_failure_cause(&error),
+            if crate::native_scope::is_revoked(&error) {
+                "scope_revoked"
+            } else {
+                crate::runner::screenshot_failure_cause(&error)
+            },
             format!("{error:#}"),
         )),
         Err(_) => Err((
@@ -17021,6 +18113,18 @@ async fn agent_mjpeg(
     }
 }
 
+/// An opaque process identity plus the privacy incarnation. Not a credential.
+/// Prevents a client from retaining encoded frames across hide/unhide or restart.
+fn screen_stream_scope(generation: u64) -> String {
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).expect("os randomness");
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    });
+    format!("{boot}-{generation}")
+}
+
 /// `GET /agent/h264` — the live screen as H.264, ~10× less bandwidth than
 /// `/agent/mjpeg` (see [`crate::video`] for the wire format). Same auth,
 /// lifecycle gates, viewer accounting and freshness tracking as the MJPEG
@@ -17143,6 +18247,7 @@ async fn agent_h264(
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CACHE_CONTROL, "no-store")
         .header("x-video-format", "iphone-use-h264-annexb-v1")
+        .header("x-ipu-screen-scope", screen_stream_scope(privacy_generation))
         .body(Body::from_stream(frames))
         .map(with_security_headers)
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
@@ -22128,6 +23233,12 @@ mod tests {
 
     #[test]
     fn validate_set_value_requires_element_snapshot_and_bounded_value() {
+        for valid in [false,true] {
+            assert!(validate_action(serde_json::json!({"type":"set_value","element":2,"snapshot":"abc","value":"new","recover_focus_after_clear":valid})).is_ok());
+        }
+        for invalid in [serde_json::Value::Null,serde_json::json!(1),serde_json::json!("true")] {
+            assert!(validate_action(serde_json::json!({"type":"set_value","element":2,"snapshot":"abc","value":"new","recover_focus_after_clear":invalid})).is_err());
+        }
         assert!(validate_action(
             serde_json::json!({"type":"set_value","element":2,"snapshot":"abc","value":"你好"})
         )
@@ -24651,7 +25762,7 @@ mod tests {
         assert_eq!(claim_phone_owner(&state, &named("a")).ok(), Some(true));
         assert_eq!(claim_phone_owner(&state, &named("a")).ok(), Some(false));
         assert!(claim_phone_owner(&state, &HeaderMap::new()).is_err());
-        *recover(state.owner.lock()) = None;
+        state.release_owner_lease();
         assert_eq!(claim_phone_owner(&state, &HeaderMap::new()).ok(), Some(false));
         assert_eq!(claim_phone_owner(&state, &named("b")).ok(), Some(true));
     }
@@ -25188,8 +26299,188 @@ mod tests {
         (runner, keys, clears)
     }
 
+    /// Negotiate the real HTTP protocol and refuse a later chunk without reselection/replay.
+    #[test]
+    fn guarded_long_text_keeps_one_target_and_stops_on_focus_loss() {
+        block(async {
+            for fail_at in [0_usize, 1, 3] {
+                let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+                let seen = calls.clone();
+                let mut runner = MockRunner::start(move |request| {
+                    let mut calls = seen.lock().unwrap();
+                    calls.push(request.to_string());
+                    if request.starts_with("POST /session ") {
+                        return r#"{"value":{"sessionId":"SESSION","capabilities":{"ipu:guardedInput":true}}}"#.into();
+                    }
+                    if request.contains("/wda/input-target") {
+                        return r#"{"value":{"token":"bound-field"}}"#.into();
+                    }
+                    if request.contains("/wda/keys") {
+                        let body: serde_json::Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+                        assert_eq!(body["inputTarget"], "bound-field");
+                        let n = calls.iter().filter(|r| r.contains("/wda/keys")).count();
+                        if n == fail_at {
+                            let body = r#"{"value":{"error":"invalid argument","message":"input_target_focus_changed; nothing was sent"}}"#;
+                            return format!("HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                        }
+                        return r#"{"value":null}"#.into();
+                    }
+                    healthy_runner_responder(request)
+                });
+                let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+                let actionable = std::sync::atomic::AtomicBool::new(true);
+                let mut detail = None;
+                let outcome = direct_agent_action(&mut client, &actionable,
+                    &serde_json::json!({"type":"text","text":"x".repeat(800)}),
+                    &mut detail, far_deadline()).await;
+                match fail_at {
+                    0 => assert_eq!(outcome, RunnerControlOutcome::Applied),
+                    1 => assert_eq!(outcome, RunnerControlOutcome::RunnerRejected),
+                    3 => assert_eq!(outcome, RunnerControlOutcome::TextPartial { confirmed:400, uncertain:0 }),
+                    _ => unreachable!(),
+                }
+                if fail_at > 0 {
+                    assert_eq!(detail.as_ref().unwrap()["runner_error"]["message"],
+                        "input_target_focus_changed; nothing was sent");
+                }
+                let calls = calls.lock().unwrap();
+                assert_eq!(calls.iter().filter(|r| r.contains("/wda/input-target")).count(), 1);
+                assert_eq!(calls.iter().filter(|r| r.contains("/wda/keys")).count(), if fail_at == 0 { 4 } else { fail_at });
+                drop(calls);
+                runner.shutdown();
+            }
+        });
+    }
+
+    #[test]
+    fn guarded_long_text_cannot_clear_or_type_when_binding_fails() {
+        block(async {
+            for bad_target in [r#"{"value":{}}"#, r#"{"value":{"token":"../keys"}}"#, r#"{"value":{"error":"invalid argument","message":"input_target_missing; nothing was sent"}}"#] {
+                let mutations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let seen = mutations.clone();
+                let mut runner = MockRunner::start(move |request| {
+                    if request.starts_with("POST /session ") {
+                        return r#"{"value":{"sessionId":"SESSION","capabilities":{"ipu:guardedInput":true}}}"#.into();
+                    }
+                    if request.contains("/wda/input-target") { return bad_target.into(); }
+                    if request.contains("/wda/keys") || request.contains("/clear") {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    healthy_runner_responder(request)
+                });
+                let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+                let outcome = direct_agent_action(&mut client, &std::sync::atomic::AtomicBool::new(true),
+                    &serde_json::json!({"type":"text","text":"x".repeat(600),"clear":true}),
+                    &mut None, far_deadline()).await;
+                assert_eq!(outcome, RunnerControlOutcome::NotSent);
+                assert_eq!(mutations.load(std::sync::atomic::Ordering::SeqCst), 0);
+                runner.shutdown();
+            }
+        });
+    }
+
+    #[test]
+    fn guarded_long_text_never_types_after_a_failed_targeted_clear() {
+        block(async {
+            let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let seen = calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                seen.lock().unwrap().push(request.to_string());
+                if request.starts_with("POST /session ") {
+                    return r#"{"value":{"sessionId":"SESSION","capabilities":{"ipu:guardedInput":true}}}"#.into();
+                }
+                if request.contains("/wda/input-target") { return r#"{"value":{"token":"bound-field"}}"#.into(); }
+                if request.contains("/clear") {
+                    assert!(request.contains("/element/bound-field/clear"));
+                    assert!(request.contains(r#""inputTarget":"bound-field""#));
+                    return r#"{"value":{"error":"unknown error","message":"guarded clear incomplete"}}"#.into();
+                }
+                healthy_runner_responder(request)
+            });
+            let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+            let outcome = direct_agent_action(&mut client, &std::sync::atomic::AtomicBool::new(true),
+                &serde_json::json!({"type":"text","text":"x".repeat(600),"clear":true}),
+                &mut None, far_deadline()).await;
+            assert_eq!(outcome, RunnerControlOutcome::Failed);
+            assert!(!calls.lock().unwrap().iter().any(|r| r.contains("/wda/keys") || r.contains("/element/active")));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn guarded_long_text_rechecks_capability_after_session_replacement() {
+        block(async {
+            let sessions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let bindings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (seen_sessions, seen_bindings) = (sessions.clone(), bindings.clone());
+            let mut runner = MockRunner::start(move |request| {
+                if request.starts_with("POST /session ") {
+                    let first = seen_sessions.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                    return serde_json::json!({"value":{"sessionId":"SESSION","capabilities":{"ipu:guardedInput":first}}}).to_string();
+                }
+                if request.contains("/wda/input-target") {
+                    seen_bindings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    return r#"{"value":{"token":"bound-field"}}"#.into();
+                }
+                healthy_runner_responder(request)
+            });
+            let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+            assert_eq!(client.input_target().await.unwrap(), Some("bound-field".into()));
+            client.invalidate_session();
+            assert_eq!(client.input_target().await.unwrap(), None);
+            assert_eq!(sessions.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert_eq!(bindings.load(std::sync::atomic::Ordering::SeqCst), 1);
+            runner.shutdown();
+        });
+    }
+
     fn far_deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + std::time::Duration::from_secs(60)
+    }
+
+    #[test]
+    fn focused_text_contract_preserves_locked_field_and_batch_order() {
+        block(async {
+            for locked in [true, false] {
+                let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+                let seen = calls.clone();
+                let mut runner = MockRunner::start(move |request| {
+                    seen.lock().unwrap().push(request.lines().next().unwrap().to_string());
+                    if request.starts_with("POST /session ") {
+                        return r#"{"value":{"sessionId":"SESSION","capabilities":{"ipu:atomicText":true}}}"#.into();
+                    }
+                    if request.contains("/ipu/text") && locked {
+                        return r#"{"value":{"error":"invalid element state","message":"device is locked; no text sent"}}"#.into();
+                    }
+                    healthy_runner_responder(request)
+                });
+                let state = readiness_state_with_runner(runner.base());
+                recover(state.runner_health.lock()).locked = Some(locked);
+                let scope = capture_input_scope(&state, &HeaderMap::new(), 0, None);
+                let response = if locked {
+                    agent_input_claimed(State(state), Query(AgentInputQuery::default()),
+                        HeaderMap::new(), serde_json::json!({"type":"text","text":"x"}).to_string(), scope).await
+                } else {
+                    agent_actions_claimed(State(state), HeaderMap::new(), serde_json::json!({"steps":[
+                        {"kind":"action","action":{"type":"text","text":"x"}},
+                        {"kind":"action","action":{"type":"launch_app","bundle":"com.example.fixture"}}
+                    ]}).to_string(), scope).await
+                };
+                let calls = calls.lock().unwrap();
+                assert!(!calls.iter().any(|r| r.contains("/unlock") || r.contains("/openurl")), "{calls:?}");
+                let text = calls.iter().position(|r| r.contains("/ipu/text")).expect("atomic text dispatched");
+                if locked {
+                    assert!(!response.status().is_success());
+                    assert!(!calls.iter().any(|r| r.contains("/launch") || r.contains("/activate")), "{calls:?}");
+                } else {
+                    assert!(response.status().is_success(), "{} {calls:?}", response.status());
+                    let launch = calls.iter().position(|r| r.contains("/launch") || r.contains("/activate")).expect("launch dispatched");
+                    assert!(text < launch, "later launch must not precede focused text: {calls:?}");
+                }
+                drop(calls);
+                runner.shutdown();
+            }
+        });
     }
 
     #[test]
@@ -25418,6 +26709,32 @@ mod tests {
                 "actions failed: synthesis error"
             );
             runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn replacement_progress_cannot_be_reclassified_as_a_whole_not_sent() {
+        block(async {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap()); drop(listener);
+            let source = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(3)).build().unwrap().post(&base).send().await.unwrap_err();
+            assert!(source.is_connect());
+            let error = crate::runner::ReplacementDeliveryError::wrap(source.into(),200,0,301,true);
+            assert!(!error_never_reached_runner(&error));
+            let mut client = crate::runner::RunnerClient::new(base).unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(true);
+            let outcome = snapshot_element_outcome(Err(SnapshotElementTapError::AfterDispatch(error)), &mut client, "test replacement").unwrap();
+            let error = outcome.unwrap_err();
+            let outcome = runner_failure_outcome(&mut client, &actionable, &error, "set_value", &mut None);
+            assert_eq!(outcome, RunnerControlOutcome::ReplacementPartial {confirmed:200,uncertain:0,unsent:301,clear_confirmed:true});
+            assert!(!actionable.load(std::sync::atomic::Ordering::Acquire));
+            let body = replacement_partial_body(200,0,301,true,None);
+            assert_eq!(body["retry_safe"],false); assert_eq!(body["outcome"],"partial");
+            assert_eq!(body["characters_total"],501); assert_eq!(body["clear_outcome"],"confirmed");
+            assert!(body.get("continue_token").is_none());
+            let unknown = replacement_partial_body(0,200,301,false,None);
+            assert_eq!(unknown["outcome"],"unknown"); assert_eq!(unknown["clear_outcome"],"unknown");
+            assert_eq!(unknown["retry_safe"],false);
         });
     }
 

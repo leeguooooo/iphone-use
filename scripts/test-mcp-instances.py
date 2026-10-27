@@ -74,7 +74,7 @@ try:
         env = {'HOME': home, 'PATH': os.environ['PATH'], 'NO_PROXY': '', 'no_proxy': '', 'HTTP_PROXY': f'http://127.0.0.1:{servers[2].server_port}', 'http_proxy': f'http://127.0.0.1:{servers[2].server_port}', 'HTTPS_PROXY': f'http://127.0.0.1:{servers[2].server_port}',
                'IPHONE_USE_URL': f'http://127.0.0.1:{servers[0].server_port}',
                'IPHONE_USE_TOKEN': 'ambient-token', 'IPHONE_USE_MCP_TOOLS': 'all',
-               'IPHONE_USE_MCP_PREWARM': '0'}
+               'IPHONE_USE_MCP_HOST': 'workbuddy', 'IPHONE_USE_MCP_PREWARM': '0'}
         process = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, env=env)
         selector = selectors.DefaultSelector()
@@ -136,6 +136,19 @@ try:
                 requests = [r for r in seen if r[0] == marker and r[1] == 'POST']
                 assert requests
                 assert parse_qs(urlsplit(requests[-1][2]).query).get('since') == [marker]
+            # Read-only host resources carry the target in each URI, independent of tools/call.
+            for instance, marker, token in [('i13', 'B', 'token-B'), ('default', 'A', 'token-A')]:
+                for resource in ['frame-v1/600/1', 'video-v1/1/2']:
+                    start = len(seen)
+                    reply = rpc('resources/read', {'uri': f'ui://iphone-use/instance-v1/{instance}/{resource}'})
+                    assert 'result' in reply, reply
+                    reads = seen[start:]
+                    assert reads and all(r[0] == marker and r[1] == 'GET' and r[3] == 'Bearer ' + token for r in reads), reads
+            count = len(seen)
+            for uri in ['missing/frame-v1/600/1', 'runner/video-v1/1/2',
+                        'i13/../frame-v1/600/1', 'i13/frame-v1/600/no', 'i13/screen.html']:
+                assert 'error' in rpc('resources/read', {'uri': 'ui://iphone-use/instance-v1/' + uri})
+            assert len(seen) == count, 'invalid resource must not fall back to another daemon'
             # Missing, malformed and symlinked configuration must not touch any daemon.
             count = len(seen)
             for instance in ['missing', '../i13', 'runner']:

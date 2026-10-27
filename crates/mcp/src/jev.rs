@@ -994,7 +994,7 @@ mod tests {
         );
         let refused = serde_json::json!({"action":"CLICK","action_outcome":"not_sent","error_code":"element_occluded"});
         assert_eq!(
-            super::keyboard_recovery(&screen, &[refused.clone()]),
+            super::keyboard_recovery(&screen, std::slice::from_ref(&refused)),
             super::KeyboardRecovery::Dismiss
         );
         let dismissal = serde_json::json!({"action":"DISMISS_KEYBOARD"});

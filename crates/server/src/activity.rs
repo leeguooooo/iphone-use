@@ -189,6 +189,7 @@ pub fn describe(action: &Value, rows: Option<&[ElementRow]>) -> Line {
         "tap" | "tap_locator" => on("Tapped", "点按"),
         "longpress" => on("Long-pressed", "长按"),
         "set_value" => on("Filled in", "填写"),
+        "text" if action.get("continue_token").is_some() => line("Continued text input", "继续输入文字"),
         "text" => {
             let n = action
                 .get("text")

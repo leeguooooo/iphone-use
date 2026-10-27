@@ -310,6 +310,69 @@ struct ClassChain {
   }
 }
 
+/// Guarded text is deliberately stricter than ordinary element reads: stale stored snapshots,
+/// non-editable nodes and unreported focus cannot authorize typing. Geometry and labels are not
+/// identities. The caller re-snapshots the retained live AX element on each chunk.
+enum InputTargetCheck {
+  /// AX point lookup alone can lag a newly installed sibling control. An
+  /// independent complete-scene check must reject overlapping actionable nodes.
+  static func focusPointOccluded(target: UINode, root: UINode, point: CGPoint) -> Bool {
+    var ancestors = Set<ObjectIdentifier>()
+    var parent = target.parent
+    while let node = parent { ancestors.insert(ObjectIdentifier(node)); parent = node.parent }
+    let actionable: Set<String> = ["XCUIElementTypeButton", "XCUIElementTypeLink", "XCUIElementTypeCell",
+      "XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeSearchField",
+      "XCUIElementTypeTextView", "XCUIElementTypeSwitch", "XCUIElementTypeSlider", "XCUIElementTypeStepper",
+      "XCUIElementTypePickerWheel", "XCUIElementTypeDatePicker", "XCUIElementTypeKey", "XCUIElementTypeAlert",
+      "XCUIElementTypeSheet", "XCUIElementTypePopover", "XCUIElementTypeMenu", "XCUIElementTypeMenuItem"]
+    return ([root] + root.descendants()).contains { node in
+      node !== target && !ancestors.contains(ObjectIdentifier(node)) && node.rect.contains(point)
+        && (actionable.contains(node.type) || (node.type == "XCUIElementTypeOther" && node.label != nil && node.children.isEmpty))
+    }
+  }
+
+  /// Read-only proof for the retained original element. Focus may be absent only
+  /// while an explicitly requested replacement verifies its completed clear.
+  static func replacementRefusal(original: UINode, current: UINode,
+      foregroundPID: Int32, visible: Bool, bindingMatches: Bool, requireFocus: Bool) -> String? {
+    guard bindingMatches else { return "replacement_binding_changed" }
+    guard original.pid == current.pid, original.type == current.type,
+          original.identifier == current.identifier,
+          original.identifier != nil || original.label == current.label else {
+      return "replacement_identity_changed"
+    }
+    guard visible else { return "replacement_target_not_visible" }
+    return refusal(type: current.type, focused: !requireFocus || current.isFocused,
+      enabled: current.isEnabled, pid: current.pid, foregroundPID: foregroundPID,
+      live: current.axElement != nil)
+  }
+
+  /// Only these bridge failures precede event dispatch. An arbitrary synthesis error may
+  /// already have delivered text, so it must never trigger another typing implementation.
+  static func mayFallbackAfterTextSynthesis(_ error: String, targeted: Bool) -> Bool {
+    !targeted && ["private XCTest text synthesis unavailable",
+      "private XCTest text synthesis failed: could not create text event"].contains(error)
+  }
+
+  /// Read-only routes never reach this gate. Only the same bound keys/clear may preserve the
+  /// binding across a mutation; arbitrary keys, Home, taps and other controllers invalidate it.
+  static func preservesBinding(path: String, binding: String?, body: [String: Any]) -> Bool {
+    guard let binding, body["inputTarget"] as? String == binding else { return false }
+    return path.hasSuffix("/wda/keys") || path.hasSuffix("/element/\(binding)/clear")
+  }
+
+  static func refusal(type: String, focused: Bool, enabled: Bool, pid: Int32,
+                      foregroundPID: Int32, live: Bool) -> String? {
+    guard live else { return "input_target_unreadable" }
+    guard pid > 0, foregroundPID == pid else { return "input_target_app_changed" }
+    guard type != "XCUIElementTypeSecureTextField" else { return "input_target_secure_field_requires_human" }
+    guard ["XCUIElementTypeTextField", "XCUIElementTypeTextView", "XCUIElementTypeSearchField"].contains(type)
+    else { return "input_target_not_editable" }
+    guard enabled, focused else { return "input_target_focus_changed" }
+    return nil
+  }
+}
+
 // MARK: - Registry
 
 /// Element ids handed out by the find routes, runner style. Entries keep the node they were found
@@ -328,6 +391,11 @@ final class ElementRegistry {
 
   var count: Int { entries.count }
 
+  func removeAll() {
+    entries.removeAll()
+    order.removeAll()
+  }
+
   func register(_ node: UINode, now: Date = Date()) -> String {
     let id = UUID().uuidString
     entries[id] = (node, now)
@@ -341,6 +409,16 @@ final class ElementRegistry {
   }
 
   func node(_ id: String) -> UINode? { entries[id]?.node }
+
+  /// Keep an actively used input binding alive, without creating a new identity. Move it to the
+  /// tail as prune relies on timestamp order; do not resurrect an expired/evicted binding.
+  func renew(_ id: String, node: UINode, now: Date = Date()) {
+    guard entries[id] != nil else { return }
+    entries[id] = (node, now)
+    order.removeAll { $0 == id }
+    order.append(id)
+  }
+
 
   /// Drops ids registered more than `maxAgeSeconds` before `now` (order is registration order).
   func prune(now: Date = Date()) {

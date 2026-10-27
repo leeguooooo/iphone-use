@@ -1062,5 +1062,96 @@ do {
   check(false, "strict identifier predicate: \(error)")
 }
 
+// Guarded input uses live identity and focus, never labels or geometry.
+do {
+  func replacementNode(_ changes: [String: Any] = [:], pid: Int32 = 42) -> UINode {
+    var raw: [String: Any] = ["type":"XCUIElementTypeTextField", "rawIdentifier":"field-a",
+      "label":"Draft", "isEnabled":"1", "isFocused":"0", IPURNodeAXElementKey:NSObject()]
+    for (key, value) in changes { raw[key] = value }
+    return UINode(raw: raw, parent: nil, pid: pid)
+  }
+  let original = replacementNode(["isFocused":"1"])
+  func replacementAllowed(_ node: UINode, foreground: Int32 = 42, visible: Bool = true,
+      binding: Bool = true, requireFocus: Bool = false) -> Bool {
+    InputTargetCheck.replacementRefusal(original: original, current: node, foregroundPID: foreground,
+      visible: visible, bindingMatches: binding, requireFocus: requireFocus) == nil
+  }
+  check(replacementAllowed(replacementNode()), "retained unfocused original may be inspected for clear proof")
+  check(!replacementAllowed(replacementNode(), requireFocus: true), "unfocused proof cannot authorize typing")
+  check(replacementAllowed(replacementNode(["isFocused":"1"]), requireFocus: true), "same focused original passes replacement identity gate")
+  check(!replacementAllowed(replacementNode(), binding: false), "recovery cannot revive an invalidated binding")
+  check(!replacementAllowed(replacementNode(), foreground: 43), "recovery refuses a changed foreground")
+  check(!replacementAllowed(replacementNode(pid: 43), foreground: 43), "recovery refuses another process even if foreground")
+  check(!replacementAllowed(replacementNode(["rawIdentifier":"field-b"])), "same-label different field cannot be restored")
+  check(!replacementAllowed(replacementNode(["rawIdentifier":NSNull()])), "lost identifier cannot rebind by label")
+  check(!replacementAllowed(replacementNode(["type":"XCUIElementTypeSecureTextField"])), "secure conversion refuses recovery")
+  check(!replacementAllowed(replacementNode(["isEnabled":"0"])), "disabled original refuses recovery")
+  check(!replacementAllowed(replacementNode(), visible: false), "hidden original refuses recovery")
+  let noAX = UINode(raw:["type":"XCUIElementTypeTextField", "rawIdentifier":"field-a"], parent:nil, pid:42)
+  check(!replacementAllowed(noAX), "stored metadata without live AX cannot authorize recovery")
+  let field: [String:Any] = ["type":"XCUIElementTypeTextField", "rawIdentifier":"a",
+    "rect":["x":0,"y":0,"width":100,"height":40]]
+  let covering: [String:Any] = ["type":"XCUIElementTypeButton", "rawIdentifier":"overlay",
+    "rect":["x":0,"y":0,"width":100,"height":40]]
+  func scene(_ children:[[String:Any]]) -> UINode {
+    UINode(raw:["type":"XCUIElementTypeWindow","children":children],parent:nil,pid:42)
+  }
+  let point=CGPoint(x:50,y:20)
+  let alone=scene([field])
+  check(!InputTargetCheck.focusPointOccluded(target:alone.children[0],root:alone,point:point), "uncovered original focus point is permitted")
+  let covered=scene([field,covering])
+  check(InputTargetCheck.focusPointOccluded(target:covered.children[0],root:covered,point:point), "new sibling action covering the field blocks restoration")
+  var disabledCover=covering;disabledCover["isEnabled"]="0"
+  let disabledScene=scene([field,disabledCover])
+  check(InputTargetCheck.focusPointOccluded(target:disabledScene.children[0],root:disabledScene,point:point), "disabled control still blocks a physical focus point")
+  var distant=covering;distant["rect"]=["x":200,"y":0,"width":100,"height":40]
+  let separate=scene([field,distant])
+  check(!InputTargetCheck.focusPointOccluded(target:separate.children[0],root:separate,point:point), "unrelated nonoverlapping control does not block restoration")
+  let cell=scene([["type":"XCUIElementTypeCell","rect":["x":0,"y":0,"width":100,"height":40],"children":[field]]])
+  check(!InputTargetCheck.focusPointOccluded(target:cell.children[0].children[0],root:cell,point:point), "original's ancestor container is not a sibling occluder")
+  var withClear=field;withClear["children"]=[covering]
+  let childAction=scene([withClear])
+  check(InputTargetCheck.focusPointOccluded(target:childAction.children[0],root:childAction,point:point), "an actionable descendant cannot be blindly tapped as the field")
+  func refusal(_ type: String = "XCUIElementTypeTextField", focused: Bool = true,
+               enabled: Bool = true, pid: Int32 = 42, foreground: Int32 = 42, live: Bool = true) -> String? {
+    InputTargetCheck.refusal(type: type, focused: focused, enabled: enabled, pid: pid,
+                             foregroundPID: foreground, live: live)
+  }
+  check(refusal() == nil, "live focused editable target is permitted")
+  check(InputTargetCheck.mayFallbackAfterTextSynthesis("private XCTest text synthesis unavailable", targeted: false), "legacy fallback is allowed before dispatch")
+  check(!InputTargetCheck.mayFallbackAfterTextSynthesis("private XCTest event synthesis failed: timeout", targeted: false), "ambiguous text synthesis never falls back")
+  check(!InputTargetCheck.mayFallbackAfterTextSynthesis("private XCTest text synthesis unavailable", targeted: true), "bound input never falls back to an unbound path")
+  check(!InputTargetCheck.mayFallbackAfterTextSynthesis("unknown error", targeted: false), "unrecognized failures never authorize a second input")
+  check(InputTargetCheck.preservesBinding(path: "/session/s/wda/keys", binding: "t", body: ["inputTarget":"t"]), "own bound chunk preserves input binding")
+  check(InputTargetCheck.preservesBinding(path: "/session/s/element/t/clear", binding: "t", body: ["inputTarget":"t"]), "own bound clear preserves input binding")
+  check(!InputTargetCheck.preservesBinding(path: "/session/s/wda/homescreen", binding: "t", body: ["inputTarget":"t"]), "other native command invalidates binding even with a copied token")
+  check(!InputTargetCheck.preservesBinding(path: "/session/s/wda/keys", binding: "t", body: [:]), "unbound native keys invalidate binding")
+  check(!InputTargetCheck.preservesBinding(path: "/session/s/element/other/clear", binding: "t", body: ["inputTarget":"t"]), "another field cannot preserve binding")
+  check(refusal("XCUIElementTypeTextView") == nil, "multiline target is permitted")
+  check(refusal("XCUIElementTypeSearchField") == nil, "search target is permitted")
+  check(refusal(foreground: 43) == "input_target_app_changed", "app switch refuses target")
+  check(refusal(pid: 0, foreground: 0) != nil, "unknown foreground cannot authorize input")
+  check(refusal(focused: false) == "input_target_focus_changed", "focus switch refuses target")
+  check(refusal(enabled: false) != nil, "disabled target refuses input")
+  check(refusal(live: false) == "input_target_unreadable", "stored snapshot cannot authorize input")
+  check(refusal("XCUIElementTypeSecureTextField") != nil, "secure target requires human input")
+  check(refusal("XCUIElementTypeButton") != nil, "focused noneditable node refuses input")
+  let registry = ElementRegistry(capacity: 4)
+  let start = Date(timeIntervalSince1970: 100)
+  let id = registry.register(tree, now: start)
+  let later = registry.register(tree, now: start.addingTimeInterval(30))
+  registry.renew(id, node: tree, now: start.addingTimeInterval(50))
+  registry.prune(now: start.addingTimeInterval(95))
+  check(registry.node(later) == nil, "renew preserves timestamp order for expiry")
+  check(registry.node(id) != nil, "active binding survives original expiry")
+  registry.prune(now: start.addingTimeInterval(115))
+  registry.renew(id, node: tree, now: start.addingTimeInterval(116))
+  check(registry.node(id) == nil, "renew never resurrects expired binding")
+  let sessionID = registry.register(tree)
+  registry.removeAll()
+  registry.renew(sessionID, node: tree)
+  check(registry.count == 0, "session reset invalidates all prior bindings")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)

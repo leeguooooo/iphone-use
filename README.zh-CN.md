@@ -27,6 +27,8 @@ Claude Code、Codex 或任何 MCP 客户端都能用它把屏幕读成文字，�
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
+WorkBuddy、豆包工作：[候选适配与接入方法](docs/mcp-hosts.md)，实际客户端界面仍待验收。
+
 https://github.com/user-attachments/assets/6192e8a6-ab2d-4dfc-b2e9-2c971f527d55
 
 <sub>1 分钟演示，真机录屏 · [English](https://github.com/user-attachments/assets/ee298774-bf3e-4fd0-9a08-481b20904f61)</sub>

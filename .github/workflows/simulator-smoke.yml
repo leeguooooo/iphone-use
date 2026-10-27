@@ -10,11 +10,21 @@ on:
     paths:
       - crates/server/src/simulator.rs
       - crates/server/src/main.rs
+      - crates/server/src/http.rs
+      - crates/server/src/runner.rs
       - crates/mcp/src/client.rs
+      - crates/mcp/src/server.rs
       - runner/**
       - scripts/test-simulator-smoke.sh
       - scripts/test-drag-simulator.py
       - scripts/test-drag-simulator-verdict.py
+      - scripts/test-replacement-recovery-simulator.py
+      - scripts/test-replacement-recovery-verdict.py
+      - scripts/paired-bench-fixture.swift
+      - scripts/owned-mcp-fixture.py
+      - scripts/fixtures/replacement-recovery/**
+      - scripts/test-input-target-simulator.py
+      - scripts/runner_auth.py
       - .github/workflows/simulator-smoke.yml
   workflow_dispatch:
 
@@ -29,14 +39,35 @@ permissions:
 
 jobs:
   smoke:
-    name: Simulator end to end
+    name: Simulator iOS ${{ matrix.ios }} / Xcode ${{ matrix.xcode }}
     runs-on: macos-14
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - xcode: '15.4'
+            ios: '17.5'
+            runtime: com.apple.CoreSimulator.SimRuntime.iOS-17-5
+          - xcode: '16.2'
+            ios: '18.2'
+            runtime: com.apple.CoreSimulator.SimRuntime.iOS-18-2
     env:
       CARGO_TERM_COLOR: always
+      DEVELOPER_DIR: /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify selected Xcode and Simulator SDK
+        env:
+          EXPECTED_SIMULATOR_SDK: ${{ matrix.ios }}
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          /usr/bin/xcodebuild -version
+          test "$(/usr/bin/xcrun --sdk iphonesimulator --show-sdk-version)" = "$EXPECTED_SIMULATOR_SDK"
+          echo "SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master; explicit stable toolchain
@@ -50,10 +81,16 @@ jobs:
         run: cargo build --release --locked -p server -p iphone-use-mcp
 
       - name: Xcode and simulators
+        env:
+          EXPECTED_RUNTIME: ${{ matrix.runtime }}
         run: |
+          set -euo pipefail
           xcodebuild -version
           xcrun simctl list runtimes
           ./target/release/iphone-use simulators
+          xcrun simctl list runtimes --json | python3 -c 'import json,os,sys; rows=json.load(sys.stdin)["runtimes"]; assert any(r["identifier"]==os.environ["EXPECTED_RUNTIME"] and r.get("isAvailable") is True for r in rows), "required matching runtime unavailable"'
+          simulator_id=$(xcrun simctl create "iphone-use-ci-${{ matrix.ios }}" com.apple.CoreSimulator.SimDeviceType.iPhone-15 "$EXPECTED_RUNTIME")
+          echo "SIM=$simulator_id" >> "$GITHUB_ENV"
 
       - name: Smoke test
         timeout-minutes: 35
@@ -72,7 +109,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: simulator-gesture-evidence
+          name: simulator-gesture-evidence-ios-${{ matrix.ios }}
           include-hidden-files: true
           if-no-files-found: ignore
           path: |
@@ -82,3 +119,17 @@ jobs:
             ~/.iphone-use/instances/ci-sim/gesture-acceptance/fixture-build.log
             ~/.iphone-use/instances/ci-sim/gesture-acceptance/**/*.xml
             ~/.iphone-use/instances/ci-sim/gesture-acceptance/**/trace.ndjson
+            ~/.iphone-use/instances/ci-sim/replacement-recovery/result.json
+            ~/.iphone-use/instances/ci-sim/replacement-recovery/traceback.txt
+            ~/.iphone-use/instances/ci-sim/replacement-recovery/mcp.log
+
+      - name: Remove only the owned CI Simulator
+        if: always()
+        run: |
+          if [ -n "${SIM:-}" ]; then
+            if [ -x ./target/release/iphone-use ]; then
+              ./target/release/iphone-use simulator stop "$SIM" --instance ci-sim --shutdown || true
+            fi
+            xcrun simctl shutdown "$SIM" >/dev/null 2>&1 || true
+            xcrun simctl delete "$SIM"
+          fi

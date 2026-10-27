@@ -84,6 +84,7 @@ fn row_line_with_ids(index: u64, row: &Value, show_id: bool, full_id: bool) -> S
     if let Some(value) = text(row, "value").filter(|value| *value != label) {
         line.push_str(&format!(" value={}", clip(&value)));
     }
+    if row.get("value_truncated")==Some(&Value::Bool(true)){line.push_str(" value_truncated");}
     if text(row, "placeholder").is_some() && text(row, "value").is_none() {
         line.push_str(&format!(
             " placeholder={}",
@@ -461,11 +462,10 @@ pub fn observed(json: &Value) -> Option<String> {
             .map_or(0, Vec::len);
         let unchanged = delta.get("unchanged").and_then(Value::as_u64).unwrap_or(0);
         out.push(format!("- {removed} removed · = {unchanged} unchanged"));
-    } else if let Some(rows) = json.get("elements").and_then(Value::as_array) {
+    } else {
+        let rows = json.get("elements").and_then(Value::as_array)?;
         out.push(format!("{} rows (no baseline: whole screen)", rows.len()));
         rows_block(rows, &mut out);
-    } else {
-        return None;
     }
     extra_blocks(json, &mut out);
     Some(out.join("\n"))
@@ -641,6 +641,10 @@ pub fn failed_batch(json: &Value) -> Option<String> {
         None => {}
     }
     let mut out = vec![head];
+    if let Some(confirmed)=json.get("native_mutations_confirmed").and_then(Value::as_u64){
+        let uncertain=json.get("native_mutations_uncertain").and_then(Value::as_u64).unwrap_or(0);
+        out.push(format!("native sub-operations: {confirmed} acknowledged, {uncertain} uncertain; the logical action was interrupted. These are request acknowledgements, not app postconditions; do not replay the whole action"));
+    }
     // A long text that stopped part-way: how far it got is the whole point.
     // `remaining_text` itself stays in the structured content.
     if let Some(confirmed) = json.get("characters_confirmed").and_then(Value::as_u64) {
@@ -652,10 +656,16 @@ pub fn failed_batch(json: &Value) -> Option<String> {
             .get("characters_uncertain")
             .and_then(Value::as_u64)
             .unwrap_or_default();
-        out.push(format!(
-            "text: {confirmed} of {total} characters typed, {uncertain} uncertain; read the field, \
-             then type only the rest (remaining_text) with clear=false — never the whole text"
-        ));
+        if json.get("error").and_then(Value::as_str) == Some("replacement_incomplete") {
+            let unsent = json.get("characters_unsent").and_then(Value::as_u64).unwrap_or_default();
+            let clear = json.get("clear_outcome").and_then(Value::as_str).unwrap_or("unknown");
+            out.push(format!("replacement: {confirmed} of {total} characters acknowledged, {uncertain} uncertain, {unsent} unsent; clear={clear}. Inspect the original field and current app/focus; DO NOT repeat the whole replacement"));
+        } else {
+            out.push(format!(
+                "text: {confirmed} of {total} characters typed, {uncertain} uncertain; read the field, \
+                 then type only the rest (remaining_text) with clear=false — never the whole text"
+            ));
+        }
     }
     let list = steps
         .iter()
@@ -733,6 +743,18 @@ fn list_app_changed(json: &Value) -> Option<String> {
     Some(format!("App changed: {detail} swipe was sent. Read the screen again and confirm the target app is in front."))
 }
 
+fn list_delivery_note(json: &Value) -> Option<String> {
+    let confirmed = json
+        .get("native_mutations_confirmed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let uncertain = json
+        .get("native_mutations_uncertain")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (confirmed>0 || uncertain>0).then(||format!("native dispatch: {confirmed} acknowledged, {uncertain} uncertain; do not replay the whole list call"))
+}
+
 /// `phone_collect_list`: the verdict, then one line per collected row.
 pub fn collected_list(json: &Value) -> Option<String> {
     if let Some(refusal) = list_app_changed(json) {
@@ -747,6 +769,9 @@ pub fn collected_list(json: &Value) -> Option<String> {
         text(json, "stop_reason").unwrap_or_else(|| "?".to_string()),
         text(json, "complete").unwrap_or_else(|| "false".to_string()),
     )];
+    if let Some(note) = list_delivery_note(json) {
+        out.push(note);
+    }
     if let Some(app) = text(json, "app") {
         out[0].push_str(&format!(" in {app}"));
     }
@@ -807,6 +832,9 @@ pub fn found_label(json: &Value) -> Option<String> {
         text(json, "swipes").unwrap_or_else(|| "0".to_string()),
         text(json, "error").map_or(String::new(), |e| format!(" error={e}")),
     )];
+    if let Some(note) = list_delivery_note(json) {
+        out.push(note);
+    }
     if let Some(app) = text(json, "app") {
         out[0].push_str(&format!(" in {app}"));
     }
@@ -1263,5 +1291,33 @@ mod tests {
                           "steps": [{"index": 1, "kind": "tap_label", "ok": true}]})),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod value_preview_tests {
+    use super::*;
+    #[test]
+    fn explicit_preview_marker_survives_compact_rows() {
+        let row=serde_json::json!({"kind":"TextField","label":"Draft","value":"PREFIX","value_truncated":true});
+        let rendered=row_line(0,&row,true);assert!(rendered.contains("PREFIX")&&rendered.contains("value_truncated"));
+        let short=serde_json::json!({"kind":"TextField","label":"Draft","value":"short"});assert!(!row_line(0,&short,true).contains("value_truncated"));
+    }
+}
+
+#[cfg(test)]
+mod replacement_progress_tests {
+    use super::*;
+    #[test]
+    fn replacement_partial_batch_keeps_clear_and_unsent_counts_without_append_advice() {
+        let body = serde_json::json!({"ok":false,"error":"replacement_incomplete",
+            "retry_safe":false,"outcome":"partial","failed_step":0,"completed":0,"applied_actions":0,
+            "characters_confirmed":200,"characters_uncertain":0,"characters_unsent":301,
+            "characters_total":501,"clear_outcome":"confirmed","steps":[]});
+        let rendered = failed_batch(&body).unwrap();
+        assert!(rendered.contains("replacement: 200 of 501"), "{rendered}");
+        assert!(rendered.contains("301 unsent") && rendered.contains("clear=confirmed"));
+        assert!(rendered.contains("DO NOT repeat the whole replacement"));
+        assert!(!rendered.contains("remaining_text") && !rendered.contains("clear=false"));
     }
 }

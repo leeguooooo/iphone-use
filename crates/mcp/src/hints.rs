@@ -83,7 +83,6 @@ pub use iu_core::progress::{Action, ProgressGuard, ProgressTracker};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn near_misses_fold_case_space_and_full_width() {

@@ -87,6 +87,7 @@ pub fn app_state(inputs: StateInputs<'_>) -> Arc<AppState> {
         private_until: Arc::new(Mutex::new(None)),
         owner: Arc::new(Mutex::new(None)),
         owner_lease_secs: inputs.cfg.owner_lease_secs,
+        owner_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         runner_bootstrap: crate::http::write_and_bootstrap_runner_agent,
     })
 }
