@@ -9011,15 +9011,16 @@ fn locator_runner_query(locator: &AgentElementLocator) -> Option<(&'static str, 
     (!clauses.is_empty()).then(|| ("predicate string", clauses.join(" AND ")))
 }
 
-fn is_system_capture(value: &serde_json::Value) -> bool {
+fn is_capture_or_volume(value: &serde_json::Value) -> bool {
     value.get("type").and_then(serde_json::Value::as_str) == Some("shortcut")
-        && value.get("name").and_then(serde_json::Value::as_str) == Some("save_screenshot")
+        && value.get("name").and_then(serde_json::Value::as_str)
+            .is_some_and(|name| matches!(name, "save_screenshot" | "volume_up" | "volume_down"))
 }
 
-fn system_capture_private_refusal(state: &AppState, value: &serde_json::Value) -> Option<Response> {
-    (is_system_capture(value) && screen_private_now(&state.private_until)).then(||
+fn system_request_private_refusal(state: &AppState, value: &serde_json::Value) -> Option<Response> {
+    (is_capture_or_volume(value) && screen_private_now(&state.private_until)).then(||
         ControlRefusal::new(StatusCode::LOCKED, "screen_private", false)
-            .with("hint", serde_json::json!("the screen is private; no system screenshot was requested"))
+            .with("hint", serde_json::json!("the screen is private; no capture or volume request was sent"))
             .into_response())
 }
 
@@ -9033,7 +9034,7 @@ async fn runner_control_with_client(
     v: &serde_json::Value,
     detail: &mut Option<serde_json::Value>,
     guard_alert: bool,
-    capture_allowed: Option<&(dyn Fn() -> bool + Sync)>,
+    dispatch_allowed: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> RunnerControlOutcome {
     use std::sync::atomic::Ordering;
     let typ = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -9299,10 +9300,14 @@ async fn runner_control_with_client(
             Some("home") => w.press_home().await,
             Some(name @ ("volume_up" | "volume_down")) => {
                 let button = if name == "volume_up" { crate::runner::VolumeButton::Up } else { crate::runner::VolumeButton::Down };
-                match w.request_volume_button(button).await {
-                    Ok(true) => Ok(()),
-                    Ok(false) => return RunnerControlOutcome::Refused("volume_buttons_unsupported",
+                let scope_changed = || RunnerControlOutcome::Refused("volume_scope_changed",
+                    "privacy, control ownership or request lifetime changed; no volume button request was sent");
+                let Some(allowed) = dispatch_allowed else { return scope_changed(); };
+                match w.request_volume_button(button, allowed).await {
+                    Ok(crate::runner::VolumeButtonOutcome::Requested) => Ok(()),
+                    Ok(crate::runner::VolumeButtonOutcome::Unsupported) => return RunnerControlOutcome::Refused("volume_buttons_unsupported",
                         "volume buttons require a physical device and a capable native Runner; no button request was sent"),
+                    Ok(crate::runner::VolumeButtonOutcome::ScopeChanged) => return scope_changed(),
                     Err(error) => Err(error),
                 }
             },
@@ -9311,7 +9316,7 @@ async fn runner_control_with_client(
             // verify the search field before reporting success.
             Some("spotlight") => w.open_spotlight().await,
             Some("save_screenshot") => {
-                let Some(allowed) = capture_allowed else { return capture_scope_refusal(); };
+                let Some(allowed) = dispatch_allowed else { return capture_scope_refusal(); };
                 match w.request_system_capture(allowed).await {
                     Ok(crate::runner::SystemCaptureOutcome::Requested(receipt)) => {
                         *detail = Some(serde_json::json!({"system_capture": receipt}));
@@ -9995,7 +10000,7 @@ async fn direct_agent_action(
     value: &serde_json::Value,
     detail: &mut Option<serde_json::Value>,
     deadline: tokio::time::Instant,
-    capture_allowed: Option<&(dyn Fn() -> bool + Sync)>,
+    dispatch_allowed: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> RunnerControlOutcome {
     use std::sync::atomic::Ordering;
 
@@ -10177,7 +10182,7 @@ async fn direct_agent_action(
     };
 
     let Some(result) = custom_result else {
-        return runner_control_with_client(w, actionable, value, detail, true, capture_allowed).await;
+        return runner_control_with_client(w, actionable, value, detail, true, dispatch_allowed).await;
     };
     match result {
         Ok(()) => {
@@ -10253,7 +10258,7 @@ async fn direct_control(
             );
         }
     };
-    if let Some(refused) = system_capture_private_refusal(&state, &value) { return refused; }
+    if let Some(refused) = system_request_private_refusal(&state, &value) { return refused; }
     let deadline = match direct_control_deadline(&value, tokio::time::Instant::now()) {
         Ok(deadline) => deadline,
         Err(ControlFreshnessError::Missing | ControlFreshnessError::Invalid) => {
@@ -10337,14 +10342,14 @@ async fn direct_control(
             None
         };
         *recover(dispatch_marker.lock()) = Some(client.last_post());
-        let capture_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < deadline;
+        let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < deadline;
         let outcome = runner_control_with_client(
             &mut client,
             &state.runner_actionable,
             &value,
             &mut detail,
             false,
-            Some(&capture_allowed),
+            Some(&dispatch_allowed),
         )
         .await;
         Some((outcome, recorded_locator))
@@ -11947,10 +11952,10 @@ fn private_batch_refusal_with_steps(index: usize, completed: usize, applied: usi
         "not_sent", applied == 0, steps, None)
 }
 
-fn batch_observes_screen(request: &AgentActionsRequest) -> bool {
+fn batch_needs_private_scope(request: &AgentActionsRequest) -> bool {
     request.observe || request.steps.iter().any(|step|
         matches!(step, AgentActionStep::WaitFor { .. })
-            || matches!(step, AgentActionStep::Action { action, .. } if is_system_capture(action)))
+            || matches!(step, AgentActionStep::Action { action, .. } if is_capture_or_volume(action)))
 }
 
 async fn agent_actions_inner(
@@ -11960,7 +11965,7 @@ async fn agent_actions_inner(
 ) -> Response {
     let generation = state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire);
     let observes_screen = serde_json::from_str::<AgentActionsRequest>(&body).ok()
-        .is_some_and(|request| batch_observes_screen(&request));
+        .is_some_and(|request| batch_needs_private_scope(&request));
     let mut response = agent_actions_generation(State(state.clone()), headers, body, generation).await;
     if observes_screen && !refused_as_unauthenticated(&response) {
         response.extensions_mut().insert(BatchPrivacyFence {
@@ -12013,7 +12018,7 @@ async fn agent_actions_generation(
     if let Err(error) = validate_agent_actions(&request) {
         return agent_actions_invalid(error);
     }
-    let observes_screen = batch_observes_screen(&request);
+    let observes_screen = batch_needs_private_scope(&request);
     if batch_privacy_revoked(&state, observes_screen, privacy_generation) {
         return private_batch_refusal(0, 0, 0);
     }
@@ -12087,9 +12092,9 @@ async fn agent_actions_generation(
     // Control priority first: a health probe must not hold the runner while
     // the focus step (or the action after it) waits for it.
     let _priority = state.begin_runner_control();
-    let capture_only = request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if is_system_capture(action)))
-        && !request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if !is_system_capture(action)));
-    if !capture_only { engage_agent_focus(&state, runner, first_launch.flatten(), true).await; }
+    let system_request_only = request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if is_capture_or_volume(action)))
+        && !request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if !is_capture_or_volume(action)));
+    if !system_request_only { engage_agent_focus(&state, runner, first_launch.flatten(), true).await; }
     // Long text steps add their typing time (zero for text up to one chunk).
     let typing_allowance: std::time::Duration = request
         .steps
@@ -12183,7 +12188,7 @@ async fn agent_actions_generation(
                 // not be replayed automatically.
                 let post_mark = w.last_post();
                 let mut step_detail = None;
-                let capture_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < batch_deadline;
+                let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < batch_deadline;
                 let outcome = match tokio::time::timeout_at(
                     batch_deadline,
                     direct_agent_action(
@@ -12192,7 +12197,7 @@ async fn agent_actions_generation(
                         action,
                         &mut step_detail,
                         batch_deadline,
-                        Some(&capture_allowed),
+                        Some(&dispatch_allowed),
                     ),
                 )
                 .await
@@ -14302,7 +14307,7 @@ async fn agent_input_inner(
     if let Err(response) = reject_invalid_open_url(&value) {
         return response;
     }
-    if let Some(refused) = system_capture_private_refusal(&state, &value) { return refused; }
+    if let Some(refused) = system_request_private_refusal(&state, &value) { return refused; }
     let mut value = value;
     fresh_launch_while_recording(&state, &mut value);
     match resolve_launch_app_action(&state, &mut value).await {
@@ -14340,7 +14345,7 @@ async fn agent_input_inner(
     // the focus step (or the action after it) waits for it.
     let _priority = state.begin_runner_control();
     let focus_started = tokio::time::Instant::now();
-    if !is_system_capture(&value) {
+    if !is_capture_or_volume(&value) {
         engage_agent_focus(&state, runner, crate::focus::launch_bundle(&value), true).await;
     }
     // A long text gets its typing time on top (zero for text up to one chunk),
@@ -14396,19 +14401,19 @@ async fn agent_input_inner(
         {
             return None;
         }
-        if !is_system_capture(&value) {
+        if !is_capture_or_volume(&value) {
             unlock_before_action(&state, &mut client, agent_runner_deadline).await;
         }
         *recover(dispatch_marker.lock()) = Some(client.last_post());
         let mut detail = None;
-        let capture_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < agent_runner_deadline;
+        let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < agent_runner_deadline;
         let outcome = direct_agent_action(
             &mut client,
             &state.runner_actionable,
             &value,
             &mut detail,
             agent_runner_deadline,
-            Some(&capture_allowed),
+            Some(&dispatch_allowed),
         )
         .await;
         Some((client, outcome, detail))
@@ -20742,7 +20747,7 @@ mod tests {
             .split("async fn direct_control(")
             .next()
             .unwrap();
-        assert!(agent.contains("value, detail, true, capture_allowed)"));
+        assert!(agent.contains("value, detail, true, dispatch_allowed)"));
     }
     #[test]
     fn scroll_alert_error_keeps_full_json_and_buttons() {
@@ -25910,7 +25915,7 @@ mod tests {
         block(async {
             let state = readiness_test_state();
             set_screen_private(&state, true, 60);
-            let response = system_capture_private_refusal(&state,
+            let response = system_request_private_refusal(&state,
                 &serde_json::json!({"type":"shortcut","name":"save_screenshot"})).unwrap();
             assert_eq!(response.status(), StatusCode::LOCKED);
             let (_, body) = read_json_response(response).await;
@@ -25918,7 +25923,7 @@ mod tests {
             assert_eq!(body["error"], "screen_private");
             assert_eq!(body["outcome"], "not_sent");
             assert_eq!(body["retry_safe"], true);
-            assert!(system_capture_private_refusal(&state, &serde_json::json!({"type":"shortcut","name":"home"})).is_none());
+            assert!(system_request_private_refusal(&state, &serde_json::json!({"type":"shortcut","name":"home"})).is_none());
         });
     }
 

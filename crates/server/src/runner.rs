@@ -81,6 +81,13 @@ pub enum VolumeButton {
     Down,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum VolumeButtonOutcome {
+    Unsupported,
+    ScopeChanged,
+    Requested,
+}
+
 /// Pre-dispatch refusal or an acknowledged request; post-dispatch uncertainty is an error.
 #[derive(Debug)]
 pub enum SystemCaptureOutcome {
@@ -1547,25 +1554,30 @@ impl RunnerClient {
         Ok(())
     }
 
-    /// False means the Runner refused capability before any button POST.
-    /// True confirms the request, not the audible or displayed volume level.
-    pub async fn request_volume_button(&mut self, button: VolumeButton) -> Result<bool> {
+    /// Confirms only the button request, never the audible volume level.
+    /// Scope is checked again after session setup and signing, before admission.
+    pub async fn request_volume_button(
+        &mut self,
+        button: VolumeButton,
+        allowed: &(dyn Fn() -> bool + Sync),
+    ) -> Result<VolumeButtonOutcome> {
+        if !allowed() { return Ok(VolumeButtonOutcome::ScopeChanged); }
         let sid = self.ensure_session().await?.to_string();
-        if !self.volume_buttons {
-            return Ok(false);
-        }
+        if !self.volume_buttons { return Ok(VolumeButtonOutcome::Unsupported); }
         let name = match button {
             VolumeButton::Up => "volumeUp",
             VolumeButton::Down => "volumeDown",
         };
-        let response = self
+        let (client, request) = self
             .post_req(format!("{}/session/{}/wda/pressButton", self.base, sid))
-            .json(&serde_json::json!({"name": name}))
-            .send_signed(&self.auth)
-            .await
+            .json(&serde_json::json!({"name": name})).build_split();
+        let mut request = request.context("build volume button request")?;
+        crate::runner_token::sign_request(&self.auth, &mut request);
+        if !allowed() { return Ok(VolumeButtonOutcome::ScopeChanged); }
+        let response = crate::timing::execute_timed(client, request).await
             .context("POST /wda/pressButton volume")?;
         ensure_runner_success(response, "POST /wda/pressButton volume").await?;
-        Ok(true)
+        Ok(VolumeButtonOutcome::Requested)
     }
 
     /// Press the Home button on-device (`POST /wda/pressButton` `{name:home}`).
@@ -3901,10 +3913,7 @@ mod tests {
             client.volume_buttons = true;
             client.invalidate_session();
             block(async {
-                assert!(!client
-                    .request_volume_button(VolumeButton::Up)
-                    .await
-                    .unwrap());
+                assert_eq!(client.request_volume_button(VolumeButton::Up, &|| true).await.unwrap(), VolumeButtonOutcome::Unsupported);
             });
             task.join().unwrap();
         }
@@ -3932,14 +3941,8 @@ mod tests {
         });
         let mut client = RunnerClient::new(base).unwrap();
         block(async {
-            assert!(client
-                .request_volume_button(VolumeButton::Up)
-                .await
-                .unwrap());
-            assert!(client
-                .request_volume_button(VolumeButton::Down)
-                .await
-                .unwrap());
+            assert_eq!(client.request_volume_button(VolumeButton::Up, &|| true).await.unwrap(), VolumeButtonOutcome::Requested);
+            assert_eq!(client.request_volume_button(VolumeButton::Down, &|| true).await.unwrap(), VolumeButtonOutcome::Requested);
         });
         task.join().unwrap();
         assert_eq!(*seen.lock().unwrap(), ["volumeUp", "volumeDown"]);
@@ -3956,7 +3959,7 @@ mod tests {
         client.volume_buttons = true;
         block(async {
             assert!(client
-                .request_volume_button(VolumeButton::Up)
+                .request_volume_button(VolumeButton::Up, &|| true)
                 .await
                 .is_err());
         });

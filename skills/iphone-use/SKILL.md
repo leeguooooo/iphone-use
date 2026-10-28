@@ -102,11 +102,13 @@ it off again.
 | Tap a point | `tap` + `x`,`y` | `phone_tap` | `tap` |
 | Type | `text` (into the focused field; up to 20000 chars — on `text_partially_typed` send only `remaining_text` with `clear:false`) | `phone_type` | `type` (`input` names a runtime value) |
 | Key | `key` `return`… | `phone_key` | `key` |
-| Home / Spotlight / physical volume | `shortcut` (`home`, `spotlight`, `volume_up`, `volume_down`) | `phone_shortcut` | `shortcut` |
+| Home / Spotlight / Photos capture / physical volume | `shortcut` (`home`, `spotlight`, `save_screenshot`, `volume_up`, `volume_down`) | `phone_shortcut` | `shortcut` |
 | Scroll | `scroll` `dy` (80 ≈ 15% of a screen, 400 ≈ 75%) | `phone_scroll` (`x`, `y`, `dx`, `dy` required) | `scroll` (`x`, `y`, `dx`, `dy` required in MCP batches) |
 | System alert | `alert` `button` / `action` | `phone_run_steps` step | `alert` |
 | App asks you to log in | `POST /agent/login` (`iphone-use auth login --bwu`) | `phone_login` | — |
 | Switch / slider | `perform` `toggle` / `adjust` | `phone_run_steps` `perform` step (element + snapshot) | — |
+
+`save_screenshot` requests a new image in Photos; its acknowledgement is not independent save verification. Complete an existing system preview without taking another capture.
 
 Volume shortcuts require a physical device and an explicitly capable Runner. Acknowledgement confirms a button request, not the audible volume level. Never repeat an uncertain volume action.
 
