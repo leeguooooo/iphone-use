@@ -20729,7 +20729,7 @@ mod tests {
             .split("async fn direct_control(")
             .next()
             .unwrap();
-        assert!(agent.contains("value, detail, true)"));
+        assert!(agent.contains("value, detail, true, capture_allowed)"));
     }
     #[test]
     fn scroll_alert_error_keeps_full_json_and_buttons() {

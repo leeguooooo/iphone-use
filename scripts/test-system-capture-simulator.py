@@ -7,11 +7,17 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import signal
+import secrets
+import urllib.request
 import sqlite3
 import subprocess
 import time
 import uuid
+
+from mcp_probe_peer import Peer, payload, port, stop
+from runner_auth import authorization
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = 'com.leeguoo.iphone-use.capture-fixture'
@@ -22,16 +28,27 @@ def main():
     parser.add_argument('--xctestrun', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--runtime', required=True)
+    parser.add_argument('--daemon', type=Path)
+    parser.add_argument('--mcp', type=Path)
     args = parser.parse_args()
+    if bool(args.daemon) != bool(args.mcp): parser.error('--daemon and --mcp must be supplied together')
+    daemon_binary = args.daemon.resolve(strict=True) if args.daemon else None
+    mcp_binary = args.mcp.resolve(strict=True) if args.mcp else None
     recipe = args.xctestrun.resolve(strict=True)
     out = args.out.resolve()
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     run_id = str(uuid.uuid4()).upper()
-    env = {k: v for k, v in os.environ.items() if not k.startswith(('IPU_', 'TEST_RUNNER_IPU_', 'IPHONE_USE_', 'SIMCTL_CHILD_'))}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('IPU_', 'TEST_RUNNER_IPU_', 'IPHONE_USE_', 'PHONE_REMOTE_', 'SIMCTL_CHILD_'))}
     env['TEST_RUNNER_IPU_CAPTURE_PROBE_RUN_ID'] = run_id
     result = {'run_id': run_id, 'scope': 'owned Simulator only; native request plus independent Photos/128-cell proof; not physical evidence',
               'passed': False, 'capture_verified': False, 'screenshot_category_verified': False, 'cleanup_errors': [], 'recipe_sha256': hashlib.sha256(recipe.read_bytes()).hexdigest()}
     simulator = process = fixture_documents = host_documents = host_bundle = media = baseline = None
+    daemon_process = peer = None
+    probe_token = secrets.token_hex(32)
+    result['capture_path'] = 'mcp-daemon-native' if mcp_binary else 'native-direct-probe'
+    if mcp_binary:
+        result['daemon_binary_sha256'] = hashlib.sha256(daemon_binary.read_bytes()).hexdigest()
+        result['mcp_binary_sha256'] = hashlib.sha256(mcp_binary.read_bytes()).hexdigest()
 
     def command(*argv, timeout=45):
         completed = subprocess.run([str(v) for v in argv], env=env, capture_output=True, text=True, timeout=timeout)
@@ -115,16 +132,105 @@ def main():
             return {p for p in dcim.rglob('*') if p.is_file() and p.suffix.lower() in ['.png', '.jpg', '.jpeg', '.heic']}
         baseline = image_paths()
         result['baseline_dcim_images'] = len(baseline)
-        result['phase'] = 'one_capture_test_started'
-        with (out / 'xcode.log').open('wb') as log:
-            process = subprocess.Popen(['xcodebuild', 'test-without-building', '-xctestrun', str(recipe),
-                '-destination', 'platform=iOS Simulator,id=' + simulator,
-                '-only-testing:IPhoneUseRunnerUITests/RunnerTests/testSystemScreenshotProbe',
-                '-parallel-testing-enabled', 'NO'], env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            result['xcode_exit'] = process.wait(timeout=180)
-        host_documents = Path(command('xcrun', 'simctl', 'get_app_container', simulator, host_bundle, 'data')) / 'Documents'
-        dispatch = receipt(host_documents, 'capture-dispatch.json')
-        assert dispatch.get('invoked') is True and dispatch.get('acknowledged') is True and dispatch.get('saved_verified') is False, 'dispatch not acknowledged; never repeat the capture'
+        if not mcp_binary:
+            result['phase'] = 'one_capture_test_started'
+            with (out / 'xcode.log').open('wb') as log:
+                process = subprocess.Popen(['xcodebuild', 'test-without-building', '-xctestrun', str(recipe),
+                    '-destination', 'platform=iOS Simulator,id=' + simulator,
+                    '-only-testing:IPhoneUseRunnerUITests/RunnerTests/testSystemScreenshotProbe',
+                    '-parallel-testing-enabled', 'NO'], env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                result['xcode_exit'] = process.wait(timeout=180)
+            host_documents = Path(command('xcrun', 'simctl', 'get_app_container', simulator, host_bundle, 'data')) / 'Documents'
+            dispatch = receipt(host_documents, 'capture-dispatch.json')
+            assert dispatch.get('invoked') is True and dispatch.get('acknowledged') is True and dispatch.get('saved_verified') is False, 'dispatch not acknowledged; never repeat the capture'
+        else:
+            runner_port = port()
+            env.update(TEST_RUNNER_IPU_RUNNER_PORT=str(runner_port), TEST_RUNNER_IPU_RUNNER_MJPEG_PORT='0',
+                       TEST_RUNNER_IPU_RUNNER_TOKEN=probe_token, TEST_RUNNER_IPU_DAEMON_PORT='0')
+            result['phase'] = 'owned_runner_starting'
+            with (out / 'xcode.log').open('wb') as log:
+                process = subprocess.Popen(['xcodebuild', 'test-without-building', '-xctestrun', str(recipe),
+                    '-destination', 'platform=iOS Simulator,id=' + simulator,
+                    '-only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe', '-parallel-testing-enabled', 'NO'],
+                    env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            def native(path, body=None):
+                raw = None if body is None else json.dumps(body).encode()
+                method = 'GET' if body is None else 'POST'
+                request = urllib.request.Request(f'http://127.0.0.1:{runner_port}' + path, data=raw,
+                    headers={'Content-Type': 'application/json', 'Authorization': authorization(probe_token, method, path, raw or b'')})
+                with opener.open(request, timeout=5) as response: return json.load(response)['value']
+            until = time.monotonic() + 120
+            while True:
+                if process.poll() is not None: raise RuntimeError('owned Runner stopped before readiness')
+                try:
+                    if native('/status').get('ready') is True: break
+                except (OSError, ValueError): pass
+                if time.monotonic() >= until: raise RuntimeError('owned Runner readiness deadline')
+                time.sleep(.2)
+            result['runner_ready'] = True
+            session = native('/session', {})
+            assert session['capabilities'].get('ipu:systemCaptureRequest') is True, 'Native capture capability missing'
+            prefix = '/session/' + session['sessionId']
+            native(prefix + '/wda/apps/launch', {'bundleId': BUNDLE})
+            active = native(prefix + '/wda/activeAppInfo')
+            assert active['bundleId'] == BUNDLE and active['pid'] == ready['pid'], 'wrong foreground fixture'
+            state = out / 'daemon-state'; state.mkdir(mode=0o700)
+            token_file = state / 'runner-token'; token_file.write_text(probe_token); token_file.chmod(0o600)
+            daemon_port = port()
+            child_env = dict(env, IPHONE_USE_HOST='127.0.0.1', IPHONE_USE_PORT=str(daemon_port),
+                IPHONE_USE_INSTANCE='cap-' + run_id[:8].lower(), IPHONE_USE_STATE_DIR=str(state),
+                IPHONE_USE_SIMULATOR=simulator, IPHONE_USE_RUNNER_MANAGED='0',
+                IPHONE_USE_RUNNER_URL=f'http://127.0.0.1:{runner_port}',
+                IPHONE_USE_RUNNER_MJPEG_URL=f'http://127.0.0.1:{runner_port}', IPU_RUNNER_TOKEN_FILE=str(token_file),
+                IPHONE_USE_AGENT_TOKEN=probe_token, IPHONE_USE_PASSWORD='fixture-' + probe_token,
+                IPHONE_USE_AUTO_FOCUS='0', IPHONE_USE_IDLE_RELEASE_SECS='0', IPHONE_USE_FLOWS_NO_AUTO_UPDATE='1',
+                IPHONE_USE_NO_UPDATE_CHECK='1')
+            with (out / 'daemon.log').open('w') as log:
+                daemon_process = subprocess.Popen([str(daemon_binary), 'serve'], env=child_env,
+                    stdout=log, stderr=log, start_new_session=True)
+            def daemon_status():
+                request = urllib.request.Request(f'http://127.0.0.1:{daemon_port}/agent/status',
+                    headers={'Authorization': 'Bearer ' + probe_token})
+                with opener.open(request, timeout=5) as response: return json.load(response)
+            until = time.monotonic() + 60
+            while True:
+                if daemon_process.poll() is not None: raise RuntimeError('owned daemon stopped before readiness')
+                try:
+                    status = daemon_status()
+                    assert status.get('target') == 'simulator' and status.get('udid') == simulator, 'wrong daemon target'
+                    if status.get('drivable') is True: break
+                except (OSError, ValueError): pass
+                if time.monotonic() >= until: raise RuntimeError('owned daemon readiness deadline')
+                time.sleep(.2)
+            peer_env = dict(child_env, IPHONE_USE_URL=f'http://127.0.0.1:{daemon_port}', IPHONE_USE_TOKEN=probe_token,
+                IPHONE_USE_OWNER='capture-' + run_id[:8].lower(), IPHONE_USE_MCP_PREWARM='0')
+            peer = Peer([str(mcp_binary)], peer_env, out / 'mcp.log')
+            _, _, routed = payload(peer.request('tools/call', {'name': 'phone_status', 'arguments': {}}, timeout=15))
+            assert routed.get('target') == 'simulator' and routed.get('udid') == simulator and routed.get('drivable') is True, 'MCP target mismatch'
+            held, _, _ = payload(peer.request('tools/call', {'name': 'phone_hold', 'arguments': {'secs': 60, 'private': True}}, timeout=15))
+            assert held.get('isError') is not True and daemon_status().get('screen_private_secs', 0) > 0
+            refused, _, refusal = payload(peer.request('tools/call', {'name': 'phone_shortcut',
+                'arguments': {'name': 'save_screenshot', 'observe': False}}, timeout=20))
+            (out / 'capture-private-refusal.json').write_text(json.dumps(refusal, indent=2) + '\n')
+            assert refused.get('isError') is True and refusal.get('outcome') == 'not_sent' and refusal.get('retry_safe') is True
+            assert image_paths() == baseline, 'capture occurred during private hold'
+            cleared, _, _ = payload(peer.request('tools/call', {'name': 'phone_hold', 'arguments': {'secs': 0}}, timeout=15))
+            assert cleared.get('isError') is not True and daemon_status().get('screen_private_secs') == 0
+            # Exactly one capture request after the prior, acknowledged not-sent
+            # refusal. A timeout leaves the same Peer handle pending; no retry.
+            (out / 'mcp-capture-attempt.json').write_text(json.dumps({'run_id': run_id}) + '\n')
+            result['phase'] = 'mcp_capture_requested_once'
+            reply = peer.request('tools/call', {'name': 'phone_shortcut',
+                'arguments': {'name': 'save_screenshot', 'observe': False}}, timeout=25)
+            (out / 'capture-mcp-reply.json').write_text(json.dumps(reply, indent=2) + '\n')
+            tool, message, body = payload(reply)
+            assert tool.get('isError') is not True and body.get('ok') is True, 'MCP did not confirm the request'
+            capture = body.get('system_capture', {})
+            assert capture.get('requested') is True and capture.get('saved_verified') is False
+            assert 'not independently verified' in message, 'text-only clients lost the save boundary'
+            result['private_hold_refused_before_capture'] = True
+            result['mcp_request_acknowledged'] = True
         deadline = time.monotonic() + 30
         registered = None
         original_path = None
@@ -164,11 +270,19 @@ def main():
         assert photo['run_id'] == run_id and photo['verified'] is True, 'original Photos bytes do not match this run marker'
         assert photo['matched_cells'] == photo['marker_cells'] == 128 and photo['negative_matched_cells'] < 128
         assert hashlib.sha256(original).hexdigest() == photo['photo_sha256'], 'asset bytes hash mismatch'
-        assert result['xcode_exit'] == 0, 'XCTest failed despite retained capture receipts'
+        assert result.get('runner_ready') is True if mcp_binary else result.get('xcode_exit') == 0, 'Runner/XCTest did not complete its required stage'
         result.update(capture_verified=True, phase='new_photos_asset_matches_fixture', photo_sha256=photo['photo_sha256'])
     except Exception as error:
         result['error'] = f'{type(error).__name__}: {error}'
     finally:
+        if peer:
+            try: peer.close()
+            except Exception as error: result['cleanup_errors'].append(f'MCP close: {error}')
+            try: stop(peer.process)
+            except Exception as error: result['cleanup_errors'].append(f'owned MCP: {error}')
+        if daemon_process:
+            try: stop(daemon_process)
+            except Exception as error: result['cleanup_errors'].append(f'owned daemon: {error}')
         try: stop_child()
         except Exception as error: result['cleanup_errors'].append(f'owned XCTest process: {error}')
         # A timed-out xcodebuild can already have dispatched the one capture.
@@ -195,6 +309,15 @@ def main():
                         if (directory / name).exists(): receipt(directory, name)
                     except Exception as error:
                         result['cleanup_errors'].append(f'receipt {name}: {error}')
+        if mcp_binary and (out / 'xcode.log').exists():
+            lines = (out / 'xcode.log').read_text(errors='replace').splitlines()
+            dispatches = {line for line in lines if re.search(r'ipu-runner: POST /(?:session/[^/\s]+/)?ipu/system-capture ->', line)}
+            result['native_capture_posts_logged'] = len(dispatches)
+            if result['capture_verified'] and len(dispatches) != 1:
+                result['cleanup_errors'].append('expected exactly one Native capture POST across privacy refusal and successful request')
+        for name in ['xcode.log', 'daemon.log', 'mcp.log']:
+            log = out / name
+            if log.exists(): log.write_text(log.read_text(errors='replace').replace(probe_token, '[redacted fixture token]'))
         # Preserve evidence before potentially slow CoreSimulator cleanup.
         (out / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
         if simulator:
