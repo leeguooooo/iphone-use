@@ -269,22 +269,24 @@ def main():
                 # Completing the already captured image is a different UI
                 # action. Never request another capture when save is pending.
                 for attempt in range(2):
-                    preview_deadline = time.monotonic() + 10
+                    preview_deadline = time.monotonic() + 40
                     recognized = False
                     reads = 0
-                    while time.monotonic() < preview_deadline and not (image_paths() - baseline):
+                    while reads < 3 and time.monotonic() < preview_deadline and not (image_paths() - baseline):
                         try:
-                            observed = peer.request('tools/call', {'name': 'phone_elements', 'arguments': {}}, timeout=20)
+                            observed = peer.request('tools/call', {'name': 'phone_elements', 'arguments': {}},
+                                timeout=min(20, max(.01, preview_deadline - time.monotonic())))
                         except TimeoutError:
                             # A cold system preview can finish its AX snapshot
                             # after the first observation window. Consume that
                             # same read's response; never issue a replacement.
-                            observed = peer.wait(10)
+                            observed = peer.wait(min(10, max(.01, preview_deadline - time.monotonic())))
                         (out / f'preview-observation-{attempt}-{reads}.json').write_text(json.dumps(observed, indent=2) + '\n')
                         reads += 1
                         observation, description, _ = payload(observed)
                         assert observation.get('isError') is not True, 'preview observation failed'
                         active = native(prefix + '/wda/activeAppInfo')
+                        (out / f'preview-active-{attempt}-{reads - 1}.json').write_text(json.dumps(active, indent=2) + '\n')
                         recognized = active.get('bundleId') == 'com.apple.springboard' and '[NavigationBar] "SSSScreenshotsView"' in description
                         if recognized: break
                         time.sleep(.2)  # Read-only observation of one pending preview, no new capture.
