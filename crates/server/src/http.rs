@@ -25930,7 +25930,7 @@ mod tests {
                 crate::runner::RunnerClient::new(runner.base()).unwrap())));
             let mut headers = HeaderMap::new();
             headers.insert("x-phone-control", HeaderValue::from_static("1"));
-            let response = direct_control(State(state), headers, serde_json::json!({"type":"shortcut","name":"save_screenshot"}).to_string()).await;
+            let response = direct_control(State(state), headers, serde_json::json!({"type":"shortcut","name":"save_screenshot","ttl_ms":2500}).to_string()).await;
             assert_eq!(response.status(), StatusCode::OK);
             let (_, value) = read_json_response(response).await;
             let value = value.unwrap();

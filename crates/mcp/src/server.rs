@@ -3128,6 +3128,13 @@ fn shape_structured(mut result: CallToolResult, mode: StructuredMode) -> CallToo
             }
             let mut slim = serde_json::Map::new();
             for (key, value) in full {
+                if key == "system_capture" {
+                    let receipt: serde_json::Map<String, serde_json::Value> = ["requested", "saved_verified"]
+                        .into_iter().filter_map(|name| value.get(name).filter(|field| field.is_boolean())
+                            .map(|field| (name.to_string(), field.clone()))).collect();
+                    if !receipt.is_empty() { slim.insert(key.clone(), serde_json::Value::Object(receipt)); }
+                    continue;
+                }
                 let keep = match value {
                     serde_json::Value::String(s) => s.len() <= SLIM_STRING_LIMIT,
                     serde_json::Value::Array(_) | serde_json::Value::Object(_) => false,
@@ -4410,6 +4417,19 @@ mod tests {
         assert_ne!(result.is_error, Some(true));
         assert!(text_of(&result).contains("not independently verified"));
         assert_eq!(result.structured_content.unwrap()["system_capture"]["saved_verified"], false);
+    }
+
+    #[test]
+    fn system_capture_receipt_survives_default_structured_slim() {
+        let (url, task) = scripted_daemon("200 OK", br#"{"ok":true,"system_capture":{"requested":true,"saved_verified":false,"image":"PRIVATE","asset":"PRIVATE"}}"#.to_vec());
+        let result = block(handler_for(&url).phone_shortcut(Parameters(ShortcutParams {
+            name: "save_screenshot".into(), observe: Some(false),
+        })));
+        task.join().unwrap();
+        let shaped = shape_structured(result, StructuredMode::Slim);
+        let structured = shaped.structured_content.unwrap();
+        assert_eq!(structured["system_capture"], serde_json::json!({"requested":true,"saved_verified":false}));
+        assert!(!structured.to_string().contains("PRIVATE"));
     }
 
     #[test]
