@@ -13,6 +13,7 @@ import secrets
 import urllib.request
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 
@@ -30,8 +31,10 @@ def main():
     parser.add_argument('--runtime', required=True)
     parser.add_argument('--daemon', type=Path)
     parser.add_argument('--mcp', type=Path)
+    parser.add_argument('--debug-preview', action='store_true', help='local TTY only: inspect/save the existing preview without another capture')
     args = parser.parse_args()
     if bool(args.daemon) != bool(args.mcp): parser.error('--daemon and --mcp must be supplied together')
+    if args.debug_preview and (not args.mcp or not sys.stdin.isatty()): parser.error('--debug-preview requires MCP mode and a local interactive terminal')
     daemon_binary = args.daemon.resolve(strict=True) if args.daemon else None
     mcp_binary = args.mcp.resolve(strict=True) if args.mcp else None
     recipe = args.xctestrun.resolve(strict=True)
@@ -234,6 +237,9 @@ def main():
             assert 'not independently verified' in message, 'text-only clients lost the save boundary'
             result['private_hold_refused_before_capture'] = True
             result['mcp_request_acknowledged'] = True
+            if args.debug_preview:
+                print('Existing screenshot only: inspect or save its preview; never call save_screenshot again.', flush=True)
+                breakpoint()
         deadline = time.monotonic() + 30
         registered = None
         original_path = None
