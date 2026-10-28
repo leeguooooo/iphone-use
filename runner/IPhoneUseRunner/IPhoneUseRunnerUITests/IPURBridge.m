@@ -1654,6 +1654,36 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
   return @{@"secs": @(secs), @"never": @(never)};
 }
 
++ (NSDictionary *)requestSystemScreenshot
+{
+  BOOL invoked = NO;
+  @try {
+    Class eventClass = NSClassFromString(@"XCDeviceEvent");
+    SEL make = NSSelectorFromString(@"deviceEventWithPage:usage:duration:");
+    SEL perform = NSSelectorFromString(@"performDeviceEvent:error:");
+    NSMethodSignature *factory = [eventClass methodSignatureForSelector:make];
+    NSMethodSignature *dispatch = [XCUIDevice.sharedDevice methodSignatureForSelector:perform];
+    if (factory == nil || factory.numberOfArguments != 5 || factory.methodReturnType[0] != '@' ||
+        [factory getArgumentTypeAtIndex:2][0] != 'I' || [factory getArgumentTypeAtIndex:3][0] != 'I' ||
+        [factory getArgumentTypeAtIndex:4][0] != 'd' || dispatch == nil || dispatch.numberOfArguments != 4 ||
+        (dispatch.methodReturnType[0] != 'B' && dispatch.methodReturnType[0] != 'c') ||
+        [dispatch getArgumentTypeAtIndex:2][0] != '@' || strcmp([dispatch getArgumentTypeAtIndex:3],"^@") != 0)
+      return @{@"invoked":@NO,@"acknowledged":@NO,@"reason":@"system capture event ABI unavailable"};
+    // Consumer-page Snapshot requests a system capture. ACK does not prove an
+    // image was saved; the caller must verify the new Photos asset separately.
+    id event = ((id (*)(id,SEL,unsigned int,unsigned int,double))objc_msgSend)(eventClass,make,0x0C,0x65,0.005);
+    if (event == nil) return @{@"invoked":@NO,@"acknowledged":@NO,@"reason":@"system capture event unavailable"};
+    NSError *error = nil;
+    invoked = YES;
+    BOOL ok = ((BOOL (*)(id,SEL,id,NSError **))objc_msgSend)(XCUIDevice.sharedDevice,perform,event,&error);
+    return @{@"invoked":@YES,@"acknowledged":(ok && error == nil ? @YES : @NO),
+      @"saved_verified":@NO,@"error_domain":error.domain ?: @"",@"error_code":@(error.code)};
+  } @catch (NSException *exception) {
+    return @{@"invoked":(invoked ? @YES : @NO),@"acknowledged":@NO,
+      @"saved_verified":@NO,@"reason":@"system capture exception",@"exception":exception.name};
+  }
+}
+
 + (nullable NSString *)resetIdleTimer
 {
   // Measured on an iPhone 13 / iOS 27 with Auto-Lock at 30 s: F13 every 10 s kept the phone

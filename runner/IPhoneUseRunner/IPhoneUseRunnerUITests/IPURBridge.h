@@ -29,6 +29,7 @@ FOUNDATION_EXPORT NSString *const IPURTreeExtensionCallsKey; // NSNumber: re-roo
 FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 
 @interface IPURBridge : NSObject
++ (NSDictionary *)requestSystemScreenshot NS_SWIFT_NAME(requestSystemScreenshot());
 
 /// Turns every XCTest quiescence / idle wait into a no-op for the whole process
 /// (XCUIApplicationProcess waitForQuiescence…, XCAXClient_iOS
