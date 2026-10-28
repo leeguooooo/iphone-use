@@ -64,11 +64,15 @@ fn regional_indicator(c: char) -> bool {
 
 /// Characters that attach to what FOLLOWS them (grapheme "Prepend"), plus the
 /// joiners: nothing may be cut right after one.
+/// Prepend ranges follow Unicode 17.0.0 GraphemeBreakProperty.txt:
+/// https://www.unicode.org/Public/17.0.0/ucd/auxiliary/GraphemeBreakProperty.txt
 fn binds_forward(c: char) -> bool {
     matches!(c as u32,
         0x200C | 0x200D            // ZWNJ, ZWJ
         | 0x0600..=0x0605 | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2 | 0x0D4E
         | 0x110BD | 0x110CD | 0x111C2..=0x111C3
+        | 0x113D1 | 0x1193F | 0x11941
+        | 0x11A84..=0x11A89 | 0x11D46 | 0x11F02
         | 0x1100..=0x115F | 0xA960..=0xA97F // Hangul leading jamo
     )
 }
