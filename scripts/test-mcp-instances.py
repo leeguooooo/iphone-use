@@ -159,6 +159,16 @@ try:
                     body = json.loads(request[4])
                     assert body['type'] == 'shortcut' and body['name'] == name
                     assert request[5], 'button mutation must claim the selected instance control'
+                    response = call('phone_run_steps', instance=instance,
+                        steps=[{'kind': 'shortcut', 'name': name}], observe=False)
+                    assert not response.get('error'), response
+                    request = seen[-1]
+                    assert request[0] == marker and request[3] == 'Bearer ' + token
+                    assert request[1] == 'POST' and urlsplit(request[2]).path == '/agent/actions'
+                    body = json.loads(request[4])
+                    assert body['steps'][0]['action']['name'] == name
+                    assert request[5], 'batch must claim only the selected instance control'
+
             # Missing, malformed and symlinked configuration must not touch any daemon.
             count = len(seen)
             for instance in ['missing', '../i13', 'runner']:
