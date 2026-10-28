@@ -101,11 +101,13 @@ it off again.
 | Tap a point | `tap` + `x`,`y` | `phone_tap` | `tap` |
 | Type | `text` (into the focused field; up to 20000 chars — on `text_partially_typed` send only `remaining_text` with `clear:false`) | `phone_type` | `type` (`input` names a runtime value) |
 | Key | `key` `return`… | `phone_key` | `key` |
-| Home / Spotlight | `shortcut` | `phone_shortcut` | `shortcut` |
+| Home / Spotlight / physical volume | `shortcut` (`home`, `spotlight`, `volume_up`, `volume_down`) | `phone_shortcut` | `shortcut` |
 | Scroll | `scroll` `dy` (80 ≈ 15% of a screen, 400 ≈ 75%) | `phone_scroll` (`x`, `y`, `dx`, `dy` required) | `scroll` (`x`, `y`, `dx`, `dy` required in MCP batches) |
 | System alert | `alert` `button` / `action` | `phone_run_steps` step | `alert` |
 | App asks you to log in | `POST /agent/login` (`iphone-use auth login --bwu`) | `phone_login` | — |
 | Switch / slider | `perform` `toggle` / `adjust` | `phone_run_steps` `perform` step (element + snapshot) | — |
+
+Volume shortcuts require a physical device and an explicitly capable Runner. Acknowledgement confirms a button request, not the audible volume level. Never repeat an uncertain volume action.
 
 For a drag that needs an edge hover, a `drag` step can use
 `points: [{x, y, dwell_ms}, …]` instead of `x1/y1/x2/y2`. Use 2–16 points from

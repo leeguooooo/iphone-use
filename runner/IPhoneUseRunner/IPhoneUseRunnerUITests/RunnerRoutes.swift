@@ -132,11 +132,17 @@ extension RunnerTests {
   // MARK: - Session
 
   private func capabilities() -> [String: Any] {
-    [
+    #if targetEnvironment(simulator)
+    let volumeButtons = false
+    #else
+    let volumeButtons = true
+    #endif
+    return [
       "device": UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone",
       "sdkVersion": Self.systemVersion,
       "ipu:timedDragPath": true,
       "ipu:valueRead": true,
+      "ipu:volumeButtons": volumeButtons,
       "browserName": NSNull(),
       "CFBundleIdentifier": NSNull(),
     ]

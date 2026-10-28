@@ -61,6 +61,17 @@ done
 [ "$(printf '%s' "$status" | json 'd.get("drivable")')" = "True" ] || bad "not drivable: $status"
 ok_t "the daemon drives the simulator (target simulator, drivable)"
 
+# A real Simulator session must explicitly refuse physical volume buttons.
+for button in volume_up volume_down; do
+    body="$(curl -sS -m 30 "${H[@]}" -X POST "$B/agent/input" \
+        -d "{\"type\":\"shortcut\",\"name\":\"$button\",\"observe\":false}")"
+    [ "$(printf '%s' "$body" | json 'd.get("error")')" = "volume_buttons_unsupported" ] || bad "volume refusal: $body"
+    [ "$(printf '%s' "$body" | json 'd.get("outcome")')" = "not_sent" ] || bad "volume outcome: $body"
+    [ "$(printf '%s' "$body" | json 'd.get("retry_safe")')" = "True" ] || bad "volume retry boundary: $body"
+done
+ok_t "physical volume shortcuts refuse before dispatch on Simulator"
+
+
 body="$(curl -fsS -m 60 "$B/agent/elements")"
 [ "$(printf '%s' "$body" | json 'len(d.get("elements") or [])')" -gt 0 ] || bad "no elements: ${body:0:300}"
 ok_t "the screen reads as elements"

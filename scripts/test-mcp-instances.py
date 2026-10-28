@@ -105,8 +105,8 @@ try:
                     assert chunk, 'MCP exited before response'
                     buffer += chunk
             raise AssertionError('bounded MCP request did not return')
-        def call(name, **args):
-            return rpc('tools/call', {'name': name, 'arguments': args})
+        def call(tool_name, **args):
+            return rpc('tools/call', {'name': tool_name, 'arguments': args})
         try:
             assert 'result' in rpc('initialize', {'protocolVersion': '2025-03-26',
                 'capabilities': {}, 'clientInfo': {'name': 'instance-routing-test', 'version': '1'}})
@@ -149,6 +149,16 @@ try:
                 requests = [r for r in seen if r[0] == marker and r[1] == 'POST']
                 assert requests
                 assert parse_qs(urlsplit(requests[-1][2]).query).get('since') == [marker]
+            for instance, marker, token in [('i13','B','token-B'),('default','A','token-A')]:
+                for name in ['volume_up', 'volume_down']:
+                    response = call('phone_shortcut', instance=instance, name=name, observe=False)
+                    assert not response.get('error'), response
+                    request = seen[-1]
+                    assert request[0] == marker and request[3] == 'Bearer ' + token
+                    assert request[1] == 'POST' and urlsplit(request[2]).path == '/agent/input'
+                    body = json.loads(request[4])
+                    assert body['type'] == 'shortcut' and body['name'] == name
+                    assert request[5], 'button mutation must claim the selected instance control'
             # Missing, malformed and symlinked configuration must not touch any daemon.
             count = len(seen)
             for instance in ['missing', '../i13', 'runner']:

@@ -76,6 +76,11 @@ fn bounded_read_query() -> String {
     )
 }
 
+pub enum VolumeButton {
+    Up,
+    Down,
+}
+
 /// A runner endpoint plus a lazily-created session id.
 pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
@@ -100,6 +105,7 @@ pub struct RunnerClient {
     /// runner). Asked again whenever a new session starts (a new runner).
     device_settle: Option<bool>,
     value_read: bool,
+    volume_buttons: bool,
     /// The last tree read and when: snapshot-bound actions reuse it instead
     /// of reading the whole tree again (see [`Self::recent_tree`]).
     last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
@@ -346,6 +352,7 @@ impl RunnerClient {
             no_alert_at: None,
             device_settle: None,
             value_read: false,
+            volume_buttons: false,
             last_tree: None,
             lite_source: false,
             probe: ProbeMemory::default(),
@@ -703,6 +710,8 @@ impl RunnerClient {
             self.no_alert_at = None;
             self.value_read = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.volume_buttons = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:volumeButtons").and_then(serde_json::Value::as_bool)) == Some(true);
             self.device_settle = None;
             {
                 let sid = self.session.as_deref().unwrap().to_string();
@@ -1495,6 +1504,27 @@ impl RunnerClient {
             .context("POST /actions (scroll)")?;
         ensure_runner_success(response, "POST /actions (scroll)").await?;
         Ok(())
+    }
+
+    /// False means the Runner refused capability before any button POST.
+    /// True confirms the request, not the audible or displayed volume level.
+    pub async fn request_volume_button(&mut self, button: VolumeButton) -> Result<bool> {
+        let sid = self.ensure_session().await?.to_string();
+        if !self.volume_buttons {
+            return Ok(false);
+        }
+        let name = match button {
+            VolumeButton::Up => "volumeUp",
+            VolumeButton::Down => "volumeDown",
+        };
+        let response = self
+            .post_req(format!("{}/session/{}/wda/pressButton", self.base, sid))
+            .json(&serde_json::json!({"name": name}))
+            .send_signed(&self.auth)
+            .await
+            .context("POST /wda/pressButton volume")?;
+        ensure_runner_success(response, "POST /wda/pressButton volume").await?;
+        Ok(true)
     }
 
     /// Press the Home button on-device (`POST /wda/pressButton` `{name:home}`).
@@ -2483,6 +2513,7 @@ impl RunnerClient {
     pub fn invalidate_session(&mut self) {
         self.session = None;
         self.value_read = false;
+        self.volume_buttons = false;
         self.window = None;
         self.no_alert_at = None;
         self.last_tree = None;
@@ -3802,6 +3833,92 @@ mod tests {
         assert_eq!(bounded_move_duration_ms(450), 450);
         assert_eq!(bounded_move_duration_ms(2_000), 2_000);
         assert_eq!(bounded_move_duration_ms(u64::MAX), 2_000);
+    }
+
+    #[test]
+    fn volume_buttons_require_an_explicit_current_session_capability() {
+        for capabilities in [
+            serde_json::json!({}),
+            serde_json::json!({"ipu:volumeButtons": false}),
+            serde_json::json!({"ipu:volumeButtons": "true"}),
+        ] {
+            let (base, task) = mock_runner(2, move |request| {
+                if request.starts_with("POST /session ") {
+                    serde_json::json!({"value":{"sessionId":"S","capabilities":capabilities}})
+                        .to_string()
+                } else {
+                    assert!(
+                        request.contains("/appium/settings "),
+                        "unsupported button was dispatched: {request}"
+                    );
+                    r#"{"value":null}"#.into()
+                }
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            // A previously capable session must not leak into a new one.
+            client.volume_buttons = true;
+            client.invalidate_session();
+            block(async {
+                assert!(!client
+                    .request_volume_button(VolumeButton::Up)
+                    .await
+                    .unwrap());
+            });
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn volume_buttons_send_exactly_one_native_request_each() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = seen.clone();
+        let (base, task) = mock_runner(4, move |request| {
+            if request.starts_with("POST /session ") {
+                return r#"{"value":{"sessionId":"S","capabilities":{"ipu:volumeButtons":true}}}"#
+                    .into();
+            }
+            if !request.contains("/appium/settings ") {
+                assert!(request.starts_with("POST /session/S/wda/pressButton "));
+                let body: serde_json::Value =
+                    serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(body["name"].as_str().unwrap().to_string());
+            }
+            r#"{"value":null}"#.into()
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        block(async {
+            assert!(client
+                .request_volume_button(VolumeButton::Up)
+                .await
+                .unwrap());
+            assert!(client
+                .request_volume_button(VolumeButton::Down)
+                .await
+                .unwrap());
+        });
+        task.join().unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["volumeUp", "volumeDown"]);
+    }
+
+    #[test]
+    fn volume_button_lost_ack_does_not_trigger_a_fallback_or_replay() {
+        let (base, task) = mock_runner(1, |request| {
+            assert!(request.starts_with("POST /session/S/wda/pressButton "));
+            "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\n".into()
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        client.session = Some("S".into());
+        client.volume_buttons = true;
+        block(async {
+            assert!(client
+                .request_volume_button(VolumeButton::Up)
+                .await
+                .is_err());
+        });
+        task.join().unwrap();
     }
 
     fn mock_runner(

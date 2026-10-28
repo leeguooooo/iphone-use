@@ -9280,6 +9280,15 @@ async fn runner_control_with_client(
         "back" => w.back().await,
         "shortcut" => match v.get("name").and_then(|n| n.as_str()) {
             Some("home") => w.press_home().await,
+            Some(name @ ("volume_up" | "volume_down")) => {
+                let button = if name == "volume_up" { crate::runner::VolumeButton::Up } else { crate::runner::VolumeButton::Down };
+                match w.request_volume_button(button).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => return RunnerControlOutcome::Refused("volume_buttons_unsupported",
+                        "volume buttons require a physical device and a capable native Runner; no button request was sent"),
+                    Err(error) => Err(error),
+                }
+            },
             // Spotlight's Search pill acknowledges coordinate taps without
             // always opening. Resolve and click its accessibility element, then
             // verify the search field before reporting success.
@@ -11025,9 +11034,9 @@ fn validate_agent_action_value(
             if !action
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|name| matches!(name, "home" | "spotlight"))
+                .is_some_and(|name| matches!(name, "home" | "spotlight" | "volume_up" | "volume_down"))
             {
-                return invalid("shortcut must be home or spotlight");
+                return invalid("shortcut must be home, spotlight, volume_up or volume_down");
             }
         }
         "drag" if action.contains_key("points") => {

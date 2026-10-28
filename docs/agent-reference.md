@@ -342,7 +342,7 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"set_value","element":5,"snapshot":"…","value":"你好"}  // write a field directly; 409 value_not_applied → tap + text instead (web views)
 {"type":"key","name":"return"}                          // return|enter|send|go|search fire Return; escape, space, tab, delete/backspace, arrows
 {"type":"keyboard"}                                     // dismiss the keyboard
-{"type":"shortcut","name":"home"}                       // home | spotlight (switcher is unsupported)
+{"type":"shortcut","name":"home"}                       // home | spotlight | volume_up | volume_down (switcher is unsupported)
 {"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":80}        // ≈15% of a screen; ≈400 → 75%
 {"type":"scroll","element":7,"snapshot":"…","dy":120}   // inside that element only
 {"type":"scroll","page":true,"dy":300}                  // the page scroller (long web forms); 422 no_page_scroller if none
@@ -354,6 +354,8 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"picker","column":0,"value":"2026"}
 {"type":"perform","element":9,"snapshot":"…","action":"toggle"}  // increment|decrement|adjust(+value)|toggle|menu|double_tap|two_finger_tap|scroll_to_visible|pinch|rotate
 ```
+
+`volume_up` and `volume_down` require a physical device and a Runner advertising `ipu:volumeButtons=true`. Missing capability refuses before the button request. An acknowledgement does not verify the volume level; do not replay an uncertain press.
 
 **Multi-finger hold.** `multi_longpress` holds 2–5 distinct normalized
 `{x,y}` points simultaneously in one runner request; the array length is the

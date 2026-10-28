@@ -227,7 +227,7 @@ pub struct KeyParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShortcutParams {
-    /// Supported names: `home` (Home Screen) and `spotlight` (search).
+    /// Supported names: `home`, `spotlight`, and physical-only `volume_up`, `volume_down`.
     /// App Switcher is unsupported by the device runner.
     pub name: String,
     /// Default true: return what the screen settled to (as on phone_tap).
@@ -1322,8 +1322,10 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Navigate to the iOS Home Screen (home) or Spotlight search (spotlight), leaving the current app or \
-        changing its visible state. Use this for system navigation, phone_key for field keys, or \
+        description = "Use Home (home), Spotlight (spotlight), or physical volume buttons (volume_up, volume_down). \
+        Volume acknowledgement confirms only a button request, not its effect on the volume level. Simulator and older \
+        Runners without the capability refuse before dispatch. Volume requests are not safe to replay after uncertainty. \
+        Navigation leaves the current app or changes its visible state. Use this for system navigation, phone_key for field keys, or \
         phone_run_steps with launch_app for a specific app. Requires phone_status.drivable=true. Names are \
         trimmed and case-insensitive. switcher and other names fail before input is sent; the runner cannot \
         synthesize the App Switcher gesture. observe defaults on and returns the settled screen change. \
@@ -1336,7 +1338,7 @@ impl PhoneHandler {
         self.progress_reset();
         let name = name.trim().to_ascii_lowercase();
         match name.as_str() {
-            "home" | "spotlight" => {
+            "home" | "spotlight" | "volume_up" | "volume_down" => {
                 send_input_observed(&self.daemon, &InputMsg::Shortcut { name }, observe).await
             }
             "switcher" => CallToolResult::error(vec![Content::text(
@@ -1345,7 +1347,7 @@ impl PhoneHandler {
                  supported device action instead",
             )]),
             _ => CallToolResult::error(vec![Content::text(format!(
-                "unsupported shortcut '{name}'; supported: home, spotlight"
+                "unsupported shortcut '{name}'; supported: home, spotlight, volume_up, volume_down"
             ))]),
         }
     }
@@ -3592,9 +3594,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
             PhoneStep::Shortcut { name, after_ms } => {
                 validate_after(after_ms)?;
                 let name = name.trim().to_ascii_lowercase();
-                if !matches!(name.as_str(), "home" | "spotlight") {
+                if !matches!(name.as_str(), "home" | "spotlight" | "volume_up" | "volume_down") {
                     return Err(format!(
-                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight; no action was sent"
+                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight, volume_up, volume_down; no action was sent"
                     ));
                 }
                 action_step(serde_json::json!({"type":"shortcut","name":name}), after_ms)
@@ -4335,6 +4337,23 @@ mod tests {
             }
         });
         (format!("http://{address}"), task)
+    }
+
+    #[test]
+    fn volume_shortcuts_are_sent_to_the_selected_daemon() {
+        for name in ["volume_up", "volume_down"] {
+            let (url, task) = scripted_daemon("200 OK", br#"{"ok":true}"#.to_vec());
+            let result = block(handler_for(&url).phone_shortcut(Parameters(ShortcutParams {
+                name: format!("  {}  ", name.to_uppercase()),
+                observe: Some(false),
+            })));
+            assert_ne!(result.is_error, Some(true), "{}", text_of(&result));
+            task.join().unwrap();
+            let step: PhoneStep =
+                serde_json::from_value(serde_json::json!({"kind":"shortcut","name":name})).unwrap();
+            let request = phone_steps_request(vec![step]).unwrap();
+            assert_eq!(request["steps"][0]["action"]["name"], name);
+        }
     }
 
     fn handler_for(url: &str) -> PhoneHandler {
