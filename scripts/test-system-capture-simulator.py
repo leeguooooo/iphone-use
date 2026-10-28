@@ -120,7 +120,7 @@ def main():
             process = subprocess.Popen(['xcodebuild', 'test-without-building', '-xctestrun', str(recipe),
                 '-destination', 'platform=iOS Simulator,id=' + simulator,
                 '-only-testing:IPhoneUseRunnerUITests/RunnerTests/testSystemScreenshotProbe',
-                '-parallel-testing-enabled', 'NO', '-test-iterations', '1'], env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                '-parallel-testing-enabled', 'NO'], env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             result['xcode_exit'] = process.wait(timeout=180)
         host_documents = Path(command('xcrun', 'simctl', 'get_app_container', simulator, host_bundle, 'data')) / 'Documents'
         dispatch = receipt(host_documents, 'capture-dispatch.json')
@@ -140,6 +140,7 @@ def main():
                     with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=1) as connection:
                         connection.row_factory = sqlite3.Row
                         columns = {row[1] for row in connection.execute('PRAGMA table_info(ZASSET)')}
+                        result['photos_schema_supported'] = {'ZFILENAME', 'ZDIRECTORY'}.issubset(columns)
                         if {'ZFILENAME', 'ZDIRECTORY'}.issubset(columns):
                             selected = [key for key in ['Z_PK', 'ZFILENAME', 'ZDIRECTORY', 'ZUUID', 'ZKIND', 'ZKINDSUBTYPE', 'ZTRASHEDSTATE'] if key in columns]
                             rows = [dict(row) for row in connection.execute('SELECT ' + ','.join(selected) + ' FROM ZASSET WHERE ZFILENAME=?', (original_path.name,))]
@@ -148,10 +149,11 @@ def main():
                             if len(rows) == 1:
                                 registered = rows[0]
                                 break
-                except sqlite3.Error:
-                    pass  # Read-only observation of the same pending asset, never another capture.
+                except sqlite3.Error as error:
+                    result['photos_observation_error'] = str(error)
+                    # Read-only observation of the same pending asset, never another capture.
             time.sleep(.2)
-        assert registered is not None and original_path is not None, 'new original image was not registered in Photos; never repeat capture'
+        assert registered is not None and original_path is not None, 'could not verify new original image registration in Photos; never repeat capture'
         (out / 'capture-photos-registration.json').write_text(json.dumps({'run_id': run_id, 'asset': registered,
             'original_relative_path': original_path.relative_to(media).as_posix(),
             'classification_note': 'raw private subtype retained without assuming its enum meaning'}, indent=2) + '\n')

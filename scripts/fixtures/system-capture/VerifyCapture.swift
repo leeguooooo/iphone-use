@@ -31,20 +31,18 @@ let counts = pixels.withUnsafeMutableBytes { raw -> (Int, Int) in
     bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)!
   context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-  func count(flipped: Bool, inverted: Bool) -> Int {
+  func count(inverted: Bool) -> Int {
     expected.indices.filter { index in
       let px = (gridX + (Double(index % 16) + 0.5) * cell) / pointWidth
       let py = (gridY + (Double(index / 16) + 0.5) * cell) / pointHeight
       let x = min(image.width - 1, max(0, Int(px * Double(image.width))))
-      let originalY = min(image.height - 1, max(0, Int(py * Double(image.height))))
-      let y = flipped ? image.height - 1 - originalY : originalY
+      let y = min(image.height - 1, max(0, Int(py * Double(image.height))))
       let offset = (y * image.width + x) * 4
       let red = Int(raw[offset]), blue = Int(raw[offset + 2])
       return expected[index] != inverted ? blue > red + 100 : red > blue + 100
     }.count
   }
-  return (max(count(flipped: false, inverted: false), count(flipped: true, inverted: false)),
-    max(count(flipped: false, inverted: true), count(flipped: true, inverted: true)))
+  return (count(inverted: false), count(inverted: true))
 }
 let dimensionsMatch = image.width == (ready["screen_width"] as! Int) && image.height == (ready["screen_height"] as! Int)
 let result: [String: Any] = ["run_id": runID, "verified": counts.0 == 128 && counts.1 < 128 && dimensionsMatch,
