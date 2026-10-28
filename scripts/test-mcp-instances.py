@@ -42,6 +42,8 @@ class Daemon(http.server.BaseHTTPRequestHandler):
                 'limit_utf16': 8192, 'complete': True, 'truncated': False}
         elif self.path.startswith('/agent/elements'):
             value = {'ok': True, 'snapshot': self.server.name, 'elements': []}
+        elif self.command == 'POST' and self.path.startswith('/agent/input') and json.loads(body).get('name') == 'save_screenshot':
+            value = {'ok': True, 'system_capture': {'requested': True, 'saved_verified': False, 'destination': 'iPhone Photos'}}
         elif self.command == 'POST':
             value = {'ok': True, 'snapshot': self.server.name + '2', 'elements': []}
         else:
@@ -169,6 +171,18 @@ try:
                     assert body['steps'][0]['action']['name'] == name
                     assert request[5], 'batch must claim only the selected instance control'
 
+            # The new Photos mutation follows the selected instance and token,
+            # including with observe:false (no ambient/default fallback).
+            for instance, marker, token in [('i13', 'B', 'token-B'), ('default', 'A', 'token-A')]:
+                before = len(seen)
+                response = call('phone_shortcut', instance=instance, name='save_screenshot', observe=False)['result']
+                assert response.get('isError') is not True, response
+                assert response['structuredContent']['system_capture']['saved_verified'] is False
+                calls = seen[before:]
+                assert calls and all(row[0] == marker and row[3] == 'Bearer ' + token for row in calls)
+                posts = [row for row in calls if row[1] == 'POST']
+                assert len(posts) == 1 and posts[0][5] == '1'
+                assert json.loads(posts[0][4]) == {'type': 'shortcut', 'name': 'save_screenshot'}
             # Missing, malformed and symlinked configuration must not touch any daemon.
             count = len(seen)
             for instance in ['missing', '../i13', 'runner']:

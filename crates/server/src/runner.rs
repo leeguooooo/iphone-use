@@ -81,6 +81,14 @@ pub enum VolumeButton {
     Down,
 }
 
+/// Pre-dispatch refusal or an acknowledged request; post-dispatch uncertainty is an error.
+#[derive(Debug)]
+pub enum SystemCaptureOutcome {
+    Unsupported,
+    ScopeChanged,
+    Requested(serde_json::Value),
+}
+
 /// A runner endpoint plus a lazily-created session id.
 pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
@@ -106,6 +114,7 @@ pub struct RunnerClient {
     device_settle: Option<bool>,
     value_read: bool,
     volume_buttons: bool,
+    system_capture_request: bool,
     /// The last tree read and when: snapshot-bound actions reuse it instead
     /// of reading the whole tree again (see [`Self::recent_tree`]).
     last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
@@ -353,6 +362,7 @@ impl RunnerClient {
             device_settle: None,
             value_read: false,
             volume_buttons: false,
+            system_capture_request: false,
             last_tree: None,
             lite_source: false,
             probe: ProbeMemory::default(),
@@ -712,6 +722,8 @@ impl RunnerClient {
                 .and_then(|value| value.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool)) == Some(true);
             self.volume_buttons = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:volumeButtons").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.system_capture_request = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:systemCaptureRequest").and_then(serde_json::Value::as_bool)) == Some(true);
             self.device_settle = None;
             {
                 let sid = self.session.as_deref().unwrap().to_string();
@@ -975,6 +987,35 @@ impl RunnerClient {
         let response=self.http.get(format!("{}/session/{}/element/{}/value?complete=1",self.base,sid,id))
             .query(&[("max_utf16",max_utf16)]).send_signed(&self.auth).await?;
         ensure_runner_success(response,"GET element value").await
+    }
+
+    /// Request one iOS system capture under a live screen/owner permit;
+    /// an acknowledged request still says nothing about Photos persistence.
+    pub async fn request_system_capture(&mut self, allowed: &(dyn Fn() -> bool + Sync)) -> Result<SystemCaptureOutcome> {
+        if !allowed() { return Ok(SystemCaptureOutcome::ScopeChanged); }
+        let sid = self.ensure_session().await?.to_string();
+        if !self.system_capture_request {
+            return Ok(SystemCaptureOutcome::Unsupported);
+        }
+        let (client, request) = self.post_req(format!("{}/session/{}/ipu/system-capture", self.base, sid))
+            .json(&serde_json::json!({})).build_split();
+        let mut request = request.context("build system capture")?;
+        crate::runner_token::sign_request(&self.auth, &mut request);
+        // Session creation and signing may outlive privacy/owner changes.
+        // Refuse before transport admission, never re-send after admission.
+        if !allowed() { return Ok(SystemCaptureOutcome::ScopeChanged); }
+        let response = crate::timing::execute_timed(client, request).await
+            .context("POST system capture")?;
+        let value = ensure_runner_success(response, "POST system capture").await?;
+        match (value.get("invoked").and_then(serde_json::Value::as_bool), value.get("acknowledged").and_then(serde_json::Value::as_bool)) {
+            (Some(false), Some(false)) => Ok(SystemCaptureOutcome::Unsupported),
+            (Some(true), Some(true)) => Ok(SystemCaptureOutcome::Requested(serde_json::json!({
+                "requested": true, "destination": "iPhone Photos", "saved_verified": false,
+                "verification_scope": "system_capture_request_acknowledged",
+                "hint": "If a full-screen preview is open, inspect it and save that existing image with Done/Save to Photos. Check Photos or its picker; never take another screenshot to finish a pending save."
+            }))),
+            _ => anyhow::bail!("system capture dispatch was not acknowledged; outcome unknown; do not repeat"),
+        }
     }
 
     /// Set a date/option PickerWheel to a target value (issue #23). A `scroll`
@@ -2514,6 +2555,7 @@ impl RunnerClient {
         self.session = None;
         self.value_read = false;
         self.volume_buttons = false;
+        self.system_capture_request = false;
         self.window = None;
         self.no_alert_at = None;
         self.last_tree = None;

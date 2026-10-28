@@ -227,7 +227,7 @@ pub struct KeyParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShortcutParams {
-    /// Supported names: `home`, `spotlight`, and physical-only `volume_up`, `volume_down`.
+    /// Home, Spotlight, Photos capture (`save_screenshot`), or physical-only `volume_up` / `volume_down`.
     /// App Switcher is unsupported by the device runner.
     pub name: String,
     /// Default true: return what the screen settled to (as on phone_tap).
@@ -1322,10 +1322,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Use Home (home), Spotlight (spotlight), or physical volume buttons (volume_up, volume_down). \
-        Volume acknowledgement confirms only a button request, not its effect on the volume level. Simulator and older \
-        Runners without the capability refuse before dispatch. Volume requests are not safe to replay after uncertainty. \
-        Navigation leaves the current app or changes its visible state. Use this for system navigation, phone_key for field keys, or \
+        description = "Use Home (home), Spotlight (spotlight), physical volume buttons (volume_up, volume_down), or request a system screenshot in Photos (save_screenshot). \
+        Volume acknowledgement confirms only a button request, not the volume level; Simulator and older Runners without ipu:volumeButtons refuse before dispatch. \
+        save_screenshot is a mutation, unlike phone_screenshot which only returns image bytes. Its receipt means requested, not saved_verified, and requires ipu:systemCaptureRequest. \
+        If iOS opens a screenshot preview, inspect the system UI and choose Done/Save to Photos for that existing image; never take another screenshot to complete its save. \
+        Check Photos or its picker before claiming it saved. Never replay an uncertain capture or volume request. \
+        Navigation leaves the current app or changes its visible state. Use phone_key for field keys, or \
         phone_run_steps with launch_app for a specific app. Requires phone_status.drivable=true. Names are \
         trimmed and case-insensitive. switcher and other names fail before input is sent; the runner cannot \
         synthesize the App Switcher gesture. observe defaults on and returns the settled screen change. \
@@ -1338,7 +1340,7 @@ impl PhoneHandler {
         self.progress_reset();
         let name = name.trim().to_ascii_lowercase();
         match name.as_str() {
-            "home" | "spotlight" | "volume_up" | "volume_down" => {
+            "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down" => {
                 send_input_observed(&self.daemon, &InputMsg::Shortcut { name }, observe).await
             }
             "switcher" => CallToolResult::error(vec![Content::text(
@@ -1347,7 +1349,7 @@ impl PhoneHandler {
                  supported device action instead",
             )]),
             _ => CallToolResult::error(vec![Content::text(format!(
-                "unsupported shortcut '{name}'; supported: home, spotlight, volume_up, volume_down"
+                "unsupported shortcut '{name}'; supported: home, spotlight, save_screenshot, volume_up, volume_down"
             ))]),
         }
     }
@@ -3127,6 +3129,13 @@ fn shape_structured(mut result: CallToolResult, mode: StructuredMode) -> CallToo
             }
             let mut slim = serde_json::Map::new();
             for (key, value) in full {
+                if key == "system_capture" {
+                    let receipt: serde_json::Map<String, serde_json::Value> = ["requested", "saved_verified"]
+                        .into_iter().filter_map(|name| value.get(name).filter(|field| field.is_boolean())
+                            .map(|field| (name.to_string(), field.clone()))).collect();
+                    if !receipt.is_empty() { slim.insert(key.clone(), serde_json::Value::Object(receipt)); }
+                    continue;
+                }
                 let keep = match value {
                     serde_json::Value::String(s) => s.len() <= SLIM_STRING_LIMIT,
                     serde_json::Value::Array(_) | serde_json::Value::Object(_) => false,
@@ -3594,9 +3603,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
             PhoneStep::Shortcut { name, after_ms } => {
                 validate_after(after_ms)?;
                 let name = name.trim().to_ascii_lowercase();
-                if !matches!(name.as_str(), "home" | "spotlight" | "volume_up" | "volume_down") {
+                if !matches!(name.as_str(), "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down") {
                     return Err(format!(
-                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight, volume_up, volume_down; no action was sent"
+                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight, save_screenshot, volume_up, volume_down; no action was sent"
                     ));
                 }
                 action_step(serde_json::json!({"type":"shortcut","name":name}), after_ms)
@@ -3899,6 +3908,12 @@ fn with_structure(
         .filter(|value| value.is_object())
         .cloned()
     {
+        let capture_requested = json.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)
+            || json.get("steps").and_then(serde_json::Value::as_array).is_some_and(|steps|
+                steps.iter().any(|step| step.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)));
+        if capture_requested {
+            result.content.insert(0, Content::text("System screenshot requested; saving to Photos is not independently verified. If a full-screen preview is open, inspect it and save that existing image with Done/Save to Photos. Check Photos or its picker; do not take another screenshot to finish the pending save."));
+        }
         result.structured_content = Some(json);
     }
     result
@@ -4407,6 +4422,39 @@ mod tests {
         assert_eq!(structured["settle"]["captures"], 2);
         assert_eq!(structured["delta"]["added"][0], "搜索");
         assert_eq!(structured["snapshot"], "snap-1");
+    }
+
+    #[test]
+    fn system_capture_mcp_preserves_unverified_save_and_explicit_notice() {
+        let (url, task) = scripted_daemon("200 OK", br#"{"ok":true,"transport":"runner","system_capture":{"requested":true,"destination":"iPhone Photos","saved_verified":false}}"#.to_vec());
+        let handler = handler_for(&url);
+        let result = block(handler.phone_shortcut(Parameters(ShortcutParams {
+            name: " SAVE_SCREENSHOT ".into(), observe: Some(false),
+        })));
+        task.join().unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert!(text_of(&result).contains("not independently verified"));
+        assert_eq!(result.structured_content.unwrap()["system_capture"]["saved_verified"], false);
+    }
+
+    #[test]
+    fn system_capture_receipt_survives_default_structured_slim() {
+        let (url, task) = scripted_daemon("200 OK", br#"{"ok":true,"system_capture":{"requested":true,"saved_verified":false,"image":"PRIVATE","asset":"PRIVATE"}}"#.to_vec());
+        let result = block(handler_for(&url).phone_shortcut(Parameters(ShortcutParams {
+            name: "save_screenshot".into(), observe: Some(false),
+        })));
+        task.join().unwrap();
+        let shaped = shape_structured(result, StructuredMode::Slim);
+        let structured = shaped.structured_content.unwrap();
+        assert_eq!(structured["system_capture"], serde_json::json!({"requested":true,"saved_verified":false}));
+        assert!(!structured.to_string().contains("PRIVATE"));
+    }
+
+    #[test]
+    fn system_capture_batch_validation_accepts_explicit_mutation() {
+        let step: PhoneStep = serde_json::from_value(serde_json::json!({"kind":"shortcut","name":"save_screenshot"})).unwrap();
+        let request = phone_steps_request(vec![step]).unwrap();
+        assert_eq!(request["steps"][0]["action"]["name"], "save_screenshot");
     }
 
     /// With `observe:false` the result stays the short string callers

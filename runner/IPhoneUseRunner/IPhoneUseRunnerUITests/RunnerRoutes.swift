@@ -93,6 +93,10 @@ extension RunnerTests {
       return nil
 
     case "POST":
+      if match(parts, "ipu/system-capture") != nil {
+        defer { IPURBridge.invalidateRequestCache() }
+        return .value(IPURBridge.requestSystemScreenshot())
+      }
       if match(parts, "appium/settings") != nil { return try updateSettings(request) }
       if match(parts, "actions") != nil { return try performActions(request) }
       if match(parts, "elements") != nil { return try findElements(request, from: nil) }
@@ -143,6 +147,7 @@ extension RunnerTests {
       "ipu:timedDragPath": true,
       "ipu:valueRead": true,
       "ipu:volumeButtons": volumeButtons,
+      "ipu:systemCaptureRequest": IPURBridge.systemScreenshotAvailable(),
       "browserName": NSNull(),
       "CFBundleIdentifier": NSNull(),
     ]

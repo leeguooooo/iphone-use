@@ -342,7 +342,7 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"set_value","element":5,"snapshot":"…","value":"你好"}  // write a field directly; 409 value_not_applied → tap + text instead (web views)
 {"type":"key","name":"return"}                          // return|enter|send|go|search fire Return; escape, space, tab, delete/backspace, arrows
 {"type":"keyboard"}                                     // dismiss the keyboard
-{"type":"shortcut","name":"home"}                       // home | spotlight | volume_up | volume_down (switcher is unsupported)
+{"type":"shortcut","name":"home"}                       // home | spotlight | save_screenshot | volume_up | volume_down (switcher is unsupported)
 {"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":80}        // ≈15% of a screen; ≈400 → 75%
 {"type":"scroll","element":7,"snapshot":"…","dy":120}   // inside that element only
 {"type":"scroll","page":true,"dy":300}                  // the page scroller (long web forms); 422 no_page_scroller if none
@@ -356,6 +356,20 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 ```
 
 `volume_up` and `volume_down` require a physical device and a Runner advertising `ipu:volumeButtons=true`. Missing capability refuses before the button request. An acknowledgement does not verify the volume level; do not replay an uncertain press.
+
+`phone_shortcut {"name":"save_screenshot"}` requests one iOS system screenshot
+for the phone's Photos library. The HTTP form is
+`POST /agent/input {"type":"shortcut","name":"save_screenshot"}`. It requires
+a native Runner declaring `ipu:systemCaptureRequest`; an older Runner is
+refused before the capture event. The action receipt reports
+`system_capture.requested:true` and `saved_verified:false`: the OS acknowledged
+the request, while the saved image still needs checking in Photos or a picker.
+On newer iOS, the capture can open a full-screen preview. Inspect that system
+UI and choose Done/Save to Photos for the existing image, then verify Photos;
+do not request another screenshot to complete its save. An unknown outcome
+must never be repeated. `phone_screenshot` continues to
+return an observation image to the caller without adding a Photos asset.
+
 
 **Multi-finger hold.** `multi_longpress` holds 2–5 distinct normalized
 `{x,y}` points simultaneously in one runner request; the array length is the

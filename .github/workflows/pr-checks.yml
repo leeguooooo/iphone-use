@@ -29,6 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 -I scripts/test-bench-census.py
+      - run: python3 -I scripts/test-mcp-probe-peer.py
 
   remote-connection:
     name: Remote connection and credential recovery

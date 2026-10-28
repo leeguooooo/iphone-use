@@ -6,6 +6,7 @@ const RECEIPT_KEYS: &[&str] = &[
     "outcome",
     "retry_safe",
     "transport",
+    "system_capture",
     "completed",
     "applied_actions",
     "failed_step",
@@ -97,7 +98,13 @@ fn clean(value: &mut Value) {
             }
             for (key, value) in map.iter_mut() {
                 // Timing has only controller route/count/byte/duration facts; it is not UI.
-                if key == "detail" {
+                if key == "system_capture" {
+                    if let Some(capture) = value.as_object_mut() {
+                        capture.retain(|key, value| matches!(key.as_str(), "requested" | "saved_verified") && value.is_boolean());
+                    } else {
+                        *value = Value::Null;
+                    }
+                } else if key == "detail" {
                     if let Some(error) = value.get_mut("runner_error") {
                         clean_runner_error(error);
                     }
@@ -147,6 +154,22 @@ pub fn redact_batch(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capture_receipt_survives_privacy_redaction_without_screen_or_asset_data() {
+        let receipt = json!({"requested":true,"saved_verified":false,"image":"PRIVATE",
+            "destination":"PRIVATE","asset":"PRIVATE","hint":"PRIVATE"});
+        let single = redact(json!({"ok":true,"outcome":"applied","system_capture":receipt}), "screen_privacy_changed");
+        assert_eq!(single["system_capture"], json!({"requested":true,"saved_verified":false}));
+        let batch = redact_batch(json!({"ok":true,"applied_actions":1,"retry_safe":false,
+            "steps":[{"index":0,"kind":"action","ok":true,"system_capture":receipt}]}));
+        assert_eq!(batch["steps"][0]["system_capture"], json!({"requested":true,"saved_verified":false}));
+        assert_eq!(batch["applied_actions"], 1);
+        assert_eq!(batch["retry_safe"], false);
+        assert!(!single.to_string().contains("PRIVATE") && !batch.to_string().contains("PRIVATE"));
+        let malformed = redact(json!({"ok":true,"system_capture":{"requested":"PRIVATE","saved_verified":"PRIVATE"}}), "screen_privacy_changed");
+        assert_eq!(malformed["system_capture"], json!({}));
+    }
+
     #[test]
     fn nested_ui_is_removed_but_partial_and_uncertain_receipts_survive() {
         let original = json!({"ok":false,"error":"text_partially_typed","outcome":"partial","batch_outcome":"partially_applied","applied_actions":1,"characters_confirmed":200,"characters_uncertain":0,"remaining_text":"caller input","retry_safe":false,"steps":[{"index":0,"kind":"wait_for","ok":true,"observation":{"label":"PRIVATE"}}],"detail":{"clear_applied":true,"runner_error":{"status":500,"error":"unknown error","message":"PRIVATE"},"candidates":["PRIVATE"]},"image":{"png_base64":"PRIVATE"}});

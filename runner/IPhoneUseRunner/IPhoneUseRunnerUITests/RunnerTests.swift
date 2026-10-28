@@ -80,6 +80,42 @@ final class RunnerTests: XCTestCase {
   /// that never came up), not a request's, and must reach xcodebuild.
   var serveEnded = false
 
+  func testSystemScreenshotProbe() throws {
+    serveEnded = true
+    #if !targetEnvironment(simulator)
+    throw XCTSkip("isolated Simulator capture diagnostic only")
+    #else
+    let env = ProcessInfo.processInfo.environment
+    guard let runID = env["IPU_CAPTURE_PROBE_RUN_ID"], UUID(uuidString: runID) != nil else {
+      throw XCTSkip("requires an explicit capture diagnostic run")
+    }
+    let app = XCUIApplication(bundleIdentifier: "com.leeguoo.iphone-use.capture-fixture")
+    guard app.state == .runningForeground || app.state == .runningBackground else {
+      XCTFail("owned capture fixture must already be running")
+      return
+    }
+    if app.state != .runningForeground { app.activate() }
+    guard app.state == .runningForeground,
+          app.staticTexts["capture-marker"].waitForExistence(timeout: 5),
+          app.staticTexts["capture-marker"].label == runID else {
+      XCTFail("owned capture fixture is not in the foreground with this run's marker")
+      return
+    }
+    let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    // Persist before dispatch. An infrastructure retry must never take another
+    // system screenshot after an uncertain first attempt.
+    try Data(runID.utf8).write(to: documents.appendingPathComponent("capture-attempt-\(runID)"), options: .withoutOverwriting)
+    var result = IPURBridge.requestSystemScreenshot() as! [String: Any]
+    result["probe_run_id"] = runID
+    try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]).write(
+      to: documents.appendingPathComponent("capture-dispatch.json"), options: .atomic)
+    XCTAssertEqual(result["invoked"] as? Bool, true)
+    XCTAssertEqual(result["acknowledged"] as? Bool, true)
+    // The host independently checks the new asset's Photos database row and
+    // original bytes. This App/Runner pair cannot declare persistence verified.
+    #endif
+  }
+
   func testServe() throws {
     let patched = IPURBridge.installQuiescenceBypass()
     NSLog("ipu-runner: quiescence bypass installed on %@", patched.joined(separator: ", "))

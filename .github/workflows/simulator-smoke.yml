@@ -16,9 +16,23 @@ on:
       - scripts/test-drag-simulator.py
       - scripts/test-drag-simulator-verdict.py
       - scripts/test-value-read-simulator.py
+      - scripts/test-system-capture-simulator.py
+      - scripts/test-system-capture-verifier.py
+      - scripts/mcp_probe_peer.py
+      - scripts/test-mcp-probe-peer.py
+      - scripts/fixtures/system-capture/**
       - scripts/value-read-fixture.swift
       - .github/workflows/simulator-smoke.yml
   workflow_dispatch:
+    inputs:
+      capture_probe_only:
+        description: Verify native system screenshot persistence in an owned Simulator
+        type: boolean
+        default: false
+      capture_mcp:
+        description: Verify MCP and privacy refusal through the real daemon and native Photos capture
+        type: boolean
+        default: false
 
 concurrency:
   group: >-
@@ -31,6 +45,7 @@ permissions:
 
 jobs:
   smoke:
+    if: ${{ !inputs.capture_probe_only && !inputs.capture_mcp }}
     name: Simulator end to end
     runs-on: macos-14
     timeout-minutes: 45
@@ -87,3 +102,66 @@ jobs:
             ~/.iphone-use/instances/ci-sim/gesture-acceptance/fixture-build.log
             ~/.iphone-use/instances/ci-sim/gesture-acceptance/**/*.xml
             ~/.iphone-use/instances/ci-sim/gesture-acceptance/**/trace.ndjson
+
+  system_capture_probe:
+    if: ${{ inputs.capture_probe_only || inputs.capture_mcp }}
+    name: System capture / iOS ${{ matrix.ios }}
+    runs-on: macos-14
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - xcode: '15.4'
+            ios: '17.5'
+            runtime: com.apple.CoreSimulator.SimRuntime.iOS-17-5
+          - xcode: '16.2'
+            ios: '18.2'
+            runtime: com.apple.CoreSimulator.SimRuntime.iOS-18-2
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check stdio pending-request and journal behavior
+        run: python3 -I scripts/test-mcp-probe-peer.py
+      - if: ${{ inputs.capture_mcp }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+      - if: ${{ inputs.capture_mcp }}
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Build real daemon and MCP transport
+        if: ${{ inputs.capture_mcp }}
+        run: |
+          set -euo pipefail
+          SDKROOT=$(xcrun --sdk macosx --show-sdk-path) CARGO_BUILD_JOBS=2 cargo build --release --locked -p server -p iphone-use-mcp
+      - name: Build isolated Runner
+        run: |
+          set -euo pipefail
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = '${{ matrix.ios }}'
+          export IPU_RUNNER_DERIVED_DATA="$RUNNER_TEMP/capture-runner"
+          bash runner/build.sh --simulator
+      - name: Verify one system capture using independent Photos bytes
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          xctestrun=$(python3 -c 'import os; from pathlib import Path; p=list((Path(os.environ["RUNNER_TEMP"])/"capture-runner/Build/Products").glob("*.xctestrun")); assert len(p)==1,p; print(p[0])')
+          args=(--xctestrun "$xctestrun" --runtime '${{ matrix.runtime }}' --out "$RUNNER_TEMP/system-capture-proof")
+          if [ '${{ inputs.capture_mcp }}' = 'true' ]; then
+            args+=(--daemon target/release/iphone-use --mcp target/release/iphone-use-mcp --finish-preview)
+          fi
+          python3 scripts/test-system-capture-simulator.py "${args[@]}"
+      - name: Preserve capture dispatch and independent Photos receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: system-capture-ios-${{ matrix.ios }}
+          path: |
+            ${{ runner.temp }}/system-capture-proof/*.json
+            ${{ runner.temp }}/system-capture-proof/*.jsonl
+            ${{ runner.temp }}/system-capture-proof/capture-photo-original.bin
+            ${{ runner.temp }}/system-capture-proof/failure-ui.png
+            ${{ runner.temp }}/system-capture-proof/xcode.log
+            ${{ runner.temp }}/system-capture-proof/daemon.log
+            ${{ runner.temp }}/system-capture-proof/mcp.log
+            ${{ runner.temp }}/build-simulator.log
