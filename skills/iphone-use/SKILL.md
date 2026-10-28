@@ -94,6 +94,7 @@ it off again.
 | Find an app's bundle id | `GET /agent/apps?query=微信` | `phone_apps` | — |
 | Open an app | `launch_app` `bundle` (or `name` for built-ins, or `app`: any app's exact name, or a loose name matching exactly one installed app — `resolved` says which; refused with candidates if ambiguous) | `phone_run_steps` step | `launch_app` (`bundle` or `app`) |
 | Read home pages, Dock and folders | `GET /agent/home-layout?page=0` (omit page for all) | `phone_home_layout` (`page?`) | — |
+| Read this client's task timing | `GET /agent/metrics?owner=<current-owner>` | `phone_metrics` (`limit?`) | — |
 | Read the screen | `GET /agent/elements` | `phone_elements` | `wait_for` (`application`, `present`, `absent`; on canvas/game screens `ocr_present` / `ocr_absent`, up to 60 s) |
 | Tap an element | `tap` + `element` + `snapshot` | `phone_tap_element` | `tap_locator` (durable) |
 | Tap a unique label | `tap` + `label` | `phone_tap_label` | `tap_label` |

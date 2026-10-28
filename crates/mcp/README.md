@@ -319,6 +319,7 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 |---|---|---|
 | `phone_status` | — | Query backend, canonical target, `drivable`, device-runner readiness, lifecycle, and recovery hints |
 | `phone_capabilities` | — | What this build supports for the configured backend, and whether the phone can be driven now. Read-only: wakes nothing, takes no owner lease |
+| `phone_metrics` | `limit?` | Latest performance aggregates for this client on the selected instance: recorded HTTP calls, p50/p95, batching, unknown outcomes and losses. Default 5 runs per section, max 20, shared 12 KiB row budget; omissions are explicit. No phone connection or lease. |
 | `phone_reconnect` | `wait_secs?` (1–300) | Restart the daemon-managed device runner once; with `wait_secs`, return when drivable, blocked (`setup_blocked_on`) or timed out, else poll `phone_status`; never changes backend or target |
 | `phone_hold` | `secs` | Keep the phone through a bounded human-in-the-loop pause (a PIN, a code): the idle watchdog does not release it for `secs` (0 clears, max 14400) |
 | `phone_release_owner` | — | Release this session's owner lease when the task is done |

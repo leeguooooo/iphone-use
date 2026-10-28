@@ -20,6 +20,7 @@
   "phone_key",
   "phone_login",
   "phone_logs",
+  "phone_metrics",
   "phone_read_value",
   "phone_reconnect",
   "phone_record",

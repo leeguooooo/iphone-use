@@ -29,6 +29,17 @@ use crate::{client::DaemonClient, types::InputMsg};
 // Parameter types (one struct per tool that takes arguments)
 // ---------------------------------------------------------------------------
 
+/// Parameters for [`PhoneHandler::phone_metrics`].
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsParams {
+    /// Latest runs per section (open/recent), default 5, maximum 20.
+    /// A shared 12 KiB row budget can reduce the number returned further.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 20))]
+    pub limit: Option<usize>,
+}
+
 /// Parameters for [`phone_tap`].
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1095,6 +1106,72 @@ impl PhoneHandler {
                 "capabilities failed: {e:#}"
             ))]),
         }
+    }
+
+    #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
+        description = "Read task performance aggregates for this MCP client's X-Phone-Owner on the selected instance. \
+        Includes recorded HTTP-call counts, batch/flow usage, stale/unknown outcomes, losses and p50/p95 call latency. \
+        HTTP calls are not model turns or token usage; model_round_trips remains null without a complete declared trace. \
+        Read-only: no phone connection, Runner launch or control lease. Default latest 5 open and recent runs, maximum \
+        20 per section and a shared 12 KiB row budget; omitted counts and truncated state are explicit. Never reconnect \
+        solely for metrics. Global cross-owner loss counters are excluded."
+    )]
+    async fn phone_metrics(&self, Parameters(params): Parameters<MetricsParams>) -> CallToolResult {
+        let limit = params.limit.unwrap_or(5);
+        if !(1..=20).contains(&limit) {
+            return CallToolResult::error(vec![Content::text("limit must be between 1 and 20")]);
+        }
+        let response = match self.daemon.metrics().await {
+            Ok(response) => response,
+            Err(error) => return CallToolResult::error(vec![Content::text(format!("metrics failed: {error:#}"))]),
+        };
+        if !response.ok() { return daemon_read_result(&response); }
+        let Some(body) = response.json.as_ref().filter(|body| body.get("ok").and_then(serde_json::Value::as_bool) == Some(true)) else {
+            return CallToolResult::error(vec![Content::text("metrics response did not contain a valid report")]);
+        };
+        let owner = self.daemon.owner().trim();
+        let mut budget = 12 * 1024;
+        let mut report = serde_json::json!({"ok":true,"owner":owner,
+            "definitions":"Counts cover recorded HTTP calls, not model turns or token usage. A missing or incomplete model trace is not zero round trips. Only this client's owner is included; global loss counters are excluded.",
+            "truncated":false});
+        for section in ["open", "recent"] {
+            let Some(rows) = body.get(section).and_then(serde_json::Value::as_array) else {
+                return CallToolResult::error(vec![Content::text("metrics report is missing its open/recent arrays")]);
+            };
+            let mut ordered = Vec::with_capacity(rows.len());
+            for row in rows {
+                if row.pointer("/key/owner").and_then(serde_json::Value::as_str) != Some(owner) {
+                    return CallToolResult::error(vec![Content::text("metrics report did not match this client's owner; no run data returned")]);
+                }
+                let (Some(start), Some(end), Some(incarnation)) = (
+                    row.get("started_ms").and_then(serde_json::Value::as_u64),
+                    row.get("ended_ms").and_then(serde_json::Value::as_u64),
+                    row.pointer("/key/incarnation").and_then(serde_json::Value::as_u64),
+                ) else {
+                    return CallToolResult::error(vec![Content::text("metrics run is missing its timestamps or identity")]);
+                };
+                ordered.push(((end.max(start), incarnation), row));
+            }
+            ordered.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+            let mut selected = Vec::new();
+            for (_, row) in ordered.into_iter().take(limit) {
+                let bytes = match serde_json::to_vec(row) {
+                    Ok(bytes) => bytes.len(),
+                    Err(_) => return CallToolResult::error(vec![Content::text("could not encode metrics run")]),
+                };
+                if bytes > budget { break; }
+                budget -= bytes;
+                selected.push(row.clone());
+            }
+            let omitted = rows.len() - selected.len();
+            if omitted > 0 { report["truncated"] = serde_json::json!(true); }
+            report[format!("{section}_omitted")] = serde_json::json!(omitted);
+            report[section] = serde_json::json!(selected);
+        }
+        let mut result = CallToolResult::success(vec![Content::text(report.to_string())]);
+        result.structured_content = Some(report);
+        result
     }
 
     #[tool(
@@ -2915,7 +2992,11 @@ fn slim_tools(tools: Vec<rmcp::model::Tool>) -> Vec<rmcp::model::Tool> {
 /// is read by the panel, never the model, and its base64 image must reach
 /// `structuredContent` whole.
 fn finish_result(tool: &str, result: CallToolResult, mode: StructuredMode) -> CallToolResult {
-    if tool == crate::screen::FRAME_TOOL {
+    if tool == "phone_metrics" && result.is_error != Some(true) && matches!(mode, StructuredMode::Slim) {
+        // Metrics has its own row and byte bounds; generic slimming loses the
+        // per-run counters and the loss/unknown fields needed to interpret them.
+        shape_structured(result, StructuredMode::Full)
+    } else if tool == crate::screen::FRAME_TOOL {
         result
     } else {
         shape_structured(result, mode)
@@ -4829,7 +4910,7 @@ mod tests {
 
     /// The tools that only read: no phone input, no outward-facing writes.
     /// `IPHONE_USE_MCP_TOOLS=readonly` exposes exactly these.
-    const READ_ONLY_TOOLS: [&str; 14] = [
+    const READ_ONLY_TOOLS: [&str; 15] = [
         "phone_apps",
         "phone_capabilities",
         "phone_crashes",
@@ -4839,6 +4920,7 @@ mod tests {
         "phone_flow_list",
         "phone_home_layout",
         "phone_instances",
+        "phone_metrics",
         "phone_read_value",
         "phone_screen",
         "phone_screen_frame",

@@ -615,6 +615,16 @@ impl DaemonClient {
         read_response(req.send().await?).await
     }
 
+    /// Read only this client's task aggregates; never acquire control or wake a Runner.
+    pub async fn metrics(&self) -> anyhow::Result<DaemonResponse> {
+        let owner = self.owner().trim();
+        anyhow::ensure!(!owner.is_empty() && owner.len() <= 64 && !owner.chars().any(char::is_control),
+            "metrics requires a valid X-Phone-Owner of at most 64 bytes");
+        let req = self.auth(self.http().get(self.url("/agent/metrics")))
+            .query(&[("owner", owner)]);
+        read_response(req.send().await?).await
+    }
+
     /// A complete home-screen inventory, without changing the foreground app.
     pub async fn home_layout(&self, page: Option<usize>) -> anyhow::Result<DaemonResponse> {
         let mut request = self
