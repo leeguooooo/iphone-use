@@ -277,6 +277,14 @@ def main():
         result.update(capture_verified=True, phase='new_photos_asset_matches_fixture', photo_sha256=photo['photo_sha256'])
     except Exception as error:
         result['error'] = f'{type(error).__name__}: {error}'
+        if simulator and media is not None:
+            try:
+                result['new_original_image_paths'] = [path.relative_to(media).as_posix() for path in image_paths() - baseline]
+                # A host-side observation only: this does not create a Photos asset.
+                command('xcrun', 'simctl', 'io', simulator, 'screenshot', out / 'failure-ui.png', timeout=15)
+                result['failure_ui_retained'] = True
+            except Exception as observation_error:
+                result['failure_observation_error'] = str(observation_error)
     finally:
         if peer:
             try: peer.close()

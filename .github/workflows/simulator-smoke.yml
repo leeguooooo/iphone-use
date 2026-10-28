@@ -160,6 +160,7 @@ jobs:
             ${{ runner.temp }}/system-capture-proof/*.json
             ${{ runner.temp }}/system-capture-proof/*.jsonl
             ${{ runner.temp }}/system-capture-proof/capture-photo-original.bin
+            ${{ runner.temp }}/system-capture-proof/failure-ui.png
             ${{ runner.temp }}/system-capture-proof/xcode.log
             ${{ runner.temp }}/system-capture-proof/daemon.log
             ${{ runner.temp }}/system-capture-proof/mcp.log
