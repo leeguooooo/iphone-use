@@ -31,9 +31,11 @@ def main():
     parser.add_argument('--runtime', required=True)
     parser.add_argument('--daemon', type=Path)
     parser.add_argument('--mcp', type=Path)
+    parser.add_argument('--finish-preview', action='store_true', help='save an existing recognized system screenshot preview through fresh MCP controls')
     parser.add_argument('--debug-preview', action='store_true', help='local TTY only: inspect/save the existing preview without another capture')
     args = parser.parse_args()
     if bool(args.daemon) != bool(args.mcp): parser.error('--daemon and --mcp must be supplied together')
+    if args.finish_preview and not args.mcp: parser.error('--finish-preview requires MCP mode')
     if args.debug_preview and (not args.mcp or not sys.stdin.isatty()): parser.error('--debug-preview requires MCP mode and a local interactive terminal')
     daemon_binary = args.daemon.resolve(strict=True) if args.daemon else None
     mcp_binary = args.mcp.resolve(strict=True) if args.mcp else None
@@ -123,6 +125,7 @@ def main():
         command('xcrun', 'simctl', 'boot', simulator)
         command('xcrun', 'simctl', 'bootstatus', simulator, '-b', timeout=120)
         command('xcrun', 'simctl', 'install', simulator, app, timeout=120)
+        command('xcrun', 'simctl', 'install', simulator, host, timeout=120)
         command('xcrun', 'simctl', 'launch', simulator, BUNDLE, run_id)
         fixture_documents = Path(command('xcrun', 'simctl', 'get_app_container', simulator, BUNDLE, 'data')) / 'Documents'
         deadline = time.monotonic() + 30
@@ -237,6 +240,44 @@ def main():
             assert 'not independently verified' in message, 'text-only clients lost the save boundary'
             result['private_hold_refused_before_capture'] = True
             result['mcp_request_acknowledged'] = True
+            if args.finish_preview and not (image_paths() - baseline):
+                # Completing the already captured image is a different UI
+                # action. Never request another capture when save is pending.
+                for attempt in range(2):
+                    preview_deadline = time.monotonic() + 10
+                    recognized = False
+                    reads = 0
+                    while time.monotonic() < preview_deadline and not (image_paths() - baseline):
+                        observed = peer.request('tools/call', {'name': 'phone_elements', 'arguments': {}}, timeout=20)
+                        (out / f'preview-observation-{attempt}-{reads}.json').write_text(json.dumps(observed, indent=2) + '\n')
+                        reads += 1
+                        observation, description, _ = payload(observed)
+                        assert observation.get('isError') is not True, 'preview observation failed'
+                        active = native(prefix + '/wda/activeAppInfo')
+                        recognized = active.get('bundleId') == 'com.apple.springboard' and '[NavigationBar] "SSSScreenshotsView"' in description
+                        if recognized: break
+                        time.sleep(.2)  # Read-only observation of one pending preview, no new capture.
+                    if image_paths() - baseline: break
+                    if not recognized:
+                        result['preview_completion'] = {'recognized_system_view': False, 'ui_action_sent': False, 'reads': reads}
+                        break  # The common independent asset oracle still determines success.
+                    token = re.search(r'snapshot (\S+)', description)
+                    choices = re.findall(r'#(\d+) \[Button\] "(完成|Done|完了)"', description)
+                    assert token and len(choices) == 1, 'missing or ambiguous existing-preview completion control'
+                    index, label = choices[0]
+                    completion = peer.request('tools/call', {'name': 'phone_tap_element', 'arguments': {
+                        'element': int(index), 'snapshot': token.group(1), 'observe': False}}, timeout=20)
+                    (out / f'preview-completion-{attempt}.json').write_text(json.dumps(completion, indent=2) + '\n')
+                    completed, _, verdict = payload(completion)
+                    if completed.get('isError') is not True and verdict.get('ok') is True:
+                        result['preview_completion'] = {'recognized_system_view': 'SSSScreenshotsView', 'button': label,
+                            'tap_acknowledged': True, 'attempts': attempt + 1, 'saved_verified': False}
+                        break
+                    # Only the explicit no-send stale snapshot permits a fresh
+                    # selection. Unknown/other failures end this trial.
+                    assert verdict.get('error') == 'stale_element_snapshot' and verdict.get('outcome') == 'not_sent' and verdict.get('retry_safe') is True, 'preview tap was not safely refused; never repeat an uncertain UI action'
+                else:
+                    raise RuntimeError('preview kept changing; no further save control was sent')
             if args.debug_preview:
                 print('Existing screenshot only: inspect or save its preview; never call save_screenshot again.', flush=True)
                 breakpoint()

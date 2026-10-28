@@ -1003,7 +1003,7 @@ impl RunnerClient {
             (Some(true), Some(true)) => Ok(SystemCaptureOutcome::Requested(serde_json::json!({
                 "requested": true, "destination": "iPhone Photos", "saved_verified": false,
                 "verification_scope": "system_capture_request_acknowledged",
-                "hint": "Check the new image in Photos or its picker before reporting it saved; never repeat an uncertain capture."
+                "hint": "If a full-screen preview is open, inspect it and save that existing image with Done/Save to Photos. Check Photos or its picker; never take another screenshot to finish a pending save."
             }))),
             _ => anyhow::bail!("system capture dispatch was not acknowledged; outcome unknown; do not repeat"),
         }

@@ -148,7 +148,7 @@ jobs:
           xctestrun=$(python3 -c 'import os; from pathlib import Path; p=list((Path(os.environ["RUNNER_TEMP"])/"capture-runner/Build/Products").glob("*.xctestrun")); assert len(p)==1,p; print(p[0])')
           args=(--xctestrun "$xctestrun" --runtime '${{ matrix.runtime }}' --out "$RUNNER_TEMP/system-capture-proof")
           if [ '${{ inputs.capture_mcp }}' = 'true' ]; then
-            args+=(--daemon target/release/iphone-use --mcp target/release/iphone-use-mcp)
+            args+=(--daemon target/release/iphone-use --mcp target/release/iphone-use-mcp --finish-preview)
           fi
           python3 scripts/test-system-capture-simulator.py "${args[@]}"
       - name: Preserve capture dispatch and independent Photos receipts

@@ -1324,7 +1324,8 @@ impl PhoneHandler {
         ),
         description = "Navigate to Home (home), Spotlight (spotlight), or request a new system screenshot in iPhone Photos (save_screenshot). \
         save_screenshot is a mutation, unlike phone_screenshot which only returns image bytes. Acknowledgement means requested, \
-        not saved_verified; check the image in Photos or a picker before claiming it saved, and never repeat an unknown capture. \
+        not saved_verified. If iOS opens a full-screen screenshot preview, inspect the current system UI and choose Done/Save to Photos \
+        for that existing image; never take another screenshot to complete its save. Check Photos or its picker before claiming it saved. \
         Requires a native Runner advertising ipu:systemCaptureRequest. Navigation leaves the current app or \
         changing its visible state. Use this for system navigation, phone_key for field keys, or \
         phone_run_steps with launch_app for a specific app. Requires phone_status.drivable=true. Names are \
@@ -3911,7 +3912,7 @@ fn with_structure(
             || json.get("steps").and_then(serde_json::Value::as_array).is_some_and(|steps|
                 steps.iter().any(|step| step.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)));
         if capture_requested {
-            result.content.insert(0, Content::text("System screenshot requested; saving to Photos is not independently verified. Check the image in Photos or its picker."));
+            result.content.insert(0, Content::text("System screenshot requested; saving to Photos is not independently verified. If a full-screen preview is open, inspect it and save that existing image with Done/Save to Photos. Check Photos or its picker; do not take another screenshot to finish the pending save."));
         }
         result.structured_content = Some(json);
     }

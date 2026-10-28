@@ -362,7 +362,10 @@ a native Runner declaring `ipu:systemCaptureRequest`; an older Runner is
 refused before the capture event. The action receipt reports
 `system_capture.requested:true` and `saved_verified:false`: the OS acknowledged
 the request, while the saved image still needs checking in Photos or a picker.
-An unknown outcome must never be repeated. `phone_screenshot` continues to
+On newer iOS, the capture can open a full-screen preview. Inspect that system
+UI and choose Done/Save to Photos for the existing image, then verify Photos;
+do not request another screenshot to complete its save. An unknown outcome
+must never be repeated. `phone_screenshot` continues to
 return an observation image to the caller without adding a Photos asset.
 
 
