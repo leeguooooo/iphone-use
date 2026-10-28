@@ -76,6 +76,14 @@ fn bounded_read_query() -> String {
     )
 }
 
+/// Pre-dispatch refusal or an acknowledged request; post-dispatch uncertainty is an error.
+#[derive(Debug)]
+pub enum SystemCaptureOutcome {
+    Unsupported,
+    ScopeChanged,
+    Requested(serde_json::Value),
+}
+
 /// A runner endpoint plus a lazily-created session id.
 pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
@@ -972,20 +980,27 @@ impl RunnerClient {
         ensure_runner_success(response,"GET element value").await
     }
 
-    /// Request one iOS system capture. None is a verified pre-dispatch refusal;
+    /// Request one iOS system capture under a live screen/owner permit;
     /// an acknowledged request still says nothing about Photos persistence.
-    pub async fn request_system_capture(&mut self) -> Result<Option<serde_json::Value>> {
+    pub async fn request_system_capture(&mut self, allowed: &(dyn Fn() -> bool + Sync)) -> Result<SystemCaptureOutcome> {
+        if !allowed() { return Ok(SystemCaptureOutcome::ScopeChanged); }
         let sid = self.ensure_session().await?.to_string();
         if !self.system_capture_request {
-            return Ok(None);
+            return Ok(SystemCaptureOutcome::Unsupported);
         }
-        let response = self.post_req(format!("{}/session/{}/ipu/system-capture", self.base, sid))
-            .json(&serde_json::json!({})).send_signed(&self.auth).await
+        let (client, request) = self.post_req(format!("{}/session/{}/ipu/system-capture", self.base, sid))
+            .json(&serde_json::json!({})).build_split();
+        let mut request = request.context("build system capture")?;
+        crate::runner_token::sign_request(&self.auth, &mut request);
+        // Session creation and signing may outlive privacy/owner changes.
+        // Refuse before transport admission, never re-send after admission.
+        if !allowed() { return Ok(SystemCaptureOutcome::ScopeChanged); }
+        let response = crate::timing::execute_timed(client, request).await
             .context("POST system capture")?;
         let value = ensure_runner_success(response, "POST system capture").await?;
         match (value.get("invoked").and_then(serde_json::Value::as_bool), value.get("acknowledged").and_then(serde_json::Value::as_bool)) {
-            (Some(false), Some(false)) => Ok(None),
-            (Some(true), Some(true)) => Ok(Some(serde_json::json!({
+            (Some(false), Some(false)) => Ok(SystemCaptureOutcome::Unsupported),
+            (Some(true), Some(true)) => Ok(SystemCaptureOutcome::Requested(serde_json::json!({
                 "requested": true, "destination": "iPhone Photos", "saved_verified": false,
                 "verification_scope": "system_capture_request_acknowledged",
                 "hint": "Check the new image in Photos or its picker before reporting it saved; never repeat an uncertain capture."

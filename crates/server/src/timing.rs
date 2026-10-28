@@ -155,7 +155,7 @@ impl SendTimed for reqwest::RequestBuilder {
     }
 }
 
-async fn execute_timed(
+pub(crate) async fn execute_timed(
     client: reqwest::Client,
     request: reqwest::Request,
 ) -> reqwest::Result<reqwest::Response> {
