@@ -31,10 +31,14 @@ def main():
     parser.add_argument('--runtime', required=True)
     parser.add_argument('--daemon', type=Path)
     parser.add_argument('--mcp', type=Path)
+    parser.add_argument('--require-preview-completion', action='store_true', help='fail coverage unless an actual existing-preview completion tap was acknowledged')
+    parser.add_argument('--debug-before-capture', action='store_true', help='local TTY only: configure the fresh owned Simulator before its single capture')
     parser.add_argument('--finish-preview', action='store_true', help='save an existing recognized system screenshot preview through fresh MCP controls')
     parser.add_argument('--debug-preview', action='store_true', help='local TTY only: inspect/save the existing preview without another capture')
     args = parser.parse_args()
     if bool(args.daemon) != bool(args.mcp): parser.error('--daemon and --mcp must be supplied together')
+    if args.require_preview_completion and not args.finish_preview: parser.error('--require-preview-completion requires --finish-preview')
+    if args.debug_before_capture and (not args.mcp or not sys.stdin.isatty()): parser.error('--debug-before-capture requires MCP mode and a local TTY')
     if args.finish_preview and not args.mcp: parser.error('--finish-preview requires MCP mode')
     if args.debug_preview and (not args.mcp or not sys.stdin.isatty()): parser.error('--debug-preview requires MCP mode and a local interactive terminal')
     daemon_binary = args.daemon.resolve(strict=True) if args.daemon else None
@@ -226,6 +230,13 @@ def main():
             assert image_paths() == baseline, 'capture occurred during private hold'
             cleared, _, _ = payload(peer.request('tools/call', {'name': 'phone_hold', 'arguments': {'secs': 0}}, timeout=15))
             assert cleared.get('isError') is not True and daemon_status().get('screen_private_secs') == 0
+            if args.debug_before_capture:
+                print('Fresh owned Simulator setup only; do not take a screenshot in this pause.', flush=True)
+                breakpoint()
+                restored, _, restore_receipt = payload(peer.request('tools/call', {'name': 'phone_run_steps',
+                    'arguments': {'steps': [{'kind': 'launch_app', 'bundle': BUNDLE}], 'observe': False}}, timeout=25))
+                assert restored.get('isError') is not True and restore_receipt.get('ok') is True, 'owned fixture activation was not confirmed; do not repeat it in this trial'
+                assert native(prefix + '/wda/activeAppInfo').get('pid') == ready['pid'], 'owned fixture changed during setup'
             # Exactly one capture request after the prior, acknowledged not-sent
             # refusal. A timeout leaves the same Peer handle pending; no retry.
             (out / 'mcp-capture-attempt.json').write_text(json.dumps({'run_id': run_id}) + '\n')
@@ -281,6 +292,8 @@ def main():
             if args.debug_preview:
                 print('Existing screenshot only: inspect or save its preview; never call save_screenshot again.', flush=True)
                 breakpoint()
+        if args.require_preview_completion:
+            assert result.get('preview_completion', {}).get('tap_acknowledged') is True, 'required preview-completion branch was not exercised; direct save is a different coverage result'
         deadline = time.monotonic() + 30
         registered = None
         original_path = None
