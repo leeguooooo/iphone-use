@@ -111,10 +111,8 @@ final class RunnerTests: XCTestCase {
       to: documents.appendingPathComponent("capture-dispatch.json"), options: .atomic)
     XCTAssertEqual(result["invoked"] as? Bool, true)
     XCTAssertEqual(result["acknowledged"] as? Bool, true)
-    // Keep the owned App running until its independent Photos reader has
-    // published an answer. The controller also verifies its full receipt.
-    XCTAssertTrue(app.staticTexts["capture-proof"].waitForExistence(timeout: 30))
-    XCTAssertEqual(app.staticTexts["capture-proof"].label, "VERIFIED")
+    // The host independently checks the new asset's Photos database row and
+    // original bytes. This App/Runner pair cannot declare persistence verified.
     #endif
   }
 

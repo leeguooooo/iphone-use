@@ -16,6 +16,9 @@ on:
       - scripts/test-drag-simulator.py
       - scripts/test-drag-simulator-verdict.py
       - scripts/test-value-read-simulator.py
+      - scripts/test-system-capture-simulator.py
+      - scripts/test-system-capture-verifier.py
+      - scripts/fixtures/system-capture/**
       - scripts/value-read-fixture.swift
       - .github/workflows/simulator-smoke.yml
   workflow_dispatch:

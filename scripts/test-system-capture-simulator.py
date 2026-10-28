@@ -8,6 +8,7 @@ from pathlib import Path
 import platform
 import plistlib
 import signal
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -29,8 +30,8 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith(('IPU_', 'TEST_RUNNER_IPU_', 'IPHONE_USE_', 'SIMCTL_CHILD_'))}
     env['TEST_RUNNER_IPU_CAPTURE_PROBE_RUN_ID'] = run_id
     result = {'run_id': run_id, 'scope': 'owned Simulator only; native request plus independent Photos/128-cell proof; not physical evidence',
-              'passed': False, 'capture_verified': False, 'cleanup_errors': [], 'recipe_sha256': hashlib.sha256(recipe.read_bytes()).hexdigest()}
-    simulator = process = fixture_documents = host_documents = host_bundle = None
+              'passed': False, 'capture_verified': False, 'screenshot_category_verified': False, 'cleanup_errors': [], 'recipe_sha256': hashlib.sha256(recipe.read_bytes()).hexdigest()}
+    simulator = process = fixture_documents = host_documents = host_bundle = media = baseline = None
 
     def command(*argv, timeout=45):
         completed = subprocess.run([str(v) for v in argv], env=env, capture_output=True, text=True, timeout=timeout)
@@ -75,14 +76,19 @@ def main():
         sdk = command('xcrun', '--sdk', 'iphonesimulator', '--show-sdk-path')
         arch = 'arm64' if platform.machine() == 'arm64' else 'x86_64'
         command('xcrun', '--sdk', 'iphonesimulator', 'swiftc', '-swift-version', '5', '-parse-as-library', '-sdk', sdk,
-                '-target', f'{arch}-apple-ios17.0-simulator', '-framework', 'UIKit', '-framework', 'Photos', '-framework', 'ImageIO',
-                '-framework', 'CryptoKit', source, '-o', app / 'CaptureFixture', timeout=120)
+                '-target', f'{arch}-apple-ios17.0-simulator', '-framework', 'UIKit', source, '-o', app / 'CaptureFixture', timeout=120)
         info = {'CFBundleExecutable': 'CaptureFixture', 'CFBundleIdentifier': BUNDLE, 'CFBundleName': 'CaptureFixture',
                 'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1', 'CFBundleShortVersionString': '1.0',
                 'CFBundleSupportedPlatforms': ['iPhoneSimulator'], 'MinimumOSVersion': '17.0', 'UIDeviceFamily': [1],
-                'UILaunchScreen': {}, 'NSPhotoLibraryUsageDescription': 'Verify a new system screenshot in this disposable Simulator.'}
+                'UILaunchScreen': {}}
         (app / 'Info.plist').write_bytes(plistlib.dumps(info))
         command('codesign', '--force', '--sign', '-', app)
+        verifier = out / 'verify-capture'
+        mac_sdk = command('xcrun', '--sdk', 'macosx', '--show-sdk-path')
+        command('xcrun', '--sdk', 'macosx', 'swiftc', '-sdk', mac_sdk, '-target', f'{arch}-apple-macos13.0',
+                '-framework', 'CoreGraphics', '-framework', 'ImageIO', '-framework', 'CryptoKit',
+                ROOT / 'scripts/fixtures/system-capture/VerifyCapture.swift', '-o', verifier, timeout=120)
+        result['offline_verifier_checks'] = json.loads(command('python3', ROOT / 'scripts/test-system-capture-verifier.py', '--verifier', verifier))
         name = 'ipu-system-capture-' + run_id[:8]
         created_id = command('xcrun', 'simctl', 'create', name, 'com.apple.CoreSimulator.SimDeviceType.iPhone-15', args.runtime)
         uuid.UUID(created_id)
@@ -94,7 +100,6 @@ def main():
         command('xcrun', 'simctl', 'boot', simulator)
         command('xcrun', 'simctl', 'bootstatus', simulator, '-b', timeout=120)
         command('xcrun', 'simctl', 'install', simulator, app, timeout=120)
-        command('xcrun', 'simctl', 'privacy', simulator, 'grant', 'photos', BUNDLE)
         command('xcrun', 'simctl', 'launch', simulator, BUNDLE, run_id)
         fixture_documents = Path(command('xcrun', 'simctl', 'get_app_container', simulator, BUNDLE, 'data')) / 'Documents'
         deadline = time.monotonic() + 30
@@ -104,6 +109,12 @@ def main():
             time.sleep(.1)
         ready = receipt(fixture_documents, 'capture-ready.json')
         assert ready.get('ready') is True and ready['marker_cells'] == 128, 'fixture not ready'
+        media = Path.home() / 'Library/Developer/CoreSimulator/Devices' / simulator / 'data/Media'
+        dcim = media / 'DCIM'
+        def image_paths():
+            return {p for p in dcim.rglob('*') if p.is_file() and p.suffix.lower() in ['.png', '.jpg', '.jpeg', '.heic']}
+        baseline = image_paths()
+        result['baseline_dcim_images'] = len(baseline)
         result['phase'] = 'one_capture_test_started'
         with (out / 'xcode.log').open('wb') as log:
             process = subprocess.Popen(['xcodebuild', 'test-without-building', '-xctestrun', str(recipe),
@@ -115,18 +126,42 @@ def main():
         dispatch = receipt(host_documents, 'capture-dispatch.json')
         assert dispatch.get('invoked') is True and dispatch.get('acknowledged') is True and dispatch.get('saved_verified') is False, 'dispatch not acknowledged; never repeat the capture'
         deadline = time.monotonic() + 30
-        while not (fixture_documents / 'capture-photo.json').exists():
-            if time.monotonic() >= deadline:
-                raise RuntimeError('no independently verified new Photos asset; never repeat the capture')
-            time.sleep(.1)
-        photo = receipt(fixture_documents, 'capture-photo.json')
-        assert photo['pid'] == ready['pid'] and photo.get('verified') is True, 'Photos image does not match this fixture/run'
-        assert photo['new_assets'] == 1 and photo['screenshot_subtype'] is True and photo['matched_cells'] == photo['marker_cells'] == 128
-        assert photo['negative_matched_cells'] < 128, 'pixel verifier accepted a wrong challenge'
-        assert photo['pixel_width'] == ready['screen_width'] and photo['pixel_height'] == ready['screen_height'], 'saved image has unexpected dimensions'
-        original = (fixture_documents / 'capture-photo-original.bin').read_bytes()
-        assert hashlib.sha256(original).hexdigest() == photo['photo_sha256'], 'Photos bytes do not match the independent receipt'
+        registered = None
+        original_path = None
+        while time.monotonic() < deadline:
+            added = image_paths() - baseline
+            assert len(added) <= 1, 'more than one new original image; attribution is ambiguous'
+            database = media / 'PhotoData/Photos.sqlite'
+            if len(added) == 1:
+                original_path = added.pop()
+                original_path.resolve().relative_to(media.resolve())
+            if original_path is not None and database.exists():
+                try:
+                    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=1) as connection:
+                        connection.row_factory = sqlite3.Row
+                        columns = {row[1] for row in connection.execute('PRAGMA table_info(ZASSET)')}
+                        if {'ZFILENAME', 'ZDIRECTORY'}.issubset(columns):
+                            selected = [key for key in ['Z_PK', 'ZFILENAME', 'ZDIRECTORY', 'ZUUID', 'ZKIND', 'ZKINDSUBTYPE', 'ZTRASHEDSTATE'] if key in columns]
+                            rows = [dict(row) for row in connection.execute('SELECT ' + ','.join(selected) + ' FROM ZASSET WHERE ZFILENAME=?', (original_path.name,))]
+                            relative_directory = original_path.parent.relative_to(media).as_posix()
+                            rows = [row for row in rows if row['ZDIRECTORY'] in [relative_directory, original_path.parent.name] and row.get('ZTRASHEDSTATE', 0) == 0]
+                            if len(rows) == 1:
+                                registered = rows[0]
+                                break
+                except sqlite3.Error:
+                    pass  # Read-only observation of the same pending asset, never another capture.
+            time.sleep(.2)
+        assert registered is not None and original_path is not None, 'new original image was not registered in Photos; never repeat capture'
+        (out / 'capture-photos-registration.json').write_text(json.dumps({'run_id': run_id, 'asset': registered,
+            'original_relative_path': original_path.relative_to(media).as_posix(),
+            'classification_note': 'raw private subtype retained without assuming its enum meaning'}, indent=2) + '\n')
+        original = original_path.read_bytes()
         (out / 'capture-photo-original.bin').write_bytes(original)
+        photo = json.loads(command(verifier, out / 'capture-photo-original.bin', out / 'capture-ready.json'))
+        (out / 'capture-photo.json').write_text(json.dumps(photo, indent=2) + '\n')
+        assert photo['run_id'] == run_id and photo['verified'] is True, 'original Photos bytes do not match this run marker'
+        assert photo['matched_cells'] == photo['marker_cells'] == 128 and photo['negative_matched_cells'] < 128
+        assert hashlib.sha256(original).hexdigest() == photo['photo_sha256'], 'asset bytes hash mismatch'
         assert result['xcode_exit'] == 0, 'XCTest failed despite retained capture receipts'
         result.update(capture_verified=True, phase='new_photos_asset_matches_fixture', photo_sha256=photo['photo_sha256'])
     except Exception as error:
@@ -141,12 +176,17 @@ def main():
                 host_documents = Path(command('xcrun', 'simctl', 'get_app_container', simulator, host_bundle, 'data', timeout=10)) / 'Documents'
             except Exception as error:
                 result['dispatch_evidence_unavailable'] = str(error)
-        if fixture_documents and (fixture_documents / 'capture-photo-original.bin').exists():
+        if media is not None and baseline is not None:
             try:
-                (out / 'capture-photo-original.bin').write_bytes((fixture_documents / 'capture-photo-original.bin').read_bytes())
+                pending_images = image_paths() - baseline
+                if len(pending_images) == 1 and not (out / 'capture-photo-original.bin').exists():
+                    candidate = pending_images.pop()
+                    candidate.resolve().relative_to(media.resolve())
+                    (out / 'capture-photo-original.bin').write_bytes(candidate.read_bytes())
+                    result['pending_original_retained'] = True
             except Exception as error:
-                result['cleanup_errors'].append(f'original Photos bytes: {error}')
-        for directory, names in [(fixture_documents, ['capture-ready.json', 'capture-photo.json']), (host_documents, ['capture-dispatch.json'])]:
+                result['photo_evidence_unavailable'] = str(error)
+        for directory, names in [(fixture_documents, ['capture-ready.json']), (host_documents, ['capture-dispatch.json'])]:
             if directory:
                 for name in names:
                     try:
