@@ -285,10 +285,11 @@ def main():
                         reads += 1
                         observation, description, _ = payload(observed)
                         assert observation.get('isError') is not True, 'preview observation failed'
-                        active = native(prefix + '/wda/activeAppInfo')
-                        (out / f'preview-active-{attempt}-{reads - 1}.json').write_text(json.dumps(active, indent=2) + '\n')
-                        recognized = active.get('bundleId') == 'com.apple.springboard' and '[NavigationBar] "SSSScreenshotsView"' in description
-                        if recognized: break
+                        if '[NavigationBar] "SSSScreenshotsView"' in description:
+                            active = native(prefix + '/wda/activeAppInfo')
+                            (out / f'preview-active-{attempt}-{reads - 1}.json').write_text(json.dumps(active, indent=2) + '\n')
+                            recognized = active.get('bundleId') in {'com.apple.springboard', 'com.apple.ScreenshotServicesService'}
+                            if recognized: break
                         time.sleep(.2)  # Read-only observation of one pending preview, no new capture.
                     if image_paths() - baseline: break
                     if not recognized:
