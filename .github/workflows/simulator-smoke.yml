@@ -133,5 +133,6 @@ jobs:
           name: system-capture-ios-${{ matrix.ios }}
           path: |
             ${{ runner.temp }}/system-capture-proof/*.json
+            ${{ runner.temp }}/system-capture-proof/capture-photo-original.bin
             ${{ runner.temp }}/system-capture-proof/xcode.log
             ${{ runner.temp }}/build-simulator.log

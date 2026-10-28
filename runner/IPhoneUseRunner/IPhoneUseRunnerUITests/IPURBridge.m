@@ -1663,15 +1663,21 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
     SEL perform = NSSelectorFromString(@"performDeviceEvent:error:");
     NSMethodSignature *factory = [eventClass methodSignatureForSelector:make];
     NSMethodSignature *dispatch = [XCUIDevice.sharedDevice methodSignatureForSelector:perform];
+    BOOL unsigned32 = factory.numberOfArguments == 5 &&
+      strcmp([factory getArgumentTypeAtIndex:2],"I") == 0 && strcmp([factory getArgumentTypeAtIndex:3],"I") == 0;
+    BOOL unsigned64 = factory.numberOfArguments == 5 &&
+      strcmp([factory getArgumentTypeAtIndex:2],"Q") == 0 && strcmp([factory getArgumentTypeAtIndex:3],"Q") == 0;
     if (factory == nil || factory.numberOfArguments != 5 || factory.methodReturnType[0] != '@' ||
-        [factory getArgumentTypeAtIndex:2][0] != 'I' || [factory getArgumentTypeAtIndex:3][0] != 'I' ||
+        (!unsigned32 && !unsigned64) ||
         [factory getArgumentTypeAtIndex:4][0] != 'd' || dispatch == nil || dispatch.numberOfArguments != 4 ||
         (dispatch.methodReturnType[0] != 'B' && dispatch.methodReturnType[0] != 'c') ||
         [dispatch getArgumentTypeAtIndex:2][0] != '@' || strcmp([dispatch getArgumentTypeAtIndex:3],"^@") != 0)
       return @{@"invoked":@NO,@"acknowledged":@NO,@"reason":@"system capture event ABI unavailable"};
     // Consumer-page Snapshot requests a system capture. ACK does not prove an
     // image was saved; the caller must verify the new Photos asset separately.
-    id event = ((id (*)(id,SEL,unsigned int,unsigned int,double))objc_msgSend)(eventClass,make,0x0C,0x65,0.005);
+    id event = unsigned64
+      ? ((id (*)(id,SEL,unsigned long long,unsigned long long,double))objc_msgSend)(eventClass,make,0x0C,0x65,0.005)
+      : ((id (*)(id,SEL,unsigned int,unsigned int,double))objc_msgSend)(eventClass,make,0x0C,0x65,0.005);
     if (event == nil) return @{@"invoked":@NO,@"acknowledged":@NO,@"reason":@"system capture event unavailable"};
     NSError *error = nil;
     invoked = YES;

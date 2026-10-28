@@ -30,7 +30,7 @@ def main():
     env['TEST_RUNNER_IPU_CAPTURE_PROBE_RUN_ID'] = run_id
     result = {'run_id': run_id, 'scope': 'owned Simulator only; native request plus independent Photos/128-cell proof; not physical evidence',
               'passed': False, 'capture_verified': False, 'cleanup_errors': [], 'recipe_sha256': hashlib.sha256(recipe.read_bytes()).hexdigest()}
-    simulator = process = fixture_documents = host_documents = None
+    simulator = process = fixture_documents = host_documents = host_bundle = None
 
     def command(*argv, timeout=45):
         completed = subprocess.run([str(v) for v in argv], env=env, capture_output=True, text=True, timeout=timeout)
@@ -84,15 +84,16 @@ def main():
         (app / 'Info.plist').write_bytes(plistlib.dumps(info))
         command('codesign', '--force', '--sign', '-', app)
         name = 'ipu-system-capture-' + run_id[:8]
-        simulator = command('xcrun', 'simctl', 'create', name, 'com.apple.CoreSimulator.SimDeviceType.iPhone-15', args.runtime)
-        uuid.UUID(simulator)
+        created_id = command('xcrun', 'simctl', 'create', name, 'com.apple.CoreSimulator.SimDeviceType.iPhone-15', args.runtime)
+        uuid.UUID(created_id)
+        simulator = created_id
         rows = json.loads(command('xcrun', 'simctl', 'list', 'devices', '--json'))['devices']
         matches = [d for runtime, ds in rows.items() for d in ds if runtime == args.runtime and d['udid'] == simulator and d['name'] == name]
         assert len(matches) == 1, 'owned Simulator identity mismatch'
         result['simulator'] = simulator
         command('xcrun', 'simctl', 'boot', simulator)
         command('xcrun', 'simctl', 'bootstatus', simulator, '-b', timeout=120)
-        command('xcrun', 'simctl', 'install', simulator, app)
+        command('xcrun', 'simctl', 'install', simulator, app, timeout=120)
         command('xcrun', 'simctl', 'privacy', simulator, 'grant', 'photos', BUNDLE)
         command('xcrun', 'simctl', 'launch', simulator, BUNDLE, run_id)
         fixture_documents = Path(command('xcrun', 'simctl', 'get_app_container', simulator, BUNDLE, 'data')) / 'Documents'
@@ -123,12 +124,28 @@ def main():
         assert photo['new_assets'] == 1 and photo['screenshot_subtype'] is True and photo['matched_cells'] == photo['marker_cells'] == 128
         assert photo['negative_matched_cells'] < 128, 'pixel verifier accepted a wrong challenge'
         assert photo['pixel_width'] == ready['screen_width'] and photo['pixel_height'] == ready['screen_height'], 'saved image has unexpected dimensions'
+        original = (fixture_documents / 'capture-photo-original.bin').read_bytes()
+        assert hashlib.sha256(original).hexdigest() == photo['photo_sha256'], 'Photos bytes do not match the independent receipt'
+        (out / 'capture-photo-original.bin').write_bytes(original)
         assert result['xcode_exit'] == 0, 'XCTest failed despite retained capture receipts'
         result.update(capture_verified=True, phase='new_photos_asset_matches_fixture', photo_sha256=photo['photo_sha256'])
     except Exception as error:
         result['error'] = f'{type(error).__name__}: {error}'
     finally:
-        stop_child()
+        try: stop_child()
+        except Exception as error: result['cleanup_errors'].append(f'owned XCTest process: {error}')
+        # A timed-out xcodebuild can already have dispatched the one capture.
+        # Recover its existing receipt read-only before deleting the owned Sim.
+        if simulator and host_bundle and host_documents is None:
+            try:
+                host_documents = Path(command('xcrun', 'simctl', 'get_app_container', simulator, host_bundle, 'data', timeout=10)) / 'Documents'
+            except Exception as error:
+                result['dispatch_evidence_unavailable'] = str(error)
+        if fixture_documents and (fixture_documents / 'capture-photo-original.bin').exists():
+            try:
+                (out / 'capture-photo-original.bin').write_bytes((fixture_documents / 'capture-photo-original.bin').read_bytes())
+            except Exception as error:
+                result['cleanup_errors'].append(f'original Photos bytes: {error}')
         for directory, names in [(fixture_documents, ['capture-ready.json', 'capture-photo.json']), (host_documents, ['capture-dispatch.json'])]:
             if directory:
                 for name in names:

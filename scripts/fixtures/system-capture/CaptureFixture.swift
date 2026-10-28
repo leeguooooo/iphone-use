@@ -37,10 +37,22 @@ final class CaptureFixture: UIResponder, UIApplicationDelegate {
   func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
     guard let marker = ProcessInfo.processInfo.arguments.last, UUID(uuidString: marker) != nil else { return false }
     runID = marker
-    guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else {
-      write("capture-ready.json", ["ready": false, "error": "full Photos access was not granted to this isolated fixture"])
-      return true
+    // Follow PhotoKit's authorization API even with the test's pre-grant;
+    // only its authorization callback admits the independent asset reader.
+    PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
+      DispatchQueue.main.async {
+        guard status == .authorized else {
+          self.write("capture-ready.json", ["ready": false, "authorization_raw": status.rawValue,
+            "error": "full Photos access was not granted to this isolated fixture"])
+          return
+        }
+        self.prepareFixture()
+      }
     }
+    return true
+  }
+
+  private func prepareFixture() {
     started = Date()
     PHAsset.fetchAssets(with: .image, options: nil).enumerateObjects { asset, _, _ in self.baseline.insert(asset.localIdentifier) }
     bits = runID.replacingOccurrences(of: "-", with: "").flatMap { character -> [Bool] in
@@ -70,9 +82,10 @@ final class CaptureFixture: UIResponder, UIApplicationDelegate {
       points.append(CGPoint(x: point.x / window.bounds.width, y: point.y / window.bounds.height))
     }
     write("capture-ready.json", ["ready": true, "baseline_assets": baseline.count, "marker_cells": bits.count,
-      "screen_width": Int(UIScreen.main.nativeBounds.width), "screen_height": Int(UIScreen.main.nativeBounds.height)])
+      "screen_width": Int(UIScreen.main.nativeBounds.width), "screen_height": Int(UIScreen.main.nativeBounds.height),
+      "screen_points_width": Double(window.bounds.width), "screen_points_height": Double(window.bounds.height),
+      "cell_points": Double(cell), "grid_x": 20, "grid_y": 200])
     timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.inspectNewAsset() }
-    return true
   }
 
   private func inspectNewAsset() {
@@ -93,15 +106,22 @@ final class CaptureFixture: UIResponder, UIApplicationDelegate {
     options.isNetworkAccessAllowed = false
     options.version = .original
     options.deliveryMode = .highQualityFormat
-    PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+    PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, _ in
       guard let data = data else {
         self.write("capture-photo.json", ["verified": false, "error": "new Photos asset has no locally readable original bytes"])
+        return
+      }
+      // Preserve the actual Photos bytes so a separate reader can recompute
+      // the pixel proof after this disposable Simulator has been deleted.
+      do { try data.write(to: self.documents.appendingPathComponent("capture-photo-original.bin"), options: .atomic) }
+      catch {
+        self.write("capture-photo.json", ["verified": false, "error": "could not preserve original Photos bytes"])
         return
       }
       let result = self.verifyPixels(data)
       let negative = self.verifyPixels(data, inverted: true)
       self.write("capture-photo.json", ["verified": result.matched == 128 && negative.matched < 128, "new_assets": assets.count,
-        "screenshot_subtype": true, "pixel_width": asset.pixelWidth, "pixel_height": asset.pixelHeight,
+        "screenshot_subtype": true, "photo_uti": uti ?? "unknown", "pixel_width": asset.pixelWidth, "pixel_height": asset.pixelHeight,
         "marker_cells": self.bits.count, "matched_cells": result.matched, "negative_matched_cells": negative.matched, "row_order": result.order,
         "photo_sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
         "asset_id_sha256": SHA256.hash(data: Data(asset.localIdentifier.utf8)).map { String(format: "%02x", $0) }.joined()])
