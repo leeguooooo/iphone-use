@@ -97,7 +97,10 @@ def main():
         info = {'CFBundleExecutable': 'CaptureFixture', 'CFBundleIdentifier': BUNDLE, 'CFBundleName': 'CaptureFixture',
                 'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1', 'CFBundleShortVersionString': '1.0',
                 'CFBundleSupportedPlatforms': ['iPhoneSimulator'], 'MinimumOSVersion': '17.0', 'UIDeviceFamily': [1],
-                'UILaunchScreen': {}}
+                'UILaunchScreen': {}, 'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait'], 'UIApplicationSceneManifest': {
+                    'UIApplicationSupportsMultipleScenes': False, 'UISceneConfigurations': {
+                        'UIWindowSceneSessionRoleApplication': [{'UISceneConfigurationName': 'Default',
+                                                               'UISceneDelegateClassName': 'CaptureScene'}]}}}
         (app / 'Info.plist').write_bytes(plistlib.dumps(info))
         command('codesign', '--force', '--sign', '-', app)
         verifier = out / 'verify-capture'

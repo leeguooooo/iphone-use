@@ -2,17 +2,32 @@ import UIKit
 
 @main
 final class CaptureFixture: UIResponder, UIApplicationDelegate {
+  func application(_ application: UIApplication, configurationForConnecting session: UISceneSession,
+                   options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+    let configuration = UISceneConfiguration(name: "Default", sessionRole: session.role)
+    configuration.delegateClass = CaptureScene.self
+    return configuration
+  }
+}
+
+private final class CaptureController: UIViewController {
+  override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .portrait }
+}
+
+@objc(CaptureScene)
+final class CaptureScene: UIResponder, UIWindowSceneDelegate {
   var window: UIWindow?
 
-  func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-    guard let runID = ProcessInfo.processInfo.arguments.last, UUID(uuidString: runID) != nil else { return false }
+  func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
+    guard let scene = scene as? UIWindowScene,
+          let runID = ProcessInfo.processInfo.arguments.last, UUID(uuidString: runID) != nil else { return }
     let bits = runID.replacingOccurrences(of: "-", with: "").flatMap { character -> [Bool] in
       let nibble = Int(String(character), radix: 16)!
       return (0..<4).reversed().map { nibble & (1 << $0) != 0 }
     }
-    let controller = UIViewController()
+    let controller = CaptureController()
     controller.view.backgroundColor = .white
-    let window = UIWindow(frame: UIScreen.main.bounds)
+    let window = UIWindow(windowScene: scene)
     window.rootViewController = controller
     self.window = window
     window.makeKeyAndVisible()
@@ -38,6 +53,5 @@ final class CaptureFixture: UIResponder, UIApplicationDelegate {
     if let data = try? JSONSerialization.data(withJSONObject: ready, options: [.sortedKeys]) {
       try? data.write(to: documents.appendingPathComponent("capture-ready.json"), options: .atomic)
     }
-    return true
   }
 }
