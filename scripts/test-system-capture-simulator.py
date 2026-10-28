@@ -24,6 +24,20 @@ ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = 'com.leeguoo.iphone-use.capture-fixture'
 
 
+def preview_completion_choices(description):
+    if '[NavigationBar] "SSSScreenshotsView"' not in description:
+        return []
+    buttons = re.findall(r'^#(\d+) \[Button\] "([^"]*)"$', description, re.MULTILINE)
+    labels = {label for _, label in buttons}
+    # iOS 27.2 sometimes exposes the visible completion checkmark as
+    # "已选择". Accept that observed alias only alongside its three
+    # screenshot-editor controls, never as a generic selected button.
+    selected_is_completion = all(labels.intersection(group) for group in (
+        {'Close', '关闭'}, {'标记', 'Markup'}, {'共享', 'Share'}))
+    return [(index, label) for index, label in buttons
+            if label in {'完成', 'Done', '完了'} or (label == '已选择' and selected_is_completion)]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--xctestrun', type=Path, required=True)
@@ -279,7 +293,7 @@ def main():
                         result['preview_completion'] = {'recognized_system_view': False, 'ui_action_sent': False, 'reads': reads}
                         break  # The common independent asset oracle still determines success.
                     token = re.search(r'snapshot (\S+)', description)
-                    choices = re.findall(r'#(\d+) \[Button\] "(完成|Done|完了)"', description)
+                    choices = preview_completion_choices(description)
                     assert token and len(choices) == 1, 'missing or ambiguous existing-preview completion control'
                     index, label = choices[0]
                     completion = peer.request('tools/call', {'name': 'phone_tap_element', 'arguments': {
