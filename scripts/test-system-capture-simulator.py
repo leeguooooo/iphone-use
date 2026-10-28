@@ -259,7 +259,13 @@ def main():
                     recognized = False
                     reads = 0
                     while time.monotonic() < preview_deadline and not (image_paths() - baseline):
-                        observed = peer.request('tools/call', {'name': 'phone_elements', 'arguments': {}}, timeout=20)
+                        try:
+                            observed = peer.request('tools/call', {'name': 'phone_elements', 'arguments': {}}, timeout=20)
+                        except TimeoutError:
+                            # A cold system preview can finish its AX snapshot
+                            # after the first observation window. Consume that
+                            # same read's response; never issue a replacement.
+                            observed = peer.wait(10)
                         (out / f'preview-observation-{attempt}-{reads}.json').write_text(json.dumps(observed, indent=2) + '\n')
                         reads += 1
                         observation, description, _ = payload(observed)
