@@ -2183,13 +2183,7 @@ impl PhoneHandler {
                     crate::compact::flow_list(&json).unwrap_or_else(|| json.to_string())
                 };
                 let mut result = CallToolResult::success(vec![Content::text(text)]);
-                let capture_requested = json.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)
-            || json.get("steps").and_then(serde_json::Value::as_array).is_some_and(|steps|
-                steps.iter().any(|step| step.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)));
-        if capture_requested {
-            result.content.insert(0, Content::text("System screenshot requested; saving to Photos is not independently verified. Check the image in Photos or its picker."));
-        }
-        result.structured_content = Some(json);
+                result.structured_content = Some(json);
                 result
             }
             Err(e) => {
@@ -3906,6 +3900,12 @@ fn with_structure(
         .filter(|value| value.is_object())
         .cloned()
     {
+        let capture_requested = json.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)
+            || json.get("steps").and_then(serde_json::Value::as_array).is_some_and(|steps|
+                steps.iter().any(|step| step.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)));
+        if capture_requested {
+            result.content.insert(0, Content::text("System screenshot requested; saving to Photos is not independently verified. Check the image in Photos or its picker."));
+        }
         result.structured_content = Some(json);
     }
     result
