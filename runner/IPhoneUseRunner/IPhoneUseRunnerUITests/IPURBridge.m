@@ -1654,31 +1654,38 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
   return @{@"secs": @(secs), @"never": @(never)};
 }
 
+// Availability is a metadata check only: status/session discovery never takes a photo.
++ (BOOL)systemScreenshotAvailable
+{
+  @try {
+    Class eventClass = NSClassFromString(@"XCDeviceEvent");
+    NSMethodSignature *factory = [eventClass methodSignatureForSelector:NSSelectorFromString(@"deviceEventWithPage:usage:duration:")];
+    NSMethodSignature *dispatch = [XCUIDevice.sharedDevice methodSignatureForSelector:NSSelectorFromString(@"performDeviceEvent:error:")];
+    if (factory.numberOfArguments != 5 || dispatch.numberOfArguments != 4) return NO;
+    BOOL unsigned32 = strcmp([factory getArgumentTypeAtIndex:2],"I") == 0 && strcmp([factory getArgumentTypeAtIndex:3],"I") == 0;
+    BOOL unsigned64 = strcmp([factory getArgumentTypeAtIndex:2],"Q") == 0 && strcmp([factory getArgumentTypeAtIndex:3],"Q") == 0;
+    return factory.methodReturnType[0] == '@' && (unsigned32 || unsigned64) &&
+      [factory getArgumentTypeAtIndex:4][0] == 'd' &&
+      (dispatch.methodReturnType[0] == 'B' || dispatch.methodReturnType[0] == 'c') &&
+      [dispatch getArgumentTypeAtIndex:2][0] == '@' && strcmp([dispatch getArgumentTypeAtIndex:3],"^@") == 0;
+  } @catch (__unused NSException *exception) { return NO; }
+}
+
 + (NSDictionary *)requestSystemScreenshot
 {
   BOOL invoked = NO;
   @try {
+    if (![self systemScreenshotAvailable])
+      return @{@"invoked":@NO,@"acknowledged":@NO,@"saved_verified":@NO,@"reason":@"system capture event ABI unavailable"};
     Class eventClass = NSClassFromString(@"XCDeviceEvent");
     SEL make = NSSelectorFromString(@"deviceEventWithPage:usage:duration:");
     SEL perform = NSSelectorFromString(@"performDeviceEvent:error:");
-    NSMethodSignature *factory = [eventClass methodSignatureForSelector:make];
-    NSMethodSignature *dispatch = [XCUIDevice.sharedDevice methodSignatureForSelector:perform];
-    BOOL unsigned32 = factory.numberOfArguments == 5 &&
-      strcmp([factory getArgumentTypeAtIndex:2],"I") == 0 && strcmp([factory getArgumentTypeAtIndex:3],"I") == 0;
-    BOOL unsigned64 = factory.numberOfArguments == 5 &&
-      strcmp([factory getArgumentTypeAtIndex:2],"Q") == 0 && strcmp([factory getArgumentTypeAtIndex:3],"Q") == 0;
-    if (factory == nil || factory.numberOfArguments != 5 || factory.methodReturnType[0] != '@' ||
-        (!unsigned32 && !unsigned64) ||
-        [factory getArgumentTypeAtIndex:4][0] != 'd' || dispatch == nil || dispatch.numberOfArguments != 4 ||
-        (dispatch.methodReturnType[0] != 'B' && dispatch.methodReturnType[0] != 'c') ||
-        [dispatch getArgumentTypeAtIndex:2][0] != '@' || strcmp([dispatch getArgumentTypeAtIndex:3],"^@") != 0)
-      return @{@"invoked":@NO,@"acknowledged":@NO,@"reason":@"system capture event ABI unavailable"};
-    // Consumer-page Snapshot requests a system capture. ACK does not prove an
-    // image was saved; the caller must verify the new Photos asset separately.
+    BOOL unsigned64 = strcmp([[eventClass methodSignatureForSelector:make] getArgumentTypeAtIndex:2],"Q") == 0;
+    // Consumer Snapshot requests a capture. ACK never proves Photos persistence.
     id event = unsigned64
       ? ((id (*)(id,SEL,unsigned long long,unsigned long long,double))objc_msgSend)(eventClass,make,0x0C,0x65,0.005)
       : ((id (*)(id,SEL,unsigned int,unsigned int,double))objc_msgSend)(eventClass,make,0x0C,0x65,0.005);
-    if (event == nil) return @{@"invoked":@NO,@"acknowledged":@NO,@"reason":@"system capture event unavailable"};
+    if (event == nil) return @{@"invoked":@NO,@"acknowledged":@NO,@"saved_verified":@NO,@"reason":@"system capture event unavailable"};
     NSError *error = nil;
     invoked = YES;
     BOOL ok = ((BOOL (*)(id,SEL,id,NSError **))objc_msgSend)(XCUIDevice.sharedDevice,perform,event,&error);

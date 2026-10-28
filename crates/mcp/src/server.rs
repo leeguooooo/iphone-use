@@ -227,7 +227,7 @@ pub struct KeyParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShortcutParams {
-    /// Supported names: `home` (Home Screen) and `spotlight` (search).
+    /// Supported names: `home`, `spotlight`, and `save_screenshot` (new image in Photos).
     /// App Switcher is unsupported by the device runner.
     pub name: String,
     /// Default true: return what the screen settled to (as on phone_tap).
@@ -1322,7 +1322,10 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Navigate to the iOS Home Screen (home) or Spotlight search (spotlight), leaving the current app or \
+        description = "Navigate to Home (home), Spotlight (spotlight), or request a new system screenshot in iPhone Photos (save_screenshot). \
+        save_screenshot is a mutation, unlike phone_screenshot which only returns image bytes. Acknowledgement means requested, \
+        not saved_verified; check the image in Photos or a picker before claiming it saved, and never repeat an unknown capture. \
+        Requires a native Runner advertising ipu:systemCaptureRequest. Navigation leaves the current app or \
         changing its visible state. Use this for system navigation, phone_key for field keys, or \
         phone_run_steps with launch_app for a specific app. Requires phone_status.drivable=true. Names are \
         trimmed and case-insensitive. switcher and other names fail before input is sent; the runner cannot \
@@ -1336,7 +1339,7 @@ impl PhoneHandler {
         self.progress_reset();
         let name = name.trim().to_ascii_lowercase();
         match name.as_str() {
-            "home" | "spotlight" => {
+            "home" | "spotlight" | "save_screenshot" => {
                 send_input_observed(&self.daemon, &InputMsg::Shortcut { name }, observe).await
             }
             "switcher" => CallToolResult::error(vec![Content::text(
@@ -1345,7 +1348,7 @@ impl PhoneHandler {
                  supported device action instead",
             )]),
             _ => CallToolResult::error(vec![Content::text(format!(
-                "unsupported shortcut '{name}'; supported: home, spotlight"
+                "unsupported shortcut '{name}'; supported: home, spotlight, save_screenshot"
             ))]),
         }
     }
@@ -2180,7 +2183,13 @@ impl PhoneHandler {
                     crate::compact::flow_list(&json).unwrap_or_else(|| json.to_string())
                 };
                 let mut result = CallToolResult::success(vec![Content::text(text)]);
-                result.structured_content = Some(json);
+                let capture_requested = json.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)
+            || json.get("steps").and_then(serde_json::Value::as_array).is_some_and(|steps|
+                steps.iter().any(|step| step.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)));
+        if capture_requested {
+            result.content.insert(0, Content::text("System screenshot requested; saving to Photos is not independently verified. Check the image in Photos or its picker."));
+        }
+        result.structured_content = Some(json);
                 result
             }
             Err(e) => {
@@ -3592,9 +3601,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
             PhoneStep::Shortcut { name, after_ms } => {
                 validate_after(after_ms)?;
                 let name = name.trim().to_ascii_lowercase();
-                if !matches!(name.as_str(), "home" | "spotlight") {
+                if !matches!(name.as_str(), "home" | "spotlight" | "save_screenshot") {
                     return Err(format!(
-                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight; no action was sent"
+                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight, save_screenshot; no action was sent"
                     ));
                 }
                 action_step(serde_json::json!({"type":"shortcut","name":name}), after_ms)
@@ -4388,6 +4397,26 @@ mod tests {
         assert_eq!(structured["settle"]["captures"], 2);
         assert_eq!(structured["delta"]["added"][0], "搜索");
         assert_eq!(structured["snapshot"], "snap-1");
+    }
+
+    #[test]
+    fn system_capture_mcp_preserves_unverified_save_and_explicit_notice() {
+        let (url, task) = scripted_daemon("200 OK", br#"{"ok":true,"transport":"runner","system_capture":{"requested":true,"destination":"iPhone Photos","saved_verified":false}}"#.to_vec());
+        let handler = handler_for(&url);
+        let result = block(handler.phone_shortcut(Parameters(ShortcutParams {
+            name: " SAVE_SCREENSHOT ".into(), observe: Some(false),
+        })));
+        task.join().unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert!(text_of(&result).contains("not independently verified"));
+        assert_eq!(result.structured_content.unwrap()["system_capture"]["saved_verified"], false);
+    }
+
+    #[test]
+    fn system_capture_batch_validation_accepts_explicit_mutation() {
+        let step: PhoneStep = serde_json::from_value(serde_json::json!({"kind":"shortcut","name":"save_screenshot"})).unwrap();
+        let request = phone_steps_request(vec![step]).unwrap();
+        assert_eq!(request["steps"][0]["action"]["name"], "save_screenshot");
     }
 
     /// With `observe:false` the result stays the short string callers

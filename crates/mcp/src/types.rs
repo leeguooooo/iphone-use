@@ -143,7 +143,7 @@ pub enum InputMsg {
     Text { text: String },
     /// Device-native named key press.
     Key { name: String },
-    /// Supported iOS system shortcut: `home | spotlight`. App Switcher is not
+    /// Supported iOS system shortcut: `home | spotlight | save_screenshot`. App Switcher is not
     /// available through runner and must not be advertised as supported.
     Shortcut { name: String },
     /// Begin a long-press at normalized coordinates.  Pair with an `Up` event

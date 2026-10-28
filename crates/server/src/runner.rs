@@ -100,6 +100,7 @@ pub struct RunnerClient {
     /// runner). Asked again whenever a new session starts (a new runner).
     device_settle: Option<bool>,
     value_read: bool,
+    system_capture_request: bool,
     /// The last tree read and when: snapshot-bound actions reuse it instead
     /// of reading the whole tree again (see [`Self::recent_tree`]).
     last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
@@ -346,6 +347,7 @@ impl RunnerClient {
             no_alert_at: None,
             device_settle: None,
             value_read: false,
+            system_capture_request: false,
             last_tree: None,
             lite_source: false,
             probe: ProbeMemory::default(),
@@ -703,6 +705,8 @@ impl RunnerClient {
             self.no_alert_at = None;
             self.value_read = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.system_capture_request = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:systemCaptureRequest").and_then(serde_json::Value::as_bool)) == Some(true);
             self.device_settle = None;
             {
                 let sid = self.session.as_deref().unwrap().to_string();
@@ -966,6 +970,28 @@ impl RunnerClient {
         let response=self.http.get(format!("{}/session/{}/element/{}/value?complete=1",self.base,sid,id))
             .query(&[("max_utf16",max_utf16)]).send_signed(&self.auth).await?;
         ensure_runner_success(response,"GET element value").await
+    }
+
+    /// Request one iOS system capture. None is a verified pre-dispatch refusal;
+    /// an acknowledged request still says nothing about Photos persistence.
+    pub async fn request_system_capture(&mut self) -> Result<Option<serde_json::Value>> {
+        let sid = self.ensure_session().await?.to_string();
+        if !self.system_capture_request {
+            return Ok(None);
+        }
+        let response = self.post_req(format!("{}/session/{}/ipu/system-capture", self.base, sid))
+            .json(&serde_json::json!({})).send_signed(&self.auth).await
+            .context("POST system capture")?;
+        let value = ensure_runner_success(response, "POST system capture").await?;
+        match (value.get("invoked").and_then(serde_json::Value::as_bool), value.get("acknowledged").and_then(serde_json::Value::as_bool)) {
+            (Some(false), Some(false)) => Ok(None),
+            (Some(true), Some(true)) => Ok(Some(serde_json::json!({
+                "requested": true, "destination": "iPhone Photos", "saved_verified": false,
+                "verification_scope": "system_capture_request_acknowledged",
+                "hint": "Check the new image in Photos or its picker before reporting it saved; never repeat an uncertain capture."
+            }))),
+            _ => anyhow::bail!("system capture dispatch was not acknowledged; outcome unknown; do not repeat"),
+        }
     }
 
     /// Set a date/option PickerWheel to a target value (issue #23). A `scroll`
@@ -2483,6 +2509,7 @@ impl RunnerClient {
     pub fn invalidate_session(&mut self) {
         self.session = None;
         self.value_read = false;
+        self.system_capture_request = false;
         self.window = None;
         self.no_alert_at = None;
         self.last_tree = None;

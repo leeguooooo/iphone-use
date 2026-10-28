@@ -9284,6 +9284,15 @@ async fn runner_control_with_client(
             // always opening. Resolve and click its accessibility element, then
             // verify the search field before reporting success.
             Some("spotlight") => w.open_spotlight().await,
+            Some("save_screenshot") => match w.request_system_capture().await {
+                Ok(Some(receipt)) => {
+                    *detail = Some(serde_json::json!({"system_capture": receipt}));
+                    Ok(())
+                }
+                Ok(None) => return RunnerControlOutcome::Refused("system_capture_unsupported",
+                    "the native Runner cannot request a system screenshot; update it; nothing was captured"),
+                Err(error) => Err(error),
+            },
             // App switcher: the swipe-up-from-the-home-indicator is a system
             // gesture runner can't synthesize (hardware-verified: from Home it goes
             // Home, from an app the swipe is absorbed — the switcher never opens).
@@ -11025,9 +11034,9 @@ fn validate_agent_action_value(
             if !action
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|name| matches!(name, "home" | "spotlight"))
+                .is_some_and(|name| matches!(name, "home" | "spotlight" | "save_screenshot"))
             {
-                return invalid("shortcut must be home or spotlight");
+                return invalid("shortcut must be home, spotlight or save_screenshot");
             }
         }
         "drag" if action.contains_key("points") => {
@@ -12377,6 +12386,9 @@ async fn agent_actions_generation(
                 });
                 if let Some((_, resolved)) = launch_resolutions.iter().find(|(step, _)| *step == index) {
                     receipt["resolved"] = resolved.clone();
+                }
+                if let Some(capture) = step_detail.as_ref().and_then(|value| value.get("system_capture")) {
+                    receipt["system_capture"] = capture.clone();
                 }
                 step_results.push(receipt);
             }
@@ -14480,6 +14492,9 @@ async fn agent_input_inner(
             };
             let body = attach_alert(body, alert);
             let mut blocks = flow_after_input(&state, &headers, &value);
+            if let Some(capture) = detail.as_ref().and_then(|value| value.get("system_capture")) {
+                blocks.push(("system_capture", capture.clone()));
+            }
             if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
                 blocks.push(("agent_focus", block));
             }
@@ -25752,6 +25767,50 @@ mod tests {
         );
         assert!(matches!(result, Err(DevicectlError::Timeout)));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn system_capture_capability_and_outcome_contracts() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        block(async {
+            // Unsupported/malformed capabilities never reach the capture route;
+            // ACK is request-only, while any post-dispatch ambiguity stays unknown.
+            for (capability, reply, expected, posts) in [
+                (serde_json::Value::Null, r#"{"value":null}"#, RunnerControlOutcome::Refused("system_capture_unsupported", "the native Runner cannot request a system screenshot; update it; nothing was captured"), 0),
+                (serde_json::json!("true"), r#"{"value":null}"#, RunnerControlOutcome::Refused("system_capture_unsupported", "the native Runner cannot request a system screenshot; update it; nothing was captured"), 0),
+                (serde_json::json!(true), r#"{"value":{"invoked":true,"acknowledged":true,"saved_verified":true}}"#, RunnerControlOutcome::Applied, 1),
+                (serde_json::json!(true), r#"{"value":{"invoked":false,"acknowledged":false}}"#, RunnerControlOutcome::Refused("system_capture_unsupported", "the native Runner cannot request a system screenshot; update it; nothing was captured"), 1),
+                (serde_json::json!(true), r#"{"value":{"invoked":true,"acknowledged":false}}"#, RunnerControlOutcome::Failed, 1),
+                (serde_json::json!(true), r#"{"value":{"invoked":true}}"#, RunnerControlOutcome::Failed, 1),
+                (serde_json::json!(true), "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n", RunnerControlOutcome::Failed, 1),
+            ] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let seen = calls.clone();
+                let mut runner = MockRunner::start(move |request| {
+                    if request.starts_with("POST /session ") {
+                        return serde_json::json!({"value":{"sessionId":"SESSION","capabilities":{"ipu:systemCaptureRequest":capability}}}).to_string();
+                    }
+                    if request.starts_with("POST /session/SESSION/ipu/system-capture ") {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        return reply.to_string();
+                    }
+                    healthy_runner_responder(request)
+                });
+                let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+                let actionable = AtomicBool::new(true);
+                let mut detail = None;
+                let outcome = direct_agent_action(&mut client, &actionable,
+                    &serde_json::json!({"type":"shortcut","name":"save_screenshot"}), &mut detail, far_deadline()).await;
+                assert_eq!(outcome, expected);
+                assert_eq!(calls.load(Ordering::SeqCst), posts, "capture must never be replayed");
+                if outcome == RunnerControlOutcome::Applied {
+                    let receipt = detail.unwrap();
+                    assert_eq!(receipt["system_capture"]["requested"], true);
+                    assert_eq!(receipt["system_capture"]["saved_verified"], false, "a backend assertion cannot promote ACK to a saved image");
+                }
+                runner.shutdown();
+            }
+        });
     }
 
     // -- long text ----------------------------------------------------------
