@@ -10362,10 +10362,14 @@ async fn direct_control(
             actionable: true,
             locked,
         };
+        let mut body = serde_json::json!({"ok":true});
+        if let Some(capture) = detail.as_ref().and_then(|value| value.get("system_capture")) {
+            body["system_capture"] = capture.clone();
+        }
         return with_security_headers(
             Response::builder()
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"ok":true}"#))
+                .body(Body::from(body.to_string()))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         );
     }
@@ -25906,6 +25910,33 @@ mod tests {
             assert_eq!(body["outcome"], "not_sent");
             assert_eq!(body["retry_safe"], true);
             assert!(system_capture_private_refusal(&state, &serde_json::json!({"type":"shortcut","name":"home"})).is_none());
+        });
+    }
+
+    #[test]
+    fn system_capture_browser_control_preserves_request_only_receipt() {
+        block(async {
+            let mut runner = MockRunner::start(|request| {
+                if request.starts_with("POST /session ") {
+                    return r#"{"value":{"sessionId":"SESSION","capabilities":{"ipu:systemCaptureRequest":true}}}"#.into();
+                }
+                if request.contains("/ipu/system-capture") {
+                    return r#"{"value":{"invoked":true,"acknowledged":true}}"#.into();
+                }
+                healthy_runner_responder(request)
+            });
+            let mut state = readiness_test_state();
+            Arc::get_mut(&mut state).unwrap().runner = Some(Arc::new(tokio::sync::Mutex::new(
+                crate::runner::RunnerClient::new(runner.base()).unwrap())));
+            let mut headers = HeaderMap::new();
+            headers.insert("x-phone-control", HeaderValue::from_static("1"));
+            let response = direct_control(State(state), headers, serde_json::json!({"type":"shortcut","name":"save_screenshot"}).to_string()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let (_, value) = read_json_response(response).await;
+            let value = value.unwrap();
+            assert_eq!(value["system_capture"]["requested"], true);
+            assert_eq!(value["system_capture"]["saved_verified"], false);
+            runner.shutdown();
         });
     }
 
