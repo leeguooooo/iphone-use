@@ -362,7 +362,14 @@ fn normalizing_an_expired_hold_preserves_a_new_permitted_capture() {
 async fn observed_input_revocation(during_read: bool, clear: bool, owner_change: bool) {
     let started = Arc::new(tokio::sync::Notify::new());
     let signal = started.clone();
+    let revoked=Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let marker=revoked.clone();
+    let late_reads=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count=late_reads.clone();
     let runner = mock_runner(move |request, _| {
+        if marker.load(std::sync::atomic::Ordering::SeqCst) {
+            count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+        }
         if request.starts_with("POST /session ") {
             return Some((Duration::ZERO, json!({"value":{"sessionId":"SESSION"}}).to_string()));
         }
@@ -387,13 +394,18 @@ async fn observed_input_revocation(during_read: bool, clear: bool, owner_change:
     });
     if during_read {
         tokio::time::timeout(Duration::from_secs(4),started.notified()).await.unwrap();
+        revoked.store(true,std::sync::atomic::Ordering::SeqCst);
         hold(state.clone(),true).await;
         if clear {hold(state.clone(),false).await;}
     }
     let response = pending.await.unwrap();
     assert_eq!(response.status(),StatusCode::OK);
     if !during_read {
-        if owner_change { state.owner_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel); }
+        if owner_change {
+            state.owner_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+            state.owner_snapshots.lock().unwrap().insert("new-owner".into(),"new-snapshot".into());
+            state.element_snapshots.lock().unwrap().push_back(("new-snapshot".into(),Arc::new(vec![])));
+        }
         else { hold(state.clone(),true).await; }
     }
     {
@@ -407,8 +419,14 @@ async fn observed_input_revocation(during_read: bool, clear: bool, owner_change:
     let body:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["ok"],true,"privacy must not rewrite a confirmed applied action");
     assert_eq!(body["observation_omitted"],true);
-    assert!(state.element_snapshots.lock().unwrap().is_empty());
-    assert!(state.owner_snapshots.lock().unwrap().is_empty());
+    assert_eq!(late_reads.load(std::sync::atomic::Ordering::SeqCst),0,"revoked observation must not dispatch internal retries or later reads");
+    if owner_change {
+        assert!(state.element_snapshots.lock().unwrap().iter().any(|(id,_)|id=="new-snapshot"));
+        assert_eq!(state.owner_snapshots.lock().unwrap().get("new-owner").map(String::as_str),Some("new-snapshot"));
+    } else {
+        assert!(state.element_snapshots.lock().unwrap().is_empty());
+        assert!(state.owner_snapshots.lock().unwrap().is_empty());
+    }
 }
 #[test]
 fn observed_input_is_fenced_until_its_body_is_published() {
@@ -457,5 +475,92 @@ fn private_hold_during_action_skips_post_action_observation() {
         let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["ok"],true);
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst),0,"no new observation after private hold");
+    });
+}
+
+#[test]
+fn system_shortcuts_refuse_private_hold_at_both_http_entries() {
+    block(async {
+        for uri in ["/agent/input", "/control"] {
+            for name in ["save_screenshot","volume_up","volume_down"] {
+                let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let count=calls.clone();
+                let runner=mock_runner(move |_,_| {count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                    Some((Duration::ZERO,json!({"value":null}).to_string()))});
+                let state=build_state_with_runner(runner.url());
+                hold(state.clone(),true).await;
+                let response=server::http::router(state).oneshot(Request::builder().method("POST").uri(uri)
+                    .header("x-phone-control","1").header("x-phone-owner","privacy-fixture")
+                    .header("content-type","application/json")
+                    .body(Body::from(json!({"type":"shortcut","name":name}).to_string())).unwrap()).await.unwrap();
+                assert_eq!(response.status(),StatusCode::LOCKED,"{uri}/{name}");
+                let bytes=response.into_body().collect().await.unwrap().to_bytes();
+                let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(value["outcome"],"not_sent");
+                assert_eq!(value["retry_safe"],true);
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),0);
+            }
+        }
+    });
+}
+
+#[test]
+fn batch_owner_change_redacts_queued_observation() {
+    block(async {
+        let runner=mock_runner(|request,_| Some((Duration::ZERO,if request.contains("/source") {
+            json!({"value":{"type":"XCUIElementTypeApplication","label":"PRIVATE_BATCH_OWNER",
+                "rect":{"x":0,"y":0,"width":390,"height":844},"children":[]}}).to_string()
+        } else if request.starts_with("POST /session ") {
+            json!({"value":{"sessionId":"SESSION"}}).to_string()
+        } else {json!({"value":null}).to_string()})));
+        let state=build_state_with_runner(runner.url());
+        let response=server::http::router(state.clone()).oneshot(Request::builder().method("POST").uri("/agent/actions")
+            .header("x-phone-control","1").header("x-phone-owner","privacy-fixture")
+            .header("content-type","application/json")
+            .body(Body::from(r#"{"steps":[{"kind":"action","action":{"type":"home"}}],"observe":true}"#)).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        state.owner_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+        let bytes=response.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_BATCH_OWNER"));
+        let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["observation_omitted"],true);
+        assert_eq!(value["applied_actions"],1);
+        assert_eq!(value["retry_safe"],false);
+    });
+}
+
+#[test]
+fn system_shortcut_setup_cannot_outlive_its_privacy_permission() {
+    block(async {
+        for name in ["save_screenshot","volume_up","volume_down"] {
+            let started=Arc::new(tokio::sync::Notify::new());
+            let signal=started.clone();
+            let mutations=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count=mutations.clone();
+            let runner=mock_runner(move |request,_| {
+                if request.starts_with("POST /session ") {
+                    signal.notify_one();
+                    return Some((Duration::from_millis(150),json!({"value":{"sessionId":"SESSION",
+                        "capabilities":{"ipu:systemCaptureRequest":true,"ipu:volumeButtons":true}}}).to_string()));
+                }
+                if request.contains("/ipu/system-capture") || request.contains("/wda/pressButton") {
+                    count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                }
+                Some((Duration::ZERO,json!({"value":null}).to_string()))
+            });
+            let state=build_state_with_runner(runner.url());
+            let app=server::http::router(state.clone());
+            let body=json!({"type":"shortcut","name":name}).to_string();
+            let pending=tokio::spawn(async move {app.oneshot(Request::builder().method("POST").uri("/agent/input")
+                .header("x-phone-control","1").header("x-phone-owner","privacy-fixture")
+                .header("content-type","application/json").body(Body::from(body)).unwrap()).await.unwrap()});
+            tokio::time::timeout(Duration::from_secs(4),started.notified()).await.unwrap();
+            hold(state,true).await;
+            let bytes=pending.await.unwrap().into_body().collect().await.unwrap().to_bytes();
+            let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["outcome"],"not_sent","{name}: {value}");
+            assert_eq!(value["retry_safe"],true);
+            assert_eq!(mutations.load(std::sync::atomic::Ordering::SeqCst),0);
+        }
     });
 }

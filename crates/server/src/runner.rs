@@ -2357,7 +2357,7 @@ impl RunnerClient {
         self.observation_scope = Some(allowed);
     }
 
-    fn observation_scope_current(&self) -> bool {
+    pub(crate) fn observation_scope_current(&self) -> bool {
         self.observation_scope.as_ref().is_none_or(|allowed| allowed())
     }
 

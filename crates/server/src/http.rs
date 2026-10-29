@@ -11840,6 +11840,7 @@ async fn agent_wait_elements(
         Ok(Err(first_error)) => {
             // Source reads are idempotent. A WebView transition can invalidate
             // one runner session, so rebuild once within the same wait deadline.
+            if !w.observation_scope_current() { return Err(AgentWaitReadError::TimedOut); }
             w.invalidate_session();
             match tokio::time::timeout_at(deadline, w.elements()).await {
                 Ok(Ok(rows)) => Ok(rows),
@@ -11987,19 +11988,11 @@ async fn agent_actions_inner(
     body: String,
 ) -> Response {
     let generation = state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire);
-    let observes_screen = serde_json::from_str::<AgentActionsRequest>(&body).ok()
-        .is_some_and(|request| batch_needs_private_scope(&request));
-    let mut response = agent_actions_generation(State(state.clone()), headers, body, generation).await;
-    if observes_screen && !refused_as_unauthenticated(&response) {
-        response.extensions_mut().insert(BatchPrivacyFence {
-            private_until: state.private_until.clone(), epoch: state.privacy_epoch.clone(), generation,
-        });
-    }
-    response
+    agent_actions_generation(State(state), headers, body, generation).await
 }
 
-fn batch_privacy_revoked(state: &AppState, observes_screen: bool, generation: u64) -> bool {
-    observes_screen && (screen_private_now(&state.private_until)
+fn batch_privacy_revoked(state: &AppState, observes_screen: bool, generation: u64, scope: &ScreenReadScope) -> bool {
+    observes_screen && (!scope.current(state) || screen_private_now(&state.private_until)
         || state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire) != generation)
 }
 
@@ -12029,6 +12022,19 @@ async fn agent_actions_generation(
     }
     let mut capture_scope = ScreenReadScope::capture(&state);
     capture_scope.privacy_epoch = privacy_generation;
+    let observes_screen = serde_json::from_str::<AgentActionsRequest>(&body).ok()
+        .is_some_and(|request| batch_needs_private_scope(&request));
+    let mut response = agent_actions_scoped(state.clone(), headers, body, privacy_generation, capture_scope.clone()).await;
+    if observes_screen && !refused_as_unauthenticated(&response) {
+        response.extensions_mut().insert(BatchPrivacyFence { state, scope: capture_scope });
+    }
+    response
+}
+
+async fn agent_actions_scoped(
+    state: Arc<AppState>, headers: HeaderMap, body: String, privacy_generation: u64,
+    capture_scope: ScreenReadScope,
+) -> Response {
     if body.len() > AGENT_ACTIONS_MAX_BODY_BYTES {
         return agent_actions_invalid(format!(
             "request body exceeds {AGENT_ACTIONS_MAX_BODY_BYTES} bytes"
@@ -12042,7 +12048,7 @@ async fn agent_actions_generation(
         return agent_actions_invalid(error);
     }
     let observes_screen = batch_needs_private_scope(&request);
-    if batch_privacy_revoked(&state, observes_screen, privacy_generation) {
+    if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
         return private_batch_refusal(0, 0, 0);
     }
     // `launch_app {"app": …}` becomes a bundle before the first step runs, so
@@ -12145,11 +12151,16 @@ async fn agent_actions_generation(
         }
     };
 
+    let weak_state = Arc::downgrade(&state);
+    let read_scope = capture_scope.clone();
+    w.bind_observation_scope(Arc::new(move ||
+        weak_state.upgrade().is_some_and(|state| read_scope.current(&state))));
+
     let mut completed = 0_usize;
     let mut applied_actions = 0_usize;
     let mut step_results = Vec::with_capacity(request.steps.len());
     for (index, step) in request.steps.iter().enumerate() {
-        if batch_privacy_revoked(&state, observes_screen, privacy_generation) {
+        if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
             return private_batch_refusal_with_steps(index, completed, applied_actions, &step_results);
         }
         if state.runner_lifecycle.is_transitioning()
@@ -12508,7 +12519,7 @@ async fn agent_actions_generation(
                     wait_started + std::time::Duration::from_millis(*timeout_ms),
                 );
                 if expect.uses_ocr() {
-                    match agent_wait_ocr(&state, &mut w, expect, privacy_generation, wait_deadline, *poll_ms).await {
+                    match scoped_observation(&state, &capture_scope, agent_wait_ocr(&state, &mut w, expect, privacy_generation, wait_deadline, *poll_ms)).await {
                         OcrWait::Matched(observation) => {
                             step_results.push(serde_json::json!({
                                 "index": index,
@@ -12556,7 +12567,7 @@ async fn agent_actions_generation(
                 let probes = if alert_only { None } else { wait_probe_predicates(expect) };
                 let mut probe_misses = 0_u64;
                 loop {
-                    if batch_privacy_revoked(&state, observes_screen, privacy_generation) {
+                    if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
                         return private_batch_refusal_with_steps(index, completed, applied_actions, &step_results);
                     }
                     attempts += 1;
@@ -12567,7 +12578,7 @@ async fn agent_actions_generation(
                     if let Some(probes) = &probes {
                         let poll = std::time::Duration::from_millis(*poll_ms);
                         if tokio::time::Instant::now() + poll < probe_deadline
-                            && wait_probe_missed(&mut w, probes, probe_deadline).await
+                            && scoped_observation(&state, &capture_scope, wait_probe_missed(&mut w, probes, probe_deadline)).await
                         {
                             probe_misses += 1;
                             let remaining = probe_deadline
@@ -12577,11 +12588,11 @@ async fn agent_actions_generation(
                         }
                     }
                     let read = if alert_only {
-                        agent_wait_alert(&mut w, wait_deadline).await
+                        scoped_observation(&state, &capture_scope, agent_wait_alert(&mut w, wait_deadline)).await
                     } else {
-                        agent_wait_elements(&mut w, wait_deadline).await
+                        scoped_observation(&state, &capture_scope, agent_wait_elements(&mut w, wait_deadline)).await
                     };
-                    if batch_privacy_revoked(&state, observes_screen, privacy_generation) {
+                    if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
                         return private_batch_refusal_with_steps(index, completed, applied_actions, &step_results);
                     }
                     let rows = match read {
@@ -12715,7 +12726,7 @@ async fn agent_actions_generation(
         completed += 1;
     }
 
-    if batch_privacy_revoked(&state, observes_screen, privacy_generation) {
+    if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
         return private_batch_refusal_with_steps(completed, completed, applied_actions, &step_results);
     }
     state.touch_activity();
@@ -12735,8 +12746,8 @@ async fn agent_actions_generation(
         // Observation only: the batch's verdict is already fixed above.
         let budget = std::time::Duration::from_millis(AGENT_INPUT_SETTLE_DEFAULT_MS);
         let (observed, report) =
-            settle_and_read_elements(&mut w, budget, DEVICE_SETTLE_DEFAULT_CAP).await;
-        if batch_privacy_revoked(&state, observes_screen, privacy_generation) {
+            scoped_observation(&state, &capture_scope, settle_and_read_elements(&mut w, budget, DEVICE_SETTLE_DEFAULT_CAP)).await;
+        if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
             return private_batch_refusal_with_steps(completed, completed, applied_actions, &step_results);
         }
         if let Some((snapshot, rows)) = observed {
@@ -12772,8 +12783,8 @@ async fn agent_actions_generation(
             }
         }
         result["settle"] = report.to_json();
-        if let Some(alert) = alert_json(probe_alert(&mut w).await) {
-            result["alert"] = alert;
+        if capture_scope.current(&state) {
+            if let Some(alert) = alert_json(scoped_observation(&state, &capture_scope, probe_alert(&mut w)).await) { result["alert"] = alert; }
         }
     }
     for (key, block) in flow_after_actions(&state, &headers, &recorded_body) {
@@ -12784,7 +12795,7 @@ async fn agent_actions_generation(
     }
     // A person can start a private hold while a read is in flight. Discard
     // every observation, including earlier step text, before returning it.
-    if batch_privacy_revoked(&state, observes_screen, privacy_generation) {
+    if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
         return private_batch_refusal_with_steps(completed, completed, applied_actions, &step_results);
     }
     agent_actions_json(StatusCode::OK, result)
@@ -12825,6 +12836,14 @@ impl ScreenReadScope {
             && !state.runner_lifecycle.is_transitioning()
     }
 }
+async fn scoped_observation<T>(state: &Arc<AppState>, scope: &ScreenReadScope,
+    work: impl std::future::Future<Output = T>) -> T {
+    let weak = Arc::downgrade(state);
+    let scope = scope.clone();
+    crate::timing::with_request_permit(Arc::new(move ||
+        weak.upgrade().is_some_and(|state| scope.current(&state))), work).await
+}
+
 async fn scoped_value_read<T>(state: &AppState, scope: &ScreenReadScope, work: impl std::future::Future<Output=T>) -> Option<T> {
     tokio::pin!(work);
     loop {
@@ -13712,6 +13731,7 @@ async fn read_elements_once(
     w: &mut crate::runner::RunnerClient,
     deadline: tokio::time::Instant,
 ) -> SettleRead {
+    if !w.observation_scope_current() { return SettleRead::Deadline; }
     let rows = match tokio::time::timeout_at(deadline, w.elements()).await {
         Err(_) => return SettleRead::Deadline,
         Ok(Ok(rows)) => rows,
@@ -13749,7 +13769,7 @@ async fn settle_frame(
     // it, and the tree read behind it waits. After one slow or failed frame
     // the settle check stays tree-vs-tree for a while.
     const SLOW_FRAME_BACKOFF: std::time::Duration = std::time::Duration::from_secs(600);
-    if !w.settle_frames_usable() {
+    if !w.observation_scope_current() || !w.settle_frames_usable() {
         return None;
     }
     let cap = std::cmp::min(deadline, tokio::time::Instant::now() + SETTLE_FRAME_CAP);
@@ -13806,7 +13826,9 @@ fn capture_settled_frame_later(
         // is megabytes the 3 s budget may not carry.
         let shot = crate::runner::ShotRequest::jpeg(Some(SETTLED_FRAME_MAX_SIDE));
         let budget = std::time::Duration::from_secs(3);
-        if let Ok(Ok(frame)) = tokio::time::timeout(budget, w.screenshot_sized(shot, budget)).await
+        let Some(state) = weak_state.upgrade() else { return; };
+        if let Ok(Ok(frame)) = tokio::time::timeout(budget,
+            scoped_observation(&state, &scope, w.screenshot_sized(shot, budget))).await
         {
             if weak_state.upgrade().is_some_and(|state| scope.current(&state))
                 && w.last_post() == post_mark && is_valid_capture(&frame)
@@ -13857,6 +13879,7 @@ async fn settle_on_device(
     }
     // The runner answers within its budget, but the HTTP call allows 3 s
     // more for transport: never past the observation's own deadline.
+    if !w.observation_scope_current() { return None; }
     let device = tokio::time::timeout_at(deadline, w.device_settle(device_budget, QUIET, MIN_WAIT))
         .await
         .ok()
@@ -14486,7 +14509,7 @@ async fn agent_input_inner(
         let read_scope = capture_scope.clone();
         client.bind_observation_scope(Arc::new(move ||
             weak_state.upgrade().is_some_and(|state| read_scope.current(&state))));
-        let (observed, report) = settle_and_read_elements(&mut client, budget, device_cap).await;
+        let (observed, report) = scoped_observation(&state, &capture_scope, settle_and_read_elements(&mut client, budget, device_cap)).await;
         settled = Some((
             observed.map(|(snapshot, rows)| (snapshot, Arc::new(rows))),
             report,
@@ -14496,7 +14519,7 @@ async fn agent_input_inner(
         // Bounded by its own hard 1.5s cap (see `probe_alert`), which is
         // what the client's timeout budgets for on top of the action
         // deadline and the observation budget.
-        if capture_scope.current(&state) { alert = probe_alert(&mut client).await; }
+        if capture_scope.current(&state) { alert = scoped_observation(&state, &capture_scope, probe_alert(&mut client)).await; }
     }
     // The settled screen is ready for a screenshot request without a capture:
     // the settle check kept its frame, or — when it judged by the tree (a
@@ -16304,9 +16327,8 @@ struct ActionObservationFence {
 
 #[derive(Clone)]
 struct BatchPrivacyFence {
-    private_until: Arc<Mutex<Option<Instant>>>,
-    epoch: Arc<std::sync::atomic::AtomicU64>,
-    generation: u64,
+    state: Arc<AppState>,
+    scope: ScreenReadScope,
 }
 
 #[derive(Clone)]
@@ -16329,10 +16351,16 @@ async fn privacy_read_body_layer(request: axum::extract::Request, next: axum::mi
         parts.headers.remove(header::CONTENT_LENGTH);
         let stream = futures_util::stream::once(async move {
             let bytes = if fence.scope.current(&fence.state) { bytes } else {
-                fence.state.cancel_settled_frame_prefetch();
-                recover(fence.state.element_snapshots.lock()).clear();
-                recover(fence.state.owner_snapshots.lock()).clear();
-                let value = serde_json::from_slice(&bytes).unwrap_or(fence.fallback);
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(fence.fallback);
+                if let Some(snapshot) = value.get("snapshot").and_then(serde_json::Value::as_str) {
+                    let mut owners = recover(fence.state.owner_snapshots.lock());
+                    if let Some(owner) = fence.scope.owner.as_ref() {
+                        if owners.get(owner).is_some_and(|id| id == snapshot) { owners.remove(owner); }
+                    }
+                    if !owners.values().any(|id| id == snapshot) {
+                        recover(fence.state.element_snapshots.lock()).retain(|(id, _)| id != snapshot);
+                    }
+                }
                 bytes::Bytes::from(crate::observation::redact(value, "authorization_scope_changed").to_string())
             };
             Ok::<_, std::io::Error>(bytes)
@@ -16348,8 +16376,7 @@ async fn privacy_read_body_layer(request: axum::extract::Request, next: axum::mi
         };
         parts.headers.remove(header::CONTENT_LENGTH);
         let stream = futures_util::stream::once(async move {
-            let revoked = fence.epoch.load(std::sync::atomic::Ordering::Acquire) != fence.generation
-                || screen_private_now(&fence.private_until);
+            let revoked = !fence.scope.current(&fence.state);
             let bytes = if revoked {
                 let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
                 bytes::Bytes::from(crate::observation::redact_batch(value).to_string())

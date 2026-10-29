@@ -155,10 +155,28 @@ impl SendTimed for reqwest::RequestBuilder {
     }
 }
 
+tokio::task_local! {
+    static REQUEST_PERMIT: std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+}
+
+/// Fence every transport request made by one observation, including internal retries.
+pub(crate) async fn with_request_permit<T>(
+    permit: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    REQUEST_PERMIT.scope(permit, work).await
+}
+
 pub(crate) async fn execute_timed(
     client: reqwest::Client,
     request: reqwest::Request,
 ) -> reqwest::Result<reqwest::Response> {
+    if REQUEST_PERMIT.try_with(|permit| permit()).is_ok_and(|allowed| !allowed) {
+        let mut response = axum::http::Response::new(bytes::Bytes::from_static(
+            br#"{"value":{"error":"observation_scope_changed","message":"observation authorization changed; no request sent"}}"#));
+        *response.status_mut() = axum::http::StatusCode::LOCKED;
+        return Ok(reqwest::Response::from(response));
+    }
     let route = format!(
         "{} {}",
         request.method(),
@@ -599,6 +617,19 @@ fn with_timing_field(body: &[u8], timing: &serde_json::Value) -> Option<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn revoked_observation_never_reaches_transport() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let response = super::with_request_permit(std::sync::Arc::new(|| false), async {
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let request = client.get("http://127.0.0.1:1/source").build().unwrap();
+            super::execute_timed(client, request).await.unwrap()
+        }).await;
+        assert_eq!(response.status(), reqwest::StatusCode::LOCKED);
+        assert!(response.text().await.unwrap().contains("observation_scope_changed"));
+        });
+    }
+
     use super::*;
 
     #[test]
