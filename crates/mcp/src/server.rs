@@ -1048,7 +1048,7 @@ impl PhoneHandler {
 impl PhoneHandler {
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "List installed local iPhone instances and their read-only status. Does not start, reconnect or claim a phone. Pass instance in any phone_* call to choose one; omitted instance preserves this MCP server's configured daemon. Missing/invalid instances never fall back to another phone."
+        description = "List installed local iPhone instances and their read-only status. This inventory is not a list of paired/connected devices. For recovery_owner=unconfigured, inspect xcrun devicectl list devices and run iphone-use doctor on the daemon host; ask which phone when ambiguous. Does not start, reconnect or claim a phone. Pass instance in any phone_* call to choose one; omitted instance preserves this MCP server's configured daemon. Missing/invalid instances never fall back to another phone."
     )]
     async fn phone_instances(&self) -> CallToolResult {
         let names = match crate::instances::names() {
@@ -1074,11 +1074,14 @@ impl PhoneHandler {
             rows.push(match status {
                 Ok(Ok(status)) => serde_json::json!({"instance":name,"available":true,
                     "drivable":status.drivable,"released":status.released,"owner":status.owner,
+                    "target_configured":status.target_configured,"recovery_owner":status.recovery_owner,
+                    "recovery":status.extra.get("recovery"),
                     "device":status.extra.get("device"),"human_handoff":status.extra.get("human_handoff")}),
                 _ => serde_json::json!({"instance":name,"available":false,"error":"status_unavailable"}),
             });
         }
-        let body = serde_json::json!({"instances":rows,"selection":"per_call","implicit_target":"configured_daemon"});
+        let body = serde_json::json!({"instances":rows,"selection":"per_call","implicit_target":"configured_daemon","scope":"installed_daemon_instances",
+            "paired_device_discovery_command":"xcrun devicectl list devices"});
         let mut result = CallToolResult::success(vec![Content::text(body.to_string())]);
         result.structured_content = Some(body);
         result
@@ -1543,12 +1546,20 @@ impl PhoneHandler {
         will be refused with phone_owned. The JSON preserves \
         backend, target_configured, managed_runner, managed_runner_pending, recovery_owner, \
         device_state, screen_state, runner, runner_actionable, locked, drivable, released, \
-        hint, setup_blocked_on, setup_phase, and setup_message. Gate actions on drivable=true. \
+        hint, next_step, recovery, setup_blocked_on, setup_phase, and setup_message. Gate actions on drivable=true. \
+        If target_configured=false and recovery_owner=unconfigured, phone_instances is only installed instances: inspect \
+        xcrun devicectl list devices and run iphone-use doctor on the daemon host; ask which \
+        phone if ambiguous, then IPU_RUNNER_UDID=<UDID> iphone-use setup for the confirmed \
+        target only when the task authorizes it. Preserve --instance for named instances. \
         `lock_readiness` says whether the phone locks on its own when idle (passcode_protected, \
         auto_lock_secs, keep_awake, verdict, hint): will_lock_needs_person means a person must \
         unlock it after a pause; tell the owner the hint instead of retrying. \
-        setup_blocked_on=needs_passcode_on_phone means the runner start waits for a person to \
-        enter the passcode on the phone: tell the owner next_step and do not retry. \
+        For trust, distinguish Trust This Computer pairing from developer-certificate approval \
+        under iPhone Settings > General > VPN & Device Management; use setup_message evidence. \
+        A separate passcode/automation prompt may appear later. \
+        needs_passcode_on_phone records a possible authorization requirement, not a confirmed visible prompt. \
+        Relay next_step; never request a passcode, pause screenshots/elements during sensitive input, \
+        and check status after the person finishes. Do not loop reconnect. \
         `keep_runner_alive` (non-null) means idle release keeps the runner up because its next \
         start would need a person. \
         For status/health checks, report the state and stop. Idle release \
@@ -3367,7 +3378,12 @@ impl ServerHandler for PhoneHandler {
                  1. If the user names a phone or there are multiple installed phones, use phone_instances \
                  and pass the chosen instance on every phone_* call. Omitted instance describes only the configured daemon, \
                  never all phones. Explicit unavailable instances fail without fallback. \
-                 phone_status — act only when drivable=true. If not, report its `hint` and stop; \
+                 phone_status — act only when drivable=true. If not, pause screen reads/actions and follow recovery/next_step. \
+                 For target_configured=false with recovery_owner=unconfigured, inspect xcrun devicectl list devices and run iphone-use doctor on the daemon host; \
+                 ask which device if ambiguous, then IPU_RUNNER_UDID=<UDID> iphone-use setup only for an authorized confirmed target. \
+                 Preserve --instance for named instances; external runners recover on their owning host, never via local setup. Do not take over another owner or bypass privacy/handoff. \
+                 For trust/passcode blockers, the person acts on the phone; never ask for their passcode, pause screen reads during entry, \
+                 then verify status and resume the original task. Do not loop setup or reconnect; \
                  call phone_reconnect once only when the user's current task needs the phone \
                  (each reconnect may make the user type the passcode), never for health checks.\n\
                  2. Look for a saved flow FIRST. Responses that enter an app (launch_app, the first \

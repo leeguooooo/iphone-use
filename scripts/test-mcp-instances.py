@@ -53,7 +53,10 @@ class Daemon(http.server.BaseHTTPRequestHandler):
             value = {'ok': True, 'snapshot': self.server.name + '2', 'elements': []}
         else:
             value = {'ok': True, 'runner': True, 'drivable': True, 'released': False,
-                     'device': {'name': self.server.name}}
+                     'device': {'name': self.server.name},
+                     'target_configured': self.server.name != 'B',
+                     'recovery_owner': 'unconfigured' if self.server.name == 'B' else 'daemon',
+                     'recovery': {'cause': 'target_unconfigured', 'actor': 'agent'} if self.server.name == 'B' else None}
         encoded = json.dumps(value).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -124,9 +127,16 @@ try:
             assert sorted(t['name'] for t in tools) == expected
             assert all('instance' in t['inputSchema'].get('properties', {})
                        for t in tools if t['name'] != 'phone_instances')
-            catalog = call('phone_instances')['result']['structuredContent']['instances']
+            inventory = call('phone_instances')['result']['structuredContent']
+            assert inventory['scope'] == 'installed_daemon_instances'
+            assert inventory['paired_device_discovery_command'] == 'xcrun devicectl list devices'
+            catalog = inventory['instances']
             assert {r['instance'] for r in catalog} == {'default', 'i13'}
             assert all(r['available'] for r in catalog)
+            unconfigured = next(r for r in catalog if r['instance'] == 'i13')
+            assert unconfigured['target_configured'] is False
+            assert unconfigured['recovery_owner'] == 'unconfigured'
+            assert unconfigured['recovery']['cause'] == 'target_unconfigured'
             assert not any(r[1] == 'POST' for r in seen), 'inventory must stay read-only'
             # No explicit instance keeps startup configuration and ambient credentials.
             assert 'result' in call('phone_status')

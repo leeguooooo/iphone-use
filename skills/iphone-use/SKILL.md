@@ -20,7 +20,7 @@ HOST="${IPHONE_USE_URL:-http://127.0.0.1:44321}"
 AUTH="Authorization: Bearer $IPHONE_USE_TOKEN"   # daemon password or IPHONE_USE_AGENT_TOKEN
 MUTATION="X-Phone-Control: 1"                      # required on every state-changing POST
 OWNER="X-Phone-Owner: <your-session-name>"          # MCP sends this for you
-curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure stop and report
+curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure follow recovery below
 ```
 
 ## The loop
@@ -29,7 +29,7 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure st
    use `phone_instances`, then pass that `instance` on every MCP read/action.
    Omitted instance reports only the configured daemon, never all phones.
    `GET /agent/status` / `phone_status`. Screen reads and UI input
-   require `drivable:true`; otherwise report `hint` and stop those operations.
+   require `drivable:true`; otherwise pause those operations and follow the recovery steps below.
    Paired metadata reads (`phone_home_layout`, `phone_apps`) and cached capability
    discovery do not require a running Runner. Use them without reconnecting or
    opening Home, and respect any private-hold refusal. Reconnect once
@@ -86,6 +86,47 @@ When the task is done, release the phone: `phone_release_owner` /
 `POST /agent/owner {"release":true}`. If a response carried `agent_focus`, the
 phone is on Do Not Disturb for your session: tell the user, and releasing turns
 it off again.
+
+## First-failure recovery
+
+Only recover a phone for an unfinished task that authorizes its use. For a
+health check, report status and stop. Run host commands on the daemon's Mac,
+not an unrelated remote MCP client.
+
+1. `target_configured:false` with `recovery_owner:unconfigured` is an unselected
+   target, not proof that connected
+   phones are offline. `phone_instances` lists installed daemon instances,
+   not paired phones. Inspect `xcrun devicectl list devices` and run
+   `iphone-use doctor` yourself. Match the user's named phone; if several
+   targets are plausible, ask which one. Never select by list order.
+2. For a confirmed target, run `IPU_RUNNER_UDID=<UDID> iphone-use setup` (add
+   `--instance NAME` for a named instance). Do not change another instance,
+   use `--force`, clear a private hold, or take over another owner.
+   `recovery_owner:external` means recovery belongs on the owning host; do not
+   configure or restart a local runner for it. With an
+   already configured phone, follow `setup_blocked_on`, `next_step` and
+   `recovery`; reconnect once only when the task needs it, recovery_owner is
+   `daemon`, and no blocker, handoff, or reconnect is in progress.
+3. While setup is active, inspect progress/status without repeatedly restarting
+   setup. For `trust`, distinguish computer pairing from certificate approval:
+   the person confirms **Trust This Computer** on the phone if that prompt
+   appears. For an untrusted Apple Development certificate in `setup_message`,
+   the person uses **iPhone Settings > General > VPN &
+   Device Management > the matching Apple Development certificate > Trust**.
+   This is separate from **Trust This Computer**. If there is no certificate
+   or prompt, inspect doctor output and runner logs; do not assume a popup
+   exists or retry trust by restarting the runner.
+4. Certificate trust may be followed later by a separate passcode or UI
+   automation authorization. The person handles it only on the phone. Never
+   ask for or type their passcode. Pause screenshots, elements, the live panel
+   and other screen reads during sensitive input. A historical
+   `needs_passcode_on_phone` blocker does not confirm a currently visible
+   prompt. Wait for the person, then check `phone_status`; `drivable:true`
+   is current readiness, not a guarantee that iOS will never ask again.
+5. Once ready, re-read the current app/screen and resume the original task.
+   Do not replay a prior mutation with an unknown outcome. If still blocked,
+   retain the setup phase, blocker, message and relevant redacted logs.
+   An iOS/SDK version warning alone does not establish incompatibility.
 
 ## Core actions
 

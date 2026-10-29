@@ -2159,7 +2159,7 @@ function showOverlay(kind) {
   } else if (kind === 'setup-blocked') {
     const [title, detail] = setupBlockerCopy(effectiveSetupBlocker(backendStatus));
     setTextIfChanged(olTitle, title);
-    setTextIfChanged(olSub, detail);
+    setTextIfChanged(olSub, pick(backendStatus?.next_step) || detail);
     offlineOverlay.classList.add('disconnected');
   } else if (kind === 'status-error') {
     setTextIfChanged(olTitle, t('无法获取设备状态'));

@@ -2859,7 +2859,7 @@ async fn agent_status(
         ("releasing", "direct device service is being released after inactivity — wait for confirmation before reconnecting")
     } else if !runner {
         if state.managed_runner_pending {
-            ("unconfigured", "no canonical iPhone target is configured — run iphone-use setup to persist IPHONE_USE_UDID; until then the daemon will not stop or start the local device runner")
+            ("unconfigured", "no canonical iPhone target is configured — inspect paired devices with xcrun devicectl list devices and run iphone-use doctor on this Mac; ask which phone if ambiguous, then use IPU_RUNNER_UDID=<UDID> iphone-use setup for the confirmed target; phone_instances lists installed instances, not paired phones; do not reconnect an unconfigured target")
         } else if let Some(blocker_hint) = setup_hint.as_deref() {
             ("blocker", blocker_hint)
         } else if let Some(advice) = setup_working {
@@ -2920,6 +2920,7 @@ async fn agent_status(
     // phone has its own relay ports and needs `--instance NAME`.
     let hint = hint_for_this_daemon(hint, crate::instance::current(), &relay_ports_label());
     let hint_json = serde_json::to_string(&hint).unwrap_or_else(|_| "\"\"".into());
+    let recovery = setup_recovery(advice, &setup_blocked_on);
     let next_step_json = human_next_step(advice, &setup_blocked_on, runner_died_reason)
         .map(|(zh, en)| {
             let instance = crate::instance::current();
@@ -3022,7 +3023,7 @@ async fn agent_status(
     // The daemon inside the runner on the phone, as its last /status said.
     let phone_daemon = crate::phone_daemon::status_json(runner);
     let body = format!(
-        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_runner":{},"managed_runner_pending":{},"recovery_owner":"{recovery_owner}","runner":{runner},"runner_actionable":{runner_actionable},"runner_locked":{runner_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"ended_on_phone":{ended_on_phone},"runner_parked":{runner_parked},"runner_parked_reason":{runner_parked_reason_json},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"runner_build":{runner_build},"runner_died_reason":"{runner_died_reason}","runner_died_at":{runner_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"auto_update":{auto_update},"transport":"{transport}","runner_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus},"phone_daemon":{phone_daemon}}}"#,
+        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_runner":{},"managed_runner_pending":{},"recovery_owner":"{recovery_owner}","runner":{runner},"runner_actionable":{runner_actionable},"runner_locked":{runner_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"ended_on_phone":{ended_on_phone},"runner_parked":{runner_parked},"runner_parked_reason":{runner_parked_reason_json},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"recovery":{recovery},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"runner_build":{runner_build},"runner_died_reason":"{runner_died_reason}","runner_died_at":{runner_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"auto_update":{auto_update},"transport":"{transport}","runner_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus},"phone_daemon":{phone_daemon}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&status_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -3437,6 +3438,28 @@ fn setup_working_advice(phase: &str, message: &str) -> Option<(&'static str, &'s
     })
 }
 
+fn setup_recovery(advice: &str, blocked_on: &str) -> serde_json::Value {
+    match (advice, blocked_on) {
+        ("unconfigured", _) => serde_json::json!({
+            "cause": "target_unconfigured", "actor": "agent",
+            "action": "discover_devices_then_doctor",
+            "discovery_command": "xcrun devicectl list devices",
+            "doctor_command": for_instance("iphone-use doctor", crate::instance::current()),
+            "setup_command": for_instance("IPU_RUNNER_UDID=<UDID> iphone-use setup", crate::instance::current()),
+            "requires_unambiguous_target": true, "requires_task_authorization": true,
+            "pause_screen_reads": true, "verify": "phone_status.drivable=true"
+        }),
+        ("blocker", "trust" | "needs_passcode_on_phone" | "locked_after_restart" | "automation_mode_disabled") => serde_json::json!({
+            "cause": blocked_on, "actor": "person_on_phone",
+            "action": "follow_next_step_then_check_status",
+            "pause_screen_reads": true, "disclose_passcode": false,
+            "retry_reconnect": false, "verify": "phone_status.drivable=true",
+            "prompt_detection": "not_confirmed"
+        }),
+        _ => serde_json::Value::Null,
+    }
+}
+
 fn human_next_step(
     advice: &str,
     blocked_on: &str,
@@ -3465,8 +3488,8 @@ fn human_next_step(
         ),
         "releasing" => ("正在释放设备，请稍候", "Releasing the phone — one moment"),
         "unconfigured" => (
-            "连接、解锁并信任 iPhone，然后在这台 Mac 上运行 iphone-use setup",
-            "Connect, unlock and trust the iPhone, then run iphone-use setup on this Mac",
+            "尚未选择目标手机。请告诉代理要使用哪台 iPhone，并把它连接到这台 Mac、解锁；如果有「信任此电脑」提示，请在手机上确认。",
+            "No target phone is selected. Tell the agent which iPhone to use, connect it to this Mac and unlock it; confirm Trust This Computer on the phone if prompted.",
         ),
         "blocker" => match blocked_on {
             "warp" => (
@@ -3486,8 +3509,8 @@ fn human_next_step(
                 "Plug this iPhone in over USB (or keep it on this Mac's Wi-Fi; with IPU_RUNNER_TRANSPORT=usb only the cable works), unlock it and keep it awake — connecting resumes on its own",
             ),
             "trust" => (
-                "在 iPhone 上解锁并点「信任」，保持亮屏，连接会自动恢复",
-                "Unlock the iPhone and tap Trust, keep it awake — connecting resumes on its own",
+                "若 iPhone 显示「信任此电脑」，请在手机上解锁并确认；若提示 Apple Development 开发者证书未信任，请打开 设置 › 通用 › VPN 与设备管理，选择对应证书并信任。两者是不同步骤。没有对应证书或提示时，请把当前情况告诉代理。之后仍可能出现密码或 UI 自动化授权，请只在手机上处理，不要透露密码，完成后告诉代理继续。",
+                "If the iPhone shows Trust This Computer, unlock it and confirm on the phone. For an untrusted Apple Development certificate, open Settings > General > VPN & Device Management and trust the matching certificate. These are separate steps. If no certificate or prompt appears, tell the agent. A passcode/UI automation prompt may appear later: handle it only on the phone, never disclose the passcode, and tell the agent when finished.",
             ),
             "ddi" => (
                 "手机保持连接，打开 Xcode 等设备准备完成，连接会自动恢复",
@@ -3502,8 +3525,8 @@ fn human_next_step(
                 "This iPhone restarted and has not been unlocked since: someone needs to enter the passcode on the phone once, then it connects on its own.",
             ),
             "needs_passcode_on_phone" => (
-                "连接记录提示可能需要手机授权；若出现密码或允许提示，请处理。若已处理，检查 CoreDevice 连接和 runner 日志。",
-                "Setup recorded a possible on-phone authorization requirement. Handle a passcode or Allow prompt if one appears; if already authorized, inspect the CoreDevice connection and runner log.",
+                "连接记录提示可能需要手机授权。若出现密码或允许提示，请只在手机上处理，不要透露密码，完成后告诉代理继续；若没有提示或已处理，请告诉代理检查连接。",
+                "Setup recorded a possible on-phone authorization requirement. Handle a passcode or Allow prompt only on the phone if one appears; never disclose the passcode. Tell the agent when finished; if already authorized or no prompt appears, ask the agent to check the connection.",
             ),
             "automation_mode_disabled" => (
                 "自动化模式未就绪。请检查 设置 › 开发者 › 启用 UI 自动化，并处理实际出现的授权提示；若已启用并授权，检查连接和日志。",
@@ -3676,7 +3699,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the configured iPhone is not available over USB or its encrypted CoreDevice Wi-Fi tunnel — connect that phone, or (unless IPU_RUNNER_TRANSPORT=usb, which allows only the cable; setup_message says when) keep it unlocked on this Mac's network; keep it awake while the managed service retries",
         ),
         "trust" => Some(
-            "the configured iPhone needs trust or developer-signing approval — unlock the phone, accept the prompt, then keep it awake while the managed service retries",
+            "trust can mean computer pairing or developer-certificate approval. For a Trust This Computer prompt, have the person unlock and confirm on the iPhone. If setup_message reports an untrusted Apple Development certificate, use iPhone Settings > General > VPN & Device Management for the matching certificate. If no certificate or prompt appears, run iphone-use doctor and inspect runner logs. A separate passcode/UI automation prompt may appear later: never request the passcode, pause screenshots and screen reads during entry, then check phone_status. Do not loop reconnect.",
         ),
         "ddi" => Some(
             "the iPhone Developer Disk Image is unavailable — open Xcode with the phone connected, let device preparation finish, then poll status",
@@ -3688,7 +3711,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the configured iPhone is on USB but usbmuxd does not list it: it restarted and has not been unlocked since (Before First Unlock), and iOS keeps it off usbmuxd until its passcode is entered once — this is not an Xcode problem; have a person enter the passcode on the phone, and the managed service connects on its own after that, so do not send another reconnect request",
         ),
         "needs_passcode_on_phone" => Some(
-            "Setup recorded a possible on-phone authorization requirement. If a passcode or Allow prompt appears, handle it on the unlocked phone. If already authorized, inspect the CoreDevice connection and runner log; this historical blocker does not prove that a prompt was ignored. keep_runner_alive avoids unnecessary relaunches; do not send another reconnect request",
+            "Setup recorded a possible on-phone authorization requirement. If a passcode or Allow prompt appears, handle it on the unlocked phone. If already authorized, inspect the CoreDevice connection and runner log; this historical blocker does not prove that a prompt was ignored. Never ask for the passcode; pause screenshots and screen reads during entry, then check phone_status. keep_runner_alive avoids unnecessary relaunches; do not send another reconnect request",
         ),
         "automation_mode_disabled" => Some(
             "The device runner did not become ready for UI automation. On the unlocked iPhone, check Settings › Developer › Enable UI Automation and handle a passcode or Allow automation prompt if one appears; if already enabled and authorized, inspect the CoreDevice connection and runner log; the managed service retries on its own backoff, so do not send another reconnect request",
@@ -23711,6 +23734,44 @@ mod tests {
     }
 
     #[test]
+    fn setup_recovery_distinguishes_selection_from_on_phone_authorization() {
+        let unconfigured = setup_recovery("unconfigured", "");
+        assert_eq!(unconfigured["actor"], "agent");
+        assert_eq!(unconfigured["requires_unambiguous_target"], true);
+        assert_eq!(unconfigured["requires_task_authorization"], true);
+        assert_eq!(unconfigured["discovery_command"], "xcrun devicectl list devices");
+        for blocker in ["trust", "needs_passcode_on_phone", "locked_after_restart", "automation_mode_disabled"] {
+            let handoff = setup_recovery("blocker", blocker);
+            assert_eq!(handoff["cause"], blocker);
+            assert_eq!(handoff["actor"], "person_on_phone");
+            assert_eq!(handoff["pause_screen_reads"], true);
+            assert_eq!(handoff["disclose_passcode"], false);
+            assert_eq!(handoff["retry_reconnect"], false);
+            assert_eq!(handoff["prompt_detection"], "not_confirmed");
+        }
+        assert!(setup_recovery("", "trust").is_null(), "ready status must not invent a handoff");
+        assert!(setup_recovery("blocker", "usb").is_null());
+    }
+
+    #[test]
+    fn trust_guidance_covers_pairing_and_developer_certificates() {
+        let (zh, en) = human_next_step("blocker", "trust", "").unwrap();
+        assert!(zh.contains("VPN 与设备管理") && zh.contains("信任此电脑"));
+        assert!(en.contains("VPN & Device Management") && en.contains("Trust This Computer"));
+        assert!(en.contains("If no certificate or prompt") && en.contains("may appear later"));
+        assert!(!en.contains("phone_status") && !en.contains("pause screenshots"));
+        let pairing = crate::setup::usbdiag::Diagnosis::NotTrusted { serial: "test-phone".into() };
+        assert_eq!(pairing.blocker(), "trust");
+        let hint = setup_blocker_hint(pairing.blocker()).unwrap();
+        assert!(hint.contains("Trust This Computer") && hint.contains("VPN & Device Management"));
+        assert!(hint.contains("pause screenshots and screen reads"));
+        assert!(crate::setup::DEVELOPER_TRUST_EN.contains("Apple Development"));
+        let named = crate::instance::Instance::derive("guidance-test", "/tmp/ipu-guidance-home", None).unwrap();
+        let text = for_instance(hint, &named);
+        assert!(text.contains("iphone-use doctor --instance guidance-test"));
+    }
+
+    #[test]
     fn needs_passcode_on_phone_asks_a_person_once() {
         let payload = r#"{"phase":"building-fail","blocked_on":"needs_passcode_on_phone","message":"m","ts":1000}"#;
         assert_eq!(
@@ -23720,7 +23781,7 @@ mod tests {
         let (zh, en) = human_next_step("blocker", "needs_passcode_on_phone", "").unwrap();
         assert_eq!(
             zh,
-            "连接记录提示可能需要手机授权；若出现密码或允许提示，请处理。若已处理，检查 CoreDevice 连接和 runner 日志。"
+            "连接记录提示可能需要手机授权。若出现密码或允许提示，请只在手机上处理，不要透露密码，完成后告诉代理继续；若没有提示或已处理，请告诉代理检查连接。"
         );
         assert!(
             en.contains("if one appears") && en.contains("if already authorized"),
@@ -26626,6 +26687,25 @@ mod tests {
         assert_eq!(calls[3][3], "clear");
         assert_eq!(calls[5][3], app.to_str().unwrap());
         assert!(calls.iter().all(|c| c[0] == "simctl"));
+    }
+
+    #[test]
+    fn unconfigured_status_exposes_selection_recovery_without_starting_a_phone() {
+        let mut state = fixture_app_state(None);
+        Arc::get_mut(&mut state).unwrap().managed_runner_pending = true;
+        block(async move {
+            let (code, body) = call(&state, "GET", "/agent/status", "").await;
+            assert_eq!(code, StatusCode::OK);
+            let status: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(status["target_configured"], false);
+            assert_eq!(status["drivable"], false);
+            assert_eq!(status["recovery_owner"], "unconfigured");
+            assert_eq!(status["recovery"]["cause"], "target_unconfigured");
+            assert_eq!(status["recovery"]["actor"], "agent");
+            assert_eq!(status["recovery"]["pause_screen_reads"], true);
+            assert!(status["hint"].as_str().unwrap().contains("not paired phones"));
+            assert!(!status["next_step"]["en"].as_str().unwrap().contains("devicectl"));
+        });
     }
 
     #[test]

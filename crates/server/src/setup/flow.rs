@@ -2152,9 +2152,9 @@ impl Setup {
                 self.phase(
                     "trust",
                     "trust",
-                    "trust the Apple Development cert on the iPhone",
+                    super::DEVELOPER_TRUST_EN,
                 );
-                return die("Developer cert not trusted. On the iPhone: Settings → General → VPN & Device Management → Trust 'Apple Development: …' (设置 → 通用 → VPN与设备管理 → 信任), then re-run. (pitfall ②)");
+                return die(format!("{}\n{}", super::DEVELOPER_TRUST_EN, super::DEVELOPER_TRUST_ZH));
             }
             if pid::validate(
                 &self.ctx,

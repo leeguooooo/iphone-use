@@ -321,6 +321,8 @@ pub fn run(ctx: &Ctx) -> i32 {
     }
     // Caveats that matter only when something above goes wrong.
     println!("{BOLD}Notes{RST}");
+    println!("  • For target selection, inspect `xcrun devicectl list devices`; installed daemon instances are not the paired-device inventory. With multiple plausible phones, ask which one; then use IPU_RUNNER_UDID=<UDID> iphone-use setup (and --instance NAME for a named instance). Do not take over another session.");
+    println!("  • For developer-certificate approval: {}", super::DEVELOPER_TRUST_EN);
     println!("  • The device runner on the iPhone refuses any request not signed with its per-launch token (state dir:");
     println!("    runner-token, 0600). The Mac relays it on 127.0.0.1 only,");
     println!("    over USB or, off the cable, through CoreDevice's encrypted Wi-Fi tunnel (launch over USB once: iOS asks");

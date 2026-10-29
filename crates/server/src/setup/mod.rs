@@ -10,6 +10,10 @@
 //! the setup status protocol (`status-watch` is a run's heartbeat watcher),
 //! and `prebuild` (the runner product only, after an upgrade; no phone).
 
+/// Developer-certificate diagnostics for setup; computer pairing is a separate step.
+pub const DEVELOPER_TRUST_ZH: &str = "请在 iPhone 上打开 设置 › 通用 › VPN 与设备管理，选择对应的 Apple Development 开发者证书并信任；这不同于「信任此电脑」。若没有证书或提示，运行 iphone-use doctor 并查看 runner 日志，不要反复重连。之后仍可能出现密码或 UI 自动化授权，请只在手机上处理，不要把密码发给代理；输入期间暂停截图和屏幕读取，完成后检查 phone_status。";
+pub const DEVELOPER_TRUST_EN: &str = "On the iPhone: Settings > General > VPN & Device Management > matching Apple Development certificate > Trust (separate from Trust This Computer). If no certificate or prompt appears, run iphone-use doctor and inspect runner logs; do not loop reconnect. A passcode/UI automation prompt may appear later: handle it only on the phone, never disclose the passcode, pause screenshots and screen reads during entry, then check phone_status.";
+
 pub mod app;
 pub mod asc;
 pub mod checks;

@@ -45,6 +45,30 @@ passcode.
 | `released` + `ended_on_phone:true` | The person ended the session on the phone (both volume keys) | Nothing restarts the runner on its own and pre-warm skips it. Ask before acting; the next action or `{"mode":"agent"}` starts it again. |
 | `released` + `runner_parked:true` + `ended_on_phone:false` | The test connection was invalidated or the parked evidence is unknown | Automatic schedules and prewarming stay off. A new explicit request may reconnect. `runner_parked_reason` describes the recorded evidence; it does not assert a human exit or a Wi-Fi cause. |
 
+**First setup and selection.** `target_configured:false` with `recovery_owner:unconfigured`
+means no target was selected; it does not inventory paired phones. `phone_instances`
+returns installed daemon instances (`scope:installed_daemon_instances`), with each
+available row's `target_configured` and `recovery_owner`. On the daemon's Mac,
+inspect `xcrun devicectl list devices` and run `iphone-use doctor`. If multiple
+phones plausibly match the task, ask which one. For an authorized, confirmed
+target, use `IPU_RUNNER_UDID=<UDID> iphone-use setup` (add `--instance NAME`
+for a named instance). Preserve ownership, private holds and human handoffs;
+never use `--force` as routine recovery. `recovery_owner:external` must recover
+on the owning host, not through local setup/restart. Do not loop setup or reconnect while
+setup is active. After recovery, check status, re-read the screen and resume
+the original task without replaying an uncertain mutation.
+
+Status adds nullable `recovery` metadata for unconfigured targets and known
+trust/authorization blockers: `cause`, `actor`, `action`, `pause_screen_reads`
+and `verify`. Unconfigured recovery includes host discovery/doctor/setup command
+templates and requires an unambiguous authorized target. Authorization handoffs
+set `actor:person_on_phone`, `disclose_passcode:false`, `retry_reconnect:false`
+and `prompt_detection:not_confirmed`: historical setup evidence is not a live
+prompt detector. During sensitive input, pause screenshots, elements, the live
+panel and other screen reads; the person enters any passcode only on the phone.
+After they finish, check `phone_status`. `drivable:true` describes current
+readiness, not a guarantee against a later iOS authorization prompt.
+
 **Lock readiness.** `lock_readiness` says whether the phone will lock on its
 own while nobody drives it, so an owner with many phones sees which ones get
 stuck at the lock screen:
@@ -186,7 +210,15 @@ KeepAlive keeps the last concrete blocker while it re-checks).
   are not the problem; do not reconnect or run doctor for this.
 - **`proxy`**: an enabled macOS HTTP/HTTPS/SOCKS entry is malformed or points at
   a loopback port with no listener; start that proxy app or disable the stale entry.
-- **`trust`**: a one-time "trust the Apple Development certificate" tap on the phone.
+- **`trust`**: can mean computer pairing or developer-certificate approval.
+  For **Trust This Computer**, the person unlocks and confirms on the iPhone.
+  If `setup_message` reports an untrusted **Apple Development** certificate,
+  on the iPhone open **Settings > General > VPN & Device Management**,
+  select the matching **Apple Development** certificate and trust it. This is
+  separate from **Trust This Computer** pairing. If no certificate or prompt
+  appears, run doctor and inspect the runner log instead of looping reconnect.
+  A separate passcode/UI automation authorization may appear later; the person
+  handles it on the phone while screen reads are paused.
 - **`automation_mode_disabled`**: the runner did not become ready for UI
   automation (for example, "Timed out while enabling automation mode"). Check
   **Settings › Developer › Enable UI Automation** and handle a prompt if one
