@@ -69,8 +69,8 @@ pub fn typing_allowance(text: &str) -> Duration {
     if chars <= CHUNK_CHARS {
         return Duration::ZERO;
     }
-    typing_time(chars).mul_f64(1.5)
-        + Duration::from_secs(split(text, CHUNK_CHARS).len() as u64)
+    let requests = split(text, CHUNK_CHARS).len().max(chars.div_ceil(CHUNK_CHARS));
+    typing_time(chars).mul_f64(1.5) + Duration::from_secs(requests as u64)
 }
 
 /// The extra time a `text` action (or any JSON action) needs; zero otherwise.
@@ -199,6 +199,14 @@ mod tests {
         let pieces = split(&text, 20);
         assert_eq!(rejoin(&pieces), text);
         assert_eq!(pieces, vec![cluster.as_str(), " tail"]);
+    }
+
+    #[test]
+    fn oversized_cluster_keeps_the_existing_long_text_budget_floor() {
+        let text = format!("e{}", "\u{0301}".repeat(1199));
+        assert_eq!(split(&text,CHUNK_CHARS).len(),1);
+        let old_floor = typing_time(1200).mul_f64(1.5) + Duration::from_secs(6);
+        assert!(typing_allowance(&text)>=old_floor);
     }
 
     #[test]

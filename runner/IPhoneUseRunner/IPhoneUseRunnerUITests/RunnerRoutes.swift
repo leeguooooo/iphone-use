@@ -862,8 +862,12 @@ extension RunnerTests {
     default: throw RunnerError.invalidArgument("unsupported button '\(name)'; use home, volumeUp or volumeDown")
     }
     defer { IPURBridge.invalidateRequestCache() }
+    let issuesBefore = recordedIssues.count
     if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(button) }) {
       throw RunnerError.failed("pressButton \(name) failed: \(exception)")
+    }
+    if recordedIssues.count > issuesBefore {
+      throw RunnerError.failed("pressButton \(name) failed: \(recordedIssues.last ?? "unknown issue")")
     }
     return .value(NSNull())
   }

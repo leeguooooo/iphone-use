@@ -141,6 +141,7 @@ pub struct RunnerClient {
     /// by the next screen-changing POST.
     settled_frame: Option<(std::sync::Arc<Capture>, std::time::Instant)>,
     settled_frame_generation: u64,
+    observation_scope: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
     /// Until when screenshots are not used to judge "settled" (a frame was
     /// slow or failed; see `settle_frame` in http.rs).
     settle_frames_paused_until: Option<std::time::Instant>,
@@ -376,6 +377,7 @@ impl RunnerClient {
             full_visibility: full_visibility_requested(),
             settled_frame: None,
             settled_frame_generation: 0,
+            observation_scope: None,
             settle_frames_paused_until: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
             last_actionable: false,
@@ -2307,6 +2309,7 @@ impl RunnerClient {
     /// (a timer, a network load, a person's finger); callers must verify the
     /// element live before acting on it.
     pub fn recent_tree(&self, max_age: Duration) -> Option<std::sync::Arc<Vec<ElementRow>>> {
+        if !self.observation_scope_current() { return None; }
         let (rows, read_at) = self.last_tree.as_ref()?;
         let untouched = self.posted_at.is_none_or(|posted| posted < *read_at);
         (untouched && read_at.elapsed() < max_age).then(|| rows.clone())
@@ -2338,6 +2341,7 @@ impl RunnerClient {
     /// The settled screen, when it is younger than `max_age` and nothing that
     /// changes the screen was sent since it was captured.
     pub fn settled_frame(&self, max_age: Duration) -> Option<std::sync::Arc<Capture>> {
+        if !self.observation_scope_current() { return None; }
         let (frame, at) = self.settled_frame.as_ref()?;
         let untouched = self.posted_at.is_none_or(|posted| posted < *at);
         (untouched && at.elapsed() < max_age).then(|| frame.clone())
@@ -2346,6 +2350,22 @@ impl RunnerClient {
     /// Drop the reusable tree so the next snapshot-bound action reads afresh.
     pub fn forget_tree(&mut self) {
         self.last_tree = None;
+    }
+
+    pub fn bind_observation_scope(&mut self, allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.forget_observations();
+        self.observation_scope = Some(allowed);
+    }
+
+    fn observation_scope_current(&self) -> bool {
+        self.observation_scope.as_ref().is_none_or(|allowed| allowed())
+    }
+
+    /// Discard screen-derived data after the caller's authorization scope changes.
+    pub fn forget_observations(&mut self) {
+        self.last_tree = None;
+        self.settled_frame = None;
+        self.no_alert_at = None;
     }
 
     /// Drop a reused "no alert" answer so the next probe asks runner.
@@ -2466,7 +2486,7 @@ impl RunnerClient {
     /// two runner round trips. Anything POSTed since, or 2 s passing, asks again.
     fn no_alert_known(&self) -> bool {
         const NO_ALERT_REUSE: Duration = Duration::from_secs(2);
-        self.no_alert_at.is_some_and(|at| {
+        self.observation_scope_current() && self.no_alert_at.is_some_and(|at| {
             at.elapsed() < NO_ALERT_REUSE && self.posted_at.is_none_or(|posted| posted < at)
         })
     }

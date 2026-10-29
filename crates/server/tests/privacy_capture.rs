@@ -358,3 +358,104 @@ fn normalizing_an_expired_hold_preserves_a_new_permitted_capture() {
         assert_eq!(bytes.as_ref(), include_bytes!("fixtures/privacy.png"));
     });
 }
+
+async fn observed_input_revocation(during_read: bool, clear: bool, owner_change: bool) {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let signal = started.clone();
+    let runner = mock_runner(move |request, _| {
+        if request.starts_with("POST /session ") {
+            return Some((Duration::ZERO, json!({"value":{"sessionId":"SESSION"}}).to_string()));
+        }
+        if request.contains("/source") {
+            signal.notify_one();
+            return Some((if during_read {Duration::from_millis(150)} else {Duration::ZERO},
+                json!({"value":{"type":"XCUIElementTypeApplication","label":"PRIVATE_INPUT_OBSERVATION",
+                    "rect":{"x":0,"y":0,"width":390,"height":844},"children":[]}}).to_string()));
+        }
+        if request.contains("/window/size") {
+            return Some((Duration::ZERO, json!({"value":{"width":390,"height":844}}).to_string()));
+        }
+        Some((Duration::ZERO, json!({"value":null}).to_string()))
+    });
+    let state = build_state_with_runner(runner.url());
+    let app = server::http::router(state.clone());
+    let pending = tokio::spawn(async move {
+        app.oneshot(Request::builder().method("POST")
+            .uri("/agent/input?return=delta&settle_ms=1000")
+            .header("x-phone-control","1").header("x-phone-owner","privacy-fixture")
+            .header("content-type","application/json").body(Body::from(r#"{"type":"home"}"#)).unwrap()).await.unwrap()
+    });
+    if during_read {
+        tokio::time::timeout(Duration::from_secs(4),started.notified()).await.unwrap();
+        hold(state.clone(),true).await;
+        if clear {hold(state.clone(),false).await;}
+    }
+    let response = pending.await.unwrap();
+    assert_eq!(response.status(),StatusCode::OK);
+    if !during_read {
+        if owner_change { state.owner_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel); }
+        else { hold(state.clone(),true).await; }
+    }
+    {
+        let runner = state.runner.as_ref().unwrap().lock().await;
+        assert!(runner.recent_tree(Duration::from_secs(10)).is_none(),"revoked tree cannot be reused before body publication");
+        assert!(runner.settled_frame(Duration::from_secs(10)).is_none(),"revoked frame cannot be reused before body publication");
+    }
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(!text.contains("PRIVATE_INPUT_OBSERVATION"),"private action observation leaked: {text}");
+    let body:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["ok"],true,"privacy must not rewrite a confirmed applied action");
+    assert_eq!(body["observation_omitted"],true);
+    assert!(state.element_snapshots.lock().unwrap().is_empty());
+    assert!(state.owner_snapshots.lock().unwrap().is_empty());
+}
+#[test]
+fn observed_input_is_fenced_until_its_body_is_published() {
+    block(observed_input_revocation(false,false,false));
+}
+#[test]
+fn observed_input_does_not_cache_a_read_crossing_a_private_hold() {
+    block(observed_input_revocation(true,true,false));
+}
+
+#[test]
+fn observed_input_owner_change_invalidates_cache_before_publication() {
+    block(observed_input_revocation(false,false,true));
+}
+
+#[test]
+fn private_hold_during_action_skips_post_action_observation() {
+    block(async {
+        let started=Arc::new(tokio::sync::Notify::new());
+        let signal=started.clone();
+        let reads=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count=reads.clone();
+        let runner=mock_runner(move |request,_| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO,json!({"value":{"sessionId":"SESSION"}}).to_string()));
+            }
+            if request.contains("/wda/pressButton") {
+                signal.notify_one();
+                return Some((Duration::from_millis(150),json!({"value":null}).to_string()));
+            }
+            if request.contains("/source") || request.contains("/screenshot") || request.contains("/alert/") || request.contains("/wda/settle") {
+                count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            }
+            Some((Duration::ZERO,json!({"value":null}).to_string()))
+        });
+        let state=build_state_with_runner(runner.url());
+        let app=server::http::router(state.clone());
+        let pending=tokio::spawn(async move {
+            app.oneshot(Request::builder().method("POST").uri("/agent/input?return=delta")
+                .header("x-phone-control","1").header("x-phone-owner","privacy-fixture")
+                .header("content-type","application/json").body(Body::from(r#"{"type":"home"}"#)).unwrap()).await.unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(4),started.notified()).await.unwrap();
+        hold(state,true).await;
+        let bytes=pending.await.unwrap().into_body().collect().await.unwrap().to_bytes();
+        let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["ok"],true);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst),0,"no new observation after private hold");
+    });
+}
