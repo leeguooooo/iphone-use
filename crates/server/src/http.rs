@@ -12025,7 +12025,7 @@ async fn agent_actions_generation(
     let observes_screen = serde_json::from_str::<AgentActionsRequest>(&body).ok()
         .is_some_and(|request| batch_needs_private_scope(&request));
     let mut response = agent_actions_scoped(state.clone(), headers, body, privacy_generation, capture_scope.clone()).await;
-    if observes_screen && !refused_as_unauthenticated(&response) {
+    if observes_screen {
         response.extensions_mut().insert(BatchPrivacyFence { state, scope: capture_scope });
     }
     response
@@ -12194,7 +12194,7 @@ async fn agent_actions_scoped(
 
         match step {
             AgentActionStep::Action { action, after_ms } => {
-                if let Err(refusal) = guard_foreground(&mut w, action).await {
+                if let Err(refusal) = scoped_observation(&state, &capture_scope, guard_foreground(&mut w, action)).await {
                     let mut body = agent_actions_failure_body(
                         index,
                         completed,
