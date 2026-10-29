@@ -103,6 +103,37 @@ pub async fn set_state(udid: &str, state: plist::Value) -> Result<()> {
     .context("home layout write timed out")?
 }
 
+/// Page and icon counts of an icon state, folders counted by what they hold.
+pub fn summarize(state: &plist::Value) -> String {
+    fn icons(items: &[plist::Value]) -> usize {
+        items
+            .iter()
+            .map(|it| match it.as_dictionary().and_then(|d| d.get("iconLists")) {
+                Some(plist::Value::Array(pages)) if !pages.is_empty() => pages
+                    .iter()
+                    .filter_map(|p| p.as_array())
+                    .map(|p| icons(p))
+                    .sum(),
+                _ => 1,
+            })
+            .sum()
+    }
+    let Some(pages) = state.as_array() else {
+        return "not an icon state".into();
+    };
+    let counts: Vec<String> = pages
+        .iter()
+        .map(|p| p.as_array().map_or(0, |p| p.len()).to_string())
+        .collect();
+    let total: usize = pages.iter().filter_map(|p| p.as_array()).map(|p| icons(p)).sum();
+    format!(
+        "{} home pages, {} icons; slots per Dock/page: [{}]",
+        pages.len().saturating_sub(1),
+        total,
+        counts.join(", ")
+    )
+}
+
 fn check_udid(udid: &str) -> Result<()> {
     if udid.is_empty() || !udid.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         bail!("an explicit device UDID is required");
@@ -222,6 +253,20 @@ mod tests {
                 server.await.unwrap();
             }
         });
+    }
+    #[test]
+    fn summary_counts_folder_contents_not_folders() {
+        let state: plist::Value = plist::from_bytes(
+            br#"<plist version="1.0"><array><array/><array>
+            <dict><key>displayIdentifier</key><string>a</string></dict>
+            <dict><key>iconLists</key><array><array>
+              <dict><key>displayIdentifier</key><string>b</string></dict>
+              <dict><key>displayIdentifier</key><string>c</string></dict>
+            </array></array></dict></array></array></plist>"#,
+        )
+        .unwrap();
+        let text = summarize(&state);
+        assert!(text.contains("1 home pages, 3 icons"), "{text}");
     }
     #[test]
     fn page_selection_retains_its_original_index_and_total() {

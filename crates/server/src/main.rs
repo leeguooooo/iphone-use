@@ -198,6 +198,9 @@ enum Command {
         /// `backup` or `apply`.
         action: String,
         file: std::path::PathBuf,
+        /// With `apply`: print the before/after summary and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Print which instance this environment would run as, as JSON, and exit.
     ///
@@ -863,7 +866,11 @@ fn main() -> Result<()> {
             result
         }
         Command::InstanceContext => instance_context(),
-        Command::HomeLayout { action, file } => {
+        Command::HomeLayout {
+            action,
+            file,
+            dry_run,
+        } => {
             let udid = std::env::var("IPHONE_USE_UDID").context("IPHONE_USE_UDID is not set")?;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -877,6 +884,23 @@ fn main() -> Result<()> {
                 }
                 "apply" => {
                     let state: plist::Value = plist::from_file(&file)?;
+                    let current = rt.block_on(server::home_layout::raw_state(&udid))?;
+                    println!("now:   {}", server::home_layout::summarize(&current));
+                    println!("after: {}", server::home_layout::summarize(&state));
+                    if dry_run {
+                        println!("dry run: nothing written");
+                        return Ok(());
+                    }
+                    // Always keep the layout being replaced, so apply is undoable.
+                    let dir = std::path::PathBuf::from(std::env::var("HOME")?)
+                        .join(".iphone-use-backups");
+                    std::fs::create_dir_all(&dir)?;
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_secs();
+                    let backup = dir.join(format!("home-before-apply-{stamp}.plist"));
+                    plist::to_file_xml(&backup, &current)?;
+                    println!("backed up current layout to {}", backup.display());
                     rt.block_on(server::home_layout::set_state(&udid, state))?;
                     println!("applied {}", file.display());
                 }
