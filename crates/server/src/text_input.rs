@@ -1,20 +1,15 @@
 //! Long text input: typed in chunks so every runner request stays short.
 //!
-//! The device runner types at about 60 characters a second, so one request
-//! for a long text outlives any fixed timeout and, when it fails, says nothing
-//! about how much landed. Chunks keep each request a few seconds long and let
-//! a failure report exactly how many characters were acknowledged.
+//! Long input is divided so each request can acknowledge a bounded prefix.
+//! Timeout calculations use a nominal rate, not a measured device throughput.
 //!
-//! A chunk boundary never splits what a reader sees as one character (a
-//! grapheme cluster): emoji ZWJ sequences, skin tones, flags, keycaps,
-//! combining marks, CRLF, Hangul jamo, Indic conjuncts. Without a Unicode
-//! segmentation table in the dependency tree, the rule is conservative: a cut
-//! is made only before a character that always starts a new cluster (ASCII,
-//! Latin, CJK, kana, Hangul syllables, emoji bases, …) and never after a
-//! joiner or prepend mark. Where none is found nearby the chunk grows instead
-//! — a longer chunk only takes longer; a split cluster would type garbage.
+//! A chunk boundary preserves a full Unicode extended grapheme cluster.
+//! Unicode UAX #29 segmentation keeps ordinary letters bounded without
+//! splitting combining marks, Indic conjuncts, flags or emoji sequences.
+//! Only a single cluster larger than the requested size may exceed it.
 
 use std::time::Duration;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Text up to this many characters goes out in one request, exactly as it
 /// always did; longer text is chunked to about this size.
@@ -23,7 +18,7 @@ pub const CHUNK_CHARS: usize = 200;
 /// Longest `text` an action may carry, in Unicode scalar values.
 pub const MAX_TEXT_CHARS: usize = 20_000;
 
-/// The runner's default typing speed (`/wda/keys` `frequency`).
+/// Nominal rate for timeout budgeting, not a device throughput measurement.
 pub const TYPING_CHARS_PER_SEC: f64 = 60.0;
 
 /// Number of characters as every limit and count here measures them:
@@ -32,104 +27,30 @@ pub fn char_count(text: &str) -> usize {
     text.chars().count()
 }
 
-/// Whether `c` always begins a new grapheme cluster when it follows an
-/// ordinary character. Deliberately incomplete: anything not listed is never
-/// a cut point.
-fn starts_cluster(c: char) -> bool {
-    matches!(c as u32,
-        0x0A | 0x0D | 0x09 | 0x20..=0x7E
-        | 0x00A0..=0x024F          // Latin-1, Latin Extended A/B
-        | 0x0370..=0x03FF          // Greek (combining marks are 0300–036F)
-        | 0x0400..=0x0482 | 0x048A..=0x052F // Cyrillic letters
-        | 0x1E00..=0x1EFF          // Latin Extended Additional
-        | 0x2010..=0x2027 | 0x2030..=0x205E // punctuation (no ZW*/bidi controls)
-        | 0x20A0..=0x20CF          // currency
-        | 0x2100..=0x23FF | 0x2460..=0x27BF | 0x2900..=0x2BFF // symbols, dingbats
-        | 0x2E80..=0x2FDF | 0x3000..=0x3029 | 0x3030..=0x303F // CJK radicals, punctuation
-        | 0x3041..=0x3096 | 0x309B..=0x30FF // kana (3099/309A combine)
-        | 0x3100..=0x312F | 0x3131..=0x318F | 0x31A0..=0x31FF | 0x3200..=0x33FF
-        | 0x3400..=0x4DBF | 0x4E00..=0x9FFF // CJK ideographs
-        | 0xAC00..=0xD7A3          // Hangul syllables
-        | 0xF900..=0xFAFF | 0xFE30..=0xFE4F
-        | 0xFF01..=0xFF9D          // fullwidth / halfwidth (FF9E/FF9F combine)
-        | 0x1F000..=0x1F1FF        // tiles, cards, enclosed, regional indicators
-        | 0x1F200..=0x1F3FA | 0x1F400..=0x1FAFF // emoji (1F3FB–1F3FF are skin tones)
-        | 0x20000..=0x3FFFF        // CJK extensions
-    )
-}
-
-fn regional_indicator(c: char) -> bool {
-    matches!(c as u32, 0x1F1E6..=0x1F1FF)
-}
-
-/// Characters that attach to what FOLLOWS them (grapheme "Prepend"), plus the
-/// joiners: nothing may be cut right after one.
-/// Prepend ranges follow Unicode 17.0.0 GraphemeBreakProperty.txt:
-/// https://www.unicode.org/Public/17.0.0/ucd/auxiliary/GraphemeBreakProperty.txt
-fn binds_forward(c: char) -> bool {
-    matches!(c as u32,
-        0x200C | 0x200D            // ZWNJ, ZWJ
-        | 0x0600..=0x0605 | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2 | 0x0D4E
-        | 0x110BD | 0x110CD | 0x111C2..=0x111C3
-        | 0x113D1 | 0x1193F | 0x11941
-        | 0x11A84..=0x11A89 | 0x11D46 | 0x11F02
-        | 0x1100..=0x115F | 0xA960..=0xA97F // Hangul leading jamo
-    )
-}
-
-/// May `chars` be cut before `chars[index]`?
-pub fn safe_boundary(chars: &[char], index: usize) -> bool {
-    if index == 0 || index >= chars.len() {
-        return true;
-    }
-    let (previous, next) = (chars[index - 1], chars[index]);
-    if !starts_cluster(next) || binds_forward(previous) {
-        return false;
-    }
-    if previous == '\r' && next == '\n' {
-        return false;
-    }
-    if regional_indicator(next) && regional_indicator(previous) {
-        // Flags are pairs: a cut is safe only after an even run.
-        let run = chars[..index]
-            .iter()
-            .rev()
-            .take_while(|c| regional_indicator(**c))
-            .count();
-        return run % 2 == 0;
-    }
-    true
-}
-
-/// Split `text` into consecutive pieces of about `size` characters that
-/// rejoin to exactly `text`, cutting only at [`safe_boundary`]. A piece is
-/// shortened down to half of `size` to find a boundary, then lengthened.
+/// Split into consecutive slices bounded by `size` Unicode scalar values.
+/// A single extended grapheme cluster is indivisible even when larger than
+/// the limit. Slices preserve the original UTF-8 bytes without normalization.
 pub fn split(text: &str, size: usize) -> Vec<&str> {
     let size = size.max(1);
-    let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
-    let byte_at = |index: usize| offsets.get(index).copied().unwrap_or(text.len());
     let mut pieces = Vec::new();
     let mut start = 0;
-    while n - start > size {
-        let target = start + size;
-        let floor = start + (size / 2).max(1);
-        let cut = (floor..=target)
-            .rev()
-            .find(|&i| safe_boundary(&chars, i))
-            .or_else(|| (target + 1..n).find(|&i| safe_boundary(&chars, i)))
-            .unwrap_or(n);
-        pieces.push(&text[byte_at(start)..byte_at(cut)]);
-        start = cut;
+    let mut scalars = 0;
+    for (at, cluster) in text.grapheme_indices(true) {
+        let count = cluster.chars().count();
+        if scalars > 0 && scalars + count > size {
+            pieces.push(&text[start..at]);
+            start = at;
+            scalars = 0;
+        }
+        scalars += count;
     }
-    if start < n {
-        pieces.push(&text[byte_at(start)..]);
+    if start < text.len() {
+        pieces.push(&text[start..]);
     }
     pieces
 }
 
-/// Expected typing time for `chars` characters at the runner's default speed.
+/// Nominal typing-time estimate used by the request budget.
 pub fn typing_time(chars: usize) -> Duration {
     Duration::from_secs_f64(chars as f64 / TYPING_CHARS_PER_SEC)
 }
@@ -140,15 +61,16 @@ pub fn chunk_timeout(chars: usize) -> Duration {
     (typing_time(chars) * 2 + Duration::from_secs(10)).max(Duration::from_secs(20))
 }
 
-/// How much longer than a short action a request typing `chars` characters
-/// may take, on top of the ordinary action deadline. Zero for text that goes
-/// out in one request, so short text keeps its old deadline exactly.
-pub fn typing_allowance(chars: usize) -> Duration {
+/// Extra typing time above a short action's ordinary deadline. Short text
+/// keeps its existing deadline; long text includes the actual request count,
+/// since whole clusters can leave a short chunk beside a full-size cluster.
+pub fn typing_allowance(text: &str) -> Duration {
+    let chars = char_count(text);
     if chars <= CHUNK_CHARS {
         return Duration::ZERO;
     }
-    let chunks = chars.div_ceil(CHUNK_CHARS) as u32;
-    typing_time(chars).mul_f64(1.5) + Duration::from_secs(1) * chunks
+    typing_time(chars).mul_f64(1.5)
+        + Duration::from_secs(split(text, CHUNK_CHARS).len() as u64)
 }
 
 /// The extra time a `text` action (or any JSON action) needs; zero otherwise.
@@ -159,7 +81,7 @@ pub fn action_allowance(action: &serde_json::Value) -> Duration {
     action
         .get("text")
         .and_then(serde_json::Value::as_str)
-        .map_or(Duration::ZERO, |text| typing_allowance(char_count(text)))
+        .map_or(Duration::ZERO, typing_allowance)
 }
 
 #[cfg(test)]
@@ -176,6 +98,15 @@ mod tests {
         assert_eq!(split("", 200), Vec::<&str>::new());
         let exact: String = "a".repeat(200);
         assert_eq!(split(&exact, 200).len(), 1);
+    }
+
+    #[test]
+    fn separate_devanagari_letters_keep_the_requested_chunk_bound() {
+        let text = "क".repeat(500);
+        let pieces = split(&text, 200);
+        assert_eq!(rejoin(&pieces), text);
+        assert_eq!(pieces.iter().map(|piece| char_count(piece)).collect::<Vec<_>>(),
+            vec![200, 200, 100]);
     }
 
     #[test]
@@ -262,13 +193,20 @@ mod tests {
     }
 
     #[test]
-    fn a_run_with_no_boundary_grows_instead_of_splitting() {
-        // Thai has no cut point this table knows of until the space.
-        let thai = "สวัสดีครับ".repeat(30);
-        let text = format!("{thai} tail");
+    fn a_single_oversized_cluster_is_kept_whole() {
+        let cluster = format!("e{}", "\u{0301}".repeat(300));
+        let text = format!("{cluster} tail");
         let pieces = split(&text, 20);
         assert_eq!(rejoin(&pieces), text);
-        assert_eq!(pieces[0], thai.as_str());
+        assert_eq!(pieces, vec![cluster.as_str(), " tail"]);
+    }
+
+    #[test]
+    fn allowance_accounts_for_whole_cluster_packing() {
+        let text = format!("ae{}b", "\u{0301}".repeat(199));
+        assert_eq!(split(&text, 200).iter().map(|p| char_count(p)).collect::<Vec<_>>(), vec![1, 200, 1]);
+        assert_eq!(action_allowance(&serde_json::json!({"type":"text","text":text})),
+            typing_time(202).mul_f64(1.5) + Duration::from_secs(3));
     }
 
     #[test]
@@ -276,15 +214,15 @@ mod tests {
         assert_eq!(chunk_timeout(1), Duration::from_secs(20));
         assert_eq!(chunk_timeout(200), Duration::from_secs(20));
         assert!(chunk_timeout(1200) > Duration::from_secs(45));
-        assert_eq!(typing_allowance(0), Duration::ZERO);
-        assert_eq!(typing_allowance(CHUNK_CHARS), Duration::ZERO);
-        assert!(typing_allowance(CHUNK_CHARS + 1) > Duration::ZERO);
+        assert_eq!(typing_allowance(""), Duration::ZERO);
+        assert_eq!(typing_allowance(&"x".repeat(CHUNK_CHARS)), Duration::ZERO);
+        assert!(typing_allowance(&"x".repeat(CHUNK_CHARS + 1)) > Duration::ZERO);
         // 20 000 characters: 333 s of typing, 500 s with margin, + 100 chunks.
-        let most = typing_allowance(MAX_TEXT_CHARS).as_secs_f64();
+        let most = typing_allowance(&"x".repeat(MAX_TEXT_CHARS)).as_secs_f64();
         assert!((599.0..=601.0).contains(&most), "{most}");
         assert_eq!(
             action_allowance(&serde_json::json!({"type":"text","text":"x".repeat(400)})),
-            typing_allowance(400)
+            typing_allowance(&"x".repeat(400))
         );
         assert_eq!(
             action_allowance(&serde_json::json!({"type":"tap","x":0.5})),

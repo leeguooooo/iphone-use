@@ -26008,6 +26008,21 @@ mod tests {
     }
 
     #[test]
+    fn devanagari_long_text_uses_three_bounded_native_requests() {
+        block(async {
+            let (mut runner, keys, _) = counting_keys_runner(0);
+            let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(false);
+            let outcome = direct_agent_action(&mut client, &actionable,
+                &serde_json::json!({"type":"text","text":"क".repeat(500)}),
+                &mut None, far_deadline(), None).await;
+            assert_eq!(outcome, RunnerControlOutcome::Applied);
+            assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), 3);
+            runner.shutdown();
+        });
+    }
+
+    #[test]
     fn long_text_is_typed_in_chunks() {
         block(async {
             let (mut runner, keys, _) = counting_keys_runner(0);

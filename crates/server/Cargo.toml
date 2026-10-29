@@ -73,6 +73,7 @@ ab_glyph = "0.2"
 # App install reads the bundle id from the app's Info.plist (binary or XML);
 # already in the tree through legacy-launch.
 plist = "1.7"
+unicode-segmentation = "1.13.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 browser-session = { path = "../browser-session", features = ["desktop"] }
