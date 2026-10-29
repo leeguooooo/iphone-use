@@ -32,7 +32,12 @@ class Daemon(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
         with seen_lock:
             seen.append((self.server.name, self.command, self.path, self.headers.get('Authorization'), body, self.headers.get('X-Phone-Control')))
-        if self.path.startswith('/agent/capabilities'):
+        if self.path.startswith('/agent/metrics'):
+            owner = parse_qs(urlsplit(self.path).query).get('owner', [''])[0]
+            value = {'ok':True, 'open':[{'key':{'kind':'inferred','owner':owner,'incarnation':1},
+                'started_ms':1,'ended_ms':2,'tool_calls':2,'dropped_events':1,
+                'outcome_unknown':1,'model_round_trips':None}], 'recent':[]}
+        elif self.path.startswith('/agent/capabilities'):
             value = {'ok': True, 'operations': {'single': ['tap', 'type'],
                 'batch': {'max': 24}}, 'limits': {'nested': {'value': 'x' * 300}}}
         elif self.path.startswith('/agent/value'):
@@ -144,6 +149,17 @@ try:
             assert capabilities['structuredContent'] == {'ok': True,
                 'operations': {'single': ['tap', 'type'], 'batch': {'max': 24}},
                 'limits': {'nested': {'value': 'x' * 300}}}, 'named capabilities must preserve the full nested contract'
+            for instance, marker, token in [('i13','B','token-B'),('default','A','token-A')]:
+                reply = call('phone_metrics', instance=instance, limit=1)['result']
+                assert reply.get('isError') is not True, reply
+                request = seen[-1]
+                assert request[0] == marker and request[3] == 'Bearer ' + token
+                assert request[1] == 'GET' and urlsplit(request[2]).path == '/agent/metrics'
+                assert request[5] is None, 'metrics must not claim control'
+                report = reply['structuredContent']
+                assert report['owner'] == parse_qs(urlsplit(request[2]).query)['owner'][0]
+                assert report['open'][0]['outcome_unknown'] == 1
+                assert report['open'][0]['model_round_trips'] is None
             # Interleaved reads must keep separate observation baselines.
             for instance, marker in [('i13', 'B'), ('default', 'A')]:
                 response = call('phone_tap', instance=instance, x=0.5, y=0.5, observe=True)

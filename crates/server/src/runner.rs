@@ -3890,6 +3890,37 @@ mod tests {
     }
 
     #[test]
+    fn volume_scope_revoked_before_setup_does_not_contact_runner() {
+        let mut client = RunnerClient::new("http://127.0.0.1:1").unwrap();
+        block(async {
+            assert_eq!(client.request_volume_button(VolumeButton::Up, &|| false).await.unwrap(),
+                VolumeButtonOutcome::ScopeChanged);
+        });
+    }
+
+    #[test]
+    fn volume_scope_revoked_during_setup_never_posts_a_button() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let allowed = Arc::new(AtomicBool::new(true));
+        let revoked = allowed.clone();
+        let (base, task) = mock_runner(2, move |request| {
+            if request.starts_with("POST /session ") {
+                revoked.store(false, Ordering::SeqCst);
+                r#"{"value":{"sessionId":"S","capabilities":{"ipu:volumeButtons":true}}}"#.into()
+            } else {
+                assert!(request.contains("/appium/settings "), "button dispatched after revocation");
+                r#"{"value":null}"#.into()
+            }
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        block(async {
+            assert_eq!(client.request_volume_button(VolumeButton::Down,
+                &|| allowed.load(Ordering::SeqCst)).await.unwrap(), VolumeButtonOutcome::ScopeChanged);
+        });
+        task.join().unwrap();
+    }
+
+    #[test]
     fn volume_buttons_require_an_explicit_current_session_capability() {
         for capabilities in [
             serde_json::json!({}),

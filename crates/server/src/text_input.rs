@@ -206,6 +206,20 @@ mod tests {
     }
 
     #[test]
+    fn modern_prepend_signs_stay_with_the_following_letter_at_chunk_limit() {
+        // Unicode 17 Prepend signs missing from the previous boundary table.
+        for code in [0x113D1, 0x1193F, 0x11941, 0x11A84, 0x11A85, 0x11A86,
+            0x11A87, 0x11A88, 0x11A89, 0x11D46, 0x11F02] {
+            let sign = char::from_u32(code).unwrap();
+            let text = format!("{}{sign}b", "a".repeat(199));
+            let pieces = split(&text, 200);
+            assert_eq!(rejoin(&pieces), text);
+            assert!(pieces.iter().all(|piece| !piece.ends_with(sign)),
+                "U+{code:04X} was separated from its following letter");
+        }
+    }
+
+    #[test]
     fn grapheme_clusters_are_never_split() {
         for unit in [
             "👨\u{200D}👩\u{200D}👧\u{200D}👦", // family ZWJ sequence

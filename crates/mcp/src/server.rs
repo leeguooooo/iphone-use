@@ -4452,6 +4452,79 @@ mod tests {
         }
     }
 
+    fn metrics_run(owner: &str, incarnation: u64, end: u64) -> serde_json::Value {
+        serde_json::json!({"key":{"kind":"explicit","owner":owner,
+            "run_id":format!("run-{incarnation}"),"incarnation":incarnation},
+            "started_ms":1,"ended_ms":end,"tool_calls":3,"stored_calls":2,
+            "incomplete":true,"dropped_events":1,"outcome_unknown":1,
+            "model_round_trips":null,"failures":{"runner_error":1}})
+    }
+
+    fn metrics_reply(body: serde_json::Value, limit: Option<usize>) -> CallToolResult {
+        let (url, task) = scripted_daemon("200 OK", serde_json::to_vec(&body).unwrap());
+        let handler = PhoneHandler::new(DaemonClient::new(url, None).with_owner("metrics-owner"));
+        let result = block(handler.phone_metrics(Parameters(MetricsParams { limit })));
+        task.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn metrics_keeps_latest_runs_and_unknown_loss_fields_in_slim_mode() {
+        let result = metrics_reply(serde_json::json!({"ok":true,"open":[
+            metrics_run("metrics-owner",1,10),metrics_run("metrics-owner",3,30),
+            metrics_run("metrics-owner",2,20)],"recent":[],"stats":{"unattributed_events":99}}), Some(1));
+        assert_ne!(result.is_error, Some(true));
+        let slim = finish_result("phone_metrics", result, StructuredMode::Slim);
+        let report = slim.structured_content.unwrap();
+        assert_eq!(report["open"][0]["key"]["run_id"], "run-3");
+        assert_eq!(report["open"][0]["dropped_events"], 1);
+        assert_eq!(report["open"][0]["outcome_unknown"], 1);
+        assert!(report["open"][0]["model_round_trips"].is_null());
+        assert_eq!(report["open_omitted"], 2);
+        assert_eq!(report["truncated"], true);
+        assert!(report.get("stats").is_none());
+    }
+
+    #[test]
+    fn metrics_rejects_other_owner_without_returning_their_run_data() {
+        let result = metrics_reply(serde_json::json!({"ok":true,
+            "open":[metrics_run("private-other-owner",1,10)],"recent":[]}), None);
+        assert_eq!(result.is_error, Some(true));
+        assert!(!text_of(&result).contains("private-other-owner"));
+        assert!(result.structured_content.is_none());
+    }
+
+    #[test]
+    fn metrics_reports_byte_budget_omissions_without_forwarding_oversized_data() {
+        let mut run = metrics_run("metrics-owner",1,10);
+        run["extra"] = serde_json::json!("x".repeat(13 * 1024));
+        let result = metrics_reply(serde_json::json!({"ok":true,"open":[run],"recent":[]}), None);
+        assert_ne!(result.is_error, Some(true));
+        let report = result.structured_content.unwrap();
+        assert_eq!(report["open"], serde_json::json!([]));
+        assert_eq!(report["open_omitted"], 1);
+        assert_eq!(report["truncated"], true);
+    }
+
+    #[test]
+    fn metrics_rejects_malformed_run_identity_instead_of_inventing_timing() {
+        let mut run = metrics_run("metrics-owner",1,10);
+        run.as_object_mut().unwrap().remove("started_ms");
+        let result = metrics_reply(serde_json::json!({"ok":true,"open":[run],"recent":[]}), None);
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.structured_content.is_none());
+    }
+
+    #[test]
+    fn metrics_invalid_limit_is_rejected_before_contact() {
+        let handler = handler_for("http://127.0.0.1:1");
+        for limit in [0, 21] {
+            let result = block(handler.phone_metrics(Parameters(MetricsParams { limit:Some(limit) })));
+            assert_eq!(result.is_error, Some(true));
+            assert!(text_of(&result).contains("limit must be"));
+        }
+    }
+
     fn handler_for(url: &str) -> PhoneHandler {
         PhoneHandler::new(DaemonClient::new(url.to_string(), None))
     }
