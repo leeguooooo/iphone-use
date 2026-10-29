@@ -59,6 +59,75 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     Ok(json)
 }
 
+/// The untouched icon state, as SpringBoard stores it, for backup and restore.
+pub async fn raw_state(udid: &str) -> Result<plist::Value> {
+    check_udid(udid)?;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut stream =
+            crate::lockdown::open_service(udid, "com.apple.springboardservices").await?;
+        let mut request = plist::Dictionary::new();
+        request.insert("command".into(), "getIconState".into());
+        request.insert("formatVersion".into(), "2".into());
+        let reply = send_plist(&mut stream, &plist::Value::Dictionary(request)).await?;
+        Ok(reply)
+    })
+    .await
+    .context("home layout read timed out")?
+}
+
+/// Replaces the whole icon state. Only the CLI calls this, with a plist the
+/// person has seen; the caller backs up first.
+pub async fn set_state(udid: &str, state: plist::Value) -> Result<()> {
+    check_udid(udid)?;
+    if !state.as_array().is_some_and(|a| a.len() >= 2) {
+        bail!("icon state must be an array holding the Dock and at least one page");
+    }
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut stream =
+            crate::lockdown::open_service(udid, "com.apple.springboardservices").await?;
+        let mut request = plist::Dictionary::new();
+        request.insert("command".into(), "setIconState".into());
+        request.insert("iconState".into(), state);
+        // Success is an empty acknowledgement or a closed stream; only an
+        // error dictionary is a refusal.
+        if let Ok(reply) = send_plist(&mut stream, &plist::Value::Dictionary(request)).await {
+            if let Some(d) = reply.as_dictionary() {
+                if d.contains_key("error") || d.contains_key("Error") {
+                    bail!("SpringBoard refused setIconState: {d:?}");
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .context("home layout write timed out")?
+}
+
+fn check_udid(udid: &str) -> Result<()> {
+    if udid.is_empty() || !udid.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        bail!("an explicit device UDID is required");
+    }
+    Ok(())
+}
+
+async fn send_plist<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    request: &plist::Value,
+) -> Result<plist::Value> {
+    let mut bytes = Vec::new();
+    plist::to_writer_xml(&mut bytes, request)?;
+    stream.write_u32(bytes.len() as u32).await?;
+    stream.write_all(&bytes).await?;
+    stream.flush().await?;
+    let size = stream.read_u32().await? as usize;
+    if !(1..=MAX_PLIST_BYTES).contains(&size) {
+        bail!("SpringBoard response size is invalid");
+    }
+    let mut response = vec![0; size];
+    stream.read_exact(&mut response).await?;
+    plist::Value::from_reader(std::io::Cursor::new(response)).context("invalid SpringBoard plist")
+}
+
 /// Filtering changes only the response, never the phone or the original page indexes.
 pub fn select_page(mut body: Value, page: Option<usize>) -> Result<Value> {
     if let Some(page) = page {

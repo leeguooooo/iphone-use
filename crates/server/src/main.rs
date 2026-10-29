@@ -189,6 +189,16 @@ enum Command {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// Back up or replace the phone's Home Screen layout (icon state plist).
+    ///
+    /// `home-layout backup <file>` saves the current layout; `home-layout
+    /// apply <file>` writes a plist in the same shape (also how a backup is
+    /// restored). Needs the paired phone's UDID in IPHONE_USE_UDID.
+    HomeLayout {
+        /// `backup` or `apply`.
+        action: String,
+        file: std::path::PathBuf,
+    },
     /// Print which instance this environment would run as, as JSON, and exit.
     ///
     /// Read-only: derives the instance from IPHONE_USE_INSTANCE / HOME /
@@ -853,6 +863,27 @@ fn main() -> Result<()> {
             result
         }
         Command::InstanceContext => instance_context(),
+        Command::HomeLayout { action, file } => {
+            let udid = std::env::var("IPHONE_USE_UDID").context("IPHONE_USE_UDID is not set")?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("start the runtime")?;
+            match action.as_str() {
+                "backup" => {
+                    let state = rt.block_on(server::home_layout::raw_state(&udid))?;
+                    plist::to_file_xml(&file, &state)?;
+                    println!("saved {}", file.display());
+                }
+                "apply" => {
+                    let state: plist::Value = plist::from_file(&file)?;
+                    rt.block_on(server::home_layout::set_state(&udid, state))?;
+                    println!("applied {}", file.display());
+                }
+                other => anyhow::bail!("unknown action {other}; use backup or apply"),
+            }
+            Ok(())
+        }
         Command::Relay {
             udid,
             listen,
