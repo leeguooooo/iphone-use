@@ -74,6 +74,21 @@ enum ModelCatalog {
     }
 }
 
+/// Sends a model request that forces one tool. Some models (Claude Fable 5.x)
+/// refuse a forced `tool_choice` with a 400; retry those once with `auto`, the
+/// instructions still ask for exactly one tool call.
+func sendForcedToolRequest(_ session: URLSession, _ request: URLRequest, body: [String: Any], anthropic: Bool) async throws -> (Data, URLResponse) {
+    var request = request
+    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+    let (data, response) = try await session.data(for: request)
+    guard (response as? HTTPURLResponse)?.statusCode == 400,
+          String(decoding: data, as: UTF8.self).contains("tool_choice") else { return (data, response) }
+    var relaxed = body
+    relaxed["tool_choice"] = anthropic ? ["type": "auto"] as [String: Any] : "auto"
+    request.httpBody = try JSONSerialization.data(withJSONObject: relaxed)
+    return try await session.data(for: request)
+}
+
 func validateModelResponse(_ data: Data, response: URLResponse) throws {
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0

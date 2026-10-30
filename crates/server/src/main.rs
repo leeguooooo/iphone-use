@@ -871,6 +871,16 @@ fn main() -> Result<()> {
         Command::Device { query } => std::process::exit(device_query(query)),
         Command::Upgrade { check, json } => std::process::exit(upgrade(check || json, json)),
         Command::Setup { instance, args } => {
+            // `setup pause --instance i13`: clap's trailing args swallow a
+            // flag written after the subcommand, which silently fell back to
+            // the default phone and paused the wrong one.
+            let (instance, args) = match split_instance_arg(instance, args) {
+                Ok(split) => split,
+                Err(message) => {
+                    eprintln!("iphone-use: {message}");
+                    std::process::exit(2)
+                }
+            };
             // `setup --simulator <name|udid>`: no phone setup at all, the
             // same as `simulator start` (preview).
             match server::simulator::setup_simulator_arg(&args) {
@@ -2042,5 +2052,58 @@ mod take_instance_tests {
         let (instance, rest) = take_instance(Some("a".into()), strings(&["list"]));
         assert_eq!(instance.as_deref(), Some("a"));
         assert_eq!(rest, strings(&["list"]));
+    }
+}
+
+/// Lift `--instance <name>` / `--instance=<name>` out of `setup`'s trailing
+/// arguments. Two different names are refused rather than guessed.
+fn split_instance_arg(
+    instance: Option<String>,
+    args: Vec<String>,
+) -> Result<(Option<String>, Vec<String>), String> {
+    let mut found = instance;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let name = if arg == "--instance" {
+            iter.next().ok_or("--instance needs a name")?
+        } else if let Some(value) = arg.strip_prefix("--instance=") {
+            value.to_string()
+        } else {
+            rest.push(arg);
+            continue;
+        };
+        if found.as_deref().is_some_and(|prev| prev != name) {
+            return Err(format!("two different --instance values: {} and {name}", found.unwrap_or_default()));
+        }
+        found = Some(name);
+    }
+    Ok((found, rest))
+}
+
+#[cfg(test)]
+mod split_instance_tests {
+    use super::split_instance_arg;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn instance_after_subcommand_is_honoured() {
+        let (instance, args) = split_instance_arg(None, v(&["pause", "--instance", "i13"])).unwrap();
+        assert_eq!(instance.as_deref(), Some("i13"));
+        assert_eq!(args, v(&["pause"]));
+        let (instance, args) = split_instance_arg(None, v(&["resume", "--instance=i13"])).unwrap();
+        assert_eq!(instance.as_deref(), Some("i13"));
+        assert_eq!(args, v(&["resume"]));
+    }
+
+    #[test]
+    fn conflicting_or_missing_names_are_refused() {
+        assert!(split_instance_arg(Some("a".into()), v(&["pause", "--instance", "b"])).is_err());
+        assert!(split_instance_arg(None, v(&["pause", "--instance"])).is_err());
+        let (instance, _) = split_instance_arg(Some("a".into()), v(&["pause", "--instance", "a"])).unwrap();
+        assert_eq!(instance.as_deref(), Some("a"));
     }
 }

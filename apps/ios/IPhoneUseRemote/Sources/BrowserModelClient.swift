@@ -179,8 +179,7 @@ final class BrowserModelClient: BrowserReasoning, AssistantReasoning, BrowserCom
         }
         let zen = !anthropic && ZenCompatibility.matches(provider.baseURL, key: provider.key)
         if zen { ZenCompatibility.prepare(&request, body: &body, session: zenSession) }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await sendForcedToolRequest(session, request, body: body, anthropic: anthropic)
         try validateModelResponse(data, response: response)
         let object = zen ? try ZenCompatibility.collapse(data) : try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let answer: String?
