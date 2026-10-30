@@ -25,17 +25,32 @@ struct Options {
     remote_only: bool,
     no_install: bool,
     no_pair: bool,
+    /// Another phone (instance name or UDID) whose app connects to this
+    /// phone's local control, with nobody tapping either phone.
+    connect_to: Option<String>,
+    connect_only: bool,
 }
 
+const OPTIONS_HINT: &str = "--remote-only, --no-install, --no-pair, --connect-to <instance|udid>, --connect-only";
+
 fn parse(args: &[String]) -> Result<Options, String> {
-    let mut options = Options { remote_only: false, no_install: false, no_pair: false };
-    for arg in args {
+    let mut options = Options { remote_only: false, no_install: false, no_pair: false, connect_to: None, connect_only: false };
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--remote-only" => options.remote_only = true,
             "--no-install" => options.no_install = true,
             "--no-pair" => options.no_pair = true,
-            other => return Err(format!("unknown setup-app option: {other} (--remote-only, --no-install, --no-pair)")),
+            "--connect-only" => options.connect_only = true,
+            "--connect-to" => match args.next() {
+                Some(value) if !value.starts_with('-') => options.connect_to = Some(value.clone()),
+                _ => return Err("--connect-to needs an instance name or UDID".into()),
+            },
+            other => return Err(format!("unknown setup-app option: {other} ({OPTIONS_HINT})")),
         }
+    }
+    if options.connect_only && options.connect_to.is_none() {
+        return Err("--connect-only needs --connect-to <instance|udid>".into());
     }
     Ok(options)
 }
@@ -63,7 +78,16 @@ pub fn run(args: &[String]) -> i32 {
             return code;
         }
     };
-    match install(&ctx, &options) {
+    let result = if options.connect_only {
+        Ok(())
+    } else {
+        install(&ctx, &options)
+    };
+    let result = result.and_then(|()| match &options.connect_to {
+        Some(controller) => connect(&ctx, controller),
+        None => Ok(()),
+    });
+    match result {
         Ok(()) => 0,
         Err(message) => {
             term::die_line(&message);
@@ -119,6 +143,10 @@ fn install(ctx: &Ctx, options: &Options) -> Result<(), String> {
     ]);
     if checkout_override().is_none() {
         build.arg("--no-generate");
+    }
+    // QA builds (`Debug`) accept the local-control launch switches.
+    if let Ok(configuration) = std::env::var("IPU_APP_CONFIGURATION") {
+        build.args(["--configuration", &configuration]);
     }
     if full {
         let host = root.join("native/libipu_phone_host.a");
@@ -359,6 +387,120 @@ fn stage_pairing(ctx: &Ctx, root: &Path, bundle: &str) -> Result<(), String> {
     }
     term::ok("Pairing record handed to the app (it imports it on first open)");
     Ok(())
+}
+
+/// Connect `controller`'s app to this phone's local control over USB: drop a
+/// one-time code into this phone's app container (the on-phone daemon reads
+/// it from there), read back the daemon's LAN address, and open the matching
+/// `iphoneuse://pair` link in the controller's app. Neither phone is touched.
+fn connect(ctx: &Ctx, controller: &str) -> Result<(), String> {
+    let bundle = app_bundle_id(&ctx.team_id);
+    let controller_udid = resolve_udid(controller)?;
+    if controller_udid == ctx.udid {
+        return Err("--connect-to names this same phone; pick the phone that should control it".into());
+    }
+    term::info(&format!("Connecting {controller} to this phone's local control"));
+    let dir = tempfile_dir()?;
+    let result = connect_in(ctx, &bundle, &controller_udid, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn connect_in(ctx: &Ctx, bundle: &str, controller_udid: &str, dir: &Path) -> Result<(), String> {
+    use base64::Engine as _;
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| format!("randomness: {e}"))?;
+    let code = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs()
+        + crate::pairing::CODE_TTL.as_secs();
+    let drop = dir.join("connect-code-import.json");
+    std::fs::write(&drop, serde_json::json!({ "code": code, "expires_at": expires_at }).to_string())
+        .map_err(|e| format!("write {}: {e}", drop.display()))?;
+    devicectl(&["device", "copy", "to", "--device", &ctx.udid, "--domain-type", "appDataContainer",
+        "--domain-identifier", bundle, "--source", &drop.to_string_lossy(),
+        "--destination", "Documents/connect-code-import.json"])
+        .map_err(|e| format!("could not hand the connection code to the app: {e}"))?;
+
+    let lan = dir.join("daemon-lan.json");
+    devicectl(&["device", "copy", "from", "--device", &ctx.udid, "--domain-type", "appDataContainer",
+        "--domain-identifier", bundle, "--source", "Documents/daemon-lan.json",
+        "--destination", &lan.to_string_lossy()])
+        .map_err(|_| "this phone's local control is not running (no daemon address yet): \
+            start it in Phone Use › Settings › 本机控制, then retry with --connect-only".to_string())?;
+    let urls: Vec<String> = std::fs::read_to_string(&lan)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v["lan_urls"].as_array().map(|a| a.iter().filter_map(|u| u.as_str().map(String::from)).collect()))
+        .unwrap_or_default();
+    let Some(base) = urls.into_iter().find(|u| u.starts_with("http://") && !u.ends_with(".local:18787")) else {
+        return Err("this phone has no Wi-Fi address: join Wi-Fi on both phones and retry with --connect-only".into());
+    };
+
+    let controller_app = installed_app(controller_udid)?;
+    let encoded: String = base
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    let link = format!("iphoneuse://pair?u={encoded}&c={code}");
+    devicectl(&["device", "process", "launch", "--device", controller_udid, "--terminate-existing",
+        "--payload-url", &link, &controller_app])
+        .map_err(|e| format!("could not open the connection link on the other phone: {e}"))?;
+    term::ok(&format!("Opened the connection in {controller_app} on the other phone (this phone at {base})"));
+    Ok(())
+}
+
+/// An instance name → its phone's UDID; a UDID passes through.
+fn resolve_udid(value: &str) -> Result<String, String> {
+    if value.len() >= 24 && value.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        return Ok(value.to_string());
+    }
+    let previous = std::env::var_os("IPHONE_USE_INSTANCE");
+    std::env::set_var("IPHONE_USE_INSTANCE", if value == "default" { "" } else { value });
+    let resolved = Ctx::resolve();
+    match previous {
+        Some(v) => std::env::set_var("IPHONE_USE_INSTANCE", v),
+        None => std::env::remove_var("IPHONE_USE_INSTANCE"),
+    }
+    let ctx = resolved.map_err(|(message, _)| format!("instance {value}: {message}"))?;
+    if ctx.udid.is_empty() {
+        return Err(format!("instance {value} has no phone set up"));
+    }
+    Ok(ctx.udid)
+}
+
+/// The Phone Use app on `udid`: our team's build first, else any of ours.
+fn installed_app(udid: &str) -> Result<String, String> {
+    let out = Command::new("xcrun")
+        .args(["devicectl", "device", "info", "apps", "--device", udid])
+        .output()
+        .map_err(|e| format!("run devicectl: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut ids: Vec<&str> = text
+        .split_whitespace()
+        .filter(|w| *w == "com.leeguoo.iphone-use.remote" || w.starts_with("com.leeguoo.iphone-use.remote."))
+        .filter(|w| !w.ends_with(".tunnel"))
+        .collect();
+    ids.sort_by_key(|id| std::cmp::Reverse(id.len()));
+    ids.first()
+        .map(|id| id.to_string())
+        .ok_or_else(|| "the other phone has no Phone Use app: run iphone-use setup-app for it first".into())
+}
+
+fn devicectl(args: &[&str]) -> Result<(), String> {
+    // The exit status, not the text: devicectl reports failures on stderr.
+    let out = Command::new("xcrun")
+        .arg("devicectl")
+        .args(args)
+        .output()
+        .map_err(|e| format!("run devicectl: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 fn tempfile_dir() -> Result<PathBuf, String> {

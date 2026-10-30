@@ -273,6 +273,9 @@ enum Command {
     /// Mac needed); a free Apple ID gets the remote app. The app is not in the
     /// App Store. `--remote-only` skips local control; `--no-install` only
     /// builds; `--no-pair` skips the first USB pairing for local control.
+    /// `--connect-to <instance|udid>` then connects that other phone's app to
+    /// this phone's local control over USB, tapping neither phone;
+    /// `--connect-only` does just that, without building.
     SetupApp {
         /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]

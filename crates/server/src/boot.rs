@@ -160,6 +160,12 @@ pub fn serve_embedded(options: EmbeddedOptions) -> Result<()> {
     // through `embedded_pair_code`, in-process: the app is a loopback client,
     // so this works although the daemon is not LAN-reachable.
     let _ = EMBEDDED_PAIRING.set(state.pairing.clone());
+    // A Mac connecting another phone over USB (`setup-app --connect-to`)
+    // drops a one-time code into Documents and reads back where we listen.
+    let documents = std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Documents"));
+    if let Some(documents) = &documents {
+        state.pairing.set_drop_file(documents.join("connect-code-import.json"));
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -184,6 +190,20 @@ pub fn serve_embedded(options: EmbeddedOptions) -> Result<()> {
         );
         crate::keep_awake::spawn(state.clone());
         crate::lock_readiness::spawn(state.clone());
+        if let Some(documents) = documents {
+            let pairing = state.pairing.clone();
+            let port = cfg.port;
+            tokio::spawn(async move {
+                loop {
+                    let urls = pairing.lan_urls(Some(port));
+                    let _ = std::fs::write(
+                        documents.join("daemon-lan.json"),
+                        serde_json::json!({ "lan_urls": urls }).to_string(),
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            });
+        }
         spawn_registry_refresh_in_process();
         axum::serve(listener, http::router(state))
             .await
