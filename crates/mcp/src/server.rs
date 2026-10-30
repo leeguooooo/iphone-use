@@ -103,6 +103,18 @@ pub struct TypeParams {
 #[serde(deny_unknown_fields)]
 pub struct HomeLayoutParams {
     pub page: Option<usize>,
+    /// Omit to read. `backup` saves the current layout on the Mac; `preview`
+    /// shows what writing `file` would change, by app identifier; `apply`
+    /// writes `file`; `restore` writes the newest automatic backup (or `file`).
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Absolute path of a layout .plist on the Mac (from a backup).
+    #[serde(default)]
+    pub file: Option<String>,
+    /// apply/restore only: true writes. Without it the preview comes back and
+    /// nothing changes; show it to the person and ask first.
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 /// Parameters for [`phone_apps`].
@@ -1178,13 +1190,25 @@ impl PhoneHandler {
     }
 
     #[tool(
-        annotations(read_only_hint = true, open_world_hint = true),
-        description = "Read all home-screen pages, Dock, folder pages and widget stacks from the paired iPhone without opening folders, swiping, or taking screenshots. Optional page selects one zero-based page to reduce output. Requires a configured physical target reachable through usbmuxd. This metadata read does not require drivable=true or a running XCTest Runner; never reconnect or open Home solely for this read. Page indexes refer to persisted icon state, including hidden/Focus-filtered pages; they are not the visible page-control indexes. Zero-based row/col positions are derived from icon-state order and grid metrics; null positions or positions_complete=false mean unknown, never safe drag coordinates. Contains no pixel coordinates and does not restore or modify a layout. An unreadable device returns an error rather than an empty home screen."
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true),
+        description = "Read all home-screen pages, Dock, folder pages and widget stacks from the paired iPhone without opening folders, swiping, or taking screenshots. Optional page selects one zero-based page to reduce output. Requires a configured physical target reachable through usbmuxd. This metadata read does not require drivable=true or a running XCTest Runner; never reconnect or open Home solely for this read. Page indexes refer to persisted icon state, including hidden/Focus-filtered pages; they are not the visible page-control indexes. Zero-based row/col positions are derived from icon-state order and grid metrics; null positions or positions_complete=false mean unknown, never safe drag coordinates. Contains no pixel coordinates. An unreadable device returns an error rather than an empty home screen. Writing (action): backup saves the layout as a plist on the Mac; preview compares a plist with the phone by app identifier (added, removed, moved, widgets that would be lost); apply/restore replace the whole layout, only with confirm=true after the person agreed to the preview, and back up the replaced layout first. After a write read again: SpringBoard may bring App Library apps back over a few passes. Undo with action=restore."
     )]
     async fn phone_home_layout(
         &self,
         Parameters(params): Parameters<HomeLayoutParams>,
     ) -> CallToolResult {
+        if let Some(action) = params.action {
+            if *self.profile == ToolProfile::ReadOnly {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "home layout {action} is not available with {TOOLS_ENV}=readonly; call phone_home_layout without action to read"
+                ))]);
+            }
+            let body = serde_json::json!({"action": action, "file": params.file, "confirm": params.confirm});
+            return match self.daemon.home_layout_write(body).await {
+                Ok(response) => daemon_read_result(&response),
+                Err(error) => CallToolResult::error(vec![Content::text(format!("home layout {error:#}"))]),
+            };
+        }
         match self.daemon.home_layout(params.page).await {
             Ok(response) => daemon_read_result(&response),
             Err(error) => CallToolResult::error(vec![Content::text(format!(
@@ -3038,6 +3062,17 @@ fn listed_tools(profile: &ToolProfile) -> Vec<rmcp::model::Tool> {
                 tool.input_schema = std::sync::Arc::new(schema);
                 tool.description = Some("Read the current app's applied-action trail as a flow v1 draft and todo list; never executes the flow. Typed values are replaced with named inputs. In this read-only profile no file is written and save_as is unavailable. Inspect and fix the draft before using phone_flow_run in an action-enabled session.".into());
             }
+            if *profile == ToolProfile::ReadOnly && tool.name == "phone_home_layout" {
+                // Reading stays; this profile hides the write actions.
+                let annotations = tool.annotations.as_mut().expect("home layout annotations");
+                annotations.read_only_hint = Some(true);
+                annotations.destructive_hint = None;
+                let mut schema = (*tool.input_schema).clone();
+                if let Some(properties) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
+                    for key in ["action", "file", "confirm"] { properties.remove(key); }
+                }
+                tool.input_schema = std::sync::Arc::new(schema);
+            }
             if tool.name != "phone_instances" {
                 let mut schema = (*tool.input_schema).clone();
                 let properties = schema.entry("properties").or_insert_with(|| serde_json::json!({}));
@@ -3130,6 +3165,7 @@ impl ToolProfile {
                 // The handler refuses save_as in this profile; discovery below
                 // advertises only the side-effect-free draft operation.
                 tool.name == "phone_flow_draft"
+                    || tool.name == "phone_home_layout"
                     || tool.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true)
             }
             Self::Allow(names) => names.contains(tool.name.as_ref()),
@@ -4878,7 +4914,7 @@ mod tests {
             ("200 OK", br#"{"ok":true,"page_index_space":"persisted_icon_state","pages":[{"page":0,"positions_complete":false}]}"#.to_vec(), false),
         ] {
             let (url, task)=scripted_daemon(status,body);
-            let result=block(handler_for(&url).phone_home_layout(Parameters(HomeLayoutParams{page:Some(0)})));
+            let result=block(handler_for(&url).phone_home_layout(Parameters(HomeLayoutParams{page:Some(0),action:None,file:None,confirm:false})));
             task.join().unwrap();
             assert_eq!(result.is_error==Some(true),fails,"{}",text_of(&result));
             if !fails { assert_eq!(result.structured_content.unwrap()["page_index_space"],"persisted_icon_state"); }
@@ -5057,7 +5093,7 @@ mod tests {
             read_only,
             READ_ONLY_TOOLS
                 .into_iter()
-                .filter(|name| *name != "phone_flow_draft")
+                .filter(|name| *name != "phone_flow_draft" && *name != "phone_home_layout")
                 .collect::<Vec<_>>()
         );
 

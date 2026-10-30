@@ -1070,7 +1070,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         // existing `/agent/inbox`; the registry file — not the phone — is the
         // capability list.
         .route("/agent/apps", get(agent_apps))
-        .route("/agent/home-layout", get(agent_home_layout))
+        .route("/agent/home-layout", get(agent_home_layout).post(agent_home_layout_write))
         .route("/agent/intents", get(agent_intents))
         .route("/agent/intent", post(agent_intent))
         .route("/agent/hold", post(agent_hold))
@@ -5823,7 +5823,7 @@ async fn agent_capabilities(State(state): State<Arc<AppState>>, headers: HeaderM
             // device: an unlisted name is refused without reaching the phone.
             "perform_actions": perform,
             "element_tree": true,
-            "home_layout": {"source":"springboardservices","read_only":true,
+            "home_layout": {"source":"springboardservices","read_only":false,"write_actions":["backup","preview","apply","restore"],"write_needs_confirm":true,
                 "physical_only":true,"target_required":true,"positions":"derived_from_icon_state_order"},
             "drag_path": {
                 "requires_runner_capability": "ipu:timedDragPath",
@@ -19212,6 +19212,98 @@ async fn agent_home_layout(
             "ok":false,"error":"home_layout_unavailable","reason":format!("{error:#}"),
             "hint":"Connect the configured iPhone through its paired USB or usbmuxd network connection; no UI input or layout change was sent"}),
         ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HomeLayoutWrite {
+    action: String,
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    confirm: bool,
+}
+
+/// `POST /agent/home-layout {"action","file"?,"confirm"?}` (issue #383):
+/// `backup` saves the current layout; `preview` shows what writing `file`
+/// changes, by app identifier; `apply` writes `file` and `restore` writes the
+/// newest automatic backup (or `file`). Both writes answer the preview
+/// without writing until `confirm` is true, and back up the layout they
+/// replace first. Files are plists on this Mac.
+async fn agent_home_layout_write(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    use crate::home_layout as layout;
+    if let Some(refusal) = agent_auth_refusal(&state, &headers) {
+        return refusal;
+    }
+    if !has_phone_control_header(&headers) {
+        return missing_phone_control_header_response();
+    }
+    let fail = |status: StatusCode, error: &str, reason: String| {
+        agent_apps_json(status, serde_json::json!({"ok": false, "error": error, "reason": reason}))
+    };
+    let request: HomeLayoutWrite = match serde_json::from_str(&body) {
+        Ok(request) => request,
+        Err(error) => return fail(StatusCode::BAD_REQUEST, "invalid_request", error.to_string()),
+    };
+    if let Err(response) = claim_phone_owner(&state, &headers) {
+        return response;
+    }
+    if state.simulator.is_some() {
+        return fail(StatusCode::NOT_IMPLEMENTED, "home_layout_unavailable", "simulator layouts are not supported".into());
+    }
+    let Some(udid) = state.device_udid.clone().filter(|s| !s.is_empty()) else {
+        return fail(StatusCode::CONFLICT, "target_required", "configure IPHONE_USE_UDID".into());
+    };
+    let current = match layout::raw_state(&udid).await {
+        Ok(current) => current,
+        Err(error) => return fail(StatusCode::SERVICE_UNAVAILABLE, "home_layout_unavailable", format!("{error:#}")),
+    };
+    if request.action == "backup" {
+        return match layout::save_backup(&current, "home") {
+            Ok(path) => agent_apps_json(StatusCode::OK, serde_json::json!({
+                "ok": true, "file": path, "summary": layout::summarize(&current)})),
+            Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, "backup_failed", format!("{error:#}")),
+        };
+    }
+    let file = match (request.action.as_str(), request.file) {
+        ("preview" | "apply" | "restore", Some(file)) => std::path::PathBuf::from(file),
+        ("restore", None) => match layout::latest_backup() {
+            Some(file) => file,
+            None => return fail(StatusCode::NOT_FOUND, "no_backup", "no earlier layout in ~/.iphone-use-backups".into()),
+        },
+        ("preview" | "apply", None) => return fail(StatusCode::BAD_REQUEST, "file_required", "name the layout plist".into()),
+        (other, _) => return fail(StatusCode::BAD_REQUEST, "invalid_action", format!("{other}: use backup, preview, apply or restore")),
+    };
+    if !file.is_absolute() || file.extension().and_then(|e| e.to_str()) != Some("plist") {
+        return fail(StatusCode::BAD_REQUEST, "invalid_file", "an absolute path to a .plist".into());
+    }
+    let next: plist::Value = match plist::from_file(&file) {
+        Ok(next) => next,
+        Err(error) => return fail(StatusCode::BAD_REQUEST, "invalid_file", error.to_string()),
+    };
+    if let Err(error) = layout::validate(&next) {
+        return fail(StatusCode::BAD_REQUEST, "invalid_layout", error.to_string());
+    }
+    let preview = layout::preview(&current, &next);
+    if request.action == "preview" || !request.confirm {
+        return agent_apps_json(StatusCode::OK, serde_json::json!({
+            "ok": true, "written": false, "file": file, "preview": preview,
+            "next": (request.action != "preview").then_some("show the preview to the person; send again with confirm:true only after they agree")}));
+    }
+    let backup = match layout::save_backup(&current, "home-before-apply") {
+        Ok(path) => path,
+        Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, "backup_failed", format!("{error:#}")),
+    };
+    match layout::set_state(&udid, next).await {
+        Ok(()) => agent_apps_json(StatusCode::OK, serde_json::json!({
+            "ok": true, "written": true, "file": file, "backup": backup, "preview": preview,
+            "next": "read the layout again (GET /agent/home-layout): SpringBoard may re-add hidden apps over a few passes; undo with action restore"})),
+        Err(error) => fail(StatusCode::BAD_GATEWAY, "write_failed", format!("{error:#} (current layout saved to {})", backup.display())),
     }
 }
 

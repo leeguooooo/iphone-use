@@ -636,6 +636,17 @@ impl DaemonClient {
         read_response(request.send().await?).await
     }
 
+    /// `POST /agent/home-layout`: backup, preview, apply or restore (#383).
+    pub async fn home_layout_write(&self, body: serde_json::Value) -> anyhow::Result<DaemonResponse> {
+        let request = self
+            .auth(self.http().post(self.url("/agent/home-layout")))
+            .header("x-phone-control", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .timeout(Duration::from_secs(60))
+            .body(body.to_string());
+        read_response(request.send().await?).await
+    }
+
     /// `POST /agent/input` with the daemon's structured result kept.
     ///
     /// `observe` asks the daemon for a post-action observation

@@ -195,10 +195,12 @@ enum Command {
     /// apply <file>` writes a plist in the same shape (also how a backup is
     /// restored). Needs the paired phone's UDID in IPHONE_USE_UDID.
     HomeLayout {
-        /// `backup` or `apply`.
+        /// `backup [file]`, `apply <file>` or `restore [file]` (the newest
+        /// automatic backup when no file is named). Every write backs up the
+        /// layout it replaces first.
         action: String,
-        file: std::path::PathBuf,
-        /// With `apply`: print the before/after summary and write nothing.
+        file: Option<std::path::PathBuf>,
+        /// With `apply`/`restore`: print the preview and write nothing.
         #[arg(long)]
         dry_run: bool,
     },
@@ -876,35 +878,41 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()
                 .context("start the runtime")?;
+            use server::home_layout as layout;
             match action.as_str() {
                 "backup" => {
-                    let state = rt.block_on(server::home_layout::raw_state(&udid))?;
-                    plist::to_file_xml(&file, &state)?;
-                    println!("saved {}", file.display());
+                    let state = rt.block_on(layout::raw_state(&udid))?;
+                    let path = match file {
+                        Some(path) => {
+                            plist::to_file_xml(&path, &state)?;
+                            path
+                        }
+                        None => layout::save_backup(&state, "home")?,
+                    };
+                    println!("saved {} ({})", path.display(), layout::summarize(&state));
                 }
-                "apply" => {
+                "apply" | "restore" => {
+                    let file = match (action.as_str(), file) {
+                        (_, Some(file)) => file,
+                        ("restore", None) => layout::latest_backup()
+                            .context("no earlier layout to restore in ~/.iphone-use-backups")?,
+                        _ => anyhow::bail!("apply needs the layout file"),
+                    };
                     let state: plist::Value = plist::from_file(&file)?;
-                    let current = rt.block_on(server::home_layout::raw_state(&udid))?;
-                    println!("now:   {}", server::home_layout::summarize(&current));
-                    println!("after: {}", server::home_layout::summarize(&state));
+                    layout::validate(&state)?;
+                    let current = rt.block_on(layout::raw_state(&udid))?;
+                    println!("{}", serde_json::to_string_pretty(&layout::preview(&current, &state))?);
                     if dry_run {
                         println!("dry run: nothing written");
                         return Ok(());
                     }
-                    // Always keep the layout being replaced, so apply is undoable.
-                    let dir = std::path::PathBuf::from(std::env::var("HOME")?)
-                        .join(".iphone-use-backups");
-                    std::fs::create_dir_all(&dir)?;
-                    let stamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)?
-                        .as_secs();
-                    let backup = dir.join(format!("home-before-apply-{stamp}.plist"));
-                    plist::to_file_xml(&backup, &current)?;
-                    println!("backed up current layout to {}", backup.display());
-                    rt.block_on(server::home_layout::set_state(&udid, state))?;
+                    // Always keep the layout being replaced, so every write is undoable.
+                    let backup = layout::save_backup(&current, "home-before-apply")?;
+                    println!("backed up current layout to {} (undo: iphone-use home-layout restore)", backup.display());
+                    rt.block_on(layout::set_state(&udid, state))?;
                     println!("applied {}", file.display());
                 }
-                other => anyhow::bail!("unknown action {other}; use backup or apply"),
+                other => anyhow::bail!("unknown action {other}; use backup, apply or restore"),
             }
             Ok(())
         }

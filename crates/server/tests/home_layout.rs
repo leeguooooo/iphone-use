@@ -58,12 +58,12 @@ fn private_handoff_precedes_any_device_read() {
     });
 }
 #[test]
-fn read_does_not_claim_an_owner_or_accept_a_mutating_request() {
+fn read_does_not_claim_an_owner_and_a_bare_write_is_refused() {
     block(async {
         let state = build_state(None);
         let _ = get(state.clone(), None, "/agent/home-layout").await;
         assert!(state.owner.lock().unwrap().is_none());
-        let response = server::http::router(state)
+        let response = server::http::router(state.clone())
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -73,7 +73,10 @@ fn read_does_not_claim_an_owner_or_accept_a_mutating_request() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        // Writing exists (#383) but needs auth and X-Phone-Control: a bare
+        // POST is refused before any owner is claimed or the phone is read.
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert!(state.owner.lock().unwrap().is_none());
     });
 }
 #[test]
