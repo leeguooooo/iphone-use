@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>iPhone remote control, phone to phone · iphone-use</title>
+  <meta name="description" content="Control an iPhone from another iPhone: hosted by a Mac, self-hosted with no computer, or across networks via a Cloudflare relay you deploy." />
+  <meta name="theme-color" content="#fcfbf4" />
+  <meta name="author" content="Guo Li (leeguoo)" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="apple-touch-icon" href="/assets/icon-180.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <!-- seo:fonts --><link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Permanent+Marker&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap" onload="this.onload=null;this.rel='stylesheet'" /><noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Permanent+Marker&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap" /></noscript><link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&amp;display=swap&amp;text=%20%21%22%23%24%25%26%27%28%29%2A%2B%2C-.%2F0123456789%3A%3B%3C%3D%3E%3F%40ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D~" onload="this.onload=null;this.rel='stylesheet'" /><noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&amp;display=swap&amp;text=%20%21%22%23%24%25%26%27%28%29%2A%2B%2C-.%2F0123456789%3A%3B%3C%3D%3E%3F%40ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D~" /></noscript><!-- /seo:fonts -->
+  <link rel="stylesheet" href="/assets/docs/docs.css" />
+  <!-- seo:head -->
+  <link rel="canonical" href="https://iphone-use.leeguoo.com/en/remote" />
+  <link rel="alternate" hreflang="zh-Hans" href="https://iphone-use.leeguoo.com/remote" />
+  <link rel="alternate" hreflang="en" href="https://iphone-use.leeguoo.com/en/remote" />
+  <link rel="alternate" hreflang="x-default" href="https://iphone-use.leeguoo.com/en/remote" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="iphone-use" />
+  <meta property="og:title" content="iPhone remote control, phone to phone · iphone-use" />
+  <meta property="og:description" content="Control an iPhone from another iPhone: hosted by a Mac, self-hosted with no computer, or across networks via a Cloudflare relay you deploy." />
+  <meta property="og:url" content="https://iphone-use.leeguoo.com/en/remote" />
+  <meta property="og:image" content="https://iphone-use.leeguoo.com/assets/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="iphone-use: let AI agents use your real iPhone" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:locale:alternate" content="zh_CN" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="iPhone remote control, phone to phone · iphone-use" />
+  <meta name="twitter:description" content="Control an iPhone from another iPhone: hosted by a Mac, self-hosted with no computer, or across networks via a Cloudflare relay you deploy." />
+  <meta name="twitter:image" content="https://iphone-use.leeguoo.com/assets/og.png" />
+  <meta name="twitter:image:alt" content="iphone-use: let AI agents use your real iPhone" />
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"iphone-use","item":"https://iphone-use.leeguoo.com/en/"},{"@type":"ListItem","position":2,"name":"Remote control: drive a phone from another iPhone or a browser","item":"https://iphone-use.leeguoo.com/en/remote"}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Remote control: drive a phone from another iPhone or a browser","description":"Control an iPhone from another iPhone: hosted by a Mac, self-hosted with no computer, or across networks via a Cloudflare relay you deploy.","inLanguage":"en","url":"https://iphone-use.leeguoo.com/en/remote","mainEntityOfPage":"https://iphone-use.leeguoo.com/en/remote","image":"https://iphone-use.leeguoo.com/assets/og.png","dateModified":"2026-10-30","author":{"@id":"https://leeguoo.com/about#person","@type":"Person","name":"Guo Li (leeguoo)","url":"https://leeguoo.com/about"},"publisher":{"@id":"https://leeguoo.com/about#person","@type":"Person","name":"Guo Li (leeguoo)","url":"https://leeguoo.com/about"},"isPartOf":{"@type":"WebSite","name":"iphone-use","url":"https://iphone-use.leeguoo.com/"},"about":{"@id":"https://iphone-use.leeguoo.com/#software","@type":"SoftwareApplication","name":"iphone-use"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","inLanguage":"en","url":"https://iphone-use.leeguoo.com/en/remote","mainEntity":[{"@type":"Question","name":"Why not Tailscale?","acceptedAnswer":{"@type":"Answer","text":"iOS allows only one VPN at a time, and local control already uses that slot. When a Mac hosts the phone, a VPN such as Tailscale still works for reaching the Mac."}},{"@type":"Question","name":"The picture is black, but taps work?","acceptedAnswer":{"@type":"Answer","text":"Check the latency and frame rate in the status bar. A very low frame rate away from home usually means the controller's connection is too slow; it speeds up again on the LAN. If no picture appears at all, tap 重新加载画面 (Reload picture)."}},{"@type":"Question","name":"Who can connect to my phone?","acceptedAnswer":{"@type":"Answer","text":"Only a device that holds a one-time pairing code (the QR code, or --connect-to) or has paired before. The id in a relay address is random, and the relay pins the key the phone first presents, so nobody else can pose as that phone."}}]}</script>
+  <!-- /seo:head -->
+</head>
+<body data-page="remote" data-lang="en">
+
+  <div id="du-topbar" class="du-topbar"></div>
+
+  <div class="du-shell">
+
+    <nav id="du-sidebar" class="du-sidebar" aria-label="Documentation"><div class="du-nav-group"><div class="du-nav-label">Getting Started</div><a class="du-nav-item" href="/en/"><span class="du-nav-ico">🧭</span><span class="du-nav-text">Overview</span></a><a class="du-nav-item" href="/en/install"><span class="du-nav-ico">📦</span><span class="du-nav-text">Install</span></a><a class="du-nav-item" href="/en/compare"><span class="du-nav-ico">⚖️</span><span class="du-nav-text">vs Other Tools</span></a></div><div class="du-nav-group"><div class="du-nav-label">What Agents Can Do</div><a class="du-nav-item" href="/en/tasks"><span class="du-nav-ico">📱</span><span class="du-nav-text">Ask Your Agent</span></a><a class="du-nav-item" href="/en/flows"><span class="du-nav-ico">🔁</span><span class="du-nav-text">Flows &amp; Replay</span></a></div><div class="du-nav-group"><div class="du-nav-label">Connecting Agents</div><a class="du-nav-item active" aria-current="page" href="/en/remote"><span class="du-nav-ico">📡</span><span class="du-nav-text">Remote Control</span></a><a class="du-nav-item" href="/en/connect"><span class="du-nav-ico">🔌</span><span class="du-nav-text">MCP, HTTP API &amp; Skill</span></a></div><div class="du-nav-group"><div class="du-nav-label">Under the Hood</div><a class="du-nav-item" href="/en/how-it-works"><span class="du-nav-ico">⚙️</span><span class="du-nav-text">How It Works</span></a></div><div class="du-nav-group"><div class="du-nav-label">Reference</div><a class="du-nav-item" href="/en/faq"><span class="du-nav-ico">❓</span><span class="du-nav-text">FAQ</span></a><a class="du-nav-item" href="/en/privacy"><span class="du-nav-ico">🔒</span><span class="du-nav-text">Privacy &amp; Security</span></a></div></nav>
+
+    <main class="du-main">
+
+      <p class="du-eyebrow">For people</p>
+
+      <div class="du-title-row">
+        <h1>Remote control: drive a phone from another iPhone or a browser</h1>
+        <button class="du-copy-page" type="button" aria-label="Copy page">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"/></svg>
+          <span class="du-copy-page-label">Copy page</span>
+        </button>
+      </div>
+
+      <p class="du-lede">
+        The daemon that serves agents also serves people. You get a live picture in a browser or the iOS
+        app, and you can tap, swipe and type. With the app signed by a paid developer team, the phone can
+        <span class="mark">host its own control service</span>, so no computer is needed. With a cloud relay
+        added, you can reach it from any network.
+      </p>
+
+      <h2>Three ways to connect</h2>
+      <div class="du-cards">
+        <div class="du-card">
+          <div class="du-card-title"><span class="du-card-ico">🖥️</span> Hosted by a Mac</div>
+          <p>The phone is plugged into a Mac or on the Mac's Wi‑Fi. You drive it from the Mac's control page or from the iOS app. The picture is H.264, encoded on the phone.</p>
+        </div>
+        <div class="du-card">
+          <div class="du-card-title"><span class="du-card-ico">📱</span> Self-hosted (local control)</div>
+          <p>Phone Use on the controlled phone runs the control service itself, so no Mac is needed at run time. Another phone on the same network connects to it directly.</p>
+        </div>
+        <div class="du-card">
+          <div class="du-card-title"><span class="du-card-ico">🌐</span> Across networks (cloud relay)</div>
+          <p>The controlled phone dials out to a relay you deploy, and the controller reaches it through that relay from any network. The phone needs no open port and no VPN.</p>
+        </div>
+      </div>
+
+      <h2>Install the app</h2>
+      <p>The app is not in the App Store. You build and install it with your own developer team:</p>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">bash</span></div>
+<pre><code><span class="du-prompt">$</span> iphone-use setup-app                    <span class="du-cmt"># the default instance's phone</span>
+<span class="du-prompt">$</span> iphone-use setup-app --instance i13     <span class="du-cmt"># another phone</span></code></pre>
+      </div>
+      <ul>
+        <li>A paid team gets the full app, with local control. A free Apple ID can only sign the remote app, which connects to phones a Mac hosts.</li>
+        <li>Before the first launch, trust your developer certificate in Settings › General › VPN &amp; Device Management.</li>
+        <li>The first time the app reaches the local network, iOS asks for permission. Allow it.</li>
+      </ul>
+
+      <h2>Self-hosted: no computer needed</h2>
+      <ol class="du-steps">
+        <li><strong>Pair once</strong>: after installing, <code>setup-app</code> pairs the phone over USB and hands the pairing record to the app. After that, nothing at run time needs the Mac.</li>
+        <li><strong>Turn it on</strong>: on the controlled phone, open Phone Use › Settings › 本机控制 (Local control) › 启用本机控制 (Turn on local control), and allow the VPN configuration. Local control takes the one VPN slot iOS allows, so it cannot run alongside Tailscale or another VPN.</li>
+        <li><strong>Connect</strong>: tap 让其他设备连接 (Let other devices connect) to show a QR code, and scan it with Phone Use on the other phone.</li>
+      </ol>
+      <p>Local control and the Mac's runner compete for the same automation session. To use local control, first run <code>iphone-use setup pause --instance &lt;name&gt;</code> on the Mac. To go back to the Mac, stop local control in the app, then run <code>iphone-use setup resume</code>.</p>
+
+      <h3>Connect without touching the controlled phone</h3>
+      <p>When both phones are connected to the Mac, one command connects the controller with no QR code:</p>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">bash</span></div>
+<pre><code><span class="du-prompt">$</span> iphone-use setup-app --instance i13 --connect-to default --connect-only</code></pre>
+      </div>
+      <p>Over USB, the Mac drops a one-time code into the controlled phone's app. The code is valid for 5 minutes. The Mac then opens the connection link on the controller, which asks once: tap 连接 (Connect).</p>
+
+      <hr class="du-divider" />
+
+      <h2>Across networks: the cloud relay</h2>
+      <p>Use the relay when the controlled phone is at home and you are out, for example on cellular. The relay only forwards traffic. Sign-in, pairing codes and device tokens are still checked by the daemon on the controlled phone.</p>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">text</span></div>
+<pre><code>controller ──https──▶ relay /p/&lt;id&gt;/…  ──WebSocket──▶ daemon on the controlled phone</code></pre>
+      </div>
+
+      <h3>Deploy your own relay</h3>
+      <p>The relay is a Cloudflare Worker with one Durable Object per phone. It lives in the repository's <code>relay/</code> directory. Deploy it with your own Cloudflare account:</p>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">bash</span></div>
+<pre><code><span class="du-prompt">$</span> cd relay &amp;&amp; npm install
+<span class="du-prompt">$</span> npx wrangler login
+<span class="du-prompt">$</span> $EDITOR wrangler.toml        <span class="du-cmt"># your own domain, or delete routes for workers.dev</span>
+<span class="du-prompt">$</span> npx wrangler deploy
+<span class="du-prompt">$</span> curl https://&lt;your relay&gt;/   <span class="du-cmt"># → iphone-use relay</span></code></pre>
+      </div>
+
+      <h3>Connect a phone through it</h3>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">bash</span></div>
+<pre><code><span class="du-prompt">$</span> iphone-use setup-app --instance &lt;controlled phone&gt; --connect-to &lt;controlling phone&gt; \
+    --connect-only --relay https://&lt;your relay&gt;</code></pre>
+      </div>
+      <p>Once the controlled phone has the relay address, it keeps one outgoing connection open. When the controller is on the same Wi‑Fi, the app switches to a direct LAN connection and the status bar shows 局域网 (LAN). Away from that network, the app goes back through the relay and shows 外网 (Internet). A daemon on a Mac connects to the relay too when <code>IPHONE_USE_RELAY_URL=https://&lt;your relay&gt;</code> is set.</p>
+
+      <h3>Cost and limits</h3>
+      <ul>
+        <li>Outbound Worker traffic is free. The relay uses WebSocket hibernation, so a phone that is connected but not being watched bills no duration.</li>
+        <li>An hour of watching at about 10 frames a second costs roughly 1,800 requests and 450 GB·s. The paid plan includes enough for about 890 hours a month. Check Cloudflare's current prices.</li>
+        <li>The relay has flow control: when the network cannot keep up, it sends fewer frames instead of building up lag. Picture quality depends on the controller's download speed.</li>
+        <li>TLS ends at Cloudflare, so the relay can see the traffic it forwards. Deploy your own relay if that matters to you.</li>
+        <li>Use the iOS app through a relay. The daemon's web page assumes it is served from the root path, so it does not work through the relay yet.</li>
+      </ul>
+
+      <section class="du-faq">
+        <h2>FAQ</h2>
+        <h3>Why not Tailscale?</h3>
+        <p>iOS allows only one VPN at a time, and local control already uses that slot. When a Mac hosts the phone, a VPN such as Tailscale still works for reaching the Mac.</p>
+        <h3>The picture is black, but taps work?</h3>
+        <p>Check the latency and frame rate in the status bar. A very low frame rate away from home usually means the controller's connection is too slow; it speeds up again on the LAN. If no picture appears at all, tap 重新加载画面 (Reload picture).</p>
+        <h3>Who can connect to my phone?</h3>
+        <p>Only a device that holds a one-time pairing code (the QR code, or <code>--connect-to</code>) or has paired before. The id in a relay address is random, and the relay pins the key the phone first presents, so nobody else can pose as that phone.</p>
+      </section>
+
+      <p>Next: <a href="/en/how-it-works">How it works</a> · <a href="/en/privacy">Privacy &amp; security</a>.</p><!-- seo:footer --><nav class="du-static-footer" aria-label="Site"><a href="/en/">iphone-use</a> · <a href="/en/">Overview</a> · <a href="/en/install">Install</a> · <a href="/en/compare">vs Other Tools</a> · <a href="/en/tasks">Ask Your Agent</a> · <a href="/en/flows">Flows &amp; Replay</a> · <a href="/en/remote">Remote Control</a> · <a href="/en/connect">MCP, HTTP API &amp; Skill</a> · <a href="/en/how-it-works">How It Works</a> · <a href="/en/faq">FAQ</a> · <a href="/en/privacy">Privacy &amp; Security</a> · <a href="https://github.com/leeguooooo/iphone-use">GitHub</a> · <a href="https://github.com/leeguooooo/iphone-use/releases">Releases</a> · <a href="https://github.com/leeguooooo/iphone-use-flows">Official flow registry</a> · <a href="https://blog.leeguoo.com/en/posts/iphone-use/">Blog: iphone-use guide</a> · <a href="https://blog.leeguoo.com/en/posts/iphone-use-video/">Blog: demo video</a> · <a href="https://chrome-use.leeguoo.com/en/">chrome-use (agents in your Chrome)</a> · <a href="https://leeguoo.com/about/en">Author</a> · <a href="/remote" hreflang="zh-Hans">中文</a></nav><!-- /seo:footer -->
+    </main>
+
+    <aside id="du-toc"></aside>
+
+  </div>
+
+  <script src="/assets/docs/docs.js" defer></script>
+</body>
+</html>

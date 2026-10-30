@@ -67,6 +67,7 @@
       { slug: "flows", ico: "🔁", zh: "Flow 录制与重放", en: "Flows & Replay", kw: "flow replay registry record schedule test suite ci 录制 重放 定时 测试套件" },
     ]},
     { id: "connect", label: { zh: "接入方式", en: "Connecting Agents" }, items: [
+      { slug: "remote", ico: "📡", zh: "远程控制", en: "Remote Control", kw: "remote control phone to phone relay cloudflare local control no mac self host 远程 手机控制手机 中继 本机控制 不需要电脑" },
       { slug: "connect", ico: "🔌", zh: "MCP、HTTP API 与 skill", en: "MCP, HTTP API & Skill", kw: "mcp claude code codex cursor vscode gemini opencode windsurf http api skill plugin 接入 插件" },
     ]},
     { id: "under", label: { zh: "底层", en: "Under the Hood" }, items: [

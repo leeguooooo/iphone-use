@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>iPhone 远程控制：手机控制手机，跨网络 · iphone-use</title>
+  <meta name="description" content="用另一台 iPhone 或浏览器远程控制 iPhone：Mac 托管、手机自托管（不需要电脑）、自建 Cloudflare 云中继跨网络连接，含部署步骤、费用和安全说明。" />
+  <meta name="theme-color" content="#fcfbf4" />
+  <meta name="author" content="Guo Li (leeguoo)" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="apple-touch-icon" href="/assets/icon-180.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <!-- seo:fonts --><link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&amp;family=Permanent+Marker&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap" onload="this.onload=null;this.rel='stylesheet'" /><noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&amp;family=Permanent+Marker&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap" /></noscript><!-- /seo:fonts -->
+  <link rel="stylesheet" href="/assets/docs/docs.css" />
+  <!-- seo:head -->
+  <link rel="canonical" href="https://iphone-use.leeguoo.com/remote" />
+  <link rel="alternate" hreflang="zh-Hans" href="https://iphone-use.leeguoo.com/remote" />
+  <link rel="alternate" hreflang="en" href="https://iphone-use.leeguoo.com/en/remote" />
+  <link rel="alternate" hreflang="x-default" href="https://iphone-use.leeguoo.com/en/remote" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="iphone-use" />
+  <meta property="og:title" content="iPhone 远程控制：手机控制手机，跨网络 · iphone-use" />
+  <meta property="og:description" content="用另一台 iPhone 或浏览器远程控制 iPhone：Mac 托管、手机自托管（不需要电脑）、自建 Cloudflare 云中继跨网络连接，含部署步骤、费用和安全说明。" />
+  <meta property="og:url" content="https://iphone-use.leeguoo.com/remote" />
+  <meta property="og:image" content="https://iphone-use.leeguoo.com/assets/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="iphone-use：让 AI agent 操作你的真实 iPhone" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:locale:alternate" content="en_US" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="iPhone 远程控制：手机控制手机，跨网络 · iphone-use" />
+  <meta name="twitter:description" content="用另一台 iPhone 或浏览器远程控制 iPhone：Mac 托管、手机自托管（不需要电脑）、自建 Cloudflare 云中继跨网络连接，含部署步骤、费用和安全说明。" />
+  <meta name="twitter:image" content="https://iphone-use.leeguoo.com/assets/og.png" />
+  <meta name="twitter:image:alt" content="iphone-use：让 AI agent 操作你的真实 iPhone" />
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"iphone-use","item":"https://iphone-use.leeguoo.com/"},{"@type":"ListItem","position":2,"name":"远程控制：用另一台 iPhone 或浏览器操作手机","item":"https://iphone-use.leeguoo.com/remote"}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"远程控制：用另一台 iPhone 或浏览器操作手机","description":"用另一台 iPhone 或浏览器远程控制 iPhone：Mac 托管、手机自托管（不需要电脑）、自建 Cloudflare 云中继跨网络连接，含部署步骤、费用和安全说明。","inLanguage":"zh-Hans","url":"https://iphone-use.leeguoo.com/remote","mainEntityOfPage":"https://iphone-use.leeguoo.com/remote","image":"https://iphone-use.leeguoo.com/assets/og.png","dateModified":"2026-10-30","author":{"@id":"https://leeguoo.com/about#person","@type":"Person","name":"Guo Li (leeguoo)","url":"https://leeguoo.com/about"},"publisher":{"@id":"https://leeguoo.com/about#person","@type":"Person","name":"Guo Li (leeguoo)","url":"https://leeguoo.com/about"},"isPartOf":{"@type":"WebSite","name":"iphone-use","url":"https://iphone-use.leeguoo.com/"},"about":{"@id":"https://iphone-use.leeguoo.com/#software","@type":"SoftwareApplication","name":"iphone-use"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","inLanguage":"zh-Hans","url":"https://iphone-use.leeguoo.com/remote","mainEntity":[{"@type":"Question","name":"为什么不用 Tailscale？","acceptedAnswer":{"@type":"Answer","text":"iOS 同一时间只允许一个 VPN 生效，而本机控制本身就占用了这个位置。被控手机由 Mac 托管时，Tailscale 这类 VPN 仍然可以用来访问 Mac。"}},{"@type":"Question","name":"画面黑着，但能操作？","acceptedAnswer":{"@type":"Answer","text":"先看状态栏的延迟和帧率。外网下帧率很低，通常是控制方网速不够；回到局域网会自动变快。还是没有画面，点「重新加载画面」。"}},{"@type":"Question","name":"谁能连我的手机？","acceptedAnswer":{"@type":"Answer","text":"只有拿到一次性配对码（二维码或 --connect-to）、或者已经配对过的设备。中继地址里的 id 是随机的，中继还会锁定手机第一次出示的密钥，别人冒充不了这台手机。"}}]}</script>
+  <!-- /seo:head -->
+</head>
+<body data-page="remote" data-lang="zh">
+
+  <div id="du-topbar" class="du-topbar"></div>
+
+  <div class="du-shell">
+
+    <nav id="du-sidebar" class="du-sidebar" aria-label="文档"><div class="du-nav-group"><div class="du-nav-label">开始</div><a class="du-nav-item" href="/"><span class="du-nav-ico">🧭</span><span class="du-nav-text">概览</span></a><a class="du-nav-item" href="/install"><span class="du-nav-ico">📦</span><span class="du-nav-text">安装</span></a><a class="du-nav-item" href="/compare"><span class="du-nav-ico">⚖️</span><span class="du-nav-text">和其他方案对比</span></a></div><div class="du-nav-group"><div class="du-nav-label">让 agent 做事</div><a class="du-nav-item" href="/tasks"><span class="du-nav-ico">📱</span><span class="du-nav-text">让 agent 用手机</span></a><a class="du-nav-item" href="/flows"><span class="du-nav-ico">🔁</span><span class="du-nav-text">Flow 录制与重放</span></a></div><div class="du-nav-group"><div class="du-nav-label">接入方式</div><a class="du-nav-item active" aria-current="page" href="/remote"><span class="du-nav-ico">📡</span><span class="du-nav-text">远程控制</span></a><a class="du-nav-item" href="/connect"><span class="du-nav-ico">🔌</span><span class="du-nav-text">MCP、HTTP API 与 skill</span></a></div><div class="du-nav-group"><div class="du-nav-label">底层</div><a class="du-nav-item" href="/how-it-works"><span class="du-nav-ico">⚙️</span><span class="du-nav-text">它怎么工作</span></a></div><div class="du-nav-group"><div class="du-nav-label">参考</div><a class="du-nav-item" href="/faq"><span class="du-nav-ico">❓</span><span class="du-nav-text">常见问题</span></a><a class="du-nav-item" href="/privacy"><span class="du-nav-ico">🔒</span><span class="du-nav-text">隐私与安全</span></a></div></nav>
+
+    <main class="du-main">
+
+      <p class="du-eyebrow">给人用</p>
+
+      <div class="du-title-row">
+        <h1>远程控制：用另一台 iPhone 或浏览器操作手机</h1>
+        <button class="du-copy-page" type="button" aria-label="复制页面">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"/></svg>
+          <span class="du-copy-page-label">复制页面</span>
+        </button>
+      </div>
+
+      <p class="du-lede">
+        同一套守护进程既给 agent 用，也给人用：在浏览器或 iOS App 里看实时画面，点、滑、输入。
+        付费开发者账号签的 App 还能让手机<span class="mark">自己跑控制服务</span>，不需要电脑；
+        配一个云中继，就能从任何网络连回来。
+      </p>
+
+      <h2>三种用法</h2>
+      <div class="du-cards">
+        <div class="du-card">
+          <div class="du-card-title"><span class="du-card-ico">🖥️</span> Mac 托管</div>
+          <p>手机插在 Mac 上（或和 Mac 在同一 Wi‑Fi），在 Mac 的控制页或 iOS App 里操作。画面是手机上编码的 H.264。</p>
+        </div>
+        <div class="du-card">
+          <div class="du-card-title"><span class="du-card-ico">📱</span> 手机自托管（本机控制）</div>
+          <p>被控手机上的 Phone Use 自己跑控制服务，运行时不需要 Mac。另一台手机在同一局域网里直接连它。</p>
+        </div>
+        <div class="du-card">
+          <div class="du-card-title"><span class="du-card-ico">🌐</span> 跨网络（云中继）</div>
+          <p>被控手机主动连到你部署的中继，控制方从任何网络经中继连过来。被控手机不用开端口，也不用 VPN。</p>
+        </div>
+      </div>
+
+      <h2>装 App</h2>
+      <p>App 不在 App Store 上，用你自己的开发者账号构建安装：</p>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">bash</span></div>
+<pre><code><span class="du-prompt">$</span> iphone-use setup-app                    <span class="du-cmt"># 默认实例的手机</span>
+<span class="du-prompt">$</span> iphone-use setup-app --instance i13     <span class="du-cmt"># 另一台手机</span></code></pre>
+      </div>
+      <ul>
+        <li>付费团队得到完整版，带「本机控制」；免费 Apple ID 只能签远程版，用来连 Mac 托管的手机。</li>
+        <li>第一次打开前，在手机的 设置 › 通用 › VPN 与设备管理 里信任你的开发者证书。</li>
+        <li>App 第一次连局域网时，iOS 会要本地网络权限，要允许。</li>
+      </ul>
+
+      <h2>手机自托管：不需要电脑</h2>
+      <ol class="du-steps">
+        <li><strong>首次配对</strong>：<code>setup-app</code> 装完会用 USB 做一次配对，把配对记录交给 App。之后运行时不再需要 Mac。</li>
+        <li><strong>启用</strong>：在被控手机上打开 Phone Use › 设置 › 本机控制 › 启用本机控制，允许添加 VPN 配置。本机控制占用的是 iOS 唯一的 VPN 位置，所以和 Tailscale 等 VPN 不能同时开。</li>
+        <li><strong>连接</strong>：点「让其他设备连接」出二维码，用另一台手机的 Phone Use 扫码。</li>
+      </ol>
+      <p>本机控制和 Mac 上的 runner 会抢同一个自动化会话。要用本机控制，先在 Mac 上 <code>iphone-use setup pause --instance &lt;名字&gt;</code>；要改回 Mac 托管，先在 App 里停掉本机控制，再 <code>iphone-use setup resume</code>。</p>
+
+      <h3>不碰被控手机就连上</h3>
+      <p>两台手机都连着 Mac 时，一条命令就能把控制方连上被控手机，不用扫码：</p>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">bash</span></div>
+<pre><code><span class="du-prompt">$</span> iphone-use setup-app --instance i13 --connect-to default --connect-only</code></pre>
+      </div>
+      <p>Mac 通过 USB 往被控手机的 App 里放一个只能用一次、5 分钟内有效的连接码，再在控制方手机上打开连接链接。控制方手机会弹一次确认，点「连接」即可。</p>
+
+      <hr class="du-divider" />
+
+      <h2>跨网络：云中继</h2>
+      <p>被控手机在家、控制方在外面（比如走蜂窝网络）时，用云中继。中继只转发；登录、配对码、设备令牌这些鉴权，仍由被控手机上的守护进程自己做。</p>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">text</span></div>
+<pre><code>控制方 ──https──▶ 中继 /p/&lt;id&gt;/…  ──WebSocket──▶ 被控手机上的守护进程</code></pre>
+      </div>
+
+      <h3>部署你自己的中继</h3>
+      <p>中继是一个 Cloudflare Worker（每台手机一个 Durable Object），在仓库的 <code>relay/</code> 目录里。用你自己的 Cloudflare 账号：</p>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">bash</span></div>
+<pre><code><span class="du-prompt">$</span> cd relay &amp;&amp; npm install
+<span class="du-prompt">$</span> npx wrangler login
+<span class="du-prompt">$</span> $EDITOR wrangler.toml        <span class="du-cmt"># 换成你的域名，或删掉 routes 用 workers.dev</span>
+<span class="du-prompt">$</span> npx wrangler deploy
+<span class="du-prompt">$</span> curl https://&lt;你的中继&gt;/      <span class="du-cmt"># → iphone-use relay</span></code></pre>
+      </div>
+
+      <h3>让手机经中继连接</h3>
+      <div class="du-code">
+        <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">bash</span></div>
+<pre><code><span class="du-prompt">$</span> iphone-use setup-app --instance &lt;被控手机&gt; --connect-to &lt;控制方手机&gt; \
+    --connect-only --relay https://&lt;你的中继&gt;</code></pre>
+      </div>
+      <p>被控手机拿到中继地址后会一直保持一条出站连接。控制方和它在同一 Wi‑Fi 时，App 会自动改走局域网直连（状态栏显示「局域网」），离开后回到中继（显示「外网」）。Mac 上的守护进程设置 <code>IPHONE_USE_RELAY_URL=https://&lt;你的中继&gt;</code> 也会连到中继。</p>
+
+      <h3>费用与限制</h3>
+      <ul>
+        <li>Worker 出站流量不收费。中继用 WebSocket 休眠，手机连着但没人看时不计运行时长。</li>
+        <li>按每秒约 10 帧看一小时，大约是 1,800 个计费请求加 450 GB·s；付费套餐每月的含量够看约 890 小时。以 Cloudflare 官方价格为准。</li>
+        <li>中继有流量控制：网速跟不上时少传帧，而不是越积越卡。画面清晰度取决于控制方的下行网速。</li>
+        <li>TLS 在 Cloudflare 终止，中继看得到经过它的流量。介意的话请自己部署。</li>
+        <li>经中继请用 iOS App；守护进程的网页默认部署在根路径，暂不支持经中继打开。</li>
+      </ul>
+
+      <section class="du-faq">
+        <h2>常见问题</h2>
+        <h3>为什么不用 Tailscale？</h3>
+        <p>iOS 同一时间只允许一个 VPN 生效，而本机控制本身就占用了这个位置。被控手机由 Mac 托管时，Tailscale 这类 VPN 仍然可以用来访问 Mac。</p>
+        <h3>画面黑着，但能操作？</h3>
+        <p>先看状态栏的延迟和帧率。外网下帧率很低，通常是控制方网速不够；回到局域网会自动变快。还是没有画面，点「重新加载画面」。</p>
+        <h3>谁能连我的手机？</h3>
+        <p>只有拿到一次性配对码（二维码或 <code>--connect-to</code>）、或者已经配对过的设备。中继地址里的 id 是随机的，中继还会锁定手机第一次出示的密钥，别人冒充不了这台手机。</p>
+      </section>
+
+      <p>接下来：<a href="/how-it-works">它怎么工作</a> · <a href="/privacy">隐私与安全</a>。</p><!-- seo:footer --><nav class="du-static-footer" aria-label="站点"><a href="/">iphone-use</a> · <a href="/">概览</a> · <a href="/install">安装</a> · <a href="/compare">和其他方案对比</a> · <a href="/tasks">让 agent 用手机</a> · <a href="/flows">Flow 录制与重放</a> · <a href="/remote">远程控制</a> · <a href="/connect">MCP、HTTP API 与 skill</a> · <a href="/how-it-works">它怎么工作</a> · <a href="/faq">常见问题</a> · <a href="/privacy">隐私与安全</a> · <a href="https://github.com/leeguooooo/iphone-use">GitHub</a> · <a href="https://github.com/leeguooooo/iphone-use/releases">下载 / Releases</a> · <a href="https://github.com/leeguooooo/iphone-use-flows">官方 flow 源</a> · <a href="https://blog.leeguoo.com/zh/posts/iphone-use/">博客：iphone-use 产品介绍</a> · <a href="https://blog.leeguoo.com/zh/posts/iphone-use-video/">博客：演示视频</a> · <a href="https://chrome-use.leeguoo.com/">chrome-use（让 agent 用你的 Chrome）</a> · <a href="https://leeguoo.com/about">作者</a> · <a href="/en/remote" hreflang="en">English</a></nav><!-- /seo:footer -->
+    </main>
+
+    <aside id="du-toc"></aside>
+
+  </div>
+
+  <script src="/assets/docs/docs.js" defer></script>
+</body>
+</html>

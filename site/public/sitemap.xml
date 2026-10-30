@@ -71,6 +71,13 @@
     <lastmod>2026-10-27</lastmod>
   </url>
   <url>
+    <loc>https://iphone-use.leeguoo.com/en/remote</loc>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://iphone-use.leeguoo.com/remote" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://iphone-use.leeguoo.com/en/remote" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://iphone-use.leeguoo.com/en/remote" />
+    <lastmod>2026-10-30</lastmod>
+  </url>
+  <url>
     <loc>https://iphone-use.leeguoo.com/en/tasks</loc>
     <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://iphone-use.leeguoo.com/tasks" />
     <xhtml:link rel="alternate" hreflang="en" href="https://iphone-use.leeguoo.com/en/tasks" />
@@ -118,6 +125,13 @@
     <xhtml:link rel="alternate" hreflang="en" href="https://iphone-use.leeguoo.com/en/privacy" />
     <xhtml:link rel="alternate" hreflang="x-default" href="https://iphone-use.leeguoo.com/en/privacy" />
     <lastmod>2026-10-27</lastmod>
+  </url>
+  <url>
+    <loc>https://iphone-use.leeguoo.com/remote</loc>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://iphone-use.leeguoo.com/remote" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://iphone-use.leeguoo.com/en/remote" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://iphone-use.leeguoo.com/en/remote" />
+    <lastmod>2026-10-30</lastmod>
   </url>
   <url>
     <loc>https://iphone-use.leeguoo.com/tasks</loc>
