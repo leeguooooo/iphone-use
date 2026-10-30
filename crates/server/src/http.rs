@@ -13008,16 +13008,146 @@ async fn agent_value(
 // for one label, swiping on the agent's behalf (see `crate::collect`).
 // ---------------------------------------------------------------------------
 
+/// Native ACK counts only; neither displacement nor business completeness is implied.
+#[derive(Default)]
+struct ListDelivery {
+    setup_started: std::sync::atomic::AtomicBool,
+    confirmed: std::sync::atomic::AtomicU32,
+    uncertain: std::sync::atomic::AtomicU32,
+}
+impl ListDelivery {
+    fn receipt(&self) -> serde_json::Value {
+        use std::sync::atomic::Ordering::Acquire;
+        let confirmed = self.confirmed.load(Acquire);
+        let uncertain = self.uncertain.load(Acquire);
+        serde_json::json!({"swipes":confirmed,"swipes_confirmed":confirmed,"swipes_uncertain":uncertain,
+            "swipe_outcome":if uncertain>0 {"unknown"} else if confirmed>0 {"applied"} else {"not_sent"}})
+    }
+}
+struct ListSwipeReceipt {
+    delivery: Arc<ListDelivery>,
+    dispatched: Arc<std::sync::atomic::AtomicBool>,
+    finished: bool,
+}
+impl ListSwipeReceipt {
+    fn finish(&mut self, confirmed: bool) {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire};
+        if self.dispatched.load(Acquire) {
+            if confirmed {
+                self.delivery.confirmed.fetch_add(1, AcqRel);
+            } else {
+                self.delivery.uncertain.fetch_add(1, AcqRel);
+            }
+        }
+        self.finished = true;
+    }
+}
+impl Drop for ListSwipeReceipt {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish(false);
+        }
+    }
+}
+fn list_interrupted(delivery: &ListDelivery, error: &str) -> Response {
+    let mut body = delivery.receipt();
+    body["ok"] = false.into();
+    body["error"] = error.into();
+    body["retry_safe"] = false.into();
+    body["observation_omitted"] = true.into();
+    body["hint"]="List observations were withheld. Setup or scrolling may already have affected the device; check status and coordinate with the current owner before new work. Do not automatically replay this call.".into();
+    json_response(StatusCode::CONFLICT, body)
+}
+fn scoped_list_read_failure(
+    state: &AppState,
+    scope: &ScreenReadScope,
+    delivery: &ListDelivery,
+    error: &anyhow::Error,
+) -> Response {
+    if !scope.current(state) {
+        list_interrupted(delivery, "list_scope_changed")
+    } else {
+        first_read_failed(state, error)
+    }
+}
+fn private_list_refusal(state: &AppState) -> Option<Response> {
+    screen_private_refusal(state).map(|_| {
+        json_response(
+            StatusCode::LOCKED,
+            serde_json::json!({"ok":false,"error":"screen_private","outcome":"not_sent",
+            "retry_safe":true,"swipes":0,"swipes_confirmed":0,"swipes_uncertain":0}),
+        )
+    })
+}
+fn list_read_scope(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    generation: u64,
+) -> Result<ScreenReadScope, Response> {
+    // Pin the caller and expected epoch across claim/capture; a concurrent
+    // takeover must not lend its new permission to this request.
+    let epoch = state.owner_epoch.load(std::sync::atomic::Ordering::Acquire);
+    let newly_claimed = claim_phone_owner(state, headers)?;
+    let mut scope = ScreenReadScope::capture(state);
+    scope.epoch = epoch.wrapping_add(u64::from(newly_claimed));
+    scope.owner = match owner_claim_from_headers(headers)? {
+        OwnerClaim::Named(name) | OwnerClaim::Takeover(name) => Some(name.to_owned()),
+        OwnerClaim::Anonymous => None,
+    };
+    scope.privacy_epoch = generation;
+    Ok(scope)
+}
+fn forget_unpublished_list_snapshot(
+    state: &AppState,
+    scope: &ScreenReadScope,
+    value: &serde_json::Value,
+) {
+    if let Some(snapshot) = value.get("snapshot").and_then(serde_json::Value::as_str) {
+        let mut owners = recover(state.owner_snapshots.lock());
+        if let Some(owner) = scope.owner.as_ref() {
+            if owners.get(owner).is_some_and(|id| id == snapshot) {
+                owners.remove(owner);
+            }
+        }
+        if !owners.values().any(|id| id == snapshot) {
+            recover(state.element_snapshots.lock()).retain(|(id, _)| id != snapshot);
+        }
+    }
+}
+#[derive(Clone)]
+struct ListObservationFence {
+    state: Arc<AppState>,
+    scope: ScreenReadScope,
+    delivery: Arc<ListDelivery>,
+}
+fn fence_list_response(
+    mut response: Response,
+    state: Arc<AppState>,
+    scope: ScreenReadScope,
+    delivery: Arc<ListDelivery>,
+) -> Response {
+    response.extensions_mut().insert(ListObservationFence {
+        state,
+        scope,
+        delivery,
+    });
+    response
+}
+
 /// The runner as a [`crate::collect::Pager`]: a page is the element tree, a
 /// swipe is the coordinate scroll `/agent/input` sends (`runner_scroll`).
 struct RunnerPager<'a> {
     w: &'a mut crate::runner::RunnerClient,
     screen: Option<(f64, f64)>,
     first_page: Option<crate::collect::Page>,
+    state: &'a Arc<AppState>,
+    scope: &'a ScreenReadScope,
+    delivery: Arc<ListDelivery>,
 }
 
 impl crate::collect::Pager for RunnerPager<'_> {
     async fn read(&mut self) -> anyhow::Result<crate::collect::Page> {
+        anyhow::ensure!(self.scope.current(self.state), "list authorization changed");
         if let Some(page) = self.first_page.take() {
             return Ok(page);
         }
@@ -13033,6 +13163,7 @@ impl crate::collect::Pager for RunnerPager<'_> {
         if self.screen.is_none() {
             self.screen = self.w.window_size().await.ok();
         }
+        anyhow::ensure!(self.scope.current(self.state), "list authorization changed");
         Ok(crate::collect::Page {
             rows,
             screen: self.screen,
@@ -13044,6 +13175,7 @@ impl crate::collect::Pager for RunnerPager<'_> {
         region: Option<crate::collect::Region>,
         direction: crate::collect::Direction,
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(self.scope.current(self.state), "list authorization changed");
         let (_, height) = match self.screen {
             Some(screen) => screen,
             None => self.w.window_size().await?,
@@ -13051,11 +13183,25 @@ impl crate::collect::Pager for RunnerPager<'_> {
         let region = region.unwrap_or(crate::collect::Region::FULL);
         let (x, y) = region.center();
         let dy = crate::collect::page_dy(region.h * height, direction);
-        runner_scroll(self.w, x, y, 0.0, dy).await?;
+        let mut receipt = ListSwipeReceipt {
+            delivery: self.delivery.clone(),
+            dispatched: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finished: false,
+        };
+        let result = crate::timing::with_dispatch_probe(
+            "POST /actions",
+            receipt.dispatched.clone(),
+            runner_scroll(self.w, x, y, 0.0, dy),
+        )
+        .await;
+        receipt.finish(result.is_ok());
+        result?;
+        anyhow::ensure!(self.scope.current(self.state), "list authorization changed");
         tokio::time::sleep(crate::collect::SWIPE_SETTLE).await;
         Ok(())
     }
 }
+
 
 /// Auth and the control header, before the body is even looked at.
 fn authorize_list_call(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
@@ -13088,7 +13234,6 @@ async fn begin_list_control<'a>(
     runner: &'a tokio::sync::Mutex<crate::runner::RunnerClient>,
     deadline: tokio::time::Instant,
 ) -> Result<tokio::sync::MutexGuard<'a, crate::runner::RunnerClient>, Response> {
-    claim_phone_owner(state, headers)?;
     if let Some(refusal) = control_readiness_refusal(state) {
         return Err(refusal.into_response());
     }
@@ -13204,34 +13349,85 @@ async fn agent_collect(
     if let Err(refused) = authorize_list_call(&state, &headers) {
         return refused;
     }
+    let generation = state
+        .privacy_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
+    if let Some(refused) = private_list_refusal(&state) {
+        return refused;
+    }
     let parsed = if body.trim().is_empty() {
         Ok(serde_json::Value::Null)
     } else {
-        serde_json::from_str::<serde_json::Value>(&body).map_err(|e| format!("body is not JSON: {e}"))
+        serde_json::from_str::<serde_json::Value>(&body)
+            .map_err(|e| format!("body is not JSON: {e}"))
     };
     let request = match parsed.and_then(|value| crate::collect::CollectRequest::from_json(&value)) {
         Ok(request) => request,
         Err(detail) => return invalid_list_request(detail),
     };
+    let scope = match list_read_scope(&state, &headers, generation) {
+        Ok(scope) => scope,
+        Err(refused) => return refused,
+    };
+    let delivery = Arc::new(ListDelivery::default());
+    let deadline = tokio::time::Instant::now() + crate::collect::COLLECT_DEADLINE;
+    let work = agent_collect_scoped(
+        state.clone(),
+        headers,
+        request,
+        scope.clone(),
+        delivery.clone(),
+        deadline,
+    );
+    let response =
+        match tokio::time::timeout_at(deadline, scoped_observation(&state, &scope, work)).await {
+            Ok(response) => response,
+            Err(_) => list_interrupted(&delivery, "list_deadline"),
+        };
+    fence_list_response(response, state, scope, delivery)
+}
+async fn agent_collect_scoped(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    request: crate::collect::CollectRequest,
+    scope: ScreenReadScope,
+    delivery: Arc<ListDelivery>,
+    deadline: tokio::time::Instant,
+) -> Response {
+    if !scope.current(&state) {
+        return list_interrupted(&delivery, "list_scope_changed");
+    }
     let expected_app = expected_collect_app(&state, request.snapshot.as_deref());
     let Some(runner) = state.runner.clone() else {
         return ControlRefusal::runner_not_configured().into_response();
     };
-    let deadline = tokio::time::Instant::now() + crate::collect::COLLECT_DEADLINE;
     let _priority = state.begin_runner_control();
+    delivery.setup_started.store(true, std::sync::atomic::Ordering::Release);
     let mut w = match begin_list_control(&state, &headers, &runner, deadline).await {
         Ok(w) => w,
         Err(refused) => return refused,
     };
+    if !scope.current(&state) {
+        return list_interrupted(&delivery, "list_scope_changed");
+    }
+    let cache_scope = scope.clone();
+    let weak = Arc::downgrade(&state);
+    w.begin_element_read(Arc::new(move || {
+        weak.upgrade()
+            .is_some_and(|state| cache_scope.current(&state))
+    }));
     let mut pager = RunnerPager {
         w: &mut w,
         screen: None,
         first_page: None,
+        state: &state,
+        scope: &scope,
+        delivery: delivery.clone(),
     };
     use crate::collect::Pager as _;
     let page = match pager.read().await {
         Ok(page) => page,
-        Err(error) => return first_read_failed(&state, &error),
+        Err(error) => return scoped_list_read_failure(&state, &scope, &delivery, &error),
     };
     if let Some(refusal) = list_app_refusal(&state, &headers, expected_app.as_deref(), &page) {
         return refusal;
@@ -13240,8 +13436,11 @@ async fn agent_collect(
     let result = crate::collect::collect(&mut pager, &request, deadline).await;
     drop(w);
     match result {
-        Err(error) => first_read_failed(&state, &error),
+        Err(error) => scoped_list_read_failure(&state, &scope, &delivery, &error),
         Ok(mut collection) => {
+            if !scope.current(&state) {
+                return list_interrupted(&delivery, "list_scope_changed");
+            }
             // After a failed swipe or read the last tree read is no longer
             // the screen: no snapshot to act on.
             let current = !matches!(
@@ -13454,6 +13653,12 @@ async fn agent_scroll_find(
     if let Err(refused) = authorize_list_call(&state, &headers) {
         return refused;
     }
+    let generation = state
+        .privacy_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
+    if let Some(refused) = private_list_refusal(&state) {
+        return refused;
+    }
     let request = match serde_json::from_str::<serde_json::Value>(&body)
         .map_err(|e| format!("body is not JSON: {e}"))
         .and_then(|value| crate::collect::FindRequest::from_json(&value))
@@ -13461,27 +13666,71 @@ async fn agent_scroll_find(
         Ok(request) => request,
         Err(detail) => return invalid_list_request(detail),
     };
+    let scope = match list_read_scope(&state, &headers, generation) {
+        Ok(scope) => scope,
+        Err(refused) => return refused,
+    };
+    let delivery = Arc::new(ListDelivery::default());
+    let deadline = tokio::time::Instant::now() + crate::collect::COLLECT_DEADLINE;
+    let work = agent_scroll_find_scoped(
+        state.clone(),
+        headers,
+        request,
+        scope.clone(),
+        delivery.clone(),
+        deadline,
+    );
+    let response =
+        match tokio::time::timeout_at(deadline, scoped_observation(&state, &scope, work)).await {
+            Ok(response) => response,
+            Err(_) => list_interrupted(&delivery, "list_deadline"),
+        };
+    fence_list_response(response, state, scope, delivery)
+}
+async fn agent_scroll_find_scoped(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    request: crate::collect::FindRequest,
+    scope: ScreenReadScope,
+    delivery: Arc<ListDelivery>,
+    deadline: tokio::time::Instant,
+) -> Response {
+    if !scope.current(&state) {
+        return list_interrupted(&delivery, "list_scope_changed");
+    }
     let expected_app = expected_collect_app(&state, request.snapshot.as_deref());
     let Some(runner) = state.runner.clone() else {
         return ControlRefusal::runner_not_configured().into_response();
     };
-    let deadline = tokio::time::Instant::now() + crate::collect::COLLECT_DEADLINE;
     let _priority = state.begin_runner_control();
+    delivery.setup_started.store(true, std::sync::atomic::Ordering::Release);
     let mut w = match begin_list_control(&state, &headers, &runner, deadline).await {
         Ok(w) => w,
         Err(refused) => return refused,
     };
+    if !scope.current(&state) {
+        return list_interrupted(&delivery, "list_scope_changed");
+    }
+    let cache_scope = scope.clone();
+    let weak = Arc::downgrade(&state);
+    w.begin_element_read(Arc::new(move || {
+        weak.upgrade()
+            .is_some_and(|state| cache_scope.current(&state))
+    }));
     let mut pager = RunnerPager {
         w: &mut w,
         screen: None,
         first_page: None,
+        state: &state,
+        scope: &scope,
+        delivery: delivery.clone(),
     };
     use crate::collect::Pager as _;
     let page = match pager.read().await {
         Ok(page) => page,
         Err(error) => {
             drop(w);
-            return first_read_failed(&state, &error);
+            return scoped_list_read_failure(&state, &scope, &delivery, &error);
         }
     };
     if let Some(refusal) = list_app_refusal(&state, &headers, expected_app.as_deref(), &page) {
@@ -13496,6 +13745,9 @@ async fn agent_scroll_find(
         seen_earlier,
     } = run_scroll_find(&mut pager, page, &request, deadline).await;
     drop(w);
+    if !scope.current(&state) {
+        return list_interrupted(&delivery, "list_scope_changed");
+    }
     let mut body = serde_json::json!({"swipes": swipes, "max_swipes": request.max_swipes});
     let found = matches!(verdict, FindVerdict::Found(_));
     if let Some(app) = active_application(&page.rows).filter(|app| !app.is_empty()) {
@@ -13507,7 +13759,9 @@ async fn agent_scroll_find(
             body["found"] = true.into();
             body["stop_reason"] = "found".into();
             body["target"] = found_row_json(&page.rows, *index);
-            body["hint"] = "on screen and tappable: tap it by its index with this snapshot, or by its label".into();
+            body["hint"] =
+                "on screen and tappable: tap it by its index with this snapshot, or by its label"
+                    .into();
         }
         FindVerdict::Ambiguous(detail) => {
             body["error"] = "ambiguous_element_label".into();
@@ -13517,14 +13771,20 @@ async fn agent_scroll_find(
         }
         FindVerdict::Blocked(code) => {
             body["error"] = (*code).into();
-            body["stop_reason"] = if *code == "element_occluded" { "occluded" } else { "not_visible" }.into();
+            body["stop_reason"] = if *code == "element_occluded" {
+                "occluded"
+            } else {
+                "not_visible"
+            }
+            .into();
             if let Some(index) = page.rows.iter().position(|row| {
                 row.label == request.label
                     && request.kind.as_deref().is_none_or(|kind| row.kind == kind)
             }) {
                 body["target"] = found_row_json(&page.rows, index);
                 if let Some(cover) = occluding_row(&page.rows, index) {
-                    body["covered_by"] = serde_json::json!({"kind": cover.kind, "label": cover.label});
+                    body["covered_by"] =
+                        serde_json::json!({"kind": cover.kind, "label": cover.label});
                 }
             }
             body["hint"] = "the label is there but a tap would not reach it (covered or not drawn); nothing more was swiped — bring it clear, then read again".into();
@@ -13562,7 +13822,10 @@ async fn agent_scroll_find(
         }
         body["stop_error"] = error.into();
     }
-    if let Some(snapshot) = current.then(|| remember_page(&state, &headers, page.rows)).flatten() {
+    if let Some(snapshot) = current
+        .then(|| remember_page(&state, &headers, page.rows))
+        .flatten()
+    {
         body["snapshot"] = snapshot.into();
     }
     json_response(StatusCode::OK, body)
@@ -16355,9 +16618,62 @@ struct ReadPrivacyFence {
 
 /// Applied outside timing: no later JSON rewrite may strip the publication
 /// fence or lose its fixed-size timing/metrics enrichment before it is installed.
-async fn privacy_read_body_layer(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+async fn privacy_read_body_layer(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
     let response = next.run(request).await;
-    if let Some(fence) = response.extensions().get::<ActionObservationFence>().cloned() {
+    if let Some(fence) = response.extensions().get::<ListObservationFence>().cloned() {
+        let (mut parts, body) = response.into_parts();
+        let bytes = match axum::body::to_bytes(body, 8 << 20).await {
+            Ok(bytes) => bytes,
+            Err(_) => return list_interrupted(&fence.delivery, "list_result_unavailable"),
+        };
+        parts.headers.remove(header::CONTENT_LENGTH);
+        let stream = futures_util::stream::once(async move {
+            let mut value=serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(|_| serde_json::json!({"ok":false,"error":"list_result_unavailable","retry_safe":false}));
+            if !fence.scope.current(&fence.state) {
+                forget_unpublished_list_snapshot(&fence.state, &fence.scope, &value);
+                value = crate::observation::redact(value, "authorization_scope_changed");
+                value["ok"] = false.into();
+                value["error"] = "list_scope_changed".into();
+                value["retry_safe"] = false.into();
+                value["hint"]="List observations were withheld after authorization changed; retain the swipe receipt and do not replay this call automatically.".into();
+            }
+            if let (Some(map), Some(receipt)) =
+                (value.as_object_mut(), fence.delivery.receipt().as_object())
+            {
+                map.extend(receipt.clone());
+            }
+            if fence
+                .delivery
+                .setup_started
+                .load(std::sync::atomic::Ordering::Acquire)
+                || fence
+                    .delivery
+                    .confirmed
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    > 0
+                || fence
+                    .delivery
+                    .uncertain
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    > 0
+            {
+                value["retry_safe"] = false.into();
+                if value.get("outcome").and_then(serde_json::Value::as_str) == Some("not_sent") {
+                    value.as_object_mut().unwrap().remove("outcome");
+                }
+            }
+            Ok::<_, std::io::Error>(bytes::Bytes::from(value.to_string()))
+        });
+        return Response::from_parts(parts, Body::from_stream(stream));
+    }
+    if let Some(fence) = response
+        .extensions()
+        .get::<ActionObservationFence>()
+        .cloned()
+    {
         let (mut parts, body) = response.into_parts();
         let bytes = match axum::body::to_bytes(body, 2 << 20).await {
             Ok(bytes) => bytes,
@@ -16365,18 +16681,26 @@ async fn privacy_read_body_layer(request: axum::extract::Request, next: axum::mi
         };
         parts.headers.remove(header::CONTENT_LENGTH);
         let stream = futures_util::stream::once(async move {
-            let bytes = if fence.scope.current(&fence.state) { bytes } else {
-                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(fence.fallback);
+            let bytes = if fence.scope.current(&fence.state) {
+                bytes
+            } else {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&bytes).unwrap_or(fence.fallback);
                 if let Some(snapshot) = value.get("snapshot").and_then(serde_json::Value::as_str) {
                     let mut owners = recover(fence.state.owner_snapshots.lock());
                     if let Some(owner) = fence.scope.owner.as_ref() {
-                        if owners.get(owner).is_some_and(|id| id == snapshot) { owners.remove(owner); }
+                        if owners.get(owner).is_some_and(|id| id == snapshot) {
+                            owners.remove(owner);
+                        }
                     }
                     if !owners.values().any(|id| id == snapshot) {
-                        recover(fence.state.element_snapshots.lock()).retain(|(id, _)| id != snapshot);
+                        recover(fence.state.element_snapshots.lock())
+                            .retain(|(id, _)| id != snapshot);
                     }
                 }
-                bytes::Bytes::from(crate::observation::redact(value, "authorization_scope_changed").to_string())
+                bytes::Bytes::from(
+                    crate::observation::redact(value, "authorization_scope_changed").to_string(),
+                )
             };
             Ok::<_, std::io::Error>(bytes)
         });
@@ -16386,8 +16710,12 @@ async fn privacy_read_body_layer(request: axum::extract::Request, next: axum::mi
         let (mut parts, body) = response.into_parts();
         let bytes = match axum::body::to_bytes(body, 2 << 20).await {
             Ok(bytes) => bytes,
-            Err(_) => return json_response(StatusCode::BAD_GATEWAY,
-                serde_json::json!({"ok":false,"error":"outcome_unknown","outcome":"unknown","retry_safe":false})),
+            Err(_) => {
+                return json_response(
+                    StatusCode::BAD_GATEWAY,
+                    serde_json::json!({"ok":false,"error":"outcome_unknown","outcome":"unknown","retry_safe":false}),
+                )
+            }
         };
         parts.headers.remove(header::CONTENT_LENGTH);
         let stream = futures_util::stream::once(async move {
@@ -16395,7 +16723,9 @@ async fn privacy_read_body_layer(request: axum::extract::Request, next: axum::mi
             let bytes = if revoked {
                 let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
                 bytes::Bytes::from(crate::observation::redact_batch(value).to_string())
-            } else { bytes };
+            } else {
+                bytes
+            };
             Ok::<_, std::io::Error>(bytes)
         });
         return Response::from_parts(parts, Body::from_stream(stream));
@@ -16409,37 +16739,64 @@ async fn privacy_read_body_layer(request: axum::extract::Request, next: axum::mi
         };
         parts.headers.remove(header::CONTENT_LENGTH);
         let stream = futures_util::stream::once(async move {
-            let bytes = if fence.scope.current(&fence.state) { bytes }
-                else { bytes::Bytes::from(value_scope_failure().to_string()) };
+            let bytes = if fence.scope.current(&fence.state) {
+                bytes
+            } else {
+                bytes::Bytes::from(value_scope_failure().to_string())
+            };
             Ok::<_, std::io::Error>(bytes)
         });
         return Response::from_parts(parts, Body::from_stream(stream));
     }
-    let Some(fence) = response.extensions().get::<ReadPrivacyFence>().cloned() else { return response; };
+    let Some(fence) = response.extensions().get::<ReadPrivacyFence>().cloned() else {
+        return response;
+    };
     // The response can sit queued before the HTTP writer first polls its body.
     use futures_util::StreamExt;
-    let ReadPrivacyFence { private_until, privacy_epoch, generation } = fence;
+    let ReadPrivacyFence {
+        private_until,
+        privacy_epoch,
+        generation,
+    } = fence;
     let (mut parts, body) = response.into_parts();
     parts.headers.remove(header::CONTENT_LENGTH);
-    let stream = futures_util::stream::unfold((body.into_data_stream(), false), move |(mut body, done)| {
-        let private_until = private_until.clone();
-        let privacy_epoch = privacy_epoch.clone();
-        async move {
-            if done { return None; }
-            let current = || privacy_epoch.load(std::sync::atomic::Ordering::Acquire) == generation
-                && !screen_private_now(&private_until);
-            if !current() {
-                return Some((Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "screen privacy changed before body publication")), (body, true)));
+    let stream =
+        futures_util::stream::unfold((body.into_data_stream(), false), move |(mut body, done)| {
+            let private_until = private_until.clone();
+            let privacy_epoch = privacy_epoch.clone();
+            async move {
+                if done {
+                    return None;
+                }
+                let current = || {
+                    privacy_epoch.load(std::sync::atomic::Ordering::Acquire) == generation
+                        && !screen_private_now(&private_until)
+                };
+                if !current() {
+                    return Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "screen privacy changed before body publication",
+                        )),
+                        (body, true),
+                    ));
+                }
+                let next = body.next().await?;
+                if !current() {
+                    return Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "screen privacy changed before body publication",
+                        )),
+                        (body, true),
+                    ));
+                }
+                Some((next.map_err(std::io::Error::other), (body, false)))
             }
-            let next = body.next().await?;
-            if !current() {
-                return Some((Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "screen privacy changed before body publication")), (body, true)));
-            }
-            Some((next.map_err(std::io::Error::other), (body, false)))
-        }
-    });
+        });
     Response::from_parts(parts, Body::from_stream(stream))
 }
+
 
 /// Run `work` unless the screen turns private first (checked every 250 ms),
 /// so an open live feed ends at once when a private hold begins instead of
@@ -20716,6 +21073,80 @@ fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancelled_list_swipe_retains_exactly_one_uncertain_receipt() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                for dispatched in [false, true] {
+                    let delivery = std::sync::Arc::new(super::ListDelivery::default());
+                    let work = {
+                        let delivery = delivery.clone();
+                        async move {
+                            let _receipt = super::ListSwipeReceipt {
+                                delivery,
+                                dispatched: std::sync::Arc::new(AtomicBool::new(dispatched)),
+                                finished: false,
+                            };
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    assert!(
+                        tokio::time::timeout(std::time::Duration::from_millis(10), work)
+                            .await
+                            .is_err()
+                    );
+                    assert_eq!(delivery.confirmed.load(Ordering::Acquire), 0);
+                    assert_eq!(
+                        delivery.uncertain.load(Ordering::Acquire),
+                        u32::from(dispatched)
+                    );
+                }
+            });
+    }
+
+    #[test]
+    fn list_scope_epoch_matches_each_successful_claim() {
+        for (previous, expired, requested, takeover) in [
+            (None, false, None, false),
+            (None, false, Some("a"), false),
+            (Some("a"), false, Some("a"), false),
+            (Some("a"), true, Some("a"), false),
+            (Some("a"), false, Some("a"), true),
+            (Some("a"), false, Some("b"), true),
+        ] {
+            let state = readiness_test_state();
+            *recover(state.owner.lock()) = previous.map(|name| PhoneOwner {
+                name: name.into(),
+                last_seen: if expired {
+                    Instant::now() - std::time::Duration::from_secs(state.owner_lease_secs + 1)
+                } else {
+                    Instant::now()
+                },
+            });
+            let mut headers = HeaderMap::new();
+            if let Some(name) = requested {
+                headers.insert("x-phone-owner", name.parse().unwrap());
+            }
+            if takeover {
+                headers.insert("x-phone-owner-takeover", "1".parse().unwrap());
+            }
+            let generation = state
+                .privacy_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
+            let scope = list_read_scope(&state, &headers, generation)
+                .unwrap_or_else(|_| panic!("claim should succeed"));
+            assert!(
+                scope.current(&state),
+                "claim {previous:?} -> {requested:?}, expired={expired}, takeover={takeover}"
+            );
+            assert_eq!(scope.owner.as_deref(), requested);
+        }
+    }
+
     #[test]
     fn scroll_alert_present_refuses_all_gesture_modes() {
         let source = include_str!("http.rs");

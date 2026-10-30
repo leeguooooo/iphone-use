@@ -2098,8 +2098,10 @@ impl PhoneHandler {
         what the accessibility tree exposes is collected. It swipes the live list, so the \
         screen is left where the last page was; `snapshot` is that last page. \
         Optional `snapshot` (from a read of the target app; never filled in for you): a known \
-        foreground app mismatch refuses before any swipe (app_changed, not_sent, retry_safe). \
+        foreground app mismatch refuses before any swipe (app_changed; setup may already have affected the device). \
         Results name the app. \
+        Owner/privacy changes stop further reads and scrolling. swipes_confirmed counts Native ACKs, \
+        swipes_uncertain may have reached the device; never replay uncertain scrolling. \
         Requires phone_status drivable=true."
     )]
     async fn phone_collect_list(
@@ -2129,7 +2131,9 @@ impl PhoneHandler {
         as `candidates`. No screenshot is taken; absence after the budget is not proof — \
         look at the screen before swiping further. Optional `snapshot` (from a read of the \
         target app; never filled in for you): a known foreground app mismatch refuses before \
-        any swipe (app_changed, not_sent, retry_safe). Results name the app. Requires \
+        any swipe (app_changed). Setup may already have affected the device. Stops when ownership \
+        or privacy authorization changes and withholds observations. swipes_confirmed counts Native ACKs, \
+        not displacement; swipes_uncertain means no ACK and must not be replayed automatically. Requires \
         phone_status drivable=true."
     )]
     async fn phone_scroll_find(

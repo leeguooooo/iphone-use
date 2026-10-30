@@ -748,6 +748,16 @@ fn list_app_changed(json: &Value) -> Option<String> {
     Some(format!("App changed: {detail} swipe was sent. Read the screen again and confirm the target app is in front."))
 }
 
+fn list_delivery_warning(json: &Value) -> Option<String> {
+    let uncertain = json
+        .get("swipes_uncertain")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (uncertain>0).then(|| format!("delivery: {} confirmed swipes, {uncertain} uncertain; do not automatically repeat this call",
+        json.get("swipes_confirmed").and_then(Value::as_u64).unwrap_or(0)))
+}
+
+
 /// `phone_collect_list`: the verdict, then one line per collected row.
 pub fn collected_list(json: &Value) -> Option<String> {
     if let Some(refusal) = list_app_changed(json) {
@@ -762,6 +772,9 @@ pub fn collected_list(json: &Value) -> Option<String> {
         text(json, "stop_reason").unwrap_or_else(|| "?".to_string()),
         text(json, "complete").unwrap_or_else(|| "false".to_string()),
     )];
+    if let Some(warning) = list_delivery_warning(json) {
+        out.push(warning);
+    }
     if let Some(app) = text(json, "app") {
         out[0].push_str(&format!(" in {app}"));
     }
@@ -822,6 +835,9 @@ pub fn found_label(json: &Value) -> Option<String> {
         text(json, "swipes").unwrap_or_else(|| "0".to_string()),
         text(json, "error").map_or(String::new(), |e| format!(" error={e}")),
     )];
+    if let Some(warning) = list_delivery_warning(json) {
+        out.push(warning);
+    }
     if let Some(app) = text(json, "app") {
         out[0].push_str(&format!(" in {app}"));
     }
@@ -861,6 +877,16 @@ pub fn found_label(json: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn list_summaries_keep_uncertain_swipe_warning() {
+        let report=serde_json::json!({"ok":false,"found":false,"rows":[],"pages":[],
+            "swipes":0,"swipes_confirmed":0,"swipes_uncertain":1,"stop_reason":"swipe_failed","complete":false});
+        for text in [super::collected_list(&report).unwrap(),super::found_label(&report).unwrap()] {
+            assert!(text.contains("1 uncertain"));
+            assert!(text.contains("do not automatically repeat"));
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

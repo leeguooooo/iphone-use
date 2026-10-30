@@ -637,3 +637,457 @@ fn a_queued_read_cannot_gain_permission_from_a_later_private_hold() {
         assert!(state.runner.as_ref().unwrap().lock().await.recent_tree(Duration::from_secs(10)).is_none(),"hold expiry must not authorize a revoked request's cache");
     });
 }
+
+#[test]
+fn private_list_operations_refuse_before_reading_or_swiping() {
+    block(async {
+        for (uri, body) in [
+            ("/agent/collect", json!({"max_pages":1})),
+            (
+                "/agent/scroll_find",
+                json!({"label":"PRIVATE_LIST_SECRET","max_swipes":0}),
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let state =
+                build_state_with_runner(&format!("http://{}", listener.local_addr().unwrap()));
+            hold(state.clone(), true).await;
+            let response = server::http::router(state)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("x-phone-control", "1")
+                        .header("x-phone-owner", "privacy-fixture")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::LOCKED);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], "screen_private");
+            assert_eq!(value["swipes_confirmed"], 0);
+            assert_eq!(value["swipes_uncertain"], 0);
+            assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_LIST_SECRET"));
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "private admission must not make any Native connection, including setup"
+            );
+        }
+    });
+}
+
+async fn list_response_race(
+    uri: &str,
+    request: serde_json::Value,
+    during_swipe: bool,
+    drop_swipe: bool,
+    private_publish: bool,
+) {
+    let sent = Arc::new(tokio::sync::Notify::new());
+    let signal = sent.clone();
+    let actions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = actions.clone();
+    let source = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = source.clone();
+    let runner = mock_runner(move |request, _| {
+        if request.starts_with("POST /session ") {
+            return Some((
+                Duration::ZERO,
+                json!({"value":{"sessionId":"SESSION"}}).to_string(),
+            ));
+        }
+        if request.contains("/actions") {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            signal.notify_one();
+            if drop_swipe {
+                std::thread::sleep(Duration::from_millis(150));
+                return None;
+            }
+            return Some((
+                Duration::from_millis(150),
+                json!({"value":null}).to_string(),
+            ));
+        }
+        if request.contains("/source") {
+            let page = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Some((Duration::ZERO,json!({"value":{"type":"XCUIElementTypeApplication","label":"PRIVATE_LIST_APP",
+                "rect":{"x":0,"y":0,"width":390,"height":844},"children":[
+                {"type":"XCUIElementTypeCell","label":format!("PRIVATE_LIST_ROW_{page}"),"rect":{"x":20,"y":100,"width":300,"height":50}}]}}).to_string()));
+        }
+        if request.contains("/window/size") {
+            return Some((
+                Duration::ZERO,
+                json!({"value":{"width":390,"height":844}}).to_string(),
+            ));
+        }
+        Some((Duration::ZERO, json!({"value":null}).to_string()))
+    });
+    let state = build_state_with_runner(runner.url());
+    let app = server::http::router(state.clone());
+    let uri = uri.to_string();
+    let pending = tokio::spawn(async move {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("x-phone-control", "1")
+                .header("x-phone-owner", "privacy-fixture")
+                .header("content-type", "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    });
+    if during_swipe {
+        tokio::time::timeout(Duration::from_secs(5), sent.notified())
+            .await
+            .unwrap();
+        hold(state.clone(), true).await;
+    }
+    let response = pending.await.unwrap();
+    if !during_swipe && private_publish {
+        hold(state.clone(), true).await;
+    }
+    if !during_swipe && !private_publish {
+        state
+            .owner_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        state
+            .owner_snapshots
+            .lock()
+            .unwrap()
+            .insert("new-owner".into(), "NEW_SAFE_SNAPSHOT".into());
+        state
+            .element_snapshots
+            .lock()
+            .unwrap()
+            .push_back(("NEW_SAFE_SNAPSHOT".into(), Arc::new(vec![])));
+    }
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        !text.contains("PRIVATE_LIST"),
+        "revoked list response leaked: {text}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["observation_omitted"], true);
+    assert_eq!(value["retry_safe"], false);
+    if during_swipe {
+        assert_eq!(
+            actions.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "revocation must not issue another swipe"
+        );
+        assert_eq!(
+            source.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "revocation must not read another page"
+        );
+        assert_eq!(value["swipes_confirmed"], if drop_swipe { 0 } else { 1 });
+        assert_eq!(value["swipes_uncertain"], if drop_swipe { 1 } else { 0 });
+    }
+    assert!(
+        value.get("rows").is_none()
+            && value.get("found").is_none()
+            && value.get("complete").is_none()
+    );
+    if !during_swipe && !private_publish {
+        assert_eq!(
+            state
+                .owner_snapshots
+                .lock()
+                .unwrap()
+                .get("new-owner")
+                .map(String::as_str),
+            Some("NEW_SAFE_SNAPSHOT")
+        );
+        assert!(state
+            .element_snapshots
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == "NEW_SAFE_SNAPSHOT"));
+    }
+}
+#[test]
+fn list_scope_changes_preserve_delivery_and_hide_observations() {
+    block(async {
+        for (uri, body) in [
+            ("/agent/collect", json!({"max_pages":3})),
+            (
+                "/agent/scroll_find",
+                json!({"label":"NOT_PRESENT","max_swipes":2}),
+            ),
+        ] {
+            list_response_race(uri, body.clone(), true, false, false).await;
+            list_response_race(uri, body, true, true, false).await;
+        }
+        list_response_race(
+            "/agent/collect",
+            json!({"max_pages":1}),
+            false,
+            false,
+            false,
+        )
+        .await;
+        list_response_race("/agent/collect", json!({"max_pages":1}), false, false, true).await;
+        list_response_race(
+            "/agent/scroll_find",
+            json!({"label":"PRIVATE_LIST_ROW_0","max_swipes":0}),
+            false,
+            false,
+            true,
+        )
+        .await;
+        list_response_race(
+            "/agent/scroll_find",
+            json!({"label":"PRIVATE_LIST_ROW_0","max_swipes":0}),
+            false,
+            false,
+            false,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn queued_list_operations_do_not_gain_new_permission_after_a_brief_hold() {
+    block(async {
+        for (uri, body) in [
+            ("/agent/collect", json!({"max_pages":2})),
+            (
+                "/agent/scroll_find",
+                json!({"label":"missing","max_swipes":1}),
+            ),
+        ] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = calls.clone();
+            let runner = mock_runner(move |_, _| {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some((Duration::ZERO, json!({"value":null}).to_string()))
+            });
+            let state = build_state_with_runner(runner.url());
+            hold(state.clone(), false).await;
+            state
+                .runner_actionable
+                .store(true, std::sync::atomic::Ordering::Release);
+            *state.runner_health.lock().unwrap() = server::runner::RunnerHealth {
+                up: true,
+                actionable: true,
+                locked: Some(false),
+            };
+            let client = state.runner.as_ref().unwrap().lock().await;
+            let app = server::http::router(state.clone());
+            let pending = tokio::spawn(async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("x-phone-control", "1")
+                        .header("x-phone-owner", "privacy-fixture")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while state
+                    .runner_control_pending
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == 0
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            hold(state.clone(), true).await;
+            hold(state.clone(), false).await;
+            drop(client);
+            let bytes = pending
+                .await
+                .unwrap()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["ok"], false);
+            assert_eq!(value["retry_safe"], false);
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "queued list sent a scripted Native request after revocation"
+            );
+            assert!(state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
+        }
+    });
+}
+
+#[test]
+fn list_revocation_during_first_read_hides_rows_without_degrading_hardware() {
+    block(async {
+        for uri in ["/agent/collect", "/agent/scroll_find"] {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let signal = started.clone();
+            let sources = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let reads = sources.clone();
+            let actions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let swipes = actions.clone();
+            let runner = mock_runner(move |request, _| {
+                if request.contains("/actions") {
+                    swipes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                if request.contains("/source") {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    signal.notify_one();
+                    return Some((Duration::from_millis(150),json!({"value":{"type":"XCUIElementTypeApplication","label":"PRIVATE_LIST_APP","rect":{"x":0,"y":0,"width":390,"height":844}}}).to_string()));
+                }
+                Some((
+                    Duration::ZERO,
+                    if request.starts_with("POST /session ") {
+                        json!({"value":{"sessionId":"SESSION"}}).to_string()
+                    } else {
+                        json!({"value":null}).to_string()
+                    },
+                ))
+            });
+            let state = build_state_with_runner(runner.url());
+            state
+                .runner_actionable
+                .store(true, std::sync::atomic::Ordering::Release);
+            let app = server::http::router(state.clone());
+            let pending = tokio::spawn(async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("x-phone-control", "1")
+                        .header("x-phone-owner", "privacy-fixture")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            (if uri == "/agent/collect" {json!({"max_pages":2})} else {json!({"label":"missing","max_swipes":1})}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            });
+            tokio::time::timeout(Duration::from_secs(4), started.notified())
+                .await
+                .unwrap();
+            hold(state.clone(), true).await;
+            let bytes = pending
+                .await
+                .unwrap()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_LIST"));
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["ok"], false);
+            assert_eq!(value["retry_safe"], false);
+            assert_eq!(value["swipes_confirmed"], 0);
+            assert_eq!(value["swipes_uncertain"], 0);
+            assert_eq!(sources.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(actions.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert!(state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
+        }
+    });
+}
+
+#[test]
+fn list_setup_failures_never_claim_safe_replay_or_global_not_sent() {
+    block(async {
+        for uri in ["/agent/collect", "/agent/scroll_find"] {
+            for app_mismatch in [false, true] {
+                let sources = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let reads = sources.clone();
+                let runner = mock_runner(move |request, _| {
+                    if request.contains("/source") {
+                        let n = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if !app_mismatch {
+                            return None;
+                        }
+                        return Some((Duration::ZERO,json!({"value":{"type":"XCUIElementTypeApplication","label":if n==0 {"ExpectedApp"}else{"OtherApp"},"rect":{"x":0,"y":0,"width":390,"height":844}}}).to_string()));
+                    }
+                    Some((
+                        Duration::ZERO,
+                        if request.starts_with("POST /session ") {
+                            json!({"value":{"sessionId":"SESSION"}}).to_string()
+                        } else if request.contains("/window/size") {
+                            json!({"value":{"width":390,"height":844}}).to_string()
+                        } else {
+                            json!({"value":null}).to_string()
+                        },
+                    ))
+                });
+                let state = build_state_with_runner(runner.url());
+                let app = server::http::router(state);
+                let mut body = if uri == "/agent/collect" {json!({"max_pages":1})} else {json!({"label":"missing","max_swipes":0})};
+                if app_mismatch {
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri("/agent/elements?ocr=off")
+                                .header("x-phone-owner", "privacy-fixture")
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    body["snapshot"] = value["snapshot"].clone();
+                    assert!(body["snapshot"].is_string(), "seed snapshot: {value}");
+                }
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(uri)
+                            .header("x-phone-control", "1")
+                            .header("x-phone-owner", "privacy-fixture")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    value["error"],
+                    if app_mismatch {
+                        "app_changed"
+                    } else {
+                        "runner_source_failed"
+                    },
+                    "{value}"
+                );
+                assert_eq!(value["retry_safe"], false, "{value}");
+                assert_ne!(value["outcome"], "not_sent");
+                assert_eq!(value["swipes_confirmed"], 0);
+                assert_eq!(value["swipes_uncertain"], 0);
+                assert_eq!(value["swipe_outcome"], "not_sent");
+            }
+        }
+    });
+}

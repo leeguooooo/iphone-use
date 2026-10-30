@@ -167,6 +167,18 @@ pub(crate) async fn with_request_permit<T>(
     REQUEST_PERMIT.scope(permit, work).await
 }
 
+tokio::task_local! {
+    static DISPATCH_PROBE: (&'static str, std::sync::Arc<std::sync::atomic::AtomicBool>);
+}
+
+pub(crate) async fn with_dispatch_probe<T>(
+    route: &'static str,
+    dispatched: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    DISPATCH_PROBE.scope((route, dispatched), work).await
+}
+
 pub(crate) async fn execute_timed(
     client: reqwest::Client,
     request: reqwest::Request,
@@ -183,9 +195,14 @@ pub(crate) async fn execute_timed(
         normalize_route(request.url().path())
     );
     let call = InFlight {
-        route: Some(route),
+        route: Some(route.clone()),
         started: Instant::now(),
     };
+    let _ = DISPATCH_PROBE.try_with(|(expected, dispatched)| {
+        if *expected == route {
+            dispatched.store(true, std::sync::atomic::Ordering::Release);
+        }
+    });
     let response = match client.execute(request).await {
         Ok(response) => response,
         Err(error) => {
@@ -617,6 +634,21 @@ fn with_timing_field(body: &[u8], timing: &serde_json::Value) -> Option<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dispatch_probe_counts_transport_admission_not_preparation_or_refusal() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
+            let client=reqwest::Client::builder().no_proxy().build().unwrap();
+            for (path,permitted,expected) in [("/session/S/actions",false,false),("/session",true,false),("/session/S/actions",true,true)] {
+                let flag=Arc::new(AtomicBool::new(false));
+                let request=client.post(format!("http://127.0.0.1:1{path}")).build().unwrap();
+                let _=super::with_dispatch_probe("POST /actions",flag.clone(),
+                    super::with_request_permit(Arc::new(move||permitted),super::execute_timed(client.clone(),request))).await;
+                assert_eq!(flag.load(Ordering::Acquire),expected,"{path}/{permitted}");
+            }
+        });
+    }
+
     #[test]
     fn revoked_observation_never_reaches_transport() {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
