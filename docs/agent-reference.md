@@ -663,14 +663,13 @@ swipe.
 A row without a label (most Cells) is named by its texts, joined with ` · `.
 Rows are deduplicated on `(kind, identifier, label, value)`. Different exposed
 identifiers keep identical-looking rows distinct; absent or reused identifiers
-with identical content may collapse. With `end_label`, a moved page that adds
-no distinct rows still continues toward the marker within the page/time budget. `stop_reason`:
+with identical content may collapse. A changed page that adds no distinct rows
+still continues within the page/time budget: later pages may expose new rows. `stop_reason`:
 
 | `stop_reason` | Meaning |
 |---|---|
 | `end_label` | The end label was on screen — the only case with `complete:true` |
 | `duplicate_page` | After a swipe the exposed row identities, labels and frames repeated: further progress cannot be confirmed (identical-looking pages may also repeat) |
-| `no_progress` | Without `end_label`, the list moved but showed nothing new |
 | `max_pages` | Page budget used up; more rows may follow |
 | `deadline` | Too little of the 80 s call budget was left to swipe and read another page |
 | `read_failed` / `swipe_failed` | Stopped early; rows so far are returned, no snapshot |
@@ -678,8 +677,7 @@ no distinct rows still continues toward the marker within the page/time budget. 
 
 `complete` retains its end-marker meaning (`complete_scope:"end_label_visibility"`).
 `business_complete` is always false: even reaching the marker does not verify
-row counts or business totals. `complete` is false in every case but `end_label`; `duplicate_page` and
-`no_progress` are not proof the list ended. `snapshot` is the last page's
+row counts or business totals. `complete` is false in every case but `end_label`; `duplicate_page` is not proof the list ended. `snapshot` is the last page's
 tree; rows from earlier pages are off screen and carry no index.
 
 `POST /agent/scroll_find` (MCP `phone_scroll_find`) looks for one exact label:

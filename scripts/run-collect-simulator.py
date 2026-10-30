@@ -88,13 +88,16 @@ def main():
                 break
             assert time.monotonic() < until, 'Simulator Agent API did not become drivable'
             time.sleep(2)
-        logged(['python3', ROOT / 'scripts/test-collect-simulator.py', '--base', f"http://127.0.0.1:{binding['daemon_port']}",
-                '--udid', simulator, '--owner', instance, '--mcp', mcp, '--runner-record', record,
-                '--product-version', match[1],
-                '--out', args.out / 'conformance'], args.out / 'conformance.log', env, 720)
-        proof = json.loads((args.out / 'conformance/result.json').read_text())
-        assert proof['passed'] is True and not proof['cleanup_errors'] and len(proof['cases']) == 4
-        result.update(passed=True, cases=proof['cases'])
+        for folder, flags, field in [('conformance', [], 'cases'),
+                                     ('default-conformance', ['--without-end-label'], 'default_cases')]:
+            logged(['python3', ROOT / 'scripts/test-collect-simulator.py', '--base', f"http://127.0.0.1:{binding['daemon_port']}",
+                    '--udid', simulator, '--owner', instance, '--mcp', mcp, '--runner-record', record,
+                    '--product-version', match[1], '--out', args.out / folder, *flags],
+                   args.out / (folder + '.log'), env, 720)
+            proof = json.loads((args.out / folder / 'result.json').read_text())
+            assert proof['passed'] is True and not proof['cleanup_errors'] and len(proof['cases']) == 4
+            result[field] = proof['cases']
+        result['passed'] = True
     except Exception as error:
         result['error'] = str(error)
         raise

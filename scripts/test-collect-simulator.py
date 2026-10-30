@@ -37,7 +37,7 @@ def fixture_model(mode):
             for index in range(8 if mode == 'counter' else 32)]
 
 
-def verify_case(oracle, before, after, result, last_tree, seed_tree=None):
+def verify_case(oracle, before, after, result, last_tree, seed_tree=None, *, expect_end_label=True):
     """A Native ACK alone cannot satisfy model coverage or UIKit movement."""
     errors = []
     mode, nonce = oracle.get('mode'), oracle.get('run_id')
@@ -68,17 +68,19 @@ def verify_case(oracle, before, after, result, last_tree, seed_tree=None):
         errors.append('collection did not cover multiple reads')
     if not result.get('snapshot') or result['snapshot'] != last_tree.get('snapshot'):
         errors.append('returned snapshot differs from final page')
+    expected_complete = expect_end_label
+    expected_stop = 'end_label' if expect_end_label else 'duplicate_page'
     if mode in ('unique', 'reused'):
         if Counter(map(row_key, rows)) != Counter(map(row_key, expected)):
             errors.append('collected rows differ from independent App model')
-        if result.get('complete') is not True or result.get('end_label_seen') is not True or result.get('stop_reason') != 'end_label':
+        if result.get('complete') is not expected_complete or result.get('end_label_seen') is not expected_complete or result.get('stop_reason') != expected_stop:
             errors.append('did not reach the independent model end')
         if after.get('max_offset_y', 0) < 100 or after.get('scroll_events', 0) < 1:
             errors.append('UIKit did not observe list movement')
         if set(after.get('seen_indices', [])) != set(range(len(expected))):
             errors.append('UIKit did not expose every model index')
     elif mode == 'missing':
-        if len(rows) != 1 or result.get('complete') is not True or result.get('end_label_seen') is not True or result.get('stop_reason') != 'end_label':
+        if len(rows) != 1 or result.get('complete') is not expected_complete or result.get('end_label_seen') is not expected_complete or result.get('stop_reason') != expected_stop:
             errors.append('anonymous rows did not reach the requested end marker')
         if set(after.get('seen_indices', [])) != set(range(len(expected))):
             errors.append('anonymous list did not expose every model index')
@@ -168,6 +170,7 @@ def main():
         parser.add_argument('--' + name, required=True)
     for name in ('mcp', 'runner-record', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--without-end-label', action='store_true')
     args = parser.parse_args()
     args.out = args.out.resolve()
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -180,7 +183,7 @@ def main():
     assert any(d['udid'].lower() == args.udid.lower() and d['state'] == 'Booted' for group in devices['devices'].values() for d in group)
     assert drag.command(['xcrun', 'simctl', 'get_app_container', args.udid, BUNDLE, 'data'], check=False).returncode != 0, 'fixture already installed; nothing overwritten'
     app = build_fixture(args.out)
-    result = {'scope': 'owned Simulator Native list conformance', 'passed': False, 'cases': [],
+    result = {'scope': 'owned Simulator Native list conformance', 'without_end_label': args.without_end_label, 'passed': False, 'cases': [],
               'binary_sha256': hashlib.sha256(args.mcp.read_bytes()).hexdigest(),
               'fixture_sha256': hashlib.sha256((args.out / 'fixture-src/runner/gesture-fixture/main.swift').read_bytes()).hexdigest()}
     installed = False
@@ -237,7 +240,7 @@ def main():
                 assert exposed <= native_ids(raw), 'rawIdentifier was lost in Native source'
             (case / 'seed.json').write_text(json.dumps(seed, indent=2))
             parameters = {'max_pages': 4 if mode == 'counter' else 10, 'snapshot': seed['snapshot']}
-            if mode != 'counter':
+            if mode != 'counter' and not args.without_end_label:
                 parameters['end_label'] = 'END OF LIST ORACLE'
             started = time.monotonic()
             result['collection_calls_sent'] += 1
@@ -273,7 +276,7 @@ def main():
                 assert last_exposed and last_exposed <= native_ids(raw_last), 'final Native rawIdentifier propagation failed'
             if mode == 'unique':
                 assert 'row.031' in last_exposed and last_exposed != exposed, 'Native never exposed a new final page'
-            errors = verify_case(oracle, before, after, collection, last, seed)
+            errors = verify_case(oracle, before, after, collection, last, seed, expect_end_label=not args.without_end_label)
             result['cases'].append({'mode': mode, 'run_id': nonce, 'elapsed_secs': elapsed,
                 'rows': collection.get('row_count'), 'stop': collection.get('stop_reason'), 'errors': errors, 'passed': not errors})
             assert not errors, '; '.join(errors)

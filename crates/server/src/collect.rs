@@ -2,8 +2,7 @@
 //!
 //! One page is the rows of a kind (default `Cell`) whose centre lies on the
 //! screen, or inside an optional region of it. Between pages the daemon swipes
-//! once; it stops when the list stops moving, when a page adds nothing new
-//! without a requested end label,
+//! once; it stops when the exposed page repeats,
 //! when an end label shows up, or at a page budget. Rows are deduplicated on
 //! `(kind, identifier, label, value)`; rows with different exposed identifiers
 //! stay distinct, while identical content with absent or reused identifiers can collapse.
@@ -476,8 +475,6 @@ pub enum StopReason {
     /// The exposed row identities, labels and frames repeated. Further
     /// progress cannot be confirmed; identical-looking pages may also repeat.
     DuplicatePage,
-    /// The list moved but showed no row not already collected.
-    NoProgress,
     MaxPages,
     Deadline,
     /// A read after a swipe failed; what was collected before is returned.
@@ -493,7 +490,6 @@ impl StopReason {
         match self {
             StopReason::EndLabel => "end_label",
             StopReason::DuplicatePage => "duplicate_page",
-            StopReason::NoProgress => "no_progress",
             StopReason::MaxPages => "max_pages",
             StopReason::Deadline => "deadline",
             StopReason::ReadFailed => "read_failed",
@@ -574,9 +570,6 @@ pub(crate) async fn collect<P: Pager>(
         if duplicate {
             break StopReason::DuplicatePage;
         }
-        if number > 1 && new_rows == 0 && request.end_label.is_none() {
-            break StopReason::NoProgress;
-        }
         if number >= request.max_pages {
             break StopReason::MaxPages;
         }
@@ -617,7 +610,7 @@ pub fn coverage_note(collection: &Collection) -> String {
             "the end label was on screen on page {}: the list was read to that point. Business row counts and totals are NOT verified. {dedupe}.",
             collection.pages.len()
         ),
-        StopReason::DuplicatePage | StopReason::NoProgress => format!(
+        StopReason::DuplicatePage => format!(
             "NOT proven complete: the list stopped yielding new rows ({}), which may be its end or a swipe that did not scroll it. Check the screen or pass end_label. {dedupe}.",
             collection.stop.as_str()
         ),
@@ -802,14 +795,17 @@ mod tests {
     }
 
     #[test]
-    fn a_moved_page_with_nothing_new_is_no_progress() {
+    fn a_changed_page_with_no_new_rows_can_lead_to_later_new_rows() {
         let mut pager = Scripted::new(vec![
             screen_of(&[("A", 100.0), ("B", 200.0)]),
             screen_of(&[("A", 150.0), ("B", 250.0)]),
+            screen_of(&[("C", 100.0)]),
         ]);
         let collection = run(&mut pager, &request(serde_json::json!({})));
-        assert_eq!(collection.stop, StopReason::NoProgress);
-        assert_eq!(labels(&collection), ["A", "B"]);
+        assert_eq!(collection.stop, StopReason::DuplicatePage);
+        assert_eq!(labels(&collection), ["A", "B", "C"]);
+        assert_eq!(collection.pages[1].new_rows, 0);
+        assert_eq!(collection.pages[2].new_rows, 1);
     }
 
     #[test]
@@ -967,7 +963,7 @@ mod tests {
             &request(serde_json::json!({})),
         );
         assert_eq!(collection.rows.len(), 1);
-        assert_eq!(collection.stop, StopReason::NoProgress);
+        assert_eq!(collection.stop, StopReason::DuplicatePage);
         let collection = run(
             &mut Scripted::new(vec![
                 identified_page(Some("item-a"), Some("1")),

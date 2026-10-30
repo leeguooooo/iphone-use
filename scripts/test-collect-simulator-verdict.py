@@ -49,6 +49,14 @@ class OracleTests(unittest.TestCase):
             else: values[3]['complete'] = False
             with self.subTest(fault=fault): self.assertTrue(probe.verify_case(*values))
 
+    def test_default_collection_requires_full_ui_coverage_without_claiming_an_end(self):
+        for mode in ('unique', 'reused', 'missing'):
+            values = sample(mode)
+            values[3].update(complete=False, end_label_seen=False, stop_reason='duplicate_page')
+            self.assertEqual(probe.verify_case(*values, expect_end_label=False), [])
+            values[2]['seen_indices'].pop()
+            self.assertTrue(probe.verify_case(*values, expect_end_label=False))
+
     def test_old_text_only_collapse_is_not_complete_coverage(self):
         values = sample(); values[3].update(rows=values[3]['rows'][:1], row_count=1)
         self.assertTrue(probe.verify_case(*values))
