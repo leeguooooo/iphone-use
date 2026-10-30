@@ -2092,8 +2092,9 @@ impl PhoneHandler {
         turns: reads the rows of one kind (default Cell) on screen, swipes one page, reads \
         again, and stops when the list stops moving (duplicate_page), a page adds nothing \
         new (no_progress), end_label is on screen, or max_pages (default 6, max 10) is \
-        reached. Rows are deduplicated on (kind, label, value): identical-looking rows \
-        collapse, so reconcile counts the user cares about. `complete` is true ONLY when \
+        reached. Rows are deduplicated on (kind, identifier, label, value): different exposed \
+        identifiers preserve identical-looking rows. Absent or reused identifiers with identical \
+        content may still collapse, so reconcile counts the user cares about. `complete` is true ONLY when \
         end_label was seen; no_progress or duplicate_page is not proof the list ended. Only \
         what the accessibility tree exposes is collected. It swipes the live list, so the \
         screen is left where the last page was; `snapshot` is that last page. \

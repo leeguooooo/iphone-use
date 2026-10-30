@@ -4,7 +4,8 @@
 //! screen, or inside an optional region of it. Between pages the daemon swipes
 //! once; it stops when the list stops moving, when a page adds nothing new,
 //! when an end label shows up, or at a page budget. Rows are deduplicated on
-//! `(kind, label, value)`, so two genuinely identical rows collapse into one.
+//! `(kind, identifier, label, value)`; rows with different exposed identifiers
+//! stay distinct, while identical content with absent or reused identifiers can collapse.
 //!
 //! What this can NOT tell: whether the list is complete. Only an end label the
 //! caller named proves the bottom was reached; a list that stopped moving may
@@ -379,8 +380,13 @@ pub struct CollectedRow {
 }
 
 impl CollectedRow {
-    fn key(&self) -> (String, String, Option<String>) {
-        (self.kind.clone(), self.label.clone(), self.value.clone())
+    fn key(&self) -> (String, Option<String>, String, Option<String>) {
+        (
+            self.kind.clone(),
+            self.identifier.clone(),
+            self.label.clone(),
+            self.value.clone(),
+        )
     }
 }
 
@@ -424,7 +430,7 @@ pub fn page_rows(
                     kind: row.kind.clone(),
                     label,
                     value: row.value.clone().filter(|v| !v.is_empty()),
-                    identifier: row.identifier.clone(),
+                    identifier: row.identifier.clone().filter(|identifier| !identifier.is_empty()),
                     texts,
                     page,
                 },
@@ -434,14 +440,15 @@ pub fn page_rows(
         .collect()
 }
 
-/// What a page looks like for "did the list move": the rows' kinds, labels
-/// and frames. Values are left out on purpose — a counter or a timestamp that
+/// What a page looks like for "did the list move": the rows' kinds, identifiers,
+/// labels and frames. Values are left out on purpose — a counter or a timestamp that
 /// refreshes in place is not a new page.
-fn page_key(rows: &[(CollectedRow, [f64; 4])]) -> Vec<(String, String, [i64; 4])> {
+fn page_key(rows: &[(CollectedRow, [f64; 4])]) -> Vec<(String, Option<String>, String, [i64; 4])> {
     rows.iter()
         .map(|(row, rect)| {
             (
                 row.kind.clone(),
+                row.identifier.clone(),
                 row.label.clone(),
                 rect.map(|v| v.round() as i64),
             )
@@ -523,8 +530,8 @@ pub(crate) async fn collect<P: Pager>(
 ) -> anyhow::Result<Collection> {
     let mut page = pager.read().await?;
     let mut rows: Vec<CollectedRow> = Vec::new();
-    let mut seen: HashSet<(String, String, Option<String>)> = HashSet::new();
-    let mut seen_pages: Vec<Vec<(String, String, [i64; 4])>> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut seen_pages = Vec::new();
     let mut pages = Vec::new();
     let mut swipes = 0;
     let mut end_label_seen = false;
@@ -603,7 +610,7 @@ pub(crate) async fn collect<P: Pager>(
 
 /// What the caller should and should not conclude from a collection.
 pub fn coverage_note(collection: &Collection) -> String {
-    let dedupe = "rows are deduplicated on (kind, label, value), so identical-looking rows collapse into one; only what the accessibility tree exposes is collected";
+    let dedupe = "rows are deduplicated on (kind, identifier, label, value); different exposed identifiers keep identical-looking rows distinct, while absent or reused identifiers with identical content may collapse; only what the accessibility tree exposes is collected";
     match collection.stop {
         StopReason::EndLabel => format!(
             "the end label was on screen on page {}: the list was read to that point. {dedupe}.",
@@ -815,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn identical_rows_collapse_on_kind_label_value() {
+    fn identical_rows_without_identifiers_still_collapse() {
         let mut pager = Scripted::new(vec![screen_of(&[
             ("Same", 100.0),
             ("Same", 200.0),
@@ -826,7 +833,109 @@ mod tests {
         assert!(collection_json(&collection, None)["coverage"]
             .as_str()
             .unwrap()
-            .contains("identical-looking rows collapse"));
+            .contains("absent or reused identifiers with identical content may collapse"));
+    }
+
+    fn identified_page(identifier: Option<&str>, value: Option<&str>) -> Vec<ElementRow> {
+        let mut page = screen_of(&[("Same", 100.0)]);
+        page[1].identifier = identifier.map(str::to_owned);
+        page[1].value = value.map(str::to_owned);
+        page
+    }
+
+    #[test]
+    fn distinct_identifiers_keep_identical_text_rows_on_one_page() {
+        let mut page = screen_of(&[("Same", 100.0), ("Same", 200.0)]);
+        page[1].identifier = Some("item-a".into());
+        page[3].identifier = Some("item-b".into());
+        let collection = run(
+            &mut Scripted::new(vec![page]),
+            &request(serde_json::json!({"max_pages":1})),
+        );
+        let json = collection_json(&collection, None);
+        assert_eq!(json["row_count"], 2);
+        assert_eq!(json["rows"][0]["identifier"], "item-a");
+        assert_eq!(json["rows"][1]["identifier"], "item-b");
+        assert_eq!(json["complete"], false);
+    }
+
+    #[test]
+    fn new_identifiers_in_reused_frames_are_not_a_duplicate_page() {
+        let mut pager = Scripted::new(vec![
+            identified_page(Some("item-a"), None),
+            identified_page(Some("item-b"), None),
+            identified_page(Some("item-b"), None),
+        ]);
+        let collection = run(&mut pager, &request(serde_json::json!({})));
+        assert_eq!(collection.rows.len(), 2);
+        assert_eq!(collection.rows[1].identifier.as_deref(), Some("item-b"));
+        assert_eq!(collection.rows[1].page, 2);
+        assert_eq!(collection.pages.len(), 3);
+        assert_eq!(collection.pages[1].new_rows, 1);
+        assert_eq!(collection.stop, StopReason::DuplicatePage);
+        assert_eq!(collection.swipes, 2);
+        assert_eq!(collection_json(&collection, None)["complete"], false);
+    }
+
+    #[test]
+    fn empty_identifiers_and_missing_identifiers_share_the_text_fallback() {
+        let mut page = screen_of(&[("Same", 100.0), ("Same", 200.0)]);
+        page[1].identifier = Some(String::new());
+        let collection = run(
+            &mut Scripted::new(vec![page]),
+            &request(serde_json::json!({"max_pages":1})),
+        );
+        assert_eq!(collection.rows.len(), 1);
+        let mut pager = Scripted::new(vec![
+            identified_page(None, None),
+            identified_page(Some(""), None),
+        ]);
+        let collection = run(&mut pager, &request(serde_json::json!({})));
+        assert_eq!(collection.stop, StopReason::DuplicatePage);
+        assert_eq!(collection.rows.len(), 1);
+    }
+
+    #[test]
+    fn identified_rows_still_deduplicate_and_value_refreshes_do_not_scroll_forever() {
+        let first = identified_page(Some("item-a"), Some("1"));
+        let mut moved = first.clone();
+        for row in &mut moved[1..] {
+            row.rect[1] += 50.0;
+        }
+        let collection = run(
+            &mut Scripted::new(vec![first, moved]),
+            &request(serde_json::json!({})),
+        );
+        assert_eq!(collection.rows.len(), 1);
+        assert_eq!(collection.stop, StopReason::NoProgress);
+        let collection = run(
+            &mut Scripted::new(vec![
+                identified_page(Some("item-a"), Some("1")),
+                identified_page(Some("item-a"), Some("2")),
+            ]),
+            &request(serde_json::json!({})),
+        );
+        assert_eq!(collection.stop, StopReason::DuplicatePage);
+        assert_eq!(collection.rows.len(), 1);
+        assert_eq!(collection.rows[0].value.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn reused_identifiers_do_not_discard_different_labels_or_values() {
+        let mut page = screen_of(&[("Same", 100.0), ("Same", 200.0), ("Other", 300.0)]);
+        for index in [1, 3, 5] {
+            page[index].identifier = Some("reused-id".into());
+        }
+        page[1].value = Some("1".into());
+        page[3].value = Some("2".into());
+        page[5].value = Some("1".into());
+        let collection = run(
+            &mut Scripted::new(vec![page]),
+            &request(serde_json::json!({"max_pages":1})),
+        );
+        assert_eq!(collection.rows.len(), 3);
+        assert_eq!(labels(&collection), ["Same", "Same", "Other"]);
+        assert_eq!(collection.rows[1].value.as_deref(), Some("2"));
     }
 
     #[test]
