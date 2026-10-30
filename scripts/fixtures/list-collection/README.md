@@ -27,7 +27,7 @@ python3 scripts/run-collect-simulator.py \
   --runtime com.apple.CoreSimulator.SimRuntime.iOS-18-2 --out /new/output/directory
 ```
 
-运行前检查目标、实例记录、前台 App、窗口状态和原生 viewport。请求不重放；HTTP 错误、MCP 错误、不确定滑动、数据缺失、前后身份检查不符和清理失败都会使验收失败。判定器负例可离线运行：`python3 -I scripts/test-collect-simulator-verdict.py`。
+运行前检查目标、实例记录、前台 App、窗口状态和原生 viewport。MCP 发送首个采集前，还会在同一 stdio 会话调用只读 `phone_status`，核对 Simulator UDID、可控制状态和 owner。请求不重放；HTTP 错误、MCP 错误、不确定滑动、数据缺失、前后身份检查不符和清理失败都会使验收失败。判定器负例可离线运行：`python3 -I scripts/test-collect-simulator-verdict.py`。
 
 本机有明显内存压力或 swap 时，使用隔离 CI，不中断其他会话。脚本会在退出时清理本轮创建的 Simulator，并保留模型、Native 树、响应和无凭据日志。失败时的 `failure-ui.png` 是该专用 Simulator 的帧缓冲诊断，不是原生系统截图保存的验收。
 

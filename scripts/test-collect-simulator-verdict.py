@@ -92,6 +92,13 @@ class OracleTests(unittest.TestCase):
             else: values[2]['max_abs_offset_y'] = 50
             with self.subTest(fault=fault): self.assertTrue(probe.verify_case(*values))
 
+    def test_mcp_device_gate_refuses_wrong_target_before_collection(self):
+        status = {'ok': True, 'target': 'simulator', 'udid': 'owned-uuid', 'drivable': True, 'owner': None}
+        self.assertEqual(probe.target_errors(status, 'OWNED-UUID', 'test-owner'), [])
+        for key, value in [('target', 'iphone'), ('udid', 'other-uuid'), ('drivable', False), ('owner', 'other-owner'), ('ok', False)]:
+            wrong = {**status, key: value}
+            with self.subTest(field=key): self.assertTrue(probe.target_errors(wrong, 'owned-uuid', 'test-owner'))
+
     def test_counter_requires_observed_refresh_and_first_values(self):
         for fault in ('not-observed', 'latest-values', 'continued'):
             values = sample('counter')

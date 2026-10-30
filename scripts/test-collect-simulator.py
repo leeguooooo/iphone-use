@@ -111,6 +111,14 @@ def transport_errors(*, http_status=None, mcp_reply=None):
     return []
 
 
+def target_errors(status, udid, owner):
+    if status.get('ok') is not True or status.get('target') != 'simulator' or str(status.get('udid', '')).lower() != udid.lower():
+        return ['MCP targets a different device; no collection sent']
+    if status.get('drivable') is not True or status.get('owner') not in (None, owner):
+        return ['MCP target is unavailable or owned elsewhere; no collection sent']
+    return []
+
+
 def native_ids(value):
     if isinstance(value, dict):
         found = {value['rawIdentifier']} if value.get('type') == 'XCUIElementTypeCell' and value.get('rawIdentifier') else set()
@@ -183,6 +191,12 @@ def main():
         server = peer.initialization.get('result', {}).get('serverInfo', {})
         result['mcp_server'] = server
         assert server.get('version') == args.product_version, 'MCP and product versions differ; no collection sent'
+        status_reply = peer.request('tools/call', {'name': 'phone_status', 'arguments': {}}, timeout=30)
+        assert not transport_errors(mcp_reply=status_reply), 'MCP status failed; no collection sent'
+        _, _, mcp_status = payload(status_reply)
+        assert not target_errors(mcp_status, args.udid, args.owner), 'MCP device binding differs; no collection sent'
+        result['mcp_binding'] = {key: mcp_status.get(key) for key in ('target', 'udid', 'drivable', 'owner')}
+        result['collection_calls_sent'] = 0
         for mode in MODES:
             case = args.out / mode; case.mkdir()
             nonce = str(uuid.uuid4())
@@ -220,6 +234,7 @@ def main():
             if mode != 'counter':
                 parameters['end_label'] = 'END OF LIST ORACLE'
             started = time.monotonic()
+            result['collection_calls_sent'] += 1
             if mode == 'unique':
                 reply = peer.request('tools/call', {'name': 'phone_collect_list', 'arguments': parameters}, timeout=110)
                 (case / 'mcp-response.json').write_text(json.dumps(reply, indent=2))
