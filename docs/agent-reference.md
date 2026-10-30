@@ -1039,6 +1039,11 @@ Selectors require a full read: combining one with `since` (including
 `scope=changed`) is refused before the device read. Malformed/unsupported
 selectors return 400 `invalid_selector`.
 
+The MCP checks that `filter.selector` confirms the requested selector before
+returning or caching the read. Missing or different confirmation fails instead
+of silently returning a broader view; ordinary reads still work with older
+daemons. Update the selected instance when its daemon lacks selector support.
+
 **Images only when needed.** `?image=auto` attaches a screenshot only when the
 tree is unusable (no interactive rows, containers only). The screenshot is
 always a fresh capture taken after the read. It is labelled with

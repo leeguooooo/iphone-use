@@ -533,9 +533,22 @@ pub fn upgrade_rebuild(old: &str, new: &str) -> bool {
 
 /// Held while a runner product is built, validated and recorded: setup and
 /// the post-upgrade prebuild share one DerivedData, and two xcodebuilds in
-/// it corrupt each other. Released on drop (the descriptor closes).
+/// it corrupt each other. Released by its creating process on drop.
 pub struct BuildLock {
-    _file: std::fs::File,
+    file: std::fs::File,
+    owner_pid: u32,
+}
+
+impl Drop for BuildLock {
+    fn drop(&mut self) {
+        // fork may keep another reference to the same open-file lock alive.
+        // Only the creator owns release; a borrowed child must only close its copy.
+        if std::process::id() == self.owner_pid {
+            let fd = std::os::unix::io::AsRawFd::as_raw_fd(&self.file);
+            // SAFETY: this guard acquired the lock on this owned descriptor.
+            let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
+        }
+    }
 }
 
 /// Take the build lock without waiting: `Ok(None)` while another process
@@ -565,8 +578,10 @@ pub fn try_build_lock(ctx: &Ctx) -> Result<Option<BuildLock>, String> {
     }
     let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
     // SAFETY: flock on a descriptor this function owns.
-    Ok((unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0)
-        .then_some(BuildLock { _file: file }))
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Ok(None);
+    }
+    Ok(Some(BuildLock { file, owner_pid: std::process::id() }))
 }
 
 // ── the post-upgrade prebuild ───────────────────────────────────────────────
@@ -946,6 +961,86 @@ mod tests {
         assert!(!upgrade_rebuild(&before, &key("src1", "u", "17", "embed:aa")));
         assert!(!upgrade_rebuild("", &before));
         assert!(!upgrade_rebuild("v2|x|y", &before));
+    }
+
+    struct InheritedLockChild(libc::pid_t);
+    impl InheritedLockChild {
+        fn alive(&self) -> bool {
+            unsafe { libc::waitpid(self.0, std::ptr::null_mut(), libc::WNOHANG) == 0 }
+        }
+    }
+    impl Drop for InheritedLockChild {
+        fn drop(&mut self) {
+            // Only the child this test forked; an unreaped child PID cannot be reused.
+            if self.alive() {
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                    while libc::waitpid(self.0, std::ptr::null_mut(), 0) < 0 {
+                        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted { break; }
+                    }
+                }
+            }
+        }
+    }
+
+    fn fork_with_build_lock(held: BuildLock, drop_in_child: bool) -> (BuildLock, InheritedLockChild) {
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            unsafe { libc::close(pipe[0]); libc::close(pipe[1]); }
+            panic!("test fork failed");
+        }
+        if pid == 0 {
+            // After fork use only descriptor cleanup, syscalls and _exit, never
+            // allocation, logging, or inherited runtime/allocator locks.
+            unsafe { libc::close(pipe[0]); }
+            if drop_in_child { drop(held); }
+            if unsafe { libc::write(pipe[1], b"R".as_ptr().cast(), 1) } != 1 {
+                unsafe { libc::_exit(2) }
+            }
+            unsafe { libc::close(pipe[1]); }
+            loop { unsafe { libc::pause(); } }
+        }
+        let child = InheritedLockChild(pid);
+        unsafe { libc::close(pipe[1]); }
+        let mut ready = unsafe { std::fs::File::from_raw_fd(pipe[0]) };
+        let mut poll = libc::pollfd { fd: ready.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now()).as_millis().min(5000) as i32;
+            let result = unsafe { libc::poll(&mut poll, 1, remaining) };
+            if result < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
+            assert!(result > 0, "child did not signal within the bounded observation window");
+            break;
+        }
+        let mut byte = [0]; ready.read_exact(&mut byte).unwrap(); assert_eq!(byte, *b"R");
+        assert!(child.alive());
+        (held, child)
+    }
+
+    #[test]
+    fn build_lock_owner_drop_releases_even_with_an_inherited_descriptor() {
+        let home = tempfile::tempdir().unwrap();
+        let instance = crate::instance::Instance::derive("", home.path(), None).unwrap();
+        let ctx = Ctx::paths(instance); std::fs::create_dir_all(ctx.state_dir()).unwrap();
+        let held = try_build_lock(&ctx).unwrap().unwrap();
+        let (held, child) = fork_with_build_lock(held, false);
+        drop(held);
+        assert!(child.alive());
+        assert!(try_build_lock(&ctx).unwrap().is_some(), "owner drop must release while a forked child still holds the descriptor");
+    }
+
+    #[test]
+    fn build_lock_child_drop_does_not_release_the_parent_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let instance = crate::instance::Instance::derive("", home.path(), None).unwrap();
+        let ctx = Ctx::paths(instance); std::fs::create_dir_all(ctx.state_dir()).unwrap();
+        let held = try_build_lock(&ctx).unwrap().unwrap();
+        let (_held, _child) = fork_with_build_lock(held, true);
+        assert!(try_build_lock(&ctx).unwrap().is_none(), "borrowed child must not unlock its parent's critical section");
     }
 
     #[test]

@@ -874,7 +874,7 @@ impl DaemonClient {
     /// `{"snapshot":"…","elements":[{kind,label,identifier?,rect,
     /// enabled?,visible?,accessible?,focused?,placeholder?,depth},…]}`.
     pub async fn elements(&self) -> anyhow::Result<String> {
-        self.elements_at("/agent/elements").await
+        self.elements_at("/agent/elements", None).await
     }
 
     /// [`Self::elements`] with the daemon's `image=auto` policy: when the tree
@@ -899,10 +899,12 @@ impl DaemonClient {
             url.query_pairs_mut().append_pair("selector", &serde_json::to_string(selector)?);
             path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
         }
-        self.elements_at(&path).await
+        self.elements_at(&path, selector).await
     }
 
-    async fn elements_at(&self, path: &str) -> anyhow::Result<String> {
+    async fn elements_at(
+        &self, path: &str, selector: Option<&iu_core::element_selector::ElementSelector>,
+    ) -> anyhow::Result<String> {
         // A cold runner call may create a session and then request the source tree;
         // each upstream step is bounded by the daemon, but together can exceed
         // the generic 30-second MCP timeout. Wait long enough for the daemon to
@@ -920,6 +922,15 @@ impl DaemonClient {
             anyhow::bail!(
                 "/agent/elements answered more than {DAEMON_RESPONSE_READ_LIMIT} bytes; not read"
             );
+        }
+        if let Some(selector) = selector {
+            let expected = serde_json::to_value(selector)?;
+            let acknowledged = response.json.as_ref()
+                .and_then(|body| body.get("filter"))
+                .and_then(|filter| filter.get("selector"));
+            if acknowledged != Some(&expected) {
+                anyhow::bail!("selected daemon did not acknowledge the requested selector; read result discarded. Verify or update the selected instance before retrying");
+            }
         }
         self.remember_snapshot(response.json.as_ref());
         Ok(response.body)
@@ -1327,6 +1338,44 @@ pub(crate) mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc;
     use std::thread::JoinHandle;
+
+    #[tokio::test]
+    async fn selector_reply_must_acknowledge_the_requested_filter_before_caching() {
+        let selector: iu_core::element_selector::ElementSelector = serde_json::from_value(
+            serde_json::json!({"identifier":"primary"})
+        ).unwrap();
+        for body in [
+            serde_json::json!({"snapshot":"unfiltered","elements":[{"label":"UNRELATED_SCREEN"}]}),
+            serde_json::json!({"snapshot":"wrong-filter","elements":[],"filter":{"selector":{"identifier":"other"}}}),
+            serde_json::json!({"snapshot":"legacy-query-only","elements":[],"filter":{"query":"primary"}}),
+        ] {
+            let (url,task)=mock_daemon("200 OK",&body.to_string());
+            let client=DaemonClient::new(&url,None);
+            client.remember_snapshot(Some(&serde_json::json!({"snapshot":"previous"})));
+            let result=client.elements_with_selector(None,None,None,Some(&selector)).await;
+            task.join().unwrap();
+            assert!(result.is_err(),"a legacy or different filter must not silently broaden results");
+            assert_eq!(client.last_snapshot.lock().unwrap().as_deref(),Some("previous"));
+            assert!(!result.unwrap_err().to_string().contains("UNRELATED_SCREEN"));
+        }
+    }
+
+    #[tokio::test]
+    async fn selector_acknowledgement_and_legacy_plain_reads_remain_supported() {
+        let selector: iu_core::element_selector::ElementSelector = serde_json::from_value(
+            serde_json::json!({"identifier":"primary"})
+        ).unwrap();
+        for selected in [false,true] {
+            let mut body=serde_json::json!({"snapshot":"accepted","elements":[]});
+            if selected { body["filter"]=serde_json::json!({"selector":selector}); }
+            let (url,task)=mock_daemon("200 OK",&body.to_string());
+            let client=DaemonClient::new(&url,None);
+            let result=client.elements_with_selector(None,None,None,selected.then_some(&selector)).await;
+            task.join().unwrap();
+            assert!(result.is_ok());
+            assert_eq!(client.last_snapshot.lock().unwrap().as_deref(),Some("accepted"));
+        }
+    }
 
     #[tokio::test]
     async fn http_pool_is_lazy_and_shared_but_session_state_is_separate() {
