@@ -110,6 +110,11 @@ final class DeviceSession: ObservableObject, Identifiable {
     @Published private var metricsTask: Task<Void, Never>?
     /// Wireframe shown over a picture the app blanked (see `captureRedacted`).
     @Published var redactedImage: UIImage?
+    /// The picture from `/agent/mjpeg`, for a daemon with no H.264 encoder
+    /// (the on-phone daemon answers `/agent/h264` with 501).
+    @Published var mjpegImage: UIImage?
+    private var mjpegReader: MJPEGStreamReader?
+    private var h264Unavailable = false
     /// Requests go straight to the Mac on the LAN rather than through the
     /// paired (tunnel) address.
     @Published var onLAN = false
@@ -477,6 +482,10 @@ final class DeviceSession: ObservableObject, Identifiable {
         redactedImage = nil
         reader?.stop()
         reader = nil
+        mjpegReader?.stop()
+        mjpegReader = nil
+        mjpegImage = nil
+        h264Unavailable = false
         client = nil
         status = nil
         videoLive = false
@@ -556,7 +565,7 @@ final class DeviceSession: ObservableObject, Identifiable {
     /// reopen a stream that went silent (the runner sends a frame at least
     /// every second, so silence means the connection died without saying so).
     private func updateMetrics() {
-        let wanted = role == .full && video != nil && reader != nil
+        let wanted = role == .full && video != nil && (reader != nil || mjpegReader != nil)
         if wanted, metricsTask == nil {
             metricsTask = Task { [weak self] in
                 var restarts = 0
@@ -603,7 +612,34 @@ final class DeviceSession: ObservableObject, Identifiable {
                 && $0.deviceState != "offline" && $0.deviceState != "blocked"
         } ?? false
         let wanted = client != nil && video != nil && !suspended && showable && !Self.observeOnly
-        if wanted, reader == nil, let client {
+        if wanted, h264Unavailable, mjpegReader == nil, let client {
+            let reader = MJPEGStreamReader(
+                request: client.request("agent/mjpeg"),
+                onImage: { [weak self] image in
+                    self?.mjpegImage = image
+                    self?.frameArrived()
+                },
+                onState: { [weak self] ok, why in
+                    self?.videoMessage = why
+                    if !ok { self?.videoLive = false }
+                    if why?.contains("401") == true {
+                        Task { _ = await self?.relogin() }
+                    }
+                })
+            mjpegReader = reader
+            if videoWaitSince == nil { videoWaitSince = Date() }
+            streamOpenedAt = Date()
+            reader.start()
+        } else if !wanted || !h264Unavailable, let reader = mjpegReader {
+            reader.stop()
+            mjpegReader = nil
+            mjpegImage = nil
+            if !wanted {
+                videoLive = false
+                videoWaitSince = nil
+            }
+        }
+        if wanted, !h264Unavailable, reader == nil, let client {
             let quality = wantedQuality
             let reader = H264StreamReader(
                 request: client.request(
@@ -611,6 +647,12 @@ final class DeviceSession: ObservableObject, Identifiable {
                     query: [URLQueryItem(name: "mode", value: quality ? "quality" : "performance")]),
                 onMessage: { [weak self] message in self?.video?.enqueue(message) },
                 onState: { [weak self] ok, why in
+                    if why?.contains("501") == true, let self {
+                        // No H.264 here (the on-phone daemon): MJPEG instead.
+                        self.h264Unavailable = true
+                        self.restartStream()
+                        return
+                    }
                     self?.videoMessage = why
                     if !ok { self?.videoLive = false }
                     // A dropped stream on the LAN may mean the LAN is gone:

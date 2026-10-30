@@ -646,7 +646,7 @@ struct RemoteStage: View {
                     resetZoom: resetZoom,
                     onZoom: { zoom = $0 },
                     onPictureFrame: { pictureFrameSink($0) },
-                    overlay: session.redactedImage,
+                    overlay: session.redactedImage ?? session.mjpegImage,
                     accessibilityLabel: String(localized: "\(session.name) 的屏幕"),
                     accessibilityActions: [
                         (String(localized: "主屏幕"), { session.send(.home) }),
