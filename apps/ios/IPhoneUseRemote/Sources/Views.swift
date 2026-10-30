@@ -105,7 +105,7 @@ struct IPhoneUseRemoteApp: App {
                 .alert(
                     LocalizedStringKey(
                         app.pendingLink.map { DeviceStore.isThisPhone($0.base.absoluteString) } == true
-                            ? "让 agent 在这台 iPhone 上做事？" : "连接到这台 Mac？"),
+                            ? "让 agent 在这台 iPhone 上做事？" : "连接到这台设备？"),
                     isPresented: Binding(
                         get: { app.pendingLink != nil },
                         set: { if !$0 { app.pendingLink = nil } }),
@@ -117,9 +117,9 @@ struct IPhoneUseRemoteApp: App {
                     if DeviceStore.isThisPhone(link.base.absoluteString) {
                         Text("配对这台 iPhone 自己的 agent。只在你刚刚在自己 Mac 上点了「配对本机 Agent」时才点「连接」。")
                     } else if let name = app.savedName(for: link) {
-                        Text("\(DeviceStore.defaultName(for: link.base.absoluteString))\n已保存为「\(name)」，会刷新它的配对。只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
+                        Text("\(DeviceStore.defaultName(for: link.base.absoluteString))\n已保存为「\(name)」，会刷新它的配对。只在连接是你自己刚刚发起的（扫了自己设备上的二维码，或在自己的电脑上运行了连接命令）时才点「连接」。")
                     } else {
-                        Text("\(DeviceStore.defaultName(for: link.base.absoluteString))\n只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。")
+                        Text("\(DeviceStore.defaultName(for: link.base.absoluteString))\n只在连接是你自己刚刚发起的（扫了自己设备上的二维码，或在自己的电脑上运行了连接命令）时才点「连接」。")
                     }
                 }
         }
