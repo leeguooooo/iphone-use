@@ -116,8 +116,9 @@ scripts/agent-bench/run.py --task settings-ios-version \
   --label alt-cli --prepare-only
 ```
 
-`--env-file` is a JSON object of `UPPER_CASE` names to strings, applied to the
-trial's process. `{run_dir}` in a value becomes the run's private directory, so
+`--env-file` is a JSON object of `UPPER_CASE` names to strings, applied only to
+the backend. MCP values go into its single server configuration; CLI values
+are set by a private launcher that forwards the original arguments unchanged. `{run_dir}` in a value becomes the run's private directory, so
 a backend can get a fresh home and no inherited session, for example
 `{"ALT_HOME": "{run_dir}/alt-home", "ALT_SESSION": "", "ALT_TELEMETRY": "0"}`.
 Its digest is recorded in the run context. Keep backend-specific files
@@ -137,7 +138,7 @@ MCP trials disable built-in execution tools and expose only the selected server.
 Claude's `ToolSearch` and `WaitForMcpServers` remain available for native MCP
 discovery/readiness, and their calls count in the metrics. See the
 [Claude MCP tool availability documentation](https://code.claude.com/docs/en/mcp#tool-availability). CLI
-trials expose Bash with allow rules for the exact executable; the CLI path
+trials expose Bash with allow rules for the private environment launcher; the CLI path
 must not contain whitespace or shell/glob characters. Both request `dontAsk`
 permissions, disable hooks, use user settings only, and run outside this
 repository so its project instructions do not enter the comparison.
@@ -148,7 +149,7 @@ phone, or a cloud session.
 
 Each live context records the interface, label, requested model, prompt and
 reference digests, MCP configuration digest, driver digest and entrypoint
-digest. The environment digest is included. Observed model IDs and cache-token counts come from the Claude trace.
+digest. Template and expanded backend environment digests are included. Observed model IDs and cache-token counts come from the Claude trace.
 The entrypoint digest covers that file, not all imported backend modules:
 retain the installed source revision/version as separate evidence. Runs that
 use another backend's tool namespace or whose entrypoint changes fail checks.
@@ -175,3 +176,37 @@ all pass. A legacy/default run with no model pin may verify its task, but is not
 an eligible controlled-comparison sample. An eligible individual sample still
 needs matched task/device/source/setup conditions and repeat runs before any
 performance verdict.
+
+## Agent runtime and backend environment
+
+A live run resolves `claude` from the parent environment to an absolute real
+path before launching. The agent keeps that parent environment, including its
+PATH, HOME and auth/settings; a backend's PATH/HOME/session overrides cannot
+select a different agent or interpreter. For CLI backends, the model invokes a
+private (mode0700) launcher. Its quoted environment assignments are applied by
+`/usr/bin/env` before exec of the absolute backend, and argv is preserved.
+Launcher time is part of the measured end-to-end path; do not report it as raw
+backend-only latency. Private configurations/launchers may contain credentials.
+
+New contexts record the agent executable and environment hashes, pre-run driver
+and config hashes, expanded backend environment hash and launcher hash. Changes
+to runtime, driver, backend entrypoint, launcher or config fail execution checks.
+These file fingerprints do not cover all imported modules or all managed user
+settings. Retain versions/source and settings evidence independently.
+
+`runtime_check` describes the isolation evidence. `comparison_eligible` now also
+requires the new runtime controls. Old contexts retain their task verification
+and metrics, but lack controlled-comparison eligibility. The flag still does not
+prove paired device/source/setup equivalence, repeatability or a speedup.
+`--prepare-only` remains available without an installed agent and never executes
+the private launcher, backend, model or phone tool.
+
+CLI trace auditing accepts only one literal invocation of this run's launcher
+per Bash call. Quoted literal arguments are supported; expansions, pipelines,
+redirections, compound commands and unsupported syntax do not qualify. This is
+post-run evidence checking, not a security sandbox or a device-action blocker.
+A successful correlated backend tool result is required for comparison
+eligibility; an attempted/denied call or framework-only discovery is not proof
+of backend work. Unresolved tool results invalidate new controlled traces.
+The driver source digest is frozen on module load and checked before preparation,
+before agent launch and after the run.

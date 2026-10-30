@@ -222,7 +222,7 @@ with tempfile.TemporaryDirectory(prefix="bench-native-") as tmp:
 
     def fake_claude(command, **kwargs):
         # A real model, MCP server, backend CLI or phone must never run here.
-        assert command[:2] == ["claude", "-p"]
+        assert pathlib.Path(command[0]).resolve() == pathlib.Path(sys.executable).resolve() and command[1] == "-p"
         fake_calls.append((command, kwargs))
         kwargs["stdout"].write(json.dumps({"type": "system", "subtype": "init", "model": command[command.index("--model") + 1]}) + "\n")
         for raw in current_trace["value"].splitlines():
@@ -233,10 +233,15 @@ with tempfile.TemporaryDirectory(prefix="bench-native-") as tmp:
                 continue
             if event.get("type") == "assistant" and isinstance(event.get("message"), dict):
                 event["message"].setdefault("model", command[command.index("--model") + 1])
+                if command[command.index("--tools") + 1] == "Bash":
+                    launcher = command[command.index("--allowedTools") + 1][5:-1]
+                    for block in event["message"].get("content", []):
+                        if block.get("type") == "tool_use" and block.get("name") == "Bash":
+                            block["input"] = {"command": launcher + " probe"}
             kwargs["stdout"].write(json.dumps(event) + "\n")
         return type("Completed", (), {"returncode": 0})()
 
-    with patch.object(bench.subprocess, "run", side_effect=fake_claude):
+    with patch.object(bench.subprocess, "run", side_effect=fake_claude), patch.object(bench.shutil, "which", return_value=sys.executable):
         out = root / "mcp-run"
         out.mkdir(mode=0o700)
         row = real_run_task(task, out, None, "fixed-model", mcp)
@@ -284,7 +289,8 @@ with tempfile.TemporaryDirectory(prefix="bench-native-") as tmp:
 
     discovery = root / "discovery.jsonl"
     discovery.write_text(json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "id": "search-1", "name": "ToolSearch", "input": {}}]}}) + "\n" + current_trace["value"])
+        {"type": "tool_use", "id": "search-1", "name": "ToolSearch", "input": {}}]}}) + "\n" +
+                         json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "search-1", "content": "ready"}]}}) + "\n" + current_trace["value"])
     discovery_context = root / "discovery.context.json"
     discovery_context.write_text(json.dumps({**context_data, "trace_sha256": hashlib.sha256(discovery.read_bytes()).hexdigest()}))
     result = bench.assess(bench.parse_task(task)[0], discovery, 0, context=discovery_context)
@@ -305,7 +311,7 @@ with tempfile.TemporaryDirectory(prefix="bench-native-") as tmp:
             if block.get("type") == "tool_use":
                 block["name"] = "Bash"
     current_trace["value"] = "\n".join(json.dumps(event) for event in events) + "\n"
-    with patch.object(bench.subprocess, "run", side_effect=fake_claude), patch.dict(os.environ, {"OTHER_CLI_SESSION": "old-cloud-session"}):
+    with patch.object(bench.subprocess, "run", side_effect=fake_claude), patch.object(bench.shutil, "which", return_value=sys.executable), patch.dict(os.environ, {"OTHER_CLI_SESSION": "old-cloud-session"}):
         out = root / "cli-run"
         out.mkdir(mode=0o700)
         row = real_run_task(task, out, None, "fixed-model", cli)
@@ -313,8 +319,11 @@ with tempfile.TemporaryDirectory(prefix="bench-native-") as tmp:
     command, kwargs = fake_calls[-1]
     assert command[command.index("--tools") + 1] == "Bash"
     # --env-file overrides the inherited session and expands {run_dir}.
-    assert kwargs["env"]["OTHER_CLI_SESSION"] == ""
-    assert kwargs["env"]["OTHER_CLI_HOME"] == str(out / "cli-home")
+    assert kwargs["env"]["OTHER_CLI_SESSION"] == "old-cloud-session"
+    assert "OTHER_CLI_HOME" not in kwargs["env"]
+    launcher = out / "settings-ios-version.backend"
+    assert launcher.is_file() and stat.S_IMODE(launcher.stat().st_mode) == 0o700
+    assert str(launcher) in command[2] and str(launcher) in command[command.index("--allowedTools") + 1]
     assert json.loads((out / "settings-ios-version.mcp.json").read_text()) == {"mcpServers": {}}
 
     # Preparation is useful while no phone is available, but is never a pass.
@@ -372,7 +381,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert checked["passed"] is wanted, (observed, checked)
         assert checked["model_check"]["state"] == state
         assert checked["verification"]["state"] == "passed", "model checks must not rewrite independent device evidence"
-        assert checked["comparison_eligible"] is (wanted is True and state == "matched")
+        assert checked["comparison_eligible"] is False, "old contexts without runtime controls are not comparable"
     # A result-usage model also matters; it cannot be hidden by a matching init.
     trace.write_text(json.dumps({"type": "system", "subtype": "init", "model": "pinned-model"}) + "\n" +
                      json.dumps({"type": "result", "result": "iOS18.1", "modelUsage": {"other-model": {}}, "is_error": False}) + "\n")
@@ -403,7 +412,7 @@ with tempfile.TemporaryDirectory() as tmp:
             "verified": True, "verifier": "synthetic-postconditions", "evidence": "offline event identity test"}))
         checked = bench.assess(header, trace, 0, receipt, context)
         assert checked["passed"] is wanted, (name, checked)
-        assert checked["comparison_eligible"] is (wanted is True)
+        assert checked["comparison_eligible"] is False, "old contexts preserve task results only"
     earlier = bench.audit([json.dumps({"type": "result", "modelUsage": {"other-model": {}}}),
                            json.dumps({"type": "result", "modelUsage": {"pinned-model": {}}, "result": "iOS18.1"})])
     assert earlier["models_executed"] == ["other-model", "pinned-model"]

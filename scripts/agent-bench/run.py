@@ -25,6 +25,8 @@ It drives a real phone and spends model tokens, so it is manual, not CI:
 Artifacts go to scripts/agent-bench/out/<timestamp>/ (git-ignored).
 """
 import argparse
+import copy
+import shlex
 import datetime
 import hashlib
 import json
@@ -38,6 +40,51 @@ import shutil
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
+def file_fingerprint(path):
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+DRIVER_LOADED_SHA256 = file_fingerprint(__file__)
+
+
+def literal_cli_call(command, launcher):
+    """Prove a single literal launcher invocation; do not evaluate shell data."""
+    if not isinstance(command, str) or any(c in command for c in "\n\r"):
+        return False
+    quote = None
+    escaped = False
+    for char in command:
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'": quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"': quote = None
+            elif char in "$`!": return False
+            continue
+        if char in "\"'": quote = char
+        elif char in "$`;&|<>()*?[]{}~#!": return False
+    if escaped or quote:
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(words) and words[0] == launcher
+
+
 DEFAULT_MCP = pathlib.Path.home() / "Applications/iPhoneUse.app/Contents/MacOS/iphone-use-mcp"
 TOOL_PREFIX = "mcp__iphone-use__"
 MCP_FRAMEWORK_TOOLS = ["ToolSearch", "WaitForMcpServers"]
@@ -63,17 +110,23 @@ def parse_task(path):
     return header, text.strip()
 
 
-def audit(lines, returncode=0, tool_prefix=TOOL_PREFIX):
+def audit(lines, returncode=0, tool_prefix=TOOL_PREFIX, cli_launcher=None):
     """Summarize one stream-json run (an iterable of JSONL lines). A run
     without a final `result` event, or whose known exit code is non-zero, is
     an error. None means the original exit code was not supplied."""
     calls, failed, names, full_names = [], [], {}, []
     pending = {}
+    full_pending = {}
+    cli_pending = {}
+    successful_tools = []
+    seen_call_ids = set()
+    invalid_call_ids = 0
     result = {}
     models = set()
     executed_models = set()
     model_sources = {"init": set(), "assistant": set(), "usage": set()}
     result_events = 0
+    cli_scope = []
     for raw in lines:
         raw = raw.strip()
         if not raw:
@@ -94,14 +147,34 @@ def audit(lines, returncode=0, tool_prefix=TOOL_PREFIX):
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     name = block.get("name", "")
                     full_names.append(name)
+                    if cli_launcher is not None and name == "Bash":
+                        command = (block.get("input") or {}).get("command")
+                        cli_scope.append({"verified": literal_cli_call(command, cli_launcher), "successful": False,
+                            "command_sha256": hashlib.sha256(command.encode()).hexdigest() if isinstance(command, str) else None})
                     short = name[len(tool_prefix):] if tool_prefix and name.startswith(tool_prefix) else name
                     calls.append(short)
                     names[short] = names.get(short, 0) + 1
-                    pending[block.get("id")] = short
+                    call_id = block.get("id")
+                    if isinstance(call_id, str) and call_id and call_id not in seen_call_ids:
+                        seen_call_ids.add(call_id)
+                        pending[call_id] = short
+                        full_pending[call_id] = name
+                        if cli_launcher is not None and name == "Bash":
+                            cli_pending[call_id] = len(cli_scope) - 1
+                    else:
+                        invalid_call_ids += 1
         elif kind == "user":
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
-                    failed.append(pending.get(block.get("tool_use_id"), "?"))
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    call_id = block.get("tool_use_id")
+                    if block.get("is_error"):
+                        failed.append(pending.get(call_id, "?"))
+                    elif isinstance(call_id, str) and call_id in full_pending:
+                        successful_tools.append(full_pending[call_id])
+                        if call_id in cli_pending:
+                            cli_scope[cli_pending[call_id]]["successful"] = True
+                    pending.pop(call_id, None)
+                    full_pending.pop(call_id, None)
         elif kind == "result":
             result_events += 1
             result = event
@@ -115,6 +188,8 @@ def audit(lines, returncode=0, tool_prefix=TOOL_PREFIX):
         "tools": names,
         "sequence": calls,
         "full_tool_names": full_names,
+        "cli_call_scope": cli_scope, "successful_tool_names": successful_tools,
+        "unresolved_tool_calls": list(full_pending.values()), "invalid_tool_call_ids": invalid_call_ids,
         "failed_calls": failed,
         "turns": result.get("num_turns"),
         "duration_ms": result.get("duration_ms"),
@@ -176,11 +251,18 @@ def assess(header, trace, returncode=None, verification=None, context=None):
                 digest.update(line)
                 yield line.decode("utf-8")
         summary = audit(captured_lines(), returncode,
-                        captured_context.get("tool_prefix") if captured_context else TOOL_PREFIX)
+                        captured_context.get("tool_prefix") if captured_context else TOOL_PREFIX,
+                        captured_context.get("launcher_path") if captured_context and captured_context.get("runtime_isolation_version") == 1 and captured_context.get("interface") == "cli" else None)
     fingerprint = digest.hexdigest()
     if captured_context and captured_context.get("trace_sha256") != fingerprint:
         raise ValueError("run context does not match this trace")
     checks_passed, reasons = judge(header, summary)
+    if captured_context and captured_context.get("runtime_isolation_version") == 1 and summary["invalid_tool_call_ids"]:
+        checks_passed = False
+        reasons.append("tool call IDs are missing or repeated in the captured trace")
+    if captured_context and captured_context.get("runtime_isolation_version") == 1 and summary["unresolved_tool_calls"]:
+        checks_passed = False
+        reasons.append("tool delivery/results remain unresolved in the captured trace")
     if captured_context:
         prefix = captured_context.get("tool_prefix")
         interface = captured_context.get("interface")
@@ -192,6 +274,25 @@ def assess(header, trace, returncode=None, verification=None, context=None):
         if captured_context.get("entrypoint_unchanged") is not True:
             checks_passed = False
             reasons.append("backend entrypoint changed during the run")
+    runtime_check = {"state": "legacy_unverified"}
+    if captured_context and captured_context.get("runtime_isolation_version") == 1:
+        for key in ("agent_entrypoint_sha256", "agent_env_sha256", "driver_sha256"):
+            if not isinstance(captured_context.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", captured_context[key]):
+                raise ValueError("invalid runtime fingerprint in captured context")
+        runtime_check["state"] = "verified"
+        if captured_context["interface"] == "cli":
+            launcher = captured_context.get("launcher_path")
+            if not isinstance(launcher, str) or not re.fullmatch(r"[/A-Za-z0-9_.-]+", launcher):
+                raise ValueError("invalid captured CLI launcher")
+            if any(call["verified"] is not True for call in summary["cli_call_scope"]):
+                runtime_check["state"] = "failed"
+                checks_passed = False
+                reasons.append("CLI command was not proven to be a literal captured-launcher call")
+        for key in ("backend_env_isolated", "agent_entrypoint_unchanged", "driver_unchanged", "launcher_unchanged", "mcp_config_unchanged"):
+            if captured_context.get(key) is not True:
+                runtime_check["state"] = "failed"
+                checks_passed = False
+                reasons.append(f"runtime control failed: {key}")
     requested_model = captured_context.get("model_requested") if captured_context else None
     if requested_model is not None and (not isinstance(requested_model, str) or not requested_model.strip()):
         raise ValueError("invalid requested model in run context")
@@ -242,12 +343,14 @@ def assess(header, trace, returncode=None, verification=None, context=None):
             reasons.append("the original process exit status was not supplied")
         if not model_confirmed:
             reasons.append("requested model identity was not observed; controlled comparison is unverified")
+    backend_work_observed = any(name.startswith(captured_context["tool_prefix"]) for name in summary["successful_tool_names"]) if captured_context and captured_context["interface"] == "mcp" else any(call["successful"] for call in summary["cli_call_scope"]) and all(call["verified"] for call in summary["cli_call_scope"])
     return {"schema_version": 2, "task": header["name"], **summary, "passed": passed,
             "trace_sha256": fingerprint,
             "context": captured_context, "context_sha256": context_digest,
             "checks_passed": checks_passed, "verification": proof, "reasons": reasons,
             "model_check": model_check,
-            "comparison_eligible": passed is True and model_check["state"] == "matched"}
+            "runtime_check": runtime_check, "backend_work_observed": backend_work_observed,
+            "comparison_eligible": passed is True and model_check["state"] == "matched" and runtime_check["state"] == "verified" and backend_work_observed}
 
 
 def private_json(path, value):
@@ -331,6 +434,25 @@ def task_invocation(path, out_dir, mcp, model, backend=None):
     if not re.fullmatch(r"[A-Za-z0-9_-]+", header["name"]):
         raise ValueError("task name must be a safe filename")
     backend = backend or backend_spec(mcp)
+    backend = copy.deepcopy(backend)
+    effective_env = {key: value.replace("{run_dir}", str(out_dir)) for key, value in backend.get("env", {}).items()}
+    backend["effective_env"] = effective_env
+    backend["launcher"] = None
+    if backend["interface"] == "mcp":
+        server = next(iter(backend["config"]["mcpServers"].values()))
+        server["env"] = {**server.get("env", {}), **effective_env, "DO_NOT_TRACK": "1",
+                         "IPHONE_USE_ANALYTICS": "0", "IPHONE_USE_TELEMETRY": "0"}
+    else:
+        launcher = (out_dir / f"{header['name']}.backend").resolve()
+        if not re.fullmatch(r"[/A-Za-z0-9_.-]+", str(launcher)):
+            raise ValueError("CLI launcher path must not contain whitespace or shell/glob characters")
+        argv = [f"{key}={value}" for key, value in effective_env.items()] + [backend["entrypoint"]]
+        body = "#!/bin/sh\nexec /usr/bin/env " + shlex.join(argv) + ' "$@"\n'
+        fd = os.open(launcher, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+        with os.fdopen(fd, "w", encoding="utf-8") as sink:
+            sink.write(body)
+        backend["launcher"] = str(launcher)
+        backend["allowed"] = [f"Bash({launcher})", f"Bash({launcher} *)"]
     config = out_dir / f"{header['name']}.mcp.json"
     private_json(config, backend["config"])
     jsonl = out_dir / f"{header['name']}.jsonl"
@@ -338,7 +460,7 @@ def task_invocation(path, out_dir, mcp, model, backend=None):
     if backend["reference"]:
         prompt += "\n\nBackend API reference:\n" + backend["reference"]
     if backend["interface"] == "cli":
-        prompt += f"\nUse this native executable for shell calls: {backend['entrypoint']}"
+        prompt += f"\nUse this environment-isolated executable for all shell calls: {backend['launcher']}"
     prompt += ("\n\nUse only the already configured, authorized local test phone. "
                "Do not install or reconfigure software, rent cloud devices, send messages, pay, "
                "or delete user data. Stop if the configured phone is unavailable.")
@@ -356,21 +478,41 @@ def task_invocation(path, out_dir, mcp, model, backend=None):
 
 
 def run_task(path, out_dir, mcp, model, backend=None):
+    if not DRIVER_LOADED_SHA256 or file_fingerprint(__file__) != DRIVER_LOADED_SHA256:
+        raise ValueError("driver changed since load; no agent started")
     header, backend, config, jsonl, task_prompt, command = task_invocation(path, out_dir, mcp, model, backend)
-    entrypoint_before = hashlib.sha256(pathlib.Path(backend["entrypoint"]).read_bytes()).hexdigest()
-    started = time.monotonic()
     child = os.environ.copy()
-    # The backend's own settings (--env-file), e.g. a fresh home under this
-    # run's directory, so a trial never reuses a profile or a cloud session.
-    run_env = {k: v.replace("{run_dir}", str(out_dir)) for k, v in backend.get("env", {}).items()}
-    child.update(run_env)
+    selected_agent = shutil.which("claude", path=child.get("PATH"))
+    if not selected_agent:
+        raise ValueError("Claude CLI is missing from the parent environment; use --prepare-only without a live agent")
+    agent = pathlib.Path(selected_agent).resolve(strict=True)
+    command[0] = str(agent)
+    agent_before = file_fingerprint(agent)
+    driver_before = DRIVER_LOADED_SHA256
+    config_before = file_fingerprint(config)
+    entrypoint_before = file_fingerprint(backend["entrypoint"])
+    launcher_before = file_fingerprint(backend["launcher"]) if backend["launcher"] else None
+    if not agent_before or not entrypoint_before or not driver_before or not config_before or (backend["launcher"] and not launcher_before):
+        raise ValueError("cannot fingerprint the selected runtime before launch")
+    if file_fingerprint(__file__) != DRIVER_LOADED_SHA256:
+        raise ValueError("driver changed during preparation; no agent started")
+    started = time.monotonic()
     fd = os.open(jsonl, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as sink, tempfile.TemporaryDirectory(prefix="iphone-bench-work-") as workspace:
         proc = subprocess.run(command, stdout=sink, stderr=subprocess.STDOUT, cwd=workspace, env=child, check=False)
     wall_ms = int((time.monotonic() - started) * 1000)
     context = {"task": header["name"], "trace_sha256": hashlib.sha256(jsonl.read_bytes()).hexdigest(),
                "task_header": header,
-               "driver_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
+               "driver_sha256": driver_before,
+               "driver_unchanged": driver_before == file_fingerprint(__file__),
+               "runtime_isolation_version": 1, "backend_env_isolated": True,
+               "agent_entrypoint": str(agent), "agent_entrypoint_sha256": agent_before,
+               "agent_entrypoint_unchanged": agent_before == file_fingerprint(agent),
+               "agent_env_sha256": hashlib.sha256(json.dumps(child, sort_keys=True).encode()).hexdigest(),
+               "effective_prompt_sha256": hashlib.sha256(command[2].encode()).hexdigest(),
+               "effective_backend_env_sha256": hashlib.sha256(json.dumps(backend["effective_env"], sort_keys=True).encode()).hexdigest(),
+               "launcher_sha256": launcher_before, "launcher_path": backend["launcher"],
+               "launcher_unchanged": launcher_before == file_fingerprint(backend["launcher"]) if backend["launcher"] else True,
                "backend_label": backend["label"], "interface": backend["interface"],
                "tool_prefix": backend["tool_prefix"], "allowed_tools": backend["allowed"],
                "framework_tools": backend["framework_tools"],
@@ -378,9 +520,10 @@ def run_task(path, out_dir, mcp, model, backend=None):
                "task_prompt_sha256": hashlib.sha256(task_prompt.encode()).hexdigest(),
                "reference_sha256": hashlib.sha256(backend["reference"].encode()).hexdigest(),
                "env_sha256": hashlib.sha256(json.dumps(backend.get("env", {}), sort_keys=True).encode()).hexdigest(),
-               "mcp_config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+               "mcp_config_sha256": config_before,
+               "mcp_config_unchanged": config_before == file_fingerprint(config),
                "entrypoint_sha256": entrypoint_before,
-               "entrypoint_unchanged": entrypoint_before == hashlib.sha256(pathlib.Path(backend["entrypoint"]).read_bytes()).hexdigest(),
+               "entrypoint_unchanged": entrypoint_before == file_fingerprint(backend["entrypoint"]),
                "cli_config_and_state_isolated": backend["interface"] == "cli",
                "agent_policy_requested": {"permission_mode": "dontAsk", "settings_sources": "user",
                                           "disable_all_hooks": True},

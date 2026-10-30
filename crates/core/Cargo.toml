@@ -1,6 +1,6 @@
 [package]
 name = "core"
-version = "0.27.12"
+version = "0.27.13"
 edition = "2021"
 license-file = "../../LICENSE"
 
