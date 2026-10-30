@@ -1,0 +1,15 @@
+# The cloud relay: a phone's on-phone daemon dials out to it, and another
+# phone reaches that daemon through it from anywhere. See README.md.
+name = "iphone-use-relay"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+# Our deployment; change or delete this line when you deploy your own (see README.md).
+routes = [{ pattern = "iphone-use-relay.leeguoo.com", custom_domain = true }]
+
+[[durable_objects.bindings]]
+name = "PHONES"
+class_name = "Phone"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Phone"]

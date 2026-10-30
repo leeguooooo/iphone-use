@@ -29,12 +29,15 @@ struct Options {
     /// phone's local control, with nobody tapping either phone.
     connect_to: Option<String>,
     connect_only: bool,
+    /// Connect through this cloud relay (`relay/`) instead of the LAN, so the
+    /// other phone reaches this one from anywhere.
+    relay: Option<String>,
 }
 
-const OPTIONS_HINT: &str = "--remote-only, --no-install, --no-pair, --connect-to <instance|udid>, --connect-only";
+const OPTIONS_HINT: &str = "--remote-only, --no-install, --no-pair, --connect-to <instance|udid>, --connect-only, --relay <https url>";
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    let mut options = Options { remote_only: false, no_install: false, no_pair: false, connect_to: None, connect_only: false };
+    let mut options = Options { remote_only: false, no_install: false, no_pair: false, connect_to: None, connect_only: false, relay: None };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -42,12 +45,19 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--no-install" => options.no_install = true,
             "--no-pair" => options.no_pair = true,
             "--connect-only" => options.connect_only = true,
+            "--relay" => match args.next() {
+                Some(value) if value.starts_with("https://") => options.relay = Some(value.trim_end_matches('/').to_string()),
+                _ => return Err("--relay needs the relay's https:// address".into()),
+            },
             "--connect-to" => match args.next() {
                 Some(value) if !value.starts_with('-') => options.connect_to = Some(value.clone()),
                 _ => return Err("--connect-to needs an instance name or UDID".into()),
             },
             other => return Err(format!("unknown setup-app option: {other} ({OPTIONS_HINT})")),
         }
+    }
+    if options.relay.is_some() && options.connect_to.is_none() {
+        return Err("--relay needs --connect-to <instance|udid>".into());
     }
     if options.connect_only && options.connect_to.is_none() {
         return Err("--connect-only needs --connect-to <instance|udid>".into());
@@ -84,7 +94,7 @@ pub fn run(args: &[String]) -> i32 {
         install(&ctx, &options)
     };
     let result = result.and_then(|()| match &options.connect_to {
-        Some(controller) => connect(&ctx, controller),
+        Some(controller) => connect(&ctx, controller, options.relay.as_deref()),
         None => Ok(()),
     });
     match result {
@@ -393,7 +403,7 @@ fn stage_pairing(ctx: &Ctx, root: &Path, bundle: &str) -> Result<(), String> {
 /// one-time code into this phone's app container (the on-phone daemon reads
 /// it from there), read back the daemon's LAN address, and open the matching
 /// `iphoneuse://pair` link in the controller's app. Neither phone is touched.
-fn connect(ctx: &Ctx, controller: &str) -> Result<(), String> {
+fn connect(ctx: &Ctx, controller: &str, relay: Option<&str>) -> Result<(), String> {
     let bundle = app_bundle_id(&ctx.team_id);
     let controller_udid = resolve_udid(controller)?;
     if controller_udid == ctx.udid {
@@ -401,12 +411,12 @@ fn connect(ctx: &Ctx, controller: &str) -> Result<(), String> {
     }
     term::info(&format!("Connecting {controller} to this phone's local control"));
     let dir = tempfile_dir()?;
-    let result = connect_in(ctx, &bundle, &controller_udid, &dir);
+    let result = connect_in(ctx, &bundle, &controller_udid, &dir, relay);
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
 
-fn connect_in(ctx: &Ctx, bundle: &str, controller_udid: &str, dir: &Path) -> Result<(), String> {
+fn connect_in(ctx: &Ctx, bundle: &str, controller_udid: &str, dir: &Path, relay: Option<&str>) -> Result<(), String> {
     use base64::Engine as _;
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| format!("randomness: {e}"))?;
@@ -424,19 +434,52 @@ fn connect_in(ctx: &Ctx, bundle: &str, controller_udid: &str, dir: &Path) -> Res
         "--destination", "Documents/connect-code-import.json"])
         .map_err(|e| format!("could not hand the connection code to the app: {e}"))?;
 
+    if let Some(relay) = relay {
+        let file = dir.join("relay.json");
+        std::fs::write(&file, serde_json::json!({ "url": relay }).to_string())
+            .map_err(|e| format!("write {}: {e}", file.display()))?;
+        devicectl(&["device", "copy", "to", "--device", &ctx.udid, "--domain-type", "appDataContainer",
+            "--domain-identifier", bundle, "--source", &file.to_string_lossy(),
+            "--destination", "Documents/relay.json"])
+            .map_err(|e| format!("could not hand the relay address to the app: {e}"))?;
+    }
+    // The daemon rewrites this file every 30 s; with a relay, wait for the
+    // address it got there.
     let lan = dir.join("daemon-lan.json");
-    devicectl(&["device", "copy", "from", "--device", &ctx.udid, "--domain-type", "appDataContainer",
-        "--domain-identifier", bundle, "--source", "Documents/daemon-lan.json",
-        "--destination", &lan.to_string_lossy()])
-        .map_err(|_| "this phone's local control is not running (no daemon address yet): \
-            start it in Phone Use › Settings › 本机控制, then retry with --connect-only".to_string())?;
-    let urls: Vec<String> = std::fs::read_to_string(&lan)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|v| v["lan_urls"].as_array().map(|a| a.iter().filter_map(|u| u.as_str().map(String::from)).collect()))
-        .unwrap_or_default();
-    let Some(base) = urls.into_iter().find(|u| u.starts_with("http://") && !u.ends_with(".local:18787")) else {
-        return Err("this phone has no Wi-Fi address: join Wi-Fi on both phones and retry with --connect-only".into());
+    let mut base = None;
+    for attempt in 0..(if relay.is_some() { 20 } else { 1 }) {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        devicectl(&["device", "copy", "from", "--device", &ctx.udid, "--domain-type", "appDataContainer",
+            "--domain-identifier", bundle, "--source", "Documents/daemon-lan.json",
+            "--destination", &lan.to_string_lossy()])
+            .map_err(|_| "this phone's local control is not running (no daemon address yet): \
+                start it in Phone Use › Settings › 本机控制, then retry with --connect-only".to_string())?;
+        let value = std::fs::read_to_string(&lan)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_default();
+        base = match relay {
+            Some(relay) => value["relay_url"].as_str().filter(|u| u.starts_with(relay)).map(String::from),
+            None => value["lan_urls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|u| u.as_str())
+                .find(|u| u.starts_with("http://") && !u.ends_with(".local:18787"))
+                .map(String::from),
+        };
+        if base.is_some() {
+            break;
+        }
+    }
+    let Some(base) = base else {
+        return Err(if relay.is_some() {
+            "this phone did not report a relay address within a minute: check its network, then retry with --connect-only".into()
+        } else {
+            "this phone has no Wi-Fi address: join Wi-Fi on both phones and retry with --connect-only".into()
+        });
     };
 
     let controller_app = installed_app(controller_udid)?;

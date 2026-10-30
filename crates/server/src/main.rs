@@ -1268,6 +1268,10 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
             server::device_identity::spawn(state.clone());
         }
 
+        // The cloud relay, when configured: reach this daemon from anywhere.
+        if let Some(relay) = std::env::var("IPHONE_USE_RELAY_URL").ok().filter(|v| !v.is_empty()) {
+            server::relay_client::spawn(move || Some(relay.clone()), server::instance::current().state_dir.clone(), cfg.port);
+        }
         let app = http::router(state);
         let serve_result = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())

@@ -453,7 +453,7 @@ final class DeviceSession: ObservableObject, Identifiable {
         let quality = preferQuality
         refreshQuality(fresh: false)
         // A quality change restarted the stream already.
-        if reader != nil, quality == preferQuality { restartStream() }
+        if reader != nil || mjpegReader != nil, quality == preferQuality { restartStream() }
     }
 
     private func startPathMonitor() {
@@ -622,6 +622,7 @@ final class DeviceSession: ObservableObject, Identifiable {
                 onState: { [weak self] ok, why in
                     self?.videoMessage = why
                     if !ok { self?.videoLive = false }
+                    if !ok, self?.onLAN == true { self?.reprobe() }
                     if why?.contains("401") == true {
                         Task { _ = await self?.relogin() }
                     }
@@ -700,6 +701,9 @@ final class DeviceSession: ObservableObject, Identifiable {
     private func restartStream(keepPicture: Bool = false) {
         reader?.stop()
         reader = nil
+        // The MJPEG fallback holds its URL too: reopen it on the current route.
+        mjpegReader?.stop()
+        mjpegReader = nil
         if !keepPicture { videoLive = false }
         updateStream()
     }
