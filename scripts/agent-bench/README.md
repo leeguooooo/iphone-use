@@ -156,3 +156,22 @@ use another backend's tool namespace or whose entrypoint changes fail checks.
 Keep raw traces and MCP configuration private: they may contain phone data or
 environment credentials. Publish sanitized summaries and verifiable receipts.
 These launch paths alone provide no comparative performance result.
+
+## Model identity for controlled comparisons
+
+An explicit request is not proof of the model that ran. New live contexts are
+checked against all reported IDs from init, assistant messages and every result
+usage event. An init declaration alone does not prove which model executed;
+assistant/usage identity is required. The local `<synthetic>` marker is not a
+model identity. Multiple final result events invalidate execution metrics. Pass the
+exact reported model ID: aliases and unresolved mappings are not inferred.
+A different or mixed model set fails execution checks; a requested model with
+no reported identity remains `UNVERIFIED`, even with a valid device receipt.
+Raw metrics and independent device-verification evidence are retained.
+
+`model_check` records requested and observed IDs. `comparison_eligible` is true
+only when execution checks, the exact model pin and independent postconditions
+all pass. A legacy/default run with no model pin may verify its task, but is not
+an eligible controlled-comparison sample. An eligible individual sample still
+needs matched task/device/source/setup conditions and repeat runs before any
+performance verdict.

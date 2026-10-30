@@ -224,7 +224,16 @@ with tempfile.TemporaryDirectory(prefix="bench-native-") as tmp:
         # A real model, MCP server, backend CLI or phone must never run here.
         assert command[:2] == ["claude", "-p"]
         fake_calls.append((command, kwargs))
-        kwargs["stdout"].write(current_trace["value"])
+        kwargs["stdout"].write(json.dumps({"type": "system", "subtype": "init", "model": command[command.index("--model") + 1]}) + "\n")
+        for raw in current_trace["value"].splitlines():
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                kwargs["stdout"].write(raw + "\n")
+                continue
+            if event.get("type") == "assistant" and isinstance(event.get("message"), dict):
+                event["message"].setdefault("model", command[command.index("--model") + 1])
+            kwargs["stdout"].write(json.dumps(event) + "\n")
         return type("Completed", (), {"returncode": 0})()
 
     with patch.object(bench.subprocess, "run", side_effect=fake_claude):
@@ -335,4 +344,69 @@ record = bench.audit([
 assert record["models_observed"] == ["model-A", "model-B"]
 assert record["cache_read_input_tokens"] == 30 and record["cache_creation_input_tokens"] == 20
 
-print("agent-bench: audit, native interfaces, context binding and private artifacts ok")
+# Model identity is an execution condition, separate from device verification.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    header, _ = bench.parse_task(HERE / "agent-bench/tasks/settings-ios-version.md")
+    baseline = (HERE / "fixtures/agent-bench-run.jsonl").read_text()
+    for observed, requested, wanted, state in [
+        (["pinned-model"], "pinned-model", True, "matched"),
+        (["other-model"], "pinned-model", False, "mismatch"),
+        (["pinned-model", "other-model"], "pinned-model", False, "mismatch"),
+        ([], "pinned-model", None, "missing"),
+        (["actual-default"], None, True, "not_requested"),
+    ]:
+        trace = root / "task.jsonl"
+        prefix = "".join(json.dumps({"type": "assistant", "message": {"model": model, "content": []}}) + "\n" for model in observed)
+        trace.write_text(prefix + baseline)
+        context = root / "context.json"
+        context.write_text(json.dumps({"task": header["name"], "task_header": header,
+            "trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(), "interface": "mcp",
+            "tool_prefix": bench.TOOL_PREFIX, "framework_tools": [], "entrypoint_unchanged": True,
+            "model_requested": requested}))
+        receipt = root / "proof.json"
+        receipt.write_text(json.dumps({"task": header["name"], "trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(),
+            "context_sha256": hashlib.sha256(context.read_bytes()).hexdigest(), "verified": True,
+            "verifier": "synthetic-independent-postconditions", "evidence": "offline model identity control"}))
+        checked = bench.assess(header, trace, 0, receipt, context)
+        assert checked["passed"] is wanted, (observed, checked)
+        assert checked["model_check"]["state"] == state
+        assert checked["verification"]["state"] == "passed", "model checks must not rewrite independent device evidence"
+        assert checked["comparison_eligible"] is (wanted is True and state == "matched")
+    # A result-usage model also matters; it cannot be hidden by a matching init.
+    trace.write_text(json.dumps({"type": "system", "subtype": "init", "model": "pinned-model"}) + "\n" +
+                     json.dumps({"type": "result", "result": "iOS18.1", "modelUsage": {"other-model": {}}, "is_error": False}) + "\n")
+    data = json.loads(context.read_text());data.update(trace_sha256=hashlib.sha256(trace.read_bytes()).hexdigest(), model_requested="pinned-model")
+    context.write_text(json.dumps(data))
+    checked = bench.assess(header, trace, 0, context=context)
+    assert checked["passed"] is False and checked["model_check"]["state"] == "mismatch"
+
+# Init is configured identity only; assistant and every usage event must be audited.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    header, _ = bench.parse_task(HERE / "agent-bench/tasks/settings-ios-version.md")
+    for name, identities, result_usage, wanted in [
+        ("assistant-drift", ["other-model"], {"pinned-model": {}}, False),
+        ("init-only", [], {}, None),
+        ("synthetic-only", ["<synthetic>"], {}, None),
+        ("real-and-synthetic", ["pinned-model", "<synthetic>"], {}, True),
+    ]:
+        events = [{"type": "system", "subtype": "init", "model": "pinned-model"}]
+        events += [{"type": "assistant", "message": {"model": model, "content": []}} for model in identities]
+        events += [{"type": "result", "result": "iOS18.1", "modelUsage": result_usage, "is_error": False}]
+        trace = root / "trace.jsonl"; trace.write_text("\n".join(map(json.dumps, events)) + "\n")
+        context = root / "context.json"; context.write_text(json.dumps({"task": header["name"], "task_header": header,
+            "trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(), "interface": "mcp", "tool_prefix": bench.TOOL_PREFIX,
+            "framework_tools": [], "entrypoint_unchanged": True, "model_requested": "pinned-model"}))
+        receipt = root / "proof.json"; receipt.write_text(json.dumps({"task": header["name"],
+            "trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(), "context_sha256": hashlib.sha256(context.read_bytes()).hexdigest(),
+            "verified": True, "verifier": "synthetic-postconditions", "evidence": "offline event identity test"}))
+        checked = bench.assess(header, trace, 0, receipt, context)
+        assert checked["passed"] is wanted, (name, checked)
+        assert checked["comparison_eligible"] is (wanted is True)
+    earlier = bench.audit([json.dumps({"type": "result", "modelUsage": {"other-model": {}}}),
+                           json.dumps({"type": "result", "modelUsage": {"pinned-model": {}}, "result": "iOS18.1"})])
+    assert earlier["models_executed"] == ["other-model", "pinned-model"]
+    assert earlier["result_events"] == 2 and earlier["is_error"], "concatenated results must not use only the last metrics"
+
+print("agent-bench: audit, interfaces, model identity, context binding and private artifacts ok")

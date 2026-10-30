@@ -71,6 +71,9 @@ def audit(lines, returncode=0, tool_prefix=TOOL_PREFIX):
     pending = {}
     result = {}
     models = set()
+    executed_models = set()
+    model_sources = {"init": set(), "assistant": set(), "usage": set()}
+    result_events = 0
     for raw in lines:
         raw = raw.strip()
         if not raw:
@@ -81,9 +84,12 @@ def audit(lines, returncode=0, tool_prefix=TOOL_PREFIX):
             continue
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init" and isinstance(event.get("model"), str):
-            models.add(event["model"])
+            model_sources["init"].add(event["model"])
         content = (event.get("message") or {}).get("content") or []
         if kind == "assistant":
+            message_model = (event.get("message") or {}).get("model")
+            if isinstance(message_model, str) and message_model and message_model != "<synthetic>":
+                model_sources["assistant"].add(message_model)
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     name = block.get("name", "")
@@ -97,10 +103,13 @@ def audit(lines, returncode=0, tool_prefix=TOOL_PREFIX):
                 if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
                     failed.append(pending.get(block.get("tool_use_id"), "?"))
         elif kind == "result":
+            result_events += 1
             result = event
+            if isinstance(event.get("modelUsage"), dict):
+                model_sources["usage"].update(name for name in event["modelUsage"] if name != "<synthetic>")
     usage = result.get("usage") or {}
-    if isinstance(result.get("modelUsage"), dict):
-        models.update(result["modelUsage"])
+    models.update(*(model_sources.values()))
+    executed_models.update(model_sources["assistant"], model_sources["usage"])
     return {
         "tool_calls": len(calls),
         "tools": names,
@@ -115,8 +124,11 @@ def audit(lines, returncode=0, tool_prefix=TOOL_PREFIX):
         "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
         "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
         "models_observed": sorted(models),
+        "models_executed": sorted(executed_models),
+        "model_identity_sources": {key: sorted(values) for key, values in model_sources.items()},
+        "result_events": result_events,
         "answer": result.get("result", ""),
-        "is_error": bool(result.get("is_error")) or not result or returncode not in (None, 0),
+        "is_error": bool(result.get("is_error")) or result_events != 1 or returncode not in (None, 0),
         "process_returncode": returncode,
     }
 
@@ -125,7 +137,7 @@ def judge(header, summary):
     """Check execution, answer format and call budget, not physical completion."""
     reasons = []
     if summary["is_error"]:
-        reasons.append("claude reported an error, exited non-zero or gave no result")
+        reasons.append("claude reported an error, exited non-zero or did not give exactly one final result")
     expect = header.get("expect")
     if expect and not re.search(expect, summary["answer"] or ""):
         reasons.append(f"answer does not match {expect!r}")
@@ -180,6 +192,22 @@ def assess(header, trace, returncode=None, verification=None, context=None):
         if captured_context.get("entrypoint_unchanged") is not True:
             checks_passed = False
             reasons.append("backend entrypoint changed during the run")
+    requested_model = captured_context.get("model_requested") if captured_context else None
+    if requested_model is not None and (not isinstance(requested_model, str) or not requested_model.strip()):
+        raise ValueError("invalid requested model in run context")
+    observed_models = summary["models_observed"]
+    model_check = {"requested": requested_model, "observed": observed_models,
+                   "executed": summary["models_executed"], "state": "not_requested"}
+    if requested_model is not None:
+        if not observed_models:
+            model_check["state"] = "missing"
+        elif observed_models == [requested_model]:
+            model_check["state"] = "matched" if summary["models_executed"] else "missing"
+        else:
+            model_check["state"] = "mismatch"
+            checks_passed = False
+            reasons.append("reported model IDs differ from the requested exact model pin")
+    model_confirmed = model_check["state"] in ("matched", "not_requested")
     proof = {"state": "unverified"}
     if verification:
         with open(verification, encoding="utf-8") as source:
@@ -204,7 +232,7 @@ def assess(header, trace, returncode=None, verification=None, context=None):
         passed = False
         if proof["state"] == "failed":
             reasons.append("independent task verification failed")
-    elif proof["state"] == "passed" and returncode == 0:
+    elif proof["state"] == "passed" and returncode == 0 and model_confirmed:
         passed = True
     else:
         passed = None
@@ -212,10 +240,14 @@ def assess(header, trace, returncode=None, verification=None, context=None):
             reasons.append("task postconditions have not been independently verified")
         if returncode is None:
             reasons.append("the original process exit status was not supplied")
+        if not model_confirmed:
+            reasons.append("requested model identity was not observed; controlled comparison is unverified")
     return {"schema_version": 2, "task": header["name"], **summary, "passed": passed,
             "trace_sha256": fingerprint,
             "context": captured_context, "context_sha256": context_digest,
-            "checks_passed": checks_passed, "verification": proof, "reasons": reasons}
+            "checks_passed": checks_passed, "verification": proof, "reasons": reasons,
+            "model_check": model_check,
+            "comparison_eligible": passed is True and model_check["state"] == "matched"}
 
 
 def private_json(path, value):
@@ -372,6 +404,8 @@ def print_report(rows):
               f"{len(row['failed_calls'])} failed, {row.get('turns')} turns, {timing}"
               + (f", ${cost:.4f}" if isinstance(cost, (int, float)) else ""))
         print(f"     sequence: {' → '.join(row['sequence']) or '(none)'}")
+        print(f"     model: {row.get('model_check', {}).get('state', 'unknown')}; "
+              f"controlled comparison: {'eligible' if row.get('comparison_eligible') else 'not eligible'}")
         for reason in row["reasons"]:
             print(f"     ✗ {reason}")
 
@@ -394,6 +428,8 @@ def main(argv=None):
     parser.add_argument("--context", help="captured run context for --from-jsonl (otherwise infer sibling file)")
     parser.add_argument("--json", action="store_true", help="print machine-readable results")
     args = parser.parse_args(argv)
+    if args.model is not None and not args.model.strip():
+        parser.error("--model must name an exact reported model ID")
     if args.task and any(not re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in args.task):
         parser.error("task names must be safe filenames")
     replay = args.from_jsonl is not None
