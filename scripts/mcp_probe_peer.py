@@ -20,7 +20,7 @@ class Peer:
         with log.open('w') as out:self.process=subprocess.Popen(argv,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=out,start_new_session=True)
         self.buffer=b'';self.serial=0;self.pending=None
         self.pending_started=None;self.pending_method=None;self.pending_tool=None
-        self.request('initialize',{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'paired-scripted-operations','version':'1'}})
+        self.initialization=self.request('initialize',{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'paired-scripted-operations','version':'1'}})
         self.process.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n');self.process.stdin.flush()
     def event(self,kind,**extra):
         # Metadata only: never persist arguments, responses, text or tokens.

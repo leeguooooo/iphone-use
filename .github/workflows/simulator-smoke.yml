@@ -16,6 +16,10 @@ on:
       - scripts/test-drag-simulator.py
       - scripts/test-drag-simulator-verdict.py
       - scripts/test-value-read-simulator.py
+      - scripts/run-collect-simulator.py
+      - scripts/test-collect-simulator.py
+      - scripts/test-collect-simulator-verdict.py
+      - scripts/fixtures/list-collection/**
       - scripts/test-system-capture-simulator.py
       - scripts/test-system-capture-verifier.py
       - scripts/mcp_probe_peer.py
@@ -25,6 +29,14 @@ on:
       - .github/workflows/simulator-smoke.yml
   workflow_dispatch:
     inputs:
+      collect_probe_only:
+        description: Verify Native collection against an independent UIKit model on a new Simulator
+        type: boolean
+        default: false
+      collect_release_tag:
+        description: Published GitHub release whose binaries and runner sources are tested
+        type: string
+        default: v0.27.10
       capture_probe_only:
         description: Verify native system screenshot persistence in an owned Simulator
         type: boolean
@@ -45,7 +57,7 @@ permissions:
 
 jobs:
   smoke:
-    if: ${{ !inputs.capture_probe_only && !inputs.capture_mcp }}
+    if: ${{ !inputs.capture_probe_only && !inputs.capture_mcp && !inputs.collect_probe_only }}
     name: Simulator end to end
     runs-on: macos-14
     timeout-minutes: 45
@@ -165,3 +177,66 @@ jobs:
             ${{ runner.temp }}/system-capture-proof/daemon.log
             ${{ runner.temp }}/system-capture-proof/mcp.log
             ${{ runner.temp }}/build-simulator.log
+
+  list_collection_probe:
+    if: ${{ inputs.collect_probe_only }}
+    name: Native list oracle / released artifact
+    runs-on: macos-14
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      LIST_RELEASE: ${{ inputs.collect_release_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Negative controls for the model oracle
+        run: python3 -I scripts/test-collect-simulator-verdict.py
+      - name: Download and check the exact published product
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LIST_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir "$RUNNER_TEMP/list-release"
+          gh release download "$LIST_RELEASE" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/list-release" \
+            --pattern iPhoneUse.app.zip --pattern iPhoneUse.app.zip.sha256 \
+            --pattern iphone-use-runner.tar.gz --pattern iphone-use-runner.tar.gz.sha256
+          cd "$RUNNER_TEMP/list-release"
+          shasum -a 256 -c iPhoneUse.app.zip.sha256
+          shasum -a 256 -c iphone-use-runner.tar.gz.sha256
+          ditto -x -k iPhoneUse.app.zip .
+          python3 -c 'import tarfile; t=tarfile.open("iphone-use-runner.tar.gz"); t.extractall(".",filter="data")'
+          codesign --verify --deep --strict iPhoneUse.app
+          xcrun stapler validate iPhoneUse.app
+          test "$(./iPhoneUse.app/Contents/MacOS/iphone-use --version)" = "iphone-use ${LIST_RELEASE#v}"
+      - name: Build the published Native runner separately from startup
+        run: |
+          xcodebuild -project "$RUNNER_TEMP/list-release/runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj" \
+            -scheme IPhoneUseRunner -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/list-runner" \
+            -jobs 2 CODE_SIGNING_ALLOWED=NO build-for-testing > "$RUNNER_TEMP/list-runner-build.log" 2>&1
+      - name: Run the Native collection oracle on an owned iOS 18.2 Simulator
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          recipe=$(python3 -c 'import os; from pathlib import Path; p=list((Path(os.environ["RUNNER_TEMP"])/"list-runner/Build/Products").glob("*.xctestrun")); assert len(p)==1,p; print(p[0])')
+          python3 scripts/run-collect-simulator.py \
+            --daemon "$RUNNER_TEMP/list-release/iPhoneUse.app/Contents/MacOS/iphone-use" \
+            --mcp "$RUNNER_TEMP/list-release/iPhoneUse.app/Contents/MacOS/iphone-use-mcp" \
+            --runner-source "$RUNNER_TEMP/list-release/runner" \
+            --xctestrun "$recipe" \
+            --runtime com.apple.CoreSimulator.SimRuntime.iOS-18-2 \
+            --out "$RUNNER_TEMP/list-oracle-proof"
+      - name: Preserve independent models, Native results and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-list-oracle
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/list-runner-build.log
+            ${{ runner.temp }}/list-oracle-proof/*.json
+            ${{ runner.temp }}/list-oracle-proof/*.log
+            ${{ runner.temp }}/list-oracle-proof/conformance/*.json
+            ${{ runner.temp }}/list-oracle-proof/conformance/*.log
+            ${{ runner.temp }}/list-oracle-proof/conformance/*.jsonl
+            ${{ runner.temp }}/list-oracle-proof/conformance/*/*.json
