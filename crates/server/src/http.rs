@@ -6830,7 +6830,16 @@ fn diff_element_rows(
     baseline: &[crate::runner::ElementRow],
     current: &[crate::runner::ElementRow],
 ) -> ElementRowsDelta {
-    core::control::diff_rows(baseline, current, |row| {
+    // Deltas follow the compact wire view, like snapshot hashes. Known true
+    // remains available internally to selectors but is absent from that view.
+    let sparse = |rows: &[crate::runner::ElementRow]| rows.iter().cloned().map(|mut row| {
+        row.enabled = row.enabled.filter(|enabled| !enabled);
+        row.value = row.value.filter(|value| !value.is_empty());
+        row
+    }).collect::<Vec<_>>();
+    let baseline = sparse(baseline);
+    let current = sparse(current);
+    core::control::diff_rows(&baseline, &current, |row| {
         (
             row.kind.as_str(),
             row.label.as_str(),
@@ -7024,9 +7033,9 @@ fn snapshot_row_locator(row: &crate::runner::ElementRow) -> Option<AgentElementL
         label,
         identifier,
         kind,
-        value: row.value.clone(),
+        value: row.value.clone().filter(|value| !value.is_empty()),
         focused: row.focused,
-        enabled: row.enabled,
+        enabled: row.enabled.filter(|enabled| !enabled),
         visible: row.visible,
     })
 }
@@ -16045,7 +16054,7 @@ async fn agent_elements_unfenced(
             );
         }
     }
-    let response = agent_elements_inner(state.clone(), query, headers.clone(), read_scope).await;
+    let response = agent_elements_inner(state.clone(), query, headers.clone(), read_scope, selector.as_ref()).await;
     if refused_as_unauthenticated(&response) {
         return response;
     }
@@ -16153,6 +16162,7 @@ async fn agent_elements_inner(
     Query(query): Query<AgentElementsQuery>,
     headers: HeaderMap,
     read_scope: ScreenReadScope,
+    selector: Option<&core::element_selector::ElementSelector>,
 ) -> Response {
     // The browser's accessible-controls drawer reads the same on-device tree
     // that agents use. It is read-only, so accept the authenticated browser
@@ -16447,6 +16457,22 @@ async fn agent_elements_inner(
             "ax_stats": ax_stats,
         }),
     };
+    // Restore only the metadata the selector requests; ordinary reads stay
+    // sparse. Unknown and redacted secure values never become empty values.
+    let include_enabled = selector.and_then(|selector| selector.enabled).is_some();
+    let include_value = selector.is_some_and(|selector| selector.value.is_some());
+    if include_enabled || include_value {
+        if let Some(elements) = body.get_mut("elements").and_then(|value| value.as_array_mut()) {
+            for (element, row) in elements.iter_mut().zip(rows.iter()) {
+                if include_enabled {
+                    if let Some(enabled) = row.enabled { element["enabled"] = serde_json::json!(enabled); }
+                }
+                if include_value {
+                    if let Some(value) = &row.value { element["value"] = serde_json::json!(value); }
+                }
+            }
+        }
+    }
     // A tree too large to read with runner's `isVisible` (see
     // RunnerClient::bounded_source) carries a geometric `visible`: off-root rows
     // are `visible:false`, but rows hidden inside the root rect (a collapsed
@@ -23696,6 +23722,26 @@ mod tests {
     }
 
     #[test]
+    fn selector_enabled_enrichment_keeps_default_snapshot_delta_and_action_contracts() {
+        let unknown=crate::runner::ElementRow {kind:"Button".into(),label:"Save".into(),identifier:Some("save".into()),..Default::default()};
+        let known=crate::runner::ElementRow {enabled:Some(true),..unknown.clone()};
+        assert_eq!(element_snapshot_id(&[unknown.clone()]).unwrap(),element_snapshot_id(&[known.clone()]).unwrap());
+        let delta=diff_element_rows(&[unknown.clone()],&[known.clone()]);
+        assert_eq!(delta.unchanged,1);
+        assert!(delta.changed.is_empty());
+        assert_eq!(snapshot_row_locator(&unknown).unwrap().enabled,None);
+        assert_eq!(snapshot_row_locator(&known).unwrap().enabled,None);
+        let empty=crate::runner::ElementRow {value:Some(String::new()),..known.clone()};
+        assert_eq!(element_snapshot_id(&[known.clone()]).unwrap(),element_snapshot_id(&[empty.clone()]).unwrap());
+        assert!(diff_element_rows(&[known.clone()],&[empty.clone()]).changed.is_empty());
+        assert_eq!(snapshot_row_locator(&empty).unwrap().value,None);
+        let disabled=crate::runner::ElementRow {enabled:Some(false),..known.clone()};
+        assert_ne!(element_snapshot_id(&[known.clone()]).unwrap(),element_snapshot_id(&[disabled.clone()]).unwrap());
+        assert_eq!(diff_element_rows(&[known],&[disabled.clone()]).changed,vec![0]);
+        assert_eq!(snapshot_row_locator(&disabled).unwrap().enabled,Some(false));
+    }
+
+    #[test]
     fn snapshot_row_locator_uses_semantics_instead_of_system_rectangle() {
         let row = crate::runner::ElementRow {
             kind: "Button".to_string(),
@@ -23715,7 +23761,7 @@ mod tests {
         let locator = snapshot_row_locator(&row).unwrap();
         assert_eq!(locator.label.as_deref(), Some("保存"));
         assert_eq!(locator.kind.as_deref(), Some("Button"));
-        assert_eq!(locator.enabled, Some(true));
+        assert_eq!(locator.enabled, None, "known true enrichment must not add a default action constraint");
         assert_eq!(locator.visible, Some(true));
     }
 
@@ -27172,7 +27218,7 @@ mod tests {
             });
             let state=readiness_state_with_runner(runner.base());
             let mut url=reqwest::Url::parse("http://daemon/agent/elements").unwrap();
-            url.query_pairs_mut().append_pair("selector",r#"{"kind":"Button","identifier":"primary"}"#)
+            url.query_pairs_mut().append_pair("selector",r#"{"kind":"Button","identifier":"primary","enabled":true}"#)
                 .append_pair("limit","1").append_pair("ocr","off");
             let response=router(state.clone()).oneshot(axum::http::Request::builder()
                 .uri(format!("{}?{}",url.path(),url.query().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
@@ -27181,13 +27227,54 @@ mod tests {
             let body:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
             assert_eq!(body["elements"].as_array().unwrap().len(),1);
             assert_eq!(body["elements"][0]["index"],2);
+            assert_eq!(body["elements"][0]["enabled"],true);
             assert_eq!(body["filter"]["matched"],2);
             assert_eq!(body["filter"]["omitted"],1);
             let snapshot=body["snapshot"].as_str().unwrap();
             let rows=lookup_element_snapshot(&state,snapshot).unwrap();
             assert_eq!(rows.len(),4,"filtering must not replace the full snapshot cache");
             assert_eq!(rows[2].identifier.as_deref(),Some("primary"));
+            assert_eq!(rows[2].enabled,Some(true));
             assert_eq!(rows[1].identifier.as_deref(),Some("other"));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn element_selector_empty_value_keeps_missing_and_secure_fields_distinct() {
+        use tower::ServiceExt;
+        block(async {
+            let mut runner=MockRunner::start(|request| {
+                if request.contains("/source") {
+                    serde_json::json!({"value":{"type":"XCUIElementTypeApplication","label":"Value fixture",
+                        "rect":{"x":0,"y":0,"width":390,"height":844},"children":[
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"empty","label":"Empty","value":"","rect":{"x":0,"y":60,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"missing","label":"Missing","rect":{"x":0,"y":120,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeSecureTextField","rawIdentifier":"secure-empty","label":"Secure","value":"","rect":{"x":0,"y":180,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeSecureTextField","rawIdentifier":"secret","label":"Password","value":"synthetic-secret","rect":{"x":0,"y":240,"width":100,"height":40}}
+                    ]}}).to_string()
+                } else if request.contains("/window/size") {
+                    r#"{"value":{"width":390,"height":844}}"#.into()
+                } else { healthy_runner_responder(request) }
+            });
+            let state=readiness_state_with_runner(runner.base());
+            let mut url=reqwest::Url::parse("http://daemon/agent/elements").unwrap();
+            url.query_pairs_mut().append_pair("selector",r#"{"value":""}"#).append_pair("ocr","off");
+            let response=router(state.clone()).oneshot(axum::http::Request::builder()
+                .uri(format!("{}?{}",url.path(),url.query().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(),StatusCode::OK);
+            let bytes=axum::body::to_bytes(response.into_body(),1<<20).await.unwrap();
+            let body:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["elements"].as_array().unwrap().len(),1);
+            assert_eq!(body["elements"][0]["identifier"],"empty");
+            assert_eq!(body["elements"][0]["value"],"");
+            let rows=lookup_element_snapshot(&state,body["snapshot"].as_str().unwrap()).unwrap();
+            assert_eq!(rows[1].value.as_deref(),Some(""));
+            assert_eq!(rows[2].value,None);
+            assert_eq!(rows[3].value,None);
+            let ordinary=serde_json::to_value(&*rows).unwrap();
+            assert!(ordinary[1].get("value").is_none());
+            assert!(!ordinary.to_string().contains("synthetic-secret"));
             runner.shutdown();
         });
     }

@@ -1023,7 +1023,11 @@ HTTP callers pass the same object as URL-encoded JSON in `?selector=`.
 Fields combine with AND: exact `kind`, `identifier`, `label`, `value`, boolean
 `enabled`, and case-sensitive `label_contains`. Exact values preserve whitespace
 and newlines; an empty `value` matches a present empty value, not a missing one.
-Unknown enabled state matches neither true nor false. The optional
+Known truncated value previews cannot match an exact value filter; use
+`phone_read_value` to inspect bounded full values.
+Known enabled state and explicit empty values are included when those fields
+are filtered; redacted secure values are never treated as empty. Ordinary reads
+keep the compact representation. Unknown enabled state matches neither true nor false. The optional
 `XCUIElementType` prefix is accepted for `kind`. Selectors need at least one
 field; strings are limited to 1000 characters. No predicates are evaluated.
 

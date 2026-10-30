@@ -19,7 +19,8 @@ pub struct ElementSelector {
     /// Case-sensitive substring of the label. Combined with other fields using AND.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_contains: Option<String>,
-    /// Exact accessibility value. An empty string matches a present empty value.
+    /// Exact exposed accessibility value; known truncated previews never match.
+    /// An empty string matches a present empty value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// Exact enabled state. A missing state never matches either boolean.
@@ -129,6 +130,8 @@ impl ElementSelector {
         ) && exact("identifier", self.identifier.as_deref())
             && exact("label", self.label.as_deref())
             && exact("value", self.value.as_deref())
+            && (self.value.is_none()
+                || row.get("value_truncated").and_then(Value::as_bool) != Some(true))
             && self.label_contains.as_deref().is_none_or(|text| {
                 row.get("label")
                     .and_then(Value::as_str)
@@ -179,6 +182,13 @@ mod tests {
         ] {
             assert!(!selector.matches(&row));
         }
+    }
+
+    #[test]
+    fn truncated_value_previews_cannot_satisfy_an_exact_value_filter() {
+        let selector: ElementSelector = serde_json::from_value(json!({"value":"prefix"})).unwrap();
+        assert!(!selector.matches(&json!({"value":"prefix","value_truncated":true})));
+        assert!(selector.matches(&json!({"value":"prefix","value_truncated":false})));
     }
 
     #[test]

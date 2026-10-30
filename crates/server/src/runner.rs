@@ -2938,6 +2938,8 @@ pub struct ElementRow {
     /// Provider explicitly reported a truncated snapshot value; absence is not proof of completeness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_truncated: Option<bool>,
+    /// Preserve known enabled state internally for exact selectors. The wire
+    /// form omits true unless the caller explicitly filters by enabled.
     /// runner emits these flags for every source node. Keep the common healthy
     /// state sparse to avoid inflating every MCP response: `enabled:false` and
     /// `visible:false` are emitted only for exceptional nodes.
@@ -3046,9 +3048,9 @@ impl From<ElementRow> for ElementRowJson {
             identifier: row.identifier,
             rect: row.rect.map(Coordinate),
             depth: row.depth,
-            value: row.value,
+            value: row.value.filter(|value| !value.is_empty()),
             value_truncated: row.value_truncated,
-            enabled: row.enabled,
+            enabled: row.enabled.filter(|enabled| !enabled),
             visible: row.visible,
             accessible: row.accessible,
             focused: row.focused,
@@ -3291,9 +3293,9 @@ fn flatten_node(
         let g = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
         // Current value/state (issue #20). runner reports `value` as a string
         // ("1"/"0" for a Switch), a number (Slider fraction), or a bool —
-        // normalize to a non-empty string, else None.
+        // preserve known strings (including empty) internally; the wire stays sparse.
         let value = node.get("value").and_then(|v| match v {
-            serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+            serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Number(n) => Some(n.to_string()),
             serde_json::Value::Bool(b) => Some(b.to_string()),
             _ => None,
@@ -3303,7 +3305,7 @@ fn flatten_node(
         // placeholder (shown while empty) is not secret and stays.
         let placeholder = non_empty_string(node, "placeholderValue");
         let value = if kind == "SecureTextField" {
-            value.map(|v| {
+            value.filter(|value| !value.is_empty()).map(|v| {
                 if placeholder.as_deref() == Some(v.as_str()) {
                     v
                 } else {
@@ -3313,7 +3315,7 @@ fn flatten_node(
         } else {
             value
         };
-        let enabled = runner_bool(node, "isEnabled").filter(|value| !value);
+        let enabled = runner_bool(node, "isEnabled");
         let visible = runner_bool(node, "isVisible").filter(|value| !value);
         let accessible = runner_bool(node, "isAccessible").filter(|value| *value);
         let focused = runner_bool(node, "isFocused").filter(|value| *value);
@@ -5016,7 +5018,7 @@ mod tests {
         assert_eq!(rows[0].label, "新备忘录");
         assert_eq!(rows[0].identifier.as_deref(), Some("new-note-button"));
         assert_eq!(rows[0].rect, [369.0, 885.0, 38.0, 38.0]);
-        assert_eq!(rows[0].enabled, None);
+        assert_eq!(rows[0].enabled, Some(true));
         assert_eq!(rows[0].visible, None);
         assert_eq!(rows[0].accessible, Some(true));
         assert_eq!(rows[0].focused, None);
