@@ -241,3 +241,8 @@ jobs:
             ${{ runner.temp }}/list-oracle-proof/conformance/*.jsonl
             ${{ runner.temp }}/list-oracle-proof/conformance/failure-ui.png
             ${{ runner.temp }}/list-oracle-proof/conformance/*/*.json
+            ${{ runner.temp }}/list-oracle-proof/default-conformance/*.json
+            ${{ runner.temp }}/list-oracle-proof/default-conformance/*.log
+            ${{ runner.temp }}/list-oracle-proof/default-conformance/*.jsonl
+            ${{ runner.temp }}/list-oracle-proof/default-conformance/failure-ui.png
+            ${{ runner.temp }}/list-oracle-proof/default-conformance/*/*.json
