@@ -89,6 +89,9 @@ pub enum VideoMode {
     Performance,
     /// Full size, as many frames as the phone captures (up to 60), ~10 Mbit/s.
     Quality,
+    /// A third of the size, 12 fps, ~0.3 Mbit/s: for a viewer on a slow link
+    /// (the app asks for it over the relay). Only while every viewer wants it.
+    Saver,
 }
 
 impl VideoMode {
@@ -97,6 +100,7 @@ impl VideoMode {
     pub fn parse(value: Option<&str>) -> Self {
         match value.map(str::trim) {
             Some(v) if v.eq_ignore_ascii_case("quality") || v == "画质" => Self::Quality,
+            Some(v) if v.eq_ignore_ascii_case("saver") || v == "省流" => Self::Saver,
             _ => Self::Performance,
         }
     }
@@ -105,6 +109,7 @@ impl VideoMode {
         match self {
             Self::Performance => "performance",
             Self::Quality => "quality",
+            Self::Saver => "saver",
         }
     }
 
@@ -115,6 +120,8 @@ impl VideoMode {
         match self {
             Self::Performance => format!("mode=performance&kbps={performance_kbps}"),
             Self::Quality => "mode=quality".to_string(),
+            // The runner's performance preset with its explicit overrides.
+            Self::Saver => format!("mode=performance&kbps={}&fps=12&scale=33", performance_kbps.min(SAVER_KBPS)),
         }
     }
 
@@ -123,6 +130,7 @@ impl VideoMode {
         match self {
             Self::Performance => (30, 50, 60),
             Self::Quality => (30, 100, 85),
+            Self::Saver => (12, 33, 50),
         }
     }
 
@@ -131,9 +139,13 @@ impl VideoMode {
         match self {
             Self::Performance => performance_bitrate,
             Self::Quality => performance_bitrate.max(8_000_000),
+            Self::Saver => performance_bitrate.min(SAVER_KBPS * 1000),
         }
     }
 }
+
+/// Saver's bitrate cap, kbit/s: fits a weak cellular link (0.7 Mbit/s measured).
+const SAVER_KBPS: u32 = 300;
 
 /// How long a new upstream connection may go without a frame before its mode
 /// counts as failed. The runner forces a keyframe for every new connection and
@@ -155,14 +167,15 @@ pub struct ModeFailures {
 impl ModeFailures {
     fn slot(&mut self, mode: VideoMode) -> &mut Option<std::time::Instant> {
         match mode {
-            VideoMode::Performance => &mut self.performance,
+            // Saver is the runner's performance preset: it fails with it.
+            VideoMode::Performance | VideoMode::Saver => &mut self.performance,
             VideoMode::Quality => &mut self.quality,
         }
     }
 
     fn failed(&self, mode: VideoMode, now: std::time::Instant) -> bool {
         let at = match mode {
-            VideoMode::Performance => self.performance,
+            VideoMode::Performance | VideoMode::Saver => self.performance,
             VideoMode::Quality => self.quality,
         };
         at.is_some_and(|at| now.saturating_duration_since(at) < MODE_FAILURE_TTL)
@@ -186,7 +199,7 @@ impl ModeFailures {
     /// failed, the wanted one (nothing better to offer).
     pub fn resolve(&self, wanted: VideoMode, now: std::time::Instant) -> VideoMode {
         let other = match wanted {
-            VideoMode::Performance => VideoMode::Quality,
+            VideoMode::Performance | VideoMode::Saver => VideoMode::Quality,
             VideoMode::Quality => VideoMode::Performance,
         };
         if self.failed(wanted, now) && !self.failed(other, now) {
@@ -324,6 +337,7 @@ pub struct VideoHub {
     /// Subscribers that asked for [`VideoMode::Quality`] (also counted in
     /// `subscribers`).
     quality_subscribers: Arc<AtomicUsize>,
+    saver_subscribers: Arc<AtomicUsize>,
     force_idr: Arc<AtomicBool>,
     /// Modes that produced no frame on the runner's own H.264 (see
     /// [`ModeFailures`]).
@@ -355,12 +369,16 @@ pub struct Subscription {
     subscribers: Arc<AtomicUsize>,
     privacy_viewers: Arc<AtomicUsize>,
     quality: Option<Arc<AtomicUsize>>,
+    saver: Option<Arc<AtomicUsize>>,
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
         if let Some(quality) = &self.quality {
             quality.fetch_sub(1, Ordering::AcqRel);
+        }
+        if let Some(saver) = &self.saver {
+            saver.fetch_sub(1, Ordering::AcqRel);
         }
         self.subscribers.fetch_sub(1, Ordering::AcqRel);
         self.privacy_viewers.fetch_sub(1, Ordering::AcqRel);
@@ -381,6 +399,7 @@ impl VideoHub {
             tx,
             subscribers: Arc::new(AtomicUsize::new(0)),
             quality_subscribers: Arc::new(AtomicUsize::new(0)),
+            saver_subscribers: Arc::new(AtomicUsize::new(0)),
             force_idr: Arc::new(AtomicBool::new(true)),
             mode_failures: Mutex::new(ModeFailures::default()),
             wake: tokio::sync::Notify::new(),
@@ -461,10 +480,14 @@ impl VideoHub {
         cfg!(target_os = "macos") || (cfg!(target_os = "ios") && passthrough_enabled())
     }
 
-    /// The mode viewers ask for: quality while any viewer wants it.
+    /// The mode viewers ask for: quality while any viewer wants it, saver
+    /// only while every viewer does (one slow viewer never blurs the rest).
     pub fn wanted_mode(&self) -> VideoMode {
+        let savers = self.saver_subscribers.load(Ordering::Acquire);
         if self.quality_subscribers.load(Ordering::Acquire) > 0 {
             VideoMode::Quality
+        } else if savers > 0 && savers >= self.subscribers.load(Ordering::Acquire) {
+            VideoMode::Saver
         } else {
             VideoMode::Performance
         }
@@ -495,6 +518,10 @@ impl VideoHub {
             self.quality_subscribers.fetch_add(1, Ordering::AcqRel);
             Arc::clone(&self.quality_subscribers)
         });
+        let saver = (mode == VideoMode::Saver).then(|| {
+            self.saver_subscribers.fetch_add(1, Ordering::AcqRel);
+            Arc::clone(&self.saver_subscribers)
+        });
         self.subscribers.fetch_add(1, Ordering::AcqRel);
         // The newcomer's decoder needs an entry point now, not at the next GOP.
         self.force_idr.store(true, Ordering::Release);
@@ -517,6 +544,7 @@ impl VideoHub {
             subscribers: Arc::clone(&self.subscribers),
             privacy_viewers,
             quality,
+            saver,
         }
     }
 
@@ -1790,6 +1818,24 @@ mod tests {
     }
 
     #[test]
+    fn saver_runs_only_while_every_viewer_wants_it() {
+        // subscribing starts the pipeline task, which needs a runtime
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        assert_eq!(VideoMode::parse(Some("saver")), VideoMode::Saver);
+        assert_eq!(VideoMode::Saver.runner_query(1500), "mode=performance&kbps=300&fps=12&scale=33");
+        let hub = VideoHub::new("http://127.0.0.1:9".into());
+        let slow = hub.subscribe(VideoMode::Saver);
+        assert_eq!(hub.wanted_mode(), VideoMode::Saver);
+        let fast = hub.subscribe(VideoMode::Performance);
+        assert_eq!(hub.wanted_mode(), VideoMode::Performance, "a fast viewer is never blurred");
+        drop(fast);
+        assert_eq!(hub.wanted_mode(), VideoMode::Saver);
+        drop(slow);
+        assert_eq!(hub.wanted_mode(), VideoMode::Performance);
+    }
+
+    #[test]
     fn the_upstream_runs_in_quality_while_any_quality_viewer_watches() {
         let hub = VideoHub::new("http://127.0.0.1:9".into());
         assert_eq!(hub.effective_mode(), VideoMode::Performance);
@@ -1800,6 +1846,7 @@ mod tests {
             subscribers: Arc::clone(&hub.subscribers),
             privacy_viewers: Arc::new(AtomicUsize::new(1)),
             quality: Some(Arc::clone(&hub.quality_subscribers)),
+            saver: None,
         };
         hub.subscribers.fetch_add(1, Ordering::AcqRel);
         let performance = Subscription {
@@ -1807,6 +1854,7 @@ mod tests {
             subscribers: Arc::clone(&hub.subscribers),
             privacy_viewers: Arc::new(AtomicUsize::new(1)),
             quality: None,
+            saver: None,
         };
         assert_eq!(hub.effective_mode(), VideoMode::Quality);
         drop(performance);

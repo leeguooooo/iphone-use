@@ -134,6 +134,14 @@ final class DeviceSession: ObservableObject, Identifiable {
         return client.publicBase.scheme == "https" ? String(localized: "外网") : nil
     }
 
+    /// Auto over the relay (外网): the small, low-rate stream, so a weak
+    /// cellular link shows a live picture instead of a stalled one. A daemon
+    /// that predates `saver` reads it as performance.
+    private var savesData: Bool {
+        guard let client, videoPreference == .auto, !onLAN else { return false }
+        return client.publicBase.scheme == "https"
+    }
+
     /// The person's viewing choice for the focused screen. Tiles ignore it.
     @Published var videoPreference: VideoPreference = .auto {
         didSet { if videoPreference != oldValue { refreshQuality(fresh: true) } }
@@ -647,7 +655,7 @@ final class DeviceSession: ObservableObject, Identifiable {
             let reader = H264StreamReader(
                 request: client.request(
                     "agent/h264",
-                    query: [URLQueryItem(name: "mode", value: quality ? "quality" : "performance")]),
+                    query: [URLQueryItem(name: "mode", value: quality ? "quality" : (savesData ? "saver" : "performance"))]),
                 onMessage: { [weak self] message in self?.video?.enqueue(message) },
                 onState: { [weak self] ok, why in
                     if why?.contains("501") == true, let self {
