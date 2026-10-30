@@ -192,6 +192,10 @@ final class BrowserModelClient: BrowserReasoning, AssistantReasoning, BrowserCom
         } else {
             let message = (object?["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
             let calls = message?["tool_calls"] as? [[String: Any]] ?? []
+            if calls.isEmpty, let text = ToolArguments.text(message?["content"] as? String),
+               let written = ToolArguments.writtenCall(text, tool: tool) {
+                return String(decoding: written, as: UTF8.self)
+            }
             guard calls.count == 1, let function = calls[0]["function"] as? [String: Any], function["name"] as? String == tool else {
                 throw BrowserToolError.actionFailed(String(localized: "模型没有返回一个有效操作，请换一个模型重试"))
             }

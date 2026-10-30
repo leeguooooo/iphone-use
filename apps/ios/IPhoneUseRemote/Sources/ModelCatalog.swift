@@ -89,6 +89,67 @@ func sendForcedToolRequest(_ session: URLSession, _ request: URLRequest, body: [
     return try await session.data(for: request)
 }
 
+/// Reads tool arguments the way a free model actually writes them: fenced in
+/// ```json, wrapped in words, or as a call written into the reply text
+/// (`<tool_call>{"name":…,"arguments":…}</tool_call>`), after magpie's
+/// gateway/textcalls.go.
+enum ToolArguments {
+    /// The JSON object inside `data`; `data` itself when there is none.
+    static func json(_ data: Data) -> Data {
+        guard (try? JSONSerialization.jsonObject(with: data)) == nil,
+              let object = firstObject(String(decoding: data, as: UTF8.self)) else { return data }
+        return Data(object.utf8)
+    }
+
+    /// Non-empty trimmed text, or nil.
+    static func text(_ value: String?) -> String? {
+        let text = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    /// The arguments of a call to `tool` written into `text`, if any: a
+    /// `<tool_call>` block naming it, a `{"name","arguments"}` object, or the
+    /// bare arguments object itself.
+    static func writtenCall(_ text: String, tool: String) -> Data? {
+        var body = text
+        if let open = body.range(of: "<tool_call>") {
+            body = String(body[open.upperBound...])
+            if let close = body.range(of: "</tool_call>") { body = String(body[..<close.lowerBound]) }
+        }
+        guard let object = firstObject(body), let data = object.data(using: .utf8),
+              let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        if let name = value["name"] as? String {
+            guard name == tool else { return nil }
+            if let args = value["arguments"] as? String { return Data(args.utf8) }
+            if let args = value["arguments"] ?? value["parameters"] { return try? JSONSerialization.data(withJSONObject: args) }
+            return nil
+        }
+        return data
+    }
+
+    /// The first balanced `{…}` in `text`, braces inside strings ignored.
+    static func firstObject(_ text: String) -> String? {
+        guard let start = text.firstIndex(of: "{") else { return nil }
+        var depth = 0, inString = false, escaped = false
+        for index in text[start...].indices {
+            let c = text[index]
+            if inString {
+                if escaped { escaped = false } else if c == "\\" { escaped = true } else if c == "\"" { inString = false }
+                continue
+            }
+            switch c {
+            case "\"": inString = true
+            case "{": depth += 1
+            case "}":
+                depth -= 1
+                if depth == 0 { return String(text[start...index]) }
+            default: break
+            }
+        }
+        return nil
+    }
+}
+
 func validateModelResponse(_ data: Data, response: URLResponse) throws {
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
