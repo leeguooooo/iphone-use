@@ -264,7 +264,7 @@ async fn serve(
         Message::Binary(frame.into())
     };
     let mut body = response.bytes_stream();
-    let mut parts = boundary.map(|b| MultipartSplitter::new(b));
+    let mut parts = boundary.map(MultipartSplitter::new);
     while let Some(Ok(chunk)) = body.next().await {
         if let Some(splitter) = parts.as_mut() {
             for part in splitter.push(&chunk) {
