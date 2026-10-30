@@ -32,6 +32,7 @@ jobs:
       - run: python3 -I scripts/test-agent-bench-runtime.py
       - run: python3 -I scripts/test-mcp-probe-peer.py
       - run: python3 -I scripts/test-collect-simulator-verdict.py
+      - run: python3 -I scripts/test-selector-simulator-verdict.py
 
   remote-connection:
     name: Remote connection and credential recovery

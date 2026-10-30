@@ -33,10 +33,14 @@ on:
         description: Verify Native collection against an independent UIKit model on a new Simulator
         type: boolean
         default: false
+      selector_probe_only:
+        description: Verify literal selectors against an independent App model on a new Simulator
+        type: boolean
+        default: false
       collect_release_tag:
         description: Published GitHub release whose binaries and runner sources are tested
         type: string
-        default: v0.27.11
+        default: v0.27.15
       capture_probe_only:
         description: Verify native system screenshot persistence in an owned Simulator
         type: boolean
@@ -57,10 +61,10 @@ permissions:
 
 jobs:
   smoke:
-    if: ${{ !inputs.capture_probe_only && !inputs.capture_mcp && !inputs.collect_probe_only }}
+    if: ${{ !inputs.capture_probe_only && !inputs.capture_mcp && !inputs.collect_probe_only && !inputs.selector_probe_only }}
     name: Simulator end to end
     runs-on: macos-14
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -87,6 +91,39 @@ jobs:
       - name: Smoke test
         timeout-minutes: 35
         run: bash scripts/test-simulator-smoke.sh
+
+      - name: Candidate selector oracle on iOS 18.2
+        timeout-minutes: 15
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          xcodebuild -project runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj \
+            -scheme IPhoneUseRunner -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/selector-runner" \
+            -jobs 2 CODE_SIGNING_ALLOWED=NO build-for-testing > "$RUNNER_TEMP/selector-runner-build.log" 2>&1
+          recipe=$(python3 -c 'import os; from pathlib import Path; p=list((Path(os.environ["RUNNER_TEMP"])/"selector-runner/Build/Products").glob("*.xctestrun")); assert len(p)==1,p; print(p[0])')
+          python3 scripts/run-collect-simulator.py --probe selector \
+            --daemon "$GITHUB_WORKSPACE/target/release/iphone-use" \
+            --mcp "$GITHUB_WORKSPACE/target/release/iphone-use-mcp" \
+            --runner-source "$GITHUB_WORKSPACE/runner" --xctestrun "$recipe" \
+            --runtime com.apple.CoreSimulator.SimRuntime.iOS-18-2 \
+            --out "$RUNNER_TEMP/candidate-selector-proof"
+
+      - name: Preserve candidate selector evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: candidate-selector-oracle
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/selector-runner-build.log
+            ${{ runner.temp }}/candidate-selector-proof/*.json
+            ${{ runner.temp }}/candidate-selector-proof/*.log
+            ${{ runner.temp }}/candidate-selector-proof/conformance/*.json
+            ${{ runner.temp }}/candidate-selector-proof/conformance/*.log
+            ${{ runner.temp }}/candidate-selector-proof/conformance/*.jsonl
+            ${{ runner.temp }}/candidate-selector-proof/conformance/*/*.json
 
       - name: Logs
         if: always()
@@ -179,18 +216,26 @@ jobs:
             ${{ runner.temp }}/build-simulator.log
 
   list_collection_probe:
-    if: ${{ inputs.collect_probe_only }}
-    name: Native list oracle / released artifact
+    if: ${{ inputs.collect_probe_only || inputs.selector_probe_only }}
+    name: Native element oracle / released artifact
     runs-on: macos-14
     timeout-minutes: 25
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
       LIST_RELEASE: ${{ inputs.collect_release_tag }}
+      ELEMENT_PROBE: ${{ inputs.selector_probe_only && 'selector' || 'list' }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Reject conflicting probe modes
+        if: ${{ inputs.collect_probe_only && inputs.selector_probe_only }}
+        run: |
+          echo "Choose collect_probe_only or selector_probe_only, not both" >&2
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Negative controls for the model oracle
         run: python3 -I scripts/test-collect-simulator-verdict.py
+      - name: Selector oracle negative controls
+        run: python3 -I scripts/test-selector-simulator-verdict.py
       - name: Download and check the exact published product
         shell: bash
         run: |
@@ -220,6 +265,7 @@ jobs:
           set -euo pipefail
           recipe=$(python3 -c 'import os; from pathlib import Path; p=list((Path(os.environ["RUNNER_TEMP"])/"list-runner/Build/Products").glob("*.xctestrun")); assert len(p)==1,p; print(p[0])')
           python3 scripts/run-collect-simulator.py \
+            --probe "$ELEMENT_PROBE" \
             --daemon "$RUNNER_TEMP/list-release/iPhoneUse.app/Contents/MacOS/iphone-use" \
             --mcp "$RUNNER_TEMP/list-release/iPhoneUse.app/Contents/MacOS/iphone-use-mcp" \
             --runner-source "$RUNNER_TEMP/list-release/runner" \

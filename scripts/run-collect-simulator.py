@@ -40,18 +40,19 @@ def main():
     for name in ('daemon', 'mcp', 'runner-source', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--runtime', required=True)
+    parser.add_argument('--probe', choices=('list','selector'), default='list')
     parser.add_argument('--xctestrun', type=Path, required=True)
     args = parser.parse_args()
     daemon, mcp, runner = (path.resolve(strict=True) for path in (args.daemon, args.mcp, args.runner_source))
     assert (runner / 'IPhoneUseRunner/IPhoneUseRunner.xcodeproj').is_dir()
     args.out = args.out.resolve(); args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
-    env = {k: v for k, v in os.environ.items() if not k.startswith(('IPHONE_USE_', 'PHONE_REMOTE_', 'IPU_', 'TEST_RUNNER_'))}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('IPHONE_USE_', 'PHONE_REMOTE_', 'IPU_', 'TEST_RUNNER_')) and k not in ('GH_TOKEN','GITHUB_TOKEN')}
     env.pop('SDKROOT', None)
     env.update(IPU_RUNNER_SRC=str(runner), IPU_RUNNER_DERIVED_DATA=str(args.out / 'runner-build'),
                IPHONE_USE_MCP_PREWARM='0', IPHONE_USE_FLOWS_NO_AUTO_UPDATE='1')
     runtimes = json.loads(command(['xcrun', 'simctl', 'list', 'runtimes', '--json'], env=env))['runtimes']
     assert any(r['identifier'] == args.runtime and r.get('isAvailable') is True for r in runtimes), 'requested runtime unavailable'
-    nonce = str(uuid.uuid4()); name = 'ipu-list-oracle-' + nonce[:8]; instance = 'list-oracle-' + nonce[:8]
+    nonce = str(uuid.uuid4()); name = 'ipu-' + args.probe + '-oracle-' + nonce[:8]; instance = args.probe + '-oracle-' + nonce[:8]
     state = Path.home() / '.iphone-use/instances' / instance
     assert not state.exists(), 'disposable instance already exists'
     simulator = None
@@ -88,14 +89,16 @@ def main():
                 break
             assert time.monotonic() < until, 'Simulator Agent API did not become drivable'
             time.sleep(2)
-        for folder, flags, field in [('conformance', [], 'cases'),
-                                     ('default-conformance', ['--without-end-label'], 'default_cases')]:
-            logged(['python3', ROOT / 'scripts/test-collect-simulator.py', '--base', f"http://127.0.0.1:{binding['daemon_port']}",
+        groups = [('conformance', [], 'cases')] if args.probe == 'selector' else [
+            ('conformance', [], 'cases'), ('default-conformance', ['--without-end-label'], 'default_cases')]
+        test_script = 'test-selector-simulator.py' if args.probe == 'selector' else 'test-collect-simulator.py'
+        for folder, flags, field in groups:
+            logged(['python3', ROOT / 'scripts' / test_script, '--base', f"http://127.0.0.1:{binding['daemon_port']}",
                     '--udid', simulator, '--owner', instance, '--mcp', mcp, '--runner-record', record,
                     '--product-version', match[1], '--out', args.out / folder, *flags],
                    args.out / (folder + '.log'), env, 720)
             proof = json.loads((args.out / folder / 'result.json').read_text())
-            assert proof['passed'] is True and not proof['cleanup_errors'] and len(proof['cases']) == 4
+            assert proof['passed'] is True and not proof['cleanup_errors'] and len(proof['cases']) == (11 if args.probe == 'selector' else 4)
             result[field] = proof['cases']
         result['passed'] = True
     except Exception as error:
