@@ -281,7 +281,7 @@ final class UnifiedAssistant: ObservableObject {
                     guard nativeID != nil else { task?.state = .needsReview; message = "上次提交结果未知，执行服务中没有可核对的请求 ID。请先检查手机。"; try save(); return }
                 }
                 if nativeID == nil {
-                    let returnNote = "\n先读屏并核对页面标题。若停在与本任务无关的分享、联系人选择或搜索页面，先取消或返回目标 App 主页；除非本任务明确要求，不选择联系人、不确认分享。每次导航后重新读屏。连续两次滚动仍未接近目标时，改用可见的搜索或导航入口，不要一直上下滚动。没有实际证据就说明未完成。\n完成后的返回由执行服务自动处理。先在目标页面完成读取和核验，再选择 DONE；不要为了返回助手而使用 BACK 或 HOME，以免丢失页面证据。"
+                    let returnNote = "\n先读屏并核对页面标题。若停在与本任务无关的分享、联系人选择或搜索页面，先取消或返回目标 App 主页；除非本任务明确要求，不选择联系人、不确认分享。每次导航后重新读屏。连续两次滚动仍未接近目标时，改用可见的搜索或导航入口，不要一直上下滚动。没有实际证据就说明未完成。\n完成后的返回由执行服务自动处理。先在目标页面完成读取和核验，再选择 DONE；不要为了返回助手而使用 BACK 或 HOME，以免丢失页面证据。\n最后的结果用与本任务相同的语言写。"
                     let phoneGoal = goal + returnNote
                     guard phoneGoal.count <= 2000 else { throw BrowserToolError.actionFailed("手机步骤过长，请缩短后重试") }
                     let phoneModels = try await PhoneModelRelay.shared.payload(taskModels)

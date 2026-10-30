@@ -211,6 +211,7 @@ fn install(ctx: &Ctx, options: &Options) -> Result<(), String> {
         ));
     }
     term::ok("Installed: Phone Use");
+    record_signing(ctx.state_dir(), &bundle, &output);
     let _ = std::fs::remove_dir_all(&output);
 
     if full && !options.no_pair {
@@ -218,6 +219,31 @@ fn install(ctx: &Ctx, options: &Options) -> Result<(), String> {
     }
     next_steps(full);
     Ok(())
+}
+
+/// Where `iphone-use status` and the nightly job read when the installed
+/// app's signing runs out (a paid team's profile lasts a year).
+pub const SIGNING_FILE: &str = "app-signing.json";
+
+/// Note the installed app's profile expiry next to the instance's state. A
+/// profile that can't be read leaves the old note alone: a warning that is
+/// missing is better than one that is wrong.
+fn record_signing(state_dir: &Path, bundle: &str, app: &Path) {
+    let Some(expires_at) = profile_expiry(&app.join("embedded.mobileprovision")) else { return };
+    let note = serde_json::json!({ "bundle": bundle, "expires_at": expires_at, "installed_at": now_secs() });
+    if std::fs::write(state_dir.join(SIGNING_FILE), note.to_string()).is_ok() {
+        let days = expires_at.saturating_sub(now_secs()) / 86_400;
+        term::ok(&format!("Signing valid for {days} more days; the nightly job re-signs it in its last 21"));
+    }
+}
+
+/// A provisioning profile's ExpirationDate, as Unix seconds.
+fn profile_expiry(profile: &Path) -> Option<u64> {
+    let decoded = Command::new("security").args(["cms", "-D", "-i"]).arg(profile).output().ok()?;
+    if !decoded.status.success() { return None; }
+    let plist = plist::Value::from_reader_xml(decoded.stdout.as_slice()).ok()?;
+    let date = plist.as_dictionary()?.get("ExpirationDate")?.as_date()?;
+    std::time::SystemTime::from(date).duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
 /// IPHONE_USE_APP_SRC: a checkout to build from instead of the release asset.
@@ -597,4 +623,8 @@ mod tests {
         assert!(parse(&["--remote-only".into()]).unwrap().remote_only);
         assert!(parse(&["--bogus".into()]).is_err());
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

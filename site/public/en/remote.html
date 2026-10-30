@@ -154,6 +154,15 @@
       </ul>
 
       <section class="du-faq">
+      <h2>Stay reachable: set it up once</h2>
+      <p>Remote control is usually urgent, and you are not next to the phone. With these done you never need to touch it:</p>
+      <ul>
+        <li><b>Pairing doesn't expire</b>: every connection swaps in a fresh 180-day credential, so a phone used at least once every six months stays paired. Its relay identity is permanent and reconnects after an outage.</li>
+        <li><b>Turn off iOS automatic updates</b> (Settings › General › Software Update › Automatic Updates). They restart the phone at night, and after a restart iOS runs nothing until someone enters the passcode once.</li>
+        <li><b>Keep it charging</b>; Auto-Lock can be Never. Local control restarts itself if iOS stops it.</li>
+        <li><b>Signing lasts a year</b>: an app signed with a paid developer account is valid for one year. Run <code>iphone-use setup-app</code> on the Mac again before then; pairing and settings are kept.</li>
+      </ul>
+
         <h2>FAQ</h2>
         <h3>Why not Tailscale?</h3>
         <p>iOS allows only one VPN at a time, and local control already uses that slot. When a Mac hosts the phone, a VPN such as Tailscale still works for reaching the Mac.</p>
