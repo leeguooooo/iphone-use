@@ -196,7 +196,7 @@ def main():
                 try:
                     before = json.loads((data / 'list-state.json').read_text())
                     oracle = json.loads((data / 'list-oracle.json').read_text())
-                    if before['run_id'] == oracle['run_id'] == nonce and before['visible_indices'] and before['width'] > 0:
+                    if before['run_id'] == oracle['run_id'] == nonce and before['visible_indices'] and before['width'] > 0 and before.get('application_state') == 0 and before.get('key_window') is True:
                         break
                 except (OSError, ValueError, KeyError):
                     pass
@@ -259,6 +259,9 @@ def main():
         result['passed'] = True
     except Exception as error:
         result['error'] = str(error)
+        if installed:
+            capture = drag.command(['xcrun', 'simctl', 'io', args.udid, 'screenshot', args.out / 'failure-ui.png'], check=False, timeout=30)
+            result['failure_framebuffer_saved'] = capture.returncode == 0
         raise
     finally:
         if peer:

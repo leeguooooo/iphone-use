@@ -55,11 +55,14 @@ final class ListController: UIViewController, UICollectionViewDataSource, UIColl
       let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
       pan.cancelsTouchesInView = false; collection.addGestureRecognizer(pan)
     }
+    NotificationCenter.default.addObserver(self, selector: #selector(activated(_:)), name: UIApplication.didBecomeActiveNotification, object: nil)
+    NotificationCenter.default.addObserver(self, selector: #selector(activated(_:)), name: UIWindow.didBecomeKeyNotification, object: nil)
     saveOracle()
   }
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated); collection.layoutIfNeeded(); saveState()
   }
+  @objc func activated(_ notification: Notification) { saveState() }
   func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { model.count }
   func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
     CGSize(width: collectionView.bounds.width, height: 60)
@@ -119,6 +122,11 @@ final class ListController: UIViewController, UICollectionViewDataSource, UIColl
     write(["run_id": runID, "mode": mode, "pid": ProcessInfo.processInfo.processIdentifier,
            "bundle_version": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "",
            "width": view.bounds.width, "height": view.bounds.height,
+           "application_state": UIApplication.shared.applicationState.rawValue,
+           "scene_state": view.window?.windowScene?.activationState.rawValue ?? -1,
+           "key_window": view.window?.isKeyWindow ?? false,
+           "scroll_enabled": collection.isScrollEnabled, "interaction_enabled": collection.isUserInteractionEnabled,
+           "content_height": collection.contentSize.height, "viewport_height": collection.bounds.height,
            "offset_y": collection.contentOffset.y, "max_offset_y": maxOffset, "max_abs_offset_y": maxAbsoluteOffset,
            "scroll_events": scrollEvents, "pan_events": panEvents, "counter_changed": counter,
            "visible_indices": visible, "seen_indices": seen.sorted()], name: "list-state.json")

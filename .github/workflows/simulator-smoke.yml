@@ -36,7 +36,7 @@ on:
       collect_release_tag:
         description: Published GitHub release whose binaries and runner sources are tested
         type: string
-        default: v0.27.10
+        default: v0.27.11
       capture_probe_only:
         description: Verify native system screenshot persistence in an owned Simulator
         type: boolean
@@ -239,4 +239,5 @@ jobs:
             ${{ runner.temp }}/list-oracle-proof/conformance/*.json
             ${{ runner.temp }}/list-oracle-proof/conformance/*.log
             ${{ runner.temp }}/list-oracle-proof/conformance/*.jsonl
+            ${{ runner.temp }}/list-oracle-proof/conformance/failure-ui.png
             ${{ runner.temp }}/list-oracle-proof/conformance/*/*.json

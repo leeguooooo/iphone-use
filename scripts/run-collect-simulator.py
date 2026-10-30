@@ -40,7 +40,7 @@ def main():
     for name in ('daemon', 'mcp', 'runner-source', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--runtime', required=True)
-    parser.add_argument('--xctestrun', type=Path)
+    parser.add_argument('--xctestrun', type=Path, required=True)
     args = parser.parse_args()
     daemon, mcp, runner = (path.resolve(strict=True) for path in (args.daemon, args.mcp, args.runner_source))
     assert (runner / 'IPhoneUseRunner/IPhoneUseRunner.xcodeproj').is_dir()
@@ -70,8 +70,7 @@ def main():
         devices = json.loads(command(['xcrun', 'simctl', 'list', 'devices', '--json'], env=env))['devices']
         assert any(d['udid'] == simulator and d['name'] == name for d in devices.get(args.runtime, [])), 'created Simulator identity differs'
         start = [daemon, 'simulator', 'start', simulator, '--instance', instance]
-        if args.xctestrun:
-            start += ['--xctestrun', args.xctestrun.resolve(strict=True)]
+        start += ['--xctestrun', args.xctestrun.resolve(strict=True)]
         logged(start, args.out / 'simulator-start.log', env, 360)
         record = state / 'simulator.json'
         binding = json.loads(record.read_text())
