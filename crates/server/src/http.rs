@@ -15694,9 +15694,11 @@ async fn agent_elements(
 ) -> Response {
     // Authenticate before the cancellation gate, including a private screen.
     if let Some(refused) = auth_refusal(browser_or_agent_auth(&state, &headers)) { return refused; }
-    let generation = state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire);
+    let read_scope = ScreenReadScope::capture(&state);
+    let generation = read_scope.privacy_epoch;
     let response = unless_private(&state.private_until, &state.privacy_epoch, generation,
-        agent_elements_unfenced(state.clone(), query, headers)).await.unwrap_or_else(|| {
+        scoped_observation(&state, &read_scope,
+            agent_elements_unfenced(state.clone(), query, headers, read_scope.clone()))).await.unwrap_or_else(|| {
             recover(state.element_snapshots.lock()).clear();
             recover(state.owner_snapshots.lock()).clear();
             agent_error(StatusCode::LOCKED, "screen_privacy_changed",
@@ -15709,6 +15711,7 @@ async fn agent_elements_unfenced(
     state: State<Arc<AppState>>,
     query: Query<AgentElementsQuery>,
     headers: HeaderMap,
+    read_scope: ScreenReadScope,
 ) -> Response {
     let owner = trusted_owner(&state, &headers);
     let full_read = query.since.is_none();
@@ -15748,7 +15751,7 @@ async fn agent_elements_unfenced(
             );
         }
     }
-    let response = agent_elements_inner(state.clone(), query, headers.clone()).await;
+    let response = agent_elements_inner(state.clone(), query, headers.clone(), read_scope).await;
     if refused_as_unauthenticated(&response) {
         return response;
     }
@@ -15855,6 +15858,7 @@ async fn agent_elements_inner(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AgentElementsQuery>,
     headers: HeaderMap,
+    read_scope: ScreenReadScope,
 ) -> Response {
     // The browser's accessible-controls drawer reads the same on-device tree
     // that agents use. It is read-only, so accept the authenticated browser
@@ -15918,10 +15922,12 @@ async fn agent_elements_inner(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(35);
     let result = tokio::time::timeout_at(deadline, async {
         let mut w = runner.lock().await;
-        let read_scope = ScreenReadScope::capture(&state);
+
+        if !read_scope.current(&state) { return Err(anyhow::anyhow!("observation scope changed while waiting for runner")); }
+        let cache_scope = read_scope.clone();
         let weak_state = Arc::downgrade(&state);
         w.begin_element_read(Arc::new(move ||
-            weak_state.upgrade().is_some_and(|state| read_scope.current(&state))));
+            weak_state.upgrade().is_some_and(|state| cache_scope.current(&state))));
         let mut first_source_error = None;
         let read_started = tokio::time::Instant::now();
         let mut alert_probes = 0u8;
@@ -16025,6 +16031,11 @@ async fn agent_elements_inner(
         Ok::<_, anyhow::Error>((rows, screen, alert, geometric, bounded))
     })
     .await;
+    if !read_scope.current(&state) {
+        return json_body(StatusCode::CONFLICT, serde_json::json!({
+            "elements": [], "error": "observation_scope_changed", "observation_omitted": true
+        }).to_string());
+    }
     let (rows, screen, alert, geometric, partial) = match result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) if error.downcast_ref::<BlockingAlert>().is_some() => {

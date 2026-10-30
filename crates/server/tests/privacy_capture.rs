@@ -602,3 +602,38 @@ fn fresh_elements_restore_cache_reuse_after_owner_or_privacy_revocation() {
         }
     });
 }
+
+#[test]
+fn a_queued_read_cannot_gain_permission_from_a_later_private_hold() {
+    block(async {
+        let reads=Arc::new(std::sync::atomic::AtomicUsize::new(0));let count=reads.clone();
+        let runner=mock_runner(move |request,_| {
+            if request.contains("/source") {count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
+            Some((Duration::ZERO,json!({"value":{"type":"XCUIElementTypeApplication",
+                "label":"private-queued-fixture","rect":{"x":0,"y":0,"width":390,"height":844},"children":[]}}).to_string()))
+        });
+        let state=build_state_with_runner(runner.url());
+        hold(state.clone(),false).await; // Keep owner identity unchanged across the private interval.
+        state.runner_actionable.store(true,std::sync::atomic::Ordering::Release);
+        *state.runner_health.lock().unwrap()=server::runner::RunnerHealth{up:true,actionable:true,locked:Some(false)};
+        let guard=state.runner.as_ref().unwrap().lock().await;
+        let app=server::http::router(state.clone());
+        let pending=tokio::spawn(async move {
+            app.oneshot(Request::builder().uri("/agent/elements?ocr=off").body(Body::empty()).unwrap()).await.unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(2),async {
+            while state.runner_control_pending.load(std::sync::atomic::Ordering::Acquire)==0 {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        let held=server::http::router(state.clone()).oneshot(Request::builder().method("POST").uri("/agent/hold")
+            .header("x-phone-control","1").header("x-phone-owner","privacy-fixture")
+            .header("content-type","application/json").body(Body::from(r#"{"secs":1,"private":true}"#)).unwrap()).await.unwrap();
+        assert_eq!(held.status(),StatusCode::OK);drop(guard);
+        let response=pending.await.unwrap();assert_eq!(response.status(),StatusCode::LOCKED);
+        response.into_body().collect().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst),0,"revoked queued read must not reach Native after acquiring the lock");
+        assert!(state.runner_actionable.load(std::sync::atomic::Ordering::Acquire),"scope refusal must not mark healthy hardware unavailable");
+        assert!(state.runner_health.lock().unwrap().up);
+        assert!(state.runner.as_ref().unwrap().lock().await.recent_tree(Duration::from_secs(10)).is_none(),"hold expiry must not authorize a revoked request's cache");
+    });
+}
