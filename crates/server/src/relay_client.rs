@@ -27,6 +27,10 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// Largest body chunk sent in one frame.
 const CHUNK: usize = 256 * 1024;
+/// Body bytes a request may have in flight before the relay acks them (the
+/// viewer took them). A live picture past this drops whole frames; anything
+/// else waits.
+const WINDOW: usize = 512 * 1024;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Identity {
@@ -154,7 +158,7 @@ async fn run(relay: &str, state_dir: &Path, port: u16) -> Result<(), String> {
         .no_proxy()
         .build()
         .map_err(|e| e.to_string())?;
-    let mut tasks: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut tasks: HashMap<u32, (tokio::task::JoinHandle<()>, Arc<tokio::sync::Semaphore>)> = HashMap::new();
     let result = loop {
         let Some(message) = stream.next().await else { break Ok(()) };
         let text = match message {
@@ -168,21 +172,27 @@ async fn run(relay: &str, state_dir: &Path, port: u16) -> Result<(), String> {
         }
         let Ok(frame) = serde_json::from_str::<serde_json::Value>(text.as_str()) else { continue };
         let Some(id) = frame["id"].as_u64().map(|id| id as u32) else { continue };
-        tasks.retain(|_, task| !task.is_finished());
+        tasks.retain(|_, (task, _)| !task.is_finished());
         match frame["t"].as_str() {
             Some("req") => {
-                let task = tokio::spawn(serve(client.clone(), port, id, frame, out_tx.clone()));
-                tasks.insert(id, task);
+                let window = Arc::new(tokio::sync::Semaphore::new(WINDOW));
+                let task = tokio::spawn(serve(client.clone(), port, id, frame, out_tx.clone(), window.clone()));
+                tasks.insert(id, (task, window));
+            }
+            Some("ack") => {
+                if let (Some((_, window)), Some(n)) = (tasks.get(&id), frame["n"].as_u64()) {
+                    window.add_permits(n as usize);
+                }
             }
             Some("cancel") => {
-                if let Some(task) = tasks.remove(&id) {
+                if let Some((task, _)) = tasks.remove(&id) {
                     task.abort();
                 }
             }
             _ => {}
         }
     };
-    for (_, task) in tasks {
+    for (_, (task, _)) in tasks {
         task.abort();
     }
     pinger.abort();
@@ -194,7 +204,14 @@ trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
 
 /// Replay one relayed request on loopback and stream the answer back.
-async fn serve(client: reqwest::Client, port: u16, id: u32, frame: serde_json::Value, out: mpsc::Sender<Message>) {
+async fn serve(
+    client: reqwest::Client,
+    port: u16,
+    id: u32,
+    frame: serde_json::Value,
+    out: mpsc::Sender<Message>,
+    window: Arc<tokio::sync::Semaphore>,
+) {
     let method = frame["m"].as_str().unwrap_or("GET");
     let path = frame["p"].as_str().unwrap_or("/");
     let reply = |status: u16, headers: Vec<(String, String)>| {
@@ -224,6 +241,14 @@ async fn serve(client: reqwest::Client, port: u16, id: u32, frame: serde_json::V
             return;
         }
     };
+    // A live picture (`multipart/x-mixed-replace; boundary=…`) may drop frames.
+    let boundary = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| v.starts_with("multipart/x-mixed-replace"))
+        .and_then(|v| v.split("boundary=").nth(1))
+        .map(|b| format!("--{}", b.trim_matches('"').trim_start_matches("--")).into_bytes());
     let headers = response
         .headers()
         .iter()
@@ -232,13 +257,30 @@ async fn serve(client: reqwest::Client, port: u16, id: u32, frame: serde_json::V
     if out.send(reply(response.status().as_u16(), headers)).await.is_err() {
         return;
     }
+    let send = |piece: &[u8]| {
+        let mut frame = Vec::with_capacity(4 + piece.len());
+        frame.extend_from_slice(&id.to_be_bytes());
+        frame.extend_from_slice(piece);
+        Message::Binary(frame.into())
+    };
     let mut body = response.bytes_stream();
+    let mut parts = boundary.map(|b| MultipartSplitter::new(b));
     while let Some(Ok(chunk)) = body.next().await {
+        if let Some(splitter) = parts.as_mut() {
+            for part in splitter.push(&chunk) {
+                // Too far ahead of the viewer: skip this frame, keep the newest.
+                let Ok(permit) = window.try_acquire_many(part.len().min(WINDOW) as u32) else { continue };
+                permit.forget();
+                if out.send(send(&part)).await.is_err() {
+                    return;
+                }
+            }
+            continue;
+        }
         for piece in chunk.chunks(CHUNK) {
-            let mut frame = Vec::with_capacity(4 + piece.len());
-            frame.extend_from_slice(&id.to_be_bytes());
-            frame.extend_from_slice(piece);
-            if out.send(Message::Binary(frame.into())).await.is_err() {
+            let Ok(permit) = window.acquire_many(piece.len() as u32).await else { return };
+            permit.forget();
+            if out.send(send(piece)).await.is_err() {
                 return;
             }
         }
@@ -246,9 +288,58 @@ async fn serve(client: reqwest::Client, port: u16, id: u32, frame: serde_json::V
     let _ = out.send(end()).await;
 }
 
+/// Cuts a multipart stream into whole parts, each starting at its boundary,
+/// so frames can be dropped without corrupting the ones that are sent.
+struct MultipartSplitter {
+    boundary: Vec<u8>,
+    buffer: Vec<u8>,
+}
+
+impl MultipartSplitter {
+    fn new(boundary: Vec<u8>) -> Self {
+        Self { boundary, buffer: Vec::new() }
+    }
+
+    fn find(&self, from: usize) -> Option<usize> {
+        let b = &self.boundary;
+        self.buffer.get(from..)?.windows(b.len()).position(|w| w == b.as_slice()).map(|i| i + from)
+    }
+
+    /// The parts completed by `data` (a part ends where the next boundary starts).
+    fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        self.buffer.extend_from_slice(data);
+        let mut parts = Vec::new();
+        while let Some(start) = self.find(0) {
+            let Some(next) = self.find(start + self.boundary.len()) else {
+                self.buffer.drain(..start);
+                break;
+            };
+            parts.push(self.buffer[start..next].to_vec());
+            self.buffer.drain(..next);
+        }
+        if self.buffer.len() > 16 << 20 {
+            self.buffer.clear();
+        }
+        parts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multipart_parts_come_out_whole_whatever_the_chunking() {
+        let stream = b"--B\r\nA1\r\n--B\r\nBB22\r\n--B\r\nC";
+        for size in [1, 3, 7, stream.len()] {
+            let mut splitter = MultipartSplitter::new(b"--B".to_vec());
+            let mut parts = Vec::new();
+            for chunk in stream.chunks(size) {
+                parts.extend(splitter.push(chunk));
+            }
+            assert_eq!(parts, vec![b"--B\r\nA1\r\n".to_vec(), b"--B\r\nBB22\r\n".to_vec()], "chunk {size}");
+        }
+    }
 
     #[test]
     fn the_identity_is_made_once_and_kept() {

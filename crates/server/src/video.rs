@@ -454,9 +454,11 @@ impl VideoHub {
         (at.elapsed() < MAX_AGE && after_action).then(|| jpeg.clone())
     }
 
-    /// Whether this build can encode at all (VideoToolbox is macOS-only).
+    /// Whether this build can serve H.264. The Mac can always (it transcodes
+    /// with VideoToolbox when the runner cannot encode); the on-phone daemon
+    /// only passes the runner's own H.264 through, which our runner serves.
     pub fn supported() -> bool {
-        cfg!(target_os = "macos")
+        cfg!(target_os = "macos") || (cfg!(target_os = "ios") && passthrough_enabled())
     }
 
     /// The mode viewers ask for: quality while any viewer wants it.

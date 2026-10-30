@@ -11,6 +11,7 @@
 // Frames on the tunnel:
 //   relay → phone  text  {"t":"req","id":N,"m":"GET","p":"/agent/status","h":[[k,v]],"b":"<base64>"}
 //                  text  {"t":"cancel","id":N}
+//                  text  {"t":"ack","id":N,"n":BYTES}   the client took BYTES of the body
 //   phone → relay  text  {"t":"res","id":N,"s":200,"h":[[k,v]]}
 //                  binary  4-byte big-endian id, then body bytes
 //                  text  {"t":"end","id":N}
@@ -119,7 +120,14 @@ export class Phone implements DurableObject {
       const id = new DataView(message).getUint32(0);
       const entry = this.pending.get(id);
       if (!entry?.writer) return;
-      entry.writer.write(bytes.subarray(4)).catch(() => this.cancel(id));
+      const length = bytes.length - 4;
+      // Ack once the client has taken the chunk: the phone keeps a window of
+      // unacked bytes, so a slow viewer slows (or thins) what the phone sends
+      // instead of piling it up here.
+      entry.writer.write(bytes.subarray(4)).then(
+        () => { try { ws.send(JSON.stringify({ t: "ack", id, n: length })); } catch {} },
+        () => this.cancel(id),
+      );
       return;
     }
     let frame: { t?: string; id?: number; s?: number; h?: [string, string][] };
