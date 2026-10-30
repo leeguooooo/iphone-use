@@ -325,7 +325,9 @@ final class DeviceSession: ObservableObject, Identifiable {
                                   lanKey: Self.savedLANKey(address))
         do {
             if let token {
-                try await client.renew(deviceToken: token)
+                if let fresh = try await client.renew(deviceToken: token) {
+                    Keychain.save(password: fresh, for: Self.deviceAccount(address))
+                }
             } else if let code {
                 let token = try await client.pair(code: code)
                 Keychain.save(password: token, for: Self.deviceAccount(address))
@@ -842,7 +844,9 @@ final class DeviceSession: ObservableObject, Identifiable {
             do {
                 if let token {
                     do {
-                        try await client.renew(deviceToken: token)
+                        if let fresh = try await client.renew(deviceToken: token) {
+                            Keychain.save(password: fresh, for: Self.deviceAccount(self.address))
+                        }
                     } catch DaemonError.pairingRevoked where password != nil {
                         // The pairing died (password changed?); the saved password may still work.
                         Keychain.delete(for: Self.deviceAccount(self.address))

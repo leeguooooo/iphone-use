@@ -1826,7 +1826,14 @@ async fn pair_submit(
                 serde_json::json!({"ok": false, "error": "device_token_invalid", "hint": "the pairing expired or the control password changed; scan a new QR code"}),
             );
         }
-        None
+        // Sliding: every renewal hands back a fresh token, so a phone that
+        // connects at least once per token lifetime stays paired for good
+        // (remote control is often needed when nobody can reach the phone).
+        Some(core::auth::make_token(
+            &device_key(&state),
+            crate::pairing::DEVICE_TOKEN_TTL_SECS,
+            now_secs(),
+        ))
     } else {
         return pair_json(
             StatusCode::BAD_REQUEST,
