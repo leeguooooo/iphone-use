@@ -7,6 +7,10 @@ import io
 import json
 import pathlib
 import tempfile
+import os
+import stat
+import sys
+from unittest.mock import patch
 
 HERE = pathlib.Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("agent_bench", HERE / "agent-bench" / "run.py")
@@ -18,6 +22,7 @@ def forbid_live_task(*args, **kwargs):
     raise AssertionError("offline audit tests must never start a real agent or phone task")
 
 
+real_run_task = bench.run_task
 bench.run_task = forbid_live_task
 
 with open(HERE / "fixtures" / "agent-bench-run.jsonl", encoding="utf-8") as source:
@@ -168,4 +173,166 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         bench.HERE = old_here
 
-print("agent-bench: ok")
+with tempfile.TemporaryDirectory(prefix="bench-native-") as tmp:
+    root = pathlib.Path(tmp)
+    program = root / "other-phone-cli"
+    program.write_text("fixture executable, never launched\n")
+    program.chmod(0o700)
+    reference = root / "usage.md"
+    reference.write_text("Use the local phone helpers over standard input.")
+    env_file = root / "cli-env.json"
+    env_file.write_text(json.dumps({"OTHER_CLI_HOME": "{run_dir}/cli-home", "OTHER_CLI_SESSION": ""}))
+    config = root / "other-mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"alt": {
+        "command": sys.executable, "args": ["fixture-server.py"],
+        "env": {"FIXTURE_SECRET": "not-for-the-public-context"}}}}))
+    mcp = bench.backend_spec(None, config=config, label="other-mcp")
+    cli = bench.backend_spec(None, cli=program, reference=reference, label="other-cli",
+                             env=bench.load_env_file(env_file))
+    assert mcp["tool_prefix"] == "mcp__alt__" and mcp["tools"] == "ToolSearch,WaitForMcpServers"
+    assert cli["tool_prefix"] is None and cli["tools"] == "Bash"
+    for bad in ({"lower": "x"}, {"OK": 1}, ["OTHER_CLI_HOME"]):
+        bad_env = root / "bad-env.json"; bad_env.write_text(json.dumps(bad))
+        try:
+            bench.load_env_file(bad_env)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted a bad --env-file: {bad}")
+    task = HERE / "agent-bench/tasks/settings-ios-version.md"
+
+    for i, invalid in enumerate([
+        {"mcpServers": {}},
+        {"mcpServers": {"one": {}, "two": {}}},
+        {"mcpServers": {"alt*": {"command": sys.executable}}},
+        {"mcpServers": {"alt": {"type": "http", "url": "https://example.invalid"}}},
+        {"mcpServers": {"alt": {"command": sys.executable, "args": "not-a-list"}}},
+        {"mcpServers": {"alt": {"command": sys.executable, "env": {"X": 1}}}},
+    ]):
+        bad = root / f"invalid-{i}.json"
+        bad.write_text(json.dumps(invalid))
+        try:
+            bench.backend_spec(None, config=bad)
+            raise AssertionError("invalid native backend accepted")
+        except ValueError:
+            pass
+
+    fake_calls = []
+    current_trace = {"value": original.replace("mcp__iphone-use__", "mcp__alt__")}
+
+    def fake_claude(command, **kwargs):
+        # A real model, MCP server, backend CLI or phone must never run here.
+        assert command[:2] == ["claude", "-p"]
+        fake_calls.append((command, kwargs))
+        kwargs["stdout"].write(current_trace["value"])
+        return type("Completed", (), {"returncode": 0})()
+
+    with patch.object(bench.subprocess, "run", side_effect=fake_claude):
+        out = root / "mcp-run"
+        out.mkdir(mode=0o700)
+        row = real_run_task(task, out, None, "fixed-model", mcp)
+    assert row["passed"] is None and row["checks_passed"]
+    assert row["sequence"] == ["phone_status", "phone_run_steps", "phone_run_steps"]
+    command, kwargs = fake_calls[-1]
+    assert command[command.index("--tools") + 1] == "ToolSearch,WaitForMcpServers"
+    assert command[command.index("--allowedTools") + 1] == "mcp__alt__*"
+    assert command[command.index("--permission-mode") + 1] == "dontAsk"
+    assert json.loads(command[command.index("--settings") + 1]) == {"disableAllHooks": True}
+    assert pathlib.Path(kwargs["cwd"]) != out and not pathlib.Path(kwargs["cwd"]).exists()
+    context_path = out / "settings-ios-version.context.json"
+    trace = out / "settings-ios-version.jsonl"
+    assert "not-for-the-public-context" not in context_path.read_text()
+    for artifact in [context_path, trace, out / "settings-ios-version.mcp.json"]:
+        assert stat.S_IMODE(artifact.stat().st_mode) == 0o600
+    proof = root / "bound-receipt.json"
+    receipt = {"task": "settings-ios-version", "trace_sha256": row["trace_sha256"],
+               "context_sha256": row["context_sha256"], "verified": True,
+               "verifier": "fixture-verifier", "evidence": "synthetic postcondition"}
+    proof.write_text(json.dumps(receipt))
+    assert bench.assess(bench.parse_task(task)[0], trace, 0, proof, context_path)["passed"] is True
+    try:
+        bench.assess({**bench.parse_task(task)[0], "max_tool_calls": 100}, trace, 0, proof, context_path)
+        raise AssertionError("changed task rules reused the old receipt")
+    except ValueError:
+        pass
+    for changed in [{k: v for k, v in receipt.items() if k != "context_sha256"},
+                    {**receipt, "context_sha256": "0" * 64}]:
+        proof.write_text(json.dumps(changed))
+        try:
+            bench.assess(bench.parse_task(task)[0], trace, 0, proof, context_path)
+            raise AssertionError("a receipt not bound to the backend context passed")
+        except ValueError:
+            pass
+    proof.write_text(json.dumps(receipt))
+    context_data = json.loads(context_path.read_text())
+    context_path.write_text(json.dumps({**context_data, "backend_label": "another-backend"}))
+    try:
+        bench.assess(bench.parse_task(task)[0], trace, 0, proof, context_path)
+        raise AssertionError("a relabeled backend inherited the old verification")
+    except ValueError:
+        pass
+    context_path.write_text(json.dumps(context_data))
+
+    discovery = root / "discovery.jsonl"
+    discovery.write_text(json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "search-1", "name": "ToolSearch", "input": {}}]}}) + "\n" + current_trace["value"])
+    discovery_context = root / "discovery.context.json"
+    discovery_context.write_text(json.dumps({**context_data, "trace_sha256": hashlib.sha256(discovery.read_bytes()).hexdigest()}))
+    result = bench.assess(bench.parse_task(task)[0], discovery, 0, context=discovery_context)
+    assert result["checks_passed"] and result["sequence"][0] == "ToolSearch"
+    assert result["tool_calls"] == 4, "framework discovery must count toward the task budget"
+
+    # A successful final answer cannot hide tools from another backend.
+    foreign = root / "foreign.jsonl"
+    foreign.write_text(original.replace("mcp__iphone-use__", "mcp__other__"))
+    foreign_context = root / "foreign.context.json"
+    foreign_context.write_text(json.dumps({**context_data, "trace_sha256": hashlib.sha256(foreign.read_bytes()).hexdigest()}))
+    result = bench.assess(bench.parse_task(task)[0], foreign, 0, context=foreign_context)
+    assert result["passed"] is False and not result["checks_passed"]
+
+    events = [json.loads(line) for line in lines if line != "not json at all"]
+    for event in events:
+        for block in (event.get("message") or {}).get("content", []):
+            if block.get("type") == "tool_use":
+                block["name"] = "Bash"
+    current_trace["value"] = "\n".join(json.dumps(event) for event in events) + "\n"
+    with patch.object(bench.subprocess, "run", side_effect=fake_claude), patch.dict(os.environ, {"OTHER_CLI_SESSION": "old-cloud-session"}):
+        out = root / "cli-run"
+        out.mkdir(mode=0o700)
+        row = real_run_task(task, out, None, "fixed-model", cli)
+    assert row["passed"] is None and row["checks_passed"]
+    command, kwargs = fake_calls[-1]
+    assert command[command.index("--tools") + 1] == "Bash"
+    # --env-file overrides the inherited session and expands {run_dir}.
+    assert kwargs["env"]["OTHER_CLI_SESSION"] == ""
+    assert kwargs["env"]["OTHER_CLI_HOME"] == str(out / "cli-home")
+    assert json.loads((out / "settings-ios-version.mcp.json").read_text()) == {"mcpServers": {}}
+
+    # Preparation is useful while no phone is available, but is never a pass.
+    old_here = bench.HERE
+    try:
+        bench.HERE = root / "preparation"
+        (bench.HERE / "tasks").mkdir(parents=True)
+        (bench.HERE / "tasks/settings-ios-version.md").write_text(task.read_text())
+        captured = io.StringIO()
+        with patch.object(bench.subprocess, "run", side_effect=AssertionError("preparation executed a process")), contextlib.redirect_stdout(captured):
+            assert bench.main(["--task", "settings-ios-version", "--cli", str(program),
+                               "--instructions", str(reference), "--model", "fixed-model",
+                               "--prepare-only", "--json"]) == 0
+        prepared = json.loads(captured.getvalue())
+        assert prepared[0]["state"] == "prepared" and prepared[0]["passed"] is None
+        outputs = list((bench.HERE / "out").iterdir())
+        assert len(outputs) == 1 and stat.S_IMODE(outputs[0].stat().st_mode) == 0o700
+        assert not list(outputs[0].glob("*.jsonl")) and not (outputs[0] / "results.json").exists()
+    finally:
+        bench.HERE = old_here
+
+record = bench.audit([
+    json.dumps({"type": "system", "subtype": "init", "model": "model-A"}),
+    json.dumps({"type": "result", "result": "done", "modelUsage": {"model-B": {}},
+                "usage": {"cache_read_input_tokens": 30, "cache_creation_input_tokens": 20}}),
+])
+assert record["models_observed"] == ["model-A", "model-B"]
+assert record["cache_read_input_tokens"] == 30 and record["cache_creation_input_tokens"] == 20
+
+print("agent-bench: audit, native interfaces, context binding and private artifacts ok")

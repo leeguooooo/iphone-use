@@ -79,7 +79,7 @@ pub async fn raw_state(udid: &str) -> Result<plist::Value> {
 /// person has seen; the caller backs up first.
 pub async fn set_state(udid: &str, state: plist::Value) -> Result<()> {
     check_udid(udid)?;
-    if !state.as_array().is_some_and(|a| a.len() >= 2) {
+    if state.as_array().is_none_or(|a| a.len() < 2) {
         bail!("icon state must be an array holding the Dock and at least one page");
     }
     tokio::time::timeout(Duration::from_secs(30), async {
