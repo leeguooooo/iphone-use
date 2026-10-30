@@ -670,6 +670,17 @@ fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<bool, Resp
     }
 }
 
+/// The owner name the iOS app's remote viewer sends (`DaemonClient.ownerName`).
+const HUMAN_VIEWER_OWNER: &str = "ios-remote";
+
+/// Give up a lease held by the app's remote viewer or its startup launch, and
+/// only those: another agent's lease still wins.
+fn yield_viewer_lease(state: &AppState) {
+    if matches!(owner_status(state).0.as_deref(), Some(HUMAN_VIEWER_OWNER | "iphone-local-startup")) {
+        state.release_owner_lease();
+    }
+}
+
 /// The current owner name and the seconds left on its lease (0 when none).
 fn owner_status(state: &AppState) -> (Option<String>, u64) {
     let lease = std::time::Duration::from_secs(state.owner_lease_secs);
@@ -1826,7 +1837,14 @@ async fn pair_submit(
                 serde_json::json!({"ok": false, "error": "device_token_invalid", "hint": "the pairing expired or the control password changed; scan a new QR code"}),
             );
         }
-        None
+        // Sliding: every renewal hands back a fresh token, so a phone that
+        // connects at least once per token lifetime stays paired for good
+        // (remote control is often needed when nobody can reach the phone).
+        Some(core::auth::make_token(
+            &device_key(&state),
+            crate::pairing::DEVICE_TOKEN_TTL_SECS,
+            now_secs(),
+        ))
     } else {
         return pair_json(
             StatusCode::BAD_REQUEST,
@@ -15818,6 +15836,10 @@ async fn agent_task_start(
     let Some(scheduler) = crate::schedules::current() else {
         return agent_json_response(StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({"ok": false, "error": "not_ready"}));
     };
+    // A person who just tapped through the remote viewer (or the app's own
+    // startup) still holds a lease for minutes; starting a task is that person
+    // handing the phone to the assistant, so the task must not hit 409.
+    yield_viewer_lease(&state);
     match iphone_use_mcp::task::start(request, |owner| scheduler.self_client(owner)) {
         Ok(id) => agent_json_response(StatusCode::ACCEPTED, serde_json::json!({"ok": true, "id": id, "status": "running"})),
         Err(iphone_use_mcp::task::StartError::Busy(id)) => agent_json_response(
@@ -25981,6 +26003,19 @@ mod tests {
             advertised(CAPABILITY_BATCH_ACTIONS),
             "batch catalogue drifted from validate_agent_action_value"
         );
+    }
+
+    /// A task started right after someone tapped through the remote viewer
+    /// must not inherit that viewer's lease (every step used to 409); another
+    /// agent's lease is left alone.
+    #[test]
+    fn a_task_start_yields_only_the_viewer_lease() {
+        let state = readiness_test_state();
+        for (holder, kept) in [(HUMAN_VIEWER_OWNER, false), ("iphone-local-startup", false), ("claude-1", true)] {
+            *recover(state.owner.lock()) = Some(PhoneOwner { name: holder.into(), last_seen: Instant::now() });
+            yield_viewer_lease(&state);
+            assert_eq!(owner_status(&state).0.is_some(), kept, "{holder}");
+        }
     }
 
     /// Fetch `/agent/capabilities` through the real router.

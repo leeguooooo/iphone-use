@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fixture tests for scripts/auto-update.sh: the idle gate decides, the installer is a stub."""
-import http.server, json, os, plistlib, subprocess, sys, tempfile, threading
+import http.server, json, os, plistlib, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent / "auto-update.sh"
@@ -277,6 +277,26 @@ with tempfile.TemporaryDirectory() as home:
     report("each upgraded instance is prebuilt, a skipped one is not",
            rc == 0 and sorted(prebuilt(log)) == ["default", "ix"] and "prebuild[ix]: finished (exit 0)" in err,
            f"rc={rc} prebuilt={prebuilt(log)} err={err.strip()[-300:]}")
+
+# Phone Use is re-signed in its signing's last weeks, whether or not a release
+# came out; one with time left is not touched.
+for name, days_left, expect_resign in [("signing ending in 10 days is re-signed", 10, True),
+                                       ("signing with 200 days left is left alone", 200, False)]:
+    with tempfile.TemporaryDirectory() as home:
+        log = Path(home) / "installed"
+        state = Path(home) / "state"; state.mkdir()
+        (state / "app-signing.json").write_text(json.dumps({"expires_at": int(time.time()) + days_left * 86400}))
+        fakebin = Path(home) / "bin"; fakebin.mkdir()
+        (fakebin / "iphone-use").write_text(f"#!/bin/sh\necho \"$@\" >> '{log}.resigned'\n"); (fakebin / "iphone-use").chmod(0o755)
+        srv = StatusServer({**base, "version": "0.6.0"})
+        write_plist(home, "com.leeguoo.iphone-use", srv.port)
+        try:
+            rc, err = run("v0.6.0", home=home, installed_log=log, extra_env={"PATH": f"{fakebin}:{os.environ['PATH']}"})
+        finally:
+            srv.close()
+        resigned = Path(f"{log}.resigned").read_text() if Path(f"{log}.resigned").exists() else ""
+        ok = rc == 0 and (("setup-app --instance default --no-pair" in resigned) == expect_resign)
+        report(name, ok, f"rc={rc} resigned={resigned!r} err={err.strip()[-200:]}")
 
 for name, env, payload, expect in [
     ("a failed upgrade is not prebuilt", {"AUTO_UPDATE_INSTALLER_CMD": "exit 3"}, base, []),

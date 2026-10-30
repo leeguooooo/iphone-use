@@ -160,6 +160,12 @@ pub fn serve_embedded(options: EmbeddedOptions) -> Result<()> {
     // through `embedded_pair_code`, in-process: the app is a loopback client,
     // so this works although the daemon is not LAN-reachable.
     let _ = EMBEDDED_PAIRING.set(state.pairing.clone());
+    // A Mac connecting another phone over USB (`setup-app --connect-to`)
+    // drops a one-time code into Documents and reads back where we listen.
+    let documents = std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Documents"));
+    if let Some(documents) = &documents {
+        state.pairing.set_drop_file(documents.join("connect-code-import.json"));
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -184,11 +190,43 @@ pub fn serve_embedded(options: EmbeddedOptions) -> Result<()> {
         );
         crate::keep_awake::spawn(state.clone());
         crate::lock_readiness::spawn(state.clone());
+        let relay_url = {
+            let documents = documents.clone();
+            move || relay_url(documents.as_deref())
+        };
+        crate::relay_client::spawn(relay_url.clone(), instance.state_dir.clone(), cfg.port);
+        if let Some(documents) = documents {
+            let pairing = state.pairing.clone();
+            let port = cfg.port;
+            let state_dir = instance.state_dir.clone();
+            tokio::spawn(async move {
+                loop {
+                    let urls = pairing.lan_urls(Some(port));
+                    let relay = relay_url().and_then(|relay| crate::relay_client::public_url(&relay, &state_dir));
+                    let _ = std::fs::write(
+                        documents.join("daemon-lan.json"),
+                        serde_json::json!({ "lan_urls": urls, "relay_url": relay }).to_string(),
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            });
+        }
         spawn_registry_refresh_in_process();
         axum::serve(listener, http::router(state))
             .await
             .context("axum serve")
     })
+}
+
+/// The cloud relay to keep a tunnel to: `IPHONE_USE_RELAY_URL`, else the
+/// `{"url"}` a Mac dropped into Documents/relay.json. Only https (or http to
+/// loopback, for tests).
+fn relay_url(documents: Option<&std::path::Path>) -> Option<String> {
+    let url = std::env::var("IPHONE_USE_RELAY_URL").ok().filter(|v| !v.is_empty()).or_else(|| {
+        let text = std::fs::read_to_string(documents?.join("relay.json")).ok()?;
+        serde_json::from_str::<serde_json::Value>(&text).ok()?["url"].as_str().map(String::from)
+    })?;
+    (url.starts_with("https://") || url.starts_with("http://127.0.0.1")).then_some(url)
 }
 
 /// The embedded daemon's pairing, once it is built.

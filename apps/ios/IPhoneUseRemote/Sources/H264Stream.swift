@@ -282,6 +282,99 @@ final class H264StreamReader: NSObject, URLSessionDataDelegate, @unchecked Senda
     }
 }
 
+/// Reads `/agent/mjpeg` (multipart JPEG) and hands the newest frame to a
+/// callback on the main queue, skipping frames the UI has not drawn yet.
+/// Reconnects with backoff until stopped.
+final class MJPEGStreamReader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let request: URLRequest
+    private let session: URLSession
+    private var task: URLSessionDataTask?
+    private var buffer = Data()
+    private var stopped = true
+    private var attempt = 0
+    private var pending = false
+    private let onImage: @MainActor (UIImage) -> Void
+    private let onState: @MainActor (Bool, String?) -> Void
+
+    init(request: URLRequest,
+         onImage: @escaping @MainActor (UIImage) -> Void,
+         onState: @escaping @MainActor (Bool, String?) -> Void) {
+        self.request = request
+        self.onImage = onImage
+        self.onState = onState
+        let config = URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = .infinity
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        session = URLSession(configuration: config, delegate: nil, delegateQueue: queue)
+        super.init()
+    }
+
+    func start() {
+        stopped = false
+        connect()
+    }
+
+    func stop() {
+        stopped = true
+        task?.cancel()
+        task = nil
+    }
+
+    private func connect() {
+        guard !stopped else { return }
+        buffer = Data()
+        let task = session.dataTask(with: request)
+        task.delegate = self
+        self.task = task
+        task.resume()
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse) async -> URLSession.ResponseDisposition {
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let ok = code == 200
+        if ok { attempt = 0 }
+        let onState = self.onState
+        await MainActor.run { onState(ok, ok ? nil : String(localized: "画面暂不可用（\(code)）")) }
+        return ok ? .allow : .cancel
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        buffer.append(data)
+        // Keep only the newest complete JPEG (SOI … EOI); older ones are dropped.
+        var newest: Data?
+        while let start = buffer.firstRange(of: Data([0xFF, 0xD8])),
+              let end = buffer[start.upperBound...].firstRange(of: Data([0xFF, 0xD9])) {
+            newest = buffer[start.lowerBound..<end.upperBound]
+            buffer.removeSubrange(buffer.startIndex..<end.upperBound)
+        }
+        if buffer.count > 8 << 20 { buffer.removeAll() }
+        guard let jpeg = newest, !pending, let image = UIImage(data: jpeg) else { return }
+        pending = true
+        let onImage = self.onImage
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { onImage(image) }
+            self?.session.delegateQueue.addOperation { self?.pending = false }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard !stopped, task === self.task else { return }
+        attempt += 1
+        let delay = min(5.0, 0.4 * Double(attempt))
+        let onState = self.onState
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { onState(false, String(localized: "画面断开，正在重连…")) }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.connect()
+        }
+    }
+}
+
 private extension VideoDisplayView {
     var rendererFailed: Bool {
         if #available(iOS 17, *) { return displayLayer.sampleBufferRenderer.status == .failed }

@@ -110,6 +110,11 @@ final class DeviceSession: ObservableObject, Identifiable {
     @Published private var metricsTask: Task<Void, Never>?
     /// Wireframe shown over a picture the app blanked (see `captureRedacted`).
     @Published var redactedImage: UIImage?
+    /// The picture from `/agent/mjpeg`, for a daemon with no H.264 encoder
+    /// (the on-phone daemon answers `/agent/h264` with 501).
+    @Published var mjpegImage: UIImage?
+    private var mjpegReader: MJPEGStreamReader?
+    private var h264Unavailable = false
     /// Requests go straight to the Mac on the LAN rather than through the
     /// paired (tunnel) address.
     @Published var onLAN = false
@@ -127,6 +132,14 @@ final class DeviceSession: ObservableObject, Identifiable {
         guard let client, phase == .connected else { return nil }
         if onLAN { return String(localized: "局域网") }
         return client.publicBase.scheme == "https" ? String(localized: "外网") : nil
+    }
+
+    /// Auto over the relay (外网): the small, low-rate stream, so a weak
+    /// cellular link shows a live picture instead of a stalled one. A daemon
+    /// that predates `saver` reads it as performance.
+    private var savesData: Bool {
+        guard let client, videoPreference == .auto, !onLAN else { return false }
+        return client.publicBase.scheme == "https"
     }
 
     /// The person's viewing choice for the focused screen. Tiles ignore it.
@@ -320,7 +333,9 @@ final class DeviceSession: ObservableObject, Identifiable {
                                   lanKey: Self.savedLANKey(address))
         do {
             if let token {
-                try await client.renew(deviceToken: token)
+                if let fresh = try await client.renew(deviceToken: token) {
+                    Keychain.save(password: fresh, for: Self.deviceAccount(address))
+                }
             } else if let code {
                 let token = try await client.pair(code: code)
                 Keychain.save(password: token, for: Self.deviceAccount(address))
@@ -448,7 +463,7 @@ final class DeviceSession: ObservableObject, Identifiable {
         let quality = preferQuality
         refreshQuality(fresh: false)
         // A quality change restarted the stream already.
-        if reader != nil, quality == preferQuality { restartStream() }
+        if reader != nil || mjpegReader != nil, quality == preferQuality { restartStream() }
     }
 
     private func startPathMonitor() {
@@ -477,6 +492,10 @@ final class DeviceSession: ObservableObject, Identifiable {
         redactedImage = nil
         reader?.stop()
         reader = nil
+        mjpegReader?.stop()
+        mjpegReader = nil
+        mjpegImage = nil
+        h264Unavailable = false
         client = nil
         status = nil
         videoLive = false
@@ -556,7 +575,7 @@ final class DeviceSession: ObservableObject, Identifiable {
     /// reopen a stream that went silent (the runner sends a frame at least
     /// every second, so silence means the connection died without saying so).
     private func updateMetrics() {
-        let wanted = role == .full && video != nil && reader != nil
+        let wanted = role == .full && video != nil && (reader != nil || mjpegReader != nil)
         if wanted, metricsTask == nil {
             metricsTask = Task { [weak self] in
                 var restarts = 0
@@ -603,14 +622,48 @@ final class DeviceSession: ObservableObject, Identifiable {
                 && $0.deviceState != "offline" && $0.deviceState != "blocked"
         } ?? false
         let wanted = client != nil && video != nil && !suspended && showable && !Self.observeOnly
-        if wanted, reader == nil, let client {
+        if wanted, h264Unavailable, mjpegReader == nil, let client {
+            let reader = MJPEGStreamReader(
+                request: client.request("agent/mjpeg"),
+                onImage: { [weak self] image in
+                    self?.mjpegImage = image
+                    self?.frameArrived()
+                },
+                onState: { [weak self] ok, why in
+                    self?.videoMessage = why
+                    if !ok { self?.videoLive = false }
+                    if !ok, self?.onLAN == true { self?.reprobe() }
+                    if why?.contains("401") == true {
+                        Task { _ = await self?.relogin() }
+                    }
+                })
+            mjpegReader = reader
+            if videoWaitSince == nil { videoWaitSince = Date() }
+            streamOpenedAt = Date()
+            reader.start()
+        } else if !wanted || !h264Unavailable, let reader = mjpegReader {
+            reader.stop()
+            mjpegReader = nil
+            mjpegImage = nil
+            if !wanted {
+                videoLive = false
+                videoWaitSince = nil
+            }
+        }
+        if wanted, !h264Unavailable, reader == nil, let client {
             let quality = wantedQuality
             let reader = H264StreamReader(
                 request: client.request(
                     "agent/h264",
-                    query: [URLQueryItem(name: "mode", value: quality ? "quality" : "performance")]),
+                    query: [URLQueryItem(name: "mode", value: quality ? "quality" : (savesData ? "saver" : "performance"))]),
                 onMessage: { [weak self] message in self?.video?.enqueue(message) },
                 onState: { [weak self] ok, why in
+                    if why?.contains("501") == true, let self {
+                        // No H.264 here (the on-phone daemon): MJPEG instead.
+                        self.h264Unavailable = true
+                        self.restartStream()
+                        return
+                    }
                     self?.videoMessage = why
                     if !ok { self?.videoLive = false }
                     // A dropped stream on the LAN may mean the LAN is gone:
@@ -658,6 +711,9 @@ final class DeviceSession: ObservableObject, Identifiable {
     private func restartStream(keepPicture: Bool = false) {
         reader?.stop()
         reader = nil
+        // The MJPEG fallback holds its URL too: reopen it on the current route.
+        mjpegReader?.stop()
+        mjpegReader = nil
         if !keepPicture { videoLive = false }
         updateStream()
     }
@@ -796,7 +852,9 @@ final class DeviceSession: ObservableObject, Identifiable {
             do {
                 if let token {
                     do {
-                        try await client.renew(deviceToken: token)
+                        if let fresh = try await client.renew(deviceToken: token) {
+                            Keychain.save(password: fresh, for: Self.deviceAccount(self.address))
+                        }
                     } catch DaemonError.pairingRevoked where password != nil {
                         // The pairing died (password changed?); the saved password may still work.
                         Keychain.delete(for: Self.deviceAccount(self.address))

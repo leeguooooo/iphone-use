@@ -3549,6 +3549,16 @@ fn app_trades_a_code_once_for_a_session_and_a_device_token() {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(cookie_pair(&resp).starts_with("phone_session="));
+        // Renewal slides: a fresh device token comes back, so a paired phone
+        // that keeps connecting never has to be paired again.
+        let fresh = body_json(resp).await["device_token"].as_str().unwrap_or_default().to_string();
+        assert!(!fresh.is_empty(), "renewal must return a fresh device token");
+        let resp = app
+            .clone()
+            .oneshot(pair_json_request(serde_json::json!({"device_token": fresh})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "the renewed token works");
         let resp = app
             .oneshot(
                 Request::builder()

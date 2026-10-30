@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>iPhone drives itself: on-phone AI assistant · iphone-use</title>
+  <meta name="description" content="No computer needed: tell the Phone Use assistant a task and it operates the same iPhone. Enable local control, add a model; sensitive steps ask first." />
+  <meta name="theme-color" content="#fcfbf4" />
+  <meta name="author" content="Guo Li (leeguoo)" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="apple-touch-icon" href="/assets/icon-180.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <!-- seo:fonts --><link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Permanent+Marker&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap" onload="this.onload=null;this.rel='stylesheet'" /><noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Permanent+Marker&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap" /></noscript><link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&amp;display=swap&amp;text=%20%21%22%23%24%25%26%27%28%29%2A%2B%2C-.%2F0123456789%3A%3B%3C%3D%3E%3F%40ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D~" onload="this.onload=null;this.rel='stylesheet'" /><noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&amp;display=swap&amp;text=%20%21%22%23%24%25%26%27%28%29%2A%2B%2C-.%2F0123456789%3A%3B%3C%3D%3E%3F%40ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D~" /></noscript><!-- /seo:fonts -->
+  <link rel="stylesheet" href="/assets/docs/docs.css" />
+  <!-- seo:head -->
+  <link rel="canonical" href="https://iphone-use.leeguoo.com/en/phone-agent" />
+  <link rel="alternate" hreflang="zh-Hans" href="https://iphone-use.leeguoo.com/phone-agent" />
+  <link rel="alternate" hreflang="en" href="https://iphone-use.leeguoo.com/en/phone-agent" />
+  <link rel="alternate" hreflang="x-default" href="https://iphone-use.leeguoo.com/en/phone-agent" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="iphone-use" />
+  <meta property="og:title" content="iPhone drives itself: on-phone AI assistant · iphone-use" />
+  <meta property="og:description" content="No computer needed: tell the Phone Use assistant a task and it operates the same iPhone. Enable local control, add a model; sensitive steps ask first." />
+  <meta property="og:url" content="https://iphone-use.leeguoo.com/en/phone-agent" />
+  <meta property="og:image" content="https://iphone-use.leeguoo.com/assets/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="iphone-use: let AI agents use your real iPhone" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:locale:alternate" content="zh_CN" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="iPhone drives itself: on-phone AI assistant · iphone-use" />
+  <meta name="twitter:description" content="No computer needed: tell the Phone Use assistant a task and it operates the same iPhone. Enable local control, add a model; sensitive steps ask first." />
+  <meta name="twitter:image" content="https://iphone-use.leeguoo.com/assets/og.png" />
+  <meta name="twitter:image:alt" content="iphone-use: let AI agents use your real iPhone" />
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"iphone-use","item":"https://iphone-use.leeguoo.com/en/"},{"@type":"ListItem","position":2,"name":"The phone drives itself: the on-phone assistant","item":"https://iphone-use.leeguoo.com/en/phone-agent"}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The phone drives itself: the on-phone assistant","description":"No computer needed: tell the Phone Use assistant a task and it operates the same iPhone. Enable local control, add a model; sensitive steps ask first.","inLanguage":"en","url":"https://iphone-use.leeguoo.com/en/phone-agent","mainEntityOfPage":"https://iphone-use.leeguoo.com/en/phone-agent","image":"https://iphone-use.leeguoo.com/assets/og.png","dateModified":"2026-10-30","author":{"@id":"https://leeguoo.com/about#person","@type":"Person","name":"Guo Li (leeguoo)","url":"https://leeguoo.com/about"},"publisher":{"@id":"https://leeguoo.com/about#person","@type":"Person","name":"Guo Li (leeguoo)","url":"https://leeguoo.com/about"},"isPartOf":{"@type":"WebSite","name":"iphone-use","url":"https://iphone-use.leeguoo.com/"},"about":{"@id":"https://iphone-use.leeguoo.com/#software","@type":"SoftwareApplication","name":"iphone-use"}}</script>
+  <!-- /seo:head -->
+</head>
+<body data-page="phone-agent" data-lang="en">
+
+  <div id="du-topbar" class="du-topbar"></div>
+
+  <div class="du-shell">
+
+    <nav id="du-sidebar" class="du-sidebar" aria-label="Documentation"><div class="du-nav-group"><div class="du-nav-label">Getting Started</div><a class="du-nav-item" href="/en/"><span class="du-nav-ico">🧭</span><span class="du-nav-text">Overview</span></a><a class="du-nav-item" href="/en/install"><span class="du-nav-ico">📦</span><span class="du-nav-text">Install</span></a><a class="du-nav-item" href="/en/compare"><span class="du-nav-ico">⚖️</span><span class="du-nav-text">vs Other Tools</span></a></div><div class="du-nav-group"><div class="du-nav-label">What Agents Can Do</div><a class="du-nav-item" href="/en/tasks"><span class="du-nav-ico">📱</span><span class="du-nav-text">Ask Your Agent</span></a><a class="du-nav-item" href="/en/flows"><span class="du-nav-ico">🔁</span><span class="du-nav-text">Flows &amp; Replay</span></a></div><div class="du-nav-group"><div class="du-nav-label">Connecting Agents</div><a class="du-nav-item active" aria-current="page" href="/en/phone-agent"><span class="du-nav-ico">🤖</span><span class="du-nav-text">Phone Drives Itself</span></a><a class="du-nav-item" href="/en/remote"><span class="du-nav-ico">📡</span><span class="du-nav-text">Remote Control</span></a><a class="du-nav-item" href="/en/connect"><span class="du-nav-ico">🔌</span><span class="du-nav-text">MCP, HTTP API &amp; Skill</span></a></div><div class="du-nav-group"><div class="du-nav-label">Under the Hood</div><a class="du-nav-item" href="/en/how-it-works"><span class="du-nav-ico">⚙️</span><span class="du-nav-text">How It Works</span></a></div><div class="du-nav-group"><div class="du-nav-label">Reference</div><a class="du-nav-item" href="/en/faq"><span class="du-nav-ico">❓</span><span class="du-nav-text">FAQ</span></a><a class="du-nav-item" href="/en/privacy"><span class="du-nav-ico">🔒</span><span class="du-nav-text">Privacy &amp; Security</span></a></div></nav>
+
+    <main class="du-main">
+      <p class="du-eyebrow">For people</p>
+
+      <div class="du-title-row">
+        <h1>The phone drives itself: the on-phone assistant</h1>
+        <button class="du-copy-page" type="button" aria-label="Copy page">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"/></svg>
+          <span class="du-copy-page-label">Copy page</span>
+        </button>
+      </div>
+
+      <p class="du-lede">
+        Tell the 助手 (Assistant) tab in Phone Use what you want, and it <span class="mark">taps, swipes and types on this same iPhone</span>, then reports back.
+        No computer while it runs: the control service lives on the phone and the model uses your own key.
+      </p>
+
+      <figure style="margin:1.5em auto;max-width:420px;text-align:center">
+        <img src="/assets/shots/phone-agent.png" alt="The Phone Use assistant tab with a task typed in: open Health and check today's steps" loading="lazy" style="width:100%;height:auto;border-radius:18px;border:1px solid rgba(0,0,0,.12)" />
+        <figcaption style="font-size:.85em;opacity:.7;margin-top:.5em">Type what you want in the assistant and send it; the phone does it itself.</figcaption>
+      </figure>
+
+      <figure style="margin:1.5em auto;max-width:420px;text-align:center">
+        <img src="/assets/shots/phone-agent-done.png" alt="The assistant finished: it opened Settings, went to General › About and read iOS 27.0" loading="lazy" style="width:100%;height:auto;border-radius:18px;border:1px solid rgba(0,0,0,.12)" />
+        <figcaption style="font-size:.85em;opacity:.7;margin-top:.5em">It opened Settings by itself, went to General › About, read the iOS version and reported back.</figcaption>
+      </figure>
+
+      <h2>What you need</h2>
+      <ul>
+        <li>Phone Use installed with a paid developer account (<code>iphone-use setup-app</code>, see <a href="/en/remote">Remote Control › Install the app</a>). Builds signed with a free Apple ID have no local control.</li>
+        <li>An API key for a model: OpenRouter, Anthropic or OpenAI. With OpenRouter, <code>free</code> picks a working free model for you.</li>
+        <li>A Mac once, for the first pairing. Not after that.</li>
+      </ul>
+
+      <h2>Three steps</h2>
+      <ol>
+        <li><b>Turn on local control</b>: Settings › 本机控制 (local control) › 启用本机控制, and allow the VPN configuration. If a Mac also hosts this phone, run <code>iphone-use setup pause --instance &lt;name&gt;</code> on the Mac first.</li>
+        <li><b>Add a model</b>: Settings › Models and Services, pick a provider, paste the key, tap Test. Add fallbacks if you like; they are tried in order.</li>
+        <li><b>Give it a task</b>: back in 助手, choose this phone as the device and type, for example, "Open Health and tell me today's step count".</li>
+      </ol>
+
+      <h2>How it works</h2>
+      <ul>
+        <li>The assistant model reads screenshots and the element tree, picks the next step and acts through the local control service. Tasks that have a <a href="/en/flows">flow</a> are replayed directly.</li>
+        <li>With a Jev key, Jev picks each step quickly and the assistant model takes over only when it gets stuck.</li>
+        <li><b>Payments, sending messages and deleting</b> stop and ask you first. No answer within 5 minutes stops the task.</li>
+        <li>You can also pick another paired device (such as a Mac-hosted phone), or the built-in browser or chrome-use for websites.</li>
+      </ul>
+
+      <h2>Notes</h2>
+      <ul>
+        <li>Local control takes iOS's single VPN slot, so it can't run alongside Tailscale or another VPN.</li>
+        <li>After a reboot, unlock the phone once before local control comes back. Turn off iOS automatic updates, which restart the phone at night.</li>
+        <li>Screenshots go to the model provider you configured. Don't run a task over a screen you don't want sent. See <a href="/en/privacy">Privacy &amp; Security</a>.</li>
+      </ul>
+
+      <p>Next: <a href="/en/remote">Remote Control</a> · <a href="/en/flows">Flows &amp; Replay</a>.</p><!-- seo:footer --><nav class="du-static-footer" aria-label="Site"><a href="/en/">iphone-use</a> · <a href="/en/">Overview</a> · <a href="/en/install">Install</a> · <a href="/en/compare">vs Other Tools</a> · <a href="/en/tasks">Ask Your Agent</a> · <a href="/en/flows">Flows &amp; Replay</a> · <a href="/en/phone-agent">Phone Drives Itself</a> · <a href="/en/remote">Remote Control</a> · <a href="/en/connect">MCP, HTTP API &amp; Skill</a> · <a href="/en/how-it-works">How It Works</a> · <a href="/en/faq">FAQ</a> · <a href="/en/privacy">Privacy &amp; Security</a> · <a href="https://github.com/leeguooooo/iphone-use">GitHub</a> · <a href="https://github.com/leeguooooo/iphone-use/releases">Releases</a> · <a href="https://github.com/leeguooooo/iphone-use-flows">Official flow registry</a> · <a href="https://blog.leeguoo.com/en/posts/iphone-use/">Blog: iphone-use guide</a> · <a href="https://blog.leeguoo.com/en/posts/iphone-use-video/">Blog: demo video</a> · <a href="https://chrome-use.leeguoo.com/en/">chrome-use (agents in your Chrome)</a> · <a href="https://leeguoo.com/about/en">Author</a> · <a href="/phone-agent" hreflang="zh-Hans">中文</a></nav><!-- /seo:footer -->
+    </main>
+
+    <aside id="du-toc"></aside>
+
+  </div>
+
+  <script src="/assets/docs/docs.js" defer></script>
+</body>
+</html>

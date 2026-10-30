@@ -25,17 +25,42 @@ struct Options {
     remote_only: bool,
     no_install: bool,
     no_pair: bool,
+    /// Another phone (instance name or UDID) whose app connects to this
+    /// phone's local control, with nobody tapping either phone.
+    connect_to: Option<String>,
+    connect_only: bool,
+    /// Connect through this cloud relay (`relay/`) instead of the LAN, so the
+    /// other phone reaches this one from anywhere.
+    relay: Option<String>,
 }
 
+const OPTIONS_HINT: &str = "--remote-only, --no-install, --no-pair, --connect-to <instance|udid>, --connect-only, --relay <https url>";
+
 fn parse(args: &[String]) -> Result<Options, String> {
-    let mut options = Options { remote_only: false, no_install: false, no_pair: false };
-    for arg in args {
+    let mut options = Options { remote_only: false, no_install: false, no_pair: false, connect_to: None, connect_only: false, relay: None };
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--remote-only" => options.remote_only = true,
             "--no-install" => options.no_install = true,
             "--no-pair" => options.no_pair = true,
-            other => return Err(format!("unknown setup-app option: {other} (--remote-only, --no-install, --no-pair)")),
+            "--connect-only" => options.connect_only = true,
+            "--relay" => match args.next() {
+                Some(value) if value.starts_with("https://") => options.relay = Some(value.trim_end_matches('/').to_string()),
+                _ => return Err("--relay needs the relay's https:// address".into()),
+            },
+            "--connect-to" => match args.next() {
+                Some(value) if !value.starts_with('-') => options.connect_to = Some(value.clone()),
+                _ => return Err("--connect-to needs an instance name or UDID".into()),
+            },
+            other => return Err(format!("unknown setup-app option: {other} ({OPTIONS_HINT})")),
         }
+    }
+    if options.relay.is_some() && options.connect_to.is_none() {
+        return Err("--relay needs --connect-to <instance|udid>".into());
+    }
+    if options.connect_only && options.connect_to.is_none() {
+        return Err("--connect-only needs --connect-to <instance|udid>".into());
     }
     Ok(options)
 }
@@ -63,7 +88,16 @@ pub fn run(args: &[String]) -> i32 {
             return code;
         }
     };
-    match install(&ctx, &options) {
+    let result = if options.connect_only {
+        Ok(())
+    } else {
+        install(&ctx, &options)
+    };
+    let result = result.and_then(|()| match &options.connect_to {
+        Some(controller) => connect(&ctx, controller, options.relay.as_deref()),
+        None => Ok(()),
+    });
+    match result {
         Ok(()) => 0,
         Err(message) => {
             term::die_line(&message);
@@ -120,6 +154,10 @@ fn install(ctx: &Ctx, options: &Options) -> Result<(), String> {
     if checkout_override().is_none() {
         build.arg("--no-generate");
     }
+    // QA builds (`Debug`) accept the local-control launch switches.
+    if let Ok(configuration) = std::env::var("IPU_APP_CONFIGURATION") {
+        build.args(["--configuration", &configuration]);
+    }
     if full {
         let host = root.join("native/libipu_phone_host.a");
         let embed = embed_library(ctx)?;
@@ -173,6 +211,7 @@ fn install(ctx: &Ctx, options: &Options) -> Result<(), String> {
         ));
     }
     term::ok("Installed: Phone Use");
+    record_signing(ctx.state_dir(), &bundle, &output);
     let _ = std::fs::remove_dir_all(&output);
 
     if full && !options.no_pair {
@@ -180,6 +219,31 @@ fn install(ctx: &Ctx, options: &Options) -> Result<(), String> {
     }
     next_steps(full);
     Ok(())
+}
+
+/// Where `iphone-use status` and the nightly job read when the installed
+/// app's signing runs out (a paid team's profile lasts a year).
+pub const SIGNING_FILE: &str = "app-signing.json";
+
+/// Note the installed app's profile expiry next to the instance's state. A
+/// profile that can't be read leaves the old note alone: a warning that is
+/// missing is better than one that is wrong.
+fn record_signing(state_dir: &Path, bundle: &str, app: &Path) {
+    let Some(expires_at) = profile_expiry(&app.join("embedded.mobileprovision")) else { return };
+    let note = serde_json::json!({ "bundle": bundle, "expires_at": expires_at, "installed_at": now_secs() });
+    if std::fs::write(state_dir.join(SIGNING_FILE), note.to_string()).is_ok() {
+        let days = expires_at.saturating_sub(now_secs()) / 86_400;
+        term::ok(&format!("Signing valid for {days} more days; the nightly job re-signs it in its last 21"));
+    }
+}
+
+/// A provisioning profile's ExpirationDate, as Unix seconds.
+fn profile_expiry(profile: &Path) -> Option<u64> {
+    let decoded = Command::new("security").args(["cms", "-D", "-i"]).arg(profile).output().ok()?;
+    if !decoded.status.success() { return None; }
+    let plist = plist::Value::from_reader_xml(decoded.stdout.as_slice()).ok()?;
+    let date = plist.as_dictionary()?.get("ExpirationDate")?.as_date()?;
+    std::time::SystemTime::from(date).duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
 /// IPHONE_USE_APP_SRC: a checkout to build from instead of the release asset.
@@ -361,6 +425,153 @@ fn stage_pairing(ctx: &Ctx, root: &Path, bundle: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Connect `controller`'s app to this phone's local control over USB: drop a
+/// one-time code into this phone's app container (the on-phone daemon reads
+/// it from there), read back the daemon's LAN address, and open the matching
+/// `iphoneuse://pair` link in the controller's app. Neither phone is touched.
+fn connect(ctx: &Ctx, controller: &str, relay: Option<&str>) -> Result<(), String> {
+    let bundle = app_bundle_id(&ctx.team_id);
+    let controller_udid = resolve_udid(controller)?;
+    if controller_udid == ctx.udid {
+        return Err("--connect-to names this same phone; pick the phone that should control it".into());
+    }
+    term::info(&format!("Connecting {controller} to this phone's local control"));
+    let dir = tempfile_dir()?;
+    let result = connect_in(ctx, &bundle, &controller_udid, &dir, relay);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn connect_in(ctx: &Ctx, bundle: &str, controller_udid: &str, dir: &Path, relay: Option<&str>) -> Result<(), String> {
+    use base64::Engine as _;
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| format!("randomness: {e}"))?;
+    let code = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs()
+        + crate::pairing::CODE_TTL.as_secs();
+    let drop = dir.join("connect-code-import.json");
+    std::fs::write(&drop, serde_json::json!({ "code": code, "expires_at": expires_at }).to_string())
+        .map_err(|e| format!("write {}: {e}", drop.display()))?;
+    devicectl(&["device", "copy", "to", "--device", &ctx.udid, "--domain-type", "appDataContainer",
+        "--domain-identifier", bundle, "--source", &drop.to_string_lossy(),
+        "--destination", "Documents/connect-code-import.json"])
+        .map_err(|e| format!("could not hand the connection code to the app: {e}"))?;
+
+    if let Some(relay) = relay {
+        let file = dir.join("relay.json");
+        std::fs::write(&file, serde_json::json!({ "url": relay }).to_string())
+            .map_err(|e| format!("write {}: {e}", file.display()))?;
+        devicectl(&["device", "copy", "to", "--device", &ctx.udid, "--domain-type", "appDataContainer",
+            "--domain-identifier", bundle, "--source", &file.to_string_lossy(),
+            "--destination", "Documents/relay.json"])
+            .map_err(|e| format!("could not hand the relay address to the app: {e}"))?;
+    }
+    // The daemon rewrites this file every 30 s; with a relay, wait for the
+    // address it got there.
+    let lan = dir.join("daemon-lan.json");
+    let mut base = None;
+    for attempt in 0..(if relay.is_some() { 20 } else { 1 }) {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        devicectl(&["device", "copy", "from", "--device", &ctx.udid, "--domain-type", "appDataContainer",
+            "--domain-identifier", bundle, "--source", "Documents/daemon-lan.json",
+            "--destination", &lan.to_string_lossy()])
+            .map_err(|_| "this phone's local control is not running (no daemon address yet): \
+                start it in Phone Use › Settings › 本机控制, then retry with --connect-only".to_string())?;
+        let value = std::fs::read_to_string(&lan)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_default();
+        base = match relay {
+            Some(relay) => value["relay_url"].as_str().filter(|u| u.starts_with(relay)).map(String::from),
+            None => value["lan_urls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|u| u.as_str())
+                .find(|u| u.starts_with("http://") && !u.ends_with(".local:18787"))
+                .map(String::from),
+        };
+        if base.is_some() {
+            break;
+        }
+    }
+    let Some(base) = base else {
+        return Err(if relay.is_some() {
+            "this phone did not report a relay address within a minute: check its network, then retry with --connect-only".into()
+        } else {
+            "this phone has no Wi-Fi address: join Wi-Fi on both phones and retry with --connect-only".into()
+        });
+    };
+
+    let controller_app = installed_app(controller_udid)?;
+    let encoded: String = base
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    let link = format!("iphoneuse://pair?u={encoded}&c={code}");
+    devicectl(&["device", "process", "launch", "--device", controller_udid, "--terminate-existing",
+        "--payload-url", &link, &controller_app])
+        .map_err(|e| format!("could not open the connection link on the other phone: {e}"))?;
+    term::ok(&format!("Opened the connection in {controller_app} on the other phone (this phone at {base})"));
+    Ok(())
+}
+
+/// An instance name → its phone's UDID; a UDID passes through.
+fn resolve_udid(value: &str) -> Result<String, String> {
+    if value.len() >= 24 && value.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        return Ok(value.to_string());
+    }
+    let previous = std::env::var_os("IPHONE_USE_INSTANCE");
+    std::env::set_var("IPHONE_USE_INSTANCE", if value == "default" { "" } else { value });
+    let resolved = Ctx::resolve();
+    match previous {
+        Some(v) => std::env::set_var("IPHONE_USE_INSTANCE", v),
+        None => std::env::remove_var("IPHONE_USE_INSTANCE"),
+    }
+    let ctx = resolved.map_err(|(message, _)| format!("instance {value}: {message}"))?;
+    if ctx.udid.is_empty() {
+        return Err(format!("instance {value} has no phone set up"));
+    }
+    Ok(ctx.udid)
+}
+
+/// The Phone Use app on `udid`: our team's build first, else any of ours.
+fn installed_app(udid: &str) -> Result<String, String> {
+    let out = Command::new("xcrun")
+        .args(["devicectl", "device", "info", "apps", "--device", udid])
+        .output()
+        .map_err(|e| format!("run devicectl: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut ids: Vec<&str> = text
+        .split_whitespace()
+        .filter(|w| *w == "com.leeguoo.iphone-use.remote" || w.starts_with("com.leeguoo.iphone-use.remote."))
+        .filter(|w| !w.ends_with(".tunnel"))
+        .collect();
+    ids.sort_by_key(|id| std::cmp::Reverse(id.len()));
+    ids.first()
+        .map(|id| id.to_string())
+        .ok_or_else(|| "the other phone has no Phone Use app: run iphone-use setup-app for it first".into())
+}
+
+fn devicectl(args: &[&str]) -> Result<(), String> {
+    // The exit status, not the text: devicectl reports failures on stderr.
+    let out = Command::new("xcrun")
+        .arg("devicectl")
+        .args(args)
+        .output()
+        .map_err(|e| format!("run devicectl: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 fn tempfile_dir() -> Result<PathBuf, String> {
     let dir = std::env::temp_dir().join(format!("ipu-pair-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -412,4 +623,8 @@ mod tests {
         assert!(parse(&["--remote-only".into()]).unwrap().remote_only);
         assert!(parse(&["--bogus".into()]).is_err());
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

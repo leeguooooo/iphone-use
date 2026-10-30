@@ -11,12 +11,12 @@
 "地址和密码在 Mac 上运行安装程序时会打印出来。手机和 Mac 需要在同一个网络里，或者通过 VPN 连通。" = "The installer on your Mac prints the address and password. This iPhone and the Mac need to be on the same network, or connected through a VPN.";
 "用密码连接" = "Connect with password";
 "正在连接…" = "Connecting…";
-"连接到这台 Mac？" = "Connect to this Mac?";
+"连接到这台设备？" = "Connect to this device?";
 "让 agent 在这台 iPhone 上做事？" = "Let the agent work on this iPhone?";
 "配对这台 iPhone 自己的 agent。只在你刚刚在自己 Mac 上点了「配对本机 Agent」时才点「连接」。" = "Pairs this iPhone’s own agent. Tap Connect only if you just chose “Pair this phone’s agent” on your own Mac.";
 "连接" = "Connect";
 "取消" = "Cancel";
-"%@\n只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。" = "%@\nTap Connect only if you just scanned the code on your own Mac.";
+"%@\n只在连接是你自己刚刚发起的（扫了自己设备上的二维码，或在自己的电脑上运行了连接命令）时才点「连接」。" = "%@\nTap Connect only if you started this yourself: you just scanned the code on your own device or ran the connect command on your own computer.";
 
 /* Scanner */
 "扫描 Mac 上 iphone-use 页面里「扫码」按钮显示的二维码" = "Scan the code that the Scan button shows on the iphone-use page on your Mac";
@@ -243,7 +243,7 @@
 "已等待 %lld 秒" = "Waiting %lld s";
 "%lld 秒后自动重试" = "Retrying in %lld s";
 "这台 iPhone 没有联网，联网后会自动重连" = "This iPhone is offline; it reconnects once it's back online";
-"%@\n已保存为「%@」，会刷新它的配对。只在你刚刚扫了自己 Mac 上的二维码时才点「连接」。" = "%@\nAlready saved as “%@”; its pairing will be refreshed. Tap Connect only if you just scanned the code on your own Mac.";
+"%@\n已保存为「%@」，会刷新它的配对。只在连接是你自己刚刚发起的（扫了自己设备上的二维码，或在自己的电脑上运行了连接命令）时才点「连接」。" = "%@\nAlready saved as “%@”; its pairing will be refreshed. Tap Connect only if you started this yourself: you just scanned the code on your own device or ran the connect command on your own computer.";
 
 /* Adding and editing */
 "Mac 地址" = "Mac address";
