@@ -40,12 +40,13 @@ class OracleTests(unittest.TestCase):
                 self.assertEqual(probe.verify_case(*sample(mode)), [])
 
     def test_anonymous_list_requires_end_and_independent_index_coverage(self):
-        for fault in ('early-stop', 'missing-index', 'missing-limitation', 'business-complete'):
+        for fault in ('early-stop', 'missing-index', 'missing-limitation', 'business-complete', 'legacy-inconsistent'):
             values = sample('missing')
             if fault == 'early-stop': values[3].update(end_label_seen=False, stop_reason='no_progress')
             elif fault == 'missing-index': values[2]['seen_indices'].pop()
             elif fault == 'missing-limitation': values[3]['coverage'] = ''
-            else: values[3]['business_complete'] = True
+            elif fault == 'business-complete': values[3]['business_complete'] = True
+            else: values[3]['complete'] = False
             with self.subTest(fault=fault): self.assertTrue(probe.verify_case(*values))
 
     def test_old_text_only_collapse_is_not_complete_coverage(self):

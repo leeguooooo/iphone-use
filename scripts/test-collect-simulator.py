@@ -78,7 +78,7 @@ def verify_case(oracle, before, after, result, last_tree, seed_tree=None):
         if set(after.get('seen_indices', [])) != set(range(len(expected))):
             errors.append('UIKit did not expose every model index')
     elif mode == 'missing':
-        if len(rows) != 1 or result.get('end_label_seen') is not True or result.get('stop_reason') != 'end_label':
+        if len(rows) != 1 or result.get('complete') is not True or result.get('end_label_seen') is not True or result.get('stop_reason') != 'end_label':
             errors.append('anonymous rows did not reach the requested end marker')
         if set(after.get('seen_indices', [])) != set(range(len(expected))):
             errors.append('anonymous list did not expose every model index')

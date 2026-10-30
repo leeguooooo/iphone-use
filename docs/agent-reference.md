@@ -669,7 +669,7 @@ no distinct rows still continues toward the marker within the page/time budget. 
 | `stop_reason` | Meaning |
 |---|---|
 | `end_label` | The end label was on screen — the only case with `complete:true` |
-| `duplicate_page` | After a swipe the page was the same: the list did not move (its end, or the swipe hit something that does not scroll) |
+| `duplicate_page` | After a swipe the exposed row identities, labels and frames repeated: further progress cannot be confirmed (identical-looking pages may also repeat) |
 | `no_progress` | Without `end_label`, the list moved but showed nothing new |
 | `max_pages` | Page budget used up; more rows may follow |
 | `deadline` | Too little of the 80 s call budget was left to swipe and read another page |

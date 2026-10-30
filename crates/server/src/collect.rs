@@ -473,8 +473,8 @@ fn end_label_on_screen(
 pub enum StopReason {
     /// The end label was on screen: the only proof of having reached the end.
     EndLabel,
-    /// The page after a swipe was identical to one already read: the list
-    /// did not move (its end, or a swipe that hit something else).
+    /// The exposed row identities, labels and frames repeated. Further
+    /// progress cannot be confirmed; identical-looking pages may also repeat.
     DuplicatePage,
     /// The list moved but showed no row not already collected.
     NoProgress,
