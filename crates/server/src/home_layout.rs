@@ -75,32 +75,156 @@ pub async fn raw_state(udid: &str) -> Result<plist::Value> {
     .context("home layout read timed out")?
 }
 
-/// Replaces the whole icon state. Only the CLI calls this, with a plist the
-/// person has seen; the caller backs up first.
-pub async fn set_state(udid: &str, state: plist::Value) -> Result<()> {
-    check_udid(udid)?;
+/// The shape SpringBoard accepts: the Dock plus at least one page.
+pub fn validate(state: &plist::Value) -> Result<()> {
     if state.as_array().is_none_or(|a| a.len() < 2) {
         bail!("icon state must be an array holding the Dock and at least one page");
     }
+    Ok(())
+}
+
+/// Replaces the whole icon state. Callers preview it and back up the current
+/// layout first ([`save_backup`]).
+pub async fn set_state(udid: &str, state: plist::Value) -> Result<()> {
+    check_udid(udid)?;
+    validate(&state)?;
     tokio::time::timeout(Duration::from_secs(30), async {
         let mut stream =
             crate::lockdown::open_service(udid, "com.apple.springboardservices").await?;
-        let mut request = plist::Dictionary::new();
-        request.insert("command".into(), "setIconState".into());
-        request.insert("iconState".into(), state);
-        // Success is an empty acknowledgement or a closed stream; only an
-        // error dictionary is a refusal.
-        if let Ok(reply) = send_plist(&mut stream, &plist::Value::Dictionary(request)).await {
-            if let Some(d) = reply.as_dictionary() {
-                if d.contains_key("error") || d.contains_key("Error") {
-                    bail!("SpringBoard refused setIconState: {d:?}");
-                }
-            }
-        }
-        Ok(())
+        write_state(&mut stream, state).await
     })
     .await
     .context("home layout write timed out")?
+}
+
+async fn write_state<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, state: plist::Value) -> Result<()> {
+    let mut request = plist::Dictionary::new();
+    request.insert("command".into(), "setIconState".into());
+    request.insert("iconState".into(), state);
+    // Success is an empty acknowledgement or a closed stream; only an
+    // error dictionary is a refusal.
+    if let Ok(reply) = send_plist(stream, &plist::Value::Dictionary(request)).await {
+        if let Some(d) = reply.as_dictionary() {
+            if d.contains_key("error") || d.contains_key("Error") {
+                bail!("SpringBoard refused setIconState: {d:?}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where layouts are kept before every write: `~/.iphone-use-backups`.
+pub fn backup_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".iphone-use-backups")
+}
+
+/// Saves `state` as `<prefix>-<unix seconds>.plist` in [`backup_dir`] and
+/// returns the path. Dates are cut to whole seconds: SpringBoard's carry
+/// nanoseconds, which `plutil` and Python's plistlib cannot read.
+pub fn save_backup(state: &plist::Value, prefix: &str) -> Result<std::path::PathBuf> {
+    let dir = backup_dir();
+    std::fs::create_dir_all(&dir)?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let mut path = dir.join(format!("{prefix}-{stamp}.plist"));
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{prefix}-{stamp}-{n}.plist"));
+        n += 1;
+    }
+    plist::to_file_xml(&path, &whole_second_dates(state.clone()))?;
+    Ok(path)
+}
+
+/// The newest backup made before a write, for `restore`.
+pub fn latest_backup() -> Option<std::path::PathBuf> {
+    std::fs::read_dir(backup_dir())
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("home-before-") && n.ends_with(".plist")))
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+}
+
+fn whole_second_dates(value: plist::Value) -> plist::Value {
+    match value {
+        plist::Value::Date(date) => {
+            let at = std::time::SystemTime::from(date);
+            let secs = at.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            plist::Value::Date((std::time::UNIX_EPOCH + Duration::from_secs(secs)).into())
+        }
+        plist::Value::Array(items) => plist::Value::Array(items.into_iter().map(whole_second_dates).collect()),
+        plist::Value::Dictionary(dict) => plist::Value::Dictionary(
+            dict.into_iter().map(|(k, v)| (k, whole_second_dates(v))).collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Every identified icon by page (0 is the Dock), and how many items have no
+/// identifier (widgets and stacks), which a rearranged layout can drop.
+fn placements(state: &plist::Value) -> (std::collections::BTreeMap<String, Vec<usize>>, usize) {
+    fn walk(items: &[plist::Value], page: usize, out: &mut std::collections::BTreeMap<String, Vec<usize>>, unnamed: &mut usize) {
+        for item in items {
+            let Some(d) = item.as_dictionary() else { continue };
+            if let Some(plist::Value::Array(lists)) = d.get("iconLists") {
+                for list in lists.iter().filter_map(|l| l.as_array()) {
+                    walk(list, page, out, unnamed);
+                }
+                continue;
+            }
+            // Identifiers, never display names: two apps can share a name.
+            let id = ["bundleIdentifier", "displayIdentifier", "webClipIdentifier"]
+                .iter()
+                .find_map(|k| d.get(k).and_then(|v| v.as_string()));
+            match id {
+                Some(id) => out.entry(id.to_string()).or_default().push(page),
+                None => *unnamed += 1,
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    let mut unnamed = 0;
+    for (page, items) in state.as_array().into_iter().flatten().enumerate() {
+        if let Some(items) = items.as_array() {
+            walk(items, page, &mut out, &mut unnamed);
+        }
+    }
+    (out, unnamed)
+}
+
+/// What writing `next` over `current` changes, by app identifier.
+pub fn diff(current: &plist::Value, next: &plist::Value) -> Value {
+    let (before, unnamed_before) = placements(current);
+    let (after, unnamed_after) = placements(next);
+    let (mut added, mut removed, mut moved) = (vec![], vec![], vec![]);
+    for (id, pages) in &after {
+        match before.get(id) {
+            None => added.push(json!({"id": id, "page": pages[0]})),
+            Some(old) if old != pages => moved.push(json!({"id": id, "from": old, "to": pages})),
+            _ => {}
+        }
+    }
+    for (id, pages) in &before {
+        if !after.contains_key(id) {
+            removed.push(json!({"id": id, "page": pages[0]}));
+        }
+    }
+    let mut warnings = vec![];
+    if unnamed_after < unnamed_before {
+        warnings.push(format!(
+            "{} widget(s) or stack(s) without an identifier would be dropped",
+            unnamed_before - unnamed_after
+        ));
+    }
+    if !removed.is_empty() {
+        warnings.push("apps missing from the new layout go to the App Library; SpringBoard may also bring hidden apps back to the Home Screen over several passes, so read the layout again after writing".into());
+    }
+    json!({"added": added, "removed": removed, "moved": moved,
+           "widgets_before": unnamed_before, "widgets_after": unnamed_after, "warnings": warnings})
+}
+
+/// Counts before and after, plus [`diff`].
+pub fn preview(current: &plist::Value, next: &plist::Value) -> Value {
+    json!({"now": summarize(current), "after": summarize(next), "changes": diff(current, next)})
 }
 
 /// Page and icon counts of an icon state, folders counted by what they hold.
@@ -223,6 +347,77 @@ mod tests {
             server.await.unwrap();
         });
     }
+    fn layout(value: serde_json::Value) -> plist::Value {
+        plist::to_value(&value).unwrap()
+    }
+
+    #[test]
+    fn a_write_sends_set_icon_state_and_reports_a_refusal() {
+        for (reply, refused) in [(json!({}), false), (json!({"error": "denied"}), true)] {
+            block(async move {
+                let (mut peer, mut client) = tokio::io::duplex(8192);
+                let server = tokio::spawn(async move {
+                    let size = peer.read_u32().await.unwrap() as usize;
+                    let mut data = vec![0; size];
+                    peer.read_exact(&mut data).await.unwrap();
+                    let request: plist::Value = plist::from_bytes(&data).unwrap();
+                    let d = request.as_dictionary().unwrap();
+                    assert_eq!(d["command"].as_string(), Some("setIconState"));
+                    assert_eq!(d["iconState"].as_array().unwrap().len(), 2);
+                    let mut bytes = Vec::new();
+                    plist::to_writer_binary(&mut bytes, &plist::to_value(&reply).unwrap()).unwrap();
+                    peer.write_u32(bytes.len() as u32).await.unwrap();
+                    peer.write_all(&bytes).await.unwrap();
+                });
+                let state = layout(json!([[], [{"bundleIdentifier": "a"}]]));
+                assert_eq!(write_state(&mut client, state).await.is_err(), refused);
+                server.await.unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn only_a_dock_plus_pages_is_writable() {
+        assert!(validate(&layout(json!([[]]))).is_err(), "no page");
+        assert!(validate(&layout(json!({"not": "a list"}))).is_err());
+        assert!(validate(&layout(json!([[], []]))).is_ok());
+    }
+
+    #[test]
+    fn the_preview_matches_apps_by_identifier_not_name() {
+        // Two apps share a name; a widget has no identifier.
+        let current = layout(json!([
+            [{"bundleIdentifier": "com.apple.mobilephone"}],
+            [{"displayName": "Authenticator", "bundleIdentifier": "com.google.Authenticator"},
+             {"displayName": "Authenticator", "bundleIdentifier": "com.microsoft.azureauthenticator"},
+             {"iconType": "custom", "gridSize": "medium"}],
+            [{"displayName": "Tools", "iconLists": [[{"bundleIdentifier": "com.apple.calculator"}]]}]
+        ]));
+        let next = layout(json!([
+            [{"bundleIdentifier": "com.apple.mobilephone"}],
+            [{"displayName": "Authenticator", "bundleIdentifier": "com.google.Authenticator"},
+             {"bundleIdentifier": "com.apple.calculator"}],
+            [{"bundleIdentifier": "com.apple.mobilesafari"}]
+        ]));
+        let changes = diff(&current, &next);
+        assert_eq!(changes["removed"], json!([{"id": "com.microsoft.azureauthenticator", "page": 1}]));
+        assert_eq!(changes["added"], json!([{"id": "com.apple.mobilesafari", "page": 2}]));
+        assert_eq!(changes["moved"], json!([{"id": "com.apple.calculator", "from": [2], "to": [1]}]));
+        assert_eq!((changes["widgets_before"].clone(), changes["widgets_after"].clone()), (json!(1), json!(0)));
+        let warnings = changes["warnings"].as_array().unwrap();
+        assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("widget")));
+        assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("App Library")));
+        assert!(diff(&current, &current)["warnings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn backups_keep_whole_second_dates() {
+        let at = std::time::UNIX_EPOCH + Duration::new(1_800_000_000, 123_456_789);
+        let cut = whole_second_dates(plist::Value::Array(vec![plist::Value::Date(at.into())]));
+        let date = cut.as_array().unwrap()[0].as_date().unwrap();
+        assert_eq!(std::time::SystemTime::from(date), std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000));
+    }
+
     #[test]
     fn oversized_or_error_replies_never_become_empty_layouts() {
         block(async {

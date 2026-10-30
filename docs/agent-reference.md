@@ -942,8 +942,10 @@ update / publish / report`, and the device tools `phone_logs`, `phone_crashes`,
   tools also `destructiveHint`, `idempotentHint`). Read-only: `phone_status`,
   `phone_capabilities`, `phone_apps`, `phone_screen`, `phone_screen_frame`,
   `phone_screenshot`, `phone_elements`, `phone_crashes`, `phone_flow_list`,
-  `phone_flow_info`, `phone_flow_draft`, `phone_home_layout`, `phone_instances`. `phone_logs` is not read-only (its
-  start/stop change the capture); `phone_install_app` is destructive.
+  `phone_flow_info`, `phone_flow_draft`, `phone_instances`. `phone_logs` is not read-only (its
+  start/stop change the capture); `phone_install_app` is destructive. `phone_home_layout` reads
+  without `action` and writes with it (destructive); the `readonly` profile keeps the read and
+  hides the write actions, as it does `phone_flow_draft`'s `save_as`.
 - `IPHONE_USE_MCP_TOOLS` picks the exposed tools: `all` (default), `readonly`
   (only the read-only set), or a comma list of tool names (unknown names are
   warned about on stderr and ignored). A hidden tool is not listed, and a call
@@ -1364,7 +1366,33 @@ mean the geometry is unknown; unknown items remain in the inventory. These are
 not pixel coordinates or a restore format. Read again after moving an icon and
 resolve live UI elements before sending a gesture. An unavailable service returns
 `503 home_layout_unavailable`, never a successful empty layout. Simulator targets
-are explicitly unsupported. No endpoint changes the saved layout.
+are explicitly unsupported.
+
+### Writing a layout
+
+`POST /agent/home-layout {"action","file"?,"confirm"?}` / MCP `phone_home_layout`
+with `action` (CLI: `iphone-use home-layout backup|apply|restore [file] [--dry-run]`)
+replaces the whole icon state through SpringBoard's `setIconState`. It needs
+`X-Phone-Control` and the owner lease. Files are plists on the Mac, saved in
+`~/.iphone-use-backups` unless a path is given.
+
+- `backup` saves the current layout. Dates are cut to whole seconds so `plutil`
+  and Python's `plistlib` can read the file (SpringBoard's carry nanoseconds).
+- `preview` compares `file` with the phone **by app identifier**
+  (`bundleIdentifier`, `displayIdentifier`, `webClipIdentifier`), never by name:
+  two apps called "Authenticator" stay two apps. It lists `added`, `removed`,
+  `moved` (pages, 0 is the Dock) and the count of widgets/stacks, which have no
+  identifier, before and after.
+- `apply` writes `file`; `restore` writes the newest automatic backup, or `file`.
+  Without `confirm:true` both answer the preview and write nothing: show it to
+  the person and send again only after they agree. A write first saves the
+  layout it replaces as `home-before-apply-<time>.plist`, so `restore` undoes it.
+
+After writing, read the layout again. Apps left out of the new layout go to the
+App Library, and SpringBoard can bring hidden App Library apps back onto Home
+pages over several passes, so a second read can differ from the first; repeat
+the write only after reading. Widgets and stacks are easy to lose in a
+rearrangement: the preview warns when the new layout has fewer of them.
 
 When `runner_parked=true` (or legacy `ended_on_phone=true`), automatic schedules remain postponed. An explicitly
 requested manual schedule run may reconnect, but it still respects human handoff,
