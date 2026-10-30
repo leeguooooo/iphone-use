@@ -15920,7 +15920,7 @@ async fn agent_elements_inner(
         let mut w = runner.lock().await;
         let read_scope = ScreenReadScope::capture(&state);
         let weak_state = Arc::downgrade(&state);
-        w.refresh_observation_scope(Arc::new(move ||
+        w.begin_element_read(Arc::new(move ||
             weak_state.upgrade().is_some_and(|state| read_scope.current(&state))));
         let mut first_source_error = None;
         let read_started = tokio::time::Instant::now();

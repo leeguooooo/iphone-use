@@ -586,6 +586,12 @@ fn fresh_elements_restore_cache_reuse_after_owner_or_privacy_revocation() {
                 response.into_body().collect().await.unwrap();
                 assert!(state.runner.as_ref().unwrap().lock().await.recent_tree(Duration::from_secs(10)).is_some(),
                     "fresh read must restore reusable observations after {revoke}, round {round}");
+                // A fresh tree must not reauthorize independent frame observations.
+                if round == 0 {
+                    let mut client = state.runner.as_ref().unwrap().lock().await;
+                    client.remember_settled_frame(server::runner::Capture::full_png(include_bytes!("fixtures/privacy.png").to_vec()));
+                    assert!(client.settled_frame(Duration::from_secs(10)).is_none());
+                }
                 if round == 0 {
                     if revoke == "owner" { state.owner_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel); }
                     else { hold(state.clone(),true).await; hold(state.clone(),false).await; }

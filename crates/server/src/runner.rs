@@ -142,6 +142,7 @@ pub struct RunnerClient {
     settled_frame: Option<(std::sync::Arc<Capture>, std::time::Instant)>,
     settled_frame_generation: u64,
     observation_scope: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    tree_scope: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
     /// Until when screenshots are not used to judge "settled" (a frame was
     /// slow or failed; see `settle_frame` in http.rs).
     settle_frames_paused_until: Option<std::time::Instant>,
@@ -378,6 +379,7 @@ impl RunnerClient {
             settled_frame: None,
             settled_frame_generation: 0,
             observation_scope: None,
+            tree_scope: None,
             settle_frames_paused_until: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
             last_actionable: false,
@@ -2309,7 +2311,7 @@ impl RunnerClient {
     /// (a timer, a network load, a person's finger); callers must verify the
     /// element live before acting on it.
     pub fn recent_tree(&self, max_age: Duration) -> Option<std::sync::Arc<Vec<ElementRow>>> {
-        if !self.observation_scope_current() { return None; }
+        if self.tree_scope.as_ref().or(self.observation_scope.as_ref()).is_some_and(|allowed| !allowed()) { return None; }
         let (rows, read_at) = self.last_tree.as_ref()?;
         let untouched = self.posted_at.is_none_or(|posted| posted < *read_at);
         (untouched && read_at.elapsed() < max_age).then(|| rows.clone())
@@ -2354,15 +2356,14 @@ impl RunnerClient {
 
     pub fn bind_observation_scope(&mut self, allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
         self.forget_observations();
+        self.tree_scope = None;
         self.observation_scope = Some(allowed);
     }
 
-    /// Begin a fresh read after revocation without relabeling any older data.
-    /// A still-current scope retains its reusable observations.
-    pub fn refresh_observation_scope(&mut self, allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
-        if self.observation_scope.is_none() || !self.observation_scope_current() {
-            self.bind_observation_scope(allowed);
-        }
+    /// Attribute the next fresh element tree without changing frame/alert authorization.
+    pub fn begin_element_read(&mut self, allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.forget_tree();
+        self.tree_scope = Some(allowed);
     }
 
     pub(crate) fn observation_scope_current(&self) -> bool {
