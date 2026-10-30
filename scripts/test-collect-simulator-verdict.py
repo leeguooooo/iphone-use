@@ -22,7 +22,7 @@ def sample(mode='unique'):
               'swipes': 1, 'swipes_confirmed': 1, 'swipes_uncertain': 0, 'snapshot': 'last-page',
               'complete': True, 'end_label_seen': True, 'stop_reason': 'end_label'}
     if mode == 'missing':
-        result.update(rows=rows[:1], row_count=1, complete=False, end_label_seen=False, stop_reason='no_progress')
+        result.update(rows=rows[:1], row_count=1, coverage='absent or reused identifiers with identical content may collapse', complete_scope='end_label_visibility', business_complete=False)
     if mode == 'counter':
         result.update(complete=False, end_label_seen=False, stop_reason='duplicate_page')
         after.update(counter_changed=True, pan_events=1, offset_y=0, max_offset_y=0, max_abs_offset_y=0)
@@ -38,6 +38,15 @@ class OracleTests(unittest.TestCase):
         for mode in probe.MODES:
             with self.subTest(mode=mode):
                 self.assertEqual(probe.verify_case(*sample(mode)), [])
+
+    def test_anonymous_list_requires_end_and_independent_index_coverage(self):
+        for fault in ('early-stop', 'missing-index', 'missing-limitation', 'business-complete'):
+            values = sample('missing')
+            if fault == 'early-stop': values[3].update(end_label_seen=False, stop_reason='no_progress')
+            elif fault == 'missing-index': values[2]['seen_indices'].pop()
+            elif fault == 'missing-limitation': values[3]['coverage'] = ''
+            else: values[3]['business_complete'] = True
+            with self.subTest(fault=fault): self.assertTrue(probe.verify_case(*values))
 
     def test_old_text_only_collapse_is_not_complete_coverage(self):
         values = sample(); values[3].update(rows=values[3]['rows'][:1], row_count=1)
@@ -70,7 +79,7 @@ class OracleTests(unittest.TestCase):
             with self.subTest(fault=fault): self.assertTrue(probe.verify_case(*values))
 
     def test_missing_identifier_fallback_must_not_claim_full_count(self):
-        values = sample('missing'); values[3]['complete'] = True
+        values = sample('missing'); values[3]['rows'] *= 32; values[3]['row_count'] = 32
         self.assertTrue(probe.verify_case(*values))
 
     def test_success_shaped_payload_does_not_hide_transport_errors(self):

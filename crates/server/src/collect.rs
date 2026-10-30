@@ -2,7 +2,8 @@
 //!
 //! One page is the rows of a kind (default `Cell`) whose centre lies on the
 //! screen, or inside an optional region of it. Between pages the daemon swipes
-//! once; it stops when the list stops moving, when a page adds nothing new,
+//! once; it stops when the list stops moving, when a page adds nothing new
+//! without a requested end label,
 //! when an end label shows up, or at a page budget. Rows are deduplicated on
 //! `(kind, identifier, label, value)`; rows with different exposed identifiers
 //! stay distinct, while identical content with absent or reused identifiers can collapse.
@@ -573,7 +574,7 @@ pub(crate) async fn collect<P: Pager>(
         if duplicate {
             break StopReason::DuplicatePage;
         }
-        if number > 1 && new_rows == 0 {
+        if number > 1 && new_rows == 0 && request.end_label.is_none() {
             break StopReason::NoProgress;
         }
         if number >= request.max_pages {
@@ -613,7 +614,7 @@ pub fn coverage_note(collection: &Collection) -> String {
     let dedupe = "rows are deduplicated on (kind, identifier, label, value); different exposed identifiers keep identical-looking rows distinct, while absent or reused identifiers with identical content may collapse; only what the accessibility tree exposes is collected";
     match collection.stop {
         StopReason::EndLabel => format!(
-            "the end label was on screen on page {}: the list was read to that point. {dedupe}.",
+            "the end label was on screen on page {}: the list was read to that point. Business row counts and totals are NOT verified. {dedupe}.",
             collection.pages.len()
         ),
         StopReason::DuplicatePage | StopReason::NoProgress => format!(
@@ -643,6 +644,8 @@ pub fn collection_json(collection: &Collection, snapshot: Option<&str>) -> serde
         "stop_reason": collection.stop.as_str(),
         "end_label_seen": collection.end_label_seen,
         "complete": collection.end_label_seen,
+        "complete_scope": "end_label_visibility",
+        "business_complete": false,
         "coverage": coverage_note(collection),
     });
     if let Some(snapshot) = snapshot {
@@ -807,6 +810,63 @@ mod tests {
         let collection = run(&mut pager, &request(serde_json::json!({})));
         assert_eq!(collection.stop, StopReason::NoProgress);
         assert_eq!(labels(&collection), ["A", "B"]);
+    }
+
+    #[test]
+    fn an_end_label_search_continues_across_moved_anonymous_rows() {
+        let first = screen_of(&[("Same", 100.0), ("Same", 200.0)]);
+        let moved = screen_of(&[("Same", 150.0), ("Same", 250.0)]);
+        let mut end = screen_of(&[("Same", 175.0), ("Same", 275.0)]);
+        end.push(row("StaticText", "End", 600.0, 1));
+        let mut pager = Scripted::new(vec![first, moved, end]);
+        let collection = run(&mut pager, &request(serde_json::json!({"end_label":"End"})));
+        assert_eq!(collection.stop, StopReason::EndLabel);
+        assert_eq!(
+            collection.rows.len(),
+            1,
+            "anonymous business rows still collapse"
+        );
+        assert_eq!(collection.pages.len(), 3);
+        assert_eq!(collection.swipes, 2);
+        assert!(collection.end_label_seen);
+        let json = collection_json(&collection, None);
+        assert_eq!(json["complete_scope"], "end_label_visibility");
+        assert_eq!(json["business_complete"], false);
+    }
+
+    #[test]
+    fn an_end_label_does_not_override_duplicate_pages_or_page_budget() {
+        let first = screen_of(&[("Same", 100.0)]);
+        let moved = screen_of(&[("Same", 150.0)]);
+        let collection = run(
+            &mut Scripted::new(vec![first.clone(), moved.clone(), moved.clone()]),
+            &request(serde_json::json!({"end_label":"End"})),
+        );
+        assert_eq!(collection.stop, StopReason::DuplicatePage);
+        assert_eq!(collection.swipes, 2);
+        assert!(!collection.end_label_seen);
+        let collection = run(
+            &mut Scripted::new(vec![first, moved]),
+            &request(serde_json::json!({"end_label":"End", "max_pages":2})),
+        );
+        assert_eq!(collection.stop, StopReason::MaxPages);
+        assert_eq!(collection.swipes, 1);
+        assert!(!collection.end_label_seen);
+    }
+
+    #[test]
+    fn an_end_label_does_not_turn_value_refreshes_into_new_pages() {
+        let first = identified_page(Some("item-a"), Some("before"));
+        let second = identified_page(Some("item-a"), Some("after"));
+        let collection = run(
+            &mut Scripted::new(vec![first, second]),
+            &request(serde_json::json!({"end_label":"End"})),
+        );
+        assert_eq!(collection.stop, StopReason::DuplicatePage);
+        assert_eq!(collection.swipes, 1);
+        assert_eq!(collection.rows.len(), 1);
+        assert_eq!(collection.rows[0].value.as_deref(), Some("before"));
+        assert!(!collection.end_label_seen);
     }
 
     #[test]

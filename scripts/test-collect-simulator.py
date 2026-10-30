@@ -78,8 +78,14 @@ def verify_case(oracle, before, after, result, last_tree, seed_tree=None):
         if set(after.get('seen_indices', [])) != set(range(len(expected))):
             errors.append('UIKit did not expose every model index')
     elif mode == 'missing':
-        if len(rows) != 1 or result.get('complete') is not False or result.get('stop_reason') not in ('duplicate_page', 'no_progress'):
-            errors.append('missing identifiers falsely imply business completeness')
+        if len(rows) != 1 or result.get('end_label_seen') is not True or result.get('stop_reason') != 'end_label':
+            errors.append('anonymous rows did not reach the requested end marker')
+        if set(after.get('seen_indices', [])) != set(range(len(expected))):
+            errors.append('anonymous list did not expose every model index')
+        if result.get('complete_scope') != 'end_label_visibility' or result.get('business_complete') is not False:
+            errors.append('end marker was not distinguished from business completeness')
+        if 'may collapse' not in result.get('coverage', ''):
+            errors.append('anonymous deduplication limit was not disclosed')
         if rows and row_key(rows[0]) != row_key(expected[0]):
             errors.append('fallback row differs from model')
         if after.get('max_offset_y', 0) < 100:
@@ -230,7 +236,7 @@ def main():
                 assert exposed and exposed <= {r['identifier'] for r in oracle['rows']}, 'Native identifiers differ from model'
                 assert exposed <= native_ids(raw), 'rawIdentifier was lost in Native source'
             (case / 'seed.json').write_text(json.dumps(seed, indent=2))
-            parameters = {'max_pages': 4 if mode in ('missing', 'counter') else 10, 'snapshot': seed['snapshot']}
+            parameters = {'max_pages': 4 if mode == 'counter' else 10, 'snapshot': seed['snapshot']}
             if mode != 'counter':
                 parameters['end_label'] = 'END OF LIST ORACLE'
             started = time.monotonic()
