@@ -152,6 +152,18 @@ pub fn validate_filter(query: Option<&str>, limit: Option<&str>) -> Result<(), V
     Ok(())
 }
 
+/// Decode literal selectors before any device read. Delta views have no full row set.
+pub fn parse_selector(raw: Option<&str>) -> Result<Option<core::element_selector::ElementSelector>, Value> {
+    let Some(raw) = raw else { return Ok(None); };
+    if raw.len() > 16_384 {
+        return Err(json!({"ok":false,"error":"invalid_selector","hint":"selector JSON is at most 16 KiB"}));
+    }
+    let selector: core::element_selector::ElementSelector = serde_json::from_str(raw)
+        .map_err(|_| json!({"ok":false,"error":"invalid_selector","hint":"selector must be a JSON object containing kind, identifier, label, label_contains, value or boolean enabled"}))?;
+    selector.validate().map_err(|hint| json!({"ok":false,"error":"invalid_selector","hint":hint}))?;
+    Ok(Some(selector))
+}
+
 /// Whether `row` contains `needle` (already lowercased) in its label,
 /// identifier, value or placeholder. Non-ASCII text (CJK) compares as is.
 fn row_matches(row: &Value, needle: &str) -> bool {
@@ -164,8 +176,8 @@ fn row_matches(row: &Value, needle: &str) -> bool {
 /// Keep only the rows matching `query`, then at most `limit` of them, each
 /// carrying its original `index` (a scoped view's rows already do). Applied
 /// after a scope, so the two combine. The snapshot is left as it is.
-pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>) {
-    if query.is_none() && limit.is_none() {
+pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>, selector: Option<&core::element_selector::ElementSelector>) {
+    if query.is_none() && limit.is_none() && selector.is_none() {
         return;
     }
     let Some(rows) = json.get("elements").and_then(Value::as_array).cloned() else {
@@ -176,7 +188,8 @@ pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>) {
     let matched: Vec<Value> = rows
         .into_iter()
         .enumerate()
-        .filter(|(_, row)| needle.as_deref().is_none_or(|n| row_matches(row, n)))
+        .filter(|(_, row)| needle.as_deref().is_none_or(|n| row_matches(row, n))
+            && selector.is_none_or(|selector| selector.matches(row)))
         .map(|(i, mut row)| {
             if row.get("index").is_none() {
                 row["index"] = json!(i);
@@ -198,6 +211,9 @@ pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>) {
         "of": total,
         "note": "indexes refer to the full read with this snapshot",
     });
+    if let Some(selector) = selector {
+        summary["selector"] = json!(selector);
+    }
     if let Some(query) = query {
         summary["query"] = json!(query);
     }
@@ -421,6 +437,34 @@ mod tests {
     }
 
     #[test]
+    fn exact_selector_combines_with_query_scope_and_limit_without_reindexing() {
+        let mut tree=json!({"snapshot":"full-tree", "elements":[
+            {"kind":"Application","label":"App","depth":0},
+            {"kind":"Button","identifier":"save.secondary","label":"Save","enabled":true,"depth":1},
+            {"kind":"Button","identifier":"save.primary","label":"Save","enabled":false,"depth":1},
+            {"kind":"Button","identifier":"save.primary","label":"save","enabled":false,"depth":1},
+            {"kind":"Button","identifier":"save.primary","label":"Save","depth":1}
+        ]});
+        apply(&mut tree,"interactive");
+        let selector=parse_selector(Some(r#"{"identifier":"save.primary","label":"Save","enabled":false}"#)).unwrap().unwrap();
+        filter(&mut tree,Some("SAVE"),Some(1),Some(&selector));
+        assert_eq!(tree["snapshot"],"full-tree");
+        assert_eq!(tree["elements"].as_array().unwrap().len(),1);
+        assert_eq!(tree["elements"][0]["index"],2);
+        assert_eq!(tree["filter"]["matched"],1);
+        assert_eq!(tree["filter"]["selector"]["enabled"],false);
+    }
+
+    #[test]
+    fn malformed_or_unsupported_selectors_fail_before_reading() {
+        assert!(parse_selector(None).unwrap().is_none());
+        for text in ["null","[]","{}",r#"{"predicate":"TRUEPREDICATE"}"#,r#"{"enabled":"false"}"#,r#"{"label_contains":""}"#] {
+            assert_eq!(parse_selector(Some(text)).unwrap_err()["error"],"invalid_selector");
+        }
+        assert!(parse_selector(Some(&"x".repeat(16_385))).is_err());
+    }
+
+    #[test]
     fn query_matches_any_text_field_case_insensitively_and_keeps_indexes() {
         let mut json = json!({"snapshot": "H", "elements": [
             {"kind": "Application", "label": "设置", "depth": 0},
@@ -431,7 +475,7 @@ mod tests {
             {"kind": "StaticText", "label": "通用设置", "depth": 1},
         ]});
         let mut cjk = json.clone();
-        filter(&mut json, Some("SIGNIN"), None);
+        filter(&mut json, Some("SIGNIN"), None, None);
         let indexes = |json: &Value| -> Vec<u64> {
             json["elements"]
                 .as_array()
@@ -444,11 +488,11 @@ mod tests {
         assert_eq!(json["snapshot"], "H");
         assert_eq!(json["filter"]["matched"], 1);
         assert_eq!(json["filter"]["of"], 6);
-        filter(&mut cjk, Some("设置"), None);
+        filter(&mut cjk, Some("设置"), None, None);
         assert_eq!(indexes(&cjk), vec![0, 5]);
         let mut email = read();
         email["elements"][2]["placeholder"] = json!("Email");
-        filter(&mut email, Some("email"), None);
+        filter(&mut email, Some("email"), None, None);
         assert_eq!(indexes(&email), vec![2]);
     }
 
@@ -456,7 +500,7 @@ mod tests {
     fn limit_caps_rows_after_the_query_and_scope_and_reports_omitted() {
         let mut json = read();
         apply(&mut json, "interactive");
-        filter(&mut json, None, Some(2));
+        filter(&mut json, None, Some(2), None);
         let indexes: Vec<u64> = json["elements"]
             .as_array()
             .unwrap()
@@ -474,7 +518,7 @@ mod tests {
         assert_eq!(json["scope"]["name"], "interactive");
 
         let mut both = read();
-        filter(&mut both, Some("通用"), Some(1));
+        filter(&mut both, Some("通用"), Some(1), None);
         assert_eq!(both["elements"][0]["index"], 3);
         assert_eq!(
             (
@@ -485,7 +529,7 @@ mod tests {
         );
 
         let mut none = read();
-        filter(&mut none, Some("nothing here"), None);
+        filter(&mut none, Some("nothing here"), None, None);
         assert_eq!(none["elements"].as_array().unwrap().len(), 0);
         assert_eq!(none["filter"]["matched"], 0);
     }

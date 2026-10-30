@@ -889,13 +889,17 @@ impl DaemonClient {
     ///
     /// `ocr` (`1` or `force`) asks for text read from a fresh screenshot when
     /// the tree is unusable (or always, with `force`).
-    pub async fn elements_with_image(
-        &self,
-        query: Option<&str>,
-        limit: Option<usize>,
-        ocr: Option<&str>,
+    pub async fn elements_with_selector(
+        &self, query: Option<&str>, limit: Option<usize>, ocr: Option<&str>,
+        selector: Option<&iu_core::element_selector::ElementSelector>,
     ) -> anyhow::Result<String> {
-        self.elements_at(&elements_path(query, limit, ocr)).await
+        let mut path = elements_path(query, limit, ocr);
+        if let Some(selector) = selector {
+            let mut url = reqwest::Url::parse(&format!("http://daemon{path}"))?;
+            url.query_pairs_mut().append_pair("selector", &serde_json::to_string(selector)?);
+            path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
+        }
+        self.elements_at(&path).await
     }
 
     async fn elements_at(&self, path: &str) -> anyhow::Result<String> {

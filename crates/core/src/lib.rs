@@ -6,3 +6,4 @@ pub mod env;
 pub mod progress;
 pub mod runner_auth;
 pub mod value_read;
+pub mod element_selector;

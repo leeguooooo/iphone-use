@@ -16002,12 +16002,20 @@ async fn agent_elements_unfenced(
     let full_read = query.since.is_none();
     let scope = query.scope.clone();
     let image_auto = query.image.as_deref() == Some("auto");
+    let selector = crate::scope::parse_selector(query.selector.as_deref());
     let filter_query = query.query.clone();
     let filter_limit = query.limit.as_deref().and_then(|l| l.trim().parse::<usize>().ok());
     let ocr_mode = parse_ocr_mode(query.ocr.as_deref());
     if let Err(error) = crate::scope::validate(scope.as_deref(), query.since.as_deref())
         .and_then(|()| {
             crate::scope::validate_filter(filter_query.as_deref(), query.limit.as_deref())
+        })
+        .and_then(|()| selector.as_ref().map(|_| ()).map_err(Clone::clone))
+        .and_then(|()| {
+            if query.selector.is_some() && query.since.is_some() {
+                Err(serde_json::json!({"ok":false,"error":"selector_needs_full_read",
+                    "hint":"selector filters a full fresh tree; omit since and scope=changed"}))
+            } else { Ok(()) }
         })
         .and_then(|()| ocr_mode.clone().map(|_| ()))
     {
@@ -16022,6 +16030,7 @@ async fn agent_elements_unfenced(
             ),
         };
     }
+    let selector = selector.expect("selector validated before observation");
     if scope.as_deref() == Some("changed") && credentials_ok(&state, &headers) {
         let held = query
             .since
@@ -16133,7 +16142,7 @@ async fn agent_elements_unfenced(
         crate::scope::apply(&mut json, scope);
     }
     // After the scope, so `query`/`limit` narrow a scoped view too.
-    crate::scope::filter(&mut json, filter_query.as_deref(), filter_limit);
+    crate::scope::filter(&mut json, filter_query.as_deref(), filter_limit, selector.as_ref());
     let (mut parts, _) = response.into_parts();
     parts.headers.remove(header::CONTENT_LENGTH);
     Response::from_parts(parts, Body::from(json.to_string()))
@@ -17147,6 +17156,9 @@ struct AgentElementsQuery {
     /// text, case-insensitively (see [`crate::scope::filter`]).
     #[serde(default)]
     query: Option<String>,
+    /// JSON literal field selector, ANDed with query. No expression evaluation.
+    #[serde(default)]
+    selector: Option<String>,
     /// At most this many rows (1..=500) after `scope` and `query`. Kept as
     /// text so a bad value gets the daemon's own 400, not a parse error.
     #[serde(default)]
@@ -27140,6 +27152,74 @@ mod tests {
         assert!(q("x", None, Some("c1"), None).is_err());
         assert!(q("x", None, None, Some(0)).is_err());
         assert!(q("x", None, None, Some(31)).is_err());
+    }
+
+    #[test]
+    fn element_selector_router_keeps_the_full_snapshot_and_original_indexes() {
+        use tower::ServiceExt;
+        block(async {
+            let mut runner=MockRunner::start(|request| {
+                if request.contains("/source") {
+                    serde_json::json!({"value":{"type":"XCUIElementTypeApplication","label":"Selector fixture",
+                        "rect":{"x":0,"y":0,"width":390,"height":844},"children":[
+                        {"type":"XCUIElementTypeButton","rawIdentifier":"other","label":"Save","isEnabled":true,"rect":{"x":0,"y":60,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeButton","rawIdentifier":"primary","label":"Save","isEnabled":true,"rect":{"x":0,"y":120,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeButton","rawIdentifier":"primary","label":"Save","isEnabled":true,"rect":{"x":0,"y":180,"width":100,"height":40}}
+                    ]}}).to_string()
+                } else if request.contains("/window/size") {
+                    r#"{"value":{"width":390,"height":844}}"#.into()
+                } else { healthy_runner_responder(request) }
+            });
+            let state=readiness_state_with_runner(runner.base());
+            let mut url=reqwest::Url::parse("http://daemon/agent/elements").unwrap();
+            url.query_pairs_mut().append_pair("selector",r#"{"kind":"Button","identifier":"primary"}"#)
+                .append_pair("limit","1").append_pair("ocr","off");
+            let response=router(state.clone()).oneshot(axum::http::Request::builder()
+                .uri(format!("{}?{}",url.path(),url.query().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(),StatusCode::OK);
+            let bytes=axum::body::to_bytes(response.into_body(),1<<20).await.unwrap();
+            let body:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["elements"].as_array().unwrap().len(),1);
+            assert_eq!(body["elements"][0]["index"],2);
+            assert_eq!(body["filter"]["matched"],2);
+            assert_eq!(body["filter"]["omitted"],1);
+            let snapshot=body["snapshot"].as_str().unwrap();
+            let rows=lookup_element_snapshot(&state,snapshot).unwrap();
+            assert_eq!(rows.len(),4,"filtering must not replace the full snapshot cache");
+            assert_eq!(rows[2].identifier.as_deref(),Some("primary"));
+            assert_eq!(rows[1].identifier.as_deref(),Some("other"));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn element_selector_refuses_invalid_or_delta_requests_before_device_reads() {
+        use tower::ServiceExt;
+        block(async {
+            for (selector, since, expected) in [
+                ("{}",false,"invalid_selector"),
+                (r#"["Button",null,null,null,null,null]"#,false,"invalid_selector"),
+                (r#"["Button"]"#,false,"invalid_selector"),
+                (r#"{"predicate":"TRUEPREDICATE"}"#,false,"invalid_selector"),
+                (r#"{"enabled":true}"#,true,"selector_needs_full_read"),
+            ] {
+                let mut uri=reqwest::Url::parse("http://daemon/agent/elements").unwrap();
+                uri.query_pairs_mut().append_pair("selector",selector);
+                if since { uri.query_pairs_mut().append_pair("since","old"); }
+                let path=format!("{}?{}",uri.path(),uri.query().unwrap());
+                let response=router(readiness_test_state()).oneshot(
+                    axum::http::Request::builder().uri(&path).body(Body::empty()).unwrap()
+                ).await.unwrap();
+                assert_eq!(response.status(),StatusCode::BAD_REQUEST);
+                let bytes=axum::body::to_bytes(response.into_body(),8192).await.unwrap();
+                let body:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["error"],expected);
+                let response=router(fixture_app_state(Some("synthetic-password"))).oneshot(
+                    axum::http::Request::builder().uri(&path).body(Body::empty()).unwrap()
+                ).await.unwrap();
+                assert_eq!(response.status(),StatusCode::UNAUTHORIZED);
+            }
+        });
     }
 
     #[test]

@@ -150,6 +150,10 @@ pub struct ElementsParams {
     /// this text (case-insensitive). Rows keep their original index.
     #[serde(default)]
     pub query: Option<String>,
+    /// Literal case-sensitive field filters combined with AND; preserves original snapshot indexes.
+    /// Requires at least one field; filters AX elements, not separate OCR text.
+    #[serde(default)]
+    pub selector: Option<iu_core::element_selector::ElementSelector>,
     /// Return at most this many rows; the answer says how many were left out.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -1714,7 +1718,9 @@ impl PhoneHandler {
         of magnitude cheaper). Rows carry kind, label, identifier, value, rect and state, plus a \
         `snapshot` token for phone_tap_element; indexes and snapshot tokens are valid for this read \
         only. `query` keeps only rows containing that text (label, identifier, value, placeholder) \
-        and `limit` caps the rows — both keep each row's index and the snapshot, so taps still \
+        and `limit` caps the rows. `selector` ANDs exact kind/identifier/label/value/enabled \
+        fields and case-sensitive label_contains; it filters AX rows, not OCR. Queries preserve \
+        each row's index and the snapshot, so taps still \
         work. Screen text shows at most 200 rows and 32 KiB of row text; an omission notice \
         means a partial view, not absence or list completion. Narrow with query when needed. \
         include_hidden=true expands off-screen/not-drawn rows instead of summarizing five labels; \
@@ -1730,6 +1736,7 @@ impl PhoneHandler {
         &self,
         Parameters(ElementsParams {
             query,
+            selector,
             limit,
             ocr,
             include_hidden,
@@ -1739,12 +1746,17 @@ impl PhoneHandler {
             Ok(ocr) => ocr,
             Err(error) => return CallToolResult::error(vec![Content::text(error)]),
         };
+        if let Some(selector) = &selector {
+            if let Err(hint) = selector.validate() {
+                return CallToolResult::error(vec![Content::text(format!("invalid selector: {hint}; nothing was sent to the daemon"))]);
+            }
+        }
         // A narrowed read is not the whole screen: it must not become the
         // no-progress tracker's baseline.
-        let narrowed = query.as_deref().is_some_and(|q| !q.trim().is_empty()) || limit.is_some();
+        let narrowed = query.as_deref().is_some_and(|q| !q.trim().is_empty()) || limit.is_some() || selector.is_some();
         match self
             .daemon
-            .elements_with_image(query.as_deref(), limit, ocr)
+            .elements_with_selector(query.as_deref(), limit, ocr, selector.as_ref())
             .await
         {
             // The daemon adds `registry` on the first read in a newly
@@ -6029,6 +6041,55 @@ mod tests {
                 assert_eq!(shaped.structured_content.as_ref().unwrap()["elements"], body["elements"]);
             }
         }
+    }
+
+    #[test]
+    fn element_selector_is_encoded_literally_and_preserves_snapshot_indexes() {
+        let selector: iu_core::element_selector::ElementSelector = serde_json::from_value(
+            serde_json::json!({"kind":"Button", "identifier":"save.primary", "label":"保存\n'O\\K'", "enabled":false})
+        ).unwrap();
+        let expected = serde_json::to_value(&selector).unwrap();
+        let body=serde_json::json!({"snapshot":"S", "elements":[
+            {"index":17,"kind":"Button","label":"保存", "enabled":false}
+        ], "filter":{"matched":1,"returned":1,"omitted":0,"selector":expected}});
+        let (result,line,_,_)=device_call("200 OK", &body.to_string(), |h| async move {
+            h.phone_elements(Parameters(ElementsParams {selector:Some(selector),..Default::default()})).await
+        });
+        let path=line.split_whitespace().nth(1).unwrap();
+        let url=reqwest::Url::parse(&format!("http://daemon{path}")).unwrap();
+        let encoded=url.query_pairs().find(|(key,_)|key=="selector").unwrap().1.into_owned();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),expected);
+        assert_eq!(result.structured_content.as_ref().unwrap()["snapshot"],"S");
+        assert_eq!(result.structured_content.as_ref().unwrap()["elements"][0]["index"],17);
+        assert_ne!(result.is_error,Some(true));
+    }
+
+    #[test]
+    fn element_selector_schema_is_object_only_and_has_strict_field_types() {
+        for selector in [serde_json::json!(["Button",null,null,null,null,null]),serde_json::json!(["Button"])] {
+            assert!(serde_json::from_value::<ElementsParams>(serde_json::json!({"selector":selector})).is_err());
+        }
+        let tool=PhoneHandler::tool_router().list_all().into_iter().find(|tool|tool.name.as_ref()=="phone_elements").unwrap();
+        let schema=serde_json::to_value(tool.input_schema.as_ref()).unwrap();
+        fn resolve<'a>(root: &'a serde_json::Value, value: &'a serde_json::Value) -> &'a serde_json::Value {
+            value.get("$ref").and_then(|v|v.as_str()).and_then(|reference|reference.strip_prefix('#'))
+                .and_then(|pointer|root.pointer(pointer)).unwrap_or(value)
+        }
+        let selector=resolve(&schema,&schema["properties"]["selector"]);
+        let object=selector.get("anyOf").and_then(|a|a.as_array()).and_then(|a|a.iter()
+            .map(|v|resolve(&schema,v)).find(|v|v.get("type")==Some(&serde_json::json!("object")))).unwrap_or(selector);
+        assert_eq!(object["type"],"object");
+        assert_eq!(object["additionalProperties"],false);
+        assert!(object["properties"]["enabled"].to_string().contains("boolean"));
+        assert!(object["properties"].get("predicate").is_none());
+    }
+
+    #[test]
+    fn invalid_selector_is_refused_before_contacting_a_daemon() {
+        let result=block(handler_for("http://127.0.0.1:9").phone_elements(Parameters(ElementsParams {
+            selector:Some(Default::default()),..Default::default()
+        })));
+        assert!(refused_offline(result).contains("selector needs at least one field"));
     }
 
     #[test]

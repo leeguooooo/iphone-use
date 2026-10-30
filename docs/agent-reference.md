@@ -1017,6 +1017,24 @@ or raising `limit`. A `query` that is empty or over 200 characters is 400
 (`since` without `scope=changed`) is not filtered. Search when you know the words on screen.
 Read the whole screen when you do not.
 
+**Field selectors.** MCP `phone_elements` also accepts a `selector` object,
+for example `{"kind":"Button","identifier":"save.primary","enabled":true}`.
+HTTP callers pass the same object as URL-encoded JSON in `?selector=`.
+Fields combine with AND: exact `kind`, `identifier`, `label`, `value`, boolean
+`enabled`, and case-sensitive `label_contains`. Exact values preserve whitespace
+and newlines; an empty `value` matches a present empty value, not a missing one.
+Unknown enabled state matches neither true nor false. The optional
+`XCUIElementType` prefix is accepted for `kind`. Selectors need at least one
+field; strings are limited to 1000 characters. No predicates are evaluated.
+
+Selector filtering combines with `scope`, `query` and `limit`, preserving the
+full tree's snapshot and original indexes. The `filter` summary includes the
+selector and match/omission counts. It applies to accessibility rows; separate
+OCR rows are unchanged. A match is not proof of visibility or hittability.
+Selectors require a full read: combining one with `since` (including
+`scope=changed`) is refused before the device read. Malformed/unsupported
+selectors return 400 `invalid_selector`.
+
 **Images only when needed.** `?image=auto` attaches a screenshot only when the
 tree is unusable (no interactive rows, containers only). The screenshot is
 always a fresh capture taken after the read. It is labelled with
