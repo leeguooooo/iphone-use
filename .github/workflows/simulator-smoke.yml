@@ -41,6 +41,17 @@ on:
         description: Published GitHub release whose binaries and runner sources are tested
         type: string
         default: v0.27.21
+      prepare_element_ui:
+        description: Explicit warm UIKit preparation; false retains the cold-start lane
+        type: boolean
+        default: false
+      element_platform:
+        description: Explicit platform for the published Native element oracle; other lanes are unchanged
+        type: choice
+        default: xcode16.2-ios18.2
+        options:
+          - xcode16.2-ios18.2
+          - xcode16.4-ios18.5
       capture_probe_only:
         description: Verify native system screenshot persistence in an owned Simulator
         type: boolean
@@ -290,9 +301,13 @@ jobs:
     permissions:
       contents: read
       actions: read
-    timeout-minutes: 45
+    timeout-minutes: 105
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      DEVELOPER_DIR: ${{ inputs.element_platform == 'xcode16.4-ios18.5' && '/Applications/Xcode_16.4.app/Contents/Developer' || '/Applications/Xcode_16.2.app/Contents/Developer' }}
+      ELEMENT_RUNTIME: ${{ inputs.element_platform == 'xcode16.4-ios18.5' && 'com.apple.CoreSimulator.SimRuntime.iOS-18-5' || 'com.apple.CoreSimulator.SimRuntime.iOS-18-2' }}
+      ELEMENT_IOS: ${{ inputs.element_platform == 'xcode16.4-ios18.5' && '18.5' || '18.2' }}
+      IPU_DIAGNOSTIC_PLATFORM: ${{ inputs.element_platform }}
+      PREPARE_ELEMENT_UI: ${{ inputs.prepare_element_ui }}
       LIST_RELEASE: ${{ inputs.collect_release_tag }}
       ELEMENT_PROBE: ${{ inputs.selector_probe_only && 'selector' || 'list' }}
       GH_TOKEN: ${{ github.token }}
@@ -305,7 +320,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate the published version before selecting its test recipes
         shell: bash
-        run: '[[ "$LIST_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+        run: |
+          [[ "$LIST_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.2-ios18.2 || "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.4-ios18.5 ]]
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = "$ELEMENT_IOS"
       - name: Checkout the exact published version's oracle and fixtures
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -328,12 +346,12 @@ jobs:
           builds=[r for r in runs if r['head_sha']==sha and r['head_branch']==tag and r['event']=='push' and r['conclusion']=='success']
           assert builds,'selected oracle must match a successful tag release build'
           build=max(builds,key=lambda r:r['id'])
-          proof={'release_tag':tag,'oracle_commit':sha,'verification_workflow_sha':os.environ['WORKFLOW_SHA'],'release_build_run':build['id'],'release_build_url':build['html_url'],'scope':'source identity bound to successful release build metadata; not reproducible-build attestation'}
+          proof={'release_tag':tag,'oracle_commit':sha,'verification_workflow_sha':os.environ['WORKFLOW_SHA'],'warm_ui_requested':os.environ['PREPARE_ELEMENT_UI']=='true','release_build_run':build['id'],'release_build_url':build['html_url'],'scope':'source identity bound to successful release build metadata; not reproducible-build attestation'}
           (Path(os.environ['RUNNER_TEMP'])/'list-oracle-source.json').write_text(json.dumps(proof,indent=2)+'\n')
           PYCODE
-      - name: Ensure iOS 18.2 runtime
+      - name: Ensure explicitly selected element-test runtime
         timeout-minutes: 15
-        run: bash scripts/ensure-simulator-runtime.sh com.apple.CoreSimulator.SimRuntime.iOS-18-2 18.2 "$RUNNER_TEMP/pinned-runtime-18.2"
+        run: bash scripts/ensure-simulator-runtime.sh "$ELEMENT_RUNTIME" "$ELEMENT_IOS" "$RUNNER_TEMP/pinned-runtime-$ELEMENT_IOS"
       - name: Negative controls for the model oracle
         run: python3 -I .release-oracle/scripts/test-collect-simulator-verdict.py
       - name: Selector oracle negative controls
@@ -369,19 +387,23 @@ jobs:
             -scheme IPhoneUseRunner -configuration Debug -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/list-runner" \
             -jobs 2 CODE_SIGNING_ALLOWED=NO build-for-testing > "$RUNNER_TEMP/list-runner-build.log" 2>&1
-      - name: Run the Native collection oracle on an owned iOS 18.2 Simulator
-        timeout-minutes: 20
+      - name: Run the version-pinned Native oracle in the selected startup context
+        timeout-minutes: 75
         run: |
           set -euo pipefail
           test -s "$RUNNER_TEMP/list-oracle-source.json"
+          oracle_sha=$(python3 -c 'import json,os; from pathlib import Path; print(json.loads((Path(os.environ["RUNNER_TEMP"])/"list-oracle-source.json").read_text())["oracle_commit"])')
+          preparation=()
+          if [ "$PREPARE_ELEMENT_UI" = true ]; then preparation+=(--prepare-ui); fi
           recipe=$(python3 -c 'import os; from pathlib import Path; p=list((Path(os.environ["RUNNER_TEMP"])/"list-runner/Build/Products").glob("*.xctestrun")); assert len(p)==1,p; print(p[0])')
-          python3 .release-oracle/scripts/run-collect-simulator.py \
+          python3 scripts/run-collect-simulator.py \
             --probe "$ELEMENT_PROBE" \
             --daemon "$RUNNER_TEMP/list-release/iPhoneUse.app/Contents/MacOS/iphone-use" \
             --mcp "$RUNNER_TEMP/list-release/iPhoneUse.app/Contents/MacOS/iphone-use-mcp" \
             --runner-source "$RUNNER_TEMP/list-release/runner" \
             --xctestrun "$recipe" \
-            --runtime com.apple.CoreSimulator.SimRuntime.iOS-18-2 \
+            --oracle-root "$GITHUB_WORKSPACE/.release-oracle" --oracle-commit "$oracle_sha" "${preparation[@]}" \
+            --runtime "$ELEMENT_RUNTIME" \
             --out "$RUNNER_TEMP/list-oracle-proof"
       - name: Preserve independent models, Native results and cleanup evidence
         if: always()
@@ -394,6 +416,9 @@ jobs:
             ${{ runner.temp }}/list-runner-build.log
             ${{ runner.temp }}/list-oracle-proof/*.json
             ${{ runner.temp }}/list-oracle-proof/*.log
+            ${{ runner.temp }}/list-oracle-proof/platform-warmup/*.json
+            ${{ runner.temp }}/list-oracle-proof/platform-warmup/*.log
+            ${{ runner.temp }}/list-oracle-proof/platform-warmup/ordinary-app-build/fixture-build.log
             ${{ runner.temp }}/list-oracle-proof/conformance/*.json
             ${{ runner.temp }}/list-oracle-proof/conformance/*.log
             ${{ runner.temp }}/list-oracle-proof/conformance/*.jsonl

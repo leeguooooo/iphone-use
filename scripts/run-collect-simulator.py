@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Create and delete one dedicated Simulator for Native list conformance; never select a phone."""
 import argparse
+import ast
 import hashlib
 import json
 import os
 import re
+import signal
 from pathlib import Path
 import subprocess
 import time
 import urllib.request
 import uuid
 
-from mcp_probe_peer import stop
 
 ROOT = Path(__file__).resolve().parents[1]
 PROBES = {
@@ -19,6 +20,24 @@ PROBES = {
     'selector': ('test-selector-simulator.py', 16),
     'agent-selector': ('test-agent-selector-simulator.py', 7),
 }
+
+
+def probe_recipe(oracle_root, probe):
+    source_root = oracle_root.resolve(strict=True)
+    path = (source_root / 'scripts/run-collect-simulator.py').resolve(strict=True)
+    assert path.is_relative_to(source_root), 'oracle manifest escapes source root'
+    module = ast.parse(path.read_text())
+    assignments = [node for node in module.body if
+        (isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'PROBES' for target in node.targets))
+        or (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == 'PROBES')]
+    assert len(assignments) == 1 and isinstance(assignments[0], ast.Assign), 'one literal PROBES assignment required'
+    definitions = ast.literal_eval(assignments[0].value)
+    script, count = definitions[probe]
+    assert isinstance(script, str) and Path(script).name == script and script.endswith('.py'), 'invalid oracle script'
+    assert type(count) is int and 1 <= count <= 256, 'invalid oracle case count'
+    test = (oracle_root / 'scripts' / script).resolve(strict=True)
+    assert test.parent == (oracle_root / 'scripts').resolve(strict=True) and test.is_relative_to(source_root), 'oracle script escapes source root'
+    return test, count
 
 
 class CommandTerminationUnverified(RuntimeError):
@@ -39,7 +58,15 @@ def logged(argv, log, env, timeout):
             code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             try:
-                stop(process)
+                # The UIKit preparer forwards TERM to its active command group;
+                # allow its bounded cleanup to finish before killing the parent.
+                try: os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError: pass
+                try: process.wait(timeout=15)
+                except subprocess.TimeoutExpired: pass
+                try: os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+                process.wait(timeout=5)
             except Exception as error:
                 raise CommandTerminationUnverified(f'owned pid {process.pid} termination unverified; inspect {log.name}; do not replay') from error
             raise RuntimeError(f'owned command timed out; inspect {log.name}; no mutation replay')
@@ -122,7 +149,19 @@ def main():
     parser.add_argument('--runtime', required=True)
     parser.add_argument('--probe', choices=tuple(PROBES), default='list')
     parser.add_argument('--xctestrun', type=Path, required=True)
+    parser.add_argument('--oracle-root', type=Path)
+    parser.add_argument('--oracle-commit')
+    parser.add_argument('--prepare-ui', action='store_true')
     args = parser.parse_args()
+    assert not args.prepare_ui or (args.oracle_root and args.oracle_commit), 'warm preparation requires explicit oracle source and commit'
+    oracle_root = (args.oracle_root or ROOT).resolve(strict=True)
+    oracle_commit = None
+    if args.oracle_commit:
+        assert re.fullmatch(r'[0-9a-f]{40}', args.oracle_commit), 'expected full oracle commit'
+        oracle_commit = command(['git', '-C', oracle_root, 'rev-parse', 'HEAD'])
+        assert oracle_commit == args.oracle_commit, 'oracle checkout differs from requested commit'
+        command(['git', '-C', oracle_root, 'diff', '--quiet', 'HEAD'])
+    test_script, expected_cases = probe_recipe(oracle_root, args.probe)
     daemon, mcp, runner = (path.resolve(strict=True) for path in (args.daemon, args.mcp, args.runner_source))
     assert (runner / 'IPhoneUseRunner/IPhoneUseRunner.xcodeproj').is_dir()
     args.out = args.out.resolve(); args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -143,6 +182,9 @@ def main():
               'xcode': command(['xcodebuild', '-version'], env=env), 'cleanup_errors': []}
     match = re.fullmatch(r'iphone-use (\d+\.\d+\.\d+)', result['version'])
     assert match, 'unknown product version'
+    result['oracle_source'] = {'root': str(oracle_root), 'script': str(test_script.relative_to(oracle_root)),
+        'script_sha256': hashlib.sha256(test_script.read_bytes()).hexdigest(), 'expected_cases': expected_cases,
+        'manifest_sha256': hashlib.sha256((oracle_root / 'scripts/run-collect-simulator.py').read_bytes()).hexdigest(), 'commit': oracle_commit}
     result['runner_sources'] = {str(path.relative_to(runner)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in runner.rglob('*') if path.is_file() and path.suffix in ('.swift', '.m', '.h')}
     try:
@@ -150,6 +192,23 @@ def main():
         uuid.UUID(simulator); result['simulator'] = simulator
         devices = json.loads(command(['xcrun', 'simctl', 'list', 'devices', '--json'], env=env))['devices']
         assert any(d['udid'] == simulator and d['name'] == name for d in devices.get(args.runtime, [])), 'created Simulator identity differs'
+        if args.prepare_ui:
+            platform = os.environ.get('IPU_DIAGNOSTIC_PLATFORM')
+            assert platform in ('xcode16.2-ios18.2', 'xcode16.4-ios18.5'), 'explicit UI preparation platform required'
+            warm_env = dict(env, IPU_DIAGNOSTIC_PLATFORM=platform)
+            result['startup_context'] = 'ordinary UIKit preparation requested; cold startup is not evaluated'
+            result['ui_preparation_artifact'] = str(args.out / 'platform-warmup/result.json')
+            logged(['python3', ROOT / 'scripts/diagnose-simulator-platform.py', '--prepare-ui-only',
+                    '--owned-simulator', simulator, '--owned-name', name, '--oracle-root', oracle_root,
+                    '--out', args.out / 'platform-warmup'], args.out / 'platform-warmup.log', warm_env, 600)
+            warm = json.loads((args.out / 'platform-warmup/result.json').read_text())
+            assert warm['mode'] == 'ordinary-ui-only' and warm['passed'] is True and not warm['cleanup_errors']
+            assert warm['simulator'].lower() == simulator.lower() and warm['simulator_name'] == name
+            assert warm['platform'] == platform and warm['runtime'] == args.runtime
+            assert warm['caller_owned_target']['udid'].lower() == simulator.lower() and warm['caller_owned_target']['name'] == name
+            assert warm['ordinary_app']['ready'] is True and warm['ordinary_app']['bundle_isolated'] is True
+            result['ui_preparation'] = warm
+            result['startup_context'] = 'warm, after independently confirmed ordinary UIKit window; not cold-start acceptance'
         start = [daemon, 'simulator', 'start', simulator, '--instance', instance]
         start += ['--xctestrun', args.xctestrun.resolve(strict=True)]
         logged(start, args.out / 'simulator-start.log', env, 360)
@@ -171,9 +230,8 @@ def main():
             time.sleep(2)
         groups = [('conformance', [], 'cases')] if args.probe != 'list' else [
             ('conformance', [], 'cases'), ('default-conformance', ['--without-end-label'], 'default_cases')]
-        test_script, expected_cases = PROBES[args.probe]
         for folder, flags, field in groups:
-            logged(['python3', ROOT / 'scripts' / test_script, '--base', f"http://127.0.0.1:{binding['daemon_port']}",
+            logged(['python3', test_script, '--base', f"http://127.0.0.1:{binding['daemon_port']}",
                     '--udid', simulator, '--owner', instance, '--mcp', mcp, '--runner-record', record,
                     '--product-version', match[1], '--out', args.out / folder, *flags],
                    args.out / (folder + '.log'), env, 720)

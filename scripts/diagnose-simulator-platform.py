@@ -1,18 +1,37 @@
 #!/usr/bin/env python3
 """Isolate hosted CI Simulator/XCTest startup from the product CLI. Never selects a phone."""
-import http.client,importlib.util,json,os,re,secrets,signal,socket,subprocess,tempfile,time,urllib.request,uuid
+import argparse,http.client,importlib.util,json,os,re,secrets,signal,socket,subprocess,tempfile,time,urllib.request,uuid
 from pathlib import Path
 from runner_auth import authorization
 ROOT=Path(__file__).resolve().parents[1]
 assert os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted','hosted CI only'
-OUT=Path(os.environ['RUNNER_TEMP'])/'simulator-platform-diagnostic';OUT.mkdir(exist_ok=False)
+def interrupted_by_parent(*_):raise KeyboardInterrupt('diagnostic termination requested')
+signal.signal(signal.SIGTERM,interrupted_by_parent)
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--prepare-ui-only',action='store_true')
+parser.add_argument('--owned-simulator')
+parser.add_argument('--owned-name')
+parser.add_argument('--oracle-root',type=Path,default=ROOT)
+parser.add_argument('--out',type=Path,default=Path(os.environ['RUNNER_TEMP'])/'simulator-platform-diagnostic')
+options=parser.parse_args()
+assert options.prepare_ui_only == bool(options.owned_simulator and options.owned_name),'UI-only requires explicit caller-owned Simulator and name'
+assert options.prepare_ui_only or not(options.owned_simulator or options.owned_name),'owned target is only valid for UI preparation'
+ORACLE_ROOT=options.oracle_root.resolve(strict=True)
+OUT=options.out.resolve();OUT.mkdir(mode=0o700,parents=True,exist_ok=False)
 PLATFORMS={'xcode16.2-ios18.2':('16.2','18.2'),'xcode16.4-ios18.5':('16.4','18.5')}
 PLATFORM=os.environ.get('IPU_DIAGNOSTIC_PLATFORM','xcode16.2-ios18.2')
 assert PLATFORM in PLATFORMS,'unsupported diagnostic platform'
 XCODE,IOS=PLATFORMS[PLATFORM]
 RUNTIME='com.apple.CoreSimulator.SimRuntime.iOS-'+IOS.replace('.','-')
-NAME='ipu-platform-'+str(uuid.uuid4());sim=None;process=None;token=secrets.token_hex(32)
+NAME=options.owned_name if options.prepare_ui_only else 'ipu-platform-'+str(uuid.uuid4());sim=None;process=None;token=secrets.token_hex(32)
+if options.prepare_ui_only:assert re.fullmatch(r'ipu-[a-zA-Z0-9-]{1,100}',NAME),'unexpected owned Simulator name'
 result={'premise':f'macos15/Xcode{XCODE}/runtime{IOS} can boot an owned Simulator and directly launch the Native XCTest runner','platform':PLATFORM,'passed':False,'scope':'hostedCI only;not product or physical acceptance;does not establish other runtime lanes','stages':[],'cleanup_errors':[]}
+result['runtime']=RUNTIME
+result['mode']='ordinary-ui-only' if options.prepare_ui_only else 'direct-xctest'
+if options.prepare_ui_only:
+    result['premise']=f'ordinary UIKit can publish an active window on the caller-owned iOS{IOS} Simulator'
+    result['scope']='hostedCI UIKit preparation only;caller owns Simulator cleanup;not XCTest/product/physical acceptance'
+    result['simulator_cleanup']={'not_attempted':'caller retains cleanup ownership'}
 def save(): (OUT/'result.json').write_text(json.dumps(result,indent=2)+'\n')
 def stop_owned_group(child):
     report={'pid':child.pid,'signals':[],'errors':[],'scope':'owned group signals and parent exit; escaped descendants not checked'}
@@ -56,14 +75,25 @@ try:
     assert command('sdk-version',['xcrun','--sdk','iphonesimulator','--show-sdk-version'])==IOS,'unexpected Simulator SDK'
     command('simctl-location',['xcrun','--find','simctl'])
     command('processes-before',['ps','-Ao','pid,ppid,etime,comm'])
-    command('runtime',['bash',ROOT/'scripts/ensure-simulator-runtime.sh',RUNTIME,IOS,OUT/'runtime'],900)
+    if options.prepare_ui_only:
+        available=json.loads(command('runtime-ready',['xcrun','simctl','list','runtimes','--json']))['runtimes']
+        assert any(item['identifier']==RUNTIME and item.get('isAvailable') is True for item in available),'caller runtime unavailable; UI preparation never installs one'
+    else:command('runtime',['bash',ROOT/'scripts/ensure-simulator-runtime.sh',RUNTIME,IOS,OUT/'runtime'],900)
     command('full-inventory-before',['xcrun','simctl','list'],90)
-    env=dict(os.environ,IPU_RUNNER_DERIVED_DATA=str(OUT/'runner-build'))
-    command('runner-build',['bash',ROOT/'runner/build.sh','--simulator'],300,env)
-    recipes=list((OUT/'runner-build/Build/Products').glob('*.xctestrun'));assert len(recipes)==1
-    sim=command('create',['xcrun','simctl','create',NAME,'com.apple.CoreSimulator.SimDeviceType.iPhone-15',RUNTIME]);uuid.UUID(sim)
+    if options.prepare_ui_only:
+        requested_sim=str(uuid.UUID(options.owned_simulator))
+        devices=json.loads(command('owned-target-inventory',['xcrun','simctl','list','devices','--json']))['devices']
+        matches=[d for d in devices.get(RUNTIME,[]) if d['udid'].lower()==requested_sim.lower() and d['name']==NAME]
+        assert len(matches)==1 and matches[0]['state'] in ('Shutdown','Booted'),'caller-owned target or state differs'
+        sim=matches[0]['udid']
+        result['caller_owned_target']=matches[0];save()
+    else:
+        env=dict(os.environ,IPU_RUNNER_DERIVED_DATA=str(OUT/'runner-build'))
+        command('runner-build',['bash',ROOT/'runner/build.sh','--simulator'],300,env)
+        recipes=list((OUT/'runner-build/Build/Products').glob('*.xctestrun'));assert len(recipes)==1
+        sim=command('create',['xcrun','simctl','create',NAME,'com.apple.CoreSimulator.SimDeviceType.iPhone-15',RUNTIME]);uuid.UUID(sim)
     result.update(simulator=sim,simulator_name=NAME);save()
-    command('boot',['xcrun','simctl','boot',sim],120)
+    if not options.prepare_ui_only or matches[0]['state']=='Shutdown':command('boot',['xcrun','simctl','boot',sim],120)
     command('bootstatus',['xcrun','simctl','bootstatus',sim,'-b'],240)
     command('full-inventory-after-boot',['xcrun','simctl','list'],90)
     command('processes-after-boot',['ps','-Ao','pid,ppid,etime,comm'])
@@ -78,11 +108,15 @@ spec=importlib.util.spec_from_file_location('ordinary_fixture',root/'scripts/tes
 module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module
 with contextlib.redirect_stdout(sys.stderr):
     spec.loader.exec_module(module)
+    oracle_bundle=module.BUNDLE
+    module.BUNDLE='com.leeguoo.iphone-use.platform-readiness'
+    assert module.BUNDLE!=oracle_bundle,'warmup bundle must differ from oracle'
     app=module.build_fixture(Path(sys.argv[2]))
-print(json.dumps({'app':str(app),'bundle':module.BUNDLE}))
+print(json.dumps({'app':str(app),'bundle':module.BUNDLE,'oracle_bundle':oracle_bundle}))
 """
-    fixture=json.loads(command('ordinary-app-build',['python3','-c',fixture_code,ROOT,fixture_out],300))
-    result['ordinary_app'].update(bundle=fixture['bundle'],phase='install');save()
+    fixture=json.loads(command('ordinary-app-build',['python3','-c',fixture_code,ORACLE_ROOT,fixture_out],300))
+    assert fixture['bundle']=='com.leeguoo.iphone-use.platform-readiness' and fixture['oracle_bundle']!=fixture['bundle'],'warmup bundle isolation failed'
+    result['ordinary_app'].update(bundle=fixture['bundle'],oracle_bundle=fixture['oracle_bundle'],bundle_isolated=True,phase='install');save()
     command('ordinary-app-install',['xcrun','simctl','install',sim,fixture['app']],90)
     nonce=str(uuid.uuid4());result['ordinary_app'].update(phase='launch',run_id=nonce);save()
     launched=command('ordinary-app-launch',['xcrun','simctl','launch',sim,fixture['bundle'],'--run-id',nonce,'--mode','unique'],90)
@@ -117,36 +151,41 @@ print(json.dumps({'app':str(app),'bundle':module.BUNDLE}))
     result['ordinary_app'].update(ready=True,phase='ready',state=ordinary,observation_scope='before terminate command');save()
     command('ordinary-app-stop',['xcrun','simctl','terminate',sim,fixture['bundle']],30)
     result['ordinary_app']['terminate_command']='completed; process absence not independently checked'
-    result['xctest_start_context']='warm, after ordinary UIKit readiness and completed terminate command';save()
-    with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
-    args=['xcodebuild','-destination','id='+sim,'test-without-building','-xctestrun',str(recipes[0]),'-only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe']
-    env=dict(os.environ,TEST_RUNNER_IPU_RUNNER_PORT=str(port),TEST_RUNNER_IPU_RUNNER_TOKEN=token)
-    log=OUT/'direct-xctest.log'
-    with log.open('w') as sink:process=subprocess.Popen(args,env=env,stdout=sink,stderr=subprocess.STDOUT,start_new_session=True)
-    result['xctest_pid']=process.pid;result['xctest_started_at']=time.time();save();deadline=time.monotonic()+180
-    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));observations=[]
-    while time.monotonic()<deadline:
-        if process.poll() is not None:raise RuntimeError(f'direct XCTest exited {process.returncode}')
-        try:
-            request=urllib.request.Request(f'http://127.0.0.1:{port}/status',headers={'Authorization':authorization(token,'GET','/status',b'')})
-            with opener.open(request,timeout=3) as reply:status=json.load(reply)
-            observations.append({'at':time.time(),'status':status})
-            if not isinstance(status,dict) or not isinstance(status.get('value'),dict):
-                raise ValueError('status reply must contain an object value')
-            if status.get('value',{}).get('ready') is True:result['passed']=True;break
-        except (OSError,ValueError,http.client.HTTPException) as error:
-            observations.append({'at':time.time(),'error':type(error).__name__+': '+str(error)})
-        finally:
-            (OUT/'status-observations.json').write_text(json.dumps(observations,indent=2)+'\n')
-        time.sleep(1)
-    if not result['passed']:
-        # A failed optional stack sample must not replace the readiness failure.
-        result['readiness_failure']='direct XCTest status never became ready'
-        result['xctest_exit_at_deadline']=process.poll();save()
-        try:command('sample-xctest',['sample',str(process.pid),'3','-file',OUT/'xctest.sample'],20)
-        except Exception as error:result['sample_error']=type(error).__name__+': '+str(error);save()
-        raise RuntimeError('direct XCTest status never became ready')
-    command('full-inventory-after-xctest',['xcrun','simctl','list'],90)
+    result['preparation_context']='ordinary UIKit readiness followed by completed terminate command';save()
+    if not options.prepare_ui_only:result['xctest_start_context']='warm, after ordinary UIKit readiness and completed terminate command';save()
+    if options.prepare_ui_only:
+        result['passed']=True
+        result['simulator_cleanup']={'not_attempted':'caller retains cleanup ownership'}
+    else:
+        with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+        args=['xcodebuild','-destination','id='+sim,'test-without-building','-xctestrun',str(recipes[0]),'-only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe']
+        env=dict(os.environ,TEST_RUNNER_IPU_RUNNER_PORT=str(port),TEST_RUNNER_IPU_RUNNER_TOKEN=token)
+        log=OUT/'direct-xctest.log'
+        with log.open('w') as sink:process=subprocess.Popen(args,env=env,stdout=sink,stderr=subprocess.STDOUT,start_new_session=True)
+        result['xctest_pid']=process.pid;result['xctest_started_at']=time.time();save();deadline=time.monotonic()+180
+        opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));observations=[]
+        while time.monotonic()<deadline:
+            if process.poll() is not None:raise RuntimeError(f'direct XCTest exited {process.returncode}')
+            try:
+                request=urllib.request.Request(f'http://127.0.0.1:{port}/status',headers={'Authorization':authorization(token,'GET','/status',b'')})
+                with opener.open(request,timeout=3) as reply:status=json.load(reply)
+                observations.append({'at':time.time(),'status':status})
+                if not isinstance(status,dict) or not isinstance(status.get('value'),dict):
+                    raise ValueError('status reply must contain an object value')
+                if status.get('value',{}).get('ready') is True:result['passed']=True;break
+            except (OSError,ValueError,http.client.HTTPException) as error:
+                observations.append({'at':time.time(),'error':type(error).__name__+': '+str(error)})
+            finally:
+                (OUT/'status-observations.json').write_text(json.dumps(observations,indent=2)+'\n')
+            time.sleep(1)
+        if not result['passed']:
+            # A failed optional stack sample must not replace the readiness failure.
+            result['readiness_failure']='direct XCTest status never became ready'
+            result['xctest_exit_at_deadline']=process.poll();save()
+            try:command('sample-xctest',['sample',str(process.pid),'3','-file',OUT/'xctest.sample'],20)
+            except Exception as error:result['sample_error']=type(error).__name__+': '+str(error);save()
+            raise RuntimeError('direct XCTest status never became ready')
+        command('full-inventory-after-xctest',['xcrun','simctl','list'],90)
 except BaseException as error:
     result['passed']=False
     result['error']=type(error).__name__+': '+str(error)
@@ -167,16 +206,12 @@ finally:
     for path in OUT.glob('*.log'):
         try:path.write_text(path.read_text(errors='replace').replace(token,'REDACTED'))
         except OSError as error:result['cleanup_errors'].append('log redaction: '+str(error))
-    if sim:
+    if sim and not options.prepare_ui_only:
         try:
             spec=importlib.util.spec_from_file_location('owned_cleanup',ROOT/'scripts/run-collect-simulator.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
             def cleanup_command(argv,*,env=None,timeout=120):
                 return command('cleanup-read-'+str(len(result['stages'])),argv,env=env,timeout=timeout)
-            def cleanup_stop(child):
-                report=stop_owned_group(child)
-                result.setdefault('cleanup_process_groups',[]).append(report)
-                if report['errors']:raise RuntimeError('cleanup client termination unconfirmed')
-            module.command=cleanup_command;module.stop=cleanup_stop
+            module.command=cleanup_command
             result['simulator_cleanup']=module.cleanup_owned_simulator(sim,NAME,dict(os.environ),OUT)
         except BaseException as error:result['cleanup_errors'].append(str(error))
     if result['cleanup_errors']:result['passed']=False
