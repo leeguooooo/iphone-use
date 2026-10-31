@@ -44,7 +44,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 
 # The cloud relay tunnel (`relay_client`): a WebSocket over the tokio-rustls
 # connection above, so no second TLS stack.
-tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 webpki-roots = "1"
 
 # Stream combinators — attach a live-view drop guard to the proxied MJPEG
