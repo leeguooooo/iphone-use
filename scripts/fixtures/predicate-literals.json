@@ -42,5 +42,9 @@
   {
     "input": "value %@ %K",
     "literal": "'value %@ %K'"
+  },
+  {
+    "input": "\nQA\r\t'\\n",
+    "literal": "'\\u000aQA\\u000d\\u0009\\'\\\\n'"
   }
 ]

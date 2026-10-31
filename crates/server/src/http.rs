@@ -23979,7 +23979,7 @@ mod tests {
         assert_eq!(using, "predicate string");
         assert_eq!(
             query,
-            "type == 'XCUIElementTypeTextField' AND (label == 'local-agent-goal' OR name == 'local-agent-goal') AND value == '\\nQA\\r\\t\\'\\\\n'"
+            "type == 'XCUIElementTypeTextField' AND (label == 'local-agent-goal' OR name == 'local-agent-goal') AND value == '\\u000aQA\\u000d\\u0009\\'\\\\n'"
         );
         assert!(!query.contains(['\n', '\r', '\t']));
     }
