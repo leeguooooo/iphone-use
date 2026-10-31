@@ -202,6 +202,11 @@ impl RunnerLifecycle {
         Self::decode(self.state.load(std::sync::atomic::Ordering::Acquire)).1
     }
 
+    fn active_stamp(&self) -> Option<u64> {
+        let state = self.state.load(std::sync::atomic::Ordering::Acquire);
+        (Self::decode(state).1 == RunnerLifecycleTransition::Active).then_some(state)
+    }
+
     fn try_begin(&self, transition: RunnerLifecycleTransition) -> Option<RunnerTransitionToken> {
         debug_assert_ne!(transition, RunnerLifecycleTransition::Active);
         let mut observed = self.state.load(std::sync::atomic::Ordering::Acquire);
@@ -271,6 +276,12 @@ impl RunnerLifecycle {
             return None;
         }
         Some(publish())
+    }
+
+    fn publish_if_active_stamp<R>(&self, stamp: Option<u64>, publish: impl FnOnce() -> R) -> Option<R> {
+        let (generation, phase) = Self::decode(stamp?);
+        if phase != RunnerLifecycleTransition::Active { return None; }
+        self.publish_if_current(RunnerTransitionToken {generation,phase}, publish)
     }
 
     fn try_begin_releasing(&self) -> Option<RunnerTransitionToken> {
@@ -6624,6 +6635,9 @@ enum RunnerControlOutcome {
     RunnerRejected,
     /// Terminate was acknowledged; launch was not applied (scope or explicit refusal).
     AppLaunchInterrupted,
+    /// Authorization stopped a compound action before its next transport request.
+    /// Earlier requests may have acted; this is not a Runner health failure.
+    ScopeInterrupted,
     Failed,
 }
 
@@ -9633,6 +9647,13 @@ async fn with_app_lifecycle_receipt(response: Response, detail: Option<&serde_js
     Response::from_parts(parts, Body::from(body.to_string()))
 }
 
+fn control_scope_interrupted_response() -> Response {
+    with_security_headers((StatusCode::CONFLICT, axum::Json(serde_json::json!({
+        "ok":false,"error":"control_scope_changed","outcome":"unknown","retry_safe":false,
+        "hint":"Control authorization or request lifetime changed during the action; later Runner requests were stopped. Do not replay; coordinate with the current owner before new work."
+    }))).into_response())
+}
+
 fn app_launch_interrupted_response(detail: Option<&serde_json::Value>) -> Response {
     let mut body = serde_json::json!({"ok":false,"error":"app_launch_interrupted",
         "outcome":"partial","retry_safe":false});
@@ -9942,16 +9963,25 @@ fn text_partial_body(
     })
 }
 
-/// Typing a long text can outlast the owner lease and the idle-release
-/// window, both measured from when the request arrived. Count its end as
-/// activity and renew the caller's lease, so the follow-up (an append of the
-/// rest, a tap on Send) is not refused or met by a released phone.
-fn renew_after_long_text(state: &AppState, headers: &HeaderMap, action: &serde_json::Value) {
-    if crate::text_input::action_allowance(action).is_zero() {
-        return;
+/// Renew only the still-current original lease after long typing. Never run
+/// takeover arbitration again: a newer owner may have arrived during the action.
+fn renew_after_long_text(state: &AppState, headers: &HeaderMap, action: &serde_json::Value, scope: &ScreenReadScope) {
+    if crate::text_input::action_allowance(action).is_zero() || !scope.current(state) { return; }
+    let now = Instant::now();
+    let lease = std::time::Duration::from_secs(state.owner_lease_secs);
+    let mut slot = recover(state.owner.lock());
+    if scope.epoch != state.owner_epoch.load(std::sync::atomic::Ordering::Acquire)
+        || scope.privacy_epoch != state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire)
+        || state.released.load(std::sync::atomic::Ordering::Acquire)
+        || scope.lifecycle_stamp != state.runner_lifecycle.active_stamp()
+        || named_owner(headers) != scope.owner.as_deref()
+        || slot.as_ref().map(|owner| owner.name.as_str()) != scope.owner.as_deref()
+    { return; }
+    if let Some(owner) = slot.as_mut() {
+        if lease_remaining(owner.last_seen, now, lease).is_zero() { return; }
+        owner.last_seen = owner.last_seen.max(now);
     }
     state.touch_activity();
-    let _ = claim_phone_owner(state, headers);
 }
 
 /// A `text` action longer than the daemon types, refused before anything is
@@ -10450,15 +10480,14 @@ async fn direct_control(
         };
         *recover(dispatch_marker.lock()) = Some(client.last_post());
         let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < deadline;
-        let outcome = runner_control_with_client(
+        let outcome = scoped_runner_action(&state, &capture_scope, deadline, runner_control_with_client(
             &mut client,
             &state.runner_actionable,
             &value,
             &mut detail,
             false,
             Some(&dispatch_allowed),
-        )
-        .await;
+        )).await;
         Some((outcome, recorded_locator))
     })
     .await;
@@ -10495,6 +10524,9 @@ async fn direct_control(
         );
     }
 
+    if outcome == RunnerControlOutcome::ScopeInterrupted {
+        return with_app_lifecycle_receipt(control_scope_interrupted_response(), detail.as_ref()).await;
+    }
     if outcome == RunnerControlOutcome::Failed {
         let locked = recover(state.runner_health.lock()).locked;
         *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
@@ -10790,40 +10822,49 @@ fn should_unlock_before_action(
 /// when a passcode is set. Best effort: on failure the action runs as it
 /// always did and the lock is reported the usual way.
 async fn unlock_before_action(
-    state: &AppState,
+    state: &Arc<AppState>,
     client: &mut crate::runner::RunnerClient,
     deadline: tokio::time::Instant,
-) {
+    scope: &ScreenReadScope,
+) -> Result<(), crate::timing::ControlInterruption> {
+    let weak = Arc::downgrade(state);
+    let original = scope.clone();
+    let allowed: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move ||
+        tokio::time::Instant::now() < deadline
+            && weak.upgrade().is_some_and(|state| original.current(&state)));
+    if !allowed() { return Err(crate::timing::ControlInterruption {mutations_admitted:false}); }
     let cached = recover(state.runner_health.lock()).locked;
-    if !should_unlock_before_action(cached, crate::keep_awake::lock_report()) {
-        return;
-    }
-    // Leave the action most of its budget: the unlock takes ~2.5 s.
-    let budget = deadline
-        .saturating_duration_since(tokio::time::Instant::now())
+    if !should_unlock_before_action(cached, crate::keep_awake::lock_report()) { return Ok(()); }
+    let budget = deadline.saturating_duration_since(tokio::time::Instant::now())
         .saturating_sub(std::time::Duration::from_secs(6))
         .min(std::time::Duration::from_secs(5));
     if budget.is_zero() {
-        return;
+        return if allowed() {Ok(())} else {Err(crate::timing::ControlInterruption {mutations_admitted:false})};
     }
-    match tokio::time::timeout(budget, client.unlock()).await {
-        Ok(Ok(())) => {
+    let result = crate::timing::with_control_permit(allowed.clone(),
+        tokio::time::timeout(budget, client.unlock())).await;
+    match result {
+        Err(interrupted) => return Err(interrupted),
+        Ok(Ok(Ok(()))) => {
+            if !allowed() { return Err(crate::timing::ControlInterruption {mutations_admitted:true}); }
             tracing::info!("the phone was locked; unlocked it (no passcode) before the action");
-            crate::keep_awake::note_unlocked();
-            apply_runner_health_probe(
-                &state.runner_health,
-                &state.runner_actionable,
-                &state.released,
-                crate::runner::RunnerHealth {
-                    up: true,
-                    actionable: true,
-                    locked: Some(false),
-                },
-            );
+            // Publish under the lifecycle gate; an old ACK cannot overwrite
+            // health belonging to a newer generation or clear a release.
+            let committed = state.runner_lifecycle.publish_if_active_stamp(scope.lifecycle_stamp, || {
+                if state.released.load(std::sync::atomic::Ordering::Acquire) { return false; }
+                crate::keep_awake::note_unlocked();
+                *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
+                    up: true, actionable: true, locked: Some(false),
+                };
+                state.runner_actionable.store(true, std::sync::atomic::Ordering::Release);
+                true
+            }).unwrap_or(false);
+            if !committed { return Err(crate::timing::ControlInterruption {mutations_admitted:true}); }
         }
-        Ok(Err(error)) => tracing::info!("the phone is locked and could not be unlocked: {error:#}"),
-        Err(_) => tracing::info!("unlocking the phone took longer than {}s", budget.as_secs()),
+        Ok(Ok(Err(error))) => tracing::info!("the phone is locked and could not be unlocked: {error:#}"),
+        Ok(Err(_)) => tracing::info!("unlocking the phone took longer than {}s", budget.as_secs()),
     }
+    if allowed() {Ok(())} else {Err(crate::timing::ControlInterruption {mutations_admitted:true})}
 }
 
 fn control_readiness_refusal(state: &Arc<AppState>) -> Option<ControlRefusal> {
@@ -12309,14 +12350,14 @@ async fn agent_actions_scoped(
                 let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < batch_deadline;
                 let outcome = match tokio::time::timeout_at(
                     batch_deadline,
-                    direct_agent_action(
+                    scoped_runner_action(&state, &capture_scope, batch_deadline, direct_agent_action(
                         &mut w,
                         &state.runner_actionable,
                         action,
                         &mut step_detail,
                         batch_deadline,
                         Some(&dispatch_allowed),
-                    ),
+                    )),
                 )
                 .await
                 {
@@ -12377,7 +12418,7 @@ async fn agent_actions_scoped(
                     completed += 1;
                     continue;
                 }
-                renew_after_long_text(&state, &headers, action);
+                renew_after_long_text(&state, &headers, action, &capture_scope);
                 if let RunnerControlOutcome::TextPartial {
                     confirmed,
                     uncertain,
@@ -12494,6 +12535,8 @@ async fn agent_actions_scoped(
                             "not_sent",
                             true,
                         ),
+                        RunnerControlOutcome::ScopeInterrupted =>
+                            (StatusCode::CONFLICT, "control_scope_changed", "unknown", false),
                         RunnerControlOutcome::AppLaunchInterrupted =>
                             (StatusCode::CONFLICT, "app_launch_interrupted", "partial", false),
                         RunnerControlOutcome::Failed => {
@@ -12889,13 +12932,14 @@ async fn agent_actions_scoped(
 }
 
 #[derive(Clone)]
-struct ScreenReadScope { epoch: u64, privacy_epoch: u64, owner: Option<String> }
+struct ScreenReadScope { epoch: u64, privacy_epoch: u64, lifecycle_stamp: Option<u64>, owner: Option<String> }
 impl ScreenReadScope {
     fn capture(state: &AppState) -> Self {
         let owner = recover(state.owner.lock());
         let now = Instant::now();
         let lease = std::time::Duration::from_secs(state.owner_lease_secs);
         Self {
+            lifecycle_stamp: state.runner_lifecycle.active_stamp(),
             epoch: state.owner_epoch.load(std::sync::atomic::Ordering::Acquire),
             privacy_epoch: state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire),
             owner: owner.as_ref().filter(|owner| now.saturating_duration_since(owner.last_seen) < lease)
@@ -12920,9 +12964,28 @@ impl ScreenReadScope {
         owner_matches
             && privacy_matches
             && !state.released.load(std::sync::atomic::Ordering::Acquire)
-            && !state.runner_lifecycle.is_transitioning()
+            && self.lifecycle_stamp.is_some()
+            && self.lifecycle_stamp == state.runner_lifecycle.active_stamp()
     }
 }
+fn control_interruption_outcome(interrupted: crate::timing::ControlInterruption) -> RunnerControlOutcome {
+    if interrupted.mutations_admitted { RunnerControlOutcome::ScopeInterrupted }
+    else { RunnerControlOutcome::Refused("control_scope_changed",
+        "Control authorization or request lifetime changed before any action request was dispatched; check status with the current owner before new work") }
+}
+
+async fn scoped_runner_action(
+    state: &Arc<AppState>, scope: &ScreenReadScope, deadline: tokio::time::Instant,
+    work: impl std::future::Future<Output=RunnerControlOutcome>,
+) -> RunnerControlOutcome {
+    let weak = Arc::downgrade(state);
+    let scope = scope.clone();
+    crate::timing::with_control_permit(Arc::new(move ||
+        tokio::time::Instant::now() < deadline
+            && weak.upgrade().is_some_and(|state| scope.current(&state))), work)
+        .await.unwrap_or_else(control_interruption_outcome)
+}
+
 async fn scoped_observation<T>(state: &Arc<AppState>, scope: &ScreenReadScope,
     work: impl std::future::Future<Output = T>) -> T {
     let weak = Arc::downgrade(state);
@@ -13320,6 +13383,7 @@ async fn begin_list_control<'a>(
     headers: &HeaderMap,
     runner: &'a tokio::sync::Mutex<crate::runner::RunnerClient>,
     deadline: tokio::time::Instant,
+    scope: &ScreenReadScope,
 ) -> Result<tokio::sync::MutexGuard<'a, crate::runner::RunnerClient>, Response> {
     if let Some(refusal) = control_readiness_refusal(state) {
         return Err(refusal.into_response());
@@ -13342,7 +13406,12 @@ async fn begin_list_control<'a>(
             serde_json::json!({"ok": false, "error": "device_transition_in_progress", "transitioning": true, "retry_safe": true}),
         ));
     }
-    unlock_before_action(state, &mut w, deadline).await;
+    if let Err(interrupted) = unlock_before_action(state, &mut w, deadline, scope).await {
+        return Err(match control_interruption_outcome(interrupted) {
+            RunnerControlOutcome::Refused(error, hint) => hinted_control_response(StatusCode::CONFLICT,error,"not_sent",hint),
+            _ => control_scope_interrupted_response(),
+        });
+    }
     // Owner limits (`crate::guard`): these calls swipe inside the app in
     // front, and count as one action.
     let policy = crate::guard::Policy::get();
@@ -13490,7 +13559,7 @@ async fn agent_collect_scoped(
     };
     let _priority = state.begin_runner_control();
     delivery.setup_started.store(true, std::sync::atomic::Ordering::Release);
-    let mut w = match begin_list_control(&state, &headers, &runner, deadline).await {
+    let mut w = match begin_list_control(&state, &headers, &runner, deadline, &scope).await {
         Ok(w) => w,
         Err(refused) => return refused,
     };
@@ -13791,7 +13860,7 @@ async fn agent_scroll_find_scoped(
     };
     let _priority = state.begin_runner_control();
     delivery.setup_started.store(true, std::sync::atomic::Ordering::Release);
-    let mut w = match begin_list_control(&state, &headers, &runner, deadline).await {
+    let mut w = match begin_list_control(&state, &headers, &runner, deadline, &scope).await {
         Ok(w) => w,
         Err(refused) => return refused,
     };
@@ -14804,20 +14873,23 @@ async fn agent_input_inner(
         {
             return None;
         }
-        if !is_capture_or_volume(&value) {
-            unlock_before_action(&state, &mut client, agent_runner_deadline).await;
-        }
         *recover(dispatch_marker.lock()) = Some(client.last_post());
         let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < agent_runner_deadline;
-        let outcome = direct_agent_action(
-            &mut client,
-            &state.runner_actionable,
-            &value,
-            &mut detail,
-            agent_runner_deadline,
-            Some(&dispatch_allowed),
-        )
-        .await;
+        let outcome = scoped_runner_action(&state, &capture_scope, agent_runner_deadline, async {
+            if !is_capture_or_volume(&value) {
+                if let Err(interrupted) = unlock_before_action(&state, &mut client, agent_runner_deadline, &capture_scope).await {
+                    return control_interruption_outcome(interrupted);
+                }
+            }
+            direct_agent_action(
+                &mut client,
+                &state.runner_actionable,
+                &value,
+                &mut detail,
+                agent_runner_deadline,
+                Some(&dispatch_allowed),
+            ).await
+        }).await;
         Some((client, outcome))
     })
     .await;
@@ -14829,7 +14901,7 @@ async fn agent_input_inner(
             return with_app_lifecycle_receipt(runner_deadline_response(posted_since(runner, mark).await), detail.as_ref()).await;
         }
     };
-    renew_after_long_text(&state, &headers, &value);
+    renew_after_long_text(&state, &headers, &value, &capture_scope);
     // Post-action observation (`?return=delta`), still holding the SAME
     // guard so no other control interleaves between the action and its
     // read — but on its own budget, bounded by both the caller's
@@ -15058,6 +15130,8 @@ async fn agent_input_inner(
             )
         }
         RunnerControlOutcome::RunnerRejected => runner_rejected_response(detail.as_ref()),
+        RunnerControlOutcome::ScopeInterrupted => with_app_lifecycle_receipt(
+            control_scope_interrupted_response(), detail.as_ref()).await,
         RunnerControlOutcome::AppLaunchInterrupted => app_launch_interrupted_response(detail.as_ref()),
         RunnerControlOutcome::Failed => with_app_lifecycle_receipt(
             runner_failed_after_dispatch_response_with(detail.as_ref()), detail.as_ref()).await,
@@ -25790,6 +25864,260 @@ mod tests {
             assert_eq!(body["retry_safe"], false);
             assert_eq!(body["app_lifecycle"]["terminate_acknowledged"], true);
             assert!(body["app_lifecycle"].get("launch_attempted").is_none());
+        });
+    }
+
+    #[test]
+    fn text_clear_handoff_never_dispatches_following_keys() {
+        block(async {
+            use tower::ServiceExt;
+            for (batch, long, revocation) in [false,true].into_iter().flat_map(|batch|
+                [false,true].into_iter().flat_map(move |long| (0..4).map(move |revocation| (batch,long,revocation)))) {
+                let state_slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<AppState>>));
+                let slot = state_slot.clone();
+                let keys = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let seen_keys = keys.clone();
+                let clears = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let seen_clears = clears.clone();
+                let runner = MockRunner::start(move |request| {
+                    if request.contains("/element/active") {
+                        return r#"{"value":{"element-6066-11e4-a52e-4f735466cecf":"E1"}}"#.into();
+                    }
+                    if request.contains("/element/E1/clear") {
+                        seen_clears.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let state = slot.lock().unwrap().as_ref().unwrap().upgrade().unwrap();
+                        match revocation {
+                            0 => state.released.store(true, std::sync::atomic::Ordering::Release),
+                            1 => {state.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);},
+                            2 => {state.privacy_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);},
+                            _ => {
+                                let token = state.runner_lifecycle.try_begin_reconnecting().unwrap();
+                                assert!(state.runner_lifecycle.finish_reconnecting(token));
+                            },
+                        }
+                    }
+                    if request.contains("/wda/keys") {
+                        seen_keys.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    healthy_runner_responder(request)
+                });
+                let mut state = readiness_state_with_runner(runner.base());
+                Arc::get_mut(&mut state).unwrap().managed_runner = false;
+                state.runner_actionable.store(true, std::sync::atomic::Ordering::Release);
+                *state_slot.lock().unwrap() = Some(Arc::downgrade(&state));
+                let text = if long {"x".repeat(crate::text_input::CHUNK_CHARS+1)} else {"fixture".into()};
+                let action = serde_json::json!({"type":"text","text":text,"clear":true});
+                let (path, body) = if batch {
+                    ("/agent/actions", serde_json::json!({"steps":[{"kind":"action","action":action}]}))
+                } else { ("/agent/input", action) };
+                let response = router(state.clone()).oneshot(axum::http::Request::builder()
+                    .method("POST").uri(path).header("x-phone-control", "1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+                assert_eq!(clears.load(std::sync::atomic::Ordering::Relaxed), 1);
+                assert_eq!(keys.load(std::sync::atomic::Ordering::Relaxed), 0,
+                    "keys must stop after control handoff; batch={batch}, long={long}, revocation={revocation}");
+                let (_, body) = read_json_response(response).await;
+                assert_eq!(body.unwrap()["retry_safe"], false, "clear already acknowledged");
+                assert!(state.runner_actionable.load(std::sync::atomic::Ordering::Acquire),
+                    "a scope interruption is not a hardware failure");
+            }
+        });
+    }
+
+    #[test]
+    fn session_handoff_stops_home_on_all_control_routes() {
+        block(async {
+            use tower::ServiceExt;
+            for path in ["/control", "/agent/input", "/agent/actions"] {
+                let state_slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<AppState>>));
+                let slot = state_slot.clone();
+                let buttons = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let seen = buttons.clone();
+                let runner = MockRunner::start(move |request| {
+                    if request.contains("/appium/settings") {
+                        slot.lock().unwrap().as_ref().unwrap().upgrade().unwrap()
+                            .owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    }
+                    if request.contains("/wda/pressButton") {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    healthy_runner_responder(request)
+                });
+                let mut state = readiness_state_with_runner(runner.base());
+                Arc::get_mut(&mut state).unwrap().managed_runner = false;
+                state.runner_actionable.store(true, std::sync::atomic::Ordering::Release);
+                *state_slot.lock().unwrap() = Some(Arc::downgrade(&state));
+                let action = serde_json::json!({"type":"home","ttl_ms":2500});
+                let body = if path == "/agent/actions" {
+                    serde_json::json!({"steps":[{"kind":"action","action":action}]})
+                } else { action };
+                let response = router(state.clone()).oneshot(axum::http::Request::builder()
+                    .method("POST").uri(path).header("x-phone-control", "1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+                assert_eq!(buttons.load(std::sync::atomic::Ordering::Relaxed), 0, "{path}");
+                let (_, body) = read_json_response(response).await;
+                let body = body.unwrap();
+                assert_eq!(body["retry_safe"], true, "session/settings do not dispatch phone input");
+                assert_eq!(body["outcome"], "not_sent");
+                assert!(state.runner_actionable.load(std::sync::atomic::Ordering::Acquire));
+            }
+        });
+    }
+
+    #[test]
+    fn unlock_ack_cannot_reverse_scope_revocation() {
+        block(async {
+            use tower::ServiceExt;
+            let state_slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<AppState>>));
+            let slot = state_slot.clone();
+            let keys = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = keys.clone();
+            let runner = MockRunner::start(move |request| {
+                if request.contains("/wda/unlock") {
+                    slot.lock().unwrap().as_ref().unwrap().upgrade().unwrap()
+                        .released.store(true, std::sync::atomic::Ordering::Release);
+                }
+                if request.contains("/wda/keys") {seen.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
+                healthy_runner_responder(request)
+            });
+            let mut state = readiness_state_with_runner(runner.base());
+            Arc::get_mut(&mut state).unwrap().managed_runner = false;
+            *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {up:true,actionable:true,locked:Some(true)};
+            state.runner_actionable.store(true,std::sync::atomic::Ordering::Release);
+            *state_slot.lock().unwrap() = Some(Arc::downgrade(&state));
+            let response = router(state.clone()).oneshot(axum::http::Request::builder()
+                .method("POST").uri("/agent/input").header("x-phone-control","1")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"type":"text","text":"fixture"}"#)).unwrap()).await.unwrap();
+            assert!(state.released.load(std::sync::atomic::Ordering::Acquire), "unlock ACK must not undo release");
+            assert_eq!(keys.load(std::sync::atomic::Ordering::Relaxed),0);
+            assert_eq!(recover(state.runner_health.lock()).locked,Some(true),"stale ACK must not commit health");
+            let (_, body) = read_json_response(response).await;
+            assert_eq!(body.unwrap()["retry_safe"],false);
+        });
+    }
+
+    #[test]
+    fn stale_text_renewal_cannot_take_back_scope_revocation() {
+        let state = fixture_app_state(None);
+        let mut old_headers = HeaderMap::new();
+        old_headers.insert("x-phone-owner", "old-agent".parse().unwrap());
+        old_headers.insert("x-phone-owner-takeover", "1".parse().unwrap());
+        claim_phone_owner(&state,&old_headers).unwrap();
+        let scope = ScreenReadScope::capture(&state);
+        let mut new_headers = HeaderMap::new();
+        new_headers.insert("x-phone-owner", "new-owner".parse().unwrap());
+        new_headers.insert("x-phone-owner-takeover", "1".parse().unwrap());
+        claim_phone_owner(&state,&new_headers).unwrap();
+        let epoch = state.owner_epoch.load(std::sync::atomic::Ordering::Acquire);
+        let before = recover(state.owner.lock()).clone();
+        assert!(!scope.current(&state));
+        renew_after_long_text(&state,&old_headers,&serde_json::json!({"type":"text","text":"x".repeat(crate::text_input::CHUNK_CHARS+1)}),&scope);
+        assert_eq!(*recover(state.owner.lock()),before,"renewal must not retake a newer owner");
+        assert_eq!(state.owner_epoch.load(std::sync::atomic::Ordering::Acquire),epoch);
+    }
+
+    #[test]
+    fn completed_reconnect_never_revalidates_an_old_scope() {
+        let state = fixture_app_state(None);
+        let scope = ScreenReadScope::capture(&state);
+        assert!(scope.current(&state));
+        let token = state.runner_lifecycle.try_begin_reconnecting().unwrap();
+        assert!(!scope.current(&state));
+        assert!(state.runner_lifecycle.finish_reconnecting(token));
+        assert!(!scope.current(&state), "finishing reconnect must not revive the previous request");
+        assert!(state.runner_lifecycle.publish_if_active_stamp(scope.lifecycle_stamp, || panic!("stale ACK published")).is_none());
+        let fresh = ScreenReadScope::capture(&state);
+        assert!(fresh.current(&state));
+        assert_eq!(state.runner_lifecycle.publish_if_active_stamp(fresh.lifecycle_stamp, || true), Some(true));
+    }
+
+    #[test]
+    fn nested_control_counts_inner_mutation_before_outer_refusal() {
+        block(async {
+            use std::sync::atomic::{AtomicBool,Ordering};
+            let runner = MockRunner::start(healthy_runner_responder);
+            let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+            let permit = Arc::new(AtomicBool::new(true));
+            let allowed = permit.clone();
+            let result = crate::timing::with_control_permit(Arc::new(move || allowed.load(Ordering::Acquire)),async {
+                crate::timing::with_control_permit(Arc::new(|| true),client.press_home()).await.unwrap().unwrap();
+                permit.store(false,Ordering::Release);
+                client.press_home().await
+            }).await;
+            assert!(result.unwrap_err().mutations_admitted,"inner Home was already admitted");
+        });
+    }
+
+    #[test]
+    fn nested_control_cannot_replace_revoked_ancestor() {
+        block(async {
+            use std::sync::atomic::{AtomicBool,Ordering};
+            let runner = MockRunner::start(healthy_runner_responder);
+            let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+            let admitted = Arc::new(AtomicBool::new(false));
+            let result = crate::timing::with_dispatch_probe("POST /session",admitted.clone(),
+                crate::timing::with_control_permit(Arc::new(|| false),async {
+                    tokio::select! {
+                        biased;
+                        _ = client.press_home() => {},
+                        _ = std::future::ready(()) => {},
+                    }
+                    crate::timing::with_control_permit(Arc::new(|| true),client.press_home()).await
+                })).await;
+            assert!(result.is_err());
+            assert!(!admitted.load(Ordering::Acquire),"inner permit must not bypass ancestor denial");
+        });
+    }
+
+    #[test]
+    fn nested_control_unlock_ack_keeps_unknown_after_later_handoff() {
+        block(async {
+            use tower::ServiceExt;
+            let slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<AppState>>));
+            let state_slot = slot.clone();
+            let touches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = touches.clone();
+            let runner = MockRunner::start(move |request| {
+                if request.contains("/window/size") {
+                    state_slot.lock().unwrap().as_ref().unwrap().upgrade().unwrap()
+                        .released.store(true,std::sync::atomic::Ordering::Release);
+                    return r#"{"value":{"width":390,"height":844}}"#.into();
+                }
+                if request.contains("/actions") {seen.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
+                healthy_runner_responder(request)
+            });
+            let mut state = readiness_state_with_runner(runner.base());
+            Arc::get_mut(&mut state).unwrap().managed_runner=false;
+            *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {up:true,actionable:true,locked:Some(true)};
+            state.runner_actionable.store(true,std::sync::atomic::Ordering::Release);
+            *slot.lock().unwrap()=Some(Arc::downgrade(&state));
+            let response=router(state).oneshot(axum::http::Request::builder().method("POST").uri("/agent/input")
+                .header("x-phone-control","1").header("content-type","application/json")
+                .body(Body::from(r#"{"type":"tap","x":0.5,"y":0.5}"#)).unwrap()).await.unwrap();
+            let (_,body)=read_json_response(response).await;let body=body.unwrap();
+            assert_eq!(touches.load(std::sync::atomic::Ordering::Relaxed),0);
+            assert_eq!(body["retry_safe"],false,"unlock already acted: {body}");
+            assert_eq!(body["outcome"],"unknown");
+        });
+    }
+
+    #[test]
+    fn revoked_unlock_preserves_zero_admission_information() {
+        block(async {
+            let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));let seen=calls.clone();
+            let runner=MockRunner::start(move |request| {seen.fetch_add(1,std::sync::atomic::Ordering::Relaxed);healthy_runner_responder(request)});
+            let state=fixture_app_state(None);
+            *recover(state.runner_health.lock())=crate::runner::RunnerHealth {up:true,actionable:true,locked:Some(true)};
+            let scope=ScreenReadScope::capture(&state);
+            state.owner_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+            let mut client=crate::runner::RunnerClient::new(runner.base()).unwrap();
+            let interrupted=unlock_before_action(&state,&mut client,far_deadline(),&scope).await.unwrap_err();
+            assert!(!interrupted.mutations_admitted);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed),0);
+            assert!(matches!(control_interruption_outcome(interrupted),RunnerControlOutcome::Refused(_, _)));
         });
     }
 

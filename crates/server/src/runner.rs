@@ -96,6 +96,14 @@ pub enum SystemCaptureOutcome {
     Requested(serde_json::Value),
 }
 
+/// Session/settings and element lookups do not dispatch phone input. Shared
+/// with the transport fence so a refused setup preserves known no-write receipts.
+pub(crate) fn post_mutates_screen(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    !(path.ends_with("/session") || path.ends_with("/appium/settings")
+        || path.ends_with("/elements") || path.ends_with("/element"))
+}
+
 /// A runner endpoint plus a lazily-created session id.
 pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
@@ -2407,11 +2415,7 @@ impl RunnerClient {
 
     fn mark_post(&mut self, url: &str) {
         let path = url.split('?').next().unwrap_or(url);
-        let read_only = path.ends_with("/session")
-            || path.ends_with("/appium/settings")
-            || path.ends_with("/elements")
-            || path.ends_with("/element");
-        if !read_only {
+        if post_mutates_screen(path) {
             // A new app or the Home Screen is a screen of unknown size.
             if path.ends_with("/wda/apps/launch")
                 || path.ends_with("/wda/apps/activate")

@@ -606,6 +606,16 @@ is no longer cached). The action result and the observation are separate facts:
   acted. Read elements or a screenshot before deciding; never replay text,
   scroll, back, pay, send or delete blindly. When the runner answered with an
   error, `runner_error` (`call`, `status`, `code`, `message`) says why.
+- From v0.27.20, direct action dispatch checks the original owner/privacy scope, Runner generation and deadline
+  before each Runner transport request, including compound input subrequests.
+  `409 control_scope_changed` stops the remainder after authorization or request
+  lifetime changes. With zero mutating requests admitted it reports `not_sent`,
+  `retry_safe:true`; otherwise it reports `unknown`, `retry_safe:false`. A request
+  already admitted may have acted; there is no rollback. Retry safety is a delivery
+  fact, not permission to reclaim control or replay uncertain work.
+  Long-text completion only renews its original, still-live owner lease; it never
+  reuses a takeover header to reclaim the phone. An unlock acknowledgement cannot
+  cancel a concurrent release.
 - A fresh app launch checks authorization before terminating and again before
   launching, including after session setup. A terminate error stops the sequence.
   `409 app_launch_interrupted` (`outcome:partial`, `retry_safe:false`) means the

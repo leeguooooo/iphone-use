@@ -513,7 +513,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "core"
-version = "0.27.19"
+version = "0.27.20"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.4.2",
@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "iphone-use-mcp"
-version = "0.27.19"
+version = "0.27.20"
 dependencies = [
  "anyhow",
  "axum",
@@ -1377,7 +1377,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "legacy-launch"
-version = "0.27.19"
+version = "0.27.20"
 dependencies = [
  "core",
  "idevice",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.27.19"
+version = "0.27.20"
 dependencies = [
  "ab_glyph",
  "anyhow",

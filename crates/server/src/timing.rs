@@ -167,6 +167,72 @@ pub(crate) async fn with_request_permit<T>(
     REQUEST_PERMIT.scope(permit, work).await
 }
 
+struct ControlPermit {
+    allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    revoked: tokio::sync::Notify,
+    denied: std::sync::atomic::AtomicBool,
+    mutations: std::sync::atomic::AtomicUsize,
+    parent: Option<std::sync::Arc<ControlPermit>>,
+}
+
+impl ControlPermit {
+    fn current(&self) -> bool {
+        let mut current = Some(self);
+        while let Some(permit) = current {
+            if permit.denied.load(std::sync::atomic::Ordering::Acquire) || !(permit.allowed)() { return false; }
+            current = permit.parent.as_deref();
+        }
+        true
+    }
+    fn revoke(&self) {
+        let mut current = Some(self);
+        while let Some(permit) = current {
+            permit.denied.store(true, std::sync::atomic::Ordering::Release);
+            permit.revoked.notify_one();
+            current = permit.parent.as_deref();
+        }
+    }
+    fn admit_mutation(&self) {
+        let mut current = Some(self);
+        while let Some(permit) = current {
+            permit.mutations.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            current = permit.parent.as_deref();
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ControlInterruption {
+    pub mutations_admitted: bool,
+}
+
+tokio::task_local! { static CONTROL_PERMIT: std::sync::Arc<ControlPermit>; }
+
+/// Fence transport admission and cancel scoped work on refusal. A sticky latch
+/// also rejects ready internal fallbacks and never reauthorizes the same work.
+pub(crate) async fn with_control_permit<T>(
+    allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, ControlInterruption> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let permit = std::sync::Arc::new(ControlPermit {
+        allowed, revoked: tokio::sync::Notify::new(),
+        denied: AtomicBool::new(false), mutations: AtomicUsize::new(0),
+        parent: CONTROL_PERMIT.try_with(std::sync::Arc::clone).ok(),
+    });
+    CONTROL_PERMIT.scope(permit.clone(), async {
+        let value = tokio::select! {
+            biased;
+            _ = permit.revoked.notified() => None,
+            value = work => Some(value),
+        };
+        match value {
+            Some(value) if !permit.denied.load(Ordering::Acquire) => Ok(value),
+            _ => Err(ControlInterruption {mutations_admitted:permit.mutations.load(Ordering::Acquire)>0}),
+        }
+    }).await
+}
+
 tokio::task_local! {
     static DISPATCH_PROBE: (&'static str, std::sync::Arc<std::sync::atomic::AtomicBool>);
 }
@@ -183,6 +249,16 @@ pub(crate) async fn execute_timed(
     client: reqwest::Client,
     request: reqwest::Request,
 ) -> reqwest::Result<reqwest::Response> {
+    let control_revoked = CONTROL_PERMIT.try_with(|permit| {
+        if permit.current() { return false; }
+        permit.revoke();
+        true
+    }).unwrap_or(false);
+    if control_revoked {
+        // Only with_control_permit installs this task local. Its select cancels
+        // this future; never resume the caller with a synthetic transport error.
+        return std::future::pending().await;
+    }
     if REQUEST_PERMIT.try_with(|permit| permit()).is_ok_and(|allowed| !allowed) {
         let mut response = axum::http::Response::new(bytes::Bytes::from_static(
             br#"{"value":{"error":"observation_scope_changed","message":"observation authorization changed; no request sent"}}"#));
@@ -203,6 +279,14 @@ pub(crate) async fn execute_timed(
             dispatched.store(true, std::sync::atomic::Ordering::Release);
         }
     });
+    let mutating = match request.method().as_str() {
+        "GET" | "HEAD" | "OPTIONS" => false,
+        "POST" => crate::runner::post_mutates_screen(request.url().path()),
+        _ => true,
+    };
+    if mutating {
+        let _ = CONTROL_PERMIT.try_with(|permit| permit.admit_mutation());
+    }
     let response = match client.execute(request).await {
         Ok(response) => response,
         Err(error) => {
@@ -634,6 +718,69 @@ fn with_timing_field(body: &[u8], timing: &serde_json::Value) -> Option<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn control_refusal_stays_revoked_after_inner_fallback() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let permit = Arc::new(AtomicBool::new(false));
+            let allowed = permit.clone();
+            let admitted = Arc::new(AtomicBool::new(false));
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let result = with_dispatch_probe("POST /actions", admitted.clone(),
+                with_control_permit(Arc::new(move || allowed.load(Ordering::Acquire)), async {
+                    tokio::select! {
+                        biased;
+                        _ = client.post(format!("http://{address}/actions")).send_timed() => {},
+                        _ = std::future::ready(()) => {},
+                    }
+                    permit.store(true, Ordering::Release);
+                    tokio::select! {
+                        biased;
+                        _ = client.post(format!("http://{address}/actions")).send_timed() => {},
+                        _ = std::future::ready(()) => {},
+                    }
+                    "applied"
+                })).await;
+            assert!(result.is_err());
+            assert!(!admitted.load(Ordering::Acquire), "revoked work must not admit another request after a fallback");
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        });
+    }
+
+    #[test]
+    fn control_refusal_cancels_without_returning_a_transport_error() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let continued = Arc::new(AtomicBool::new(false));
+        let after = continued.clone();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = with_control_permit(Arc::new(|| false), async {
+            let response = client.post(format!("http://{address}/actions"))
+                .timeout(Duration::from_millis(100)).send_timed().await;
+            after.store(true, Ordering::Release);
+            response
+        }).await;
+        assert!(result.is_err());
+        assert!(!continued.load(Ordering::Acquire), "the action must not handle a fake transport failure");
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        // An already-expired inner timeout can complete in the same poll as
+        // transport refusal. Its fallback must not make the outer action succeed.
+        let fallback = with_control_permit(Arc::new(|| false), async {
+            let _ = tokio::time::timeout_at(tokio::time::Instant::now(),
+                client.post(format!("http://{address}/actions")).send_timed()).await;
+            "applied"
+        }).await;
+        assert!(fallback.is_err());
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        });
+    }
+
     #[test]
     fn dispatch_probe_counts_transport_admission_not_preparation_or_refusal() {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
