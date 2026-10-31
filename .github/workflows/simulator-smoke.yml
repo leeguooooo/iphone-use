@@ -67,9 +67,17 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify Xcode and Simulator SDK
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          test "$(xcodebuild -version | head -1)" = 'Xcode 16.2'
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = '18.2'
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master; explicit stable toolchain
@@ -83,13 +91,20 @@ jobs:
         run: cargo build --release --locked -p server -p iphone-use-mcp
 
       - name: Xcode and simulators
+        id: simulator_target
         run: |
+          set -euo pipefail
           xcodebuild -version
           xcrun simctl list runtimes
           ./target/release/iphone-use simulators
+          ./target/release/iphone-use simulators --json > "$RUNNER_TEMP/simulators.json"
+          sim=$(python3 -c 'import json,sys; rows=json.load(open(sys.argv[1])); matches=[d["udid"] for d in rows if d.get("runtime_id")=="com.apple.CoreSimulator.SimRuntime.iOS-18-2" and d.get("name")=="iPhone 15"]; assert matches,"iPhone 15 / iOS 18.2 unavailable"; print(matches[0])' "$RUNNER_TEMP/simulators.json")
+          echo "udid=$sim" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test
         timeout-minutes: 35
+        env:
+          SIM: ${{ steps.simulator_target.outputs.udid }}
         run: bash scripts/test-simulator-smoke.sh
 
       - name: Candidate selector oracle on iOS 18.2
