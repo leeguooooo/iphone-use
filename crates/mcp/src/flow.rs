@@ -946,37 +946,35 @@ fn locator_weight(matched: &[String]) -> u32 {
 /// Score one element row against a locator: which fields matched, which
 /// differed. The basis is reported as FIELD NAMES, so a reader can see why a
 /// candidate is a candidate without the daemon having to explain itself.
-fn candidate_basis(
-    row: &serde_json::Value,
-    locator: &serde_json::Value,
-) -> (Vec<String>, Vec<String>) {
-    let (mut matched, mut differed) = (Vec::new(), Vec::new());
+#[derive(Default)]
+struct CandidateBasis {
+    matched: Vec<String>,
+    differed: Vec<String>,
+    unproven: Vec<String>,
+}
+
+fn candidate_basis(row: &serde_json::Value, locator: &serde_json::Value) -> CandidateBasis {
+    let mut basis = CandidateBasis::default();
     let Some(fields) = locator.as_object() else {
-        return (matched, differed);
+        return basis;
     };
     for (key, expected) in fields {
         if !LOCATOR_FIELDS.contains(&key.as_str()) {
             continue;
         }
-        // The element tree is sparse: a row omits `enabled` / `visible` when
-        // they are true and `focused` when it is false. The daemon's matcher
-        // applies exactly those defaults, so comparing raw presence here would
-        // report a field as `differed` that the daemon considers a MATCH —
-        // a diagnosis that disagrees with the thing it is diagnosing.
-        let actual = match row.get(key) {
-            Some(value) => Some(value.clone()),
-            None => match key.as_str() {
-                "enabled" | "visible" => Some(serde_json::Value::Bool(true)),
-                "focused" => Some(serde_json::Value::Bool(false)),
-                _ => None,
-            },
-        };
-        match actual {
-            Some(actual) if actual == *expected => matched.push(key.clone()),
-            _ => differed.push(key.clone()),
+        // Compact rows do not establish whether an omitted flag was known.
+        // Only an explicit boolean can prove a boolean locator constraint.
+        if matches!(key.as_str(), "enabled" | "visible" | "focused")
+            && row.get(key).and_then(serde_json::Value::as_bool).is_none()
+        {
+            basis.unproven.push(key.clone());
+        } else if row.get(key) == Some(expected) {
+            basis.matched.push(key.clone());
+        } else {
+            basis.differed.push(key.clone());
         }
     }
-    (matched, differed)
+    basis
 }
 
 /// Look at the screen ONCE after a failed run and say what is there.
@@ -1082,15 +1080,20 @@ async fn diagnose_failure(
         .iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            let (matched, differed) = candidate_basis(row, &locator);
+            let CandidateBasis {
+                matched,
+                differed,
+                unproven,
+            } = candidate_basis(row, &locator);
             // Nothing in common is not a candidate, it is noise.
-            (!matched.is_empty()).then(|| {
+            (!matched.is_empty() || (differed.is_empty() && !unproven.is_empty())).then(|| {
                 (
                     locator_weight(&matched),
                     serde_json::json!({
                         "index": row.get("index").cloned().unwrap_or(serde_json::json!(index)),
                         "matched": matched,
                         "differed": differed,
+                        "unproven": unproven,
                         // Screen text, for THIS authenticated response only.
                         // It is not written to disk and not published: the
                         // evidence file and any issue carry structure alone.
@@ -1104,19 +1107,32 @@ async fn diagnose_failure(
     // Identity beats resemblance: an `identifier` match outranks a `label`
     // match, which outranks a pile of matching booleans.
     scored.sort_by_key(|(weight, _)| std::cmp::Reverse(*weight));
+    let potentially_matching = |candidate: &serde_json::Value| {
+        candidate["differed"]
+            .as_array()
+            .is_some_and(|fields| fields.is_empty())
+    };
     let exact = scored
         .iter()
         .filter(|(_, candidate)| {
-            candidate["differed"]
-                .as_array()
-                .is_some_and(|differed| differed.is_empty())
+            potentially_matching(candidate)
+                && candidate["unproven"]
+                    .as_array()
+                    .is_some_and(|fields| fields.is_empty())
+        })
+        .count();
+    let unproven = scored
+        .iter()
+        .filter(|(_, candidate)| {
+            potentially_matching(candidate)
+                && candidate["unproven"]
+                    .as_array()
+                    .is_some_and(|fields| !fields.is_empty())
         })
         .count();
     diagnosis["reason"] = serde_json::json!(match (expectation, exact, scored.len()) {
-        // The element the flow wanted GONE is still here.
         ("absent", _, _) if exact >= 1 => "still_present",
-        // The locator resolves NOW but did not during the run: a timing
-        // problem, not a wrong selector.
+        (_, _, _) if unproven > 0 && exact <= 1 => "locator_state_unproven",
         (_, 1, _) => "locator_matches_now",
         (_, 0, 0) => "no_similar_element",
         (_, 0, _) => "locator_no_match",
@@ -1935,65 +1951,133 @@ mod tests {
         phone_steps_request(steps).unwrap()["steps"].clone()
     }
 
-    /// The element tree is sparse: a row omits `enabled`/`visible` when they
-    /// are true and `focused` when it is false. The daemon's matcher applies
-    /// those defaults, so a diagnosis that compares raw presence would call a
-    /// field `differed` on a row the daemon considers a MATCH — and send a
-    /// reader hunting for a difference that does not exist.
     #[test]
-    fn absent_boolean_fields_match_the_daemons_defaults() {
-        // A row as runner actually serialises it: nothing but identity.
-        let sparse = serde_json::json!({"index": 0, "kind": "Button", "label": "搜索"});
-
-        let (matched, differed) = candidate_basis(
-            &sparse,
-            &serde_json::json!({"kind": "Button", "enabled": true, "visible": true}),
-        );
-        assert_eq!(differed, Vec::<String>::new(), "matched={matched:?}");
-        assert!(matched.contains(&"enabled".to_string()), "{matched:?}");
-        assert!(matched.contains(&"visible".to_string()), "{matched:?}");
-
-        let (matched, differed) = candidate_basis(
-            &sparse,
-            &serde_json::json!({"kind": "Button", "focused": false}),
-        );
-        assert_eq!(differed, Vec::<String>::new(), "matched={matched:?}");
-        assert!(matched.contains(&"focused".to_string()), "{matched:?}");
-    }
-
-    /// The defaults are defaults, not wildcards: asking for the opposite of
-    /// what an omitted field means must still be a difference.
-    #[test]
-    fn asking_for_the_opposite_of_a_default_is_a_difference() {
-        let sparse = serde_json::json!({"index": 0, "kind": "Button", "label": "搜索"});
-
-        for (field, wanted) in [("enabled", false), ("visible", false), ("focused", true)] {
-            let (matched, differed) = candidate_basis(
-                &sparse,
-                &serde_json::json!({"kind": "Button", field: wanted}),
-            );
-            assert_eq!(
-                differed,
-                vec![field.to_string()],
-                "{field}={wanted} must differ from the default; matched={matched:?}"
-            );
+    fn unavailable_boolean_fields_are_unproven_for_either_expected_value() {
+        for field in ["enabled", "visible", "focused"] {
+            for actual in [
+                None,
+                Some(serde_json::Value::Null),
+                Some(serde_json::json!("true")),
+            ] {
+                for wanted in [false, true] {
+                    let mut row = serde_json::json!({"kind":"Button"});
+                    if let Some(actual) = &actual {
+                        row[field] = actual.clone();
+                    }
+                    let basis =
+                        candidate_basis(&row, &serde_json::json!({"kind":"Button",field:wanted}));
+                    assert_eq!(basis.matched, vec!["kind"]);
+                    assert!(basis.differed.is_empty());
+                    assert_eq!(basis.unproven, vec![field]);
+                }
+            }
         }
     }
 
-    /// An explicit value on the row still wins over the default.
     #[test]
-    fn an_explicit_field_is_compared_as_given() {
-        let row = serde_json::json!({"kind": "Button", "enabled": false, "focused": true});
+    fn an_explicit_boolean_field_is_compared_as_given() {
+        for field in ["enabled", "visible", "focused"] {
+            for actual in [false, true] {
+                for wanted in [false, true] {
+                    let basis = candidate_basis(
+                        &serde_json::json!({field:actual}),
+                        &serde_json::json!({field:wanted}),
+                    );
+                    assert!(basis.unproven.is_empty());
+                    if actual == wanted {
+                        assert_eq!(basis.matched, vec![field]);
+                        assert!(basis.differed.is_empty());
+                    } else {
+                        assert!(basis.matched.is_empty());
+                        assert_eq!(basis.differed, vec![field]);
+                    }
+                }
+            }
+        }
+    }
 
-        let (matched, _) = candidate_basis(
-            &row,
-            &serde_json::json!({"enabled": false, "focused": true}),
-        );
-        assert_eq!(matched, vec!["enabled".to_string(), "focused".to_string()]);
+    #[tokio::test]
+    async fn fresh_sparse_rows_cannot_prove_matches_or_presence() {
+        for expectation in ["present", "absent"] {
+            for locator in [
+                serde_json::json!({"identifier":"save","visible":true}),
+                serde_json::json!({"focused":false}),
+            ] {
+                let steps =
+                    serde_json::json!([{"kind":"wait_for","expect":{expectation:[locator]}}]);
+                let mut result = failing_result(0);
+                if expectation == "absent" {
+                    result["observation"] = serde_json::json!({"read":true,"violated_absent":[0]});
+                }
+                let (url, task, requests) = mock_daemon_sequence(&[(
+                    "200 OK",
+                    r#"{"elements":[{"index":0,"kind":"Button","identifier":"save"}]}"#,
+                )]);
+                let diagnosis =
+                    diagnose_failure(Some(&steps), &result, &DaemonClient::new(url, None))
+                        .await
+                        .unwrap();
+                task.join().unwrap();
+                assert_eq!(diagnosis["reason"], "locator_state_unproven", "{diagnosis}");
+                assert_eq!(diagnosis["exact_matches"], 0);
+                assert_eq!(
+                    diagnosis["candidates"][0]["unproven"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert!(requests.recv().unwrap().starts_with("GET /agent/elements"));
+                assert!(requests.try_recv().is_err());
+            }
+        }
+    }
 
-        let (_, differed) =
-            candidate_basis(&row, &serde_json::json!({"enabled": true, "focused": false}));
-        assert_eq!(differed, vec!["enabled".to_string(), "focused".to_string()]);
+    #[tokio::test]
+    async fn unknown_rows_preserve_known_mismatches_and_prevent_false_uniqueness() {
+        let steps = serde_json::json!([{"kind":"wait_for","expect":{"present":[{"identifier":"save","visible":true}]}}]);
+        for (rows, reason, exact) in [
+            (
+                serde_json::json!([{"identifier":"other"}]),
+                "no_similar_element",
+                0,
+            ),
+            (
+                serde_json::json!([{"identifier":"save","visible":false}]),
+                "locator_no_match",
+                0,
+            ),
+            (
+                serde_json::json!([{"identifier":"save","visible":true}]),
+                "locator_matches_now",
+                1,
+            ),
+            (
+                serde_json::json!([{"identifier":"save","visible":true},{"identifier":"save"}]),
+                "locator_state_unproven",
+                1,
+            ),
+            (
+                serde_json::json!([{"identifier":"save","visible":true},{"identifier":"save","visible":true},{"identifier":"save"}]),
+                "locator_ambiguous",
+                2,
+            ),
+        ] {
+            let body = serde_json::json!({"elements":rows}).to_string();
+            let (url, task, requests) = mock_daemon_sequence(&[("200 OK", body.as_str())]);
+            let diagnosis = diagnose_failure(
+                Some(&steps),
+                &failing_result(0),
+                &DaemonClient::new(url, None),
+            )
+            .await
+            .unwrap();
+            task.join().unwrap();
+            assert_eq!(diagnosis["reason"], reason, "{diagnosis}");
+            assert_eq!(diagnosis["exact_matches"], exact);
+            assert!(requests.recv().unwrap().starts_with("GET /agent/elements"));
+            assert!(requests.try_recv().is_err());
+        }
     }
 
     #[tokio::test]
