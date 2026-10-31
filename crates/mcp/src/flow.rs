@@ -1104,14 +1104,16 @@ async fn diagnose_failure(
             })
         })
         .collect();
-    // Identity beats resemblance: an `identifier` match outranks a `label`
-    // match, which outranks a pile of matching booleans.
-    scored.sort_by_key(|(weight, _)| std::cmp::Reverse(*weight));
     let potentially_matching = |candidate: &serde_json::Value| {
         candidate["differed"]
             .as_array()
             .is_some_and(|fields| fields.is_empty())
     };
+    // Keep the reason's supporting rows within the bounded candidate list.
+    // Among possible matches, identity still outranks resemblance.
+    scored.sort_by_key(|(weight, candidate)| {
+        std::cmp::Reverse((potentially_matching(candidate), *weight))
+    });
     let exact = scored
         .iter()
         .filter(|(_, candidate)| {
@@ -1139,6 +1141,7 @@ async fn diagnose_failure(
         _ => "locator_ambiguous",
     });
     diagnosis["exact_matches"] = serde_json::json!(exact);
+    diagnosis["unproven_candidates"] = serde_json::json!(unproven);
     diagnosis["candidates"] = serde_json::Value::Array(
         scored
             .into_iter()
@@ -2078,6 +2081,52 @@ mod tests {
             assert!(requests.recv().unwrap().starts_with("GET /agent/elements"));
             assert!(requests.try_recv().is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_candidates_include_the_unknown_row_supporting_the_reason() {
+        let steps = serde_json::json!([{"kind":"wait_for","expect":{"present":[{"identifier":"save","visible":true}]}}]);
+        let mut rows =
+            vec![serde_json::json!({"identifier":"save","visible":false}); MAX_CANDIDATES + 1];
+        rows.push(serde_json::json!({"identifier":"save"}));
+        let body = serde_json::json!({"elements":rows}).to_string();
+        let (url, task, _requests) = mock_daemon_sequence(&[("200 OK", &body)]);
+        let diagnosis = diagnose_failure(
+            Some(&steps),
+            &failing_result(0),
+            &DaemonClient::new(url, None),
+        )
+        .await
+        .unwrap();
+        task.join().unwrap();
+        assert_eq!(diagnosis["reason"], "locator_state_unproven");
+        assert_eq!(diagnosis["unproven_candidates"], 1);
+        assert_eq!(
+            diagnosis["candidates"].as_array().unwrap().len(),
+            MAX_CANDIDATES
+        );
+        assert_eq!(
+            diagnosis["candidates"][0]["unproven"],
+            serde_json::json!(["visible"])
+        );
+    }
+
+    #[tokio::test]
+    async fn known_presence_survives_other_unknown_candidates() {
+        let steps = serde_json::json!([{"kind":"wait_for","expect":{"absent":[{"identifier":"save","visible":true}]}}]);
+        let mut result = failing_result(0);
+        result["observation"] = serde_json::json!({"read":true,"violated_absent":[0]});
+        let (url, task, _requests) = mock_daemon_sequence(&[(
+            "200 OK",
+            r#"{"elements":[{"identifier":"save"},{"identifier":"save","visible":true}]}"#,
+        )]);
+        let diagnosis = diagnose_failure(Some(&steps), &result, &DaemonClient::new(url, None))
+            .await
+            .unwrap();
+        task.join().unwrap();
+        assert_eq!(diagnosis["reason"], "still_present");
+        assert_eq!(diagnosis["exact_matches"], 1);
+        assert_eq!(diagnosis["unproven_candidates"], 1);
     }
 
     #[tokio::test]

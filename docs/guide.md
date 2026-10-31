@@ -599,7 +599,9 @@ a `reason` (`locator_matches_now`, `locator_no_match`, `locator_ambiguous`,
 `diagnosis_timeout`, `step_has_no_locator`), and up to five
 `candidates` with the `matched` / `differed` / `unproven` locator fields they were picked
 on. Missing or non-boolean state flags remain unproven; they cannot establish
-a match, continued presence, or uniqueness. It is one bounded read taken after the run: nothing is re-sent, the flow is
+a match, continued presence, or uniqueness. `exact_matches` counts proven
+matches only; `unproven_candidates` counts additional possible matches, so
+`exact_matches:1` alone does not establish uniqueness. It is one bounded read taken after the run: nothing is re-sent, the flow is
 never silently edited, and the run's own `outcome` / `applied_actions` /
 `retry_safe` are not touched by it.
 
