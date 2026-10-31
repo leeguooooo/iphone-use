@@ -322,8 +322,10 @@ IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./r
 `locator_state_unproven`、`no_readable_tree`、`screen_unreadable`、`diagnosis_timeout`、
 `step_has_no_locator`），以及最多五
 个候选元素，附上它们是按哪些定位字段 `matched` / `differed` / `unproven` 挑出来的（身份
-字段 `identifier` 优先于 `label`）。缺失或非布尔的状态字段记为未知，
-不能据此证明目标匹配、仍在屏幕上或只有一个匹配目标。`exact_matches` 只统计
+字段 `identifier` 优先于 `label`）。诊断读取保留同一快照中的已知布尔状态和空字符串。
+旧版紧凑响应缺失的 value、不支持的值类型、受保护或被截断的值，以及未知布尔状态，
+都记为 `unproven`，不能据此证明匹配或持续存在。不完整快照还会报告 `partial:true`，
+不能据此排除其他匹配。`exact_matches` 只统计
 已证实的匹配，`unproven_candidates` 统计尚不能确定的候选；仅凭 `exact_matches:1`
 不能判断唯一性。这是执行结束后一次有界（4 秒）的只读：
 不重发任何动作，不静默改写 flow，也不改动本次执行的 `outcome` /

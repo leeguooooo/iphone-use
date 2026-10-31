@@ -1022,6 +1022,17 @@ locators.
 
 ### Scoped and searched reads
 
+**Diagnostic state.** `GET /agent/elements?locator_state=1` preserves known
+`enabled`, `visible`, `focused` and empty `value` strings from that same fresh
+snapshot, with a per-row `value_known` boolean. `value_known:false` means the
+value is unsupported, protected or truncated. With `value_known:true`, an
+omitted `value` is known absence; `value:""` is a known empty string. Unknown
+booleans remain omitted. The response echoes `locator_state:1`. This projection
+requires a full read without `since`, preserves original indices and the full
+snapshot cache, and does not change default compact reads. Flow diagnosis uses
+it once after a failure. Older daemons may omit the metadata; the MCP treats
+missing value information as unproven without issuing a fallback read.
+
 **Scoped reads.** `GET /agent/elements?scope=…` filters the same fresh read.
 The `snapshot` and every row's original `index` stay valid for taps.
 - `app`: the active app's subtree, plus the keyboard. The top-level `alert`

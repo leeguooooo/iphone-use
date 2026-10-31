@@ -877,6 +877,12 @@ impl DaemonClient {
         self.elements_at("/agent/elements", None).await
     }
 
+    /// One fresh read preserving known locator state. Older daemons may ignore
+    /// the query; diagnosis treats their omitted values conservatively.
+    pub async fn elements_for_diagnosis(&self) -> anyhow::Result<String> {
+        self.elements_at("/agent/elements?locator_state=1", None).await
+    }
+
     /// [`Self::elements`] with the daemon's `image=auto` policy: when the tree
     /// is unusable the answer carries a fresh, budget-bounded screenshot
     /// taken after the read (never a cached frame). For the model-facing

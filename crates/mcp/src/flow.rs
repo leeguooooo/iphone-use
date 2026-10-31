@@ -964,9 +964,33 @@ fn candidate_basis(row: &serde_json::Value, locator: &serde_json::Value) -> Cand
         }
         // Compact rows do not establish whether an omitted flag was known.
         // Only an explicit boolean can prove a boolean locator constraint.
-        if matches!(key.as_str(), "enabled" | "visible" | "focused")
-            && row.get(key).and_then(serde_json::Value::as_bool).is_none()
-        {
+        let boolean_unknown = matches!(key.as_str(), "enabled" | "visible" | "focused")
+            && row.get(key).and_then(serde_json::Value::as_bool).is_none();
+        let value_unknown = key == "value"
+            && (row
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| {
+                    kind.trim_start_matches("XCUIElementType") == "SecureTextField"
+                })
+                || row
+                    .get("value_truncated")
+                    .is_some_and(|flag| flag != &serde_json::Value::Bool(false))
+                || row
+                    .get("snapshot_value_unavailable")
+                    .is_some_and(|flag| flag != &serde_json::Value::Bool(false))
+                || row
+                    .get("value_known")
+                    .is_some_and(|flag| flag != &serde_json::Value::Bool(true))
+                || row
+                    .get("value")
+                    .is_some_and(|value| !value.is_string() && !value.is_null())
+                || (row
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+                    && row.get("value_known") != Some(&serde_json::Value::Bool(true))));
+        if boolean_unknown || value_unknown {
             basis.unproven.push(key.clone());
         } else if row.get(key) == Some(expected) {
             basis.matched.push(key.clone());
@@ -1037,7 +1061,7 @@ async fn diagnose_failure(
     };
     diagnosis["expectation"] = serde_json::json!(expectation);
 
-    let elements = match tokio::time::timeout(DIAGNOSIS_BUDGET, daemon.elements()).await {
+    let elements = match tokio::time::timeout(DIAGNOSIS_BUDGET, daemon.elements_for_diagnosis()).await {
         Err(_) => {
             diagnosis["observable"] = serde_json::json!(false);
             diagnosis["reason"] = serde_json::json!("diagnosis_timeout");
@@ -1073,6 +1097,8 @@ async fn diagnose_failure(
         diagnosis["rows"] = serde_json::json!(rows.len());
         return Some(diagnosis);
     }
+    let partial = tree.as_ref().and_then(|tree| tree.get("partial")).and_then(serde_json::Value::as_bool) == Some(true);
+    diagnosis["partial"] = serde_json::json!(partial);
     diagnosis["observable"] = serde_json::json!(true);
     diagnosis["rows"] = serde_json::json!(rows.len());
 
@@ -1134,7 +1160,7 @@ async fn diagnose_failure(
         .count();
     diagnosis["reason"] = serde_json::json!(match (expectation, exact, scored.len()) {
         ("absent", _, _) if exact >= 1 => "still_present",
-        (_, _, _) if unproven > 0 && exact <= 1 => "locator_state_unproven",
+        (_, _, _) if (unproven > 0 || partial) && exact <= 1 => "locator_state_unproven",
         (_, 1, _) => "locator_matches_now",
         (_, 0, 0) => "no_similar_element",
         (_, 0, _) => "locator_no_match",
@@ -2127,6 +2153,116 @@ mod tests {
         assert_eq!(diagnosis["reason"], "still_present");
         assert_eq!(diagnosis["exact_matches"], 1);
         assert_eq!(diagnosis["unproven_candidates"], 1);
+    }
+
+    #[test]
+    fn value_diagnosis_distinguishes_known_content_absence_and_unknown_previews() {
+        for row in [
+            serde_json::json!({}),
+            serde_json::json!({"value":null}),
+            serde_json::json!({"value":{}}),
+            serde_json::json!({"value":42}),
+            serde_json::json!({"value":"prefix","value_truncated":true}),
+            serde_json::json!({"value":"prefix","kind":"SecureTextField"}),
+            serde_json::json!({"value":"prefix","kind":"XCUIElementTypeSecureTextField"}),
+            serde_json::json!({"value":"prefix","value_known":false}),
+            serde_json::json!({"value":"prefix","value_known":"true"}),
+            serde_json::json!({"value":"prefix","snapshot_value_unavailable":true}),
+        ] {
+            let basis = candidate_basis(&row, &serde_json::json!({"value":"prefix"}));
+            assert_eq!(basis.unproven, vec!["value"], "{row}");
+            assert!(basis.matched.is_empty() && basis.differed.is_empty());
+        }
+        for value in ["", "prefix", "different"] {
+            let basis = candidate_basis(
+                &serde_json::json!({"value":value,"value_known":true}),
+                &serde_json::json!({"value":"prefix"}),
+            );
+            assert!(basis.unproven.is_empty());
+            assert_eq!(basis.matched.is_empty(), value != "prefix");
+            assert_eq!(basis.differed.is_empty(), value == "prefix");
+        }
+        let empty = candidate_basis(
+            &serde_json::json!({"value":"","value_known":true}),
+            &serde_json::json!({"value":""}),
+        );
+        assert_eq!(empty.matched, vec!["value"]);
+        let absent = candidate_basis(
+            &serde_json::json!({"value_known":true}),
+            &serde_json::json!({"value":""}),
+        );
+        assert_eq!(absent.differed, vec!["value"]);
+        assert!(absent.unproven.is_empty());
+    }
+
+    #[tokio::test]
+    async fn value_unknown_candidates_cannot_prove_presence_or_uniqueness() {
+        for expectation in ["present", "absent"] {
+            let steps = serde_json::json!([{"kind":"wait_for","expect":{expectation:[{"identifier":"save","value":"prefix"}]}}]);
+            let mut result = failing_result(0);
+            if expectation == "absent" {
+                result["observation"] = serde_json::json!({"read":true,"violated_absent":[0]});
+            }
+            for rows in [
+                serde_json::json!([{"identifier":"save","value":"prefix","value_truncated":true}]),
+                serde_json::json!([{"identifier":"save","value":"prefix","kind":"SecureTextField"}]),
+                serde_json::json!([{"identifier":"save"}]),
+            ] {
+                let body = serde_json::json!({"elements":rows}).to_string();
+                let (url, task, requests) = mock_daemon_sequence(&[("200 OK", &body)]);
+                let diagnosis =
+                    diagnose_failure(Some(&steps), &result, &DaemonClient::new(url, None))
+                        .await
+                        .unwrap();
+                task.join().unwrap();
+                assert_eq!(diagnosis["reason"], "locator_state_unproven", "{diagnosis}");
+                assert_eq!(diagnosis["exact_matches"], 0);
+                assert_eq!(
+                    diagnosis["candidates"][0]["unproven"],
+                    serde_json::json!(["value"])
+                );
+                assert!(requests
+                    .recv()
+                    .unwrap()
+                    .starts_with("GET /agent/elements?locator_state=1 "));
+                assert!(requests.try_recv().is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_trees_cannot_prove_uniqueness_or_rule_out_matching_rows() {
+        for (expectation, rows, reason) in [
+            (
+                "present",
+                serde_json::json!([{"identifier":"save","value":"prefix"}]),
+                "locator_state_unproven",
+            ),
+            (
+                "present",
+                serde_json::json!([{"identifier":"other","value":"prefix"}]),
+                "locator_state_unproven",
+            ),
+            (
+                "absent",
+                serde_json::json!([{"identifier":"save","value":"prefix"}]),
+                "still_present",
+            ),
+        ] {
+            let steps = serde_json::json!([{"kind":"wait_for","expect":{expectation:[{"identifier":"save","value":"prefix"}]}}]);
+            let mut result = failing_result(0);
+            if expectation == "absent" {
+                result["observation"] = serde_json::json!({"read":true,"violated_absent":[0]});
+            }
+            let body = serde_json::json!({"partial":true,"elements":rows}).to_string();
+            let (url, task, _requests) = mock_daemon_sequence(&[("200 OK", &body)]);
+            let diagnosis = diagnose_failure(Some(&steps), &result, &DaemonClient::new(url, None))
+                .await
+                .unwrap();
+            task.join().unwrap();
+            assert_eq!(diagnosis["reason"], reason);
+            assert_eq!(diagnosis["partial"], true);
+        }
     }
 
     #[tokio::test]

@@ -356,7 +356,7 @@ jobs:
               --team-id "$APPLE_TEAM_ID" \
               --wait
           fi
-          xcrun stapler staple "$APP"
+          python3 scripts/validate-stapled-artifact.py --staple "$APP"
           rm -f "$ZIP_FOR_NOTARIZE"
 
       # Note when shipping an unsigned build (no Developer ID secrets configured).

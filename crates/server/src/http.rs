@@ -16202,6 +16202,14 @@ async fn agent_elements_unfenced(
                     "hint":"selector filters a full fresh tree; omit since and scope=changed"}))
             } else { Ok(()) }
         })
+        .and_then(|()| {
+            match query.locator_state.as_deref() {
+                None => Ok(()),
+                Some("1") if query.since.is_none() => Ok(()),
+                _ => Err(serde_json::json!({"ok":false,"error":"invalid_locator_state",
+                    "hint":"locator_state=1 requires a full read without since"})),
+            }
+        })
         .and_then(|()| ocr_mode.clone().map(|_| ()))
     {
         // Authenticate first: a refused caller learns nothing about scopes.
@@ -16635,13 +16643,21 @@ async fn agent_elements_inner(
     };
     // Restore only the metadata the selector requests; ordinary reads stay
     // sparse. Unknown and redacted secure values never become empty values.
-    let include_enabled = selector.and_then(|selector| selector.enabled).is_some();
-    let include_value = selector.is_some_and(|selector| selector.value.is_some() || selector.value_present.is_some());
+    let include_locator_state = query.locator_state.as_deref() == Some("1");
+    let include_enabled = include_locator_state || selector.and_then(|selector| selector.enabled).is_some();
+    let include_value = include_locator_state || selector.is_some_and(|selector| selector.value.is_some() || selector.value_present.is_some());
+    if include_locator_state { body["locator_state"] = 1.into(); }
     if include_enabled || include_value {
         if let Some(elements) = body.get_mut("elements").and_then(|value| value.as_array_mut()) {
             for (element, row) in elements.iter_mut().zip(rows.iter()) {
                 if include_enabled {
                     if let Some(enabled) = row.enabled { element["enabled"] = serde_json::json!(enabled); }
+                }
+                if include_locator_state {
+                    if let Some(visible) = row.visible { element["visible"] = visible.into(); }
+                    if let Some(focused) = row.focused { element["focused"] = focused.into(); }
+                    element["value_known"] = (!row.value_unavailable
+                        && row.value_truncated != Some(true) && row.kind != "SecureTextField").into();
                 }
                 if include_value {
                     if let Some(value) = &row.value { element["value"] = serde_json::json!(value); }
@@ -17370,6 +17386,10 @@ struct AgentElementsQuery {
     /// text so a bad value gets the daemon's own 400, not a parse error.
     #[serde(default)]
     limit: Option<String>,
+    /// `1`: preserve known booleans and empty values for failure diagnosis.
+    /// Only full reads support this projection; default reads remain sparse.
+    #[serde(default)]
+    locator_state: Option<String>,
     /// `1`/`auto`: add Vision OCR rows when the tree is unusable; `force`:
     /// always (see [`elements_ocr`]).
     #[serde(default)]
@@ -27928,6 +27948,146 @@ mod tests {
             assert_eq!(rows[2].enabled,Some(true));
             assert_eq!(rows[1].identifier.as_deref(),Some("other"));
             runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn diagnostic_projection_preserves_known_state_without_changing_default_or_cache() {
+        use tower::ServiceExt;
+        block(async {
+            let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = reads.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("/source") {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    serde_json::json!({"value":{"type":"XCUIElementTypeApplication","label":"Fixture",
+                        "rect":{"x":0,"y":0,"width":390,"height":844},"children":[
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"empty","rect":{"x":0,"y":60,"width":100,"height":40},"label":"Empty","value":"","isEnabled":true,"isVisible":true,"isFocused":false},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"missing","rect":{"x":0,"y":120,"width":100,"height":40},"label":"Missing"},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"truncated","rect":{"x":0,"y":180,"width":100,"height":40},"label":"Truncated","value":"prefix","value_truncated":true},
+                        {"type":"XCUIElementTypeSecureTextField","rawIdentifier":"secure","rect":{"x":0,"y":240,"width":100,"height":40},"label":"Password","value":"synthetic-secret"},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"unsupported","rect":{"x":0,"y":300,"width":100,"height":40},"label":"Unsupported","value":{}},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"known","rect":{"x":0,"y":360,"width":100,"height":40},"label":"Known","value":"prefix"}
+                    ]}}).to_string()
+                } else if request.contains("/window/size") {
+                    r#"{"value":{"width":390,"height":844}}"#.into()
+                } else {
+                    healthy_runner_responder(request)
+                }
+            });
+            let state = readiness_state_with_runner(runner.base());
+            let mut snapshot = None;
+            for (uri, diagnostic, filtered) in [
+                ("/agent/elements?ocr=off", false, false),
+                ("/agent/elements?ocr=off&locator_state=1", true, false),
+                (
+                    "/agent/elements?ocr=off&locator_state=1&query=empty&limit=1",
+                    true,
+                    true,
+                ),
+            ] {
+                let response = router(state.clone())
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(uri)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert!(!body.to_string().contains("synthetic-secret"));
+                let current = body["snapshot"].as_str().unwrap();
+                if let Some(expected) = &snapshot {
+                    assert_eq!(current, expected);
+                } else {
+                    snapshot = Some(current.to_string());
+                }
+                let cached = lookup_element_snapshot(&state, current).unwrap();
+                assert_eq!(cached.len(), 7);
+                assert_eq!(cached[1].value.as_deref(), Some(""));
+                assert_eq!(cached[1].enabled, Some(true));
+                let elements = body["elements"].as_array().unwrap();
+                let empty = elements
+                    .iter()
+                    .find(|r| r["identifier"] == "empty")
+                    .unwrap();
+                assert_eq!(empty["index"], 1);
+                if diagnostic {
+                    assert_eq!(body["locator_state"], 1);
+                    assert_eq!(empty["value"], "");
+                    assert_eq!(empty["value_known"], true);
+                    assert_eq!(empty["enabled"], true);
+                    assert_eq!(empty["visible"], true);
+                    assert_eq!(empty["focused"], false);
+                    if filtered {
+                        assert_eq!(elements.len(), 1);
+                    } else {
+                        for (id, known) in [
+                            ("missing", true),
+                            ("truncated", false),
+                            ("secure", false),
+                            ("unsupported", false),
+                            ("known", true),
+                        ] {
+                            let row = elements.iter().find(|r| r["identifier"] == id).unwrap();
+                            assert_eq!(row["value_known"], known, "{row}");
+                            if id == "missing" {
+                                assert!(row.get("value").is_none());
+                                assert!(row.get("enabled").is_none());
+                                assert!(row.get("focused").is_none());
+                            }
+                        }
+                    }
+                } else {
+                    assert!(body.get("locator_state").is_none());
+                    assert!(elements.iter().all(|row| row.get("value_known").is_none()));
+                    assert!(empty.get("value").is_none());
+                    assert!(empty.get("enabled").is_none());
+                    assert!(empty.get("focused").is_none());
+                }
+            }
+            assert_eq!(
+                reads.load(std::sync::atomic::Ordering::SeqCst),
+                3,
+                "One source read per request"
+            );
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn diagnostic_projection_refuses_invalid_or_delta_queries_after_authentication() {
+        use tower::ServiceExt;
+        block(async {
+            for uri in [
+                "/agent/elements?locator_state=true",
+                "/agent/elements?locator_state=0",
+                "/agent/elements?locator_state=1&since=old",
+            ] {
+                for (state, status) in [
+                    (readiness_test_state(), StatusCode::BAD_REQUEST),
+                    (
+                        fixture_app_state(Some("synthetic-password")),
+                        StatusCode::UNAUTHORIZED,
+                    ),
+                ] {
+                    let response = router(state)
+                        .oneshot(
+                            axum::http::Request::builder()
+                                .uri(uri)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), status);
+                }
+            }
         });
     }
 
