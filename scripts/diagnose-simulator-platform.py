@@ -6,9 +6,13 @@ from runner_auth import authorization
 ROOT=Path(__file__).resolve().parents[1]
 assert os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted','hosted CI only'
 OUT=Path(os.environ['RUNNER_TEMP'])/'simulator-platform-diagnostic';OUT.mkdir(exist_ok=False)
-RUNTIME='com.apple.CoreSimulator.SimRuntime.iOS-18-2'
+PLATFORMS={'xcode16.2-ios18.2':('16.2','18.2'),'xcode16.4-ios18.5':('16.4','18.5')}
+PLATFORM=os.environ.get('IPU_DIAGNOSTIC_PLATFORM','xcode16.2-ios18.2')
+assert PLATFORM in PLATFORMS,'unsupported diagnostic platform'
+XCODE,IOS=PLATFORMS[PLATFORM]
+RUNTIME='com.apple.CoreSimulator.SimRuntime.iOS-'+IOS.replace('.','-')
 NAME='ipu-platform-'+str(uuid.uuid4());sim=None;process=None;token=secrets.token_hex(32)
-result={'premise':'macos15/Xcode16.2/runtime18.2 can boot an owned Simulator and directly launch the Native XCTest runner','passed':False,'scope':'hostedCI only;not product or physical acceptance','stages':[],'cleanup_errors':[]}
+result={'premise':f'macos15/Xcode{XCODE}/runtime{IOS} can boot an owned Simulator and directly launch the Native XCTest runner','platform':PLATFORM,'passed':False,'scope':'hostedCI only;not product or physical acceptance;does not establish other runtime lanes','stages':[],'cleanup_errors':[]}
 def save(): (OUT/'result.json').write_text(json.dumps(result,indent=2)+'\n')
 def command(label,args,timeout=60,env=None):
     stage={'label':label,'argv':list(map(str,args)),'state':'started'};result['stages'].append(stage);save()
@@ -23,10 +27,11 @@ def command(label,args,timeout=60,env=None):
         (OUT/(label+'.log')).write_bytes((error.stdout or b'')+(error.stderr or b''))
         stage.update(state='timeout_stopped',seconds=time.monotonic()-start);save();raise
 try:
-    command('xcode',['xcodebuild','-version'])
+    assert command('xcode',['xcodebuild','-version']).splitlines()[0]=='Xcode '+XCODE,'unexpected Xcode'
+    assert command('sdk-version',['xcrun','--sdk','iphonesimulator','--show-sdk-version'])==IOS,'unexpected Simulator SDK'
     command('simctl-location',['xcrun','--find','simctl'])
     command('processes-before',['ps','-Ao','pid,ppid,etime,comm'])
-    command('runtime',['bash',ROOT/'scripts/ensure-simulator-runtime.sh',RUNTIME,'18.2',OUT/'runtime'],900)
+    command('runtime',['bash',ROOT/'scripts/ensure-simulator-runtime.sh',RUNTIME,IOS,OUT/'runtime'],900)
     command('full-inventory-before',['xcrun','simctl','list'],90)
     env=dict(os.environ,IPU_RUNNER_DERIVED_DATA=str(OUT/'runner-build'))
     command('runner-build',['bash',ROOT/'runner/build.sh','--simulator'],300,env)

@@ -1,6 +1,14 @@
 name: Simulator platform premise diagnostic
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Compare the pinned lane with the hosted image's supported default
+        type: choice
+        default: xcode16.2-ios18.2
+        options:
+          - xcode16.2-ios18.2
+          - xcode16.4-ios18.5
 permissions:
   contents: read
 jobs:
@@ -8,7 +16,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 35
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      DEVELOPER_DIR: ${{ inputs.platform == 'xcode16.4-ios18.5' && '/Applications/Xcode_16.4.app/Contents/Developer' || '/Applications/Xcode_16.2.app/Contents/Developer' }}
+      IPU_DIAGNOSTIC_PLATFORM: ${{ inputs.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
