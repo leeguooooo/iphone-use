@@ -111,8 +111,15 @@ def main():
    after=json.loads((data/'selector-state.json').read_text())
    if after.get('touches',0)>0:break
    assert time.monotonic()<until,'App did not receive the action; no replay';time.sleep(.05)
-  save('tap-contains/after.json',after);errors=verify_action(model,before,after,body)
-  result['cases'].append({'name':'tap-contains','passed':not errors,'errors':errors});assert not errors,str(errors)
+  samples=[];quiet_started=time.monotonic();quiet_until=quiet_started+3
+  while True:
+   after=json.loads((data/'selector-state.json').read_text());errors=verify_action(model,before,after,body)
+   samples.append({'at_ms':(time.monotonic()-quiet_started)*1000,'state':after});assert not errors,str(errors)
+   if time.monotonic()>=quiet_until:break
+   time.sleep(.05)
+  result['action_quiet_window_secs']=3;save('tap-contains/quiet-window.json',samples)
+  save('tap-contains/after.json',after)
+  result['cases'].append({'name':'tap-contains','passed':True,'errors':[]})
   active,_=drag.runner_call(args,'/wda/activeAppInfo');assert active['value']['bundleId']==BUNDLE and active['value']['pid']==before['pid']
   result['passed']=True
  except Exception as error:

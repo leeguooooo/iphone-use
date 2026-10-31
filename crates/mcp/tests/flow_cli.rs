@@ -320,6 +320,55 @@ fn value_diagnosis_through_the_cli_respects_availability_and_never_retries() {
     }
 }
 
+#[test]
+fn a_single_read_gateway_timeout_keeps_the_applied_prefix_without_retry_or_extra_read() {
+    let store = tempfile::tempdir().unwrap();
+    let flow = store.path().join("flow.json");
+    std::fs::write(
+        &flow,
+        serde_json::json!({"version":1,"name":"One check","steps":[
+            {"kind":"shortcut","name":"home"},
+            {"kind":"wait_for","expect":{"present":[{"label_contains":"ready"}]},"timeout_ms":0}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let failure = r#"{"ok":false,"error":"single_read_timeout","failed_step":1,"completed":1,"applied_actions":1,"outcome":"not_sent","failed_step_outcome":"not_sent","batch_outcome":"partially_applied","retry_safe":false,"observation":{"read":false,"attempts":1,"reads":0,"single_read":true}}"#;
+    let mut script = compat_preamble();
+    script.extend([
+        ("200 OK", Some(STATUS)),
+        ("504 Gateway Timeout", Some(failure)),
+    ]);
+    let (url, requests) = mock_daemon(&script);
+    let run = flow_run(&url, &flow, store.path(), None);
+    assert_eq!(run.code, Some(1), "{}", run.stdout);
+    let result = run.json.unwrap();
+    assert_eq!(result["error"], "single_read_timeout");
+    assert_eq!(result["http_status"], 504);
+    assert_eq!(result["applied_actions"], 1);
+    assert_eq!(result["completed"], 1);
+    assert_eq!(result["retry_safe"], false);
+    assert_eq!(result["batch_outcome"], "partially_applied");
+    assert_eq!(result["diagnosis"]["reason"], "single_read_unavailable");
+    assert_eq!(result["diagnosis"]["budget_ms"], 0);
+    assert_eq!(result["diagnosis"]["reused_observation"], false);
+    let sent: Vec<_> = requests.try_iter().collect();
+    assert_eq!(
+        sent.iter()
+            .filter(|r| r.starts_with("POST /agent/actions"))
+            .count(),
+        1,
+        "{sent:?}"
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|r| r.starts_with("GET /agent/elements"))
+            .count(),
+        0,
+        "{sent:?}"
+    );
+}
+
 /// The daemon says no with a 200. A caller reading only the status code would
 /// call this a success and refresh a verification date on it.
 #[test]
