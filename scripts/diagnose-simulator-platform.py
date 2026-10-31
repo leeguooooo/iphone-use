@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Isolate hosted CI Simulator/XCTest startup from the product CLI. Never selects a phone."""
-import importlib.util,json,os,secrets,signal,socket,subprocess,time,urllib.request,uuid
+import http.client,importlib.util,json,os,secrets,signal,socket,subprocess,time,urllib.request,uuid
 from pathlib import Path
 from runner_auth import authorization
 ROOT=Path(__file__).resolve().parents[1]
@@ -42,28 +42,39 @@ try:
     env=dict(os.environ,TEST_RUNNER_IPU_RUNNER_PORT=str(port),TEST_RUNNER_IPU_RUNNER_TOKEN=token)
     log=OUT/'direct-xctest.log'
     with log.open('w') as sink:process=subprocess.Popen(args,env=env,stdout=sink,stderr=subprocess.STDOUT,start_new_session=True)
-    result['xctest_pid']=process.pid;save();deadline=time.monotonic()+180
+    result['xctest_pid']=process.pid;result['xctest_started_at']=time.time();save();deadline=time.monotonic()+180
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));observations=[]
     while time.monotonic()<deadline:
         if process.poll() is not None:raise RuntimeError(f'direct XCTest exited {process.returncode}')
         try:
             request=urllib.request.Request(f'http://127.0.0.1:{port}/status',headers={'Authorization':authorization(token,'GET','/status',b'')})
             with opener.open(request,timeout=3) as reply:status=json.load(reply)
-            observations.append(status);(OUT/'status-observations.json').write_text(json.dumps(observations,indent=2)+'\n')
+            observations.append({'at':time.time(),'status':status})
+            if not isinstance(status,dict) or not isinstance(status.get('value'),dict):
+                raise ValueError('status reply must contain an object value')
             if status.get('value',{}).get('ready') is True:result['passed']=True;break
-        except (OSError,ValueError):pass
+        except (OSError,ValueError,http.client.HTTPException) as error:
+            observations.append({'at':time.time(),'error':type(error).__name__+': '+str(error)})
+        finally:
+            (OUT/'status-observations.json').write_text(json.dumps(observations,indent=2)+'\n')
         time.sleep(1)
     if not result['passed']:
-        command('sample-xctest',['sample',str(process.pid),'3','-file',OUT/'xctest.sample'],20)
+        # A failed optional stack sample must not replace the readiness failure.
+        result['readiness_failure']='direct XCTest status never became ready'
+        result['xctest_exit_at_deadline']=process.poll();save()
+        try:command('sample-xctest',['sample',str(process.pid),'3','-file',OUT/'xctest.sample'],20)
+        except Exception as error:result['sample_error']=type(error).__name__+': '+str(error);save()
         raise RuntimeError('direct XCTest status never became ready')
     command('full-inventory-after-xctest',['xcrun','simctl','list'],90)
 except BaseException as error:
+    result['passed']=False
     result['error']=type(error).__name__+': '+str(error)
 finally:
     if process is not None and process.poll() is None:
         os.killpg(process.pid,signal.SIGTERM)
         try:process.wait(timeout=10)
         except subprocess.TimeoutExpired:os.killpg(process.pid,signal.SIGKILL);process.wait(timeout=10)
+    if process is not None:result['xctest_exit_after_cleanup']=process.poll()
     for path in OUT.glob('*.log'):path.write_text(path.read_text(errors='replace').replace(token,'REDACTED'))
     if sim:
         try:
