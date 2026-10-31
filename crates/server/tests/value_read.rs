@@ -330,3 +330,75 @@ fn transient_native_failure_is_retryable_instead_of_claiming_unsupported() {
         assert!(body.get("value").is_none());
     });
 }
+
+#[test]
+fn supported_reader_attribute_unavailability_does_not_prescribe_runner_upgrade() {
+    block(async {
+        let runner = mock_runner(|r, _| {
+            let body = if r.starts_with("GET ") && r.contains("/element/E0/value") {
+                let body=json!({"value":{"error":"unsupported operation","message":"full AX value attribute unavailable"}}).to_string();
+                format!("HTTP/1.1 501 Not Implemented\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())
+            } else {base(r,1,true)};
+            Some((Duration::ZERO,body))
+        });
+        let state=build_state_with_runner(runner.url());
+        let (status,body)=decode(response(state.clone(),json!({"identifier":"field-a"})).await).await;
+        assert_eq!(status,StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"],"full_value_unavailable");
+        assert_eq!(body["reason"],"ax_attribute_unavailable","{body}");
+        assert!(!body["hint"].as_str().unwrap().contains("upgrade"),"{body}");
+        assert!(body.get("value").is_none(),"unavailable is not empty or null");
+        assert!(state.owner.lock().unwrap().is_none());
+    });
+}
+
+#[test]
+fn unavailable_value_reasons_preserve_capability_attribute_and_contract_boundaries() {
+    block(async {
+        for (supports,message,expected) in [
+            (false,None,"runner_capability_missing"),
+            (true,Some("full AX value read unavailable"),"ax_bridge_unavailable"),
+            (true,Some("full AX value selector shape unavailable (return=@, arg2=@, arg3=@, arg4=^@)"),"ax_bridge_unavailable"),
+            (true,Some("full AX value is not scalar"),"ax_value_not_scalar"),
+            (true,Some("full AX value read failed"),"ax_read_failed"),
+            (true,Some("unknown complete-value endpoint"),"runner_endpoint_unavailable"),
+            (true,None,"invalid_contract"),
+        ] {
+            let reads=Arc::new(std::sync::atomic::AtomicUsize::new(0));let seen=reads.clone();
+            let runner=mock_runner(move |r,_| {
+                let body=if r.starts_with("GET ") && r.contains("/element/E0/value") {
+                    seen.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+                    if let Some(message)=message {
+                        let body=json!({"value":{"error":"unsupported operation","message":message}}).to_string();
+                        format!("HTTP/1.1 501 Not Implemented\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())
+                    } else {json!({"value":{"value":"PREVIEW","complete":true}}).to_string()}
+                } else {base(r,1,supports)};
+                Some((Duration::ZERO,body))
+            });
+            let (status,body)=decode(response(build_state_with_runner(runner.url()),json!({"identifier":"field-a"})).await).await;
+            assert_eq!(status,StatusCode::NOT_IMPLEMENTED,"{body}");
+            assert_eq!(body["error"],"full_value_unavailable");
+            assert_eq!(body["reason"],expected,"{body}");
+            assert!(body.get("value").is_none());
+            assert!(!body.to_string().contains("PREVIEW"));
+            assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed),usize::from(supports));
+        }
+    });
+}
+
+#[test]
+fn an_explicit_complete_null_contract_remains_distinct_from_an_unavailable_value() {
+    block(async {
+        let runner=mock_runner(|r,_| Some((Duration::ZERO,
+            if r.starts_with("GET ") && r.contains("/element/E0/value") {
+                json!({"value":{"value":null,"source":"ax_value_attribute","utf16_length":0,
+                    "returned_utf16_length":0,"limit_utf16":8192,"complete":true,"truncated":false}}).to_string()
+            } else {base(r,1,true)})));
+        let (status,body)=decode(response(build_state_with_runner(runner.url()),json!({"identifier":"field-a"})).await).await;
+        assert_eq!(status,StatusCode::OK,"{body}");
+        assert!(body.get("value").is_some_and(Value::is_null));
+        assert_eq!(body["complete"],true);
+        assert!(body.get("error").is_none());
+        assert!(body.get("reason").is_none());
+    });
+}

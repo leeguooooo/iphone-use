@@ -1503,3 +1503,21 @@ permitted reads. Plan a fresh read only after checking current status.
 
 The Native complete-value route is explicitly opted into with `complete=1`;
 existing attribute/value snapshot reads and POST value writes keep their contracts.
+
+
+From v0.27.21, `full_value_unavailable` retains its existing 501 status and adds
+`reason` so a selected-element failure does not imply that the Runner needs an
+upgrade. It never carries a value or promotes a snapshot preview.
+
+| Reason | What this read established |
+| --- | --- |
+| `runner_capability_missing` | The selected Runner did not advertise `ipu:valueRead`. |
+| `ax_attribute_unavailable` | This request did not return the selected full AX attribute. Its value remains unknown. |
+| `ax_value_not_scalar` | The returned AX attribute is outside this API's scalar contract. |
+| `ax_bridge_unavailable` | The Native AX bridge could not service this request. |
+| `ax_read_failed` | The Native AX read failed for this request. |
+| `runner_endpoint_unavailable` | The Runner refused the complete-value endpoint without a recognized Native diagnosis. |
+| `invalid_contract` | The returned payload failed completeness validation. |
+
+Only a successful, validated complete-value contract can report a complete null
+or empty value. An unavailable attribute is evidence of neither.

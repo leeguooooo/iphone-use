@@ -13020,6 +13020,30 @@ struct ValueReadRequest {
     kind: Option<String>,
     max_utf16: Option<u32>,
 }
+fn unavailable_value_read(reason: &'static str, hint: &'static str) -> Response {
+    json_response(StatusCode::NOT_IMPLEMENTED,
+        serde_json::json!({"ok":false,"error":"full_value_unavailable","reason":reason,"hint":hint}))
+}
+
+fn unsupported_value_read(error: &crate::runner::RunnerHttpError) -> Response {
+    let (reason, hint) = match error.message.as_deref() {
+        Some("runner lacks ipu:valueRead") => ("runner_capability_missing",
+            "The selected Runner does not advertise ipu:valueRead. Select a capable Native Runner or use another permitted read; no preview was promoted to a complete value."),
+        Some("full AX value attribute unavailable") => ("ax_attribute_unavailable",
+            "The full AX value request for the selected element did not return the requested attribute. This does not establish an empty or null value, or a missing Runner API. Use another permitted read without inferring the value."),
+        Some("full AX value is not scalar") => ("ax_value_not_scalar",
+            "The selected AX value is not a scalar supported by this read. Use another permitted view; no complete string or null value was inferred."),
+        Some("full AX value read failed" | "full AX value read raised an exception") => ("ax_read_failed",
+            "The Native AX read failed for this request. Use another permitted read; no empty or null value was inferred."),
+        Some(message) if matches!(message, "full AX value read unavailable" | "full AX value selector argument count unavailable")
+            || message.starts_with("full AX value selector shape unavailable (") => ("ax_bridge_unavailable",
+            "The Native AX bridge was unavailable for this request. Use another permitted read; this failure does not establish an empty or null value."),
+        _ => ("runner_endpoint_unavailable",
+            "The selected Runner did not provide a usable complete-value endpoint. Check the selected Runner's capabilities or use another permitted read; no preview was promoted to a complete value."),
+    };
+    unavailable_value_read(reason, hint)
+}
+
 async fn agent_value(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13137,14 +13161,14 @@ async fn agent_value(
                 )
             }
             Ok(None) => json_response(StatusCode::CONFLICT, value_scope_failure()),
-            Ok(Some(Err(ref error))) if !crate::runner::runner_http_error(error).is_some_and(|e|
-                e.status.as_u16() == 501 || matches!(e.code.as_deref(), Some("unknown command" | "unsupported operation"))) =>
-                json_response(StatusCode::BAD_GATEWAY,
+            Ok(Some(Err(ref error))) => match crate::runner::runner_http_error(error) {
+                Some(error) if error.status.as_u16() == 501
+                    || matches!(error.code.as_deref(), Some("unknown command" | "unsupported operation")) => unsupported_value_read(error),
+                _ => json_response(StatusCode::BAD_GATEWAY,
                     serde_json::json!({"ok":false,"error":"value_read_failed","retry_safe":true})),
-            _ => json_response(
-                StatusCode::NOT_IMPLEMENTED,
-                serde_json::json!({"ok":false,"error":"full_value_unavailable","hint":"The runner did not supply a complete-value contract; upgrade it or use a permitted alternative read. No preview was promoted to a full value"}),
-            ),
+            },
+            Ok(Some(Ok(Ok(_)))) => unavailable_value_read("invalid_contract",
+                "The Runner response failed complete-value validation. No preview was promoted, and no empty or null value was inferred. Use another permitted read."),
         }
     };
     response

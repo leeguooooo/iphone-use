@@ -4669,6 +4669,31 @@ mod tests {
     }
 
     #[test]
+    fn value_read_unavailability_reason_reaches_every_output_mode_without_a_preview() {
+        let body=serde_json::json!({"ok":false,"error":"full_value_unavailable","reason":"ax_attribute_unavailable",
+            "hint":"The element did not supply a complete AX attribute; do not infer empty or null.","value":"PREVIEW"});
+        let (url,task)=scripted_daemon("501 Not Implemented",body.to_string().into_bytes());
+        let result=block(handler_for(&url).phone_read_value(Parameters(ReadValueParams {
+            identifier:Some("field-a".into()),label:None,kind:None,max_utf16:None,
+        })));
+        task.join().unwrap();
+        for mode in [StructuredMode::Full,StructuredMode::Slim,StructuredMode::Off] {
+            let shaped=shape_structured(result.clone(),mode);
+            assert_eq!(shaped.is_error,Some(true));
+            let text=shaped.content.iter().filter_map(|c| c.as_text().map(|t|t.text.as_str())).collect::<Vec<_>>().join("\n");
+            let value:serde_json::Value=serde_json::from_str(&text).unwrap();
+            assert_eq!(value["reason"],"ax_attribute_unavailable");
+            assert!(value.get("value").is_none());
+            assert!(!text.contains("PREVIEW"));
+            if mode != StructuredMode::Off {
+                let structured=shaped.structured_content.unwrap();
+                assert_eq!(structured["reason"],"ax_attribute_unavailable");
+                assert!(structured.get("value").is_none());
+            }
+        }
+    }
+
+    #[test]
     fn system_capture_receipt_survives_default_structured_slim() {
         let (url, task) = scripted_daemon("200 OK", br#"{"ok":true,"system_capture":{"requested":true,"saved_verified":false,"image":"PRIVATE","asset":"PRIVATE"}}"#.to_vec());
         let result = block(handler_for(&url).phone_shortcut(Parameters(ShortcutParams {
