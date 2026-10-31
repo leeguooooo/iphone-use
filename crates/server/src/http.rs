@@ -11561,9 +11561,9 @@ fn validate_agent_actions(request: &AgentActionsRequest) -> Result<(), String> {
 /// Missing requested booleans and unavailable/protected value previews are
 /// unknown. A known mismatch still rules out a row with other unknown fields.
 fn agent_locator_assessment(row: &crate::runner::ElementRow, locator: &AgentElementLocator) -> Option<bool> {
-    if !locator.label.as_ref().is_none_or(|value| &row.label == value)
-        || !locator.identifier.as_ref().is_none_or(|value| row.identifier.as_ref() == Some(value))
-        || !locator.kind.as_ref().is_none_or(|value| &row.kind == value)
+    if locator.label.as_ref().is_some_and(|value| &row.label != value)
+        || locator.identifier.as_ref().is_some_and(|value| row.identifier.as_ref() != Some(value))
+        || locator.kind.as_ref().is_some_and(|value| &row.kind != value)
     { return Some(false); }
     let mut unknown = false;
     if let Some(expected) = &locator.value {
