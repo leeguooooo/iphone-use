@@ -40,7 +40,7 @@ on:
       collect_release_tag:
         description: Published GitHub release whose binaries and runner sources are tested
         type: string
-        default: v0.27.15
+        default: v0.27.21
       capture_probe_only:
         description: Verify native system screenshot persistence in an owned Simulator
         type: boolean
@@ -287,6 +287,9 @@ jobs:
     if: ${{ inputs.collect_probe_only || inputs.selector_probe_only }}
     name: Native element oracle / released artifact
     runs-on: macos-15
+    permissions:
+      contents: read
+      actions: read
     timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
@@ -300,13 +303,41 @@ jobs:
           echo "Choose collect_probe_only or selector_probe_only, not both" >&2
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate the published version before selecting its test recipes
+        shell: bash
+        run: '[[ "$LIST_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+      - name: Checkout the exact published version's oracle and fixtures
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.LIST_RELEASE }}
+          path: .release-oracle
+          persist-credentials: false
+      - name: Record product and oracle provenance separately from workflow infrastructure
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, subprocess
+          from pathlib import Path
+          tag=os.environ['LIST_RELEASE']
+          sha=subprocess.check_output(['git','-C','.release-oracle','rev-parse','HEAD'],text=True).strip()
+          tagged=subprocess.check_output(['git','-C','.release-oracle','rev-parse',f'refs/tags/{tag}^{{commit}}'],text=True).strip()
+          assert sha==tagged,'oracle HEAD must be the selected tag commit'
+          endpoint=f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/workflows/release-binaries.yml/runs?branch={tag}&status=success&event=push&per_page=100"
+          runs=json.loads(subprocess.check_output(['gh','api',endpoint],text=True))['workflow_runs']
+          builds=[r for r in runs if r['head_sha']==sha and r['head_branch']==tag and r['event']=='push' and r['conclusion']=='success']
+          assert builds,'selected oracle must match a successful tag release build'
+          build=max(builds,key=lambda r:r['id'])
+          proof={'release_tag':tag,'oracle_commit':sha,'verification_workflow_sha':os.environ['WORKFLOW_SHA'],'release_build_run':build['id'],'release_build_url':build['html_url'],'scope':'source identity bound to successful release build metadata; not reproducible-build attestation'}
+          (Path(os.environ['RUNNER_TEMP'])/'list-oracle-source.json').write_text(json.dumps(proof,indent=2)+'\n')
+          PYCODE
       - name: Ensure iOS 18.2 runtime
         timeout-minutes: 15
         run: bash scripts/ensure-simulator-runtime.sh com.apple.CoreSimulator.SimRuntime.iOS-18-2 18.2 "$RUNNER_TEMP/pinned-runtime-18.2"
       - name: Negative controls for the model oracle
-        run: python3 -I scripts/test-collect-simulator-verdict.py
+        run: python3 -I .release-oracle/scripts/test-collect-simulator-verdict.py
       - name: Selector oracle negative controls
-        run: python3 -I scripts/test-selector-simulator-verdict.py
+        run: python3 -I .release-oracle/scripts/test-selector-simulator-verdict.py
       - name: Download and check the exact published product
         shell: bash
         run: |
@@ -324,6 +355,14 @@ jobs:
           codesign --verify --deep --strict iPhoneUse.app
           python3 "$GITHUB_WORKSPACE/scripts/validate-stapled-artifact.py" iPhoneUse.app
           test "$(./iPhoneUse.app/Contents/MacOS/iphone-use --version)" = "iphone-use ${LIST_RELEASE#v}"
+          python3 - <<'PYCODE'
+          import hashlib,json,os
+          from pathlib import Path
+          path=Path(os.environ['RUNNER_TEMP'])/'list-oracle-source.json'
+          proof=json.loads(path.read_text())
+          proof['downloaded_payload_sha256']={name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in ['iPhoneUse.app.zip','iphone-use-runner.tar.gz']}
+          path.write_text(json.dumps(proof,indent=2)+'\n')
+          PYCODE
       - name: Build the published Native runner separately from startup
         run: |
           xcodebuild -project "$RUNNER_TEMP/list-release/runner/IPhoneUseRunner/IPhoneUseRunner.xcodeproj" \
@@ -334,8 +373,9 @@ jobs:
         timeout-minutes: 20
         run: |
           set -euo pipefail
+          test -s "$RUNNER_TEMP/list-oracle-source.json"
           recipe=$(python3 -c 'import os; from pathlib import Path; p=list((Path(os.environ["RUNNER_TEMP"])/"list-runner/Build/Products").glob("*.xctestrun")); assert len(p)==1,p; print(p[0])')
-          python3 scripts/run-collect-simulator.py \
+          python3 .release-oracle/scripts/run-collect-simulator.py \
             --probe "$ELEMENT_PROBE" \
             --daemon "$RUNNER_TEMP/list-release/iPhoneUse.app/Contents/MacOS/iphone-use" \
             --mcp "$RUNNER_TEMP/list-release/iPhoneUse.app/Contents/MacOS/iphone-use-mcp" \
@@ -348,8 +388,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: native-list-oracle
-          if-no-files-found: ignore
+          if-no-files-found: error
           path: |
+            ${{ runner.temp }}/list-oracle-source.json
             ${{ runner.temp }}/list-runner-build.log
             ${{ runner.temp }}/list-oracle-proof/*.json
             ${{ runner.temp }}/list-oracle-proof/*.log
