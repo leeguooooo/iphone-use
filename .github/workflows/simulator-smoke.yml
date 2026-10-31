@@ -72,6 +72,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Ensure iOS 18.2 runtime
+        timeout-minutes: 15
+        run: bash scripts/ensure-simulator-runtime.sh com.apple.CoreSimulator.SimRuntime.iOS-18-2 18.2 "$RUNNER_TEMP/pinned-runtime-18.2"
       - name: Verify Xcode and Simulator SDK
         run: |
           set -euo pipefail
@@ -96,16 +99,33 @@ jobs:
           set -euo pipefail
           xcodebuild -version
           xcrun simctl list runtimes
-          ./target/release/iphone-use simulators
-          ./target/release/iphone-use simulators --json > "$RUNNER_TEMP/simulators.json"
-          sim=$(python3 -c 'import json,sys; rows=json.load(open(sys.argv[1])); matches=[d["udid"] for d in rows if d.get("runtime_id")=="com.apple.CoreSimulator.SimRuntime.iOS-18-2" and d.get("name", "").startswith("iPhone")]; assert matches,"iPhone / iOS 18.2 unavailable"; print(matches[0])' "$RUNNER_TEMP/simulators.json")
+          name="ipu-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sim=$(xcrun simctl create "$name" com.apple.CoreSimulator.SimDeviceType.iPhone-15 com.apple.CoreSimulator.SimRuntime.iOS-18-2)
+          python3 -c 'import sys,uuid; uuid.UUID(sys.argv[1])' "$sim"
           echo "udid=$sim" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test
         timeout-minutes: 35
         env:
           SIM: ${{ steps.simulator_target.outputs.udid }}
         run: bash scripts/test-simulator-smoke.sh
+
+      - name: Delete only the owned smoke Simulator
+        if: ${{ always() && steps.simulator_target.outputs.udid != '' }}
+        env:
+          OWNED_SIM: ${{ steps.simulator_target.outputs.udid }}
+          OWNED_NAME: ${{ steps.simulator_target.outputs.name }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('scripts').resolve()))
+          spec=importlib.util.spec_from_file_location('cleanup', 'scripts/run-collect-simulator.py')
+          module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+          out=Path(os.environ['RUNNER_TEMP'])/'smoke-cleanup';out.mkdir(exist_ok=True)
+          module.cleanup_owned_simulator(os.environ['OWNED_SIM'],os.environ['OWNED_NAME'],dict(os.environ),out)
+          PY
 
       - name: Candidate selector oracle on iOS 18.2
         timeout-minutes: 15
@@ -231,28 +251,7 @@ jobs:
           SDKROOT=$(xcrun --sdk macosx --show-sdk-path) CARGO_BUILD_JOBS=2 cargo build --release --locked -p server -p iphone-use-mcp
       - name: Ensure the pinned Simulator runtime
         timeout-minutes: 15
-        env:
-          WANTED_RUNTIME: ${{ matrix.runtime }}
-          WANTED_IOS: ${{ matrix.ios }}
-        run: |
-          set -euo pipefail
-          runtime_ready() {
-            xcrun simctl list runtimes --json > "$RUNNER_TEMP/runtime-inventory.json" || return 1
-            python3 -c 'import json,os,sys; rows=json.load(open(sys.argv[1]))["runtimes"]; found=[r for r in rows if r.get("identifier")==os.environ["WANTED_RUNTIME"]]; sys.exit(2 if not found else 0 if len(found)==1 and found[0].get("isAvailable") is True else 1)' "$RUNNER_TEMP/runtime-inventory.json"
-          }
-          runtime_status=0
-          runtime_ready || runtime_status=$?
-          if [ "$runtime_status" = 2 ]; then
-            export_dir="$RUNNER_TEMP/pinned-runtime-${WANTED_IOS}"
-            mkdir -p "$export_dir"
-            xcodebuild -downloadPlatform iOS -buildVersion "$WANTED_IOS" -exportPath "$export_dir"
-            dmg=$(python3 -c 'import sys; from pathlib import Path; files=list(Path(sys.argv[1]).rglob("*.dmg")); assert len(files)==1,files; print(files[0])' "$export_dir")
-            xcodebuild -importPlatform "$dmg"
-          elif [ "$runtime_status" != 0 ]; then
-            echo "Simulator runtime inventory failed or the listed runtime is unavailable; refusing an inferred reinstall" >&2
-            exit "$runtime_status"
-          fi
-          runtime_ready
+        run: bash scripts/ensure-simulator-runtime.sh '${{ matrix.runtime }}' '${{ matrix.ios }}' "$RUNNER_TEMP/pinned-runtime-${{ matrix.ios }}"
       - name: Build isolated Runner
         run: |
           set -euo pipefail
@@ -288,7 +287,7 @@ jobs:
     if: ${{ inputs.collect_probe_only || inputs.selector_probe_only }}
     name: Native element oracle / released artifact
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
       LIST_RELEASE: ${{ inputs.collect_release_tag }}
@@ -301,6 +300,9 @@ jobs:
           echo "Choose collect_probe_only or selector_probe_only, not both" >&2
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Ensure iOS 18.2 runtime
+        timeout-minutes: 15
+        run: bash scripts/ensure-simulator-runtime.sh com.apple.CoreSimulator.SimRuntime.iOS-18-2 18.2 "$RUNNER_TEMP/pinned-runtime-18.2"
       - name: Negative controls for the model oracle
         run: python3 -I scripts/test-collect-simulator-verdict.py
       - name: Selector oracle negative controls
