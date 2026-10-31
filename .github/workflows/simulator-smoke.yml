@@ -237,14 +237,20 @@ jobs:
         run: |
           set -euo pipefail
           runtime_ready() {
-            xcrun simctl list runtimes --json | python3 -c 'import json,os,sys; rows=json.load(sys.stdin)["runtimes"]; sys.exit(0 if any(r.get("identifier")==os.environ["WANTED_RUNTIME"] and r.get("isAvailable") is True for r in rows) else 1)'
+            xcrun simctl list runtimes --json > "$RUNNER_TEMP/runtime-inventory.json" || return 1
+            python3 -c 'import json,os,sys; rows=json.load(open(sys.argv[1]))["runtimes"]; found=[r for r in rows if r.get("identifier")==os.environ["WANTED_RUNTIME"]]; sys.exit(2 if not found else 0 if len(found)==1 and found[0].get("isAvailable") is True else 1)' "$RUNNER_TEMP/runtime-inventory.json"
           }
-          if ! runtime_ready; then
+          runtime_status=0
+          runtime_ready || runtime_status=$?
+          if [ "$runtime_status" = 2 ]; then
             export_dir="$RUNNER_TEMP/pinned-runtime-${WANTED_IOS}"
             mkdir -p "$export_dir"
             xcodebuild -downloadPlatform iOS -buildVersion "$WANTED_IOS" -exportPath "$export_dir"
             dmg=$(python3 -c 'import sys; from pathlib import Path; files=list(Path(sys.argv[1]).rglob("*.dmg")); assert len(files)==1,files; print(files[0])' "$export_dir")
             xcodebuild -importPlatform "$dmg"
+          elif [ "$runtime_status" != 0 ]; then
+            echo "Simulator runtime inventory failed or the listed runtime is unavailable; refusing an inferred reinstall" >&2
+            exit "$runtime_status"
           fi
           runtime_ready
       - name: Build isolated Runner
