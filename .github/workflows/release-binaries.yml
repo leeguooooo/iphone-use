@@ -60,6 +60,7 @@ jobs:
           python3 -I scripts/test-agent-selector-oracle.py
           python3 -I scripts/test-simulator-cleanup.py
           python3 -I scripts/test-probe-recipe.py
+          python3 -I scripts/test-element-oracle-command.py
 
           skill_file_count="$(
             find skills/iphone-use -type f -print | wc -l | tr -d '[:space:]'

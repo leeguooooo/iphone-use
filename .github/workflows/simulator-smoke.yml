@@ -393,8 +393,8 @@ jobs:
           set -euo pipefail
           test -s "$RUNNER_TEMP/list-oracle-source.json"
           oracle_sha=$(python3 -c 'import json,os; from pathlib import Path; print(json.loads((Path(os.environ["RUNNER_TEMP"])/"list-oracle-source.json").read_text())["oracle_commit"])')
-          preparation=()
-          if [ "$PREPARE_ELEMENT_UI" = true ]; then preparation+=(--prepare-ui); fi
+          oracle_args=(--oracle-root "$GITHUB_WORKSPACE/.release-oracle" --oracle-commit "$oracle_sha")
+          if [ "$PREPARE_ELEMENT_UI" = true ]; then oracle_args+=(--prepare-ui); fi
           recipe=$(python3 -c 'import os; from pathlib import Path; p=list((Path(os.environ["RUNNER_TEMP"])/"list-runner/Build/Products").glob("*.xctestrun")); assert len(p)==1,p; print(p[0])')
           python3 scripts/run-collect-simulator.py \
             --probe "$ELEMENT_PROBE" \
@@ -402,7 +402,7 @@ jobs:
             --mcp "$RUNNER_TEMP/list-release/iPhoneUse.app/Contents/MacOS/iphone-use-mcp" \
             --runner-source "$RUNNER_TEMP/list-release/runner" \
             --xctestrun "$recipe" \
-            --oracle-root "$GITHUB_WORKSPACE/.release-oracle" --oracle-commit "$oracle_sha" "${preparation[@]}" \
+            "${oracle_args[@]}" \
             --runtime "$ELEMENT_RUNTIME" \
             --out "$RUNNER_TEMP/list-oracle-proof"
       - name: Preserve independent models, Native results and cleanup evidence
