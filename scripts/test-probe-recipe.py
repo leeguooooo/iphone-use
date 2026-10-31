@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Version-specific oracle recipes must never fall back to moving main."""
 import importlib.util
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -14,6 +15,15 @@ spec.loader.exec_module(collector)
 
 
 class Recipe(unittest.TestCase):
+    def test_outer_start_budget_covers_the_prebuilt_clis_bounded_phases(self):
+        source=(HERE.parent/'crates/server/src/simulator.rs').read_text()
+        boot=re.search(r'const BOOT_TIMEOUT: Duration = Duration::from_secs\((\d+)\)',source)
+        self.assertIsNotNone(boot,'inspect the CLI boot budget before changing the outer deadline')
+        start=source.split('fn start(',1)[1].split('\npub fn',1)[0]
+        readiness=[int(value) for value in re.findall(r'started\.elapsed\(\)\s*>\s*Duration::from_secs\((\d+)\)',start)]
+        self.assertEqual(len(readiness),2,'inspect changed runner/daemon readiness phases')
+        self.assertGreaterEqual(collector.SIMULATOR_START_TIMEOUT,int(boot[1])+sum(readiness)+120)
+
     def fixture(self, root, recipe):
         scripts = root / 'scripts'
         scripts.mkdir()

@@ -15,6 +15,9 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Prebuilt CLI: boot240s + runner600s + daemon60s +120s setup/metadata.
+# Do not terminate it before its own bounded phases can finish.
+SIMULATOR_START_TIMEOUT = 1020
 PROBES = {
     'list': ('test-collect-simulator.py', 4),
     'selector': ('test-selector-simulator.py', 16),
@@ -180,7 +183,8 @@ def main():
               'instance': instance, 'daemon_sha256': hashlib.sha256(daemon.read_bytes()).hexdigest(),
               'mcp_sha256': hashlib.sha256(mcp.read_bytes()).hexdigest(),
               'version': command([daemon, '--version'], env=env),
-              'xcode': command(['xcodebuild', '-version'], env=env), 'cleanup_errors': []}
+              'xcode': command(['xcodebuild', '-version'], env=env), 'cleanup_errors': [],
+              'startup_command_budget_secs': SIMULATOR_START_TIMEOUT}
     match = re.fullmatch(r'iphone-use (\d+\.\d+\.\d+)', result['version'])
     assert match, 'unknown product version'
     result['oracle_source'] = {'root': str(oracle_root), 'script': str(test_script.relative_to(oracle_root)),
@@ -212,7 +216,7 @@ def main():
             result['startup_context'] = 'warm, after independently confirmed ordinary UIKit window; not cold-start acceptance'
         start = [daemon, 'simulator', 'start', simulator, '--instance', instance]
         start += ['--xctestrun', args.xctestrun.resolve(strict=True)]
-        logged(start, args.out / 'simulator-start.log', env, 360)
+        logged(start, args.out / 'simulator-start.log', env, SIMULATOR_START_TIMEOUT)
         record = state / 'simulator.json'
         binding = json.loads(record.read_text())
         assert binding['udid'].lower() == simulator.lower()
