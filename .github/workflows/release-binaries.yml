@@ -56,6 +56,7 @@ jobs:
           python3 -I scripts/test-agent-bench.py
           python3 -I scripts/test-agent-bench-runtime.py
           python3 -I scripts/test-agent-bench-policy.py
+          python3 -I scripts/test-agent-selector-oracle.py
 
           skill_file_count="$(
             find skills/iphone-use -type f -print | wc -l | tr -d '[:space:]'

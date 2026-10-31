@@ -255,3 +255,30 @@ performance advantage.
 The supervisor keeps its group identifier reserved until cleanup, including
 when the agent exits normally. Descendants that deliberately create a new
 session escape this group; the driver does not claim to stop those processes.
+
+## Blind selector task fixture
+
+`selector_oracle.py` constructs eight rows with the same neutral label and
+random opaque identifiers and order. It distinguishes one StaticText with an
+explicitly empty raw value from absent/whitespace values and Button decoys.
+Keep each private seed, case file and App-held oracle out of agent prompts and
+file tools. A pair shares rows, while each launch has its own run ID and case
+digest. The task prompt contains no target identifier or position.
+
+The App writes actual UIKit properties. Task verification checks the case,
+run ID, process identity, live foreground identity before and after, delivered
+window input events, cumulative foreground loss, a strict JSON answer and a
+correlated successful read returning the target identifier. Input detection
+covers touch/press events delivered to the fixture, not system-wide input.
+State-write failure invalidates the fixture; a stale clean file cannot replace
+the required live foreground/PID check. Only MCP envelopes and actual top-level
+element/node collections qualify as reads; echoed selectors do not.
+
+The owned Simulator wrapper accepts `--probe agent-selector` with the same
+explicit binaries, Runner source/recipe and runtime arguments as `--probe
+selector`. It installs a new disposable fixture and verifies seven scenarios:
+clean reads, static/disabled/blank taps, swipe, background/return and a failed
+state write. These deliberately injected inputs test the oracle; they are not
+agent runs and do not establish a competitor or performance advantage.
+`python3 -I scripts/test-agent-selector-oracle.py` exercises offline refusal
+cases without starting a model or target.

@@ -14,6 +14,11 @@ import uuid
 from mcp_probe_peer import stop
 
 ROOT = Path(__file__).resolve().parents[1]
+PROBES = {
+    'list': ('test-collect-simulator.py', 4),
+    'selector': ('test-selector-simulator.py', 11),
+    'agent-selector': ('test-agent-selector-simulator.py', 7),
+}
 
 
 def command(argv, *, env=None, timeout=120):
@@ -40,7 +45,7 @@ def main():
     for name in ('daemon', 'mcp', 'runner-source', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--runtime', required=True)
-    parser.add_argument('--probe', choices=('list','selector'), default='list')
+    parser.add_argument('--probe', choices=tuple(PROBES), default='list')
     parser.add_argument('--xctestrun', type=Path, required=True)
     args = parser.parse_args()
     daemon, mcp, runner = (path.resolve(strict=True) for path in (args.daemon, args.mcp, args.runner_source))
@@ -89,16 +94,16 @@ def main():
                 break
             assert time.monotonic() < until, 'Simulator Agent API did not become drivable'
             time.sleep(2)
-        groups = [('conformance', [], 'cases')] if args.probe == 'selector' else [
+        groups = [('conformance', [], 'cases')] if args.probe != 'list' else [
             ('conformance', [], 'cases'), ('default-conformance', ['--without-end-label'], 'default_cases')]
-        test_script = 'test-selector-simulator.py' if args.probe == 'selector' else 'test-collect-simulator.py'
+        test_script, expected_cases = PROBES[args.probe]
         for folder, flags, field in groups:
             logged(['python3', ROOT / 'scripts' / test_script, '--base', f"http://127.0.0.1:{binding['daemon_port']}",
                     '--udid', simulator, '--owner', instance, '--mcp', mcp, '--runner-record', record,
                     '--product-version', match[1], '--out', args.out / folder, *flags],
                    args.out / (folder + '.log'), env, 720)
             proof = json.loads((args.out / folder / 'result.json').read_text())
-            assert proof['passed'] is True and not proof['cleanup_errors'] and len(proof['cases']) == (11 if args.probe == 'selector' else 4)
+            assert proof['passed'] is True and not proof['cleanup_errors'] and len(proof['cases']) == expected_cases, f'{args.probe}: expected {expected_cases} passing cases and clean teardown'
             result[field] = proof['cases']
         result['passed'] = True
     except Exception as error:

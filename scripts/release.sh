@@ -58,6 +58,7 @@ t python3 scripts/test-auto-update.py
 t python3 -I scripts/test-agent-bench.py
 t python3 -I scripts/test-agent-bench-runtime.py
 t python3 -I scripts/test-agent-bench-policy.py
+t python3 -I scripts/test-agent-selector-oracle.py
 echo "checks passed"
 
 if [ "$DRY" = 1 ]; then
