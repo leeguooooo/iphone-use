@@ -1,0 +1,116 @@
+name: Candidate Native App oracle
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        type: choice
+        default: selector
+        options: [selector, agent-selector, list]
+      platform:
+        type: choice
+        default: xcode16.4-ios18.5
+        options: [xcode16.2-ios18.2, xcode16.4-ios18.5]
+      prepare_ui:
+        description: Explicit warm UIKit preparation; false retains cold startup
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-native-${{ github.repository }}-${{ github.ref }}-${{ inputs.probe }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 105
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: always
+      DEVELOPER_DIR: ${{ inputs.platform == 'xcode16.4-ios18.5' && '/Applications/Xcode_16.4.app/Contents/Developer' || '/Applications/Xcode_16.2.app/Contents/Developer' }}
+      ORACLE_RUNTIME: ${{ inputs.platform == 'xcode16.4-ios18.5' && 'com.apple.CoreSimulator.SimRuntime.iOS-18-5' || 'com.apple.CoreSimulator.SimRuntime.iOS-18-2' }}
+      ORACLE_IOS: ${{ inputs.platform == 'xcode16.4-ios18.5' && '18.5' || '18.2' }}
+      IPU_DIAGNOSTIC_PLATFORM: ${{ inputs.platform }}
+      ORACLE_PROBE: ${{ inputs.probe }}
+      PREPARE_UI: ${{ inputs.prepare_ui }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate explicit candidate context
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.2-ios18.2 || "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.4-ios18.5 ]]
+          [[ "$ORACLE_PROBE" == selector || "$ORACLE_PROBE" == agent-selector || "$ORACLE_PROBE" == list ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = "$ORACLE_IOS"
+          python3 -I scripts/test-probe-recipe.py
+          python3 -I scripts/test-selector-simulator-verdict.py
+          python3 -I scripts/test-collect-simulator-verdict.py
+      - name: Prepare selected runtime
+        timeout-minutes: 15
+        run: bash scripts/ensure-simulator-runtime.sh "$ORACLE_RUNTIME" "$ORACLE_IOS" "$RUNNER_TEMP/candidate-runtime"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Build candidate daemon and MCP
+        run: cargo build --release --locked -p server -p iphone-use-mcp
+      - name: Bind binaries to candidate source
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,subprocess,tomllib
+          from pathlib import Path
+          version=tomllib.loads(Path('crates/server/Cargo.toml').read_text())['package']['version']
+          assert subprocess.check_output(['target/release/iphone-use','--version'],text=True).strip()=='iphone-use '+version
+          proof={'source_commit':os.environ['GITHUB_SHA'],'version':version,'probe':os.environ['ORACLE_PROBE'],'runtime':os.environ['ORACLE_RUNTIME'],'warm_ui_requested':os.environ['PREPARE_UI']=='true','scope':'source-built release-profile candidate;not a published signed artifact or physical proof'}
+          proof['binaries']={name:hashlib.sha256((Path('target/release')/name).read_bytes()).hexdigest() for name in ['iphone-use','iphone-use-mcp']}
+          (Path(os.environ['RUNNER_TEMP'])/'candidate-source.json').write_text(json.dumps(proof,indent=2)+'\n')
+          PY
+      - name: Build candidate Native Runner
+        env:
+          IPU_RUNNER_DERIVED_DATA: ${{ runner.temp }}/candidate-runner
+        run: bash runner/build.sh --simulator > "$RUNNER_TEMP/candidate-runner-build.log" 2>&1
+      - name: Run exact-source App oracle on a new owned Simulator
+        timeout-minutes: 75
+        shell: bash
+        run: |
+          set -euo pipefail
+          recipe=$(python3 -c 'import os; from pathlib import Path; p=list((Path(os.environ["RUNNER_TEMP"])/"candidate-runner/Build/Products").glob("*.xctestrun")); assert len(p)==1,p; print(p[0])')
+          oracle_args=(--oracle-root "$GITHUB_WORKSPACE" --oracle-commit "$GITHUB_SHA")
+          if [ "$PREPARE_UI" = true ]; then oracle_args+=(--prepare-ui); fi
+          python3 scripts/run-collect-simulator.py \
+            --probe "$ORACLE_PROBE" \
+            --daemon "$GITHUB_WORKSPACE/target/release/iphone-use" \
+            --mcp "$GITHUB_WORKSPACE/target/release/iphone-use-mcp" \
+            --runner-source "$GITHUB_WORKSPACE/runner" \
+            --xctestrun "$recipe" "${oracle_args[@]}" \
+            --runtime "$ORACLE_RUNTIME" --out "$RUNNER_TEMP/candidate-element-proof"
+      - name: Preserve candidate proof and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: candidate-native-oracle
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/candidate-source.json
+            ${{ runner.temp }}/candidate-runner-build.log
+            ${{ runner.temp }}/candidate-element-proof/*.json
+            ${{ runner.temp }}/candidate-element-proof/*.log
+            ${{ runner.temp }}/candidate-element-proof/platform-warmup/*.json
+            ${{ runner.temp }}/candidate-element-proof/platform-warmup/*.log
+            ${{ runner.temp }}/candidate-element-proof/platform-warmup/ordinary-app-build/fixture-build.log
+            ${{ runner.temp }}/candidate-element-proof/conformance/*.json
+            ${{ runner.temp }}/candidate-element-proof/conformance/*.log
+            ${{ runner.temp }}/candidate-element-proof/conformance/*.jsonl
+            ${{ runner.temp }}/candidate-element-proof/conformance/*/*.json
+            ${{ runner.temp }}/candidate-element-proof/conformance/failure-ui.png
+            ${{ runner.temp }}/candidate-element-proof/default-conformance/*.json
+            ${{ runner.temp }}/candidate-element-proof/default-conformance/*.log
+            ${{ runner.temp }}/candidate-element-proof/default-conformance/*.jsonl
+            ${{ runner.temp }}/candidate-element-proof/default-conformance/*/*.json
+            ${{ runner.temp }}/candidate-element-proof/default-conformance/failure-ui.png
