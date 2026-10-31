@@ -3,6 +3,15 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A literal filter over exposed snapshot metadata.
+///
+/// ```
+/// let selector: core::element_selector::ElementSelector =
+///     serde_json::from_str(r#"{"value_present": true}"#).unwrap();
+/// let row = serde_json::from_str(r#"{"kind":"TextField","value":""}"#).unwrap();
+/// assert!(selector.validate().is_ok());
+/// assert!(selector.matches(&row));
+/// ```
 #[derive(Debug, Clone, Default, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -23,6 +32,11 @@ pub struct ElementSelector {
     /// An empty string matches a present empty value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// Whether the snapshot supplies a string value, including empty or truncated
+    /// strings. False matches an omitted/null non-secure snapshot value, not an App's
+    /// null AX value. Protected SecureTextField rows match neither boolean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_present: Option<bool>,
     /// Exact enabled state. A missing state never matches either boolean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -46,6 +60,7 @@ impl<'de> Deserialize<'de> for ElementSelector {
                     "label",
                     "label_contains",
                     "value",
+                    "value_present",
                     "enabled",
                 ];
                 let mut fields = serde_json::Map::new();
@@ -72,6 +87,7 @@ impl<'de> Deserialize<'de> for ElementSelector {
                     label: take(&mut fields, "label")?,
                     label_contains: take(&mut fields, "label_contains")?,
                     value: take(&mut fields, "value")?,
+                    value_present: take(&mut fields, "value_present")?,
                     enabled: take(&mut fields, "enabled")?,
                 })
             }
@@ -87,9 +103,13 @@ impl ElementSelector {
             && self.label.is_none()
             && self.label_contains.is_none()
             && self.value.is_none()
+            && self.value_present.is_none()
             && self.enabled.is_none()
         {
-            return Err("selector needs at least one field: kind, identifier, label, label_contains, value or enabled");
+            return Err("selector needs at least one field: kind, identifier, label, label_contains, value, value_present or enabled");
+        }
+        if self.value.is_some() && self.value_present == Some(false) {
+            return Err("value cannot be combined with value_present:false");
         }
         for text in [
             &self.kind,
@@ -130,6 +150,17 @@ impl ElementSelector {
         ) && exact("identifier", self.identifier.as_deref())
             && exact("label", self.label.as_deref())
             && exact("value", self.value.as_deref())
+            && (self.value_present.is_none() || row.get("kind").and_then(Value::as_str)
+                .is_none_or(|kind| kind.trim_start_matches("XCUIElementType") != "SecureTextField"))
+            && self.value_present.is_none_or(|expected| {
+                if row.get("snapshot_value_unavailable").is_some_and(|flag| flag != &Value::Bool(false)) { return false; }
+                match row.get("value") {
+                    Some(Value::String(_)) => expected,
+                    None | Some(Value::Null) => !expected
+                        && row.get("value_truncated").and_then(Value::as_bool) != Some(true),
+                    _ => false,
+                }
+            })
             && (self.value.is_none()
                 || row.get("value_truncated").and_then(Value::as_bool) != Some(true))
             && self.label_contains.as_deref().is_none_or(|text| {
@@ -189,6 +220,28 @@ mod tests {
         let selector: ElementSelector = serde_json::from_value(json!({"value":"prefix"})).unwrap();
         assert!(!selector.matches(&json!({"value":"prefix","value_truncated":true})));
         assert!(selector.matches(&json!({"value":"prefix","value_truncated":false})));
+    }
+
+    #[test]
+    fn snapshot_value_presence_is_distinct_from_empty_content_and_complete_ax_null() {
+        let present:ElementSelector=serde_json::from_value(json!({"value_present":true})).unwrap();
+        let absent:ElementSelector=serde_json::from_value(json!({"value_present":false})).unwrap();
+        assert!(present.validate().is_ok());assert!(absent.validate().is_ok());
+        for row in [json!({"value":""}),json!({"value":"text"}),json!({"value":"prefix","value_truncated":true})] {
+            assert!(present.matches(&row));assert!(!absent.matches(&row));
+        }
+        // These are snapshot representation facts, not proof of an App's null value.
+        for row in [json!({}),json!({"value":null})] {
+            assert!(absent.matches(&row));assert!(!present.matches(&row));
+        }
+        for row in [json!({"value":false}),json!({"value":12}),json!({"value":{}}),json!({"snapshot_value_unavailable":true}),json!({"snapshot_value_unavailable":"true"}),json!({"value_truncated":true}),json!({"value":null,"value_truncated":true})] {
+            assert!(!present.matches(&row));assert!(!absent.matches(&row));
+        }
+        for row in [json!({"kind":"SecureTextField"}),json!({"kind":"SecureTextField","value":""}),json!({"kind":"SecureTextField","value":"••••"})] {
+            assert!(!present.matches(&row));assert!(!absent.matches(&row));
+        }
+        let contradictory:ElementSelector=serde_json::from_value(json!({"value":"","value_present":false})).unwrap();
+        assert!(contradictory.validate().is_err());
     }
 
     #[test]

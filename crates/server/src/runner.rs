@@ -2951,6 +2951,9 @@ pub struct ElementRow {
     /// switches / sliders drivable without vision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// Raw provider value could not be normalized to a supported scalar. Internal
+    /// only: query projection must not turn this into known value absence.
+    pub value_unavailable: bool,
     /// Provider explicitly reported a truncated snapshot value; absence is not proof of completeness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_truncated: Option<bool>,
@@ -3310,6 +3313,8 @@ fn flatten_node(
         // Current value/state (issue #20). runner reports `value` as a string
         // ("1"/"0" for a Switch), a number (Slider fraction), or a bool —
         // preserve known strings (including empty) internally; the wire stays sparse.
+        let value_unavailable = node.get("value").is_some_and(|value|
+            matches!(value, serde_json::Value::Array(_) | serde_json::Value::Object(_)));
         let value = node.get("value").and_then(|v| match v {
             serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Number(n) => Some(n.to_string()),
@@ -3368,6 +3373,7 @@ fn flatten_node(
             depth,
             value_truncated,
             value,
+            value_unavailable,
             enabled,
             visible,
             accessible,

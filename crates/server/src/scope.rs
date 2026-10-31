@@ -159,7 +159,7 @@ pub fn parse_selector(raw: Option<&str>) -> Result<Option<core::element_selector
         return Err(json!({"ok":false,"error":"invalid_selector","hint":"selector JSON is at most 16 KiB"}));
     }
     let selector: core::element_selector::ElementSelector = serde_json::from_str(raw)
-        .map_err(|_| json!({"ok":false,"error":"invalid_selector","hint":"selector must be a JSON object containing kind, identifier, label, label_contains, value or boolean enabled"}))?;
+        .map_err(|_| json!({"ok":false,"error":"invalid_selector","hint":"selector must be a JSON object containing kind, identifier, label, label_contains, value, boolean value_present or enabled"}))?;
     selector.validate().map_err(|hint| json!({"ok":false,"error":"invalid_selector","hint":hint}))?;
     Ok(Some(selector))
 }

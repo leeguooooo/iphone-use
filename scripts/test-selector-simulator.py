@@ -26,6 +26,11 @@ CASES=[
  ('query-and-selector',{'selector':{'kind':'Button','enabled':False},'query':'SAVE'},['selector.disabled'],1),
  ('missing-identifier',{'selector':{'identifier':'selector.absent'}},[],0),
  ('missing-is-not-empty',{'selector':{'identifier':'selector.missing-value','value':''}},[],0),
+ ('present-empty',{'selector':{'identifier':'selector.empty','value_present':True}},['selector.empty'],1),
+ ('snapshot-value-unprovided',{'selector':{'identifier':'selector.missing-value','value_present':False}},['selector.missing-value'],1),
+ ('provided-empty-is-not-unprovided',{'selector':{'identifier':'selector.empty','value_present':False}},[],0),
+ ('buttons-with-values',{'selector':{'kind':'Button','value_present':True}},['selector.primary'],1),
+ ('buttons-without-exposed-values',{'selector':{'kind':'Button','value_present':False}},['selector.secondary','selector.disabled','selector.unicode'],3),
 ]
 
 def verify_case(model,seed,before,after,body,expected,matched,arguments=None):
@@ -55,6 +60,12 @@ def verify_case(model,seed,before,after,body,expected,matched,arguments=None):
     if (row.get(field) is not expected_value if field=='enabled' else row.get(field)!=expected_value):errors.append('requested '+field+' differs from App model')
     if (row.get(field) is not selector[field] if field=='enabled' else row.get(field)!=selector[field]):errors.append('requested '+field+' not preserved')
   if 'value' in selector and row.get('value_truncated') is True:errors.append('truncated preview matched an exact value')
+  if 'value_present' in selector:
+   wanted=selector['value_present']
+   provided=isinstance(row.get('value'),str)
+   model_provided=isinstance(declared.get(row.get('identifier'),{}).get('value'),str)
+   if row.get('value') is not None and not provided:errors.append('snapshot value has an invalid type')
+   if provided is not wanted or model_provided is not wanted:errors.append('snapshot value presence differs from requested model')
  if not body.get('snapshot') or body.get('snapshot')!=seed.get('snapshot'):errors.append('filtered snapshot differs from full static seed')
  return errors
 

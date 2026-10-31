@@ -1045,6 +1045,19 @@ Fields combine with AND: exact `kind`, `identifier`, `label`, `value`, boolean
 and newlines; an empty `value` matches a present empty value, not a missing one.
 Known truncated value previews cannot match an exact value filter; use
 `phone_read_value` to inspect bounded full values.
+From v0.27.22, `value_present:true` matches exposed snapshot strings, including
+empty strings and truncated previews. `false` matches an unprovided snapshot
+value (omitted or null on non-secure rows), not proof that an App's full AX value
+is null. Protected `SecureTextField` rows match neither boolean; their redaction
+must not be classified as either a real value or an empty field.
+This predicate uses the provider snapshot; ordinary compact output can omit an
+empty string. Filtering restores that known empty metadata. A malformed non-string
+snapshot value matches neither boolean. Provider numbers and booleans retain the
+existing normalization to strings; object/array normalization failures remain
+unknown rather than becoming absent. A truncated-value marker without any value
+also stays unknown and matches neither boolean. Combining `value_present:false` with an
+exact `value` is invalid. For example, `{"kind":"Button","value_present":false}`
+finds buttons without an exposed snapshot value in one read.
 Known enabled state and explicit empty values are included when those fields
 are filtered; redacted secure values are never treated as empty. Ordinary reads
 keep the compact representation. Unknown enabled state matches neither true nor false. The optional

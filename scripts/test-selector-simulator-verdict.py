@@ -37,4 +37,14 @@ class Verdict(unittest.TestCase):
    elif fault=='missing-seed-control':v[1]['elements'].pop()
    else:row['value_truncated']=True
    with self.subTest(fault=fault):self.assertTrue(probe.verify_case(*v))
+ def test_value_presence_evidence_rejects_missing_or_malformed_values(self):
+  good=sample();good[7]={'selector':{'value_present':True}}
+  self.assertEqual(probe.verify_case(*good),[])
+  for value in [None,False,13,{},'missing-key']:
+   v=copy.deepcopy(good)
+   if value=='missing-key':v[4]['elements'][0].pop('value')
+   else:v[4]['elements'][0]['value']=value
+   with self.subTest(value=value):self.assertTrue(probe.verify_case(*v))
+  wrong_request=sample();wrong_request[7]={'selector':{'value_present':False}}
+  self.assertTrue(probe.verify_case(*wrong_request))
 if __name__=='__main__':unittest.main()

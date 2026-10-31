@@ -6851,6 +6851,7 @@ fn diff_element_rows(
     let sparse = |rows: &[crate::runner::ElementRow]| rows.iter().cloned().map(|mut row| {
         row.enabled = row.enabled.filter(|enabled| !enabled);
         row.value = row.value.filter(|value| !value.is_empty());
+        row.value_unavailable = false;
         row
     }).collect::<Vec<_>>();
     let baseline = sparse(baseline);
@@ -16620,7 +16621,7 @@ async fn agent_elements_inner(
     // Restore only the metadata the selector requests; ordinary reads stay
     // sparse. Unknown and redacted secure values never become empty values.
     let include_enabled = selector.and_then(|selector| selector.enabled).is_some();
-    let include_value = selector.is_some_and(|selector| selector.value.is_some());
+    let include_value = selector.is_some_and(|selector| selector.value.is_some() || selector.value_present.is_some());
     if include_enabled || include_value {
         if let Some(elements) = body.get_mut("elements").and_then(|value| value.as_array_mut()) {
             for (element, row) in elements.iter_mut().zip(rows.iter()) {
@@ -16629,6 +16630,11 @@ async fn agent_elements_inner(
                 }
                 if include_value {
                     if let Some(value) = &row.value { element["value"] = serde_json::json!(value); }
+                    if selector.is_some_and(|selector| selector.value_present.is_some()) && row.value_unavailable {
+                        // Retain normalization failure until matching; otherwise
+                        // an unsupported raw value would look like known absence.
+                        element["snapshot_value_unavailable"] = true.into();
+                    }
                 }
             }
         }
@@ -27857,7 +27863,12 @@ mod tests {
                         {"type":"XCUIElementTypeTextField","rawIdentifier":"empty","label":"Empty","value":"","rect":{"x":0,"y":60,"width":100,"height":40}},
                         {"type":"XCUIElementTypeTextField","rawIdentifier":"missing","label":"Missing","rect":{"x":0,"y":120,"width":100,"height":40}},
                         {"type":"XCUIElementTypeSecureTextField","rawIdentifier":"secure-empty","label":"Secure","value":"","rect":{"x":0,"y":180,"width":100,"height":40}},
-                        {"type":"XCUIElementTypeSecureTextField","rawIdentifier":"secret","label":"Password","value":"synthetic-secret","rect":{"x":0,"y":240,"width":100,"height":40}}
+                        {"type":"XCUIElementTypeSecureTextField","rawIdentifier":"secret","label":"Password","value":"synthetic-secret","rect":{"x":0,"y":240,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"bad-object","label":"Bad object","value":{},"rect":{"x":0,"y":300,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"bad-array","label":"Bad array","value":[],"rect":{"x":0,"y":360,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"number","label":"Number","value":0,"rect":{"x":0,"y":420,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"boolean","label":"Boolean","value":false,"rect":{"x":0,"y":480,"width":100,"height":40}},
+                        {"type":"XCUIElementTypeTextField","rawIdentifier":"null","label":"Null","value":null,"rect":{"x":0,"y":540,"width":100,"height":40}}
                     ]}}).to_string()
                 } else if request.contains("/window/size") {
                     r#"{"value":{"width":390,"height":844}}"#.into()
@@ -27881,6 +27892,25 @@ mod tests {
             let ordinary=serde_json::to_value(&*rows).unwrap();
             assert!(ordinary[1].get("value").is_none());
             assert!(!ordinary.to_string().contains("synthetic-secret"));
+            for (selector, expected_indexes) in [
+                (serde_json::json!({"kind":"TextField","value_present":true}),vec![1,7,8]),
+                (serde_json::json!({"kind":"TextField","value_present":false}),vec![2,9]),
+                (serde_json::json!({"kind":"SecureTextField","value_present":true}),vec![]),
+                (serde_json::json!({"kind":"SecureTextField","value_present":false}),vec![]),
+            ] {
+                let mut url=reqwest::Url::parse("http://daemon/agent/elements").unwrap();
+                url.query_pairs_mut().append_pair("selector",&selector.to_string()).append_pair("ocr","off");
+                let response=router(state.clone()).oneshot(axum::http::Request::builder()
+                    .uri(format!("{}?{}",url.path(),url.query().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
+                assert_eq!(response.status(),StatusCode::OK);
+                let bytes=axum::body::to_bytes(response.into_body(),1<<20).await.unwrap();
+                let body:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+                let indexes=body["elements"].as_array().unwrap().iter().map(|row|row["index"].as_u64().unwrap()).collect::<Vec<_>>();
+                assert_eq!(indexes,expected_indexes,"{selector}: {body}");
+                assert_eq!(body["filter"]["selector"],selector);
+                assert_eq!(lookup_element_snapshot(&state,body["snapshot"].as_str().unwrap()).unwrap().len(),10);
+                assert!(!body.to_string().contains("synthetic-secret"));
+            }
             runner.shutdown();
         });
     }
@@ -27894,7 +27924,10 @@ mod tests {
                 (r#"["Button",null,null,null,null,null]"#,false,"invalid_selector"),
                 (r#"["Button"]"#,false,"invalid_selector"),
                 (r#"{"predicate":"TRUEPREDICATE"}"#,false,"invalid_selector"),
+                (r#"{"value":"","value_present":false}"#,false,"invalid_selector"),
+                (r#"{"value_present":"false"}"#,false,"invalid_selector"),
                 (r#"{"enabled":true}"#,true,"selector_needs_full_read"),
+                (r#"{"value_present":false}"#,true,"selector_needs_full_read"),
             ] {
                 let mut uri=reqwest::Url::parse("http://daemon/agent/elements").unwrap();
                 uri.query_pairs_mut().append_pair("selector",selector);

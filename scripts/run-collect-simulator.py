@@ -16,7 +16,7 @@ from mcp_probe_peer import stop
 ROOT = Path(__file__).resolve().parents[1]
 PROBES = {
     'list': ('test-collect-simulator.py', 4),
-    'selector': ('test-selector-simulator.py', 11),
+    'selector': ('test-selector-simulator.py', 16),
     'agent-selector': ('test-agent-selector-simulator.py', 7),
 }
 

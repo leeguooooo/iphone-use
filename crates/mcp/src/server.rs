@@ -1719,7 +1719,8 @@ impl PhoneHandler {
         `snapshot` token for phone_tap_element; indexes and snapshot tokens are valid for this read \
         only. `query` keeps only rows containing that text (label, identifier, value, placeholder) \
         and `limit` caps the rows. `selector` ANDs exact kind/identifier/label/value/enabled \
-        fields and case-sensitive label_contains; it filters AX rows, not OCR. Queries preserve \
+        fields and case-sensitive label_contains; value_present checks whether the snapshot supplies a string value \
+        (including empty/truncated); false means omitted/null on non-secure rows, not a complete AX null; protected SecureTextField rows match neither boolean. It filters AX rows, not OCR. Queries preserve \
         each row's index and the snapshot, so taps still \
         work. Screen text shows at most 200 rows and 32 KiB of row text; an omission notice \
         means a partial view, not absence or list completion. Narrow with query when needed. \
@@ -6108,7 +6109,7 @@ mod tests {
     #[test]
     fn element_selector_is_encoded_literally_and_preserves_snapshot_indexes() {
         let selector: iu_core::element_selector::ElementSelector = serde_json::from_value(
-            serde_json::json!({"kind":"Button", "identifier":"save.primary", "label":"保存\n'O\\K'", "enabled":false})
+            serde_json::json!({"kind":"Button", "identifier":"save.primary", "label":"保存\n'O\\K'", "enabled":false,"value_present":false})
         ).unwrap();
         let expected = serde_json::to_value(&selector).unwrap();
         let body=serde_json::json!({"snapshot":"S", "elements":[
@@ -6143,6 +6144,8 @@ mod tests {
         assert_eq!(object["type"],"object");
         assert_eq!(object["additionalProperties"],false);
         assert!(object["properties"]["enabled"].to_string().contains("boolean"));
+        assert!(object["properties"]["value_present"].to_string().contains("boolean"));
+        assert_eq!(object["properties"].as_object().unwrap().len(),7);
         assert!(object["properties"].get("predicate").is_none());
     }
 

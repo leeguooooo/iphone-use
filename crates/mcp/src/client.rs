@@ -1342,11 +1342,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn selector_reply_must_acknowledge_the_requested_filter_before_caching() {
         let selector: iu_core::element_selector::ElementSelector = serde_json::from_value(
-            serde_json::json!({"identifier":"primary"})
+            serde_json::json!({"identifier":"primary","value_present":false})
         ).unwrap();
         for body in [
             serde_json::json!({"snapshot":"unfiltered","elements":[{"label":"UNRELATED_SCREEN"}]}),
             serde_json::json!({"snapshot":"wrong-filter","elements":[],"filter":{"selector":{"identifier":"other"}}}),
+            serde_json::json!({"snapshot":"partial-ack","elements":[],"filter":{"selector":{"identifier":"primary"}}}),
             serde_json::json!({"snapshot":"legacy-query-only","elements":[],"filter":{"query":"primary"}}),
         ] {
             let (url,task)=mock_daemon("200 OK",&body.to_string());
