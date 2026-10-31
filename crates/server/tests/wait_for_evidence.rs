@@ -809,3 +809,52 @@ fn privacy_revocation_during_a_single_read_withholds_the_returned_tree() {
         assert!(!result.to_string().contains("搜索"));
     });
 }
+
+#[test]
+fn a_single_read_timeout_preserves_an_existing_runner_session() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    block(async {
+        let sessions = Arc::new(AtomicUsize::new(0));
+        let count = sessions.clone();
+        let runner = mock_runner(move |request, _| {
+            if request.starts_with("POST /session ") {
+                count.fetch_add(1, Ordering::SeqCst);
+                return Some((Duration::ZERO, SESSION.into()));
+            }
+            if request.contains("/source") {
+                return Some((Duration::from_secs(5), PRESENT_SCREEN.into()));
+            }
+            None
+        });
+        let state = build_state_with_runner(runner.url());
+        state
+            .runner
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .ensure_session()
+            .await
+            .unwrap();
+        let (status,result)=run_actions_with_state(state.clone(),r#"{"observe":false,"steps":[{"kind":"wait_for","expect":{"present":[{"label_contains":"ready"}]},"timeout_ms":0}]}"#).await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(result["error"], "single_read_timeout");
+        assert_eq!(result["observation"]["read"], false);
+        let handle = state.runner.as_ref().unwrap().clone();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            handle
+                .lock()
+                .await
+                .ensure_session()
+                .await
+                .map(str::to_owned)
+        })
+        .await
+        .expect("existing session must not be discarded after a deliberately short observation")
+        .unwrap();
+        assert_eq!(sessions.load(Ordering::SeqCst), 1);
+    });
+}

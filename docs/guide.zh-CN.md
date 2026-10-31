@@ -337,7 +337,8 @@ IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./r
 也不自动预热或开启 Focus。独立请求的预算包含 runner 锁排队；批量中的零等待在到达
 该步骤时开始计时，并按 500ms 计入总预算。`phone_run_steps` 传 `observe:false` 可省去
 独立的结束观察；Flow 失败诊断复用零等待的结果。未知状态、空树或读取失败都不能
-证明目标不存在。OCR 等待仍要求正数超时。
+证明目标不存在。`single_read_timeout` 表示预算内没有读到树，不能据此认定 runner
+断线，也不会因此丢弃现有 session。OCR 等待仍要求正数超时。
 
 `--artifacts-dir DIR` 把本次执行写成可机器读取的记录——schema、flow 名称
 与 sha256（算的是本次真正解析的那份文件内容）、执行时所对的各版本（读不到

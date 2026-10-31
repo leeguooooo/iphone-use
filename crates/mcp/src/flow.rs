@@ -1052,7 +1052,7 @@ async fn diagnose_failure(
     let single_read = step.get("kind").and_then(serde_json::Value::as_str) == Some("wait_for")
         && step.get("timeout_ms").and_then(serde_json::Value::as_u64) == Some(0);
     if single_read {
-        diagnosis["reused_observation"] = observation.is_some().into();
+        diagnosis["reused_observation"] = observation.and_then(|value| value.get("read")).and_then(serde_json::Value::as_bool).unwrap_or(false).into();
         diagnosis["budget_ms"] = 0.into();
     }
     if observation.and_then(|value| value.get("application_matches")).and_then(serde_json::Value::as_bool) == Some(false) {
@@ -2345,7 +2345,7 @@ mod tests {
                 }
             );
             assert_eq!(diagnosis["observable"], read);
-            assert_eq!(diagnosis["reused_observation"], true);
+            assert_eq!(diagnosis["reused_observation"], read);
             assert_eq!(diagnosis["budget_ms"], 0);
         }
     }

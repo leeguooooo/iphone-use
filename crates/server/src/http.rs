@@ -11984,6 +11984,7 @@ fn alert_only_expectation(expect: &AgentUiExpectation) -> bool {
         && expect.present.iter().all(|locator| {
             locator.kind.as_deref() == Some("Alert")
                 && locator.identifier.is_none()
+                && locator.label_contains.is_none()
                 && locator.value.is_none()
                 && locator.focused.is_none()
                 && locator.enabled.is_none()
@@ -12866,7 +12867,7 @@ async fn agent_actions_scoped(
                                     "runner batch wait_for source timed out after retries: {error}"
                                 );
                             }
-                            w.invalidate_session();
+                            if !single_read { w.invalidate_session(); }
                             // The read that ended the window is this timeout,
                             // whether or not an earlier attempt also failed.
                             let timeout_error = match last_read_error.as_deref() {
@@ -12877,11 +12878,11 @@ async fn agent_actions_scoped(
                                 None => "element read timed out inside the wait window".to_string(),
                             };
                             return agent_actions_failure(
-                                StatusCode::CONFLICT,
+                                if single_read {StatusCode::GATEWAY_TIMEOUT} else {StatusCode::CONFLICT},
                                 index,
                                 completed,
                                 applied_actions,
-                                "expectation_timeout",
+                                if single_read {"single_read_timeout"} else {"expectation_timeout"},
                                 "not_sent",
                                 applied_actions == 0,
                                 &step_results,
@@ -24003,6 +24004,20 @@ mod tests {
             runner_predicate_literal("O'Reilly\\Files"),
             "'O\\'Reilly\\\\Files'"
         );
+    }
+
+    #[test]
+    fn alert_text_shortcut_does_not_reinterpret_a_label_substring() {
+        let exact: AgentUiExpectation = serde_json::from_value(
+            serde_json::json!({"present":[{"kind":"Alert","label":"Notice"}]}),
+        )
+        .unwrap();
+        let contains: AgentUiExpectation = serde_json::from_value(
+            serde_json::json!({"present":[{"kind":"Alert","label_contains":"Notice"}]}),
+        )
+        .unwrap();
+        assert!(alert_only_expectation(&exact));
+        assert!(!alert_only_expectation(&contains));
     }
 
     #[test]

@@ -600,6 +600,8 @@ is no longer cached). The action result and the observation are separate facts:
   issuing another read. `single_read:true`, `attempts` and `reads` distinguish
   a known unmet condition from unavailable state. OCR waits still require a
   positive timeout; a timeout or empty/unknown tree cannot prove absence.
+  `single_read_timeout` means the observation budget expired without a tree;
+  it does not establish a disconnected runner or discard its existing session.
 - Keep `pause` for short animation gaps (maximum 3000 ms). For a slow page such
   as iPhone Storage, use a semantic `wait_for` with `timeout_ms:30000` on the
   expected result instead of chaining pauses.

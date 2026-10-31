@@ -417,6 +417,7 @@ const DAEMON_ERROR_CODES: &[&str] = &[
     "device_transition_in_progress",
     "element_not_found",
     "expectation_timeout",
+    "single_read_timeout",
     "force_press_unsupported",
     "intent_args_too_large",
     "intent_bridge_unavailable",

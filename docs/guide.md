@@ -618,7 +618,8 @@ its read budget starts at that step and counts toward the batch limit.
 Use `observe:false` with `phone_run_steps` to avoid the separate final
 observation. Flow diagnosis reuses a failed zero wait's result. Unknown state
 and a failed read remain failures; they do not prove absence. OCR waits need
-a positive timeout.
+a positive timeout. `single_read_timeout` means no tree arrived in the observation budget;
+it is not proof that the runner disconnected.
 
 `--artifacts-dir DIR` writes a machine-readable record of the run — schema,
 flow name and sha256, the versions it ran against (`unavailable` when they

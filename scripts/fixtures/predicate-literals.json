@@ -34,5 +34,13 @@
   {
     "input": "paragraph value",
     "literal": "'paragraph\\u2029value'"
+  },
+  {
+    "input": "100% $price",
+    "literal": "'100% $price'"
+  },
+  {
+    "input": "value %@ %K",
+    "literal": "'value %@ %K'"
   }
 ]
