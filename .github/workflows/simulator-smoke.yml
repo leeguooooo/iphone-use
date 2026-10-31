@@ -98,7 +98,7 @@ jobs:
           xcrun simctl list runtimes
           ./target/release/iphone-use simulators
           ./target/release/iphone-use simulators --json > "$RUNNER_TEMP/simulators.json"
-          sim=$(python3 -c 'import json,sys; rows=json.load(open(sys.argv[1])); matches=[d["udid"] for d in rows if d.get("runtime_id")=="com.apple.CoreSimulator.SimRuntime.iOS-18-2" and d.get("name")=="iPhone 15"]; assert matches,"iPhone 15 / iOS 18.2 unavailable"; print(matches[0])' "$RUNNER_TEMP/simulators.json")
+          sim=$(python3 -c 'import json,sys; rows=json.load(open(sys.argv[1])); matches=[d["udid"] for d in rows if d.get("runtime_id")=="com.apple.CoreSimulator.SimRuntime.iOS-18-2" and d.get("name", "").startswith("iPhone")]; assert matches,"iPhone / iOS 18.2 unavailable"; print(matches[0])' "$RUNNER_TEMP/simulators.json")
           echo "udid=$sim" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test
