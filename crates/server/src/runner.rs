@@ -2180,6 +2180,24 @@ impl RunnerClient {
         Ok(self.rows_from_tree(&tree, lite))
     }
 
+    /// One source request, without the optional full/lite pre-probe or retry.
+    /// Used by zero-timeout waits whose one observation must stay one read.
+    pub async fn elements_once(&mut self) -> Result<Vec<ElementRow>> {
+        let skip_probe =
+            std::env::var("IPHONE_USE_SOURCE_PROBE").is_ok_and(|value| value.trim() == "0");
+        let lite = !skip_probe && !self.full_visibility;
+        let tree = self
+            .source_excluding(if lite {
+                Some(PROBE_EXCLUDED_ATTRIBUTES)
+            } else {
+                None
+            })
+            .await?;
+        self.probe.record(&tree, full_source_max_nodes());
+        self.lite_source = lite;
+        Ok(self.rows_from_tree(&tree, lite))
+    }
+
     /// [`Self::elements`] over a depth- and node-capped read
     /// ([`BOUNDED_READ_DEPTH`], [`BOUNDED_READ_NODES`], no frontier
     /// re-rooting): what an elements request falls back to after a full read

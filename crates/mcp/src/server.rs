@@ -481,7 +481,9 @@ pub enum PhoneStep {
         #[serde(default)]
         after_ms: u64,
     },
-    /// Poll the current element tree until the semantic expectation holds.
+    /// Poll until the expectation holds. For tree waits, timeout_ms:0 makes
+    /// one observation attempt bounded to 500ms, without polling or read retry.
+    /// Use observe:false to omit the separate final batch observation.
     WaitFor {
         expect: PhoneUiExpectation,
         #[serde(default = "default_phone_wait_ms")]
@@ -522,6 +524,10 @@ pub struct PhoneUiExpectation {
 pub struct PhoneElementLocator {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Case-sensitive literal substring of the normalized label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 1000))]
+    pub label_contains: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3478,13 +3484,28 @@ impl ServerHandler for PhoneHandler {
 // ---------------------------------------------------------------------------
 
 fn phone_locator_has_condition(locator: &PhoneElementLocator) -> bool {
-    locator.label.is_some()
-        || locator.identifier.is_some()
-        || locator.kind.is_some()
-        || locator.value.is_some()
-        || locator.focused.is_some()
-        || locator.enabled.is_some()
-        || locator.visible.is_some()
+    [
+        locator.label.as_deref(),
+        locator.label_contains.as_deref(),
+        locator.identifier.as_deref(),
+        locator.kind.as_deref(),
+        locator.value.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|text| !text.contains('\0'))
+        && locator
+            .label_contains
+            .as_ref()
+            .is_none_or(|text| !text.is_empty() && text.chars().count() <= 1000)
+        && (locator.label_contains.is_some()
+            || locator.label.is_some()
+            || locator.identifier.is_some()
+            || locator.kind.is_some()
+            || locator.value.is_some()
+            || locator.focused.is_some()
+            || locator.enabled.is_some()
+            || locator.visible.is_some())
 }
 
 /// Longest text one step (or a whole batch) may type — the daemon's
@@ -4010,9 +4031,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                         "steps[{index}] contains an empty element locator; no action was sent"
                     ));
                 }
-                if timeout_ms == 0 || timeout_ms > max_wait {
+                if (ocr && timeout_ms == 0) || timeout_ms > max_wait {
                     return Err(format!(
-                        "steps[{index}].timeout_ms must be between 1 and {max_wait}; no action was sent"
+                        "steps[{index}].timeout_ms must be between {} and {max_wait}; zero selects one bounded tree read; no action was sent", if ocr {1} else {0}
                     ));
                 }
                 if !(50..=1_000).contains(&poll_ms) {
@@ -4020,7 +4041,7 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                         "steps[{index}].poll_ms must be between 50 and 1000; no action was sent"
                     ));
                 }
-                declared_wait_ms = declared_wait_ms.saturating_add(timeout_ms);
+                declared_wait_ms = declared_wait_ms.saturating_add(if timeout_ms == 0 {iu_core::SINGLE_READ_WAIT_BUDGET_MS} else {timeout_ms});
                 serde_json::json!({
                     "kind": "wait_for",
                     "expect": expect,
@@ -5357,6 +5378,7 @@ mod tests {
                 via: None,
                 if_present: false,
                 locator: PhoneElementLocator {
+                    label_contains: None,
                     label: None,
                     identifier: Some("search-field".to_string()),
                     kind: Some("TextField".to_string()),
@@ -5371,6 +5393,7 @@ mod tests {
                 expect: PhoneUiExpectation {
                     application: Some("聚焦".to_string()),
                     present: vec![PhoneElementLocator {
+                        label_contains: None,
                         label: Some("搜索".to_string()),
                         identifier: None,
                         kind: Some("TextField".to_string()),
@@ -5654,6 +5677,31 @@ mod tests {
     }
 
     #[test]
+    fn literal_contains_and_single_read_wait_are_encoded_and_budgeted() {
+        let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"present":[{"label":"保存\n'O\\K'🙂","label_contains":"'O\\K'"}]},"timeout_ms":0,"poll_ms":50}])).unwrap();
+        let body = phone_steps_request(steps).unwrap();
+        assert_eq!(body["steps"][0]["timeout_ms"], 0);
+        assert_eq!(
+            body["steps"][0]["expect"]["present"][0]["label_contains"],
+            "'O\\K'"
+        );
+        for fragment in [String::new(), "x".repeat(1001)] {
+            let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"present":[{"identifier":"save","label_contains":fragment}]},"timeout_ms":0}])).unwrap();
+            assert!(phone_steps_request(steps).is_err());
+        }
+        let steps: Vec<PhoneStep> = serde_json::from_value(serde_json::json!([
+            {"kind":"wait_for","expect":{"present":[{"label_contains":"Save"}]},"timeout_ms":0},
+            {"kind":"wait_for","expect":{"ocr_present":["ready"]},"timeout_ms":60000}
+        ]))
+        .unwrap();
+        assert!(phone_steps_request(steps)
+            .unwrap_err()
+            .contains("declared waits"));
+        let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"ocr_present":["ready"]},"timeout_ms":0}])).unwrap();
+        assert!(phone_steps_request(steps).is_err());
+    }
+
+    #[test]
     fn multi_step_request_rejects_invalid_waits_and_empty_locators_offline() {
         // The ceiling is 30s — sized for an element read that can cost six or
         // seven seconds on real hardware. One millisecond over is still
@@ -5691,6 +5739,7 @@ mod tests {
             expect: PhoneUiExpectation {
                 application: None,
                 present: vec![PhoneElementLocator {
+                    label_contains: None,
                     label: None,
                     identifier: None,
                     kind: None,

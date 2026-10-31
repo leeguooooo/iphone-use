@@ -1,0 +1,38 @@
+[
+  {
+    "input": "line\nnext",
+    "literal": "'line\\u000anext'"
+  },
+  {
+    "input": "line\\nnext",
+    "literal": "'line\\\\nnext'"
+  },
+  {
+    "input": "tab\tvalue",
+    "literal": "'tab\\u0009value'"
+  },
+  {
+    "input": "quote'O\\K'🙂",
+    "literal": "'quote\\'O\\\\K\\'🙂'"
+  },
+  {
+    "input": "separator value",
+    "literal": "'separator\\u2028value'"
+  },
+  {
+    "input": "' OR TRUEPREDICATE OR SELF == '",
+    "literal": "'\\' OR TRUEPREDICATE OR SELF == \\''"
+  },
+  {
+    "input": "carriage\rvalue",
+    "literal": "'carriage\\u000dvalue'"
+  },
+  {
+    "input": "deletevalue",
+    "literal": "'delete\\u007fvalue'"
+  },
+  {
+    "input": "paragraph value",
+    "literal": "'paragraph\\u2029value'"
+  }
+]

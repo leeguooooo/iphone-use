@@ -7049,6 +7049,7 @@ fn snapshot_row_locator(row: &crate::runner::ElementRow) -> Option<AgentElementL
     }
 
     Some(AgentElementLocator {
+        label_contains: None,
         label,
         identifier,
         kind,
@@ -9031,17 +9032,22 @@ async fn tap_unique_locator(
 }
 
 fn runner_predicate_literal(value: &str) -> String {
-    // NSPredicate rejects literal line breaks inside quoted strings. Source
-    // values can contain them (for example a multiline SwiftUI composer).
-    format!(
-        "'{}'",
-        value
-            .replace('\\', "\\\\")
-            .replace('\'', "\\'")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t")
-    )
+    let mut literal = String::from("'");
+    for character in value.chars() {
+        match character {
+            '\\' => literal.push_str("\\\\"),
+            '\'' => literal.push_str("\\'"),
+            character
+                if character.is_ascii_control() || matches!(character, '\u{2028}' | '\u{2029}') =>
+            {
+                use std::fmt::Write;
+                let _ = write!(literal, "\\u{:04x}", u32::from(character));
+            }
+            character => literal.push(character),
+        }
+    }
+    literal.push('\'');
+    literal
 }
 
 /// Build a fresh runner element lookup for a strict agent locator.
@@ -9051,6 +9057,9 @@ fn runner_predicate_literal(value: &str) -> String {
 /// only condition: a namesake without that identifier must not replace a
 /// target that disappeared after the source precheck.
 fn locator_runner_query(locator: &AgentElementLocator) -> Option<(&'static str, String)> {
+    if !locator_has_condition(locator) {
+        return None;
+    }
     let mut clauses = Vec::new();
     if let Some(kind) = &locator.kind {
         clauses.push(format!(
@@ -9062,8 +9071,15 @@ fn locator_runner_query(locator: &AgentElementLocator) -> Option<(&'static str, 
         let label = runner_predicate_literal(label);
         clauses.push(format!("(label == {label} OR name == {label})"));
     }
+    if let Some(fragment) = &locator.label_contains {
+        let fragment = runner_predicate_literal(fragment);
+        clauses.push(format!("(label CONTAINS {fragment} OR ((label == nil OR label == '') AND name CONTAINS {fragment}))"));
+    }
     if let Some(identifier) = &locator.identifier {
-        clauses.push(format!("identifier == {}", runner_predicate_literal(identifier)));
+        clauses.push(format!(
+            "identifier == {}",
+            runner_predicate_literal(identifier)
+        ));
     }
     if let Some(value) = &locator.value {
         clauses.push(format!("value == {}", runner_predicate_literal(value)));
@@ -10671,6 +10687,9 @@ impl AgentUiExpectation {
 struct AgentElementLocator {
     #[serde(default)]
     label: Option<String>,
+    /// Case-sensitive literal substring of the normalized label.
+    #[serde(default)]
+    label_contains: Option<String>,
     #[serde(default)]
     identifier: Option<String>,
     #[serde(default)]
@@ -10962,13 +10981,28 @@ fn agent_actions_invalid(detail: impl Into<String>) -> Response {
 }
 
 fn locator_has_condition(locator: &AgentElementLocator) -> bool {
-    locator.label.is_some()
-        || locator.identifier.is_some()
-        || locator.kind.is_some()
-        || locator.value.is_some()
-        || locator.focused.is_some()
-        || locator.enabled.is_some()
-        || locator.visible.is_some()
+    [
+        locator.label.as_deref(),
+        locator.label_contains.as_deref(),
+        locator.identifier.as_deref(),
+        locator.kind.as_deref(),
+        locator.value.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|text| !text.contains('\0'))
+        && locator
+            .label_contains
+            .as_ref()
+            .is_none_or(|text| !text.is_empty() && text.chars().count() <= 1000)
+        && (locator.label_contains.is_some()
+            || locator.label.is_some()
+            || locator.identifier.is_some()
+            || locator.kind.is_some()
+            || locator.value.is_some()
+            || locator.focused.is_some()
+            || locator.enabled.is_some()
+            || locator.visible.is_some())
 }
 
 fn finite_unit(value: Option<f64>) -> bool {
@@ -11528,9 +11562,9 @@ fn validate_agent_actions(request: &AgentActionsRequest) -> Result<(), String> {
                 {
                     return Err(format!("steps[{index}] contains an empty element locator"));
                 }
-                if *timeout_ms == 0 || *timeout_ms > max_wait {
+                if (expect.uses_ocr() && *timeout_ms == 0) || *timeout_ms > max_wait {
                     return Err(format!(
-                        "steps[{index}].timeout_ms must be between 1 and {max_wait}"
+                        "steps[{index}].timeout_ms must be between {} and {max_wait}; zero selects one bounded tree read", if expect.uses_ocr() {1} else {0}
                     ));
                 }
                 if !(50..=1_000).contains(poll_ms) {
@@ -11538,7 +11572,7 @@ fn validate_agent_actions(request: &AgentActionsRequest) -> Result<(), String> {
                         "steps[{index}].poll_ms must be between 50 and 1000"
                     ));
                 }
-                declared_wait_ms = declared_wait_ms.saturating_add(*timeout_ms);
+                declared_wait_ms = declared_wait_ms.saturating_add(if *timeout_ms == 0 {core::SINGLE_READ_WAIT_BUDGET_MS} else {*timeout_ms});
             }
             AgentActionStep::Pause { ms } => {
                 if *ms == 0 || *ms > AGENT_ACTIONS_MAX_PAUSE_MS {
@@ -11562,6 +11596,7 @@ fn validate_agent_actions(request: &AgentActionsRequest) -> Result<(), String> {
 /// unknown. A known mismatch still rules out a row with other unknown fields.
 fn agent_locator_assessment(row: &crate::runner::ElementRow, locator: &AgentElementLocator) -> Option<bool> {
     if locator.label.as_ref().is_some_and(|value| &row.label != value)
+        || locator.label_contains.as_ref().is_some_and(|value| !row.label.contains(value.as_str()))
         || locator.identifier.as_ref().is_some_and(|value| row.identifier.as_ref() != Some(value))
         || locator.kind.as_ref().is_some_and(|value| &row.kind != value)
     { return Some(false); }
@@ -11848,6 +11883,7 @@ fn agent_wait_observation(
     // happens to be around.
     last_read_failed: bool,
     read_error: Option<&str>,
+    single_read: bool,
 ) -> serde_json::Value {
     let mut value = if last_observation.is_null() {
         serde_json::json!({
@@ -11857,6 +11893,7 @@ fn agent_wait_observation(
     } else {
         last_observation
     };
+    value["single_read"] = single_read.into();
     value["attempts"] = attempts.into();
     value["reads"] = reads.into();
     if last_read_failed && value["read"] == serde_json::Value::Bool(true) {
@@ -11887,7 +11924,8 @@ fn wait_probe_predicates(expect: &AgentUiExpectation) -> Option<Vec<String>> {
         .present
         .iter()
         .map(|locator| {
-            if locator.value.is_some()
+            if locator.label_contains.is_some()
+                || locator.value.is_some()
                 || locator.focused.is_some()
                 || locator.enabled.is_some()
                 || locator.visible.is_some()
@@ -11896,8 +11934,7 @@ fn wait_probe_predicates(expect: &AgentUiExpectation) -> Option<Vec<String>> {
             {
                 return None;
             }
-            let quote =
-                |text: &str| format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"));
+            let quote = runner_predicate_literal;
             let mut clauses = Vec::new();
             if let Some(kind) = &locator.kind {
                 clauses.push(format!(
@@ -11967,6 +12004,17 @@ async fn agent_wait_alert(
                 ..Default::default()
             })
             .collect()),
+        Ok(Err(error)) => Err(AgentWaitReadError::Failed(error)),
+        Err(_) => Err(AgentWaitReadError::TimedOut),
+    }
+}
+
+async fn agent_wait_elements_once(
+    w: &mut crate::runner::RunnerClient,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<crate::runner::ElementRow>, AgentWaitReadError> {
+    match tokio::time::timeout_at(deadline, w.elements_once()).await {
+        Ok(Ok(rows)) => Ok(rows),
         Ok(Err(error)) => Err(AgentWaitReadError::Failed(error)),
         Err(_) => Err(AgentWaitReadError::TimedOut),
     }
@@ -12138,7 +12186,10 @@ fn batch_privacy_revoked(state: &AppState, observes_screen: bool, generation: u6
 }
 
 async fn agent_actions_generation(
-    State(state): State<Arc<AppState>>, headers: HeaderMap, body: String, privacy_generation: u64,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+    privacy_generation: u64,
 ) -> Response {
     match agent_auth(&state, &headers) {
         AgentAuth::Locked => {
@@ -12156,38 +12207,52 @@ async fn agent_actions_generation(
     if !has_phone_control_header(&headers) {
         return missing_phone_control_header_response();
     }
-    match claim_phone_owner(&state, &headers) {
-        Err(refused) => return refused,
-        Ok(true) => prewarm_on_new_lease(&state, &headers),
-        Ok(false) => {}
-    }
-    let mut capture_scope = ScreenReadScope::capture(&state);
-    capture_scope.privacy_epoch = privacy_generation;
-    let observes_screen = serde_json::from_str::<AgentActionsRequest>(&body).ok()
-        .is_some_and(|request| batch_needs_private_scope(&request));
-    let mut response = agent_actions_scoped(state.clone(), headers, body, privacy_generation, capture_scope.clone()).await;
-    if observes_screen {
-        response.extensions_mut().insert(BatchPrivacyFence { state, scope: capture_scope });
-    }
-    response
-}
-
-async fn agent_actions_scoped(
-    state: Arc<AppState>, headers: HeaderMap, body: String, privacy_generation: u64,
-    capture_scope: ScreenReadScope,
-) -> Response {
     if body.len() > AGENT_ACTIONS_MAX_BODY_BYTES {
         return agent_actions_invalid(format!(
             "request body exceeds {AGENT_ACTIONS_MAX_BODY_BYTES} bytes"
         ));
     }
-    let mut request: AgentActionsRequest = match serde_json::from_str(&body) {
+    let request: AgentActionsRequest = match serde_json::from_str(&body) {
         Ok(request) => request,
         Err(error) => return agent_actions_invalid(format!("invalid JSON shape: {error}")),
     };
     if let Err(error) = validate_agent_actions(&request) {
         return agent_actions_invalid(error);
     }
+    let single_read_only = matches!(
+        request.steps.as_slice(),
+        [AgentActionStep::WaitFor { timeout_ms: 0, .. }]
+    );
+    let observes_screen = batch_needs_private_scope(&request);
+    match claim_phone_owner(&state, &headers) {
+        Err(refused) => return refused,
+        Ok(true) if !single_read_only => prewarm_on_new_lease(&state, &headers),
+        Ok(_) => {}
+    }
+    let mut capture_scope = ScreenReadScope::capture(&state);
+    capture_scope.privacy_epoch = privacy_generation;
+    let mut response = agent_actions_scoped(
+        state.clone(),
+        headers,
+        body,
+        request,
+        privacy_generation,
+        capture_scope.clone(),
+    )
+    .await;
+    if observes_screen {
+        response.extensions_mut().insert(BatchPrivacyFence {
+            state,
+            scope: capture_scope,
+        });
+    }
+    response
+}
+
+async fn agent_actions_scoped(
+    state: Arc<AppState>, headers: HeaderMap, body: String, mut request: AgentActionsRequest,
+    privacy_generation: u64, capture_scope: ScreenReadScope,
+) -> Response {
     let observes_screen = batch_needs_private_scope(&request);
     if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
         return private_batch_refusal(0, 0, 0);
@@ -12262,9 +12327,10 @@ async fn agent_actions_scoped(
     // Control priority first: a health probe must not hold the runner while
     // the focus step (or the action after it) waits for it.
     let _priority = state.begin_runner_control();
+    let single_read_only = matches!(request.steps.as_slice(), [AgentActionStep::WaitFor {timeout_ms: 0, ..}]);
     let system_request_only = request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if is_capture_or_volume(action)))
         && !request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if !is_capture_or_volume(action)));
-    if !system_request_only { engage_agent_focus(&state, runner, first_launch.flatten(), true).await; }
+    if !system_request_only && !single_read_only { engage_agent_focus(&state, runner, first_launch.flatten(), true).await; }
     // Long text steps add their typing time (zero for text up to one chunk).
     let typing_allowance: std::time::Duration = request
         .steps
@@ -12274,7 +12340,12 @@ async fn agent_actions_scoped(
             _ => std::time::Duration::ZERO,
         })
         .sum();
-    let batch_deadline = tokio::time::Instant::now() + AGENT_ACTIONS_DEADLINE + typing_allowance;
+    // A standalone single-read wait also bounds waiting for the runner mutex.
+    // In a longer batch its read window starts when that step is reached.
+    let batch_budget = if single_read_only {
+        std::time::Duration::from_millis(core::SINGLE_READ_WAIT_BUDGET_MS)
+    } else { AGENT_ACTIONS_DEADLINE + typing_allowance };
+    let batch_deadline = tokio::time::Instant::now() + batch_budget;
     let mut w = match tokio::time::timeout_at(batch_deadline, runner.lock()).await {
         Ok(client) => client,
         Err(_) => {
@@ -12659,10 +12730,12 @@ async fn agent_actions_scoped(
                 timeout_ms,
                 poll_ms,
             } => {
+                let single_read = *timeout_ms == 0;
+                let wait_budget_ms = if single_read {core::SINGLE_READ_WAIT_BUDGET_MS} else {*timeout_ms};
                 let wait_started = tokio::time::Instant::now();
                 let wait_deadline = std::cmp::min(
                     batch_deadline,
-                    wait_started + std::time::Duration::from_millis(*timeout_ms),
+                    wait_started + std::time::Duration::from_millis(wait_budget_ms),
                 );
                 if expect.uses_ocr() {
                     match scoped_observation(&state, &capture_scope, agent_wait_ocr(&state, &mut w, expect, privacy_generation, wait_deadline, *poll_ms)).await {
@@ -12710,7 +12783,7 @@ async fn agent_actions_scoped(
                 // erase history.
                 let mut reads = 0_u64;
                 let alert_only = alert_only_expectation(expect);
-                let probes = if alert_only { None } else { wait_probe_predicates(expect) };
+                let probes = if alert_only || single_read { None } else { wait_probe_predicates(expect) };
                 let mut probe_misses = 0_u64;
                 loop {
                     if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
@@ -12735,6 +12808,8 @@ async fn agent_actions_scoped(
                     }
                     let read = if alert_only {
                         scoped_observation(&state, &capture_scope, agent_wait_alert(&mut w, wait_deadline)).await
+                    } else if single_read {
+                        scoped_observation(&state, &capture_scope, agent_wait_elements_once(&mut w, wait_deadline)).await
                     } else {
                         scoped_observation(&state, &capture_scope, agent_wait_elements(&mut w, wait_deadline)).await
                     };
@@ -12751,7 +12826,7 @@ async fn agent_actions_scoped(
                             // so keep rebuilding the read-only session inside that
                             // window instead of failing on the first two quick
                             // connection refusals. No mutation is replayed.
-                            if tokio::time::Instant::now() >= wait_deadline {
+                            if single_read || tokio::time::Instant::now() >= wait_deadline {
                                 tracing::warn!(
                                     "runner batch wait_for source never recovered: {error:#}"
                                 );
@@ -12772,6 +12847,7 @@ async fn agent_actions_scoped(
                                         reads,
                                         true,
                                         Some(&error),
+                                        single_read,
                                     )),
                                 );
                             }
@@ -12815,6 +12891,7 @@ async fn agent_actions_scoped(
                                     reads,
                                     true,
                                     Some(&timeout_error),
+                                    single_read,
                                 )),
                             );
                         }
@@ -12825,6 +12902,7 @@ async fn agent_actions_scoped(
                         observation["source"] = serde_json::json!("alert");
                         observation["alert"] = rows.first().map(|row| row.label.clone()).into();
                     }
+                    observation["single_read"] = single_read.into();
                     last_observation = observation;
                     if matches {
                         step_results.push(serde_json::json!({
@@ -12832,12 +12910,14 @@ async fn agent_actions_scoped(
                             "kind": "wait_for",
                             "ok": true,
                             "attempts": attempts,
+                            "reads": reads,
+                            "single_read": single_read,
                             "probe_misses": probe_misses,
                             "observation": last_observation
                         }));
                         break;
                     }
-                    if tokio::time::Instant::now() >= wait_deadline {
+                    if single_read || tokio::time::Instant::now() >= wait_deadline {
                         return agent_actions_failure(
                             StatusCode::CONFLICT,
                             index,
@@ -12856,6 +12936,7 @@ async fn agent_actions_scoped(
                                 reads,
                                 false,
                                 last_read_error.as_deref(),
+                                single_read,
                             )),
                         );
                     }
@@ -23868,6 +23949,7 @@ mod tests {
     #[test]
     fn locator_runner_query_uses_element_clickable_predicate_fields() {
         let locator = AgentElementLocator {
+            label_contains: None,
             label: Some("保存到“文件”".to_string()),
             identifier: Some("actionGroupCell".to_string()),
             kind: Some("Cell".to_string()),
@@ -23904,6 +23986,7 @@ mod tests {
     #[test]
     fn locator_runner_query_matches_the_identifier_and_escapes_predicates() {
         let locator = AgentElementLocator {
+            label_contains: None,
             label: None,
             identifier: Some("unique-control".to_string()),
             kind: None,
@@ -23920,6 +24003,20 @@ mod tests {
             runner_predicate_literal("O'Reilly\\Files"),
             "'O\\'Reilly\\\\Files'"
         );
+    }
+
+    #[test]
+    fn native_predicate_literal_encoding_matches_foundation_fixtures() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/predicate-literals.json"
+        ))
+        .unwrap();
+        for case in fixtures.as_array().unwrap() {
+            assert_eq!(
+                runner_predicate_literal(case["input"].as_str().unwrap()),
+                case["literal"].as_str().unwrap()
+            );
+        }
     }
 
     #[test]
@@ -24380,6 +24477,7 @@ mod tests {
         let expect = AgentUiExpectation {
             application: Some("招商银行".to_string()),
             present: vec![AgentElementLocator {
+                label_contains: None,
                 label: Some("搜索".to_string()),
                 identifier: Some("search-field".to_string()),
                 kind: Some("TextField".to_string()),
@@ -24389,6 +24487,7 @@ mod tests {
                 visible: Some(true),
             }],
             absent: vec![AgentElementLocator {
+                label_contains: None,
                 label: Some("确认转账".to_string()),
                 identifier: None,
                 kind: None,

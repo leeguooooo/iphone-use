@@ -526,6 +526,7 @@ fn project_observation(value: &serde_json::Value) -> Option<serde_json::Value> {
             value,
             &[
                 ("read", flag),
+                ("single_read", flag),
                 ("reads", count),
                 ("attempts", count),
                 ("stale", flag),

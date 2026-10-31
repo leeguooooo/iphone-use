@@ -620,3 +620,192 @@ fn an_alert_read_in_flight_is_discarded_when_the_screen_turns_private() {
         *slot.lock().unwrap() = None;
     });
 }
+
+#[test]
+fn single_read_waits_honor_literal_substrings_and_never_poll_or_probe() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    for (mode, fragment, expected) in [
+        ("present", "索", true),
+        ("present", "不存在", false),
+        ("absent", "不存在", true),
+        ("absent", "索", false),
+    ] {
+        block(async {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let sources = reads.clone();
+            let probes = Arc::new(AtomicUsize::new(0));
+            let queries = probes.clone();
+            let runner = mock_runner(move |request, _| {
+                if request.starts_with("POST /session ") {
+                    return Some((Duration::ZERO, SESSION.into()));
+                }
+                if request.contains("/elements") {
+                    queries.fetch_add(1, Ordering::SeqCst);
+                    return Some((Duration::ZERO, r#"{"value":[]}"#.into()));
+                }
+                if request.contains("/source") {
+                    sources.fetch_add(1, Ordering::SeqCst);
+                    return Some((Duration::ZERO, PRESENT_SCREEN.into()));
+                }
+                None
+            });
+            let input=serde_json::json!({"observe":false,"steps":[{"kind":"wait_for","expect":{mode:[{"kind":"Button","label_contains":fragment}]},"timeout_ms":0,"poll_ms":50}]}).to_string();
+            let (status, result) = run_actions(runner.url(), &input).await;
+            assert_eq!(result["ok"], expected, "{result}");
+            assert_eq!(result["applied_actions"], 0);
+            assert_eq!(reads.load(Ordering::SeqCst), 1, "{result}");
+            assert_eq!(probes.load(Ordering::SeqCst), 0);
+            if expected {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(result["steps"][0]["attempts"], 1);
+                assert_eq!(result["steps"][0]["reads"], 1);
+                assert_eq!(result["steps"][0]["single_read"], true);
+            } else {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(result["observation"]["attempts"], 1);
+                assert_eq!(result["observation"]["reads"], 1);
+                assert_eq!(result["observation"]["single_read"], true);
+            }
+        });
+    }
+}
+
+#[test]
+fn a_single_read_source_error_or_timeout_never_retries_or_proves_absence() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    for slow in [false, true] {
+        block(async {
+            let count = Arc::new(AtomicUsize::new(0));
+            let source = count.clone();
+            let runner = mock_runner(move |request, _| {
+                if request.starts_with("POST /session ") {
+                    return Some((Duration::ZERO, SESSION.into()));
+                }
+                if request.contains("/source") {
+                    source.fetch_add(1, Ordering::SeqCst);
+                    return Some((
+                        if slow {
+                            Duration::from_secs(5)
+                        } else {
+                            Duration::ZERO
+                        },
+                        if slow {
+                            PRESENT_SCREEN.into()
+                        } else {
+                            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+                        },
+                    ));
+                }
+                None
+            });
+            let started = std::time::Instant::now();
+            let (status,result)=run_actions(runner.url(),r#"{"observe":false,"steps":[{"kind":"wait_for","expect":{"absent":[{"label_contains":"gone"}]},"timeout_ms":0,"poll_ms":50}]}"#).await;
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(
+                status.is_client_error() || status.is_server_error(),
+                "{result}"
+            );
+            assert_eq!(result["ok"], false);
+            assert_eq!(result["applied_actions"], 0);
+            assert_eq!(result["observation"]["read"], false);
+            assert_eq!(result["observation"]["attempts"], 1);
+            assert_eq!(result["observation"]["reads"], 0);
+            assert_eq!(result["observation"]["single_read"], true);
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "no source retry allowed: {result}"
+            );
+        });
+    }
+}
+
+#[test]
+fn invalid_contains_ocr_zero_and_hidden_single_read_budget_are_refused_before_source() {
+    block(async {
+        let state = build_state_with_runner("http://127.0.0.1:1");
+        for body in [
+            serde_json::json!({"steps":[{"kind":"wait_for","expect":{"present":[{"identifier":"save","label_contains":""}]},"timeout_ms":0}]}),
+            serde_json::json!({"steps":[{"kind":"wait_for","expect":{"ocr_present":["ready"]},"timeout_ms":0}]}),
+            serde_json::json!({"steps":[{"kind":"wait_for","expect":{"present":[{"label_contains":"Save"}]},"timeout_ms":0},{"kind":"wait_for","expect":{"ocr_present":["ready"]},"timeout_ms":60000}]}),
+        ] {
+            let (status, result) = run_actions_with_state(state.clone(), &body.to_string()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+        }
+    });
+}
+
+#[test]
+fn a_single_read_wait_is_bounded_while_queued_for_the_runner() {
+    block(async {
+        let state = build_state_with_runner("http://127.0.0.1:1");
+        let runner = state.runner.as_ref().unwrap().clone();
+        let _held = runner.lock().await;
+        let body = r#"{"observe":false,"steps":[{"kind":"wait_for","expect":{"present":[{"label_contains":"ready"}]},"timeout_ms":0}]}"#;
+        let (status, result) =
+            tokio::time::timeout(Duration::from_secs(2), run_actions_with_state(state, body))
+                .await
+                .expect("single read must not wait for the batch's normal75s deadline");
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(result["error"], "batch_deadline");
+        assert_eq!(result["applied_actions"], 0);
+    });
+}
+
+#[test]
+fn privacy_revocation_during_a_single_read_withholds_the_returned_tree() {
+    block(async {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let signal = started.clone();
+        let runner = mock_runner(move |request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.into()));
+            }
+            if request.contains("/source") {
+                signal.notify_one();
+                return Some((Duration::from_millis(200), PRESENT_SCREEN.into()));
+            }
+            None
+        });
+        let state = build_state_with_runner(runner.url());
+        let pending_state = state.clone();
+        let worker = tokio::spawn(async move {
+            run_actions_with_state(pending_state,r#"{"observe":false,"steps":[{"kind":"wait_for","expect":{"present":[{"label_contains":"索"}]},"timeout_ms":0}]}"#).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        for private in [true, false] {
+            let reply = server::http::router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/agent/hold")
+                        .header("x-phone-owner", "wait-fixture")
+                        .header("x-phone-control", "1")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"secs":if private {60} else {0},"private":private})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status(), StatusCode::OK);
+        }
+        let (status, result) = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, StatusCode::LOCKED);
+        assert_eq!(result["applied_actions"], 0);
+        assert!(!result.to_string().contains("搜索"));
+    });
+}

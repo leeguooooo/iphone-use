@@ -39,6 +39,7 @@ jobs:
       - run: python3 -I scripts/test-mcp-probe-peer.py
       - run: python3 -I scripts/test-collect-simulator-verdict.py
       - run: python3 -I scripts/test-selector-simulator-verdict.py
+      - run: python3 -I scripts/test-wait-simulator-verdict.py
 
   remote-connection:
     name: Remote connection and credential recovery
@@ -98,6 +99,9 @@ jobs:
           # TODO: bump this with the toolchain, fixing what the new lints find.
           rustup toolchain install 1.96.0 --profile minimal --component clippy
           cargo +1.96.0 clippy --workspace --locked -- -D warnings
+
+      - name: Native predicate literal semantics (no UI)
+        run: swift scripts/test-predicate-literals.swift scripts/fixtures/predicate-literals.json
 
       - name: Shared protocol tests
         run: cargo test -p core --locked

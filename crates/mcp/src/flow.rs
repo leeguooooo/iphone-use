@@ -856,8 +856,9 @@ const DIAGNOSIS_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
 const MAX_CANDIDATES: usize = 5;
 
 /// Locator fields the daemon matches on, in the order a reader scans them.
-const LOCATOR_FIELDS: [&str; 7] = [
+const LOCATOR_FIELDS: [&str; 8] = [
     "label",
+    "label_contains",
     "identifier",
     "kind",
     "value",
@@ -992,7 +993,14 @@ fn candidate_basis(row: &serde_json::Value, locator: &serde_json::Value) -> Cand
                     && row.get("value_known") != Some(&serde_json::Value::Bool(true))));
         if boolean_unknown || value_unknown {
             basis.unproven.push(key.clone());
-        } else if row.get(key) == Some(expected) {
+        } else if (key == "label_contains"
+            && row
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .zip(expected.as_str())
+                .is_some_and(|(label, fragment)| label.contains(fragment)))
+            || (key != "label_contains" && row.get(key) == Some(expected))
+        {
             basis.matched.push(key.clone());
         } else {
             basis.differed.push(key.clone());
@@ -1041,6 +1049,12 @@ async fn diagnose_failure(
         observation.and_then(|value| value.get(key)).and_then(serde_json::Value::as_array)
             .map(|values| values.iter().filter_map(serde_json::Value::as_u64).collect()).unwrap_or_default()
     };
+    let single_read = step.get("kind").and_then(serde_json::Value::as_str) == Some("wait_for")
+        && step.get("timeout_ms").and_then(serde_json::Value::as_u64) == Some(0);
+    if single_read {
+        diagnosis["reused_observation"] = observation.is_some().into();
+        diagnosis["budget_ms"] = 0.into();
+    }
     if observation.and_then(|value| value.get("application_matches")).and_then(serde_json::Value::as_bool) == Some(false) {
         diagnosis["observable"] = serde_json::json!(false);
         diagnosis["reason"] = serde_json::json!("application_mismatch");
@@ -1052,6 +1066,12 @@ async fn diagnose_failure(
         && !known_missing && indexes("violated_absent").is_empty() {
         diagnosis["observable"] = serde_json::json!(false);
         diagnosis["reason"] = serde_json::json!("expectation_state_unproven");
+        return Some(diagnosis);
+    }
+    if single_read {
+        let read = observation.and_then(|value| value.get("read")).and_then(serde_json::Value::as_bool) == Some(true);
+        diagnosis["observable"] = read.into();
+        diagnosis["reason"] = (if read {"single_read_expectation_unmet"} else {"single_read_unavailable"}).into();
         return Some(diagnosis);
     }
     let Some((locator, expectation)) = failed_step_locator(step, observation) else {
@@ -2289,6 +2309,62 @@ mod tests {
         task.join().unwrap();
         assert_eq!(diagnosis["reason"], "locator_state_unproven");
         assert_eq!(diagnosis["exact_matches"], 0);
+    }
+
+    #[test]
+    fn diagnosis_uses_literal_substrings_without_evaluating_expressions() {
+        let row = serde_json::json!({"label":"保存\n'O\\K'🙂"});
+        let matched = candidate_basis(&row, &serde_json::json!({"label_contains":"'O\\K'"}));
+        assert_eq!(matched.matched, vec!["label_contains"]);
+        for text in ["保存\\n", "TRUEPREDICATE", "保存x"] {
+            let basis = candidate_basis(&row, &serde_json::json!({"label_contains":text}));
+            assert_eq!(basis.differed, vec!["label_contains"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_read_failure_reuses_its_observation_without_another_daemon_call() {
+        let steps = serde_json::json!([{"kind":"wait_for","expect":{"present":[{"label_contains":"Save"}]},"timeout_ms":0}]);
+        for read in [true, false] {
+            let mut result = failing_result(0);
+            result["observation"]["single_read"] = true.into();
+            result["observation"]["read"] = read.into();
+            let diagnosis = diagnose_failure(
+                Some(&steps),
+                &result,
+                &DaemonClient::new("http://127.0.0.1:1", None),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                diagnosis["reason"],
+                if read {
+                    "single_read_expectation_unmet"
+                } else {
+                    "single_read_unavailable"
+                }
+            );
+            assert_eq!(diagnosis["observable"], read);
+            assert_eq!(diagnosis["reused_observation"], true);
+            assert_eq!(diagnosis["budget_ms"], 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_read_that_could_not_acquire_the_runner_does_not_trigger_diagnosis_io() {
+        let steps = serde_json::json!([{"kind":"wait_for","expect":{"present":[{"label_contains":"Save"}]},"timeout_ms":0}]);
+        let mut result = failing_result(0);
+        result.as_object_mut().unwrap().remove("observation");
+        let diagnosis = diagnose_failure(
+            Some(&steps),
+            &result,
+            &DaemonClient::new("http://127.0.0.1:1", None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(diagnosis["reason"], "single_read_unavailable");
+        assert_eq!(diagnosis["reused_observation"], false);
+        assert_eq!(diagnosis["budget_ms"], 0);
     }
 
     #[tokio::test]

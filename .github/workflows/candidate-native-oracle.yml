@@ -6,7 +6,7 @@ on:
       probe:
         type: choice
         default: selector
-        options: [selector, agent-selector, list]
+        options: [selector, agent-selector, list, wait]
       platform:
         type: choice
         default: xcode16.4-ios18.5
@@ -45,11 +45,12 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.2-ios18.2 || "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.4-ios18.5 ]]
-          [[ "$ORACLE_PROBE" == selector || "$ORACLE_PROBE" == agent-selector || "$ORACLE_PROBE" == list ]]
+          [[ "$ORACLE_PROBE" == selector || "$ORACLE_PROBE" == agent-selector || "$ORACLE_PROBE" == list || "$ORACLE_PROBE" == wait ]]
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = "$ORACLE_IOS"
           python3 -I scripts/test-probe-recipe.py
           python3 -I scripts/test-selector-simulator-verdict.py
+          python3 -I scripts/test-wait-simulator-verdict.py
           python3 -I scripts/test-collect-simulator-verdict.py
       - name: Prepare selected runtime
         timeout-minutes: 15

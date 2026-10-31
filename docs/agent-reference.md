@@ -587,6 +587,19 @@ is no longer cached). The action result and the observation are separate facts:
   tree is blocked. Its observation says `source:"alert"` and includes the alert
   text. It does not accept/dismiss the alert or establish app identity, absence,
   identifiers or element state. Combined conditions still need the full tree.
+- Locators also accept `label_contains`: a case-sensitive literal substring,
+  ANDed with label, identifier, kind, value and state fields. The fragment must
+  have 1–1000 characters. NUL is refused in locator strings before execution.
+- For a tree `wait_for`, `timeout_ms:0` selects one observation attempt bounded
+  to 500 ms, with no predicate pre-probe, snapshot probe, read retry or polling.
+  A standalone request includes runner-lock queueing in that budget and does
+  not prewarm or engage Focus. A zero wait inside a longer batch starts its
+  read window when reached and counts 500 ms against the declared-wait cap.
+  Set `phone_run_steps`'s `observe:false` to omit its separate final batch
+  observation. Flow failure diagnosis reuses this observation rather than
+  issuing another read. `single_read:true`, `attempts` and `reads` distinguish
+  a known unmet condition from unavailable state. OCR waits still require a
+  positive timeout; a timeout or empty/unknown tree cannot prove absence.
 - Keep `pause` for short animation gaps (maximum 3000 ms). For a slow page such
   as iPhone Storage, use a semantic `wait_for` with `timeout_ms:30000` on the
   expected result instead of chaining pauses.

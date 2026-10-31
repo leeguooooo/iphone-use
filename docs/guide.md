@@ -608,6 +608,18 @@ matches only; `unproven_candidates` counts additional possible matches, so
 never silently edited, and the run's own `outcome` / `applied_actions` /
 `retry_safe` are not touched by it.
 
+For a changing label, a locator can use `label_contains:"Download"` together
+with its other fields. Matching is literal and case-sensitive; the fragment
+must have 1–1000 characters, and NUL is refused in locator strings.
+A tree wait with `timeout_ms:0` makes one observation attempt within 500 ms,
+without polling, optional probes, prewarming or automatic Focus setup.
+For a standalone wait this includes runner-lock queueing; in a longer batch
+its read budget starts at that step and counts toward the batch limit.
+Use `observe:false` with `phone_run_steps` to avoid the separate final
+observation. Flow diagnosis reuses a failed zero wait's result. Unknown state
+and a failed read remain failures; they do not prove absence. OCR waits need
+a positive timeout.
+
 `--artifacts-dir DIR` writes a machine-readable record of the run — schema,
 flow name and sha256, the versions it ran against (`unavailable` when they
 could not be read, never guessed), timings, and the projected result. The

@@ -278,7 +278,7 @@ verb 定义在 `~/.iphone-use/intents-registry.json`（从 [`deploy/intents-regi
 
 整个路径中手指保持按下；Flow 草稿会保留路径和停留时间。原有四坐标写法仍可用。
 
-这 26 个工具的返回都分两部分：
+这些工具的返回通常分为两部分：
 
 * **文本块**是写给模型看的精简内容：动作工具执行后稳定下来的变化，`phone_elements` 每个元素一行，批次的结论和结束时的屏幕。批次失败时，文本给出失败的那一步、它的错误、`retry_safe` 和结束时的屏幕。
 * **`structuredContent`** 默认是精简版：只保留程序做分支要用的字段（`ok`、`outcome`、`retry_safe`、`error`、`failed_step`、`snapshot` 等），文本放在 `summary` 里。设 `IPHONE_USE_MCP_STRUCTURED=full` 会给出 daemon 的完整 JSON，设 `off` 则不给结构化内容。
@@ -330,6 +330,14 @@ IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./r
 不能判断唯一性。这是执行结束后一次有界（4 秒）的只读：
 不重发任何动作，不静默改写 flow，也不改动本次执行的 `outcome` /
 `applied_actions` / `retry_safe`。CLI 和 `phone_flow_run` 走的是同一条路径。
+
+标签有动态部分时，可以用 `label_contains:"下载"`，并与 identifier、kind 等条件
+一起匹配。它是区分大小写的字面子串，长度为 1–1000 个字符；定位字符串不接受 NUL。
+树等待的 `timeout_ms:0` 表示最多用 500ms 做一次观察，不轮询，不做可选探测或读取重试，
+也不自动预热或开启 Focus。独立请求的预算包含 runner 锁排队；批量中的零等待在到达
+该步骤时开始计时，并按 500ms 计入总预算。`phone_run_steps` 传 `observe:false` 可省去
+独立的结束观察；Flow 失败诊断复用零等待的结果。未知状态、空树或读取失败都不能
+证明目标不存在。OCR 等待仍要求正数超时。
 
 `--artifacts-dir DIR` 把本次执行写成可机器读取的记录——schema、flow 名称
 与 sha256（算的是本次真正解析的那份文件内容）、执行时所对的各版本（读不到
