@@ -35,3 +35,5 @@ jobs:
             ${{ runner.temp }}/simulator-platform-diagnostic/*.log
             ${{ runner.temp }}/simulator-platform-diagnostic/*.sample
             ${{ runner.temp }}/simulator-platform-diagnostic/*observations.json
+            ${{ runner.temp }}/simulator-platform-diagnostic/ordinary-app-state.json
+            ${{ runner.temp }}/simulator-platform-diagnostic/ordinary-app-build/fixture-build.log
