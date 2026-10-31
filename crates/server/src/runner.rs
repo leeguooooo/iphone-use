@@ -2966,8 +2966,8 @@ pub struct ElementRow {
     pub enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visible: Option<bool>,
-    /// Positive accessibility/focus state is useful for strict locators; false
-    /// is the common state and is omitted.
+    /// Positive accessibility state is useful for strict locators; false is
+    /// omitted. Focus retains known true/false internally; its wire form omits false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accessible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3070,9 +3070,9 @@ impl From<ElementRow> for ElementRowJson {
             value: row.value.filter(|value| !value.is_empty()),
             value_truncated: row.value_truncated,
             enabled: row.enabled.filter(|enabled| !enabled),
-            visible: row.visible,
+            visible: row.visible.filter(|visible| !visible),
             accessible: row.accessible,
-            focused: row.focused,
+            focused: row.focused.filter(|focused| *focused),
             placeholder: row.placeholder,
             actions: row.actions,
             selected: row.selected,
@@ -3337,9 +3337,9 @@ fn flatten_node(
             value
         };
         let enabled = runner_bool(node, "isEnabled");
-        let visible = runner_bool(node, "isVisible").filter(|value| !value);
+        let visible = runner_bool(node, "isVisible");
         let accessible = runner_bool(node, "isAccessible").filter(|value| *value);
-        let focused = runner_bool(node, "isFocused").filter(|value| *value);
+        let focused = runner_bool(node, "isFocused");
         // Affordance extras (both env-gated; the default daemon parses none of
         // this and every field stays None → byte-identical serialized rows).
         let traits = if options.affordances || options.raw_traits {
@@ -5011,6 +5011,22 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn flatten_preserves_boolean_knowledge_while_wire_stays_sparse() {
+        for reported in [None, Some(serde_json::json!(true)), Some(serde_json::json!(false)), Some(serde_json::json!({"invalid":true}))] {
+            let known=reported.as_ref().and_then(serde_json::Value::as_bool);
+            let mut tree=serde_json::json!({"type":"XCUIElementTypeButton","label":"Control"});
+            if let Some(value)=reported { for key in ["isEnabled","isVisible","isFocused"] {tree[key]=value.clone();} }
+            let mut rows=Vec::new();flatten_tree(&tree,0,&mut rows);
+            assert_eq!(rows[0].enabled,known);assert_eq!(rows[0].visible,known);assert_eq!(rows[0].focused,known);
+            let wire=serde_json::to_value(&rows[0]).unwrap();
+            assert_eq!(wire.get("enabled").cloned(),known.filter(|value| !value).map(serde_json::Value::Bool));
+            assert_eq!(wire.get("visible").cloned(),known.filter(|value| !value).map(serde_json::Value::Bool));
+            assert_eq!(wire.get("focused").cloned(),known.filter(|value| *value).map(serde_json::Value::Bool));
+        }
+    }
+
     #[test]
     fn flatten_keeps_labels_and_interactive_skips_noise() {
         let tree: serde_json::Value = serde_json::from_str(
@@ -5041,9 +5057,9 @@ mod tests {
         assert_eq!(rows[0].identifier.as_deref(), Some("new-note-button"));
         assert_eq!(rows[0].rect, [369.0, 885.0, 38.0, 38.0]);
         assert_eq!(rows[0].enabled, Some(true));
-        assert_eq!(rows[0].visible, None);
+        assert_eq!(rows[0].visible, Some(true));
         assert_eq!(rows[0].accessible, Some(true));
-        assert_eq!(rows[0].focused, None);
+        assert_eq!(rows[0].focused, Some(false));
         assert_eq!(rows[1].label, "你好世界");
         assert_eq!(rows[1].visible, Some(false));
         // Plain button has no value

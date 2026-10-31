@@ -533,6 +533,7 @@ fn project_observation(value: &serde_json::Value) -> Option<serde_json::Value> {
                 ("rows", count),
                 ("application_matches", flag),
                 ("missing_present", indices),
+                ("present_unproven", indices),
                 ("violated_absent", indices),
                 ("absent_unproven", indices),
             ],
@@ -962,7 +963,7 @@ mod tests {
             "ok": "PRIVATE-TEXT-CANARY",
             "failed_step": "http://daemon.invalid:8100",
             "outcome": "SCREEN-LABEL-CANARY",
-            "observation": {"missing_present": ["PRIVATE-TEXT-CANARY"], "reads": true}
+            "observation": {"missing_present": ["PRIVATE-TEXT-CANARY"], "present_unproven":[0,"PRIVATE-TEXT-CANARY"], "reads": true}
         }));
         let text = serde_json::to_string(&redacted).unwrap();
 
@@ -970,6 +971,7 @@ mod tests {
         assert!(!text.contains("daemon.invalid"), "{text}");
         assert!(!text.contains("SCREEN-LABEL-CANARY"), "{text}");
         assert_eq!(redacted["observation"]["missing_present"], serde_json::json!([]));
+        assert_eq!(redacted["observation"]["present_unproven"], serde_json::json!([0]));
         assert!(redacted["observation"]["reads"].is_null(), "{text}");
     }
 

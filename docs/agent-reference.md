@@ -597,9 +597,16 @@ is no longer cached). The action result and the observation are separate facts:
   is a screenshot plus Vision OCR (about 1 s). An OCR wait may run up to
   60000 ms, cannot be mixed with `application`/`present`/`absent` in the same
   step, and on timeout its `observation` lists the `lines` it did read.
+- Boolean wait conditions (`enabled`, `visible`, `focused`) require a known
+  provider state. Missing or malformed flags satisfy neither a positive condition
+  nor absence of that condition. `present_unproven` and `absent_unproven` identify
+  affected expectation indexes; polling continues within the existing timeout.
+  Truncated, unsupported or protected secure values likewise cannot establish
+  exact value presence or absence. A known mismatch in another requested field
+  still rules out that row.
 - A failed `wait_for` carries `observation`: `read:false` proves nothing;
-  `read:true, stale:true` is the last valid view; plain `read:true` means the
-  condition really was not met. Locators an empty tree would have "satisfied" are
+  `read:true, stale:true` is the last valid view; plain `read:true` means a
+  current tree was returned. Check the unproven indexes before drawing a conclusion. Locators an empty tree would have "satisfied" are
   listed in `absent_unproven` and do not pass. Never conclude something is gone
   from a tree with nothing in it — screenshot instead.
 - A 502/504 after dispatch (`outcome_unknown`, `retry_safe:false`) may have

@@ -6850,6 +6850,8 @@ fn diff_element_rows(
     // remains available internally to selectors but is absent from that view.
     let sparse = |rows: &[crate::runner::ElementRow]| rows.iter().cloned().map(|mut row| {
         row.enabled = row.enabled.filter(|enabled| !enabled);
+        row.visible = row.visible.filter(|visible| !visible);
+        row.focused = row.focused.filter(|focused| *focused);
         row.value = row.value.filter(|value| !value.is_empty());
         row.value_unavailable = false;
         row
@@ -11556,29 +11558,35 @@ fn validate_agent_actions(request: &AgentActionsRequest) -> Result<(), String> {
     Ok(())
 }
 
+/// Missing requested booleans and unavailable/protected value previews are
+/// unknown. A known mismatch still rules out a row with other unknown fields.
+fn agent_locator_assessment(row: &crate::runner::ElementRow, locator: &AgentElementLocator) -> Option<bool> {
+    if !locator.label.as_ref().is_none_or(|value| &row.label == value)
+        || !locator.identifier.as_ref().is_none_or(|value| row.identifier.as_ref() == Some(value))
+        || !locator.kind.as_ref().is_none_or(|value| &row.kind == value)
+    { return Some(false); }
+    let mut unknown = false;
+    if let Some(expected) = &locator.value {
+        if row.value_unavailable || row.value_truncated == Some(true) || row.kind == "SecureTextField" {
+            unknown = true;
+        } else if row.value.as_ref() != Some(expected) {
+            return Some(false);
+        }
+    }
+    for (actual, expected) in [(row.focused, locator.focused), (row.enabled, locator.enabled), (row.visible, locator.visible)] {
+        if let Some(expected) = expected {
+            match actual {
+                Some(actual) if actual != expected => return Some(false),
+                None => unknown = true,
+                _ => {}
+            }
+        }
+    }
+    if unknown { None } else { Some(true) }
+}
+
 fn agent_locator_matches(row: &crate::runner::ElementRow, locator: &AgentElementLocator) -> bool {
-    locator
-        .label
-        .as_ref()
-        .is_none_or(|value| &row.label == value)
-        && locator
-            .identifier
-            .as_ref()
-            .is_none_or(|value| row.identifier.as_ref() == Some(value))
-        && locator.kind.as_ref().is_none_or(|value| &row.kind == value)
-        && locator
-            .value
-            .as_ref()
-            .is_none_or(|value| row.value.as_ref() == Some(value))
-        && locator
-            .focused
-            .is_none_or(|value| row.focused.unwrap_or(false) == value)
-        && locator
-            .enabled
-            .is_none_or(|value| row.enabled.unwrap_or(true) == value)
-        && locator
-            .visible
-            .is_none_or(|value| row.visible.unwrap_or(true) == value)
+    agent_locator_assessment(row, locator) == Some(true)
 }
 
 /// Label of the frontmost app as the flattened tree reports it: the single
@@ -11628,6 +11636,11 @@ fn agent_expectation_observation(
             (!rows.iter().any(|row| agent_locator_matches(row, locator))).then_some(index)
         })
         .collect();
+    let present_unproven: Vec<usize> = expect.present.iter().enumerate()
+        .filter_map(|(index, locator)| {
+            (!rows.iter().any(|row| agent_locator_matches(row, locator))
+                && rows.iter().any(|row| agent_locator_assessment(row, locator).is_none())).then_some(index)
+        }).collect();
     let violated_absent: Vec<usize> = expect
         .absent
         .iter()
@@ -11641,11 +11654,11 @@ fn agent_expectation_observation(
     // Empty or container-only: readable as a response, but not usable as
     // evidence that something is NOT there.
     let sparse = settle_tree_is_sparse(rows);
-    let absent_unproven: Vec<usize> = if sparse {
-        (0..expect.absent.len()).collect()
-    } else {
-        Vec::new()
-    };
+    let absent_unproven: Vec<usize> = expect.absent.iter().enumerate()
+        .filter_map(|(index, locator)| {
+            (!rows.iter().any(|row| agent_locator_matches(row, locator))
+                && (sparse || rows.iter().any(|row| agent_locator_assessment(row, locator).is_none()))).then_some(index)
+        }).collect();
     let matches = application_matches
         && missing_present.is_empty()
         && violated_absent.is_empty()
@@ -11656,6 +11669,7 @@ fn agent_expectation_observation(
             "application": application,
             "application_matches": application_matches,
             "missing_present": missing_present,
+            "present_unproven": present_unproven,
             "violated_absent": violated_absent,
             // Additive evidence about the READ itself, so a caller can tell a
             // condition that was genuinely not met from a screen nobody could
@@ -11678,7 +11692,8 @@ fn agent_expectation_observation(
 /// * `read:true, stale:true` — the screen was read at least once, but the last
 ///   read failed, so this is the last valid observation, not the current one.
 ///   A late failure must never erase the reads that did succeed.
-/// * `read:true` — the screen was read and the condition simply was not met.
+/// * `read:true` — a current tree was read; unproven indexes distinguish
+///   missing metadata from a condition known not to match.
 enum OcrWait {
     Matched(serde_json::Value),
     TimedOut(serde_json::Value),
@@ -23890,7 +23905,7 @@ mod tests {
     #[test]
     fn selector_enabled_enrichment_keeps_default_snapshot_delta_and_action_contracts() {
         let unknown=crate::runner::ElementRow {kind:"Button".into(),label:"Save".into(),identifier:Some("save".into()),..Default::default()};
-        let known=crate::runner::ElementRow {enabled:Some(true),..unknown.clone()};
+        let known=crate::runner::ElementRow {enabled:Some(true),visible:Some(true),focused:Some(false),..unknown.clone()};
         assert_eq!(element_snapshot_id(&[unknown.clone()]).unwrap(),element_snapshot_id(&[known.clone()]).unwrap());
         let delta=diff_element_rows(&[unknown.clone()],&[known.clone()]);
         assert_eq!(delta.unchanged,1);
@@ -24246,6 +24261,70 @@ mod tests {
         }
     }
 
+
+
+    #[test]
+    fn waits_do_not_treat_unavailable_or_protected_values_as_absence() {
+        for row in [
+            crate::runner::ElementRow {kind:"TextField".into(),value_unavailable:true,..Default::default()},
+            crate::runner::ElementRow {kind:"TextField".into(),value:Some("target".into()),value_truncated:Some(true),..Default::default()},
+            crate::runner::ElementRow {kind:"SecureTextField".into(),value:Some("••••".into()),..Default::default()},
+        ] {
+            let rows=vec![crate::runner::ElementRow {label:"Field".into(),identifier:Some("field".into()),rect:[10.0,10.0,100.0,40.0],..row}];
+            for mode in ["present","absent"] {
+                let mut input=serde_json::json!({});input[mode]=serde_json::json!([{"identifier":"field","value":"target"}]);
+                let expect:AgentUiExpectation=serde_json::from_value(input).unwrap();
+                let (matched,observation)=agent_expectation_observation(&rows,&expect);
+                assert!(!matched,"{mode}: {observation}");
+                assert_eq!(observation[format!("{mode}_unproven")],serde_json::json!([0]));
+            }
+        }
+    }
+
+    #[test]
+    fn wait_known_mismatch_overrides_unknown_and_a_known_match_proves_presence() {
+        let unknown=crate::runner::ElementRow {kind:"Button".into(),label:"Control".into(),identifier:Some("control".into()),rect:[10.0,10.0,100.0,40.0],enabled:Some(false),..Default::default()};
+        let expect:AgentUiExpectation=serde_json::from_value(serde_json::json!({"absent":[{"identifier":"control","focused":false,"enabled":true}]})).unwrap();
+        assert!(agent_expectation_observation(&[unknown.clone()],&expect).0);
+        let known=crate::runner::ElementRow {focused:Some(false),enabled:Some(true),..unknown.clone()};
+        let present:AgentUiExpectation=serde_json::from_value(serde_json::json!({"present":[{"identifier":"control","focused":false,"enabled":true}]})).unwrap();
+        let uncertain=crate::runner::ElementRow {enabled:Some(true),..unknown};
+        let rows=[uncertain,known];
+        assert!(agent_expectation_observation(&rows,&present).0);
+        let (gone,observation)=agent_expectation_observation(&rows,&expect);
+        assert!(!gone);
+        assert_eq!(observation["violated_absent"],serde_json::json!([0]));
+        assert_eq!(observation["absent_unproven"],serde_json::json!([]));
+    }
+
+    #[test]
+    fn wait_unknown_boolean_metadata_is_not_presence_or_absence_evidence() {
+        for field in ["enabled", "visible", "focused"] {
+            for reported in [None, Some(serde_json::json!(true)), Some(serde_json::json!(false)), Some(serde_json::json!({"invalid": true}))] {
+                let known = reported.as_ref().and_then(serde_json::Value::as_bool);
+                let mut row = crate::runner::ElementRow { kind:"Button".into(), label:"Control".into(), identifier:Some("control".into()), rect:[10.0,10.0,100.0,40.0], ..Default::default() };
+                match field { "enabled" => row.enabled=known, "visible" => row.visible=known, "focused" => row.focused=known, _ => unreachable!() }
+                let rows = vec![row];
+                for wanted in [false, true] {
+                    let mut locator = serde_json::json!({"identifier":"control"});
+                    locator[field] = serde_json::json!(wanted);
+                    let present: AgentUiExpectation = serde_json::from_value(serde_json::json!({"present":[locator.clone()]})).unwrap();
+                    let absent: AgentUiExpectation = serde_json::from_value(serde_json::json!({"absent":[locator.clone()]})).unwrap();
+                    let (found, positive) = agent_expectation_observation(&rows, &present);
+                    let (gone, negative) = agent_expectation_observation(&rows, &absent);
+                    assert_eq!(found, known == Some(wanted), "present {field}={wanted}, raw={reported:?}: {positive}");
+                    assert_eq!(gone, known.is_some_and(|value| value != wanted), "absent {field}={wanted}, raw={reported:?}: {negative}");
+                    assert_eq!(negative["absent_unproven"], if known.is_none() { serde_json::json!([0]) } else { serde_json::json!([]) });
+                    assert_eq!(positive["present_unproven"], if known.is_none() { serde_json::json!([0]) } else { serde_json::json!([]) });
+                    // An unrelated row with unknown flags cannot block a proven absence.
+                    locator["identifier"] = serde_json::json!("different");
+                    let unrelated: AgentUiExpectation = serde_json::from_value(serde_json::json!({"absent":[locator]})).unwrap();
+                    assert!(agent_expectation_observation(&rows, &unrelated).0);
+                }
+            }
+        }
+    }
+
     #[test]
     fn batch_expectations_match_application_and_strict_element_state() {
         let rows = vec![
@@ -24270,8 +24349,8 @@ mod tests {
                 rect: [20.0, 80.0, 400.0, 44.0],
                 depth: 4,
                 value: Some("示例联系人".to_string()),
-                enabled: None,
-                visible: None,
+                enabled: Some(true),
+                visible: Some(true),
                 accessible: Some(true),
                 focused: Some(true),
                 placeholder: Some("搜索交易".to_string()),

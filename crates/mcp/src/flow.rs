@@ -890,9 +890,10 @@ fn failed_step_locator(
         // Which locator actually failed is in the daemon's own observation.
         // Guessing "the first `present` one" describes a different failure
         // whenever a later locator is the one that did not match.
+        let unproven = indices("present_unproven");
         let missing = indices("missing_present");
         if let Some(locator) = missing
-            .first()
+            .iter().find(|index| !unproven.contains(index))
             .and_then(|index| expect.get("present")?.as_array()?.get(*index))
         {
             return Some((locator.clone(), "present"));
@@ -1012,6 +1013,25 @@ async fn diagnose_failure(
     }
 
     let observation = result.get("observation");
+    // Compact element output omits default flags and cannot resolve the
+    // provider uncertainty explicitly reported by this failed expectation.
+    let indexes = |key: &str| -> Vec<u64> {
+        observation.and_then(|value| value.get(key)).and_then(serde_json::Value::as_array)
+            .map(|values| values.iter().filter_map(serde_json::Value::as_u64).collect()).unwrap_or_default()
+    };
+    if observation.and_then(|value| value.get("application_matches")).and_then(serde_json::Value::as_bool) == Some(false) {
+        diagnosis["observable"] = serde_json::json!(false);
+        diagnosis["reason"] = serde_json::json!("application_mismatch");
+        return Some(diagnosis);
+    }
+    let unproven_present = indexes("present_unproven");
+    let known_missing = indexes("missing_present").iter().any(|index| !unproven_present.contains(index));
+    if (!unproven_present.is_empty() || !indexes("absent_unproven").is_empty())
+        && !known_missing && indexes("violated_absent").is_empty() {
+        diagnosis["observable"] = serde_json::json!(false);
+        diagnosis["reason"] = serde_json::json!("expectation_state_unproven");
+        return Some(diagnosis);
+    }
     let Some((locator, expectation)) = failed_step_locator(step, observation) else {
         diagnosis["observable"] = serde_json::json!(false);
         diagnosis["reason"] = serde_json::json!("step_has_no_locator");
@@ -1974,6 +1994,33 @@ mod tests {
         let (_, differed) =
             candidate_basis(&row, &serde_json::json!({"enabled": true, "focused": false}));
         assert_eq!(differed, vec!["enabled".to_string(), "focused".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn unproven_wait_metadata_is_not_reclassified_from_compact_defaults() {
+        let steps=serde_json::json!([{"kind":"wait_for","expect":{"present":[{"enabled":true}]}}]);
+        for key in ["present_unproven","absent_unproven"] {
+            let mut result=failing_result(0);result["observation"][key]=serde_json::json!([0]);
+            if key=="absent_unproven" { result["observation"]["missing_present"]=serde_json::json!([]); }
+            let diagnosis=diagnose_failure(Some(&steps),&result,&DaemonClient::new("http://127.0.0.1:1",None)).await.unwrap();
+            assert_eq!(diagnosis["observable"],false);
+            assert_eq!(diagnosis["reason"],"expectation_state_unproven");
+            assert!(diagnosis.get("candidates").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn proven_wait_failures_are_not_hidden_by_unknown_metadata() {
+        let steps=serde_json::json!([{"kind":"wait_for","expect":{"present":[{"identifier":"unknown"},{"identifier":"missing"}]}}]);
+        let mut result=failing_result(0);
+        result["observation"]["missing_present"]=serde_json::json!([0,1]);
+        result["observation"]["present_unproven"]=serde_json::json!([0]);
+        assert_eq!(failed_step_locator(&steps[0],result.get("observation")).unwrap().0,serde_json::json!({"identifier":"missing"}));
+        let diagnosis=diagnose_failure(Some(&steps),&result,&DaemonClient::new("http://127.0.0.1:1",None)).await.unwrap();
+        assert_eq!(diagnosis["reason"],"screen_unreadable");
+        result["observation"]["application_matches"]=serde_json::json!(false);
+        let diagnosis=diagnose_failure(Some(&steps),&result,&DaemonClient::new("http://127.0.0.1:1",None)).await.unwrap();
+        assert_eq!(diagnosis["reason"],"application_mismatch");
     }
 
     #[tokio::test]
