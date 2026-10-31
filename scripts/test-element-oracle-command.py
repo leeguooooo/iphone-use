@@ -49,7 +49,7 @@ class Command(unittest.TestCase):
             env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ.get('PATH', ''),
                        RUNNER_TEMP=str(out), GITHUB_WORKSPACE='/fixture-workspace',
                        IPU_TEST_CAPTURE=str(capture), PREPARE_ELEMENT_UI='true' if warm else 'false',
-                       ELEMENT_PROBE='selector', ELEMENT_RUNTIME='com.apple.CoreSimulator.SimRuntime.iOS-18-5',
+                       ELEMENT_PROBE='selector', ELEMENT_RUNTIME='com.apple.CoreSimulator.SimRuntime.iOS-18-2',
                        ORACLE_PROBE='selector', ORACLE_RUNTIME='com.apple.CoreSimulator.SimRuntime.iOS-18-5',
                        PREPARE_UI='true' if warm else 'false', GITHUB_SHA='a' * 40)
             process = subprocess.run(['/bin/bash', str(script)], env=env, cwd=ROOT,
@@ -59,7 +59,7 @@ class Command(unittest.TestCase):
             self.assertEqual(args.count('--prepare-ui'), int(warm))
             self.assertEqual(args[args.index('--oracle-commit') + 1], 'a' * 40)
             self.assertEqual(args[args.index('--oracle-root') + 1], '/fixture-workspace' + ('/.release-oracle' if kind == 'published' else ''))
-            self.assertEqual(args[args.index('--runtime') + 1], env['ELEMENT_RUNTIME'])
+            self.assertEqual(args[args.index('--runtime') + 1], env['ORACLE_RUNTIME' if kind == 'candidate' else 'ELEMENT_RUNTIME'])
 
     def test_cold_start_reaches_the_collector_without_preparation(self):
         self.execute(False)

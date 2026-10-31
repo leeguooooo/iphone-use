@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: candidate-native-${{ github.repository }}-${{ github.ref }}-${{ inputs.probe }}
+  group: candidate-native-${{ github.repository }}-${{ github.ref }}-${{ inputs.probe }}-${{ inputs.platform }}-${{ inputs.prepare_ui }}
   cancel-in-progress: false
 
 jobs:
@@ -75,6 +75,21 @@ jobs:
         env:
           IPU_RUNNER_DERIVED_DATA: ${{ runner.temp }}/candidate-runner
         run: bash runner/build.sh --simulator > "$RUNNER_TEMP/candidate-runner-build.log" 2>&1
+      - name: Bind built Native Runner products
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          base=Path(os.environ['RUNNER_TEMP'])/'candidate-runner/Build/Products'
+          files=[path for path in base.rglob('*') if path.is_file()]
+          assert any(path.suffix=='.xctestrun' for path in files)
+          hashes={}
+          for path in files:
+              with path.open('rb') as stream: hashes[str(path.relative_to(base))]=hashlib.file_digest(stream,'sha256').hexdigest()
+          proof_path=Path(os.environ['RUNNER_TEMP'])/'candidate-source.json'
+          proof=json.loads(proof_path.read_text());proof['runner_products_sha256']=hashes
+          proof_path.write_text(json.dumps(proof,indent=2)+'\n')
+          PY
       - name: Run exact-source App oracle on a new owned Simulator
         timeout-minutes: 75
         shell: bash
