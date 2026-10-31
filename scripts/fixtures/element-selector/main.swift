@@ -4,6 +4,7 @@ final class SelectorController: UIViewController {
   let runID: String
   var rows = [[String: Any]]()
   var touches = 0
+  var lastTapped: String?
   init(runID: String) { self.runID = runID; super.init(nibName: nil, bundle: nil) }
   required init?(coder: NSCoder) { fatalError("fixture only") }
   override func viewDidLoad() {
@@ -22,7 +23,7 @@ final class SelectorController: UIViewController {
       if button {
         let control = UIButton(type: .system)
         control.setTitle(label, for: .normal); control.titleLabel?.numberOfLines = 0
-        control.isEnabled = enabled; control.addTarget(self, action: #selector(tapped), for: .touchUpInside)
+        control.isEnabled = enabled; control.addTarget(self, action: #selector(tapped(_:)), for: .touchUpInside)
         element = control
       } else {
         let text = UILabel(); text.text = label; text.backgroundColor = .lightGray
@@ -44,13 +45,14 @@ final class SelectorController: UIViewController {
   }
   override func viewDidAppear(_ animated: Bool) { super.viewDidAppear(animated); saveState() }
   @objc func activated() { saveState() }
-  @objc func tapped() { touches += 1; saveState() }
+  @objc func tapped(_ sender: UIButton) { touches += 1; lastTapped = sender.accessibilityIdentifier; saveState() }
   func write(_ object: [String:Any], name: String) {
     let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(name)
     if let data = try? JSONSerialization.data(withJSONObject:object) { try? data.write(to:path, options:.atomic) }
   }
   func saveState() {
     write(["run_id":runID, "pid":ProcessInfo.processInfo.processIdentifier, "touches":touches,
+           "last_tapped":lastTapped.map { $0 as Any } ?? NSNull(),
            "application_state":UIApplication.shared.applicationState.rawValue,
            "key_window":view.window?.isKeyWindow ?? false], name:"selector-state.json")
   }

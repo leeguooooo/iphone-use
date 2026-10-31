@@ -22,7 +22,7 @@ PROBES = {
     'list': ('test-collect-simulator.py', 4),
     'selector': ('test-selector-simulator.py', 16),
     'agent-selector': ('test-agent-selector-simulator.py', 7),
-    'wait': ('test-wait-simulator.py', 11),
+    'wait': ('test-wait-simulator.py', 12),
 }
 
 

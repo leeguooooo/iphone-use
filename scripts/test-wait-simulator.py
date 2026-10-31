@@ -27,7 +27,7 @@ def verify_case(model,before,after,body,expect,expected,timeout):
  errors=[]
  if model.get('rows')!=fixture.EXPECTED_ROWS:errors.append('independent App model changed')
  if before.get('run_id')!=model.get('run_id') or after.get('run_id')!=model.get('run_id') or before.get('pid')!=after.get('pid'):errors.append('stale App identity')
- if after.get('touches')!=0 or after.get('application_state')!=0 or after.get('key_window') is not True:errors.append('App state or input changed')
+ if not count_is(after.get('touches'),0) or not count_is(after.get('application_state'),0) or after.get('key_window') is not True:errors.append('App state or input changed')
  if body.get('ok') is not expected or not count_is(body.get('applied_actions'),0):errors.append('wrong verdict or unexpected applied action')
  if expected:
   if not count_is(body.get('completed'),1):errors.append('step not completed')
@@ -51,6 +51,15 @@ def verify_case(model,before,after,body,expect,expected,timeout):
   if any('/elements' in call.get('call','') for call in calls):errors.append('predicate pre-probe used')
  return errors
 
+def verify_action(model,before,after,body):
+ errors=[]
+ if model.get('rows')!=fixture.EXPECTED_ROWS:errors.append('independent App model changed')
+ if before.get('run_id')!=model.get('run_id') or after.get('run_id')!=model.get('run_id') or before.get('pid')!=after.get('pid'):errors.append('stale App identity')
+ if not count_is(before.get('touches'),0) or not count_is(after.get('touches'),1) or after.get('last_tapped')!='selector.unicode':errors.append('wrong target or input count')
+ if not count_is(after.get('application_state'),0) or after.get('key_window') is not True:errors.append('App left foreground')
+ if body.get('ok') is not True or not count_is(body.get('completed'),1) or not count_is(body.get('applied_actions'),1):errors.append('wrong action acknowledgement')
+ return errors
+
 def main():
  parser=argparse.ArgumentParser(description=__doc__)
  for name in ['base','udid','owner','product-version']:parser.add_argument('--'+name,required=True)
@@ -58,7 +67,7 @@ def main():
  args=parser.parse_args();args.out.mkdir(mode=0o700,parents=True,exist_ok=False)
  daemon=drag.Daemon(args.base,args.owner);daemon.require_simulator(args.udid)
  assert drag.command(['xcrun','simctl','get_app_container',args.udid,BUNDLE,'data'],check=False).returncode!=0,'do not overwrite existing fixture'
- result={'scope':'Independent App model plus Native/MCP wait on owned Simulator;not phone/performance/parity proof','passed':False,'cases':[],'cleanup_errors':[],'mcp_sha256':hashlib.sha256(args.mcp.read_bytes()).hexdigest()};installed=False;peer=None
+ result={'scope':'Independent App model, Native/MCP wait and one guarded test-button tap on owned Simulator;not phone/performance/parity proof','passed':False,'cases':[],'cleanup_errors':[],'mcp_sha256':hashlib.sha256(args.mcp.read_bytes()).hexdigest()};installed=False;peer=None
  def save(name,value):
   path=args.out/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
  try:
@@ -94,6 +103,16 @@ def main():
     assert (tool.get('isError') is True) is (not expected),'tool error classification differs'
     errors=verify_case(model,before,after,body,expect,expected,timeout)
    result['cases'].append({'name':name,'passed':not errors,'errors':errors});assert not errors,str(errors)
+  daemon.require_simulator(args.udid)
+  response=peer.request('tools/call',{'name':'phone_run_steps','arguments':{'observe':False,'steps':[{'kind':'tap_locator','locator':{'kind':'Button','identifier':'selector.unicode','label_contains':"保存\n'O\\K'"}}]}},timeout=90);save('tap-contains/response.json',response)
+  tool,_,body=payload(response);assert 'error' not in response and tool.get('isError') is not True,'action not acknowledged; never replay'
+  until=time.monotonic()+5
+  while True:
+   after=json.loads((data/'selector-state.json').read_text())
+   if after.get('touches',0)>0:break
+   assert time.monotonic()<until,'App did not receive the action; no replay';time.sleep(.05)
+  save('tap-contains/after.json',after);errors=verify_action(model,before,after,body)
+  result['cases'].append({'name':'tap-contains','passed':not errors,'errors':errors});assert not errors,str(errors)
   active,_=drag.runner_call(args,'/wda/activeAppInfo');assert active['value']['bundleId']==BUNDLE and active['value']['pid']==before['pid']
   result['passed']=True
  except Exception as error:

@@ -63,4 +63,19 @@ class Verdict(unittest.TestCase):
    elif fault=='missing':observation['missing_present']=[]
    else:observation['missing_present']=[False]
    with self.subTest(fault=fault):self.assertTrue(probe.verify_case(*v))
+ def test_action_verifier_requires_one_tap_on_the_declared_unicode_button(self):
+  v=sample();model,before,after=v[:3];after.update(touches=1,last_tapped='selector.unicode');body={'ok':True,'completed':1,'applied_actions':1}
+  self.assertEqual(probe.verify_action(model,before,after,body),[])
+  for fault in ['nonce','pid','wrong-target','double-tap','tap-bool','background','no-ack','wrong-count','count-bool']:
+   a=copy.deepcopy(after);b=copy.deepcopy(body)
+   if fault=='nonce':a['run_id']='old'
+   elif fault=='pid':a['pid']=44
+   elif fault=='wrong-target':a['last_tapped']='selector.primary'
+   elif fault=='double-tap':a['touches']=2
+   elif fault=='tap-bool':a['touches']=True
+   elif fault=='background':a['application_state']=2
+   elif fault=='no-ack':b['ok']=False
+   elif fault=='wrong-count':b['applied_actions']=0
+   else:b['applied_actions']=True
+   with self.subTest(fault=fault):self.assertTrue(probe.verify_action(model,before,a,b))
 if __name__=='__main__':unittest.main()
