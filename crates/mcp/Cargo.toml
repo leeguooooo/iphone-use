@@ -24,7 +24,7 @@ iu_core = { package = "core", path = "../core", features = ["schema"] }
 #   schemars      — JSON Schema generation for tool parameter types
 #   transport-streamable-http-server — `--listen`: MCP over streamable HTTP
 rmcp = { version = "1.7.0", features = ["server", "macros", "transport-io", "schemars", "transport-streamable-http-server"] }
-schemars = "0.8"
+schemars = "1.2"
 
 # HTTP client — same version / features as crates/server so the workspace
 # resolves a single copy of the crate.
