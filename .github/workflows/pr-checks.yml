@@ -32,6 +32,7 @@ jobs:
       - run: python3 -I scripts/test-agent-bench-runtime.py
       - run: python3 -I scripts/test-agent-bench-policy.py
       - run: python3 -I scripts/test-agent-selector-oracle.py
+      - run: python3 -I scripts/test-simulator-cleanup.py
       - run: python3 -I scripts/test-mcp-probe-peer.py
       - run: python3 -I scripts/test-collect-simulator-verdict.py
       - run: python3 -I scripts/test-selector-simulator-verdict.py

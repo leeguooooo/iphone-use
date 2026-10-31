@@ -21,6 +21,10 @@ PROBES = {
 }
 
 
+class CommandTerminationUnverified(RuntimeError):
+    pass
+
+
 def command(argv, *, env=None, timeout=120):
     result = subprocess.run([str(x) for x in argv], env=env, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
@@ -34,10 +38,81 @@ def logged(argv, log, env, timeout):
         try:
             code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            stop(process)
+            try:
+                stop(process)
+            except Exception as error:
+                raise CommandTerminationUnverified(f'owned pid {process.pid} termination unverified; inspect {log.name}; do not replay') from error
             raise RuntimeError(f'owned command timed out; inspect {log.name}; no mutation replay')
     if code:
         raise RuntimeError(f'owned command exit {code}; inspect {log.name}')
+
+
+def cleanup_owned_simulator(simulator, name, env, out):
+    """Dispatch SDK mutations once; settle unknown outcomes by readback."""
+    receipt = {'passed': False, 'shutdown_attempts': 0, 'delete_attempts': 0,
+               'observations': [], 'commands': [], 'final_state': None}
+
+    def inspect():
+        devices = json.loads(command(['xcrun', 'simctl', 'list', 'devices', '--json'], env=env, timeout=30))['devices']
+        owned = [device for group in devices.values() for device in group if device['udid'] == simulator]
+        if not owned:
+            state = None
+        elif len(owned) != 1 or owned[0]['name'] != name:
+            raise RuntimeError('cleanup no longer matches created Simulator; no further mutation sent')
+        else:
+            state = owned[0]['state']
+            if not isinstance(state, str) or not state.strip():
+                raise RuntimeError('owned Simulator has no readable state; cleanup outcome unverified')
+        receipt['observations'].append(state if state is not None else 'absent')
+        return state
+
+    def normalized(state):
+        return state.replace(' ', '').lower() if isinstance(state, str) else None
+
+    def dispatch(action, timeout):
+        receipt[action + '_attempts'] += 1
+        entry = {'action': action, 'state': 'sent_once'}
+        receipt['commands'].append(entry)
+        try:
+            logged(['xcrun', 'simctl', action, simulator], out / f'simulator-{action}.log', env, timeout)
+            entry['state'] = 'client_completed'
+        except CommandTerminationUnverified as error:
+            entry.update(state='client_termination_unverified', error=str(error))
+            raise
+        except Exception as error:
+            # The SDK may keep working after its client exits. Never repeat
+            # the mutation, including when the client returned a known error.
+            entry.update(state='client_failed_outcome_unknown', error=str(error))
+
+    def observe(goal, deadline):
+        while True:
+            state = inspect()
+            if state is None or (goal == 'shutdown' and normalized(state) == 'shutdown'):
+                return state
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f'Simulator {goal} outcome unverified (last state {state}); no mutation replay')
+            time.sleep(1)
+
+    try:
+        state = inspect()
+        if state is not None and normalized(state) != 'shutdown':
+            deadline = time.monotonic() + 240
+            if normalized(state) in ('booted', 'booting'):
+                dispatch('shutdown', 240)
+            elif normalized(state) != 'shuttingdown':
+                raise RuntimeError(f'cannot safely shut down Simulator in state {state}')
+            state = observe('shutdown', max(deadline, time.monotonic() + 30))
+        if state is not None:
+            deadline = time.monotonic() + 120
+            dispatch('delete', 120)
+            observe('absent', max(deadline, time.monotonic() + 30))
+        receipt.update(passed=True, final_state='absent')
+        return receipt
+    except Exception as error:
+        receipt['error'] = str(error)
+        raise
+    finally:
+        (out / 'simulator-cleanup.json').write_text(json.dumps(receipt, indent=2) + '\n')
 
 
 def main():
@@ -117,16 +192,14 @@ def main():
                 if record.exists():
                     owned_record = json.loads(record.read_text())['udid'].lower() == simulator.lower()
                     assert owned_record, 'cleanup record belongs elsewhere'
-                    logged([daemon, 'simulator', 'stop', simulator, '--instance', instance, '--shutdown'], args.out / 'simulator-stop.log', env, 120)
+                    # The wrapper owns the single SDK shutdown below. The CLI
+                    # shutdown budget is 240s; killing it at 120s and sending
+                    # shutdown again leaves an unknown operation in flight.
+                    logged([daemon, 'simulator', 'stop', simulator, '--instance', instance], args.out / 'simulator-stop.log', env, 120)
             except Exception as error:
                 result['cleanup_errors'].append(str(error))
             try:
-                devices = json.loads(command(['xcrun', 'simctl', 'list', 'devices', '--json'], env=env))['devices']
-                owned = [d for group in devices.values() for d in group if d['udid'] == simulator and d['name'] == name]
-                assert len(owned) == 1, 'cleanup no longer matches created Simulator'
-                if owned[0]['state'] != 'Shutdown':
-                    command(['xcrun', 'simctl', 'shutdown', simulator], env=env)
-                command(['xcrun', 'simctl', 'delete', simulator], env=env)
+                result['simulator_cleanup'] = cleanup_owned_simulator(simulator, name, env, args.out)
             except Exception as error:
                 result['cleanup_errors'].append(str(error))
             for name in ('simulator-runner.log', 'simulator-daemon.log', 'runner-build-simulator.log'):

@@ -282,3 +282,11 @@ state write. These deliberately injected inputs test the oracle; they are not
 agent runs and do not establish a competitor or performance advantage.
 `python3 -I scripts/test-agent-selector-oracle.py` exercises offline refusal
 cases without starting a model or target.
+
+Simulator cleanup stops the recorded backend without asking it to shut down
+the SDK device. The wrapper then owns at most one shutdown and one delete.
+An already shutting-down device, or an ambiguous client result, is resolved
+by bounded state readback rather than another mutation. A failed client is
+retained in `simulator-cleanup.json`; cleanup succeeds only when the owned
+device is confirmed absent. Unconfirmed client termination, a foreign device
+identity or an unresolved SDK state still fails acceptance.
