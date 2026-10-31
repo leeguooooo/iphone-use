@@ -6622,6 +6622,8 @@ enum RunnerControlOutcome {
     /// (issue #257: a scroll point outside the runner's screen). Its reason
     /// is in the `runner_error` detail.
     RunnerRejected,
+    /// Terminate was acknowledged; launch was not applied (scope or explicit refusal).
+    AppLaunchInterrupted,
     Failed,
 }
 
@@ -9615,6 +9617,32 @@ fn runner_failed_after_dispatch_response_with(detail: Option<&serde_json::Value>
     with_security_headers((StatusCode::BAD_GATEWAY, axum::Json(body)).into_response())
 }
 
+fn copy_app_lifecycle_receipt(body: &mut serde_json::Value, detail: Option<&serde_json::Value>) {
+    if let Some(receipt) = detail.and_then(|d| d.get("app_lifecycle")) {
+        body["app_lifecycle"] = receipt.clone();
+    }
+}
+
+async fn with_app_lifecycle_receipt(response: Response, detail: Option<&serde_json::Value>) -> Response {
+    if detail.and_then(|d| d.get("app_lifecycle")).is_none() { return response; }
+    let (response, body) = read_json_response(response).await;
+    let Some(mut body) = body else { return response; };
+    copy_app_lifecycle_receipt(&mut body, detail);
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(body.to_string()))
+}
+
+fn app_launch_interrupted_response(detail: Option<&serde_json::Value>) -> Response {
+    let mut body = serde_json::json!({"ok":false,"error":"app_launch_interrupted",
+        "outcome":"partial","retry_safe":false});
+    copy_app_lifecycle_receipt(&mut body, detail);
+    if let Some(error) = detail.and_then(|d| d.get("runner_error")) {
+        body["runner_error"] = error.clone();
+    }
+    with_security_headers((StatusCode::CONFLICT, axum::Json(body)).into_response())
+}
+
 const RUNNER_REJECTED_HINT: &str = "the device runner refused this action before touching the screen (see runner_error); nothing was sent, so fix what it names and send it again";
 
 /// The runner refused the action and said nothing reached the screen.
@@ -10074,17 +10102,46 @@ async fn direct_agent_action(
             let Some(bundle) = bundle else {
                 return RunnerControlOutcome::Unsupported;
             };
-            // `fresh`: quit it first, so it opens on its first screen and not
-            // the page it was left on (recorded flows start there).
+            let allowed = || dispatch_allowed.is_some_and(|allowed| allowed())
+                && tokio::time::Instant::now() < deadline;
+            let scope_refusal = || RunnerControlOutcome::Refused("app_scope_changed",
+                "control ownership, privacy or request lifetime changed; no app request was sent");
             let fresh = value.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
+            let mut terminate_acknowledged = false;
             if fresh {
-                if let Err(error) = w.terminate_app(&bundle).await {
-                    tracing::warn!("fresh launch: terminate {bundle} failed, launching as is: {error:#}");
-                } else {
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                match w.app_lifecycle_scoped("terminate", &bundle, &allowed).await {
+                    Ok(None) => return scope_refusal(),
+                    Ok(Some(_)) => {
+                        terminate_acknowledged = true;
+                        *detail = Some(serde_json::json!({"app_lifecycle":{"terminate_acknowledged":true}}));
+                    },
+                    // An uncertain termination must never be followed by launch.
+                    Err(error) => return runner_failure_outcome(w, actionable, &error, typ, detail),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            let launch_mark = w.last_post();
+            match w.app_lifecycle_scoped("launch", &bundle, &allowed).await {
+                Ok(Some(_)) => Some(Ok(())),
+                Ok(None) if !terminate_acknowledged => return scope_refusal(),
+                Ok(None) => {
+                    *detail = Some(serde_json::json!({"app_lifecycle":{"terminate_acknowledged":true,"launch_attempted":false}}));
+                    return RunnerControlOutcome::AppLaunchInterrupted;
+                }
+                Err(error) => {
+                    let outcome = runner_failure_outcome(w, actionable, &error, typ, detail);
+                    if terminate_acknowledged {
+                        let receipt = serde_json::json!({"terminate_acknowledged":true,"launch_attempted":w.last_post() != launch_mark});
+                        detail.get_or_insert_with(|| serde_json::json!({}))["app_lifecycle"] = receipt;
+                        if outcome == RunnerControlOutcome::RunnerRejected {
+                            return RunnerControlOutcome::AppLaunchInterrupted;
+                        }
+                        actionable.store(false, Ordering::Release);
+                        return RunnerControlOutcome::Failed;
+                    }
+                    return outcome;
                 }
             }
-            Some(w.launch_app(&bundle).await)
         }
         // The handlers refuse a disallowed scheme with a 403 before this;
         // checked again here so no path can dial or message by accident.
@@ -12279,7 +12336,7 @@ async fn agent_actions_scoped(
                                     false,
                                 )
                             };
-                        return agent_actions_failure(
+                        return with_app_lifecycle_receipt(agent_actions_failure(
                             status,
                             index,
                             completed,
@@ -12289,7 +12346,7 @@ async fn agent_actions_scoped(
                             retry_safe,
                             &step_results,
                             None,
-                        );
+                        ), step_detail.as_ref()).await;
                     }
                 };
                 // An optional alert step ({"if_present":true}) that found no
@@ -12437,6 +12494,8 @@ async fn agent_actions_scoped(
                             "not_sent",
                             true,
                         ),
+                        RunnerControlOutcome::AppLaunchInterrupted =>
+                            (StatusCode::CONFLICT, "app_launch_interrupted", "partial", false),
                         RunnerControlOutcome::Failed => {
                             (StatusCode::BAD_GATEWAY, "outcome_unknown", "unknown", false)
                         }
@@ -12460,6 +12519,7 @@ async fn agent_actions_scoped(
                         &step_results,
                         None,
                     );
+                    copy_app_lifecycle_receipt(&mut body, step_detail.as_ref());
                     // The runner's own reason for a refused or failed step.
                     if let Some(runner_error) =
                         step_detail.as_ref().and_then(|d| d.get("runner_error"))
@@ -14735,6 +14795,7 @@ async fn agent_input_inner(
     // follows gets its own, strictly shorter deadline, so a slow `/source`
     // or `/alert/text` can never turn an applied action into
     // `outcome_unknown` and can never cause the mutation to be re-sent.
+    let mut detail = None;
     let dispatch = tokio::time::timeout_at(agent_runner_deadline, async {
         let mut client = runner.lock().await;
         if tokio::time::Instant::now() >= agent_runner_deadline
@@ -14747,7 +14808,6 @@ async fn agent_input_inner(
             unlock_before_action(&state, &mut client, agent_runner_deadline).await;
         }
         *recover(dispatch_marker.lock()) = Some(client.last_post());
-        let mut detail = None;
         let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < agent_runner_deadline;
         let outcome = direct_agent_action(
             &mut client,
@@ -14758,15 +14818,15 @@ async fn agent_input_inner(
             Some(&dispatch_allowed),
         )
         .await;
-        Some((client, outcome, detail))
+        Some((client, outcome))
     })
     .await;
-    let (mut client, outcome, detail) = match dispatch {
+    let (mut client, outcome) = match dispatch {
         Ok(Some(dispatched)) => dispatched,
         Ok(None) => return runner_deadline_response(false),
         Err(_) => {
             let mark = *recover(dispatched.lock());
-            return runner_deadline_response(posted_since(runner, mark).await);
+            return with_app_lifecycle_receipt(runner_deadline_response(posted_since(runner, mark).await), detail.as_ref()).await;
         }
     };
     renew_after_long_text(&state, &headers, &value);
@@ -14998,7 +15058,9 @@ async fn agent_input_inner(
             )
         }
         RunnerControlOutcome::RunnerRejected => runner_rejected_response(detail.as_ref()),
-        RunnerControlOutcome::Failed => runner_failed_after_dispatch_response_with(detail.as_ref()),
+        RunnerControlOutcome::AppLaunchInterrupted => app_launch_interrupted_response(detail.as_ref()),
+        RunnerControlOutcome::Failed => with_app_lifecycle_receipt(
+            runner_failed_after_dispatch_response_with(detail.as_ref()), detail.as_ref()).await,
     }
 }
 
@@ -25537,6 +25599,198 @@ mod tests {
                 self.shutdown();
             }
         }
+    }
+
+    #[test]
+    fn fresh_launch_stops_after_control_scope_changes() {
+        block(async {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let allowed = Arc::new(AtomicBool::new(true));
+            let scope = allowed.clone();
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = requests.clone();
+            let runner = MockRunner::start(move |request| {
+                seen.lock().unwrap().push(request.lines().next().unwrap().to_string());
+                if request.contains("/wda/apps/terminate") {
+                    scope.store(false, Ordering::Release);
+                }
+                if request.starts_with("POST /session ") {
+                    r#"{"value":{"sessionId":"SESSION"}}"#.into()
+                } else {
+                    r#"{"value":true}"#.into()
+                }
+            });
+            let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+            let actionable = AtomicBool::new(true);
+            let mut detail = None;
+            let outcome = direct_agent_action(
+                &mut client, &actionable,
+                &serde_json::json!({"type":"launch_app","bundle":"test.fixture","fresh":true}),
+                &mut detail,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                Some(&|| allowed.load(Ordering::Acquire)),
+            ).await;
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.iter().filter(|r| r.contains("/wda/apps/terminate")).count(), 1);
+            assert_eq!(requests.iter().filter(|r| r.contains("/wda/apps/launch")).count(), 0,
+                "launch must stop after termination transfers control");
+            assert_eq!(outcome, RunnerControlOutcome::AppLaunchInterrupted);
+            assert!(actionable.load(Ordering::Acquire), "scope change is not a Runner fault");
+            let response = app_launch_interrupted_response(detail.as_ref());
+            let (_, body) = read_json_response(response).await;
+            let body = body.unwrap();
+            assert_eq!(body["app_lifecycle"]["launch_attempted"], false);
+            assert_eq!(body["app_lifecycle"]["terminate_acknowledged"], true);
+            assert_eq!(body["retry_safe"], false);
+            assert_eq!(body["outcome"], "partial");
+            let redacted = crate::observation::redact_batch(body);
+            assert_eq!(redacted["app_lifecycle"]["terminate_acknowledged"], true);
+        });
+    }
+
+    #[test]
+    fn app_launch_admission_and_compound_failure_contracts() {
+        block(async {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            // Initial revocation, setup revocation, healthy fresh, uncertain
+            // termination, rejected launch after termination, ordinary launch,
+            // missing authorization, and expired deadline.
+            for case in 0..9 {
+                let allowed = Arc::new(AtomicBool::new(case != 0));
+                let scope = allowed.clone();
+                let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let seen = requests.clone();
+                let runner = MockRunner::start(move |request| {
+                    seen.lock().unwrap().push(request.lines().next().unwrap().to_string());
+                    if (case == 1 && request.starts_with("POST /session "))
+                        || (case == 2 && request.contains("/appium/settings")) {
+                        scope.store(false, Ordering::Release);
+                    }
+                    let error = if case == 4 && request.contains("/wda/apps/terminate") {
+                        Some(("500 Internal Server Error", r#"{"value":{"error":"unknown error","message":"termination outcome unknown"}}"#))
+                    } else if case == 5 && request.contains("/wda/apps/launch") {
+                        Some(("400 Bad Request", r#"{"value":{"error":"invalid argument","message":"nothing was sent"}}"#))
+                    } else { None };
+                    if let Some((status, body)) = error {
+                        return format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    }
+                    if request.starts_with("POST /session ") {
+                        r#"{"value":{"sessionId":"SESSION"}}"#.into()
+                    } else { r#"{"value":true}"#.into() }
+                });
+                let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+                let actionable = AtomicBool::new(true);
+                let guard = || allowed.load(Ordering::Acquire);
+                let mut detail = None;
+                let deadline = if case == 8 { tokio::time::Instant::now() }
+                    else { far_deadline() };
+                let outcome = direct_agent_action(&mut client, &actionable,
+                    &serde_json::json!({"type":"launch_app","bundle":"test.fixture","fresh":case != 6}),
+                    &mut detail, deadline, if case == 7 {None} else {Some(&guard)}).await;
+                let requests = requests.lock().unwrap();
+                let terminations = requests.iter().filter(|r| r.contains("/wda/apps/terminate")).count();
+                let launches = requests.iter().filter(|r| r.contains("/wda/apps/launch")).count();
+                assert_eq!(terminations, usize::from(matches!(case, 3..=5)), "case {case}: {requests:?}");
+                assert_eq!(launches, usize::from(matches!(case, 3 | 5 | 6)), "case {case}: {requests:?}");
+                match case {
+                    3 | 6 => assert_eq!(outcome, RunnerControlOutcome::Applied),
+                    5 => {
+                        assert_eq!(outcome, RunnerControlOutcome::AppLaunchInterrupted);
+                        assert!(actionable.load(Ordering::Acquire));
+                        let (_, body) = read_json_response(app_launch_interrupted_response(detail.as_ref())).await;
+                        assert_eq!(body.as_ref().unwrap()["retry_safe"], false);
+                        assert_eq!(body.as_ref().unwrap()["app_lifecycle"]["terminate_acknowledged"], true);
+                        assert_eq!(body.as_ref().unwrap()["runner_error"]["status"], 400);
+                    }
+                    4 => {
+                        assert_eq!(outcome, RunnerControlOutcome::Failed);
+                        let response = runner_failed_after_dispatch_response_with(detail.as_ref());
+                        let (_, body) = read_json_response(response).await;
+                        assert_eq!(body.as_ref().unwrap()["retry_safe"], false);
+                        assert_eq!(body.as_ref().unwrap()["outcome"], "unknown");
+                    }
+                    _ => {
+                        assert!(matches!(outcome, RunnerControlOutcome::Refused("app_scope_changed", _)));
+                        assert!(client.last_post().is_none(), "case {case}: no mutation admitted");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn fresh_launch_http_preserves_handoff_receipt_in_single_and_batch() {
+        block(async {
+            use tower::ServiceExt;
+            for (batch, fault) in [false, true].into_iter().flat_map(|batch| (0..3).map(move |fault| (batch, fault))) {
+                let state_slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<AppState>>));
+                let slot = state_slot.clone();
+                let launches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let seen_launches = launches.clone();
+                let runner = MockRunner::start(move |request| {
+                    if request.contains("/wda/apps/terminate") {
+                        if fault == 0 {
+                            slot.lock().unwrap().as_ref().unwrap().upgrade().unwrap()
+                                .released.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        return r#"{"value":false}"#.into();
+                    }
+                    if request.contains("/wda/apps/launch") {
+                        seen_launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if fault == 1 {
+                            return "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nConnection: close\r\n\r\n".into();
+                        }
+                        let body = r#"{"value":{"error":"invalid argument","message":"nothing was sent"}}"#;
+                        return format!("HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    }
+                    healthy_runner_responder(request)
+                });
+                let state = readiness_state_with_runner(runner.base());
+                state.runner_actionable.store(true, std::sync::atomic::Ordering::Release);
+                *state_slot.lock().unwrap() = Some(Arc::downgrade(&state));
+                let action = serde_json::json!({"type":"launch_app","bundle":"test.fixture","fresh":true});
+                let (path, body) = if batch {
+                    ("/agent/actions", serde_json::json!({"steps":[{"kind":"action","action":action}]}))
+                } else { ("/agent/input", action) };
+                let response = router(state.clone()).oneshot(axum::http::Request::builder()
+                    .method("POST").uri(path).header("x-phone-control", "1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+                assert_eq!(response.status(), if fault == 1 {StatusCode::BAD_GATEWAY} else {StatusCode::CONFLICT});
+                let (_, body) = read_json_response(response).await;
+                let body = body.unwrap();
+                assert_eq!(body["outcome"], if fault == 1 {"unknown"} else {"partial"}, "{body}");
+                assert_eq!(body["retry_safe"], false);
+                assert_eq!(body["app_lifecycle"]["terminate_acknowledged"], true);
+                assert_eq!(body["app_lifecycle"]["launch_attempted"], fault != 0);
+                assert_eq!(launches.load(std::sync::atomic::Ordering::Relaxed), usize::from(fault != 0));
+                assert_eq!(state.runner_actionable.load(std::sync::atomic::Ordering::Acquire), fault != 1);
+                if batch { assert_eq!(body["batch_outcome"], if fault == 1 {"unknown"} else {"partially_applied"}); }
+            }
+        });
+    }
+
+    #[test]
+    fn fresh_launch_cancellation_keeps_ack_without_inventing_launch_attempt() {
+        block(async {
+            let runner = MockRunner::start(healthy_runner_responder);
+            let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+            client.ensure_session().await.unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(true);
+            let mut detail = None;
+            // Session setup is complete; cancel during the 300ms post-ACK wait.
+            let result = tokio::time::timeout(std::time::Duration::from_millis(150), direct_agent_action(
+                &mut client, &actionable,
+                &serde_json::json!({"type":"launch_app","bundle":"test.fixture","fresh":true}),
+                &mut detail, far_deadline(), Some(&|| true))).await;
+            assert!(result.is_err());
+            let response = with_app_lifecycle_receipt(runner_deadline_response(true), detail.as_ref()).await;
+            let (_, body) = read_json_response(response).await;
+            let body = body.unwrap();
+            assert_eq!(body["retry_safe"], false);
+            assert_eq!(body["app_lifecycle"]["terminate_acknowledged"], true);
+            assert!(body["app_lifecycle"].get("launch_attempted").is_none());
+        });
     }
 
     fn readiness_state_with_runner(base: &str) -> Arc<AppState> {

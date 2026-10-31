@@ -606,6 +606,16 @@ is no longer cached). The action result and the observation are separate facts:
   acted. Read elements or a screenshot before deciding; never replay text,
   scroll, back, pay, send or delete blindly. When the runner answered with an
   error, `runner_error` (`call`, `status`, `code`, `message`) says why.
+- A fresh app launch checks authorization before terminating and again before
+  launching, including after session setup. A terminate error stops the sequence.
+  `409 app_launch_interrupted` (`outcome:partial`, `retry_safe:false`) means the
+  terminate request was acknowledged but launch was refused. Do not replay the
+  whole fresh launch. `app_lifecycle.terminate_acknowledged` confirms only the
+  request acknowledgement, not an independently verified restart.
+  `launch_attempted:true` means launch was admitted for a transport attempt; it
+  may have reached the Runner. `false` means it was not admitted. A missing field
+  is unknown, including cancellation during the wait after termination. These
+  receipts survive failed single actions, batches and MCP Full/Slim/Off modes.
 - `422 runner_rejected` (`not_sent`, `retry_safe:true`): the runner refused the
   action before touching the screen (for example a point outside the screen it
   measures); `runner_error.message` names the reason.

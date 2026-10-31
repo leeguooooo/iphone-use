@@ -656,6 +656,14 @@ pub fn failed_batch(json: &Value) -> Option<String> {
         None => {}
     }
     let mut out = vec![head];
+    if let Some(receipt) = json.get("app_lifecycle") {
+        let facts = ["terminate_acknowledged", "launch_attempted"].into_iter()
+            .filter_map(|key| receipt.get(key).and_then(Value::as_bool)
+                .map(|value| format!("{key}={value}")))
+            .collect::<Vec<_>>();
+        if !facts.is_empty() { out.push(format!("app lifecycle: {}", facts.join(" · "))); }
+    }
+
     // A long text that stopped part-way: how far it got is the whole point.
     // `remaining_text` itself stays in the structured content.
     if let Some(confirmed) = json.get("characters_confirmed").and_then(Value::as_u64) {

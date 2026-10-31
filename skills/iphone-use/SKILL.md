@@ -247,7 +247,11 @@ reference: *Flows*.
 
 1. **`retry_safe:false` or `outcome_unknown` means do not replay.** The phone may
    already have acted. Read the screen first; never resend text, send, pay or
-   delete blindly. The same applies to a failed flow.
+   delete blindly. The same applies to a failed flow. A fresh launch can return
+   `app_launch_interrupted` after the terminate request was acknowledged; inspect
+   `app_lifecycle` and current status before continuing, never replay the whole
+   fresh launch. `launch_attempted` records an attempt, not verified delivery;
+   a missing field does not mean false.
 2. **`risk: side_effect` and destructive taps need the user's explicit OK** on
    the exact target and inputs (`confirm=true` / `--confirm`). Never operate
    payment or 2FA screens unattended.

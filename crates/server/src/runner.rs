@@ -1858,30 +1858,38 @@ impl RunnerClient {
     /// system app. Examples: Settings = `com.apple.Preferences`, Photos =
     /// `com.apple.mobileslideshow`.
     pub async fn launch_app(&mut self, bundle_id: &str) -> Result<()> {
-        let sid = self.ensure_session().await?.to_string();
-        let response = self
-            .post_req(format!("{}/session/{}/wda/apps/launch", self.base, sid))
-            .json(&serde_json::json!({ "bundleId": bundle_id }))
-            .send_signed(&self.auth)
-            .await
-            .context("POST /wda/apps/launch")?;
-        ensure_runner_success(response, "POST /wda/apps/launch").await?;
+        self.app_lifecycle_scoped("launch", bundle_id, &|| true).await?;
         Ok(())
     }
 
-    /// Quit an app (`POST /wda/apps/terminate`), so its next launch starts on
-    /// its first screen rather than the page it was left on. Answers whether
-    /// it was running.
+    /// Quit an app, returning whether it was running.
     pub async fn terminate_app(&mut self, bundle_id: &str) -> Result<bool> {
+        Ok(self.app_lifecycle_scoped("terminate", bundle_id, &|| true).await?
+            .and_then(|value| value.get("value").and_then(serde_json::Value::as_bool))
+            .unwrap_or(true))
+    }
+
+    /// None means authorization expired before admission. Recheck after async
+    /// session setup and signing; never mark a mutation before that final check.
+    pub(crate) async fn app_lifecycle_scoped(
+        &mut self,
+        action: &str,
+        bundle_id: &str,
+        allowed: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Option<serde_json::Value>> {
+        if !allowed() { return Ok(None); }
         let sid = self.ensure_session().await?.to_string();
-        let response = self
-            .post_req(format!("{}/session/{}/wda/apps/terminate", self.base, sid))
-            .json(&serde_json::json!({ "bundleId": bundle_id }))
-            .send_signed(&self.auth)
-            .await
-            .context("POST /wda/apps/terminate")?;
-        let value = ensure_runner_success(response, "POST /wda/apps/terminate").await?;
-        Ok(value.get("value").and_then(serde_json::Value::as_bool).unwrap_or(true))
+        let url = format!("{}/session/{}/wda/apps/{action}", self.base, sid);
+        let (client, request) = self.http.post(&url)
+            .json(&serde_json::json!({"bundleId": bundle_id})).build_split();
+        let mut request = request.context("build app lifecycle request")?;
+        crate::runner_token::sign_request(&self.auth, &mut request);
+        if !allowed() { return Ok(None); }
+        // Track admission using the same cache invalidation as other mutations.
+        self.mark_post(&url);
+        let response = crate::timing::execute_timed(client, request).await
+            .with_context(|| format!("POST /wda/apps/{action}"))?;
+        ensure_runner_success(response, &format!("POST /wda/apps/{action}")).await.map(Some)
     }
 
     /// Bundle id of the foreground app (`GET /session/:sid/wda/apps/list`,
@@ -2393,7 +2401,12 @@ impl RunnerClient {
     }
 
     fn post_req(&mut self, url: String) -> reqwest::RequestBuilder {
-        let path = url.split('?').next().unwrap_or(&url);
+        self.mark_post(&url);
+        self.http.post(url)
+    }
+
+    fn mark_post(&mut self, url: &str) {
+        let path = url.split('?').next().unwrap_or(url);
         let read_only = path.ends_with("/session")
             || path.ends_with("/appium/settings")
             || path.ends_with("/elements")
@@ -2412,7 +2425,6 @@ impl RunnerClient {
             // Shows a screen that is about to change; free it now.
             self.settled_frame = None;
         }
-        self.http.post(url)
     }
 
     /// Find an element by its visible label and tap it. Tries the

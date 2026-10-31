@@ -3275,6 +3275,13 @@ fn shape_structured(mut result: CallToolResult, mode: StructuredMode) -> CallToo
             }
             let mut slim = serde_json::Map::new();
             for (key, value) in full {
+                if key == "app_lifecycle" {
+                    let receipt: serde_json::Map<String, serde_json::Value> = ["terminate_acknowledged", "launch_attempted"]
+                        .into_iter().filter_map(|name| value.get(name).filter(|field| field.is_boolean())
+                            .map(|field| (name.to_string(), field.clone()))).collect();
+                    if !receipt.is_empty() { slim.insert(key.clone(), serde_json::Value::Object(receipt)); }
+                    continue;
+                }
                 if key == "system_capture" {
                     let receipt: serde_json::Map<String, serde_json::Value> = ["requested", "saved_verified"]
                         .into_iter().filter_map(|name| value.get(name).filter(|field| field.is_boolean())
@@ -5883,6 +5890,36 @@ mod tests {
         let info = serde_json::to_value(handler_for("http://127.0.0.1:9").get_info()).unwrap();
         assert!(info["capabilities"]["resources"].is_object(), "{info}");
         assert!(info["capabilities"]["tools"].is_object(), "{info}");
+    }
+
+    #[test]
+    fn app_lifecycle_receipt_reaches_models_in_all_structured_modes() {
+        for (status, launch_attempted, outcome) in [("409 Conflict", Some(false), "partial"), ("409 Conflict", Some(true), "partial"), ("502 Bad Gateway", Some(true), "unknown"), ("504 Gateway Timeout", None, "unknown")] {
+            let mut receipt = serde_json::json!({"terminate_acknowledged":true});
+            if let Some(sent) = launch_attempted { receipt["launch_attempted"] = sent.into(); }
+            let body = serde_json::json!({"ok":false,"error":if outcome == "partial" {"app_launch_interrupted"} else {"outcome_unknown"}, "outcome":outcome,
+                "failed_step":0,"completed":0,"applied_actions":0,"failed_step_outcome":outcome,
+                "batch_outcome":if outcome == "partial" {"partially_applied"} else {"unknown"},
+                "retry_safe":false,"steps":[],"app_lifecycle":receipt});
+            let (url, task) = scripted_daemon(status, body.to_string().into_bytes());
+            let result = block(handler_for(&url).phone_run_steps(Parameters(RunStepsParams {
+                steps:vec![PhoneStep::LaunchApp {bundle:Some("test.fixture".into()),app:None,fresh:true,after_ms:0}],
+                observe:Some(false),
+            })));
+            task.join().unwrap();
+            for mode in [StructuredMode::Full, StructuredMode::Slim, StructuredMode::Off] {
+                let shaped = shape_structured(result.clone(), mode);
+                let text = shaped.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str())).collect::<Vec<_>>().join("\n");
+                assert!(text.contains("terminate_acknowledged=true"), "{mode:?}: {text}");
+                match launch_attempted {
+                    Some(sent) => assert!(text.contains(&format!("launch_attempted={sent}")), "{text}"),
+                    None => assert!(!text.contains("launch_attempted="), "unknown must stay unknown: {text}"),
+                }
+                if mode != StructuredMode::Off {
+                    assert_eq!(shaped.structured_content.as_ref().unwrap()["app_lifecycle"], receipt);
+                }
+            }
+        }
     }
 
     #[test]

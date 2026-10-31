@@ -7,6 +7,7 @@ const RECEIPT_KEYS: &[&str] = &[
     "retry_safe",
     "transport",
     "system_capture",
+    "app_lifecycle",
     "completed",
     "applied_actions",
     "failed_step",
@@ -98,7 +99,11 @@ fn clean(value: &mut Value) {
             }
             for (key, value) in map.iter_mut() {
                 // Timing has only controller route/count/byte/duration facts; it is not UI.
-                if key == "system_capture" {
+                if key == "app_lifecycle" {
+                    if let Some(receipt) = value.as_object_mut() {
+                        receipt.retain(|key, value| matches!(key.as_str(), "terminate_acknowledged" | "launch_attempted") && value.is_boolean());
+                    } else { *value = Value::Null; }
+                } else if key == "system_capture" {
                     if let Some(capture) = value.as_object_mut() {
                         capture.retain(|key, value| matches!(key.as_str(), "requested" | "saved_verified") && value.is_boolean());
                     } else {
