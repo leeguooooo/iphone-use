@@ -322,7 +322,7 @@ jobs:
           ditto -x -k iPhoneUse.app.zip .
           python3 -c 'import tarfile; t=tarfile.open("iphone-use-runner.tar.gz"); t.extractall(".",filter="data")'
           codesign --verify --deep --strict iPhoneUse.app
-          xcrun stapler validate iPhoneUse.app
+          python3 "$GITHUB_WORKSPACE/scripts/validate-stapled-artifact.py" iPhoneUse.app
           test "$(./iPhoneUse.app/Contents/MacOS/iphone-use --version)" = "iphone-use ${LIST_RELEASE#v}"
       - name: Build the published Native runner separately from startup
         run: |
