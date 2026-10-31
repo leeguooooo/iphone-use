@@ -23,11 +23,12 @@ jobs:
   build-macos:
     name: Build macOS binary & create release
     if: inputs.registry_release == ''
-    runs-on: macos-14
+    runs-on: macos-15
     # The `secrets` context is NOT available in step `if:` expressions (GitHub
     # rejects the workflow at parse time). Map the gate secrets into job-level
     # env (job env CAN reference secrets); steps gate on `env.*` instead.
     env:
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
       HAS_SIGNING: ${{ secrets.APPLE_SIGNING_CERTIFICATE != '' && secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD != '' }}
       # Notarization accepts either an App Store Connect API key (preferred:
       # no Apple ID password, no 2FA, revocable per key) or an Apple ID with

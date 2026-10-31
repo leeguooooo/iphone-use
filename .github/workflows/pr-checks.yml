@@ -39,7 +39,7 @@ jobs:
 
   remote-connection:
     name: Remote connection and credential recovery
-    # The iOS app uses Swift 6; macos-14's default Xcode still uses Swift 5.
+    # The iOS app requires Swift 6 on a supported macOS runner image.
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -50,7 +50,7 @@ jobs:
     name: Tests and MCP tool discovery
     # Same image as the release build, so a failure here means the code, not a
     # different environment.
-    runs-on: macos-14
+    runs-on: macos-15
     # A deadlocked test holds a macOS runner until GitHub's six-hour ceiling.
     # This project has already had one: a mock server blocking on `accept` for
     # a connection a failed test never made. The whole job finishes in a couple
@@ -59,6 +59,7 @@ jobs:
 
     env:
       CARGO_TERM_COLOR: always
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
       # Nothing in this job may drive a phone or a Mirroring window: no device
       # is attached, and reaching for one would hang rather than fail. Point
       # the daemon URL at a port nothing listens on so any code that tried

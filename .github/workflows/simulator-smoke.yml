@@ -63,7 +63,7 @@ jobs:
   smoke:
     if: ${{ !inputs.capture_probe_only && !inputs.capture_mcp && !inputs.collect_probe_only && !inputs.selector_probe_only }}
     name: Simulator end to end
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
@@ -198,16 +198,18 @@ jobs:
   system_capture_probe:
     if: ${{ inputs.capture_probe_only || inputs.capture_mcp }}
     name: System capture / iOS ${{ matrix.ios }}
-    runs-on: macos-14
-    timeout-minutes: 25
+    runs-on: macos-15
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - xcode: '15.4'
+          - xcode: '16.2'
+            sdk: '18.2'
             ios: '17.5'
             runtime: com.apple.CoreSimulator.SimRuntime.iOS-17-5
           - xcode: '16.2'
+            sdk: '18.2'
             ios: '18.2'
             runtime: com.apple.CoreSimulator.SimRuntime.iOS-18-2
     env:
@@ -227,10 +229,28 @@ jobs:
         run: |
           set -euo pipefail
           SDKROOT=$(xcrun --sdk macosx --show-sdk-path) CARGO_BUILD_JOBS=2 cargo build --release --locked -p server -p iphone-use-mcp
+      - name: Ensure the pinned Simulator runtime
+        timeout-minutes: 15
+        env:
+          WANTED_RUNTIME: ${{ matrix.runtime }}
+          WANTED_IOS: ${{ matrix.ios }}
+        run: |
+          set -euo pipefail
+          runtime_ready() {
+            xcrun simctl list runtimes --json | python3 -c 'import json,os,sys; rows=json.load(sys.stdin)["runtimes"]; sys.exit(0 if any(r.get("identifier")==os.environ["WANTED_RUNTIME"] and r.get("isAvailable") is True for r in rows) else 1)'
+          }
+          if ! runtime_ready; then
+            export_dir="$RUNNER_TEMP/pinned-runtime-${WANTED_IOS}"
+            mkdir -p "$export_dir"
+            xcodebuild -downloadPlatform iOS -buildVersion "$WANTED_IOS" -exportPath "$export_dir"
+            dmg=$(python3 -c 'import sys; from pathlib import Path; files=list(Path(sys.argv[1]).rglob("*.dmg")); assert len(files)==1,files; print(files[0])' "$export_dir")
+            xcodebuild -importPlatform "$dmg"
+          fi
+          runtime_ready
       - name: Build isolated Runner
         run: |
           set -euo pipefail
-          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = '${{ matrix.ios }}'
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = '${{ matrix.sdk }}'
           export IPU_RUNNER_DERIVED_DATA="$RUNNER_TEMP/capture-runner"
           bash runner/build.sh --simulator
       - name: Verify one system capture using independent Photos bytes
@@ -261,7 +281,7 @@ jobs:
   list_collection_probe:
     if: ${{ inputs.collect_probe_only || inputs.selector_probe_only }}
     name: Native element oracle / released artifact
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 25
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
