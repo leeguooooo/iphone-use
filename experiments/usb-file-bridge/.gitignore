@@ -1,0 +1,4 @@
+/build/
+/_scratch/
+/ios/*.xcodeproj/
+/ios/Info.plist
