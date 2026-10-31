@@ -166,6 +166,68 @@ fn a_409_failure_prints_the_whole_result_and_exits_non_zero() {
     assert_eq!(reads, 1, "exactly one diagnostic read: {sent:?}");
 }
 
+/// A fresh compact tree cannot turn an earlier proven failure into a known
+/// match. Exercise the actual CLI, including its unchanged failure verdict.
+#[test]
+fn sparse_diagnosis_preserves_the_failure_and_never_replays() {
+    for expectation in ["present", "absent"] {
+        let store = tempfile::tempdir().unwrap();
+        let flow = store.path().join("flow.json");
+        std::fs::write(&flow, serde_json::json!({
+            "version":1, "name":"Availability", "risk":"read_only",
+            "steps":[{"kind":"wait_for","expect":{expectation:[{"identifier":"save","visible":true}]},"timeout_ms":1000,"poll_ms":100}]
+        }).to_string()).unwrap();
+        let observation = if expectation == "present" {
+            serde_json::json!({"read":true,"missing_present":[0]})
+        } else {
+            serde_json::json!({"read":true,"violated_absent":[0]})
+        };
+        let failure = serde_json::json!({"ok":false,"error":"expectation_timeout","failed_step":0,
+            "applied_actions":0,"outcome":"not_sent","retry_safe":true,"observation":observation})
+        .to_string();
+        let elements = r#"{"elements":[{"index":0,"kind":"Button","identifier":"save"}]}"#;
+        let mut script = compat_preamble();
+        script.extend([
+            ("200 OK", Some(STATUS)),
+            ("409 Conflict", Some(failure.as_str())),
+            ("200 OK", Some(elements)),
+        ]);
+        let (url, requests) = mock_daemon(&script);
+        let run = flow_run(&url, &flow, store.path(), None);
+        assert_eq!(run.code, Some(1), "{}", run.stdout);
+        let result = run.json.unwrap();
+        assert_eq!(result["error"], "expectation_timeout");
+        assert_eq!(result["outcome"], "not_sent");
+        assert_eq!(result["applied_actions"], 0);
+        assert_eq!(result["retry_safe"], true);
+        assert_eq!(result["diagnosis"]["reason"], "locator_state_unproven");
+        assert_eq!(result["diagnosis"]["exact_matches"], 0);
+        assert_eq!(
+            result["diagnosis"]["candidates"][0]["matched"],
+            serde_json::json!(["identifier"])
+        );
+        assert_eq!(
+            result["diagnosis"]["candidates"][0]["unproven"],
+            serde_json::json!(["visible"])
+        );
+        let sent: Vec<_> = requests.try_iter().collect();
+        assert_eq!(
+            sent.iter()
+                .filter(|r| r.starts_with("POST /agent/actions"))
+                .count(),
+            1,
+            "{sent:?}"
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|r| r.starts_with("GET /agent/elements"))
+                .count(),
+            1,
+            "{sent:?}"
+        );
+    }
+}
+
 /// The daemon says no with a 200. A caller reading only the status code would
 /// call this a success and refresh a verification date on it.
 #[test]
