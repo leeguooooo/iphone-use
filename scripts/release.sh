@@ -56,6 +56,8 @@ t bash scripts/test-setup-runner-shim.sh
 t bash runner/ci-check.sh
 t python3 scripts/test-auto-update.py
 t python3 -I scripts/test-agent-bench.py
+t python3 -I scripts/test-agent-bench-runtime.py
+t python3 -I scripts/test-agent-bench-policy.py
 echo "checks passed"
 
 if [ "$DRY" = 1 ]; then

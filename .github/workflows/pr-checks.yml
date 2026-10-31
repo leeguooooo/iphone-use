@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 -I scripts/test-bench-census.py
       - run: python3 -I scripts/test-agent-bench-runtime.py
+      - run: python3 -I scripts/test-agent-bench-policy.py
       - run: python3 -I scripts/test-mcp-probe-peer.py
       - run: python3 -I scripts/test-collect-simulator-verdict.py
       - run: python3 -I scripts/test-selector-simulator-verdict.py

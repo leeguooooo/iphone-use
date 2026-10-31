@@ -38,6 +38,9 @@ import sys
 import time
 import shutil
 import tempfile
+import decimal
+import signal
+import select
 
 HERE = pathlib.Path(__file__).resolve().parent
 def file_fingerprint(path):
@@ -138,9 +141,13 @@ def audit(lines, returncode=0, tool_prefix=TOOL_PREFIX, cli_launcher=None):
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init" and isinstance(event.get("model"), str):
             model_sources["init"].add(event["model"])
-        content = (event.get("message") or {}).get("content") or []
+        message = event.get("message")
+        # System permission-denied events carry a string message, unlike
+        # assistant/user envelopes. They are not assistant content blocks.
+        message = message if isinstance(message, dict) else {}
+        content = message.get("content") or []
         if kind == "assistant":
-            message_model = (event.get("message") or {}).get("model")
+            message_model = message.get("model")
             if isinstance(message_model, str) and message_model and message_model != "<synthetic>":
                 model_sources["assistant"].add(message_model)
             for block in content:
@@ -268,6 +275,14 @@ def assess(header, trace, returncode=None, verification=None, context=None):
         interface = captured_context.get("interface")
         unexpected = [name for name in summary["full_tool_names"]
                       if not ((name.startswith(prefix) or name in framework) if interface == "mcp" else name == "Bash")]
+        allowed_backend = captured_context.get("allowed_backend_tools")
+        if allowed_backend is not None:
+            if interface != "mcp" or not isinstance(allowed_backend, list) or not allowed_backend or any(
+                    not isinstance(name, str) or not re.fullmatch(re.escape(prefix) + r"[A-Za-z0-9_-]+", name) for name in allowed_backend) or len(set(allowed_backend)) != len(allowed_backend):
+                raise ValueError("invalid captured MCP tool allowlist")
+            if captured_context.get("allowed_tools") != [*allowed_backend, *framework]:
+                raise ValueError("captured tool permissions differ from explicit MCP allowlist")
+            unexpected = [name for name in summary["full_tool_names"] if name not in allowed_backend and name not in framework]
         if unexpected:
             checks_passed = False
             reasons.append("trace used tools outside the captured backend")
@@ -293,6 +308,41 @@ def assess(header, trace, returncode=None, verification=None, context=None):
                 runtime_check["state"] = "failed"
                 checks_passed = False
                 reasons.append(f"runtime control failed: {key}")
+    policy_check = {"state": "legacy_unverified"}
+    if captured_context and captured_context.get("execution_policy_version") == 1:
+        raw_limits = captured_context.get("execution_limits")
+        if not isinstance(raw_limits, dict) or set(raw_limits) != {"max_turns", "max_budget_usd", "timeout_seconds"}:
+            raise ValueError("invalid captured execution policy")
+        limits = execution_limits(**raw_limits)
+        if limits != captured_context.get("execution_limits") or type(captured_context.get("agent_timed_out")) is not bool:
+            raise ValueError("invalid captured execution policy")
+        policy_check = {"state": "recorded", "limits": limits, "timed_out": captured_context["agent_timed_out"]}
+        process_record = captured_context.get("process_record")
+        process_hash = captured_context.get("process_receipt_sha256")
+        if process_record is not None:
+            if not isinstance(process_record, dict) or not isinstance(process_hash, str):
+                raise ValueError("invalid captured process receipt")
+            expected_hash = hashlib.sha256((json.dumps(process_record) + "\n").encode()).hexdigest()
+            argv_hash = process_record.get("argv_sha256")
+            if not isinstance(argv_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", argv_hash) or process_hash != expected_hash or argv_hash != captured_context.get("agent_argv_sha256") or process_record.get("timeout_seconds") != limits["timeout_seconds"]:
+                raise ValueError("captured process receipt does not match execution context")
+            if process_record.get("agent_limits") != {"--max-turns": str(limits["max_turns"]), "--max-budget-usd": limits["max_budget_usd"]}:
+                raise ValueError("captured limits differ from executed agent arguments")
+            if process_record.get("state") != "completed" or process_record.get("group_stop_sent") is not True or process_record.get("returncode") != returncode:
+                checks_passed = False
+                reasons.append("agent process did not complete with owned-group cleanup")
+            else:
+                turns, cost = summary["turns"], summary["cost_usd"]
+                if type(turns) is int and turns >= 0 and type(cost) in (int, float) and decimal.Decimal(str(cost)).is_finite() and cost >= 0:
+                    if turns > limits["max_turns"] or decimal.Decimal(str(cost)) > decimal.Decimal(limits["max_budget_usd"]):
+                        checks_passed = False
+                        reasons.append("reported agent usage exceeded captured limits")
+                        policy_check["state"] = "failed"
+                    else:
+                        policy_check["state"] = "observed_within_limits"
+        if captured_context["agent_timed_out"]:
+            checks_passed = False
+            reasons.append("agent execution deadline reached; task not retried")
     requested_model = captured_context.get("model_requested") if captured_context else None
     if requested_model is not None and (not isinstance(requested_model, str) or not requested_model.strip()):
         raise ValueError("invalid requested model in run context")
@@ -350,7 +400,8 @@ def assess(header, trace, returncode=None, verification=None, context=None):
             "checks_passed": checks_passed, "verification": proof, "reasons": reasons,
             "model_check": model_check,
             "runtime_check": runtime_check, "backend_work_observed": backend_work_observed,
-            "comparison_eligible": passed is True and model_check["state"] == "matched" and runtime_check["state"] == "verified" and backend_work_observed}
+            "execution_policy_check": policy_check,
+            "comparison_eligible": policy_check["state"] == "observed_within_limits" and passed is True and model_check["state"] == "matched" and runtime_check["state"] == "verified" and backend_work_observed}
 
 
 def private_json(path, value):
@@ -376,11 +427,13 @@ def load_env_file(path):
     return data
 
 
-def backend_spec(mcp, config=None, cli=None, reference=None, label=None, env=None):
+def backend_spec(mcp, config=None, cli=None, reference=None, label=None, env=None, allowed_mcp_tools=None):
     """Prepare native interfaces without starting an MCP server or a phone CLI."""
     instructions = pathlib.Path(reference).read_text() if reference else ""
     env = dict(env or {})
     if cli:
+        if allowed_mcp_tools is not None:
+            raise ValueError("MCP tool restrictions cannot be used with CLI mode")
         executable = pathlib.Path(cli).expanduser().resolve()
         # A literal Bash allow rule must not contain glob or shell syntax.
         if not re.fullmatch(r"[/A-Za-z0-9_.-]+", str(executable)):
@@ -420,16 +473,136 @@ def backend_spec(mcp, config=None, cli=None, reference=None, label=None, env=Non
             raise ValueError("MCP executable is missing or not executable")
         data = {"mcpServers": {name: {"command": executable}}}
     server = data["mcpServers"][name]
+    allowed_backend = None
+    if allowed_mcp_tools is not None:
+        if not isinstance(allowed_mcp_tools, (list, tuple)) or not allowed_mcp_tools or any(
+                not isinstance(tool, str) or (not re.fullmatch(r"[A-Za-z0-9_-]+", tool) or tool.startswith("mcp__")) for tool in allowed_mcp_tools) or len(set(allowed_mcp_tools)) != len(allowed_mcp_tools):
+            raise ValueError("MCP tools must be unique literal names, without namespace or wildcards")
+        allowed_backend = [f"mcp__{name}__{tool}" for tool in allowed_mcp_tools]
     server["env"] = {**server.get("env", {}), "DO_NOT_TRACK": "1",
                      "IPHONE_USE_ANALYTICS": "0", "IPHONE_USE_TELEMETRY": "0"}
     return {"interface": "mcp", "label": label or name, "config": data,
             "tool_prefix": f"mcp__{name}__", "tools": ",".join(MCP_FRAMEWORK_TOOLS),
             "framework_tools": MCP_FRAMEWORK_TOOLS,
-            "allowed": [f"mcp__{name}__*", *MCP_FRAMEWORK_TOOLS],
+            "allowed": [*(allowed_backend if allowed_backend is not None else [f"mcp__{name}__*"]), *MCP_FRAMEWORK_TOOLS],
+            "allowed_backend_tools": allowed_backend,
             "entrypoint": executable, "reference": instructions, "env": env}
 
 
-def task_invocation(path, out_dir, mcp, model, backend=None):
+def execution_limits(max_turns=12, max_budget_usd="0.50", timeout_seconds=300):
+    if type(max_turns) is not int or not 1 <= max_turns <= 1000:
+        raise ValueError("max_turns must be an integer from 1 to 1000")
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
+        raise ValueError("timeout_seconds must be an integer from 1 to 3600")
+    try:
+        budget = decimal.Decimal(str(max_budget_usd))
+    except decimal.InvalidOperation as error:
+        raise ValueError("max_budget_usd must be a positive finite amount up to 100") from error
+    if not budget.is_finite() or not 0 < budget <= 100:
+        raise ValueError("max_budget_usd must be a positive finite amount up to 100")
+    return {"max_turns": max_turns, "max_budget_usd": format(budget, "f"), "timeout_seconds": timeout_seconds}
+
+
+# Keep the session leader alive until the driver cleans up the whole group.
+# The agent cannot inherit either control descriptor (Popen closes them).
+AGENT_SUPERVISOR = """import json,os,subprocess,sys
+report,hold=int(sys.argv[1]),int(sys.argv[2])
+try:
+    child=subprocess.Popen(json.loads(sys.argv[3]))
+    result={'agent_pid':child.pid,'returncode':child.wait()}
+except BaseException as error:
+    result={'error':type(error).__name__}
+os.write(report,(json.dumps(result)+'\\n').encode())
+os.close(report)
+os.read(hold,1)
+"""
+
+
+def execute_agent(command, *, stdout, cwd, env, timeout, receipt):
+    """Own one agent process group; never replay a task after stopping it."""
+    record = {"argv_sha256": hashlib.sha256(json.dumps(command).encode()).hexdigest(),
+              "timeout_seconds": timeout, "state": "prepared",
+              "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    record["agent_limits"] = {flag: command[command.index(flag) + 1]
+                              for flag in ("--max-turns", "--max-budget-usd")
+                              if command.count(flag) == 1 and command.index(flag) + 1 < len(command)}
+    private_json(receipt, record)  # Reserve before spawning: collisions start no agent.
+    def update():
+        fd, temporary = tempfile.mkstemp(prefix=receipt.name + ".", dir=receipt.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as sink:
+                json.dump(record, sink)
+                sink.write("\n")
+            os.replace(temporary, receipt)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    report_read, report_write = os.pipe()
+    hold_read, hold_write = os.pipe()
+    proc = None
+    timed_out = False
+    outcome = None
+    failure = None
+    started = time.monotonic()
+    try:
+        proc = subprocess.Popen([sys.executable, "-I", "-c", AGENT_SUPERVISOR,
+                                str(report_write), str(hold_read), json.dumps(command)],
+                                stdout=stdout, stderr=subprocess.STDOUT, cwd=cwd, env=env,
+                                pass_fds=(report_write, hold_read), start_new_session=True)
+        os.close(report_write); report_write = None
+        os.close(hold_read); hold_read = None
+        record.update(pid=proc.pid, process_group=proc.pid, state="running")
+        update()
+        readable, _, _ = select.select([report_read], [], [], max(0, timeout - (time.monotonic() - started)))
+        if readable:
+            data = os.read(report_read, 4096)
+            if not data:
+                raise RuntimeError("agent supervisor exited without a result; task not retried")
+            outcome = json.loads(data)
+            if "error" in outcome:
+                raise RuntimeError("agent launch failed: " + outcome["error"])
+            record.update(agent_pid=outcome["agent_pid"], returncode=outcome["returncode"])
+        else:
+            timed_out = True
+    except BaseException as error:
+        failure = error
+    finally:
+        # Never poll/reap the leader before killpg: even if it crashed, its
+        # unreaped PID still prevents process-group identifier reuse.
+        if proc is not None:
+            record["state"] = "deadline_stop_requested" if timed_out else "cleanup_requested"
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                failure = error
+            try:
+                proc.wait(timeout=5)
+                record["group_stop_sent"] = True
+            except subprocess.TimeoutExpired:
+                record["state"] = "termination_unverified"
+                failure = RuntimeError(f"agent termination unverified (pid {proc.pid}); inspect this handle, do not retry")
+        for descriptor in (report_read, report_write, hold_read, hold_write):
+            if descriptor is not None:
+                os.close(descriptor)
+        if record["state"] != "termination_unverified":
+            record["state"] = "interrupted" if failure else "deadline_stopped" if timed_out else "completed"
+        if timed_out:
+            record["returncode"] = proc.returncode
+        record["elapsed_seconds"] = time.monotonic() - started
+        update()
+    if failure:
+        raise failure
+    result = subprocess.CompletedProcess(command, record["returncode"])
+    result.timed_out = timed_out
+    result.process_receipt_sha256 = file_fingerprint(receipt)
+    result.process_record = record
+    return result
+
+
+def task_invocation(path, out_dir, mcp, model, backend=None, limits=None):
+    limits = execution_limits(**(limits or {}))
     header, prompt = parse_task(path)
     if not re.fullmatch(r"[A-Za-z0-9_-]+", header["name"]):
         raise ValueError("task name must be a safe filename")
@@ -461,7 +634,7 @@ def task_invocation(path, out_dir, mcp, model, backend=None):
         prompt += "\n\nBackend API reference:\n" + backend["reference"]
     if backend["interface"] == "cli":
         prompt += f"\nUse this environment-isolated executable for all shell calls: {backend['launcher']}"
-    prompt += ("\n\nUse only the already configured, authorized local test phone. "
+    prompt += ("\n\nUse only the already configured, authorized test target (device or Simulator). "
                "Do not install or reconfigure software, rent cloud devices, send messages, pay, "
                "or delete user data. Stop if the configured phone is unavailable.")
     command = [
@@ -471,16 +644,19 @@ def task_invocation(path, out_dir, mcp, model, backend=None):
         "--tools", backend["tools"], "--allowedTools", *backend["allowed"],
         "--permission-mode", "dontAsk", "--setting-sources", "user",
         "--settings", '{"disableAllHooks":true}',
+        "--no-session-persistence", "--max-turns", str(limits["max_turns"]),
+        "--max-budget-usd", limits["max_budget_usd"],
     ]
     if model:
         command += ["--model", model]
     return header, backend, config, jsonl, task_prompt, command
 
 
-def run_task(path, out_dir, mcp, model, backend=None):
+def run_task(path, out_dir, mcp, model, backend=None, limits=None):
+    limits = execution_limits(**(limits or {}))
     if not DRIVER_LOADED_SHA256 or file_fingerprint(__file__) != DRIVER_LOADED_SHA256:
         raise ValueError("driver changed since load; no agent started")
-    header, backend, config, jsonl, task_prompt, command = task_invocation(path, out_dir, mcp, model, backend)
+    header, backend, config, jsonl, task_prompt, command = task_invocation(path, out_dir, mcp, model, backend, limits)
     child = os.environ.copy()
     selected_agent = shutil.which("claude", path=child.get("PATH"))
     if not selected_agent:
@@ -499,13 +675,20 @@ def run_task(path, out_dir, mcp, model, backend=None):
     started = time.monotonic()
     fd = os.open(jsonl, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as sink, tempfile.TemporaryDirectory(prefix="iphone-bench-work-") as workspace:
-        proc = subprocess.run(command, stdout=sink, stderr=subprocess.STDOUT, cwd=workspace, env=child, check=False)
+        proc = execute_agent(command, stdout=sink, cwd=workspace, env=child, timeout=limits["timeout_seconds"],
+                             receipt=out_dir / f"{header['name']}.process.json")
     wall_ms = int((time.monotonic() - started) * 1000)
     context = {"task": header["name"], "trace_sha256": hashlib.sha256(jsonl.read_bytes()).hexdigest(),
                "task_header": header,
                "driver_sha256": driver_before,
                "driver_unchanged": driver_before == file_fingerprint(__file__),
                "runtime_isolation_version": 1, "backend_env_isolated": True,
+               "execution_policy_version": 1, "execution_limits": limits,
+               "agent_timed_out": getattr(proc, "timed_out", False),
+               "agent_argv_sha256": hashlib.sha256(json.dumps(command).encode()).hexdigest(),
+               "process_record": getattr(proc, "process_record", None),
+               "process_receipt_sha256": getattr(proc, "process_receipt_sha256", None),
+               "allowed_backend_tools": backend.get("allowed_backend_tools"),
                "agent_entrypoint": str(agent), "agent_entrypoint_sha256": agent_before,
                "agent_entrypoint_unchanged": agent_before == file_fingerprint(agent),
                "agent_env_sha256": hashlib.sha256(json.dumps(child, sort_keys=True).encode()).hexdigest(),
@@ -556,6 +739,11 @@ def print_report(rows):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--task", action="append", help="task name (tasks/<name>.md); repeatable")
+    parser.add_argument("--task-file", action="append", help="explicit local Markdown task; cannot combine with --task")
+    parser.add_argument("--max-turns", type=int, default=12, help="agent execution turn limit (default 12)")
+    parser.add_argument("--max-budget-usd", default="0.50", help="agent dollar budget (default 0.50)")
+    parser.add_argument("--timeout-seconds", type=int, default=300, help="owned agent process-group deadline (default 300)")
+    parser.add_argument("--allow-mcp-tool", action="append", help="literal MCP tool name; repeat to restrict backend access")
     parser.add_argument("--model", help="exact Claude model id for a controlled comparison")
     interface = parser.add_mutually_exclusive_group()
     interface.add_argument("--mcp", help="iphone-use MCP executable (default: installed binary)")
@@ -571,6 +759,12 @@ def main(argv=None):
     parser.add_argument("--context", help="captured run context for --from-jsonl (otherwise infer sibling file)")
     parser.add_argument("--json", action="store_true", help="print machine-readable results")
     args = parser.parse_args(argv)
+    try:
+        limits = execution_limits(args.max_turns, args.max_budget_usd, args.timeout_seconds)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.task and args.task_file:
+        parser.error("choose --task or --task-file")
     if args.model is not None and not args.model.strip():
         parser.error("--model must name an exact reported model ID")
     if args.task and any(not re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in args.task):
@@ -586,14 +780,16 @@ def main(argv=None):
         parser.error("--returncode requires --from-jsonl")
     if args.context is not None and not replay:
         parser.error("--context requires --from-jsonl")
-    if replay and any([args.mcp, args.mcp_config, args.cli, args.instructions, args.label, args.env_file, args.model, args.prepare_only]):
+    if replay and any([args.allow_mcp_tool, args.max_turns != 12, args.max_budget_usd != "0.50", args.timeout_seconds != 300, args.mcp, args.mcp_config, args.cli, args.instructions, args.label, args.env_file, args.model, args.prepare_only]):
         parser.error("replay uses the captured context, not new backend or model settings")
 
     if replay:
         if args.task and len(args.task) != 1:
             parser.error("re-auditing needs exactly one --task")
         name = args.task[0] if args.task else pathlib.Path(args.from_jsonl).stem
-        task = HERE / "tasks" / f"{name}.md"
+        if args.task_file and len(args.task_file) != 1:
+            parser.error("replay needs exactly one task file")
+        task = pathlib.Path(args.task_file[0]).resolve() if args.task_file else HERE / "tasks" / f"{name}.md"
         if not task.is_file():
             parser.error("no matching task header; provide --task NAME")
         header, prompt = parse_task(task)
@@ -608,7 +804,7 @@ def main(argv=None):
         except (OSError, ValueError) as error:
             parser.error(str(error))
     else:
-        tasks = sorted((HERE / "tasks").glob("*.md"))
+        tasks = [pathlib.Path(path).resolve() for path in args.task_file] if args.task_file else sorted((HERE / "tasks").glob("*.md"))
         if args.task:
             tasks = [HERE / "tasks" / f"{name}.md" for name in args.task]
         if not tasks:
@@ -622,14 +818,17 @@ def main(argv=None):
         mcp = args.mcp or os.environ.get("IPHONE_USE_MCP", str(DEFAULT_MCP))
         try:
             backend = backend_spec(mcp, args.mcp_config, args.cli, args.instructions, args.label,
-                                   load_env_file(args.env_file))
+                                   load_env_file(args.env_file), args.allow_mcp_tool)
+            task_names = [parse_task(task)[0]["name"] for task in tasks]
+            if len(set(task_names)) != len(task_names):
+                parser.error("task headers must have unique names")
             parent = HERE / "out"
             parent.mkdir(parents=True, exist_ok=True)
             out_dir = pathlib.Path(tempfile.mkdtemp(prefix=datetime.datetime.now().strftime("%Y%m%d-%H%M%S-"), dir=parent))
             if args.prepare_only:
                 prepared = []
                 for task in tasks:
-                    header, _, config, _, _, command = task_invocation(task, out_dir, mcp, args.model, backend)
+                    header, _, config, _, _, command = task_invocation(task, out_dir, mcp, args.model, backend, limits)
                     prepared.append({"task": header["name"], "state": "prepared", "passed": None,
                                      "backend_label": backend["label"], "interface": backend["interface"],
                                      "mcp_config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
@@ -640,7 +839,7 @@ def main(argv=None):
                 else:
                     print(f"PREPARED {len(prepared)} task(s): {out_dir}; no agent or phone tool started")
                 return 0
-            rows = [run_task(task, out_dir, mcp, args.model, backend) for task in tasks]
+            rows = [run_task(task, out_dir, mcp, args.model, backend, limits) for task in tasks]
             private_json(out_dir / "results.json", rows)
         except (OSError, ValueError) as error:
             parser.error(str(error))

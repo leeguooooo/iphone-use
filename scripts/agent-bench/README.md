@@ -210,3 +210,48 @@ eligibility; an attempted/denied call or framework-only discovery is not proof
 of backend work. Unresolved tool results invalidate new controlled traces.
 The driver source digest is frozen on module load and checked before preparation,
 before agent launch and after the run.
+
+## Execution limits and read-only comparison profiles
+
+Each new run requests `--max-turns 12`, `--max-budget-usd 0.50` and
+`--no-session-persistence` from Claude. The driver independently enforces a
+300-second wall deadline. Override these with the corresponding driver flags,
+including `--timeout-seconds`. A deadline kills only the owned agent process
+group and records `<task>.process.json`; the task is not automatically retried.
+Stopping the agent does not roll back an already dispatched device action.
+The limits bound a task run; they do not make `max_tool_calls` a live call limit.
+The dollar threshold can be exceeded by the model request already in flight;
+it is not a hard billing cap. Turn-limit errors may also report a count above
+the requested limit. Such samples fail the usage check.
+
+Use repeated `--allow-mcp-tool NAME` flags for a profile limited to literal
+backend tools. Names exclude the MCP namespace and wildcards. Framework
+discovery remains enabled; trace auditing also rejects calls outside the exact
+captured list. Without this option, the existing whole-backend permission
+remains. Tool-name restrictions do not validate tool arguments or establish
+that the selected tools are read-only; choose and verify the profile separately.
+
+An external task can be selected with `--task-file /absolute/task.md`, including
+for replay. It cannot be combined with `--task`. For example, preparation alone
+does not start an agent or backend:
+
+```sh
+scripts/agent-bench/run.py --task-file /absolute/task.md \
+  --mcp-config /absolute/backend.json --model EXACT_MODEL_ID \
+  --allow-mcp-tool phone_get_elements --max-turns 4 \
+  --max-budget-usd 0.25 --timeout-seconds 120 --prepare-only
+```
+
+New contexts capture these limits and whether the deadline fired.
+`execution_policy_check` distinguishes recorded requests from reported usage
+within limits. A qualifying sample needs a bound process receipt, confirmed
+group-stop request and finite nonnegative reported cost and turn count within
+the limits. This does not prove the model service's budget enforcement.
+Calibrate the actual agent version against a synthetic
+backend before trusting its turn, dollar or permission behavior. Legacy runs
+remain auditable but cannot qualify for a controlled comparison without the
+new policy evidence. Eligibility alone still does not prove a capability or
+performance advantage.
+The supervisor keeps its group identifier reserved until cleanup, including
+when the agent exits normally. Descendants that deliberately create a new
+session escape this group; the driver does not claim to stop those processes.

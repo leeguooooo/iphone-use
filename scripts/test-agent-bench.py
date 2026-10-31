@@ -241,7 +241,7 @@ with tempfile.TemporaryDirectory(prefix="bench-native-") as tmp:
             kwargs["stdout"].write(json.dumps(event) + "\n")
         return type("Completed", (), {"returncode": 0})()
 
-    with patch.object(bench.subprocess, "run", side_effect=fake_claude), patch.object(bench.shutil, "which", return_value=sys.executable):
+    with patch.object(bench, "execute_agent", side_effect=fake_claude), patch.object(bench.shutil, "which", return_value=sys.executable):
         out = root / "mcp-run"
         out.mkdir(mode=0o700)
         row = real_run_task(task, out, None, "fixed-model", mcp)
@@ -311,7 +311,7 @@ with tempfile.TemporaryDirectory(prefix="bench-native-") as tmp:
             if block.get("type") == "tool_use":
                 block["name"] = "Bash"
     current_trace["value"] = "\n".join(json.dumps(event) for event in events) + "\n"
-    with patch.object(bench.subprocess, "run", side_effect=fake_claude), patch.object(bench.shutil, "which", return_value=sys.executable), patch.dict(os.environ, {"OTHER_CLI_SESSION": "old-cloud-session"}):
+    with patch.object(bench, "execute_agent", side_effect=fake_claude), patch.object(bench.shutil, "which", return_value=sys.executable), patch.dict(os.environ, {"OTHER_CLI_SESSION": "old-cloud-session"}):
         out = root / "cli-run"
         out.mkdir(mode=0o700)
         row = real_run_task(task, out, None, "fixed-model", cli)

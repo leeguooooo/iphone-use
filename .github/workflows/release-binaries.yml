@@ -54,6 +54,8 @@ jobs:
           bash scripts/test-setup-runner-shim.sh
           python3 scripts/test-auto-update.py
           python3 -I scripts/test-agent-bench.py
+          python3 -I scripts/test-agent-bench-runtime.py
+          python3 -I scripts/test-agent-bench-policy.py
 
           skill_file_count="$(
             find skills/iphone-use -type f -print | wc -l | tr -d '[:space:]'
