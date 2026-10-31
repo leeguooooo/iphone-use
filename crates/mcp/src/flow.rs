@@ -1079,7 +1079,7 @@ async fn diagnose_failure(
     // A tree we could not parse, that carries no `elements`, or that holds
     // nothing to act on is NOT an observation. Saying `observable: true` here
     // would be the same mistake as letting an empty tree prove absence.
-    let rows = match tree.as_ref().and_then(|tree| tree.get("elements")) {
+    let mut rows = match tree.as_ref().and_then(|tree| tree.get("elements")) {
         Some(serde_json::Value::Array(rows)) if !rows.is_empty() => rows.clone(),
         _ => {
             diagnosis["observable"] = serde_json::json!(false);
@@ -1087,6 +1087,13 @@ async fn diagnose_failure(
             return Some(diagnosis);
         }
     };
+    // New-format rows must explicitly state value availability. A missing
+    // row marker is not permission to fall back to legacy string inference.
+    if tree.as_ref().and_then(|tree| tree.get("locator_state")) == Some(&serde_json::json!(1)) {
+        for row in &mut rows {
+            if row.is_object() && row.get("value_known").is_none() { row["value_known"] = false.into(); }
+        }
+    }
     if rows.iter().all(|row| {
         row.get("kind")
             .and_then(serde_json::Value::as_str)
@@ -2224,7 +2231,7 @@ mod tests {
                 assert!(requests
                     .recv()
                     .unwrap()
-                    .starts_with("GET /agent/elements?locator_state=1 "));
+                    .starts_with("GET /agent/elements?locator_state=1&ocr=off "));
                 assert!(requests.try_recv().is_err());
             }
         }
@@ -2263,6 +2270,25 @@ mod tests {
             assert_eq!(diagnosis["reason"], reason);
             assert_eq!(diagnosis["partial"], true);
         }
+    }
+
+    #[tokio::test]
+    async fn projected_rows_missing_value_availability_do_not_fall_back_to_legacy_inference() {
+        let steps = serde_json::json!([{"kind":"wait_for","expect":{"present":[{"identifier":"save","value":"prefix"}]}}]);
+        let (url, task, _requests) = mock_daemon_sequence(&[(
+            "200 OK",
+            r#"{"locator_state":1,"elements":[{"identifier":"save","value":"prefix"}]}"#,
+        )]);
+        let diagnosis = diagnose_failure(
+            Some(&steps),
+            &failing_result(0),
+            &DaemonClient::new(url, None),
+        )
+        .await
+        .unwrap();
+        task.join().unwrap();
+        assert_eq!(diagnosis["reason"], "locator_state_unproven");
+        assert_eq!(diagnosis["exact_matches"], 0);
     }
 
     #[tokio::test]

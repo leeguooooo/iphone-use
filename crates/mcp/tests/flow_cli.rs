@@ -263,7 +263,7 @@ fn value_diagnosis_through_the_cli_respects_availability_and_never_retries() {
                 0,
             ),
             (
-                serde_json::json!([{"identifier":"save","value":"prefix"},{"identifier":"save","value":"prefix","value_truncated":true}]),
+                serde_json::json!([{"identifier":"save","value":"prefix","value_known":true},{"identifier":"save","value":"prefix","value_truncated":true}]),
                 "prefix",
                 "locator_state_unproven",
                 1,
@@ -311,7 +311,7 @@ fn value_diagnosis_through_the_cli_respects_availability_and_never_retries() {
             );
             assert_eq!(
                 sent.iter()
-                    .filter(|r| r.starts_with("GET /agent/elements?locator_state=1 "))
+                    .filter(|r| r.starts_with("GET /agent/elements?locator_state=1&ocr=off "))
                     .count(),
                 1,
                 "{sent:?}"

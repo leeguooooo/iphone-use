@@ -28016,7 +28016,12 @@ mod tests {
                     .iter()
                     .find(|r| r["identifier"] == "empty")
                     .unwrap();
-                assert_eq!(empty["index"], 1);
+                if filtered {
+                    assert_eq!(empty["index"], 1);
+                } else {
+                    assert_eq!(elements.iter().position(|row| row["identifier"] == "empty"), Some(1));
+                    assert!(empty.get("index").is_none(), "unfiltered rows retain implicit indices");
+                }
                 if diagnostic {
                     assert_eq!(body["locator_state"], 1);
                     assert_eq!(empty["value"], "");
