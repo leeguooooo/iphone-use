@@ -554,6 +554,7 @@ fn project_observation(value: &serde_json::Value) -> Option<serde_json::Value> {
                 ("stale", flag),
                 ("sparse", flag),
                 ("partial", flag),
+                ("coverage", |value| one_of(value,&["complete","partial","unknown"])),
                 ("present_counts", project_match_counts),
                 ("absent_counts", project_match_counts),
                 ("rows", count),

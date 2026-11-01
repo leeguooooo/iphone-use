@@ -139,8 +139,8 @@ def main():
   result['cases'].append({'name':'tap-contains','passed':True,'errors':[]})
   daemon.require_simulator(args.udid)
   capped,headers=drag.runner_call(args,'/source?format=json&max_nodes=1&extension_calls=0');save('native-truncation-header/source.json',capped)
-  quality={'truncated':headers.get('X-IPU-Truncated'),'nodes':headers.get('X-IPU-Nodes')};save('native-truncation-header/quality.json',quality)
-  assert quality['truncated']=='1','node cap must be reported incomplete by the real Native producer'
+  quality={'truncated':headers.get('X-IPU-Truncated'),'complete':headers.get('X-IPU-Tree-Complete'),'nodes':headers.get('X-IPU-Nodes')};save('native-truncation-header/quality.json',quality)
+  assert quality['truncated']=='1' and quality['complete']=='0','node cap must be reported incomplete by the real Native producer'
   result['cases'].append({'name':'native-truncation-header','passed':True,'errors':[]})
   active,_=drag.runner_call(args,'/wda/activeAppInfo');assert active['value']['bundleId']==BUNDLE and active['value']['pid']==before['pid']
   result['passed']=True

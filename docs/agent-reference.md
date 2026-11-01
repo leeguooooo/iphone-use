@@ -596,7 +596,12 @@ is no longer cached). The action result and the observation are separate facts:
   fewer than3 possible matches. Unknown attributes and partial trees remain
   unproven unless the known witnesses already meet the threshold. Wait
   observations return `present_counts` / `absent_counts` with required, known
-  and unproven counts and a completeness flag. Index-only locators, null/bool/
+  and unproven counts and a completeness flag. `coverage` is `complete`,
+  `partial`, or `unknown`; proving shortage requires a new Native
+  `X-IPU-Tree-Complete:1` acknowledgement. Old or unacknowledged providers can
+  prove presence from enough known rows, but cannot prove shortage. Update
+  the selected instance's Runner source when negative checks need that proof.
+  Index-only locators, null/bool/
   fractional/out-of-range indexes and indexed action locators are rejected.
   Actions keep their existing unique-target contract. Counts describe the
   current provider snapshot, not business completion or durable item identity.

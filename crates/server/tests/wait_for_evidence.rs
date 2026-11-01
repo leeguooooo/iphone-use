@@ -881,7 +881,7 @@ fn wait_ordinals_use_producer_truncation_headers_without_losing_known_presence()
                 }
                 if request.contains("/source") {
                     count.fetch_add(1, Ordering::SeqCst);
-                    return Some((Duration::ZERO,format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-IPU-Truncated: {header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PRESENT_SCREEN}",PRESENT_SCREEN.len())));
+                    return Some((Duration::ZERO,format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-IPU-Truncated: {header}\r\nX-IPU-Tree-Complete: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PRESENT_SCREEN}",PRESENT_SCREEN.len())));
                 }
                 None
             });
@@ -907,7 +907,16 @@ fn wait_ordinals_use_producer_truncation_headers_without_losing_known_presence()
                 index + 1
             );
             assert_eq!(observation[format!("{mode}_counts")][0]["known_matches"], 1);
-            assert_eq!(observation["partial"], header != "0");
+            assert_eq!(
+                observation["coverage"],
+                if header == "0" {
+                    "complete"
+                } else if header == "1" {
+                    "partial"
+                } else {
+                    "unknown"
+                }
+            );
         });
     }
 }
@@ -965,6 +974,46 @@ fn agent_elements_exposes_native_truncation_without_changing_rows() {
         assert_eq!(body["partial"], true);
         assert_eq!(body["elements"].as_array().unwrap().len(), 2);
         assert_eq!(body["elements"][1]["label"], "搜索");
-        assert!(!body.to_string().contains("_ipu_tree_truncated"));
+        assert!(!body.to_string().contains("_ipu_tree_"));
+    });
+}
+
+#[test]
+fn legacy_or_unacknowledged_coverage_never_proves_wait_shortage() {
+    block(async {
+        let runner = mock_runner(move |request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.into()));
+            }
+            if request.contains("/source") {
+                return Some((Duration::ZERO,format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-IPU-Truncated: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{OTHER_SCREEN}",OTHER_SCREEN.len())));
+            }
+            None
+        });
+        let (_,result)=run_actions(runner.url(),r#"{"observe":false,"steps":[{"kind":"wait_for","expect":{"absent":[{"label":"Save","index":1}]},"timeout_ms":0}]}"#).await;
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["observation"]["coverage"], "unknown");
+        assert_eq!(
+            result["observation"]["absent_unproven"],
+            serde_json::json!([0])
+        );
+    });
+}
+
+#[test]
+fn malformed_source_is_not_a_readable_complete_snapshot() {
+    block(async {
+        let runner = mock_runner(move |request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.into()));
+            }
+            if request.contains("/source") {
+                return Some((Duration::ZERO, r#"{"value":[]}"#.into()));
+            }
+            None
+        });
+        let (_,result)=run_actions(runner.url(),r#"{"observe":false,"steps":[{"kind":"wait_for","expect":{"absent":[{"label":"Save"}]},"timeout_ms":0}]}"#).await;
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["observation"]["read"], false);
     });
 }

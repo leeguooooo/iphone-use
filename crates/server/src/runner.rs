@@ -811,7 +811,9 @@ impl RunnerClient {
     /// Source reads are read-only, so avoiding session creation also removes a
     /// source/session churn loop during relay recovery.
     pub async fn source(&mut self) -> Result<serde_json::Value> {
-        self.source_excluding(None).await
+        let mut tree=self.source_excluding(None).await?;
+        if let Some(root)=tree.as_object_mut(){root.remove("_ipu_tree_coverage");}
+        Ok(tree)
     }
 
     /// Can the runner read the screen right now? A light tree read (no
@@ -866,13 +868,15 @@ impl RunnerClient {
             .get("x-ipu-alert")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let truncated = response.headers().get("x-ipu-truncated")
-            .is_some_and(|value| value.as_bytes() != b"0");
+        let coverage = match (response.headers().get("x-ipu-truncated").map(|value|value.as_bytes()),response.headers().get("x-ipu-tree-complete").map(|value|value.as_bytes())) {
+            (Some(b"1"),_)=>SnapshotCoverage::Truncated,
+            (Some(b"0"),Some(b"1"))=>SnapshotCoverage::Complete,
+            _=>SnapshotCoverage::Unknown,
+        };
         let body = response.text().await.context("parse /source")?;
         let mut value = parse_runner_value(&body, "GET /source")?;
-        if truncated {
-            if let Some(root) = value.as_object_mut() { root.insert("_ipu_tree_truncated".into(), true.into()); }
-        }
+        let root=value.as_object_mut().ok_or_else(||anyhow::anyhow!("/source must return a tree object"))?;
+        root.insert("_ipu_tree_coverage".into(),coverage.as_str().into());
         match alert.as_deref() {
             Some("0") => self.no_alert_at = Some(asked_at),
             Some("1") => self.no_alert_at = None,
@@ -2186,8 +2190,11 @@ impl RunnerClient {
 
     pub async fn element_snapshot(&mut self) -> Result<ElementSnapshot> {
         let (tree, lite) = self.bounded_source().await?;
-        let truncated = tree.get("_ipu_tree_truncated").and_then(serde_json::Value::as_bool) == Some(true);
-        Ok(ElementSnapshot {rows:self.rows_from_tree(&tree, lite),truncated})
+        let coverage = SnapshotCoverage::from_tree(&tree);
+        Ok(ElementSnapshot {
+            rows: self.rows_from_tree(&tree, lite),
+            coverage,
+        })
     }
 
     /// One source request, without the optional full/lite pre-probe or retry.
@@ -2205,8 +2212,11 @@ impl RunnerClient {
             .await?;
         self.probe.record(&tree, full_source_max_nodes());
         self.lite_source = lite;
-        let truncated = tree.get("_ipu_tree_truncated").and_then(serde_json::Value::as_bool) == Some(true);
-        Ok(ElementSnapshot {rows:self.rows_from_tree(&tree, lite),truncated})
+        let coverage = SnapshotCoverage::from_tree(&tree);
+        Ok(ElementSnapshot {
+            rows: self.rows_from_tree(&tree, lite),
+            coverage,
+        })
     }
 
     /// [`Self::elements`] over a depth- and node-capped read
@@ -2275,7 +2285,7 @@ impl RunnerClient {
     /// kinds of screen, and backing out of a WeChat chat lands on the list.
     async fn bounded_source(&mut self) -> Result<(serde_json::Value, bool)> {
         if std::env::var("IPHONE_USE_SOURCE_PROBE").is_ok_and(|value| value.trim() == "0") {
-            return Ok((self.source().await?, false));
+            return Ok((self.source_excluding(None).await?, false));
         }
         // Every read skips `isVisible` unless asked otherwise (the approach
         // callstack/agent-device takes: no per-node hit-testing, visibility
@@ -2316,7 +2326,7 @@ impl RunnerClient {
             };
         }
         if !self.probe.should_probe(limit, untouched, self.lite_source) {
-            let full = self.source().await?;
+            let full = self.source_excluding(None).await?;
             self.probe.record(&full, limit);
             if self.probe.last_nodes() > limit {
                 // Grew past the limit without a probe: it was read, but the
@@ -2341,7 +2351,7 @@ impl RunnerClient {
         // A small tree whose full read still fails points at runner itself, not
         // at the tree: report it like any failed read rather than hide it
         // behind the probe.
-        let full = self.source().await?;
+        let full = self.source_excluding(None).await?;
         Ok((full, false))
     }
 
@@ -2954,9 +2964,37 @@ fn snapshot_settings(
 
 /// One source observation, with completeness kept beside the rows rather than
 /// inferred from count or lost when the provider's headers are consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotCoverage {
+    Complete,
+    Truncated,
+    Unknown,
+}
+impl SnapshotCoverage {
+    pub fn is_complete(self) -> bool {
+        self == Self::Complete
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Truncated => "partial",
+            Self::Unknown => "unknown",
+        }
+    }
+    fn from_tree(tree: &serde_json::Value) -> Self {
+        match tree
+            .get("_ipu_tree_coverage")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("complete") => Self::Complete,
+            Some("partial") => Self::Truncated,
+            _ => Self::Unknown,
+        }
+    }
+}
 pub struct ElementSnapshot {
     pub rows: Vec<ElementRow>,
-    pub truncated: bool,
+    pub coverage: SnapshotCoverage,
 }
 
 /// One row of the flattened element tree.

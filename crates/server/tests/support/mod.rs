@@ -232,8 +232,9 @@ fn mock_runner_inner(
             let response = if body.starts_with("HTTP/1.1 ") {
                 body
             } else {
+                let coverage=if request.contains("/source") {"X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n"} else {""};
                 format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{coverage}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
             };

@@ -11659,7 +11659,7 @@ fn app_changed_json(
 fn agent_expectation_observation(
     rows: &[crate::runner::ElementRow],
     expect: &AgentUiExpectation,
-    tree_complete: bool,
+    coverage: crate::runner::SnapshotCoverage,
 ) -> (bool, serde_json::Value) {
     let application = active_application(rows);
     let application_matches = expect
@@ -11667,7 +11667,7 @@ fn agent_expectation_observation(
         .as_ref()
         .is_none_or(|expected| application.as_ref() == Some(expected));
     let sparse = settle_tree_is_sparse(rows);
-    let complete = tree_complete && !sparse;
+    let complete = coverage.is_complete() && !sparse;
     let assess = |selector: &AgentWaitSelector| {
         let mut known = 0usize;
         let mut unknown = 0usize;
@@ -11714,7 +11714,7 @@ fn agent_expectation_observation(
             "application":application,"application_matches":application_matches,
             "missing_present":missing_present,"present_unproven":present_unproven,
             "violated_absent":violated_absent,"absent_unproven":absent_unproven,
-            "read":true,"rows":rows.len(),"sparse":sparse,"partial":!tree_complete,
+            "read":true,"rows":rows.len(),"sparse":sparse,"partial":coverage==crate::runner::SnapshotCoverage::Truncated,"coverage":coverage.as_str(),
             "present_counts":present.into_iter().map(|(_,counts)|counts).collect::<Vec<_>>(),
             "absent_counts":absent.into_iter().map(|(_,counts)|counts).collect::<Vec<_>>()
         }),
@@ -12010,7 +12010,7 @@ async fn agent_wait_alert(
                     ..Default::default()
                 })
                 .collect(),
-            truncated: false,
+            coverage: crate::runner::SnapshotCoverage::Complete,
         }),
         Ok(Err(error)) => Err(AgentWaitReadError::Failed(error)),
         Err(_) => Err(AgentWaitReadError::TimedOut),
@@ -12907,7 +12907,7 @@ async fn agent_actions_scoped(
                         }
                     };
                     reads += 1;
-                    let (matches, mut observation) = agent_expectation_observation(&snapshot.rows, expect, !snapshot.truncated);
+                    let (matches, mut observation) = agent_expectation_observation(&snapshot.rows, expect, snapshot.coverage);
                     if alert_only {
                         observation["source"] = serde_json::json!("alert");
                         observation["alert"] = snapshot.rows.first().map(|row| row.label.clone()).into();
@@ -16516,7 +16516,7 @@ async fn agent_elements_inner(
         let mut bounded = false;
         let snapshot = loop {
             let attempt = if bounded {
-                w.elements_bounded().await.map(|rows| crate::runner::ElementSnapshot { rows, truncated:true })
+                w.elements_bounded().await.map(|rows| crate::runner::ElementSnapshot { rows, coverage:crate::runner::SnapshotCoverage::Truncated })
             } else {
                 w.element_snapshot().await
             };
@@ -16607,7 +16607,7 @@ async fn agent_elements_inner(
         // flattened tree misses or misrepresents it (see RunnerClient::alert_summary).
         let alert = probe_alert(&mut w).await;
         let geometric = w.visibility_is_geometric();
-        Ok::<_, anyhow::Error>((snapshot.rows, screen, alert, geometric, bounded || snapshot.truncated))
+        Ok::<_, anyhow::Error>((snapshot.rows, screen, alert, geometric, if bounded {crate::runner::SnapshotCoverage::Truncated} else {snapshot.coverage}))
     })
     .await;
     if !read_scope.current(&state) {
@@ -16615,7 +16615,7 @@ async fn agent_elements_inner(
             "elements": [], "error": "observation_scope_changed", "observation_omitted": true
         }).to_string());
     }
-    let (rows, screen, alert, geometric, partial) = match result {
+    let (rows, screen, alert, geometric, coverage) = match result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) if error.downcast_ref::<BlockingAlert>().is_some() => {
             // The phone is fine; an alert is waiting for an answer.
@@ -16684,6 +16684,7 @@ async fn agent_elements_inner(
             return json_body(StatusCode::GATEWAY_TIMEOUT, body.to_string());
         }
     };
+    let partial = !coverage.is_complete();
     let snapshot = match element_snapshot_id(&rows) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -16737,7 +16738,7 @@ async fn agent_elements_inner(
     let include_locator_state = query.locator_state.as_deref() == Some("1");
     let include_enabled = include_locator_state || selector.and_then(|selector| selector.enabled).is_some();
     let include_value = include_locator_state || selector.is_some_and(|selector| selector.value.is_some() || selector.value_present.is_some());
-    if include_locator_state { body["locator_state"] = 1.into(); }
+    if include_locator_state { body["locator_state"] = 1.into(); body["coverage"] = coverage.as_str().into(); }
     if include_enabled || include_value {
         if let Some(elements) = body.get_mut("elements").and_then(|value| value.as_array_mut()) {
             for (element, row) in elements.iter_mut().zip(rows.iter()) {
@@ -16771,6 +16772,7 @@ async fn agent_elements_inner(
     }
     if partial {
         mark_partial(&mut body);
+        body["coverage"] = coverage.as_str().into();
     }
     if let (Some(object), Some(alert)) = (body.as_object_mut(), alert_json(alert)) {
         object.insert("alert".to_string(), alert);
@@ -24115,7 +24117,7 @@ mod tests {
             ),
         ] {
             let expect:AgentUiExpectation=serde_json::from_value(serde_json::json!({mode:[{"kind":"Button","label":"Save","enabled":true,"index":index}]})).unwrap();
-            let (matched, observation) = agent_expectation_observation(&rows, &expect, complete);
+            let (matched, observation) = agent_expectation_observation(&rows, &expect, if complete {crate::runner::SnapshotCoverage::Complete} else {crate::runner::SnapshotCoverage::Truncated});
             assert_eq!(matched, expected, "{mode}: {observation}");
             assert_eq!(
                 observation[format!("{mode}_unproven")],
@@ -24537,7 +24539,7 @@ mod tests {
             for mode in ["present","absent"] {
                 let mut input=serde_json::json!({});input[mode]=serde_json::json!([{"identifier":"field","value":"target"}]);
                 let expect:AgentUiExpectation=serde_json::from_value(input).unwrap();
-                let (matched,observation)=agent_expectation_observation(&rows,&expect, true);
+                let (matched,observation)=agent_expectation_observation(&rows,&expect, crate::runner::SnapshotCoverage::Complete);
                 assert!(!matched,"{mode}: {observation}");
                 assert_eq!(observation[format!("{mode}_unproven")],serde_json::json!([0]));
             }
@@ -24548,13 +24550,13 @@ mod tests {
     fn wait_known_mismatch_overrides_unknown_and_a_known_match_proves_presence() {
         let unknown=crate::runner::ElementRow {kind:"Button".into(),label:"Control".into(),identifier:Some("control".into()),rect:[10.0,10.0,100.0,40.0],enabled:Some(false),..Default::default()};
         let expect:AgentUiExpectation=serde_json::from_value(serde_json::json!({"absent":[{"identifier":"control","focused":false,"enabled":true}]})).unwrap();
-        assert!(agent_expectation_observation(&[unknown.clone()],&expect, true).0);
+        assert!(agent_expectation_observation(&[unknown.clone()],&expect, crate::runner::SnapshotCoverage::Complete).0);
         let known=crate::runner::ElementRow {focused:Some(false),enabled:Some(true),..unknown.clone()};
         let present:AgentUiExpectation=serde_json::from_value(serde_json::json!({"present":[{"identifier":"control","focused":false,"enabled":true}]})).unwrap();
         let uncertain=crate::runner::ElementRow {enabled:Some(true),..unknown};
         let rows=[uncertain,known];
-        assert!(agent_expectation_observation(&rows,&present, true).0);
-        let (gone,observation)=agent_expectation_observation(&rows,&expect, true);
+        assert!(agent_expectation_observation(&rows,&present, crate::runner::SnapshotCoverage::Complete).0);
+        let (gone,observation)=agent_expectation_observation(&rows,&expect, crate::runner::SnapshotCoverage::Complete);
         assert!(!gone);
         assert_eq!(observation["violated_absent"],serde_json::json!([0]));
         assert_eq!(observation["absent_unproven"],serde_json::json!([]));
@@ -24573,8 +24575,8 @@ mod tests {
                     locator[field] = serde_json::json!(wanted);
                     let present: AgentUiExpectation = serde_json::from_value(serde_json::json!({"present":[locator.clone()]})).unwrap();
                     let absent: AgentUiExpectation = serde_json::from_value(serde_json::json!({"absent":[locator.clone()]})).unwrap();
-                    let (found, positive) = agent_expectation_observation(&rows, &present, true);
-                    let (gone, negative) = agent_expectation_observation(&rows, &absent, true);
+                    let (found, positive) = agent_expectation_observation(&rows, &present, crate::runner::SnapshotCoverage::Complete);
+                    let (gone, negative) = agent_expectation_observation(&rows, &absent, crate::runner::SnapshotCoverage::Complete);
                     assert_eq!(found, known == Some(wanted), "present {field}={wanted}, raw={reported:?}: {positive}");
                     assert_eq!(gone, known.is_some_and(|value| value != wanted), "absent {field}={wanted}, raw={reported:?}: {negative}");
                     assert_eq!(negative["absent_unproven"], if known.is_none() { serde_json::json!([0]) } else { serde_json::json!([]) });
@@ -24582,7 +24584,7 @@ mod tests {
                     // An unrelated row with unknown flags cannot block a proven absence.
                     locator["identifier"] = serde_json::json!("different");
                     let unrelated: AgentUiExpectation = serde_json::from_value(serde_json::json!({"absent":[locator]})).unwrap();
-                    assert!(agent_expectation_observation(&rows, &unrelated, true).0);
+                    assert!(agent_expectation_observation(&rows, &unrelated, crate::runner::SnapshotCoverage::Complete).0);
                 }
             }
         }
@@ -24646,7 +24648,7 @@ mod tests {
             ocr_absent: vec![],
         };
 
-        let (matches, observation) = agent_expectation_observation(&rows, &expect, true);
+        let (matches, observation) = agent_expectation_observation(&rows, &expect, crate::runner::SnapshotCoverage::Complete);
         assert!(matches);
         assert_eq!(observation["application"], "招商银行");
         assert_eq!(observation["missing_present"], serde_json::json!([]));
@@ -24659,7 +24661,7 @@ mod tests {
             ocr_present: vec![],
             ocr_absent: vec![],
         };
-        assert!(!agent_expectation_observation(&rows, &wrong_app, true).0);
+        assert!(!agent_expectation_observation(&rows, &wrong_app, crate::runner::SnapshotCoverage::Complete).0);
     }
 
     #[test]
@@ -26010,8 +26012,9 @@ mod tests {
                     let response = if body.starts_with("HTTP/1.1 ") {
                         body
                     } else {
+                        let coverage=if request.contains("/source") {"X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n"} else {""};
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{coverage}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
                         )
                     };

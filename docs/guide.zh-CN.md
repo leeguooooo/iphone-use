@@ -336,6 +336,8 @@ IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./r
 放在 `absent` 中则要求能够证明可能匹配少于3个。未知属性和不完整树不能证明
 数量不足；返回的 `present_counts` / `absent_counts` 会列出确定、未证实和要求的数量。
 这个序号不是 snapshot 元素编号、点击目标或业务条目标识，动作定位器不接受它。
+`coverage:unknown` 表示提供端没有确认完整性；足够的确定匹配仍可证明存在，但不能
+证明数量不足。负条件需要新版 Native 完整性标记，所选实例的 Runner 也需更新。
 
 标签有动态部分时，可以用 `label_contains:"下载"`，并与 identifier、kind 等条件
 一起匹配。它是区分大小写的字面子串，长度为 1–1000 个字符；定位字符串不接受 NUL。

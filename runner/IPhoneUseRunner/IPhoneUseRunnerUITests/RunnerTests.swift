@@ -606,6 +606,7 @@ final class RunnerTests: XCTestCase {
       "X-IPU-Node-Count": "\(tree[IPURTreeNodeCountKey] ?? 0)",
       "X-IPU-Depth": "\(tree[IPURTreeDepthKey] ?? 0)",
       "X-IPU-Truncated": ((tree[IPURTreeTruncatedKey] as? Bool) == true) ? "1" : "0",
+      "X-IPU-Tree-Complete": ((tree[IPURTreeTruncatedKey] as? Bool) == false) ? "1" : "0",
       "X-IPU-Extension-Calls": "\(tree[IPURTreeExtensionCallsKey] ?? 0)",
       "X-IPU-Pid": "\(pid)",
     ]

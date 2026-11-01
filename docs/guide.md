@@ -614,6 +614,9 @@ known matches. In `absent`, it requires proving fewer than3 possible matches.
 Unknown attributes or a truncated tree prevent a shortage proof. The index is
 not a snapshot row number, action target, or business item identifier; action
 locators reject it. `present_counts` / `absent_counts` expose the evidence.
+`coverage:unknown` means the provider did not acknowledge completeness;
+known witnesses still prove presence, but shortage stays unproven. Negative
+checks need the new Native completeness marker, including an updated Runner.
 
 For a changing label, a locator can use `label_contains:"Download"` together
 with its other fields. Matching is literal and case-sensitive; the fragment

@@ -1185,6 +1185,7 @@ async fn diagnose_failure(
                     .is_some_and(|fields| !fields.is_empty())
         })
         .count();
+    let complete = !partial && tree.as_ref().and_then(|tree|tree.get("coverage")).and_then(serde_json::Value::as_str)==Some("complete");
     let is_wait = matches!(expectation, "present" | "absent");
     let reason = if is_wait {
         let parsed_index:Result<Option<iu_core::wait_selector::WaitIndex>,_> = locator.get("index").cloned()
@@ -1194,7 +1195,7 @@ async fn diagnose_failure(
             Err(_)=>{diagnosis["observable"]=false.into();diagnosis["reason"]="invalid_wait_selector".into();return Some(diagnosis);}
         };
         diagnosis["required_matches"] = index.required_matches().into();
-        match (expectation,index.assess(exact,unproven,!partial)) {
+        match (expectation,index.assess(exact,unproven,complete)) {
             ("absent",Some(true)) => "still_present",
             (_,Some(true)) if !index.is_zero() => "wait_threshold_matches_now",
             (_,Some(true)) => "locator_matches_now",
@@ -2138,7 +2139,7 @@ mod tests {
                 2,
             ),
         ] {
-            let body = serde_json::json!({"elements":rows}).to_string();
+            let body = serde_json::json!({"coverage":"complete","elements":rows}).to_string();
             let (url, task, requests) = mock_daemon_sequence(&[("200 OK", body.as_str())]);
             let diagnosis = diagnose_failure(
                 Some(&steps),
@@ -2430,7 +2431,7 @@ mod tests {
             } else {
                 serde_json::json!({"kind":"action","action":{"type":"tap_locator","locator":locator}})
             };
-            let body = serde_json::json!({"elements":rows}).to_string();
+            let body = serde_json::json!({"coverage":"complete","elements":rows}).to_string();
             let (url, task, _) = mock_daemon_sequence(&[("200 OK", &body)]);
             let diagnosis = diagnose_failure(
                 Some(&serde_json::json!([step])),
