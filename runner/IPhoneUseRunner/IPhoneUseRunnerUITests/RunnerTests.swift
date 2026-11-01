@@ -686,20 +686,9 @@ final class RunnerTests: XCTestCase {
     }
     if text.isEmpty { return .value(NSNull()) }
     let frequency = UInt(max(1, min(1000, number(body, "frequency") ?? 60)))
-    if let error = IPURBridge.synthesizeText(text, charactersPerSecond: frequency, pid: 0) {
-      NSLog("ipu-runner: text synthesis failed, using XCUIApplication.typeText: %@", error)
-      let application = foreground().application
-      let issuesBefore = recordedIssues.count
-      var exception: String?
-      IPURBridge.performWithoutQuiescence(application) {
-        exception = IPURBridge.catchException { application.typeText(text) }
-      }
-      if let failure = exception ?? (recordedIssues.count > issuesBefore ? recordedIssues.last : nil) {
-        throw RunnerError.failed("type failed (synthesis: \(error); typeText: \(failure))")
-      }
-      return .value(NSNull(), headers: ["X-IPU-Gesture": "xcui-typetext"])
-    }
-    return .value(NSNull(), headers: ["X-IPU-Gesture": "synthesized"])
+    // /type accepts literal text; only the WebDriver routes map private-use keys.
+    let path = try typeIntoFocus(text, frequency: frequency, mapKeys: false)
+    return .value(NSNull(), headers: ["X-IPU-Gesture": path])
   }
 
   /// Send Home once to dismiss system UI; activate SpringBoard only if the event had no effect.

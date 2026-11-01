@@ -510,11 +510,12 @@ extension RunnerTests {
   }
 
   /// Types text (with WebDriver private-use key codes mapped) into whatever has focus.
-  func typeIntoFocus(_ text: String, frequency: UInt = 60) throws -> String {
-    let mapped = Self.mapWebDriverKeys(text)
+  func typeIntoFocus(_ text: String, frequency: UInt = 60, mapKeys: Bool = true) throws -> String {
+    let mapped = mapKeys ? Self.mapWebDriverKeys(text) : text
     if mapped.isEmpty { return "none" }
-    if let error = IPURBridge.synthesizeText(mapped, charactersPerSecond: frequency, pid: 0) {
-      NSLog("ipu-runner: text synthesis failed, using XCUIApplication.typeText: %@", error)
+    // Select before dispatch. An error may follow delivery of a prefix, so never
+    // infer permission to replay or select a newly focused app after dispatch.
+    if !IPURBridge.textSynthesisAvailable() {
       let application = foreground().application
       let issuesBefore = recordedIssues.count
       var exception: String?
@@ -522,9 +523,12 @@ extension RunnerTests {
         exception = IPURBridge.catchException { application.typeText(mapped) }
       }
       if let failure = exception ?? (recordedIssues.count > issuesBefore ? recordedIssues.last : nil) {
-        throw RunnerError.failed("typing failed (synthesis: \(error); typeText: \(failure))")
+        throw RunnerError.failed("typing outcome unknown (XCUIApplication.typeText: \(failure)); do not retry input")
       }
       return "xcui-typetext"
+    }
+    if let error = IPURBridge.synthesizeText(mapped, charactersPerSecond: frequency, pid: 0) {
+      throw RunnerError.failed("typing outcome unknown (synthesis: \(error)); do not retry input")
     }
     return "synthesized"
   }
