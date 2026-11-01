@@ -7332,6 +7332,7 @@ const TEXT_INPUT_KINDS: [&str; 4] = ["TextField", "SecureTextField", "SearchFiel
 async fn set_value_snapshot_element(
     w: &mut crate::runner::RunnerClient,
     value: &serde_json::Value,
+    allowed: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), SnapshotElementTapError> {
     let text = value
         .get("value")
@@ -7343,7 +7344,7 @@ async fn set_value_snapshot_element(
     let element_id = if snapshot_row_locator(row).is_some() {
         let element_id = resolve_snapshot_row_element(w, &rows, index).await?;
         if reused && !verify_reused_row(w, &element_id, row).await? {
-            return Box::pin(set_value_snapshot_element(w, value)).await;
+            return Box::pin(set_value_snapshot_element(w, value, allowed)).await;
         }
         element_id
     } else if TEXT_INPUT_KINDS.contains(&row.kind.as_str()) {
@@ -7354,6 +7355,26 @@ async fn set_value_snapshot_element(
     } else {
         return Err(SnapshotElementTapError::InvalidTarget);
     };
+    let secure = row.kind == "SecureTextField";
+    if !allowed() { return Err(SnapshotElementTapError::BeforeDispatch(anyhow::anyhow!("replacement scope ended before binding"))); }
+    if !secure {
+        if let Some(target) = w.input_target_for_element(&element_id, &text).await.map_err(set_value_dispatch_error)? {
+            if !allowed() { return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement scope ended after focus"))); }
+            w.clear_input_target(&target).await.map_err(set_value_dispatch_error)?;
+            for chunk in crate::text_input::split(&text, crate::text_input::CHUNK_CHARS) {
+                if !allowed() { return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement scope ended; do not retry"))); }
+                w.keys_to_target(chunk, &target, crate::text_input::chunk_timeout(crate::text_input::char_count(chunk)))
+                    .await.map_err(set_value_dispatch_error)?;
+            }
+            let receipt = w.read_element_value(&target, (text.encode_utf16().count() + 1) as u32)
+                .await.map_err(set_value_dispatch_error)?;
+            if !allowed() || receipt.get("complete").and_then(serde_json::Value::as_bool) != Some(true)
+                || receipt.get("value").and_then(serde_json::Value::as_str) != Some(text.as_str()) {
+                return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("selected replacement exact value was not confirmed; do not retry")));
+            }
+            return Ok(());
+        }
+    }
     if text.is_empty() {
         // Clearing IS the requested mutation — report its real outcome.
         return w.clear_element(&element_id).await.map_err(|error| {
@@ -7364,7 +7385,6 @@ async fn set_value_snapshot_element(
             }
         });
     }
-    let secure = row.kind == "SecureTextField";
     let before = if secure {
         None
     } else {
@@ -9138,7 +9158,8 @@ async fn runner_control_with_client(
             }
         }
         "set_value" => {
-            let result = set_value_snapshot_element(w, v).await;
+            let allowed = || actionable.load(Ordering::Acquire) && dispatch_allowed.is_none_or(|allowed| allowed());
+            let result = set_value_snapshot_element(w, v, &allowed).await;
             match snapshot_element_outcome(result, w, "control set_value") {
                 Ok(result) => result,
                 Err(outcome) => return outcome,

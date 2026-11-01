@@ -73,13 +73,15 @@ pub fn typing_allowance(text: &str) -> Duration {
     typing_time(chars).mul_f64(1.5) + Duration::from_secs(requests as u64)
 }
 
-/// The extra time a `text` action (or any JSON action) needs; zero otherwise.
+/// Extra time for typed text, including snapshot-selected field replacement.
 pub fn action_allowance(action: &serde_json::Value) -> Duration {
-    if action.get("type").and_then(serde_json::Value::as_str) != Some("text") {
-        return Duration::ZERO;
-    }
+    let field = match action.get("type").and_then(serde_json::Value::as_str) {
+        Some("text") => "text",
+        Some("set_value") => "value",
+        _ => return Duration::ZERO,
+    };
     action
-        .get("text")
+        .get(field)
         .and_then(serde_json::Value::as_str)
         .map_or(Duration::ZERO, typing_allowance)
 }
@@ -236,5 +238,13 @@ mod tests {
             action_allowance(&serde_json::json!({"type":"tap","x":0.5})),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn selected_replacement_gets_the_same_bounded_typing_allowance() {
+        for text in [String::new(), "x".repeat(200), "字".repeat(1000)] {
+            assert_eq!(action_allowance(&serde_json::json!({"type":"set_value","value":text})), typing_allowance(&text));
+        }
+        assert_eq!(action_allowance(&serde_json::json!({"type":"set_value","text":"x".repeat(1000)})), Duration::ZERO);
     }
 }

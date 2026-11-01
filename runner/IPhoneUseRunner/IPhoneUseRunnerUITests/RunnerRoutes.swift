@@ -102,6 +102,7 @@ extension RunnerTests {
       return nil
 
     case "POST":
+      if let id = match(parts, "ipu/element/:id/input-target")?.first { return try selectedInputTarget(id, request) }
       if match(parts, "ipu/system-capture") != nil {
         defer { IPURBridge.invalidateRequestCache() }
         return .value(IPURBridge.requestSystemScreenshot())
@@ -158,6 +159,7 @@ extension RunnerTests {
       "ipu:timedDragPath": true,
       "ipu:valueRead": true,
       "ipu:guardedInput": guardedInput,
+      "ipu:selectedInputTarget": guardedInput && IPURBridge.focusRecoveryAvailable(),
       "ipu:inputContinuation": guardedInput,
       "ipu:volumeButtons": volumeButtons,
       "ipu:systemCaptureRequest": IPURBridge.systemScreenshotAvailable(),
@@ -318,6 +320,101 @@ extension RunnerTests {
   }
 
   /// Read-only capture; every subsequent chunk re-reads this retained AX handle.
+  private func checkedReplacementTarget(_ token: String, original: UINode, requireFocus: Bool) throws -> UINode {
+    IPURBridge.invalidateRequestCache()
+    elements.prune()
+    let current = try freshNode(token)
+    guard let ax = current.axElement, IPURBridge.pid(forAXElement: ax) == original.pid else {
+      throw RunnerError.failed("replacement original AX process unavailable")
+    }
+    if let refusal = InputTargetCheck.replacementRefusal(original: original, current: current,
+        foregroundPID: foreground().pid, visible: current.isVisible(screen: windowSizePoints()),
+        bindingMatches: inputBinding == token, requireFocus: requireFocus) {
+      throw RunnerError.failed("\(refusal); replacement stopped")
+    }
+    IPURBridge.invalidateRequestCache()
+    let finalPID = foreground().pid
+    guard finalPID == original.pid, inputBinding == token else {
+      throw RunnerError.failed("replacement app or binding changed during verification")
+    }
+    return current
+  }
+
+  private func replacementFocusPointAllowed(_ token: String, original: UINode, point: CGPoint) -> Bool {
+    do {
+      IPURBridge.invalidateRequestCache()
+      let front = foreground()
+      guard front.pid == original.pid, let application = front.element, let ax = original.axElement else { return false }
+      let tree = timed("SelectedFocusScene") {
+        IPURBridge.runnerTree(forAXElement: application, maxDepth: Self.defaultMaxDepth,
+          maxNodes: 500, extensionCallLimit: Self.defaultExtensionCalls, rememberKey: nil, includeElements: true)
+      }
+      guard (tree[IPURTreeOkKey] as? NSNumber)?.boolValue == true,
+            let truncated = tree[IPURTreeTruncatedKey] as? NSNumber, !truncated.boolValue,
+            let raw = tree[IPURTreeRootKey] as? [String: Any] else { return false }
+      let root = UINode(raw: raw, parent: nil, pid: front.pid)
+      let matches = ([root] + root.descendants()).filter {
+        $0.axElement.map { IPURBridge.sameAXElement($0, ax) } == true
+      }
+      guard matches.count == 1, let current = matches.first, current.rect.contains(point),
+            InputTargetCheck.replacementRefusal(original: original, current: current,
+              foregroundPID: front.pid, visible: current.isVisible(screen: windowSizePoints()),
+              bindingMatches: inputBinding == token, requireFocus: false) == nil,
+            !InputTargetCheck.focusPointOccluded(target: current, root: root, point: point) else { return false }
+      _ = try checkedReplacementTarget(token, original: original, requireFocus: false)
+      return true
+    } catch { return false }
+  }
+
+  private func focusReplacementTarget(_ token: String, original: UINode) throws -> (node: UINode, tapped: Bool) {
+    let before = try checkedReplacementTarget(token, original: original, requireFocus: false)
+    if before.isFocused { return (before, false) }
+    guard replacementFocusPointAllowed(token, original: original, point: before.center) else {
+      throw RunnerError.failed("replacement original focus point occluded or scene unavailable; nothing was tapped")
+    }
+    guard let ax = before.axElement else { throw RunnerError.failed("replacement original AX handle unavailable") }
+    if let error = IPURBridge.synthesizeFocusTap(forAXElement: ax, at: before.center, pid: before.pid,
+        allowDispatch: { self.replacementFocusPointAllowed(token, original: original, point: before.center) }) {
+      throw RunnerError.failed("replacement focus tap outcome unknown: \(error)")
+    }
+    let deadline = ProcessInfo.processInfo.systemUptime + 0.75
+    repeat {
+      let current = try checkedReplacementTarget(token, original: original, requireFocus: false)
+      if current.isFocused {
+        let confirmed = try checkedReplacementTarget(token, original: original, requireFocus: true)
+        elements.renew(token, node: confirmed)
+        return (confirmed, true)
+      }
+      RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+    } while ProcessInfo.processInfo.systemUptime < deadline
+    throw RunnerError.failed("replacement original field did not gain focus; no text was sent")
+  }
+
+  private func selectedInputTarget(_ id: String, _ request: HTTPRequest) throws -> HTTPResponse {
+    let body = try request.jsonObject()
+    guard Set(body.keys).isSubset(of: ["multiline"]),
+          let multiline = body["multiline"] as? NSNumber,
+          CFGetTypeID(multiline) == CFBooleanGetTypeID() else {
+      throw RunnerError.invalidArgument("selected input target requires a multiline boolean; nothing was sent")
+    }
+    let original = try freshNode(id)
+    guard ["XCUIElementTypeTextField", "XCUIElementTypeSearchField", "XCUIElementTypeTextView"].contains(original.type),
+          !multiline.boolValue || original.type == "XCUIElementTypeTextView" else {
+      throw RunnerError.invalidArgument("selected input target is not an eligible editable field; nothing was sent")
+    }
+    let token = elements.register(original)
+    inputBinding = token
+    do {
+      _ = try focusReplacementTarget(token, original: original)
+      let confirmed = try checkedReplacementTarget(token, original: original, requireFocus: true)
+      elements.renew(token, node: confirmed)
+      return .value(["token": token])
+    } catch {
+      inputBinding = nil
+      throw RunnerError.failed("selected field focus could not be confirmed; outcome unknown; no automatic retry")
+    }
+  }
+
   private func inputTarget(_ request: HTTPRequest) throws -> HTTPResponse {
     inputBinding = nil
     let root = try foregroundTree()

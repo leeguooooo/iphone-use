@@ -22,12 +22,23 @@ def block(source, marker):
 routes = (SOURCE / 'RunnerRoutes.swift').read_text()
 methods = '\n'.join(block(routes, '  private func ' + name + '(').replace('private func', 'func', 1)
                     for name in ['inputTarget', 'checkInputTarget', 'checkedInputTarget',
-                                 'boundKeys', 'boundClearState', 'clearBoundInput'])
+                                 'boundKeys', 'boundClearState', 'clearBoundInput',
+                                 'selectedInputTarget', 'checkedReplacementTarget', 'focusReplacementTarget'])
 helpers = block((SOURCE / 'RunnerElements.swift').read_text(), 'enum InputTargetCheck')
 error = block((SOURCE / 'RunnerHTTP.swift').read_text(), 'struct RunnerError: Error')
 program = r'''
 import Foundation
+import CoreGraphics
+import CoreFoundation
 final class UINode {
+  var parent: UINode?
+  var children: [UINode] = []
+  var rect = CGRect(x: 0, y: 0, width: 100, height: 40)
+  var label: String?
+  var identifier: String?
+  var visible = true
+  var center: CGPoint { CGPoint(x: rect.midX, y: rect.midY) }
+  func isVisible(screen: CGSize) -> Bool { visible }
   var type = "XCUIElementTypeTextField"
   var isFocused = true
   var isEnabled: Bool? = true
@@ -37,7 +48,11 @@ final class UINode {
   var nodes: [UINode] = []
   func descendants() -> [UINode] { nodes }
 }
-struct HTTPRequest { var query: [String:String] = [:] }
+struct HTTPRequest {
+  var query: [String:String] = [:]
+  var body: [String:Any] = [:]
+  func jsonObject() throws -> [String:Any] { body }
+}
 struct HTTPResponse {
   var value: Any; var headers: [String:String]
   static func value(_ value: Any, headers: [String:String] = [:]) -> HTTPResponse {
@@ -55,8 +70,17 @@ var canSelect = true
 var selectionConfirmed = true
 var selectionWrong = false
 var selectionCalls = 0
+var focusTaps = 0
+var focusEffect: (() -> Void)?
+var focusError: String?
 enum IPURBridge {
   static func invalidateRequestCache() {}
+  static func pid(forAXElement element:AnyObject) -> Int32 { 42 }
+  static func synthesizeFocusTap(forAXElement element:AnyObject,at point:CGPoint,pid:Int32,
+      allowDispatch:() -> Bool) -> String? {
+    guard allowDispatch() else { return "blocked" }
+    focusTaps += 1;focusEffect?();return focusError
+  }
   static func shortClearKeys(for element:AnyObject,error:inout NSString?) -> String? { shortKeys }
   static func textSelection(for element:AnyObject,error:inout NSString?) -> [String:NSNumber]? {
     ["can_select":NSNumber(value:canSelect),"location":NSNumber(value:selectionWrong && selectionCalls>0 ? 1 : 0),"length":3,"utf16_length":3]
@@ -79,9 +103,16 @@ final class RunnerTests {
   var sends = 0
   var lastMapKeys: Bool?
   var afterSend: (() -> Void)?
+  var focusBlocked = false
   init() { root.nodes = [node] }
   func foregroundTree() throws -> UINode { root }
   func foreground() -> (pid:Int32, unused:Bool) { (foregroundPID,true) }
+  func windowSizePoints() -> CGSize { CGSize(width:390,height:844) }
+  // Synthetic external complete-scene/hit-test decision. Its production
+  // occlusion predicate is covered by the separate Runner unit checks.
+  func replacementFocusPointAllowed(_ token:String,original:UINode,point:CGPoint) -> Bool {
+    !focusBlocked && inputBinding == token && foregroundPID == original.pid && node.visible
+  }
   func freshNode(_ id:String) throws -> UINode {
     guard let node = elements.entries[id] else { throw RunnerError.failed("stale") }; return node
   }
@@ -181,6 +212,44 @@ for path in ["/session/s/wda/keys","/session/s/element/id/clear"] {
 }
 for path in ["/tap","/home","/session/s/wda/keys","/session/s/element/other/clear"] {
   check(!InputTargetCheck.preservesBinding(path:path,binding:"id",body:["inputTarget":"other"]),"another mutation invalidates token")
+}
+for focused in [true,false] {
+  let r=RunnerTests();r.node.isFocused=focused;let selected=r.elements.register(r.node)
+  focusTaps=0;focusError=nil;focusEffect={r.node.isFocused=true}
+  let response=try r.selectedInputTarget(selected,HTTPRequest(body:["multiline":false]))
+  let bound=(response.value as! [String:String])["token"]!
+  check(r.inputBinding == bound && r.elements.entries[bound] === r.node,"selected original stays bound")
+  check(focusTaps == (focused ? 0 : 1) && r.sends == 0,"at most one initial focus tap; no text yet")
+  _ = try r.clearBoundInput(bound)
+  check(r.sends == 1,"selected binding supports confirmed clear")
+}
+for reason in 0..<4 {
+  let r=RunnerTests();r.node.isFocused=false;let selected=r.elements.register(r.node)
+  focusTaps=0;focusError=reason == 3 ? "unknown tap" : nil
+  r.focusBlocked = reason == 0
+  focusEffect={
+    r.node.isFocused=true
+    if reason == 1 {r.inputBinding=nil}
+    if reason == 2 {r.foregroundPID=99}
+  }
+  refused({_ = try r.selectedInputTarget(selected,HTTPRequest(body:["multiline":false]))},status:500,"selected focus uncertainty stops")
+  check(focusTaps <= 1 && r.sends == 0 && r.inputBinding == nil,"no rebind, typing or fallback after focus failure")
+}
+for kind in ["XCUIElementTypeSecureTextField","XCUIElementTypeButton"] {
+  let r=RunnerTests();r.node.type=kind;let selected=r.elements.register(r.node);focusTaps=0
+  refused({_ = try r.selectedInputTarget(selected,HTTPRequest(body:["multiline":false]))},status:400,"ineligible selected input refuses")
+  check(focusTaps == 0 && r.sends == 0,"ineligible target never dispatches")
+}
+do {
+  let r=RunnerTests();let selected=r.elements.register(r.node);focusTaps=0
+  refused({_ = try r.selectedInputTarget(selected,HTTPRequest(body:["multiline":true]))},status:400,"single-line field rejects newline before focus")
+  check(focusTaps == 0 && r.sends == 0,"newline refusal never dispatches")
+}
+focusEffect=nil;focusError=nil
+for body: [String:Any] in [[:],["multiline":1],["multiline":"false"]] {
+  let r=RunnerTests();let selected=r.elements.register(r.node);focusTaps=0
+  refused({_ = try r.selectedInputTarget(selected,HTTPRequest(body:body))},status:400,"invalid selected target body refuses")
+  check(focusTaps == 0 && r.sends == 0,"invalid target body never dispatches")
 }
 print("Native input binding: \(checks) production-logic checks passed; synthetic services only")
 '''
