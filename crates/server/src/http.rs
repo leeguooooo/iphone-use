@@ -9887,21 +9887,46 @@ async fn type_text_chunked(
     clear: bool,
     deadline: tokio::time::Instant,
     detail: &mut Option<serde_json::Value>,
+    dispatch_allowed: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> RunnerControlOutcome {
     use crate::text_input::{char_count, chunk_timeout, split, typing_time, CHUNK_CHARS};
     use std::sync::atomic::Ordering;
     let deadline = deadline
         .checked_sub(TEXT_CHUNK_DEADLINE_MARGIN)
         .unwrap_or(deadline);
+    if dispatch_allowed.is_some_and(|allowed| !allowed()) {
+        return RunnerControlOutcome::NotSent;
+    }
+    let target = match w.input_target_for_text(text).await {
+        Ok(target) => target,
+        Err(error) => return runner_failure_outcome(w, actionable, &error, "text", detail),
+    };
     if clear {
+        if dispatch_allowed.is_some_and(|allowed| !allowed()) {
+            return RunnerControlOutcome::NotSent;
+        }
         // Replacement requires an acknowledged clear. A failure can follow a
         // partial deletion, so stop without appending or replaying the action.
-        if let Err(error) = w.clear_active().await {
+        let result = match target.as_deref() {
+            Some(token) => w.clear_input_target(token).await,
+            None => w.clear_active().await,
+        };
+        if let Err(error) = result {
             return runner_failure_outcome(w, actionable, &error, "text", detail);
         }
     }
     let mut confirmed = 0;
     for piece in split(text, CHUNK_CHARS) {
+        if dispatch_allowed.is_some_and(|allowed| !allowed()) {
+            return if confirmed == 0 && !clear {
+                RunnerControlOutcome::NotSent
+            } else {
+                RunnerControlOutcome::TextPartial {
+                    confirmed,
+                    uncertain: 0,
+                }
+            };
+        }
         let n = char_count(piece);
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         if left < typing_time(n) + std::time::Duration::from_millis(500) {
@@ -9915,13 +9940,26 @@ async fn type_text_chunked(
                 uncertain: 0,
             };
         }
-        if let Err(error) = w.keys_with_timeout(piece, chunk_timeout(n).min(left)).await {
-            actionable.store(false, Ordering::Release);
-            w.invalidate_session();
-            tracing::warn!("chunked text failed after {confirmed} characters: {error:#}");
+        let result = match target.as_deref() {
+            Some(token) => {
+                w.keys_to_target(piece, token, chunk_timeout(n).min(left))
+                    .await
+            }
+            None => w.keys_with_timeout(piece, chunk_timeout(n).min(left)).await,
+        };
+        if let Err(error) = result {
+            let not_sent = crate::runner::runner_http_error(&error)
+                .is_some_and(crate::runner::RunnerHttpError::nothing_sent);
+            if confirmed == 0
+                && !clear
+                && (not_sent || crate::text_input::char_count(text) <= CHUNK_CHARS)
+            {
+                return runner_failure_outcome(w, actionable, &error, "text", detail);
+            }
+            let _ = runner_failure_outcome(w, actionable, &error, "text", detail);
             return RunnerControlOutcome::TextPartial {
                 confirmed,
-                uncertain: n,
+                uncertain: if not_sent { 0 } else { n },
             };
         }
         confirmed += n;
@@ -9930,8 +9968,8 @@ async fn type_text_chunked(
     RunnerControlOutcome::Applied
 }
 
-/// The body that tells an agent how far a long text got and how to finish it:
-/// append `remaining_text` with `clear:false` after reading the field.
+/// Report acknowledged and uncertain scalar counts without authorizing a replay
+/// or assuming that the original input field still has focus.
 fn text_partial_body(
     action: &serde_json::Value,
     confirmed: usize,
@@ -9952,9 +9990,9 @@ fn text_partial_body(
         "characters_total": crate::text_input::char_count(text),
         "remaining_text": remaining,
         "hint": if uncertain == 0 {
-            "the deadline stopped typing between chunks: the first characters_confirmed characters are typed, nothing after them was sent. Send remaining_text as a new text action with clear=false; never resend the whole text"
+            "typing stopped between chunks: characters_confirmed were acknowledged and no later text was sent. Inspect the original field and restore its authorized input context before explicitly continuing with only the missing text and clear=false; never resend the whole text"
         } else {
-            "typing failed part-way: the first characters_confirmed characters are typed; the next characters_uncertain may be partly on screen. Read the field's value, then send only what is missing (from remaining_text) with clear=false; never resend the whole text"
+            "typing failed part-way: characters_confirmed were acknowledged; characters_uncertain may be partly on screen. Inspect the original field and restore its authorized input context before explicitly continuing with only the missing text and clear=false; never resend the whole text"
         },
     })
 }
@@ -10269,44 +10307,12 @@ async fn direct_agent_action(
                 .unwrap_or(0);
             Some(w.set_picker(column, target).await)
         }
-        // Long text goes out in chunks so a failure can say how much landed.
-        // Text up to one chunk takes the paths below, unchanged.
-        "text"
-            if value
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|text| {
-                    crate::text_input::char_count(text) > crate::text_input::CHUNK_CHARS
-                }) =>
-        {
-            let text = value
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let clear = value
-                .get("clear")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            return type_text_chunked(w, actionable, text, clear, deadline, detail).await;
-        }
-        "text"
-            if value
-                .get("clear")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false) =>
-        {
+        "text" => {
             let Some(text) = value.get("text").and_then(serde_json::Value::as_str) else {
                 return RunnerControlOutcome::Unsupported;
             };
-            Some(
-                async {
-                    // An unsuccessful clear must never turn replacement into
-                    // append. Preserve its refusal/unknown outcome without typing.
-                    w.clear_active().await?;
-                    w.keys(text).await
-                }
-                .await,
-            )
+            let clear = value.get("clear").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            return type_text_chunked(w, actionable, text, clear, deadline, detail, dispatch_allowed).await;
         }
         _ => None,
     };
@@ -27775,6 +27781,73 @@ mod tests {
             assert_eq!(outcome, RunnerControlOutcome::Applied);
             assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), 3);
             runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn agent_text_binds_once_and_never_reselects_after_a_guarded_refusal() {
+        block(async {
+            for length in [8, 450] {
+                let binds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let keys = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let seen_binds = binds.clone();
+                let seen_keys = keys.clone();
+                let mut runner = MockRunner::start(move |request| {
+                    if request.starts_with("POST /session ") {
+                        return r#"{"value":{"sessionId":"SESSION","capabilities":{"ipu:guardedInput":true}}}"#.into();
+                    }
+                    if request.contains("/wda/input-target") {
+                        seen_binds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        return r#"{"value":{"token":"original-field"}}"#.into();
+                    }
+                    if request.contains("/wda/keys") {
+                        let body: serde_json::Value =
+                            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap())
+                                .unwrap();
+                        assert_eq!(body["inputTarget"], "original-field");
+                        let index = seen_keys.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if length == 8 || index == 1 {
+                            let body = r#"{"value":{"error":"invalid argument","message":"input_target_focus_changed; nothing was sent"}}"#;
+                            return format!("HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        }
+                        return r#"{"value":null}"#.into();
+                    }
+                    healthy_runner_responder(request)
+                });
+                let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+                let actionable = std::sync::atomic::AtomicBool::new(true);
+                let mut detail = None;
+                let outcome = direct_agent_action(
+                    &mut client,
+                    &actionable,
+                    &serde_json::json!({"type":"text","text":"字".repeat(length)}),
+                    &mut detail,
+                    far_deadline(),
+                    None,
+                )
+                .await;
+                assert_eq!(
+                    outcome,
+                    if length == 8 {
+                        RunnerControlOutcome::RunnerRejected
+                    } else {
+                        RunnerControlOutcome::TextPartial {
+                            confirmed: 200,
+                            uncertain: 0,
+                        }
+                    }
+                );
+                assert_eq!(binds.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(
+                    keys.load(std::sync::atomic::Ordering::SeqCst),
+                    if length == 8 { 1 } else { 2 }
+                );
+                assert_eq!(
+                    detail.as_ref().unwrap()["runner_error"]["message"],
+                    "input_target_focus_changed; nothing was sent"
+                );
+                runner.shutdown();
+            }
         });
     }
 

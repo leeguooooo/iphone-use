@@ -1169,7 +1169,10 @@ static NSString *IPURSynthesize(id record, id path)
     id path = ((IPURMsgSendObject)objc_msgSend)([pathClass alloc], initPath);
     if (record == nil || path == nil) return @"private XCTest text synthesis failed: could not create text event";
     SEL targetSelector = NSSelectorFromString(@"setTargetProcessID:");
-    if (pid > 0 && [record respondsToSelector:targetSelector]) {
+    if (pid > 0) {
+      if (![record respondsToSelector:targetSelector]) {
+        return @"targeted text synthesis unavailable: missing process selector";
+      }
       ((IPURMsgSendSetLongLong)objc_msgSend)(record, targetSelector, (long long)pid);
     }
     ((IPURMsgSendTypeText)objc_msgSend)(

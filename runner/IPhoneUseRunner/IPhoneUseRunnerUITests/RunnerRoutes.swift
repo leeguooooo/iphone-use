@@ -43,7 +43,9 @@ extension RunnerTests {
       parts.removeFirst(2)
       if parts.isEmpty {
         switch method {
-        case "DELETE": return .value(NSNull(), sessionId: Self.sessionID)
+        case "DELETE":
+          inputBinding = nil
+          return .value(NSNull(), sessionId: Self.sessionID)
         case "GET": return .value(["sessionId": Self.sessionID, "capabilities": capabilities()], sessionId: Self.sessionID)
         default: return nil
         }
@@ -52,6 +54,7 @@ extension RunnerTests {
 
     switch method {
     case "GET":
+      if match(parts, "wda/input-target") != nil { return try inputTarget(request) }
       if match(parts, "status") != nil { return .value(statusValue(), sessionId: Self.sessionID) }
       if match(parts, "source") != nil { return try source(request) }
       if match(parts, "screenshot") != nil { return try screenshot(request) }
@@ -112,7 +115,7 @@ extension RunnerTests {
       if let id = match(parts, "element/:id/ipu/tap")?.first { return try checkedTapElement(id, request) }
       if let id = match(parts, "element/:id/click")?.first { return try clickElement(id) }
       if let id = match(parts, "element/:id/value")?.first { return try setElementValue(id, request) }
-      if let id = match(parts, "element/:id/clear")?.first { return try clearElement(id) }
+      if let id = match(parts, "element/:id/clear")?.first { return try clearElement(id, request) }
       if let captures = match(parts, "wda/element/:id/:action") {
         return try elementGesture(captures[0], captures[1], request)
       }
@@ -153,6 +156,7 @@ extension RunnerTests {
       "sdkVersion": Self.systemVersion,
       "ipu:timedDragPath": true,
       "ipu:valueRead": true,
+      "ipu:guardedInput": IPURBridge.textSynthesisAvailable(),
       "ipu:volumeButtons": volumeButtons,
       "ipu:systemCaptureRequest": IPURBridge.systemScreenshotAvailable(),
       "browserName": NSNull(),
@@ -161,6 +165,7 @@ extension RunnerTests {
   }
 
   private func createSession(_ request: HTTPRequest) throws -> HTTPResponse {
+    inputBinding = nil
     let body = (try? request.jsonObject()) ?? [:]
     let capabilities = body["capabilities"] as? [String: Any]
     let always = capabilities?["alwaysMatch"] as? [String: Any] ?? [:]
@@ -308,6 +313,61 @@ extension RunnerTests {
       throw RunnerError.notFound("there is no focused element")
     }
     return .value(ElementReference.make(elements.register(node)))
+  }
+
+  /// Read-only capture; every subsequent chunk re-reads this retained AX handle.
+  private func inputTarget(_ request: HTTPRequest) throws -> HTTPResponse {
+    inputBinding = nil
+    let root = try foregroundTree()
+    guard root.treeComplete else {
+      throw RunnerError.invalidArgument("input_target_tree_incomplete; nothing was sent")
+    }
+    let focused = root.descendants().filter { $0.isFocused &&
+      ["XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeTextView",
+       "XCUIElementTypeSearchField"].contains($0.type) }
+    guard focused.count == 1, let node = focused.first else {
+      throw RunnerError.invalidArgument("input_target_ambiguous_or_missing; nothing was sent")
+    }
+    try checkInputTarget(node)
+    if request.query["multiline"] == "1", node.type != "XCUIElementTypeTextView" {
+      throw RunnerError.invalidArgument("newline_requires_multiline_field; nothing was sent")
+    }
+    let token = elements.register(node)
+    inputBinding = token
+    return .value(["token": token])
+  }
+
+  private func checkInputTarget(_ node: UINode) throws {
+    if let reason = InputTargetCheck.refusal(type: node.type, focused: node.isFocused,
+        enabled: node.isEnabled, pid: node.pid, foregroundPID: foreground().pid,
+        live: node.axElement != nil) {
+      throw RunnerError.invalidArgument("\(reason); nothing was sent")
+    }
+  }
+
+  private func checkedInputTarget(_ token: String) throws -> UINode {
+    IPURBridge.invalidateRequestCache()
+    elements.prune()
+    guard inputBinding == token, let node = try? freshNode(token) else {
+      throw RunnerError.invalidArgument("input_target_expired_or_invalidated; nothing was sent")
+    }
+    try checkInputTarget(node)
+    return node
+  }
+
+  private func boundKeys(_ text: String, token: String, frequency: UInt) throws -> HTTPResponse {
+    let node = try checkedInputTarget(token)
+    if (text.contains("\n") || text.contains("\r")), node.type != "XCUIElementTypeTextView" {
+      throw RunnerError.invalidArgument("newline_requires_multiline_field; nothing was sent")
+    }
+    let path = try typeIntoFocus(text, frequency: frequency, targetPID: node.pid)
+    // This check follows dispatch: failure is uncertain, never a not-sent receipt.
+    do { _ = try checkedInputTarget(token) }
+    catch {
+      inputBinding = nil
+      throw RunnerError.failed("input target changed during typing; text outcome unknown; do not retry input")
+    }
+    return .value(NSNull(), headers: ["X-IPU-Gesture": path])
   }
 
   // MARK: - Element reads
@@ -510,12 +570,15 @@ extension RunnerTests {
   }
 
   /// Types text (with WebDriver private-use key codes mapped) into whatever has focus.
-  func typeIntoFocus(_ text: String, frequency: UInt = 60, mapKeys: Bool = true) throws -> String {
+  func typeIntoFocus(_ text: String, frequency: UInt = 60, mapKeys: Bool = true, targetPID: Int32? = nil) throws -> String {
     let mapped = mapKeys ? Self.mapWebDriverKeys(text) : text
     if mapped.isEmpty { return "none" }
     // Select before dispatch. An error may follow delivery of a prefix, so never
     // infer permission to replay or select a newly focused app after dispatch.
     if !IPURBridge.textSynthesisAvailable() {
+      if targetPID != nil {
+        throw RunnerError.invalidArgument("guarded text synthesis unavailable; nothing was sent")
+      }
       let application = foreground().application
       let issuesBefore = recordedIssues.count
       var exception: String?
@@ -527,7 +590,7 @@ extension RunnerTests {
       }
       return "xcui-typetext"
     }
-    if let error = IPURBridge.synthesizeText(mapped, charactersPerSecond: frequency, pid: 0) {
+    if let error = IPURBridge.synthesizeText(mapped, charactersPerSecond: frequency, pid: targetPID ?? 0) {
       throw RunnerError.failed("typing outcome unknown (synthesis: \(error)); do not retry input")
     }
     return "synthesized"
@@ -595,7 +658,14 @@ extension RunnerTests {
     return .value(NSNull(), headers: ["X-IPU-Gesture": path])
   }
 
-  private func clearElement(_ id: String) throws -> HTTPResponse {
+  private func clearElement(_ id: String, _ request: HTTPRequest) throws -> HTTPResponse {
+    let body = try request.jsonObject()
+    if body["inputTarget"] != nil {
+      guard let token = body["inputTarget"] as? String, token == id else {
+        throw RunnerError.invalidArgument("input_target_mismatch; nothing was sent")
+      }
+      return try clearBoundInput(token)
+    }
     var node = try focusForTyping(id).node
     var remaining = Self.clearableCount(node)
     for _ in 0..<3 where remaining > 0 {
@@ -608,6 +678,39 @@ extension RunnerTests {
       throw RunnerError.failed("could not clear element \(id): \(remaining) characters remain")
     }
     return .value(NSNull())
+  }
+
+  private func boundClearState(_ token: String) throws -> (node: UINode, count: Int) {
+    _ = try checkedInputTarget(token)
+    let value = try fullElementValue(token, limit: 32768)
+    guard value["complete"] as? Bool == true, let text = value["value"] as? String else {
+      throw RunnerError.invalidArgument("bound clear value unavailable; nothing was sent")
+    }
+    return (try checkedInputTarget(token), text.count)
+  }
+
+  private func clearBoundInput(_ token: String) throws -> HTTPResponse {
+    var started = false
+    do {
+      var state = try boundClearState(token)
+      for _ in 0..<3 where state.count > 0 {
+        let node = try checkedInputTarget(token)
+        started = true
+        _ = try typeIntoFocus(String(repeating: XCUIKeyboardKey.delete.rawValue,
+          count: min(state.count, 500)), frequency: 120, targetPID: node.pid)
+        state = try boundClearState(token)
+      }
+      guard state.count == 0 else {
+        throw RunnerError.failed("bound clear incomplete")
+      }
+      return .value(NSNull())
+    } catch {
+      if started {
+        inputBinding = nil
+        throw RunnerError.failed("bound clear interrupted; deletion outcome unknown; inspect the original field")
+      }
+      throw RunnerError.invalidArgument("bound clear unavailable; nothing was sent")
+    }
   }
 
   /// Characters still in a field (its placeholder shown as its value counts as empty).
@@ -993,8 +1096,14 @@ extension RunnerTests {
     guard let text = textArgument(body, preferText: false) else {
       throw RunnerError.invalidArgument("'value' must be an array of strings")
     }
-    let frequency = UInt((body["frequency"] as? NSNumber)?.intValue ?? 60)
-    let path = try typeIntoFocus(text, frequency: max(1, frequency))
+    let frequency = UInt(max(1, (body["frequency"] as? NSNumber)?.intValue ?? 60))
+    if body["inputTarget"] != nil {
+      guard let token = body["inputTarget"] as? String, !token.isEmpty else {
+        throw RunnerError.invalidArgument("invalid inputTarget; nothing was sent")
+      }
+      return try boundKeys(text, token: token, frequency: frequency)
+    }
+    let path = try typeIntoFocus(text, frequency: frequency)
     return .value(NSNull(), headers: ["X-IPU-Gesture": path])
   }
 

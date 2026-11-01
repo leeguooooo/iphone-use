@@ -128,6 +128,7 @@ pub struct RunnerClient {
     /// runner). Asked again whenever a new session starts (a new runner).
     device_settle: Option<bool>,
     value_read: bool,
+    guarded_input: bool,
     volume_buttons: bool,
     system_capture_request: bool,
     /// The last tree read and when: snapshot-bound actions reuse it instead
@@ -378,6 +379,7 @@ impl RunnerClient {
             no_alert_at: None,
             device_settle: None,
             value_read: false,
+            guarded_input: false,
             volume_buttons: false,
             system_capture_request: false,
             last_tree: None,
@@ -737,6 +739,8 @@ impl RunnerClient {
             self.session = Some(parse_session_id(&text)?);
             self.window = None;
             self.no_alert_at = None;
+            self.guarded_input = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:guardedInput").and_then(serde_json::Value::as_bool)) == Some(true);
             self.value_read = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool)) == Some(true);
             self.volume_buttons = serde_json::from_str::<serde_json::Value>(&text).ok()
@@ -2028,6 +2032,83 @@ impl RunnerClient {
         Ok(())
     }
 
+    /// Bind text to the live focused field on a supporting runner. Once advertised,
+    /// failure to bind is an error, never permission to fall back to unguarded typing.
+    pub async fn input_target(&mut self) -> Result<Option<String>> {
+        self.input_target_for_text("").await
+    }
+
+    pub(crate) async fn input_target_for_text(&mut self, text: &str) -> Result<Option<String>> {
+        let sid = self.ensure_session().await?.to_string();
+        if !self.guarded_input {
+            return Ok(None);
+        }
+        let response = self
+            .http
+            .get(format!(
+                "{}/session/{}/wda/input-target{}",
+                self.base,
+                sid,
+                if text.contains('\n') || text.contains('\r') {
+                    "?multiline=1"
+                } else {
+                    ""
+                }
+            ))
+            .send_signed(&self.auth)
+            .await
+            .context("GET /wda/input-target")?;
+        let value = ensure_runner_success(response, "GET /wda/input-target").await?;
+        let token = value
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| {
+                !token.is_empty()
+                    && token.len() <= 128
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            })
+            .context("input target response missing or invalid token")?;
+        Ok(Some(token.to_string()))
+    }
+
+    /// Clear only the bound field; the runner checks focus without tapping to regain it.
+    pub async fn clear_input_target(&mut self, token: &str) -> Result<()> {
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .post_req(format!(
+                "{}/session/{}/element/{}/clear",
+                self.base, sid, token
+            ))
+            .json(&serde_json::json!({"inputTarget":token}))
+            .send_signed(&self.auth)
+            .await
+            .context("POST guarded element/clear")?;
+        ensure_runner_success(response, "POST guarded element/clear").await?;
+        Ok(())
+    }
+
+    /// Each chunk is checked on the phone immediately before dispatch. A rejection must not
+    /// trigger target reselection, refocusing or fallback to ordinary keys.
+    pub async fn keys_to_target(
+        &mut self,
+        text: &str,
+        token: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .post_req(format!("{}/session/{}/wda/keys", self.base, sid))
+            .timeout(timeout)
+            .json(&serde_json::json!({"value":[text],"inputTarget":token}))
+            .send_signed(&self.auth)
+            .await
+            .context("POST guarded /wda/keys")?;
+        ensure_runner_success(response, "POST guarded /wda/keys").await?;
+        Ok(())
+    }
+
     /// [`Self::keys`] with its own request timeout, for one chunk of a long
     /// text: the client's 20 s default is too short for a big chunk and too
     /// long when the action's deadline is nearly spent.
@@ -2700,6 +2781,7 @@ impl RunnerClient {
     pub fn invalidate_session(&mut self) {
         self.session = None;
         self.value_read = false;
+        self.guarded_input = false;
         self.volume_buttons = false;
         self.system_capture_request = false;
         self.window = None;

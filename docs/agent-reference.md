@@ -387,6 +387,16 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"perform","element":9,"snapshot":"…","action":"toggle"}  // increment|decrement|adjust(+value)|toggle|menu|double_tap|two_finger_tap|scroll_to_visible|pinch|rotate
 ```
 
+On a Runner advertising `ipu:guardedInput`, agent `text` captures one live focused
+editable field before clearing or typing. Each chunk and guarded clear checks that
+same retained AX handle and foreground process; another mutation invalidates the
+binding. A refused later chunk is not reselected or replayed. Secure fields,
+ambiguous/incomplete focus evidence and unavailable state refuse guarded input.
+Older Runners retain their legacy behavior and do not provide this binding.
+Checks occur before and after a chunk, not between individual characters: an
+in-flight focus change can still make that chunk's outcome uncertain. Partial
+receipts never authorize automatic continuation into a newly selected field.
+
 `text` with `clear:true` and `set_value` stop if the clear request fails;
 replacement text is not appended afterward. A clear may already have deleted
 some content before an error, so inspect the field and the returned outcome

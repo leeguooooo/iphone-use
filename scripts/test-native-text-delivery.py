@@ -26,6 +26,7 @@ harness = r'''
 import Foundation
 var events: [String] = []
 var capability = true
+var dispatchPID: Int32 = -1
 var synthesisError: String? = nil
 var publicError: String? = nil
 var publicIssue: (() -> Void)? = nil
@@ -43,6 +44,7 @@ enum IPURBridge {
   static func textSynthesisAvailable() -> Bool { events.append("capability"); return capability }
   static func synthesizeText(_ text: String, charactersPerSecond: UInt, pid: Int32) -> String? {
     events.append("synthesis:\(text)")
+    dispatchPID = pid
     return synthesisError
   }
   static func performWithoutQuiescence(_ app: App, body: () -> Void) { body() }
@@ -138,6 +140,17 @@ do {
   check(result.status == 400, "malformed literal request is invalid")
 } catch { check(false, "unexpected error type") }
 check(events.isEmpty, "malformed literal request sends nothing")
+reset()
+_ = try RunnerTests().typeIntoFocus("bound", targetPID: 42)
+check(dispatchPID == 42, "bound text addresses the original process")
+reset(); capability = false
+do {
+  _ = try RunnerTests().typeIntoFocus("bound", targetPID: 42)
+  check(false, "bound text refuses unavailable synthesis")
+} catch let result as RunnerError {
+  check(result.status == 400 && result.message.contains("nothing was sent"), "bound capability refusal precedes dispatch")
+} catch { check(false, "unexpected bound error") }
+check(events == ["capability"], "bound text never selects a public fallback")
 print("Native text delivery: \(checks) checks passed; production Swift with synthetic callbacks only")
 '''
 with tempfile.TemporaryDirectory(prefix='ipu-text-delivery-') as folder:
@@ -205,6 +218,71 @@ int main(void) { @autoreleasepool {
 with tempfile.TemporaryDirectory(prefix='ipu-text-capability-') as folder:
     out = Path(folder)
     (out / 'probe.m').write_text(objc)
+    subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-framework', 'Foundation',
+                    str(out / 'probe.m'), '-o', str(out / 'probe')], check=True)
+    subprocess.run([str(out / 'probe')], check=True)
+
+# Execute targeted synthesis with fake records; a missing PID selector must not
+# silently become a global keyboard event. The synth callback never contacts iOS.
+synthesis = block(bridge, '+ (nullable NSString *)synthesizeText:')
+typedefs = '\n'.join(line for line in bridge.splitlines() if line.startswith('typedef ')
+                     and any(name in line for name in ['IPURMsgSendObject)', 'IPURMsgSendInitRecordName)',
+                                                       'IPURMsgSendSetLongLong)', 'IPURMsgSendTypeText)']))
+target_probe = r'''
+#import <Foundation/Foundation.h>
+#import <objc/message.h>
+static BOOL hasTarget = YES, available = YES;
+static int synthCalls;
+static long long targetedPID;
+@interface FakeRecord : NSObject
+- (instancetype)initWithName:(NSString *)name;
+- (void)setTargetProcessID:(long long)pid;
+@end
+@implementation FakeRecord
+- (instancetype)initWithName:(NSString *)name { return [super init]; }
+- (BOOL)respondsToSelector:(SEL)s {
+  if ([NSStringFromSelector(s) isEqualToString:@"setTargetProcessID:"]) return hasTarget;
+  return [super respondsToSelector:s];
+}
+- (void)setTargetProcessID:(long long)pid { targetedPID=pid; }
+@end
+@interface FakePath : NSObject
+- (instancetype)initForTextInput;
+- (void)typeText:(NSString *)text atOffset:(double)t typingSpeed:(unsigned long long)s shouldRedact:(BOOL)b;
+@end
+@implementation FakePath
+- (instancetype)initForTextInput { return [super init]; }
+- (void)typeText:(NSString *)text atOffset:(double)t typingSpeed:(unsigned long long)s shouldRedact:(BOOL)b {}
+@end
+static Class fixtureClass(NSString *name) {
+  return [name isEqualToString:@"XCSynthesizedEventRecord"] ? FakeRecord.class : FakePath.class;
+}
+#define NSClassFromString fixtureClass
+static NSString *IPURSynthesize(id record, id path) { synthCalls++; return nil; }
+@interface IPURBridge : NSObject
++ (BOOL)textSynthesisAvailable;
++ (NSString *)synthesizeText:(NSString *)text charactersPerSecond:(NSUInteger)speed pid:(int)pid;
+@end
+@implementation IPURBridge
++ (BOOL)textSynthesisAvailable { return available; }
+'''
+target_probe += typedefs + '\n' + constants + '\n' + synthesis + '\n@end\n'
+target_probe += r'''
+int main(void) { @autoreleasepool {
+  hasTarget=NO;
+  if (![IPURBridge synthesizeText:@"once" charactersPerSecond:60 pid:42] || synthCalls) return 1;
+  hasTarget=YES;
+  if ([IPURBridge synthesizeText:@"once" charactersPerSecond:60 pid:42] || synthCalls!=1 || targetedPID!=42) return 2;
+  hasTarget=NO;
+  if ([IPURBridge synthesizeText:@"legacy" charactersPerSecond:60 pid:0] || synthCalls!=2) return 3;
+  available=NO;
+  if (![IPURBridge synthesizeText:@"stop" charactersPerSecond:60 pid:42] || synthCalls!=2) return 4;
+  puts("Native targeted text: 4 production ObjC dispatch checks passed; synthetic records only");
+} return 0; }
+'''
+with tempfile.TemporaryDirectory(prefix='ipu-targeted-text-') as folder:
+    out = Path(folder)
+    (out / 'probe.m').write_text(target_probe)
     subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-framework', 'Foundation',
                     str(out / 'probe.m'), '-o', str(out / 'probe')], check=True)
     subprocess.run([str(out / 'probe')], check=True)

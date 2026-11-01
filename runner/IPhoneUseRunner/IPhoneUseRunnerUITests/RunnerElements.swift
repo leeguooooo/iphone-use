@@ -333,6 +333,25 @@ struct ClassChain {
   }
 }
 
+/// A retained live AX handle, rather than a label or rectangle, authorizes input.
+enum InputTargetCheck {
+  static func preservesBinding(path: String, binding: String?, body: [String: Any]) -> Bool {
+    guard let binding, body["inputTarget"] as? String == binding else { return false }
+    return path.hasSuffix("/wda/keys") || path.hasSuffix("/element/\(binding)/clear")
+  }
+
+  static func refusal(type: String, focused: Bool, enabled: Bool?, pid: Int32,
+                      foregroundPID: Int32, live: Bool) -> String? {
+    guard live else { return "input_target_unreadable" }
+    guard pid > 0, foregroundPID == pid else { return "input_target_app_changed" }
+    guard type != "XCUIElementTypeSecureTextField" else { return "input_target_secure_field_requires_human" }
+    guard ["XCUIElementTypeTextField", "XCUIElementTypeTextView", "XCUIElementTypeSearchField"].contains(type)
+    else { return "input_target_not_editable" }
+    guard enabled == true, focused else { return "input_target_focus_changed" }
+    return nil
+  }
+}
+
 // MARK: - Registry
 
 /// Element ids handed out by the find routes, runner style. Entries keep the node they were found
