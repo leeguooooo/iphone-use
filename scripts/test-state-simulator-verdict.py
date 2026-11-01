@@ -154,5 +154,29 @@ class ContinuationConsumer(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
+class MCPInput(unittest.TestCase):
+    def test_continuation_arguments_exclude_new_text_and_clear(self):
+        class Peer:
+            def __init__(self): self.calls = []
+            def request(self, method, params, timeout):
+                self.calls.append((method, params))
+                return {'result': {'structuredContent': {'ok': True}, 'content': []}}
+        peer = Peer();token = 'a' * 64
+        _, body = oracle.mcp_text_action(peer, {'type': 'text', 'continue_token': token})
+        self.assertIs(body['ok'], True)
+        self.assertEqual(peer.calls, [('tools/call', {'name': 'phone_type',
+                         'arguments': {'continue_token': token, 'observe': False}})])
+
+    def test_unknown_or_protocol_failure_is_not_replayed(self):
+        for reply in ({'error': {'code': -32602}}, {'result': {'content': [{'type': 'text', 'text': 'ok'}]}}):
+            class Peer:
+                calls = 0
+                def request(self, *args, **kwargs): self.calls += 1;return reply
+            peer = Peer()
+            with self.assertRaises(AssertionError):
+                oracle.mcp_text_action(peer, {'type': 'text', 'text': 'x'})
+            self.assertEqual(peer.calls, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

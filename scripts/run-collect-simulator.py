@@ -27,6 +27,7 @@ PROBES = {
     'ordinal': ('test-selector-simulator.py', 31),
     'state': ('test-state-simulator.py', 7),
     'input': ('test-state-simulator.py', 2),
+    'mcp-input': ('test-state-simulator.py', 2),
     'tap-race': ('test-moving-target-simulator.py', 3),
     'tap-guard': ('test-moving-target-simulator.py', 4),
     'tap-identity-race': ('test-moving-target-simulator.py', 4),
@@ -250,6 +251,7 @@ def main():
             ('conformance', [], 'cases'), ('default-conformance', ['--without-end-label'], 'default_cases')]
         for folder, flags, field in groups:
             if args.probe == 'input': flags = [*flags, '--type-text']
+            if args.probe == 'mcp-input': flags = [*flags, '--type-text', '--mcp-input']
             if args.probe == 'literal-id': flags = [*flags, '--tap-literal-id']
             if args.probe == 'tap-race': flags = [*flags, '--expect-after-read-race']
             if args.probe == 'tap-guard': flags = [*flags, '--include-point']
