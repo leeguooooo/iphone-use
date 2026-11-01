@@ -3486,8 +3486,8 @@ fn flatten_node(
         } else {
             Vec::new()
         };
-        // The runner marks only selected nodes (`isSelected:"1"`): a picked
-        // photo in select mode, the current tab. Read on every tree.
+        // The runner reports known selection states. Compact rows retain only
+        // positive selection: a picked photo or current tab. Read on every tree.
         let selected_attribute = runner_bool(node, "isSelected").filter(|value| *value);
         let (actions, selected, min, max) = if options.affordances {
             let min = runner_number(node, "minValue");

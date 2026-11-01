@@ -34,10 +34,27 @@ final class UINode {
   var name: String? { identifier ?? label }
   var value: String? { attributes["value"] as? String }
   var placeholder: String? { nonEmpty(attributes["placeholderValue"]) }
-  var isEnabled: Bool { attributes["isEnabled"] as? String != "0" }
-  var isFocused: Bool { attributes["isFocused"] as? String == "1" }
-  /// Only selected nodes carry the key (see IPURSerialize).
-  var isSelected: Bool { attributes["isSelected"] as? String == "1" }
+  var isEnabled: Bool? { booleanState("isEnabled") }
+  var focusedState: Bool? { booleanState("isFocused") }
+  /// Convenience for positive focus evidence; false does not establish absence.
+  var isFocused: Bool { focusedState == true }
+  var isSelected: Bool? { booleanState("isSelected") }
+
+  private func booleanState(_ key: String) -> Bool? {
+    if let text = attributes[key] as? String {
+      switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+      case "0", "false": return false
+      case "1", "true": return true
+      default: return nil
+      }
+    }
+    if let number = attributes[key] as? NSNumber {
+      guard ["c", "C", "s", "S", "i", "I", "l", "L", "q", "Q", "B"].contains(String(cString: number.objCType)) else { return nil }
+      if number.doubleValue == 0 { return false }
+      if number.doubleValue == 1 { return true }
+    }
+    return nil
+  }
 
   var rect: CGRect {
     let r = attributes["rect"] as? [String: Any] ?? [:]
@@ -78,14 +95,18 @@ final class UINode {
     ]
     var object: [String: Any] = [
       "type": type, "wdType": type, "elementType": RunnerElementTypes.rawValue(of: type),
-      "enabled": isEnabled, "isEnabled": isEnabled, "wdEnabled": isEnabled,
       "visible": visible, "isVisible": visible, "wdVisible": visible,
       "accessible": true, "isAccessible": true, "wdAccessible": true,
-      "focused": isFocused, "hasFocus": isFocused, "isFocused": isFocused, "wdFocused": isFocused,
-      "selected": isSelected, "isSelected": isSelected, "wdSelected": isSelected,
       "rect": rectDictionary, "wdRect": rectDictionary, "frame": rectDictionary,
       "hittable": visible, "isHittable": visible, "wdHittable": visible,
     ]
+    for (state, aliases) in [
+      (isEnabled, ["enabled", "isEnabled", "wdEnabled"]),
+      (focusedState, ["focused", "hasFocus", "isFocused", "wdFocused"]),
+      (isSelected, ["selected", "isSelected", "wdSelected"]),
+    ] {
+      if let state { for alias in aliases { object[alias] = state } }
+    }
     if let name { object["name"] = name; object["wdName"] = name }
     if let label { object["label"] = label; object["wdLabel"] = label }
     if let value { object["value"] = value; object["wdValue"] = value }

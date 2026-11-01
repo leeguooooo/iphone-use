@@ -87,8 +87,14 @@ extension RunnerTests {
       if let id = match(parts, "element/:id/displayed")?.first {
         return .value(try freshNode(id).isVisible(screen: windowSizePoints()))
       }
-      if let id = match(parts, "element/:id/enabled")?.first { return .value(try freshNode(id).isEnabled) }
-      if let id = match(parts, "element/:id/selected")?.first { return .value(try freshNode(id).isSelected) }
+      if let id = match(parts, "element/:id/enabled")?.first {
+        guard let enabled = try freshNode(id).isEnabled else { throw RunnerError.failed("element enabled state unavailable") }
+        return .value(enabled)
+      }
+      if let id = match(parts, "element/:id/selected")?.first {
+        guard let selected = try freshNode(id).isSelected else { throw RunnerError.failed("element selected state unavailable") }
+        return .value(selected)
+      }
       if let id = match(parts, "element/:id/name")?.first { return .value(try freshNode(id).type) }
       return nil
 
@@ -289,12 +295,16 @@ extension RunnerTests {
 
   private func activeElement() throws -> HTTPResponse {
     let root = try foregroundTree()
-    let focused = root.descendants().filter(\.isFocused)
+    let nodes = root.descendants()
+    let focused = nodes.filter(\.isFocused)
     let inputs: Set<String> = [
       "XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeTextView",
       "XCUIElementTypeSearchField",
     ]
     guard let node = focused.first(where: { inputs.contains($0.type) }) ?? focused.last else {
+      guard root.treeComplete, nodes.allSatisfy({ $0.focusedState != nil }) else {
+        throw RunnerError.failed("focused element state unavailable")
+      }
       throw RunnerError.notFound("there is no focused element")
     }
     return .value(ElementReference.make(elements.register(node)))
@@ -367,12 +377,12 @@ extension RunnerTests {
     case "type", "wdType": return .value(node.type)
     case "rawIdentifier", "identifier": return .value(orNull(node.identifier))
     case "placeholderValue", "wdPlaceholderValue": return .value(orNull(node.placeholder))
-    case "enabled", "wdEnabled", "isEnabled": return .value(node.isEnabled)
+    case "enabled", "wdEnabled", "isEnabled": return .value(orNull(node.isEnabled))
     case "visible", "wdVisible", "isVisible", "displayed", "hittable", "isHittable":
       return .value(node.isVisible(screen: screen))
     case "accessible", "wdAccessible", "isAccessible": return .value(true)
-    case "focused", "hasFocus", "wdFocused", "isFocused": return .value(node.isFocused)
-    case "selected", "wdSelected", "isSelected": return .value(node.isSelected)
+    case "focused", "hasFocus", "wdFocused", "isFocused": return .value(orNull(node.focusedState))
+    case "selected", "wdSelected", "isSelected": return .value(orNull(node.isSelected))
     case "rect", "wdRect", "frame": return .value(rectValue(node.rect))
     default: return .value(orNull(node.predicateObject(screen: screen)[name]))
     }

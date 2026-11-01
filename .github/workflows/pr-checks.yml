@@ -108,6 +108,9 @@ jobs:
       - name: Native snapshot coverage boundaries (synthetic AX, no UI)
         run: python3 -I scripts/test-native-snapshot-coverage.py
 
+      - name: Native state availability (synthetic AX and predicates, no UI)
+        run: python3 -I scripts/test-native-state-availability.py
+
       - name: Native click delivery certainty (synthetic callbacks, no UI)
         run: python3 -I scripts/test-native-click-delivery.py
 

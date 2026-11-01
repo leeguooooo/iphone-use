@@ -643,11 +643,21 @@ static BOOL IPURHasStableScreenSize = NO;
   return size;
 }
 
-static NSString *IPURBoolString(id snapshot, NSString *key, BOOL fallback)
+static NSString *IPURBoolString(id snapshot, NSString *key)
 {
   id value = IPURKVC(snapshot, key);
-  BOOL flag = [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : fallback;
-  return flag ? @"1" : @"0";
+  if ([value isKindOfClass:NSNumber.class]) {
+    const char *type = [value objCType];
+    if (strlen(type) != 1 || strchr("cCsSiIlLqQB", type[0]) == NULL) return nil;
+    double number = [value doubleValue];
+    if (number == 0) return @"0";
+    if (number == 1) return @"1";
+  } else if ([value isKindOfClass:NSString.class]) {
+    NSString *text = [[value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    if ([text isEqual:@"0"] || [text isEqual:@"false"]) return @"0";
+    if ([text isEqual:@"1"] || [text isEqual:@"true"]) return @"1";
+  }
+  return nil;
 }
 
 static NSArray *IPURChildren(id snapshot)
@@ -686,15 +696,16 @@ static NSMutableDictionary *IPURSerialize(
   node[@"rawIdentifier"] = identifier ?: (id)NSNull.null;
   node[@"placeholderValue"] = placeholder ?: (id)NSNull.null;
   node[@"rect"] = IPURRect(snapshot);
-  node[@"isEnabled"] = IPURBoolString(snapshot, @"enabled", YES);
+  NSString *enabled = IPURBoolString(snapshot, @"enabled");
+  if (enabled != nil) node[@"isEnabled"] = enabled;
   // hasFocus is the focus engine's (tvOS-style) flag; a text field holding the keyboard reports
   // only hasKeyboardFocus (hardware: Settings' search field, iOS 27).
-  BOOL focused = [IPURKVC(snapshot, @"hasFocus") boolValue] || [IPURKVC(snapshot, @"hasKeyboardFocus") boolValue];
-  node[@"isFocused"] = focused ? @"1" : @"0";
-  // Selected (a picked photo in select mode, the current tab, a chosen segment). The attribute was
-  // already fetched with the snapshot; only a selected node carries the key, so the common case
-  // costs no bytes.
-  if ([IPURKVC(snapshot, @"selected") boolValue]) node[@"isSelected"] = @"1";
+  NSString *focus = IPURBoolString(snapshot, @"hasFocus");
+  NSString *keyboardFocus = IPURBoolString(snapshot, @"hasKeyboardFocus");
+  if ([focus isEqual:@"1"] || [keyboardFocus isEqual:@"1"]) node[@"isFocused"] = @"1";
+  else if ([focus isEqual:@"0"] && [keyboardFocus isEqual:@"0"]) node[@"isFocused"] = @"0";
+  NSString *selected = IPURBoolString(snapshot, @"selected");
+  if (selected != nil) node[@"isSelected"] = selected;
   if (walk->includeElements) {
     id element = IPURKVC(snapshot, @"accessibilityElement");
     if (element != nil) node[IPURNodeAXElementKey] = element;
