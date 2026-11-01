@@ -9982,12 +9982,18 @@ async fn type_text_chunked(
             if let (Some(target), Some(scope)) = (target.as_ref(), scope) {
                 if dispatch_allowed.is_none_or(|allowed| allowed()) {
                     let remaining: String = text.chars().skip(confirmed).collect();
-                    if let Some(token) = w.save_input_continuation(
-                        scope.clone(),
-                        target.clone(),
-                        remaining,
-                        budget_ms.unwrap_or(15000),
-                    ) {
+                    let next_budget = budget_ms.unwrap_or(15000);
+                    let token = if text_chunks_fit_budget(&remaining, next_budget) {
+                        w.save_input_continuation(
+                            scope.clone(),
+                            target.clone(),
+                            remaining,
+                            next_budget,
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(token) = token {
                         if dispatch_allowed.is_some_and(|allowed| !allowed()) {
                             w.discard_input_continuation();
                         } else {
@@ -10062,7 +10068,26 @@ fn validate_text_request(
     {
         return Err("text needs a string up to 20000 characters, optional bool clear, and optional budget_ms from 6000 to 15000");
     }
+    let text = action["text"].as_str().unwrap();
+    if action
+        .get("budget_ms")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|budget| !text_chunks_fit_budget(text, budget))
+    {
+        return Err("budget_ms is too small for an indivisible text cluster; increase the budget or choose unbudgeted input before typing");
+    }
     Ok(())
+}
+
+fn text_chunks_fit_budget(text: &str, budget_ms: u64) -> bool {
+    let budget = std::time::Duration::from_millis(budget_ms);
+    crate::text_input::split(text, crate::text_input::CHUNK_CHARS)
+        .iter()
+        .all(|piece| {
+            crate::text_input::typing_time(crate::text_input::char_count(piece))
+                + std::time::Duration::from_millis(500)
+                < budget
+        })
 }
 
 fn text_partial_with_detail(
@@ -28008,6 +28033,32 @@ mod tests {
             assert_eq!(mutations.load(std::sync::atomic::Ordering::SeqCst), 0);
             runner.shutdown();
         });
+    }
+
+    #[test]
+    fn bounded_text_rejects_a_cluster_that_cannot_fit_before_any_write() {
+        let text = format!("prefix b{}", "\u{0301}".repeat(500));
+        assert!(validate_text_request(
+            serde_json::json!({"type":"text","text":text,"budget_ms":6000})
+                .as_object()
+                .unwrap()
+        )
+        .is_err());
+        assert!(validate_text_request(
+            serde_json::json!({"type":"text","text":text,"budget_ms":15000})
+                .as_object()
+                .unwrap()
+        )
+        .is_ok());
+        assert!(validate_text_request(
+            serde_json::json!({"type":"text","text":text})
+                .as_object()
+                .unwrap()
+        )
+        .is_ok());
+        let exact = format!("b{}", "\u{0301}".repeat(329));
+        assert!(!text_chunks_fit_budget(&exact, 6000));
+        assert!(text_chunks_fit_budget(&exact, 6001));
     }
 
     #[test]
