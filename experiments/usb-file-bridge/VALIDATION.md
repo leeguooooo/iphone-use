@@ -201,8 +201,8 @@ extending their physical-device or signing acceptance scope.
 
 An ignored production-module test is enabled only by an owned GitHub-hosted
 macOS fixture. The driver creates a temporary self-signed code-signing identity
-and keychain, narrows its trust to code signing, and restores keychain preferences
-and removes its trust/keychain in cleanup. It refuses personal and self-hosted
+and keychain, leaves trust policy unchanged, restores keychain preferences,
+and removes its keychain in cleanup. It refuses personal and self-hosted
 environments before running commands. It never uses an Apple account or phone.
 
 The test calls the actual customization/ownership/signature-validation functions
@@ -212,3 +212,8 @@ preservation, unchanged nested bytes, opt-out refusal on an enabled product, and
 unchanged valid original bytes when its owned private identity is removed.
 This is not an iOS provisioning, full setup/cache/reconnect/upgrade or physical
 acceptance claim. The new lane is pending CI; local module tests leave it ignored.
+
+The first owned signing transaction passed its production test, but its separate
+admin-trust cleanup timed out and the full CI failed. That failed run is retained.
+The fixture now changes no trust settings and uses no privileged commands;
+cleanup timeout reporting is bounded. This correction awaits a fresh CI run.

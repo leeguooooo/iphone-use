@@ -41,7 +41,14 @@ def main():
         except subprocess.TimeoutExpired:
             try: os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError: pass
-            process.communicate(timeout=10)
+            except OSError:
+                raise RuntimeError(Path(argv[0]).name + ' command group termination unverified; no replay') from None
+            try:
+                process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.stdout.close()
+                process.stderr.close()
+                raise RuntimeError(Path(argv[0]).name + ' termination/stream closure unverified; no replay') from None
             raise RuntimeError(Path(argv[0]).name + ' timed out; owned command group stopped; no replay') from None
         result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
         if result.returncode:
@@ -54,13 +61,13 @@ def main():
     original_search = shlex.split(command(['/usr/bin/security', 'list-keychains', '-d', 'user']))
     original_default = shlex.split(command(['/usr/bin/security', 'default-keychain', '-d', 'user']))
     assert len(original_default) == 1
-    receipt = {'passed': False, 'personal_keychain': False, 'physical_actions': False,
+    receipt = {'passed': False, 'personal_keychain': False, 'physical_actions': False, 'trust_settings_modified': False,
                'scope': 'self-signed macOS bundle transaction through production apply; not Apple signing/install/reconnect/upgrade acceptance'}
     with tempfile.TemporaryDirectory(prefix='ipu-signing-fixture-', dir=runner_temp) as directory:
         root = Path(directory)
         keychain = root / 'fixture.keychain-db'
         cert = root / 'certificate.pem'
-        created = trusted = False
+        created = False
         cleanup_errors = []
         try:
             password = secrets.token_hex(24)
@@ -80,9 +87,8 @@ def main():
             command(['/usr/bin/security', 'import', root/'identity.p12', '-k', keychain, '-P', password, '-T', '/usr/bin/codesign'])
             command(['/usr/bin/security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', password, keychain])
             command(['/usr/bin/security', 'list-keychains', '-d', 'user', '-s', keychain, *original_search])
-            trusted = True
-            command(['sudo', '-n', '/usr/bin/security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-p', 'codeSign', '-k', keychain, cert])
-            assert identity in command(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning', keychain]).upper()
+            # Self-signed code identifies this fixture; no global trust policy is changed.
+            assert identity in command(['/usr/bin/security', 'find-identity', '-p', 'codesigning', keychain]).upper()
             app = root/'template/iPhoneUse-Runner.app'
             tests = app/'PlugIns/Fixture.xctest'
             tests.mkdir(parents=True)
@@ -110,7 +116,6 @@ def main():
         finally:
             operations = [(['/usr/bin/security','list-keychains','-d','user','-s',*original_search], True),
                           (['/usr/bin/security','default-keychain','-d','user','-s',original_default[0]], True),
-                          (['sudo','-n','/usr/bin/security','remove-trusted-cert','-d',cert], trusted),
                           (['/usr/bin/security','delete-keychain',keychain], created)]
             for argv, needed in operations:
                 if needed:
