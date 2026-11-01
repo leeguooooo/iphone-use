@@ -159,3 +159,19 @@ receiver; 43 offline engine tests now pass.
 
 These are still status checkpoints, not an atomic lease fence around the final
 hard link. Full HTTP/CLI CI and real device verification are pending.
+
+## Per-instance toolchain candidate
+
+The read-only instance-context response now includes the setup engine's chosen
+developer directory or a diagnostic error. The receiver resolves it lazily
+before its first CoreDevice command, binds the selected instance in the child
+environment, and pins the directory for the invocation. A system choice is
+resolved once with xcode-select; the global preference is not written. Invalid
+or missing context is refused before device tools run. Offline result/status/stop
+remain independent of Xcode.
+
+45 shared engine tests pass, including remembered/system directory selection,
+SDKROOT isolation, pinning across later context changes and pre-device refusal.
+A real CLI test checks remembered Xcode and invalid-choice diagnostics using an
+owned non-executed tool fixture; full CI for this candidate is pending. These
+checks are not physical CoreDevice handoff or signed upgrade acceptance.

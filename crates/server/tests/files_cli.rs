@@ -139,3 +139,47 @@ fn status_cli_preserves_control_lease_metadata_from_the_selected_daemon() {
     let returned: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(returned["control_lease"], lease);
 }
+
+#[test]
+fn instance_context_reports_selected_xcode_without_touching_services() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let canonical_home = home.path().canonicalize().unwrap();
+    let developer = canonical_home.join("Chosen Xcode.app/Contents/Developer");
+    let tool = developer.join("usr/bin/xcodebuild");
+    std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+    std::fs::write(&tool, "not executed").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let instance = server::instance::Instance::derive("chosen", &canonical_home, None).unwrap();
+    server::setup::ctx::write_xcode_choice(&instance.state_dir, Some(&developer)).unwrap();
+    let command = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_iphone-use"));
+        cmd.arg("instance-context")
+            .env("HOME", &canonical_home)
+            .env("IPHONE_USE_INSTANCE", "chosen")
+            .env_remove("IPHONE_USE_STATE_DIR")
+            .env_remove("IPHONE_USE_XCODE")
+            .env_remove("DEVELOPER_DIR")
+            .env_remove("IPU_RUNNER_KEEPALIVE");
+        cmd
+    };
+    let output = command().output().unwrap();
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["state_dir_ok"], true);
+    assert_eq!(body["name"], "chosen");
+    assert_eq!(body["developer_dir"], developer.to_str().unwrap());
+    assert!(body["developer_dir_error"].is_null());
+    let invalid = command()
+        .env("IPHONE_USE_XCODE", "/missing/xcode")
+        .output()
+        .unwrap();
+    assert!(
+        invalid.status.success(),
+        "namespace diagnostics must remain available"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(body["name"], "chosen");
+    assert!(body["developer_dir"].is_null());
+    assert!(body["developer_dir_error"].as_str().is_some());
+}

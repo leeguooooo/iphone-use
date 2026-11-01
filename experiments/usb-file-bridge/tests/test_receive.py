@@ -226,4 +226,38 @@ class InvalidStatusTests(unittest.TestCase):
             with self.subTest(response=response), patch.object(device,'command',return_value=response), self.assertRaises(b.TransferError):
                 device.check_lease()
 
+class InstanceToolchainTests(unittest.TestCase):
+    def test_device_command_uses_selected_instance_developer_directory(self):
+        for developer in ['/selected/Xcode.app/Contents/Developer', None]:
+            with self.subTest(developer=developer), tempfile.TemporaryDirectory() as temp:
+                args=types.SimpleNamespace(instance='chosen',owner='me',device='phone')
+                session=b.Session(Path(temp),10);device=b.Device(args,session,Path(temp))
+                context={'name':'chosen','state_dir_ok':True,'developer_dir':developer,'developer_dir_error':None}
+                def execute(argv,**kwargs):
+                    if 'instance-context' in argv:
+                        self.assertEqual(kwargs['env']['IPHONE_USE_INSTANCE'],'chosen')
+                        return subprocess.CompletedProcess(argv,0,json.dumps(context),'')
+                    if argv[0]=='/usr/bin/xcode-select':
+                        self.assertNotIn('DEVELOPER_DIR',kwargs['env'])
+                        return subprocess.CompletedProcess(argv,0,'/system/Xcode.app/Contents/Developer\n','')
+                    self.assertEqual(kwargs['env'].get('DEVELOPER_DIR'),developer or '/system/Xcode.app/Contents/Developer')
+                    self.assertNotIn('SDKROOT',kwargs['env'])
+                    return subprocess.CompletedProcess(argv,0,'done','')
+                with patch.dict(os.environ,{'DEVELOPER_DIR':'/wrong/global','SDKROOT':'/wrong/sdk'}), patch.object(b.subprocess,'run',side_effect=execute):
+                    self.assertEqual(device.command(['xcrun','devicectl','--version']),'done')
+                    context['developer_dir']='/changed/after-start'
+                    self.assertEqual(device.command(['xcrun','devicectl','--version']),'done')
+
+    def test_missing_or_invalid_context_never_runs_device_tool(self):
+        for context in [{'name':'other','state_dir_ok':True,'developer_dir':None,'developer_dir_error':None},
+                        {'name':'chosen','state_dir_ok':True},
+                        {'name':'chosen','state_dir_ok':True,'developer_dir':'/chosen','developer_dir_error':'invalid choice'},
+                        {'name':'chosen','state_dir_ok':False,'developer_dir':None,'developer_dir_error':None}]:
+            with self.subTest(context=context), tempfile.TemporaryDirectory() as temp:
+                args=types.SimpleNamespace(instance='chosen',owner='me',device='phone')
+                device=b.Device(args,b.Session(Path(temp),10),Path(temp))
+                with patch.object(b.subprocess,'run',return_value=subprocess.CompletedProcess([],0,json.dumps(context),'')) as execute, self.assertRaises(b.TransferError):
+                    device.command(['xcrun','devicectl','--version'])
+                self.assertEqual(execute.call_count,1)
+
 if __name__ == '__main__': unittest.main()

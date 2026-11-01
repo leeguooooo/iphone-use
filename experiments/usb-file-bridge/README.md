@@ -80,7 +80,11 @@ It uses `/usr/bin/python3` from the Mac's developer tools. `iphone-use files --h
 lists the options. It runs the engine in the same process, so interruption and
 exit codes remain those of the receiver. Output is a newline-delimited JSON
 event stream; retain the committed receipt and the started transfer ID. Lease checks use the exact CLI binary
-that started it; `IPHONE_USE_INSTANCE` supplies the default instance.
+that started it; `IPHONE_USE_INSTANCE` supplies the default instance. CoreDevice commands use
+the same per-instance Xcode selection rules as setup. A system choice is
+resolved once, and the developer directory is pinned for that receive. No global
+Xcode preference is changed. Inherited SDKROOT is cleared for these non-build
+commands so another Xcode's SDK cannot leak into the transfer.
 
 
 1. Obtain your normal iPhone Use control lease. Confirm its exact owner, UDID,

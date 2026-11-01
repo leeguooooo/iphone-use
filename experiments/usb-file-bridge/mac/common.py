@@ -156,11 +156,44 @@ class Device:
     def __init__(self, args, session, scratch):
         self.args, self.session, self.scratch = args, session, scratch
         self.lease_identity = None
+        self.command_env = None
+        self.toolchain_resolved = False
+
+    def resolve_toolchain(self):
+        if self.args is None:
+            raise TransferError('Device toolchain requires a selected instance')
+        host = os.environ.get('IPHONE_USE_FILES_HOST_BIN', 'iphone-use')
+        if host == 'xcrun':
+            raise TransferError('CLI binary binding must not be xcrun')
+        try:
+            context = json.loads(self.command([host, 'instance-context'], 5))
+        except (ValueError, TypeError):
+            raise TransferError('Invalid instance toolchain context') from None
+        expected = self.args.instance or 'default'
+        if (not isinstance(context, dict) or context.get('name') != expected
+                or context.get('state_dir_ok') is not True or 'developer_dir' not in context
+                or 'developer_dir_error' not in context or context['developer_dir_error'] is not None):
+            raise TransferError('Selected instance toolchain unavailable; check CLI and Xcode choice')
+        developer = context['developer_dir']
+        self.command_env.pop('SDKROOT', None)
+        if developer is None:
+            self.command_env.pop('DEVELOPER_DIR', None)
+            developer = self.command(['/usr/bin/xcode-select', '-p'], 5).strip()
+        if not isinstance(developer, str) or not Path(developer).is_absolute():
+            raise TransferError('Selected Xcode developer directory must be absolute')
+        self.command_env['DEVELOPER_DIR'] = developer
+        self.toolchain_resolved = True
 
     def command(self, args, limit=15):
+        if self.command_env is None:
+            self.command_env = os.environ.copy()
+            if self.args is not None:
+                self.command_env['IPHONE_USE_INSTANCE'] = self.args.instance or 'default'
+        if args and args[0] == 'xcrun' and not self.toolchain_resolved:
+            self.resolve_toolchain()
         timeout = min(limit, self.session.check())
         try:
-            result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=self.command_env)
         except subprocess.TimeoutExpired:
             raise TransferError('Device command timed out; no success inferred') from None
         self.session.check()
