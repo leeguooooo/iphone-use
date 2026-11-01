@@ -8910,17 +8910,21 @@ async fn tap_unique_locator(
     // and the live lookup below (exactly one element, same frame) proves the
     // target; otherwise read afresh.
     let reused = w.recent_tree(SNAPSHOT_TREE_REUSE).and_then(|rows| {
-        unique_locator_index(&rows, locator).ok().map(|index| (rows[index].rect, needs_reveal(&rows, index)))
+        unique_locator_index(&rows, locator).ok().map(|index| (rows, index))
     });
-    let (reused_rect, covered) = match reused {
-        Some((rect, covered)) => (Some(rect), covered),
+    let (mut proof_rows, mut proof_index, reused_rect) = match reused {
+        Some((rows, index)) => {
+            let rect = rows[index].rect;
+            (rows, index, Some(rect))
+        }
         None => {
             w.forget_tree();
             let rows = unique_target_rows(w).await?;
             let index = unique_locator_index(&rows, locator)?;
-            (None, needs_reveal(&rows, index))
+            (std::sync::Arc::new(rows), index, None)
         }
     };
+    let covered = needs_reveal(&proof_rows, proof_index);
 
     // `/source?format=json` can report stale/wrong rectangles for elements in
     // system-owned sheets (hardware-reproduced with the iOS share sheet's
@@ -8967,16 +8971,18 @@ async fn tap_unique_locator(
         if !snapshot.coverage.is_complete() {
             return Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target scope unproven after reveal; no further tap sent")));
         }
-        let rows = snapshot.rows;
-        let index = unique_locator_index(&rows, locator).map_err(|_| UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target no longer unique after reveal; no further tap sent")))?;
-        if center_off_screen(&rows, index) { return off_screen_refusal(); }
-        if center_covered(&rows, index) {
-            return match clear_tap_point(&rows, index) {
-                Some((x, y)) if point_on_screen(&rows, x, y) => w.tap_point(x, y).await.map_err(UniqueLabelTapError::AfterDispatch),
+        proof_index = unique_locator_index(&snapshot.rows, locator).map_err(|_| UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target no longer unique after reveal; no further tap sent")))?;
+        proof_rows = std::sync::Arc::new(snapshot.rows);
+        if !via_point && center_covered(&proof_rows, proof_index) {
+            let live = w.element_rect(element_id).await.map_err(UniqueLabelTapError::AfterDispatch)?;
+            std::sync::Arc::make_mut(&mut proof_rows)[proof_index].rect = live;
+            return match clear_tap_point(&proof_rows, proof_index) {
+                Some((x, y)) if point_on_screen(&proof_rows, x, y) => w.tap_point(x, y).await.map_err(UniqueLabelTapError::AfterDispatch),
                 Some(_) => off_screen_refusal(),
                 None => Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target occluded after reveal; no further tap sent"))),
             };
         }
+        if !via_point && center_off_screen(&proof_rows, proof_index) { return off_screen_refusal(); }
     }
     if via_point {
         // `"via":"point"`: some custom controls ignore XCUIElement's click
@@ -8990,6 +8996,16 @@ async fn tap_unique_locator(
             .map_err(|error| if covered { UniqueLabelTapError::AfterDispatch(error) } else { UniqueLabelTapError::BeforeDispatch(error) })?;
         if !(width > 0.0 && height > 0.0) {
             return Err(if covered { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("invalid target after reveal")) } else { UniqueLabelTapError::InvalidTarget });
+        }
+        // Occlusion must be assessed at the point we will actually tap,
+        // because /source can publish a stale target frame.
+        std::sync::Arc::make_mut(&mut proof_rows)[proof_index].rect = [x, y, width, height];
+        if center_covered(&proof_rows, proof_index) {
+            return Err(if covered {
+                UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("live target remains occluded after reveal; no tap sent"))
+            } else {
+                UniqueLabelTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
+            });
         }
         let (cx, cy) = (x + width / 2.0, y + height / 2.0);
         let (screen_w, screen_h) = w.window_size().await.map_err(|error| {

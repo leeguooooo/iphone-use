@@ -234,3 +234,71 @@ fn point_locator_needs_a_known_viewport_even_with_one_complete_match() {
         assert_eq!(body["retry_safe"], true, "{body}");
     });
 }
+
+#[test]
+fn point_locator_checks_occlusion_at_the_live_centre_including_after_reveal() {
+    block(async {
+        for reveal in [false, true] {
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let record = seen.clone();
+            let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let scrolled = moved.clone();
+            let runner = mock_runner(move |request, _| {
+                record.lock().unwrap().push(request.to_string());
+                if request.contains("/scrollTo") {
+                    scrolled.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                let body = if request.starts_with("POST /session ") {
+                    r#"{"value":{"sessionId":"SESSION"}}"#
+                } else if request.contains("/source?") {
+                    let y = if reveal && !scrolled.load(std::sync::atomic::Ordering::SeqCst) {
+                        745
+                    } else {
+                        400
+                    };
+                    let tree = format!(
+                        r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"Fixture","rect":{{"x":0,"y":0,"width":390,"height":844}},"children":[{{"type":"XCUIElementTypeButton","label":"Done","rect":{{"x":16,"y":{y},"width":358,"height":51}}}},{{"type":"XCUIElementTypeSearchField","label":"Search","rect":{{"x":28,"y":778,"width":334,"height":28}}}}]}}}}"#
+                    );
+                    return Some((Duration::ZERO, response(&tree, "complete")));
+                } else if request.starts_with("POST ") && request.contains("/elements ") {
+                    return Some((
+                        Duration::ZERO,
+                        response(r#"{"value":[{"ELEMENT":"E1"}]}"#, "complete"),
+                    ));
+                } else if request.contains("/element/E1/rect") {
+                    r#"{"value":{"x":16,"y":780,"width":358,"height":51}}"#
+                } else {
+                    r#"{"value":null}"#
+                };
+                Some((Duration::ZERO, body.into()))
+            });
+            let request=Request::builder().method("POST").uri("/agent/actions").header("x-phone-control","1").header("content-type","application/json").body(Body::from(serde_json::json!({"observe":false,"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"Done"},"via":"point"}}]}).to_string())).unwrap();
+            let reply = server::http::router(build_state_with_runner(runner.url()))
+                .oneshot(request)
+                .await
+                .unwrap();
+            let body: serde_json::Value =
+                serde_json::from_slice(&reply.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            let sent = seen.lock().unwrap();
+            assert!(
+                !sent.iter().any(|r| r.starts_with("POST ")
+                    && (r.contains("/click ") || r.contains("/actions "))),
+                "live centre is covered despite source position: {body}; {sent:?}"
+            );
+            assert_eq!(
+                sent.iter()
+                    .any(|r| r.starts_with("POST ") && r.contains("/scrollTo ")),
+                reveal,
+                "{body}; {sent:?}"
+            );
+            assert_eq!(body["ok"], false, "{body}");
+            assert_eq!(body["retry_safe"], !reveal, "{body}");
+            if reveal {
+                assert_ne!(body["outcome"], "not_sent", "{body}");
+            } else {
+                assert_eq!(body["error"], "element_occluded", "{body}");
+            }
+        }
+    });
+}
