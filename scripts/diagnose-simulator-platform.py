@@ -3,7 +3,7 @@
 import argparse,http.client,importlib.util,json,os,plistlib,re,secrets,signal,socket,subprocess,tempfile,time,urllib.request,uuid
 from pathlib import Path
 from runner_auth import authorization
-from simulator_ui_readiness import launch_once,state_reasons,process_matches
+from simulator_ui_readiness import launch_once,state_reasons,observe_process
 ROOT=Path(__file__).resolve().parents[1]
 assert os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted','hosted CI only'
 def interrupted_by_parent(*_):raise KeyboardInterrupt('diagnostic termination requested')
@@ -120,17 +120,20 @@ print(json.dumps({'app':str(app),'bundle':module.BUNDLE,'oracle_bundle':oracle_b
     result['ordinary_app'].update(bundle=fixture['bundle'],oracle_bundle=fixture['oracle_bundle'],bundle_isolated=True,phase='install');save()
     command('ordinary-app-install',['xcrun','simctl','install',sim,fixture['app']],90)
     nonce=str(uuid.uuid4());result['ordinary_app'].update(phase='launch',run_id=nonce);save()
+    # Prior nominal success path: launch90s + container60s + readback60s.
+    # The unknown-ack branch shares this total instead of adding another window.
+    ordinary_start=time.monotonic();ordinary_deadline=ordinary_start+210
+    result['ordinary_app'].update(launch_to_ready_budget_seconds=210,elapsed_seconds=0);save()
     launch_pid,ack=launch_once(command,sim,fixture['bundle'],nonce)
     result['ordinary_app'].update(phase='readback',launch_ack=ack,launch_pid=launch_pid);save()
     executable=None
     if launch_pid is None:
-        app_container=Path(command('ordinary-app-container',['xcrun','simctl','get_app_container',sim,fixture['bundle'],'app'],60)).resolve(strict=True)
+        app_container=Path(command('ordinary-app-container',['xcrun','simctl','get_app_container',sim,fixture['bundle'],'app'],min(60,max(.1,ordinary_deadline-time.monotonic())))).resolve(strict=True)
         assert sim.lower() in [part.lower() for part in app_container.parts],'ordinary app path is outside the owned Simulator'
         info=plistlib.loads((app_container/'Info.plist').read_bytes());name=info['CFBundleExecutable']
         assert isinstance(name,str) and name and Path(name).name==name,'invalid ordinary executable'
         executable=str(app_container/name)
-    data=Path(command('ordinary-app-data',['xcrun','simctl','get_app_container',sim,fixture['bundle'],'data'],60))/'Documents'
-    ordinary_start=time.monotonic();ordinary_deadline=ordinary_start+60
+    data=Path(command('ordinary-app-data',['xcrun','simctl','get_app_container',sim,fixture['bundle'],'data'],min(60,max(.1,ordinary_deadline-time.monotonic()))))/'Documents'
     while True:
         try:
             ordinary=json.loads((data/'list-state.json').read_text())
@@ -140,15 +143,16 @@ print(json.dumps({'app':str(app),'bundle':module.BUNDLE,'oracle_bundle':oracle_b
             result['ordinary_app'].pop('last_read_error',None)
             reasons=state_reasons(ordinary,nonce,launch_pid)
             if not reasons and launch_pid is None:
-                identity=command('ordinary-app-process',['ps','-ww','-p',str(ordinary['pid']),'-o','command='],min(30,max(.1,ordinary_deadline-time.monotonic())))
-                if process_matches(identity,executable,nonce):
+                verified,process_observation=observe_process(command,ordinary['pid'],executable,nonce,min(30,max(.1,ordinary_deadline-time.monotonic())))
+                if verified:
                     launch_pid=ordinary['pid'];result['ordinary_app'].update(launch_pid=launch_pid,launch_resolved_by='independent fresh window state and owned kernel process identity')
-                else:reasons.append('kernel_process_mismatch')
+                else:
+                    reasons.append(process_observation['reason']);result['ordinary_app']['process_observation']=process_observation
             result['ordinary_app'].update(rejection_reasons=reasons,elapsed_seconds=time.monotonic()-ordinary_start);save()
             if not reasons and time.monotonic()<=ordinary_deadline:break
         except (OSError,ValueError) as error:
             result['ordinary_app'].update(last_read_error=str(error),rejection_reasons=['receipt_unreadable'],elapsed_seconds=time.monotonic()-ordinary_start);save()
-        if time.monotonic()>=ordinary_deadline:raise RuntimeError('ordinary UIKit app did not publish fresh active window state within60s')
+        if time.monotonic()>=ordinary_deadline:raise RuntimeError('ordinary UIKit app did not publish fresh active window state within the210s launch-to-ready budget')
         time.sleep(.1)
     result['ordinary_app'].update(ready=True,phase='ready',state=ordinary,observation_scope='before terminate command');save()
     command('ordinary-app-stop',['xcrun','simctl','terminate',sim,fixture['bundle']],30)

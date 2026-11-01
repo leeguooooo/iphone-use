@@ -2,7 +2,7 @@
 import copy,subprocess,unittest,sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from simulator_ui_readiness import launch_once,state_reasons,process_matches
+from simulator_ui_readiness import launch_once,state_reasons,process_matches,observe_process
 class Readiness(unittest.TestCase):
  def test_launch_is_never_replayed_after_timeout_error_or_missing_ack(self):
   for outcome in [subprocess.TimeoutExpired(['simctl','launch'],90),RuntimeError('service error'),'unexpected output']:
@@ -27,4 +27,10 @@ class Readiness(unittest.TestCase):
   self.assertTrue(process_matches('/owned/App --run-id nonce --mode unique','/owned/App','nonce'))
   for command in ['/other/App --run-id nonce','/owned/App --run-id old','/owned/App.evil --run-id nonce','python -c /owned/App --run-id nonce','/owned/App --run-id nonce-suffix']:
    with self.subTest(command=command):self.assertFalse(process_matches(command,'/owned/App','nonce'))
+ def test_process_probe_failures_are_explicitly_unavailable_not_ready(self):
+  for failure in [RuntimeError('ps failed'),subprocess.TimeoutExpired(['ps'],1)]:
+   calls=[]
+   def command(*args):calls.append(args);raise failure
+   verified,report=observe_process(command,123,'/owned/App','nonce',1)
+   self.assertFalse(verified);self.assertEqual(report['reason'],'kernel_process_unavailable');self.assertEqual(len(calls),1)
 if __name__=='__main__':unittest.main()

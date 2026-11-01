@@ -25,3 +25,11 @@ def state_reasons(state,nonce,expected_pid=None):
 
 def process_matches(command,executable,nonce):
     return (command==executable or command.startswith(executable+' ')) and re.search(r'(?:^|\s)--run-id\s+'+re.escape(nonce)+r'(?:\s|$)',command) is not None
+
+def observe_process(command,pid,executable,nonce,timeout):
+    try:
+        identity=command('ordinary-app-process',['ps','-ww','-p',str(pid),'-o','command='],timeout)
+    except (RuntimeError,subprocess.TimeoutExpired) as error:
+        return False,{'reason':'kernel_process_unavailable','error':type(error).__name__+': '+str(error)}
+    if not process_matches(identity,executable,nonce):return False,{'reason':'kernel_process_mismatch'}
+    return True,{}
