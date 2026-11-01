@@ -307,7 +307,9 @@ jobs:
     name: Native element oracle / released artifact
     runs-on: macos-15
     permissions:
-      contents: read
+      # Draft assets require push access. This job only runs for explicit
+      # workflow_dispatch probe inputs, never the untrusted pull_request path.
+      contents: write
       actions: read
     timeout-minutes: 105
     env:

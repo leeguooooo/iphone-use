@@ -2,7 +2,7 @@ name: Release Binaries
 
 # Trigger on version tags (e.g. v0.2.0) pushed to the repo,
 # OR manually via the Actions UI (workflow_dispatch).
-# On a tag push  → full release: build + bundle + sign + upload to GitHub Release.
+# On a tag push → build/sign assets in a draft Release. Verify those assets before publishing.
 # On manual run  → dry-run build, or recover Registry metadata for an existing release.
 on:
   push:
@@ -520,7 +520,7 @@ jobs:
             browser-use-bridge-macos-universal.tar.gz
             browser-use-bridge-macos-universal.tar.gz.sha256
           generate_release_notes: true
-          draft: false
+          draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -545,15 +545,14 @@ jobs:
 
   # List the release in the official MCP Registry (registry.modelcontextprotocol.io).
   # GitHub OIDC proves the io.github.leeguooooo namespace, so no secret is
-  # needed. server.json carries the version release.sh bumped. A registry
-  # outage must not fail a release that already shipped, hence continue-on-error.
+  # needed. Run explicitly only after draft assets pass verification and the
+  # release is promoted. A registry outage must not destructively roll it back.
   publish-mcp-registry:
     name: Publish to the MCP Registry
     needs: build-macos
     if: >-
       always() &&
-      ((startsWith(github.ref, 'refs/tags/') && needs.build-macos.result == 'success') ||
-       (github.event_name == 'workflow_dispatch' && inputs.registry_release != ''))
+      github.event_name == 'workflow_dispatch' && inputs.registry_release != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true
