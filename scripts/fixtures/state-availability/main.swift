@@ -63,8 +63,11 @@ final class StateController: UIViewController, UITextFieldDelegate {
   func textState(_ input: UITextField) -> [String:Any] {
     let text = input.text ?? ""
     let digest = SHA256.hash(data:Data(text.utf8)).map {String(format:"%02x",$0)}.joined()
+    let selection = input.selectedTextRange
+    let location = selection.map { input.offset(from:input.beginningOfDocument,to:$0.start) } ?? -1
+    let length = selection.map { input.offset(from:$0.start,to:$0.end) } ?? -1
     return ["focused":input.isFirstResponder,"characters":text.unicodeScalars.count,
-      "utf16_length":text.utf16.count,"sha256":digest]
+      "utf16_length":text.utf16.count,"sha256":digest,"selection_location":location,"selection_length":length]
   }
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
@@ -86,7 +89,15 @@ final class StateController: UIViewController, UITextFieldDelegate {
           let focused = command["focused"] as? Bool else { return }
     sequence = next
     let before = field.isFirstResponder
-    let acknowledged = focused ? field.becomeFirstResponder() : field.resignFirstResponder()
+    let acknowledged: Bool
+    if let caret = command["caret_utf16"] as? Int {
+      if focused && before && caret >= 0, let position = field.position(from:field.beginningOfDocument,offset:caret) {
+        field.selectedTextRange = field.textRange(from:position,to:position)
+        acknowledged = field.selectedTextRange.map { field.offset(from:field.beginningOfDocument,to:$0.start)==caret && $0.isEmpty } ?? false
+      } else { acknowledged = false }
+    } else {
+      acknowledged = focused ? field.becomeFirstResponder() : field.resignFirstResponder()
+    }
     focusReceipt = ["sequence":next,"requested":focused,"acknowledged":acknowledged,
       "before":before,"after":field.isFirstResponder]
     save()

@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod advice;
 pub mod afc;
+pub mod file_provider;
 pub mod app_lookup;
 pub mod boot;
 pub mod apps;

@@ -125,4 +125,38 @@ class NativeFilesTests(unittest.TestCase):
         self.assertEqual(result['CFBundleIcons'],source['CFBundleIcons'])
         self.assertNotIn('UIFileSharingEnabled',source)
         with self.assertRaises(ValueError):file_sharing_info({'CFBundleIdentifier':'other.app'})
+class NativeProviderTests(unittest.TestCase):
+    def setUp(self):
+        self.args=types.SimpleNamespace(device='phone',bundle='owned.Runner.xctrunner',
+            owner='me',instance='i13',max_bytes=100)
+        self.device=r.RunnerFiles(self.args,None,None)
+        self.device.lease_identity=('a'*64,'1','2','3')
+    def test_native_copy_passes_exact_scope_to_current_packaged_binary(self):
+        with patch.object(self.device,'check_lease') as guard,patch.object(self.device,'command',
+                return_value=json.dumps({'provider':'native-usb-afc','bytes':5})) as command, \
+                patch.dict(r.os.environ,{'IPHONE_USE_FILES_HOST_BIN':'/owned/iphone-use'}):
+            self.device.copy('from','Documents/inbox/saved.pdf',Path('/private/first'))
+        guard.assert_called_once()
+        argv,timeout=command.call_args.args
+        self.assertEqual(argv[:3],['/owned/iphone-use','files','__native-read'])
+        self.assertEqual(argv[argv.index('--instance')+1],'i13')
+        self.assertEqual(argv[argv.index('--owner')+1],'me')
+        self.assertEqual(json.loads(argv[argv.index('--lease')+1]),
+            {'daemon_instance':'a'*64,'owner_epoch':'1','privacy_epoch':'2','lifecycle_stamp':'3'})
+        self.assertEqual(timeout,60)
+    def test_native_failure_or_invalid_receipt_never_falls_back(self):
+        for result in ['invalid','[]',json.dumps({'provider':'other','bytes':5}),
+                json.dumps({'provider':'native-usb-afc','bytes':True}),
+                json.dumps({'provider':'native-usb-afc','bytes':101})]:
+            with self.subTest(result=result),patch.object(self.device,'check_lease'), \
+                    patch.object(self.device,'command',return_value=result) as command:
+                with self.assertRaises(c.TransferError):
+                    self.device.copy('from','Documents/inbox/saved.pdf',Path('/private/first'))
+                command.assert_called_once()
+        with patch.object(self.device,'check_lease'),patch.object(self.device,'command',
+                side_effect=c.TransferError('native refused')) as command:
+            with self.assertRaises(c.TransferError):
+                self.device.copy('from','Documents/inbox/saved.pdf',Path('/private/first'))
+            command.assert_called_once()
+
 if __name__=='__main__':unittest.main()

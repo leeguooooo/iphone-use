@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if not __debug__:
     raise SystemExit("state oracle requires assertions")
 
+from mcp_probe_peer import Peer, payload as mcp_payload
 from simulator_ui_readiness import launch_once, observe_process, state_reasons
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +84,19 @@ def text_state_matches(value, text):
             and other.get('sha256') == hashlib.sha256(b'untouched').hexdigest())
 
 
+def mcp_text_action(peer, action):
+    assert action.get('type') == 'text'
+    arguments = {key: value for key, value in action.items() if key != 'type'}
+    arguments['observe'] = False
+    reply = peer.request('tools/call', {'name': 'phone_type', 'arguments': arguments}, timeout=60)
+    assert 'error' not in reply, 'MCP protocol rejected input; no replay'
+    result, _, body = mcp_payload(reply)
+    if isinstance(result.get('structuredContent'), dict):
+        body = result['structuredContent']
+    assert isinstance(body, dict) and type(body.get('ok')) is bool, 'MCP returned no authoritative input outcome; no replay'
+    return reply, body
+
+
 def build(out):
     project = out / 'fixture-src'
     shutil.copytree(ROOT / 'runner/gesture-fixture', project)
@@ -112,7 +127,9 @@ def main():
     for name in ('mcp', 'runner-record', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--type-text', action='store_true')
+    parser.add_argument('--mcp-input', action='store_true')
     args = parser.parse_args()
+    assert not args.mcp_input or args.type_text
     uuid.UUID(args.udid)
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
     base = urllib.parse.urlparse(args.base)
@@ -140,6 +157,7 @@ def main():
     sequence = 0
     data_dir = None
     install_attempted = False
+    mcp_peer = None
 
     def save(name, value):
         p = args.out / name
@@ -186,10 +204,12 @@ def main():
         assert value['touches'] == 0 and type(value['touches']) is int, 'unexpected touch'
         return value
 
-    def focus(wanted):
+    def focus(wanted, caret_utf16=None):
         nonlocal sequence
         sequence += 1
         command = {'run_id': nonce, 'pid': expected_pid, 'sequence': sequence, 'focused': wanted}
+        if caret_utf16 is not None:
+            command['caret_utf16'] = caret_utf16
         save('focus-commands/' + str(sequence) + '/request.json', command)
         temporary = data_dir / 'state-command.tmp'
         temporary.write_text(json.dumps(command))
@@ -201,6 +221,9 @@ def main():
             samples.append(value)
             save('focus-commands/' + str(sequence) + '/samples.json', samples)
             if focus_confirmed(value, sequence, wanted):
+                if caret_utf16 is not None:
+                    field = value['controls']['state.field']
+                    assert field.get('selection_location') == caret_utf16 and field.get('selection_length') == 0, 'fixture caret was not confirmed'
                 return value
             receipt = value.get('focus_command')
             if isinstance(receipt, dict) and receipt.get('sequence') == sequence and receipt.get('acknowledged') is False:
@@ -249,6 +272,17 @@ def main():
             assert len(matches) == 1
             handles[identifier] = matches[0].get('ELEMENT') or matches[0]['element-6066-11e4-a52e-4f735466cecf']
         if args.type_text:
+            if args.mcp_input:
+                clean = {key: value for key, value in os.environ.items()
+                         if not key.startswith(('IPHONE_USE_', 'PHONE_REMOTE_', 'IOS_USE_', 'IPU_', 'TEST_RUNNER_'))
+                         and key not in ('GH_TOKEN', 'GITHUB_TOKEN')}
+                clean.update(IPHONE_USE_URL=args.base, IPHONE_USE_OWNER=args.owner,
+                             IPHONE_USE_MCP_PREWARM='0', IPHONE_USE_FLOWS_NO_AUTO_UPDATE='1')
+                mcp_peer = Peer.__new__(Peer)
+                Peer.__init__(mcp_peer, [str(args.mcp)], clean, args.out / 'input-mcp.log')
+                assert mcp_peer.initialization['result']['serverInfo']['version'] == args.product_version
+                result['input_transport'] = 'MCP stdio -> host HTTP -> Native keyboard'
+                result['scope'] = 'source-built MCP stdio/HTTP/Native input with independent UIKit text hashes; not physical/published/performance proof'
             focus(True)
             untouched = hashlib.sha256(b'untouched').hexdigest()
             last_tick = state()['tick']
@@ -270,10 +304,14 @@ def main():
             def call_text(action, label):
                 assert action['type'] == 'text'
                 save('input/' + label + '-request.json', action)
-                try:
-                    response = daemon.call('/agent/input', action)
-                except urllib.error.HTTPError as error:
-                    response = json.load(error)
+                if mcp_peer is not None:
+                    reply, response = mcp_text_action(mcp_peer, action)
+                    save('input/' + label + '-mcp.json', reply)
+                else:
+                    try:
+                        response = daemon.call('/agent/input', action)
+                    except urllib.error.HTTPError as error:
+                        response = json.load(error)
                 save('input/' + label + '-response.json', response)
                 return response
 
@@ -319,12 +357,14 @@ def main():
             result['cases'].append({'name': 'input-500', 'passed': True, 'characters': 500,
                 'sha256': hashlib.sha256(payload.encode()).hexdigest(), 'continuation_calls': continuations,
                 'continuation_exercised': continuations > 0, 'consumed_token_replay_checked': replay_checked})
+            focus(True, caret_utf16=250)
+            save('input-middle-caret-before-replace.json', inspect_text(payload))
             literal = 'literal-\ue007-\ue003-👋🏻'
             after, literal_continuations, _ = complete_text(literal,
                 {'type': 'text', 'text': literal, 'clear': True}, 'literal')
             save('input-literal-state.json', after)
             result['cases'].append({'name': 'literal-private-unicode', 'passed': True,
-                'characters': len(literal), 'sha256': hashlib.sha256(literal.encode()).hexdigest(), 'return_events': 0, 'continuation_calls': literal_continuations})
+                'characters': len(literal), 'sha256': hashlib.sha256(literal.encode()).hexdigest(), 'return_events': 0, 'continuation_calls': literal_continuations, 'replacement_from_middle': True})
         for name, identifier, field, expected in ([] if args.type_text else CASES):
             if name in ('focus-on', 'focus-off'):
                 focus(expected)
@@ -395,6 +435,13 @@ def main():
         result['error'] = type(error).__name__ + ': ' + str(error)
         raise
     finally:
+        if mcp_peer is not None and hasattr(mcp_peer, 'process'):
+            try:
+                mcp_peer.close()
+                result['mcp_process_stopped'] = mcp_peer.process.poll() is not None
+                assert result['mcp_process_stopped']
+            except Exception as error:
+                result['cleanup_errors'].append('MCP cleanup: ' + type(error).__name__ + ': ' + str(error))
         # Preserve the actual fixture response before uninstall removes its files.
         if install_attempted and data_dir is not None:
             try:

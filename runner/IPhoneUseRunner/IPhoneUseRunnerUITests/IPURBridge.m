@@ -525,6 +525,210 @@ static BOOL IPURUseRequestCache(void)
 }
 
 
+// Selection metadata belongs to the same live AX element as its value. Keep the
+// actual text private to input operations; the read-only route exposes only counts.
+static NSDictionary *IPURReadTextSelection(id client, id element, NSString **errorMessage)
+{
+  SEL read = NSSelectorFromString(@"attributesForElement:attributes:error:");
+  if (client == nil || ![client respondsToSelector:read]) {
+    if (errorMessage) *errorMessage = @"AX text selection read unavailable";
+    return nil;
+  }
+  NSMethodSignature *signature = [client methodSignatureForSelector:read];
+  if (signature.numberOfArguments != 5 || signature.methodReturnType[0] != '@' ||
+      [signature getArgumentTypeAtIndex:4][0] != '^') {
+    if (errorMessage) *errorMessage = @"AX text selection read signature unavailable";
+    return nil;
+  }
+  @try {
+    NSError *error = nil;
+    id attributes = ((id (*)(id, SEL, id, id, NSError **))objc_msgSend)(client, read, element,
+      @[@"XC_kAXXCAttributeValue", @"XC_kAXXCAttributeSelectedTextRange"], &error);
+    if (![attributes isKindOfClass:NSDictionary.class]) {
+      if (errorMessage) *errorMessage = @"AX text selection response unavailable";
+      return nil;
+    }
+    if (error != nil) {
+      if (errorMessage) *errorMessage = @"AX text selection read failed";
+      return nil;
+    }
+    id value = attributes[@"XC_kAXXCAttributeValue"];
+    id selected = attributes[@"XC_kAXXCAttributeSelectedTextRange"];
+    NSString *text = value == NSNull.null ? @"" : ([value isKindOfClass:NSString.class] ? value : nil);
+    if (text == nil && [value isKindOfClass:NSNumber.class]) text = [value stringValue];
+    BOOL nsRange = [selected isKindOfClass:NSValue.class] && strcmp([selected objCType], @encode(NSRange)) == 0;
+    BOOL cfRange = [selected isKindOfClass:NSValue.class] && strcmp([selected objCType], @encode(CFRange)) == 0;
+    BOOL stringRange = [selected isKindOfClass:NSString.class];
+    if (text == nil || (!nsRange && !cfRange && !stringRange)) {
+      if (errorMessage) *errorMessage = [NSString stringWithFormat:@"AX selected range unavailable (%@)", NSStringFromClass([selected class]) ?: @"none"];
+      return nil;
+    }
+    NSRange range;
+    if (nsRange) range = [selected rangeValue];
+    else if (stringRange) {
+      NSScanner *scanner = [NSScanner scannerWithString:selected];
+      unsigned long long location, length;
+      if (![scanner scanString:@"{" intoString:NULL] || ![scanner scanUnsignedLongLong:&location] ||
+          ![scanner scanString:@"," intoString:NULL] || ![scanner scanUnsignedLongLong:&length] ||
+          ![scanner scanString:@"}" intoString:NULL] || !scanner.isAtEnd ||
+          location > NSUIntegerMax || length > NSUIntegerMax) {
+        if (errorMessage) *errorMessage = @"AX selected range string is malformed";
+        return nil;
+      }
+      range = NSMakeRange((NSUInteger)location, (NSUInteger)length);
+    } else {
+      CFRange raw;
+      [selected getValue:&raw size:sizeof(raw)];
+      if (raw.location < 0 || raw.length < 0) return nil;
+      range = NSMakeRange((NSUInteger)raw.location, (NSUInteger)raw.length);
+    }
+    if (range.location > text.length || range.length > text.length - range.location) {
+      if (errorMessage) *errorMessage = @"AX selected range is inconsistent with the current value";
+      return nil;
+    }
+    return @{@"text": text, @"range": selected, @"location": @(range.location), @"length": @(range.length), @"utf16_length": @(text.length)};
+  } @catch (__unused NSException *exception) {
+    if (errorMessage) *errorMessage = @"AX text selection read raised an exception";
+    return nil;
+  }
+}
+
++ (nullable NSString *)shortClearKeysForAXElement:(id)element error:(NSString **)errorMessage
+{
+  NSDictionary *state = IPURReadTextSelection([self axClient], element, errorMessage);
+  if (state == nil) return nil;
+  NSString *text = state[@"text"];
+  if (text.length > 100) return nil;
+  NSUInteger start = [state[@"location"] unsignedIntegerValue];
+  NSUInteger end = start + [state[@"length"] unsignedIntegerValue];
+  // Avoid splitting a composed character when translating a UTF-16 selection
+  // into keyboard deletions. Such a caret uses confirmed Select All instead.
+  for (NSNumber *boundary in @[@(start), @(end)]) {
+    NSUInteger index = boundary.unsignedIntegerValue;
+    if (index < text.length && [text rangeOfComposedCharacterSequenceAtIndex:index].location != index) return nil;
+  }
+  // This text-event path implements backspace reliably, but does not deliver
+  // forward-delete on all iOS runtimes. Only plan deletion when no suffix remains.
+  // Other caret positions use confirmed Select All before any destructive input.
+  if (end != text.length) return nil;
+  __block NSUInteger before = 0;
+  [text enumerateSubstringsInRange:NSMakeRange(0, start) options:NSStringEnumerationByComposedCharacterSequences
+    usingBlock:^(__unused NSString *substring, __unused NSRange range, __unused NSRange enclosing, __unused BOOL *stop) { before++; }];
+  NSMutableString *keys = [NSMutableString string];
+  if (end > start) [keys appendString:@"\b"];
+  for (NSUInteger i = 0; i < before; i++) [keys appendString:@"\b"];
+  // Do not append deletes beyond the initial value/selection's composed
+  // characters. An App may focus another field when this one becomes empty.
+  return keys;
+}
+
+static NSString *IPURSynthesize(id record, id path);
+static unsigned long long IPURMainDisplayID(void);
+
+static BOOL IPURTextSelectionSynthesisAvailable(void)
+{
+  Class record = NSClassFromString(@"XCSynthesizedEventRecord");
+  Class path = NSClassFromString(@"XCPointerEventPath");
+  SEL key = NSSelectorFromString(@"typeKey:modifiers:atOffset:");
+  NSMethodSignature *signature = [path instanceMethodSignatureForSelector:key];
+  return [record instancesRespondToSelector:NSSelectorFromString(@"initWithName:displayID:")] &&
+    [record instancesRespondToSelector:NSSelectorFromString(@"setTargetProcessID:")] &&
+    [record instancesRespondToSelector:NSSelectorFromString(@"synthesizeWithError:")] &&
+    [path instancesRespondToSelector:NSSelectorFromString(@"initForTextInput")] &&
+    signature.numberOfArguments == 5 && signature.methodReturnType[0] == 'v' &&
+    [signature getArgumentTypeAtIndex:2][0] == '@' &&
+    strchr("QL", [signature getArgumentTypeAtIndex:3][0]) != NULL &&
+    [signature getArgumentTypeAtIndex:4][0] == 'd';
+}
+
++ (nullable NSDictionary<NSString *, NSNumber *> *)textSelectionForAXElement:(id)element error:(NSString **)errorMessage
+{
+  id client = [self axClient];
+  NSDictionary *state = IPURReadTextSelection(client, element, errorMessage);
+  if (state == nil) return nil;
+  return @{@"location": state[@"location"], @"length": state[@"length"], @"utf16_length": state[@"utf16_length"],
+           @"can_select": IPURTextSelectionSynthesisAvailable() ? @YES : @NO};
+}
+
++ (nullable NSDictionary<NSString *, id> *)selectAllTextForAXElement:(id)element pid:(int)pid retryState:(NSDictionary<NSString *, id> *)retryState error:(NSString **)errorMessage
+{
+  id client = [self axClient];
+  NSDictionary *before = IPURReadTextSelection(client, element, errorMessage);
+  if (before == nil) return nil;
+  NSString *text = [before[@"text"] copy];
+  if (retryState != nil && (![retryState[@"retry_value"] isKindOfClass:NSString.class] ||
+                            ![retryState[@"retry_value"] isEqualToString:text])) {
+    if (errorMessage) *errorMessage = @"value changed before selection retry; no further key was sent";
+    return nil;
+  }
+  if (pid <= 0 || [self pidForAXElement:element] != pid) {
+    if (errorMessage) *errorMessage = @"selection process no longer matches; nothing was sent";
+    return nil;
+  }
+  if (text.length > 0 && ([before[@"location"] unsignedIntegerValue] != 0 || [before[@"length"] unsignedIntegerValue] != text.length)) {
+    if (retryState != nil && (![before[@"location"] isEqual:retryState[@"location"]] ||
+                              ![before[@"length"] isEqual:retryState[@"length"]])) {
+      if (errorMessage) *errorMessage = @"selection changed before retry; no further key was sent";
+      return nil;
+    }
+    @try {
+      Class pathClass = NSClassFromString(@"XCPointerEventPath");
+      SEL key = NSSelectorFromString(@"typeKey:modifiers:atOffset:");
+      if (!IPURTextSelectionSynthesisAvailable()) {
+        if (errorMessage) *errorMessage = @"targeted selection key unavailable; nothing was sent";
+        return nil;
+      }
+      Class recordClass = NSClassFromString(@"XCSynthesizedEventRecord");
+      SEL initRecord = NSSelectorFromString(@"initWithName:displayID:");
+      SEL target = NSSelectorFromString(@"setTargetProcessID:");
+      if (![recordClass instancesRespondToSelector:initRecord] || ![recordClass instancesRespondToSelector:target]) {
+        if (errorMessage) *errorMessage = @"targeted selection record unavailable; nothing was sent";
+        return nil;
+      }
+      // Keyboard records use the main display and no touch orientation, matching
+      // XCTest's keyboard-event shape. They retain the original target process.
+      id record = ((id (*)(id, SEL, id, unsigned long long))objc_msgSend)(
+        [recordClass alloc], initRecord, @"ipu-select-all", IPURMainDisplayID());
+      if (record == nil) { if (errorMessage) *errorMessage = @"selection record unavailable; nothing was sent"; return nil; }
+      ((IPURMsgSendSetLongLong)objc_msgSend)(record, target, (long long)pid);
+      id path = ((id (*)(id, SEL))objc_msgSend)([pathClass alloc], NSSelectorFromString(@"initForTextInput"));
+      if (path == nil) { if (errorMessage) *errorMessage = @"selection key path unavailable; nothing was sent"; return nil; }
+      ((void (*)(id, SEL, id, unsigned long long, double))objc_msgSend)(path, key, @"a", (unsigned long long)XCUIKeyModifierCommand, 0.0);
+      NSString *failure = IPURSynthesize(record, path);
+      if (failure != nil) { if (errorMessage) *errorMessage = @"selection key outcome unknown; no delete was sent"; return nil; }
+    } @catch (__unused NSException *exception) {
+      if (errorMessage) *errorMessage = @"selection key raised an exception; no delete was sent";
+      return nil;
+    }
+  }
+  NSTimeInterval until = NSProcessInfo.processInfo.systemUptime + 0.75;
+  BOOL selectionUnchanged = YES;
+  for (;;) {
+    NSDictionary *after = IPURReadTextSelection(client, element, errorMessage);
+    if (after == nil) return nil;
+    if (after != nil && ![after[@"text"] isEqualToString:text]) {
+      if (errorMessage) *errorMessage = @"value changed during selection; no delete was sent";
+      return nil;
+    }
+    if (after != nil && [after[@"location"] unsignedIntegerValue] == 0 &&
+        [after[@"length"] unsignedIntegerValue] == text.length) break;
+    if (![after[@"location"] isEqual:before[@"location"]] || ![after[@"length"] isEqual:before[@"length"]]) selectionUnchanged = NO;
+    if (NSProcessInfo.processInfo.systemUptime >= until) {
+      if (selectionUnchanged && [after[@"location"] isEqual:before[@"location"]] && [after[@"length"] isEqual:before[@"length"]]) {
+        // Synthesis acknowledged, all readbacks succeeded and the original value
+        // and selection are unchanged. No destructive input has been dispatched.
+        return @{@"confirmed": @NO, @"no_effect": @YES, @"retry_value": text,
+                 @"location": before[@"location"], @"length": before[@"length"],
+                 @"utf16_length": @(text.length)};
+      }
+      if (errorMessage) *errorMessage = @"full selection could not be confirmed; no delete was sent";
+      return nil;
+    }
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+  }
+  return @{@"confirmed": @YES, @"utf16_length": @(text.length), @"location": @0, @"length": @(text.length)};
+}
+
 + (nullable id)requestSnapshotForElement:(id)element
                                 maxDepth:(NSInteger)maxDepth
                                 maxNodes:(NSInteger)maxNodes

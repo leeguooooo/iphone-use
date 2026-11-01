@@ -1,6 +1,6 @@
 [package]
 name = "server"
-version = "0.27.33"
+version = "0.27.34"
 edition = "2021"
 
 # The daemon binary. Lib stays for unit-testable glue (http/signaling/webrtc
@@ -31,7 +31,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 
 # async runtime + HTTP server.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "process", "fs"] }
 axum = "0.7"
 
 # HTTP client for runner and the release check. rustls-tls: no native-tls/openssl.

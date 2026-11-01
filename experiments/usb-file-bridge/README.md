@@ -104,8 +104,10 @@ commands so another Xcode's SDK cannot leak into the transfer.
    ```
 
 `IPHONE_USE_OWNER` can supply `--owner`. `--expect-sha256` optionally checks a
-known sample. Maximum/default accepted file size is 64 MiB. This is validated after CoreDevice
-reads as well as against its initial metadata; it is not a hard download/disk quota. `--state-dir` relocates
+known sample. Maximum/default accepted file size is 64 MiB. Actual bytes use the
+CLI's native paired USB/House Arrest/AFC reader. Each read asks for at most 64 KiB
+or the remaining allowance plus one byte; over-limit data is rejected before
+writing. The original AFC size bounds each staging copy. `--state-dir` relocates
 runtime state from `~/.iphone-use/usb-file-bridge`.
 
 The receiver lists the exact saved file, verifies size/type, reads it twice with
@@ -168,10 +170,14 @@ read-only and do not remove orphan staging paths left by a hard process kill.
 
 ## Boundaries
 
-- Owner and target UDID are checked before and after the blocking CoreDevice
-  `wired` probe, immediately before each device copy, and before commit. CoreDevice controls the underlying route: checkpoints are not
-  a transport lock and do not prove a cable cannot change between checks.
-- Commands are bounded by the remaining deadline and a 15-second command cap.
+- CoreDevice remains responsible for listing metadata and the `wired` probe.
+  Payload bytes use the selected USB attachment and `VendDocuments`, with no
+  CoreDevice-copy or wireless fallback. The native reader checks the original
+  daemon/owner/privacy/lifecycle scope before opening, after opening, during
+  copying and after syncing. These checkpoints do not atomically lock remote
+  owner/privacy state through final destination publication.
+- Commands are bounded by the remaining deadline; metadata uses a 15-second cap
+  and each native read uses at most 60 seconds.
   Owner loss, cancellation and connection errors abort before publication.
 - Paths, names, file type, size, stable metadata and read digests are checked.
   Publication uses a flushed private (0600) staging file and a non-overwriting

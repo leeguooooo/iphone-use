@@ -2,6 +2,20 @@
 use std::process::{Command, Output};
 
 #[test]
+fn native_provider_rejects_invalid_scope_before_device_or_staging_access() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("must-not-exist");
+    let output = Command::new(env!("CARGO_BIN_EXE_iphone-use"))
+        .args(["files", "__native-read", "--device", "synthetic", "--bundle", "owned.xctrunner",
+            "--source", "Documents/inbox/saved.pdf", "--max-bytes", "100", "--owner", "me",
+            "--instance", "default", "--lease", "{}", "--destination"])
+        .arg(&destination).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Invalid control lease identity"));
+    assert!(!destination.exists());
+}
+
+#[test]
 fn packaged_files_entry_works_without_checkout_or_python_path_imports() {
     let root = tempfile::tempdir().unwrap();
     let binary = root.path().join("iphone-use");

@@ -34,6 +34,9 @@ except Exception as _error:
 /// Does not return after successful exec. The receiver preserves its own
 /// transfer journal and signal handling, including uncertain publication.
 pub fn main(args: &[OsString]) -> i32 {
+    if args.first().is_some_and(|arg| arg == "__native-read") {
+        return crate::file_provider::main(args);
+    }
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::process::CommandExt as _;

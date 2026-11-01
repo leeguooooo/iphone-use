@@ -173,9 +173,55 @@ pub type ServiceStream = Box<dyn ServiceIo>;
 /// service's own protocol; the lockdown session is closed by then.
 pub async fn open_service(udid: &str, name: &str) -> Result<ServiceStream> {
     let attached = attached(udid).await?;
+    open_attached_service(&attached, name).await
+}
+
+/// Open only the selected XCTest Runner's shared Documents over its current
+/// USB attachment. There is no network fallback or whole-container vending.
+/// Callers still enforce their owner/privacy scope around reads/publication.
+pub async fn open_runner_documents(
+    udid: &str,
+    bundle: &str,
+) -> Result<crate::afc::AfcClient<ServiceStream>> {
+    validate_runner_documents_bundle(bundle)?;
+    let attached = attached(udid).await?;
+    if !attached.usb {
+        bail!("Runner Documents requires a wired USB attachment");
+    }
+    let mut stream = open_attached_service(&attached, "com.apple.mobile.house_arrest").await?;
+    vend_runner_documents(&mut stream, bundle).await?;
+    Ok(crate::afc::AfcClient::new(stream))
+}
+
+fn validate_runner_documents_bundle(bundle: &str) -> Result<()> {
+    if !crate::app_lookup::valid_bundle(bundle) || !bundle.ends_with(".xctrunner") {
+        bail!("Documents access requires an exact XCTest Runner bundle identifier");
+    }
+    Ok(())
+}
+
+async fn vend_runner_documents<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    bundle: &str,
+) -> Result<()> {
+    validate_runner_documents_bundle(bundle)?;
+    let reply = exchange(
+        stream,
+        &request(&[("Command", "VendDocuments"), ("Identifier", bundle)]),
+    )
+    .await?;
+    if reply.get("Error").is_some()
+        || reply.get("Status").and_then(Value::as_str) != Some("Complete")
+    {
+        bail!("Runner Documents vending was refused or not confirmed");
+    }
+    Ok(())
+}
+
+async fn open_attached_service(attached: &usbmux::Attached, name: &str) -> Result<ServiceStream> {
     let pair = PairRecord::parse(&usbmux::read_pair_record(&attached.serial).await?)?;
     let tls = Arc::new(pair.tls_config()?);
-    let service = start_paired_service(&attached, &pair, &tls, name).await?;
+    let service = start_paired_service(attached, &pair, &tls, name).await?;
     let raw = usbmux::connect(attached.device_id, service.port)
         .await
         .with_context(|| format!("connect to {name}"))?;
@@ -717,6 +763,57 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    #[test]
+    fn runner_documents_requires_exact_runner_bundle() {
+        assert!(validate_runner_documents_bundle("com.example.Runner.xctrunner").is_ok());
+        for bundle in [
+            "",
+            "other.app",
+            "../Runner.xctrunner",
+            "com.example\0.xctrunner",
+        ] {
+            assert!(validate_runner_documents_bundle(bundle).is_err());
+        }
+    }
+
+    #[test]
+    fn runner_documents_requires_complete_without_error_then_speaks_afc() {
+        block_on(async {
+            for (fields, accepted) in [
+                ("<key>Status</key><string>Complete</string>", true),
+                ("<key>Status</key><string>Pending</string>", false),
+                ("<key>Error</key><string>ApplicationLookupFailed</string>", false),
+                ("<key>Status</key><string>Complete</string><key>Error</key><string>Denied</string>", false),
+                ("", false),
+            ] {
+                let (mut host, mut peer) = tokio::io::duplex(4096);
+                let device = tokio::spawn(async move {
+                    let mut header = [0; 4];
+                    peer.read_exact(&mut header).await.unwrap();
+                    let mut body = vec![0; u32::from_be_bytes(header) as usize];
+                    peer.read_exact(&mut body).await.unwrap();
+                    let request = usbmux::parse_plist(std::str::from_utf8(&body).unwrap()).unwrap();
+                    assert_eq!(request.get("Command").and_then(Value::as_str), Some("VendDocuments"));
+                    assert_eq!(request.get("Identifier").and_then(Value::as_str), Some("com.example.Runner.xctrunner"));
+                    let reply = format!("<plist version=\"1.0\"><dict>{fields}</dict></plist>");
+                    peer.write_all(&frame(&reply)).await.unwrap();
+                    if accepted {
+                        let request = crate::afc::read_packet(&mut peer).await.unwrap();
+                        assert_eq!(request.operation, crate::afc::OP_READ_DIR);
+                        peer.write_all(&crate::afc::encode(request.number, crate::afc::OP_DATA, &[], b"saved.pdf\0")).await.unwrap();
+                    }
+                });
+                let result = vend_runner_documents(&mut host, "com.example.Runner.xctrunner").await;
+                assert_eq!(result.is_ok(), accepted);
+                if accepted {
+                    let mut afc = crate::afc::AfcClient::new(host);
+                    assert_eq!(afc.read_dir("/").await.unwrap(), vec!["saved.pdf"]);
+                }
+                device.await.unwrap();
+            }
+        });
     }
 
     #[test]

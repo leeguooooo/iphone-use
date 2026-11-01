@@ -697,16 +697,44 @@ extension RunnerTests {
     var started = false
     do {
       var state = try boundClearState(token)
-      for _ in 0..<3 where state.count > 0 {
+      if state.count > 0 {
         let node = try checkedInputTarget(token)
-        started = true
-        _ = try typeIntoFocus(String(repeating: XCUIKeyboardKey.delete.rawValue,
-          count: min(state.count, 500)), frequency: 120, targetPID: node.pid)
-        state = try boundClearState(token)
+        guard let ax = node.axElement else { throw RunnerError.failed("bound clear AX unavailable") }
+        var readError: NSString?
+        if let keys = IPURBridge.shortClearKeys(for: ax, error: &readError) {
+          _ = try checkedInputTarget(token)
+          started = !keys.isEmpty
+          if !keys.isEmpty { _ = try typeIntoFocus(keys, frequency: 120, targetPID: node.pid) }
+        } else {
+          guard IPURBridge.textSelection(for: ax, error: &readError)?["can_select"]?.boolValue == true else {
+            throw RunnerError.invalidArgument("targeted selection unavailable; nothing was sent")
+          }
+          _ = try checkedInputTarget(token)
+          started = true
+          guard let selected = IPURBridge.selectAllText(for: ax, pid: node.pid, retryState: nil, error: &readError),
+                (selected["confirmed"] as? NSNumber)?.boolValue == true,
+                let length = selected["utf16_length"] as? NSNumber else {
+            throw RunnerError.failed("select-all not confirmed; no deletion was dispatched")
+          }
+          _ = try checkedInputTarget(token)
+          guard let range = IPURBridge.textSelection(for: ax, error: &readError),
+                range["location"]?.intValue == 0, range["length"]?.intValue == length.intValue,
+                range["utf16_length"]?.intValue == length.intValue else {
+            throw RunnerError.failed("selection changed before deletion; no deletion was dispatched")
+          }
+          if length.intValue > 0 {
+            _ = try typeIntoFocus(XCUIKeyboardKey.delete.rawValue, frequency: 120, targetPID: node.pid)
+          }
+        }
+        // AX publication can lag the acknowledgement; observe only, never replay deletion.
+        let until = ProcessInfo.processInfo.systemUptime + 0.75
+        repeat {
+          state = try boundClearState(token)
+          if state.count == 0 { break }
+          RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        } while ProcessInfo.processInfo.systemUptime < until
       }
-      guard state.count == 0 else {
-        throw RunnerError.failed("bound clear incomplete")
-      }
+      guard state.count == 0 else { throw RunnerError.failed("bound clear incomplete") }
       elements.renew(token, node: state.node)
       return .value(NSNull())
     } catch {

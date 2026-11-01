@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Receive an explicitly saved file from the EXISTING XCTest runner's Files folder."""
 import json
+import os
 from pathlib import Path, PurePosixPath
 import signal
 import sys
@@ -36,6 +37,28 @@ def file_metadata(value, filename, maximum):
     return {'size': size, 'modified': meta['lastModDate']}
 
 class RunnerFiles(core.Device):
+    def copy(self, direction, source, destination):
+        if direction != 'from':
+            raise core.TransferError('Native Runner provider only receives files')
+        self.check_lease()
+        if self.lease_identity is None:
+            raise core.TransferError('Native read requires an established control lease')
+        nonce, owner, privacy, lifecycle = self.lease_identity
+        lease = {'daemon_instance': nonce, 'owner_epoch': owner,
+                 'privacy_epoch': privacy, 'lifecycle_stamp': lifecycle}
+        result = self.command([os.environ.get('IPHONE_USE_FILES_HOST_BIN', 'iphone-use'),
+            'files', '__native-read', '--device', self.args.device, '--bundle', self.args.bundle,
+            '--source', str(source), '--destination', str(Path(destination).resolve()),
+            '--max-bytes', str(self.args.max_bytes), '--owner', self.args.owner,
+            '--instance', self.args.instance or 'default', '--lease', json.dumps(lease)], 60)
+        try:
+            receipt = json.loads(result)
+        except (TypeError, ValueError):
+            raise core.TransferError('Invalid native read receipt; no fallback') from None
+        if (not isinstance(receipt, dict) or receipt.get('provider') != 'native-usb-afc' or type(receipt.get('bytes')) is not int
+                or not 0 <= receipt['bytes'] <= self.args.max_bytes):
+            raise core.TransferError('Invalid bounded native read receipt; no fallback')
+
     def metadata(self):
         path = self.scratch/'files.json'
         self.command(['xcrun','devicectl','device','info','files','--device',self.args.device,
@@ -67,7 +90,7 @@ def receive_saved(args, session, device, scratch, emit):
     target, result = core.commit_file(first, meta, args.destination, session, device.guard)
     receipt = {**meta,'event':'received','committed':True,'result':result,'destination':str(target),
                'transport':'wired','clipboard_used':False,'receiver_app':'existing-xctest-runner',
-               'verification':'remote-size-and-two-stable-reads','sha256_origin':'mac'}
+               'verification':'native-bounded-reads-and-stable-metadata','sha256_origin':'mac'}
     receipt['transfer_id'] = meta['id']
     if getattr(session, 'publication_warning', None):
         receipt['publication_warning'] = session.publication_warning
