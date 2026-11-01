@@ -7370,12 +7370,11 @@ async fn set_value_snapshot_element(
     } else {
         w.element_value(&element_id).await.ok().flatten()
     };
-    // Clear-then-type is one intentional compound action (same contract as
-    // `text` with `clear:true`): the clear is best-effort, the type is still
-    // dispatched at most once.
-    if let Err(error) = w.clear_element(&element_id).await {
-        tracing::warn!("runner clear_element before set_value: {error:#}");
-    }
+    // Replacement must stop if clearing is refused or uncertain. Appending
+    // after a failed clear would violate the requested set-value operation.
+    w.clear_element(&element_id)
+        .await
+        .map_err(set_value_dispatch_error)?;
     let typed = w.type_into(&element_id, &text).await;
     if secure {
         // A secure field reads back as bullets; nothing to compare.
@@ -9887,6 +9886,7 @@ async fn type_text_chunked(
     text: &str,
     clear: bool,
     deadline: tokio::time::Instant,
+    detail: &mut Option<serde_json::Value>,
 ) -> RunnerControlOutcome {
     use crate::text_input::{char_count, chunk_timeout, split, typing_time, CHUNK_CHARS};
     use std::sync::atomic::Ordering;
@@ -9894,9 +9894,10 @@ async fn type_text_chunked(
         .checked_sub(TEXT_CHUNK_DEADLINE_MARGIN)
         .unwrap_or(deadline);
     if clear {
-        // As for short text: the clear is best-effort, the text is sent once.
+        // Replacement requires an acknowledged clear. A failure can follow a
+        // partial deletion, so stop without appending or replaying the action.
         if let Err(error) = w.clear_active().await {
-            tracing::warn!("runner clear_active before chunked text: {error:#}");
+            return runner_failure_outcome(w, actionable, &error, "text", detail);
         }
     }
     let mut confirmed = 0;
@@ -10286,7 +10287,7 @@ async fn direct_agent_action(
                 .get("clear")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            return type_text_chunked(w, actionable, text, clear, deadline).await;
+            return type_text_chunked(w, actionable, text, clear, deadline, detail).await;
         }
         "text"
             if value
@@ -10299,12 +10300,9 @@ async fn direct_agent_action(
             };
             Some(
                 async {
-                    // Clearing and typing are one intentional compound action.
-                    // A clear error is best-effort, but the text insertion is
-                    // still dispatched at most once.
-                    if let Err(error) = w.clear_active().await {
-                        tracing::warn!("runner clear_active before text: {error:#}");
-                    }
+                    // An unsuccessful clear must never turn replacement into
+                    // append. Preserve its refusal/unknown outcome without typing.
+                    w.clear_active().await?;
                     w.keys(text).await
                 }
                 .await,
@@ -27931,6 +27929,75 @@ mod tests {
             assert_eq!(body["retry_safe"], true);
             assert_eq!(body["runner_error"]["message"], OFF_SCREEN_REFUSAL);
             runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn replacement_clear_failure_never_dispatches_short_or_chunked_text() {
+        block(async {
+            for length in [8, crate::text_input::CHUNK_CHARS + 1] {
+                for refused in [false, true] {
+                    let clears = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let keys = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let seen_clears = clears.clone();
+                    let seen_keys = keys.clone();
+                    let message = if refused {
+                        "clear unavailable; nothing was sent"
+                    } else {
+                        "clear interrupted after deletion; outcome unknown"
+                    };
+                    let mut runner = MockRunner::start(move |request| {
+                        if request.contains("/element/active") {
+                            return r#"{"value":{"ELEMENT":"field"}}"#.into();
+                        }
+                        if request.contains("/element/field/clear") {
+                            seen_clears.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let code = if refused {
+                                "invalid argument"
+                            } else {
+                                "unknown error"
+                            };
+                            let status = if refused {
+                                "400 Bad Request"
+                            } else {
+                                "500 Internal Server Error"
+                            };
+                            let body =
+                                serde_json::json!({"value":{"error":code,"message":message}})
+                                    .to_string();
+                            return format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        }
+                        if request.contains("/wda/keys") {
+                            seen_keys.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        healthy_runner_responder(request)
+                    });
+                    let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+                    let actionable = std::sync::atomic::AtomicBool::new(true);
+                    let mut detail = None;
+                    let outcome = direct_agent_action(
+                        &mut client,
+                        &actionable,
+                        &serde_json::json!({"type":"text","text":"字".repeat(length),"clear":true}),
+                        &mut detail,
+                        far_deadline(),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(
+                        outcome,
+                        if refused {
+                            RunnerControlOutcome::RunnerRejected
+                        } else {
+                            RunnerControlOutcome::Failed
+                        }
+                    );
+                    assert_eq!(clears.load(std::sync::atomic::Ordering::SeqCst), 1);
+                    assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), 0);
+                    assert_eq!(detail.as_ref().unwrap()["runner_error"]["message"], message);
+                    runner.shutdown();
+                }
+            }
         });
     }
 

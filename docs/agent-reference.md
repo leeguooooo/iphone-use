@@ -387,6 +387,12 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"perform","element":9,"snapshot":"…","action":"toggle"}  // increment|decrement|adjust(+value)|toggle|menu|double_tap|two_finger_tap|scroll_to_visible|pinch|rotate
 ```
 
+`text` with `clear:true` and `set_value` stop if the clear request fails;
+replacement text is not appended afterward. A clear may already have deleted
+some content before an error, so inspect the field and the returned outcome
+before retrying. An acknowledged clear is not independent proof that the field
+is empty or that its focus stayed unchanged.
+
 `volume_up` and `volume_down` require a physical device and a Runner advertising `ipu:volumeButtons=true`. Missing capability refuses before the button request. An acknowledgement does not verify the volume level; do not replay an uncertain press.
 
 `phone_shortcut {"name":"save_screenshot"}` requests one iOS system screenshot
