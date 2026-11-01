@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Isolate hosted CI Simulator/XCTest startup from the product CLI. Never selects a phone."""
-import argparse,http.client,importlib.util,json,os,re,secrets,signal,socket,subprocess,tempfile,time,urllib.request,uuid
+import argparse,http.client,importlib.util,json,os,plistlib,re,secrets,signal,socket,subprocess,tempfile,time,urllib.request,uuid
 from pathlib import Path
 from runner_auth import authorization
+from simulator_ui_readiness import launch_once,state_reasons,process_matches
 ROOT=Path(__file__).resolve().parents[1]
 assert os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted','hosted CI only'
 def interrupted_by_parent(*_):raise KeyboardInterrupt('diagnostic termination requested')
@@ -119,10 +120,15 @@ print(json.dumps({'app':str(app),'bundle':module.BUNDLE,'oracle_bundle':oracle_b
     result['ordinary_app'].update(bundle=fixture['bundle'],oracle_bundle=fixture['oracle_bundle'],bundle_isolated=True,phase='install');save()
     command('ordinary-app-install',['xcrun','simctl','install',sim,fixture['app']],90)
     nonce=str(uuid.uuid4());result['ordinary_app'].update(phase='launch',run_id=nonce);save()
-    launched=command('ordinary-app-launch',['xcrun','simctl','launch',sim,fixture['bundle'],'--run-id',nonce,'--mode','unique'],90)
-    pids=re.findall(r'^'+re.escape(fixture['bundle'])+r':\s*(\d+)\s*$',launched,re.MULTILINE)
-    assert len(pids)==1,'ordinary launch must identify one app PID'
-    launch_pid=int(pids[0]);result['ordinary_app'].update(phase='readback',launch_pid=launch_pid);save()
+    launch_pid,ack=launch_once(command,sim,fixture['bundle'],nonce)
+    result['ordinary_app'].update(phase='readback',launch_ack=ack,launch_pid=launch_pid);save()
+    executable=None
+    if launch_pid is None:
+        app_container=Path(command('ordinary-app-container',['xcrun','simctl','get_app_container',sim,fixture['bundle'],'app'],60)).resolve(strict=True)
+        assert sim.lower() in [part.lower() for part in app_container.parts],'ordinary app path is outside the owned Simulator'
+        info=plistlib.loads((app_container/'Info.plist').read_bytes());name=info['CFBundleExecutable']
+        assert isinstance(name,str) and name and Path(name).name==name,'invalid ordinary executable'
+        executable=str(app_container/name)
     data=Path(command('ordinary-app-data',['xcrun','simctl','get_app_container',sim,fixture['bundle'],'data'],60))/'Documents'
     ordinary_start=time.monotonic();ordinary_deadline=ordinary_start+60
     while True:
@@ -132,16 +138,12 @@ print(json.dumps({'app':str(app),'bundle':module.BUNDLE,'oracle_bundle':oracle_b
             result['ordinary_app']['last_state']=ordinary
             if not isinstance(ordinary,dict):raise ValueError('ordinary receipt must be an object')
             result['ordinary_app'].pop('last_read_error',None)
-            reasons=[]
-            for reason,valid in [
-                ('nonce_mismatch',ordinary.get('run_id')==nonce),
-                ('not_active',ordinary.get('application_state')==0),
-                ('window_not_key',ordinary.get('key_window') is True),
-                ('empty_viewport',ordinary.get('width',0)>0),
-                ('no_visible_rows',bool(ordinary.get('visible_indices'))),
-                ('pid_mismatch',ordinary.get('pid')==launch_pid),
-            ]:
-                if not valid:reasons.append(reason)
+            reasons=state_reasons(ordinary,nonce,launch_pid)
+            if not reasons and launch_pid is None:
+                identity=command('ordinary-app-process',['ps','-ww','-p',str(ordinary['pid']),'-o','command='],min(30,max(.1,ordinary_deadline-time.monotonic())))
+                if process_matches(identity,executable,nonce):
+                    launch_pid=ordinary['pid'];result['ordinary_app'].update(launch_pid=launch_pid,launch_resolved_by='independent fresh window state and owned kernel process identity')
+                else:reasons.append('kernel_process_mismatch')
             result['ordinary_app'].update(rejection_reasons=reasons,elapsed_seconds=time.monotonic()-ordinary_start);save()
             if not reasons and time.monotonic()<=ordinary_deadline:break
         except (OSError,ValueError) as error:

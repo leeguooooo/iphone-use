@@ -51,6 +51,7 @@ jobs:
           python3 -I scripts/test-probe-recipe.py
           python3 -I scripts/test-selector-simulator-verdict.py
           python3 -I scripts/test-wait-simulator-verdict.py
+          python3 -I scripts/test-simulator-ui-readiness.py
           python3 -I scripts/test-collect-simulator-verdict.py
       - name: Prepare selected runtime
         timeout-minutes: 15

@@ -62,6 +62,7 @@ jobs:
           python3 -I scripts/test-probe-recipe.py
           python3 -I scripts/test-element-oracle-command.py
           python3 -I scripts/test-wait-simulator-verdict.py
+          python3 -I scripts/test-simulator-ui-readiness.py
           swift scripts/test-predicate-literals.swift scripts/fixtures/predicate-literals.json
 
           skill_file_count="$(
