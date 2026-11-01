@@ -23,6 +23,7 @@ PROBES = {
     'selector': ('test-selector-simulator.py', 20),
     'agent-selector': ('test-agent-selector-simulator.py', 7),
     'wait': ('test-wait-simulator.py', 22),
+    'state': ('test-state-simulator.py', 7),
     'tap-race': ('test-moving-target-simulator.py', 3),
     'tap-guard': ('test-moving-target-simulator.py', 4),
     'tap-identity-race': ('test-moving-target-simulator.py', 4),

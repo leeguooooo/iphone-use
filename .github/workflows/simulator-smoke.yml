@@ -53,6 +53,10 @@ on:
         description: Published GitHub release whose binaries and runner sources are tested
         type: string
         default: v0.27.21
+      element_oracle_ref:
+        description: Optional exact wait-oracle commit for a verified seed-check repair; product stays release-pinned
+        type: string
+        default: ""
       prepare_element_ui:
         description: Explicit warm UIKit preparation; false retains the cold-start lane
         type: boolean
@@ -323,6 +327,7 @@ jobs:
       IPU_DIAGNOSTIC_PLATFORM: ${{ inputs.element_platform }}
       PREPARE_ELEMENT_UI: ${{ inputs.prepare_element_ui }}
       LIST_RELEASE: ${{ inputs.collect_release_tag }}
+      ELEMENT_ORACLE_REF: ${{ inputs.element_oracle_ref }}
       ELEMENT_PROBE: ${{ inputs.tap_identity_guard_probe_only && 'tap-identity-guard' || inputs.tap_guard_probe_only && 'tap-guard' || inputs.wait_probe_only && 'wait' || inputs.selector_probe_only && 'selector' || 'list' }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -337,11 +342,13 @@ jobs:
         run: |
           [[ "$LIST_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.2-ios18.2 || "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.4-ios18.5 ]]
+          [[ -z "$ELEMENT_ORACLE_REF" || "$ELEMENT_ORACLE_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ -z "$ELEMENT_ORACLE_REF" || "$ELEMENT_PROBE" = wait ]]
           test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = "$ELEMENT_IOS"
       - name: Checkout the exact published version's oracle and fixtures
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.LIST_RELEASE }}
+          ref: ${{ env.ELEMENT_ORACLE_REF || format('refs/tags/{0}', env.LIST_RELEASE) }}
           path: .release-oracle
           persist-credentials: false
       - name: Record product and oracle provenance separately from workflow infrastructure
@@ -353,14 +360,24 @@ jobs:
           from pathlib import Path
           tag=os.environ['LIST_RELEASE']
           sha=subprocess.check_output(['git','-C','.release-oracle','rev-parse','HEAD'],text=True).strip()
+          subprocess.check_call(['git','-C','.release-oracle','fetch','--depth=1','--no-tags','origin',f'refs/tags/{tag}:refs/tags/{tag}'])
           tagged=subprocess.check_output(['git','-C','.release-oracle','rev-parse',f'refs/tags/{tag}^{{commit}}'],text=True).strip()
-          assert sha==tagged,'oracle HEAD must be the selected tag commit'
+          override=os.environ['ELEMENT_ORACLE_REF']
+          compatibility=None
+          if override:
+              assert sha==override==os.environ['WORKFLOW_SHA'] and os.environ['ELEMENT_PROBE']=='wait'
+              import importlib.util
+              spec=importlib.util.spec_from_file_location('recovery_guard','scripts/check-oracle-recovery.py')
+              guard=importlib.util.module_from_spec(spec);spec.loader.exec_module(guard)
+              compatibility=guard.verify(Path('.release-oracle'),tagged,sha)
+          else:
+              assert sha==tagged,'default oracle must be the selected tag commit'
           endpoint=f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/workflows/release-binaries.yml/runs?branch={tag}&status=success&event=push&per_page=100"
           runs=json.loads(subprocess.check_output(['gh','api',endpoint],text=True))['workflow_runs']
-          builds=[r for r in runs if r['head_sha']==sha and r['head_branch']==tag and r['event']=='push' and r['conclusion']=='success']
-          assert builds,'selected oracle must match a successful tag release build'
+          builds=[r for r in runs if r['head_sha']==tagged and r['head_branch']==tag and r['event']=='push' and r['conclusion']=='success']
+          assert builds,'selected product must match a successful tag release build'
           build=max(builds,key=lambda r:r['id'])
-          proof={'release_tag':tag,'oracle_commit':sha,'verification_workflow_sha':os.environ['WORKFLOW_SHA'],'warm_ui_requested':os.environ['PREPARE_ELEMENT_UI']=='true','release_build_run':build['id'],'release_build_url':build['html_url'],'scope':'source identity bound to successful release build metadata; not reproducible-build attestation'}
+          proof={'release_tag':tag,'product_commit':tagged,'oracle_commit':sha,'oracle_override':bool(override),'oracle_compatibility':compatibility,'verification_workflow_sha':os.environ['WORKFLOW_SHA'],'warm_ui_requested':os.environ['PREPARE_ELEMENT_UI']=='true','release_build_run':build['id'],'release_build_url':build['html_url'],'scope':'source identity bound to successful release build metadata; not reproducible-build attestation'}
           (Path(os.environ['RUNNER_TEMP'])/'list-oracle-source.json').write_text(json.dumps(proof,indent=2)+'\n')
           PYCODE
       - name: Ensure explicitly selected element-test runtime
