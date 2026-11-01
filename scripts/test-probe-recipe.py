@@ -24,6 +24,14 @@ class Recipe(unittest.TestCase):
         self.assertEqual(len(readiness),2,'inspect changed runner/daemon readiness phases')
         self.assertGreaterEqual(collector.SIMULATOR_START_TIMEOUT,int(boot[1])+sum(readiness)+120)
 
+    def test_long_probe_keeps_instance_inside_product_name_limit(self):
+        nonce = '01234567-89ab-cdef-0123-456789abcdef'
+        for probe in ['wait', 'tap-guard', 'tap-identity-race', 'x' * 100]:
+            instance = collector.oracle_instance(probe, nonce)
+            self.assertRegex(instance, r'^[a-z][a-z0-9-]{0,31}$')
+            self.assertTrue(instance.endswith('-oracle-01234567'))
+        self.assertEqual(collector.oracle_instance('wait', nonce), 'wait-oracle-01234567')
+
     def fixture(self, root, recipe):
         scripts = root / 'scripts'
         scripts.mkdir()

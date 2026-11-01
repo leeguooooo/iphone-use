@@ -29,6 +29,11 @@ PROBES = {
 }
 
 
+def oracle_instance(probe, nonce):
+    suffix = '-oracle-' + nonce[:8]
+    return probe[:32-len(suffix)] + suffix
+
+
 def probe_recipe(oracle_root, probe):
     source_root = oracle_root.resolve(strict=True)
     path = (source_root / 'scripts/run-collect-simulator.py').resolve(strict=True)
@@ -178,7 +183,7 @@ def main():
                IPHONE_USE_MCP_PREWARM='0', IPHONE_USE_FLOWS_NO_AUTO_UPDATE='1')
     runtimes = json.loads(command(['xcrun', 'simctl', 'list', 'runtimes', '--json'], env=env))['runtimes']
     assert any(r['identifier'] == args.runtime and r.get('isAvailable') is True for r in runtimes), 'requested runtime unavailable'
-    nonce = str(uuid.uuid4()); name = 'ipu-' + args.probe + '-oracle-' + nonce[:8]; instance = args.probe + '-oracle-' + nonce[:8]
+    nonce = str(uuid.uuid4()); name = 'ipu-' + args.probe + '-oracle-' + nonce[:8]; instance = oracle_instance(args.probe, nonce)
     state = Path.home() / '.iphone-use/instances' / instance
     assert not state.exists(), 'disposable instance already exists'
     simulator = None
