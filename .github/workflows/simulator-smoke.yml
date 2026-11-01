@@ -33,6 +33,10 @@ on:
         description: Verify Native collection against an independent UIKit model on a new Simulator
         type: boolean
         default: false
+      tap_guard_probe_only:
+        description: Verify Native target-frame refusal with independent UIKit touch counters
+        type: boolean
+        default: false
       wait_probe_only:
         description: Verify Native wait semantics against an independent App on a new Simulator
         type: boolean
@@ -76,7 +80,7 @@ permissions:
 
 jobs:
   smoke:
-    if: ${{ !inputs.capture_probe_only && !inputs.capture_mcp && !inputs.collect_probe_only && !inputs.selector_probe_only && !inputs.wait_probe_only }}
+    if: ${{ !inputs.capture_probe_only && !inputs.capture_mcp && !inputs.collect_probe_only && !inputs.selector_probe_only && !inputs.wait_probe_only && !inputs.tap_guard_probe_only }}
     name: Simulator end to end
     runs-on: macos-15
     timeout-minutes: 60
@@ -299,7 +303,7 @@ jobs:
             ${{ runner.temp }}/build-simulator.log
 
   list_collection_probe:
-    if: ${{ inputs.collect_probe_only || inputs.selector_probe_only || inputs.wait_probe_only }}
+    if: ${{ inputs.collect_probe_only || inputs.selector_probe_only || inputs.wait_probe_only || inputs.tap_guard_probe_only }}
     name: Native element oracle / released artifact
     runs-on: macos-15
     permissions:
@@ -313,13 +317,13 @@ jobs:
       IPU_DIAGNOSTIC_PLATFORM: ${{ inputs.element_platform }}
       PREPARE_ELEMENT_UI: ${{ inputs.prepare_element_ui }}
       LIST_RELEASE: ${{ inputs.collect_release_tag }}
-      ELEMENT_PROBE: ${{ inputs.wait_probe_only && 'wait' || inputs.selector_probe_only && 'selector' || 'list' }}
+      ELEMENT_PROBE: ${{ inputs.tap_guard_probe_only && 'tap-guard' || inputs.wait_probe_only && 'wait' || inputs.selector_probe_only && 'selector' || 'list' }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Reject conflicting probe modes
-        if: ${{ (inputs.collect_probe_only && inputs.selector_probe_only) || (inputs.wait_probe_only && (inputs.collect_probe_only || inputs.selector_probe_only)) }}
+        if: ${{ (inputs.tap_guard_probe_only && (inputs.collect_probe_only || inputs.selector_probe_only || inputs.wait_probe_only)) || (inputs.collect_probe_only && inputs.selector_probe_only) || (inputs.wait_probe_only && (inputs.collect_probe_only || inputs.selector_probe_only)) }}
         run: |
-          echo "Choose exactly one of collect_probe_only, selector_probe_only or wait_probe_only" >&2
+          echo "Choose exactly one of collect_probe_only, selector_probe_only, wait_probe_only or tap_guard_probe_only" >&2
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate the published version before selecting its test recipes
