@@ -117,6 +117,14 @@ iphone-use files status --device '<udid>' --bundle '<runner>.xctrunner'
 iphone-use files stop   --device '<udid>' --bundle '<runner>.xctrunner'
 ```
 
+The selected daemon must provide `control_lease` identity metadata. Update it
+with the CLI before receiving; an older daemon without this field is refused.
+The receiver binds its first successful status checkpoint to the daemon
+instance, owner, privacy and Runner lifecycle generations. An unavailable, private or changed scope
+stops later copies/publication, including release/reacquisition under the same
+owner name. This remains a checkpoint protocol, with a gap between the final
+check and publication.
+
 Use the same instance/state-dir for each command. `stop` uses a session token,
 not a stale PID. An OS lock scopes exclusivity by UDID/bundle/instance. Agents
 should select one route per task and avoid clipboard-export flows while a USB

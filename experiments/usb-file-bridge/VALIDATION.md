@@ -142,3 +142,20 @@ This packaging does not strengthen the previously documented owner/transport
 checkpoints into atomic lease fencing, prove source freshness, or establish a
 hard live I/O quota. Same-owner reincarnation and signed-device acceptance
 remain open work; neither command availability nor a green build closes them.
+
+## Lease generation checkpoint follow-up
+
+The status response now carries a public daemon-instance correlation nonce,
+owner, privacy and Runner lifecycle generations. Epochs use
+decimal strings to avoid JSON numeric precision loss. A fresh daemon process
+gets a new correlation nonce; it is not an authentication credential.
+
+The receiver binds its first validated checkpoint and refuses changed or
+missing identities, private scope and non-boolean drivable state. Same-name
+reacquisition, daemon replacement and a private-then-public transition no longer
+pass merely because the owner text matches. A generation change during blocking
+transport discovery is also refused. The new checks fail against the previous
+receiver; 43 offline engine tests now pass.
+
+These are still status checkpoints, not an atomic lease fence around the final
+hard link. Full HTTP/CLI CI and real device verification are pending.

@@ -694,15 +694,37 @@ fn yield_viewer_lease(state: &AppState) {
 
 /// The current owner name and the seconds left on its lease (0 when none).
 fn owner_status(state: &AppState) -> (Option<String>, u64) {
+    let (owner, remaining, _) = owner_status_versioned(state);
+    (owner, remaining)
+}
+
+fn owner_status_versioned(state: &AppState) -> (Option<String>, u64, u64) {
     let lease = std::time::Duration::from_secs(state.owner_lease_secs);
     let now = Instant::now();
-    match recover(state.owner.lock()).as_ref() {
+    let slot = recover(state.owner.lock());
+    let epoch = state.owner_epoch.load(std::sync::atomic::Ordering::Acquire);
+    match slot.as_ref() {
         Some(owner) if now.saturating_duration_since(owner.last_seen) < lease => (
             Some(owner.name.clone()),
             lease_remaining(owner.last_seen, now, lease).as_secs(),
+            epoch,
         ),
-        _ => (None, 0),
+        _ => (None, 0, epoch),
     }
+}
+
+/// Correlates status checkpoints; this is not an atomic file-publication fence.
+fn control_lease_status(state: &AppState, owner: Option<&str>, epoch: u64) -> serde_json::Value {
+    let Some(owner) = owner else { return serde_json::Value::Null; };
+    let scope = ScreenReadScope::capture(state);
+    let Some(instance) = crate::lease_identity::daemon_instance() else { return serde_json::Value::Null; };
+    // Reuse the same owner/privacy/lifecycle checks as protected screen reads.
+    if scope.owner.as_deref() != Some(owner) || scope.epoch != epoch || !scope.current(state) {
+        return serde_json::Value::Null;
+    }
+    serde_json::json!({"daemon_instance":instance,"owner":owner,
+        "owner_epoch":scope.epoch.to_string(),"privacy_epoch":scope.privacy_epoch.to_string(),
+        "lifecycle_stamp":scope.lifecycle_stamp.map(|stamp|stamp.to_string()),"private":false})
 }
 
 /// `POST /agent/owner {"release":true}` — give up the lease. Only the current
@@ -3051,15 +3073,14 @@ async fn agent_status(
     let agent_focus = recover(state.agent_focus.lock()).status_json();
     // The daemon inside the runner on the phone, as its last /status said.
     let phone_daemon = crate::phone_daemon::status_json(runner);
+    let (status_owner, status_owner_remaining, status_owner_epoch) = owner_status_versioned(&state);
+    let control_lease_json = control_lease_status(&state, status_owner.as_deref(), status_owner_epoch).to_string();
     let body = format!(
-        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_runner":{},"managed_runner_pending":{},"recovery_owner":"{recovery_owner}","runner":{runner},"runner_actionable":{runner_actionable},"runner_locked":{runner_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"ended_on_phone":{ended_on_phone},"runner_parked":{runner_parked},"runner_parked_reason":{runner_parked_reason_json},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"recovery":{recovery},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"runner_build":{runner_build},"runner_died_reason":"{runner_died_reason}","runner_died_at":{runner_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"auto_update":{auto_update},"transport":"{transport}","runner_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus},"phone_daemon":{phone_daemon}}}"#,
+        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"control_lease":{control_lease_json},"target_configured":{},"managed_runner":{},"managed_runner_pending":{},"recovery_owner":"{recovery_owner}","runner":{runner},"runner_actionable":{runner_actionable},"runner_locked":{runner_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"ended_on_phone":{ended_on_phone},"runner_parked":{runner_parked},"runner_parked_reason":{runner_parked_reason_json},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"recovery":{recovery},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"runner_build":{runner_build},"runner_died_reason":"{runner_died_reason}","runner_died_at":{runner_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"auto_update":{auto_update},"transport":"{transport}","runner_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus},"phone_daemon":{phone_daemon}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&status_udid).unwrap_or_else(|_| "null".into()),
-        {
-            let (owner, _) = owner_status(&state);
-            serde_json::to_string(&owner).unwrap_or_else(|_| "null".into())
-        },
-        owner_status(&state).1,
+        serde_json::to_string(&status_owner).unwrap_or_else(|_| "null".into()),
+        status_owner_remaining,
         status_udid.is_some(),
         state.managed_runner,
         state.managed_runner_pending,
@@ -17193,12 +17214,23 @@ fn hold_owner_lease(
     now: Instant,
     secs: u64,
     lease: std::time::Duration,
-) {
+) -> bool {
     let Some(owner) = slot.as_mut().filter(|owner| owner.name == holder) else {
-        return;
+        return false;
     };
+    let reincarnated = lease_remaining(owner.last_seen, now, lease).is_zero();
     let hold = std::time::Duration::from_secs(secs);
     owner.last_seen = if hold > lease { now + (hold - lease) } else { now };
+    reincarnated
+}
+
+/// Keep the lease update and any incarnation change in one critical section.
+fn extend_hold_owner(state: &AppState, holder: &str, now: Instant, secs: u64) {
+    let mut owner = recover(state.owner.lock());
+    if hold_owner_lease(&mut owner, holder, now, secs,
+        std::time::Duration::from_secs(state.owner_lease_secs)) {
+        state.owner_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 /// The gate every `/agent/login*` call passes: auth, the control header, the
@@ -17409,14 +17441,7 @@ async fn agent_hold(
         );
     }
     if let Some(holder) = holder {
-        let mut owner = recover(state.owner.lock());
-        hold_owner_lease(
-            &mut owner,
-            &holder,
-            Instant::now(),
-            secs,
-            std::time::Duration::from_secs(state.owner_lease_secs),
-        );
+        extend_hold_owner(&state, &holder, Instant::now(), secs);
     }
     set_screen_private(&state, private, secs);
     state.touch_activity();
@@ -27121,6 +27146,84 @@ mod tests {
             advertised(CAPABILITY_BATCH_ACTIONS),
             "batch catalogue drifted from validate_agent_action_value"
         );
+    }
+
+    #[test]
+    fn status_wire_includes_the_live_lease_generation() {
+        block(async {
+            use http_body_util::BodyExt as _;
+            use tower::ServiceExt as _;
+            let state = readiness_test_state();
+            *recover(state.owner.lock())=Some(PhoneOwner{name:"wire-owner".into(),last_seen:Instant::now()});
+            state.owner_epoch.store(7,std::sync::atomic::Ordering::Release);
+            let response=router(state).oneshot(axum::http::Request::builder()
+                .uri("/agent/status").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(),StatusCode::OK);
+            let body:serde_json::Value=serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+            assert_eq!(body["owner"],"wire-owner");
+            assert_eq!(body["control_lease"]["owner"],"wire-owner");
+            assert_eq!(body["control_lease"]["owner_epoch"],"7");
+            assert_eq!(body["control_lease"]["private"],false);
+            assert_eq!(body["control_lease"]["daemon_instance"].as_str().unwrap().len(),64);
+        });
+    }
+
+    #[test]
+    fn hold_update_bumps_the_published_incarnation_only_on_revival() {
+        let state=readiness_test_state();let now=Instant::now();
+        *recover(state.owner.lock())=Some(PhoneOwner{name:"holder".into(),last_seen:now});
+        let epoch=state.owner_epoch.load(std::sync::atomic::Ordering::Acquire);
+        extend_hold_owner(&state,"holder",now,0);
+        assert_eq!(epoch,state.owner_epoch.load(std::sync::atomic::Ordering::Acquire));
+        let later=now+std::time::Duration::from_secs(state.owner_lease_secs+1);
+        extend_hold_owner(&state,"holder",later,0);
+        assert_eq!(epoch+1,state.owner_epoch.load(std::sync::atomic::Ordering::Acquire));
+        extend_hold_owner(&state,"holder",later,0);
+        assert_eq!(epoch+1,state.owner_epoch.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn delayed_hold_reports_an_expired_lease_revival() {
+        let now=Instant::now();let lease=std::time::Duration::from_secs(5);
+        let mut owner=Some(PhoneOwner{name:"holder".into(),last_seen:now});
+        assert!(!hold_owner_lease(&mut owner,"holder",now,10,lease));
+        assert!(hold_owner_lease(&mut owner,"holder",now+std::time::Duration::from_secs(11),0,lease));
+        assert!(!hold_owner_lease(&mut owner,"holder",now+std::time::Duration::from_secs(11),0,lease));
+    }
+
+    #[test]
+    fn control_lease_tracks_reacquisition_and_privacy_without_renewal_churn() {
+        let state = readiness_test_state();
+        let mut headers=HeaderMap::new();headers.insert("x-phone-owner",HeaderValue::from_static("same-owner"));
+        assert!(claim_phone_owner(&state,&headers).is_ok());
+        let (name,_,epoch)=owner_status_versioned(&state);
+        let first=control_lease_status(&state,name.as_deref(),epoch);
+        assert_eq!(first["owner"],"same-owner");assert_eq!(first["private"],false);
+        assert!(claim_phone_owner(&state,&headers).is_ok());
+        assert_eq!(first,control_lease_status(&state,name.as_deref(),epoch));
+        state.release_owner_lease();assert!(control_lease_status(&state,name.as_deref(),epoch).is_null());
+        assert!(claim_phone_owner(&state,&headers).is_ok());
+        let (name,_,next)=owner_status_versioned(&state);
+        assert_ne!(epoch,next);
+        let reacquired=control_lease_status(&state,name.as_deref(),next);
+        assert_ne!(first["owner_epoch"],reacquired["owner_epoch"]);
+        set_screen_private(&state,true,30);
+        let hidden=control_lease_status(&state,name.as_deref(),next);
+        assert!(hidden.is_null());
+        set_screen_private(&state,false,0);
+        let visible=control_lease_status(&state,name.as_deref(),next);
+        assert_eq!(visible["private"],false);assert_ne!(reacquired["privacy_epoch"],visible["privacy_epoch"]);
+        let transition=state.runner_lifecycle.try_begin_reconnecting().unwrap();
+        assert!(control_lease_status(&state,name.as_deref(),next).is_null());
+        assert!(state.runner_lifecycle.finish_reconnecting(transition));
+        let restarted=control_lease_status(&state,name.as_deref(),next);
+        assert_ne!(visible["lifecycle_stamp"],restarted["lifecycle_stamp"]);
+        recover(state.owner.lock()).as_mut().unwrap().last_seen=Instant::now()-std::time::Duration::from_secs(state.owner_lease_secs+1);
+        assert!(control_lease_status(&state,name.as_deref(),next).is_null());
+        assert!(claim_phone_owner(&state,&headers).is_ok());
+        let (name,_,after_expiry)=owner_status_versioned(&state);
+        assert_ne!(next,after_expiry);
+        assert!(!control_lease_status(&state,name.as_deref(),after_expiry).is_null());
     }
 
     /// A task started right after someone tapped through the remote viewer

@@ -18,6 +18,10 @@ spec = importlib.util.spec_from_file_location('bridge', Path(__file__).parents[1
 b = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(b)
 
+def lease_status(owner='me', udid='phone'):
+    return {'drivable':True,'owner':owner,'udid':udid,'control_lease':{
+        'owner':owner,'daemon_instance':'a'*64,'owner_epoch':'1','privacy_epoch':'1','lifecycle_stamp':'0','private':False}}
+
 def metadata(data=b'file bytes', **changes):
     return {'version': 1, 'id': str(uuid.uuid4()), 'name': 'invoice.pdf', 'bytes': len(data),
             'sha256': hashlib.sha256(data).hexdigest(), **changes}
@@ -67,7 +71,7 @@ class DeviceTests(unittest.TestCase):
                 args=types.SimpleNamespace(device='phone',owner='me',instance='default')
                 dev=b.Device(args,b.Session(root,10),root)
                 def command(argv, *rest):
-                    if argv[0]=='iphone-use':return json.dumps({'drivable':True,'owner':owner,'udid':udid})
+                    if argv[0]=='iphone-use':return json.dumps(lease_status(owner, udid))
                     (root/'device.json').write_text(json.dumps({'result':{'connectionProperties':{'transportType':transport}}}))
                     return ''
                 with patch.object(dev,'command',side_effect=command):
@@ -77,11 +81,12 @@ class DeviceTests(unittest.TestCase):
 
     def test_lease_change_during_transport_probe_is_rejected(self):
         changes = ({'owner': 'new-owner'}, {'owner': None},
-                   {'udid': 'other-phone'}, {'drivable': False})
+                   {'udid': 'other-phone'}, {'drivable': False},
+                   {'control_lease':{**lease_status()['control_lease'],'owner_epoch':'2'}})
         for change in changes:
             with self.subTest(change=change), tempfile.TemporaryDirectory() as d:
                 root = Path(d)
-                state = {'drivable': True, 'owner': 'me', 'udid': 'phone'}
+                state = lease_status()
                 args = types.SimpleNamespace(device='phone', owner='me', instance='default')
                 device = b.Device(args, b.Session(root, 10), root)
                 def command(argv, *rest):
@@ -106,7 +111,7 @@ class DeviceTests(unittest.TestCase):
                 target = dest/'invoice.pdf'
                 if existing:
                     target.write_bytes(source.read_bytes())
-                state = {'drivable': True, 'owner': 'me', 'udid': 'phone'}
+                state = lease_status()
                 args = types.SimpleNamespace(device='phone', owner='me', instance='default')
                 session = b.Session(root/'state', 10)
                 device = b.Device(args, session, root)
@@ -130,7 +135,7 @@ class DeviceTests(unittest.TestCase):
         for change in ({'owner': 'new-owner'}, {'udid': 'other-phone'}, {'drivable': False}):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as d:
                 root = Path(d)
-                state = {'drivable': True, 'owner': 'me', 'udid': 'phone', **change}
+                state = {**lease_status(), **change}
                 args = types.SimpleNamespace(device='phone', owner='me', instance='default', bundle='test.xctrunner')
                 device = b.Device(args, b.Session(root, 10), root)
                 operations = []
@@ -182,7 +187,7 @@ class PackagedHostTests(unittest.TestCase):
         args=types.SimpleNamespace(instance='chosen',owner='me',device='phone')
         device=b.Device(args,None,None)
         with patch.dict(os.environ, {'IPHONE_USE_FILES_HOST_BIN':'/owned/current iphone-use'}), \
-             patch.object(device,'command',return_value=json.dumps({'drivable':True,'owner':'me','udid':'phone'})) as command:
+             patch.object(device,'command',return_value=json.dumps(lease_status())) as command:
             device.check_lease()
         self.assertEqual(command.call_args.args[0], ['/owned/current iphone-use','status','--instance','chosen','--json'])
 
@@ -191,5 +196,34 @@ class PackagedHostTests(unittest.TestCase):
         with patch.dict(os.environ, {'IPHONE_USE_INSTANCE':'chosen'}):
             self.assertEqual(b.parser().parse_args(base).instance,'chosen')
             self.assertEqual(b.parser().parse_args(base+['--instance','other']).instance,'other')
+
+class LeaseGenerationTests(unittest.TestCase):
+    def test_same_owner_new_epoch_and_restarted_daemon_are_refused(self):
+        for field,new in [('owner_epoch','2'),('daemon_instance','b'*64),('privacy_epoch','2'),('lifecycle_stamp','256')]:
+            with self.subTest(field=field):
+                args=types.SimpleNamespace(instance='default',owner='me',device='phone')
+                state={'drivable':True,'owner':'me','udid':'phone', 'control_lease':{
+                    'owner':'me','daemon_instance':'a'*64,'owner_epoch':'1','privacy_epoch':'1','lifecycle_stamp':'0','private':False}}
+                device=b.Device(args,None,None)
+                with patch.object(device,'command',side_effect=lambda *a:json.dumps(state)):
+                    device.check_lease()
+                    state['control_lease'][field]=new
+                    with self.assertRaises(b.TransferError):device.check_lease()
+
+    def test_unknown_identity_or_private_state_is_not_a_live_lease(self):
+        for change in [{'control_lease':None},{'control_lease':{}}, {'drivable':'true'},
+                       {'control_lease':{'owner':'me','daemon_instance':'a'*64,'owner_epoch':'1','privacy_epoch':'1','private':True}}]:
+            with self.subTest(change=change):
+                state=lease_status();state.update(change)
+                device=b.Device(types.SimpleNamespace(instance='default',owner='me',device='phone'),None,None)
+                with patch.object(device,'command',return_value=json.dumps(state)), self.assertRaises(b.TransferError):
+                    device.check_lease()
+
+class InvalidStatusTests(unittest.TestCase):
+    def test_malformed_or_nonobject_status_refuses(self):
+        for response in ['not-json','null','[]','true']:
+            device=b.Device(types.SimpleNamespace(instance='default',owner='me',device='phone'),None,None)
+            with self.subTest(response=response), patch.object(device,'command',return_value=response), self.assertRaises(b.TransferError):
+                device.check_lease()
 
 if __name__ == '__main__': unittest.main()

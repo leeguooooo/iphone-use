@@ -155,6 +155,7 @@ class Session:
 class Device:
     def __init__(self, args, session, scratch):
         self.args, self.session, self.scratch = args, session, scratch
+        self.lease_identity = None
 
     def command(self, args, limit=15):
         timeout = min(limit, self.session.check())
@@ -168,11 +169,36 @@ class Device:
         return result.stdout
 
     def check_lease(self):
-        state = json.loads(self.command([os.environ.get('IPHONE_USE_FILES_HOST_BIN', 'iphone-use'), 'status', '--instance', self.args.instance, '--json'], 10))
-        if not state.get('drivable') or state.get('owner') != self.args.owner:
+        response = self.command([os.environ.get('IPHONE_USE_FILES_HOST_BIN', 'iphone-use'), 'status', '--instance', self.args.instance, '--json'], 10)
+        try:
+            state = json.loads(response)
+        except (ValueError, TypeError):
+            raise TransferError('Invalid instance status JSON') from None
+        if not isinstance(state, dict):
+            raise TransferError('Instance status must be an object')
+        if state.get('drivable') is not True or state.get('owner') != self.args.owner:
             raise TransferError('iPhone Use control lease ended or belongs to another caller')
         if state.get('udid') != self.args.device:
             raise TransferError('iPhone Use instance targets a different UDID')
+        lease = state.get('control_lease')
+        if 'control_lease' not in state:
+            raise TransferError('Control lease identity unavailable; update the selected daemon before receiving')
+        if not isinstance(lease, dict):
+            raise TransferError('Control lease unavailable, private or interrupted')
+        nonce = lease.get('daemon_instance')
+        epochs = [lease.get('owner_epoch'), lease.get('privacy_epoch'), lease.get('lifecycle_stamp')]
+        if lease.get('owner') != self.args.owner or lease.get('private') is not False:
+            raise TransferError('Control lease is private, unavailable or belongs to another caller')
+        if not isinstance(nonce, str) or not re.fullmatch('[0-9a-f]{64}', nonce):
+            raise TransferError('Invalid daemon instance identity')
+        if any(not isinstance(value, str) or not re.fullmatch('0|[1-9][0-9]{0,19}', value)
+               or int(value) > 2**64-1 for value in epochs):
+            raise TransferError('Invalid control lease generation')
+        identity = (nonce, *epochs)
+        if self.lease_identity is None:
+            self.lease_identity = identity
+        elif self.lease_identity != identity:
+            raise TransferError('Control lease or privacy generation changed; receiver stopped')
 
     def guard(self):
         self.check_lease()

@@ -18,6 +18,7 @@ pub mod http;
 pub mod instance;
 pub mod keep_awake;
 pub mod keep_runner;
+pub mod lease_identity;
 pub mod locale;
 pub mod location;
 pub mod lock_readiness;
