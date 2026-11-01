@@ -30,8 +30,10 @@ class Verdict(unittest.TestCase):
         self.assertFalse(oracle.judge_case('after-rect', {'ok': False}, self.counts(), False, False))
         self.assertFalse(oracle.judge_case('after-rect', {'ok': True}, self.counts(overlay=1), False, True))
 
-    def test_guard_acceptance_refuses_all_touches_and_false_success(self):
-        self.assertTrue(oracle.judge_case('after-rect', {'ok': False}, self.counts(), True, False))
+    def test_regression_requires_specific_refusal_not_transport_failure(self):
+        refused = {'ok': False, 'error': 'target_changed', 'outcome': 'not_sent', 'retry_safe': True}
+        self.assertTrue(oracle.judge_case('after-rect', refused, self.counts(), True, False))
+        self.assertFalse(oracle.judge_case('after-rect', {'ok': False, 'error': 'unauthorized'}, self.counts(), True, False))
         self.assertFalse(oracle.judge_case('after-rect', {'ok': True}, self.counts(), True, False))
         self.assertFalse(oracle.judge_case('after-rect', {'ok': False}, self.counts(background=1), True, False))
 

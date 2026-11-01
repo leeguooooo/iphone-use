@@ -73,7 +73,7 @@ def judge_case(case, body, delta, established, expect_race, activation_delta=0):
     if case == 'after-rect':
         if expect_race:
             return wrong == 1 and delta['race.target'] == 0
-        return body.get('ok') is False and all(v == 0 for v in delta.values())
+        return body.get('ok') is False and body.get('error') == 'target_changed' and body.get('outcome') == 'not_sent' and body.get('retry_safe') is True and all(v == 0 for v in delta.values())
     if case == 'after-query':
         return body.get('ok') is False and wrong == 0 and delta['race.target'] == 0
     return False
@@ -106,6 +106,9 @@ def main():
     args = parser.parse_args()
     uuid.UUID(args.udid)
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
+    parsed_base = urllib.parse.urlparse(args.base)
+    assert parsed_base.scheme == 'http' and parsed_base.hostname in ('127.0.0.1', 'localhost', '::1')
+    assert not parsed_base.username and not parsed_base.password and not parsed_base.query and not parsed_base.fragment
     original = OwnedDaemon(args.base, args.owner)
     original.require_simulator(args.udid)
     record = json.loads(args.runner_record.read_text())
@@ -136,6 +139,7 @@ def main():
     armed = None
     target_ids = set()
     hooks = []
+    traffic = []
 
     def save(name, value):
         path = args.out / name
@@ -215,15 +219,26 @@ def main():
                 with upstream:
                     status, response_headers, body = upstream.status, dict(upstream.headers), upstream.read()
                 path = urllib.parse.unquote(self.path.split('?', 1)[0])
-                parsed = json.loads(body)
                 query = self.command == 'POST' and path.endswith('/elements') and b'race.target' in raw
-                if status == 200 and query:
+                trace = {'method': self.command, 'path': path, 'status': status,
+                         'request_sha256': hashlib.sha256(raw).hexdigest(),
+                         'response_sha256': hashlib.sha256(body).hexdigest()}
+                if self.command == 'POST' and path.endswith(('/actions', '/click', '/scrollTo')):
+                    trace['action'] = json.loads(raw) if raw else None
+                traffic.append(trace)
+                parsed = None
+                if status == 200 and (query or armed == 'after-rect' and self.command == 'GET' and path.endswith('/rect')):
+                    try:
+                        parsed = json.loads(body)
+                    except ValueError:
+                        trace['hook_parse_error'] = True
+                if status == 200 and query and isinstance(parsed, dict):
                     ids = [row.get('ELEMENT') or row.get('element-6066-11e4-a52e-4f735466cecf') for row in parsed.get('value', [])]
                     target_ids.update(id for id in ids if isinstance(id, str))
                     if armed == 'after-query' and len(ids) == 1:
                         armed = None
                         move_after_response(ids[0], parsed)
-                if status == 200 and armed == 'after-rect' and self.command == 'GET':
+                if status == 200 and armed == 'after-rect' and self.command == 'GET' and isinstance(parsed, dict):
                     hit = next((id for id in target_ids if path.endswith('/element/' + id + '/rect')), None)
                     if hit is not None:
                         armed = None
@@ -301,6 +316,7 @@ def main():
             current_before = before
             target_ids.clear()
             hooks.clear()
+            traffic.clear()
             armed = hook
             action = {'observe': False, 'steps': [{'kind': 'action', 'action': {'type': 'tap_locator', 'locator': {'identifier': 'race.target', 'kind': 'Button'}, 'via': via}}]}
             try:
@@ -317,34 +333,68 @@ def main():
             save(case + '/before.json', before)
             save(case + '/response.json', body)
             save(case + '/hooks.json', hooks)
+            save(case + '/traffic.json', traffic)
             save(case + '/quiet.json', samples)
             delta = {k: after['received'][k] - before['received'][k] for k in before['received']}
             wrong = delta['race.overlay'] + delta['race.decoy']
             established = hook is None or len(hooks) == 1 and hooks[0]['native_matches_app_new_frame']
             passed = judge_case(case, body, delta, established, args.expect_after_read_race,
                                 after['activated']['race.target'] - before['activated']['race.target'])
+            if case == 'control':
+                passed = passed and any(t['method'] == 'POST' and t['path'].endswith('/elements') and t['status'] == 200 for t in traffic)
+                passed = passed and any(t['method'] == 'POST' and t['path'].endswith('/click') and t['status'] == 200 for t in traffic)
+            if case == 'after-query':
+                daemon_log = (args.out / 'proxy-daemon.log').read_text(errors='replace')
+                passed = passed and body.get('error') == 'outcome_unknown' and body.get('retry_safe') is False
+                passed = passed and any(t['method'] == 'POST' and t['path'].endswith('/scrollTo') for t in traffic)
+                passed = passed and all(t['status'] == 200 for t in traffic if t['method'] == 'GET' or t['path'].endswith('/elements'))
+                passed = passed and 'element_occluded after reveal; no tap sent' in daemon_log
+
             state['cases'].append({'name': case, 'passed': passed, 'delta': delta, 'established': established,
                                    'diagnostic_counterexample': case == 'after-rect' and args.expect_after_read_race})
             assert passed, f'{case}: independent touch recipients violate expectation: {delta}'
         active, _ = native_call('/wda/activeAppInfo')
         assert active['value']['bundleId'] == BUNDLE and active['value']['pid'] == expected_pid
         state['passed'] = True
-        state['product_acceptance'] = not args.expect_after_read_race
+        state['product_acceptance'] = False
+        state['race_regression_passed'] = not args.expect_after_read_race
     except Exception as error:
         state['error'] = type(error).__name__ + ': ' + str(error)
         raise
     finally:
         try:
-            if child is not None and child.poll() is None:
-                os.killpg(child.pid, signal.SIGTERM)
+            if child is not None:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     child.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait(timeout=5)
+                until = time.monotonic() + 2
+                group_alive = True
+                while time.monotonic() < until:
+                    try: os.killpg(child.pid, 0)
+                    except ProcessLookupError:
+                        group_alive = False
+                        break
+                    time.sleep(0.05)
+                if group_alive:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    until = time.monotonic() + 5
+                    while time.monotonic() < until:
+                        try: os.killpg(child.pid, 0)
+                        except ProcessLookupError:
+                            group_alive = False
+                            break
+                        time.sleep(0.05)
+                if group_alive:
+                    raise RuntimeError('owned process group still exists after stop')
         except Exception as error:
             state['cleanup_errors'].append('owned consumer termination unconfirmed: ' + str(error))
-        state['owned_consumer_stopped'] = child is None or child.poll() is not None
+        state['owned_consumer_stopped'] = (child is None or child.poll() is not None) and not any('termination' in error or 'group' in error for error in state['cleanup_errors'])
         if proxy:
             try:
                 proxy.shutdown()
@@ -354,10 +404,20 @@ def main():
             except Exception as error:
                 state['cleanup_errors'].append('owned proxy shutdown: ' + str(error))
         if temporary_state and state['owned_consumer_stopped']:
-            shutil.rmtree(temporary_state)
+            try:
+                shutil.rmtree(temporary_state)
+            except Exception as error:
+                state['cleanup_errors'].append('temporary credential state cleanup: ' + str(error))
+        elif temporary_state:
+            state['cleanup_errors'].append('owned consumer termination unconfirmed;temporary credential state preserved outside artifacts')
         log = args.out / 'proxy-daemon.log'
         if log.exists():
-            log.write_text(log.read_text(errors='replace').replace(token, 'REDACTED'))
+            try:
+                log.write_text(log.read_text(errors='replace').replace(token, 'REDACTED'))
+            except Exception as error:
+                state['cleanup_errors'].append('log redaction failed: ' + str(error))
+                try: log.unlink()
+                except OSError: pass
         if installed:
             try:
                 drag.command(['xcrun', 'simctl', 'uninstall', args.udid, BUNDLE])
@@ -366,6 +426,8 @@ def main():
         if state['cleanup_errors'] or not state['owned_consumer_stopped']:
             state['passed'] = False
         save('result.json', state)
+    if not state['passed']:
+        raise RuntimeError('diagnostic or cleanup failed;inspect result.json;no replay')
 
 
 if __name__ == '__main__':
