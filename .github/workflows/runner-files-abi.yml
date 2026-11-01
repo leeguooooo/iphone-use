@@ -9,6 +9,7 @@ on:
       - 'crates/**'
       - 'runner/**'
       - 'scripts/build-ios-embed.sh'
+      - 'scripts/rust-nm.sh'
       - 'scripts/test-runner-daemon-control.py'
       - '.github/workflows/runner-files-abi.yml'
 
@@ -35,6 +36,7 @@ jobs:
         with:
           toolchain: stable
           targets: aarch64-apple-ios
+          components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: runner-private-control-ios
@@ -45,7 +47,7 @@ jobs:
           lib="$(bash scripts/build-ios-embed.sh | tail -1)"
           test -f "$lib"
           git diff --exit-code Cargo.lock
-          nm -gU "$lib" > "$RUNNER_TEMP/private-role-library-symbols.txt"
+          bash scripts/rust-nm.sh --extern-only --defined-only "$lib" > "$RUNNER_TEMP/private-role-library-symbols.txt"
           grep -q '_ipu_daemon_start$' "$RUNNER_TEMP/private-role-library-symbols.txt"
           grep -q '_ipu_daemon_start_runner$' "$RUNNER_TEMP/private-role-library-symbols.txt"
           IPU_EMBED_LIB="$lib" IPU_RUNNER_DERIVED_DATA="$RUNNER_TEMP/private-role-runner/DerivedData" \
@@ -55,7 +57,7 @@ jobs:
           [[ -n "$executable" && "$executable" != */* ]]
           binary="$bundle/$executable"
           test -f "$binary"
-          nm -gU "$binary" > "$RUNNER_TEMP/private-role-linked-symbols.txt"
+          bash scripts/rust-nm.sh --extern-only --defined-only "$binary" > "$RUNNER_TEMP/private-role-linked-symbols.txt"
           grep -q '_ipu_daemon_start$' "$RUNNER_TEMP/private-role-linked-symbols.txt"
           grep -q '_ipu_daemon_start_runner$' "$RUNNER_TEMP/private-role-linked-symbols.txt"
           shasum -a 256 "$lib" "$binary"

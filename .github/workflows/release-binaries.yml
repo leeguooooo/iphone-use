@@ -115,6 +115,7 @@ jobs:
         with:
           toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios
+          components: llvm-tools-preview
 
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -417,7 +418,7 @@ jobs:
           # (grep -q under pipefail can SIGPIPE its writer; read whole files.)
           lipo -info "$lib" > "$RUNNER_TEMP/embed-archs.txt"
           grep -q arm64 "$RUNNER_TEMP/embed-archs.txt"
-          nm -gU "$lib" > "$RUNNER_TEMP/embed-symbols.txt" 2>/dev/null || true
+          bash scripts/rust-nm.sh --extern-only --defined-only "$lib" > "$RUNNER_TEMP/embed-symbols.txt"
           grep -q '_ipu_daemon_start$' "$RUNNER_TEMP/embed-symbols.txt"
           grep -q '_ipu_daemon_start_runner$' "$RUNNER_TEMP/embed-symbols.txt"
           grep -q '_ipu_daemon_pair_code$' "$RUNNER_TEMP/embed-symbols.txt"
