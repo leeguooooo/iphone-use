@@ -175,6 +175,115 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
+    #[ignore = "requires the owned GitHub-hosted temporary signing fixture"]
+    fn signed_product_transaction_preserves_bundle_and_fails_without_private_key() {
+        use std::os::unix::fs::PermissionsExt;
+        fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, (Vec<u8>, u32)> {
+            let mut result = std::collections::BTreeMap::new();
+            let mut todo = vec![root.to_path_buf()];
+            while let Some(dir) = todo.pop() {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    let metadata = std::fs::symlink_metadata(&path).unwrap();
+                    assert!(!metadata.file_type().is_symlink());
+                    if metadata.is_dir() {
+                        todo.push(path);
+                    } else {
+                        result.insert(
+                            path.strip_prefix(root).unwrap().to_path_buf(),
+                            (std::fs::read(&path).unwrap(), metadata.permissions().mode()),
+                        );
+                    }
+                }
+            }
+            result
+        }
+        fn entitlements(app: &Path) -> plist::Value {
+            let bytes = checked(
+                Command::new("/usr/bin/codesign")
+                    .args(["-d", "--entitlements", "-", "--xml"])
+                    .arg(app),
+            )
+            .unwrap()
+            .stdout;
+            plist::Value::from_reader(std::io::Cursor::new(bytes)).unwrap()
+        }
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(
+            std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+            Ok("github-hosted")
+        );
+        let root = std::path::PathBuf::from(std::env::var_os("IPU_SIGNING_FIXTURE_ROOT").unwrap())
+            .canonicalize()
+            .unwrap();
+        let runner_temp = std::path::PathBuf::from(std::env::var_os("RUNNER_TEMP").unwrap())
+            .canonicalize()
+            .unwrap();
+        assert!(root.starts_with(runner_temp));
+        let template = root.join("template/iPhoneUse-Runner.app");
+        let keychain = root.join("fixture.keychain-db");
+        assert!(template.is_dir() && keychain.is_file());
+        let ctx = Ctx::paths(
+            crate::instance::Instance::derive("signing-fixture", root.join("home"), None).unwrap(),
+        );
+        std::fs::create_dir_all(&ctx.runner_products_dir).unwrap();
+        let app = ctx.runner_products_dir.join("iPhoneUse-Runner.app");
+        checked(Command::new("/usr/bin/ditto").arg(&template).arg(&app)).unwrap();
+        runner::validate_bundle(&app).unwrap();
+        let certificate = legacy_ios::signing_certificate(&app).unwrap();
+        let identity = legacy_ios::sha1_hex(&certificate);
+        assert_eq!(
+            identity,
+            std::env::var("IPU_SIGNING_FIXTURE_IDENTITY").unwrap()
+        );
+        let original_entitlements = entitlements(&app);
+        let nested = snapshot(&app.join("PlugIns"));
+        assert!(matches(&app, false));
+        for _ in 0..2 {
+            apply(&ctx, &app, true).unwrap();
+            runner::validate_bundle(&app).unwrap();
+            assert!(matches(&app, true) && customized(&app));
+            assert_eq!(legacy_ios::signing_certificate(&app).unwrap(), certificate);
+            assert_eq!(entitlements(&app), original_entitlements);
+            assert_eq!(snapshot(&app.join("PlugIns")), nested);
+            let info = sys::read_plist(&app.join("Info.plist")).unwrap();
+            assert_eq!(
+                info.get("CFBundleIdentifier").and_then(|v| v.as_str()),
+                Some("owned.signing.fixture")
+            );
+            assert_eq!(
+                info.get("CFBundleIconName").and_then(|v| v.as_str()),
+                Some("FixtureIcon")
+            );
+        }
+        let shared = snapshot(&app);
+        assert!(apply(&ctx, &app, false).is_err());
+        assert_eq!(snapshot(&app), shared);
+        let missing = ctx.runner_products_dir.join("MissingKey-Runner.app");
+        checked(Command::new("/usr/bin/ditto").arg(&template).arg(&missing)).unwrap();
+        let original = snapshot(&missing);
+        checked(
+            Command::new("/usr/bin/security")
+                .args(["delete-identity", "-Z", &identity])
+                .arg(&keychain),
+        )
+        .unwrap();
+        runner::validate_bundle(&missing).unwrap();
+        let error = apply(&ctx, &missing, true).unwrap_err();
+        assert!(error.contains("command failed"), "{error}");
+        assert_eq!(snapshot(&missing), original);
+        runner::validate_bundle(&missing).unwrap();
+        assert!(std::fs::read_dir(&ctx.runner_products_dir)
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("runner-files.")));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
     fn product_exchange_keeps_both_nonempty_bundles_and_cleans_only_old_product() {
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("iPhoneUse-Runner.app");

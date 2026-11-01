@@ -196,3 +196,19 @@ At preceding head 3cc0c18f, full PR CI 41313251749, actual iOS ABI/link CI
 41313251778, Simulator 41313251774 and security scan 41313251852 passed.
 These supersede the pending CI notes for earlier candidates above, without
 extending their physical-device or signing acceptance scope.
+
+## Owned signed-product transaction lane
+
+An ignored production-module test is enabled only by an owned GitHub-hosted
+macOS fixture. The driver creates a temporary self-signed code-signing identity
+and keychain, narrows its trust to code signing, and restores keychain preferences
+and removes its trust/keychain in cleanup. It refuses personal and self-hosted
+environments before running commands. It never uses an Apple account or phone.
+
+The test calls the actual customization/ownership/signature-validation functions
+on a signed macOS bundle with a nested signed xctest-shaped bundle. It checks
+two successive customizations, certificate/parsed entitlement/identity/icon
+preservation, unchanged nested bytes, opt-out refusal on an enabled product, and
+unchanged valid original bytes when its owned private identity is removed.
+This is not an iOS provisioning, full setup/cache/reconnect/upgrade or physical
+acceptance claim. The new lane is pending CI; local module tests leave it ignored.

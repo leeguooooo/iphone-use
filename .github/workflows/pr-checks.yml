@@ -147,6 +147,20 @@ jobs:
           set -euo pipefail
           cargo test -p server --locked --no-fail-fast
 
+      - name: Owned signed Runner product transaction (no device)
+        timeout-minutes: 8
+        run: python3 -I scripts/test-runner-files-signing.py
+
+      - name: Preserve owned signing transaction receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: runner-files-signing
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/runner-files-signing.json
+            ${{ runner.temp }}/runner-files-signing-test.log
+
       - name: Real daemon target-scope protocol (synthetic provider, no UI)
         timeout-minutes: 8
         shell: bash
