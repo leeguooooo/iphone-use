@@ -115,14 +115,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p server --locked
+          cargo test -p server --locked --no-fail-fast
 
       - name: cargo test -p iphone-use-mcp
         timeout-minutes: 15
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p iphone-use-mcp --locked
+          cargo test -p iphone-use-mcp --locked --no-fail-fast
 
       - name: Encrypted browser handoff and Chrome scope tests
         run: cargo test -p browser-session --features desktop --locked

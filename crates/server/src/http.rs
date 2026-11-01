@@ -8906,9 +8906,6 @@ async fn tap_unique_locator(
     locator: &AgentElementLocator,
     via_point: bool,
 ) -> Result<(), UniqueLabelTapError> {
-    // Same reuse as label taps: a recent untouched tree may prove uniqueness,
-    // and the live lookup below (exactly one element, same frame) proves the
-    // target; otherwise read afresh.
     let reused = w.recent_tree(SNAPSHOT_TREE_REUSE).and_then(|rows| {
         unique_locator_index(&rows, locator).ok().map(|index| (rows, index))
     });
@@ -8924,24 +8921,13 @@ async fn tap_unique_locator(
             (std::sync::Arc::new(rows), index, None)
         }
     };
-    let covered = needs_reveal(&proof_rows, proof_index);
-
-    // `/source?format=json` can report stale/wrong rectangles for elements in
-    // system-owned sheets (hardware-reproduced with the iOS share sheet's
-    // "Save to Files" cell). A coordinate tap at that rectangle returns a runner
-    // success envelope while landing elsewhere. Re-resolve the already-proven
-    // unique locator through runner's live element query and invoke XCUIElement's
-    // click action instead. Requiring exactly one returned element preserves
-    // the fail-closed uniqueness contract across the second lookup.
     let (using, value) = locator_runner_query(locator).ok_or(UniqueLabelTapError::InvalidTarget)?;
-    let matches = w.find_element_matches(using, &value).await
-        .map_err(UniqueLabelTapError::BeforeDispatch)?;
+    let matches = w.find_element_matches(using, &value).await.map_err(UniqueLabelTapError::BeforeDispatch)?;
     if !matches.coverage.is_complete() {
         return Err(UniqueLabelTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT));
     }
-    let element_id = match matches.ids.as_slice() {
-        [element_id] => element_id,
-        // The reused tree is the doubt, not the locator: read afresh.
+    let mut element_id = match matches.ids.as_slice() {
+        [id] => id.clone(),
         _ if reused_rect.is_some() => {
             w.forget_tree();
             return Box::pin(tap_unique_locator(w, locator, via_point)).await;
@@ -8949,82 +8935,63 @@ async fn tap_unique_locator(
         [] => return Err(UniqueLabelTapError::NotFound),
         _ => return Err(UniqueLabelTapError::Ambiguous(None)),
     };
-    if let Some(rect) = reused_rect {
-        if !matches!(w.element_rect(element_id).await, Ok(live) if rects_match(live, rect)) {
-            w.forget_tree();
-            return Box::pin(tap_unique_locator(w, locator, via_point)).await;
-        }
+    // Both dispatch modes act at the live frame. Source rectangles can be
+    // stale in system sheets; they cannot exempt a target from occlusion checks.
+    let mut live = w.element_rect(&element_id).await.map_err(UniqueLabelTapError::BeforeDispatch)?;
+    if reused_rect.is_some_and(|rect| !rects_match(rect, live)) {
+        w.forget_tree();
+        return Box::pin(tap_unique_locator(w, locator, via_point)).await;
     }
-    // A floating bar over the target's centre (iOS 26's search pill) eats
-    // XCUIElement's click there too: reveal it first, like snapshot and label
-    // taps do.
-    if covered {
-        reveal_element(w, element_id).await;
-        // Look again, as `reveal_and_click` does: a centre still under the
-        // pill must not be clicked, and one still off the screen (or not
-        // provably on it) must not be either — the click would touch nothing
-        // and answer ok.
-        let off_screen_refusal = || {
-            Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target not visible after reveal; no further tap sent")))
-        };
+    std::sync::Arc::make_mut(&mut proof_rows)[proof_index].rect = live;
+    let revealed = needs_reveal(&proof_rows, proof_index);
+    if revealed {
+        reveal_element(w, &element_id).await;
         let snapshot = w.element_snapshot().await.map_err(UniqueLabelTapError::AfterDispatch)?;
         if !snapshot.coverage.is_complete() {
-            return Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target scope unproven after reveal; no further tap sent")));
+            return Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target scope unproven after reveal; no tap sent")));
         }
-        proof_index = unique_locator_index(&snapshot.rows, locator).map_err(|_| UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target no longer unique after reveal; no further tap sent")))?;
+        proof_index = unique_locator_index(&snapshot.rows, locator).map_err(|_| UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target no longer unique after reveal; no tap sent")))?;
         proof_rows = std::sync::Arc::new(snapshot.rows);
-        if !via_point && center_covered(&proof_rows, proof_index) {
-            let live = w.element_rect(element_id).await.map_err(UniqueLabelTapError::AfterDispatch)?;
-            std::sync::Arc::make_mut(&mut proof_rows)[proof_index].rect = live;
-            return match clear_tap_point(&proof_rows, proof_index) {
-                Some((x, y)) if point_on_screen(&proof_rows, x, y) => w.tap_point(x, y).await.map_err(UniqueLabelTapError::AfterDispatch),
-                Some(_) => off_screen_refusal(),
-                None => Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target occluded after reveal; no further tap sent"))),
-            };
+        // A reveal can replace the AX object. Resolve it again rather than
+        // applying a fresh row's geometry proof to an older element handle.
+        let matches = w.find_element_matches(using, &value).await.map_err(UniqueLabelTapError::AfterDispatch)?;
+        if !matches.coverage.is_complete() || matches.ids.len() != 1 {
+            return Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("live target scope unproven after reveal; no tap sent")));
         }
-        if !via_point && center_off_screen(&proof_rows, proof_index) { return off_screen_refusal(); }
+        element_id = matches.ids[0].clone();
+        live = w.element_rect(&element_id).await.map_err(UniqueLabelTapError::AfterDispatch)?;
+        std::sync::Arc::make_mut(&mut proof_rows)[proof_index].rect = live;
+    }
+    let refuse = |code, hint| {
+        if revealed { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("{code} after reveal; no tap sent")) }
+        else { UniqueLabelTapError::Refused(code, hint) }
+    };
+    let [x, y, width, height] = live;
+    if !live.iter().all(|v| v.is_finite()) || width <= 0.0 || height <= 0.0 {
+        return Err(if revealed { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("invalid target after reveal")) } else { UniqueLabelTapError::InvalidTarget });
+    }
+    let (screen_w, screen_h) = w.window_size().await.map_err(|error| {
+        if revealed { UniqueLabelTapError::AfterDispatch(error) } else { UniqueLabelTapError::BeforeDispatch(error) }
+    })?;
+    let on_screen = |(px, py): (f64, f64)| (0.0..=screen_w).contains(&px) && (0.0..=screen_h).contains(&py);
+    let center = (x + width / 2.0, y + height / 2.0);
+    if !on_screen(center) { return Err(refuse("element_not_visible", ELEMENT_OFF_SCREEN_HINT)); }
+    if center_covered(&proof_rows, proof_index) {
+        // The default action retains its clear-part fallback after a reveal;
+        // explicit point mode continues to mean the live centre itself.
+        if revealed && !via_point {
+            if let Some(point) = clear_tap_point(&proof_rows, proof_index).filter(|point| on_screen(*point)) {
+                return w.tap_point(point.0, point.1).await.map_err(UniqueLabelTapError::AfterDispatch);
+            }
+        }
+        return Err(refuse("element_occluded", ELEMENT_OCCLUDED_HINT));
     }
     if via_point {
-        // `"via":"point"`: some custom controls ignore XCUIElement's click
-        // (hardware: Xiaohongshu's 30×30 back button ACKed two clicks and
-        // stayed put; a coordinate tap at its centre worked). Tap the centre
-        // of the element's LIVE frame — from runner's element query, not the
-        // possibly stale /source rect the default path avoids.
-        let [x, y, width, height] = w
-            .element_rect(element_id)
-            .await
-            .map_err(|error| if covered { UniqueLabelTapError::AfterDispatch(error) } else { UniqueLabelTapError::BeforeDispatch(error) })?;
-        if !(width > 0.0 && height > 0.0) {
-            return Err(if covered { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("invalid target after reveal")) } else { UniqueLabelTapError::InvalidTarget });
-        }
-        // Occlusion must be assessed at the point we will actually tap,
-        // because /source can publish a stale target frame.
-        std::sync::Arc::make_mut(&mut proof_rows)[proof_index].rect = [x, y, width, height];
-        if center_covered(&proof_rows, proof_index) {
-            return Err(if covered {
-                UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("live target remains occluded after reveal; no tap sent"))
-            } else {
-                UniqueLabelTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
-            });
-        }
-        let (cx, cy) = (x + width / 2.0, y + height / 2.0);
-        let (screen_w, screen_h) = w.window_size().await.map_err(|error| {
-            if covered { UniqueLabelTapError::AfterDispatch(error) } else { UniqueLabelTapError::BeforeDispatch(error) }
-        })?;
-        if !(0.0..=screen_w).contains(&cx) || !(0.0..=screen_h).contains(&cy) {
-            return Err(if covered { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target not visible after reveal")) } else { UniqueLabelTapError::Refused("element_not_visible", ELEMENT_OFF_SCREEN_HINT) });
-        }
-        return w
-            .tap_point(cx, cy)
-            .await
-            .map_err(UniqueLabelTapError::AfterDispatch);
+        return w.tap_point(center.0, center.1).await.map_err(UniqueLabelTapError::AfterDispatch);
     }
-    w.click_element(element_id).await.map_err(|error| {
-        if !covered && runner_error_is_missing_element(&error) {
-            UniqueLabelTapError::NotFound
-        } else {
-            UniqueLabelTapError::AfterDispatch(error)
-        }
+    w.click_element(&element_id).await.map_err(|error| {
+        if !revealed && runner_error_is_missing_element(&error) { UniqueLabelTapError::NotFound }
+        else { UniqueLabelTapError::AfterDispatch(error) }
     })
 }
 

@@ -4747,17 +4747,38 @@ mod tests {
     }
 
     #[test]
+    fn action_singleton_query_requires_complete_valid_and_exactly_one_match() {
+        for (headers, body, allowed) in [
+            ("X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n", r#"{"value":[{"ELEMENT":"E1"}]}"#, true),
+            ("X-IPU-Truncated: 1\r\nX-IPU-Tree-Complete: 0\r\n", r#"{"value":[{"ELEMENT":"E1"}]}"#, false),
+            ("", r#"{"value":[{"ELEMENT":"E1"}]}"#, false),
+            ("X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n", r#"{"value":[{"ELEMENT":"E1"},{"ELEMENT":"E2"}]}"#, false),
+            ("X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n", r#"{"value":[{"ELEMENT":"E1"},{}]}"#, false),
+        ] {
+            let (base, server) = mock_runner(1, move |request| {
+                assert!(request.starts_with("POST /session/SESSION/elements "), "{request}");
+                format!("HTTP/1.1 200 OK\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            client.session = Some("SESSION".into());
+            let result = block(client.find_unique_element("accessibility id", "Done"));
+            server.join().unwrap();
+            assert_eq!(result.is_ok(), allowed, "{result:?}");
+        }
+    }
+
+    #[test]
     fn dismiss_only_never_looks_for_form_commit_or_submit_keys() {
         let (base, server) = mock_runner(2, |request| {
             let body: serde_json::Value =
                 serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
-            if request.contains("/element ") {
+            if request.contains("/elements ") {
                 let predicate = body["value"].as_str().unwrap();
                 for key in ["Done", "完了", "return", "前往", "search"] {
                     assert!(!predicate.contains(key), "{predicate}");
                 }
-                return r#"{"value":{"error":"no such element","message":"no hide accessory"}}"#
-                    .into();
+                let body = r#"{"value":[]}"#;
+                return format!("HTTP/1.1 200 OK\r\nX-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             }
             assert!(request.contains("/wda/keyboard/dismiss "), "{request}");
             let names = body["keyNames"].as_array().unwrap();

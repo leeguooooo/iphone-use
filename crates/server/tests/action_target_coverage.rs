@@ -131,7 +131,15 @@ fn losing_scope_after_reveal_stops_the_tap_and_never_authorizes_replay() {
                             response(r#"{"value":[{"ELEMENT":"E1"}]}"#, "complete"),
                         ));
                     } else if request.contains("/element/E1/rect") {
-                        r#"{"value":{"x":16,"y":400,"width":358,"height":51}}"#
+                        let y = if scrolled.load(std::sync::atomic::Ordering::SeqCst) {
+                            400
+                        } else {
+                            745
+                        };
+                        return Some((
+                            Duration::ZERO,
+                            format!(r#"{{"value":{{"x":16,"y":{y},"width":358,"height":51}}}}"#),
+                        ));
                     } else {
                         r#"{"value":null}"#
                     };
@@ -236,68 +244,123 @@ fn point_locator_needs_a_known_viewport_even_with_one_complete_match() {
 }
 
 #[test]
-fn point_locator_checks_occlusion_at_the_live_centre_including_after_reveal() {
+fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
     block(async {
-        for reveal in [false, true] {
-            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
-            let record = seen.clone();
-            let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let scrolled = moved.clone();
-            let runner = mock_runner(move |request, _| {
-                record.lock().unwrap().push(request.to_string());
-                if request.contains("/scrollTo") {
-                    scrolled.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                let body = if request.starts_with("POST /session ") {
-                    r#"{"value":{"sessionId":"SESSION"}}"#
-                } else if request.contains("/source?") {
-                    let y = if reveal && !scrolled.load(std::sync::atomic::Ordering::SeqCst) {
-                        745
+        for via in ["element", "point"] {
+            for (source_covered, live_covered, clear_after) in [
+                (false, false, true),
+                (false, true, false),
+                (true, true, false),
+                (false, true, true),
+                (true, true, true),
+            ] {
+                let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+                let record = seen.clone();
+                let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let scrolled = moved.clone();
+                let runner = mock_runner(move |request, _| {
+                    record.lock().unwrap().push(request.to_string());
+                    if request.contains("/scrollTo") {
+                        scrolled.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    let after = scrolled.load(std::sync::atomic::Ordering::SeqCst);
+                    let body = if request.starts_with("POST /session ") {
+                        r#"{"value":{"sessionId":"SESSION"}}"#
+                    } else if request.contains("/source?") {
+                        let y = if source_covered && !after { 745 } else { 400 };
+                        let tree = format!(
+                            r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"Fixture","rect":{{"x":0,"y":0,"width":390,"height":844}},"children":[{{"type":"XCUIElementTypeButton","label":"Done","rect":{{"x":16,"y":{y},"width":358,"height":51}}}},{{"type":"XCUIElementTypeSearchField","label":"Search","rect":{{"x":28,"y":778,"width":334,"height":28}}}}]}}}}"#
+                        );
+                        return Some((Duration::ZERO, response(&tree, "complete")));
+                    } else if request.starts_with("POST ") && request.contains("/elements ") {
+                        let id = if after { "E2" } else { "E1" };
+                        return Some((
+                            Duration::ZERO,
+                            response(
+                                &format!(r#"{{"value":[{{"ELEMENT":"{id}"}}]}}"#),
+                                "complete",
+                            ),
+                        ));
+                    } else if request.contains("/rect") {
+                        let y = if live_covered && (!after || !clear_after) {
+                            780
+                        } else {
+                            420
+                        };
+                        return Some((
+                            Duration::ZERO,
+                            format!(r#"{{"value":{{"x":16,"y":{y},"width":358,"height":51}}}}"#),
+                        ));
                     } else {
-                        400
+                        r#"{"value":null}"#
                     };
-                    let tree = format!(
-                        r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"Fixture","rect":{{"x":0,"y":0,"width":390,"height":844}},"children":[{{"type":"XCUIElementTypeButton","label":"Done","rect":{{"x":16,"y":{y},"width":358,"height":51}}}},{{"type":"XCUIElementTypeSearchField","label":"Search","rect":{{"x":28,"y":778,"width":334,"height":28}}}}]}}}}"#
-                    );
-                    return Some((Duration::ZERO, response(&tree, "complete")));
-                } else if request.starts_with("POST ") && request.contains("/elements ") {
-                    return Some((
-                        Duration::ZERO,
-                        response(r#"{"value":[{"ELEMENT":"E1"}]}"#, "complete"),
-                    ));
-                } else if request.contains("/element/E1/rect") {
-                    r#"{"value":{"x":16,"y":780,"width":358,"height":51}}"#
-                } else {
-                    r#"{"value":null}"#
-                };
-                Some((Duration::ZERO, body.into()))
-            });
-            let request=Request::builder().method("POST").uri("/agent/actions").header("x-phone-control","1").header("content-type","application/json").body(Body::from(serde_json::json!({"observe":false,"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"Done"},"via":"point"}}]}).to_string())).unwrap();
-            let reply = server::http::router(build_state_with_runner(runner.url()))
-                .oneshot(request)
-                .await
-                .unwrap();
-            let body: serde_json::Value =
-                serde_json::from_slice(&reply.into_body().collect().await.unwrap().to_bytes())
+                    Some((Duration::ZERO, body.into()))
+                });
+                let request = Request::builder().method("POST").uri("/agent/actions").header("x-phone-control","1").header("content-type","application/json").body(Body::from(serde_json::json!({"observe":false,"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"Done"},"via":via}}]}).to_string())).unwrap();
+                let reply = server::http::router(build_state_with_runner(runner.url()))
+                    .oneshot(request)
+                    .await
                     .unwrap();
-            let sent = seen.lock().unwrap();
-            assert!(
-                !sent.iter().any(|r| r.starts_with("POST ")
-                    && (r.contains("/click ") || r.contains("/actions "))),
-                "live centre is covered despite source position: {body}; {sent:?}"
-            );
-            assert_eq!(
-                sent.iter()
-                    .any(|r| r.starts_with("POST ") && r.contains("/scrollTo ")),
-                reveal,
-                "{body}; {sent:?}"
-            );
-            assert_eq!(body["ok"], false, "{body}");
-            assert_eq!(body["retry_safe"], !reveal, "{body}");
-            if reveal {
-                assert_ne!(body["outcome"], "not_sent", "{body}");
-            } else {
-                assert_eq!(body["error"], "element_occluded", "{body}");
+                let body: serde_json::Value =
+                    serde_json::from_slice(&reply.into_body().collect().await.unwrap().to_bytes())
+                        .unwrap();
+                let sent = seen.lock().unwrap();
+                let clicks: Vec<_> = sent
+                    .iter()
+                    .filter(|r| r.starts_with("POST ") && r.contains("/click "))
+                    .collect();
+                let taps: Vec<_> = sent
+                    .iter()
+                    .filter(|r| r.starts_with("POST ") && r.contains("/actions "))
+                    .collect();
+                assert_eq!(
+                    sent.iter()
+                        .any(|r| r.starts_with("POST ") && r.contains("/scrollTo ")),
+                    live_covered,
+                    "{body}; {sent:?}"
+                );
+                if live_covered && !clear_after && via == "point" {
+                    assert!(
+                        clicks.is_empty() && taps.is_empty(),
+                        "do not tap the covered centre: {body}; {sent:?}"
+                    );
+                    assert_eq!(body["ok"], false, "{body}");
+                    assert_eq!(body["retry_safe"], false, "{body}");
+                    assert_ne!(body["outcome"], "not_sent", "{body}");
+                } else {
+                    assert_eq!(body["ok"], true, "{body}; {sent:?}");
+                    assert_eq!(clicks.len() + taps.len(), 1, "{sent:?}");
+                    if via == "element" && (!live_covered || clear_after) {
+                        let id = if live_covered { "E2" } else { "E1" };
+                        assert!(
+                            clicks[0].contains(&format!("/{id}/click ")),
+                            "fresh handle must match new proof: {sent:?}"
+                        );
+                    } else {
+                        assert!(clicks.is_empty(), "{sent:?}");
+                        let payload: serde_json::Value =
+                            serde_json::from_str(taps[0].split_once("\r\n\r\n").unwrap().1)
+                                .unwrap();
+                        let actions = payload["actions"].as_array().unwrap();
+                        let motion = actions
+                            .iter()
+                            .flat_map(|device| device["actions"].as_array().unwrap())
+                            .find(|step| step["type"] == "pointerMove")
+                            .unwrap();
+                        let y = motion["y"].as_f64().unwrap();
+                        if live_covered && !clear_after {
+                            assert!(
+                                y > 820.0 && y <= 831.0,
+                                "clear-part fallback must avoid the pill: {payload}"
+                            );
+                        } else {
+                            assert!(
+                                (y - 445.5).abs() <= 1.0,
+                                "tap live, not source, centre: {payload}"
+                            );
+                        }
+                    }
+                }
             }
         }
     });
