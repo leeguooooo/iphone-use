@@ -868,11 +868,7 @@ impl RunnerClient {
             .get("x-ipu-alert")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let coverage = match (response.headers().get("x-ipu-truncated").map(|value|value.as_bytes()),response.headers().get("x-ipu-tree-complete").map(|value|value.as_bytes())) {
-            (Some(b"1"),_)=>SnapshotCoverage::Truncated,
-            (Some(b"0"),Some(b"1"))=>SnapshotCoverage::Complete,
-            _=>SnapshotCoverage::Unknown,
-        };
+        let coverage = SnapshotCoverage::from_headers(response.headers());
         let body = response.text().await.context("parse /source")?;
         let mut value = parse_runner_value(&body, "GET /source")?;
         let root=value.as_object_mut().ok_or_else(||anyhow::anyhow!("/source must return a tree object"))?;
@@ -980,6 +976,11 @@ impl RunnerClient {
     /// element of a kind (e.g. the 3 columns of a date PickerWheel) when none
     /// has a usable label.
     pub async fn find_elements(&mut self, using: &str, value: &str) -> Result<Vec<String>> {
+        Ok(self.find_element_matches(using, value).await?.ids)
+    }
+
+    /// Live matches with producer coverage. A one-item prefix is not a unique target.
+    pub async fn find_element_matches(&mut self, using: &str, value: &str) -> Result<ElementMatches> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
             .post_req(format!("{}/session/{}/elements", self.base, sid))
@@ -987,19 +988,17 @@ impl RunnerClient {
             .send_signed(&self.auth)
             .await
             .context("POST /elements")?;
+        let coverage = SnapshotCoverage::from_headers(response.headers());
         let value = ensure_runner_success(response, "POST /elements").await?;
-        let elements = value
-            .as_array()
-            .ok_or_else(|| anyhow!("POST /elements returned non-array value: {value}"))?;
-        Ok(elements
-            .iter()
-            .filter_map(|e| {
-                e.get("ELEMENT")
-                    .or_else(|| e.get("element-6066-11e4-a52e-4f735466cecf"))
-                    .and_then(|x| x.as_str())
-                    .map(String::from)
-            })
-            .collect())
+        let elements = value.as_array()
+            .ok_or_else(|| anyhow!("POST /elements returned non-array value"))?;
+        let ids = elements.iter().map(|element| {
+            element.get("ELEMENT")
+                .or_else(|| element.get("element-6066-11e4-a52e-4f735466cecf"))
+                .and_then(|value| value.as_str()).filter(|value| !value.is_empty())
+                .map(String::from).ok_or_else(|| anyhow!("POST /elements returned an invalid element reference"))
+        }).collect::<Result<Vec<_>>>()?;
+        Ok(ElementMatches { ids, coverage })
     }
 
     /// One explicitly selected element's full AX value. Older runners refuse;
@@ -2265,7 +2264,8 @@ impl RunnerClient {
                 }
             }
         }
-        self.last_tree = Some((std::sync::Arc::new(rows.clone()), std::time::Instant::now()));
+        self.last_tree = SnapshotCoverage::from_tree(tree).is_complete()
+            .then(|| (std::sync::Arc::new(rows.clone()), std::time::Instant::now()));
         rows
     }
 
@@ -2971,6 +2971,14 @@ pub enum SnapshotCoverage {
     Unknown,
 }
 impl SnapshotCoverage {
+    fn from_headers(headers: &reqwest::header::HeaderMap) -> Self {
+        match (headers.get("x-ipu-truncated").map(|v| v.as_bytes()),
+               headers.get("x-ipu-tree-complete").map(|v| v.as_bytes())) {
+            (Some(b"1"), _) => Self::Truncated,
+            (Some(b"0"), Some(b"1")) => Self::Complete,
+            _ => Self::Unknown,
+        }
+    }
     pub fn is_complete(self) -> bool {
         self == Self::Complete
     }
@@ -2991,6 +2999,10 @@ impl SnapshotCoverage {
             _ => Self::Unknown,
         }
     }
+}
+pub struct ElementMatches {
+    pub ids: Vec<String>,
+    pub coverage: SnapshotCoverage,
 }
 pub struct ElementSnapshot {
     pub rows: Vec<ElementRow>,
@@ -4996,7 +5008,7 @@ mod tests {
         server.join().unwrap();
         assert!(rows.iter().any(|row| row.label == "Food"), "{rows:?}");
         assert!(client.visibility_is_geometric());
-        assert!(client.last_tree.is_some());
+        assert!(client.last_tree.is_none(), "bounded source cannot authorize uniqueness through cache reuse");
     }
 
     #[test]

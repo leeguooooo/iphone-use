@@ -188,7 +188,7 @@ extension RunnerTests {
         extensionCallLimit: Self.defaultExtensionCalls,
         rememberKey: target.pid > 0 ? String(target.pid) : nil, includeElements: true)
       if (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] {
-        return UINode(raw: root, parent: nil, pid: target.pid)
+        return UINode(raw: root, parent: nil, pid: target.pid, treeComplete: (tree[IPURTreeTruncatedKey] as? Bool) == false)
       }
       NSLog("ipu-runner: element tree via private AX failed: %@", tree[IPURTreeErrorKey] as? String ?? "?")
     }
@@ -205,7 +205,7 @@ extension RunnerTests {
     guard let root = tree[IPURTreeRootKey] as? [String: Any] else {
       throw RunnerError.failed(tree[IPURTreeErrorKey] as? String ?? "snapshot serialization failed")
     }
-    return UINode(raw: root, parent: nil, pid: target.pid)
+    return UINode(raw: root, parent: nil, pid: target.pid, treeComplete: (tree[IPURTreeTruncatedKey] as? Bool) == false)
   }
 
   /// SpringBoard's tree when SpringBoard is active but not the chosen foreground app (a banner,
@@ -220,7 +220,7 @@ extension RunnerTests {
       forAXElement: springBoard, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
       extensionCallLimit: 0, rememberKey: String(pid), includeElements: true)
     guard let root = tree[IPURTreeRootKey] as? [String: Any] else { return nil }
-    return UINode(raw: root, parent: nil, pid: pid)
+    return UINode(raw: root, parent: nil, pid: pid, treeComplete: (tree[IPURTreeTruncatedKey] as? Bool) == false)
   }
 
   /// Re-snapshots a registered element. `depth` 1 reads the element alone (fresh rect/value);
@@ -237,7 +237,7 @@ extension RunnerTests {
       NSLog("ipu-runner: element %@ re-read failed: %@", id, tree[IPURTreeErrorKey] as? String ?? "?")
       throw RunnerError.staleElement(id)
     }
-    let node = UINode(raw: root, parent: nil, pid: stored.pid)
+    let node = UINode(raw: root, parent: nil, pid: stored.pid, treeComplete: (tree[IPURTreeTruncatedKey] as? Bool) == false)
     // A zero frame on a re-read means the element left the hierarchy.
     if node.rect == .zero, stored.rect != .zero { throw RunnerError.staleElement(id) }
     return node
@@ -253,30 +253,33 @@ extension RunnerTests {
     return (using, value)
   }
 
-  private func findNodes(_ request: HTTPRequest, from id: String?) throws -> [UINode] {
+  private func findNodes(_ request: HTTPRequest, from id: String?) throws -> (nodes: [UINode], complete: Bool) {
     let (using, value) = try locator(request)
     let screen = windowSizePoints()
     if let id {
       let scope = try freshNode(id, depth: Self.defaultMaxDepth)
-      return try Locator.find(using: using, value: value, root: scope, screen: screen)
+      return (try Locator.find(using: using, value: value, root: scope, screen: screen), scope.treeComplete)
     }
     let target = foreground()
     let root = try foregroundTree(target)
     let found = try Locator.find(using: using, value: value, root: root, screen: screen)
-    if !found.isEmpty { return found }
+    if !found.isEmpty { return (found, root.treeComplete) }
     if let springBoard = springBoardTreeIfRelevant(foregroundPID: target.pid) {
-      return try Locator.find(using: using, value: value, root: springBoard, screen: screen)
+      return (try Locator.find(using: using, value: value, root: springBoard, screen: screen), root.treeComplete && springBoard.treeComplete)
     }
-    return []
+    return ([], root.treeComplete)
   }
 
   private func findElements(_ request: HTTPRequest, from id: String?) throws -> HTTPResponse {
-    let nodes = try findNodes(request, from: id)
-    return .value(nodes.map { ElementReference.make(elements.register($0)) })
+    let result = try findNodes(request, from: id)
+    return .value(result.nodes.map { ElementReference.make(elements.register($0)) }, headers: [
+      "X-IPU-Truncated": result.complete ? "0" : "1",
+      "X-IPU-Tree-Complete": result.complete ? "1" : "0",
+    ])
   }
 
   private func findElement(_ request: HTTPRequest, from id: String?) throws -> HTTPResponse {
-    guard let node = try findNodes(request, from: id).first else {
+    guard let node = try findNodes(request, from: id).nodes.first else {
       let (using, value) = (try? locator(request)) ?? ("?", "?")
       throw RunnerError.notFound("unable to find an element using '\(using)', value '\(value)'")
     }

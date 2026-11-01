@@ -7263,8 +7263,9 @@ async fn tap_snapshot_element(
     // target clear and click it there, else tap the part it leaves clear.
     let off_screen = center_off_screen(&rows, index);
     if off_screen || (!allows_occluded(value) && center_covered(&rows, index)) {
-        if let Some(clicked) = reveal_and_click(w, row, off_screen).await {
+        if let Some(clicked) = reveal_and_click(w, row).await {
             return clicked.map_err(|error| match error {
+                RevealError::ScopeUnproven => SnapshotElementTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT),
                 RevealError::Occluded => {
                     SnapshotElementTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
                 }
@@ -8273,6 +8274,16 @@ enum UniqueLabelTapError {
     AfterDispatch(anyhow::Error),
 }
 
+const TARGET_SCOPE_UNPROVEN_HINT: &str = "Nothing was sent: a complete accessibility scope is required to prove this locator unique. Read again after the screen settles; update the Native Runner if coverage is unknown.";
+
+async fn unique_target_rows(w: &mut crate::runner::RunnerClient) -> Result<Vec<crate::runner::ElementRow>, UniqueLabelTapError> {
+    let snapshot = w.element_snapshot().await.map_err(UniqueLabelTapError::BeforeDispatch)?;
+    if !snapshot.coverage.is_complete() {
+        return Err(UniqueLabelTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT));
+    }
+    Ok(snapshot.rows)
+}
+
 async fn tap_unique_label(
     w: &mut crate::runner::RunnerClient,
     label: &str,
@@ -8306,15 +8317,13 @@ async fn tap_unique_label(
         }
         w.forget_tree();
     }
-    let rows = w
-        .elements()
-        .await
-        .map_err(UniqueLabelTapError::BeforeDispatch)?;
+    let rows = unique_target_rows(w).await?;
     let (index, x, y) = label_tap_target(&rows, label, kind, request)?;
     let off_screen = center_off_screen(&rows, index);
     if off_screen || (!allows_occluded(request) && center_covered(&rows, index)) {
-        if let Some(clicked) = reveal_and_click(w, &rows[index], off_screen).await {
+        if let Some(clicked) = reveal_and_click(w, &rows[index]).await {
             return clicked.map_err(|error| match error {
+                RevealError::ScopeUnproven => UniqueLabelTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT),
                 RevealError::Occluded => {
                     UniqueLabelTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
                 }
@@ -8440,10 +8449,11 @@ async fn reused_row_is_live(w: &mut crate::runner::RunnerClient, row: &crate::ru
     else {
         return false;
     };
-    let Ok(ids) = w.find_elements(using, &value).await else {
+    let Ok(matches) = w.find_element_matches(using, &value).await else {
         return false;
     };
-    let [id] = ids.as_slice() else {
+    if !matches.coverage.is_complete() { return false; }
+    let [id] = matches.ids.as_slice() else {
         return false;
     };
     matches!(w.element_rect(id).await, Ok(rect) if rects_match(rect, row.rect))
@@ -8781,15 +8791,15 @@ const ELEMENT_OFF_SCREEN_HINT: &str = "nothing was sent: the element is outside 
 async fn reveal_and_click(
     w: &mut crate::runner::RunnerClient,
     row: &crate::runner::ElementRow,
-    was_off_screen: bool,
 ) -> Option<Result<(), RevealError>> {
     let (using, value) = snapshot_row_locator(row)
         .as_ref()
         .and_then(locator_runner_query)?;
-    let ids = w.find_elements(using, &value).await.ok()?;
-    let [id] = ids.as_slice() else {
-        return None;
+    let matches = match w.find_element_matches(using, &value).await {
+        Ok(matches) if matches.coverage.is_complete() => matches,
+        _ => return Some(Err(RevealError::ScopeUnproven)),
     };
+    let [id] = matches.ids.as_slice() else { return Some(Err(RevealError::ScopeUnproven)); };
     reveal_element(w, id).await;
     // The scroll can fail, or the row can have nowhere to go (last row of a
     // list): look again before touching. A click on a centre that is still
@@ -8797,9 +8807,10 @@ async fn reveal_and_click(
     // (agent-loop A/B, iPhone 13: "tapped 通用", stayed on Settings).
     // A target that was off the screen must be proven on screen now; without
     // that proof the click would touch nothing and still answer ok.
-    match w.elements().await {
-        Ok(rows) => match same_row(&rows, row) {
+    match w.element_snapshot().await {
+        Ok(snapshot) if snapshot.coverage.is_complete() => match same_row(&snapshot.rows, row) {
             Some(index) => {
+                let rows = snapshot.rows;
                 if center_off_screen(&rows, index) {
                     return Some(Err(RevealError::OffScreen));
                 }
@@ -8813,23 +8824,23 @@ async fn reveal_and_click(
                     });
                 }
             }
-            None if was_off_screen => return Some(Err(RevealError::OffScreen)),
-            None => {}
+            None => return Some(Err(RevealError::Dispatch(anyhow::anyhow!("target no longer unique after reveal; no further tap sent")))),
         },
-        Err(_) if was_off_screen => return Some(Err(RevealError::OffScreen)),
-        Err(_) => {}
+        _ => return Some(Err(RevealError::Dispatch(anyhow::anyhow!("target scope unproven after reveal; no further tap sent")))),
     }
     Some(w.click_element(id).await.map_err(RevealError::Dispatch))
 }
 
 /// Why a covered or off-screen target was not clicked after revealing it.
 enum RevealError {
+    /// The live lookup cannot establish a complete unique target, before reveal.
+    ScopeUnproven,
     /// Still fully covered after the scroll: nothing was sent.
     Occluded,
     /// Still off the screen (or not provably on it) after the scroll:
     /// nothing was sent.
     OffScreen,
-    /// The click (or clear-point tap) was sent and failed.
+    /// A reveal or tap was attempted; a later failure cannot authorize replay.
     Dispatch(anyhow::Error),
 }
 
@@ -8873,6 +8884,23 @@ async fn reveal_element(w: &mut crate::runner::RunnerClient, id: &str) {
     }
 }
 
+fn unique_locator_index(rows: &[crate::runner::ElementRow], locator: &AgentElementLocator) -> Result<usize, UniqueLabelTapError> {
+    let mut known = Vec::new();
+    let mut unproven = false;
+    for (index, row) in rows.iter().enumerate() {
+        match agent_locator_assessment(row, locator) {
+            Some(true) => known.push(index),
+            None => unproven = true,
+            Some(false) => {}
+        }
+        if known.len() > 1 { return Err(UniqueLabelTapError::Ambiguous(None)); }
+    }
+    if unproven {
+        return Err(UniqueLabelTapError::Refused("target_state_unproven", "Nothing was sent: another row may match this locator because its requested value or state is unavailable."));
+    }
+    known.first().copied().ok_or(UniqueLabelTapError::NotFound)
+}
+
 async fn tap_unique_locator(
     w: &mut crate::runner::RunnerClient,
     locator: &AgentElementLocator,
@@ -8881,47 +8909,16 @@ async fn tap_unique_locator(
     // Same reuse as label taps: a recent untouched tree may prove uniqueness,
     // and the live lookup below (exactly one element, same frame) proves the
     // target; otherwise read afresh.
-    // The unique match's index in `rows`; `Err(true)` when several match.
-    fn unique_match(
-        rows: &[crate::runner::ElementRow],
-        locator: &AgentElementLocator,
-    ) -> Result<usize, bool> {
-        let mut matches = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| agent_locator_matches(row, locator));
-        match (matches.next(), matches.next()) {
-            (Some((index, _)), None) => Ok(index),
-            (None, _) => Err(false),
-            _ => Err(true),
-        }
-    }
     let reused = w.recent_tree(SNAPSHOT_TREE_REUSE).and_then(|rows| {
-        unique_match(&rows, locator).ok().map(|index| {
-            (
-                rows[index].rect,
-                needs_reveal(&rows, index),
-                center_off_screen(&rows, index),
-            )
-        })
+        unique_locator_index(&rows, locator).ok().map(|index| (rows[index].rect, needs_reveal(&rows, index)))
     });
-    let (reused_rect, covered, off_screen) = match reused {
-        Some((rect, covered, off_screen)) => (Some(rect), covered, off_screen),
+    let (reused_rect, covered) = match reused {
+        Some((rect, covered)) => (Some(rect), covered),
         None => {
             w.forget_tree();
-            let rows = w
-                .elements()
-                .await
-                .map_err(UniqueLabelTapError::BeforeDispatch)?;
-            match unique_match(&rows, locator) {
-                Ok(index) => (
-                    None,
-                    needs_reveal(&rows, index),
-                    center_off_screen(&rows, index),
-                ),
-                Err(false) => return Err(UniqueLabelTapError::NotFound),
-                Err(true) => return Err(UniqueLabelTapError::Ambiguous(None)),
-            }
+            let rows = unique_target_rows(w).await?;
+            let index = unique_locator_index(&rows, locator)?;
+            (None, needs_reveal(&rows, index))
         }
     };
 
@@ -8933,11 +8930,12 @@ async fn tap_unique_locator(
     // click action instead. Requiring exactly one returned element preserves
     // the fail-closed uniqueness contract across the second lookup.
     let (using, value) = locator_runner_query(locator).ok_or(UniqueLabelTapError::InvalidTarget)?;
-    let element_ids = w
-        .find_elements(using, &value)
-        .await
+    let matches = w.find_element_matches(using, &value).await
         .map_err(UniqueLabelTapError::BeforeDispatch)?;
-    let element_id = match element_ids.as_slice() {
+    if !matches.coverage.is_complete() {
+        return Err(UniqueLabelTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT));
+    }
+    let element_id = match matches.ids.as_slice() {
         [element_id] => element_id,
         // The reused tree is the doubt, not the locator: read afresh.
         _ if reused_rect.is_some() => {
@@ -8963,36 +8961,21 @@ async fn tap_unique_locator(
         // provably on it) must not be either — the click would touch nothing
         // and answer ok.
         let off_screen_refusal = || {
-            Err(UniqueLabelTapError::Refused(
-                "element_not_visible",
-                ELEMENT_OFF_SCREEN_HINT,
-            ))
+            Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target not visible after reveal; no further tap sent")))
         };
-        match w.elements().await {
-            Ok(rows) => match unique_match(&rows, locator) {
-                Ok(index) => {
-                    if center_off_screen(&rows, index) {
-                        return off_screen_refusal();
-                    }
-                    if center_covered(&rows, index) {
-                        return match clear_tap_point(&rows, index) {
-                            Some((x, y)) if point_on_screen(&rows, x, y) => w
-                                .tap_point(x, y)
-                                .await
-                                .map_err(UniqueLabelTapError::AfterDispatch),
-                            Some(_) => off_screen_refusal(),
-                            None => Err(UniqueLabelTapError::Refused(
-                                "element_occluded",
-                                ELEMENT_OCCLUDED_HINT,
-                            )),
-                        };
-                    }
-                }
-                Err(_) if off_screen => return off_screen_refusal(),
-                Err(_) => {}
-            },
-            Err(_) if off_screen => return off_screen_refusal(),
-            Err(_) => {}
+        let snapshot = w.element_snapshot().await.map_err(UniqueLabelTapError::AfterDispatch)?;
+        if !snapshot.coverage.is_complete() {
+            return Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target scope unproven after reveal; no further tap sent")));
+        }
+        let rows = snapshot.rows;
+        let index = unique_locator_index(&rows, locator).map_err(|_| UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target no longer unique after reveal; no further tap sent")))?;
+        if center_off_screen(&rows, index) { return off_screen_refusal(); }
+        if center_covered(&rows, index) {
+            return match clear_tap_point(&rows, index) {
+                Some((x, y)) if point_on_screen(&rows, x, y) => w.tap_point(x, y).await.map_err(UniqueLabelTapError::AfterDispatch),
+                Some(_) => off_screen_refusal(),
+                None => Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target occluded after reveal; no further tap sent"))),
+            };
         }
     }
     if via_point {
@@ -9004,17 +8987,14 @@ async fn tap_unique_locator(
         let [x, y, width, height] = w
             .element_rect(element_id)
             .await
-            .map_err(UniqueLabelTapError::BeforeDispatch)?;
+            .map_err(|error| if covered { UniqueLabelTapError::AfterDispatch(error) } else { UniqueLabelTapError::BeforeDispatch(error) })?;
         if !(width > 0.0 && height > 0.0) {
-            return Err(UniqueLabelTapError::InvalidTarget);
+            return Err(if covered { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("invalid target after reveal")) } else { UniqueLabelTapError::InvalidTarget });
         }
         let (cx, cy) = (x + width / 2.0, y + height / 2.0);
         if let Ok((screen_w, screen_h)) = w.window_size().await {
             if !(0.0..=screen_w).contains(&cx) || !(0.0..=screen_h).contains(&cy) {
-                return Err(UniqueLabelTapError::Refused(
-                    "element_not_visible",
-                    ELEMENT_OFF_SCREEN_HINT,
-                ));
+                return Err(if covered { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target not visible after reveal")) } else { UniqueLabelTapError::Refused("element_not_visible", ELEMENT_OFF_SCREEN_HINT) });
             }
         }
         return w
@@ -9023,7 +9003,7 @@ async fn tap_unique_locator(
             .map_err(UniqueLabelTapError::AfterDispatch);
     }
     w.click_element(element_id).await.map_err(|error| {
-        if runner_error_is_missing_element(&error) {
+        if !covered && runner_error_is_missing_element(&error) {
             UniqueLabelTapError::NotFound
         } else {
             UniqueLabelTapError::AfterDispatch(error)
@@ -11620,10 +11600,6 @@ fn agent_locator_assessment(row: &crate::runner::ElementRow, locator: &AgentElem
         }
     }
     if unknown { None } else { Some(true) }
-}
-
-fn agent_locator_matches(row: &crate::runner::ElementRow, locator: &AgentElementLocator) -> bool {
-    agent_locator_assessment(row, locator) == Some(true)
 }
 
 /// Label of the frontmost app as the flattened tree reports it: the single
@@ -21519,6 +21495,18 @@ fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unknown_candidate_state_cannot_prove_a_locator_unique() {
+        use crate::runner::ElementRow;
+        let locator: super::AgentElementLocator = serde_json::from_value(serde_json::json!({"label":"Done","value":"saved"})).unwrap();
+        let known = ElementRow { label: "Done".into(), value: Some("saved".into()), ..Default::default() };
+        let unknown = ElementRow { label: "Done".into(), value: Some("prefix".into()), value_truncated: Some(true), ..Default::default() };
+        assert!(matches!(super::unique_locator_index(&[known.clone(), unknown.clone()], &locator), Err(super::UniqueLabelTapError::Refused("target_state_unproven", _))));
+        assert!(matches!(super::unique_locator_index(&[unknown], &locator), Err(super::UniqueLabelTapError::Refused("target_state_unproven", _))));
+        assert!(matches!(super::unique_locator_index(&[known.clone(), known.clone()], &locator), Err(super::UniqueLabelTapError::Ambiguous(_))));
+        assert!(matches!(super::unique_locator_index(&[known], &locator), Ok(0)));
+    }
+
     #[test]
     fn cancelled_list_swipe_retains_exactly_one_uncertain_receipt() {
         tokio::runtime::Builder::new_current_thread()

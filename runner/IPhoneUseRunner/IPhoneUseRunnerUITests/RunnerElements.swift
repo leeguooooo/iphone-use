@@ -14,8 +14,9 @@ final class UINode {
   private(set) var children: [UINode] = []
   private(set) weak var parent: UINode?
   let pid: Int32
+  let treeComplete: Bool
 
-  init(raw: [String: Any], parent: UINode?, pid: Int32) {
+  init(raw: [String: Any], parent: UINode?, pid: Int32, treeComplete: Bool = false) {
     var attributes = raw
     attributes.removeValue(forKey: "children")
     let element = attributes.removeValue(forKey: IPURNodeAXElementKey)
@@ -23,6 +24,7 @@ final class UINode {
     self.axElement = element as AnyObject?
     self.parent = parent
     self.pid = pid
+    self.treeComplete = parent?.treeComplete ?? treeComplete
     children = (raw["children"] as? [[String: Any]] ?? []).map { UINode(raw: $0, parent: self, pid: pid) }
   }
 
