@@ -204,10 +204,12 @@ def main():
         assert value['touches'] == 0 and type(value['touches']) is int, 'unexpected touch'
         return value
 
-    def focus(wanted):
+    def focus(wanted, caret_utf16=None):
         nonlocal sequence
         sequence += 1
         command = {'run_id': nonce, 'pid': expected_pid, 'sequence': sequence, 'focused': wanted}
+        if caret_utf16 is not None:
+            command['caret_utf16'] = caret_utf16
         save('focus-commands/' + str(sequence) + '/request.json', command)
         temporary = data_dir / 'state-command.tmp'
         temporary.write_text(json.dumps(command))
@@ -219,6 +221,9 @@ def main():
             samples.append(value)
             save('focus-commands/' + str(sequence) + '/samples.json', samples)
             if focus_confirmed(value, sequence, wanted):
+                if caret_utf16 is not None:
+                    field = value['controls']['state.field']
+                    assert field.get('selection_location') == caret_utf16 and field.get('selection_length') == 0, 'fixture caret was not confirmed'
                 return value
             receipt = value.get('focus_command')
             if isinstance(receipt, dict) and receipt.get('sequence') == sequence and receipt.get('acknowledged') is False:
@@ -352,12 +357,14 @@ def main():
             result['cases'].append({'name': 'input-500', 'passed': True, 'characters': 500,
                 'sha256': hashlib.sha256(payload.encode()).hexdigest(), 'continuation_calls': continuations,
                 'continuation_exercised': continuations > 0, 'consumed_token_replay_checked': replay_checked})
+            focus(True, caret_utf16=250)
+            save('input-middle-caret-before-replace.json', inspect_text(payload))
             literal = 'literal-\ue007-\ue003-👋🏻'
             after, literal_continuations, _ = complete_text(literal,
                 {'type': 'text', 'text': literal, 'clear': True}, 'literal')
             save('input-literal-state.json', after)
             result['cases'].append({'name': 'literal-private-unicode', 'passed': True,
-                'characters': len(literal), 'sha256': hashlib.sha256(literal.encode()).hexdigest(), 'return_events': 0, 'continuation_calls': literal_continuations})
+                'characters': len(literal), 'sha256': hashlib.sha256(literal.encode()).hexdigest(), 'return_events': 0, 'continuation_calls': literal_continuations, 'replacement_from_middle': True})
         for name, identifier, field, expected in ([] if args.type_text else CASES):
             if name in ('focus-on', 'focus-off'):
                 focus(expected)
