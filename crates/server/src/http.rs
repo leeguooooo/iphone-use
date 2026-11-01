@@ -8908,6 +8908,7 @@ async fn send_checked_target_tap(
     match w.checked_element_tap(id, expected, point).await {
         Ok(CheckedTapOutcome::Applied) => Ok(()),
         Ok(CheckedTapOutcome::TargetChanged) if !revealed => Err(UniqueLabelTapError::Refused("target_changed", "Target changed after its frame was checked; no tap sent. Read again before a new action.")),
+        Ok(CheckedTapOutcome::CheckFailed) if !revealed => Err(UniqueLabelTapError::Refused("target_check_failed", "Native target preconditions could not be established; no tap sent.")),
         Ok(CheckedTapOutcome::Unsupported) if !revealed => Err(UniqueLabelTapError::Refused("runner_update_required", "Update the Native Runner to support checked target taps; no tap sent.")),
         Ok(_) => Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("checked target refused after reveal; no further tap sent"))),
         Err(error) => Err(UniqueLabelTapError::AfterDispatch(error)),

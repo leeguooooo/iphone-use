@@ -393,14 +393,21 @@ extension RunnerTests {
   }
 
   private func checkedTapElement(_ id: String, _ request: HTTPRequest) throws -> HTTPResponse {
-    let plan = try CheckedElementTap(request.jsonObject())
-    let node = try freshNode(id)
-    guard node.axElement != nil else {
-      throw RunnerError(status: 409, code: "target changed", message: "live target unavailable; no tap sent")
+    let point: CGPoint
+    do {
+      let plan = try CheckedElementTap(request.jsonObject())
+      let screen = windowSizePoints()
+      let node = try freshNode(id)
+      guard node.axElement != nil else {
+        throw RunnerError(status: 409, code: "target changed", message: "live target unavailable; no tap sent")
+      }
+      point = try plan.point(live: node.rect, screen: screen)
+    } catch {
+      var response = HTTPResponse.from(error)
+      response.headers["X-IPU-Tap-Phase"] = "not_sent"
+      return response
     }
-    let point = try plan.point(live: node.rect, screen: windowSizePoints())
-    // No internal scroll or alternate implementation: after this boundary an
-    // error may follow input, and the host must never replay or fall back.
+    // No internal scroll or alternate implementation after the event boundary.
     do { try tapPoint(point) }
     catch { throw RunnerError.failed("checked tap outcome unknown after dispatch; no automatic retry") }
     return .value(NSNull())

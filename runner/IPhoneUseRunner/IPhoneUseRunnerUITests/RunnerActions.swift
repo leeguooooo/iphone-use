@@ -60,8 +60,8 @@ struct CheckedElementTap {
       throw RunnerError(status: 409, code: "target changed", message: "target frame changed; no tap sent")
     }
     let point = requestedPoint ?? CGPoint(x: live.midX, y: live.midY)
-    guard point.x >= live.minX, point.x <= live.maxX, point.y >= live.minY, point.y <= live.maxY,
-          TapBounds.onScreen(point, screen) else {
+    guard point.x >= live.minX, point.x < live.maxX, point.y >= live.minY, point.y < live.maxY,
+          point.x >= 0, point.y >= 0, point.x < screen.width, point.y < screen.height else {
       throw RunnerError(status: 409, code: "target changed", message: "checked point is no longer valid; no tap sent")
     }
     return point

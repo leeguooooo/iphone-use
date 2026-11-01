@@ -46,6 +46,14 @@ for body: [String:Any] in [
 let outside = try CheckedElementTap(["expected_rect":[16,180,358,36],"point":[2,2]])
 do { _ = try outside.point(live:live,screen:screen); require(false,"outside point accepted") }
 catch let error as RunnerError { require(error.status == 409, "wrong outside-point refusal") }
+for point in [[374,198],[195,216]] {
+  let edge = try CheckedElementTap(["expected_rect":[16,180,358,36],"point":point])
+  do { _ = try edge.point(live:live,screen:screen); require(false,"exclusive target edge accepted") }
+  catch let error as RunnerError { require(error.status == 409,"wrong target edge refusal") }
+}
+let screenEdge = try CheckedElementTap(["expected_rect":[370,100,40,40],"point":[390,120]])
+do { _ = try screenEdge.point(live:CGRect(x:370,y:100,width:40,height:40),screen:screen); require(false,"exclusive screen edge accepted") }
+catch let error as RunnerError { require(error.status == 409,"wrong screen edge refusal") }
 print("Native checked tap: \(checks) assertions passed; no input delivered")
 '''
 with tempfile.TemporaryDirectory(prefix='ipu-checked-tap-') as folder:
