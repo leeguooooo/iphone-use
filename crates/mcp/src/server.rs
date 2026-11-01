@@ -151,7 +151,9 @@ pub struct ElementsParams {
     #[serde(default)]
     pub query: Option<String>,
     /// Literal case-sensitive field filters combined with AND; preserves original snapshot indexes.
-    /// Requires at least one field; filters AX elements, not separate OCR text.
+    /// Requires literal criteria; optional index0..199 chooses one match in scoped/query tree order before limit.
+    /// Row index remains the full snapshot index; incomplete or unknown earlier matches refuse an unproven rank.
+    /// Filters AX elements, not separate OCR text.
     #[serde(default)]
     pub selector: Option<iu_core::element_selector::ElementSelector>,
     /// Return at most this many rows; the answer says how many were left out.
@@ -1727,7 +1729,7 @@ impl PhoneHandler {
         `snapshot` token for phone_tap_element; indexes and snapshot tokens are valid for this read \
         only. `query` keeps only rows containing that text (label, identifier, value, placeholder) \
         and `limit` caps the rows. `selector` ANDs exact kind/identifier/name/label/value/enabled \
-        fields and case-sensitive label_contains; name matches a non-empty identifier, otherwise the label; value_present checks whether the snapshot supplies a string value \
+        fields and case-sensitive label_contains; optional selector.index (integer0..199) selects one match after scope/query and before limit, retaining the original snapshot row index. Unknown earlier candidates or incomplete tree scope refuse the ordinal. name matches a non-empty identifier, otherwise the label; value_present checks whether the snapshot supplies a string value \
         (including empty/truncated); false means omitted/null on non-secure rows, not a complete AX null; protected SecureTextField rows match neither boolean. It filters AX rows, not OCR. Queries preserve \
         each row's index and the snapshot, so taps still \
         work. Screen text shows at most 200 rows and 32 KiB of row text; an omission notice \
@@ -1838,6 +1840,17 @@ impl PhoneHandler {
             }
             Err(e) => {
                 self.progress_reset();
+                if let Some(error)=e.downcast_ref::<crate::client::DaemonHttpError>() {
+                    if error.status==reqwest::StatusCode::CONFLICT {
+                        if let Ok(body)=serde_json::from_str::<serde_json::Value>(&error.body) {
+                            if body.get("error").and_then(serde_json::Value::as_str)==Some("ordinal_unproven") {
+                                let mut result=CallToolResult::error(vec![Content::text(body.to_string())]);
+                                result.structured_content=Some(body);
+                                return result;
+                            }
+                        }
+                    }
+                }
                 CallToolResult::error(vec![Content::text(format!(
                     "elements failed: {e:#}. Call phone_status and follow its `hint`; do not retry \
                      in a loop."
@@ -6203,12 +6216,12 @@ mod tests {
     #[test]
     fn element_selector_is_encoded_literally_and_preserves_snapshot_indexes() {
         let selector: iu_core::element_selector::ElementSelector = serde_json::from_value(
-            serde_json::json!({"kind":"Button", "identifier":"save.primary", "name":"save.primary", "label":"保存\n'O\\K'", "enabled":false,"value_present":false})
+            serde_json::json!({"kind":"Button", "identifier":"save.primary", "name":"save.primary", "label":"保存\n'O\\K'", "enabled":false,"value_present":false,"index":1})
         ).unwrap();
         let expected = serde_json::to_value(&selector).unwrap();
         let body=serde_json::json!({"snapshot":"S", "elements":[
             {"index":17,"kind":"Button","label":"保存", "enabled":false}
-        ], "filter":{"matched":1,"returned":1,"omitted":0,"selector":expected}});
+        ], "filter":{"matched":2,"returned":1,"omitted":1,"selector":expected}});
         let (result,line,_,_)=device_call("200 OK", &body.to_string(), |h| async move {
             h.phone_elements(Parameters(ElementsParams {selector:Some(selector),..Default::default()})).await
         });
@@ -6240,8 +6253,21 @@ mod tests {
         assert!(object["properties"]["enabled"].to_string().contains("boolean"));
         assert!(object["properties"]["value_present"].to_string().contains("boolean"));
         assert!(object["properties"]["name"].to_string().contains("string"));
-        assert_eq!(object["properties"].as_object().unwrap().len(),8);
+        assert_eq!(object["properties"].as_object().unwrap().len(),9);
+        let index=resolve(&schema,&object["properties"]["index"]);
+        assert_eq!(index["type"],"integer");assert_eq!(index["minimum"],0);assert_eq!(index["maximum"],199);
+        assert!(!object["required"].as_array().is_some_and(|fields|fields.iter().any(|v|v=="index")));
         assert!(object["properties"].get("predicate").is_none());
+    }
+
+    #[test]
+    fn ordinal_unproven_is_structured_error_without_channel_recovery_advice() {
+        let body=serde_json::json!({"ok":false,"error":"ordinal_unproven","elements":[],"hint":"refine exact criteria ".repeat(150),"filter":{"ordinal_status":"unproven"}});
+        let (result,_,_,_)=device_call("409 Conflict",&body.to_string(),|h|async move {
+            h.phone_elements(Parameters(ElementsParams {selector:Some(serde_json::from_value(serde_json::json!({"label":"Save","index":1})).unwrap()),..Default::default()})).await
+        });
+        assert_eq!(result.is_error,Some(true));assert_eq!(result.structured_content,Some(body));
+        assert!(!refused_offline(result).contains("phone_status"));
     }
 
     #[test]

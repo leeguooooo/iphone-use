@@ -159,7 +159,7 @@ pub fn parse_selector(raw: Option<&str>) -> Result<Option<core::element_selector
         return Err(json!({"ok":false,"error":"invalid_selector","hint":"selector JSON is at most 16 KiB"}));
     }
     let selector: core::element_selector::ElementSelector = serde_json::from_str(raw)
-        .map_err(|_| json!({"ok":false,"error":"invalid_selector","hint":"selector must be a JSON object containing kind, identifier, name, label, label_contains, value, boolean value_present or enabled"}))?;
+        .map_err(|_| json!({"ok":false,"error":"invalid_selector","hint":"selector must be a JSON object containing literal criteria and optional integer index0..199; fields kind, identifier, name, label, label_contains, value, boolean value_present or enabled"}))?;
     selector.validate().map_err(|hint| json!({"ok":false,"error":"invalid_selector","hint":hint}))?;
     Ok(Some(selector))
 }
@@ -183,6 +183,10 @@ pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>, selec
     let Some(rows) = json.get("elements").and_then(Value::as_array).cloned() else {
         return;
     };
+    if let Some(selector) = selector.filter(|selector| selector.index.is_some()) {
+        filter_ordinal(json, rows, query, limit, selector);
+        return;
+    }
     let total = rows.len();
     let needle = query.map(|q| q.trim().to_lowercase());
     let matched: Vec<Value> = rows
@@ -229,6 +233,58 @@ pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>, selec
         );
     }
     json["filter"] = summary;
+}
+
+fn ordinal_query_assessment(row: &Value, needle: &str) -> Option<bool> {
+    if needle.is_empty() {return Some(true);}
+    if ["label","identifier","placeholder"].iter().filter_map(|key|row.get(*key).and_then(Value::as_str))
+        .any(|value|value.to_lowercase().contains(needle)) {return Some(true);}
+    let protected=row.get("kind").and_then(Value::as_str).is_some_and(|kind|kind.strip_prefix("XCUIElementType").unwrap_or(kind)=="SecureTextField");
+    if protected || row.get("snapshot_value_unavailable").is_some_and(|flag|flag!=&Value::Bool(false))
+        || row.get("value_truncated").is_some_and(|flag|flag!=&Value::Bool(false))
+        || row.get("value").is_some_and(|value|!matches!(value,Value::Null|Value::String(_))) {return None;}
+    Some(row.get("value").and_then(Value::as_str).is_some_and(|value|value.to_lowercase().contains(needle)))
+}
+
+fn filter_ordinal(json: &mut Value, mut rows: Vec<Value>, query: Option<&str>, limit: Option<usize>, selector: &core::element_selector::ElementSelector) {
+    use core::match_ordinal::OrdinalSelection;
+    let ordinal = selector.index.expect("ordinal branch");
+    let needle = query.map(|text|text.trim().to_lowercase());
+    for (position,row) in rows.iter_mut().enumerate() {
+        if row.is_object() && row.get("index").is_none() { row["index"]=json!(position); }
+    }
+    let assessments:Vec<_>=rows.iter().map(|row| {
+        if !row.is_object() {return None;}
+        let fields=selector.assess(row);
+        if fields==Some(false) {return Some(false);}
+        let query=needle.as_deref().map_or(Some(true),|text|ordinal_query_assessment(row,text));
+        match (fields,query) {(_,Some(false))=>Some(false),(Some(true),Some(true))=>Some(true),_=>None}
+    }).collect();
+    let complete=json.get("coverage").and_then(Value::as_str)==Some("complete") && !truthy(json,"partial") && !truthy(json,"sparse") && !truthy(json,"stale");
+    let selection=ordinal.select(&assessments,complete);
+    let known=assessments.iter().filter(|state|**state==Some(true)).count();
+    let unknown=assessments.iter().filter(|state|state.is_none()).count();
+    let mut selected=Vec::new();
+    let status=match selection {
+        OrdinalSelection::Selected(position)=>{selected.push(rows[position].clone());"selected"},
+        OrdinalSelection::Missing=>"missing",
+        OrdinalSelection::Unproven=>"unproven",
+    };
+    selected.truncate(limit.unwrap_or(usize::MAX));
+    let returned=selected.len();
+    let mut summary=json!({"matched":known,"matched_exact":complete && unknown==0,"unknown_candidates":unknown,
+        "returned":returned,"omitted":known.saturating_sub(returned),"of":rows.len(),"selector":selector,
+        "ordinal":ordinal,"ordinal_status":status,"note":"selector index is match ordinal; row indexes still refer to the full snapshot"});
+    if let Some(query)=query {summary["query"]=query.into();}
+    if let Some(limit)=limit {summary["limit"]=limit.into();}
+    if selection==OrdinalSelection::Unproven {
+        let snapshot=json.get("snapshot").cloned().unwrap_or(Value::Null);
+        let coverage=json.get("coverage").cloned().unwrap_or_else(||json!("unknown"));
+        *json=json!({"ok":false,"error":"ordinal_unproven","elements":[],"snapshot":snapshot,"coverage":coverage,"filter":summary,
+            "hint":"Cannot prove this match's tree-order rank; complete the read or narrow exact criteria to exclude uncertain candidates"});
+    } else {
+        json["elements"]=Value::Array(selected);json["filter"]=summary;
+    }
 }
 
 /// The tree cannot be used at all (no interactive rows, containers only).
@@ -453,6 +509,54 @@ mod tests {
         assert_eq!(tree["elements"][0]["index"],2);
         assert_eq!(tree["filter"]["matched"],1);
         assert_eq!(tree["filter"]["selector"]["enabled"],false);
+    }
+
+    #[test]
+    fn ordinal_filter_selects_match_order_without_reindexing_the_snapshot() {
+        let mut body=json!({"snapshot":"S","coverage":"complete","elements":[
+            {"index":4,"kind":"Button","label":"Save"},
+            {"index":8,"kind":"StaticText","label":"Save"},
+            {"index":13,"kind":"Button","label":"Save"},
+            {"index":17,"kind":"Button","label":"Save"}]});
+        let selector=parse_selector(Some(r#"{"kind":"Button","label":"Save","index":1}"#)).unwrap().unwrap();
+        filter(&mut body,None,Some(1),Some(&selector));
+        assert_eq!(body["snapshot"],"S");assert_eq!(body["elements"].as_array().unwrap().len(),1);
+        assert_eq!(body["elements"][0]["index"],13);assert_eq!(body["filter"]["matched"],3);
+        assert_eq!(body["filter"]["ordinal_status"],"selected");
+    }
+
+    #[test]
+    fn ordinal_query_does_not_hide_unreadable_earlier_values() {
+        let selector=parse_selector(Some(r#"{"kind":"Button","index":0}"#)).unwrap().unwrap();
+        for value in [json!({"value_truncated":true,"value":"preview"}),json!({"snapshot_value_unavailable":true})] {
+            let mut earlier=json!({"kind":"Button","label":"Other"});
+            for (key,value) in value.as_object().unwrap() {earlier[key]=value.clone();}
+            let mut body=json!({"coverage":"complete","elements":[earlier,{"kind":"Button","label":"Find"}]});
+            filter(&mut body,Some("Find"),None,Some(&selector));
+            assert_eq!(body["error"],"ordinal_unproven");
+        }
+        let mut body=json!({"coverage":"complete","elements":[
+            {"kind":"StaticText","label":"Other","snapshot_value_unavailable":true},
+            {"kind":"Button","label":"Find"}]});
+        filter(&mut body,Some("Find"),None,Some(&selector));
+        assert_eq!(body["filter"]["ordinal_status"],"selected");assert_eq!(body["elements"][0]["index"],1);
+    }
+
+    #[test]
+    fn ordinal_filter_refuses_unknown_prefix_or_scope_but_not_unknown_suffix() {
+        let selector=parse_selector(Some(r#"{"label":"Save","enabled":false,"index":0}"#)).unwrap().unwrap();
+        for (elements,coverage,expected) in [
+            (json!([{"label":"Save"},{"label":"Save","enabled":false}]),"complete","unproven"),
+            (json!([{"label":"Save","enabled":false},{"label":"Save"}]),"complete","selected"),
+            (json!([{"label":"Save","enabled":false}]),"truncated","unproven"),
+            (json!([]),"unknown","unproven"),
+            (json!([]),"complete","missing"),
+        ] {
+            let mut body=json!({"snapshot":"S","coverage":coverage,"elements":elements});
+            filter(&mut body,None,None,Some(&selector));
+            assert_eq!(body["filter"]["ordinal_status"],expected,"{body}");
+            assert_eq!(body.get("error").is_some(),expected=="unproven");
+        }
     }
 
     #[test]

@@ -16,6 +16,11 @@ use serde_json::Value;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ElementSelector {
+    /// Zero-based ordinal among matching AX rows, 0..199; not a snapshot row index.
+    /// Requires other criteria and a proven tree-order rank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "crate::match_ordinal::MatchOrdinal"))]
+    pub index: Option<crate::match_ordinal::MatchOrdinal>,
     /// Exact accessibility kind, e.g. Button (XCUIElementTypeButton also accepted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -31,7 +36,7 @@ pub struct ElementSelector {
     /// Case-sensitive substring of the label. Combined with other fields using AND.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_contains: Option<String>,
-    /// Exact exposed accessibility value; known truncated previews never match.
+    /// Exact exposed accessibility value; truncated, unavailable and secure values are unknown, never matches.
     /// An empty string matches a present empty value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
@@ -58,6 +63,7 @@ impl<'de> Deserialize<'de> for ElementSelector {
                 mut map: M,
             ) -> Result<Self::Value, M::Error> {
                 const FIELDS: &[&str] = &[
+                    "index",
                     "kind",
                     "identifier",
                     "name",
@@ -85,7 +91,10 @@ impl<'de> Deserialize<'de> for ElementSelector {
                         Some(value) => serde_json::from_value(value).map(Some).map_err(E::custom),
                     }
                 }
+                let index = fields.remove("index").map(serde_json::from_value)
+                    .transpose().map_err(serde::de::Error::custom)?;
                 Ok(ElementSelector {
+                    index,
                     kind: take(&mut fields, "kind")?,
                     identifier: take(&mut fields, "identifier")?,
                     name: take(&mut fields, "name")?,
@@ -145,50 +154,99 @@ impl ElementSelector {
         Ok(())
     }
 
+    /// Matching an observed field is separate from proving an ordinal's rank.
     pub fn matches(&self, row: &Value) -> bool {
+        self.assess(row) == Some(true)
+    }
+
+    pub fn assess(&self, row: &Value) -> Option<bool> {
         let exact = |field: &str, expected: Option<&str>| {
             expected.is_none_or(|text| row.get(field).and_then(Value::as_str) == Some(text))
         };
-        exact(
-            "kind",
-            self.kind
-                .as_deref()
-                .map(|k| k.strip_prefix("XCUIElementType").unwrap_or(k)),
-        ) && exact("identifier", self.identifier.as_deref())
-            && self.name.as_deref().is_none_or(|expected| {
-                row.get("identifier").and_then(Value::as_str).filter(|id| !id.is_empty())
-                    .or_else(|| row.get("label").and_then(Value::as_str)) == Some(expected)
+        if self.kind.as_deref().is_some_and(|expected| row.get("kind").and_then(Value::as_str).map(|kind|kind.strip_prefix("XCUIElementType").unwrap_or(kind)) != Some(expected.strip_prefix("XCUIElementType").unwrap_or(expected)))
+            || !exact("identifier", self.identifier.as_deref())
+            || !exact("label", self.label.as_deref())
+            || self.name.as_deref().is_some_and(|expected| {
+                row.get("identifier").and_then(Value::as_str).filter(|id|!id.is_empty())
+                    .or_else(||row.get("label").and_then(Value::as_str)) != Some(expected)
             })
-            && exact("label", self.label.as_deref())
-            && exact("value", self.value.as_deref())
-            && (self.value_present.is_none() || row.get("kind").and_then(Value::as_str)
-                .is_none_or(|kind| kind.trim_start_matches("XCUIElementType") != "SecureTextField"))
-            && self.value_present.is_none_or(|expected| {
-                if row.get("snapshot_value_unavailable").is_some_and(|flag| flag != &Value::Bool(false)) { return false; }
+            || self.label_contains.as_deref().is_some_and(|expected| {
+                !row.get("label").and_then(Value::as_str).is_some_and(|label|label.contains(expected))
+            }) { return Some(false); }
+        let mut unknown = false;
+        let unavailable = row.get("snapshot_value_unavailable").is_some_and(|flag|flag != &Value::Bool(false));
+        let truncated = row.get("value_truncated").is_some_and(|flag|flag != &Value::Bool(false));
+        let malformed_value = row.get("value").is_some_and(|value|!matches!(value,Value::Null|Value::String(_)));
+        let secure = row.get("kind").and_then(Value::as_str).is_some_and(|kind|kind.strip_prefix("XCUIElementType").unwrap_or(kind)=="SecureTextField");
+        if let Some(expected) = self.value.as_deref() {
+            if unavailable || secure || truncated || malformed_value {
+                unknown = true;
+            } else if !exact("value",Some(expected)) { return Some(false); }
+        }
+        if let Some(expected) = self.value_present {
+            if unavailable || secure { unknown = true; }
+            else {
                 match row.get("value") {
-                    Some(Value::String(_)) => expected,
-                    None | Some(Value::Null) => !expected
-                        && row.get("value_truncated").and_then(Value::as_bool) != Some(true),
-                    _ => false,
+                    Some(Value::String(_)) if !expected => return Some(false),
+                    Some(Value::String(_)) => {},
+                    None | Some(Value::Null) if !truncated => {
+                        if expected { return Some(false); }
+                    },
+                    _ => unknown = true,
                 }
-            })
-            && (self.value.is_none()
-                || row.get("value_truncated").and_then(Value::as_bool) != Some(true))
-            && self.label_contains.as_deref().is_none_or(|text| {
-                row.get("label")
-                    .and_then(Value::as_str)
-                    .is_some_and(|label| label.contains(text))
-            })
-            && self
-                .enabled
-                .is_none_or(|enabled| row.get("enabled").and_then(Value::as_bool) == Some(enabled))
+            }
+        }
+        if let Some(expected) = self.enabled {
+            match row.get("enabled").and_then(Value::as_bool) {
+                Some(value) if value!=expected => return Some(false),
+                None => unknown=true,
+                _ => {},
+            }
+        }
+        if unknown { None } else { Some(true) }
     }
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ordinal_requires_criteria_and_strict_nonnullable_bounded_index() {
+        for raw in [r#"{"label":"Save","index":0}"#,r#"{"label":"Save","index":199}"#] {
+            let selector:ElementSelector=serde_json::from_str(raw).unwrap();assert!(selector.validate().is_ok());
+            assert!(serde_json::to_value(selector).unwrap().get("index").is_some());
+        }
+        for raw in [r#"{"index":0}"#,r#"{"index":199}"#] {
+            assert!(serde_json::from_str::<ElementSelector>(raw).unwrap().validate().is_err());
+        }
+        for raw in [r#"{"label":"Save","index":null}"#,r#"{"label":"Save","index":true}"#,r#"{"label":"Save","index":200}"#,r#"{"label":"Save","index":-1}"#,r#"{"label":"Save","index":1.5}"#,r#"{"label":"Save","index":0,"index":1}"#] {
+            assert!(serde_json::from_str::<ElementSelector>(raw).is_err(),"{raw}");
+        }
+    }
+
+    #[cfg(feature="schema")]
+    #[test]
+    fn ordinal_schema_is_optional_bounded_and_not_nullable() {
+        let schema=serde_json::to_value(schemars::schema_for!(ElementSelector)).unwrap();
+        let mut index=&schema["properties"]["index"];
+        if let Some(reference)=index.get("$ref").and_then(Value::as_str) {index=schema.pointer(reference.strip_prefix('#').unwrap()).unwrap();}
+        assert_eq!(index["type"],"integer");assert_eq!(index["minimum"],0);assert_eq!(index["maximum"],199);
+        assert!(!schema["required"].as_array().is_some_and(|fields|fields.iter().any(|field|field=="index")));
+    }
+
+    #[test]
+    fn ordinal_assessment_retains_unknown_state_and_known_mismatch() {
+        let selector:ElementSelector=serde_json::from_value(json!({"label":"Save","enabled":false,"index":1})).unwrap();
+        assert_eq!(selector.assess(&json!({"label":"Save"})),None);
+        assert_eq!(selector.assess(&json!({"label":"Other"})),Some(false));
+        assert_eq!(selector.assess(&json!({"label":"Save","enabled":false})),Some(true));
+        assert_eq!(selector.assess(&json!({"kind":"XCUIElementTypeButton","label":"Other"})),Some(false));
+        let value:ElementSelector=serde_json::from_value(json!({"value":"prefix","index":0})).unwrap();
+        for row in [json!({"value":"prefix","value_truncated":true}),json!({"value":"prefix","kind":"SecureTextField"}),json!({"snapshot_value_unavailable":true}),json!({"value":{}}),json!({"value":"prefix","value_truncated":"unknown"})] {assert_eq!(value.assess(&row),None);}
+    }
 
     #[test]
     fn name_prefers_nonempty_identifier_then_label_and_combines_literally() {

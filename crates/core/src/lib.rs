@@ -13,6 +13,7 @@ pub mod runner_auth;
 pub mod value_read;
 pub mod element_selector;
 pub mod wait_selector;
+pub mod match_ordinal;
 
 /// Maximum duration of the single observation selected by a tree wait timeout of zero.
 pub const SINGLE_READ_WAIT_BUDGET_MS: u64 = 500;

@@ -920,6 +920,11 @@ impl DaemonClient {
             .auth(self.http().get(self.url(path)))
             .timeout(ELEMENTS_TIMEOUT);
         let resp = req.send().await?;
+        if selector.is_some_and(|selector|selector.index.is_some()) && resp.status()==reqwest::StatusCode::CONFLICT {
+            let response=read_response(resp).await?;
+            if response.too_large {anyhow::bail!("ordinal read error exceeded the bounded response limit");}
+            return Err(DaemonHttpError {status:reqwest::StatusCode::CONFLICT,body:response.body}.into());
+        }
         let resp = check_status(resp).await?;
         // Bounded like every structured daemon read: a runaway tree is
         // refused, not held in memory.

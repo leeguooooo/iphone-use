@@ -16401,6 +16401,7 @@ async fn agent_elements_unfenced(
     crate::scope::filter(&mut json, filter_query.as_deref(), filter_limit, selector.as_ref());
     let (mut parts, _) = response.into_parts();
     parts.headers.remove(header::CONTENT_LENGTH);
+    if json.get("error").and_then(serde_json::Value::as_str)==Some("ordinal_unproven") {parts.status=StatusCode::CONFLICT;}
     Response::from_parts(parts, Body::from(json.to_string()))
 }
 
@@ -16709,8 +16710,10 @@ async fn agent_elements_inner(
     // sparse. Unknown and redacted secure values never become empty values.
     let include_locator_state = query.locator_state.as_deref() == Some("1");
     let include_enabled = include_locator_state || selector.and_then(|selector| selector.enabled).is_some();
-    let include_value = include_locator_state || selector.is_some_and(|selector| selector.value.is_some() || selector.value_present.is_some());
-    if include_locator_state { body["locator_state"] = 1.into(); body["coverage"] = coverage.as_str().into(); }
+    let ordinal_query=selector.is_some_and(|selector|selector.index.is_some()) && query.query.is_some();
+    let include_value = include_locator_state || ordinal_query || selector.is_some_and(|selector| selector.value.is_some() || selector.value_present.is_some());
+    if include_locator_state { body["locator_state"] = 1.into(); }
+    if include_locator_state || selector.is_some_and(|selector|selector.index.is_some()) {body["coverage"]=coverage.as_str().into();}
     if include_enabled || include_value {
         if let Some(elements) = body.get_mut("elements").and_then(|value| value.as_array_mut()) {
             for (element, row) in elements.iter_mut().zip(rows.iter()) {
@@ -16725,7 +16728,7 @@ async fn agent_elements_inner(
                 }
                 if include_value {
                     if let Some(value) = &row.value { element["value"] = serde_json::json!(value); }
-                    if selector.is_some_and(|selector| selector.value_present.is_some()) && row.value_unavailable {
+                    if (ordinal_query || selector.is_some_and(|selector| selector.value_present.is_some() || selector.value.is_some())) && row.value_unavailable {
                         // Retain normalization failure until matching; otherwise
                         // an unsupported raw value would look like known absence.
                         element["snapshot_value_unavailable"] = true.into();

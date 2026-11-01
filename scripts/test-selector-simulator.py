@@ -20,6 +20,12 @@ EXPECTED_ROWS=[
  {'identifier':LITERAL_ID,'label':'Literal identifier','value':None,'enabled':True,'kind':'Button'},
 ]
 CASES=[
+ ('ordinal-first',{'selector':{'kind':'Button','label':'Save','index':0}},['selector.primary'],3),
+ ('ordinal-second',{'selector':{'kind':'Button','label':'Save','index':1}},['selector.secondary'],3),
+ ('ordinal-third',{'selector':{'kind':'Button','label':'Save','index':2}},['selector.disabled'],3),
+ ('ordinal-shortage',{'selector':{'kind':'Button','label':'Save','index':3}},[],3),
+ ('ordinal-after-query',{'selector':{'kind':'Button','label':'Save','index':0},'query':'disabled'},['selector.disabled'],1),
+ ('ordinal-name',{'selector':{'name':'selector.primary','index':0}},['selector.primary'],1),
  ('identifier-literal',{'selector':{'identifier':LITERAL_ID}},[LITERAL_ID],1),
  ('name-literal',{'selector':{'name':LITERAL_ID}},[LITERAL_ID],1),
  ('identifier-trimmed-differs',{'selector':{'identifier':LITERAL_ID.strip()}},[],0),
