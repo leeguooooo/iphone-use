@@ -347,11 +347,67 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AfcClient<S> {
         Ok((bytes, truncated))
     }
 
+    /// Stream a file into caller-owned staging, writing at most `cap` bytes.
+    /// One extra byte detects growth; it is never written. An error may leave
+    /// an incomplete prefix, which the caller must discard rather than publish.
+    /// Scope checks, source freshness, flushing and publication belong to the caller.
+    pub async fn copy_file<W: AsyncWrite + Unpin>(
+        &mut self,
+        path: &str,
+        cap: usize,
+        output: &mut W,
+    ) -> Result<usize> {
+        let handle = self.open_read(path).await?;
+        let copied = async {
+            let mut written = 0;
+            loop {
+                let remaining = cap - written;
+                let want = remaining.saturating_add(1).min(READ_CHUNK);
+                let chunk = self.read(handle, want).await?;
+                if chunk.is_empty() {
+                    return Ok(written);
+                }
+                if chunk.len() > remaining {
+                    bail!("AFC file exceeds copy byte limit");
+                }
+                output.write_all(&chunk).await?;
+                written += chunk.len();
+            }
+        }
+        .await;
+        let closed = self.close(handle).await;
+        let written = copied?;
+        closed?;
+        Ok(written)
+    }
+
+    /// Copy one regular file whose size and metadata remain unchanged across
+    /// the read. Growth is bounded by the original declared size, not only the
+    /// caller's maximum. This is a checkpoint, not proof a writer has finished.
+    pub async fn copy_regular_file<W: AsyncWrite + Unpin>(
+        &mut self,
+        path: &str,
+        maximum: usize,
+        output: &mut W,
+    ) -> Result<FileInfo> {
+        let before = self.file_info(path).await?;
+        let size = usize::try_from(before.size).context("AFC file size exceeds host range")?;
+        if !before.is_file() || before.modified_ns.is_none() || size > maximum {
+            bail!("AFC source must be a regular file with known modification time within the size limit");
+        }
+        let written = self.copy_file(path, size, output).await?;
+        let after = self.file_info(path).await?;
+        if written != size || before != after {
+            bail!("AFC source changed during copy; discard staging");
+        }
+        Ok(after)
+    }
+
     async fn read_to_cap(&mut self, handle: u64, cap: usize) -> Result<(Vec<u8>, bool)> {
         let mut out = Vec::new();
         // One byte past the cap tells a file of exactly `cap` from a longer one.
         while out.len() <= cap {
-            let want = (cap + 1 - out.len()).min(READ_CHUNK);
+            let want = (cap - out.len()).saturating_add(1).min(READ_CHUNK);
             let chunk = self.read(handle, want).await?;
             if chunk.is_empty() {
                 break;
@@ -575,6 +631,134 @@ mod tests {
     #[test]
     fn read_file_stops_at_the_cap_and_still_closes() {
         block_on(read_file_stops_at_the_cap_and_still_closes_body());
+    }
+
+    #[test]
+    fn streaming_copy_bounds_writes_and_closes_at_each_boundary() {
+        block_on(async {
+            for (cap, chunks, expected, accepted) in [
+                (0, vec![vec![]], vec![], true),
+                (0, vec![b"x".to_vec()], vec![], false),
+                (5, vec![b"12345".to_vec(), vec![]], b"12345".to_vec(), true),
+                (
+                    5,
+                    vec![b"123".to_vec(), b"456".to_vec()],
+                    b"123".to_vec(),
+                    false,
+                ),
+                (usize::MAX, vec![b"x".to_vec(), vec![]], b"x".to_vec(), true),
+            ] {
+                let (host, peer) = tokio::io::duplex(1 << 20);
+                let mut script = vec![(OP_FILE_OPEN_RESULT, 7u64.to_le_bytes().to_vec(), vec![])];
+                for chunk in chunks {
+                    script.push((OP_DATA, vec![], chunk));
+                }
+                script.push((OP_STATUS, 0u64.to_le_bytes().to_vec(), vec![]));
+                let device = tokio::spawn(fake_device(peer, script));
+                let mut client = AfcClient::new(host);
+                let mut output = Vec::new();
+                let result = client.copy_file("/saved.pdf", cap, &mut output).await;
+                assert_eq!(result.is_ok(), accepted, "{result:?}");
+                assert_eq!(output, expected);
+                assert!(output.len() <= cap);
+                if accepted {
+                    assert_eq!(result.unwrap(), expected.len());
+                }
+                let requests = device.await.unwrap();
+                assert_eq!(requests.last().unwrap().operation, OP_FILE_CLOSE);
+                assert!(requests
+                    .iter()
+                    .filter(|request| request.operation == OP_FILE_READ)
+                    .all(|request| u64::from_le_bytes(
+                        request.arguments[8..16].try_into().unwrap()
+                    ) <= READ_CHUNK as u64));
+            }
+        });
+    }
+
+    #[test]
+    fn streaming_output_error_still_closes_the_remote_handle() {
+        block_on(async {
+            let (host, peer) = tokio::io::duplex(1024);
+            let device = tokio::spawn(fake_device(
+                peer,
+                vec![
+                    (OP_FILE_OPEN_RESULT, 7u64.to_le_bytes().to_vec(), vec![]),
+                    (OP_DATA, vec![], b"saved".to_vec()),
+                    (OP_STATUS, 0u64.to_le_bytes().to_vec(), vec![]),
+                ],
+            ));
+            let mut client = AfcClient::new(host);
+            let (mut output, reader) = tokio::io::duplex(1024);
+            drop(reader);
+            assert!(client
+                .copy_file("/saved.pdf", 10, &mut output)
+                .await
+                .is_err());
+            assert_eq!(
+                device.await.unwrap().last().unwrap().operation,
+                OP_FILE_CLOSE
+            );
+        });
+    }
+
+    #[test]
+    fn regular_stream_copy_checks_metadata_and_actual_length() {
+        block_on(async {
+            let metadata = |size, modified| {
+                format!("st_size\0{size}\0st_ifmt\0S_IFREG\0st_mtime\0{modified}\0").into_bytes()
+            };
+            for (payload, after, accepted) in [
+                (b"saved".to_vec(), metadata(5, 123), true),
+                (b"save".to_vec(), metadata(5, 123), false),
+                (b"saved".to_vec(), metadata(5, 124), false),
+                (b"saved".to_vec(), metadata(6, 123), false),
+            ] {
+                let (host, peer) = tokio::io::duplex(4096);
+                let device = tokio::spawn(fake_device(
+                    peer,
+                    vec![
+                        (OP_DATA, vec![], metadata(5, 123)),
+                        (OP_FILE_OPEN_RESULT, 7u64.to_le_bytes().to_vec(), vec![]),
+                        (OP_DATA, vec![], payload.clone()),
+                        (OP_DATA, vec![], vec![]),
+                        (OP_STATUS, 0u64.to_le_bytes().to_vec(), vec![]),
+                        (OP_DATA, vec![], after),
+                    ],
+                ));
+                let mut client = AfcClient::new(host);
+                let mut output = Vec::new();
+                let result = client
+                    .copy_regular_file("/saved.pdf", 100, &mut output)
+                    .await;
+                assert_eq!(result.is_ok(), accepted, "{result:?}");
+                assert_eq!(output, payload);
+                let seen = device.await.unwrap();
+                assert_eq!(seen[2].arguments[8..], 6u64.to_le_bytes());
+            }
+        });
+    }
+
+    #[test]
+    fn regular_stream_copy_refuses_invalid_metadata_before_open() {
+        block_on(async {
+            for metadata in [
+                b"st_size\x006\0st_ifmt\0S_IFREG\0st_mtime\x00123\0".to_vec(),
+                b"st_size\x005\0st_ifmt\0S_IFLNK\0st_mtime\x00123\0".to_vec(),
+                b"st_size\x005\0st_ifmt\0S_IFREG\0".to_vec(),
+            ] {
+                let (host, peer) = tokio::io::duplex(4096);
+                let device = tokio::spawn(fake_device(peer, vec![(OP_DATA, vec![], metadata)]));
+                let mut client = AfcClient::new(host);
+                let mut output = Vec::new();
+                assert!(client
+                    .copy_regular_file("/saved.pdf", 5, &mut output)
+                    .await
+                    .is_err());
+                assert!(output.is_empty());
+                assert_eq!(device.await.unwrap().len(), 1);
+            }
+        });
     }
 
     async fn read_file_stops_at_the_cap_and_still_closes_body() {
