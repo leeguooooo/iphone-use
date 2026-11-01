@@ -118,5 +118,41 @@ class TextState(unittest.TestCase):
             self.assertFalse(oracle.text_state_matches(bad, 'x'))
 
 
+class ContinuationConsumer(unittest.TestCase):
+    def run_case(self, responses):
+        module = ast.parse((HERE / 'test-state-simulator.py').read_text())
+        function = next(node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == 'complete_text')
+        requests, inspected = [], []
+        def call(action, label):
+            requests.append(action.copy())
+            return responses.pop(0)
+        def inspect(text):
+            inspected.append(text)
+            return {'verified_text': text}
+        namespace = {'call_text': call, 'inspect_text': inspect, 'save': lambda *_: None, 're': __import__('re')}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<production-consumer>', 'exec'), namespace)
+        return namespace['complete_text'], requests, inspected
+
+    def test_cleared_but_unsent_text_continues_without_clearing_again(self):
+        text, token = 'literal-' + chr(0xE007), 'a' * 64
+        complete, calls, inspected = self.run_case([
+            {'ok': False, 'error': 'text_partially_typed', 'characters_confirmed': 0,
+             'characters_uncertain': 0, 'continuation_safe': True, 'continue_token': token, 'remaining_text': text},
+            {'ok': True}])
+        result, count, consumed = complete(text, {'type': 'text', 'text': text, 'clear': True}, 'literal')
+        self.assertEqual(count, 1)
+        self.assertEqual(consumed, token)
+        self.assertEqual(calls, [{'type': 'text', 'text': text, 'clear': True}, {'type': 'text', 'continue_token': token}])
+        self.assertEqual(inspected, ['', text])
+        self.assertEqual(result['verified_text'], text)
+
+    def test_uncertain_delivery_never_dispatches_a_continuation(self):
+        complete, calls, _ = self.run_case([{'ok': False, 'error': 'text_partially_typed',
+            'characters_confirmed': 0, 'characters_uncertain': 1, 'continuation_safe': False}])
+        with self.assertRaises(AssertionError):
+            complete('x', {'type': 'text', 'text': 'x'}, 'unknown')
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -278,30 +278,37 @@ def main():
                 return response
 
             inspect_text('')
+            def complete_text(payload, action, label):
+                response = call_text(action, label + '-start')
+                offset = 0
+                remaining = payload
+                seen_tokens = set()
+                last_consumed = None
+                continuations = 0
+                while response.get('ok') is not True:
+                    assert response.get('error') == 'text_partially_typed', 'Native input failed; inspect response; no replay'
+                    assert type(response.get('characters_confirmed')) is int and 0 <= response['characters_confirmed'] <= len(remaining)
+                    assert type(response.get('characters_uncertain')) is int and response['characters_uncertain'] == 0, 'uncertain Native input; no continuation sent'
+                    assert response.get('continuation_safe') is True
+                    token = response.get('continue_token')
+                    assert isinstance(token, str) and re.fullmatch(r'[0-9a-f]{64}', token) and token not in seen_tokens
+                    seen_tokens.add(token)
+                    offset += response['characters_confirmed']
+                    remaining = payload[offset:]
+                    assert response.get('remaining_text') == remaining
+                    boundary = inspect_text(payload[:offset])
+                    save('input/' + label + '-boundary-' + str(continuations) + '.json', boundary)
+                    continuations += 1
+                    assert continuations <= 5, 'continuation did not make bounded progress; no replay'
+                    last_consumed = token
+                    response = call_text({'type': 'text', 'continue_token': token}, label + '-continue-' + str(continuations))
+                after = inspect_text(payload)
+                save('input/' + label + '-complete.json', after)
+                return after, continuations, last_consumed
+
             payload = '字' * 500
-            response = call_text({'type': 'text', 'text': payload, 'budget_ms': 6000}, 'start')
-            offset = 0
-            remaining = payload
-            seen_tokens = set()
-            last_consumed = None
-            continuations = 0
-            while response.get('ok') is not True:
-                assert response.get('error') == 'text_partially_typed', 'Native input failed; inspect response; no replay'
-                assert type(response.get('characters_confirmed')) is int and 0 <= response['characters_confirmed'] <= len(remaining)
-                assert type(response.get('characters_uncertain')) is int and response['characters_uncertain'] == 0, 'uncertain Native input; no continuation sent'
-                assert response.get('continuation_safe') is True
-                token = response.get('continue_token')
-                assert isinstance(token, str) and re.fullmatch(r'[0-9a-f]{64}', token) and token not in seen_tokens
-                seen_tokens.add(token)
-                offset += response['characters_confirmed']
-                remaining = payload[offset:]
-                assert response.get('remaining_text') == remaining
-                inspect_text(payload[:offset])
-                continuations += 1
-                assert continuations <= 5, 'continuation did not make bounded progress; no replay'
-                last_consumed = token
-                response = call_text({'type': 'text', 'continue_token': token}, 'continue-' + str(continuations))
-            after = inspect_text(payload)
+            after, continuations, last_consumed = complete_text(payload,
+                {'type': 'text', 'text': payload, 'budget_ms': 6000}, 'input500')
             save('input-500-state.json', after)
             replay_checked = False
             if last_consumed is not None:
@@ -313,11 +320,11 @@ def main():
                 'sha256': hashlib.sha256(payload.encode()).hexdigest(), 'continuation_calls': continuations,
                 'continuation_exercised': continuations > 0, 'consumed_token_replay_checked': replay_checked})
             literal = 'literal-\ue007-\ue003-👋🏻'
-            response = call_text({'type': 'text', 'text': literal, 'clear': True}, 'literal')
-            assert response.get('ok') is True, 'literal input/clear failed; no replay'
-            save('input-literal-state.json', inspect_text(literal))
+            after, literal_continuations, _ = complete_text(literal,
+                {'type': 'text', 'text': literal, 'clear': True}, 'literal')
+            save('input-literal-state.json', after)
             result['cases'].append({'name': 'literal-private-unicode', 'passed': True,
-                'characters': len(literal), 'sha256': hashlib.sha256(literal.encode()).hexdigest(), 'return_events': 0})
+                'characters': len(literal), 'sha256': hashlib.sha256(literal.encode()).hexdigest(), 'return_events': 0, 'continuation_calls': literal_continuations})
         for name, identifier, field, expected in ([] if args.type_text else CASES):
             if name in ('focus-on', 'focus-off'):
                 focus(expected)
