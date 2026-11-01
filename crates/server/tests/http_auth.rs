@@ -1857,7 +1857,7 @@ fn agent_actions_taps_one_strict_semantic_locator() {
                 r#"{"value":{"x":160,"y":700,"width":70,"height":40}}"#.to_string()
             } else {
                 assert!(
-                    request.contains("/element/SEARCH/click"),
+                    request.contains("/element/SEARCH/ipu/tap"),
                     "unexpected runner request: {request}"
                 );
                 observed_actions.fetch_add(1, Ordering::SeqCst);
@@ -4369,7 +4369,7 @@ fn tap_after_read_with(
         let sources = lines.iter().filter(|l| l.contains("/source")).count();
         let clicked = lines
             .iter()
-            .filter(|l| l.contains("/click") || l.contains("/actions"))
+            .filter(|l| l.contains("/click") || l.contains("/actions") || l.contains("/ipu/tap"))
             .map(|l| l.to_string())
             .collect();
         (status, json, sources, clicked)
