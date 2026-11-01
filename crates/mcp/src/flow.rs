@@ -1185,14 +1185,33 @@ async fn diagnose_failure(
                     .is_some_and(|fields| !fields.is_empty())
         })
         .count();
-    diagnosis["reason"] = serde_json::json!(match (expectation, exact, scored.len()) {
-        ("absent", _, _) if exact >= 1 => "still_present",
-        (_, _, _) if (unproven > 0 || partial) && exact <= 1 => "locator_state_unproven",
-        (_, 1, _) => "locator_matches_now",
-        (_, 0, 0) => "no_similar_element",
-        (_, 0, _) => "locator_no_match",
-        _ => "locator_ambiguous",
-    });
+    let is_wait = matches!(expectation, "present" | "absent");
+    let reason = if is_wait {
+        let parsed_index:Result<Option<iu_core::wait_selector::WaitIndex>,_> = locator.get("index").cloned()
+            .map(serde_json::from_value).transpose();
+        let index=match parsed_index {
+            Ok(value)=>value.unwrap_or_default(),
+            Err(_)=>{diagnosis["observable"]=false.into();diagnosis["reason"]="invalid_wait_selector".into();return Some(diagnosis);}
+        };
+        diagnosis["required_matches"] = index.required_matches().into();
+        match (expectation,index.assess(exact,unproven,!partial)) {
+            ("absent",Some(true)) => "still_present",
+            (_,Some(true)) if !index.is_zero() => "wait_threshold_matches_now",
+            (_,Some(true)) => "locator_matches_now",
+            (_,None) => "locator_state_unproven",
+            (_,Some(false)) if scored.is_empty() => "no_similar_element",
+            _ => "locator_no_match",
+        }
+    } else {
+        match (exact,scored.len()) {
+            _ if (unproven>0 || partial) && exact<=1 => "locator_state_unproven",
+            (1,_) => "locator_matches_now",
+            (0,0) => "no_similar_element",
+            (0,_) => "locator_no_match",
+            _ => "locator_ambiguous",
+        }
+    };
+    diagnosis["reason"] = reason.into();
     diagnosis["exact_matches"] = serde_json::json!(exact);
     diagnosis["unproven_candidates"] = serde_json::json!(unproven);
     diagnosis["candidates"] = serde_json::Value::Array(
@@ -2110,12 +2129,12 @@ mod tests {
             ),
             (
                 serde_json::json!([{"identifier":"save","visible":true},{"identifier":"save"}]),
-                "locator_state_unproven",
+                "locator_matches_now",
                 1,
             ),
             (
                 serde_json::json!([{"identifier":"save","visible":true},{"identifier":"save","visible":true},{"identifier":"save"}]),
-                "locator_ambiguous",
+                "locator_matches_now",
                 2,
             ),
         ] {
@@ -2263,7 +2282,7 @@ mod tests {
             (
                 "present",
                 serde_json::json!([{"identifier":"save","value":"prefix"}]),
-                "locator_state_unproven",
+                "locator_matches_now",
             ),
             (
                 "present",
@@ -2365,6 +2384,70 @@ mod tests {
         assert_eq!(diagnosis["reason"], "single_read_unavailable");
         assert_eq!(diagnosis["reused_observation"], false);
         assert_eq!(diagnosis["budget_ms"], 0);
+    }
+
+    #[tokio::test]
+    async fn wait_ordinal_diagnosis_counts_witnesses_without_weakening_action_uniqueness() {
+        for (kind, locator, rows, reason, required) in [
+            (
+                "wait_for",
+                serde_json::json!({"identifier":"save","index":2}),
+                serde_json::json!([{"identifier":"save"},{"identifier":"save"}]),
+                "locator_no_match",
+                Some(3),
+            ),
+            (
+                "wait_for",
+                serde_json::json!({"identifier":"save","index":2}),
+                serde_json::json!([{"identifier":"save"},{"identifier":"save"},{"identifier":"save"}]),
+                "wait_threshold_matches_now",
+                Some(3),
+            ),
+            (
+                "wait_for",
+                serde_json::json!({"identifier":"save","enabled":true,"index":1}),
+                serde_json::json!([{"identifier":"save","enabled":true},{"identifier":"save"}]),
+                "locator_state_unproven",
+                Some(2),
+            ),
+            (
+                "wait_for",
+                serde_json::json!({"identifier":"save","enabled":true}),
+                serde_json::json!([{"identifier":"save","enabled":true},{"identifier":"save"}]),
+                "locator_matches_now",
+                Some(1),
+            ),
+            (
+                "action",
+                serde_json::json!({"identifier":"save","enabled":true}),
+                serde_json::json!([{"identifier":"save","enabled":true},{"identifier":"save"}]),
+                "locator_state_unproven",
+                None,
+            ),
+        ] {
+            let step = if kind == "wait_for" {
+                serde_json::json!({"kind":"wait_for","expect":{"present":[locator]}})
+            } else {
+                serde_json::json!({"kind":"action","action":{"type":"tap_locator","locator":locator}})
+            };
+            let body = serde_json::json!({"elements":rows}).to_string();
+            let (url, task, _) = mock_daemon_sequence(&[("200 OK", &body)]);
+            let diagnosis = diagnose_failure(
+                Some(&serde_json::json!([step])),
+                &failing_result(0),
+                &DaemonClient::new(url, None),
+            )
+            .await
+            .unwrap();
+            task.join().unwrap();
+            assert_eq!(diagnosis["reason"], reason, "{diagnosis}");
+            assert_eq!(
+                diagnosis
+                    .get("required_matches")
+                    .and_then(serde_json::Value::as_u64),
+                required
+            );
+        }
     }
 
     #[tokio::test]

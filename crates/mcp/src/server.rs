@@ -495,6 +495,8 @@ pub enum PhoneStep {
     Pause { ms: u64 },
 }
 
+type PhoneWaitSelector = iu_core::wait_selector::WaitSelector<PhoneElementLocator>;
+
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PhoneUiExpectation {
@@ -503,10 +505,10 @@ pub struct PhoneUiExpectation {
     pub application: Option<String>,
     /// Every locator in this list must match at least one current element.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub present: Vec<PhoneElementLocator>,
+    pub present: Vec<PhoneWaitSelector>,
     /// Every locator in this list must match no current element.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub absent: Vec<PhoneElementLocator>,
+    pub absent: Vec<PhoneWaitSelector>,
     /// Text that must be visible, read by OCR from screenshots — for canvas
     /// screens (games, Flutter/Unity) whose element tree has no labels, e.g.
     /// waiting out a game's loading screen. Case and spaces are ignored.
@@ -5401,7 +5403,7 @@ mod tests {
                         focused: Some(true),
                         enabled: None,
                         visible: None,
-                    }],
+                    }.into()],
                     absent: vec![],
                     ocr_present: vec![],
                     ocr_absent: vec![],
@@ -5677,6 +5679,49 @@ mod tests {
     }
 
     #[test]
+    fn wait_schema_exposes_a_flat_bounded_nonnullable_index_only_for_waits() {
+        let schema = serde_json::to_value(schemars::schema_for!(PhoneWaitSelector)).unwrap();
+        assert_eq!(schema["additionalProperties"], false, "{schema}");
+        assert!(schema["properties"].get("label_contains").is_some());
+        let field = &schema["properties"]["index"];
+        let index = field
+            .get("$ref")
+            .and_then(serde_json::Value::as_str)
+            .map(|reference| schema.pointer(reference.trim_start_matches('#')).unwrap())
+            .unwrap_or(field);
+        assert_eq!(index["type"], "integer", "{schema}");
+        assert_eq!(index["minimum"].as_f64(), Some(0.0));
+        assert_eq!(index["maximum"].as_f64(), Some(199.0));
+        assert!(!schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|fields| fields.contains(&serde_json::json!("index"))));
+        let action = serde_json::to_value(schemars::schema_for!(PhoneElementLocator)).unwrap();
+        assert!(action["properties"].get("index").is_none());
+    }
+
+    #[test]
+    fn wait_index_is_bounded_and_cannot_be_used_as_an_action_locator() {
+        let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"present":[{"label_contains":"Save","index":2}]},"timeout_ms":0}])).unwrap();
+        let body = phone_steps_request(steps).unwrap();
+        assert_eq!(body["steps"][0]["expect"]["present"][0]["index"], 2);
+        for index in [
+            serde_json::json!(200),
+            serde_json::json!(-1),
+            serde_json::json!(true),
+            serde_json::Value::Null,
+            serde_json::json!(1.5),
+        ] {
+            let steps = serde_json::json!([{"kind":"wait_for","expect":{"present":[{"label":"Save","index":index}]},"timeout_ms":0}]);
+            assert!(serde_json::from_value::<Vec<PhoneStep>>(steps).is_err());
+        }
+        let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"present":[{"index":2}]},"timeout_ms":0}])).unwrap();
+        assert!(phone_steps_request(steps).is_err());
+        let action = serde_json::json!([{"kind":"tap_locator","locator":{"label_contains":"Save","index":1}}]);
+        assert!(serde_json::from_value::<Vec<PhoneStep>>(action).is_err());
+    }
+
+    #[test]
     fn literal_contains_and_single_read_wait_are_encoded_and_budgeted() {
         let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"present":[{"label":"保存\n'O\\K'🙂","label_contains":"'O\\K'"}]},"timeout_ms":0,"poll_ms":50}])).unwrap();
         let body = phone_steps_request(steps).unwrap();
@@ -5747,7 +5792,7 @@ mod tests {
                     focused: None,
                     enabled: None,
                     visible: None,
-                }],
+                }.into()],
                 absent: vec![],
                 ocr_present: vec![],
                 ocr_absent: vec![],

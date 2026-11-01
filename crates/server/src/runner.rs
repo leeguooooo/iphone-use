@@ -866,8 +866,13 @@ impl RunnerClient {
             .get("x-ipu-alert")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let truncated = response.headers().get("x-ipu-truncated")
+            .is_some_and(|value| value.as_bytes() != b"0");
         let body = response.text().await.context("parse /source")?;
-        let value = parse_runner_value(&body, "GET /source")?;
+        let mut value = parse_runner_value(&body, "GET /source")?;
+        if truncated {
+            if let Some(root) = value.as_object_mut() { root.insert("_ipu_tree_truncated".into(), true.into()); }
+        }
         match alert.as_deref() {
             Some("0") => self.no_alert_at = Some(asked_at),
             Some("1") => self.no_alert_at = None,
@@ -2176,13 +2181,18 @@ impl RunnerClient {
     /// it's text — an order of magnitude cheaper, and it carries the labels
     /// needed for [`Self::find_element`]/[`Self::click_element`].
     pub async fn elements(&mut self) -> Result<Vec<ElementRow>> {
+        Ok(self.element_snapshot().await?.rows)
+    }
+
+    pub async fn element_snapshot(&mut self) -> Result<ElementSnapshot> {
         let (tree, lite) = self.bounded_source().await?;
-        Ok(self.rows_from_tree(&tree, lite))
+        let truncated = tree.get("_ipu_tree_truncated").and_then(serde_json::Value::as_bool) == Some(true);
+        Ok(ElementSnapshot {rows:self.rows_from_tree(&tree, lite),truncated})
     }
 
     /// One source request, without the optional full/lite pre-probe or retry.
     /// Used by zero-timeout waits whose one observation must stay one read.
-    pub async fn elements_once(&mut self) -> Result<Vec<ElementRow>> {
+    pub async fn element_snapshot_once(&mut self) -> Result<ElementSnapshot> {
         let skip_probe =
             std::env::var("IPHONE_USE_SOURCE_PROBE").is_ok_and(|value| value.trim() == "0");
         let lite = !skip_probe && !self.full_visibility;
@@ -2195,7 +2205,8 @@ impl RunnerClient {
             .await?;
         self.probe.record(&tree, full_source_max_nodes());
         self.lite_source = lite;
-        Ok(self.rows_from_tree(&tree, lite))
+        let truncated = tree.get("_ipu_tree_truncated").and_then(serde_json::Value::as_bool) == Some(true);
+        Ok(ElementSnapshot {rows:self.rows_from_tree(&tree, lite),truncated})
     }
 
     /// [`Self::elements`] over a depth- and node-capped read
@@ -2939,6 +2950,13 @@ fn snapshot_settings(
         settings.insert("customSnapshotTimeout".to_string(), timeout.into());
     }
     (!settings.is_empty()).then_some(settings)
+}
+
+/// One source observation, with completeness kept beside the rows rather than
+/// inferred from count or lost when the provider's headers are consumed.
+pub struct ElementSnapshot {
+    pub rows: Vec<ElementRow>,
+    pub truncated: bool,
 }
 
 /// One row of the flattened element tree.

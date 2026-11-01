@@ -521,6 +521,27 @@ fn project(source: &serde_json::Value, fields: &[(&str, Projection)]) -> serde_j
     serde_json::Value::Object(out)
 }
 
+fn project_match_counts(value: &serde_json::Value) -> Option<serde_json::Value> {
+    value.as_array().map(|rows| {
+        serde_json::Value::Array(
+            rows.iter()
+                .take(24)
+                .map(|row| {
+                    project(
+                        row,
+                        &[
+                            ("required_matches", count),
+                            ("known_matches", count),
+                            ("unproven_matches", count),
+                            ("complete", flag),
+                        ],
+                    )
+                })
+                .collect(),
+        )
+    })
+}
+
 fn project_observation(value: &serde_json::Value) -> Option<serde_json::Value> {
     value.is_object().then(|| {
         project(
@@ -532,6 +553,9 @@ fn project_observation(value: &serde_json::Value) -> Option<serde_json::Value> {
                 ("attempts", count),
                 ("stale", flag),
                 ("sparse", flag),
+                ("partial", flag),
+                ("present_counts", project_match_counts),
+                ("absent_counts", project_match_counts),
                 ("rows", count),
                 ("application_matches", flag),
                 ("missing_present", indices),
@@ -809,6 +833,16 @@ mod tests {
     }
 
     const FLOW: &str = r#"{"version":1,"name":"Open Health","description":"Launch Health.","app":"com.apple.Health","category":"health","risk":"navigation","locale":"zh-CN","verified_on":[{"device":"iPhone 17 Pro Max","ios":"26","date":"2026-09-05"}],"steps":[{"kind":"launch_app","bundle":"com.apple.Health"}]}"#;
+
+    #[test]
+    fn cardinality_projection_keeps_counts_without_screen_text_or_fake_numbers() {
+        let value = serde_json::json!({"present_counts":[{"required_matches":3,"known_matches":1,"unproven_matches":2,"complete":false,"label":"PRIVATE"}],"absent_counts":[{"required_matches":true,"known_matches":"PRIVATE","complete":true}],"partial":true});
+        let output = project_observation(&value).unwrap();
+        assert_eq!(output["present_counts"][0]["known_matches"], 1);
+        assert_eq!(output["partial"], true);
+        assert!(!output.to_string().contains("PRIVATE"));
+        assert!(output["absent_counts"][0].get("required_matches").is_none());
+    }
 
     #[test]
     fn pr_body_lists_metadata_and_verification() {

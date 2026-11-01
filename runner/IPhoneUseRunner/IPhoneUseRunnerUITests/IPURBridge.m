@@ -829,11 +829,12 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
   }
 
   IPURWalk walk = {.nodeCount = 0, .maxNodes = maxNodes, .truncated = NO, .includeElements = includeElements};
-  NSMutableArray<IPURFrontier *> *leaves = extensionCallLimit > 0 ? [NSMutableArray array] : nil;
+  NSMutableArray<IPURFrontier *> *leaves = [NSMutableArray array];
   NSMutableDictionary *rootNode = IPURSerialize(root, 0, &walk, leaves);
   if (rootNode == nil) {
     return @{IPURTreeOkKey: @NO, IPURTreeErrorKey: @"AX snapshot root could not be serialized"};
   }
+  if (walk.nodeCount >= walk.maxNodes) walk.truncated = YES;
 
   // Re-root the same request at each depth-capped frontier: the depth limit is per request, so
   // this reaches content the app-rooted request could not, without a larger depth parameter.
@@ -847,13 +848,13 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
     IPURFrontier *frontier = frontiers.firstObject;
     [frontiers removeObjectAtIndex:0];
     id element = IPURKVC(frontier.snapshot, @"accessibilityElement");
-    if (element == nil) continue;
+    if (element == nil) { walk.truncated = YES; continue; }
     calls += 1;
     id subRoot = [self requestSnapshotForElement:element
                                         maxDepth:acceptedDepth
                                         maxNodes:maxNodes - walk.nodeCount
                                            error:NULL];
-    if (subRoot == nil) continue;
+    if (subRoot == nil) { walk.truncated = YES; continue; }
     NSMutableArray<IPURFrontier *> *subLeaves = [NSMutableArray array];
     NSMutableArray *children = [NSMutableArray array];
     for (id child in IPURChildren(subRoot)) {
@@ -892,6 +893,7 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
   if (rootNode == nil) {
     return @{IPURTreeOkKey: @NO, IPURTreeErrorKey: @"snapshot could not be serialized"};
   }
+  if (walk.nodeCount >= walk.maxNodes) walk.truncated = YES;
   return @{
     IPURTreeOkKey: @YES,
     IPURTreeRootKey: rootNode,

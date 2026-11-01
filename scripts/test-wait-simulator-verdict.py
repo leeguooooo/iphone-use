@@ -78,4 +78,14 @@ class Verdict(unittest.TestCase):
    elif fault=='wrong-count':b['applied_actions']=0
    else:b['applied_actions']=True
    with self.subTest(fault=fault):self.assertTrue(probe.verify_action(model,before,a,b))
+ def test_ordinal_evidence_is_independent_and_shortage_requires_completeness(self):
+  v=sample();v[4]={'present':[{'kind':'Button','label':'Save','index':2}]};observation=v[3]['steps'][0]['observation'];observation['present_counts']=[{'required_matches':3,'known_matches':3,'unproven_matches':0,'complete':True}]
+  self.assertEqual(probe.verify_case(*v),[])
+  for key,value in [('required_matches',2),('known_matches',4),('known_matches',True),('unproven_matches',1),('complete','true')]:
+   bad=copy.deepcopy(v);bad[3]['steps'][0]['observation']['present_counts'][0][key]=value
+   with self.subTest(key=key,value=value):self.assertTrue(probe.verify_case(*bad))
+  observation['present_counts'][0]['complete']=False
+  self.assertEqual(probe.verify_case(*v),[],'a known threshold witness is valid even in a partial tree')
+  negative=sample(False);negative[4]={'present':[{'kind':'Button','label':'Save','index':3}]};negative[3]['observation']['present_counts']=[{'required_matches':4,'known_matches':3,'unproven_matches':0,'complete':False}]
+  self.assertTrue(probe.verify_case(*negative))
 if __name__=='__main__':unittest.main()

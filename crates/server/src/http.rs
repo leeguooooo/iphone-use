@@ -10657,15 +10657,17 @@ enum AgentActionStep {
     Pause { ms: u64 },
 }
 
+type AgentWaitSelector = core::wait_selector::WaitSelector<AgentElementLocator>;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentUiExpectation {
     #[serde(default)]
     application: Option<String>,
     #[serde(default)]
-    present: Vec<AgentElementLocator>,
+    present: Vec<AgentWaitSelector>,
     #[serde(default)]
-    absent: Vec<AgentElementLocator>,
+    absent: Vec<AgentWaitSelector>,
     /// Text that must be on screen, read by OCR from screenshots: for canvas
     /// screens (games, Flutter/Unity) whose element tree has no labels. Each
     /// entry matches a recognized line containing it, ignoring case and spaces.
@@ -11657,43 +11659,51 @@ fn app_changed_json(
 fn agent_expectation_observation(
     rows: &[crate::runner::ElementRow],
     expect: &AgentUiExpectation,
+    tree_complete: bool,
 ) -> (bool, serde_json::Value) {
     let application = active_application(rows);
     let application_matches = expect
         .application
         .as_ref()
         .is_none_or(|expected| application.as_ref() == Some(expected));
-    let missing_present: Vec<usize> = expect
-        .present
-        .iter()
-        .enumerate()
-        .filter_map(|(index, locator)| {
-            (!rows.iter().any(|row| agent_locator_matches(row, locator))).then_some(index)
-        })
-        .collect();
-    let present_unproven: Vec<usize> = expect.present.iter().enumerate()
-        .filter_map(|(index, locator)| {
-            (!rows.iter().any(|row| agent_locator_matches(row, locator))
-                && rows.iter().any(|row| agent_locator_assessment(row, locator).is_none())).then_some(index)
-        }).collect();
-    let violated_absent: Vec<usize> = expect
-        .absent
-        .iter()
-        .enumerate()
-        .filter_map(|(index, locator)| {
-            rows.iter()
-                .any(|row| agent_locator_matches(row, locator))
-                .then_some(index)
-        })
-        .collect();
-    // Empty or container-only: readable as a response, but not usable as
-    // evidence that something is NOT there.
     let sparse = settle_tree_is_sparse(rows);
-    let absent_unproven: Vec<usize> = expect.absent.iter().enumerate()
-        .filter_map(|(index, locator)| {
-            (!rows.iter().any(|row| agent_locator_matches(row, locator))
-                && (sparse || rows.iter().any(|row| agent_locator_assessment(row, locator).is_none()))).then_some(index)
-        }).collect();
+    let complete = tree_complete && !sparse;
+    let assess = |selector: &AgentWaitSelector| {
+        let mut known = 0usize;
+        let mut unknown = 0usize;
+        for row in rows {
+            match agent_locator_assessment(row, selector) {
+                Some(true) => known += 1,
+                None => unknown += 1,
+                Some(false) => {}
+            }
+        }
+        (
+            selector.index.assess(known, unknown, complete),
+            serde_json::json!({
+                "required_matches":selector.index.required_matches(),"known_matches":known,
+                "unproven_matches":unknown,"complete":complete
+            }),
+        )
+    };
+    let present: Vec<_> = expect.present.iter().map(assess).collect();
+    let absent: Vec<_> = expect.absent.iter().map(assess).collect();
+    let select = |values: &[(Option<bool>, serde_json::Value)],
+                  wanted: Option<bool>,
+                  include_unknown: bool|
+     -> Vec<usize> {
+        values
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (value, _))| {
+                (*value == wanted || (include_unknown && value.is_none())).then_some(index)
+            })
+            .collect()
+    };
+    let missing_present = select(&present, Some(false), true);
+    let present_unproven = select(&present, None, false);
+    let violated_absent = select(&absent, Some(true), false);
+    let absent_unproven = select(&absent, None, false);
     let matches = application_matches
         && missing_present.is_empty()
         && violated_absent.is_empty()
@@ -11701,46 +11711,16 @@ fn agent_expectation_observation(
     (
         matches,
         serde_json::json!({
-            "application": application,
-            "application_matches": application_matches,
-            "missing_present": missing_present,
-            "present_unproven": present_unproven,
-            "violated_absent": violated_absent,
-            // Additive evidence about the READ itself, so a caller can tell a
-            // condition that was genuinely not met from a screen nobody could
-            // see. `read: true` here means this observation came from an actual
-            // tree read (see the failure body for the never-read case).
-            "read": true,
-            "rows": rows.len(),
-            "sparse": sparse,
-            "absent_unproven": absent_unproven
+            "application":application,"application_matches":application_matches,
+            "missing_present":missing_present,"present_unproven":present_unproven,
+            "violated_absent":violated_absent,"absent_unproven":absent_unproven,
+            "read":true,"rows":rows.len(),"sparse":sparse,"partial":!tree_complete,
+            "present_counts":present.into_iter().map(|(_,counts)|counts).collect::<Vec<_>>(),
+            "absent_counts":absent.into_iter().map(|(_,counts)|counts).collect::<Vec<_>>()
         }),
     )
 }
 
-/// The observation a failing `wait_for` reports, in the caller's terms rather
-/// than the loop's. Exactly three things can have happened, and they must not
-/// be confused with each other:
-///
-/// * `read:false` — no readable tree was EVER obtained. Nothing here proves an
-///   element is absent.
-/// * `read:true, stale:true` — the screen was read at least once, but the last
-///   read failed, so this is the last valid observation, not the current one.
-///   A late failure must never erase the reads that did succeed.
-/// * `read:true` — a current tree was read; unproven indexes distinguish
-///   missing metadata from a condition known not to match.
-enum OcrWait {
-    Matched(serde_json::Value),
-    TimedOut(serde_json::Value),
-    Private,
-}
-
-/// Lines of recognized text a timed-out OCR wait reports, so the agent sees
-/// what IS on screen without another screenshot.
-const OCR_WAIT_REPORTED_LINES: usize = 20;
-
-/// Whether `needle` is in some recognized line, ignoring case and spacing
-/// (Vision may split or join CJK words with spaces).
 fn ocr_text_present(lines: &[String], needle: &str) -> bool {
     let needle = crate::app_lookup::normalize(needle);
     !needle.is_empty() && lines.iter().any(|line| line.contains(&needle))
@@ -11924,7 +11904,8 @@ fn wait_probe_predicates(expect: &AgentUiExpectation) -> Option<Vec<String>> {
         .present
         .iter()
         .map(|locator| {
-            if locator.label_contains.is_some()
+            if !locator.index.is_zero()
+                || locator.label_contains.is_some()
                 || locator.value.is_some()
                 || locator.focused.is_some()
                 || locator.enabled.is_some()
@@ -11982,7 +11963,7 @@ fn alert_only_expectation(expect: &AgentUiExpectation) -> bool {
         && expect.absent.is_empty()
         && !expect.present.is_empty()
         && expect.present.iter().all(|locator| {
-            locator.kind.as_deref() == Some("Alert")
+            locator.index.is_zero() && locator.kind.as_deref() == Some("Alert")
                 && locator.identifier.is_none()
                 && locator.label_contains.is_none()
                 && locator.value.is_none()
@@ -11995,16 +11976,19 @@ fn alert_only_expectation(expect: &AgentUiExpectation) -> bool {
 async fn agent_wait_alert(
     w: &mut crate::runner::RunnerClient,
     deadline: tokio::time::Instant,
-) -> Result<Vec<crate::runner::ElementRow>, AgentWaitReadError> {
+) -> Result<crate::runner::ElementSnapshot, AgentWaitReadError> {
     match tokio::time::timeout_at(deadline, w.alert_text_fresh()).await {
-        Ok(Ok(alert)) => Ok(alert
-            .into_iter()
-            .map(|text| crate::runner::ElementRow {
-                kind: "Alert".into(),
-                label: text,
-                ..Default::default()
-            })
-            .collect()),
+        Ok(Ok(alert)) => Ok(crate::runner::ElementSnapshot {
+            rows: alert
+                .into_iter()
+                .map(|text| crate::runner::ElementRow {
+                    kind: "Alert".into(),
+                    label: text,
+                    ..Default::default()
+                })
+                .collect(),
+            truncated: false,
+        }),
         Ok(Err(error)) => Err(AgentWaitReadError::Failed(error)),
         Err(_) => Err(AgentWaitReadError::TimedOut),
     }
@@ -12013,8 +11997,8 @@ async fn agent_wait_alert(
 async fn agent_wait_elements_once(
     w: &mut crate::runner::RunnerClient,
     deadline: tokio::time::Instant,
-) -> Result<Vec<crate::runner::ElementRow>, AgentWaitReadError> {
-    match tokio::time::timeout_at(deadline, w.elements_once()).await {
+) -> Result<crate::runner::ElementSnapshot, AgentWaitReadError> {
+    match tokio::time::timeout_at(deadline, w.element_snapshot_once()).await {
         Ok(Ok(rows)) => Ok(rows),
         Ok(Err(error)) => Err(AgentWaitReadError::Failed(error)),
         Err(_) => Err(AgentWaitReadError::TimedOut),
@@ -12024,15 +12008,17 @@ async fn agent_wait_elements_once(
 async fn agent_wait_elements(
     w: &mut crate::runner::RunnerClient,
     deadline: tokio::time::Instant,
-) -> Result<Vec<crate::runner::ElementRow>, AgentWaitReadError> {
-    match tokio::time::timeout_at(deadline, w.elements()).await {
+) -> Result<crate::runner::ElementSnapshot, AgentWaitReadError> {
+    match tokio::time::timeout_at(deadline, w.element_snapshot()).await {
         Ok(Ok(rows)) => Ok(rows),
         Ok(Err(first_error)) => {
             // Source reads are idempotent. A WebView transition can invalidate
             // one runner session, so rebuild once within the same wait deadline.
-            if !w.observation_scope_current() { return Err(AgentWaitReadError::TimedOut); }
+            if !w.observation_scope_current() {
+                return Err(AgentWaitReadError::TimedOut);
+            }
             w.invalidate_session();
-            match tokio::time::timeout_at(deadline, w.elements()).await {
+            match tokio::time::timeout_at(deadline, w.element_snapshot()).await {
                 Ok(Ok(rows)) => Ok(rows),
                 Ok(Err(second_error)) => Err(AgentWaitReadError::Failed(anyhow::anyhow!(
                     "source retry failed: {second_error:#}; first attempt: {first_error:#}"
@@ -12817,8 +12803,8 @@ async fn agent_actions_scoped(
                     if batch_privacy_revoked(&state, observes_screen, privacy_generation, &capture_scope) {
                         return private_batch_refusal_with_steps(index, completed, applied_actions, &step_results);
                     }
-                    let rows = match read {
-                        Ok(rows) => rows,
+                    let snapshot = match read {
+                        Ok(snapshot) => snapshot,
                         Err(AgentWaitReadError::Failed(error)) => {
                             last_read_error = Some(format!("{error:#}"));
                             // System sheets can briefly restart the runner relay or
@@ -12898,10 +12884,10 @@ async fn agent_actions_scoped(
                         }
                     };
                     reads += 1;
-                    let (matches, mut observation) = agent_expectation_observation(&rows, expect);
+                    let (matches, mut observation) = agent_expectation_observation(&snapshot.rows, expect, !snapshot.truncated);
                     if alert_only {
                         observation["source"] = serde_json::json!("alert");
-                        observation["alert"] = rows.first().map(|row| row.label.clone()).into();
+                        observation["alert"] = snapshot.rows.first().map(|row| row.label.clone()).into();
                     }
                     observation["single_read"] = single_read.into();
                     last_observation = observation;
@@ -16505,11 +16491,11 @@ async fn agent_elements_inner(
         // Set once a read failed while the runner was still working on it
         // (a heavy screen): later reads are bounded, the answer `partial`.
         let mut bounded = false;
-        let rows = loop {
+        let snapshot = loop {
             let attempt = if bounded {
-                w.elements_bounded().await
+                w.elements_bounded().await.map(|rows| crate::runner::ElementSnapshot { rows, truncated:true })
             } else {
-                w.elements().await
+                w.element_snapshot().await
             };
             match attempt {
                 Ok(rows) => break rows,
@@ -16598,7 +16584,7 @@ async fn agent_elements_inner(
         // flattened tree misses or misrepresents it (see RunnerClient::alert_summary).
         let alert = probe_alert(&mut w).await;
         let geometric = w.visibility_is_geometric();
-        Ok::<_, anyhow::Error>((rows, screen, alert, geometric, bounded))
+        Ok::<_, anyhow::Error>((snapshot.rows, screen, alert, geometric, bounded || snapshot.truncated))
     })
     .await;
     if !read_scope.current(&state) {
@@ -24007,6 +23993,128 @@ mod tests {
     }
 
     #[test]
+    fn ordinal_waits_use_known_and_possible_counts_and_snapshot_completeness() {
+        let known = crate::runner::ElementRow {
+            kind: "Button".into(),
+            label: "Save".into(),
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let unknown = crate::runner::ElementRow {
+            enabled: None,
+            ..known.clone()
+        };
+        let unrelated = crate::runner::ElementRow {
+            label: "Other".into(),
+            enabled: None,
+            ..known.clone()
+        };
+        for (mode, rows, complete, index, expected, unproven) in [
+            (
+                "present",
+                vec![known.clone(), known.clone()],
+                true,
+                1,
+                true,
+                false,
+            ),
+            (
+                "present",
+                vec![known.clone(), unknown.clone()],
+                true,
+                1,
+                false,
+                true,
+            ),
+            (
+                "present",
+                vec![known.clone(), unrelated.clone()],
+                true,
+                1,
+                false,
+                false,
+            ),
+            (
+                "present",
+                vec![known.clone(), unrelated.clone()],
+                false,
+                1,
+                false,
+                true,
+            ),
+            (
+                "present",
+                vec![known.clone(), unknown.clone()],
+                false,
+                0,
+                true,
+                false,
+            ),
+            (
+                "absent",
+                vec![known.clone(), unknown.clone()],
+                true,
+                1,
+                false,
+                true,
+            ),
+            (
+                "absent",
+                vec![known.clone(), unknown.clone()],
+                true,
+                2,
+                true,
+                false,
+            ),
+            (
+                "absent",
+                vec![known.clone(), unrelated.clone()],
+                true,
+                1,
+                true,
+                false,
+            ),
+            (
+                "absent",
+                vec![known.clone(), unrelated.clone()],
+                false,
+                1,
+                false,
+                true,
+            ),
+            (
+                "absent",
+                vec![known.clone(), known.clone()],
+                false,
+                1,
+                false,
+                false,
+            ),
+        ] {
+            let expect:AgentUiExpectation=serde_json::from_value(serde_json::json!({mode:[{"kind":"Button","label":"Save","enabled":true,"index":index}]})).unwrap();
+            let (matched, observation) = agent_expectation_observation(&rows, &expect, complete);
+            assert_eq!(matched, expected, "{mode}: {observation}");
+            assert_eq!(
+                observation[format!("{mode}_unproven")],
+                if unproven {
+                    serde_json::json!([0])
+                } else {
+                    serde_json::json!([])
+                }
+            );
+            assert_eq!(
+                observation[format!("{mode}_counts")][0]["required_matches"],
+                index + 1
+            );
+        }
+        let higher: AgentUiExpectation =
+            serde_json::from_value(serde_json::json!({"present":[{"kind":"Alert","index":1}]}))
+                .unwrap();
+        assert!(!alert_only_expectation(&higher));
+        assert!(wait_probe_predicates(&higher).is_none());
+    }
+
+    #[test]
     fn alert_text_shortcut_does_not_reinterpret_a_label_substring() {
         let exact: AgentUiExpectation = serde_json::from_value(
             serde_json::json!({"present":[{"kind":"Alert","label":"Notice"}]}),
@@ -24406,7 +24514,7 @@ mod tests {
             for mode in ["present","absent"] {
                 let mut input=serde_json::json!({});input[mode]=serde_json::json!([{"identifier":"field","value":"target"}]);
                 let expect:AgentUiExpectation=serde_json::from_value(input).unwrap();
-                let (matched,observation)=agent_expectation_observation(&rows,&expect);
+                let (matched,observation)=agent_expectation_observation(&rows,&expect, true);
                 assert!(!matched,"{mode}: {observation}");
                 assert_eq!(observation[format!("{mode}_unproven")],serde_json::json!([0]));
             }
@@ -24417,13 +24525,13 @@ mod tests {
     fn wait_known_mismatch_overrides_unknown_and_a_known_match_proves_presence() {
         let unknown=crate::runner::ElementRow {kind:"Button".into(),label:"Control".into(),identifier:Some("control".into()),rect:[10.0,10.0,100.0,40.0],enabled:Some(false),..Default::default()};
         let expect:AgentUiExpectation=serde_json::from_value(serde_json::json!({"absent":[{"identifier":"control","focused":false,"enabled":true}]})).unwrap();
-        assert!(agent_expectation_observation(&[unknown.clone()],&expect).0);
+        assert!(agent_expectation_observation(&[unknown.clone()],&expect, true).0);
         let known=crate::runner::ElementRow {focused:Some(false),enabled:Some(true),..unknown.clone()};
         let present:AgentUiExpectation=serde_json::from_value(serde_json::json!({"present":[{"identifier":"control","focused":false,"enabled":true}]})).unwrap();
         let uncertain=crate::runner::ElementRow {enabled:Some(true),..unknown};
         let rows=[uncertain,known];
-        assert!(agent_expectation_observation(&rows,&present).0);
-        let (gone,observation)=agent_expectation_observation(&rows,&expect);
+        assert!(agent_expectation_observation(&rows,&present, true).0);
+        let (gone,observation)=agent_expectation_observation(&rows,&expect, true);
         assert!(!gone);
         assert_eq!(observation["violated_absent"],serde_json::json!([0]));
         assert_eq!(observation["absent_unproven"],serde_json::json!([]));
@@ -24442,8 +24550,8 @@ mod tests {
                     locator[field] = serde_json::json!(wanted);
                     let present: AgentUiExpectation = serde_json::from_value(serde_json::json!({"present":[locator.clone()]})).unwrap();
                     let absent: AgentUiExpectation = serde_json::from_value(serde_json::json!({"absent":[locator.clone()]})).unwrap();
-                    let (found, positive) = agent_expectation_observation(&rows, &present);
-                    let (gone, negative) = agent_expectation_observation(&rows, &absent);
+                    let (found, positive) = agent_expectation_observation(&rows, &present, true);
+                    let (gone, negative) = agent_expectation_observation(&rows, &absent, true);
                     assert_eq!(found, known == Some(wanted), "present {field}={wanted}, raw={reported:?}: {positive}");
                     assert_eq!(gone, known.is_some_and(|value| value != wanted), "absent {field}={wanted}, raw={reported:?}: {negative}");
                     assert_eq!(negative["absent_unproven"], if known.is_none() { serde_json::json!([0]) } else { serde_json::json!([]) });
@@ -24451,7 +24559,7 @@ mod tests {
                     // An unrelated row with unknown flags cannot block a proven absence.
                     locator["identifier"] = serde_json::json!("different");
                     let unrelated: AgentUiExpectation = serde_json::from_value(serde_json::json!({"absent":[locator]})).unwrap();
-                    assert!(agent_expectation_observation(&rows, &unrelated).0);
+                    assert!(agent_expectation_observation(&rows, &unrelated, true).0);
                 }
             }
         }
@@ -24500,7 +24608,7 @@ mod tests {
                 focused: Some(true),
                 enabled: Some(true),
                 visible: Some(true),
-            }],
+            }.into()],
             absent: vec![AgentElementLocator {
                 label_contains: None,
                 label: Some("确认转账".to_string()),
@@ -24510,12 +24618,12 @@ mod tests {
                 focused: None,
                 enabled: None,
                 visible: None,
-            }],
+            }.into()],
             ocr_present: vec![],
             ocr_absent: vec![],
         };
 
-        let (matches, observation) = agent_expectation_observation(&rows, &expect);
+        let (matches, observation) = agent_expectation_observation(&rows, &expect, true);
         assert!(matches);
         assert_eq!(observation["application"], "招商银行");
         assert_eq!(observation["missing_present"], serde_json::json!([]));
@@ -24528,7 +24636,7 @@ mod tests {
             ocr_present: vec![],
             ocr_absent: vec![],
         };
-        assert!(!agent_expectation_observation(&rows, &wrong_app).0);
+        assert!(!agent_expectation_observation(&rows, &wrong_app, true).0);
     }
 
     #[test]

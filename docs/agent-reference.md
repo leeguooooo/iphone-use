@@ -590,6 +590,16 @@ is no longer cached). The action result and the observation are separate facts:
 - Locators also accept `label_contains`: a case-sensitive literal substring,
   ANDed with label, identifier, kind, value and state fields. The fragment must
   have 1–1000 characters. NUL is refused in locator strings before execution.
+- Wait locators additionally accept `index:0..199` (default0), selecting an
+  ordinal among matching rows, not a snapshot element index. `index:2` means
+  presence requires at least3 known matching rows; absence requires proving
+  fewer than3 possible matches. Unknown attributes and partial trees remain
+  unproven unless the known witnesses already meet the threshold. Wait
+  observations return `present_counts` / `absent_counts` with required, known
+  and unproven counts and a completeness flag. Index-only locators, null/bool/
+  fractional/out-of-range indexes and indexed action locators are rejected.
+  Actions keep their existing unique-target contract. Counts describe the
+  current provider snapshot, not business completion or durable item identity.
 - For a tree `wait_for`, `timeout_ms:0` selects one observation attempt bounded
   to 500 ms, with no predicate pre-probe, snapshot probe, read retry or polling.
   A standalone request includes runner-lock queueing in that budget and does

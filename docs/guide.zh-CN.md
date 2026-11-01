@@ -319,7 +319,7 @@ IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./r
 执行失败时结果里会多一个 **`diagnosis`** 块：daemon 原始的 0-based
 `failed_step`、屏幕当时能不能读（`observable`）、原因（`locator_matches_now`、
 `locator_no_match`、`locator_ambiguous`、`still_present`、`no_similar_element`、
-`locator_state_unproven`、`no_readable_tree`、`screen_unreadable`、`diagnosis_timeout`、
+`locator_state_unproven`、`wait_threshold_matches_now`、`invalid_wait_selector`、`no_readable_tree`、`screen_unreadable`、`diagnosis_timeout`、
 `step_has_no_locator`），以及最多五
 个候选元素，附上它们是按哪些定位字段 `matched` / `differed` / `unproven` 挑出来的（身份
 字段 `identifier` 优先于 `label`）。诊断读取保留同一快照中的已知布尔状态和空字符串。
@@ -330,6 +330,12 @@ IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./r
 不能判断唯一性。这是执行结束后一次有界（4 秒）的只读：
 不重发任何动作，不静默改写 flow，也不改动本次执行的 `outcome` /
 `applied_actions` / `retry_safe`。CLI 和 `phone_flow_run` 走的是同一条路径。
+
+等待定位器还支持从0开始的 `index`，范围0–199。例如
+`{"label_contains":"Save","kind":"Button","index":2}` 要求至少3个确定匹配；
+放在 `absent` 中则要求能够证明可能匹配少于3个。未知属性和不完整树不能证明
+数量不足；返回的 `present_counts` / `absent_counts` 会列出确定、未证实和要求的数量。
+这个序号不是 snapshot 元素编号、点击目标或业务条目标识，动作定位器不接受它。
 
 标签有动态部分时，可以用 `label_contains:"下载"`，并与 identifier、kind 等条件
 一起匹配。它是区分大小写的字面子串，长度为 1–1000 个字符；定位字符串不接受 NUL。

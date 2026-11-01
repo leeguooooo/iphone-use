@@ -858,3 +858,113 @@ fn a_single_read_timeout_preserves_an_existing_runner_session() {
         assert_eq!(sessions.load(Ordering::SeqCst), 1);
     });
 }
+
+#[test]
+fn wait_ordinals_use_producer_truncation_headers_without_losing_known_presence() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    for (header, mode, index, expected, unproven) in [
+        ("0", "absent", 1, true, false),
+        ("1", "absent", 1, false, true),
+        ("garbage", "absent", 1, false, true),
+        ("1", "present", 0, true, false),
+        ("0", "present", 1, false, false),
+    ] {
+        block(async {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = calls.clone();
+            let runner = mock_runner(move |request, _| {
+                if request.starts_with("POST /session ") {
+                    return Some((Duration::ZERO, SESSION.into()));
+                }
+                if request.contains("/source") {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    return Some((Duration::ZERO,format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-IPU-Truncated: {header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PRESENT_SCREEN}",PRESENT_SCREEN.len())));
+                }
+                None
+            });
+            let input=serde_json::json!({"observe":false,"steps":[{"kind":"wait_for","expect":{mode:[{"kind":"Button","label_contains":"索","index":index}]},"timeout_ms":0,"poll_ms":50}]}).to_string();
+            let (_, result) = run_actions(runner.url(), &input).await;
+            assert_eq!(result["ok"], expected, "{result}");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let observation = if expected {
+                &result["steps"][0]["observation"]
+            } else {
+                &result["observation"]
+            };
+            assert_eq!(
+                observation[format!("{mode}_unproven")],
+                if unproven {
+                    serde_json::json!([0])
+                } else {
+                    serde_json::json!([])
+                }
+            );
+            assert_eq!(
+                observation[format!("{mode}_counts")][0]["required_matches"],
+                index + 1
+            );
+            assert_eq!(observation[format!("{mode}_counts")][0]["known_matches"], 1);
+            assert_eq!(observation["partial"], header != "0");
+        });
+    }
+}
+
+#[test]
+fn invalid_wait_index_and_indexed_actions_are_refused_before_dispatch() {
+    block(async {
+        let state = build_state_with_runner("http://127.0.0.1:1");
+        for index in [
+            serde_json::json!(200),
+            serde_json::json!(-1),
+            serde_json::json!(true),
+            serde_json::Value::Null,
+            serde_json::json!(1.5),
+        ] {
+            let input=serde_json::json!({"steps":[{"kind":"wait_for","expect":{"present":[{"label_contains":"Save","index":index}]},"timeout_ms":0}]}).to_string();
+            let (status, result) = run_actions_with_state(state.clone(), &input).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+        }
+        for input in [
+            serde_json::json!({"steps":[{"kind":"wait_for","expect":{"present":[{"index":2}]},"timeout_ms":0}]}),
+            serde_json::json!({"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"Save","index":1}}}]}),
+        ] {
+            let (status, result) = run_actions_with_state(state.clone(), &input.to_string()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+        }
+    });
+}
+
+#[test]
+fn agent_elements_exposes_native_truncation_without_changing_rows() {
+    block(async {
+        let runner = mock_runner(move |request, _| {
+            if request.starts_with("POST /session ") {
+                return Some((Duration::ZERO, SESSION.into()));
+            }
+            if request.contains("/source") {
+                return Some((Duration::ZERO,format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-IPU-Truncated: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PRESENT_SCREEN}",PRESENT_SCREEN.len())));
+            }
+            None
+        });
+        let state = build_state_with_runner(runner.url());
+        let response = server::http::router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/elements?ocr=off")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["partial"], true);
+        assert_eq!(body["elements"].as_array().unwrap().len(), 2);
+        assert_eq!(body["elements"][1]["label"], "搜索");
+        assert!(!body.to_string().contains("_ipu_tree_truncated"));
+    });
+}

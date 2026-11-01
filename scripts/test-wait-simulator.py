@@ -16,6 +16,15 @@ CASES=[
  ('conjunction',{'present':[{'identifier':'selector.primary','label':'Save','label_contains':'av'}]},True,0),
  ('wrong-conjunction',{'present':[{'identifier':'selector.primary','label_contains':'none'}]},False,0),
  ('polling',{'present':[{'identifier':'selector.primary','label_contains':'av'}]},True,1000),
+ ('ordinal-zero',{'present':[{'kind':'Button','label':'Save','index':0}]},True,0),
+ ('ordinal-third',{'present':[{'kind':'Button','label':'Save','index':2}]},True,0),
+ ('ordinal-fourth-missing',{'present':[{'kind':'Button','label':'Save','index':3}]},False,0),
+ ('ordinal-fourth-absent',{'absent':[{'kind':'Button','label':'Save','index':3}]},True,0),
+ ('ordinal-third-still-present',{'absent':[{'kind':'Button','label':'Save','index':2}]},False,0),
+ ('ordinal-bool',{'present':[{'kind':'Button','label':'Save','index':True}]},None,0),
+ ('ordinal-null',{'present':[{'kind':'Button','label':'Save','index':None}]},None,0),
+ ('ordinal-too-large',{'present':[{'kind':'Button','label':'Save','index':200}]},None,0),
+ ('ordinal-only',{'present':[{'index':2}]},None,0),
  ('empty-contains',{'present':[{'identifier':'selector.primary','label_contains':''}]},None,0),
  ('nul-contains',{'present':[{'identifier':'selector.primary','label_contains':'\0'}]},None,0),
  ('long-contains',{'present':[{'identifier':'selector.primary','label_contains':'x'*1001}]},None,0),
@@ -44,6 +53,14 @@ def verify_case(model,before,after,body,expect,expected,timeout):
  if observation.get('read') is not True or observation.get('stale') is True or observation.get('sparse') is not False:errors.append('no current usable observation')
  if observation.get('present_unproven')!=[] or observation.get('absent_unproven')!=[]:errors.append('unknown state substituted for intended known case')
  if expected and (observation.get('missing_present')!=[] or observation.get('violated_absent')!=[]):errors.append('success conflicts with observation')
+ for mode,selectors in expect.items():
+  for position,selector in enumerate(selectors):
+   if 'index' in selector:
+    counts=observation.get(mode+'_counts',[])
+    if len(counts)<=position:errors.append('missing ordinal evidence');continue
+    count=counts[position]
+    if not count_is(count.get('required_matches'),selector['index']+1) or not count_is(count.get('known_matches'),3) or not count_is(count.get('unproven_matches'),0) or type(count.get('complete')) is not bool:errors.append('ordinal counts differ from independent three-button model')
+    if ((mode=='present' and expected is False) or (mode=='absent' and expected is True)) and count.get('complete') is not True:errors.append('incomplete tree cannot prove ordinal shortage')
  if timeout==0:
   calls=body.get('timing',{}).get('runner',[])
   if any(type(call.get('count')) is not int or call.get('count',-1)<0 for call in calls):errors.append('invalid runner count')
@@ -120,6 +137,11 @@ def main():
   result['action_quiet_window_secs']=3;save('tap-contains/quiet-window.json',samples)
   save('tap-contains/after.json',after)
   result['cases'].append({'name':'tap-contains','passed':True,'errors':[]})
+  daemon.require_simulator(args.udid)
+  capped,headers=drag.runner_call(args,'/source?format=json&max_nodes=1&extension_calls=0');save('native-truncation-header/source.json',capped)
+  quality={'truncated':headers.get('X-IPU-Truncated'),'nodes':headers.get('X-IPU-Nodes')};save('native-truncation-header/quality.json',quality)
+  assert quality['truncated']=='1','node cap must be reported incomplete by the real Native producer'
+  result['cases'].append({'name':'native-truncation-header','passed':True,'errors':[]})
   active,_=drag.runner_call(args,'/wda/activeAppInfo');assert active['value']['bundleId']==BUNDLE and active['value']['pid']==before['pid']
   result['passed']=True
  except Exception as error:
