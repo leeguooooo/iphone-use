@@ -84,6 +84,54 @@ def text_state_matches(value, text):
             and other.get('sha256') == hashlib.sha256(b'untouched').hexdigest())
 
 
+def selected_replacement_matches(before, after, text, response):
+    if not isinstance(before, dict) or not isinstance(after, dict) or not isinstance(response, dict):
+        return False
+    controls = after.get('controls', {})
+    prior = before.get('controls', {})
+    timing = response.get('timing', {})
+    if not isinstance(controls, dict) or not isinstance(prior, dict) or not isinstance(timing, dict):
+        return False
+    target, other = controls.get('state.other', {}), controls.get('state.field', {})
+    start, untouched = prior.get('state.other', {}), prior.get('state.field', {})
+    if not all(isinstance(value, dict) for value in (target, other, start, untouched)):
+        return False
+    routes = timing.get('runner', [])
+    if not isinstance(routes, list):
+        return False
+    calls = {}
+    for row in routes:
+        if not isinstance(row, dict) or type(row.get('count')) is not int or row['count'] < 1:
+            return False
+        call = row.get('call')
+        if not isinstance(call, str):
+            return False
+        calls[call] = calls.get(call, 0) + row['count']
+    return (response.get('ok') is True
+        and type(before.get('pid')) is int and before['pid'] > 0 and type(after.get('pid')) is int
+        and all(before.get(key) == after.get(key) and before.get(key) is not None for key in ('pid', 'run_id', 'controller_id'))
+        and type(before.get('tick')) is int and type(after.get('tick')) is int and after['tick'] > before['tick']
+        and type(before.get('touches')) is int and before['touches'] == 0
+        and type(after.get('touches')) is int and after['touches'] == 1
+        and type(after.get('return_events')) is int and after['return_events'] == 0
+        and type(before.get('return_events')) is int and before['return_events'] == 0
+        and start.get('focused') is False and untouched.get('focused') is False
+        and start.get('sha256') == hashlib.sha256(b'untouched').hexdigest()
+        and target.get('focused') is True and other.get('focused') is False
+        and type(target.get('characters')) is int and target['characters'] == len(text)
+        and type(target.get('utf16_length')) is int and target['utf16_length'] == len(text.encode('utf-16-le')) // 2
+        and target.get('sha256') == hashlib.sha256(text.encode()).hexdigest()
+        and other.get('sha256') == untouched.get('sha256') == hashlib.sha256(b'').hexdigest()
+        and type(other.get('characters')) is int and other['characters'] == 0
+        and type(other.get('utf16_length')) is int and other['utf16_length'] == 0
+        and calls.get('POST /ipu/element/:id/input-target') == 1
+        and calls.get('POST /element/:id/clear') == 1
+        and calls.get('POST /wda/keys') == 3
+        and calls.get('GET /element/:id/value', 0) >= 1
+        and calls.get('POST /element/:id/value', 0) == 0
+        and calls.get('POST /element/:id/click', 0) == 0)
+
+
 def mcp_text_action(peer, action):
     assert action.get('type') == 'text'
     arguments = {key: value for key, value in action.items() if key != 'type'}
@@ -128,8 +176,10 @@ def main():
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--type-text', action='store_true')
     parser.add_argument('--mcp-input', action='store_true')
+    parser.add_argument('--selected-replacement', action='store_true')
     args = parser.parse_args()
     assert not args.mcp_input or args.type_text
+    assert not args.selected_replacement or not args.type_text
     uuid.UUID(args.udid)
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
     base = urllib.parse.urlparse(args.base)
@@ -158,6 +208,7 @@ def main():
     data_dir = None
     install_attempted = False
     mcp_peer = None
+    allowed_touches = {0}
 
     def save(name, value):
         p = args.out / name
@@ -201,7 +252,7 @@ def main():
         assert not state_reasons(value, nonce, expected_pid), 'App identity/foreground changed'
         assert expected_controller is None or value.get('controller_id') == expected_controller, 'App controller recreated'
         assert type(value['command_sequence']) is int and (value['command_sequence'] in (sequence-1, sequence) if allow_pending else value['command_sequence'] == sequence), 'fixture command sequence changed'
-        assert value['touches'] == 0 and type(value['touches']) is int, 'unexpected touch'
+        assert type(value['touches']) is int and value['touches'] in allowed_touches, 'unexpected touch'
         return value
 
     def focus(wanted, caret_utf16=None):
@@ -365,7 +416,42 @@ def main():
             save('input-literal-state.json', after)
             result['cases'].append({'name': 'literal-private-unicode', 'passed': True,
                 'characters': len(literal), 'sha256': hashlib.sha256(literal.encode()).hexdigest(), 'return_events': 0, 'continuation_calls': literal_continuations, 'replacement_from_middle': True})
-        for name, identifier, field, expected in ([] if args.type_text else CASES):
+        if args.selected_replacement:
+            result['scope'] = 'owned Simulator selected snapshot replacement through host HTTP/Native, with independent UIKit values and touch count; not physical/MCP/published proof'
+            before = state()
+            save('selected/before.json', before)
+            seed = daemon.call('/agent/elements?ocr=off')
+            save('selected/snapshot.json', seed)
+            snapshot = seed.get('snapshot')
+            rows = [(row.get('index', index), row) for index, row in enumerate(seed.get('elements', []))
+                    if row.get('identifier') == 'state.other']
+            assert isinstance(snapshot, str) and snapshot and len(rows) == 1, 'selected snapshot target is ambiguous or missing'
+            index, row = rows[0]
+            assert type(index) is int and index >= 0 and row.get('kind') == 'TextField'
+            payload = '选' * 420 + '-\ue007-\ue003-👋🏻'
+            action = {'type': 'set_value', 'element': index, 'snapshot': snapshot, 'value': payload}
+            save('selected/request.json', action)
+            allowed_touches = {0, 1}
+            try:
+                response = daemon.call('/agent/input', action)
+            except urllib.error.HTTPError as error:
+                response = json.load(error)
+            save('selected/response.json', response)
+            assert response.get('ok') is True, 'selected replacement failed; no replay'
+            deadline = time.monotonic() + 20
+            while True:
+                after = state(after_tick=before['tick'])
+                save('selected/after.json', after)
+                if selected_replacement_matches(before, after, payload, response):
+                    break
+                assert time.monotonic() < deadline, 'selected replacement did not match UIKit values/routes; no replay'
+                time.sleep(0.05)
+            allowed_touches = {1}
+            result['cases'].append({'name': 'selected-unfocused-replacement', 'passed': True,
+                'characters': len(payload), 'sha256': hashlib.sha256(payload.encode()).hexdigest(),
+                'target': 'state.other', 'untouched': 'state.field', 'touches': 1,
+                'native_binding_exercised': True, 'legacy_element_value_used': False})
+        for name, identifier, field, expected in ([] if args.type_text or args.selected_replacement else CASES):
             if name in ('focus-on', 'focus-off'):
                 focus(expected)
             before = state()

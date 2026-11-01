@@ -53,6 +53,8 @@ final class StateController: UIViewController, UITextFieldDelegate {
     otherField.borderStyle = .roundedRect
     otherField.accessibilityIdentifier = "state.other"
     otherField.text = "untouched"
+    otherField.autocorrectionType = .no
+    otherField.autocapitalizationType = .none
     view.addSubview(otherField)
   }
   func textFieldShouldReturn(_ textField: UITextField) -> Bool {
