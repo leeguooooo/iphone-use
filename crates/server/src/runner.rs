@@ -76,6 +76,34 @@ fn bounded_read_query() -> String {
     )
 }
 
+pub enum VolumeButton {
+    Up,
+    Down,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum VolumeButtonOutcome {
+    Unsupported,
+    ScopeChanged,
+    Requested,
+}
+
+/// Pre-dispatch refusal or an acknowledged request; post-dispatch uncertainty is an error.
+#[derive(Debug)]
+pub enum SystemCaptureOutcome {
+    Unsupported,
+    ScopeChanged,
+    Requested(serde_json::Value),
+}
+
+/// Session/settings and element lookups do not dispatch phone input. Shared
+/// with the transport fence so a refused setup preserves known no-write receipts.
+pub(crate) fn post_mutates_screen(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    !(path.ends_with("/session") || path.ends_with("/appium/settings")
+        || path.ends_with("/elements") || path.ends_with("/element"))
+}
+
 /// A runner endpoint plus a lazily-created session id.
 pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
@@ -100,6 +128,8 @@ pub struct RunnerClient {
     /// runner). Asked again whenever a new session starts (a new runner).
     device_settle: Option<bool>,
     value_read: bool,
+    volume_buttons: bool,
+    system_capture_request: bool,
     /// The last tree read and when: snapshot-bound actions reuse it instead
     /// of reading the whole tree again (see [`Self::recent_tree`]).
     last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
@@ -119,6 +149,8 @@ pub struct RunnerClient {
     /// by the next screen-changing POST.
     settled_frame: Option<(std::sync::Arc<Capture>, std::time::Instant)>,
     settled_frame_generation: u64,
+    observation_scope: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    tree_scope: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
     /// Until when screenshots are not used to judge "settled" (a frame was
     /// slow or failed; see `settle_frame` in http.rs).
     settle_frames_paused_until: Option<std::time::Instant>,
@@ -346,12 +378,16 @@ impl RunnerClient {
             no_alert_at: None,
             device_settle: None,
             value_read: false,
+            volume_buttons: false,
+            system_capture_request: false,
             last_tree: None,
             lite_source: false,
             probe: ProbeMemory::default(),
             full_visibility: full_visibility_requested(),
             settled_frame: None,
             settled_frame_generation: 0,
+            observation_scope: None,
+            tree_scope: None,
             settle_frames_paused_until: None,
             actionability_budget: ACTIONABILITY_PROBE_BUDGET,
             last_actionable: false,
@@ -703,6 +739,10 @@ impl RunnerClient {
             self.no_alert_at = None;
             self.value_read = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.volume_buttons = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:volumeButtons").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.system_capture_request = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:systemCaptureRequest").and_then(serde_json::Value::as_bool)) == Some(true);
             self.device_settle = None;
             {
                 let sid = self.session.as_deref().unwrap().to_string();
@@ -771,7 +811,9 @@ impl RunnerClient {
     /// Source reads are read-only, so avoiding session creation also removes a
     /// source/session churn loop during relay recovery.
     pub async fn source(&mut self) -> Result<serde_json::Value> {
-        self.source_excluding(None).await
+        let mut tree=self.source_excluding(None).await?;
+        if let Some(root)=tree.as_object_mut(){root.remove("_ipu_tree_coverage");}
+        Ok(tree)
     }
 
     /// Can the runner read the screen right now? A light tree read (no
@@ -826,8 +868,11 @@ impl RunnerClient {
             .get("x-ipu-alert")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let coverage = SnapshotCoverage::from_headers(response.headers());
         let body = response.text().await.context("parse /source")?;
-        let value = parse_runner_value(&body, "GET /source")?;
+        let mut value = parse_runner_value(&body, "GET /source")?;
+        let root=value.as_object_mut().ok_or_else(||anyhow::anyhow!("/source must return a tree object"))?;
+        root.insert("_ipu_tree_coverage".into(),coverage.as_str().into());
         match alert.as_deref() {
             Some("0") => self.no_alert_at = Some(asked_at),
             Some("1") => self.no_alert_at = None,
@@ -931,6 +976,11 @@ impl RunnerClient {
     /// element of a kind (e.g. the 3 columns of a date PickerWheel) when none
     /// has a usable label.
     pub async fn find_elements(&mut self, using: &str, value: &str) -> Result<Vec<String>> {
+        Ok(self.find_element_matches(using, value).await?.ids)
+    }
+
+    /// Live matches with producer coverage. A one-item prefix is not a unique target.
+    pub async fn find_element_matches(&mut self, using: &str, value: &str) -> Result<ElementMatches> {
         let sid = self.ensure_session().await?.to_string();
         let response = self
             .post_req(format!("{}/session/{}/elements", self.base, sid))
@@ -938,19 +988,27 @@ impl RunnerClient {
             .send_signed(&self.auth)
             .await
             .context("POST /elements")?;
+        let coverage = SnapshotCoverage::from_headers(response.headers());
         let value = ensure_runner_success(response, "POST /elements").await?;
-        let elements = value
-            .as_array()
-            .ok_or_else(|| anyhow!("POST /elements returned non-array value: {value}"))?;
-        Ok(elements
-            .iter()
-            .filter_map(|e| {
-                e.get("ELEMENT")
-                    .or_else(|| e.get("element-6066-11e4-a52e-4f735466cecf"))
-                    .and_then(|x| x.as_str())
-                    .map(String::from)
-            })
-            .collect())
+        let elements = value.as_array()
+            .ok_or_else(|| anyhow!("POST /elements returned non-array value"))?;
+        let ids = elements.iter().map(|element| {
+            element.get("ELEMENT")
+                .or_else(|| element.get("element-6066-11e4-a52e-4f735466cecf"))
+                .and_then(|value| value.as_str()).filter(|value| !value.is_empty())
+                .map(String::from).ok_or_else(|| anyhow!("POST /elements returned an invalid element reference"))
+        }).collect::<Result<Vec<_>>>()?;
+        Ok(ElementMatches { ids, coverage })
+    }
+
+    /// Resolve a unique action target; singular /element remains a read API.
+    async fn find_unique_element(&mut self, using: &str, value: &str) -> Result<String> {
+        let matches = self.find_element_matches(using, value).await?;
+        if !matches.coverage.is_complete() { return Err(anyhow!("element target scope is not proven complete")); }
+        match matches.ids.as_slice() {
+            [id] => Ok(id.clone()),
+            _ => Err(anyhow!("element action needs exactly one proven match")),
+        }
     }
 
     /// One explicitly selected element's full AX value. Older runners refuse;
@@ -966,6 +1024,35 @@ impl RunnerClient {
         let response=self.http.get(format!("{}/session/{}/element/{}/value?complete=1",self.base,sid,id))
             .query(&[("max_utf16",max_utf16)]).send_signed(&self.auth).await?;
         ensure_runner_success(response,"GET element value").await
+    }
+
+    /// Request one iOS system capture under a live screen/owner permit;
+    /// an acknowledged request still says nothing about Photos persistence.
+    pub async fn request_system_capture(&mut self, allowed: &(dyn Fn() -> bool + Sync)) -> Result<SystemCaptureOutcome> {
+        if !allowed() { return Ok(SystemCaptureOutcome::ScopeChanged); }
+        let sid = self.ensure_session().await?.to_string();
+        if !self.system_capture_request {
+            return Ok(SystemCaptureOutcome::Unsupported);
+        }
+        let (client, request) = self.post_req(format!("{}/session/{}/ipu/system-capture", self.base, sid))
+            .json(&serde_json::json!({})).build_split();
+        let mut request = request.context("build system capture")?;
+        crate::runner_token::sign_request(&self.auth, &mut request);
+        // Session creation and signing may outlive privacy/owner changes.
+        // Refuse before transport admission, never re-send after admission.
+        if !allowed() { return Ok(SystemCaptureOutcome::ScopeChanged); }
+        let response = crate::timing::execute_timed(client, request).await
+            .context("POST system capture")?;
+        let value = ensure_runner_success(response, "POST system capture").await?;
+        match (value.get("invoked").and_then(serde_json::Value::as_bool), value.get("acknowledged").and_then(serde_json::Value::as_bool)) {
+            (Some(false), Some(false)) => Ok(SystemCaptureOutcome::Unsupported),
+            (Some(true), Some(true)) => Ok(SystemCaptureOutcome::Requested(serde_json::json!({
+                "requested": true, "destination": "iPhone Photos", "saved_verified": false,
+                "verification_scope": "system_capture_request_acknowledged",
+                "hint": "If a full-screen preview is open, inspect it and save that existing image with Done/Save to Photos. Check Photos or its picker; never take another screenshot to finish a pending save."
+            }))),
+            _ => anyhow::bail!("system capture dispatch was not acknowledged; outcome unknown; do not repeat"),
+        }
     }
 
     /// Set a date/option PickerWheel to a target value (issue #23). A `scroll`
@@ -1016,6 +1103,45 @@ impl RunnerClient {
             .context("POST element/click")?;
         ensure_runner_success(response, "POST element/click").await?;
         Ok(())
+    }
+
+    /// A new endpoint binds the final event to the caller's checked frame.
+    /// Legacy route absence never permits an unguarded click fallback.
+    pub async fn checked_element_tap(&mut self, element_id: &str, expected: [f64; 4], point: Option<(f64, f64)>, expected_target: &impl serde::Serialize) -> Result<CheckedTapOutcome> {
+        if expected.iter().any(|value| !value.is_finite()) || expected[2] <= 0.0 || expected[3] <= 0.0
+            || point.is_some_and(|(x,y)| !x.is_finite() || !y.is_finite()) {
+            return Ok(CheckedTapOutcome::CheckFailed);
+        }
+        let sid = self.ensure_session().await?.to_string();
+        let mut body = serde_json::json!({"expected_rect":expected,"expected_target":expected_target});
+        if let Some((x,y)) = point { body["point"] = serde_json::json!([x,y]); }
+        let response = self.post_req(format!("{}/session/{}/element/{}/ipu/tap",self.base,sid,element_id))
+            .json(&body).send_signed(&self.auth).await.context("POST checked element tap")?;
+        let no_event = response.headers().get("x-ipu-tap-phase").is_some_and(|value| value.as_bytes() == b"not_sent");
+        match ensure_runner_success(response,"POST checked element tap").await {
+            Ok(_) => Ok(CheckedTapOutcome::Applied),
+            Err(error) => {
+                if let Some(http) = error.downcast_ref::<RunnerHttpError>() {
+                    if no_event && http.status == reqwest::StatusCode::BAD_REQUEST
+                        && http.code.as_deref() == Some("invalid argument")
+                        && http.message.as_deref() == Some("unknown checked tap field") {
+                        return Ok(CheckedTapOutcome::Unsupported);
+                    }
+                    if http.status == reqwest::StatusCode::CONFLICT && http.code.as_deref() == Some("target changed") {
+                        return Ok(CheckedTapOutcome::TargetChanged);
+                    }
+                    if http.status == reqwest::StatusCode::NOT_FOUND {
+                        match http.code.as_deref() {
+                            Some("unknown command") => return Ok(CheckedTapOutcome::Unsupported),
+                            Some("stale element reference" | "no such element") => return Ok(CheckedTapOutcome::TargetChanged),
+                            _ => {}
+                        }
+                    }
+                }
+                if no_event { return Ok(CheckedTapOutcome::CheckFailed); }
+                Err(error)
+            }
+        }
     }
 
     /// Type a literal string into an element (`POST .../element/:id/value`).
@@ -1497,6 +1623,32 @@ impl RunnerClient {
         Ok(())
     }
 
+    /// Confirms only the button request, never the audible volume level.
+    /// Scope is checked again after session setup and signing, before admission.
+    pub async fn request_volume_button(
+        &mut self,
+        button: VolumeButton,
+        allowed: &(dyn Fn() -> bool + Sync),
+    ) -> Result<VolumeButtonOutcome> {
+        if !allowed() { return Ok(VolumeButtonOutcome::ScopeChanged); }
+        let sid = self.ensure_session().await?.to_string();
+        if !self.volume_buttons { return Ok(VolumeButtonOutcome::Unsupported); }
+        let name = match button {
+            VolumeButton::Up => "volumeUp",
+            VolumeButton::Down => "volumeDown",
+        };
+        let (client, request) = self
+            .post_req(format!("{}/session/{}/wda/pressButton", self.base, sid))
+            .json(&serde_json::json!({"name": name})).build_split();
+        let mut request = request.context("build volume button request")?;
+        crate::runner_token::sign_request(&self.auth, &mut request);
+        if !allowed() { return Ok(VolumeButtonOutcome::ScopeChanged); }
+        let response = crate::timing::execute_timed(client, request).await
+            .context("POST /wda/pressButton volume")?;
+        ensure_runner_success(response, "POST /wda/pressButton volume").await?;
+        Ok(VolumeButtonOutcome::Requested)
+    }
+
     /// Press the Home button on-device (`POST /wda/pressButton` `{name:home}`).
     /// The reliable "go home".
     pub async fn press_home(&mut self) -> Result<()> {
@@ -1771,30 +1923,38 @@ impl RunnerClient {
     /// system app. Examples: Settings = `com.apple.Preferences`, Photos =
     /// `com.apple.mobileslideshow`.
     pub async fn launch_app(&mut self, bundle_id: &str) -> Result<()> {
-        let sid = self.ensure_session().await?.to_string();
-        let response = self
-            .post_req(format!("{}/session/{}/wda/apps/launch", self.base, sid))
-            .json(&serde_json::json!({ "bundleId": bundle_id }))
-            .send_signed(&self.auth)
-            .await
-            .context("POST /wda/apps/launch")?;
-        ensure_runner_success(response, "POST /wda/apps/launch").await?;
+        self.app_lifecycle_scoped("launch", bundle_id, &|| true).await?;
         Ok(())
     }
 
-    /// Quit an app (`POST /wda/apps/terminate`), so its next launch starts on
-    /// its first screen rather than the page it was left on. Answers whether
-    /// it was running.
+    /// Quit an app, returning whether it was running.
     pub async fn terminate_app(&mut self, bundle_id: &str) -> Result<bool> {
+        Ok(self.app_lifecycle_scoped("terminate", bundle_id, &|| true).await?
+            .and_then(|value| value.get("value").and_then(serde_json::Value::as_bool))
+            .unwrap_or(true))
+    }
+
+    /// None means authorization expired before admission. Recheck after async
+    /// session setup and signing; never mark a mutation before that final check.
+    pub(crate) async fn app_lifecycle_scoped(
+        &mut self,
+        action: &str,
+        bundle_id: &str,
+        allowed: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Option<serde_json::Value>> {
+        if !allowed() { return Ok(None); }
         let sid = self.ensure_session().await?.to_string();
-        let response = self
-            .post_req(format!("{}/session/{}/wda/apps/terminate", self.base, sid))
-            .json(&serde_json::json!({ "bundleId": bundle_id }))
-            .send_signed(&self.auth)
-            .await
-            .context("POST /wda/apps/terminate")?;
-        let value = ensure_runner_success(response, "POST /wda/apps/terminate").await?;
-        Ok(value.get("value").and_then(serde_json::Value::as_bool).unwrap_or(true))
+        let url = format!("{}/session/{}/wda/apps/{action}", self.base, sid);
+        let (client, request) = self.http.post(&url)
+            .json(&serde_json::json!({"bundleId": bundle_id})).build_split();
+        let mut request = request.context("build app lifecycle request")?;
+        crate::runner_token::sign_request(&self.auth, &mut request);
+        if !allowed() { return Ok(None); }
+        // Track admission using the same cache invalidation as other mutations.
+        self.mark_post(&url);
+        let response = crate::timing::execute_timed(client, request).await
+            .with_context(|| format!("POST /wda/apps/{action}"))?;
+        ensure_runner_success(response, &format!("POST /wda/apps/{action}")).await.map(Some)
     }
 
     /// Bundle id of the foreground app (`GET /session/:sid/wda/apps/list`,
@@ -1990,7 +2150,7 @@ impl RunnerClient {
         let predicate = format!(
             "type == 'XCUIElementTypeButton' AND (name IN {{{quoted}}} OR label IN {{{quoted}}})"
         );
-        if let Ok(eid) = self.find_element("predicate string", &predicate).await {
+        if let Ok(eid) = self.find_unique_element("predicate string", &predicate).await {
             // Do not retry or fall back after dispatching the click: if its
             // response is lost, replaying another dismiss action would violate
             // the at-most-once contract used by Direct control.
@@ -2073,8 +2233,38 @@ impl RunnerClient {
     /// it's text — an order of magnitude cheaper, and it carries the labels
     /// needed for [`Self::find_element`]/[`Self::click_element`].
     pub async fn elements(&mut self) -> Result<Vec<ElementRow>> {
+        Ok(self.element_snapshot().await?.rows)
+    }
+
+    pub async fn element_snapshot(&mut self) -> Result<ElementSnapshot> {
         let (tree, lite) = self.bounded_source().await?;
-        Ok(self.rows_from_tree(&tree, lite))
+        let coverage = SnapshotCoverage::from_tree(&tree);
+        Ok(ElementSnapshot {
+            rows: self.rows_from_tree(&tree, lite),
+            coverage,
+        })
+    }
+
+    /// One source request, without the optional full/lite pre-probe or retry.
+    /// Used by zero-timeout waits whose one observation must stay one read.
+    pub async fn element_snapshot_once(&mut self) -> Result<ElementSnapshot> {
+        let skip_probe =
+            std::env::var("IPHONE_USE_SOURCE_PROBE").is_ok_and(|value| value.trim() == "0");
+        let lite = !skip_probe && !self.full_visibility;
+        let tree = self
+            .source_excluding(if lite {
+                Some(PROBE_EXCLUDED_ATTRIBUTES)
+            } else {
+                None
+            })
+            .await?;
+        self.probe.record(&tree, full_source_max_nodes());
+        self.lite_source = lite;
+        let coverage = SnapshotCoverage::from_tree(&tree);
+        Ok(ElementSnapshot {
+            rows: self.rows_from_tree(&tree, lite),
+            coverage,
+        })
     }
 
     /// [`Self::elements`] over a depth- and node-capped read
@@ -2109,6 +2299,7 @@ impl RunnerClient {
         // The Application node's frame IS the window in points: keep the
         // window-size cache fresh for free instead of a GET /window/size.
         // Read it from the raw root (an unlabeled root is not emitted as a row).
+        self.window = None;
         if tree.get("type").and_then(|t| t.as_str()) == Some("XCUIElementTypeApplication") {
             let field = |name: &str| {
                 tree.get("rect")
@@ -2123,7 +2314,8 @@ impl RunnerClient {
                 }
             }
         }
-        self.last_tree = Some((std::sync::Arc::new(rows.clone()), std::time::Instant::now()));
+        self.last_tree = SnapshotCoverage::from_tree(tree).is_complete()
+            .then(|| (std::sync::Arc::new(rows.clone()), std::time::Instant::now()));
         rows
     }
 
@@ -2143,7 +2335,7 @@ impl RunnerClient {
     /// kinds of screen, and backing out of a WeChat chat lands on the list.
     async fn bounded_source(&mut self) -> Result<(serde_json::Value, bool)> {
         if std::env::var("IPHONE_USE_SOURCE_PROBE").is_ok_and(|value| value.trim() == "0") {
-            return Ok((self.source().await?, false));
+            return Ok((self.source_excluding(None).await?, false));
         }
         // Every read skips `isVisible` unless asked otherwise (the approach
         // callstack/agent-device takes: no per-node hit-testing, visibility
@@ -2184,7 +2376,7 @@ impl RunnerClient {
             };
         }
         if !self.probe.should_probe(limit, untouched, self.lite_source) {
-            let full = self.source().await?;
+            let full = self.source_excluding(None).await?;
             self.probe.record(&full, limit);
             if self.probe.last_nodes() > limit {
                 // Grew past the limit without a probe: it was read, but the
@@ -2209,7 +2401,7 @@ impl RunnerClient {
         // A small tree whose full read still fails points at runner itself, not
         // at the tree: report it like any failed read rather than hide it
         // behind the probe.
-        let full = self.source().await?;
+        let full = self.source_excluding(None).await?;
         Ok((full, false))
     }
 
@@ -2224,6 +2416,7 @@ impl RunnerClient {
     /// (a timer, a network load, a person's finger); callers must verify the
     /// element live before acting on it.
     pub fn recent_tree(&self, max_age: Duration) -> Option<std::sync::Arc<Vec<ElementRow>>> {
+        if self.tree_scope.as_ref().or(self.observation_scope.as_ref()).is_some_and(|allowed| !allowed()) { return None; }
         let (rows, read_at) = self.last_tree.as_ref()?;
         let untouched = self.posted_at.is_none_or(|posted| posted < *read_at);
         (untouched && read_at.elapsed() < max_age).then(|| rows.clone())
@@ -2255,6 +2448,7 @@ impl RunnerClient {
     /// The settled screen, when it is younger than `max_age` and nothing that
     /// changes the screen was sent since it was captured.
     pub fn settled_frame(&self, max_age: Duration) -> Option<std::sync::Arc<Capture>> {
+        if !self.observation_scope_current() { return None; }
         let (frame, at) = self.settled_frame.as_ref()?;
         let untouched = self.posted_at.is_none_or(|posted| posted < *at);
         (untouched && at.elapsed() < max_age).then(|| frame.clone())
@@ -2263,6 +2457,29 @@ impl RunnerClient {
     /// Drop the reusable tree so the next snapshot-bound action reads afresh.
     pub fn forget_tree(&mut self) {
         self.last_tree = None;
+    }
+
+    pub fn bind_observation_scope(&mut self, allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.forget_observations();
+        self.tree_scope = None;
+        self.observation_scope = Some(allowed);
+    }
+
+    /// Attribute the next fresh element tree without changing frame/alert authorization.
+    pub fn begin_element_read(&mut self, allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.forget_tree();
+        self.tree_scope = Some(allowed);
+    }
+
+    pub(crate) fn observation_scope_current(&self) -> bool {
+        self.observation_scope.as_ref().is_none_or(|allowed| allowed())
+    }
+
+    /// Discard screen-derived data after the caller's authorization scope changes.
+    pub fn forget_observations(&mut self) {
+        self.last_tree = None;
+        self.settled_frame = None;
+        self.no_alert_at = None;
     }
 
     /// Drop a reused "no alert" answer so the next probe asks runner.
@@ -2281,12 +2498,13 @@ impl RunnerClient {
     }
 
     fn post_req(&mut self, url: String) -> reqwest::RequestBuilder {
-        let path = url.split('?').next().unwrap_or(&url);
-        let read_only = path.ends_with("/session")
-            || path.ends_with("/appium/settings")
-            || path.ends_with("/elements")
-            || path.ends_with("/element");
-        if !read_only {
+        self.mark_post(&url);
+        self.http.post(url)
+    }
+
+    fn mark_post(&mut self, url: &str) {
+        let path = url.split('?').next().unwrap_or(url);
+        if post_mutates_screen(path) {
             // A new app or the Home Screen is a screen of unknown size.
             if path.ends_with("/wda/apps/launch")
                 || path.ends_with("/wda/apps/activate")
@@ -2300,7 +2518,6 @@ impl RunnerClient {
             // Shows a screen that is about to change; free it now.
             self.settled_frame = None;
         }
-        self.http.post(url)
     }
 
     /// Find an element by its visible label and tap it. Tries the
@@ -2319,7 +2536,7 @@ impl RunnerClient {
         ];
         let mut last_err = None;
         for (using, value) in attempts {
-            match self.find_element(using, &value).await {
+            match self.find_unique_element(using, &value).await {
                 Ok(eid) => return self.click_element(&eid).await,
                 Err(e) => last_err = Some(e),
             }
@@ -2383,7 +2600,7 @@ impl RunnerClient {
     /// two runner round trips. Anything POSTed since, or 2 s passing, asks again.
     fn no_alert_known(&self) -> bool {
         const NO_ALERT_REUSE: Duration = Duration::from_secs(2);
-        self.no_alert_at.is_some_and(|at| {
+        self.observation_scope_current() && self.no_alert_at.is_some_and(|at| {
             at.elapsed() < NO_ALERT_REUSE && self.posted_at.is_none_or(|posted| posted < at)
         })
     }
@@ -2483,6 +2700,8 @@ impl RunnerClient {
     pub fn invalidate_session(&mut self) {
         self.session = None;
         self.value_read = false;
+        self.volume_buttons = false;
+        self.system_capture_request = false;
         self.window = None;
         self.no_alert_at = None;
         self.last_tree = None;
@@ -2793,6 +3012,56 @@ fn snapshot_settings(
     (!settings.is_empty()).then_some(settings)
 }
 
+/// One source observation, with completeness kept beside the rows rather than
+/// inferred from count or lost when the provider's headers are consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotCoverage {
+    Complete,
+    Truncated,
+    Unknown,
+}
+impl SnapshotCoverage {
+    fn from_headers(headers: &reqwest::header::HeaderMap) -> Self {
+        match (headers.get("x-ipu-truncated").map(|v| v.as_bytes()),
+               headers.get("x-ipu-tree-complete").map(|v| v.as_bytes())) {
+            (Some(b"1"), _) => Self::Truncated,
+            (Some(b"0"), Some(b"1")) => Self::Complete,
+            _ => Self::Unknown,
+        }
+    }
+    pub fn is_complete(self) -> bool {
+        self == Self::Complete
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Truncated => "partial",
+            Self::Unknown => "unknown",
+        }
+    }
+    fn from_tree(tree: &serde_json::Value) -> Self {
+        match tree
+            .get("_ipu_tree_coverage")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("complete") => Self::Complete,
+            Some("partial") => Self::Truncated,
+            _ => Self::Unknown,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckedTapOutcome { Applied, TargetChanged, Unsupported, CheckFailed }
+
+pub struct ElementMatches {
+    pub ids: Vec<String>,
+    pub coverage: SnapshotCoverage,
+}
+pub struct ElementSnapshot {
+    pub rows: Vec<ElementRow>,
+    pub coverage: SnapshotCoverage,
+}
+
 /// One row of the flattened element tree.
 ///
 /// Serialized through [`ElementRowJson`], which prints whole-point
@@ -2821,9 +3090,14 @@ pub struct ElementRow {
     /// switches / sliders drivable without vision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// Raw provider value could not be normalized to a supported scalar. Internal
+    /// only: query projection must not turn this into known value absence.
+    pub value_unavailable: bool,
     /// Provider explicitly reported a truncated snapshot value; absence is not proof of completeness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_truncated: Option<bool>,
+    /// Preserve known enabled state internally for exact selectors. The wire
+    /// form omits true unless the caller explicitly filters by enabled.
     /// runner emits these flags for every source node. Keep the common healthy
     /// state sparse to avoid inflating every MCP response: `enabled:false` and
     /// `visible:false` are emitted only for exceptional nodes.
@@ -2831,8 +3105,8 @@ pub struct ElementRow {
     pub enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visible: Option<bool>,
-    /// Positive accessibility/focus state is useful for strict locators; false
-    /// is the common state and is omitted.
+    /// Positive accessibility state is useful for strict locators; false is
+    /// omitted. Focus retains known true/false internally; its wire form omits false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accessible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2932,12 +3206,12 @@ impl From<ElementRow> for ElementRowJson {
             identifier: row.identifier,
             rect: row.rect.map(Coordinate),
             depth: row.depth,
-            value: row.value,
+            value: row.value.filter(|value| !value.is_empty()),
             value_truncated: row.value_truncated,
-            enabled: row.enabled,
-            visible: row.visible,
+            enabled: row.enabled.filter(|enabled| !enabled),
+            visible: row.visible.filter(|visible| !visible),
             accessible: row.accessible,
-            focused: row.focused,
+            focused: row.focused.filter(|focused| *focused),
             placeholder: row.placeholder,
             actions: row.actions,
             selected: row.selected,
@@ -2985,6 +3259,12 @@ fn runner_bool(node: &serde_json::Value, key: &str) -> Option<bool> {
         },
         _ => None,
     }
+}
+
+/// An accessibility identifier is opaque. Whitespace is part of its identity.
+fn accessibility_identifier(node: &serde_json::Value) -> Option<String> {
+    node.get("rawIdentifier").and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty()).map(str::to_string)
 }
 
 fn non_empty_string(node: &serde_json::Value, key: &str) -> Option<String> {
@@ -3177,9 +3457,11 @@ fn flatten_node(
         let g = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
         // Current value/state (issue #20). runner reports `value` as a string
         // ("1"/"0" for a Switch), a number (Slider fraction), or a bool —
-        // normalize to a non-empty string, else None.
+        // preserve known strings (including empty) internally; the wire stays sparse.
+        let value_unavailable = node.get("value").is_some_and(|value|
+            matches!(value, serde_json::Value::Array(_) | serde_json::Value::Object(_)));
         let value = node.get("value").and_then(|v| match v {
-            serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+            serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Number(n) => Some(n.to_string()),
             serde_json::Value::Bool(b) => Some(b.to_string()),
             _ => None,
@@ -3189,7 +3471,7 @@ fn flatten_node(
         // placeholder (shown while empty) is not secret and stays.
         let placeholder = non_empty_string(node, "placeholderValue");
         let value = if kind == "SecureTextField" {
-            value.map(|v| {
+            value.filter(|value| !value.is_empty()).map(|v| {
                 if placeholder.as_deref() == Some(v.as_str()) {
                     v
                 } else {
@@ -3199,10 +3481,10 @@ fn flatten_node(
         } else {
             value
         };
-        let enabled = runner_bool(node, "isEnabled").filter(|value| !value);
-        let visible = runner_bool(node, "isVisible").filter(|value| !value);
+        let enabled = runner_bool(node, "isEnabled");
+        let visible = runner_bool(node, "isVisible");
         let accessible = runner_bool(node, "isAccessible").filter(|value| *value);
-        let focused = runner_bool(node, "isFocused").filter(|value| *value);
+        let focused = runner_bool(node, "isFocused");
         // Affordance extras (both env-gated; the default daemon parses none of
         // this and every field stays None → byte-identical serialized rows).
         let traits = if options.affordances || options.raw_traits {
@@ -3210,8 +3492,8 @@ fn flatten_node(
         } else {
             Vec::new()
         };
-        // The runner marks only selected nodes (`isSelected:"1"`): a picked
-        // photo in select mode, the current tab. Read on every tree.
+        // The runner reports known selection states. Compact rows retain only
+        // positive selection: a picked photo or current tab. Read on every tree.
         let selected_attribute = runner_bool(node, "isSelected").filter(|value| *value);
         let (actions, selected, min, max) = if options.affordances {
             let min = runner_number(node, "minValue");
@@ -3231,11 +3513,12 @@ fn flatten_node(
         out.push(ElementRow {
             kind,
             label,
-            identifier: non_empty_string(node, "rawIdentifier"),
+            identifier: accessibility_identifier(node),
             rect: [g("x"), g("y"), g("width"), g("height")],
             depth,
             value_truncated,
             value,
+            value_unavailable,
             enabled,
             visible,
             accessible,
@@ -3802,6 +4085,114 @@ mod tests {
         assert_eq!(bounded_move_duration_ms(450), 450);
         assert_eq!(bounded_move_duration_ms(2_000), 2_000);
         assert_eq!(bounded_move_duration_ms(u64::MAX), 2_000);
+    }
+
+    #[test]
+    fn volume_scope_revoked_before_setup_does_not_contact_runner() {
+        let mut client = RunnerClient::new("http://127.0.0.1:1").unwrap();
+        block(async {
+            assert_eq!(client.request_volume_button(VolumeButton::Up, &|| false).await.unwrap(),
+                VolumeButtonOutcome::ScopeChanged);
+        });
+    }
+
+    #[test]
+    fn volume_scope_revoked_during_setup_never_posts_a_button() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let allowed = Arc::new(AtomicBool::new(true));
+        let revoked = allowed.clone();
+        let (base, task) = mock_runner(2, move |request| {
+            if request.starts_with("POST /session ") {
+                revoked.store(false, Ordering::SeqCst);
+                r#"{"value":{"sessionId":"S","capabilities":{"ipu:volumeButtons":true}}}"#.into()
+            } else {
+                assert!(request.contains("/appium/settings "), "button dispatched after revocation");
+                r#"{"value":null}"#.into()
+            }
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        block(async {
+            assert_eq!(client.request_volume_button(VolumeButton::Down,
+                &|| allowed.load(Ordering::SeqCst)).await.unwrap(), VolumeButtonOutcome::ScopeChanged);
+        });
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn volume_buttons_require_an_explicit_current_session_capability() {
+        for capabilities in [
+            serde_json::json!({}),
+            serde_json::json!({"ipu:volumeButtons": false}),
+            serde_json::json!({"ipu:volumeButtons": "true"}),
+        ] {
+            let (base, task) = mock_runner(2, move |request| {
+                if request.starts_with("POST /session ") {
+                    serde_json::json!({"value":{"sessionId":"S","capabilities":capabilities}})
+                        .to_string()
+                } else {
+                    assert!(
+                        request.contains("/appium/settings "),
+                        "unsupported button was dispatched: {request}"
+                    );
+                    r#"{"value":null}"#.into()
+                }
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            // A previously capable session must not leak into a new one.
+            client.volume_buttons = true;
+            client.invalidate_session();
+            block(async {
+                assert_eq!(client.request_volume_button(VolumeButton::Up, &|| true).await.unwrap(), VolumeButtonOutcome::Unsupported);
+            });
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn volume_buttons_send_exactly_one_native_request_each() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = seen.clone();
+        let (base, task) = mock_runner(4, move |request| {
+            if request.starts_with("POST /session ") {
+                return r#"{"value":{"sessionId":"S","capabilities":{"ipu:volumeButtons":true}}}"#
+                    .into();
+            }
+            if !request.contains("/appium/settings ") {
+                assert!(request.starts_with("POST /session/S/wda/pressButton "));
+                let body: serde_json::Value =
+                    serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(body["name"].as_str().unwrap().to_string());
+            }
+            r#"{"value":null}"#.into()
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        block(async {
+            assert_eq!(client.request_volume_button(VolumeButton::Up, &|| true).await.unwrap(), VolumeButtonOutcome::Requested);
+            assert_eq!(client.request_volume_button(VolumeButton::Down, &|| true).await.unwrap(), VolumeButtonOutcome::Requested);
+        });
+        task.join().unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["volumeUp", "volumeDown"]);
+    }
+
+    #[test]
+    fn volume_button_lost_ack_does_not_trigger_a_fallback_or_replay() {
+        let (base, task) = mock_runner(1, |request| {
+            assert!(request.starts_with("POST /session/S/wda/pressButton "));
+            "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\n".into()
+        });
+        let mut client = RunnerClient::new(base).unwrap();
+        client.session = Some("S".into());
+        client.volume_buttons = true;
+        block(async {
+            assert!(client
+                .request_volume_button(VolumeButton::Up, &|| true)
+                .await
+                .is_err());
+        });
+        task.join().unwrap();
     }
 
     fn mock_runner(
@@ -4404,17 +4795,96 @@ mod tests {
     }
 
     #[test]
+    fn checked_tap_classifies_only_explicit_pre_input_refusals_without_fallback() {
+        for (status, code, expected) in [
+            ("409 Conflict", "target changed", Some(CheckedTapOutcome::TargetChanged)),
+            ("404 Not Found", "unknown command", Some(CheckedTapOutcome::Unsupported)),
+            ("404 Not Found", "stale element reference", Some(CheckedTapOutcome::TargetChanged)),
+            ("500 Internal Server Error", "unknown error", None),
+        ] {
+            let (base, server) = mock_runner(1, move |request| {
+                assert!(request.starts_with("POST /session/S/element/E1/ipu/tap "), "{request}");
+                let body:serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(body["expected_rect"], serde_json::json!([16.0,180.0,358.0,36.0]));
+                assert_eq!(body["point"], serde_json::json!([195.0,190.0]));
+                assert_eq!(body["expected_target"], serde_json::json!({"identifier":"primary"}));
+                let reply=serde_json::json!({"value":{"error":code,"message":"fixture"}}).to_string();
+                format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len())
+            });
+            let mut client=RunnerClient::new(base).unwrap();client.session=Some("S".into());
+            let result=block(client.checked_element_tap("E1",[16.0,180.0,358.0,36.0],Some((195.0,190.0)),&serde_json::json!({"identifier":"primary"})));
+            server.join().unwrap();
+            match expected { Some(value)=>assert_eq!(result.unwrap(),value),None=>assert!(result.is_err()) }
+        }
+    }
+
+    #[test]
+    fn semantic_checked_tap_detects_old_runner_without_sending_fallback() {
+        for (phase, message, expected) in [
+            (true,"unknown checked tap field",Some(CheckedTapOutcome::Unsupported)),
+            (true,"other argument error",Some(CheckedTapOutcome::CheckFailed)),
+            (false,"unknown checked tap field",None),
+        ] {
+            let (base, server)=mock_runner(1,move |_| {
+                let body=serde_json::json!({"value":{"error":"invalid argument","message":message}}).to_string();
+                let header=if phase {"X-IPU-Tap-Phase: not_sent\r\n"} else {""};
+                format!("HTTP/1.1 400 Bad Request\r\n{header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())
+            });
+            let mut client=RunnerClient::new(base).unwrap();client.session=Some("S".into());
+            let result=block(client.checked_element_tap("E",[1.0,2.0,3.0,4.0],None,&serde_json::json!({"label":"Done"})));
+            server.join().unwrap();
+            match expected {Some(value)=>assert_eq!(result.unwrap(),value),None=>assert!(result.is_err())}
+        }
+    }
+
+    #[test]
+    fn checked_tap_honors_native_no_event_phase_and_rejects_nonfinite_input_locally() {
+        let (base, server)=mock_runner(1, |_| {
+            let body=r#"{"value":{"error":"unknown error","message":"precondition read failed"}}"#;
+            format!("HTTP/1.1 500 Internal Server Error\r\nX-IPU-Tap-Phase: not_sent\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())
+        });
+        let mut client=RunnerClient::new(base).unwrap();client.session=Some("S".into());
+        assert_eq!(block(client.checked_element_tap("E",[1.0,2.0,3.0,4.0],None,&serde_json::json!({"identifier":"primary"}))).unwrap(),CheckedTapOutcome::CheckFailed);
+        server.join().unwrap();
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
+        let mut client=RunnerClient::new(format!("http://{}",listener.local_addr().unwrap())).unwrap();
+        assert_eq!(block(client.checked_element_tap("E",[f64::NAN,2.0,3.0,4.0],None,&serde_json::json!({"identifier":"primary"}))).unwrap(),CheckedTapOutcome::CheckFailed);
+        assert_eq!(listener.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn action_singleton_query_requires_complete_valid_and_exactly_one_match() {
+        for (headers, body, allowed) in [
+            ("X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n", r#"{"value":[{"ELEMENT":"E1"}]}"#, true),
+            ("X-IPU-Truncated: 1\r\nX-IPU-Tree-Complete: 0\r\n", r#"{"value":[{"ELEMENT":"E1"}]}"#, false),
+            ("", r#"{"value":[{"ELEMENT":"E1"}]}"#, false),
+            ("X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n", r#"{"value":[{"ELEMENT":"E1"},{"ELEMENT":"E2"}]}"#, false),
+            ("X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n", r#"{"value":[{"ELEMENT":"E1"},{}]}"#, false),
+        ] {
+            let (base, server) = mock_runner(1, move |request| {
+                assert!(request.starts_with("POST /session/SESSION/elements "), "{request}");
+                format!("HTTP/1.1 200 OK\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            client.session = Some("SESSION".into());
+            let result = block(client.find_unique_element("accessibility id", "Done"));
+            server.join().unwrap();
+            assert_eq!(result.is_ok(), allowed, "{result:?}");
+        }
+    }
+
+    #[test]
     fn dismiss_only_never_looks_for_form_commit_or_submit_keys() {
         let (base, server) = mock_runner(2, |request| {
             let body: serde_json::Value =
                 serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
-            if request.contains("/element ") {
+            if request.contains("/elements ") {
                 let predicate = body["value"].as_str().unwrap();
                 for key in ["Done", "完了", "return", "前往", "search"] {
                     assert!(!predicate.contains(key), "{predicate}");
                 }
-                return r#"{"value":{"error":"no such element","message":"no hide accessory"}}"#
-                    .into();
+                let body = r#"{"value":[]}"#;
+                return format!("HTTP/1.1 200 OK\r\nX-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             }
             assert!(request.contains("/wda/keyboard/dismiss "), "{request}");
             let names = body["keyNames"].as_array().unwrap();
@@ -4676,7 +5146,7 @@ mod tests {
         server.join().unwrap();
         assert!(rows.iter().any(|row| row.label == "Food"), "{rows:?}");
         assert!(client.visibility_is_geometric());
-        assert!(client.last_tree.is_some());
+        assert!(client.last_tree.is_none(), "bounded source cannot authorize uniqueness through cache reuse");
     }
 
     #[test]
@@ -4765,6 +5235,49 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn flatten_preserves_opaque_identifier_bytes_for_exact_name_and_identifier_selectors() {
+        for identifier in ["  opaque\nID  ", "\t", "\u{3000}标识\u{3000}"] {
+            let tree=serde_json::json!({"type":"XCUIElementTypeButton","label":"Literal control","rawIdentifier":identifier,
+                "placeholderValue":"  Search  ","rect":{"x":20,"y":80,"width":330,"height":70}});
+            let mut rows=Vec::new();flatten_tree(&tree,0,&mut rows);
+            assert_eq!(rows.len(),1);
+            assert_eq!(rows[0].identifier.as_deref(),Some(identifier));
+            // Placeholder normalization is a separate existing policy.
+            assert_eq!(rows[0].placeholder.as_deref(),Some("Search"));
+            let wire=serde_json::to_value(&rows[0]).unwrap();
+            assert_eq!(wire["identifier"],identifier);
+            for field in ["identifier","name"] {
+                let selector:core::element_selector::ElementSelector=serde_json::from_value(serde_json::json!({(field):identifier})).unwrap();
+                assert!(selector.validate().is_ok());assert!(selector.matches(&wire));
+                let trimmed:core::element_selector::ElementSelector=serde_json::from_value(serde_json::json!({(field):identifier.trim()})).unwrap();
+                assert!(!trimmed.matches(&wire));
+            }
+        }
+        for raw in [serde_json::Value::Null,serde_json::json!(""),serde_json::json!(false)] {
+            let mut rows=Vec::new();flatten_tree(&serde_json::json!({"type":"XCUIElementTypeButton","label":"Fallback","rawIdentifier":raw,"rect":{"x":20,"y":80,"width":330,"height":70}}),0,&mut rows);
+            assert_eq!(rows[0].identifier,None);
+            let selector:core::element_selector::ElementSelector=serde_json::from_value(serde_json::json!({"name":"Fallback"})).unwrap();
+            assert!(selector.matches(&serde_json::to_value(&rows[0]).unwrap()));
+        }
+    }
+
+    #[test]
+    fn flatten_preserves_boolean_knowledge_while_wire_stays_sparse() {
+        for reported in [None, Some(serde_json::json!(true)), Some(serde_json::json!(false)), Some(serde_json::json!({"invalid":true}))] {
+            let known=reported.as_ref().and_then(serde_json::Value::as_bool);
+            let mut tree=serde_json::json!({"type":"XCUIElementTypeButton","label":"Control"});
+            if let Some(value)=reported { for key in ["isEnabled","isVisible","isFocused"] {tree[key]=value.clone();} }
+            let mut rows=Vec::new();flatten_tree(&tree,0,&mut rows);
+            assert_eq!(rows[0].enabled,known);assert_eq!(rows[0].visible,known);assert_eq!(rows[0].focused,known);
+            let wire=serde_json::to_value(&rows[0]).unwrap();
+            assert_eq!(wire.get("enabled").cloned(),known.filter(|value| !value).map(serde_json::Value::Bool));
+            assert_eq!(wire.get("visible").cloned(),known.filter(|value| !value).map(serde_json::Value::Bool));
+            assert_eq!(wire.get("focused").cloned(),known.filter(|value| *value).map(serde_json::Value::Bool));
+        }
+    }
+
     #[test]
     fn flatten_keeps_labels_and_interactive_skips_noise() {
         let tree: serde_json::Value = serde_json::from_str(
@@ -4794,10 +5307,10 @@ mod tests {
         assert_eq!(rows[0].label, "新备忘录");
         assert_eq!(rows[0].identifier.as_deref(), Some("new-note-button"));
         assert_eq!(rows[0].rect, [369.0, 885.0, 38.0, 38.0]);
-        assert_eq!(rows[0].enabled, None);
-        assert_eq!(rows[0].visible, None);
+        assert_eq!(rows[0].enabled, Some(true));
+        assert_eq!(rows[0].visible, Some(true));
         assert_eq!(rows[0].accessible, Some(true));
-        assert_eq!(rows[0].focused, None);
+        assert_eq!(rows[0].focused, Some(false));
         assert_eq!(rows[1].label, "你好世界");
         assert_eq!(rows[1].visible, Some(false));
         // Plain button has no value

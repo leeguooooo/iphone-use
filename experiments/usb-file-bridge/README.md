@@ -9,29 +9,39 @@ This is an opt-in experiment, not a released MCP endpoint or automatic change
 to runner setup. The earlier standalone-app prototype has been removed from
 this proposal. The XCTest test-host delegate and control loop are unchanged.
 
-## Enable the native Files entry (development setup)
+## Enable the native Files entry
 
-Xcode generates the `.xctrunner` application. Setting plist keys on the nested
-UI-test bundle does not enable file sharing on that outer app. This helper
-stages a copy of an already signed outer runner, adds `UIFileSharingEnabled`
-and `LSSupportsOpeningDocumentsInPlace`, and re-signs its outer seal using the
-same identity and entitlements. It verifies signatures before and after,
-preserves the original icon/nested code, and never modifies its source.
+With a binary built from this PR, opt in through normal Runner setup:
 
 ```sh
-python3 mac/enable_runner_files.py \
-  --source '/absolute/path/to/iPhoneUse-Runner.app' \
-  --output '/absolute/new/path/iPhoneUse-Runner.app'
+IPU_RUNNER_FILES=1 iphone-use setup
 ```
 
-Use the existing Xcode development identity. While the managed runner is
-paused, back up its cached product, make the verified staged app the product
-used for `test-without-building`, install it with `devicectl`, and resume using
-the normal iPhone Use supervisor. Keep a backup for rollback. This deployment
-is deliberately explicit: the experiment does not rewrite the supervisor,
-install another app, or change signing accounts. A subsequent rebuild/upgrade
-can clear these flags; integration into the normal setup/signing/cache pipeline
-is still needed before this becomes a persistent product feature.
+Setup stages a private copy of the generated outer `.xctrunner`, enables
+`UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace`, preserves its
+signing certificate and entitlements, and verifies the signed bundle before
+replacing the build product. Its icon and nested test code are retained.
+On ordinary errors, setup fails while retaining or restoring the original
+product. If restoration fails, a recovery backup is retained. A process kill
+between product renames may leave the product missing; cache reuse then refuses
+it and the next setup rebuilds. This is not a power-loss-safe transaction.
+
+Re-signing requires the original development certificate and its private key
+available in the process keychain. A cloud-only signing identity or locked
+keychain can fail this opt-in step; no alternate certificate is substituted.
+
+The supervisor remembers the choice across reconnects and upgrade prebuilds.
+The product cache includes the setting and checks the actual outer plist before
+reuse. To disable Files visibility and rebuild the product:
+
+```sh
+IPU_RUNNER_FILES=0 iphone-use setup
+```
+
+The default is off. Only exact `0` and `1` values are accepted (an empty value
+also means off). The standalone `mac/enable_runner_files.py` staging helper is
+retained for development against older binaries; it does not configure the
+supervisor or change its product cache.
 
 The keys expose the runner's **whole Documents directory**, not only the inbox,
 to the user's native Files/Finder file-sharing UI. Do not store tokens or other
@@ -43,7 +53,8 @@ container with CoreDevice. Its exact bundle ID is the installed team-derived
 
 **Files → On My iPhone → iPhoneUse-Runner → Send to Mac**
 
-Optionally favorite the folder. The local Chinese-language validation used
+Optionally favorite the folder. The earlier manual-staging hardware validation, which predates the integrated
+`IPU_RUNNER_FILES` setup path, used
 “发送到 Mac”; a favorite is also available from the native save picker.
 
 ## Receive a file after saving
@@ -125,7 +136,7 @@ read-only and do not remove orphan staging paths left by a hard process kill.
   atomic hard link. An identical existing file is idempotent; symlinks and
   different content are refused. Receipts stay on the Mac.
 - Exact-file selection avoids silently substituting another file. Queues,
-  automatic cleanup, wireless transport and production setup integration are
+  automatic cleanup, wireless transport and a released receiver command are
   not implemented. Files remain in the user's runner inbox for inspection.
 
 ## Tests
@@ -134,6 +145,10 @@ read-only and do not remove orphan staging paths left by a hard process kill.
 python3 -m unittest discover -s tests -v
 ```
 
-See [VALIDATION.md](VALIDATION.md) for the current Runner-native hardware checks.
+The Rust setup module has focused tests (`cargo test -p server setup::runner_files`),
+including plist preservation and cache metadata rejection. Neither this unit suite
+nor the Python receiver suite proves real signing, integrated setup or installation.
+See [VALIDATION.md](VALIDATION.md) for the separate earlier manual-staging hardware
+checks and the unverified integrated setup candidate.
 No invoices, account/device identifiers, signing material or machine-specific
 paths are included in this contribution.

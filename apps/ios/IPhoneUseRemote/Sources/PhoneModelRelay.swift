@@ -138,7 +138,16 @@ final class PhoneModelRelay {
             if let value = headers[name] { request.setValue(value, forHTTPHeaderField: name) }
         }
         do {
-            let (data, response) = try await session.data(for: request)
+            var (data, response) = try await session.data(for: request)
+            // Same fallback as the app's own requests: a model that refuses a
+            // forced tool_choice gets one retry with "auto".
+            if method == "POST", (response as? HTTPURLResponse)?.statusCode == 400,
+               String(decoding: data, as: UTF8.self).contains("tool_choice"),
+               var object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any], object["tool_choice"] != nil {
+                object["tool_choice"] = provider.format == "anthropic" ? ["type": "auto"] as [String: Any] : "auto"
+                request.httpBody = try JSONSerialization.data(withJSONObject: object)
+                (data, response) = try await session.data(for: request)
+            }
             guard let response = response as? HTTPURLResponse, data.count <= 4_194_304 else { throw BrowserToolError.invalidResult }
             respond(id, status: response.statusCode, data: data)
         } catch {

@@ -164,6 +164,11 @@ Nothing on the Mac moves while you do it: no window takes focus and the cursor s
 
 ## Use it from an agent
 
+To save a screenshot on the phone for use in another app, call
+`phone_shortcut {"name":"save_screenshot"}`. It requests an iOS system capture
+in Photos; check the new image before claiming it saved. `phone_screenshot`
+returns an image to the caller. Saving requires an updated native Runner.
+
 A daemon on your Mac drives the phone and offers the same control in three forms:
 
 - an **MCP server** for Claude Code, Codex, Claude Desktop, Cursor and other MCP clients;

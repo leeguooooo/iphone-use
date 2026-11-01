@@ -28,6 +28,15 @@ private final class BrowserModelFixtureProtocol: URLProtocol, @unchecked Sendabl
             if body["model"] as? String == "retired:free" {
                 status = 404
                 response = ["error": "Model retired"]
+            } else if body["model"] as? String == "no-forced-tool", body["tool_choice"] is [String: Any],
+                      (body["tool_choice"] as? [String: Any])?["type"] as? String != "auto" {
+                // Like Claude Fable 5.x: a forced tool_choice is refused.
+                status = 400
+                response = ["error": ["message": "tool_choice: type \"tool\" and \"any\" are not supported for this model."]]
+            } else if body["model"] as? String == "no-forced-tool" {
+                response = path.hasSuffix("/messages")
+                    ? ["content": [["type": "tool_use", "name": "browser_action", "input": ["action": "wait", "explanation": "等待网页"]]]]
+                    : ["choices": [["message": ["tool_calls": [["function": ["name": "browser_action", "arguments": "{\"action\":\"wait\",\"explanation\":\"等待网页\"}"]]]]]]]
             } else if path.hasSuffix("/messages") {
                 let choice = body["tool_choice"] as? [String: Any]
                 guard choice?["name"] as? String == "browser_action", request.value(forHTTPHeaderField: "x-api-key") == "fixture-key" else {
@@ -61,6 +70,14 @@ final class BrowserModelTests: XCTestCase {
         let provider = ModelsPayload.Assist(format: "openai", baseURL: "https://model.example/v1", key: "", model: "retired:free")
         let decision = try await modelClient().decide(goal: "测试", page: nil, steps: [], models: [provider])
         XCTAssertEqual(decision.action, .wait)
+    }
+
+    func testRefusedForcedToolChoiceRetriesWithAuto() async throws {
+        for format in ["openai", "anthropic"] {
+            let provider = ModelsPayload.Assist(format: format, baseURL: "https://model.example/v1", key: "fixture-key", model: "no-forced-tool")
+            let decision = try await modelClient().decide(goal: "测试", page: nil, steps: [], models: [provider])
+            XCTAssertEqual(decision.action, .wait, format)
+        }
     }
 
     func testAnthropicNativeToolResponse() async throws {

@@ -595,12 +595,41 @@ IPHONE_USE_TOKEN=… "$MCP" flow run health/export-all-zh-cn --artifacts-dir ./r
 When a run fails, the result grows a **`diagnosis`** block: the daemon's own
 0-based `failed_step`, whether the screen could be read at all (`observable`),
 a `reason` (`locator_matches_now`, `locator_no_match`, `locator_ambiguous`,
-`still_present`, `no_similar_element`, `no_readable_tree`, `screen_unreadable`,
+`still_present`, `locator_state_unproven`, `wait_threshold_matches_now`, `invalid_wait_selector`, `no_similar_element`, `no_readable_tree`, `screen_unreadable`,
 `diagnosis_timeout`, `step_has_no_locator`), and up to five
-`candidates` with the `matched` / `differed` locator fields they were picked
-on. It is one bounded read taken after the run: nothing is re-sent, the flow is
+`candidates` with the `matched` / `differed` / `unproven` locator fields they were picked
+on. The diagnostic read preserves known booleans and empty strings from the
+same snapshot. Missing legacy values, unsupported, protected and truncated
+value previews remain unproven, as do unknown booleans. They cannot establish
+a match, continued presence, or uniqueness. A partial tree also cannot rule
+out additional matches; the diagnosis reports `partial:true`. `exact_matches` counts proven
+matches only; `unproven_candidates` counts additional possible matches, so
+`exact_matches:1` alone does not establish uniqueness. It is one bounded read taken after the run: nothing is re-sent, the flow is
 never silently edited, and the run's own `outcome` / `applied_actions` /
 `retry_safe` are not touched by it.
+
+A wait locator can also carry a zero-based `index` between0 and199.
+`{"label_contains":"Save","kind":"Button","index":2}` waits for at least3
+known matches. In `absent`, it requires proving fewer than3 possible matches.
+Unknown attributes or a truncated tree prevent a shortage proof. The index is
+not a snapshot row number, action target, or business item identifier; action
+locators reject it. `present_counts` / `absent_counts` expose the evidence.
+`coverage:unknown` means the provider did not acknowledge completeness;
+known witnesses still prove presence, but shortage stays unproven. Negative
+checks need the new Native completeness marker, including an updated Runner.
+
+For a changing label, a locator can use `label_contains:"Download"` together
+with its other fields. Matching is literal and case-sensitive; the fragment
+must have 1–1000 characters, and NUL is refused in locator strings.
+A tree wait with `timeout_ms:0` makes one observation attempt within 500 ms,
+without polling, optional probes, prewarming or automatic Focus setup.
+For a standalone wait this includes runner-lock queueing; in a longer batch
+its read budget starts at that step and counts toward the batch limit.
+Use `observe:false` with `phone_run_steps` to avoid the separate final
+observation. Flow diagnosis reuses a failed zero wait's result. Unknown state
+and a failed read remain failures; they do not prove absence. OCR waits need
+a positive timeout. `single_read_timeout` means no tree arrived in the observation budget;
+it is not proof that the runner disconnected.
 
 `--artifacts-dir DIR` writes a machine-readable record of the run — schema,
 flow name and sha256, the versions it ran against (`unavailable` when they

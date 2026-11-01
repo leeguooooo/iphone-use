@@ -29,10 +29,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 -I scripts/test-bench-census.py
+      - run: python3 -I scripts/test-agent-bench-runtime.py
+      - run: python3 -I scripts/test-agent-bench-policy.py
+      - run: python3 -I scripts/test-agent-selector-oracle.py
+      - run: python3 -I scripts/test-simulator-cleanup.py
+      - run: python3 -I scripts/test-probe-recipe.py
+      - run: python3 -I scripts/test-ci-runtime-setup.py
+      - run: python3 -I scripts/test-stapler-validation.py
+      - run: python3 -I scripts/test-mcp-probe-peer.py
+      - run: python3 -I scripts/test-collect-simulator-verdict.py
+      - run: python3 -I scripts/test-oracle-recovery.py
+      - run: python3 -I scripts/test-state-simulator-verdict.py
+      - run: python3 -I scripts/test-selector-simulator-verdict.py
+      - run: python3 -I scripts/test-wait-simulator-verdict.py
+      - run: python3 -I scripts/test-moving-target-verdict.py
+      - run: python3 -I scripts/test-simulator-ui-readiness.py
 
   remote-connection:
     name: Remote connection and credential recovery
-    # The iOS app uses Swift 6; macos-14's default Xcode still uses Swift 5.
+    # The iOS app requires Swift 6 on a supported macOS runner image.
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -43,7 +58,7 @@ jobs:
     name: Tests and MCP tool discovery
     # Same image as the release build, so a failure here means the code, not a
     # different environment.
-    runs-on: macos-14
+    runs-on: macos-15
     # A deadlocked test holds a macOS runner until GitHub's six-hour ceiling.
     # This project has already had one: a mock server blocking on `accept` for
     # a connection a failed test never made. The whole job finishes in a couple
@@ -52,6 +67,7 @@ jobs:
 
     env:
       CARGO_TERM_COLOR: always
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
       # Nothing in this job may drive a phone or a Mirroring window: no device
       # is attached, and reaching for one would hang rather than fail. Point
       # the daemon URL at a port nothing listens on so any code that tried
@@ -73,6 +89,9 @@ jobs:
       # `set -o pipefail` matters in every step below: a `cargo … | grep`
       # reports the grep's status, so a compilation failure can otherwise be
       # reported as a pass.
+      - name: Verify cold and warm oracle command arguments on the host shell
+        run: python3 -I scripts/test-element-oracle-command.py
+
       - name: cargo clippy
         timeout-minutes: 15
         shell: bash
@@ -85,6 +104,24 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal --component clippy
           cargo +1.96.0 clippy --workspace --locked -- -D warnings
 
+      - name: Native predicate literal semantics (no UI)
+        run: swift scripts/test-predicate-literals.swift scripts/fixtures/predicate-literals.json
+
+      - name: Native snapshot coverage boundaries (synthetic AX, no UI)
+        run: python3 -I scripts/test-native-snapshot-coverage.py
+
+      - name: Native state availability (synthetic AX and predicates, no UI)
+        run: python3 -I scripts/test-native-state-availability.py
+
+      - name: Native click delivery certainty (synthetic callbacks, no UI)
+        run: python3 -I scripts/test-native-click-delivery.py
+
+      - name: Native target-frame tap preconditions (no UI)
+        run: python3 -I scripts/test-native-checked-tap.py
+
+      - name: Native checked target delivery (synthetic callbacks, no UI)
+        run: python3 -I scripts/test-native-checked-tap-delivery.py
+
       - name: Shared protocol tests
         run: cargo test -p core --locked
 
@@ -93,14 +130,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p server --locked
+          cargo test -p server --locked --no-fail-fast
+
+      - name: Real daemon target-scope protocol (synthetic provider, no UI)
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p server --bin iphone-use --locked
+          protocol_version=$(python3 -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path("crates/server/Cargo.toml").read_text())["package"]["version"])')
+          python3 -I scripts/test-action-target-protocol.py \
+            --daemon target/debug/iphone-use --expect-version "$protocol_version" \
+            --out "$RUNNER_TEMP/action-target-protocol"
+
+      - name: Preserve target-scope protocol receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: action-target-protocol
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/action-target-protocol
 
       - name: cargo test -p iphone-use-mcp
         timeout-minutes: 15
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p iphone-use-mcp --locked
+          cargo test -p iphone-use-mcp --locked --no-fail-fast
 
       - name: Encrypted browser handoff and Chrome scope tests
         run: cargo test -p browser-session --features desktop --locked

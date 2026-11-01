@@ -87,3 +87,19 @@ All three fail against the prior recovery code; the full 38-test suite passes
 with the descriptor-bound check. No additional phone access was used. The result
 is a read-time observation, not a promise that another process cannot change the
 file after the check completes.
+
+## Normal setup integration candidate
+
+The PR now adds opt-in `IPU_RUNNER_FILES=1` to normal setup, supervisor
+persistence and upgrade prebuilds, including a setting-specific cache key and
+outer-plist validation. It stages and signs the outer runner using its original
+certificate and entitlements. This replaces the need to manually swap a patched
+cached product on binaries built from this PR.
+
+The 38 receiver tests were rerun successfully in an isolated source directory.
+Focused source-module checks cover opt-in parsing, different cache keys, plist
+identity/icon preservation and rejection of incomplete or non-boolean sharing
+metadata. These lightweight checks use adapters for unrelated setup services;
+they do not exercise a real signing identity, the complete setup engine or
+device installation. Full PR CI and signed-product/hardware upgrade acceptance
+remain required for this integration candidate. No phone was operated for it.

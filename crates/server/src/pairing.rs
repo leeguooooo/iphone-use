@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,10 @@ pub struct Pairing {
     /// paired app (a request through a tunnel carries no usable port).
     pub port: Option<u16>,
     codes: Mutex<HashMap<String, Instant>>,
+    /// A code a Mac dropped into the on-phone daemon's container over USB
+    /// (`iphone-use setup-app --connect-to`), so another phone can connect
+    /// without anyone tapping this one. Embedded daemon only.
+    drop_file: std::sync::OnceLock<PathBuf>,
 }
 
 impl Pairing {
@@ -42,6 +47,7 @@ impl Pairing {
             lan_reachable,
             port: None,
             codes: Mutex::new(HashMap::new()),
+            drop_file: std::sync::OnceLock::new(),
         }
     }
 
@@ -107,7 +113,8 @@ impl Pairing {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match codes.remove(code) {
             Some(issued) => issued.elapsed() < CODE_TTL,
-            None => false,
+            // Keep the code lock through file-backed consumption too.
+            None => self.dropped(code, true),
         }
     }
 
@@ -117,9 +124,48 @@ impl Pairing {
             .codes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        codes
+        let live = codes
             .get(code)
-            .is_some_and(|issued| issued.elapsed() < CODE_TTL)
+            .is_some_and(|issued| issued.elapsed() < CODE_TTL);
+        live || self.dropped(code, false)
+    }
+
+    /// Accept codes from `path`, a `{"code", "expires_at"}` file a Mac wrote.
+    pub fn set_drop_file(&self, path: PathBuf) {
+        let _ = self.drop_file.set(path);
+    }
+
+    /// Whether `code` matches the dropped code; `consume` spends it. An
+    /// expired, unreadable or over-long-lived file is removed.
+    fn dropped(&self, code: &str, consume: bool) -> bool {
+        let Some(path) = self.drop_file.get() else {
+            return false;
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let parsed: Option<(String, u64)> = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| Some((v["code"].as_str()?.to_string(), v["expires_at"].as_u64()?)));
+        let Some((dropped, expires_at)) = parsed else {
+            let _ = std::fs::remove_file(path);
+            return false;
+        };
+        if text.len() > 1024 || expires_at <= now || expires_at > now + CODE_TTL.as_secs() * 2 || dropped.len() < 16 {
+            let _ = std::fs::remove_file(path);
+            return false;
+        }
+        let matches = dropped.len() == code.len()
+            && dropped.bytes().zip(code.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+        if matches && consume {
+            // A successful comparison alone is not a committed redemption.
+            return std::fs::remove_file(path).is_ok();
+        }
+        matches
     }
 }
 
@@ -285,6 +331,85 @@ mod tests {
         }
     }
     use super::*;
+
+    struct DropTestDir(std::path::PathBuf);
+    impl Drop for DropTestDir {
+        fn drop(&mut self) {
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn dropped_test_dir(label: &str) -> DropTestDir {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("ipu-drop-{label}-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        DropTestDir(dir)
+    }
+    #[test]
+    fn dropped_code_has_one_winner_under_concurrent_redeems() {
+        let dir = dropped_test_dir("concurrent");
+        let file = dir.0.join("code.json");
+        let pairing = std::sync::Arc::new(Pairing::new(true));
+        pairing.set_drop_file(file.clone());
+        for round in 0..16 {
+            let code = format!("concurrent-import-code-{round:016x}");
+            std::fs::write(&file, serde_json::json!({"code":code,"expires_at":unix_now()+120}).to_string()).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let threads: Vec<_> = (0..8).map(|_| {
+                let pairing=pairing.clone(); let barrier=barrier.clone(); let code=code.clone();
+                std::thread::spawn(move || { barrier.wait(); pairing.redeem(&code) })
+            }).collect();
+            let winners = threads.into_iter().map(|thread| usize::from(thread.join().unwrap())).sum::<usize>();
+            assert_eq!(winners,1,"one dropped code must issue at most one grant");
+            assert!(!file.exists());
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn dropped_code_refuses_if_the_file_cannot_be_consumed() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("directory permission refusal requires a non-root test user");
+            return;
+        }
+        let dir = dropped_test_dir("unlink"); let file=dir.0.join("code.json");
+        let pairing=Pairing::new(true); pairing.set_drop_file(file.clone());
+        let code="non-consumable-import-code";
+        std::fs::write(&file,serde_json::json!({"code":code,"expires_at":unix_now()+120}).to_string()).unwrap();
+        std::fs::set_permissions(&dir.0,std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(!pairing.redeem(code));
+        assert!(file.exists());
+        assert!(!pairing.redeem(code));
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    #[test]
+    fn a_dropped_code_redeems_once_and_expired_ones_are_removed() {
+        let dir = std::env::temp_dir().join(format!("ipu-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("connect-code-import.json");
+        let p = Pairing::new(true);
+        p.set_drop_file(file.clone());
+        let code = "AbCdEfGhIjKlMnOpQrStUv";
+        std::fs::write(&file, format!(r#"{{"code":"{code}","expires_at":{}}}"#, unix_now() + 120)).unwrap();
+        assert!(!p.is_live("AbCdEfGhIjKlMnOpQrStUx"));
+        assert!(p.is_live(code));
+        assert!(p.redeem(code));
+        assert!(!file.exists());
+        assert!(!p.redeem(code));
+        std::fs::write(&file, format!(r#"{{"code":"{code}","expires_at":{}}}"#, unix_now() - 1)).unwrap();
+        assert!(!p.is_live(code));
+        assert!(!file.exists());
+        std::fs::write(&file, format!(r#"{{"code":"{code}","expires_at":{}}}"#, unix_now() + 86400)).unwrap();
+        assert!(!p.redeem(code));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_code_redeems_once() {

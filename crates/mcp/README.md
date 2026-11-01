@@ -319,6 +319,7 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 |---|---|---|
 | `phone_status` | — | Query backend, canonical target, `drivable`, device-runner readiness, lifecycle, and recovery hints |
 | `phone_capabilities` | — | What this build supports for the configured backend, and whether the phone can be driven now. Read-only: wakes nothing, takes no owner lease |
+| `phone_metrics` | `limit?` | Latest performance aggregates for this client on the selected instance: recorded HTTP calls, p50/p95, batching, unknown outcomes and losses. Default 5 runs per section, max 20, shared 12 KiB row budget; omissions are explicit. No phone connection or lease. |
 | `phone_reconnect` | `wait_secs?` (1–300) | Restart the daemon-managed device runner once; with `wait_secs`, return when drivable, blocked (`setup_blocked_on`) or timed out, else poll `phone_status`; never changes backend or target |
 | `phone_hold` | `secs` | Keep the phone through a bounded human-in-the-loop pause (a PIN, a code): the idle watchdog does not release it for `secs` (0 clears, max 14400) |
 | `phone_release_owner` | — | Release this session's owner lease when the task is done |
@@ -333,7 +334,7 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 | `phone_scroll` | `x`, `y`, `dx`, `dy`, `observe?` | Scroll-wheel gesture; negative `dy` scrolls content up |
 | `phone_type` | `text`, `observe?` | Type text; any Unicode (incl. CJK) lands cleanly |
 | `phone_key` | `name`, `observe?` | Named key: `return`, `escape`, `space`, `tab`, `delete`, `up`, `down`, `left`, `right` |
-| `phone_shortcut` | `name`, `observe?` | iOS system shortcut: `home` or `spotlight`; App Switcher is unsupported |
+| `phone_shortcut` | `name`, `observe?` | System shortcut: `home`, `spotlight`, `save_screenshot`, `volume_up`, `volume_down`. Screenshot requests require a capable Runner and an independent saved-image check. Volume requires a physical device and a capable Runner; ACK confirms the request, not the volume level. Do not replay uncertain presses. App Switcher is unsupported |
 | `phone_run_steps` | `steps`, `observe?` | Run up to 24 guarded action/wait steps in one MCP call; includes long-press/swipe/drag (`points` supports 2–16 stops with `dwell_ms`, travel `duration_ms` per segment, total hold/travel/dwell <= 10s), strict `tap_locator`, bundle-id `launch_app`, `open_url` (links; non-http schemes need `IPHONE_USE_ALLOW_URL_SCHEMES` on the daemon), `alert`, `picker`, `perform` (toggle a switch, adjust a slider), full preflight, one device lock, and first-failure stop |
 | `phone_jev_run` | `goal`, `app?`, `max_steps?` | Hand a whole goal to the fast on-phone agent; returns `done` / `blocked` with its step history |
 | `phone_flow_list` | `category?`, `app?`, `verified?`, `detail?` | Installed registry flows, one row each (id · risk · compat · inputs — description); `detail=true` for every field. Check this before exploring an app step by step |
@@ -359,7 +360,7 @@ tools that act, `destructiveHint` and `idempotentHint`. Clients that honour
 them can auto-approve the read-only ones and confirm the rest. The read-only
 set is `phone_status`, `phone_capabilities`, `phone_apps`, `phone_screen`,
 `phone_screen_frame`, `phone_screenshot`, `phone_elements`, `phone_home_layout`, `phone_crashes`,
-`phone_flow_list` and `phone_flow_info`. `phone_flow_draft` is non-read-only in
+`phone_metrics`, `phone_flow_list` and `phone_flow_info`. `phone_flow_draft` is non-read-only in
 normal discovery because its optional `save_as` writes a new local file. The
 `readonly` profile retains its read-only draft mode: discovery marks it read-only
 and omits `save_as`; attempts to supply that argument are still refused by the

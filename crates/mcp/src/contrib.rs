@@ -417,6 +417,7 @@ const DAEMON_ERROR_CODES: &[&str] = &[
     "device_transition_in_progress",
     "element_not_found",
     "expectation_timeout",
+    "single_read_timeout",
     "force_press_unsupported",
     "intent_args_too_large",
     "intent_bridge_unavailable",
@@ -520,19 +521,46 @@ fn project(source: &serde_json::Value, fields: &[(&str, Projection)]) -> serde_j
     serde_json::Value::Object(out)
 }
 
+fn project_match_counts(value: &serde_json::Value) -> Option<serde_json::Value> {
+    value.as_array().map(|rows| {
+        serde_json::Value::Array(
+            rows.iter()
+                .take(24)
+                .map(|row| {
+                    project(
+                        row,
+                        &[
+                            ("required_matches", count),
+                            ("known_matches", count),
+                            ("unproven_matches", count),
+                            ("complete", flag),
+                        ],
+                    )
+                })
+                .collect(),
+        )
+    })
+}
+
 fn project_observation(value: &serde_json::Value) -> Option<serde_json::Value> {
     value.is_object().then(|| {
         project(
             value,
             &[
                 ("read", flag),
+                ("single_read", flag),
                 ("reads", count),
                 ("attempts", count),
                 ("stale", flag),
                 ("sparse", flag),
+                ("partial", flag),
+                ("coverage", |value| one_of(value,&["complete","partial","unknown"])),
+                ("present_counts", project_match_counts),
+                ("absent_counts", project_match_counts),
                 ("rows", count),
                 ("application_matches", flag),
                 ("missing_present", indices),
+                ("present_unproven", indices),
                 ("violated_absent", indices),
                 ("absent_unproven", indices),
             ],
@@ -808,6 +836,16 @@ mod tests {
     const FLOW: &str = r#"{"version":1,"name":"Open Health","description":"Launch Health.","app":"com.apple.Health","category":"health","risk":"navigation","locale":"zh-CN","verified_on":[{"device":"iPhone 17 Pro Max","ios":"26","date":"2026-09-05"}],"steps":[{"kind":"launch_app","bundle":"com.apple.Health"}]}"#;
 
     #[test]
+    fn cardinality_projection_keeps_counts_without_screen_text_or_fake_numbers() {
+        let value = serde_json::json!({"present_counts":[{"required_matches":3,"known_matches":1,"unproven_matches":2,"complete":false,"label":"PRIVATE"}],"absent_counts":[{"required_matches":true,"known_matches":"PRIVATE","complete":true}],"partial":true});
+        let output = project_observation(&value).unwrap();
+        assert_eq!(output["present_counts"][0]["known_matches"], 1);
+        assert_eq!(output["partial"], true);
+        assert!(!output.to_string().contains("PRIVATE"));
+        assert!(output["absent_counts"][0].get("required_matches").is_none());
+    }
+
+    #[test]
     fn pr_body_lists_metadata_and_verification() {
         let dir = tempfile::tempdir().unwrap();
         let path = flow_file(dir.path(), "f.json", FLOW);
@@ -962,7 +1000,7 @@ mod tests {
             "ok": "PRIVATE-TEXT-CANARY",
             "failed_step": "http://daemon.invalid:8100",
             "outcome": "SCREEN-LABEL-CANARY",
-            "observation": {"missing_present": ["PRIVATE-TEXT-CANARY"], "reads": true}
+            "observation": {"missing_present": ["PRIVATE-TEXT-CANARY"], "present_unproven":[0,"PRIVATE-TEXT-CANARY"], "reads": true}
         }));
         let text = serde_json::to_string(&redacted).unwrap();
 
@@ -970,6 +1008,7 @@ mod tests {
         assert!(!text.contains("daemon.invalid"), "{text}");
         assert!(!text.contains("SCREEN-LABEL-CANARY"), "{text}");
         assert_eq!(redacted["observation"]["missing_present"], serde_json::json!([]));
+        assert_eq!(redacted["observation"]["present_unproven"], serde_json::json!([0]));
         assert!(redacted["observation"]["reads"].is_null(), "{text}");
     }
 

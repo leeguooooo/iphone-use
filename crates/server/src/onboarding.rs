@@ -527,6 +527,51 @@ fn print_status(target: &Target, status: &Value) {
     if let Some(line) = lock_line(status, prefers_chinese()) {
         println!("  {line}");
     }
+    if let Some(line) = signing_line(&target.instance.state_dir, now_secs(), prefers_chinese()) {
+        println!("  {line}");
+    }
+}
+
+/// Days left on the Phone Use app's signing, shown in its last 30: after it
+/// runs out the app no longer opens and the phone can't be reached remotely.
+fn signing_line(state_dir: &std::path::Path, now: u64, chinese: bool) -> Option<String> {
+    let note: Value = serde_json::from_slice(&std::fs::read(state_dir.join(server::setup::app::SIGNING_FILE)).ok()?).ok()?;
+    let expires_at = note["expires_at"].as_u64()?;
+    let days = expires_at.saturating_sub(now) / 86_400;
+    if days > 30 {
+        return None;
+    }
+    Some(match (expires_at <= now, chinese) {
+        (true, true) => "Phone Use 签名已过期：在 Mac 上运行 iphone-use setup-app 重签".into(),
+        (true, false) => "Phone Use signing has expired: run iphone-use setup-app on the Mac".into(),
+        (false, true) => format!("Phone Use 签名 {days} 天后到期：每晚任务会自动重签，也可以现在运行 iphone-use setup-app"),
+        (false, false) => format!("Phone Use signing expires in {days} days: the nightly job re-signs it, or run iphone-use setup-app now"),
+    })
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod signing_line_tests {
+    use super::signing_line;
+
+    #[test]
+    fn warns_only_in_the_last_month() {
+        let dir = std::env::temp_dir().join(format!("ipu-signing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = 1_800_000_000;
+        assert!(signing_line(&dir, now, false).is_none(), "no note, no line");
+        let write = |at: u64| std::fs::write(dir.join(server::setup::app::SIGNING_FILE), format!(r#"{{"expires_at":{at}}}"#)).unwrap();
+        write(now + 90 * 86_400);
+        assert!(signing_line(&dir, now, false).is_none());
+        write(now + 10 * 86_400 + 5);
+        assert!(signing_line(&dir, now, false).unwrap().contains("10 days"));
+        write(now - 1);
+        assert!(signing_line(&dir, now, true).unwrap().contains("已过期"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// The lock-screen line of `iphone-use status`: shown when the phone will

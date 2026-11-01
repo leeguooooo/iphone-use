@@ -87,18 +87,29 @@ extension RunnerTests {
       if let id = match(parts, "element/:id/displayed")?.first {
         return .value(try freshNode(id).isVisible(screen: windowSizePoints()))
       }
-      if let id = match(parts, "element/:id/enabled")?.first { return .value(try freshNode(id).isEnabled) }
-      if let id = match(parts, "element/:id/selected")?.first { return .value(try freshNode(id).isSelected) }
+      if let id = match(parts, "element/:id/enabled")?.first {
+        guard let enabled = try freshNode(id).isEnabled else { throw RunnerError.failed("element enabled state unavailable") }
+        return .value(enabled)
+      }
+      if let id = match(parts, "element/:id/selected")?.first {
+        guard let selected = try freshNode(id).isSelected else { throw RunnerError.failed("element selected state unavailable") }
+        return .value(selected)
+      }
       if let id = match(parts, "element/:id/name")?.first { return .value(try freshNode(id).type) }
       return nil
 
     case "POST":
+      if match(parts, "ipu/system-capture") != nil {
+        defer { IPURBridge.invalidateRequestCache() }
+        return .value(IPURBridge.requestSystemScreenshot())
+      }
       if match(parts, "appium/settings") != nil { return try updateSettings(request) }
       if match(parts, "actions") != nil { return try performActions(request) }
       if match(parts, "elements") != nil { return try findElements(request, from: nil) }
       if match(parts, "element") != nil { return try findElement(request, from: nil) }
       if let id = match(parts, "element/:id/elements")?.first { return try findElements(request, from: id) }
       if let id = match(parts, "element/:id/element")?.first { return try findElement(request, from: id) }
+      if let id = match(parts, "element/:id/ipu/tap")?.first { return try checkedTapElement(id, request) }
       if let id = match(parts, "element/:id/click")?.first { return try clickElement(id) }
       if let id = match(parts, "element/:id/value")?.first { return try setElementValue(id, request) }
       if let id = match(parts, "element/:id/clear")?.first { return try clearElement(id) }
@@ -132,11 +143,18 @@ extension RunnerTests {
   // MARK: - Session
 
   private func capabilities() -> [String: Any] {
-    [
+    #if targetEnvironment(simulator)
+    let volumeButtons = false
+    #else
+    let volumeButtons = true
+    #endif
+    return [
       "device": UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone",
       "sdkVersion": Self.systemVersion,
       "ipu:timedDragPath": true,
       "ipu:valueRead": true,
+      "ipu:volumeButtons": volumeButtons,
+      "ipu:systemCaptureRequest": IPURBridge.systemScreenshotAvailable(),
       "browserName": NSNull(),
       "CFBundleIdentifier": NSNull(),
     ]
@@ -177,7 +195,7 @@ extension RunnerTests {
         extensionCallLimit: Self.defaultExtensionCalls,
         rememberKey: target.pid > 0 ? String(target.pid) : nil, includeElements: true)
       if (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] {
-        return UINode(raw: root, parent: nil, pid: target.pid)
+        return UINode(raw: root, parent: nil, pid: target.pid, treeComplete: (tree[IPURTreeTruncatedKey] as? Bool) == false)
       }
       NSLog("ipu-runner: element tree via private AX failed: %@", tree[IPURTreeErrorKey] as? String ?? "?")
     }
@@ -194,7 +212,7 @@ extension RunnerTests {
     guard let root = tree[IPURTreeRootKey] as? [String: Any] else {
       throw RunnerError.failed(tree[IPURTreeErrorKey] as? String ?? "snapshot serialization failed")
     }
-    return UINode(raw: root, parent: nil, pid: target.pid)
+    return UINode(raw: root, parent: nil, pid: target.pid, treeComplete: (tree[IPURTreeTruncatedKey] as? Bool) == false)
   }
 
   /// SpringBoard's tree when SpringBoard is active but not the chosen foreground app (a banner,
@@ -209,7 +227,7 @@ extension RunnerTests {
       forAXElement: springBoard, maxDepth: Self.defaultMaxDepth, maxNodes: Self.defaultMaxNodes,
       extensionCallLimit: 0, rememberKey: String(pid), includeElements: true)
     guard let root = tree[IPURTreeRootKey] as? [String: Any] else { return nil }
-    return UINode(raw: root, parent: nil, pid: pid)
+    return UINode(raw: root, parent: nil, pid: pid, treeComplete: (tree[IPURTreeTruncatedKey] as? Bool) == false)
   }
 
   /// Re-snapshots a registered element. `depth` 1 reads the element alone (fresh rect/value);
@@ -226,7 +244,7 @@ extension RunnerTests {
       NSLog("ipu-runner: element %@ re-read failed: %@", id, tree[IPURTreeErrorKey] as? String ?? "?")
       throw RunnerError.staleElement(id)
     }
-    let node = UINode(raw: root, parent: nil, pid: stored.pid)
+    let node = UINode(raw: root, parent: nil, pid: stored.pid, treeComplete: (tree[IPURTreeTruncatedKey] as? Bool) == false)
     // A zero frame on a re-read means the element left the hierarchy.
     if node.rect == .zero, stored.rect != .zero { throw RunnerError.staleElement(id) }
     return node
@@ -242,30 +260,33 @@ extension RunnerTests {
     return (using, value)
   }
 
-  private func findNodes(_ request: HTTPRequest, from id: String?) throws -> [UINode] {
+  private func findNodes(_ request: HTTPRequest, from id: String?) throws -> (nodes: [UINode], complete: Bool) {
     let (using, value) = try locator(request)
     let screen = windowSizePoints()
     if let id {
       let scope = try freshNode(id, depth: Self.defaultMaxDepth)
-      return try Locator.find(using: using, value: value, root: scope, screen: screen)
+      return (try Locator.find(using: using, value: value, root: scope, screen: screen), scope.treeComplete)
     }
     let target = foreground()
     let root = try foregroundTree(target)
     let found = try Locator.find(using: using, value: value, root: root, screen: screen)
-    if !found.isEmpty { return found }
+    if !found.isEmpty { return (found, root.treeComplete) }
     if let springBoard = springBoardTreeIfRelevant(foregroundPID: target.pid) {
-      return try Locator.find(using: using, value: value, root: springBoard, screen: screen)
+      return (try Locator.find(using: using, value: value, root: springBoard, screen: screen), root.treeComplete && springBoard.treeComplete)
     }
-    return []
+    return ([], root.treeComplete)
   }
 
   private func findElements(_ request: HTTPRequest, from id: String?) throws -> HTTPResponse {
-    let nodes = try findNodes(request, from: id)
-    return .value(nodes.map { ElementReference.make(elements.register($0)) })
+    let result = try findNodes(request, from: id)
+    return .value(result.nodes.map { ElementReference.make(elements.register($0)) }, headers: [
+      "X-IPU-Truncated": result.complete ? "0" : "1",
+      "X-IPU-Tree-Complete": result.complete ? "1" : "0",
+    ])
   }
 
   private func findElement(_ request: HTTPRequest, from id: String?) throws -> HTTPResponse {
-    guard let node = try findNodes(request, from: id).first else {
+    guard let node = try findNodes(request, from: id).nodes.first else {
       let (using, value) = (try? locator(request)) ?? ("?", "?")
       throw RunnerError.notFound("unable to find an element using '\(using)', value '\(value)'")
     }
@@ -274,12 +295,16 @@ extension RunnerTests {
 
   private func activeElement() throws -> HTTPResponse {
     let root = try foregroundTree()
-    let focused = root.descendants().filter(\.isFocused)
+    let nodes = root.descendants()
+    let focused = nodes.filter(\.isFocused)
     let inputs: Set<String> = [
       "XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeTextView",
       "XCUIElementTypeSearchField",
     ]
     guard let node = focused.first(where: { inputs.contains($0.type) }) ?? focused.last else {
+      guard root.treeComplete, nodes.allSatisfy({ $0.focusedState != nil }) else {
+        throw RunnerError.failed("focused element state unavailable")
+      }
       throw RunnerError.notFound("there is no focused element")
     }
     return .value(ElementReference.make(elements.register(node)))
@@ -352,12 +377,12 @@ extension RunnerTests {
     case "type", "wdType": return .value(node.type)
     case "rawIdentifier", "identifier": return .value(orNull(node.identifier))
     case "placeholderValue", "wdPlaceholderValue": return .value(orNull(node.placeholder))
-    case "enabled", "wdEnabled", "isEnabled": return .value(node.isEnabled)
+    case "enabled", "wdEnabled", "isEnabled": return .value(orNull(node.isEnabled))
     case "visible", "wdVisible", "isVisible", "displayed", "hittable", "isHittable":
       return .value(node.isVisible(screen: screen))
     case "accessible", "wdAccessible", "isAccessible": return .value(true)
-    case "focused", "hasFocus", "wdFocused", "isFocused": return .value(node.isFocused)
-    case "selected", "wdSelected", "isSelected": return .value(node.isSelected)
+    case "focused", "hasFocus", "wdFocused", "isFocused": return .value(orNull(node.focusedState))
+    case "selected", "wdSelected", "isSelected": return .value(orNull(node.isSelected))
     case "rect", "wdRect", "frame": return .value(rectValue(node.rect))
     default: return .value(orNull(node.predicateObject(screen: screen)[name]))
     }
@@ -377,23 +402,54 @@ extension RunnerTests {
     }
   }
 
+  private func checkedTapElement(_ id: String, _ request: HTTPRequest) throws -> HTTPResponse {
+    let point: CGPoint
+    do {
+      let plan = try CheckedElementTap(request.jsonObject())
+      let screen = windowSizePoints()
+      let node = try freshNode(id)
+      guard node.axElement != nil else {
+        throw RunnerError(status: 409, code: "target changed", message: "live target unavailable; no tap sent")
+      }
+      try plan.checkTarget(node.attributes)
+      point = try plan.point(live: node.rect, screen: screen)
+    } catch {
+      var response = HTTPResponse.from(error)
+      response.headers["X-IPU-Tap-Phase"] = "not_sent"
+      return response
+    }
+    // No internal scroll or alternate implementation after the event boundary.
+    do { try tapPoint(point) }
+    catch { throw RunnerError.failed("checked tap outcome unknown after dispatch; no automatic retry") }
+    return .value(NSNull())
+  }
+
   private func clickElement(_ id: String) throws -> HTTPResponse {
     var node = try freshNode(id)
     guard node.rect.width > 0, node.rect.height > 0 else {
       throw RunnerError.failed("element \(id) has an empty frame and cannot be clicked")
     }
-    // An element below the visible page (a web sheet's link) is scrolled into view first, like
-    // XCUIElement's own tap does; still off the screen afterwards is a refusal, never a tap.
     let screen = windowSizePoints()
-    if screen.width > 0, !TapBounds.onScreen(node.center, screen) {
-      try? scrollIntoView(id)
-      node = try freshNode(id)
-      guard TapBounds.onScreen(node.center, screen) else {
-        throw RunnerError.invalidArgument("element \(id) is off the screen and could not be scrolled into view; nothing was tapped")
+    var revealAttempted = false
+    do {
+      if screen.width > 0, !TapBounds.onScreen(node.center, screen) {
+        // From here even a later stale-element read can follow delivered input.
+        // A 404 must remain proof of no dispatch only before this boundary.
+        revealAttempted = true
+        try? scrollIntoView(id)
+        node = try freshNode(id)
+        guard TapBounds.onScreen(node.center, screen) else {
+          throw RunnerError.invalidArgument("element remains off screen after reveal")
+        }
       }
+      try tapPoint(node.center)
+      return .value(NSNull())
+    } catch {
+      if revealAttempted {
+        throw RunnerError.failed("click outcome unknown after reveal; no automatic retry")
+      }
+      throw error
     }
-    try tapPoint(node.center)
-    return .value(NSNull())
   }
 
   /// Makes `id` the keyboard target: taps it unless it already has focus, then waits briefly for
@@ -851,8 +907,12 @@ extension RunnerTests {
     default: throw RunnerError.invalidArgument("unsupported button '\(name)'; use home, volumeUp or volumeDown")
     }
     defer { IPURBridge.invalidateRequestCache() }
+    let issuesBefore = recordedIssues.count
     if let exception = IPURBridge.catchException({ XCUIDevice.shared.press(button) }) {
       throw RunnerError.failed("pressButton \(name) failed: \(exception)")
+    }
+    if recordedIssues.count > issuesBefore {
+      throw RunnerError.failed("pressButton \(name) failed: \(recordedIssues.last ?? "unknown issue")")
     }
     return .value(NSNull())
   }

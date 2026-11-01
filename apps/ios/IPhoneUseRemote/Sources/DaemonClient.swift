@@ -319,10 +319,14 @@ final class DaemonClient: @unchecked Sendable {
         return token
     }
 
-    /// Fresh session from a paired device's token.
-    func renew(deviceToken: String) async throws {
-        let (_, response) = try await postPair(["device_token": deviceToken])
+    /// Fresh session from a paired device's token. Returns the replacement
+    /// token the daemon hands back (sliding renewal), or nil from older daemons.
+    @discardableResult
+    func renew(deviceToken: String) async throws -> String? {
+        let (data, response) = try await postPair(["device_token": deviceToken])
         try takeSessionCookie(from: response)
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (json?["device_token"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     }
 
     private func postPair(_ body: [String: String]) async throws -> (Data, HTTPURLResponse) {

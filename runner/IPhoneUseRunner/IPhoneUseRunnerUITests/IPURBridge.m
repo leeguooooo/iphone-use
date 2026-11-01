@@ -643,11 +643,21 @@ static BOOL IPURHasStableScreenSize = NO;
   return size;
 }
 
-static NSString *IPURBoolString(id snapshot, NSString *key, BOOL fallback)
+static NSString *IPURBoolString(id snapshot, NSString *key)
 {
   id value = IPURKVC(snapshot, key);
-  BOOL flag = [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : fallback;
-  return flag ? @"1" : @"0";
+  if ([value isKindOfClass:NSNumber.class]) {
+    const char *type = [value objCType];
+    if (strlen(type) != 1 || strchr("cCsSiIlLqQB", type[0]) == NULL) return nil;
+    double number = [value doubleValue];
+    if (number == 0) return @"0";
+    if (number == 1) return @"1";
+  } else if ([value isKindOfClass:NSString.class]) {
+    NSString *text = [[value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    if ([text isEqual:@"0"] || [text isEqual:@"false"]) return @"0";
+    if ([text isEqual:@"1"] || [text isEqual:@"true"]) return @"1";
+  }
+  return nil;
 }
 
 static NSArray *IPURChildren(id snapshot)
@@ -686,15 +696,16 @@ static NSMutableDictionary *IPURSerialize(
   node[@"rawIdentifier"] = identifier ?: (id)NSNull.null;
   node[@"placeholderValue"] = placeholder ?: (id)NSNull.null;
   node[@"rect"] = IPURRect(snapshot);
-  node[@"isEnabled"] = IPURBoolString(snapshot, @"enabled", YES);
+  NSString *enabled = IPURBoolString(snapshot, @"enabled");
+  if (enabled != nil) node[@"isEnabled"] = enabled;
   // hasFocus is the focus engine's (tvOS-style) flag; a text field holding the keyboard reports
   // only hasKeyboardFocus (hardware: Settings' search field, iOS 27).
-  BOOL focused = [IPURKVC(snapshot, @"hasFocus") boolValue] || [IPURKVC(snapshot, @"hasKeyboardFocus") boolValue];
-  node[@"isFocused"] = focused ? @"1" : @"0";
-  // Selected (a picked photo in select mode, the current tab, a chosen segment). The attribute was
-  // already fetched with the snapshot; only a selected node carries the key, so the common case
-  // costs no bytes.
-  if ([IPURKVC(snapshot, @"selected") boolValue]) node[@"isSelected"] = @"1";
+  NSString *focus = IPURBoolString(snapshot, @"hasFocus");
+  NSString *keyboardFocus = IPURBoolString(snapshot, @"hasKeyboardFocus");
+  if ([focus isEqual:@"1"] || [keyboardFocus isEqual:@"1"]) node[@"isFocused"] = @"1";
+  else if ([focus isEqual:@"0"] && [keyboardFocus isEqual:@"0"]) node[@"isFocused"] = @"0";
+  NSString *selected = IPURBoolString(snapshot, @"selected");
+  if (selected != nil) node[@"isSelected"] = selected;
   if (walk->includeElements) {
     id element = IPURKVC(snapshot, @"accessibilityElement");
     if (element != nil) node[IPURNodeAXElementKey] = element;
@@ -829,31 +840,36 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
   }
 
   IPURWalk walk = {.nodeCount = 0, .maxNodes = maxNodes, .truncated = NO, .includeElements = includeElements};
-  NSMutableArray<IPURFrontier *> *leaves = extensionCallLimit > 0 ? [NSMutableArray array] : nil;
+  NSMutableArray<IPURFrontier *> *leaves = [NSMutableArray array];
   NSMutableDictionary *rootNode = IPURSerialize(root, 0, &walk, leaves);
   if (rootNode == nil) {
     return @{IPURTreeOkKey: @NO, IPURTreeErrorKey: @"AX snapshot root could not be serialized"};
   }
+  if (walk.nodeCount >= walk.maxNodes) walk.truncated = YES;
 
   // Re-root the same request at each depth-capped frontier: the depth limit is per request, so
   // this reaches content the app-rooted request could not, without a larger depth parameter.
   NSInteger calls = 0;
   NSMutableArray<IPURFrontier *> *frontiers = IPURCappedFrontiers(leaves ?: @[], acceptedDepth);
   while (frontiers.count > 0) {
-    if (calls >= extensionCallLimit || walk.nodeCount >= maxNodes) {
+    // A depth-one request can only return its root, so re-rooting cannot
+    // establish whether this frontier has children. Keep coverage partial.
+    if (acceptedDepth <= 1 || calls >= extensionCallLimit || walk.nodeCount >= maxNodes) {
       walk.truncated = YES;
       break;
     }
     IPURFrontier *frontier = frontiers.firstObject;
     [frontiers removeObjectAtIndex:0];
     id element = IPURKVC(frontier.snapshot, @"accessibilityElement");
-    if (element == nil) continue;
+    if (element == nil) { walk.truncated = YES; continue; }
     calls += 1;
+    // The provider may count its root toward the cap; that root is already in
+    // our tree. Request it in addition to the remaining serializable nodes.
     id subRoot = [self requestSnapshotForElement:element
                                         maxDepth:acceptedDepth
-                                        maxNodes:maxNodes - walk.nodeCount
+                                        maxNodes:maxNodes - walk.nodeCount + 1
                                            error:NULL];
-    if (subRoot == nil) continue;
+    if (subRoot == nil) { walk.truncated = YES; continue; }
     NSMutableArray<IPURFrontier *> *subLeaves = [NSMutableArray array];
     NSMutableArray *children = [NSMutableArray array];
     for (id child in IPURChildren(subRoot)) {
@@ -892,6 +908,7 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
   if (rootNode == nil) {
     return @{IPURTreeOkKey: @NO, IPURTreeErrorKey: @"snapshot could not be serialized"};
   }
+  if (walk.nodeCount >= walk.maxNodes) walk.truncated = YES;
   return @{
     IPURTreeOkKey: @YES,
     IPURTreeRootKey: rootNode,
@@ -1652,6 +1669,49 @@ static CGImageRef IPURDecodeScaled(NSData *input, double scale) CF_RETURNS_RETAI
   // "Never" is stored as INT_MAX; anything beyond a day is no Auto-Lock a phone offers.
   BOOL never = secs <= 0 || secs >= 86400;
   return @{@"secs": @(secs), @"never": @(never)};
+}
+
+// Availability is a metadata check only: status/session discovery never takes a photo.
++ (BOOL)systemScreenshotAvailable
+{
+  @try {
+    Class eventClass = NSClassFromString(@"XCDeviceEvent");
+    NSMethodSignature *factory = [eventClass methodSignatureForSelector:NSSelectorFromString(@"deviceEventWithPage:usage:duration:")];
+    NSMethodSignature *dispatch = [XCUIDevice.sharedDevice methodSignatureForSelector:NSSelectorFromString(@"performDeviceEvent:error:")];
+    if (factory.numberOfArguments != 5 || dispatch.numberOfArguments != 4) return NO;
+    BOOL unsigned32 = strcmp([factory getArgumentTypeAtIndex:2],"I") == 0 && strcmp([factory getArgumentTypeAtIndex:3],"I") == 0;
+    BOOL unsigned64 = strcmp([factory getArgumentTypeAtIndex:2],"Q") == 0 && strcmp([factory getArgumentTypeAtIndex:3],"Q") == 0;
+    return factory.methodReturnType[0] == '@' && (unsigned32 || unsigned64) &&
+      [factory getArgumentTypeAtIndex:4][0] == 'd' &&
+      (dispatch.methodReturnType[0] == 'B' || dispatch.methodReturnType[0] == 'c') &&
+      [dispatch getArgumentTypeAtIndex:2][0] == '@' && strcmp([dispatch getArgumentTypeAtIndex:3],"^@") == 0;
+  } @catch (__unused NSException *exception) { return NO; }
+}
+
++ (NSDictionary *)requestSystemScreenshot
+{
+  BOOL invoked = NO;
+  @try {
+    if (![self systemScreenshotAvailable])
+      return @{@"invoked":@NO,@"acknowledged":@NO,@"saved_verified":@NO,@"reason":@"system capture event ABI unavailable"};
+    Class eventClass = NSClassFromString(@"XCDeviceEvent");
+    SEL make = NSSelectorFromString(@"deviceEventWithPage:usage:duration:");
+    SEL perform = NSSelectorFromString(@"performDeviceEvent:error:");
+    BOOL unsigned64 = strcmp([[eventClass methodSignatureForSelector:make] getArgumentTypeAtIndex:2],"Q") == 0;
+    // Consumer Snapshot requests a capture. ACK never proves Photos persistence.
+    id event = unsigned64
+      ? ((id (*)(id,SEL,unsigned long long,unsigned long long,double))objc_msgSend)(eventClass,make,0x0C,0x65,0.005)
+      : ((id (*)(id,SEL,unsigned int,unsigned int,double))objc_msgSend)(eventClass,make,0x0C,0x65,0.005);
+    if (event == nil) return @{@"invoked":@NO,@"acknowledged":@NO,@"saved_verified":@NO,@"reason":@"system capture event unavailable"};
+    NSError *error = nil;
+    invoked = YES;
+    BOOL ok = ((BOOL (*)(id,SEL,id,NSError **))objc_msgSend)(XCUIDevice.sharedDevice,perform,event,&error);
+    return @{@"invoked":@YES,@"acknowledged":(ok && error == nil ? @YES : @NO),
+      @"saved_verified":@NO,@"error_domain":error.domain ?: @"",@"error_code":@(error.code)};
+  } @catch (NSException *exception) {
+    return @{@"invoked":(invoked ? @YES : @NO),@"acknowledged":@NO,
+      @"saved_verified":@NO,@"reason":@"system capture exception",@"exception":exception.name};
+  }
 }
 
 + (nullable NSString *)resetIdleTimer

@@ -329,18 +329,26 @@ final class ModelsPayloadTests: XCTestCase {
         return String(decoding: try encoder.encode(payload), as: UTF8.self)
     }
 
-    /// Out of the box: only the primary Zen model; fallback is opt-in.
+    /// Out of the box: the two free services, Zen first. Switching between
+    /// keyless free services costs nothing, so it needs no opt-in.
     func testDefaultIsTheFreeTier() throws {
         let payload = ModelSettings().payload { _ in nil }
-        XCTAssertEqual(try json(payload),
-                       #"{"assist":[{"base_url":"https://opencode.ai/zen/v1","format":"openai","key":"public","model":"big-pickle"}]}"#)
+        XCTAssertEqual(payload?.assist.map(\.model), ["big-pickle", "free"])
+        XCTAssertEqual(payload?.assist.first?.baseURL, "https://opencode.ai/zen/v1")
     }
 
-    func testFallbackRequiresExplicitChoiceAndSurvivesSaving() throws {
+    /// A paid service is never reached without the switch: not behind a free
+    /// first choice, and a paid first choice gets no fallback.
+    func testPaidFallbackRequiresExplicitChoiceAndSurvivesSaving() throws {
         var settings = ModelSettings()
-        XCTAssertEqual(settings.payload { _ in nil }?.assist.count, 1)
+        let paid = ModelProvider(kind: .openRouter)
+        settings.assist = [ModelProvider(kind: .zen), paid, ModelProvider(kind: .free)]
+        let keys: (String) -> String? = { $0 == paid.keyAccount ? "k" : nil }
+        XCTAssertEqual(settings.payload(key: keys)?.assist.map(\.model), ["big-pickle", "free"])
+        settings.assist = [ModelProvider(kind: .anthropic), ModelProvider(kind: .free)]
+        XCTAssertEqual(settings.payload { _ in "k" }?.assist.count, 1)
         settings.allowModelFallback = true
-        XCTAssertEqual(settings.payload { _ in nil }?.assist.count, 2)
+        XCTAssertEqual(settings.payload { _ in "k" }?.assist.count, 2)
         let restored = try JSONDecoder().decode(ModelSettings.self, from: JSONEncoder().encode(settings))
         XCTAssertTrue(restored.allowModelFallback)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(settings)) as? [String: Any])

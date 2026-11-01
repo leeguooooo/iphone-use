@@ -236,6 +236,29 @@ setup_script() {  # setup_script <instance>
     fi
 }
 
+# Re-sign the Phone Use app in the last RESIGN_DAYS of its signing (a paid
+# team's profile lasts a year; after it the app stops opening and the phone
+# can't be reached). `setup-app` writes app-signing.json on every install; no
+# note means no app installed through it, so nothing to do. Never fails the run.
+RESIGN_DAYS="${AUTO_UPDATE_RESIGN_DAYS:-21}"
+resign_app() {  # resign_app <instance>
+    local dir note expires now bin
+    if [ "$1" = default ]; then dir="$STATE_DIR"; else dir="$STATE_DIR/instances/$1"; fi
+    note="$dir/app-signing.json"
+    [ -f "$note" ] || return 0
+    expires="$(/usr/bin/python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1]))["expires_at"]))' "$note" 2>/dev/null)" || return 0
+    now="$(date +%s)"
+    if [ $(( expires - now )) -gt $(( RESIGN_DAYS * 86400 )) ]; then return 0; fi
+    bin="$(command -v iphone-use || true)"
+    [ -n "$bin" ] || { log "resign[$1]: iphone-use is not on PATH"; return 0; }
+    log "resign[$1]: Phone Use signing ends in $(( (expires - now) / 86400 )) days; rebuilding and reinstalling it"
+    if IPHONE_USE_INSTANCE="$1" "$bin" setup-app --instance "$1" --no-pair </dev/null >>"$LOG" 2>&1; then
+        log "resign[$1]: done"
+    else
+        log "resign[$1]: failed (is the phone connected and unlocked?); retried tomorrow"
+    fi
+}
+
 # Build the upgraded instance's runner product now, so its next connect reuses
 # it (see the header). Bounded by PREBUILD_TIMEOUT; a stop signal makes the
 # setup engine end its xcodebuild. Never fails the run.
@@ -445,6 +468,9 @@ cmd_run() {
     [ "$dry" = 1 ] || write_outcome "$latest"
     [ "$upgraded" = 0 ] || refresh_self "$latest"
     for instance in $UPGRADED_INSTANCES; do prebuild_runner "$instance"; done
+    if [ "$dry" != 1 ]; then
+        while read -r instance plist; do resign_app "$instance"; done <<<"$list"
+    fi
     [ "$failed" = 0 ] || return 1
     return "$rc"
 }

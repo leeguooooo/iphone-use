@@ -135,6 +135,7 @@ not an unrelated remote MCP client.
 | Find an app's bundle id | `GET /agent/apps?query=微信` | `phone_apps` | — |
 | Open an app | `launch_app` `bundle` (or `name` for built-ins, or `app`: any app's exact name, or a loose name matching exactly one installed app — `resolved` says which; refused with candidates if ambiguous) | `phone_run_steps` step | `launch_app` (`bundle` or `app`) |
 | Read home pages, Dock and folders | `GET /agent/home-layout?page=0` (omit page for all) | `phone_home_layout` (`page?`) | — |
+| Read this client's task timing | `GET /agent/metrics?owner=<current-owner>` | `phone_metrics` (`limit?`) | — |
 | Read the screen | `GET /agent/elements` | `phone_elements` | `wait_for` (`application`, `present`, `absent`; on canvas/game screens `ocr_present` / `ocr_absent`, up to 60 s) |
 | Tap an element | `tap` + `element` + `snapshot` | `phone_tap_element` | `tap_locator` (durable) |
 | Tap a unique label | `tap` + `label` | `phone_tap_label` | `tap_label` |
@@ -142,11 +143,15 @@ not an unrelated remote MCP client.
 | Tap a point | `tap` + `x`,`y` | `phone_tap` | `tap` |
 | Type | `text` (into the focused field; up to 20000 chars — on `text_partially_typed` send only `remaining_text` with `clear:false`) | `phone_type` | `type` (`input` names a runtime value) |
 | Key | `key` `return`… | `phone_key` | `key` |
-| Home / Spotlight | `shortcut` | `phone_shortcut` | `shortcut` |
+| Home / Spotlight / Photos capture / physical volume | `shortcut` (`home`, `spotlight`, `save_screenshot`, `volume_up`, `volume_down`) | `phone_shortcut` | `shortcut` |
 | Scroll | `scroll` `dy` (80 ≈ 15% of a screen, 400 ≈ 75%) | `phone_scroll` (`x`, `y`, `dx`, `dy` required) | `scroll` (`x`, `y`, `dx`, `dy` required in MCP batches) |
 | System alert | `alert` `button` / `action` | `phone_run_steps` step | `alert` |
 | App asks you to log in | `POST /agent/login` (`iphone-use auth login --bwu`) | `phone_login` | — |
 | Switch / slider | `perform` `toggle` / `adjust` | `phone_run_steps` `perform` step (element + snapshot) | — |
+
+`save_screenshot` requests a new image in Photos; its acknowledgement is not independent save verification. Complete an existing system preview without taking another capture.
+
+Volume shortcuts require a physical device and an explicitly capable Runner. Acknowledgement confirms a button request, not the audible volume level. Never repeat an uncertain volume action.
 
 For a drag that needs an edge hover, a `drag` step can use
 `points: [{x, y, dwell_ms}, …]` instead of `x1/y1/x2/y2`. Use 2–16 points from
@@ -242,7 +247,11 @@ reference: *Flows*.
 
 1. **`retry_safe:false` or `outcome_unknown` means do not replay.** The phone may
    already have acted. Read the screen first; never resend text, send, pay or
-   delete blindly. The same applies to a failed flow.
+   delete blindly. The same applies to a failed flow. A fresh launch can return
+   `app_launch_interrupted` after the terminate request was acknowledged; inspect
+   `app_lifecycle` and current status before continuing, never replay the whole
+   fresh launch. `launch_attempted` records an attempt, not verified delivery;
+   a missing field does not mean false.
 2. **`risk: side_effect` and destructive taps need the user's explicit OK** on
    the exact target and inputs (`confirm=true` / `--confirm`). Never operate
    payment or 2FA screens unattended.

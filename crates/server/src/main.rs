@@ -189,6 +189,21 @@ enum Command {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// Back up or replace the phone's Home Screen layout (icon state plist).
+    ///
+    /// `home-layout backup <file>` saves the current layout; `home-layout
+    /// apply <file>` writes a plist in the same shape (also how a backup is
+    /// restored). Needs the paired phone's UDID in IPHONE_USE_UDID.
+    HomeLayout {
+        /// `backup [file]`, `apply <file>` or `restore [file]` (the newest
+        /// automatic backup when no file is named). Every write backs up the
+        /// layout it replaces first.
+        action: String,
+        file: Option<std::path::PathBuf>,
+        /// With `apply`/`restore`: print the preview and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print which instance this environment would run as, as JSON, and exit.
     ///
     /// Read-only: derives the instance from IPHONE_USE_INSTANCE / HOME /
@@ -273,6 +288,9 @@ enum Command {
     /// Mac needed); a free Apple ID gets the remote app. The app is not in the
     /// App Store. `--remote-only` skips local control; `--no-install` only
     /// builds; `--no-pair` skips the first USB pairing for local control.
+    /// `--connect-to <instance|udid>` then connects that other phone's app to
+    /// this phone's local control over USB, tapping neither phone;
+    /// `--connect-only` does just that, without building.
     SetupApp {
         /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
         #[arg(long)]
@@ -850,6 +868,54 @@ fn main() -> Result<()> {
             result
         }
         Command::InstanceContext => instance_context(),
+        Command::HomeLayout {
+            action,
+            file,
+            dry_run,
+        } => {
+            let udid = std::env::var("IPHONE_USE_UDID").context("IPHONE_USE_UDID is not set")?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("start the runtime")?;
+            use server::home_layout as layout;
+            match action.as_str() {
+                "backup" => {
+                    let state = rt.block_on(layout::raw_state(&udid))?;
+                    let path = match file {
+                        Some(path) => {
+                            plist::to_file_xml(&path, &state)?;
+                            path
+                        }
+                        None => layout::save_backup(&state, "home")?,
+                    };
+                    println!("saved {} ({})", path.display(), layout::summarize(&state));
+                }
+                "apply" | "restore" => {
+                    let file = match (action.as_str(), file) {
+                        (_, Some(file)) => file,
+                        ("restore", None) => layout::latest_backup()
+                            .context("no earlier layout to restore in ~/.iphone-use-backups")?,
+                        _ => anyhow::bail!("apply needs the layout file"),
+                    };
+                    let state: plist::Value = plist::from_file(&file)?;
+                    layout::validate(&state)?;
+                    let current = rt.block_on(layout::raw_state(&udid))?;
+                    println!("{}", serde_json::to_string_pretty(&layout::preview(&current, &state))?);
+                    if dry_run {
+                        println!("dry run: nothing written");
+                        return Ok(());
+                    }
+                    // Always keep the layout being replaced, so every write is undoable.
+                    let backup = layout::save_backup(&current, "home-before-apply")?;
+                    println!("backed up current layout to {} (undo: iphone-use home-layout restore)", backup.display());
+                    rt.block_on(layout::set_state(&udid, state))?;
+                    println!("applied {}", file.display());
+                }
+                other => anyhow::bail!("unknown action {other}; use backup, apply or restore"),
+            }
+            Ok(())
+        }
         Command::Relay {
             udid,
             listen,
@@ -868,6 +934,16 @@ fn main() -> Result<()> {
         Command::Device { query } => std::process::exit(device_query(query)),
         Command::Upgrade { check, json } => std::process::exit(upgrade(check || json, json)),
         Command::Setup { instance, args } => {
+            // `setup pause --instance i13`: clap's trailing args swallow a
+            // flag written after the subcommand, which silently fell back to
+            // the default phone and paused the wrong one.
+            let (instance, args) = match split_instance_arg(instance, args) {
+                Ok(split) => split,
+                Err(message) => {
+                    eprintln!("iphone-use: {message}");
+                    std::process::exit(2)
+                }
+            };
             // `setup --simulator <name|udid>`: no phone setup at all, the
             // same as `simulator start` (preview).
             match server::simulator::setup_simulator_arg(&args) {
@@ -1265,6 +1341,10 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
             server::device_identity::spawn(state.clone());
         }
 
+        // The cloud relay, when configured: reach this daemon from anywhere.
+        if let Some(relay) = std::env::var("IPHONE_USE_RELAY_URL").ok().filter(|v| !v.is_empty()) {
+            server::relay_client::spawn(move || Some(relay.clone()), server::instance::current().state_dir.clone(), cfg.port);
+        }
         let app = http::router(state);
         let serve_result = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
@@ -2035,5 +2115,58 @@ mod take_instance_tests {
         let (instance, rest) = take_instance(Some("a".into()), strings(&["list"]));
         assert_eq!(instance.as_deref(), Some("a"));
         assert_eq!(rest, strings(&["list"]));
+    }
+}
+
+/// Lift `--instance <name>` / `--instance=<name>` out of `setup`'s trailing
+/// arguments. Two different names are refused rather than guessed.
+fn split_instance_arg(
+    instance: Option<String>,
+    args: Vec<String>,
+) -> Result<(Option<String>, Vec<String>), String> {
+    let mut found = instance;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let name = if arg == "--instance" {
+            iter.next().ok_or("--instance needs a name")?
+        } else if let Some(value) = arg.strip_prefix("--instance=") {
+            value.to_string()
+        } else {
+            rest.push(arg);
+            continue;
+        };
+        if found.as_deref().is_some_and(|prev| prev != name) {
+            return Err(format!("two different --instance values: {} and {name}", found.unwrap_or_default()));
+        }
+        found = Some(name);
+    }
+    Ok((found, rest))
+}
+
+#[cfg(test)]
+mod split_instance_tests {
+    use super::split_instance_arg;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn instance_after_subcommand_is_honoured() {
+        let (instance, args) = split_instance_arg(None, v(&["pause", "--instance", "i13"])).unwrap();
+        assert_eq!(instance.as_deref(), Some("i13"));
+        assert_eq!(args, v(&["pause"]));
+        let (instance, args) = split_instance_arg(None, v(&["resume", "--instance=i13"])).unwrap();
+        assert_eq!(instance.as_deref(), Some("i13"));
+        assert_eq!(args, v(&["resume"]));
+    }
+
+    #[test]
+    fn conflicting_or_missing_names_are_refused() {
+        assert!(split_instance_arg(Some("a".into()), v(&["pause", "--instance", "b"])).is_err());
+        assert!(split_instance_arg(None, v(&["pause", "--instance"])).is_err());
+        let (instance, _) = split_instance_arg(Some("a".into()), v(&["pause", "--instance", "a"])).unwrap();
+        assert_eq!(instance.as_deref(), Some("a"));
     }
 }

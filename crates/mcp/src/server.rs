@@ -29,6 +29,17 @@ use crate::{client::DaemonClient, types::InputMsg};
 // Parameter types (one struct per tool that takes arguments)
 // ---------------------------------------------------------------------------
 
+/// Parameters for [`PhoneHandler::phone_metrics`].
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsParams {
+    /// Latest runs per section (open/recent), default 5, maximum 20.
+    /// A shared 12 KiB row budget can reduce the number returned further.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 20))]
+    pub limit: Option<usize>,
+}
+
 /// Parameters for [`phone_tap`].
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +103,18 @@ pub struct TypeParams {
 #[serde(deny_unknown_fields)]
 pub struct HomeLayoutParams {
     pub page: Option<usize>,
+    /// Omit to read. `backup` saves the current layout on the Mac; `preview`
+    /// shows what writing `file` would change, by app identifier; `apply`
+    /// writes `file`; `restore` writes the newest automatic backup (or `file`).
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Absolute path of a layout .plist on the Mac (from a backup).
+    #[serde(default)]
+    pub file: Option<String>,
+    /// apply/restore only: true writes. Without it the preview comes back and
+    /// nothing changes; show it to the person and ask first.
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 /// Parameters for [`phone_apps`].
@@ -127,6 +150,12 @@ pub struct ElementsParams {
     /// this text (case-insensitive). Rows keep their original index.
     #[serde(default)]
     pub query: Option<String>,
+    /// Literal case-sensitive field filters combined with AND; preserves original snapshot indexes.
+    /// Requires literal criteria; optional index0..199 chooses one match in scoped/query tree order before limit.
+    /// Row index remains the full snapshot index; incomplete or unknown earlier matches refuse an unproven rank.
+    /// Filters AX elements, not separate OCR text.
+    #[serde(default)]
+    pub selector: Option<iu_core::element_selector::ElementSelector>,
     /// Return at most this many rows; the answer says how many were left out.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -227,7 +256,7 @@ pub struct KeyParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShortcutParams {
-    /// Supported names: `home` (Home Screen) and `spotlight` (search).
+    /// Home, Spotlight, Photos capture (`save_screenshot`), or physical-only `volume_up` / `volume_down`.
     /// App Switcher is unsupported by the device runner.
     pub name: String,
     /// Default true: return what the screen settled to (as on phone_tap).
@@ -454,7 +483,9 @@ pub enum PhoneStep {
         #[serde(default)]
         after_ms: u64,
     },
-    /// Poll the current element tree until the semantic expectation holds.
+    /// Poll until the expectation holds. For tree waits, timeout_ms:0 makes
+    /// one observation attempt bounded to 500ms, without polling or read retry.
+    /// Use observe:false to omit the separate final batch observation.
     WaitFor {
         expect: PhoneUiExpectation,
         #[serde(default = "default_phone_wait_ms")]
@@ -466,6 +497,8 @@ pub enum PhoneStep {
     Pause { ms: u64 },
 }
 
+type PhoneWaitSelector = iu_core::wait_selector::WaitSelector<PhoneElementLocator>;
+
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PhoneUiExpectation {
@@ -474,10 +507,10 @@ pub struct PhoneUiExpectation {
     pub application: Option<String>,
     /// Every locator in this list must match at least one current element.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub present: Vec<PhoneElementLocator>,
+    pub present: Vec<PhoneWaitSelector>,
     /// Every locator in this list must match no current element.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub absent: Vec<PhoneElementLocator>,
+    pub absent: Vec<PhoneWaitSelector>,
     /// Text that must be visible, read by OCR from screenshots — for canvas
     /// screens (games, Flutter/Unity) whose element tree has no labels, e.g.
     /// waiting out a game's loading screen. Case and spaces are ignored.
@@ -495,6 +528,10 @@ pub struct PhoneUiExpectation {
 pub struct PhoneElementLocator {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Case-sensitive literal substring of the normalized label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 1000))]
+    pub label_contains: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1101,13 +1138,91 @@ impl PhoneHandler {
     }
 
     #[tool(
-        annotations(read_only_hint = true, open_world_hint = true),
-        description = "Read all home-screen pages, Dock, folder pages and widget stacks from the paired iPhone without opening folders, swiping, or taking screenshots. Optional page selects one zero-based page to reduce output. Requires a configured physical target reachable through usbmuxd. This metadata read does not require drivable=true or a running XCTest Runner; never reconnect or open Home solely for this read. Page indexes refer to persisted icon state, including hidden/Focus-filtered pages; they are not the visible page-control indexes. Zero-based row/col positions are derived from icon-state order and grid metrics; null positions or positions_complete=false mean unknown, never safe drag coordinates. Contains no pixel coordinates and does not restore or modify a layout. An unreadable device returns an error rather than an empty home screen."
+        annotations(read_only_hint = true, open_world_hint = false),
+        description = "Read task performance aggregates for this MCP client's X-Phone-Owner on the selected instance. \
+        Includes recorded HTTP-call counts, batch/flow usage, stale/unknown outcomes, losses and p50/p95 call latency. \
+        HTTP calls are not model turns or token usage; model_round_trips remains null without a complete declared trace. \
+        Read-only: no phone connection, Runner launch or control lease. Default latest 5 open and recent runs, maximum \
+        20 per section and a shared 12 KiB row budget; omitted counts and truncated state are explicit. Never reconnect \
+        solely for metrics. Global cross-owner loss counters are excluded."
+    )]
+    async fn phone_metrics(&self, Parameters(params): Parameters<MetricsParams>) -> CallToolResult {
+        let limit = params.limit.unwrap_or(5);
+        if !(1..=20).contains(&limit) {
+            return CallToolResult::error(vec![Content::text("limit must be between 1 and 20")]);
+        }
+        let response = match self.daemon.metrics().await {
+            Ok(response) => response,
+            Err(error) => return CallToolResult::error(vec![Content::text(format!("metrics failed: {error:#}"))]),
+        };
+        if !response.ok() { return daemon_read_result(&response); }
+        let Some(body) = response.json.as_ref().filter(|body| body.get("ok").and_then(serde_json::Value::as_bool) == Some(true)) else {
+            return CallToolResult::error(vec![Content::text("metrics response did not contain a valid report")]);
+        };
+        let owner = self.daemon.owner().trim();
+        let mut budget = 12 * 1024;
+        let mut report = serde_json::json!({"ok":true,"owner":owner,
+            "definitions":"Counts cover recorded HTTP calls, not model turns or token usage. A missing or incomplete model trace is not zero round trips. Only this client's owner is included; global loss counters are excluded.",
+            "truncated":false});
+        for section in ["open", "recent"] {
+            let Some(rows) = body.get(section).and_then(serde_json::Value::as_array) else {
+                return CallToolResult::error(vec![Content::text("metrics report is missing its open/recent arrays")]);
+            };
+            let mut ordered = Vec::with_capacity(rows.len());
+            for row in rows {
+                if row.pointer("/key/owner").and_then(serde_json::Value::as_str) != Some(owner) {
+                    return CallToolResult::error(vec![Content::text("metrics report did not match this client's owner; no run data returned")]);
+                }
+                let (Some(start), Some(end), Some(incarnation)) = (
+                    row.get("started_ms").and_then(serde_json::Value::as_u64),
+                    row.get("ended_ms").and_then(serde_json::Value::as_u64),
+                    row.pointer("/key/incarnation").and_then(serde_json::Value::as_u64),
+                ) else {
+                    return CallToolResult::error(vec![Content::text("metrics run is missing its timestamps or identity")]);
+                };
+                ordered.push(((end.max(start), incarnation), row));
+            }
+            ordered.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+            let mut selected = Vec::new();
+            for (_, row) in ordered.into_iter().take(limit) {
+                let bytes = match serde_json::to_vec(row) {
+                    Ok(bytes) => bytes.len(),
+                    Err(_) => return CallToolResult::error(vec![Content::text("could not encode metrics run")]),
+                };
+                if bytes > budget { break; }
+                budget -= bytes;
+                selected.push(row.clone());
+            }
+            let omitted = rows.len() - selected.len();
+            if omitted > 0 { report["truncated"] = serde_json::json!(true); }
+            report[format!("{section}_omitted")] = serde_json::json!(omitted);
+            report[section] = serde_json::json!(selected);
+        }
+        let mut result = CallToolResult::success(vec![Content::text(report.to_string())]);
+        result.structured_content = Some(report);
+        result
+    }
+
+    #[tool(
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true),
+        description = "Read all home-screen pages, Dock, folder pages and widget stacks from the paired iPhone without opening folders, swiping, or taking screenshots. Optional page selects one zero-based page to reduce output. Requires a configured physical target reachable through usbmuxd. This metadata read does not require drivable=true or a running XCTest Runner; never reconnect or open Home solely for this read. Page indexes refer to persisted icon state, including hidden/Focus-filtered pages; they are not the visible page-control indexes. Zero-based row/col positions are derived from icon-state order and grid metrics; null positions or positions_complete=false mean unknown, never safe drag coordinates. Contains no pixel coordinates. An unreadable device returns an error rather than an empty home screen. Writing (action): backup saves the layout as a plist on the Mac; preview compares a plist with the phone by app identifier (added, removed, moved, widgets that would be lost); apply/restore replace the whole layout, only with confirm=true after the person agreed to the preview, and back up the replaced layout first. After a write read again: SpringBoard may bring App Library apps back over a few passes. Undo with action=restore."
     )]
     async fn phone_home_layout(
         &self,
         Parameters(params): Parameters<HomeLayoutParams>,
     ) -> CallToolResult {
+        if let Some(action) = params.action {
+            if *self.profile == ToolProfile::ReadOnly {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "home layout {action} is not available with {TOOLS_ENV}=readonly; call phone_home_layout without action to read"
+                ))]);
+            }
+            let body = serde_json::json!({"action": action, "file": params.file, "confirm": params.confirm});
+            return match self.daemon.home_layout_write(body).await {
+                Ok(response) => daemon_read_result(&response),
+                Err(error) => CallToolResult::error(vec![Content::text(format!("home layout {error:#}"))]),
+            };
+        }
         match self.daemon.home_layout(params.page).await {
             Ok(response) => daemon_read_result(&response),
             Err(error) => CallToolResult::error(vec![Content::text(format!(
@@ -1325,8 +1440,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Navigate to the iOS Home Screen (home) or Spotlight search (spotlight), leaving the current app or \
-        changing its visible state. Use this for system navigation, phone_key for field keys, or \
+        description = "Use Home (home), Spotlight (spotlight), physical volume buttons (volume_up, volume_down), or request a system screenshot in Photos (save_screenshot). \
+        Volume acknowledgement confirms only a button request, not the volume level; Simulator and older Runners without ipu:volumeButtons refuse before dispatch. \
+        save_screenshot is a mutation, unlike phone_screenshot which only returns image bytes. Its receipt means requested, not saved_verified, and requires ipu:systemCaptureRequest. \
+        If iOS opens a screenshot preview, inspect the system UI and choose Done/Save to Photos for that existing image; never take another screenshot to complete its save. \
+        Check Photos or its picker before claiming it saved. Never replay an uncertain capture or volume request. \
+        Navigation leaves the current app or changes its visible state. Use phone_key for field keys, or \
         phone_run_steps with launch_app for a specific app. Requires phone_status.drivable=true. Names are \
         trimmed and case-insensitive. switcher and other names fail before input is sent; the runner cannot \
         synthesize the App Switcher gesture. observe defaults on and returns the settled screen change. \
@@ -1339,7 +1458,7 @@ impl PhoneHandler {
         self.progress_reset();
         let name = name.trim().to_ascii_lowercase();
         match name.as_str() {
-            "home" | "spotlight" => {
+            "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down" => {
                 send_input_observed(&self.daemon, &InputMsg::Shortcut { name }, observe).await
             }
             "switcher" => CallToolResult::error(vec![Content::text(
@@ -1348,7 +1467,7 @@ impl PhoneHandler {
                  supported device action instead",
             )]),
             _ => CallToolResult::error(vec![Content::text(format!(
-                "unsupported shortcut '{name}'; supported: home, spotlight"
+                "unsupported shortcut '{name}'; supported: home, spotlight, save_screenshot, volume_up, volume_down"
             ))]),
         }
     }
@@ -1609,7 +1728,10 @@ impl PhoneHandler {
         of magnitude cheaper). Rows carry kind, label, identifier, value, rect and state, plus a \
         `snapshot` token for phone_tap_element; indexes and snapshot tokens are valid for this read \
         only. `query` keeps only rows containing that text (label, identifier, value, placeholder) \
-        and `limit` caps the rows — both keep each row's index and the snapshot, so taps still \
+        and `limit` caps the rows. `selector` ANDs exact kind/identifier/name/label/value/enabled \
+        fields and case-sensitive label_contains; optional selector.index (integer0..199) selects one match after scope/query and before limit, retaining the original snapshot row index. Unknown earlier candidates or incomplete tree scope refuse the ordinal. name matches a non-empty identifier, otherwise the label; value_present checks whether the snapshot supplies a string value \
+        (including empty/truncated); false means omitted/null on non-secure rows, not a complete AX null; protected SecureTextField rows match neither boolean. It filters AX rows, not OCR. Queries preserve \
+        each row's index and the snapshot, so taps still \
         work. Screen text shows at most 200 rows and 32 KiB of row text; an omission notice \
         means a partial view, not absence or list completion. Narrow with query when needed. \
         include_hidden=true expands off-screen/not-drawn rows instead of summarizing five labels; \
@@ -1625,6 +1747,7 @@ impl PhoneHandler {
         &self,
         Parameters(ElementsParams {
             query,
+            selector,
             limit,
             ocr,
             include_hidden,
@@ -1634,12 +1757,17 @@ impl PhoneHandler {
             Ok(ocr) => ocr,
             Err(error) => return CallToolResult::error(vec![Content::text(error)]),
         };
+        if let Some(selector) = &selector {
+            if let Err(hint) = selector.validate() {
+                return CallToolResult::error(vec![Content::text(format!("invalid selector: {hint}; nothing was sent to the daemon"))]);
+            }
+        }
         // A narrowed read is not the whole screen: it must not become the
         // no-progress tracker's baseline.
-        let narrowed = query.as_deref().is_some_and(|q| !q.trim().is_empty()) || limit.is_some();
+        let narrowed = query.as_deref().is_some_and(|q| !q.trim().is_empty()) || limit.is_some() || selector.is_some();
         match self
             .daemon
-            .elements_with_image(query.as_deref(), limit, ocr)
+            .elements_with_selector(query.as_deref(), limit, ocr, selector.as_ref())
             .await
         {
             // The daemon adds `registry` on the first read in a newly
@@ -1712,6 +1840,17 @@ impl PhoneHandler {
             }
             Err(e) => {
                 self.progress_reset();
+                if let Some(error)=e.downcast_ref::<crate::client::DaemonHttpError>() {
+                    if error.status==reqwest::StatusCode::CONFLICT {
+                        if let Ok(body)=serde_json::from_str::<serde_json::Value>(&error.body) {
+                            if body.get("error").and_then(serde_json::Value::as_str)==Some("ordinal_unproven") {
+                                let mut result=CallToolResult::error(vec![Content::text(body.to_string())]);
+                                result.structured_content=Some(body);
+                                return result;
+                            }
+                        }
+                    }
+                }
                 CallToolResult::error(vec![Content::text(format!(
                     "elements failed: {e:#}. Call phone_status and follow its `hint`; do not retry \
                      in a loop."
@@ -2009,16 +2148,20 @@ impl PhoneHandler {
         ),
         description = "Read a scrolling list across pages in ONE call instead of scroll + read \
         turns: reads the rows of one kind (default Cell) on screen, swipes one page, reads \
-        again, and stops when the list stops moving (duplicate_page), a page adds nothing \
-        new (no_progress), end_label is on screen, or max_pages (default 6, max 10) is \
-        reached. Rows are deduplicated on (kind, label, value): identical-looking rows \
-        collapse, so reconcile counts the user cares about. `complete` is true ONLY when \
-        end_label was seen; no_progress or duplicate_page is not proof the list ended. Only \
+        again, and stops when the exposed page repeats (duplicate_page), end_label is on screen, \
+        or max_pages (default 6, max 10) is \
+        reached. Rows are deduplicated on (kind, identifier, label, value): different exposed \
+        identifiers preserve identical-looking rows. Absent or reused identifiers with identical \
+        content may still collapse, so reconcile counts the user cares about. `complete` is true ONLY when \
+        end_label was seen (complete_scope=end_label_visibility); business_complete is always false. \
+        duplicate_page is not proof the list ended. Changed pages continue even with no new deduplicated rows. Only \
         what the accessibility tree exposes is collected. It swipes the live list, so the \
         screen is left where the last page was; `snapshot` is that last page. \
         Optional `snapshot` (from a read of the target app; never filled in for you): a known \
-        foreground app mismatch refuses before any swipe (app_changed, not_sent, retry_safe). \
+        foreground app mismatch refuses before any swipe (app_changed; setup may already have affected the device). \
         Results name the app. \
+        Owner/privacy changes stop further reads and scrolling. swipes_confirmed counts Native ACKs, \
+        swipes_uncertain may have reached the device; never replay uncertain scrolling. \
         Requires phone_status drivable=true."
     )]
     async fn phone_collect_list(
@@ -2048,7 +2191,9 @@ impl PhoneHandler {
         as `candidates`. No screenshot is taken; absence after the budget is not proof — \
         look at the screen before swiping further. Optional `snapshot` (from a read of the \
         target app; never filled in for you): a known foreground app mismatch refuses before \
-        any swipe (app_changed, not_sent, retry_safe). Results name the app. Requires \
+        any swipe (app_changed). Setup may already have affected the device. Stops when ownership \
+        or privacy authorization changes and withholds observations. swipes_confirmed counts Native ACKs, \
+        not displacement; swipes_uncertain means no ACK and must not be replayed automatically. Requires \
         phone_status drivable=true."
     )]
     async fn phone_scroll_find(
@@ -2922,7 +3067,11 @@ fn slim_tools(tools: Vec<rmcp::model::Tool>) -> Vec<rmcp::model::Tool> {
 /// is read by the panel, never the model, and its base64 image must reach
 /// `structuredContent` whole.
 fn finish_result(tool: &str, result: CallToolResult, mode: StructuredMode) -> CallToolResult {
-    if tool == crate::screen::FRAME_TOOL {
+    if tool == "phone_metrics" && result.is_error != Some(true) && matches!(mode, StructuredMode::Slim) {
+        // Metrics has its own row and byte bounds; generic slimming loses the
+        // per-run counters and the loss/unknown fields needed to interpret them.
+        shape_structured(result, StructuredMode::Full)
+    } else if tool == crate::screen::FRAME_TOOL {
         result
     } else {
         shape_structured(result, mode)
@@ -2947,6 +3096,17 @@ fn listed_tools(profile: &ToolProfile) -> Vec<rmcp::model::Tool> {
                 }
                 tool.input_schema = std::sync::Arc::new(schema);
                 tool.description = Some("Read the current app's applied-action trail as a flow v1 draft and todo list; never executes the flow. Typed values are replaced with named inputs. In this read-only profile no file is written and save_as is unavailable. Inspect and fix the draft before using phone_flow_run in an action-enabled session.".into());
+            }
+            if *profile == ToolProfile::ReadOnly && tool.name == "phone_home_layout" {
+                // Reading stays; this profile hides the write actions.
+                let annotations = tool.annotations.as_mut().expect("home layout annotations");
+                annotations.read_only_hint = Some(true);
+                annotations.destructive_hint = None;
+                let mut schema = (*tool.input_schema).clone();
+                if let Some(properties) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
+                    for key in ["action", "file", "confirm"] { properties.remove(key); }
+                }
+                tool.input_schema = std::sync::Arc::new(schema);
             }
             if tool.name != "phone_instances" {
                 let mut schema = (*tool.input_schema).clone();
@@ -3040,6 +3200,7 @@ impl ToolProfile {
                 // The handler refuses save_as in this profile; discovery below
                 // advertises only the side-effect-free draft operation.
                 tool.name == "phone_flow_draft"
+                    || tool.name == "phone_home_layout"
                     || tool.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true)
             }
             Self::Allow(names) => names.contains(tool.name.as_ref()),
@@ -3136,6 +3297,20 @@ fn shape_structured(mut result: CallToolResult, mode: StructuredMode) -> CallToo
             }
             let mut slim = serde_json::Map::new();
             for (key, value) in full {
+                if key == "app_lifecycle" {
+                    let receipt: serde_json::Map<String, serde_json::Value> = ["terminate_acknowledged", "launch_attempted"]
+                        .into_iter().filter_map(|name| value.get(name).filter(|field| field.is_boolean())
+                            .map(|field| (name.to_string(), field.clone()))).collect();
+                    if !receipt.is_empty() { slim.insert(key.clone(), serde_json::Value::Object(receipt)); }
+                    continue;
+                }
+                if key == "system_capture" {
+                    let receipt: serde_json::Map<String, serde_json::Value> = ["requested", "saved_verified"]
+                        .into_iter().filter_map(|name| value.get(name).filter(|field| field.is_boolean())
+                            .map(|field| (name.to_string(), field.clone()))).collect();
+                    if !receipt.is_empty() { slim.insert(key.clone(), serde_json::Value::Object(receipt)); }
+                    continue;
+                }
                 let keep = match value {
                     serde_json::Value::String(s) => s.len() <= SLIM_STRING_LIMIT,
                     serde_json::Value::Array(_) | serde_json::Value::Object(_) => false,
@@ -3324,13 +3499,28 @@ impl ServerHandler for PhoneHandler {
 // ---------------------------------------------------------------------------
 
 fn phone_locator_has_condition(locator: &PhoneElementLocator) -> bool {
-    locator.label.is_some()
-        || locator.identifier.is_some()
-        || locator.kind.is_some()
-        || locator.value.is_some()
-        || locator.focused.is_some()
-        || locator.enabled.is_some()
-        || locator.visible.is_some()
+    [
+        locator.label.as_deref(),
+        locator.label_contains.as_deref(),
+        locator.identifier.as_deref(),
+        locator.kind.as_deref(),
+        locator.value.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|text| !text.contains('\0'))
+        && locator
+            .label_contains
+            .as_ref()
+            .is_none_or(|text| !text.is_empty() && text.chars().count() <= 1000)
+        && (locator.label_contains.is_some()
+            || locator.label.is_some()
+            || locator.identifier.is_some()
+            || locator.kind.is_some()
+            || locator.value.is_some()
+            || locator.focused.is_some()
+            || locator.enabled.is_some()
+            || locator.visible.is_some())
 }
 
 /// Longest text one step (or a whole batch) may type — the daemon's
@@ -3608,9 +3798,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
             PhoneStep::Shortcut { name, after_ms } => {
                 validate_after(after_ms)?;
                 let name = name.trim().to_ascii_lowercase();
-                if !matches!(name.as_str(), "home" | "spotlight") {
+                if !matches!(name.as_str(), "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down") {
                     return Err(format!(
-                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight; no action was sent"
+                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight, save_screenshot, volume_up, volume_down; no action was sent"
                     ));
                 }
                 action_step(serde_json::json!({"type":"shortcut","name":name}), after_ms)
@@ -3856,9 +4046,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                         "steps[{index}] contains an empty element locator; no action was sent"
                     ));
                 }
-                if timeout_ms == 0 || timeout_ms > max_wait {
+                if (ocr && timeout_ms == 0) || timeout_ms > max_wait {
                     return Err(format!(
-                        "steps[{index}].timeout_ms must be between 1 and {max_wait}; no action was sent"
+                        "steps[{index}].timeout_ms must be between {} and {max_wait}; zero selects one bounded tree read; no action was sent", if ocr {1} else {0}
                     ));
                 }
                 if !(50..=1_000).contains(&poll_ms) {
@@ -3866,7 +4056,7 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                         "steps[{index}].poll_ms must be between 50 and 1000; no action was sent"
                     ));
                 }
-                declared_wait_ms = declared_wait_ms.saturating_add(timeout_ms);
+                declared_wait_ms = declared_wait_ms.saturating_add(if timeout_ms == 0 {iu_core::SINGLE_READ_WAIT_BUDGET_MS} else {timeout_ms});
                 serde_json::json!({
                     "kind": "wait_for",
                     "expect": expect,
@@ -3913,6 +4103,12 @@ fn with_structure(
         .filter(|value| value.is_object())
         .cloned()
     {
+        let capture_requested = json.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)
+            || json.get("steps").and_then(serde_json::Value::as_array).is_some_and(|steps|
+                steps.iter().any(|step| step.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)));
+        if capture_requested {
+            result.content.insert(0, Content::text("System screenshot requested; saving to Photos is not independently verified. If a full-screen preview is open, inspect it and save that existing image with Done/Save to Photos. Check Photos or its picker; do not take another screenshot to finish the pending save."));
+        }
         result.structured_content = Some(json);
     }
     result
@@ -4353,6 +4549,96 @@ mod tests {
         (format!("http://{address}"), task)
     }
 
+    #[test]
+    fn volume_shortcuts_are_sent_to_the_selected_daemon() {
+        for name in ["volume_up", "volume_down"] {
+            let (url, task) = scripted_daemon("200 OK", br#"{"ok":true}"#.to_vec());
+            let result = block(handler_for(&url).phone_shortcut(Parameters(ShortcutParams {
+                name: format!("  {}  ", name.to_uppercase()),
+                observe: Some(false),
+            })));
+            assert_ne!(result.is_error, Some(true), "{}", text_of(&result));
+            task.join().unwrap();
+            let step: PhoneStep =
+                serde_json::from_value(serde_json::json!({"kind":"shortcut","name":name})).unwrap();
+            let request = phone_steps_request(vec![step]).unwrap();
+            assert_eq!(request["steps"][0]["action"]["name"], name);
+        }
+    }
+
+    fn metrics_run(owner: &str, incarnation: u64, end: u64) -> serde_json::Value {
+        serde_json::json!({"key":{"kind":"explicit","owner":owner,
+            "run_id":format!("run-{incarnation}"),"incarnation":incarnation},
+            "started_ms":1,"ended_ms":end,"tool_calls":3,"stored_calls":2,
+            "incomplete":true,"dropped_events":1,"outcome_unknown":1,
+            "model_round_trips":null,"failures":{"runner_error":1}})
+    }
+
+    fn metrics_reply(body: serde_json::Value, limit: Option<usize>) -> CallToolResult {
+        let (url, task) = scripted_daemon("200 OK", serde_json::to_vec(&body).unwrap());
+        let handler = PhoneHandler::new(DaemonClient::new(url, None).with_owner("metrics-owner"));
+        let result = block(handler.phone_metrics(Parameters(MetricsParams { limit })));
+        task.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn metrics_keeps_latest_runs_and_unknown_loss_fields_in_slim_mode() {
+        let result = metrics_reply(serde_json::json!({"ok":true,"open":[
+            metrics_run("metrics-owner",1,10),metrics_run("metrics-owner",3,30),
+            metrics_run("metrics-owner",2,20)],"recent":[],"stats":{"unattributed_events":99}}), Some(1));
+        assert_ne!(result.is_error, Some(true));
+        let slim = finish_result("phone_metrics", result, StructuredMode::Slim);
+        let report = slim.structured_content.unwrap();
+        assert_eq!(report["open"][0]["key"]["run_id"], "run-3");
+        assert_eq!(report["open"][0]["dropped_events"], 1);
+        assert_eq!(report["open"][0]["outcome_unknown"], 1);
+        assert!(report["open"][0]["model_round_trips"].is_null());
+        assert_eq!(report["open_omitted"], 2);
+        assert_eq!(report["truncated"], true);
+        assert!(report.get("stats").is_none());
+    }
+
+    #[test]
+    fn metrics_rejects_other_owner_without_returning_their_run_data() {
+        let result = metrics_reply(serde_json::json!({"ok":true,
+            "open":[metrics_run("private-other-owner",1,10)],"recent":[]}), None);
+        assert_eq!(result.is_error, Some(true));
+        assert!(!text_of(&result).contains("private-other-owner"));
+        assert!(result.structured_content.is_none());
+    }
+
+    #[test]
+    fn metrics_reports_byte_budget_omissions_without_forwarding_oversized_data() {
+        let mut run = metrics_run("metrics-owner",1,10);
+        run["extra"] = serde_json::json!("x".repeat(13 * 1024));
+        let result = metrics_reply(serde_json::json!({"ok":true,"open":[run],"recent":[]}), None);
+        assert_ne!(result.is_error, Some(true));
+        let report = result.structured_content.unwrap();
+        assert_eq!(report["open"], serde_json::json!([]));
+        assert_eq!(report["open_omitted"], 1);
+        assert_eq!(report["truncated"], true);
+    }
+
+    #[test]
+    fn metrics_rejects_malformed_run_identity_instead_of_inventing_timing() {
+        let mut run = metrics_run("metrics-owner",1,10);
+        run.as_object_mut().unwrap().remove("started_ms");
+        let result = metrics_reply(serde_json::json!({"ok":true,"open":[run],"recent":[]}), None);
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.structured_content.is_none());
+    }
+
+    #[test]
+    fn metrics_invalid_limit_is_rejected_before_contact() {
+        let handler = handler_for("http://127.0.0.1:1");
+        for limit in [0, 21] {
+            let result = block(handler.phone_metrics(Parameters(MetricsParams { limit:Some(limit) })));
+            assert_eq!(result.is_error, Some(true));
+            assert!(text_of(&result).contains("limit must be"));
+        }
+    }
+
     fn handler_for(url: &str) -> PhoneHandler {
         PhoneHandler::new(DaemonClient::new(url.to_string(), None))
     }
@@ -4404,6 +4690,64 @@ mod tests {
         assert_eq!(structured["settle"]["captures"], 2);
         assert_eq!(structured["delta"]["added"][0], "搜索");
         assert_eq!(structured["snapshot"], "snap-1");
+    }
+
+    #[test]
+    fn system_capture_mcp_preserves_unverified_save_and_explicit_notice() {
+        let (url, task) = scripted_daemon("200 OK", br#"{"ok":true,"transport":"runner","system_capture":{"requested":true,"destination":"iPhone Photos","saved_verified":false}}"#.to_vec());
+        let handler = handler_for(&url);
+        let result = block(handler.phone_shortcut(Parameters(ShortcutParams {
+            name: " SAVE_SCREENSHOT ".into(), observe: Some(false),
+        })));
+        task.join().unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert!(text_of(&result).contains("not independently verified"));
+        assert_eq!(result.structured_content.unwrap()["system_capture"]["saved_verified"], false);
+    }
+
+    #[test]
+    fn value_read_unavailability_reason_reaches_every_output_mode_without_a_preview() {
+        let body=serde_json::json!({"ok":false,"error":"full_value_unavailable","reason":"ax_attribute_unavailable",
+            "hint":"The element did not supply a complete AX attribute; do not infer empty or null.","value":"PREVIEW"});
+        let (url,task)=scripted_daemon("501 Not Implemented",body.to_string().into_bytes());
+        let result=block(handler_for(&url).phone_read_value(Parameters(ReadValueParams {
+            identifier:Some("field-a".into()),label:None,kind:None,max_utf16:None,
+        })));
+        task.join().unwrap();
+        for mode in [StructuredMode::Full,StructuredMode::Slim,StructuredMode::Off] {
+            let shaped=shape_structured(result.clone(),mode);
+            assert_eq!(shaped.is_error,Some(true));
+            let text=shaped.content.iter().filter_map(|c| c.as_text().map(|t|t.text.as_str())).collect::<Vec<_>>().join("\n");
+            let value:serde_json::Value=serde_json::from_str(&text).unwrap();
+            assert_eq!(value["reason"],"ax_attribute_unavailable");
+            assert!(value.get("value").is_none());
+            assert!(!text.contains("PREVIEW"));
+            if mode != StructuredMode::Off {
+                let structured=shaped.structured_content.unwrap();
+                assert_eq!(structured["reason"],"ax_attribute_unavailable");
+                assert!(structured.get("value").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn system_capture_receipt_survives_default_structured_slim() {
+        let (url, task) = scripted_daemon("200 OK", br#"{"ok":true,"system_capture":{"requested":true,"saved_verified":false,"image":"PRIVATE","asset":"PRIVATE"}}"#.to_vec());
+        let result = block(handler_for(&url).phone_shortcut(Parameters(ShortcutParams {
+            name: "save_screenshot".into(), observe: Some(false),
+        })));
+        task.join().unwrap();
+        let shaped = shape_structured(result, StructuredMode::Slim);
+        let structured = shaped.structured_content.unwrap();
+        assert_eq!(structured["system_capture"], serde_json::json!({"requested":true,"saved_verified":false}));
+        assert!(!structured.to_string().contains("PRIVATE"));
+    }
+
+    #[test]
+    fn system_capture_batch_validation_accepts_explicit_mutation() {
+        let step: PhoneStep = serde_json::from_value(serde_json::json!({"kind":"shortcut","name":"save_screenshot"})).unwrap();
+        let request = phone_steps_request(vec![step]).unwrap();
+        assert_eq!(request["steps"][0]["action"]["name"], "save_screenshot");
     }
 
     /// With `observe:false` the result stays the short string callers
@@ -4652,7 +4996,7 @@ mod tests {
             ("200 OK", br#"{"ok":true,"page_index_space":"persisted_icon_state","pages":[{"page":0,"positions_complete":false}]}"#.to_vec(), false),
         ] {
             let (url, task)=scripted_daemon(status,body);
-            let result=block(handler_for(&url).phone_home_layout(Parameters(HomeLayoutParams{page:Some(0)})));
+            let result=block(handler_for(&url).phone_home_layout(Parameters(HomeLayoutParams{page:Some(0),action:None,file:None,confirm:false})));
             task.join().unwrap();
             assert_eq!(result.is_error==Some(true),fails,"{}",text_of(&result));
             if !fails { assert_eq!(result.structured_content.unwrap()["page_index_space"],"persisted_icon_state"); }
@@ -4778,7 +5122,7 @@ mod tests {
 
     /// The tools that only read: no phone input, no outward-facing writes.
     /// `IPHONE_USE_MCP_TOOLS=readonly` exposes exactly these.
-    const READ_ONLY_TOOLS: [&str; 14] = [
+    const READ_ONLY_TOOLS: [&str; 15] = [
         "phone_apps",
         "phone_capabilities",
         "phone_crashes",
@@ -4788,6 +5132,7 @@ mod tests {
         "phone_flow_list",
         "phone_home_layout",
         "phone_instances",
+        "phone_metrics",
         "phone_read_value",
         "phone_screen",
         "phone_screen_frame",
@@ -4830,7 +5175,7 @@ mod tests {
             read_only,
             READ_ONLY_TOOLS
                 .into_iter()
-                .filter(|name| *name != "phone_flow_draft")
+                .filter(|name| *name != "phone_flow_draft" && *name != "phone_home_layout")
                 .collect::<Vec<_>>()
         );
 
@@ -5048,6 +5393,7 @@ mod tests {
                 via: None,
                 if_present: false,
                 locator: PhoneElementLocator {
+                    label_contains: None,
                     label: None,
                     identifier: Some("search-field".to_string()),
                     kind: Some("TextField".to_string()),
@@ -5062,6 +5408,7 @@ mod tests {
                 expect: PhoneUiExpectation {
                     application: Some("聚焦".to_string()),
                     present: vec![PhoneElementLocator {
+                        label_contains: None,
                         label: Some("搜索".to_string()),
                         identifier: None,
                         kind: Some("TextField".to_string()),
@@ -5069,7 +5416,7 @@ mod tests {
                         focused: Some(true),
                         enabled: None,
                         visible: None,
-                    }],
+                    }.into()],
                     absent: vec![],
                     ocr_present: vec![],
                     ocr_absent: vec![],
@@ -5345,6 +5692,74 @@ mod tests {
     }
 
     #[test]
+    fn wait_schema_exposes_a_flat_bounded_nonnullable_index_only_for_waits() {
+        let schema = serde_json::to_value(schemars::schema_for!(PhoneWaitSelector)).unwrap();
+        assert_eq!(schema["additionalProperties"], false, "{schema}");
+        assert!(schema["properties"].get("label_contains").is_some());
+        let field = &schema["properties"]["index"];
+        let index = field
+            .get("$ref")
+            .and_then(serde_json::Value::as_str)
+            .map(|reference| schema.pointer(reference.trim_start_matches('#')).unwrap())
+            .unwrap_or(field);
+        assert_eq!(index["type"], "integer", "{schema}");
+        assert_eq!(index["minimum"].as_f64(), Some(0.0));
+        assert_eq!(index["maximum"].as_f64(), Some(199.0));
+        assert!(!schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|fields| fields.contains(&serde_json::json!("index"))));
+        let action = serde_json::to_value(schemars::schema_for!(PhoneElementLocator)).unwrap();
+        assert!(action["properties"].get("index").is_none());
+    }
+
+    #[test]
+    fn wait_index_is_bounded_and_cannot_be_used_as_an_action_locator() {
+        let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"present":[{"label_contains":"Save","index":2}]},"timeout_ms":0}])).unwrap();
+        let body = phone_steps_request(steps).unwrap();
+        assert_eq!(body["steps"][0]["expect"]["present"][0]["index"], 2);
+        for index in [
+            serde_json::json!(200),
+            serde_json::json!(-1),
+            serde_json::json!(true),
+            serde_json::Value::Null,
+            serde_json::json!(1.5),
+        ] {
+            let steps = serde_json::json!([{"kind":"wait_for","expect":{"present":[{"label":"Save","index":index}]},"timeout_ms":0}]);
+            assert!(serde_json::from_value::<Vec<PhoneStep>>(steps).is_err());
+        }
+        let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"present":[{"index":2}]},"timeout_ms":0}])).unwrap();
+        assert!(phone_steps_request(steps).is_err());
+        let action = serde_json::json!([{"kind":"tap_locator","locator":{"label_contains":"Save","index":1}}]);
+        assert!(serde_json::from_value::<Vec<PhoneStep>>(action).is_err());
+    }
+
+    #[test]
+    fn literal_contains_and_single_read_wait_are_encoded_and_budgeted() {
+        let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"present":[{"label":"保存\n'O\\K'🙂","label_contains":"'O\\K'"}]},"timeout_ms":0,"poll_ms":50}])).unwrap();
+        let body = phone_steps_request(steps).unwrap();
+        assert_eq!(body["steps"][0]["timeout_ms"], 0);
+        assert_eq!(
+            body["steps"][0]["expect"]["present"][0]["label_contains"],
+            "'O\\K'"
+        );
+        for fragment in [String::new(), "x".repeat(1001)] {
+            let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"present":[{"identifier":"save","label_contains":fragment}]},"timeout_ms":0}])).unwrap();
+            assert!(phone_steps_request(steps).is_err());
+        }
+        let steps: Vec<PhoneStep> = serde_json::from_value(serde_json::json!([
+            {"kind":"wait_for","expect":{"present":[{"label_contains":"Save"}]},"timeout_ms":0},
+            {"kind":"wait_for","expect":{"ocr_present":["ready"]},"timeout_ms":60000}
+        ]))
+        .unwrap();
+        assert!(phone_steps_request(steps)
+            .unwrap_err()
+            .contains("declared waits"));
+        let steps:Vec<PhoneStep>=serde_json::from_value(serde_json::json!([{"kind":"wait_for","expect":{"ocr_present":["ready"]},"timeout_ms":0}])).unwrap();
+        assert!(phone_steps_request(steps).is_err());
+    }
+
+    #[test]
     fn multi_step_request_rejects_invalid_waits_and_empty_locators_offline() {
         // The ceiling is 30s — sized for an element read that can cost six or
         // seven seconds on real hardware. One millisecond over is still
@@ -5382,6 +5797,7 @@ mod tests {
             expect: PhoneUiExpectation {
                 application: None,
                 present: vec![PhoneElementLocator {
+                    label_contains: None,
                     label: None,
                     identifier: None,
                     kind: None,
@@ -5389,7 +5805,7 @@ mod tests {
                     focused: None,
                     enabled: None,
                     visible: None,
-                }],
+                }.into()],
                 absent: vec![],
                 ocr_present: vec![],
                 ocr_absent: vec![],
@@ -5610,6 +6026,36 @@ mod tests {
     }
 
     #[test]
+    fn app_lifecycle_receipt_reaches_models_in_all_structured_modes() {
+        for (status, launch_attempted, outcome) in [("409 Conflict", Some(false), "partial"), ("409 Conflict", Some(true), "partial"), ("502 Bad Gateway", Some(true), "unknown"), ("504 Gateway Timeout", None, "unknown")] {
+            let mut receipt = serde_json::json!({"terminate_acknowledged":true});
+            if let Some(sent) = launch_attempted { receipt["launch_attempted"] = sent.into(); }
+            let body = serde_json::json!({"ok":false,"error":if outcome == "partial" {"app_launch_interrupted"} else {"outcome_unknown"}, "outcome":outcome,
+                "failed_step":0,"completed":0,"applied_actions":0,"failed_step_outcome":outcome,
+                "batch_outcome":if outcome == "partial" {"partially_applied"} else {"unknown"},
+                "retry_safe":false,"steps":[],"app_lifecycle":receipt});
+            let (url, task) = scripted_daemon(status, body.to_string().into_bytes());
+            let result = block(handler_for(&url).phone_run_steps(Parameters(RunStepsParams {
+                steps:vec![PhoneStep::LaunchApp {bundle:Some("test.fixture".into()),app:None,fresh:true,after_ms:0}],
+                observe:Some(false),
+            })));
+            task.join().unwrap();
+            for mode in [StructuredMode::Full, StructuredMode::Slim, StructuredMode::Off] {
+                let shaped = shape_structured(result.clone(), mode);
+                let text = shaped.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str())).collect::<Vec<_>>().join("\n");
+                assert!(text.contains("terminate_acknowledged=true"), "{mode:?}: {text}");
+                match launch_attempted {
+                    Some(sent) => assert!(text.contains(&format!("launch_attempted={sent}")), "{text}"),
+                    None => assert!(!text.contains("launch_attempted="), "unknown must stay unknown: {text}"),
+                }
+                if mode != StructuredMode::Off {
+                    assert_eq!(shaped.structured_content.as_ref().unwrap()["app_lifecycle"], receipt);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_slim_structure_keeps_the_verdict_and_the_summary_only() {
         let mut result = CallToolResult::error(vec![Content::text("FAILED x · step 2 of 2")]);
         result.structured_content = Some(serde_json::json!({
@@ -5765,6 +6211,74 @@ mod tests {
                 assert_eq!(shaped.structured_content.as_ref().unwrap()["elements"], body["elements"]);
             }
         }
+    }
+
+    #[test]
+    fn element_selector_is_encoded_literally_and_preserves_snapshot_indexes() {
+        let selector: iu_core::element_selector::ElementSelector = serde_json::from_value(
+            serde_json::json!({"kind":"Button", "identifier":"save.primary", "name":"save.primary", "label":"保存\n'O\\K'", "enabled":false,"value_present":false,"index":1})
+        ).unwrap();
+        let expected = serde_json::to_value(&selector).unwrap();
+        let body=serde_json::json!({"snapshot":"S", "elements":[
+            {"index":17,"kind":"Button","label":"保存", "enabled":false}
+        ], "filter":{"matched":2,"returned":1,"omitted":1,"selector":expected}});
+        let (result,line,_,_)=device_call("200 OK", &body.to_string(), |h| async move {
+            h.phone_elements(Parameters(ElementsParams {selector:Some(selector),..Default::default()})).await
+        });
+        let path=line.split_whitespace().nth(1).unwrap();
+        let url=reqwest::Url::parse(&format!("http://daemon{path}")).unwrap();
+        let encoded=url.query_pairs().find(|(key,_)|key=="selector").unwrap().1.into_owned();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),expected);
+        assert_eq!(result.structured_content.as_ref().unwrap()["snapshot"],"S");
+        assert_eq!(result.structured_content.as_ref().unwrap()["elements"][0]["index"],17);
+        assert_ne!(result.is_error,Some(true));
+    }
+
+    #[test]
+    fn element_selector_schema_is_object_only_and_has_strict_field_types() {
+        for selector in [serde_json::json!(["Button",null,null,null,null,null]),serde_json::json!(["Button"])] {
+            assert!(serde_json::from_value::<ElementsParams>(serde_json::json!({"selector":selector})).is_err());
+        }
+        let tool=PhoneHandler::tool_router().list_all().into_iter().find(|tool|tool.name.as_ref()=="phone_elements").unwrap();
+        let schema=serde_json::to_value(tool.input_schema.as_ref()).unwrap();
+        fn resolve<'a>(root: &'a serde_json::Value, value: &'a serde_json::Value) -> &'a serde_json::Value {
+            value.get("$ref").and_then(|v|v.as_str()).and_then(|reference|reference.strip_prefix('#'))
+                .and_then(|pointer|root.pointer(pointer)).unwrap_or(value)
+        }
+        let selector=resolve(&schema,&schema["properties"]["selector"]);
+        let object=selector.get("anyOf").and_then(|a|a.as_array()).and_then(|a|a.iter()
+            .map(|v|resolve(&schema,v)).find(|v|v.get("type")==Some(&serde_json::json!("object")))).unwrap_or(selector);
+        assert_eq!(object["type"],"object");
+        assert_eq!(object["additionalProperties"],false);
+        assert!(object["properties"]["enabled"].to_string().contains("boolean"));
+        assert!(object["properties"]["value_present"].to_string().contains("boolean"));
+        assert!(object["properties"]["name"].to_string().contains("string"));
+        assert_eq!(object["properties"].as_object().unwrap().len(),9);
+        let index=resolve(&schema,&object["properties"]["index"]);
+        assert_eq!(index["type"],"integer");assert_eq!(index["minimum"],0);assert_eq!(index["maximum"],199);
+        assert!(!object["required"].as_array().is_some_and(|fields|fields.iter().any(|v|v=="index")));
+        assert!(object["properties"].get("predicate").is_none());
+    }
+
+    #[test]
+    fn ordinal_unproven_is_structured_error_without_channel_recovery_advice() {
+        let body=serde_json::json!({"ok":false,"error":"ordinal_unproven","elements":[],"hint":"refine exact criteria ".repeat(150),"filter":{"ordinal_status":"unproven"}});
+        let (result,_,_,_)=device_call("409 Conflict",&body.to_string(),|h|async move {
+            h.phone_elements(Parameters(ElementsParams {selector:Some(serde_json::from_value(serde_json::json!({"label":"Save","index":1})).unwrap()),..Default::default()})).await
+        });
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.structured_content, Some(body.clone()));
+        let text = text_of(&result);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap(), body);
+        assert!(!text.contains("phone_status"));
+    }
+
+    #[test]
+    fn invalid_selector_is_refused_before_contacting_a_daemon() {
+        let result=block(handler_for("http://127.0.0.1:9").phone_elements(Parameters(ElementsParams {
+            selector:Some(Default::default()),..Default::default()
+        })));
+        assert!(refused_offline(result).contains("selector needs at least one field"));
     }
 
     #[test]

@@ -374,7 +374,7 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"set_value","element":5,"snapshot":"…","value":"你好"}  // write a field directly; 409 value_not_applied → tap + text instead (web views)
 {"type":"key","name":"return"}                          // return|enter|send|go|search fire Return; escape, space, tab, delete/backspace, arrows
 {"type":"keyboard"}                                     // dismiss the keyboard
-{"type":"shortcut","name":"home"}                       // home | spotlight (switcher is unsupported)
+{"type":"shortcut","name":"home"}                       // home | spotlight | save_screenshot | volume_up | volume_down (switcher is unsupported)
 {"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":80}        // ≈15% of a screen; ≈400 → 75%
 {"type":"scroll","element":7,"snapshot":"…","dy":120}   // inside that element only
 {"type":"scroll","page":true,"dy":300}                  // the page scroller (long web forms); 422 no_page_scroller if none
@@ -386,6 +386,22 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"picker","column":0,"value":"2026"}
 {"type":"perform","element":9,"snapshot":"…","action":"toggle"}  // increment|decrement|adjust(+value)|toggle|menu|double_tap|two_finger_tap|scroll_to_visible|pinch|rotate
 ```
+
+`volume_up` and `volume_down` require a physical device and a Runner advertising `ipu:volumeButtons=true`. Missing capability refuses before the button request. An acknowledgement does not verify the volume level; do not replay an uncertain press.
+
+`phone_shortcut {"name":"save_screenshot"}` requests one iOS system screenshot
+for the phone's Photos library. The HTTP form is
+`POST /agent/input {"type":"shortcut","name":"save_screenshot"}`. It requires
+a native Runner declaring `ipu:systemCaptureRequest`; an older Runner is
+refused before the capture event. The action receipt reports
+`system_capture.requested:true` and `saved_verified:false`: the OS acknowledged
+the request, while the saved image still needs checking in Photos or a picker.
+On newer iOS, the capture can open a full-screen preview. Inspect that system
+UI and choose Done/Save to Photos for the existing image, then verify Photos;
+do not request another screenshot to complete its save. An unknown outcome
+must never be repeated. `phone_screenshot` continues to
+return an observation image to the caller without adding a Photos asset.
+
 
 **Multi-finger hold.** `multi_longpress` holds 2–5 distinct normalized
 `{x,y}` points simultaneously in one runner request; the array length is the
@@ -571,6 +587,36 @@ is no longer cached). The action result and the observation are separate facts:
   tree is blocked. Its observation says `source:"alert"` and includes the alert
   text. It does not accept/dismiss the alert or establish app identity, absence,
   identifiers or element state. Combined conditions still need the full tree.
+- Locators also accept `label_contains`: a case-sensitive literal substring,
+  ANDed with label, identifier, kind, value and state fields. The fragment must
+  have 1–1000 characters. NUL is refused in locator strings before execution.
+- Wait locators additionally accept `index:0..199` (default0), selecting an
+  ordinal among matching rows, not a snapshot element index. `index:2` means
+  presence requires at least3 known matching rows; absence requires proving
+  fewer than3 possible matches. Unknown attributes and partial trees remain
+  unproven unless the known witnesses already meet the threshold. Wait
+  observations return `present_counts` / `absent_counts` with required, known
+  and unproven counts and a completeness flag. `coverage` is `complete`,
+  `partial`, or `unknown`; proving shortage requires a new Native
+  `X-IPU-Tree-Complete:1` acknowledgement. Old or unacknowledged providers can
+  prove presence from enough known rows, but cannot prove shortage. Update
+  the selected instance's Runner source when negative checks need that proof.
+  Index-only locators, null/bool/
+  fractional/out-of-range indexes and indexed action locators are rejected.
+  Actions keep their existing unique-target contract. Counts describe the
+  current provider snapshot, not business completion or durable item identity.
+- For a tree `wait_for`, `timeout_ms:0` selects one observation attempt bounded
+  to 500 ms, with no predicate pre-probe, snapshot probe, read retry or polling.
+  A standalone request includes runner-lock queueing in that budget and does
+  not prewarm or engage Focus. A zero wait inside a longer batch starts its
+  read window when reached and counts 500 ms against the declared-wait cap.
+  Set `phone_run_steps`'s `observe:false` to omit its separate final batch
+  observation. Flow failure diagnosis reuses this observation rather than
+  issuing another read. `single_read:true`, `attempts` and `reads` distinguish
+  a known unmet condition from unavailable state. OCR waits still require a
+  positive timeout; a timeout or empty/unknown tree cannot prove absence.
+  `single_read_timeout` means the observation budget expired without a tree;
+  it does not establish a disconnected runner or discard its existing session.
 - Keep `pause` for short animation gaps (maximum 3000 ms). For a slow page such
   as iPhone Storage, use a semantic `wait_for` with `timeout_ms:30000` on the
   expected result instead of chaining pauses.
@@ -581,15 +627,42 @@ is no longer cached). The action result and the observation are separate facts:
   is a screenshot plus Vision OCR (about 1 s). An OCR wait may run up to
   60000 ms, cannot be mixed with `application`/`present`/`absent` in the same
   step, and on timeout its `observation` lists the `lines` it did read.
+- Boolean wait conditions (`enabled`, `visible`, `focused`) require a known
+  provider state. Missing or malformed flags satisfy neither a positive condition
+  nor absence of that condition. `present_unproven` and `absent_unproven` identify
+  affected expectation indexes; polling continues within the existing timeout.
+  Truncated, unsupported or protected secure values likewise cannot establish
+  exact value presence or absence. A known mismatch in another requested field
+  still rules out that row.
 - A failed `wait_for` carries `observation`: `read:false` proves nothing;
-  `read:true, stale:true` is the last valid view; plain `read:true` means the
-  condition really was not met. Locators an empty tree would have "satisfied" are
+  `read:true, stale:true` is the last valid view; plain `read:true` means a
+  current tree was returned. Check the unproven indexes before drawing a conclusion. Locators an empty tree would have "satisfied" are
   listed in `absent_unproven` and do not pass. Never conclude something is gone
   from a tree with nothing in it — screenshot instead.
 - A 502/504 after dispatch (`outcome_unknown`, `retry_safe:false`) may have
   acted. Read elements or a screenshot before deciding; never replay text,
   scroll, back, pay, send or delete blindly. When the runner answered with an
   error, `runner_error` (`call`, `status`, `code`, `message`) says why.
+- From v0.27.20, direct action dispatch checks the original owner/privacy scope, Runner generation and deadline
+  before each Runner transport request, including compound input subrequests.
+  `409 control_scope_changed` stops the remainder after authorization or request
+  lifetime changes. With zero mutating requests admitted it reports `not_sent`,
+  `retry_safe:true`; otherwise it reports `unknown`, `retry_safe:false`. A request
+  already admitted may have acted; there is no rollback. Retry safety is a delivery
+  fact, not permission to reclaim control or replay uncertain work.
+  Long-text completion only renews its original, still-live owner lease; it never
+  reuses a takeover header to reclaim the phone. An unlock acknowledgement cannot
+  cancel a concurrent release.
+- A fresh app launch checks authorization before terminating and again before
+  launching, including after session setup. A terminate error stops the sequence.
+  `409 app_launch_interrupted` (`outcome:partial`, `retry_safe:false`) means the
+  terminate request was acknowledged but launch was refused. Do not replay the
+  whole fresh launch. `app_lifecycle.terminate_acknowledged` confirms only the
+  request acknowledgement, not an independently verified restart.
+  `launch_attempted:true` means launch was admitted for a transport attempt; it
+  may have reached the Runner. `false` means it was not admitted. A missing field
+  is unknown, including cancellation during the wait after termination. These
+  receipts survive failed single actions, batches and MCP Full/Slim/Off modes.
 - `422 runner_rejected` (`not_sent`, `retry_safe:true`): the runner refused the
   action before touching the screen (for example a point outside the screen it
   measures); `runner_error.message` names the reason.
@@ -645,21 +718,23 @@ you (the MCP tool included): pass one only from a read of the app you mean to
 swipe.
 
 A row without a label (most Cells) is named by its texts, joined with ` · `.
-Rows are deduplicated on `(kind, label, value)`, so identical-looking rows
-collapse into one. `stop_reason`:
+Rows are deduplicated on `(kind, identifier, label, value)`. Different exposed
+identifiers keep identical-looking rows distinct; absent or reused identifiers
+with identical content may collapse. A changed page that adds no distinct rows
+still continues within the page/time budget: later pages may expose new rows. `stop_reason`:
 
 | `stop_reason` | Meaning |
 |---|---|
 | `end_label` | The end label was on screen — the only case with `complete:true` |
-| `duplicate_page` | After a swipe the page was the same: the list did not move (its end, or the swipe hit something that does not scroll) |
-| `no_progress` | The list moved but showed nothing new |
+| `duplicate_page` | After a swipe the exposed row identities, labels and frames repeated: further progress cannot be confirmed (identical-looking pages may also repeat) |
 | `max_pages` | Page budget used up; more rows may follow |
 | `deadline` | Too little of the 80 s call budget was left to swipe and read another page |
 | `read_failed` / `swipe_failed` | Stopped early; rows so far are returned, no snapshot |
 | `no_rows` | No row of that kind on the first page: check `row_kind` or `region` |
 
-`complete` is false in every case but `end_label`; `duplicate_page` and
-`no_progress` are not proof the list ended. `snapshot` is the last page's
+`complete` retains its end-marker meaning (`complete_scope:"end_label_visibility"`).
+`business_complete` is always false: even reaching the marker does not verify
+row counts or business totals. `complete` is false in every case but `end_label`; `duplicate_page` is not proof the list ended. `snapshot` is the last page's
 tree; rows from earlier pages are off screen and carry no index.
 
 `POST /agent/scroll_find` (MCP `phone_scroll_find`) looks for one exact label:
@@ -926,8 +1001,10 @@ update / publish / report`, and the device tools `phone_logs`, `phone_crashes`,
   tools also `destructiveHint`, `idempotentHint`). Read-only: `phone_status`,
   `phone_capabilities`, `phone_apps`, `phone_screen`, `phone_screen_frame`,
   `phone_screenshot`, `phone_elements`, `phone_crashes`, `phone_flow_list`,
-  `phone_flow_info`, `phone_flow_draft`, `phone_home_layout`, `phone_instances`. `phone_logs` is not read-only (its
-  start/stop change the capture); `phone_install_app` is destructive.
+  `phone_flow_info`, `phone_flow_draft`, `phone_instances`. `phone_logs` is not read-only (its
+  start/stop change the capture); `phone_install_app` is destructive. `phone_home_layout` reads
+  without `action` and writes with it (destructive); the `readonly` profile keeps the read and
+  hides the write actions, as it does `phone_flow_draft`'s `save_as`.
 - `IPHONE_USE_MCP_TOOLS` picks the exposed tools: `all` (default), `readonly`
   (only the read-only set), or a comma list of tool names (unknown names are
   warned about on stderr and ignored). A hidden tool is not listed, and a call
@@ -975,6 +1052,17 @@ locators.
 
 ### Scoped and searched reads
 
+**Diagnostic state.** `GET /agent/elements?locator_state=1` preserves known
+`enabled`, `visible`, `focused` and empty `value` strings from that same fresh
+snapshot, with a per-row `value_known` boolean. `value_known:false` means the
+value is unsupported, protected or truncated. With `value_known:true`, an
+omitted `value` is known absence; `value:""` is a known empty string. Unknown
+booleans remain omitted. The response echoes `locator_state:1`. This projection
+requires a full read without `since`, preserves original indices and the full
+snapshot cache, and does not change default compact reads. Flow diagnosis uses
+it once after a failure. Older daemons may omit the metadata; the MCP treats
+missing value information as unproven without issuing a fallback read.
+
 **Scoped reads.** `GET /agent/elements?scope=…` filters the same fresh read.
 The `snapshot` and every row's original `index` stay valid for taps.
 - `app`: the active app's subtree, plus the keyboard. The top-level `alert`
@@ -996,6 +1084,46 @@ or raising `limit`. A `query` that is empty or over 200 characters is 400
 `invalid_query`; a bad `limit` is 400 `invalid_limit`. A `delta` answer
 (`since` without `scope=changed`) is not filtered. Search when you know the words on screen.
 Read the whole screen when you do not.
+
+**Field selectors.** MCP `phone_elements` also accepts a `selector` object,
+for example `{"kind":"Button","identifier":"save.primary","enabled":true}`.
+HTTP callers pass the same object as URL-encoded JSON in `?selector=`.
+Fields combine with AND: exact `kind`, `identifier`, `label`, `value`, boolean
+`enabled`, and case-sensitive `label_contains`. Exact values preserve whitespace
+and newlines; an empty `value` matches a present empty value, not a missing one.
+Known truncated value previews cannot match an exact value filter; use
+`phone_read_value` to inspect bounded full values.
+From v0.27.22, `value_present:true` matches exposed snapshot strings, including
+empty strings and truncated previews. `false` matches an unprovided snapshot
+value (omitted or null on non-secure rows), not proof that an App's full AX value
+is null. Protected `SecureTextField` rows match neither boolean; their redaction
+must not be classified as either a real value or an empty field.
+This predicate uses the provider snapshot; ordinary compact output can omit an
+empty string. Filtering restores that known empty metadata. A malformed non-string
+snapshot value matches neither boolean. Provider numbers and booleans retain the
+existing normalization to strings; object/array normalization failures remain
+unknown rather than becoming absent. A truncated-value marker without any value
+also stays unknown and matches neither boolean. Combining `value_present:false` with an
+exact `value` is invalid. For example, `{"kind":"Button","value_present":false}`
+finds buttons without an exposed snapshot value in one read.
+Known enabled state and explicit empty values are included when those fields
+are filtered; redacted secure values are never treated as empty. Ordinary reads
+keep the compact representation. Unknown enabled state matches neither true nor false. The optional
+`XCUIElementType` prefix is accepted for `kind`. Selectors need at least one
+field; strings are limited to 1000 characters. No predicates are evaluated.
+
+Selector filtering combines with `scope`, `query` and `limit`, preserving the
+full tree's snapshot and original indexes. The `filter` summary includes the
+selector and match/omission counts. It applies to accessibility rows; separate
+OCR rows are unchanged. A match is not proof of visibility or hittability.
+Selectors require a full read: combining one with `since` (including
+`scope=changed`) is refused before the device read. Malformed/unsupported
+selectors return 400 `invalid_selector`.
+
+The MCP checks that `filter.selector` confirms the requested selector before
+returning or caching the read. Missing or different confirmation fails instead
+of silently returning a broader view; ordinary reads still work with older
+daemons. Update the selected instance when its daemon lacks selector support.
 
 **Images only when needed.** `?image=auto` attaches a screenshot only when the
 tree is unusable (no interactive rows, containers only). The screenshot is
@@ -1348,7 +1476,33 @@ mean the geometry is unknown; unknown items remain in the inventory. These are
 not pixel coordinates or a restore format. Read again after moving an icon and
 resolve live UI elements before sending a gesture. An unavailable service returns
 `503 home_layout_unavailable`, never a successful empty layout. Simulator targets
-are explicitly unsupported. No endpoint changes the saved layout.
+are explicitly unsupported.
+
+### Writing a layout
+
+`POST /agent/home-layout {"action","file"?,"confirm"?}` / MCP `phone_home_layout`
+with `action` (CLI: `iphone-use home-layout backup|apply|restore [file] [--dry-run]`)
+replaces the whole icon state through SpringBoard's `setIconState`. It needs
+`X-Phone-Control` and the owner lease. Files are plists on the Mac, saved in
+`~/.iphone-use-backups` unless a path is given.
+
+- `backup` saves the current layout. Dates are cut to whole seconds so `plutil`
+  and Python's `plistlib` can read the file (SpringBoard's carry nanoseconds).
+- `preview` compares `file` with the phone **by app identifier**
+  (`bundleIdentifier`, `displayIdentifier`, `webClipIdentifier`), never by name:
+  two apps called "Authenticator" stay two apps. It lists `added`, `removed`,
+  `moved` (pages, 0 is the Dock) and the count of widgets/stacks, which have no
+  identifier, before and after.
+- `apply` writes `file`; `restore` writes the newest automatic backup, or `file`.
+  Without `confirm:true` both answer the preview and write nothing: show it to
+  the person and send again only after they agree. A write first saves the
+  layout it replaces as `home-before-apply-<time>.plist`, so `restore` undoes it.
+
+After writing, read the layout again. Apps left out of the new layout go to the
+App Library, and SpringBoard can bring hidden App Library apps back onto Home
+pages over several passes, so a second read can differ from the first; repeat
+the write only after reading. Widgets and stacks are easy to lose in a
+rearrangement: the preview warns when the new layout has fewer of them.
 
 When `runner_parked=true` (or legacy `ended_on_phone=true`), automatic schedules remain postponed. An explicitly
 requested manual schedule run may reconnect, but it still respects human handoff,
@@ -1410,3 +1564,21 @@ permitted reads. Plan a fresh read only after checking current status.
 
 The Native complete-value route is explicitly opted into with `complete=1`;
 existing attribute/value snapshot reads and POST value writes keep their contracts.
+
+
+From v0.27.21, `full_value_unavailable` retains its existing 501 status and adds
+`reason` so a selected-element failure does not imply that the Runner needs an
+upgrade. It never carries a value or promotes a snapshot preview.
+
+| Reason | What this read established |
+| --- | --- |
+| `runner_capability_missing` | The selected Runner did not advertise `ipu:valueRead`. |
+| `ax_attribute_unavailable` | This request did not return the selected full AX attribute. Its value remains unknown. |
+| `ax_value_not_scalar` | The returned AX attribute is outside this API's scalar contract. |
+| `ax_bridge_unavailable` | The Native AX bridge could not service this request. |
+| `ax_read_failed` | The Native AX read failed for this request. |
+| `runner_endpoint_unavailable` | The Runner refused the complete-value endpoint without a recognized Native diagnosis. |
+| `invalid_contract` | The returned payload failed completeness validation. |
+
+Only a successful, validated complete-value contract can report a complete null
+or empty value. An unavailable attribute is evidence of neither.

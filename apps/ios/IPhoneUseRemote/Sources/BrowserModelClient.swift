@@ -179,8 +179,7 @@ final class BrowserModelClient: BrowserReasoning, AssistantReasoning, BrowserCom
         }
         let zen = !anthropic && ZenCompatibility.matches(provider.baseURL, key: provider.key)
         if zen { ZenCompatibility.prepare(&request, body: &body, session: zenSession) }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await sendForcedToolRequest(session, request, body: body, anthropic: anthropic)
         try validateModelResponse(data, response: response)
         let object = zen ? try ZenCompatibility.collapse(data) : try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let answer: String?
@@ -193,6 +192,10 @@ final class BrowserModelClient: BrowserReasoning, AssistantReasoning, BrowserCom
         } else {
             let message = (object?["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
             let calls = message?["tool_calls"] as? [[String: Any]] ?? []
+            if calls.isEmpty, let text = ToolArguments.text(message?["content"] as? String),
+               let written = ToolArguments.writtenCall(text, tool: tool) {
+                return String(decoding: written, as: UTF8.self)
+            }
             guard calls.count == 1, let function = calls[0]["function"] as? [String: Any], function["name"] as? String == tool else {
                 throw BrowserToolError.actionFailed(String(localized: "模型没有返回一个有效操作，请换一个模型重试"))
             }

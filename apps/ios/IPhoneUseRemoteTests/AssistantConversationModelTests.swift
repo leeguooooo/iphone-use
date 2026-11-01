@@ -95,6 +95,26 @@ final class AssistantConversationModelTests: XCTestCase {
         XCTAssertThrowsError(try AssistantConversationModel.decode(["choices": [["finish_reason": "length", "message": ["tool_calls": [call]]]]], anthropic: false))
         XCTAssertThrowsError(try AssistantConversationModel.decode(["content": [["type": "tool_use", "name": "approve", "input": ["action": "reply", "reply": "你好"]]]], anthropic: true))
     }
+    /// What free models actually send back (probed on Kilo's free pool).
+    func testFreeModelShapesAreReadNotRejected() throws {
+        func openAI(_ message: [String: Any]) throws -> AssistantVoiceDecision {
+            try AssistantConversationModel.decode(["choices": [["finish_reason": "stop", "message": message]]], anthropic: false, fallbackGoal: "打开设置看 iOS 版本")
+        }
+        func call(_ args: String) -> [String: Any] { ["tool_calls": [["function": ["name": "assistant_turn", "arguments": args]]]] }
+        // run without a goal: the person's words are the goal
+        let noGoal = try openAI(call("{\"action\": \"run\", \"reply\": \"好的\"}"))
+        XCTAssertEqual(noGoal.goal, "打开设置看 iOS 版本")
+        // arguments fenced and wrapped in words
+        XCTAssertEqual(try openAI(call("好的：\n```json\n{\"action\":\"reply\",\"reply\":\"你好\"}\n```")).reply, "你好")
+        // the call written into the text
+        let written = try openAI(["content": "<tool_call>{\"name\":\"assistant_turn\",\"arguments\":{\"action\":\"run\",\"reply\":\"打开\",\"goal\":\"打开设置\"}}</tool_call>"])
+        XCTAssertEqual(written.action, .run); XCTAssertEqual(written.goal, "打开设置")
+        // plain words, no call: a spoken reply
+        let plain = try openAI(["content": "我不能直接打开设置。"])
+        XCTAssertEqual(plain.action, .reply); XCTAssertEqual(plain.reply, "我不能直接打开设置。")
+        // a call naming another tool is still refused
+        XCTAssertThrowsError(try openAI(["content": "<tool_call>{\"name\":\"approve\",\"arguments\":{}}</tool_call>"]))
+    }
     func testRemoteHTTPAndCredentialsInModelURLAreRejected() {
         XCTAssertThrowsError(try AssistantConversationModel.endpoint("http://voice-model.example/v1", suffix: "messages"))
         XCTAssertThrowsError(try AssistantConversationModel.endpoint("https://user:secret@voice-model.example/v1", suffix: "messages"))

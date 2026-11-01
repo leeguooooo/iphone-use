@@ -381,7 +381,11 @@ fn a_covered_locator_tap_reveals_before_clicking() {
                 return Some((Duration::ZERO, r#"{"value":[{"ELEMENT":"E1","element-6066-11e4-a52e-4f735466cecf":"E1"}]}"#.to_string()));
             }
             if request.contains("/element/E1/rect") {
-                return Some((Duration::ZERO, r#"{"value":{"x":16,"y":400,"width":358,"height":51}}"#.to_string()));
+                let y = if moved.load(std::sync::atomic::Ordering::SeqCst) {400} else {745};
+                return Some((Duration::ZERO, format!(r#"{{"value":{{"x":16,"y":{y},"width":358,"height":51}}}}"#)));
+            }
+            if request.contains("/window/size") {
+                return Some((Duration::ZERO, r#"{"value":{"width":390,"height":844}}"#.to_string()));
             }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
@@ -393,7 +397,7 @@ fn a_covered_locator_tap_reveals_before_clicking() {
         assert_eq!(status, StatusCode::OK, "{json}");
         let seen = seen.lock().unwrap();
         let scroll = seen.iter().position(|r| r.contains("/E1/scrollTo")).expect("a reveal scroll");
-        let click = seen.iter().position(|r| r.contains("/E1/click")).expect("an element click");
+        let click = seen.iter().position(|r| r.contains("/E1/ipu/tap")).expect("an element click");
         assert!(scroll < click, "reveal before click: {seen:?}");
     });
 }
@@ -475,7 +479,7 @@ fn a_label_tap_still_covered_after_the_reveal_taps_the_clear_part() {
 /// A row the reveal scroll pushes fully under the pill is refused before
 /// anything is sent: `element_occluded`, no click, no coordinate tap.
 #[test]
-fn a_locator_tap_fully_covered_after_the_reveal_is_refused_unsent() {
+fn a_locator_tap_fully_covered_after_reveal_never_taps_or_authorizes_replay() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let record = seen.clone();
@@ -510,6 +514,9 @@ fn a_locator_tap_fully_covered_after_the_reveal_is_refused_unsent() {
                     r#"{"value":{"x":16,"y":770,"width":358,"height":36}}"#.to_string(),
                 ));
             }
+            if request.contains("/window/size") {
+                return Some((Duration::ZERO, r#"{"value":{"width":390,"height":844}}"#.to_string()));
+            }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (_, json) = post_actions(
@@ -518,9 +525,13 @@ fn a_locator_tap_fully_covered_after_the_reveal_is_refused_unsent() {
         )
         .await;
         assert_eq!(json["ok"], false, "{json}");
-        assert!(json.to_string().contains("element_occluded"), "{json}");
+        assert_eq!(json["retry_safe"], false, "reveal was attempted: {json}");
+        assert_ne!(json["outcome"], "not_sent", "reveal was attempted: {json}");
+        assert_eq!(json["error"], "outcome_unknown", "{json}");
         let seen = seen.lock().unwrap();
-        assert!(!seen.iter().any(|r| r.contains("/E1/click")), "{seen:?}");
+        assert_eq!(seen.iter().filter(|r| r.starts_with("POST ") && r.contains("/elements ")).count(), 2, "re-resolve after reveal: {seen:?}");
+        assert!(seen.iter().filter(|r| r.contains("/element/E1/rect")).count() >= 4, "reach the post-reveal live-frame guard: {seen:?}");
+        assert!(!seen.iter().any(|r| r.contains("/E1/ipu/tap") || r.contains("/E1/click")), "{seen:?}");
         assert!(
             !seen
                 .iter()
@@ -574,6 +585,9 @@ fn sheet_runner(
         if request.contains("/element/E1/rect") {
             return Some((Duration::ZERO, rect(moved)));
         }
+        if request.contains("/window/size") {
+            return Some((Duration::ZERO, r#"{"value":{"width":440,"height":956}}"#.to_string()));
+        }
         Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
     })
 }
@@ -582,7 +596,7 @@ fn sheet_runner(
 /// not bring it on screen is refused, nothing sent — never `ok` for a tap
 /// that touched nothing (hardware, 17 Pro Max in-app Safari sheet).
 #[test]
-fn an_off_screen_locator_tap_the_reveal_cannot_bring_on_screen_is_refused_unsent() {
+fn an_off_screen_locator_tap_after_reveal_never_authorizes_replay() {
     block(async {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let runner = sheet_runner(
@@ -596,13 +610,17 @@ fn an_off_screen_locator_tap_the_reveal_cannot_bring_on_screen_is_refused_unsent
         )
         .await;
         assert_eq!(json["ok"], false, "{json}");
-        assert!(json.to_string().contains("element_not_visible"), "{json}");
+        assert_eq!(json["retry_safe"], false, "reveal was attempted: {json}");
+        assert_ne!(json["outcome"], "not_sent", "reveal was attempted: {json}");
+        assert_eq!(json["error"], "outcome_unknown", "{json}");
         let seen = seen.lock().unwrap();
+        assert_eq!(seen.iter().filter(|r| r.starts_with("POST ") && r.contains("/elements ")).count(), 2, "re-resolve after reveal: {seen:?}");
+        assert!(seen.iter().filter(|r| r.contains("/element/E1/rect")).count() >= 4, "reach the post-reveal live-frame guard: {seen:?}");
         assert!(
             seen.iter().any(|r| r.contains("/E1/scrollTo")),
             "a reveal scroll was tried: {seen:?}"
         );
-        assert!(!seen.iter().any(|r| r.contains("/E1/click")), "{seen:?}");
+        assert!(!seen.iter().any(|r| r.contains("/E1/ipu/tap") || r.contains("/E1/click")), "{seen:?}");
         assert!(
             !seen
                 .iter()
@@ -640,7 +658,7 @@ fn an_off_screen_locator_tap_is_revealed_then_clicked() {
             .expect("a reveal scroll");
         let click = seen
             .iter()
-            .position(|r| r.contains("/E1/click"))
+            .position(|r| r.contains("/E1/ipu/tap"))
             .expect("an element click");
         assert!(scroll < click, "reveal before click: {seen:?}");
     });
@@ -701,7 +719,7 @@ fn a_sheet_close_button_under_the_address_bar_edge_is_clicked() {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert!(!json.to_string().contains("element_occluded"), "{json}");
         let seen = seen.lock().unwrap();
-        assert!(seen.iter().any(|r| r.contains("/E1/click")), "{seen:?}");
+        assert!(seen.iter().any(|r| r.contains("/E1/ipu/tap")), "{seen:?}");
         assert!(
             !seen.iter().any(|r| r.contains("/scrollTo")),
             "no reveal for a visible header button: {seen:?}"
@@ -848,6 +866,12 @@ fn a_clear_locator_tap_does_not_scroll() {
             if request.starts_with("POST ") && request.contains("/elements") {
                 return Some((Duration::ZERO, r#"{"value":[{"ELEMENT":"E1","element-6066-11e4-a52e-4f735466cecf":"E1"}]}"#.to_string()));
             }
+            if request.contains("/element/E1/rect") {
+                return Some((Duration::ZERO, r#"{"value":{"x":16,"y":661,"width":358,"height":49}}"#.to_string()));
+            }
+            if request.contains("/window/size") {
+                return Some((Duration::ZERO, r#"{"value":{"width":390,"height":844}}"#.to_string()));
+            }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
@@ -858,7 +882,7 @@ fn a_clear_locator_tap_does_not_scroll() {
         assert_eq!(status, StatusCode::OK, "{json}");
         let seen = seen.lock().unwrap();
         assert!(!seen.iter().any(|r| r.contains("/scrollTo")), "no reveal: {seen:?}");
-        assert!(seen.iter().any(|r| r.contains("/E1/click")), "{seen:?}");
+        assert!(seen.iter().any(|r| r.contains("/E1/ipu/tap")), "{seen:?}");
     });
 }
 
@@ -889,6 +913,9 @@ fn a_point_locator_tap_hits_the_live_frame_centre() {
             if request.contains("/element/E1/rect") {
                 return Some((Duration::ZERO, r#"{"value":{"x":15,"y":69,"width":30,"height":30}}"#.to_string()));
             }
+            if request.contains("/window/size") {
+                return Some((Duration::ZERO, r#"{"value":{"width":440,"height":956}}"#.to_string()));
+            }
             Some((Duration::ZERO, r#"{"value":null}"#.to_string()))
         });
         let (status, json) = post_actions(
@@ -905,12 +932,12 @@ fn a_point_locator_tap_hits_the_live_frame_centre() {
             );
             let actions = seen
                 .iter()
-                .find(|r| r.contains("/actions"))
-                .expect("a W3C tap");
-            assert!(
-                actions.contains("\"x\":30") && actions.contains("\"y\":84"),
-                "{actions}"
-            );
+                .find(|r| r.contains("/ipu/tap"))
+                .expect("a target-bound Native tap");
+            let payload:serde_json::Value=serde_json::from_str(actions.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(payload["point"][0].as_f64(),Some(30.0),"{payload}");
+            assert_eq!(payload["point"][1].as_f64(),Some(84.0),"{payload}");
+            assert_eq!(payload["expected_rect"],serde_json::json!([15.0,69.0,30.0,30.0]));
         }
 
         let (bad, json) = post_actions(

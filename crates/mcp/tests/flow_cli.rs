@@ -166,6 +166,215 @@ fn a_409_failure_prints_the_whole_result_and_exits_non_zero() {
     assert_eq!(reads, 1, "exactly one diagnostic read: {sent:?}");
 }
 
+/// A fresh compact tree cannot turn an earlier proven failure into a known
+/// match. Exercise the actual CLI, including its unchanged failure verdict.
+#[test]
+fn sparse_diagnosis_preserves_the_failure_and_never_replays() {
+    for expectation in ["present", "absent"] {
+        let store = tempfile::tempdir().unwrap();
+        let flow = store.path().join("flow.json");
+        std::fs::write(&flow, serde_json::json!({
+            "version":1, "name":"Availability", "risk":"read_only",
+            "steps":[{"kind":"wait_for","expect":{expectation:[{"identifier":"save","visible":true}]},"timeout_ms":1000,"poll_ms":100}]
+        }).to_string()).unwrap();
+        let observation = if expectation == "present" {
+            serde_json::json!({"read":true,"missing_present":[0]})
+        } else {
+            serde_json::json!({"read":true,"violated_absent":[0]})
+        };
+        let failure = serde_json::json!({"ok":false,"error":"expectation_timeout","failed_step":0,
+            "applied_actions":0,"outcome":"not_sent","retry_safe":true,"observation":observation})
+        .to_string();
+        let elements = r#"{"elements":[{"index":0,"kind":"Button","identifier":"save"}]}"#;
+        let mut script = compat_preamble();
+        script.extend([
+            ("200 OK", Some(STATUS)),
+            ("409 Conflict", Some(failure.as_str())),
+            ("200 OK", Some(elements)),
+        ]);
+        let (url, requests) = mock_daemon(&script);
+        let run = flow_run(&url, &flow, store.path(), None);
+        assert_eq!(run.code, Some(1), "{}", run.stdout);
+        let result = run.json.unwrap();
+        assert_eq!(result["error"], "expectation_timeout");
+        assert_eq!(result["outcome"], "not_sent");
+        assert_eq!(result["applied_actions"], 0);
+        assert_eq!(result["retry_safe"], true);
+        assert_eq!(result["diagnosis"]["reason"], "locator_state_unproven");
+        assert_eq!(result["diagnosis"]["exact_matches"], 0);
+        assert_eq!(
+            result["diagnosis"]["candidates"][0]["matched"],
+            serde_json::json!(["identifier"])
+        );
+        assert_eq!(
+            result["diagnosis"]["candidates"][0]["unproven"],
+            serde_json::json!(["visible"])
+        );
+        let sent: Vec<_> = requests.try_iter().collect();
+        assert_eq!(
+            sent.iter()
+                .filter(|r| r.starts_with("POST /agent/actions"))
+                .count(),
+            1,
+            "{sent:?}"
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|r| r.starts_with("GET /agent/elements"))
+                .count(),
+            1,
+            "{sent:?}"
+        );
+    }
+}
+
+#[test]
+fn value_diagnosis_through_the_cli_respects_availability_and_never_retries() {
+    for (complete, partial) in [(true, false), (false, false), (false, true)] {
+        for expectation in ["present", "absent"] {
+            for (rows, value, reason, exact) in [
+                (
+                    serde_json::json!([{"identifier":"save","value":"prefix","value_truncated":true}]),
+                    "prefix",
+                    "locator_state_unproven",
+                    0,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save","kind":"SecureTextField","value":"prefix"}]),
+                    "prefix",
+                    "locator_state_unproven",
+                    0,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save"}]),
+                    "prefix",
+                    "locator_state_unproven",
+                    0,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save","value":"","value_known":true}]),
+                    "",
+                    "locator_matches_now",
+                    1,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save","value_known":true}]),
+                    "",
+                    "locator_no_match",
+                    0,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save","value":"prefix","value_known":true},{"identifier":"save","value":"prefix","value_truncated":true}]),
+                    "prefix",
+                    "locator_matches_now",
+                    1,
+                ),
+            ] {
+                let store = tempfile::tempdir().unwrap();
+                let flow = store.path().join("flow.json");
+                std::fs::write(&flow,serde_json::json!({"version":1,"name":"Value availability","risk":"read_only",
+                    "steps":[{"kind":"wait_for","expect":{expectation:[{"identifier":"save","value":value}]},"timeout_ms":1000,"poll_ms":100}]}).to_string()).unwrap();
+                let observation = if expectation == "present" {
+                    serde_json::json!({"read":true,"missing_present":[0]})
+                } else {
+                    serde_json::json!({"read":true,"violated_absent":[0]})
+                };
+                let failure=serde_json::json!({"ok":false,"error":"expectation_timeout","failed_step":0,"applied_actions":0,"outcome":"not_sent","retry_safe":true,"observation":observation}).to_string();
+                let tree = serde_json::json!({"locator_state":1,"elements":rows,"coverage":if complete {"complete"} else {"unknown"},"partial":partial}).to_string();
+                let mut script = compat_preamble();
+                script.extend([
+                    ("200 OK", Some(STATUS)),
+                    ("409 Conflict", Some(failure.as_str())),
+                    ("200 OK", Some(tree.as_str())),
+                ]);
+                let (url, requests) = mock_daemon(&script);
+                let run = flow_run(&url, &flow, store.path(), None);
+                assert_eq!(run.code, Some(1), "{}", run.stdout);
+                let result = run.json.unwrap();
+                let expected = if expectation == "absent" && exact > 0 {
+                    "still_present"
+                } else if exact > 0 {
+                    "locator_matches_now"
+                } else if !complete {
+                    "locator_state_unproven"
+                } else {
+                    reason
+                };
+                assert_eq!(result["diagnosis"]["reason"], expected, "{result}");
+                assert_eq!(result["diagnosis"]["exact_matches"], exact);
+                assert_eq!(result["error"], "expectation_timeout");
+                assert_eq!(result["outcome"], "not_sent");
+                assert_eq!(result["applied_actions"], 0);
+                assert_eq!(result["retry_safe"], true);
+                let sent: Vec<_> = requests.try_iter().collect();
+                assert_eq!(
+                    sent.iter()
+                        .filter(|r| r.starts_with("POST /agent/actions"))
+                        .count(),
+                    1,
+                    "{sent:?}"
+                );
+                assert_eq!(
+                    sent.iter()
+                        .filter(|r| r.starts_with("GET /agent/elements?locator_state=1&ocr=off "))
+                        .count(),
+                    1,
+                    "{sent:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_single_read_gateway_timeout_keeps_the_applied_prefix_without_retry_or_extra_read() {
+    let store = tempfile::tempdir().unwrap();
+    let flow = store.path().join("flow.json");
+    std::fs::write(
+        &flow,
+        serde_json::json!({"version":1,"name":"One check","steps":[
+            {"kind":"shortcut","name":"home"},
+            {"kind":"wait_for","expect":{"present":[{"label_contains":"ready"}]},"timeout_ms":0}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let failure = r#"{"ok":false,"error":"single_read_timeout","failed_step":1,"completed":1,"applied_actions":1,"outcome":"not_sent","failed_step_outcome":"not_sent","batch_outcome":"partially_applied","retry_safe":false,"observation":{"read":false,"attempts":1,"reads":0,"single_read":true}}"#;
+    let mut script = compat_preamble();
+    script.extend([
+        ("200 OK", Some(STATUS)),
+        ("504 Gateway Timeout", Some(failure)),
+    ]);
+    let (url, requests) = mock_daemon(&script);
+    let run = flow_run(&url, &flow, store.path(), None);
+    assert_eq!(run.code, Some(1), "{}", run.stdout);
+    let result = run.json.unwrap();
+    assert_eq!(result["error"], "single_read_timeout");
+    assert_eq!(result["http_status"], 504);
+    assert_eq!(result["applied_actions"], 1);
+    assert_eq!(result["completed"], 1);
+    assert_eq!(result["retry_safe"], false);
+    assert_eq!(result["batch_outcome"], "partially_applied");
+    assert_eq!(result["diagnosis"]["reason"], "single_read_unavailable");
+    assert_eq!(result["diagnosis"]["budget_ms"], 0);
+    assert_eq!(result["diagnosis"]["reused_observation"], false);
+    let sent: Vec<_> = requests.try_iter().collect();
+    assert_eq!(
+        sent.iter()
+            .filter(|r| r.starts_with("POST /agent/actions"))
+            .count(),
+        1,
+        "{sent:?}"
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|r| r.starts_with("GET /agent/elements"))
+            .count(),
+        0,
+        "{sent:?}"
+    );
+}
+
 /// The daemon says no with a 200. A caller reading only the status code would
 /// call this a success and refresh a verification date on it.
 #[test]

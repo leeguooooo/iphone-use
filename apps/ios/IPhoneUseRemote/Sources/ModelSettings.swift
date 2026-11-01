@@ -165,7 +165,11 @@ struct ModelSettings: Codable, Equatable, Sendable {
             (key(account) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
         let enabled = self.assist.filter(\.enabled)
-        let selected = allowModelFallback ? enabled : Array(enabled.prefix(1))
+        // Moving between keyless free services costs nothing, so a free first
+        // choice falls back to the other free ones without the switch; a paid
+        // service is only ever tried when the person turned fallback on.
+        let selected = allowModelFallback ? enabled
+            : enabled.first.map { $0.needsKey ? [$0] : enabled.filter { !$0.needsKey } } ?? []
         let assist: [ModelsPayload.Assist] = selected.compactMap { provider in
             let base = provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             let model = provider.model.trimmingCharacters(in: .whitespacesAndNewlines)

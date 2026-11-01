@@ -32,7 +32,12 @@ class Daemon(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
         with seen_lock:
             seen.append((self.server.name, self.command, self.path, self.headers.get('Authorization'), body, self.headers.get('X-Phone-Control')))
-        if self.path.startswith('/agent/capabilities'):
+        if self.path.startswith('/agent/metrics'):
+            owner = parse_qs(urlsplit(self.path).query).get('owner', [''])[0]
+            value = {'ok':True, 'open':[{'key':{'kind':'inferred','owner':owner,'incarnation':1},
+                'started_ms':1,'ended_ms':2,'tool_calls':2,'dropped_events':1,
+                'outcome_unknown':1,'model_round_trips':None}], 'recent':[]}
+        elif self.path.startswith('/agent/capabilities'):
             value = {'ok': True, 'operations': {'single': ['tap', 'type'],
                 'batch': {'max': 24}}, 'limits': {'nested': {'value': 'x' * 300}}}
         elif self.path.startswith('/agent/value'):
@@ -42,6 +47,8 @@ class Daemon(http.server.BaseHTTPRequestHandler):
                 'limit_utf16': 8192, 'complete': True, 'truncated': False}
         elif self.path.startswith('/agent/elements'):
             value = {'ok': True, 'snapshot': self.server.name, 'elements': []}
+        elif self.command == 'POST' and self.path.startswith('/agent/input') and json.loads(body).get('name') == 'save_screenshot':
+            value = {'ok': True, 'system_capture': {'requested': True, 'saved_verified': False, 'destination': 'iPhone Photos'}}
         elif self.command == 'POST':
             value = {'ok': True, 'snapshot': self.server.name + '2', 'elements': []}
         else:
@@ -108,8 +115,8 @@ try:
                     assert chunk, 'MCP exited before response'
                     buffer += chunk
             raise AssertionError('bounded MCP request did not return')
-        def call(name, **args):
-            return rpc('tools/call', {'name': name, 'arguments': args})
+        def call(tool_name, **args):
+            return rpc('tools/call', {'name': tool_name, 'arguments': args})
         try:
             assert 'result' in rpc('initialize', {'protocolVersion': '2025-03-26',
                 'capabilities': {}, 'clientInfo': {'name': 'instance-routing-test', 'version': '1'}})
@@ -152,6 +159,17 @@ try:
             assert capabilities['structuredContent'] == {'ok': True,
                 'operations': {'single': ['tap', 'type'], 'batch': {'max': 24}},
                 'limits': {'nested': {'value': 'x' * 300}}}, 'named capabilities must preserve the full nested contract'
+            for instance, marker, token in [('i13','B','token-B'),('default','A','token-A')]:
+                reply = call('phone_metrics', instance=instance, limit=1)['result']
+                assert reply.get('isError') is not True, reply
+                request = seen[-1]
+                assert request[0] == marker and request[3] == 'Bearer ' + token
+                assert request[1] == 'GET' and urlsplit(request[2]).path == '/agent/metrics'
+                assert request[5] is None, 'metrics must not claim control'
+                report = reply['structuredContent']
+                assert report['owner'] == parse_qs(urlsplit(request[2]).query)['owner'][0]
+                assert report['open'][0]['outcome_unknown'] == 1
+                assert report['open'][0]['model_round_trips'] is None
             # Interleaved reads must keep separate observation baselines.
             for instance, marker in [('i13', 'B'), ('default', 'A')]:
                 response = call('phone_tap', instance=instance, x=0.5, y=0.5, observe=True)
@@ -159,6 +177,38 @@ try:
                 requests = [r for r in seen if r[0] == marker and r[1] == 'POST']
                 assert requests
                 assert parse_qs(urlsplit(requests[-1][2]).query).get('since') == [marker]
+            for instance, marker, token in [('i13','B','token-B'),('default','A','token-A')]:
+                for name in ['volume_up', 'volume_down']:
+                    response = call('phone_shortcut', instance=instance, name=name, observe=False)
+                    assert not response.get('error'), response
+                    request = seen[-1]
+                    assert request[0] == marker and request[3] == 'Bearer ' + token
+                    assert request[1] == 'POST' and urlsplit(request[2]).path == '/agent/input'
+                    body = json.loads(request[4])
+                    assert body['type'] == 'shortcut' and body['name'] == name
+                    assert request[5], 'button mutation must claim the selected instance control'
+                    response = call('phone_run_steps', instance=instance,
+                        steps=[{'kind': 'shortcut', 'name': name}], observe=False)
+                    assert not response.get('error'), response
+                    request = seen[-1]
+                    assert request[0] == marker and request[3] == 'Bearer ' + token
+                    assert request[1] == 'POST' and urlsplit(request[2]).path == '/agent/actions'
+                    body = json.loads(request[4])
+                    assert body['steps'][0]['action']['name'] == name
+                    assert request[5], 'batch must claim only the selected instance control'
+
+            # The new Photos mutation follows the selected instance and token,
+            # including with observe:false (no ambient/default fallback).
+            for instance, marker, token in [('i13', 'B', 'token-B'), ('default', 'A', 'token-A')]:
+                before = len(seen)
+                response = call('phone_shortcut', instance=instance, name='save_screenshot', observe=False)['result']
+                assert response.get('isError') is not True, response
+                assert response['structuredContent']['system_capture']['saved_verified'] is False
+                calls = seen[before:]
+                assert calls and all(row[0] == marker and row[3] == 'Bearer ' + token for row in calls)
+                posts = [row for row in calls if row[1] == 'POST']
+                assert len(posts) == 1 and posts[0][5] == '1'
+                assert json.loads(posts[0][4]) == {'type': 'shortcut', 'name': 'save_screenshot'}
             # Missing, malformed and symlinked configuration must not touch any daemon.
             count = len(seen)
             for instance in ['missing', '../i13', 'runner']:

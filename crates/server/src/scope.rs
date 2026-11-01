@@ -152,6 +152,18 @@ pub fn validate_filter(query: Option<&str>, limit: Option<&str>) -> Result<(), V
     Ok(())
 }
 
+/// Decode literal selectors before any device read. Delta views have no full row set.
+pub fn parse_selector(raw: Option<&str>) -> Result<Option<core::element_selector::ElementSelector>, Value> {
+    let Some(raw) = raw else { return Ok(None); };
+    if raw.len() > 16_384 {
+        return Err(json!({"ok":false,"error":"invalid_selector","hint":"selector JSON is at most 16 KiB"}));
+    }
+    let selector: core::element_selector::ElementSelector = serde_json::from_str(raw)
+        .map_err(|_| json!({"ok":false,"error":"invalid_selector","hint":"selector must be a JSON object containing literal criteria and optional integer index0..199; fields kind, identifier, name, label, label_contains, value, boolean value_present or enabled"}))?;
+    selector.validate().map_err(|hint| json!({"ok":false,"error":"invalid_selector","hint":hint}))?;
+    Ok(Some(selector))
+}
+
 /// Whether `row` contains `needle` (already lowercased) in its label,
 /// identifier, value or placeholder. Non-ASCII text (CJK) compares as is.
 fn row_matches(row: &Value, needle: &str) -> bool {
@@ -164,19 +176,24 @@ fn row_matches(row: &Value, needle: &str) -> bool {
 /// Keep only the rows matching `query`, then at most `limit` of them, each
 /// carrying its original `index` (a scoped view's rows already do). Applied
 /// after a scope, so the two combine. The snapshot is left as it is.
-pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>) {
-    if query.is_none() && limit.is_none() {
+pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>, selector: Option<&core::element_selector::ElementSelector>) {
+    if query.is_none() && limit.is_none() && selector.is_none() {
         return;
     }
     let Some(rows) = json.get("elements").and_then(Value::as_array).cloned() else {
         return;
     };
+    if let Some(selector) = selector.filter(|selector| selector.index.is_some()) {
+        filter_ordinal(json, rows, query, limit, selector);
+        return;
+    }
     let total = rows.len();
     let needle = query.map(|q| q.trim().to_lowercase());
     let matched: Vec<Value> = rows
         .into_iter()
         .enumerate()
-        .filter(|(_, row)| needle.as_deref().is_none_or(|n| row_matches(row, n)))
+        .filter(|(_, row)| needle.as_deref().is_none_or(|n| row_matches(row, n))
+            && selector.is_none_or(|selector| selector.matches(row)))
         .map(|(i, mut row)| {
             if row.get("index").is_none() {
                 row["index"] = json!(i);
@@ -198,6 +215,9 @@ pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>) {
         "of": total,
         "note": "indexes refer to the full read with this snapshot",
     });
+    if let Some(selector) = selector {
+        summary["selector"] = json!(selector);
+    }
     if let Some(query) = query {
         summary["query"] = json!(query);
     }
@@ -213,6 +233,58 @@ pub fn filter(json: &mut Value, query: Option<&str>, limit: Option<usize>) {
         );
     }
     json["filter"] = summary;
+}
+
+fn ordinal_query_assessment(row: &Value, needle: &str) -> Option<bool> {
+    if needle.is_empty() {return Some(true);}
+    if ["label","identifier","placeholder"].iter().filter_map(|key|row.get(*key).and_then(Value::as_str))
+        .any(|value|value.to_lowercase().contains(needle)) {return Some(true);}
+    let protected=row.get("kind").and_then(Value::as_str).is_some_and(|kind|kind.strip_prefix("XCUIElementType").unwrap_or(kind)=="SecureTextField");
+    if protected || row.get("snapshot_value_unavailable").is_some_and(|flag|flag!=&Value::Bool(false))
+        || row.get("value_truncated").is_some_and(|flag|flag!=&Value::Bool(false))
+        || row.get("value").is_some_and(|value|!matches!(value,Value::Null|Value::String(_))) {return None;}
+    Some(row.get("value").and_then(Value::as_str).is_some_and(|value|value.to_lowercase().contains(needle)))
+}
+
+fn filter_ordinal(json: &mut Value, mut rows: Vec<Value>, query: Option<&str>, limit: Option<usize>, selector: &core::element_selector::ElementSelector) {
+    use core::match_ordinal::OrdinalSelection;
+    let ordinal = selector.index.expect("ordinal branch");
+    let needle = query.map(|text|text.trim().to_lowercase());
+    for (position,row) in rows.iter_mut().enumerate() {
+        if row.is_object() && row.get("index").is_none() { row["index"]=json!(position); }
+    }
+    let assessments:Vec<_>=rows.iter().map(|row| {
+        if !row.is_object() {return None;}
+        let fields=selector.assess(row);
+        if fields==Some(false) {return Some(false);}
+        let query=needle.as_deref().map_or(Some(true),|text|ordinal_query_assessment(row,text));
+        match (fields,query) {(_,Some(false))=>Some(false),(Some(true),Some(true))=>Some(true),_=>None}
+    }).collect();
+    let complete=json.get("coverage").and_then(Value::as_str)==Some("complete") && !truthy(json,"partial") && !truthy(json,"sparse") && !truthy(json,"stale");
+    let selection=ordinal.select(&assessments,complete);
+    let known=assessments.iter().filter(|state|**state==Some(true)).count();
+    let unknown=assessments.iter().filter(|state|state.is_none()).count();
+    let mut selected=Vec::new();
+    let status=match selection {
+        OrdinalSelection::Selected(position)=>{selected.push(rows[position].clone());"selected"},
+        OrdinalSelection::Missing=>"missing",
+        OrdinalSelection::Unproven=>"unproven",
+    };
+    selected.truncate(limit.unwrap_or(usize::MAX));
+    let returned=selected.len();
+    let mut summary=json!({"matched":known,"matched_exact":complete && unknown==0,"unknown_candidates":unknown,
+        "returned":returned,"omitted":known.saturating_sub(returned),"of":rows.len(),"selector":selector,
+        "ordinal":ordinal,"ordinal_status":status,"note":"selector index is match ordinal; row indexes still refer to the full snapshot"});
+    if let Some(query)=query {summary["query"]=query.into();}
+    if let Some(limit)=limit {summary["limit"]=limit.into();}
+    if selection==OrdinalSelection::Unproven {
+        let snapshot=json.get("snapshot").cloned().unwrap_or(Value::Null);
+        let coverage=json.get("coverage").cloned().unwrap_or_else(||json!("unknown"));
+        *json=json!({"ok":false,"error":"ordinal_unproven","elements":[],"snapshot":snapshot,"coverage":coverage,"filter":summary,
+            "hint":"Cannot prove this match's tree-order rank; complete the read or narrow exact criteria to exclude uncertain candidates"});
+    } else {
+        json["elements"]=Value::Array(selected);json["filter"]=summary;
+    }
 }
 
 /// The tree cannot be used at all (no interactive rows, containers only).
@@ -421,6 +493,99 @@ mod tests {
     }
 
     #[test]
+    fn exact_selector_combines_with_query_scope_and_limit_without_reindexing() {
+        let mut tree=json!({"snapshot":"full-tree", "elements":[
+            {"kind":"Application","label":"App","depth":0},
+            {"kind":"Button","identifier":"save.secondary","label":"Save","enabled":true,"depth":1},
+            {"kind":"Button","identifier":"save.primary","label":"Save","enabled":false,"depth":1},
+            {"kind":"Button","identifier":"save.primary","label":"save","enabled":false,"depth":1},
+            {"kind":"Button","identifier":"save.primary","label":"Save","depth":1}
+        ]});
+        apply(&mut tree,"interactive");
+        let selector=parse_selector(Some(r#"{"identifier":"save.primary","label":"Save","enabled":false}"#)).unwrap().unwrap();
+        filter(&mut tree,Some("SAVE"),Some(1),Some(&selector));
+        assert_eq!(tree["snapshot"],"full-tree");
+        assert_eq!(tree["elements"].as_array().unwrap().len(),1);
+        assert_eq!(tree["elements"][0]["index"],2);
+        assert_eq!(tree["filter"]["matched"],1);
+        assert_eq!(tree["filter"]["selector"]["enabled"],false);
+    }
+
+    #[test]
+    fn ordinal_filter_selects_match_order_without_reindexing_the_snapshot() {
+        let mut body=json!({"snapshot":"S","coverage":"complete","elements":[
+            {"index":4,"kind":"Button","label":"Save"},
+            {"index":8,"kind":"StaticText","label":"Save"},
+            {"index":13,"kind":"Button","label":"Save"},
+            {"index":17,"kind":"Button","label":"Save"}]});
+        let selector=parse_selector(Some(r#"{"kind":"Button","label":"Save","index":1}"#)).unwrap().unwrap();
+        filter(&mut body,None,Some(1),Some(&selector));
+        assert_eq!(body["snapshot"],"S");assert_eq!(body["elements"].as_array().unwrap().len(),1);
+        assert_eq!(body["elements"][0]["index"],13);assert_eq!(body["filter"]["matched"],3);
+        assert_eq!(body["filter"]["ordinal_status"],"selected");
+    }
+
+    #[test]
+    fn ordinal_query_does_not_hide_unreadable_earlier_values() {
+        let selector=parse_selector(Some(r#"{"kind":"Button","index":0}"#)).unwrap().unwrap();
+        for value in [json!({"value_truncated":true,"value":"preview"}),json!({"snapshot_value_unavailable":true})] {
+            let mut earlier=json!({"kind":"Button","label":"Other"});
+            for (key,value) in value.as_object().unwrap() {earlier[key]=value.clone();}
+            let mut body=json!({"coverage":"complete","elements":[earlier,{"kind":"Button","label":"Find"}]});
+            filter(&mut body,Some("Find"),None,Some(&selector));
+            assert_eq!(body["error"],"ordinal_unproven");
+        }
+        let mut body=json!({"coverage":"complete","elements":[
+            {"kind":"StaticText","label":"Other","snapshot_value_unavailable":true},
+            {"kind":"Button","label":"Find"}]});
+        filter(&mut body,Some("Find"),None,Some(&selector));
+        assert_eq!(body["filter"]["ordinal_status"],"selected");assert_eq!(body["elements"][0]["index"],1);
+    }
+
+    #[test]
+    fn ordinal_filter_refuses_unknown_prefix_or_scope_but_not_unknown_suffix() {
+        let selector=parse_selector(Some(r#"{"label":"Save","enabled":false,"index":0}"#)).unwrap().unwrap();
+        for (elements,coverage,expected) in [
+            (json!([{"label":"Save"},{"label":"Save","enabled":false}]),"complete","unproven"),
+            (json!([{"label":"Save","enabled":false},{"label":"Save"}]),"complete","selected"),
+            (json!([{"label":"Save","enabled":false}]),"truncated","unproven"),
+            (json!([]),"unknown","unproven"),
+            (json!([]),"complete","missing"),
+        ] {
+            let mut body=json!({"snapshot":"S","coverage":coverage,"elements":elements});
+            filter(&mut body,None,None,Some(&selector));
+            assert_eq!(body["filter"]["ordinal_status"],expected,"{body}");
+            assert_eq!(body.get("error").is_some(),expected=="unproven");
+        }
+    }
+
+    #[test]
+    fn exact_name_fallback_preserves_full_snapshot_indexes_and_counts() {
+        let mut tree = json!({"snapshot":"name-tree","elements":[
+            {"index":4,"identifier":"Save","label":"Different"},
+            {"index":8,"label":"Save"},
+            {"index":12,"identifier":"other","label":"Save"},
+            {"index":15,"identifier":"","label":"Save"}
+        ]});
+        let selector = parse_selector(Some(r#"{"name":"Save"}"#)).unwrap().unwrap();
+        filter(&mut tree, None, Some(2), Some(&selector));
+        assert_eq!(tree["snapshot"], "name-tree");
+        assert_eq!(tree["elements"].as_array().unwrap().iter().map(|r|r["index"].as_u64().unwrap()).collect::<Vec<_>>(), vec![4,8]);
+        assert_eq!(tree["filter"]["matched"], 3);
+        assert_eq!(tree["filter"]["omitted"], 1);
+        assert_eq!(tree["filter"]["selector"], json!({"name":"Save"}));
+    }
+
+    #[test]
+    fn malformed_or_unsupported_selectors_fail_before_reading() {
+        assert!(parse_selector(None).unwrap().is_none());
+        for text in ["null","[]","{}",r#"{"predicate":"TRUEPREDICATE"}"#,r#"{"enabled":"false"}"#,r#"{"label_contains":""}"#] {
+            assert_eq!(parse_selector(Some(text)).unwrap_err()["error"],"invalid_selector");
+        }
+        assert!(parse_selector(Some(&"x".repeat(16_385))).is_err());
+    }
+
+    #[test]
     fn query_matches_any_text_field_case_insensitively_and_keeps_indexes() {
         let mut json = json!({"snapshot": "H", "elements": [
             {"kind": "Application", "label": "设置", "depth": 0},
@@ -431,7 +596,7 @@ mod tests {
             {"kind": "StaticText", "label": "通用设置", "depth": 1},
         ]});
         let mut cjk = json.clone();
-        filter(&mut json, Some("SIGNIN"), None);
+        filter(&mut json, Some("SIGNIN"), None, None);
         let indexes = |json: &Value| -> Vec<u64> {
             json["elements"]
                 .as_array()
@@ -444,11 +609,11 @@ mod tests {
         assert_eq!(json["snapshot"], "H");
         assert_eq!(json["filter"]["matched"], 1);
         assert_eq!(json["filter"]["of"], 6);
-        filter(&mut cjk, Some("设置"), None);
+        filter(&mut cjk, Some("设置"), None, None);
         assert_eq!(indexes(&cjk), vec![0, 5]);
         let mut email = read();
         email["elements"][2]["placeholder"] = json!("Email");
-        filter(&mut email, Some("email"), None);
+        filter(&mut email, Some("email"), None, None);
         assert_eq!(indexes(&email), vec![2]);
     }
 
@@ -456,7 +621,7 @@ mod tests {
     fn limit_caps_rows_after_the_query_and_scope_and_reports_omitted() {
         let mut json = read();
         apply(&mut json, "interactive");
-        filter(&mut json, None, Some(2));
+        filter(&mut json, None, Some(2), None);
         let indexes: Vec<u64> = json["elements"]
             .as_array()
             .unwrap()
@@ -474,7 +639,7 @@ mod tests {
         assert_eq!(json["scope"]["name"], "interactive");
 
         let mut both = read();
-        filter(&mut both, Some("通用"), Some(1));
+        filter(&mut both, Some("通用"), Some(1), None);
         assert_eq!(both["elements"][0]["index"], 3);
         assert_eq!(
             (
@@ -485,7 +650,7 @@ mod tests {
         );
 
         let mut none = read();
-        filter(&mut none, Some("nothing here"), None);
+        filter(&mut none, Some("nothing here"), None, None);
         assert_eq!(none["elements"].as_array().unwrap().len(), 0);
         assert_eq!(none["filter"]["matched"], 0);
     }

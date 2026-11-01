@@ -1,6 +1,7 @@
 //! Cross-process exclusion between interactive setup and daemon bootstrap.
 //! Keep the inode: unlinking a locked file would let another caller lock a
-//! replacement inode. Closing the non-inherited descriptor releases ownership.
+//! replacement inode. Dropping the guard explicitly releases ownership even
+//! while a forked helper still has a descriptor before exec.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
@@ -10,6 +11,20 @@ use std::path::Path;
 #[derive(Debug)]
 pub struct Guard {
     _file: std::fs::File,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        // CLOEXEC closes inherited descriptors at exec, not at fork. Release
+        // logical ownership now even if a helper has not reached exec yet.
+        loop {
+            // SAFETY: the guard still owns this live descriptor.
+            let result = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+            if result == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
 }
 
 pub fn try_acquire(state_dir: &Path) -> io::Result<Option<Guard>> {
@@ -63,6 +78,18 @@ mod tests {
             dir.path().join("runner-transition.lock").is_file(),
             "never unlink the shared inode"
         );
+    }
+
+    #[test]
+    fn dropping_owner_releases_lock_even_if_a_non_owner_descriptor_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = try_acquire(dir.path()).unwrap().unwrap();
+        // dup, like fork before exec, keeps the same open file description.
+        let inherited = guard._file.try_clone().unwrap();
+        drop(guard);
+        let acquired = try_acquire(dir.path()).unwrap().is_some();
+        drop(inherited);
+        assert!(acquired, "a non-owning inherited descriptor retained the transition lock");
     }
 
     #[test]
