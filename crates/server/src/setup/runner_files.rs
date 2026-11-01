@@ -112,8 +112,8 @@ pub fn apply(ctx: &Ctx, app: &Path, enabled: bool) -> Result<(), String> {
     let ent = work.path().join("entitlements.plist");
     sys::write_atomic(&ent, &entitlements, 0o600).map_err(|e| e.to_string())?;
     checked(Command::new("/usr/bin/plutil").arg("-lint").arg(&ent))?;
-    let original_entitlements =
-        sys::read_plist(&ent).ok_or("could not read the original runner entitlements")?;
+    let original_entitlements = plist::Value::from_file(&ent)
+        .map_err(|_| "could not read the original runner entitlements")?;
     patch_info(&staged)?;
     std::fs::write(staged.join(MARKER), b"1\n").map_err(|e| e.to_string())?;
     // Nested code is unchanged; preserve the original outer entitlements.
@@ -132,7 +132,7 @@ pub fn apply(ctx: &Ctx, app: &Path, enabled: bool) -> Result<(), String> {
     .stdout;
     let signed_ent = work.path().join("signed-entitlements.plist");
     sys::write_atomic(&signed_ent, &signed_entitlements, 0o600).map_err(|e| e.to_string())?;
-    if sys::read_plist(&signed_ent).as_ref() != Some(&original_entitlements) {
+    if plist::Value::from_file(&signed_ent).as_ref().ok() != Some(&original_entitlements) {
         return Err("runner entitlements changed after signing".into());
     }
     if legacy_ios::signing_certificate(&staged).as_deref() != Some(certificate.as_slice()) {
@@ -185,8 +185,14 @@ mod tests {
         );
         assert!(!matches(dir.path(), false));
         let value = sys::read_plist(&info).unwrap();
-        assert_eq!(value["CFBundleIdentifier"], "owned.xctrunner");
-        assert_eq!(value["CFBundleIconName"], "AppIcon");
+        assert_eq!(
+            value.get("CFBundleIdentifier").and_then(|v| v.as_str()),
+            Some("owned.xctrunner")
+        );
+        assert_eq!(
+            value.get("CFBundleIconName").and_then(|v| v.as_str()),
+            Some("AppIcon")
+        );
     }
 
     #[test]
