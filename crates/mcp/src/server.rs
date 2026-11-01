@@ -6266,8 +6266,11 @@ mod tests {
         let (result,_,_,_)=device_call("409 Conflict",&body.to_string(),|h|async move {
             h.phone_elements(Parameters(ElementsParams {selector:Some(serde_json::from_value(serde_json::json!({"label":"Save","index":1})).unwrap()),..Default::default()})).await
         });
-        assert_eq!(result.is_error,Some(true));assert_eq!(result.structured_content,Some(body));
-        assert!(!refused_offline(result).contains("phone_status"));
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.structured_content, Some(body.clone()));
+        let text = text_of(&result);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap(), body);
+        assert!(!text.contains("phone_status"));
     }
 
     #[test]
