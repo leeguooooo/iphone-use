@@ -35,7 +35,7 @@ pub fn matches(app: &Path, enabled: bool) -> bool {
     let Some(info) = sys::read_plist(&app.join("Info.plist")) else {
         return false;
     };
-    KEYS.iter().all(|key| match info.get(*key) {
+    KEYS.into_iter().all(|key| match info.get(key) {
         None => !enabled,
         Some(value) => value.as_bool() == Some(enabled),
     })
@@ -45,8 +45,8 @@ pub fn matches(app: &Path, enabled: bool) -> bool {
 pub fn customized(app: &Path) -> bool {
     app.join(MARKER).exists()
         || sys::read_plist(&app.join("Info.plist")).is_some_and(|info| {
-            KEYS.iter()
-                .any(|key| info.get(*key).is_some_and(|v| v.as_bool() != Some(false)))
+            KEYS.into_iter()
+                .any(|key| info.get(key).is_some_and(|v| v.as_bool() != Some(false)))
         })
 }
 
