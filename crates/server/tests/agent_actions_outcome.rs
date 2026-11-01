@@ -527,8 +527,10 @@ fn a_locator_tap_fully_covered_after_reveal_never_taps_or_authorizes_replay() {
         assert_eq!(json["ok"], false, "{json}");
         assert_eq!(json["retry_safe"], false, "reveal was attempted: {json}");
         assert_ne!(json["outcome"], "not_sent", "reveal was attempted: {json}");
-        assert!(json.to_string().contains("element_occluded"), "{json}");
+        assert_eq!(json["error"], "outcome_unknown", "{json}");
         let seen = seen.lock().unwrap();
+        assert_eq!(seen.iter().filter(|r| r.starts_with("POST ") && r.contains("/elements ")).count(), 2, "re-resolve after reveal: {seen:?}");
+        assert!(seen.iter().filter(|r| r.contains("/element/E1/rect")).count() >= 4, "reach the post-reveal live-frame guard: {seen:?}");
         assert!(!seen.iter().any(|r| r.contains("/E1/click")), "{seen:?}");
         assert!(
             !seen
@@ -610,8 +612,10 @@ fn an_off_screen_locator_tap_after_reveal_never_authorizes_replay() {
         assert_eq!(json["ok"], false, "{json}");
         assert_eq!(json["retry_safe"], false, "reveal was attempted: {json}");
         assert_ne!(json["outcome"], "not_sent", "reveal was attempted: {json}");
-        assert!(json.to_string().contains("element_not_visible"), "{json}");
+        assert_eq!(json["error"], "outcome_unknown", "{json}");
         let seen = seen.lock().unwrap();
+        assert_eq!(seen.iter().filter(|r| r.starts_with("POST ") && r.contains("/elements ")).count(), 2, "re-resolve after reveal: {seen:?}");
+        assert!(seen.iter().filter(|r| r.contains("/element/E1/rect")).count() >= 4, "reach the post-reveal live-frame guard: {seen:?}");
         assert!(
             seen.iter().any(|r| r.contains("/E1/scrollTo")),
             "a reveal scroll was tried: {seen:?}"

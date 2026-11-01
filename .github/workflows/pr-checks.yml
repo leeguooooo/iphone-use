@@ -117,6 +117,25 @@ jobs:
           set -euo pipefail
           cargo test -p server --locked --no-fail-fast
 
+      - name: Real daemon target-scope protocol (synthetic provider, no UI)
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p server --bin iphone-use --locked
+          protocol_version=$(python3 -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path("crates/server/Cargo.toml").read_text())["package"]["version"])')
+          python3 -I scripts/test-action-target-protocol.py \
+            --daemon target/debug/iphone-use --expect-version "$protocol_version" \
+            --out "$RUNNER_TEMP/action-target-protocol"
+
+      - name: Preserve target-scope protocol receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: action-target-protocol
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/action-target-protocol
+
       - name: cargo test -p iphone-use-mcp
         timeout-minutes: 15
         shell: bash

@@ -73,6 +73,12 @@ async fn tap_on(
                 serde_json::json!({"value":found}).to_string(),
             ));
         }
+        if request.contains("/element/TARGET/rect") {
+            return Some((Duration::ZERO, r#"{"value":{"x":20,"y":100,"width":350,"height":40}}"#.into()));
+        }
+        if request.contains("/window/size") {
+            return Some((Duration::ZERO, r#"{"value":{"width":390,"height":844}}"#.into()));
+        }
         if request.starts_with("POST ") && request.contains("/click ") {
             sent.lock()
                 .unwrap()
