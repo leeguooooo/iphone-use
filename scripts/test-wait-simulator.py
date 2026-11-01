@@ -30,6 +30,18 @@ CASES=[
  ('long-contains',{'present':[{'identifier':'selector.primary','label_contains':'x'*1001}]},None,0),
 ]
 
+def seed_errors(seed):
+ rows=seed.get('elements')
+ if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):return ['invalid seed rows']
+ errors=[]
+ for expected in fixture.EXPECTED_ROWS:
+  identifier=expected['identifier']
+  matches=[row for row in rows if row.get('label')==expected['label'] and row.get('kind')==expected['kind']
+           and (row.get('identifier')==identifier if identifier else row.get('identifier') in (None,''))]
+  if len(matches)!=1:errors.append('declared control not uniquely represented: '+(identifier or expected['label']))
+ return errors
+
+
 def count_is(value,expected):return type(value) is int and value==expected
 
 def verify_case(model,before,after,body,expect,expected,timeout):
@@ -105,7 +117,7 @@ def main():
   status=peer.request('tools/call',{'name':'phone_status','arguments':{}});_,_,bound=payload(status)
   assert bound.get('target')=='simulator' and bound.get('udid','').lower()==args.udid.lower() and bound.get('drivable') is True and bound.get('owner') in (None,args.owner)
   seed=daemon.call('/agent/elements?ocr=off');save('seed.json',seed)
-  for row in fixture.EXPECTED_ROWS:assert any(item.get('identifier')==row['identifier'] and item.get('label')==row['label'] for item in seed.get('elements',[])),'missing declared App control'
+  assert not seed_errors(seed),seed_errors(seed)
   for name,expect,expected,timeout in CASES:
    daemon.require_simulator(args.udid)
    response=peer.request('tools/call',{'name':'phone_run_steps','arguments':{'observe':False,'steps':[{'kind':'wait_for','expect':expect,'timeout_ms':timeout,'poll_ms':50}]}},timeout=15);save(name+'/response.json',response)

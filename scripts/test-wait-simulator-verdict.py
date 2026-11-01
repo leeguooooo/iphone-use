@@ -15,6 +15,21 @@ def sample(ok=True):
  else:body.update(error='expectation_timeout',retry_safe=True,observation=observation)
  return [model,state,copy.deepcopy(state),body,{'present':[{'label_contains':'av'}]},ok,0]
 class Verdict(unittest.TestCase):
+ def test_seed_allows_sparse_identifier_for_declared_label_only_control(self):
+  rows=copy.deepcopy(probe.fixture.EXPECTED_ROWS)
+  for row in rows:
+   if row['identifier']=='':row.pop('identifier')
+  self.assertEqual(probe.seed_errors({'elements':rows}),[])
+ def test_seed_rejects_missing_wrong_kind_wrong_identifier_and_duplicates(self):
+  for fault in ['missing','kind','identifier','duplicate','label-only-wrong-id']:
+   rows=copy.deepcopy(probe.fixture.EXPECTED_ROWS)
+   if fault=='missing':rows.pop()
+   elif fault=='kind':rows[0]['kind']='Other'
+   elif fault=='identifier':rows[0].pop('identifier')
+   elif fault=='duplicate':rows.append(copy.deepcopy(rows[-1]))
+   else:rows[-1]['identifier']='unexpected'
+   self.assertTrue(probe.seed_errors({'elements':rows}),fault)
+  self.assertTrue(probe.seed_errors({'elements':None}))
  def test_valid_known_success_and_failure(self):
   for ok in [True,False]:self.assertEqual(probe.verify_case(*sample(ok)),[])
  def test_app_or_execution_faults_cannot_pass(self):
