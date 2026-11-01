@@ -28,6 +28,15 @@ class Verdict(unittest.TestCase):
             self.assertEqual(state, actual / 'state')
             self.assertEqual(state.stat().st_mode & 0o777, 0o700)
 
+    def test_state_setup_failure_removes_only_the_new_empty_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            created = Path(folder).resolve() / 'state'
+            created.mkdir()
+            with patch.object(oracle.tempfile, 'mkdtemp', return_value=str(created)), patch.object(Path, 'chmod', side_effect=PermissionError('fixture denial')):
+                with self.assertRaises(PermissionError):
+                    oracle.create_consumer_state()
+            self.assertFalse(created.exists())
+
     def counts(self, target=0, overlay=0, decoy=0, background=0):
         return dict(zip(('race.target', 'race.overlay', 'race.decoy', 'background'), (target, overlay, decoy, background)))
 

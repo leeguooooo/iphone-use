@@ -64,9 +64,14 @@ def close_rect(left, right):
 def create_consumer_state():
     # macOS TMPDIR commonly starts /var, a symlink to /private/var. The daemon
     # deliberately rejects symlinked state paths; resolve our own new directory.
-    path = Path(tempfile.mkdtemp(prefix='ipu-race-consumer-')).resolve(strict=True)
-    path.chmod(0o700)
-    return path
+    created = Path(tempfile.mkdtemp(prefix='ipu-race-consumer-'))
+    try:
+        path = created.resolve(strict=True)
+        path.chmod(0o700)
+        return path
+    except Exception:
+        shutil.rmtree(created)
+        raise
 
 
 def judge_case(case, body, delta, established, expect_race, activation_delta=0):
