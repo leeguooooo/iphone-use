@@ -175,3 +175,24 @@ SDKROOT isolation, pinning across later context changes and pre-device refusal.
 A real CLI test checks remembered Xcode and invalid-choice diagnostics using an
 owned non-executed tool fixture; full CI for this candidate is pending. These
 checks are not physical CoreDevice handoff or signed upgrade acceptance.
+
+## Atomic setup product replacement
+
+The verified staged Runner and installed product now exchange paths through one
+macOS RENAME_SWAP operation. There is no intermediate rename that removes the
+installed path. Unsupported filesystems fail without a two-rename fallback;
+temporary-directory cleanup removes the old product after a successful exchange.
+A process kill may leave that temporary directory, while the installed path
+continues to name the old or new bundle. This does not claim power-loss durability
+or signed-device setup acceptance.
+
+Five production-source module checks pass on a real local filesystem, including
+exchange of two nonempty bundles, cleanup preserving the new installed bundle,
+and a missing-stage error preserving the original bundle. The isolated harness
+adapts unrelated setup/signing services; the exchange itself calls the real
+macOS syscall. Full integrated PR CI for this new head remains pending.
+
+At preceding head 3cc0c18f, full PR CI 41313251749, actual iOS ABI/link CI
+41313251778, Simulator 41313251774 and security scan 41313251852 passed.
+These supersede the pending CI notes for earlier candidates above, without
+extending their physical-device or signing acceptance scope.

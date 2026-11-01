@@ -138,23 +138,77 @@ pub fn apply(ctx: &Ctx, app: &Path, enabled: bool) -> Result<(), String> {
     if legacy_ios::signing_certificate(&staged).as_deref() != Some(certificate.as_slice()) {
         return Err("runner signing certificate changed".into());
     }
-    let original = work.path().join("original.app");
-    std::fs::rename(app, &original).map_err(|e| e.to_string())?;
-    if let Err(error) = std::fs::rename(&staged, app) {
-        if let Err(restore) = std::fs::rename(&original, app) {
-            let retained = work.keep();
-            return Err(format!("runner Files publish failed: {error}; restore failed: {restore}; backup retained at {}", retained.display()));
-        }
-        return Err(format!(
-            "runner Files publish failed: {error}; original restored"
-        ));
-    }
+    // Both paths remain present; a process kill cannot land between two renames.
+    // Unsupported filesystems fail without falling back to a non-atomic swap.
+    exchange_product(app, &staged)
+        .map_err(|error| format!("runner Files atomic publish failed: {error}"))?;
     Ok(())
+}
+
+/// Exchange verified and installed bundles in one filesystem operation.
+#[cfg(target_os = "macos")]
+fn exchange_product(installed: &Path, staged: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let installed = CString::new(installed.as_os_str().as_bytes())?;
+    let staged = CString::new(staged.as_os_str().as_bytes())?;
+    // SAFETY: Both C strings live across the call; the kernel owns path lookup.
+    if unsafe { libc::renamex_np(installed.as_ptr(), staged.as_ptr(), libc::RENAME_SWAP) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn exchange_product(_installed: &Path, _staged: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic Runner product exchange requires macOS",
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn product_exchange_keeps_both_nonempty_bundles_and_cleans_only_old_product() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("iPhoneUse-Runner.app");
+        let work = tempfile::tempdir_in(dir.path()).unwrap();
+        let staged = work.path().join("iPhoneUse-Runner.app");
+        std::fs::create_dir(&installed).unwrap();
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(installed.join("identity"), b"old").unwrap();
+        std::fs::write(staged.join("identity"), b"verified").unwrap();
+        exchange_product(&installed, &staged).unwrap();
+        assert_eq!(
+            std::fs::read(installed.join("identity")).unwrap(),
+            b"verified"
+        );
+        assert_eq!(std::fs::read(staged.join("identity")).unwrap(), b"old");
+        drop(work);
+        assert_eq!(
+            std::fs::read(installed.join("identity")).unwrap(),
+            b"verified"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn failed_product_exchange_preserves_installed_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("iPhoneUse-Runner.app");
+        std::fs::create_dir(&installed).unwrap();
+        std::fs::write(installed.join("identity"), b"old").unwrap();
+        let missing = dir.path().join("missing.app");
+        assert!(exchange_product(&installed, &missing).is_err());
+        assert_eq!(std::fs::read(installed.join("identity")).unwrap(), b"old");
+        assert!(!missing.exists());
+    }
 
     #[test]
     fn explicit_opt_in_and_distinct_cache_keys() {
