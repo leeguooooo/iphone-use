@@ -43,6 +43,8 @@ fn locator_taps_require_complete_source_and_complete_live_matches_before_dispatc
                                 ));
                             } else if request.contains("/element/E1/rect") {
                                 r#"{"value":{"x":10,"y":10,"width":100,"height":40}}"#
+                            } else if request.contains("/window/size") {
+                                r#"{"value":{"width":390,"height":844}}"#
                             } else {
                                 r#"{"value":null}"#
                             };
@@ -140,6 +142,8 @@ fn losing_scope_after_reveal_stops_the_tap_and_never_authorizes_replay() {
                             Duration::ZERO,
                             format!(r#"{{"value":{{"x":16,"y":{y},"width":358,"height":51}}}}"#),
                         ));
+                    } else if request.contains("/window/size") {
+                        r#"{"value":{"width":390,"height":844}}"#
                     } else {
                         r#"{"value":null}"#
                     };
@@ -249,6 +253,7 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
         for via in ["element", "point"] {
             for (source_covered, live_covered, clear_after) in [
                 (false, false, true),
+                (true, false, true),
                 (false, true, false),
                 (true, true, false),
                 (false, true, true),
@@ -291,6 +296,8 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
                             Duration::ZERO,
                             format!(r#"{{"value":{{"x":16,"y":{y},"width":358,"height":51}}}}"#),
                         ));
+                    } else if request.contains("/window/size") {
+                        r#"{"value":{"width":390,"height":844}}"#
                     } else {
                         r#"{"value":null}"#
                     };

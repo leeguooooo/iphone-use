@@ -7267,10 +7267,10 @@ async fn tap_snapshot_element(
             return clicked.map_err(|error| match error {
                 RevealError::ScopeUnproven => SnapshotElementTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT),
                 RevealError::Occluded => {
-                    SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("target remained occluded after reveal; no tap sent"))
+                    SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("element_occluded after reveal; no tap sent"))
                 }
                 RevealError::OffScreen => {
-                    SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("target remained off screen after reveal; no tap sent"))
+                    SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("element_not_visible after reveal; no tap sent"))
                 }
                 RevealError::Dispatch(error) => SnapshotElementTapError::AfterDispatch(error),
             });
@@ -8326,10 +8326,10 @@ async fn tap_unique_label(
             return clicked.map_err(|error| match error {
                 RevealError::ScopeUnproven => UniqueLabelTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT),
                 RevealError::Occluded => {
-                    UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target remained occluded after reveal; no tap sent"))
+                    UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("element_occluded after reveal; no tap sent"))
                 }
                 RevealError::OffScreen => {
-                    UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target remained off screen after reveal; no tap sent"))
+                    UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("element_not_visible after reveal; no tap sent"))
                 }
                 RevealError::Dispatch(error) => UniqueLabelTapError::AfterDispatch(error),
             });

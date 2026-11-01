@@ -60,16 +60,48 @@ fn assert_no_runner_connection(listener: &TcpListener) {
     }
 }
 
+enum RequestBudget { Exact(usize), AtMost(usize) }
+
 fn mock_runner(
     requests: usize,
     responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)> + Send + 'static,
 ) -> (String, std::thread::JoinHandle<()>) {
+    mock_runner_with_budget(RequestBudget::Exact(requests), responder)
+}
+
+fn mock_runner_at_most(
+    requests: usize,
+    responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)> + Send + 'static,
+) -> (String, std::thread::JoinHandle<()>) {
+    mock_runner_with_budget(RequestBudget::AtMost(requests), responder)
+}
+
+fn mock_runner_with_budget(
+    budget: RequestBudget,
+    responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)> + Send + 'static,
+) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
     let task = std::thread::spawn(move || {
+        let (requests, exact) = match budget { RequestBudget::Exact(n) => (n, true), RequestBudget::AtMost(n) => (n, false) };
         let mut index = 0;
+        let mut last_request = std::time::Instant::now();
         while index < requests {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if last_request.elapsed() >= std::time::Duration::from_secs(60) {
+                        assert!(!exact, "mock runner expected {requests} requests, received {index}; a refused operation must not hang server.join()");
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+                Err(error) => panic!("mock runner accept failed: {error}"),
+            };
+            last_request = std::time::Instant::now();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(60))).unwrap();
             let mut request = [0_u8; 8_192];
             let read = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..read]);
@@ -92,10 +124,14 @@ fn mock_runner(
                 continue; // close without a response: ambiguous transport loss
             };
             std::thread::sleep(delay);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+            // Ordinary fixtures describe an exhaustive source/query result;
+            // explicit raw HTTP responses can model unknown or partial coverage.
+            let response = if body.starts_with("HTTP/1.1 ") { body } else {
+                let coverage = if request.contains("/source") || (request.starts_with("POST ") && request.contains("/elements ")) {
+                    "X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n"
+                } else { "" };
+                format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{coverage}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+            };
             let _ = stream.write_all(response.as_bytes());
         }
     });
@@ -1789,13 +1825,14 @@ fn agent_actions_taps_one_strict_semantic_locator() {
     block(async {
         let action_count = Arc::new(AtomicUsize::new(0));
         let observed_actions = action_count.clone();
-        let (base, server) = mock_runner(4, move |request, _| {
+        let (base, server) = mock_runner(6, move |request, _| {
             let body = if request.starts_with("POST /session ") {
                 r#"{"value":{"sessionId":"SESSION"}}"#.to_string()
             } else if request.contains("/source?format=json") {
                 r#"{"value":{
                     "type":"XCUIElementTypeApplication",
                     "label":"测试应用",
+                    "rect":{"x":0,"y":0,"width":390,"height":844},
                     "children":[{
                         "type":"XCUIElementTypeButton",
                         "label":"搜索",
@@ -1813,6 +1850,10 @@ fn agent_actions_taps_one_strict_semantic_locator() {
                     "strict locator state must reach the native runner query: {request}"
                 );
                 r#"{"value":[{"ELEMENT":"SEARCH"}]}"#.to_string()
+            } else if request.contains("/window/size") {
+                r#"{"value":{"width":390,"height":844}}"#.to_string()
+            } else if request.contains("/element/SEARCH/rect") {
+                r#"{"value":{"x":160,"y":700,"width":70,"height":40}}"#.to_string()
             } else {
                 assert!(
                     request.contains("/element/SEARCH/click"),
@@ -3743,7 +3784,7 @@ fn agent_answers_carry_runner_timing_in_body_and_server_timing() {
         // Answer whatever /agent/elements asks runner; the source read is slow on
         // purpose so it stands out in the breakdown. The server thread is left
         // waiting for requests that never come and ends with the process.
-        let (base, _server) = mock_runner(16, move |request, _| {
+        let (base, _server) = mock_runner_at_most(16, move |request, _| {
             if request.contains("/source") {
                 Some((
                     std::time::Duration::from_millis(50),
@@ -3817,7 +3858,7 @@ fn tap_with_duplicate_labels(
         let clicked = Arc::new(Mutex::new(Vec::<String>::new()));
         let seen = clicked.clone();
         let source = r#"{"value":{"type":"XCUIElementTypeApplication","children":[{"type":"XCUIElementTypeButton","label":"关闭","rect":{"x":24,"y":66,"width":36,"height":36},"children":[]},{"type":"XCUIElementTypeButton","label":"关闭","rect":{"x":300,"y":700,"width":60,"height":44},"children":[]}]}}"#;
-        let (base, _server) = mock_runner(32, move |request, _| {
+        let (base, _server) = mock_runner_at_most(32, move |request, _| {
             let ok = |body: String| Some((std::time::Duration::ZERO, body));
             if request.starts_with("POST /session ") {
                 ok(r#"{"value":{"sessionId":"SESSION"}}"#.to_string())
@@ -3972,7 +4013,7 @@ fn screenshot_of_blank_capture(
     .unwrap();
     let encoded = base64::engine::general_purpose::STANDARD.encode(&blank);
     block(async move {
-        let (base, _server) = mock_runner(16, move |request, _| {
+        let (base, _server) = mock_runner_at_most(16, move |request, _| {
             let ok = |body: String| Some((std::time::Duration::ZERO, body));
             if request.starts_with("POST /session ") {
                 ok(r#"{"value":{"sessionId":"SESSION"}}"#.to_string())
@@ -4085,7 +4126,7 @@ fn control_against(
     block(async move {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
         let log = seen.clone();
-        let (base, _server) = mock_runner(64, move |request, _| {
+        let (base, _server) = mock_runner_at_most(64, move |request, _| {
             let line = request.lines().next().unwrap_or("").to_string();
             log.lock().unwrap().push(line.clone());
             let ok = |body: String| Some((std::time::Duration::ZERO, body));
@@ -4264,7 +4305,7 @@ fn tap_after_read_with(
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
         let seen = log.clone();
         let source = r#"{"value":{"type":"XCUIElementTypeApplication","label":"Chat","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeButton","label":"发送","rect":{"x":300,"y":700,"width":60,"height":44}}]}}"#;
-        let (base, _server) = mock_runner(64, move |request, _| {
+        let (base, _server) = mock_runner_at_most(64, move |request, _| {
             let line = request.lines().next().unwrap_or("").to_string();
             seen.lock().unwrap().push(line.clone());
             let ok = |body: String| Some((std::time::Duration::ZERO, body));
