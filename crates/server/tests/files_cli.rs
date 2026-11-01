@@ -82,9 +82,84 @@ fn packaged_files_entry_works_without_checkout_or_python_path_imports() {
     );
 }
 
+/// A connection is not a request. Keep fragmented headers across read timeouts,
+/// and ignore a peer that closes before sending any bytes.
+fn read_status_request(
+    reader: &mut impl std::io::Read,
+    deadline: std::time::Instant,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut request = Vec::new();
+    let mut byte = [0];
+    while request.len() < 16384 && std::time::Instant::now() < deadline {
+        match reader.read(&mut byte) {
+            Ok(0) if request.is_empty() => return Ok(None),
+            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            Ok(_) => {
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    return Ok(Some(request));
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "incomplete status request headers",
+    ))
+}
+
+#[test]
+fn status_fixture_preserves_fragmented_headers_across_read_timeouts() {
+    struct Fragmented {
+        bytes: std::io::Cursor<Vec<u8>>,
+        timeout: bool,
+    }
+    impl std::io::Read for Fragmented {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.timeout = !self.timeout;
+            if self.timeout {
+                Err(std::io::ErrorKind::TimedOut.into())
+            } else {
+                std::io::Read::read(&mut self.bytes, out)
+            }
+        }
+    }
+    let expected = b"GET /agent/status HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    let mut reader = Fragmented {
+        bytes: std::io::Cursor::new(expected.to_vec()),
+        timeout: false,
+    };
+    assert_eq!(
+        read_status_request(
+            &mut reader,
+            std::time::Instant::now() + std::time::Duration::from_secs(1)
+        )
+        .unwrap()
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn status_fixture_distinguishes_empty_connections_from_truncated_requests() {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    assert!(read_status_request(&mut std::io::empty(), deadline)
+        .unwrap()
+        .is_none());
+    let error =
+        read_status_request(&mut std::io::Cursor::new(b"GET /agent/status"), deadline).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
 #[test]
 fn status_cli_preserves_control_lease_metadata_from_the_selected_daemon() {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::time::{Duration, Instant};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -100,15 +175,17 @@ fn status_cli_preserves_control_lease_metadata_from_the_selected_daemon() {
                     stream
                         .set_read_timeout(Some(Duration::from_secs(3)))
                         .unwrap();
-                    let mut request = Vec::new();
-                    let mut byte = [0];
-                    while !request.ends_with(b"\r\n\r\n") && request.len() < 16384 {
-                        if stream.read(&mut byte).unwrap_or(0) == 0 {
-                            break;
-                        }
-                        request.push(byte[0]);
-                    }
-                    assert!(String::from_utf8_lossy(&request).starts_with("GET /agent/status "));
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let Some(request) = read_status_request(&mut stream, deadline).unwrap() else {
+                        continue;
+                    };
+                    assert!(
+                        String::from_utf8_lossy(&request).starts_with("GET /agent/status "),
+                        "unexpected request: {:?}",
+                        String::from_utf8_lossy(&request)
+                    );
                     write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
                     return true;
                 }
