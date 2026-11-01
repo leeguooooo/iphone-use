@@ -21,11 +21,11 @@ prefix = r'''
 + (NSString *)elementTypeName:(NSInteger)t;
 + (NSDictionary *)runnerTreeForAXElement:(id)e maxDepth:(NSInteger)d maxNodes:(NSInteger)n extensionCallLimit:(NSInteger)c rememberKey:(NSString *)k includeElements:(BOOL)b;
 @end
-static NSInteger const IPURDepthLadder[] = {56,40,24,12};
 static NSInteger providerMode = 0;
 '''
 constants = '\n'.join(line for line in src.splitlines() if line.startswith('NSString *const IPUR'))
 types = between('@interface IPURFrontier', '@implementation IPURBridge')
+types += next(line for line in src.splitlines() if line.startswith('static NSInteger const IPURDepthLadder'))+'\n'
 helpers = between('static id IPURKVC', 'static NSDictionary *IPURRect')
 helpers += 'static NSDictionary *IPURRect(id snapshot) { return @{}; }\n'
 helpers += between('static NSString *IPURBoolString', '+ (NSDictionary<NSString *, id> *)runnerTreeForAXElement:')
@@ -35,17 +35,17 @@ method = src[method_start:method_end]
 mock = r'''
 + (NSString *)elementTypeName:(NSInteger)t { return @"XCUIElementTypeOther"; }
 + (id)requestSnapshotForElement:(id)e maxDepth:(NSInteger)d maxNodes:(NSInteger)n error:(NSString **)err {
-  if ([e isEqual:@"app"]) return @{@"children":@[@{@"children":@[@{@"accessibilityElement":@"frontier"}]}]};
+  if ([e isEqual:@"app"]) return @{@"children":@[@{@"children":@[(providerMode==3 ? @{} : @{@"accessibilityElement":@"frontier"})]}]};
   if (providerMode == 1) return nil;
   // Model an AX implementation that silently includes subRoot in its node cap.
   NSMutableArray *children = [NSMutableArray array];
-  for (NSInteger i=0; i<MIN(4, MAX(0,n-1)); i++) [children addObject:@{@"identifier":@(i)}];
+  for (NSInteger i=0; i<MIN(4, MAX(0,n-(providerMode==2 ? 0 : 1))); i++) [children addObject:@{@"identifier":@(i)}];
   return @{@"accessibilityElement":@"frontier", @"children":children};
 }
 @end
 static void check(NSInteger cap, NSInteger calls, BOOL partial, NSInteger count) {
   NSDictionary *tree = [IPURBridge runnerTreeForAXElement:@"app" maxDepth:3 maxNodes:cap extensionCallLimit:calls rememberKey:nil includeElements:NO];
-  if (![tree[@"ok"] boolValue] || [tree[@"truncated"] boolValue] != partial || [tree[@"nodeCount"] integerValue] != count) {
+  if (![tree[@"ok"] boolValue] || [tree[@"truncated"] boolValue] != partial || [tree[@"nodeCount"] integerValue] != count || (cap<=3 && [tree[@"extensionCalls"] integerValue]!=0)) {
     NSLog(@"coverage mismatch: cap=%ld calls=%ld count=%@ truncated=%@", (long)cap, (long)calls, tree[@"nodeCount"], tree[@"truncated"]); exit(1);
   }
 }
@@ -53,9 +53,14 @@ int main(void) { @autoreleasepool {
   check(6, 4, YES, 6); // Hidden descendants must not become proof of absence.
   check(20, 4, NO, 7); // Exhaustive small tree remains complete.
   check(20, 0, YES, 3); // Unexpanded depth frontier.
+  check(3, 4, YES, 3); // Exhausted budget sends no extension request.
+  providerMode=2;
+  check(6, 4, YES, 6); // Child-only provider cap still clips at our own budget.
   providerMode=1;
   check(20, 4, YES, 3); // Failed subtree request.
-  puts("native snapshot coverage: 4 cases passed (synthetic AX, no UI)");
+  providerMode=3;
+  check(20, 4, YES, 3); // Frontier has no AX element.
+  puts("native snapshot coverage: 7 cases passed (synthetic AX, no UI)");
 } return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='ipu-native-coverage-') as work:

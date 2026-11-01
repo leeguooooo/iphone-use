@@ -230,7 +230,7 @@ fn sparse_diagnosis_preserves_the_failure_and_never_replays() {
 
 #[test]
 fn value_diagnosis_through_the_cli_respects_availability_and_never_retries() {
-    for complete in [true, false] {
+    for (complete, partial) in [(true, false), (false, false), (false, true)] {
         for expectation in ["present", "absent"] {
             for (rows, value, reason, exact) in [
                 (
@@ -266,7 +266,7 @@ fn value_diagnosis_through_the_cli_respects_availability_and_never_retries() {
                 (
                     serde_json::json!([{"identifier":"save","value":"prefix","value_known":true},{"identifier":"save","value":"prefix","value_truncated":true}]),
                     "prefix",
-                    "locator_state_unproven",
+                    "locator_matches_now",
                     1,
                 ),
             ] {
@@ -280,7 +280,7 @@ fn value_diagnosis_through_the_cli_respects_availability_and_never_retries() {
                     serde_json::json!({"read":true,"violated_absent":[0]})
                 };
                 let failure=serde_json::json!({"ok":false,"error":"expectation_timeout","failed_step":0,"applied_actions":0,"outcome":"not_sent","retry_safe":true,"observation":observation}).to_string();
-                let tree = serde_json::json!({"locator_state":1,"elements":rows,"coverage":if complete {"complete"} else {"unknown"},"partial":false}).to_string();
+                let tree = serde_json::json!({"locator_state":1,"elements":rows,"coverage":if complete {"complete"} else {"unknown"},"partial":partial}).to_string();
                 let mut script = compat_preamble();
                 script.extend([
                     ("200 OK", Some(STATUS)),
