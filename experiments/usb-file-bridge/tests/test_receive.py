@@ -12,6 +12,8 @@ import unittest
 from unittest.mock import patch
 import uuid
 
+sys.path.insert(0, str(Path(__file__).parents[1] / 'mac'))
+
 spec = importlib.util.spec_from_file_location('bridge', Path(__file__).parents[1] / 'mac/common.py')
 b = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(b)
@@ -173,5 +175,21 @@ class CliTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0)
             self.assertFalse(json.loads(result.stdout)['active'])
+
+
+class PackagedHostTests(unittest.TestCase):
+    def test_lease_query_uses_explicit_current_binary(self):
+        args=types.SimpleNamespace(instance='chosen',owner='me',device='phone')
+        device=b.Device(args,None,None)
+        with patch.dict(os.environ, {'IPHONE_USE_FILES_HOST_BIN':'/owned/current iphone-use'}), \
+             patch.object(device,'command',return_value=json.dumps({'drivable':True,'owner':'me','udid':'phone'})) as command:
+            device.check_lease()
+        self.assertEqual(command.call_args.args[0], ['/owned/current iphone-use','status','--instance','chosen','--json'])
+
+    def test_environment_instance_and_explicit_override(self):
+        base=['status','--device','phone','--bundle','owned.xctrunner']
+        with patch.dict(os.environ, {'IPHONE_USE_INSTANCE':'chosen'}):
+            self.assertEqual(b.parser().parse_args(base).instance,'chosen')
+            self.assertEqual(b.parser().parse_args(base+['--instance','other']).instance,'other')
 
 if __name__ == '__main__': unittest.main()

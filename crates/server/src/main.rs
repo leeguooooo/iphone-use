@@ -161,6 +161,13 @@ struct Cli {
 enum Command {
     /// Start the daemon and browser/API server.
     Serve,
+    /// Receive an explicitly saved file through the Runner's native Files inbox.
+    /// Run after Save to Files completes. Use receive, status, stop or result.
+    #[command(disable_help_flag = true)]
+    Files {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Stop a running daemon (best-effort; kills the recorded pid).
     ///
     /// An installed daemon runs as a launchd KeepAlive job, so launchd starts
@@ -859,6 +866,7 @@ fn main() -> Result<()> {
     }
     let result = match command {
         Command::Serve => serve(),
+        Command::Files { args } => std::process::exit(server::file_handoff::main(&args)),
         Command::Stop => {
             let result = stop();
             // The daily "new version" line (stderr only). `serve` gets the same

@@ -9,6 +9,7 @@ pub mod config;
 pub mod crash;
 pub mod device_identity;
 pub mod flows;
+pub mod file_handoff;
 pub mod focus;
 pub mod guard;
 pub mod h264sps;

@@ -5,8 +5,8 @@ UI. No additional iPhone app, custom transfer screen, clipboard access, or
 Handoff toggle is required. The Mac side receives an explicitly selected saved
 file from the runner's own Documents container through CoreDevice.
 
-This is an opt-in experiment, not a released MCP endpoint or automatic change
-to runner setup. The earlier standalone-app prototype has been removed from
+This is an opt-in candidate, exposed through `iphone-use files` in binaries
+built from this PR. It is not a dedicated MCP endpoint or automatic setup change. The earlier standalone-app prototype has been removed from
 this proposal. The XCTest test-host delegate and control loop are unchanged.
 
 ## Enable the native Files entry
@@ -74,6 +74,15 @@ Optionally favorite the folder. The earlier manual-staging hardware validation, 
 
 ## Receive a file after saving
 
+The CLI embeds the same receiver engine and publication journal used by the
+source tests; no repository checkout or standalone Python script is needed.
+It uses `/usr/bin/python3` from the Mac's developer tools. `iphone-use files --help`
+lists the options. It runs the engine in the same process, so interruption and
+exit codes remain those of the receiver. Output is a newline-delimited JSON
+event stream; retain the committed receipt and the started transfer ID. Lease checks use the exact CLI binary
+that started it; `IPHONE_USE_INSTANCE` supplies the default instance.
+
+
 1. Obtain your normal iPhone Use control lease. Confirm its exact owner, UDID,
    instance and wired connection. Do not borrow another caller's owner.
 2. In the source app, use the system share menu → **Save to Files**, select the
@@ -83,7 +92,7 @@ Optionally favorite the folder. The earlier manual-staging hardware validation, 
 3. Run the receiver using your actual device/bundle/owner values:
 
    ```sh
-   python3 mac/runner_files.py receive \
+   iphone-use files receive \
      --device '<exact-udid>' --bundle '<installed-runner-id>.xctrunner' \
      --instance default --owner '<your-session-owner>' \
      --folder 'Documents/Send to Mac' --filename '<exact-saved-name.pdf>' \
@@ -104,8 +113,8 @@ There is no separate phone-side receipt UI: the native file and the Mac's
 `committed=true` result are the visible outcomes.
 
 ```sh
-python3 mac/runner_files.py status --device '<udid>' --bundle '<runner>.xctrunner'
-python3 mac/runner_files.py stop   --device '<udid>' --bundle '<runner>.xctrunner'
+iphone-use files status --device '<udid>' --bundle '<runner>.xctrunner'
+iphone-use files stop   --device '<udid>' --bundle '<runner>.xctrunner'
 ```
 
 Use the same instance/state-dir for each command. `stop` uses a session token,
@@ -122,7 +131,7 @@ persists an intent containing its expected size/hash, path and inode identity.
 After an interrupted command, query without touching the phone:
 
 ```sh
-python3 mac/runner_files.py result \
+iphone-use files result \
   --device '<udid>' --bundle '<runner>.xctrunner' --transfer-id '<uuid>'
 ```
 

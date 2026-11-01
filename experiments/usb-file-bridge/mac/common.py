@@ -168,7 +168,7 @@ class Device:
         return result.stdout
 
     def check_lease(self):
-        state = json.loads(self.command(['iphone-use', 'status', '--instance', self.args.instance, '--json'], 10))
+        state = json.loads(self.command([os.environ.get('IPHONE_USE_FILES_HOST_BIN', 'iphone-use'), 'status', '--instance', self.args.instance, '--json'], 10))
         if not state.get('drivable') or state.get('owner') != self.args.owner:
             raise TransferError('iPhone Use control lease ended or belongs to another caller')
         if state.get('udid') != self.args.device:
@@ -263,7 +263,7 @@ def parser():
     p.add_argument('action', choices=['receive', 'status', 'stop', 'result'])
     p.add_argument('--device', required=True, help='Exact UDID; must match the iPhone Use instance')
     p.add_argument('--bundle', required=True, help='Exact installed XCTest runner bundle identifier')
-    p.add_argument('--instance', default='default')
+    p.add_argument('--instance', default=os.environ.get('IPHONE_USE_INSTANCE') or 'default')
     p.add_argument('--owner', default=os.environ.get('IPHONE_USE_OWNER'), help='Exact caller control lease owner; required for receive')
     p.add_argument('--destination', type=Path)
     p.add_argument('--state-dir', type=Path, default=Path.home() / '.iphone-use' / 'usb-file-bridge')

@@ -122,3 +122,23 @@ was started. An added CI lane builds the actual iOS static library, links it
 into an unsigned Runner and checks both C entry symbols; its result is pending. Server unit coverage checks
 the path boundary and legacy app behavior. Full integration CI, signed-library
 symbol retention and actual signed-device upgrade acceptance remain required.
+
+## Packaged command candidate
+
+`iphone-use files` embeds the shared three-module receiver engine into the
+CLI binaries built from this PR. It uses isolated Python standard-library execution
+and replaces its process, preserving receiver cancellation and exit status.
+The engine's lease query is bound to that same CLI executable rather than an
+older binary found on PATH. Explicit instance flags override the environment.
+
+The shared suite now has 40 passing checks, including executable binding and
+instance selection. The actual Rust entry module, compiled in a small standalone
+harness, passed help/idle-status/missing-owner checks from a copied binary in an
+isolated directory with poisoned PYTHONPATH/current-directory modules. No phone
+or daemon was contacted. A full CLI integration test checks the real clap entry
+and no-checkout behavior in PR CI; its result is pending.
+
+This packaging does not strengthen the previously documented owner/transport
+checkpoints into atomic lease fencing, prove source freshness, or establish a
+hard live I/O quota. Same-owner reincarnation and signed-device acceptance
+remain open work; neither command availability nor a green build closes them.
