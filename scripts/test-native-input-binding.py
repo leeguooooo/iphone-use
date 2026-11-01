@@ -50,7 +50,22 @@ final class Registry {
   func prune() {}
   func renew(_ id:String, node:UINode) { if entries[id] != nil { entries[id] = node } }
 }
-enum IPURBridge { static func invalidateRequestCache() {} }
+var shortKeys: String? = "delete"
+var canSelect = true
+var selectionConfirmed = true
+var selectionWrong = false
+var selectionCalls = 0
+enum IPURBridge {
+  static func invalidateRequestCache() {}
+  static func shortClearKeys(for element:AnyObject,error:inout NSString?) -> String? { shortKeys }
+  static func textSelection(for element:AnyObject,error:inout NSString?) -> [String:NSNumber]? {
+    ["can_select":NSNumber(value:canSelect),"location":NSNumber(value:selectionWrong && selectionCalls>0 ? 1 : 0),"length":3,"utf16_length":3]
+  }
+  static func selectAllText(for element:AnyObject,pid:Int32,retryState:[String:Any]?,error:inout NSString?) -> [String:Any]? {
+    selectionCalls += 1
+    return ["confirmed":selectionConfirmed,"utf16_length":3]
+  }
+}
 '''
 program += error + '\n' + helpers
 program += r'''
@@ -147,6 +162,20 @@ do {
   refused({_ = try r.clearBoundInput(t)},status:500,"clear postflight is unknown")
   check(r.sends == 1 && r.inputBinding == nil,"clear never refocuses or replays")
 }
+shortKeys = nil;selectionCalls = 0
+ do {
+  let r = RunnerTests();let t = try token(r)
+  _ = try r.clearBoundInput(t)
+  check(selectionCalls == 1 && r.sends == 1,"confirmed Select All clears with one deletion")
+ }
+ for reason in 0..<3 {
+  selectionCalls = 0;canSelect = reason != 0;selectionConfirmed = reason != 1;selectionWrong = reason == 2
+  let r = RunnerTests();let t = try token(r)
+  refused({_ = try r.clearBoundInput(t)},status:reason == 0 ? 400 : 500,"selection uncertainty/refusal stops clear")
+  check(r.sends == 0,"unproven selection never dispatches deletion")
+  check(selectionCalls <= 1,"selection is never retried")
+ }
+ shortKeys = "delete";canSelect = true;selectionConfirmed = true;selectionWrong = false
 for path in ["/session/s/wda/keys","/session/s/element/id/clear"] {
   check(InputTargetCheck.preservesBinding(path:path,binding:"id",body:["inputTarget":"id"]),"bound route preserves token")
 }
