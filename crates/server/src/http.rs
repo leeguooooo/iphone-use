@@ -11721,6 +11721,29 @@ fn agent_expectation_observation(
     )
 }
 
+/// The observation a failing `wait_for` reports, in the caller's terms rather
+/// than the loop's. Exactly three things can have happened, and they must not
+/// be confused with each other:
+///
+/// * `read:false` — no readable tree was EVER obtained. Nothing here proves an
+///   element is absent.
+/// * `read:true, stale:true` — the screen was read at least once, but the last
+///   read failed, so this is the last valid observation, not the current one.
+///   A late failure must never erase the reads that did succeed.
+/// * `read:true` — a current tree was read; unproven indexes distinguish
+///   missing metadata from a condition known not to match.
+enum OcrWait {
+    Matched(serde_json::Value),
+    TimedOut(serde_json::Value),
+    Private,
+}
+
+/// Lines of recognized text a timed-out OCR wait reports, so the agent sees
+/// what IS on screen without another screenshot.
+const OCR_WAIT_REPORTED_LINES: usize = 20;
+
+/// Whether `needle` is in some recognized line, ignoring case and spacing
+/// (Vision may split or join CJK words with spaces).
 fn ocr_text_present(lines: &[String], needle: &str) -> bool {
     let needle = crate::app_lookup::normalize(needle);
     !needle.is_empty() && lines.iter().any(|line| line.contains(&needle))
