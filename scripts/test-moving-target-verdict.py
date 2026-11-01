@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+import tempfile
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -13,6 +15,19 @@ spec.loader.exec_module(oracle)
 
 
 class Verdict(unittest.TestCase):
+    def test_owned_state_resolves_symlinked_temp_parent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            actual = root / 'actual'
+            actual.mkdir()
+            (actual / 'state').mkdir()
+            alias = root / 'alias'
+            alias.symlink_to(actual, target_is_directory=True)
+            with patch.object(oracle.tempfile, 'mkdtemp', return_value=str(alias / 'state')):
+                state = oracle.create_consumer_state()
+            self.assertEqual(state, actual / 'state')
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+
     def counts(self, target=0, overlay=0, decoy=0, background=0):
         return dict(zip(('race.target', 'race.overlay', 'race.decoy', 'background'), (target, overlay, decoy, background)))
 

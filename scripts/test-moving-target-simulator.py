@@ -61,6 +61,14 @@ def close_rect(left, right):
     return all(type(left.get(k)) in (int, float) and abs(left[k] - right[k]) <= 1 for k in ('x', 'y', 'width', 'height'))
 
 
+def create_consumer_state():
+    # macOS TMPDIR commonly starts /var, a symlink to /private/var. The daemon
+    # deliberately rejects symlinked state paths; resolve our own new directory.
+    path = Path(tempfile.mkdtemp(prefix='ipu-race-consumer-')).resolve(strict=True)
+    path.chmod(0o700)
+    return path
+
+
 def judge_case(case, body, delta, established, expect_race, activation_delta=0):
     keys = {'race.target', 'race.overlay', 'race.decoy', 'background'}
     if not isinstance(delta, dict) or set(delta) != keys or any(type(v) is not int or v < 0 for v in delta.values()):
@@ -287,9 +295,8 @@ def main():
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
-        temporary_state = Path(tempfile.mkdtemp(prefix='ipu-race-consumer-'))
+        temporary_state = create_consumer_state()
         child_state = temporary_state
-        child_state.chmod(0o700)
         copied = child_state / 'runner-token'
         copied.write_text(token)
         copied.chmod(0o600)
