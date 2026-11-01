@@ -4778,6 +4778,29 @@ mod tests {
     }
 
     #[test]
+    fn checked_tap_classifies_only_explicit_pre_input_refusals_without_fallback() {
+        for (status, code, expected) in [
+            ("409 Conflict", "target changed", Some(CheckedTapOutcome::TargetChanged)),
+            ("404 Not Found", "unknown command", Some(CheckedTapOutcome::Unsupported)),
+            ("404 Not Found", "stale element reference", Some(CheckedTapOutcome::TargetChanged)),
+            ("500 Internal Server Error", "unknown error", None),
+        ] {
+            let (base, server) = mock_runner(1, move |request| {
+                assert!(request.starts_with("POST /session/S/element/E1/ipu/tap "), "{request}");
+                let body:serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(body["expected_rect"], serde_json::json!([16.0,180.0,358.0,36.0]));
+                assert_eq!(body["point"], serde_json::json!([195.0,190.0]));
+                let reply=serde_json::json!({"value":{"error":code,"message":"fixture"}}).to_string();
+                format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len())
+            });
+            let mut client=RunnerClient::new(base).unwrap();client.session=Some("S".into());
+            let result=block(client.checked_element_tap("E1",[16.0,180.0,358.0,36.0],Some((195.0,190.0))));
+            server.join().unwrap();
+            match expected { Some(value)=>assert_eq!(result.unwrap(),value),None=>assert!(result.is_err()) }
+        }
+    }
+
+    #[test]
     fn action_singleton_query_requires_complete_valid_and_exactly_one_match() {
         for (headers, body, allowed) in [
             ("X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n", r#"{"value":[{"ELEMENT":"E1"}]}"#, true),

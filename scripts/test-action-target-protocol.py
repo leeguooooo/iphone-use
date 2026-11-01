@@ -48,7 +48,7 @@ def run_case(binary, case, out):
             raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             path = self.path.split("?", 1)[0]
             entry = {"method": self.command, "path": path}
-            if path.endswith("/actions"):
+            if path.endswith(("/actions", "/ipu/tap")):
                 entry["body"] = json.loads(raw)
             requests.append(entry)
             if path.endswith("/scrollTo"):
@@ -167,7 +167,7 @@ def run_case(binary, case, out):
         assert receipt["owned_process_stopped"], "owned daemon was not stopped"
         assert "execution_error" not in receipt, receipt.get("execution_error")
         body = receipt["response"]
-        taps = [r for r in requests if r["method"] == "POST" and r["path"].endswith(("/actions", "/click"))]
+        taps = [r for r in requests if r["method"] == "POST" and r["path"].endswith(("/actions", "/click", "/ipu/tap"))]
         scrolls = [r for r in requests if r["method"] == "POST" and r["path"].endswith("/scrollTo")]
         queries = [r for r in requests if r["method"] == "POST" and r["path"].endswith("/elements")]
         if case in ("partial-source", "unknown-source", "invalid-reference"):
@@ -182,17 +182,17 @@ def run_case(binary, case, out):
         else:
             assert body.get("ok") is True and len(taps) == 1, body
             if case == "replaced-handle":
-                assert len(scrolls) == 1 and taps[0]["path"].endswith("/B/click"), requests
+                assert len(scrolls) == 1 and taps[0]["path"].endswith("/B/ipu/tap"), requests
             elif case == "stale-source-clear-live":
-                assert not scrolls and taps[0]["path"].endswith("/A/click"), requests
+                assert not scrolls and taps[0]["path"].endswith("/A/ipu/tap"), requests
             else:
-                assert taps[0]["path"].endswith("/actions"), requests
+                assert taps[0]["path"].endswith("/ipu/tap"), requests
                 assert len(scrolls) == (1 if case == "covered-default" else 0), requests
-                movements = [step for device in taps[0]["body"]["actions"] for step in device["actions"]
-                             if step.get("type") == "pointerMove"]
-                assert len(movements) == 1, movements
-                y = movements[0]["y"]
-                assert 820 < y <= 831 if case == "covered-default" else abs(y - 445.5) <= 1, movements
+                assert taps[0]["body"]["expected_rect"] == [16.0,780.0,358.0,51.0] if case == "covered-default" else taps[0]["body"]["expected_rect"] == [16.0,420.0,358.0,51.0]
+                point = taps[0]["body"]["point"]
+                assert len(point) == 2 and point[0] == 195, point
+                y = point[1]
+                assert 820 < y <= 831 if case == "covered-default" else abs(y - 445.5) <= 1, point
         receipt["passed"] = True
     except AssertionError as error:
         receipt["error"] = str(error)

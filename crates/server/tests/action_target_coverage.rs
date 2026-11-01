@@ -80,6 +80,7 @@ fn locator_taps_require_complete_source_and_complete_live_matches_before_dispatc
                                 r.starts_with("POST ")
                                     && (r.contains("/actions ")
                                         || r.contains("/click ")
+                                        || r.contains("/ipu/tap ")
                                         || r.contains("/wda/tap/"))
                             })
                             .collect();
@@ -170,7 +171,7 @@ fn losing_scope_after_reveal_stops_the_tap_and_never_authorizes_replay() {
                 );
                 assert!(
                     !sent.iter().any(|r| r.starts_with("POST ")
-                        && (r.contains("/click ") || r.contains("/actions "))),
+                        && (r.contains("/click ") || r.contains("/actions ") || r.contains("/ipu/tap "))),
                     "no further tap after losing scope: {body}; {sent:?}"
                 );
                 assert_eq!(body["ok"], false, "{body}");
@@ -238,7 +239,7 @@ fn point_locator_needs_a_known_viewport_even_with_one_complete_match() {
             !sent
                 .iter()
                 .any(|r| r.starts_with("POST ")
-                    && (r.contains("/click ") || r.contains("/actions "))),
+                    && (r.contains("/click ") || r.contains("/actions ") || r.contains("/ipu/tap "))),
             "unknown viewport must not tap: {body}; {sent:?}"
         );
         assert_eq!(body["ok"], false, "{body}");
@@ -314,11 +315,11 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
                 let sent = seen.lock().unwrap();
                 let clicks: Vec<_> = sent
                     .iter()
-                    .filter(|r| r.starts_with("POST ") && r.contains("/click "))
+                    .filter(|r| r.starts_with("POST ") && r.contains("/ipu/tap ") && !r.contains("\"point\""))
                     .collect();
                 let taps: Vec<_> = sent
                     .iter()
-                    .filter(|r| r.starts_with("POST ") && r.contains("/actions "))
+                    .filter(|r| r.starts_with("POST ") && r.contains("/ipu/tap ") && r.contains("\"point\""))
                     .collect();
                 assert_eq!(
                     sent.iter()
@@ -340,7 +341,7 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
                     if via == "element" && (!live_covered || clear_after) {
                         let id = if live_covered { "E2" } else { "E1" };
                         assert!(
-                            clicks[0].contains(&format!("/{id}/click ")),
+                            clicks[0].contains(&format!("/{id}/ipu/tap ")),
                             "fresh handle must match new proof: {sent:?}"
                         );
                     } else {
@@ -348,13 +349,9 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
                         let payload: serde_json::Value =
                             serde_json::from_str(taps[0].split_once("\r\n\r\n").unwrap().1)
                                 .unwrap();
-                        let actions = payload["actions"].as_array().unwrap();
-                        let motion = actions
-                            .iter()
-                            .flat_map(|device| device["actions"].as_array().unwrap())
-                            .find(|step| step["type"] == "pointerMove")
-                            .unwrap();
-                        let y = motion["y"].as_f64().unwrap();
+                        let point = payload["point"].as_array().unwrap();
+                        assert_eq!(point.len(),2,"{payload}");
+                        let y = point[1].as_f64().unwrap();
                         if live_covered && !clear_after {
                             assert!(
                                 y > 820.0 && y <= 831.0,
@@ -374,7 +371,7 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
 }
 
 #[test]
-fn native_click_unknown_after_internal_reveal_never_retries_or_falls_back() {
+fn checked_native_tap_failure_never_retries_or_falls_back() {
     block(async {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
         let record = seen.clone();
@@ -393,8 +390,8 @@ fn native_click_unknown_after_internal_reveal_never_retries_or_falls_back() {
                 r#"{"value":{"x":10,"y":10,"width":100,"height":40}}"#
             } else if request.contains("/window/size") {
                 r#"{"value":{"width":390,"height":844}}"#
-            } else if request.contains("/E1/click ") {
-                let body = r#"{"value":{"error":"unknown error","message":"click outcome unknown after reveal; no automatic retry"}}"#;
+            } else if request.contains("/E1/ipu/tap ") {
+                let body = r#"{"value":{"error":"unknown error","message":"checked tap outcome unknown after dispatch; no automatic retry"}}"#;
                 return Some((Duration::ZERO,format!("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())));
             } else {
                 r#"{"value":null}"#
@@ -411,7 +408,7 @@ fn native_click_unknown_after_internal_reveal_never_retries_or_falls_back() {
         let sent = seen.lock().unwrap();
         assert_eq!(
             sent.iter()
-                .filter(|r| r.starts_with("POST ") && r.contains("/E1/click "))
+                .filter(|r| r.starts_with("POST ") && r.contains("/E1/ipu/tap "))
                 .count(),
             1,
             "{sent:?}"
