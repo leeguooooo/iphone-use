@@ -25,6 +25,7 @@ PROBES = {
     'wait': ('test-wait-simulator.py', 22),
     'tap-race': ('test-moving-target-simulator.py', 3),
     'tap-guard': ('test-moving-target-simulator.py', 4),
+    'tap-identity-race': ('test-moving-target-simulator.py', 4),
 }
 
 
@@ -240,6 +241,7 @@ def main():
         for folder, flags, field in groups:
             if args.probe == 'tap-race': flags = [*flags, '--expect-after-read-race']
             if args.probe == 'tap-guard': flags = [*flags, '--include-point']
+            if args.probe == 'tap-identity-race': flags = [*flags, '--identity-race']
             logged(['python3', test_script, '--base', f"http://127.0.0.1:{binding['daemon_port']}",
                     '--udid', simulator, '--owner', instance, '--mcp', mcp, '--runner-record', record,
                     '--product-version', match[1], '--out', args.out / folder, *flags],
@@ -257,6 +259,12 @@ def main():
                 assert proof['race_regression_passed'] is True
                 result['race_regression_passed'] = True
                 result['product_acceptance'] = False
+            if args.probe == 'tap-identity-race':
+                assert proof['diagnostic_expects_identity_race'] is True and proof['product_acceptance'] is False
+                assert proof['owned_consumer_stopped'] is True and not proof['race_regression_passed']
+                assert proof['cases'][-1]['diagnostic_counterexample'] is True
+                result['product_acceptance'] = False
+                result['identity_counterexample_confirmed'] = True
             result[field] = proof['cases']
         result['passed'] = True
     except Exception as error:

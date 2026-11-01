@@ -75,14 +75,16 @@ def create_consumer_state():
 
 
 def judge_case(case, body, delta, established, expect_race, activation_delta=0):
-    keys = {'race.target', 'race.overlay', 'race.decoy', 'background'}
+    keys = {'race.target', 'race.overlay', 'race.decoy', 'background', 'race.replaced'}
     if not isinstance(delta, dict) or set(delta) != keys or any(type(v) is not int or v < 0 for v in delta.values()):
         return False
-    wrong = delta['race.overlay'] + delta['race.decoy']
+    wrong = delta['race.overlay'] + delta['race.decoy'] + delta['race.replaced']
     if case == 'control':
         return body.get('ok') is True and delta['race.target'] == 1 and wrong == 0 and activation_delta == 1
     if not established:
         return False
+    if case == 'after-identity':
+        return expect_race and delta['race.replaced'] == 1 and delta['race.target'] == 0
     if case in ('after-rect', 'after-rect-point'):
         if expect_race:
             return wrong == 1 and delta['race.target'] == 0
@@ -115,6 +117,7 @@ def main():
         parser.add_argument('--' + name, required=True)
     for name in ('mcp', 'runner-record', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--identity-race', action='store_true')
     parser.add_argument('--include-point', action='store_true')
     parser.add_argument('--expect-after-read-race', action='store_true', help='Diagnostic only: require observed wrong recipient, never acceptance')
     args = parser.parse_args()
@@ -138,7 +141,7 @@ def main():
     assert drag.command([daemon_binary, '--version']).stdout.strip() == 'iphone-use ' + args.product_version
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     state = {'passed': False, 'scope': 'Owned Simulator; real Native responses and independent UIKit recipients',
-             'diagnostic_expects_race': args.expect_after_read_race, 'product_acceptance': False,
+             'diagnostic_expects_race': args.expect_after_read_race, 'diagnostic_expects_identity_race': args.identity_race, 'product_acceptance': False,
              'cases': [], 'cleanup_errors': [], 'transport': 'public HTTP /agent/actions;MCP not exercised', 'mcp_sha256': hashlib.sha256(args.mcp.read_bytes()).hexdigest(), 'daemon_sha256': hashlib.sha256(daemon_binary.read_bytes()).hexdigest()}
     installed = False
     child = None
@@ -174,33 +177,39 @@ def main():
         assert not state_reasons(value, nonce, expected_pid), 'App identity/foreground changed'
         return value
 
-    def command(move):
+    def command(move, replace=False):
         nonlocal sequence
         sequence += 1
         temporary = data_dir / 'race-command.tmp'
-        temporary.write_text(json.dumps({'run_id': nonce, 'pid': expected_pid, 'sequence': sequence, 'move': move}))
+        temporary.write_text(json.dumps({'run_id': nonce, 'pid': expected_pid, 'sequence': sequence, 'move': move, 'replace': replace}))
         temporary.replace(data_dir / 'race-command.json')
         until = time.monotonic() + 5
         while time.monotonic() < until:
             value = app_state()
-            if value['command_sequence'] == sequence and value['moved'] is move:
+            if value['command_sequence'] == sequence and value['moved'] is move and value.get('replaced', False) is replace:
                 return value
             time.sleep(0.03)
         raise RuntimeError('one App command not acknowledged; no replay')
 
-    def move_after_response(element_id, captured):
-        moved = command(True)
+    def move_after_response(element_id, captured, identity=False):
+        moved = command(False, replace=True) if identity else command(True)
         if isinstance(captured.get('value'), dict) and 'x' in captured['value']:
             assert close_rect(captured['value'], current_before['target_rect']), 'captured frame was not the confirmed old pose'
-            assert not close_rect(captured['value'], moved['target_rect']), 'App did not change the target pose'
+            assert identity or not close_rect(captured['value'], moved['target_rect']), 'App did not change the target pose'
         # A new signed read only: prove Native sees the real new frame before
         # returning the older response to the consumer. Never reuse an auth nonce.
         until = time.monotonic() + 4
         while time.monotonic() < until:
             observed, _ = native_call('/element/' + urllib.parse.quote(element_id, safe='') + '/rect')
             if close_rect(observed['value'], moved['target_rect']):
+                identity_value = None
+                if identity:
+                    identity_value, _ = native_call('/element/' + urllib.parse.quote(element_id, safe='') + '/attribute/identifier')
+                    if identity_value.get('value') != 'race.replaced':
+                        time.sleep(0.1)
+                        continue
                 receipt = {'sequence': sequence, 'app': moved, 'captured_native': captured,
-                           'fresh_native': observed, 'native_matches_app_new_frame': True}
+                           'fresh_native': observed, 'native_matches_app_new_frame': True, 'identity': identity_value}
                 hooks.append(receipt)
                 return
             time.sleep(0.1)
@@ -241,7 +250,7 @@ def main():
                     trace['action'] = json.loads(raw) if raw else None
                 traffic.append(trace)
                 parsed = None
-                if status == 200 and (query or armed == 'after-rect' and self.command == 'GET' and path.endswith('/rect')):
+                if status == 200 and (query or armed in ('after-rect', 'after-identity') and self.command == 'GET' and path.endswith('/rect')):
                     try:
                         parsed = json.loads(body)
                     except ValueError:
@@ -252,11 +261,12 @@ def main():
                     if armed == 'after-query' and len(ids) == 1:
                         armed = None
                         move_after_response(ids[0], parsed)
-                if status == 200 and armed == 'after-rect' and self.command == 'GET' and isinstance(parsed, dict):
+                if status == 200 and armed in ('after-rect', 'after-identity') and self.command == 'GET' and isinstance(parsed, dict):
                     hit = next((id for id in target_ids if path.endswith('/element/' + id + '/rect')), None)
                     if hit is not None:
+                        identity = armed == 'after-identity'
                         armed = None
-                        move_after_response(hit, parsed)
+                        move_after_response(hit, parsed, identity=identity)
                 self.send_response(status)
                 for key, value in response_headers.items():
                     if key.lower() not in ('connection', 'content-length', 'transfer-encoding'):
@@ -326,6 +336,7 @@ def main():
                 time.sleep(0.1)
         cases = [('control', 'element', None), ('after-query', 'element', 'after-query'), ('after-rect', 'element', 'after-rect')]
         if args.include_point: cases.append(('after-rect-point', 'point', 'after-rect'))
+        if args.identity_race: cases.append(('after-identity', 'element', 'after-identity'))
         for case, via, hook in cases:
             before = command(False)
             current_before = before
@@ -351,9 +362,9 @@ def main():
             save(case + '/traffic.json', traffic)
             save(case + '/quiet.json', samples)
             delta = {k: after['received'][k] - before['received'][k] for k in before['received']}
-            wrong = delta['race.overlay'] + delta['race.decoy']
+            wrong = delta['race.overlay'] + delta['race.decoy'] + delta['race.replaced']
             established = hook is None or len(hooks) == 1 and hooks[0]['native_matches_app_new_frame']
-            passed = judge_case(case, body, delta, established, args.expect_after_read_race,
+            passed = judge_case(case, body, delta, established, args.expect_after_read_race or args.identity_race and case == 'after-identity',
                                 after['activated']['race.target'] - before['activated']['race.target'])
             if case == 'control':
                 passed = passed and any(t['method'] == 'POST' and t['path'].endswith('/elements') and t['status'] == 200 for t in traffic)
@@ -366,13 +377,13 @@ def main():
                 passed = passed and 'element_occluded after reveal; no tap sent' in daemon_log
 
             state['cases'].append({'name': case, 'passed': passed, 'delta': delta, 'established': established,
-                                   'diagnostic_counterexample': case in ('after-rect', 'after-rect-point') and args.expect_after_read_race})
+                                   'diagnostic_counterexample': case in ('after-rect', 'after-rect-point') and args.expect_after_read_race or case == 'after-identity' and args.identity_race})
             assert passed, f'{case}: independent touch recipients violate expectation: {delta}'
         active, _ = native_call('/wda/activeAppInfo')
         assert active['value']['bundleId'] == BUNDLE and active['value']['pid'] == expected_pid
         state['passed'] = True
         state['product_acceptance'] = False
-        state['race_regression_passed'] = not args.expect_after_read_race
+        state['race_regression_passed'] = not args.expect_after_read_race and not args.identity_race
     except Exception as error:
         state['error'] = type(error).__name__ + ': ' + str(error)
         raise

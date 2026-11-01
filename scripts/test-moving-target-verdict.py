@@ -37,8 +37,8 @@ class Verdict(unittest.TestCase):
                     oracle.create_consumer_state()
             self.assertFalse(created.exists())
 
-    def counts(self, target=0, overlay=0, decoy=0, background=0):
-        return dict(zip(('race.target', 'race.overlay', 'race.decoy', 'background'), (target, overlay, decoy, background)))
+    def counts(self, target=0, overlay=0, decoy=0, background=0, replaced=0):
+        return dict(zip(('race.target', 'race.overlay', 'race.decoy', 'background', 'race.replaced'), (target, overlay, decoy, background, replaced)))
 
     def test_control_requires_delivered_touch_and_activation(self):
         self.assertTrue(oracle.judge_case('control', {'ok': True}, self.counts(target=1), True, True, 1))
@@ -65,6 +65,11 @@ class Verdict(unittest.TestCase):
         self.assertTrue(oracle.judge_case('after-query', {'ok': False}, self.counts(background=12), True, False))
         self.assertFalse(oracle.judge_case('after-query', {'ok': True}, self.counts(), True, False))
         self.assertFalse(oracle.judge_case('after-query', {'ok': False}, self.counts(overlay=1), True, False))
+
+    def test_identity_counterexample_requires_changed_recipient(self):
+        self.assertTrue(oracle.judge_case('after-identity', {'ok':True}, self.counts(replaced=1), True, True))
+        self.assertFalse(oracle.judge_case('after-identity', {'ok':False}, self.counts(), True, True))
+        self.assertFalse(oracle.judge_case('after-identity', {'ok':True}, self.counts(replaced=1), False, True))
 
     def test_invalid_counter_cannot_pass(self):
         self.assertFalse(oracle.judge_case('after-rect', {'ok': False}, self.counts(target=False), True, False))

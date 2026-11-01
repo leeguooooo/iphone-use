@@ -9,7 +9,7 @@ final class TouchWindow: UIWindow {
       var node = touch.view
       var recipient = "background"
       while let current = node {
-        if let id = current.accessibilityIdentifier, ["race.target", "race.overlay", "race.decoy"].contains(id) {
+        if let id = current.accessibilityIdentifier, ["race.target", "race.overlay", "race.decoy", "race.replaced"].contains(id) {
           recipient = id
           break
         }
@@ -32,10 +32,11 @@ final class MovingController: UIViewController {
   let target = UIButton(type: .system)
   let decoy = UIButton(type: .system)
   let overlay = SearchOverlay()
-  var received = ["race.target": 0, "race.overlay": 0, "race.decoy": 0, "background": 0]
+  var received = ["race.target": 0, "race.overlay": 0, "race.decoy": 0, "background": 0, "race.replaced": 0]
   var activated = ["race.target": 0, "race.decoy": 0]
   var commandSequence = 0
   var moved = false
+  var replaced = false
   var timer: Timer?
   var appeared = false
   var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
@@ -103,6 +104,8 @@ final class MovingController: UIViewController {
           let shouldMove = data["move"] as? Bool
     else { return }
     moved = shouldMove
+    replaced = data["replace"] as? Bool ?? false
+    target.accessibilityIdentifier = replaced ? "race.replaced" : "race.target"
     commandSequence = sequence
     view.setNeedsLayout()
     view.layoutIfNeeded()
@@ -123,7 +126,7 @@ final class MovingController: UIViewController {
       "application_state": UIApplication.shared.applicationState.rawValue,
       "key_window": window.isKeyWindow, "appeared": appeared,
       "width": window.bounds.width, "height": window.bounds.height,
-      "visible_indices": [0, 1], "command_sequence": commandSequence, "moved": moved,
+      "visible_indices": [0, 1], "command_sequence": commandSequence, "moved": moved, "replaced": replaced,
       "received": received, "activated": activated,
       "target_rect": rect(target), "overlay_rect": rect(overlay), "decoy_rect": rect(decoy),
     ]
