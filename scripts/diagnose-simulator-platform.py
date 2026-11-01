@@ -134,6 +134,7 @@ print(json.dumps({'app':str(app),'bundle':module.BUNDLE,'oracle_bundle':oracle_b
         assert isinstance(name,str) and name and Path(name).name==name,'invalid ordinary executable'
         executable=str(app_container/name)
     data=Path(command('ordinary-app-data',['xcrun','simctl','get_app_container',sim,fixture['bundle'],'data'],min(60,max(.1,ordinary_deadline-time.monotonic()))))/'Documents'
+    readback_started=time.monotonic();readback_deadline=min(ordinary_deadline,readback_started+60)
     while True:
         try:
             ordinary=json.loads((data/'list-state.json').read_text())
@@ -143,16 +144,16 @@ print(json.dumps({'app':str(app),'bundle':module.BUNDLE,'oracle_bundle':oracle_b
             result['ordinary_app'].pop('last_read_error',None)
             reasons=state_reasons(ordinary,nonce,launch_pid)
             if not reasons and launch_pid is None:
-                verified,process_observation=observe_process(command,ordinary['pid'],executable,nonce,min(30,max(.1,ordinary_deadline-time.monotonic())))
+                verified,process_observation=observe_process(command,ordinary['pid'],executable,nonce,min(30,max(.1,readback_deadline-time.monotonic())))
                 if verified:
                     launch_pid=ordinary['pid'];result['ordinary_app'].update(launch_pid=launch_pid,launch_resolved_by='independent fresh window state and owned kernel process identity')
                 else:
                     reasons.append(process_observation['reason']);result['ordinary_app']['process_observation']=process_observation
             result['ordinary_app'].update(rejection_reasons=reasons,elapsed_seconds=time.monotonic()-ordinary_start);save()
-            if not reasons and time.monotonic()<=ordinary_deadline:break
+            if not reasons and time.monotonic()<=readback_deadline:break
         except (OSError,ValueError) as error:
             result['ordinary_app'].update(last_read_error=str(error),rejection_reasons=['receipt_unreadable'],elapsed_seconds=time.monotonic()-ordinary_start);save()
-        if time.monotonic()>=ordinary_deadline:raise RuntimeError('ordinary UIKit app did not publish fresh active window state within the210s launch-to-ready budget')
+        if time.monotonic()>=readback_deadline:raise RuntimeError('ordinary UIKit app did not publish fresh active window state within60s and the210s total budget')
         time.sleep(.1)
     result['ordinary_app'].update(ready=True,phase='ready',state=ordinary,observation_scope='before terminate command');save()
     command('ordinary-app-stop',['xcrun','simctl','terminate',sim,fixture['bundle']],30)
