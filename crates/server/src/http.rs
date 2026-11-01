@@ -7267,10 +7267,10 @@ async fn tap_snapshot_element(
             return clicked.map_err(|error| match error {
                 RevealError::ScopeUnproven => SnapshotElementTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT),
                 RevealError::Occluded => {
-                    SnapshotElementTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
+                    SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("target remained occluded after reveal; no tap sent"))
                 }
                 RevealError::OffScreen => {
-                    SnapshotElementTapError::Refused("element_not_visible", ELEMENT_OFF_SCREEN_HINT)
+                    SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("target remained off screen after reveal; no tap sent"))
                 }
                 RevealError::Dispatch(error) => SnapshotElementTapError::AfterDispatch(error),
             });
@@ -7297,10 +7297,11 @@ async fn tap_snapshot_element(
         // that row and require exactly one native element before dispatching.
         // Never fall back to the suspect rectangle when semantic lookup fails.
         let (using, value) = locator_runner_query(&locator).ok_or(SnapshotElementTapError::Invalid)?;
-        let element_ids = w
-            .find_elements(using, &value)
-            .await
-            .map_err(SnapshotElementTapError::BeforeDispatch)?;
+        let matches = w.find_element_matches(using, &value).await.map_err(SnapshotElementTapError::BeforeDispatch)?;
+        if !matches.coverage.is_complete() {
+            return Err(SnapshotElementTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT));
+        }
+        let element_ids = matches.ids;
         let element_id =
             pick_snapshot_element(w, &rows, index, (using, &value), element_ids).await?;
         if reused && !verify_reused_row(w, &element_id, row).await? {
@@ -8325,10 +8326,10 @@ async fn tap_unique_label(
             return clicked.map_err(|error| match error {
                 RevealError::ScopeUnproven => UniqueLabelTapError::Refused("target_scope_unproven", TARGET_SCOPE_UNPROVEN_HINT),
                 RevealError::Occluded => {
-                    UniqueLabelTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT)
+                    UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target remained occluded after reveal; no tap sent"))
                 }
                 RevealError::OffScreen => {
-                    UniqueLabelTapError::Refused("element_not_visible", ELEMENT_OFF_SCREEN_HINT)
+                    UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target remained off screen after reveal; no tap sent"))
                 }
                 RevealError::Dispatch(error) => UniqueLabelTapError::AfterDispatch(error),
             });
@@ -8835,10 +8836,9 @@ async fn reveal_and_click(
 enum RevealError {
     /// The live lookup cannot establish a complete unique target, before reveal.
     ScopeUnproven,
-    /// Still fully covered after the scroll: nothing was sent.
+    /// The reveal was attempted, but the intended tap remains blocked.
     Occluded,
-    /// Still off the screen (or not provably on it) after the scroll:
-    /// nothing was sent.
+    /// The reveal was attempted, but the target remains off screen or unproven.
     OffScreen,
     /// A reveal or tap was attempted; a later failure cannot authorize replay.
     Dispatch(anyhow::Error),
@@ -8992,10 +8992,11 @@ async fn tap_unique_locator(
             return Err(if covered { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("invalid target after reveal")) } else { UniqueLabelTapError::InvalidTarget });
         }
         let (cx, cy) = (x + width / 2.0, y + height / 2.0);
-        if let Ok((screen_w, screen_h)) = w.window_size().await {
-            if !(0.0..=screen_w).contains(&cx) || !(0.0..=screen_h).contains(&cy) {
-                return Err(if covered { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target not visible after reveal")) } else { UniqueLabelTapError::Refused("element_not_visible", ELEMENT_OFF_SCREEN_HINT) });
-            }
+        let (screen_w, screen_h) = w.window_size().await.map_err(|error| {
+            if covered { UniqueLabelTapError::AfterDispatch(error) } else { UniqueLabelTapError::BeforeDispatch(error) }
+        })?;
+        if !(0.0..=screen_w).contains(&cx) || !(0.0..=screen_h).contains(&cy) {
+            return Err(if covered { UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("target not visible after reveal")) } else { UniqueLabelTapError::Refused("element_not_visible", ELEMENT_OFF_SCREEN_HINT) });
         }
         return w
             .tap_point(cx, cy)

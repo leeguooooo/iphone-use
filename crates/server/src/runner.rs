@@ -1001,6 +1001,16 @@ impl RunnerClient {
         Ok(ElementMatches { ids, coverage })
     }
 
+    /// Resolve a unique action target; singular /element remains a read API.
+    async fn find_unique_element(&mut self, using: &str, value: &str) -> Result<String> {
+        let matches = self.find_element_matches(using, value).await?;
+        if !matches.coverage.is_complete() { return Err(anyhow!("element target scope is not proven complete")); }
+        match matches.ids.as_slice() {
+            [id] => Ok(id.clone()),
+            _ => Err(anyhow!("element action needs exactly one proven match")),
+        }
+    }
+
     /// One explicitly selected element's full AX value. Older runners refuse;
     /// their bounded snapshot string is never promoted to a complete value.
     pub async fn read_element_value(&mut self, id: &str, max_utf16: u32) -> Result<serde_json::Value> {
@@ -2101,7 +2111,7 @@ impl RunnerClient {
         let predicate = format!(
             "type == 'XCUIElementTypeButton' AND (name IN {{{quoted}}} OR label IN {{{quoted}}})"
         );
-        if let Ok(eid) = self.find_element("predicate string", &predicate).await {
+        if let Ok(eid) = self.find_unique_element("predicate string", &predicate).await {
             // Do not retry or fall back after dispatching the click: if its
             // response is lost, replaying another dismiss action would violate
             // the at-most-once contract used by Direct control.
@@ -2250,6 +2260,7 @@ impl RunnerClient {
         // The Application node's frame IS the window in points: keep the
         // window-size cache fresh for free instead of a GET /window/size.
         // Read it from the raw root (an unlabeled root is not emitted as a row).
+        self.window = None;
         if tree.get("type").and_then(|t| t.as_str()) == Some("XCUIElementTypeApplication") {
             let field = |name: &str| {
                 tree.get("rect")
@@ -2486,7 +2497,7 @@ impl RunnerClient {
         ];
         let mut last_err = None;
         for (using, value) in attempts {
-            match self.find_element(using, &value).await {
+            match self.find_unique_element(using, &value).await {
                 Ok(eid) => return self.click_element(&eid).await,
                 Err(e) => last_err = Some(e),
             }
