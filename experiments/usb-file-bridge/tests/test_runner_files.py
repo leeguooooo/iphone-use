@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -78,6 +79,32 @@ class NativeFilesTests(unittest.TestCase):
     def test_size_limit(self):
         self.args.max_bytes=1
         with self.assertRaises(c.TransferError):self.receive()
+    def test_staging_never_writes_beyond_declared_size(self):
+        for maximum in [0, 3, c.CHUNK + 3]:
+            with self.subTest(maximum=maximum):
+                incoming=io.BytesIO(b'x'*(maximum+1));output=io.BytesIO()
+                with self.assertRaisesRegex(c.TransferError, 'grew'):
+                    c.copy_bounded(incoming,output,maximum,lambda:None)
+                self.assertLessEqual(len(output.getvalue()),maximum)
+                self.assertLessEqual(incoming.tell(),maximum+1)
+    def test_staging_exact_boundary_and_cancellation(self):
+        for size in [0, 3, c.CHUNK + 3]:
+            output=io.BytesIO();payload=b'x'*size
+            self.assertEqual(c.copy_bounded(io.BytesIO(payload),output,size,lambda:None),size)
+            self.assertEqual(output.getvalue(),payload)
+        output=io.BytesIO()
+        def cancel():raise c.Cancelled('stopped')
+        with self.assertRaises(c.Cancelled):c.copy_bounded(io.BytesIO(b'x'),output,1,cancel)
+        self.assertEqual(output.getvalue(),b'')
+    def test_source_growth_before_staging_never_publishes(self):
+        source=self.scratch/'growing';source.write_bytes(b'x'*100)
+        meta={'version':1,'id':str(c.uuid.uuid4()),'name':'growth.bin','bytes':3,
+              'sha256':hashlib.sha256(b'xxx').hexdigest()}
+        with self.session.acquire(),self.assertRaisesRegex(c.TransferError,'grew'):
+            c.commit_file(source,meta,self.args.destination,self.session,self.guard)
+        self.assertFalse((self.args.destination/'growth.bin').exists())
+        self.assertEqual(list(self.args.destination.glob('.usb-*')),[])
+        self.assertFalse((self.session.root/'transactions').exists())
     def test_folder_traversal_rejected(self):
         for folder in ['/Documents/a','Documents/../a','Documents//a','Documents/a/','Library/a','Documents/./a']:
             with self.subTest(folder=folder),self.assertRaises(c.TransferError):r.relative_folder(folder)

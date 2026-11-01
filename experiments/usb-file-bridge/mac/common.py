@@ -86,6 +86,18 @@ def digest_file(path, maximum):
     with path.open('rb') as stream:
         return digest_stream(stream, maximum)
 
+def copy_bounded(incoming, output, maximum, check):
+    total = 0
+    while True:
+        check()
+        chunk = incoming.read(min(CHUNK, maximum - total + 1))
+        if not chunk:
+            return total
+        if len(chunk) > maximum - total:
+            raise TransferError('Source grew beyond declared size during staging')
+        output.write(chunk)
+        total += len(chunk)
+
 class Session:
     """OS lock is authoritative; cancellation is token-based, never kill-by-PID."""
     def __init__(self, root, seconds):
@@ -274,9 +286,7 @@ def commit_file(source, meta, destination, session, guard):
     attempted = False
     try:
         with os.fdopen(fd, 'wb') as output, source.open('rb') as incoming:
-            while chunk := incoming.read(CHUNK):
-                session.check()
-                output.write(chunk)
+            copy_bounded(incoming, output, meta['bytes'], session.check)
             output.flush()
             os.fsync(output.fileno())
         if digest_file(stage, meta['bytes']) != (meta['bytes'], meta['sha256']):
