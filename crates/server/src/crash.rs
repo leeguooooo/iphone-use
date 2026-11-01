@@ -418,11 +418,11 @@ mod tests {
             let Ok(request) = read_packet(&mut device).await else {
                 return;
             };
-            let path = String::from_utf8_lossy(match request.operation {
-                afc::OP_FILE_OPEN => &request.arguments[8..],
-                _ => &request.arguments,
-            })
-            .into_owned();
+            let path = if matches!(request.operation, afc::OP_READ_DIR | afc::OP_GET_FILE_INFO | afc::OP_FILE_OPEN) {
+                let bytes = if request.operation == afc::OP_FILE_OPEN { &request.arguments[8..] } else { &request.arguments };
+                std::ffi::CStr::from_bytes_with_nul(bytes).expect("AFC path must have one final NUL")
+                    .to_str().expect("AFC path must be UTF-8").to_owned()
+            } else { String::new() };
             let node = tree.iter().find(|(p, _)| *p == path);
             let not_found = (OP_STATUS, 8u64.to_le_bytes().to_vec(), vec![]);
             let (op, args, data) = match request.operation {
