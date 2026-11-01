@@ -141,7 +141,7 @@ not an unrelated remote MCP client.
 | Tap a unique label | `tap` + `label` | `phone_tap_label` | `tap_label` |
 | Tap by locator | `tap_locator` + `locator` | `phone_run_steps` step | `tap_locator` |
 | Tap a point | `tap` + `x`,`y` | `phone_tap` | `tap` |
-| Type | `text` (into the focused field; up to 20000 chars — on `text_partially_typed` send only `remaining_text` with `clear:false`) | `phone_type` | `type` (`input` names a runtime value) |
+| Type | `text` (up to 20000 scalars; optional `budget_ms` 6000..15000 requires `inputContinuation`; use a returned `continue_token` alone, once; uncertain delivery requires inspecting the original field, never replaying the whole text) | `phone_type` | `type` (`input` names a runtime value) |
 | Key | `key` `return`… | `phone_key` | `key` |
 | Home / Spotlight / Photos capture / physical volume | `shortcut` (`home`, `spotlight`, `save_screenshot`, `volume_up`, `volume_down`) | `phone_shortcut` | `shortcut` |
 | Scroll | `scroll` `dy` (80 ≈ 15% of a screen, 400 ≈ 75%) | `phone_scroll` (`x`, `y`, `dx`, `dy` required) | `scroll` (`x`, `y`, `dx`, `dy` required in MCP batches) |

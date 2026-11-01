@@ -128,6 +128,9 @@ pub struct RunnerClient {
     /// runner). Asked again whenever a new session starts (a new runner).
     device_settle: Option<bool>,
     value_read: bool,
+    guarded_input: bool,
+    input_continuation: bool,
+    pending_input: crate::input_continuation::Store,
     volume_buttons: bool,
     system_capture_request: bool,
     /// The last tree read and when: snapshot-bound actions reuse it instead
@@ -378,6 +381,9 @@ impl RunnerClient {
             no_alert_at: None,
             device_settle: None,
             value_read: false,
+            guarded_input: false,
+            input_continuation: false,
+            pending_input: crate::input_continuation::Store::default(),
             volume_buttons: false,
             system_capture_request: false,
             last_tree: None,
@@ -737,6 +743,11 @@ impl RunnerClient {
             self.session = Some(parse_session_id(&text)?);
             self.window = None;
             self.no_alert_at = None;
+            self.pending_input.clear();
+            self.input_continuation = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:inputContinuation").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.guarded_input = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:guardedInput").and_then(serde_json::Value::as_bool)) == Some(true);
             self.value_read = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool)) == Some(true);
             self.volume_buttons = serde_json::from_str::<serde_json::Value>(&text).ok()
@@ -2028,6 +2039,122 @@ impl RunnerClient {
         Ok(())
     }
 
+    pub(crate) fn supports_input_continuation(&self) -> bool {
+        self.guarded_input && self.input_continuation
+    }
+
+    pub(crate) fn discard_input_continuation(&mut self) {
+        self.pending_input.clear();
+    }
+
+    pub(crate) fn save_input_continuation(
+        &mut self,
+        scope: crate::input_continuation::Scope,
+        target: String,
+        remaining: String,
+        budget_ms: u64,
+    ) -> Option<String> {
+        if !self.supports_input_continuation() {
+            return None;
+        }
+        let session = self.session.clone()?;
+        self.pending_input.issue(
+            scope,
+            session,
+            target,
+            remaining,
+            budget_ms,
+            std::time::Instant::now(),
+        )
+    }
+
+    pub(crate) fn take_input_continuation(
+        &mut self,
+        token: &str,
+        scope: &crate::input_continuation::Scope,
+    ) -> Option<crate::input_continuation::Pending> {
+        let session = self.session.clone()?;
+        self.pending_input
+            .take(token, scope, &session, std::time::Instant::now())
+    }
+
+    /// Bind text to the live focused field on a supporting runner. Once advertised,
+    /// failure to bind is an error, never permission to fall back to unguarded typing.
+    pub async fn input_target(&mut self) -> Result<Option<String>> {
+        self.input_target_for_text("").await
+    }
+
+    pub(crate) async fn input_target_for_text(&mut self, text: &str) -> Result<Option<String>> {
+        let sid = self.ensure_session().await?.to_string();
+        if !self.guarded_input {
+            return Ok(None);
+        }
+        let response = self
+            .http
+            .get(format!(
+                "{}/session/{}/wda/input-target{}",
+                self.base,
+                sid,
+                if text.contains('\n') || text.contains('\r') {
+                    "?multiline=1"
+                } else {
+                    ""
+                }
+            ))
+            .send_signed(&self.auth)
+            .await
+            .context("GET /wda/input-target")?;
+        let value = ensure_runner_success(response, "GET /wda/input-target").await?;
+        let token = value
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| {
+                !token.is_empty()
+                    && token.len() <= 128
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            })
+            .context("input target response missing or invalid token")?;
+        Ok(Some(token.to_string()))
+    }
+
+    /// Clear only the bound field; the runner checks focus without tapping to regain it.
+    pub async fn clear_input_target(&mut self, token: &str) -> Result<()> {
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .post_req(format!(
+                "{}/session/{}/element/{}/clear",
+                self.base, sid, token
+            ))
+            .json(&serde_json::json!({"inputTarget":token}))
+            .send_signed(&self.auth)
+            .await
+            .context("POST guarded element/clear")?;
+        ensure_runner_success(response, "POST guarded element/clear").await?;
+        Ok(())
+    }
+
+    /// Each chunk is checked on the phone immediately before dispatch. A rejection must not
+    /// trigger target reselection, refocusing or fallback to ordinary keys.
+    pub async fn keys_to_target(
+        &mut self,
+        text: &str,
+        token: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .post_req(format!("{}/session/{}/wda/keys", self.base, sid))
+            .timeout(timeout)
+            .json(&serde_json::json!({"value":[text],"inputTarget":token}))
+            .send_signed(&self.auth)
+            .await
+            .context("POST guarded /wda/keys")?;
+        ensure_runner_success(response, "POST guarded /wda/keys").await?;
+        Ok(())
+    }
+
     /// [`Self::keys`] with its own request timeout, for one chunk of a long
     /// text: the client's 20 s default is too short for a big chunk and too
     /// long when the action's deadline is nearly spent.
@@ -2505,6 +2632,7 @@ impl RunnerClient {
     fn mark_post(&mut self, url: &str) {
         let path = url.split('?').next().unwrap_or(url);
         if post_mutates_screen(path) {
+            self.pending_input.clear();
             // A new app or the Home Screen is a screen of unknown size.
             if path.ends_with("/wda/apps/launch")
                 || path.ends_with("/wda/apps/activate")
@@ -2700,6 +2828,9 @@ impl RunnerClient {
     pub fn invalidate_session(&mut self) {
         self.session = None;
         self.value_read = false;
+        self.guarded_input = false;
+        self.input_continuation = false;
+        self.pending_input.clear();
         self.volume_buttons = false;
         self.system_capture_request = false;
         self.window = None;
@@ -3911,6 +4042,37 @@ mod tests {
     use std::net::TcpListener;
 
     // Issue #257: a runner's error status keeps its own reason.
+    #[test]
+    fn continuation_survives_reads_but_not_mutation_or_session_reset() {
+        let scope = crate::input_continuation::Scope {
+            owner: "writer".into(),
+            epoch: 1,
+            privacy_epoch: 0,
+            lifecycle_stamp: 256,
+        };
+        for reset in [false, true] {
+            let mut client = RunnerClient::new("http://127.0.0.1:1").unwrap();
+            client.session = Some("SESSION".into());
+            client.guarded_input = true;
+            client.input_continuation = true;
+            let first = client
+                .save_input_continuation(scope.clone(), "field".into(), "remaining".into(), 6000)
+                .unwrap();
+            client.mark_post("http://127.0.0.1:1/session/SESSION/elements");
+            assert!(client.take_input_continuation(&first, &scope).is_some());
+            let next = client
+                .save_input_continuation(scope.clone(), "field".into(), "remaining".into(), 6000)
+                .unwrap();
+            if reset {
+                client.invalidate_session();
+                client.session = Some("SESSION".into());
+            } else {
+                client.mark_post("http://127.0.0.1:1/session/SESSION/wda/keys");
+            }
+            assert!(client.take_input_continuation(&next, &scope).is_none());
+        }
+    }
+
     #[test]
     fn value_truncation_survives_flattening_without_password_length_metadata() {
         let source=serde_json::json!({"type":"XCUIElementTypeApplication","label":"Fixture","children":[

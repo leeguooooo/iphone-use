@@ -675,10 +675,16 @@ pub fn failed_batch(json: &Value) -> Option<String> {
             .get("characters_uncertain")
             .and_then(Value::as_u64)
             .unwrap_or_default();
-        out.push(format!(
-            "text: {confirmed} of {total} characters typed, {uncertain} uncertain; read the field, \
-             then type only the rest (remaining_text) with clear=false — never the whole text"
-        ));
+        let token = json.get("continue_token").and_then(Value::as_str).filter(|token|
+            json.get("continuation_safe").and_then(Value::as_bool) == Some(true)
+            && json.get("characters_uncertain").and_then(Value::as_u64) == Some(0)
+            && token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        let next = if let Some(token) = token {
+            format!("continue only with phone_type {{\"continue_token\":\"{token}\"}}; omit text, clear and budget_ms")
+        } else {
+            "inspect the original field and its input context before explicitly typing only what is missing with clear=false; never resend the whole text".to_string()
+        };
+        out.push(format!("text: {confirmed} of {total} characters typed, {uncertain} uncertain; {next}"));
     }
     let list = steps
         .iter()

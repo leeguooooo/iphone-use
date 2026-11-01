@@ -4124,6 +4124,16 @@ fn control_against(
     with_snapshot: bool,
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value, Vec<String>) {
+    control_against_clear(source, value_now, with_snapshot, body, false)
+}
+
+fn control_against_clear(
+    source: &'static str,
+    value_now: &'static str,
+    with_snapshot: bool,
+    body: serde_json::Value,
+    fail_clear: bool,
+) -> (StatusCode, serde_json::Value, Vec<String>) {
     block(async move {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
         let log = seen.clone();
@@ -4141,6 +4151,9 @@ fn control_against(
                 ok(r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string())
             } else if line.starts_with("POST") && line.contains("/elements") {
                 ok(r#"{"value":[{"ELEMENT":"FIELD"}]}"#.to_string())
+            } else if fail_clear && line.starts_with("POST") && line.contains("/clear ") {
+                let body = r#"{"value":{"error":"unknown error","message":"clear interrupted; outcome unknown"}}"#;
+                ok(format!("HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
             } else if line.starts_with("GET") && line.contains("/attribute/value") {
                 ok(format!(r#"{{"value":"{value_now}"}}"#))
             } else {
@@ -4241,6 +4254,30 @@ fn a_label_tap_under_a_fixed_header_is_refused_unless_allowed() {
 
 const ONE_TEXT_FIELD: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"PayPay","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeTextField","label":"メッセージ","rect":{"x":20,"y":700,"width":300,"height":40}}]}}"#;
 
+#[test]
+fn set_value_stops_after_clear_failure_without_writing_replacement() {
+    let (status, json, lines) = control_against_clear(
+        ONE_TEXT_FIELD,
+        "old content",
+        true,
+        serde_json::json!({"type":"set_value","element":1,"value":"replacement","ttl_ms":2000}),
+        true,
+    );
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert_eq!(json["retry_safe"], false, "{json}");
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("POST") && line.contains("/clear "))
+            .count(),
+        1
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("POST")
+            && (line.contains("/value ") || line.contains("/wda/keys "))),
+        "{lines:?}"
+    );
+}
 #[test]
 fn set_value_that_does_not_stick_is_reported_not_applied() {
     let (status, json, _) = control_against(

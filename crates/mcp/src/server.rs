@@ -85,17 +85,37 @@ pub struct ScrollParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TypeParams {
-    /// Unicode text to send through the device-side input service. Focus the
-    /// intended field and verify it before typing. Up to 20000 characters;
-    /// text over 200 is typed in chunks (about a minute per 3000 characters),
-    /// and a failure part-way reports `characters_confirmed` and
-    /// `remaining_text` with retry_safe=false — then type only the rest.
+    /// Unicode text to start typing, up to 20000 scalars. Omit when continuing.
     #[schemars(length(max = 20000))]
-    pub text: String,
-    /// Default true: return what the screen settled to (as on phone_tap).
-    /// `false` for the fastest bare action.
-    #[serde(default)]
+    pub text: Option<String>,
+    /// Single-use token from a safe chunk boundary. Pass without text, clear or budget_ms.
+    #[schemars(length(min = 64, max = 64), regex(pattern = "^[0-9a-f]{64}$"))]
+    pub continue_token: Option<String>,
+    /// Optional typing budget, 6000..15000 ms, requiring a named owner and inputContinuation.
+    #[schemars(range(min = 6000, max = 15000))]
+    pub budget_ms: Option<u64>,
+    /// Clear the bound field first. Never combine with continue_token.
+    pub clear: Option<bool>,
+    /// Default true: return the settled screen change after a completed action.
     pub observe: Option<bool>,
+}
+
+impl TypeParams {
+    fn action(&self) -> Result<serde_json::Value, &'static str> {
+        match (&self.text, &self.continue_token) {
+            (Some(text), None) if text.chars().count() <= MAX_TEXT_CHARS
+                && self.budget_ms.is_none_or(|ms| (6000..=15000).contains(&ms)) => {
+                let mut action = serde_json::json!({"type":"text", "text":text});
+                if let Some(clear) = self.clear { action["clear"] = clear.into(); }
+                if let Some(budget) = self.budget_ms { action["budget_ms"] = budget.into(); }
+                Ok(action)
+            }
+            (None, Some(token)) if self.clear.is_none() && self.budget_ms.is_none()
+                && token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) =>
+                Ok(serde_json::json!({"type":"text","continue_token":token})),
+            _ => Err("Provide text up to 20000 scalars with optional clear/budget_ms (6000..15000), or continue_token alone. Nothing was sent."),
+        }
+    }
 }
 
 /// Select one zero-based home page, or omit to read every page and folder.
@@ -383,6 +403,16 @@ pub enum PhoneStep {
         text: String,
         #[serde(default)]
         clear: bool,
+        /// Optional per-call typing budget (6000..15000 ms).
+        #[schemars(range(min = 6000, max = 15000))]
+        budget_ms: Option<u64>,
+        #[serde(default)]
+        after_ms: u64,
+    },
+    /// Continue only the unsent suffix held under a single-use original-field token.
+    TypeContinue {
+        #[schemars(length(min = 64, max = 64), regex(pattern = "^[0-9a-f]{64}$"))]
+        continue_token: String,
         #[serde(default)]
         after_ms: u64,
     },
@@ -1381,16 +1411,23 @@ impl PhoneHandler {
         description = "Insert literal Unicode text into the currently focused iPhone field. Use phone_tap_element to focus \
         the intended field first; use phone_key for a navigation or editing key. Requires \
         phone_status.drivable=true. Text can replace a selection or reach the wrong field if focus changed. \
-        Long text is chunked; on partial failure inspect characters_confirmed and remaining_text and never \
-        resend the whole value blindly. observe defaults on and returns the settled screen change. Verify \
+        Long text is chunked. Optional budget_ms (6000..15000) can stop at a safe boundary; continue only \
+        with the returned continue_token, without text/clear/budget_ms. Tokens are single-use and scoped \
+        to the original field, owner, privacy, lifecycle and session. Unknown outcomes never issue a token. \
+        On partial failure inspect characters_confirmed and remaining_text; never resend the whole value blindly. observe defaults on and returns the settled screen change. Verify \
         the resulting field before submitting; an unknown outcome is not evidence that nothing was typed."
     )]
-    async fn phone_type(
-        &self,
-        Parameters(TypeParams { text, observe }): Parameters<TypeParams>,
-    ) -> CallToolResult {
+    async fn phone_type(&self, Parameters(params): Parameters<TypeParams>) -> CallToolResult {
+        let action = match params.action() {
+            Ok(action) => action,
+            Err(hint) => return not_sent_result("invalid_text_request", hint.to_string()),
+        };
         self.progress_reset();
-        send_input_observed(&self.daemon, &InputMsg::Text { text }, observe).await
+        let observe = params.observe.unwrap_or(true);
+        match self.daemon.input_value_observed(&action, observe).await {
+            Ok(response) => daemon_action_result(&response, observe, "ok"),
+            Err(error) => unknown_action_result("transport_error", format!("the call failed: {error:#}.")),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3007,10 +3044,10 @@ impl PhoneHandler {
 
 /// Drop the parts of a schemars schema a model never needs: the meta-schema
 /// URI, generated titles (the property name already says it), numeric
-/// `format` tags (`uint`, `double`, …) and `minimum: 0` on unsigned counts.
-/// Every other key — types, descriptions, enums, required lists, ranges with
-/// meaning — is kept. Keys under `properties` are property NAMES, never
-/// schema keywords, so they are never removed (a parameter may be called
+/// `format` tags (`uint`, `double`, …).
+/// Every validation constraint — types, enums, required lists and numeric
+/// bounds including zero — is kept. Keys under `properties` are property NAMES,
+/// never schema keywords, so they are never removed (a parameter may be called
 /// `title`).
 fn slim_schema(value: &mut serde_json::Value) {
     match value {
@@ -3027,9 +3064,6 @@ fn slim_schema(value: &mut serde_json::Value) {
                 })
             }) {
                 map.remove("format");
-            }
-            if map.get("minimum") == Some(&serde_json::json!(0)) {
-                map.remove("minimum");
             }
             for (key, child) in map.iter_mut() {
                 if key == "properties" || key == "$defs" || key == "definitions" {
@@ -3754,21 +3788,19 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                 }
                 action_step(action, after_ms)
             }
-            PhoneStep::Type {
-                text,
-                clear,
-                after_ms,
-            } => {
+            PhoneStep::Type { text, clear, budget_ms, after_ms } => {
                 validate_after(after_ms)?;
-                if text.chars().count() > MAX_TEXT_CHARS {
-                    return Err(format!(
-                        "steps[{index}].text exceeds {MAX_TEXT_CHARS} characters; no action was sent"
-                    ));
-                }
-                action_step(
-                    serde_json::json!({"type":"text","text":text,"clear":clear}),
-                    after_ms,
-                )
+                let action = TypeParams {text:Some(text), clear:Some(clear), budget_ms,
+                    continue_token:None, observe:None}.action()
+                    .map_err(|error| format!("steps[{index}] {error}; no action was sent"))?;
+                action_step(action, after_ms)
+            }
+            PhoneStep::TypeContinue { continue_token, after_ms } => {
+                validate_after(after_ms)?;
+                let action = TypeParams {text:None, clear:None, budget_ms:None,
+                    continue_token:Some(continue_token), observe:None}.action()
+                    .map_err(|error| format!("steps[{index}] {error}; no action was sent"))?;
+                action_step(action, after_ms)
             }
             PhoneStep::Key { name, after_ms } => {
                 validate_after(after_ms)?;
@@ -4330,6 +4362,72 @@ async fn send_input_observed(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn public_type_schema_keeps_budget_bounds_and_token_pattern() {
+        let tool = listed_tools(&ToolProfile::All)
+            .into_iter()
+            .find(|tool| tool.name.as_ref() == "phone_type")
+            .unwrap();
+        let schema = serde_json::to_value(tool.input_schema.as_ref()).unwrap();
+        assert_eq!(
+            schema["properties"]["budget_ms"]["minimum"].as_f64(),
+            Some(6000.0)
+        );
+        assert_eq!(
+            schema["properties"]["budget_ms"]["maximum"].as_f64(),
+            Some(15000.0)
+        );
+        assert_eq!(
+            schema["properties"]["continue_token"]["pattern"],
+            "^[0-9a-f]{64}$"
+        );
+        assert_eq!(schema["properties"]["continue_token"]["minLength"], 64);
+        assert_eq!(schema["properties"]["continue_token"]["maxLength"], 64);
+    }
+
+    #[test]
+    fn text_request_keeps_continuation_separate_from_new_input() {
+        let encode = |value| {
+            serde_json::from_value::<TypeParams>(value)
+                .ok()
+                .and_then(|params| params.action().ok())
+        };
+        let token = "a".repeat(64);
+        assert_eq!(
+            encode(serde_json::json!({"continue_token":token,"observe":false})).unwrap(),
+            serde_json::json!({"type":"text","continue_token":token})
+        );
+        assert_eq!(
+            encode(serde_json::json!({"text":"界","budget_ms":6000,"clear":true})).unwrap(),
+            serde_json::json!({"type":"text","text":"界","budget_ms":6000,"clear":true})
+        );
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"text":"new","continue_token":token}),
+            serde_json::json!({"continue_token":token,"clear":false}),
+            serde_json::json!({"continue_token":token,"budget_ms":6000}),
+            serde_json::json!({"continue_token":"A".repeat(64)}),
+            serde_json::json!({"text":"new","budget_ms":5999}),
+            serde_json::json!({"text":"new","budget_ms":15001}),
+            serde_json::json!({"text":"new","budget_ms":6000.5}),
+        ] {
+            assert!(encode(bad.clone()).is_none(), "{bad}");
+        }
+        let request = phone_steps_request(vec![serde_json::from_value::<PhoneStep>(
+            serde_json::json!({"kind":"type_continue","continue_token":token}),
+        )
+        .unwrap()])
+        .unwrap();
+        assert_eq!(
+            request["steps"][0]["action"],
+            serde_json::json!({"type":"text","continue_token":token})
+        );
+        assert!(serde_json::from_value::<PhoneStep>(
+            serde_json::json!({"kind":"type_continue","continue_token":token,"text":"forbidden"})
+        )
+        .is_err());
+    }
+
+    #[test]
     fn multi_hold_steps_validate_all_fingers_before_dispatch() {
         let encode = |v| phone_steps_request(vec![serde_json::from_value::<PhoneStep>(v).unwrap()]);
         let action = serde_json::json!({"kind":"multi_longpress", "points":[
@@ -4865,13 +4963,33 @@ mod tests {
     /// A long text that stopped part-way: the counts and retry_safe=false must
     /// be readable even though remaining_text alone is far past any preview.
     #[test]
+    fn partial_batch_continuation_is_rendered_without_resending_text() {
+        let token="a".repeat(64);
+        let body=serde_json::json!({"ok":false,"error":"text_partially_typed","failed_step":0,
+            "completed":0,"applied_actions":0,"failed_step_outcome":"partial","batch_outcome":"partially_applied",
+            "retry_safe":false,"steps":[],"characters_confirmed":200,"characters_total":500,
+            "characters_uncertain":0,"remaining_text":"suffix","continue_token":token,"continuation_safe":true});
+        let (url,task)=scripted_daemon("502 Bad Gateway",body.to_string().into_bytes());
+        let handler=handler_for(&url);
+        let result=block(handler.phone_run_steps(Parameters(RunStepsParams{
+            steps:vec![PhoneStep::Type{text:"new".into(),clear:false,budget_ms:None,after_ms:0}],
+            observe:Some(false)})));
+        task.join().unwrap();
+        let text=text_of(&result);
+        assert!(text.contains(&token),"{text}");
+        assert!(text.contains("omit text, clear and budget_ms"),"{text}");
+        assert_eq!(result.structured_content.as_ref().unwrap()["continue_token"],token);
+    }
+
+    #[test]
     fn a_partially_typed_text_reaches_the_model_with_its_counts() {
         let (url, task) = scripted_daemon("502 Bad Gateway", partial_text_body(serde_json::json!({})));
         let handler = handler_for(&url);
         // The request stays small (the scripted daemon reads one 8 KiB
         // buffer); the answer is what is under test.
         let result = block(handler.phone_type(Parameters(TypeParams {
-            text: "x".repeat(600),
+            text: Some("x".repeat(600)),
+            continue_token: None, budget_ms: None, clear: None,
             observe: Some(false),
         })));
         task.join().unwrap();
@@ -4899,6 +5017,7 @@ mod tests {
             steps: vec![PhoneStep::Type {
                 text: "x".repeat(600),
                 clear: false,
+                budget_ms: None,
                 after_ms: 0,
             }],
             observe: Some(false),
@@ -5666,6 +5785,7 @@ mod tests {
         let long = |n: usize| PhoneStep::Type {
             text: "字".repeat(n),
             clear: false,
+            budget_ms: None,
             after_ms: 0,
         };
         assert!(phone_steps_request(vec![long(MAX_TEXT_CHARS)]).is_ok());
@@ -5950,9 +6070,20 @@ mod tests {
         assert!(props["title"].get("title").is_none());
         assert!(props["x"].get("format").is_none());
         assert_eq!(props["x"]["description"], "0–1");
-        assert!(props["count"].get("minimum").is_none());
+        assert_eq!(props["count"]["minimum"], 0, "zero is a validation bound, not schema noise");
         assert_eq!(props["pct"]["minimum"], 1, "a meaningful bound is kept");
         assert_eq!(schema["required"], serde_json::json!(["x", "title"]));
+    }
+
+    #[test]
+    fn schema_slimming_preserves_zero_bounds_in_definitions_and_normalized_ranges() {
+        let mut schema=serde_json::json!({"$defs":{"ordinal":{"type":"integer","minimum":0,"maximum":199}},
+            "properties":{"ratio":{"type":"number","minimum":0,"maximum":1}}});
+        slim_schema(&mut schema);
+        assert_eq!(schema["$defs"]["ordinal"]["minimum"],0);
+        assert_eq!(schema["$defs"]["ordinal"]["maximum"],199);
+        assert_eq!(schema["properties"]["ratio"]["minimum"],0);
+        assert_eq!(schema["properties"]["ratio"]["maximum"],1);
     }
 
     #[test]
@@ -6239,7 +6370,7 @@ mod tests {
         for selector in [serde_json::json!(["Button",null,null,null,null,null]),serde_json::json!(["Button"])] {
             assert!(serde_json::from_value::<ElementsParams>(serde_json::json!({"selector":selector})).is_err());
         }
-        let tool=PhoneHandler::tool_router().list_all().into_iter().find(|tool|tool.name.as_ref()=="phone_elements").unwrap();
+        let tool=listed_tools(&ToolProfile::All).into_iter().find(|tool|tool.name.as_ref()=="phone_elements").unwrap();
         let schema=serde_json::to_value(tool.input_schema.as_ref()).unwrap();
         fn resolve<'a>(root: &'a serde_json::Value, value: &'a serde_json::Value) -> &'a serde_json::Value {
             value.get("$ref").and_then(|v|v.as_str()).and_then(|reference|reference.strip_prefix('#'))

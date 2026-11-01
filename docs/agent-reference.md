@@ -387,6 +387,22 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"perform","element":9,"snapshot":"…","action":"toggle"}  // increment|decrement|adjust(+value)|toggle|menu|double_tap|two_finger_tap|scroll_to_visible|pinch|rotate
 ```
 
+On a Runner advertising `ipu:guardedInput`, agent `text` captures one live focused
+editable field before clearing or typing. Each chunk and guarded clear checks that
+same retained AX handle and foreground process; another mutation invalidates the
+binding. A refused later chunk is not reselected or replayed. Secure fields,
+ambiguous/incomplete focus evidence and unavailable state refuse guarded input.
+Older Runners retain their legacy behavior and do not provide this binding.
+Checks occur before and after a chunk, not between individual characters: an
+in-flight focus change can still make that chunk's outcome uncertain. Partial
+receipts never authorize automatic continuation into a newly selected field.
+
+`text` with `clear:true` and `set_value` stop if the clear request fails;
+replacement text is not appended afterward. A clear may already have deleted
+some content before an error, so inspect the field and the returned outcome
+before retrying. An acknowledged clear is not independent proof that the field
+is empty or that its focus stayed unchanged.
+
 `volume_up` and `volume_down` require a physical device and a Runner advertising `ipu:volumeButtons=true`. Missing capability refuses before the button request. An acknowledgement does not verify the volume level; do not replay an uncertain press.
 
 `phone_shortcut {"name":"save_screenshot"}` requests one iOS system screenshot
@@ -423,20 +439,34 @@ hovering at an edge to flip a folder page. Use coordinates observed on the
 current screen, then verify the end screen. Flow drafts preserve all points and
 dwells. `supported.drag_path` in `/agent/capabilities` advertises this format.
 
-**Long text.** Text over 200 characters is typed in chunks of about 200 (never
-splitting an emoji, flag, or combining mark), roughly 60 characters a second;
-the request's deadline grows with the text. If typing stops part-way the answer
-is `502 text_partially_typed` with `characters_confirmed` (Unicode scalar
-values from the start), `characters_uncertain`, `remaining_text`, and
-`retry_safe:false`: read the field, then send only what is missing with
-`clear:false` — never the whole text again. One batch types at most 20000
-characters in total.
-To check a long text, look at a screenshot of its end. Do not compare
-`value`: iOS cuts a text field's or text view's accessibility value at 512
-UTF-16 code units (an emoji counts two to four). On an iPhone 17 Pro Max
-with iOS 27, a 1986-character note read back as only its first 477
-characters, although the whole text was on screen. When the cut splits an
-emoji, the value ends in U+FFFD.
+**Long text.** Text over 200 Unicode scalars is sent in complete grapheme
+chunks. If typing stops, `502 text_partially_typed` reports acknowledged
+`characters_confirmed`, `characters_uncertain`, and `remaining_text`, with
+`retry_safe:false`. An uncertain prefix must not be replayed.
+
+A named owner can set `budget_ms` from 6000 to 15000 on a Runner advertising
+`ipu:inputContinuation`. When time runs out between acknowledged chunks, the
+response can include `continuation_safe:true` and an opaque `continue_token`.
+Continue with only that token; the daemon retains the original field and unsent
+suffix. Do not send text, clear or a new budget with a continuation.
+
+```jsonc
+{"type":"text","text":"…","budget_ms":6000}
+{"type":"text","continue_token":"<the returned token>"}
+```
+
+MCP uses `phone_type {"continue_token":"…"}` or the `type_continue` step in
+`phone_run_steps`. A token can be used once and expires within 60 seconds;
+another action, ownership/privacy change, Runner restart, session replacement
+or original-field expiry can invalidate it sooner. No token is issued after
+uncertain delivery or a scope interruption. If continuation is refused, inspect
+the original field before explicitly planning more input. Ordinary text without
+a budget retains the existing behavior on older Runners.
+
+Snapshot values may be shortened. Use a complete `phone_read_value` response
+when available, or inspect the original field on screen; an incomplete value
+preview cannot prove which text is missing. Explicit bound text preserves
+private-use Unicode scalars as data; use `phone_key` for Return or editing keys.
 
 **Links.** `open_url` hands the URL to iOS, which opens it in Safari or in the
 app that owns its scheme. The `url` needs a scheme and at most 2048 bytes
