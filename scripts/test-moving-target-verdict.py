@@ -75,6 +75,14 @@ class Verdict(unittest.TestCase):
         for body,counts,activation in [({'ok':False},self.counts(replaced=1),1),({'ok':True},self.counts(replaced=1,overlay=1),1),({'ok':True},self.counts(replaced=1),0)]:
             self.assertFalse(oracle.judge_case('after-identity',body,counts,True,True,activation))
 
+    def test_identity_regression_requires_no_touch_and_explicit_refusal(self):
+        refused={'ok':False,'error':'target_changed','outcome':'not_sent','retry_safe':True}
+        for case in ['after-identity','after-identity-point']:
+            self.assertTrue(oracle.judge_case(case,refused,self.counts(),True,False))
+            self.assertFalse(oracle.judge_case(case,refused,self.counts(),True,False,1))
+            self.assertFalse(oracle.judge_case(case,refused,self.counts(replaced=1),True,False))
+            self.assertFalse(oracle.judge_case(case,{'ok':False,'error':'unauthorized'},self.counts(),True,False))
+
     def test_invalid_counter_cannot_pass(self):
         self.assertFalse(oracle.judge_case('after-rect', {'ok': False}, self.counts(target=False), True, False))
         self.assertFalse(oracle.judge_case('after-rect', {'ok': False}, self.counts(target=-1), True, False))

@@ -26,6 +26,7 @@ PROBES = {
     'tap-race': ('test-moving-target-simulator.py', 3),
     'tap-guard': ('test-moving-target-simulator.py', 4),
     'tap-identity-race': ('test-moving-target-simulator.py', 4),
+    'tap-identity-guard': ('test-moving-target-simulator.py', 6),
 }
 
 
@@ -246,6 +247,7 @@ def main():
         for folder, flags, field in groups:
             if args.probe == 'tap-race': flags = [*flags, '--expect-after-read-race']
             if args.probe == 'tap-guard': flags = [*flags, '--include-point']
+            if args.probe == 'tap-identity-guard': flags = [*flags, '--identity-guard']
             if args.probe == 'tap-identity-race': flags = [*flags, '--identity-race']
             logged(['python3', test_script, '--base', f"http://127.0.0.1:{binding['daemon_port']}",
                     '--udid', simulator, '--owner', instance, '--mcp', mcp, '--runner-record', record,
@@ -262,6 +264,13 @@ def main():
             if args.probe == 'tap-guard':
                 assert proof['diagnostic_expects_race'] is False and proof['owned_consumer_stopped'] is True
                 assert proof['race_regression_passed'] is True
+                result['race_regression_passed'] = True
+                result['product_acceptance'] = False
+            if args.probe == 'tap-identity-guard':
+                assert proof['identity_regression_passed'] is True and proof['race_regression_passed'] is True
+                assert proof['owned_consumer_stopped'] is True and proof['product_acceptance'] is False
+                assert not any(case['diagnostic_counterexample'] for case in proof['cases'])
+                result['identity_regression_passed'] = True
                 result['race_regression_passed'] = True
                 result['product_acceptance'] = False
             if args.probe == 'tap-identity-race':

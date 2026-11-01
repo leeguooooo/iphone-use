@@ -83,12 +83,12 @@ def judge_case(case, body, delta, established, expect_race, activation_delta=0):
         return body.get('ok') is True and delta['race.target'] == 1 and wrong == 0 and activation_delta == 1
     if not established:
         return False
-    if case == 'after-identity':
-        return expect_race and body.get('ok') is True and activation_delta == 1 and delta['race.replaced'] == 1 and all(delta[key] == 0 for key in keys if key != 'race.replaced')
-    if case in ('after-rect', 'after-rect-point'):
+    if case in ('after-identity', 'after-identity-point') and expect_race:
+        return body.get('ok') is True and activation_delta == 1 and delta['race.replaced'] == 1 and all(delta[key] == 0 for key in keys if key != 'race.replaced')
+    if case in ('after-rect', 'after-rect-point', 'after-identity', 'after-identity-point'):
         if expect_race:
             return wrong == 1 and delta['race.target'] == 0
-        return body.get('ok') is False and body.get('error') == 'target_changed' and body.get('outcome') == 'not_sent' and body.get('retry_safe') is True and all(v == 0 for v in delta.values())
+        return body.get('ok') is False and body.get('error') == 'target_changed' and body.get('outcome') == 'not_sent' and body.get('retry_safe') is True and all(v == 0 for v in delta.values()) and (not case.startswith('after-identity') or activation_delta == 0)
     if case == 'after-query':
         return body.get('ok') is False and wrong == 0 and delta['race.target'] == 0
     return False
@@ -118,9 +118,11 @@ def main():
     for name in ('mcp', 'runner-record', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--identity-race', action='store_true')
+    parser.add_argument('--identity-guard', action='store_true')
     parser.add_argument('--include-point', action='store_true')
     parser.add_argument('--expect-after-read-race', action='store_true', help='Diagnostic only: require observed wrong recipient, never acceptance')
     args = parser.parse_args()
+    assert not args.identity_guard or not (args.identity_race or args.expect_after_read_race), "regression cannot expect a diagnostic race"
     uuid.UUID(args.udid)
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
     parsed_base = urllib.parse.urlparse(args.base)
@@ -338,8 +340,9 @@ def main():
                 assert time.monotonic() < until, 'proxy consumer not ready'
                 time.sleep(0.1)
         cases = [('control', 'element', None), ('after-query', 'element', 'after-query'), ('after-rect', 'element', 'after-rect')]
-        if args.include_point: cases.append(('after-rect-point', 'point', 'after-rect'))
-        if args.identity_race: cases.append(('after-identity', 'element', 'after-identity'))
+        if args.include_point or args.identity_guard: cases.append(('after-rect-point', 'point', 'after-rect'))
+        if args.identity_race or args.identity_guard: cases.append(('after-identity', 'element', 'after-identity'))
+        if args.identity_guard: cases.append(('after-identity-point', 'point', 'after-identity'))
         for case, via, hook in cases:
             before = command(False)
             current_before = before
@@ -368,8 +371,8 @@ def main():
             wrong = delta['race.overlay'] + delta['race.decoy'] + delta['race.replaced']
             established = hook is None or len(hooks) == 1 and hooks[0]['native_matches_app_new_frame']
             passed = judge_case(case, body, delta, established, args.expect_after_read_race or args.identity_race and case == 'after-identity',
-                                (after['activated'].get('race.replaced', 0) - before['activated'].get('race.replaced', 0)) if case == 'after-identity' else after['activated']['race.target'] - before['activated']['race.target'])
-            if case == 'after-identity' and hooks:
+                                (after['activated'].get('race.replaced', 0) - before['activated'].get('race.replaced', 0)) if case.startswith('after-identity') else after['activated']['race.target'] - before['activated']['race.target'])
+            if case.startswith('after-identity') and hooks:
                 positions = [i for i,t in enumerate(traffic) if t['id'] == hooks[0]['delayed_response_id']]
                 later = traffic[positions[0]+1:] if len(positions) == 1 else []
                 mutations = [t for t in later if t['method'] == 'POST' and t['path'].endswith(('/ipu/tap','/click','/actions'))]
@@ -393,6 +396,7 @@ def main():
         state['passed'] = True
         state['product_acceptance'] = False
         state['race_regression_passed'] = not args.expect_after_read_race and not args.identity_race
+        state['identity_regression_passed'] = args.identity_guard
     except Exception as error:
         state['error'] = type(error).__name__ + ': ' + str(error)
         raise

@@ -181,6 +181,7 @@ def run_case(binary, case, out):
             assert body.get("outcome") != "not_sent", body
         else:
             assert body.get("ok") is True and len(taps) == 1, body
+            assert taps[0]["body"]["expected_target"] == {"label":"Done"}, taps[0]
             if case == "replaced-handle":
                 assert len(scrolls) == 1 and taps[0]["path"].endswith("/B/ipu/tap"), requests
             elif case == "stale-source-clear-live":

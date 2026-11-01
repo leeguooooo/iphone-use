@@ -1107,13 +1107,13 @@ impl RunnerClient {
 
     /// A new endpoint binds the final event to the caller's checked frame.
     /// Legacy route absence never permits an unguarded click fallback.
-    pub async fn checked_element_tap(&mut self, element_id: &str, expected: [f64; 4], point: Option<(f64, f64)>) -> Result<CheckedTapOutcome> {
+    pub async fn checked_element_tap(&mut self, element_id: &str, expected: [f64; 4], point: Option<(f64, f64)>, expected_target: &impl serde::Serialize) -> Result<CheckedTapOutcome> {
         if expected.iter().any(|value| !value.is_finite()) || expected[2] <= 0.0 || expected[3] <= 0.0
             || point.is_some_and(|(x,y)| !x.is_finite() || !y.is_finite()) {
             return Ok(CheckedTapOutcome::CheckFailed);
         }
         let sid = self.ensure_session().await?.to_string();
-        let mut body = serde_json::json!({"expected_rect":expected});
+        let mut body = serde_json::json!({"expected_rect":expected,"expected_target":expected_target});
         if let Some((x,y)) = point { body["point"] = serde_json::json!([x,y]); }
         let response = self.post_req(format!("{}/session/{}/element/{}/ipu/tap",self.base,sid,element_id))
             .json(&body).send_signed(&self.auth).await.context("POST checked element tap")?;
@@ -1122,6 +1122,11 @@ impl RunnerClient {
             Ok(_) => Ok(CheckedTapOutcome::Applied),
             Err(error) => {
                 if let Some(http) = error.downcast_ref::<RunnerHttpError>() {
+                    if no_event && http.status == reqwest::StatusCode::BAD_REQUEST
+                        && http.code.as_deref() == Some("invalid argument")
+                        && http.message.as_deref() == Some("unknown checked tap field") {
+                        return Ok(CheckedTapOutcome::Unsupported);
+                    }
                     if http.status == reqwest::StatusCode::CONFLICT && http.code.as_deref() == Some("target changed") {
                         return Ok(CheckedTapOutcome::TargetChanged);
                     }
@@ -4796,13 +4801,33 @@ mod tests {
                 let body:serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
                 assert_eq!(body["expected_rect"], serde_json::json!([16.0,180.0,358.0,36.0]));
                 assert_eq!(body["point"], serde_json::json!([195.0,190.0]));
+                assert_eq!(body["expected_target"], serde_json::json!({"identifier":"primary"}));
                 let reply=serde_json::json!({"value":{"error":code,"message":"fixture"}}).to_string();
                 format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len())
             });
             let mut client=RunnerClient::new(base).unwrap();client.session=Some("S".into());
-            let result=block(client.checked_element_tap("E1",[16.0,180.0,358.0,36.0],Some((195.0,190.0))));
+            let result=block(client.checked_element_tap("E1",[16.0,180.0,358.0,36.0],Some((195.0,190.0)),&serde_json::json!({"identifier":"primary"})));
             server.join().unwrap();
             match expected { Some(value)=>assert_eq!(result.unwrap(),value),None=>assert!(result.is_err()) }
+        }
+    }
+
+    #[test]
+    fn semantic_checked_tap_detects_old_runner_without_sending_fallback() {
+        for (phase, message, expected) in [
+            (true,"unknown checked tap field",Some(CheckedTapOutcome::Unsupported)),
+            (true,"other argument error",Some(CheckedTapOutcome::CheckFailed)),
+            (false,"unknown checked tap field",None),
+        ] {
+            let (base, server)=mock_runner(1,move |_| {
+                let body=serde_json::json!({"value":{"error":"invalid argument","message":message}}).to_string();
+                let header=if phase {"X-IPU-Tap-Phase: not_sent\r\n"} else {""};
+                format!("HTTP/1.1 400 Bad Request\r\n{header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())
+            });
+            let mut client=RunnerClient::new(base).unwrap();client.session=Some("S".into());
+            let result=block(client.checked_element_tap("E",[1.0,2.0,3.0,4.0],None,&serde_json::json!({"label":"Done"})));
+            server.join().unwrap();
+            match expected {Some(value)=>assert_eq!(result.unwrap(),value),None=>assert!(result.is_err())}
         }
     }
 
@@ -4813,11 +4838,11 @@ mod tests {
             format!("HTTP/1.1 500 Internal Server Error\r\nX-IPU-Tap-Phase: not_sent\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())
         });
         let mut client=RunnerClient::new(base).unwrap();client.session=Some("S".into());
-        assert_eq!(block(client.checked_element_tap("E",[1.0,2.0,3.0,4.0],None)).unwrap(),CheckedTapOutcome::CheckFailed);
+        assert_eq!(block(client.checked_element_tap("E",[1.0,2.0,3.0,4.0],None,&serde_json::json!({"identifier":"primary"}))).unwrap(),CheckedTapOutcome::CheckFailed);
         server.join().unwrap();
         let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
         let mut client=RunnerClient::new(format!("http://{}",listener.local_addr().unwrap())).unwrap();
-        assert_eq!(block(client.checked_element_tap("E",[f64::NAN,2.0,3.0,4.0],None)).unwrap(),CheckedTapOutcome::CheckFailed);
+        assert_eq!(block(client.checked_element_tap("E",[f64::NAN,2.0,3.0,4.0],None,&serde_json::json!({"identifier":"primary"}))).unwrap(),CheckedTapOutcome::CheckFailed);
         assert_eq!(listener.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
     }
 

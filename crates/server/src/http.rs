@@ -8902,14 +8902,15 @@ fn unique_locator_index(rows: &[crate::runner::ElementRow], locator: &AgentEleme
 }
 
 async fn send_checked_target_tap(
-    w: &mut crate::runner::RunnerClient, id: &str, expected: [f64; 4], point: Option<(f64,f64)>, revealed: bool,
+    w: &mut crate::runner::RunnerClient, id: &str, expected: [f64; 4], point: Option<(f64,f64)>, revealed: bool, locator: &AgentElementLocator,
 ) -> Result<(), UniqueLabelTapError> {
     use crate::runner::CheckedTapOutcome;
-    match w.checked_element_tap(id, expected, point).await {
+    match w.checked_element_tap(id, expected, point, locator).await {
         Ok(CheckedTapOutcome::Applied) => Ok(()),
-        Ok(CheckedTapOutcome::TargetChanged) if !revealed => Err(UniqueLabelTapError::Refused("target_changed", "Target changed after its frame was checked; no tap sent. Read again before a new action.")),
+        Ok(CheckedTapOutcome::TargetChanged) if !revealed => Err(UniqueLabelTapError::Refused("target_changed", "Target no longer matches its checked frame or locator; no tap sent. Read again before a new action.")),
         Ok(CheckedTapOutcome::CheckFailed) if !revealed => Err(UniqueLabelTapError::Refused("target_check_failed", "Native target preconditions could not be established; no tap sent.")),
         Ok(CheckedTapOutcome::Unsupported) if !revealed => Err(UniqueLabelTapError::Refused("runner_update_required", "Update the Native Runner to support checked target taps; no tap sent.")),
+        Ok(CheckedTapOutcome::Unsupported) => Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("runner_update_required after reveal: scrolling may already have been delivered; update the Native Runner; no further tap sent"))),
         Ok(_) => Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("checked target refused after reveal; no further tap sent"))),
         Err(error) => Err(UniqueLabelTapError::AfterDispatch(error)),
     }
@@ -8995,15 +8996,15 @@ async fn tap_unique_locator(
         // explicit point mode continues to mean the live centre itself.
         if revealed && !via_point {
             if let Some(point) = clear_tap_point(&proof_rows, proof_index).filter(|point| on_screen(*point)) {
-                return send_checked_target_tap(w, &element_id, live, Some(point), revealed).await;
+                return send_checked_target_tap(w, &element_id, live, Some(point), revealed, locator).await;
             }
         }
         return Err(refuse("element_occluded", ELEMENT_OCCLUDED_HINT));
     }
     if via_point {
-        return send_checked_target_tap(w, &element_id, live, Some(center), revealed).await;
+        return send_checked_target_tap(w, &element_id, live, Some(center), revealed, locator).await;
     }
-    send_checked_target_tap(w, &element_id, live, None, revealed).await
+    send_checked_target_tap(w, &element_id, live, None, revealed, locator).await
 }
 
 fn runner_predicate_literal(value: &str) -> String {
@@ -10659,25 +10660,25 @@ impl AgentUiExpectation {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct AgentElementLocator {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
     /// Case-sensitive literal substring of the normalized label.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     label_contains: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     identifier: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     value: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     focused: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     enabled: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     visible: Option<bool>,
 }
 
@@ -23954,6 +23955,10 @@ mod tests {
             visible: Some(true),
         };
 
+        assert_eq!(serde_json::to_value(&locator).unwrap(),serde_json::json!({
+            "label":"保存到“文件”","identifier":"actionGroupCell","kind":"Cell",
+            "focused":false,"enabled":true,"visible":true
+        }));
         let (using, value) = locator_runner_query(&locator).unwrap();
         assert_eq!(using, "predicate string");
         assert_eq!(

@@ -313,6 +313,10 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
                     serde_json::from_slice(&reply.into_body().collect().await.unwrap().to_bytes())
                         .unwrap();
                 let sent = seen.lock().unwrap();
+                for request in sent.iter().filter(|r| r.starts_with("POST ") && r.contains("/ipu/tap ")) {
+                    let payload:serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+                    assert_eq!(payload["expected_target"],serde_json::json!({"label":"Done"}));
+                }
                 let clicks: Vec<_> = sent
                     .iter()
                     .filter(|r| r.starts_with("POST ") && r.contains("/ipu/tap ") && !r.contains("\"point\""))

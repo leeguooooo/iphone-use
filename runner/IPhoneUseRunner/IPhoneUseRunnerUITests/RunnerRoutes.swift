@@ -401,6 +401,7 @@ extension RunnerTests {
       guard node.axElement != nil else {
         throw RunnerError(status: 409, code: "target changed", message: "live target unavailable; no tap sent")
       }
+      try plan.checkTarget(node.attributes)
       point = try plan.point(live: node.rect, screen: screen)
     } catch {
       var response = HTTPResponse.from(error)

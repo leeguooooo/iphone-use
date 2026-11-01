@@ -27,10 +27,32 @@ enum GestureDelivery {
 struct CheckedElementTap {
   let expected: CGRect
   let requestedPoint: CGPoint?
+  let expectedTarget: [String: Any]?
 
   init(_ body: [String: Any]) throws {
-    guard Set(body.keys).isSubset(of: ["expected_rect", "point"]) else {
+    guard Set(body.keys).isSubset(of: ["expected_rect", "point", "expected_target"]) else {
       throw RunnerError.invalidArgument("unknown checked tap field")
+    }
+    if let supplied = body["expected_target"] {
+      guard let target = supplied as? [String: Any], !target.isEmpty,
+            Set(target.keys).isSubset(of: ["identifier", "kind", "label", "label_contains", "value", "focused", "enabled", "visible"]) else {
+        throw RunnerError.invalidArgument("checked target must contain literal locator fields")
+      }
+      for (key, value) in target {
+        if ["focused", "enabled", "visible"].contains(key) {
+          guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            throw RunnerError.invalidArgument("checked target state must be boolean")
+          }
+        } else {
+          guard let text = value as? String, !text.contains("\0"), key != "label_contains" || !text.isEmpty else {
+            throw RunnerError.invalidArgument("checked target text must be literal")
+          }
+        }
+      }
+      expectedTarget = target
+    } else {
+      // Compatibility for older hosts: their frame-only guarantee is unchanged.
+      expectedTarget = nil
     }
     func numbers(_ value: Any?, count: Int) throws -> [Double] {
       guard let values = value as? [Any], values.count == count else {
@@ -50,6 +72,43 @@ struct CheckedElementTap {
       let point = try numbers(supplied, count: 2)
       requestedPoint = CGPoint(x: point[0], y: point[1])
     } else { requestedPoint = nil }
+  }
+
+  func checkTarget(_ attributes: [String: Any]) throws {
+    guard let expectedTarget else { return }
+    let label = (attributes["label"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+      ?? (attributes["name"] as? String) ?? ""
+    let rawType = attributes["type"] as? String ?? ""
+    let kind = rawType.hasPrefix("XCUIElementType") ? String(rawType.dropFirst(15)) : rawType
+    let strings: [String: String?] = ["identifier": attributes["rawIdentifier"] as? String,
+      "kind": kind, "label": label, "value": attributes["value"] as? String]
+    func changed() -> RunnerError {
+      RunnerError(status: 409, code: "target changed", message: "target locator changed; no tap sent")
+    }
+    for (key, wanted) in expectedTarget {
+      if let text = wanted as? String {
+        if key == "label_contains" {
+          guard Data(label.utf8).range(of: Data(text.utf8)) != nil else { throw changed() }
+        } else {
+          if key == "value" {
+            if kind == "SecureTextField" { throw changed() }
+            if let flag = attributes["value_truncated"] {
+              let knownFalse = (flag as? String).map { $0 == "0" || $0 == "false" }
+                ?? (flag as? NSNumber).map { !$0.boolValue } ?? false
+              guard knownFalse else { throw changed() }
+            }
+          }
+          guard let actual = strings[key].flatMap({ $0 }), actual.utf8.elementsEqual(text.utf8) else { throw changed() }
+        }
+      } else {
+        let raw = attributes[["enabled":"isEnabled", "focused":"isFocused", "visible":"isVisible"][key] ?? ""]
+        let actual: Bool?
+        if let text = raw as? String, text == "0" || text == "1" { actual = text == "1" }
+        else if let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() { actual = number.boolValue }
+        else { actual = nil }
+        guard actual == (wanted as? NSNumber)?.boolValue else { throw changed() }
+      }
+    }
   }
 
   func point(live: CGRect, screen: CGSize) throws -> CGPoint {
