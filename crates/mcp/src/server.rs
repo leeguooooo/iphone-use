@@ -3303,6 +3303,7 @@ impl StructuredMode {
 
 /// The longest top-level string a slim payload keeps; longer ones are bulk
 /// (a base64 image, a dumped tree) and the summary already covers them.
+/// Partial input receipts keep their exact unsent suffix separately.
 const SLIM_STRING_LIMIT: usize = 200;
 
 /// Apply [`StructuredMode`] to a finished tool result. Runs after the tool
@@ -3345,7 +3346,13 @@ fn shape_structured(mut result: CallToolResult, mode: StructuredMode) -> CallToo
                     if !receipt.is_empty() { slim.insert(key.clone(), serde_json::Value::Object(receipt)); }
                     continue;
                 }
-                let keep = match value {
+                // A partial input receipt must retain the exact unsent suffix,
+                // even when the normal string preview limit would drop it.
+                let input_suffix = key == "remaining_text"
+                    && full.get("error").and_then(serde_json::Value::as_str)
+                        == Some("text_partially_typed")
+                    && value.is_string();
+                let keep = input_suffix || match value {
                     serde_json::Value::String(s) => s.len() <= SLIM_STRING_LIMIT,
                     serde_json::Value::Array(_) | serde_json::Value::Object(_) => false,
                     _ => true,
@@ -4968,7 +4975,7 @@ mod tests {
         let body=serde_json::json!({"ok":false,"error":"text_partially_typed","failed_step":0,
             "completed":0,"applied_actions":0,"failed_step_outcome":"partial","batch_outcome":"partially_applied",
             "retry_safe":false,"steps":[],"characters_confirmed":200,"characters_total":500,
-            "characters_uncertain":0,"remaining_text":"suffix","continue_token":token,"continuation_safe":true});
+            "characters_uncertain":0,"remaining_text":"字".repeat(300),"continue_token":token,"continuation_safe":true});
         let (url,task)=scripted_daemon("502 Bad Gateway",body.to_string().into_bytes());
         let handler=handler_for(&url);
         let result=block(handler.phone_run_steps(Parameters(RunStepsParams{
@@ -4978,7 +4985,9 @@ mod tests {
         let text=text_of(&result);
         assert!(text.contains(&token),"{text}");
         assert!(text.contains("omit text, clear and budget_ms"),"{text}");
+        let result = finish_result("phone_run_steps", result, StructuredMode::Slim);
         assert_eq!(result.structured_content.as_ref().unwrap()["continue_token"],token);
+        assert_eq!(result.structured_content.as_ref().unwrap()["remaining_text"], "字".repeat(300));
     }
 
     #[test]
@@ -4997,6 +5006,7 @@ mod tests {
         let text = text_of(&result);
         assert!(text.contains("retry_safe=false"), "{text}");
         assert!(text.contains("characters_confirmed"), "{text}");
+        let result = finish_result("phone_type", result, StructuredMode::Slim);
         let structured = result.structured_content.as_ref().unwrap();
         assert_eq!(structured["characters_confirmed"], 400);
         assert_eq!(structured["remaining_text"].as_str().unwrap().chars().count(), 10_200);
@@ -6197,6 +6207,7 @@ mod tests {
             "steps": [{"ok": true}, {"ok": false}],
             "observation": {"tree": "…"},
             "blob": "x".repeat(SLIM_STRING_LIMIT + 1),
+            "remaining_text": "x".repeat(SLIM_STRING_LIMIT + 1),
         }));
         let full = shape_structured(result.clone(), StructuredMode::Full);
         assert_eq!(full.structured_content, result.structured_content);
