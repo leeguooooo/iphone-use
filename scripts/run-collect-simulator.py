@@ -262,8 +262,10 @@ def main():
             if args.probe == 'tap-identity-race':
                 assert proof['diagnostic_expects_identity_race'] is True and proof['product_acceptance'] is False
                 assert proof['owned_consumer_stopped'] is True and not proof['race_regression_passed']
+                assert proof['cases'][-1]['name'] == 'after-identity' and proof['cases'][-1]['passed']
                 assert proof['cases'][-1]['diagnostic_counterexample'] is True
                 result['product_acceptance'] = False
+                result['race_regression_passed'] = False
                 result['identity_counterexample_confirmed'] = True
             result[field] = proof['cases']
         result['passed'] = True

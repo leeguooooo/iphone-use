@@ -84,7 +84,7 @@ def judge_case(case, body, delta, established, expect_race, activation_delta=0):
     if not established:
         return False
     if case == 'after-identity':
-        return expect_race and delta['race.replaced'] == 1 and delta['race.target'] == 0
+        return expect_race and body.get('ok') is True and activation_delta == 1 and delta['race.replaced'] == 1 and all(delta[key] == 0 for key in keys if key != 'race.replaced')
     if case in ('after-rect', 'after-rect-point'):
         if expect_race:
             return wrong == 1 and delta['race.target'] == 0
@@ -191,11 +191,14 @@ def main():
             time.sleep(0.03)
         raise RuntimeError('one App command not acknowledged; no replay')
 
-    def move_after_response(element_id, captured, identity=False):
+    def move_after_response(element_id, captured, identity=False, delayed_id=None):
         moved = command(False, replace=True) if identity else command(True)
         if isinstance(captured.get('value'), dict) and 'x' in captured['value']:
             assert close_rect(captured['value'], current_before['target_rect']), 'captured frame was not the confirmed old pose'
-            assert identity or not close_rect(captured['value'], moved['target_rect']), 'App did not change the target pose'
+            if identity:
+                assert close_rect(captured['value'], moved['target_rect']), 'identity diagnostic changed geometry'
+            else:
+                assert not close_rect(captured['value'], moved['target_rect']), 'App did not change the target pose'
         # A new signed read only: prove Native sees the real new frame before
         # returning the older response to the consumer. Never reuse an auth nonce.
         until = time.monotonic() + 4
@@ -208,7 +211,7 @@ def main():
                     if identity_value.get('value') != 'race.replaced':
                         time.sleep(0.1)
                         continue
-                receipt = {'sequence': sequence, 'app': moved, 'captured_native': captured,
+                receipt = {'sequence': sequence, 'app': moved, 'captured_native': captured, 'delayed_response_id': delayed_id,
                            'fresh_native': observed, 'native_matches_app_new_frame': True, 'identity': identity_value}
                 hooks.append(receipt)
                 return
@@ -243,7 +246,7 @@ def main():
                     status, response_headers, body = upstream.status, dict(upstream.headers), upstream.read()
                 path = urllib.parse.unquote(self.path.split('?', 1)[0])
                 query = self.command == 'POST' and path.endswith('/elements') and b'race.target' in raw
-                trace = {'method': self.command, 'path': path, 'status': status,
+                trace = {'id': str(uuid.uuid4()), 'method': self.command, 'path': path, 'status': status,
                          'request_sha256': hashlib.sha256(raw).hexdigest(),
                          'response_sha256': hashlib.sha256(body).hexdigest()}
                 if self.command == 'POST' and path.endswith(('/actions', '/click', '/scrollTo')):
@@ -260,13 +263,13 @@ def main():
                     target_ids.update(id for id in ids if isinstance(id, str))
                     if armed == 'after-query' and len(ids) == 1:
                         armed = None
-                        move_after_response(ids[0], parsed)
+                        move_after_response(ids[0], parsed, delayed_id=trace['id'])
                 if status == 200 and armed in ('after-rect', 'after-identity') and self.command == 'GET' and isinstance(parsed, dict):
                     hit = next((id for id in target_ids if path.endswith('/element/' + id + '/rect')), None)
                     if hit is not None:
                         identity = armed == 'after-identity'
                         armed = None
-                        move_after_response(hit, parsed, identity=identity)
+                        move_after_response(hit, parsed, identity=identity, delayed_id=trace['id'])
                 self.send_response(status)
                 for key, value in response_headers.items():
                     if key.lower() not in ('connection', 'content-length', 'transfer-encoding'):
@@ -365,7 +368,13 @@ def main():
             wrong = delta['race.overlay'] + delta['race.decoy'] + delta['race.replaced']
             established = hook is None or len(hooks) == 1 and hooks[0]['native_matches_app_new_frame']
             passed = judge_case(case, body, delta, established, args.expect_after_read_race or args.identity_race and case == 'after-identity',
-                                after['activated']['race.target'] - before['activated']['race.target'])
+                                (after['activated'].get('race.replaced', 0) - before['activated'].get('race.replaced', 0)) if case == 'after-identity' else after['activated']['race.target'] - before['activated']['race.target'])
+            if case == 'after-identity' and hooks:
+                positions = [i for i,t in enumerate(traffic) if t['id'] == hooks[0]['delayed_response_id']]
+                later = traffic[positions[0]+1:] if len(positions) == 1 else []
+                mutations = [t for t in later if t['method'] == 'POST' and t['path'].endswith(('/ipu/tap','/click','/actions'))]
+                later_target_reads = [t for t in later if t['method'] == 'GET' and ('/rect' in t['path'] or '/attribute/' in t['path']) or t['method'] == 'POST' and t['path'].endswith('/elements')]
+                passed = passed and len(positions) == 1 and len(mutations) == 1 and not later_target_reads
             if case == 'control':
                 passed = passed and any(t['method'] == 'POST' and t['path'].endswith('/elements') and t['status'] == 200 for t in traffic)
                 passed = passed and any(t['method'] == 'POST' and t['path'].endswith(('/click', '/ipu/tap')) and t['status'] == 200 for t in traffic)
