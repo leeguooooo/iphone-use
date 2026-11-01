@@ -22,6 +22,9 @@ pub struct ElementSelector {
     /// Exact accessibility identifier; case-sensitive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier: Option<String>,
+    /// Exact name: non-empty identifier when present, otherwise label; case-sensitive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Exact label, preserving case, whitespace and newlines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -57,6 +60,7 @@ impl<'de> Deserialize<'de> for ElementSelector {
                 const FIELDS: &[&str] = &[
                     "kind",
                     "identifier",
+                    "name",
                     "label",
                     "label_contains",
                     "value",
@@ -84,6 +88,7 @@ impl<'de> Deserialize<'de> for ElementSelector {
                 Ok(ElementSelector {
                     kind: take(&mut fields, "kind")?,
                     identifier: take(&mut fields, "identifier")?,
+                    name: take(&mut fields, "name")?,
                     label: take(&mut fields, "label")?,
                     label_contains: take(&mut fields, "label_contains")?,
                     value: take(&mut fields, "value")?,
@@ -100,13 +105,14 @@ impl ElementSelector {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.kind.is_none()
             && self.identifier.is_none()
+            && self.name.is_none()
             && self.label.is_none()
             && self.label_contains.is_none()
             && self.value.is_none()
             && self.value_present.is_none()
             && self.enabled.is_none()
         {
-            return Err("selector needs at least one field: kind, identifier, label, label_contains, value, value_present or enabled");
+            return Err("selector needs at least one field: kind, identifier, name, label, label_contains, value, value_present or enabled");
         }
         if self.value.is_some() && self.value_present == Some(false) {
             return Err("value cannot be combined with value_present:false");
@@ -114,6 +120,7 @@ impl ElementSelector {
         for text in [
             &self.kind,
             &self.identifier,
+            &self.name,
             &self.label,
             &self.label_contains,
             &self.value,
@@ -125,8 +132,8 @@ impl ElementSelector {
                 return Err("each selector string is at most 1000 characters");
             }
         }
-        if self.identifier.as_deref() == Some("") || self.label_contains.as_deref() == Some("") {
-            return Err("identifier and label_contains must be non-empty when supplied");
+        if self.identifier.as_deref() == Some("") || self.name.as_deref() == Some("") || self.label_contains.as_deref() == Some("") {
+            return Err("identifier, name and label_contains must be non-empty when supplied");
         }
         if let Some(kind) = &self.kind {
             let kind = kind.strip_prefix("XCUIElementType").unwrap_or(kind);
@@ -148,6 +155,10 @@ impl ElementSelector {
                 .as_deref()
                 .map(|k| k.strip_prefix("XCUIElementType").unwrap_or(k)),
         ) && exact("identifier", self.identifier.as_deref())
+            && self.name.as_deref().is_none_or(|expected| {
+                row.get("identifier").and_then(Value::as_str).filter(|id| !id.is_empty())
+                    .or_else(|| row.get("label").and_then(Value::as_str)) == Some(expected)
+            })
             && exact("label", self.label.as_deref())
             && exact("value", self.value.as_deref())
             && (self.value_present.is_none() || row.get("kind").and_then(Value::as_str)
@@ -178,6 +189,35 @@ impl ElementSelector {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn name_prefers_nonempty_identifier_then_label_and_combines_literally() {
+        let selector: ElementSelector = serde_json::from_value(json!({"name":"保存\n'O\\K'🙂"})).unwrap();
+        assert!(selector.validate().is_ok());
+        for row in [
+            json!({"identifier":"保存\n'O\\K'🙂","label":"Different"}),
+            json!({"label":"保存\n'O\\K'🙂"}),
+            json!({"identifier":"","label":"保存\n'O\\K'🙂"}),
+            json!({"identifier":null,"label":"保存\n'O\\K'🙂"}),
+        ] { assert!(selector.matches(&row), "{row}"); }
+        for row in [
+            json!({"identifier":"other","label":"保存\n'O\\K'🙂"}),
+            json!({"identifier":" 保存\n'O\\K'🙂","label":"保存\n'O\\K'🙂"}),
+            json!({"label":"保存 'O\\K'🙂"}),
+            json!({"identifier":"保存\n'o\\K'🙂"}), json!({}),
+        ] { assert!(!selector.matches(&row), "{row}"); }
+        let combined: ElementSelector = serde_json::from_value(json!({"name":"primary","label":"Save","enabled":false})).unwrap();
+        assert!(combined.matches(&json!({"identifier":"primary","label":"Save","enabled":false})));
+        assert!(!combined.matches(&json!({"identifier":"primary","label":"Other","enabled":false})));
+        assert!(!combined.matches(&json!({"identifier":"primary","label":"Save","enabled":true})));
+        assert_eq!(serde_json::to_value(&selector).unwrap(),json!({"name":"保存\n'O\\K'🙂"}));
+        for value in [json!({"name":""}),json!({"name":"字".repeat(1001)})] {
+            assert!(serde_json::from_value::<ElementSelector>(value).unwrap().validate().is_err());
+        }
+        for raw in [r#"{"name":false}"#,r#"{"name":"one","name":"two"}"#] {
+            assert!(serde_json::from_str::<ElementSelector>(raw).is_err());
+        }
+    }
 
     #[test]
     fn exact_fields_and_substrings_are_literal_case_sensitive_and_combined() {

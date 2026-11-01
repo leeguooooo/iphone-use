@@ -14,8 +14,13 @@ EXPECTED_ROWS=[
  {'identifier':'selector.unicode','label':"保存\n'O\\K'🙂",'value':None,'enabled':True,'kind':'Button'},
  {'identifier':'selector.empty','label':'Explicit empty','value':'','enabled':True,'kind':'StaticText'},
  {'identifier':'selector.missing-value','label':'Missing value','value':None,'enabled':True,'kind':'StaticText'},
+ {'identifier':'','label':'Label-only name','value':None,'enabled':True,'kind':'StaticText'},
 ]
 CASES=[
+ ('name-label-only',{'selector':{'name':'Label-only name','kind':'StaticText'}},['Label-only name'],1),
+ ('name-identifier',{'selector':{'name':'selector.primary'}},['selector.primary'],1),
+ ('name-does-not-also-match-label',{'selector':{'kind':'Button','name':'Save'}},[],0),
+ ('name-and-label',{'selector':{'name':'selector.disabled','label':'Save','enabled':False}},['selector.disabled'],1),
  ('primary',{'selector':{'kind':'XCUIElementTypeButton','identifier':'selector.primary','label':'Save','value':'stable','enabled':True}},['selector.primary'],1),
  ('disabled',{'selector':{'kind':'Button','enabled':False}},['selector.disabled'],1),
  ('duplicate-label',{'selector':{'kind':'Button','label':'Save'},'limit':1},['selector.primary'],3),
@@ -33,37 +38,43 @@ CASES=[
  ('buttons-without-exposed-values',{'selector':{'kind':'Button','value_present':False}},['selector.secondary','selector.disabled','selector.unicode'],3),
 ]
 
+def row_key(row):
+ return row.get('identifier') or row.get('label')
+
 def verify_case(model,seed,before,after,body,expected,matched,arguments=None):
  errors=[]
  if model.get('rows')!=EXPECTED_ROWS:errors.append('App fixture model differs from declared controls')
- seed_rows={r.get('identifier'):r for r in seed.get('elements',[]) if r.get('identifier')}
+ seed_rows={row_key(r):r for r in seed.get('elements',[]) if row_key(r)}
  for expected_row in EXPECTED_ROWS:
-  seed_row=seed_rows.get(expected_row['identifier'])
+  seed_row=seed_rows.get(row_key(expected_row))
   if not seed_row or any(seed_row.get(k)!=expected_row[k] for k in ('label','kind')):errors.append('seed missing a declared control')
  if before.get('run_id')!=model.get('run_id') or after.get('run_id')!=model.get('run_id') or before.get('pid')!=after.get('pid'):errors.append('stale App identity')
  if after.get('touches')!=0 or after.get('application_state')!=0 or after.get('key_window') is not True:errors.append('App changed or unexpected input')
  rows=body.get('elements')
  if not isinstance(rows,list):return errors+['missing element rows']
- if [r.get('identifier') for r in rows]!=expected:errors.append('identifiers differ from independent case')
+ if [row_key(r) for r in rows]!=expected:errors.append('identifiers differ from independent case')
  if body.get('filter',{}).get('matched')!=matched or body.get('filter',{}).get('omitted')!=matched-len(expected):errors.append('match/omission counts differ')
- original={r.get('identifier'):(r.get('index',i),r) for i,r in enumerate(seed.get('elements',[])) if r.get('identifier')}
- declared={r['identifier']:r for r in model['rows']}
+ original={row_key(r):(r.get('index',i),r) for i,r in enumerate(seed.get('elements',[])) if row_key(r)}
+ declared={row_key(r):r for r in model['rows']}
  for row in rows:
-  ident=row.get('identifier')
+  ident=row_key(row)
   if ident not in original or row.get('index')!=original[ident][0]:errors.append('original tree index was lost')
   if ident not in declared or row.get('label')!=declared[ident]['label'] or row.get('kind')!=declared[ident]['kind']:errors.append('row differs from App model')
  selector=(arguments or {}).get('selector',{})
  for row in rows:
   for field in ('enabled','value'):
    if field in selector:
-    expected_value=declared.get(row.get('identifier'),{}).get(field)
+    expected_value=declared.get(row_key(row),{}).get(field)
     if (row.get(field) is not expected_value if field=='enabled' else row.get(field)!=expected_value):errors.append('requested '+field+' differs from App model')
     if (row.get(field) is not selector[field] if field=='enabled' else row.get(field)!=selector[field]):errors.append('requested '+field+' not preserved')
+  if 'name' in selector:
+   expected_name=declared.get(row_key(row),{}).get('identifier') or declared.get(row_key(row),{}).get('label')
+   if expected_name!=selector['name']:errors.append('name differs from independent App model')
   if 'value' in selector and row.get('value_truncated') is True:errors.append('truncated preview matched an exact value')
   if 'value_present' in selector:
    wanted=selector['value_present']
    provided=isinstance(row.get('value'),str)
-   model_provided=isinstance(declared.get(row.get('identifier'),{}).get('value'),str)
+   model_provided=isinstance(declared.get(row_key(row),{}).get('value'),str)
    if row.get('value') is not None and not provided:errors.append('snapshot value has an invalid type')
    if provided is not wanted or model_provided is not wanted:errors.append('snapshot value presence differs from requested model')
  if not body.get('snapshot') or body.get('snapshot')!=seed.get('snapshot'):errors.append('filtered snapshot differs from full static seed')

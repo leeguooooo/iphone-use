@@ -37,6 +37,11 @@ class Verdict(unittest.TestCase):
    elif fault=='missing-seed-control':v[1]['elements'].pop()
    else:row['value_truncated']=True
    with self.subTest(fault=fault):self.assertTrue(probe.verify_case(*v))
+ def test_name_requires_identifier_precedence_in_independent_model(self):
+  good=sample();good[7]={'selector':{'name':'selector.primary'}}
+  self.assertEqual(probe.verify_case(*good),[])
+  wrong=sample();wrong[7]={'selector':{'name':'Save'}}
+  self.assertTrue(probe.verify_case(*wrong))
  def test_value_presence_evidence_rejects_missing_or_malformed_values(self):
   good=sample();good[7]={'selector':{'value_present':True}}
   self.assertEqual(probe.verify_case(*good),[])

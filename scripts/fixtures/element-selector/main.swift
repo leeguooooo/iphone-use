@@ -15,7 +15,8 @@ final class SelectorController: UIViewController {
       ("selector.disabled", "Save", nil, false, true),
       ("selector.unicode", "保存\n'O\\K'🙂", nil, true, true),
       ("selector.empty", "Explicit empty", "", true, false),
-      ("selector.missing-value", "Missing value", nil, true, false)
+      ("selector.missing-value", "Missing value", nil, true, false),
+      ("", "Label-only name", nil, true, false)
     ]
     for (index, definition) in definitions.enumerated() {
       let (identifier, label, value, enabled, button) = definition

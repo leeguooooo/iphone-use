@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SIMULATOR_START_TIMEOUT = 1020
 PROBES = {
     'list': ('test-collect-simulator.py', 4),
-    'selector': ('test-selector-simulator.py', 16),
+    'selector': ('test-selector-simulator.py', 20),
     'agent-selector': ('test-agent-selector-simulator.py', 7),
     'wait': ('test-wait-simulator.py', 22),
     'tap-race': ('test-moving-target-simulator.py', 3),

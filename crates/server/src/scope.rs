@@ -159,7 +159,7 @@ pub fn parse_selector(raw: Option<&str>) -> Result<Option<core::element_selector
         return Err(json!({"ok":false,"error":"invalid_selector","hint":"selector JSON is at most 16 KiB"}));
     }
     let selector: core::element_selector::ElementSelector = serde_json::from_str(raw)
-        .map_err(|_| json!({"ok":false,"error":"invalid_selector","hint":"selector must be a JSON object containing kind, identifier, label, label_contains, value, boolean value_present or enabled"}))?;
+        .map_err(|_| json!({"ok":false,"error":"invalid_selector","hint":"selector must be a JSON object containing kind, identifier, name, label, label_contains, value, boolean value_present or enabled"}))?;
     selector.validate().map_err(|hint| json!({"ok":false,"error":"invalid_selector","hint":hint}))?;
     Ok(Some(selector))
 }
@@ -453,6 +453,23 @@ mod tests {
         assert_eq!(tree["elements"][0]["index"],2);
         assert_eq!(tree["filter"]["matched"],1);
         assert_eq!(tree["filter"]["selector"]["enabled"],false);
+    }
+
+    #[test]
+    fn exact_name_fallback_preserves_full_snapshot_indexes_and_counts() {
+        let mut tree = json!({"snapshot":"name-tree","elements":[
+            {"index":4,"identifier":"Save","label":"Different"},
+            {"index":8,"label":"Save"},
+            {"index":12,"identifier":"other","label":"Save"},
+            {"index":15,"identifier":"","label":"Save"}
+        ]});
+        let selector = parse_selector(Some(r#"{"name":"Save"}"#)).unwrap().unwrap();
+        filter(&mut tree, None, Some(2), Some(&selector));
+        assert_eq!(tree["snapshot"], "name-tree");
+        assert_eq!(tree["elements"].as_array().unwrap().iter().map(|r|r["index"].as_u64().unwrap()).collect::<Vec<_>>(), vec![4,8]);
+        assert_eq!(tree["filter"]["matched"], 3);
+        assert_eq!(tree["filter"]["omitted"], 1);
+        assert_eq!(tree["filter"]["selector"], json!({"name":"Save"}));
     }
 
     #[test]
