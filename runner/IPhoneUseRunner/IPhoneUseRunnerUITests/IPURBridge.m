@@ -841,7 +841,9 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
   NSInteger calls = 0;
   NSMutableArray<IPURFrontier *> *frontiers = IPURCappedFrontiers(leaves ?: @[], acceptedDepth);
   while (frontiers.count > 0) {
-    if (calls >= extensionCallLimit || walk.nodeCount >= maxNodes) {
+    // A depth-one request can only return its root, so re-rooting cannot
+    // establish whether this frontier has children. Keep coverage partial.
+    if (acceptedDepth <= 1 || calls >= extensionCallLimit || walk.nodeCount >= maxNodes) {
       walk.truncated = YES;
       break;
     }

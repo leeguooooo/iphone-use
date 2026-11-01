@@ -35,6 +35,7 @@ method = src[method_start:method_end]
 mock = r'''
 + (NSString *)elementTypeName:(NSInteger)t { return @"XCUIElementTypeOther"; }
 + (id)requestSnapshotForElement:(id)e maxDepth:(NSInteger)d maxNodes:(NSInteger)n error:(NSString **)err {
+  if (d<=1) return @{@"accessibilityElement":e};
   if ([e isEqual:@"app"]) return @{@"children":@[@{@"children":@[(providerMode==3 ? @{} : @{@"accessibilityElement":@"frontier"})]}]};
   if (providerMode == 1) return nil;
   // Model an AX implementation that silently includes subRoot in its node cap.
@@ -43,13 +44,17 @@ mock = r'''
   return @{@"accessibilityElement":@"frontier", @"children":children};
 }
 @end
-static void check(NSInteger cap, NSInteger calls, BOOL partial, NSInteger count) {
-  NSDictionary *tree = [IPURBridge runnerTreeForAXElement:@"app" maxDepth:3 maxNodes:cap extensionCallLimit:calls rememberKey:nil includeElements:NO];
+static void checkDepth(NSInteger depth, NSInteger cap, NSInteger calls, BOOL partial, NSInteger count) {
+  NSDictionary *tree = [IPURBridge runnerTreeForAXElement:@"app" maxDepth:depth maxNodes:cap extensionCallLimit:calls rememberKey:nil includeElements:NO];
   if (![tree[@"ok"] boolValue] || [tree[@"truncated"] boolValue] != partial || [tree[@"nodeCount"] integerValue] != count || (cap<=3 && [tree[@"extensionCalls"] integerValue]!=0)) {
     NSLog(@"coverage mismatch: cap=%ld calls=%ld count=%@ truncated=%@", (long)cap, (long)calls, tree[@"nodeCount"], tree[@"truncated"]); exit(1);
   }
 }
+static void check(NSInteger cap, NSInteger calls, BOOL partial, NSInteger count) {
+  checkDepth(3, cap, calls, partial, count);
+}
 int main(void) { @autoreleasepool {
+  checkDepth(1, 20, 4, YES, 1); // Root-only requests cannot exhaust a frontier.
   check(6, 4, YES, 6); // Hidden descendants must not become proof of absence.
   check(20, 4, NO, 7); // Exhaustive small tree remains complete.
   check(20, 0, YES, 3); // Unexpanded depth frontier.
@@ -60,7 +65,7 @@ int main(void) { @autoreleasepool {
   check(20, 4, YES, 3); // Failed subtree request.
   providerMode=3;
   check(20, 4, YES, 3); // Frontier has no AX element.
-  puts("native snapshot coverage: 7 cases passed (synthetic AX, no UI)");
+  puts("native snapshot coverage: 8 cases passed (synthetic AX, no UI)");
 } return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='ipu-native-coverage-') as work:
