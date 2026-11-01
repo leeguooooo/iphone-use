@@ -9891,16 +9891,24 @@ async fn type_text_chunked(
 ) -> RunnerControlOutcome {
     use crate::text_input::{char_count, chunk_timeout, split, typing_time, CHUNK_CHARS};
     use std::sync::atomic::Ordering;
-    let deadline = deadline
-        .checked_sub(TEXT_CHUNK_DEADLINE_MARGIN)
-        .unwrap_or(deadline);
-    if dispatch_allowed.is_some_and(|allowed| !allowed()) {
+    let margin = if char_count(text) > CHUNK_CHARS {
+        TEXT_CHUNK_DEADLINE_MARGIN
+    } else {
+        std::time::Duration::ZERO
+    };
+    let deadline = deadline.checked_sub(margin).unwrap_or(deadline);
+    if tokio::time::Instant::now() >= deadline || dispatch_allowed.is_some_and(|allowed| !allowed())
+    {
         return RunnerControlOutcome::NotSent;
     }
     let target = match w.input_target_for_text(text).await {
         Ok(target) => target,
         Err(error) => return runner_failure_outcome(w, actionable, &error, "text", detail),
     };
+    // Binding is a blocking read; an expired action cannot proceed to clear.
+    if tokio::time::Instant::now() >= deadline {
+        return RunnerControlOutcome::NotSent;
+    }
     if clear {
         if dispatch_allowed.is_some_and(|allowed| !allowed()) {
             return RunnerControlOutcome::NotSent;
@@ -27780,6 +27788,41 @@ mod tests {
                 &mut None, far_deadline(), None).await;
             assert_eq!(outcome, RunnerControlOutcome::Applied);
             assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), 3);
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn slow_input_binding_cannot_clear_after_the_action_deadline() {
+        block(async {
+            let mutations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = mutations.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.starts_with("POST /session ") {
+                    return r#"{"value":{"sessionId":"SESSION","capabilities":{"ipu:guardedInput":true}}}"#.into();
+                }
+                if request.contains("/wda/input-target") {
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                    return r#"{"value":{"token":"original-field"}}"#.into();
+                }
+                if request.contains("/clear") || request.contains("/wda/keys") {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                healthy_runner_responder(request)
+            });
+            let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+            let actionable = std::sync::atomic::AtomicBool::new(true);
+            let outcome = direct_agent_action(
+                &mut client,
+                &actionable,
+                &serde_json::json!({"type":"text","text":"new","clear":true}),
+                &mut None,
+                tokio::time::Instant::now() + std::time::Duration::from_millis(40),
+                None,
+            )
+            .await;
+            assert_eq!(outcome, RunnerControlOutcome::NotSent);
+            assert_eq!(mutations.load(std::sync::atomic::Ordering::SeqCst), 0);
             runner.shutdown();
         });
     }
