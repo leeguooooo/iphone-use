@@ -39,6 +39,15 @@ pub const OP_FILE_CLOSE: u64 = 0x14;
 /// `FileRefOpen` mode `r` (O_RDONLY).
 const MODE_READ_ONLY: u64 = 1;
 
+fn path_argument(path: &str) -> Result<Vec<u8>> {
+    if path.as_bytes().contains(&0) {
+        bail!("AFC path contains an embedded NUL");
+    }
+    let mut argument = path.as_bytes().to_vec();
+    argument.push(0);
+    Ok(argument)
+}
+
 /// A non-zero AFC status code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AfcError(pub u64);
@@ -295,7 +304,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AfcClient<S> {
 
     /// Entry names in `path`, without `.` and `..`.
     pub async fn read_dir(&mut self, path: &str) -> Result<Vec<String>> {
-        let reply = self.request(OP_READ_DIR, path.as_bytes()).await?;
+        let reply = self.request(OP_READ_DIR, &path_argument(path)?).await?;
         Ok(split_strings(&reply.data)
             .into_iter()
             .filter(|name| name != "." && name != "..")
@@ -303,14 +312,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AfcClient<S> {
     }
 
     pub async fn file_info(&mut self, path: &str) -> Result<FileInfo> {
-        let reply = self.request(OP_GET_FILE_INFO, path.as_bytes()).await?;
+        let reply = self
+            .request(OP_GET_FILE_INFO, &path_argument(path)?)
+            .await?;
         FileInfo::from_pairs(&parse_pairs(&reply.data))
     }
 
     /// Open `path` read-only; the handle goes to [`Self::read`] and [`Self::close`].
     pub async fn open_read(&mut self, path: &str) -> Result<u64> {
         let mut arguments = MODE_READ_ONLY.to_le_bytes().to_vec();
-        arguments.extend_from_slice(path.as_bytes());
+        arguments.extend_from_slice(&path_argument(path)?);
         let reply = self.request(OP_FILE_OPEN, &arguments).await?;
         if reply.operation != OP_FILE_OPEN_RESULT {
             bail!("AFC FileOpen answered operation {:#x}", reply.operation);
@@ -590,7 +601,7 @@ mod tests {
         assert!(is_status(&error, AfcError::NOT_FOUND), "{error:#}");
         let seen = device.await.unwrap();
         assert_eq!(seen[0].operation, OP_READ_DIR);
-        assert_eq!(seen[0].arguments, b"/");
+        assert_eq!(seen[0].arguments, b"/\0");
         assert_eq!((seen[0].number, seen[1].number), (0, 1));
     }
 
@@ -620,7 +631,7 @@ mod tests {
             &1u64.to_le_bytes(),
             "read-only mode"
         );
-        assert_eq!(&seen[0].arguments[8..], b"/a.ips");
+        assert_eq!(&seen[0].arguments[8..], b"/a.ips\0");
         assert_eq!(seen[1].operation, OP_FILE_READ);
         assert_eq!(&seen[1].arguments[..8], &5u64.to_le_bytes());
         assert_eq!(&seen[1].arguments[8..], &101u64.to_le_bytes());
@@ -800,6 +811,53 @@ mod tests {
     #[test]
     fn file_info_and_open_errors_surface() {
         block_on(file_info_and_open_errors_surface_body());
+    }
+
+    #[test]
+    fn path_requests_include_nul_terminators_on_the_wire() {
+        block_on(async {
+            let (host, peer) = tokio::io::duplex(4096);
+            let device = tokio::spawn(fake_device(
+                peer,
+                vec![
+                    (OP_DATA, vec![], b"saved.pdf\0".to_vec()),
+                    (
+                        OP_DATA,
+                        vec![],
+                        b"st_size\x005\0st_ifmt\0S_IFREG\0".to_vec(),
+                    ),
+                    (OP_FILE_OPEN_RESULT, 7u64.to_le_bytes().to_vec(), vec![]),
+                ],
+            ));
+            let mut client = AfcClient::new(host);
+            client.read_dir("/inbox").await.unwrap();
+            client.file_info("/inbox/saved.pdf").await.unwrap();
+            assert_eq!(client.open_read("/inbox/saved.pdf").await.unwrap(), 7);
+            let seen = device.await.unwrap();
+            assert_eq!(seen[0].arguments, b"/inbox\0");
+            assert_eq!(seen[1].arguments, b"/inbox/saved.pdf\0");
+            assert_eq!(&seen[2].arguments[8..], b"/inbox/saved.pdf\0");
+        });
+    }
+
+    #[test]
+    fn embedded_nul_paths_are_refused_without_sending_requests() {
+        block_on(async {
+            let (host, mut peer) = tokio::io::duplex(4096);
+            let mut client = AfcClient::new(host);
+            for error in [
+                client.read_dir("/a\0b").await.unwrap_err(),
+                client.file_info("/a\0b").await.unwrap_err(),
+                client.open_read("/a\0b").await.unwrap_err(),
+            ] {
+                assert!(error.to_string().contains("embedded NUL"));
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), peer.read_u8())
+                    .await
+                    .is_err()
+            );
+        });
     }
 
     async fn file_info_and_open_errors_surface_body() {
