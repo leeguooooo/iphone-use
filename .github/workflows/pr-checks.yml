@@ -104,6 +104,9 @@ jobs:
       - name: Native predicate literal semantics (no UI)
         run: swift scripts/test-predicate-literals.swift scripts/fixtures/predicate-literals.json
 
+      - name: Native snapshot coverage boundaries (synthetic AX, no UI)
+        run: python3 -I scripts/test-native-snapshot-coverage.py
+
       - name: Shared protocol tests
         run: cargo test -p core --locked
 

@@ -850,9 +850,11 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
     id element = IPURKVC(frontier.snapshot, @"accessibilityElement");
     if (element == nil) { walk.truncated = YES; continue; }
     calls += 1;
+    // The provider may count its root toward the cap; that root is already in
+    // our tree. Request it in addition to the remaining serializable nodes.
     id subRoot = [self requestSnapshotForElement:element
                                         maxDepth:acceptedDepth
-                                        maxNodes:maxNodes - walk.nodeCount
+                                        maxNodes:maxNodes - walk.nodeCount + 1
                                            error:NULL];
     if (subRoot == nil) { walk.truncated = YES; continue; }
     NSMutableArray<IPURFrontier *> *subLeaves = [NSMutableArray array];

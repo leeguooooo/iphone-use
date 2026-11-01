@@ -230,92 +230,98 @@ fn sparse_diagnosis_preserves_the_failure_and_never_replays() {
 
 #[test]
 fn value_diagnosis_through_the_cli_respects_availability_and_never_retries() {
-    for expectation in ["present", "absent"] {
-        for (rows, value, reason, exact) in [
-            (
-                serde_json::json!([{"identifier":"save","value":"prefix","value_truncated":true}]),
-                "prefix",
-                "locator_state_unproven",
-                0,
-            ),
-            (
-                serde_json::json!([{"identifier":"save","kind":"SecureTextField","value":"prefix"}]),
-                "prefix",
-                "locator_state_unproven",
-                0,
-            ),
-            (
-                serde_json::json!([{"identifier":"save"}]),
-                "prefix",
-                "locator_state_unproven",
-                0,
-            ),
-            (
-                serde_json::json!([{"identifier":"save","value":"","value_known":true}]),
-                "",
-                "locator_matches_now",
-                1,
-            ),
-            (
-                serde_json::json!([{"identifier":"save","value_known":true}]),
-                "",
-                "locator_no_match",
-                0,
-            ),
-            (
-                serde_json::json!([{"identifier":"save","value":"prefix","value_known":true},{"identifier":"save","value":"prefix","value_truncated":true}]),
-                "prefix",
-                "locator_state_unproven",
-                1,
-            ),
-        ] {
-            let store = tempfile::tempdir().unwrap();
-            let flow = store.path().join("flow.json");
-            std::fs::write(&flow,serde_json::json!({"version":1,"name":"Value availability","risk":"read_only",
-                "steps":[{"kind":"wait_for","expect":{expectation:[{"identifier":"save","value":value}]},"timeout_ms":1000,"poll_ms":100}]}).to_string()).unwrap();
-            let observation = if expectation == "present" {
-                serde_json::json!({"read":true,"missing_present":[0]})
-            } else {
-                serde_json::json!({"read":true,"violated_absent":[0]})
-            };
-            let failure=serde_json::json!({"ok":false,"error":"expectation_timeout","failed_step":0,"applied_actions":0,"outcome":"not_sent","retry_safe":true,"observation":observation}).to_string();
-            let tree = serde_json::json!({"locator_state":1,"elements":rows}).to_string();
-            let mut script = compat_preamble();
-            script.extend([
-                ("200 OK", Some(STATUS)),
-                ("409 Conflict", Some(failure.as_str())),
-                ("200 OK", Some(tree.as_str())),
-            ]);
-            let (url, requests) = mock_daemon(&script);
-            let run = flow_run(&url, &flow, store.path(), None);
-            assert_eq!(run.code, Some(1), "{}", run.stdout);
-            let result = run.json.unwrap();
-            let expected = if expectation == "absent" && exact > 0 {
-                "still_present"
-            } else {
-                reason
-            };
-            assert_eq!(result["diagnosis"]["reason"], expected, "{result}");
-            assert_eq!(result["diagnosis"]["exact_matches"], exact);
-            assert_eq!(result["error"], "expectation_timeout");
-            assert_eq!(result["outcome"], "not_sent");
-            assert_eq!(result["applied_actions"], 0);
-            assert_eq!(result["retry_safe"], true);
-            let sent: Vec<_> = requests.try_iter().collect();
-            assert_eq!(
-                sent.iter()
-                    .filter(|r| r.starts_with("POST /agent/actions"))
-                    .count(),
-                1,
-                "{sent:?}"
-            );
-            assert_eq!(
-                sent.iter()
-                    .filter(|r| r.starts_with("GET /agent/elements?locator_state=1&ocr=off "))
-                    .count(),
-                1,
-                "{sent:?}"
-            );
+    for complete in [true, false] {
+        for expectation in ["present", "absent"] {
+            for (rows, value, reason, exact) in [
+                (
+                    serde_json::json!([{"identifier":"save","value":"prefix","value_truncated":true}]),
+                    "prefix",
+                    "locator_state_unproven",
+                    0,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save","kind":"SecureTextField","value":"prefix"}]),
+                    "prefix",
+                    "locator_state_unproven",
+                    0,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save"}]),
+                    "prefix",
+                    "locator_state_unproven",
+                    0,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save","value":"","value_known":true}]),
+                    "",
+                    "locator_matches_now",
+                    1,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save","value_known":true}]),
+                    "",
+                    "locator_no_match",
+                    0,
+                ),
+                (
+                    serde_json::json!([{"identifier":"save","value":"prefix","value_known":true},{"identifier":"save","value":"prefix","value_truncated":true}]),
+                    "prefix",
+                    "locator_state_unproven",
+                    1,
+                ),
+            ] {
+                let store = tempfile::tempdir().unwrap();
+                let flow = store.path().join("flow.json");
+                std::fs::write(&flow,serde_json::json!({"version":1,"name":"Value availability","risk":"read_only",
+                    "steps":[{"kind":"wait_for","expect":{expectation:[{"identifier":"save","value":value}]},"timeout_ms":1000,"poll_ms":100}]}).to_string()).unwrap();
+                let observation = if expectation == "present" {
+                    serde_json::json!({"read":true,"missing_present":[0]})
+                } else {
+                    serde_json::json!({"read":true,"violated_absent":[0]})
+                };
+                let failure=serde_json::json!({"ok":false,"error":"expectation_timeout","failed_step":0,"applied_actions":0,"outcome":"not_sent","retry_safe":true,"observation":observation}).to_string();
+                let tree = serde_json::json!({"locator_state":1,"elements":rows,"coverage":if complete {"complete"} else {"unknown"},"partial":false}).to_string();
+                let mut script = compat_preamble();
+                script.extend([
+                    ("200 OK", Some(STATUS)),
+                    ("409 Conflict", Some(failure.as_str())),
+                    ("200 OK", Some(tree.as_str())),
+                ]);
+                let (url, requests) = mock_daemon(&script);
+                let run = flow_run(&url, &flow, store.path(), None);
+                assert_eq!(run.code, Some(1), "{}", run.stdout);
+                let result = run.json.unwrap();
+                let expected = if expectation == "absent" && exact > 0 {
+                    "still_present"
+                } else if exact > 0 {
+                    "locator_matches_now"
+                } else if !complete {
+                    "locator_state_unproven"
+                } else {
+                    reason
+                };
+                assert_eq!(result["diagnosis"]["reason"], expected, "{result}");
+                assert_eq!(result["diagnosis"]["exact_matches"], exact);
+                assert_eq!(result["error"], "expectation_timeout");
+                assert_eq!(result["outcome"], "not_sent");
+                assert_eq!(result["applied_actions"], 0);
+                assert_eq!(result["retry_safe"], true);
+                let sent: Vec<_> = requests.try_iter().collect();
+                assert_eq!(
+                    sent.iter()
+                        .filter(|r| r.starts_with("POST /agent/actions"))
+                        .count(),
+                    1,
+                    "{sent:?}"
+                );
+                assert_eq!(
+                    sent.iter()
+                        .filter(|r| r.starts_with("GET /agent/elements?locator_state=1&ocr=off "))
+                        .count(),
+                    1,
+                    "{sent:?}"
+                );
+            }
         }
     }
 }
