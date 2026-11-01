@@ -1,9 +1,30 @@
 import UIKit
 
+final class SelectorWindow: UIWindow {
+  var record: ((String) -> Void)?
+  override func sendEvent(_ event: UIEvent) {
+    let began = (event.allTouches ?? []).filter { $0.phase == .began }
+    super.sendEvent(event)
+    for touch in began {
+      var node = touch.view
+      var recipient = "background"
+      while let view = node {
+        if let button = view as? UIButton, let identifier = button.accessibilityIdentifier {
+          recipient = identifier
+          break
+        }
+        node = view.superview
+      }
+      record?(recipient)
+    }
+  }
+}
+
 final class SelectorController: UIViewController {
   let runID: String
   var rows = [[String: Any]]()
   var touches = 0
+  var received: [String:Int] = [:]
   var lastTapped: String?
   init(runID: String) { self.runID = runID; super.init(nibName: nil, bundle: nil) }
   required init?(coder: NSCoder) { fatalError("fixture only") }
@@ -16,7 +37,8 @@ final class SelectorController: UIViewController {
       ("selector.unicode", "保存\n'O\\K'🙂", nil, true, true),
       ("selector.empty", "Explicit empty", "", true, false),
       ("selector.missing-value", "Missing value", nil, true, false),
-      ("", "Label-only name", nil, true, false)
+      ("", "Label-only name", nil, true, false),
+      (" \t\u{3000}selector.literal\nID\u{3000}\t ", "Literal identifier", nil, true, true)
     ]
     for (index, definition) in definitions.enumerated() {
       let (identifier, label, value, enabled, button) = definition
@@ -36,7 +58,7 @@ final class SelectorController: UIViewController {
       element.accessibilityValue = value
       if !button { element.accessibilityTraits = .staticText }
       view.addSubview(element)
-      rows.append(["identifier": identifier, "label": label,
+      rows.append(["identifier": element.accessibilityIdentifier ?? "", "label": element.accessibilityLabel ?? "",
                    "value": element.accessibilityValue.map { $0 as Any } ?? NSNull(),
                    "enabled": enabled, "kind": button ? "Button" : "StaticText"])
     }
@@ -53,6 +75,7 @@ final class SelectorController: UIViewController {
   }
   func saveState() {
     write(["run_id":runID, "pid":ProcessInfo.processInfo.processIdentifier, "touches":touches,
+           "received":received,"input_touches":received.values.reduce(0,+),
            "last_tapped":lastTapped.map { $0 as Any } ?? NSNull(),
            "application_state":UIApplication.shared.applicationState.rawValue,
            "key_window":view.window?.isKeyWindow ?? false], name:"selector-state.json")
@@ -71,8 +94,15 @@ final class SelectorSceneDelegate: UIResponder, UIWindowSceneDelegate {
     guard let scene = scene as? UIWindowScene else { return }
     let args = ProcessInfo.processInfo.arguments
     guard let index = args.firstIndex(of:"--run-id"), index + 1 < args.count, UUID(uuidString:args[index+1]) != nil else { return }
-    let window = UIWindow(windowScene:scene)
-    window.rootViewController = SelectorController(runID:args[index+1]); window.makeKeyAndVisible(); self.window = window
+    let window = SelectorWindow(windowScene:scene)
+    let controller = SelectorController(runID:args[index+1])
+    window.rootViewController = controller
+    window.record = { [weak controller] recipient in
+      guard let controller else { return }
+      controller.received[recipient,default:0] += 1
+      controller.saveState()
+    }
+    window.makeKeyAndVisible(); self.window = window
   }
 }
 UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, NSStringFromClass(SelectorAppDelegate.self))

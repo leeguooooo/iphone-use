@@ -6,7 +6,7 @@ on:
       probe:
         type: choice
         default: selector
-        options: [selector, agent-selector, list, wait, state, tap-race, tap-guard, tap-identity-race, tap-identity-guard]
+        options: [selector, literal-id, agent-selector, list, wait, state, tap-race, tap-guard, tap-identity-race, tap-identity-guard]
       platform:
         type: choice
         default: xcode16.4-ios18.5
@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.2-ios18.2 || "$IPU_DIAGNOSTIC_PLATFORM" == xcode16.4-ios18.5 ]]
-          [[ "$ORACLE_PROBE" == selector || "$ORACLE_PROBE" == agent-selector || "$ORACLE_PROBE" == list || "$ORACLE_PROBE" == wait || "$ORACLE_PROBE" == state || "$ORACLE_PROBE" == tap-race || "$ORACLE_PROBE" == tap-guard || "$ORACLE_PROBE" == tap-identity-race || "$ORACLE_PROBE" == tap-identity-guard ]]
+          [[ "$ORACLE_PROBE" == selector || "$ORACLE_PROBE" == literal-id || "$ORACLE_PROBE" == agent-selector || "$ORACLE_PROBE" == list || "$ORACLE_PROBE" == wait || "$ORACLE_PROBE" == state || "$ORACLE_PROBE" == tap-race || "$ORACLE_PROBE" == tap-guard || "$ORACLE_PROBE" == tap-identity-race || "$ORACLE_PROBE" == tap-identity-guard ]]
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = "$ORACLE_IOS"
           python3 -I scripts/test-probe-recipe.py

@@ -46,5 +46,21 @@
   {
     "input": "\nQA\r\t'\\n",
     "literal": "'\\u000aQA\\u000d\\u0009\\'\\\\n'"
+  },
+  {
+    "input": " \t　selector.literal\nID　\t ",
+    "literal": "' \\u0009　selector.literal\\u000aID　\\u0009 '"
+  },
+  {
+    "input": "selector.literal\nID",
+    "literal": "'selector.literal\\u000aID'"
+  },
+  {
+    "input": "\t",
+    "literal": "'\\u0009'"
+  },
+  {
+    "input": "　标识　",
+    "literal": "'　标识　'"
   }
 ]

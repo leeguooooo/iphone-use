@@ -200,6 +200,11 @@ class Daemon:
         return last
 
 
+class NoNativeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def runner_call(args, target, body=None):
     record = json.loads(args.runner_record.read_text())
     if str(record.get("udid", "")).lower() != args.udid.lower():
@@ -209,14 +214,18 @@ def runner_call(args, target, body=None):
         raise RuntimeError("runner record has no valid port")
     # This disposable instance's token only; never runner_auth.token(), whose
     # default may belong to a personal phone. No token or auth header is logged.
-    token = (args.runner_record.parent / "runner-token").read_text().strip()
+    token_path = args.runner_record.parent / "runner-token"
+    if token_path.is_symlink() or not token_path.is_file() or token_path.resolve().parent != args.runner_record.parent.resolve():
+        raise RuntimeError("disposable runner token is not an owned regular file")
+    token = token_path.read_text().strip()
     if not re.fullmatch(r"[0-9a-f]{32,128}", token):
         raise RuntimeError("invalid disposable runner token")
     data = None if body is None else json.dumps(body).encode()
     method = "GET" if body is None else "POST"
     request = urllib.request.Request(f"http://127.0.0.1:{port}" + target, data=data,
         headers={"Content-Type": "application/json", "Authorization": authorization(token, method, target, data or b"")})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoNativeRedirect())
+    with opener.open(request, timeout=30) as response:
         return json.load(response), response.headers
 
 

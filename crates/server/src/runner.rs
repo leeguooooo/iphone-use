@@ -3261,6 +3261,12 @@ fn runner_bool(node: &serde_json::Value, key: &str) -> Option<bool> {
     }
 }
 
+/// An accessibility identifier is opaque. Whitespace is part of its identity.
+fn accessibility_identifier(node: &serde_json::Value) -> Option<String> {
+    node.get("rawIdentifier").and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty()).map(str::to_string)
+}
+
 fn non_empty_string(node: &serde_json::Value, key: &str) -> Option<String> {
     node.get(key)
         .and_then(serde_json::Value::as_str)
@@ -3507,7 +3513,7 @@ fn flatten_node(
         out.push(ElementRow {
             kind,
             label,
-            identifier: non_empty_string(node, "rawIdentifier"),
+            identifier: accessibility_identifier(node),
             rect: [g("x"), g("y"), g("width"), g("height")],
             depth,
             value_truncated,
@@ -5229,6 +5235,33 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn flatten_preserves_opaque_identifier_bytes_for_exact_name_and_identifier_selectors() {
+        for identifier in ["  opaque\nID  ", "\t", "\u{3000}标识\u{3000}"] {
+            let tree=serde_json::json!({"type":"XCUIElementTypeButton","label":"Literal control","rawIdentifier":identifier,
+                "placeholderValue":"  Search  ","rect":{"x":20,"y":80,"width":330,"height":70}});
+            let mut rows=Vec::new();flatten_tree(&tree,0,&mut rows);
+            assert_eq!(rows.len(),1);
+            assert_eq!(rows[0].identifier.as_deref(),Some(identifier));
+            // Placeholder normalization is a separate existing policy.
+            assert_eq!(rows[0].placeholder.as_deref(),Some("Search"));
+            let wire=serde_json::to_value(&rows[0]).unwrap();
+            assert_eq!(wire["identifier"],identifier);
+            for field in ["identifier","name"] {
+                let selector:core::element_selector::ElementSelector=serde_json::from_value(serde_json::json!({(field):identifier})).unwrap();
+                assert!(selector.validate().is_ok());assert!(selector.matches(&wire));
+                let trimmed:core::element_selector::ElementSelector=serde_json::from_value(serde_json::json!({(field):identifier.trim()})).unwrap();
+                assert!(!trimmed.matches(&wire));
+            }
+        }
+        for raw in [serde_json::Value::Null,serde_json::json!(""),serde_json::json!(false)] {
+            let mut rows=Vec::new();flatten_tree(&serde_json::json!({"type":"XCUIElementTypeButton","label":"Fallback","rawIdentifier":raw,"rect":{"x":20,"y":80,"width":330,"height":70}}),0,&mut rows);
+            assert_eq!(rows[0].identifier,None);
+            let selector:core::element_selector::ElementSelector=serde_json::from_value(serde_json::json!({"name":"Fallback"})).unwrap();
+            assert!(selector.matches(&serde_json::to_value(&rows[0]).unwrap()));
+        }
+    }
 
     #[test]
     fn flatten_preserves_boolean_knowledge_while_wire_stays_sparse() {

@@ -23943,6 +23943,24 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_locator_and_native_query_preserve_opaque_identifier_whitespace() {
+        for (identifier, literal) in [
+            ("  opaque\nID  ", "'  opaque\\u000aID  '"),
+            ("\t", "'\\u0009'"),
+            ("\u{3000}标识\u{3000}", "'\u{3000}标识\u{3000}'"),
+        ] {
+            let row=crate::runner::ElementRow {kind:"Button".into(),label:"Literal control".into(),
+                identifier:Some(identifier.into()),rect:[20.0,80.0,330.0,70.0],..Default::default()};
+            let locator=snapshot_row_locator(&row).unwrap();
+            assert_eq!(locator.identifier.as_deref(),Some(identifier));
+            assert_eq!(agent_locator_assessment(&row,&locator),Some(true));
+            let (_,query)=locator_runner_query(&locator).unwrap();
+            assert!(query.contains(&format!("identifier == {literal}")),"{query}");
+            assert_eq!(serde_json::to_value(&locator).unwrap()["identifier"],identifier);
+        }
+    }
+
+    #[test]
     fn locator_runner_query_uses_element_clickable_predicate_fields() {
         let locator = AgentElementLocator {
             label_contains: None,
