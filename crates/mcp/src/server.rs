@@ -3007,10 +3007,10 @@ impl PhoneHandler {
 
 /// Drop the parts of a schemars schema a model never needs: the meta-schema
 /// URI, generated titles (the property name already says it), numeric
-/// `format` tags (`uint`, `double`, …) and `minimum: 0` on unsigned counts.
-/// Every other key — types, descriptions, enums, required lists, ranges with
-/// meaning — is kept. Keys under `properties` are property NAMES, never
-/// schema keywords, so they are never removed (a parameter may be called
+/// `format` tags (`uint`, `double`, …).
+/// Every validation constraint — types, enums, required lists and numeric
+/// bounds including zero — is kept. Keys under `properties` are property NAMES,
+/// never schema keywords, so they are never removed (a parameter may be called
 /// `title`).
 fn slim_schema(value: &mut serde_json::Value) {
     match value {
@@ -3027,9 +3027,6 @@ fn slim_schema(value: &mut serde_json::Value) {
                 })
             }) {
                 map.remove("format");
-            }
-            if map.get("minimum") == Some(&serde_json::json!(0)) {
-                map.remove("minimum");
             }
             for (key, child) in map.iter_mut() {
                 if key == "properties" || key == "$defs" || key == "definitions" {
@@ -5950,9 +5947,20 @@ mod tests {
         assert!(props["title"].get("title").is_none());
         assert!(props["x"].get("format").is_none());
         assert_eq!(props["x"]["description"], "0–1");
-        assert!(props["count"].get("minimum").is_none());
+        assert_eq!(props["count"]["minimum"], 0, "zero is a validation bound, not schema noise");
         assert_eq!(props["pct"]["minimum"], 1, "a meaningful bound is kept");
         assert_eq!(schema["required"], serde_json::json!(["x", "title"]));
+    }
+
+    #[test]
+    fn schema_slimming_preserves_zero_bounds_in_definitions_and_normalized_ranges() {
+        let mut schema=serde_json::json!({"$defs":{"ordinal":{"type":"integer","minimum":0,"maximum":199}},
+            "properties":{"ratio":{"type":"number","minimum":0,"maximum":1}}});
+        slim_schema(&mut schema);
+        assert_eq!(schema["$defs"]["ordinal"]["minimum"],0);
+        assert_eq!(schema["$defs"]["ordinal"]["maximum"],199);
+        assert_eq!(schema["properties"]["ratio"]["minimum"],0);
+        assert_eq!(schema["properties"]["ratio"]["maximum"],1);
     }
 
     #[test]
@@ -6239,7 +6247,7 @@ mod tests {
         for selector in [serde_json::json!(["Button",null,null,null,null,null]),serde_json::json!(["Button"])] {
             assert!(serde_json::from_value::<ElementsParams>(serde_json::json!({"selector":selector})).is_err());
         }
-        let tool=PhoneHandler::tool_router().list_all().into_iter().find(|tool|tool.name.as_ref()=="phone_elements").unwrap();
+        let tool=listed_tools(&ToolProfile::All).into_iter().find(|tool|tool.name.as_ref()=="phone_elements").unwrap();
         let schema=serde_json::to_value(tool.input_schema.as_ref()).unwrap();
         fn resolve<'a>(root: &'a serde_json::Value, value: &'a serde_json::Value) -> &'a serde_json::Value {
             value.get("$ref").and_then(|v|v.as_str()).and_then(|reference|reference.strip_prefix('#'))
