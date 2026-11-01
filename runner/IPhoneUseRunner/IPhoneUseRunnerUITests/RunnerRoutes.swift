@@ -396,18 +396,27 @@ extension RunnerTests {
     guard node.rect.width > 0, node.rect.height > 0 else {
       throw RunnerError.failed("element \(id) has an empty frame and cannot be clicked")
     }
-    // An element below the visible page (a web sheet's link) is scrolled into view first, like
-    // XCUIElement's own tap does; still off the screen afterwards is a refusal, never a tap.
     let screen = windowSizePoints()
-    if screen.width > 0, !TapBounds.onScreen(node.center, screen) {
-      try? scrollIntoView(id)
-      node = try freshNode(id)
-      guard TapBounds.onScreen(node.center, screen) else {
-        throw RunnerError.invalidArgument("element \(id) is off the screen and could not be scrolled into view; nothing was tapped")
+    var revealAttempted = false
+    do {
+      if screen.width > 0, !TapBounds.onScreen(node.center, screen) {
+        // From here even a later stale-element read can follow delivered input.
+        // A 404 must remain proof of no dispatch only before this boundary.
+        revealAttempted = true
+        try? scrollIntoView(id)
+        node = try freshNode(id)
+        guard TapBounds.onScreen(node.center, screen) else {
+          throw RunnerError.invalidArgument("element remains off screen after reveal")
+        }
       }
+      try tapPoint(node.center)
+      return .value(NSNull())
+    } catch {
+      if revealAttempted {
+        throw RunnerError.failed("click outcome unknown after reveal; no automatic retry")
+      }
+      throw error
     }
-    try tapPoint(node.center)
-    return .value(NSNull())
   }
 
   /// Makes `id` the keyboard target: taps it unless it already has focus, then waits briefly for
