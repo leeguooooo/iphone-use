@@ -8901,6 +8901,19 @@ fn unique_locator_index(rows: &[crate::runner::ElementRow], locator: &AgentEleme
     known.first().copied().ok_or(UniqueLabelTapError::NotFound)
 }
 
+async fn send_checked_target_tap(
+    w: &mut crate::runner::RunnerClient, id: &str, expected: [f64; 4], point: Option<(f64,f64)>, revealed: bool,
+) -> Result<(), UniqueLabelTapError> {
+    use crate::runner::CheckedTapOutcome;
+    match w.checked_element_tap(id, expected, point).await {
+        Ok(CheckedTapOutcome::Applied) => Ok(()),
+        Ok(CheckedTapOutcome::TargetChanged) if !revealed => Err(UniqueLabelTapError::Refused("target_changed", "Target changed after its frame was checked; no tap sent. Read again before a new action.")),
+        Ok(CheckedTapOutcome::Unsupported) if !revealed => Err(UniqueLabelTapError::Refused("runner_update_required", "Update the Native Runner to support checked target taps; no tap sent.")),
+        Ok(_) => Err(UniqueLabelTapError::AfterDispatch(anyhow::anyhow!("checked target refused after reveal; no further tap sent"))),
+        Err(error) => Err(UniqueLabelTapError::AfterDispatch(error)),
+    }
+}
+
 async fn tap_unique_locator(
     w: &mut crate::runner::RunnerClient,
     locator: &AgentElementLocator,
@@ -8981,18 +8994,15 @@ async fn tap_unique_locator(
         // explicit point mode continues to mean the live centre itself.
         if revealed && !via_point {
             if let Some(point) = clear_tap_point(&proof_rows, proof_index).filter(|point| on_screen(*point)) {
-                return w.tap_point(point.0, point.1).await.map_err(UniqueLabelTapError::AfterDispatch);
+                return send_checked_target_tap(w, &element_id, live, Some(point), revealed).await;
             }
         }
         return Err(refuse("element_occluded", ELEMENT_OCCLUDED_HINT));
     }
     if via_point {
-        return w.tap_point(center.0, center.1).await.map_err(UniqueLabelTapError::AfterDispatch);
+        return send_checked_target_tap(w, &element_id, live, Some(center), revealed).await;
     }
-    w.click_element(&element_id).await.map_err(|error| {
-        if !revealed && runner_error_is_missing_element(&error) { UniqueLabelTapError::NotFound }
-        else { UniqueLabelTapError::AfterDispatch(error) }
-    })
+    send_checked_target_tap(w, &element_id, live, None, revealed).await
 }
 
 fn runner_predicate_literal(value: &str) -> String {

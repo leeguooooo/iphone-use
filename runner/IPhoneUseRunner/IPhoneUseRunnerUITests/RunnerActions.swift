@@ -2,6 +2,7 @@
 // Pure logic, no XCTest, so runner/unit-check.sh can exercise it on the Mac.
 
 import CoreGraphics
+import CoreFoundation
 import Foundation
 
 /// A synthesis error may follow delivered input. Only capability absence,
@@ -19,6 +20,51 @@ enum GestureDelivery {
       throw RunnerError.failed("\(name) synthesis outcome unknown: \(error); no coordinate fallback attempted")
     }
     return "synthesized"
+  }
+}
+
+/// A target-bound tap may execute only at the pose the caller checked.
+struct CheckedElementTap {
+  let expected: CGRect
+  let requestedPoint: CGPoint?
+
+  init(_ body: [String: Any]) throws {
+    guard Set(body.keys).isSubset(of: ["expected_rect", "point"]) else {
+      throw RunnerError.invalidArgument("unknown checked tap field")
+    }
+    func numbers(_ value: Any?, count: Int) throws -> [Double] {
+      guard let values = value as? [Any], values.count == count else {
+        throw RunnerError.invalidArgument("checked tap requires a numeric array")
+      }
+      return try values.map { item in
+        guard let value = item as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(), value.doubleValue.isFinite else {
+          throw RunnerError.invalidArgument("checked tap coordinates must be finite numbers")
+        }
+        return value.doubleValue
+      }
+    }
+    let rect = try numbers(body["expected_rect"], count: 4)
+    guard rect[2] > 0, rect[3] > 0 else { throw RunnerError.invalidArgument("checked tap requires a non-empty frame") }
+    expected = CGRect(x: rect[0], y: rect[1], width: rect[2], height: rect[3])
+    if let supplied = body["point"] {
+      let point = try numbers(supplied, count: 2)
+      requestedPoint = CGPoint(x: point[0], y: point[1])
+    } else { requestedPoint = nil }
+  }
+
+  func point(live: CGRect, screen: CGSize) throws -> CGPoint {
+    let actual = [live.minX, live.minY, live.width, live.height]
+    let wanted = [expected.minX, expected.minY, expected.width, expected.height]
+    guard actual.allSatisfy({ $0.isFinite }), live.width > 0, live.height > 0,
+          zip(actual, wanted).allSatisfy({ pair in abs(pair.0 - pair.1) <= 1 }) else {
+      throw RunnerError(status: 409, code: "target changed", message: "target frame changed; no tap sent")
+    }
+    let point = requestedPoint ?? CGPoint(x: live.midX, y: live.midY)
+    guard point.x >= live.minX, point.x <= live.maxX, point.y >= live.minY, point.y <= live.maxY,
+          TapBounds.onScreen(point, screen) else {
+      throw RunnerError(status: 409, code: "target changed", message: "checked point is no longer valid; no tap sent")
+    }
+    return point
   }
 }
 

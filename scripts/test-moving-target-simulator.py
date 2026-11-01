@@ -83,7 +83,7 @@ def judge_case(case, body, delta, established, expect_race, activation_delta=0):
         return body.get('ok') is True and delta['race.target'] == 1 and wrong == 0 and activation_delta == 1
     if not established:
         return False
-    if case == 'after-rect':
+    if case in ('after-rect', 'after-rect-point'):
         if expect_race:
             return wrong == 1 and delta['race.target'] == 0
         return body.get('ok') is False and body.get('error') == 'target_changed' and body.get('outcome') == 'not_sent' and body.get('retry_safe') is True and all(v == 0 for v in delta.values())
@@ -115,6 +115,7 @@ def main():
         parser.add_argument('--' + name, required=True)
     for name in ('mcp', 'runner-record', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--include-point', action='store_true')
     parser.add_argument('--expect-after-read-race', action='store_true', help='Diagnostic only: require observed wrong recipient, never acceptance')
     args = parser.parse_args()
     uuid.UUID(args.udid)
@@ -323,7 +324,9 @@ def main():
             except (OSError, RuntimeError):
                 assert time.monotonic() < until, 'proxy consumer not ready'
                 time.sleep(0.1)
-        for case, via, hook in [('control', 'element', None), ('after-query', 'element', 'after-query'), ('after-rect', 'element', 'after-rect')]:
+        cases = [('control', 'element', None), ('after-query', 'element', 'after-query'), ('after-rect', 'element', 'after-rect')]
+        if args.include_point: cases.append(('after-rect-point', 'point', 'after-rect'))
+        for case, via, hook in cases:
             before = command(False)
             current_before = before
             target_ids.clear()
@@ -354,7 +357,7 @@ def main():
                                 after['activated']['race.target'] - before['activated']['race.target'])
             if case == 'control':
                 passed = passed and any(t['method'] == 'POST' and t['path'].endswith('/elements') and t['status'] == 200 for t in traffic)
-                passed = passed and any(t['method'] == 'POST' and t['path'].endswith('/click') and t['status'] == 200 for t in traffic)
+                passed = passed and any(t['method'] == 'POST' and t['path'].endswith(('/click', '/ipu/tap')) and t['status'] == 200 for t in traffic)
             if case == 'after-query':
                 daemon_log = (args.out / 'proxy-daemon.log').read_text(errors='replace')
                 passed = passed and body.get('error') == 'outcome_unknown' and body.get('retry_safe') is False
@@ -363,7 +366,7 @@ def main():
                 passed = passed and 'element_occluded after reveal; no tap sent' in daemon_log
 
             state['cases'].append({'name': case, 'passed': passed, 'delta': delta, 'established': established,
-                                   'diagnostic_counterexample': case == 'after-rect' and args.expect_after_read_race})
+                                   'diagnostic_counterexample': case in ('after-rect', 'after-rect-point') and args.expect_after_read_race})
             assert passed, f'{case}: independent touch recipients violate expectation: {delta}'
         active, _ = native_call('/wda/activeAppInfo')
         assert active['value']['bundleId'] == BUNDLE and active['value']['pid'] == expected_pid

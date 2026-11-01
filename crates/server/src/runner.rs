@@ -1105,6 +1105,34 @@ impl RunnerClient {
         Ok(())
     }
 
+    /// A new endpoint binds the final event to the caller's checked frame.
+    /// Legacy route absence never permits an unguarded click fallback.
+    pub async fn checked_element_tap(&mut self, element_id: &str, expected: [f64; 4], point: Option<(f64, f64)>) -> Result<CheckedTapOutcome> {
+        let sid = self.ensure_session().await?.to_string();
+        let mut body = serde_json::json!({"expected_rect":expected});
+        if let Some((x,y)) = point { body["point"] = serde_json::json!([x,y]); }
+        let response = self.post_req(format!("{}/session/{}/element/{}/ipu/tap",self.base,sid,element_id))
+            .json(&body).send_signed(&self.auth).await.context("POST checked element tap")?;
+        match ensure_runner_success(response,"POST checked element tap").await {
+            Ok(_) => Ok(CheckedTapOutcome::Applied),
+            Err(error) => {
+                if let Some(http) = error.downcast_ref::<RunnerHttpError>() {
+                    if http.status == reqwest::StatusCode::CONFLICT && http.code.as_deref() == Some("target changed") {
+                        return Ok(CheckedTapOutcome::TargetChanged);
+                    }
+                    if http.status == reqwest::StatusCode::NOT_FOUND {
+                        match http.code.as_deref() {
+                            Some("unknown command") => return Ok(CheckedTapOutcome::Unsupported),
+                            Some("stale element reference" | "no such element") => return Ok(CheckedTapOutcome::TargetChanged),
+                            _ => {}
+                        }
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Type a literal string into an element (`POST .../element/:id/value`).
     /// runner sends it through the on-device text input, so **CJK goes in directly**
     /// — no keycode mapping, no input-method interference.
@@ -3011,6 +3039,9 @@ impl SnapshotCoverage {
         }
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckedTapOutcome { Applied, TargetChanged, Unsupported }
+
 pub struct ElementMatches {
     pub ids: Vec<String>,
     pub coverage: SnapshotCoverage,

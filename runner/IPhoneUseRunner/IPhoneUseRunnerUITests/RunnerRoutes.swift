@@ -103,6 +103,7 @@ extension RunnerTests {
       if match(parts, "element") != nil { return try findElement(request, from: nil) }
       if let id = match(parts, "element/:id/elements")?.first { return try findElements(request, from: id) }
       if let id = match(parts, "element/:id/element")?.first { return try findElement(request, from: id) }
+      if let id = match(parts, "element/:id/ipu/tap")?.first { return try checkedTapElement(id, request) }
       if let id = match(parts, "element/:id/click")?.first { return try clickElement(id) }
       if let id = match(parts, "element/:id/value")?.first { return try setElementValue(id, request) }
       if let id = match(parts, "element/:id/clear")?.first { return try clearElement(id) }
@@ -389,6 +390,20 @@ extension RunnerTests {
     _ = try gesture("tap", synthesized: { IPURBridge.synthesizeTap(at: point, pid: 0) }) { app in
       coordinate(app, point).tap()
     }
+  }
+
+  private func checkedTapElement(_ id: String, _ request: HTTPRequest) throws -> HTTPResponse {
+    let plan = try CheckedElementTap(request.jsonObject())
+    let node = try freshNode(id)
+    guard node.axElement != nil else {
+      throw RunnerError(status: 409, code: "target changed", message: "live target unavailable; no tap sent")
+    }
+    let point = try plan.point(live: node.rect, screen: windowSizePoints())
+    // No internal scroll or alternate implementation: after this boundary an
+    // error may follow input, and the host must never replay or fall back.
+    do { try tapPoint(point) }
+    catch { throw RunnerError.failed("checked tap outcome unknown after dispatch; no automatic retry") }
+    return .value(NSNull())
   }
 
   private func clickElement(_ id: String) throws -> HTTPResponse {

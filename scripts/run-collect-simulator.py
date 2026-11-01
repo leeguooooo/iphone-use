@@ -24,6 +24,7 @@ PROBES = {
     'agent-selector': ('test-agent-selector-simulator.py', 7),
     'wait': ('test-wait-simulator.py', 22),
     'tap-race': ('test-moving-target-simulator.py', 3),
+    'tap-guard': ('test-moving-target-simulator.py', 4),
 }
 
 
@@ -238,6 +239,7 @@ def main():
             ('conformance', [], 'cases'), ('default-conformance', ['--without-end-label'], 'default_cases')]
         for folder, flags, field in groups:
             if args.probe == 'tap-race': flags = [*flags, '--expect-after-read-race']
+            if args.probe == 'tap-guard': flags = [*flags, '--include-point']
             logged(['python3', test_script, '--base', f"http://127.0.0.1:{binding['daemon_port']}",
                     '--udid', simulator, '--owner', instance, '--mcp', mcp, '--runner-record', record,
                     '--product-version', match[1], '--out', args.out / folder, *flags],
@@ -250,6 +252,11 @@ def main():
                 assert proof['cases'][-1]['diagnostic_counterexample'] is True
                 result['product_acceptance'] = False
                 result['diagnostic_counterexample_confirmed'] = True
+            if args.probe == 'tap-guard':
+                assert proof['diagnostic_expects_race'] is False and proof['owned_consumer_stopped'] is True
+                assert proof['race_regression_passed'] is True
+                result['race_regression_passed'] = True
+                result['product_acceptance'] = False
             result[field] = proof['cases']
         result['passed'] = True
     except Exception as error:
