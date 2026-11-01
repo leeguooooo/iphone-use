@@ -45,7 +45,22 @@ supervisor or change its product cache.
 
 The keys expose the runner's **whole Documents directory**, not only the inbox,
 to the user's native Files/Finder file-sharing UI. Do not store tokens or other
-internal secrets in Documents. No new network file server is started.
+internal secrets in Documents. No new network file server is started. The Runner-hosted daemon now keeps its
+pair-code imports, relay configuration and address exports in a private
+`Library/Application Support/iphone-use/runner-control` directory. It never
+imports old Documents files into that control directory. A Runner state-directory
+override inside Documents is rejected before writing tokens or session secrets. Existing explicit
+relay environment settings remain supported; old manually staged Documents
+relay configuration is not imported.
+
+A Files-enabled Runner with an embedded daemon requires the new `ipu_daemon_start_runner` entry point.
+If a custom/older embedded library only provides the legacy app entry point,
+the local daemon stays blocked with `runner_update_required`; Native remote
+control still runs. Files-disabled runners retain the legacy library fallback. Runners built without
+an embedded library remain remote-only without a spurious update error.
+Existing Documents contents remain visible, including any old developer-staged
+files; this opt-in does not scrub them.
+The separate self-service app keeps its existing ABI and handoff locations.
 
 Create an inbox folder (for example `Documents/Send to Mac`) in the runner's
 container with CoreDevice. Its exact bundle ID is the installed team-derived

@@ -419,6 +419,7 @@ jobs:
           grep -q arm64 "$RUNNER_TEMP/embed-archs.txt"
           nm -gU "$lib" > "$RUNNER_TEMP/embed-symbols.txt" 2>/dev/null || true
           grep -q '_ipu_daemon_start$' "$RUNNER_TEMP/embed-symbols.txt"
+          grep -q '_ipu_daemon_start_runner$' "$RUNNER_TEMP/embed-symbols.txt"
           grep -q '_ipu_daemon_pair_code$' "$RUNNER_TEMP/embed-symbols.txt"
           mkdir -p runner/embed
           cp "$lib" runner/embed/libipu_embed.a

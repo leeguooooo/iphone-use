@@ -42,10 +42,63 @@ pub extern "C" fn ipu_daemon_start(
     agent_token: *const c_char,
     password: *const c_char,
 ) -> i32 {
-    if STATE.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    start_daemon(
+        server::boot::EmbeddedHost::App,
+        host,
+        port,
+        runner_port,
+        mjpeg_port,
+        runner_token,
+        agent_token,
+        password,
+    )
+}
+
+/// Runner-only entry point: control imports/exports stay outside shared Documents.
+/// Existing app callers keep the original ipu_daemon_start ABI and handoff location.
+#[no_mangle]
+pub extern "C" fn ipu_daemon_start_runner(
+    host: *const c_char,
+    port: u16,
+    runner_port: u16,
+    mjpeg_port: u16,
+    runner_token: *const c_char,
+    agent_token: *const c_char,
+    password: *const c_char,
+) -> i32 {
+    start_daemon(
+        server::boot::EmbeddedHost::Runner,
+        host,
+        port,
+        runner_port,
+        mjpeg_port,
+        runner_token,
+        agent_token,
+        password,
+    )
+}
+
+// Both C entry points preserve the existing seven argument ABI; the host role
+// is set by the entry point, not by a file from the public Documents directory.
+#[allow(clippy::too_many_arguments)]
+fn start_daemon(
+    host_kind: server::boot::EmbeddedHost,
+    host: *const c_char,
+    port: u16,
+    runner_port: u16,
+    mjpeg_port: u16,
+    runner_token: *const c_char,
+    agent_token: *const c_char,
+    password: *const c_char,
+) -> i32 {
+    if STATE
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return 1;
     }
     let options = server::boot::EmbeddedOptions {
+        host_kind,
         host: string(host).unwrap_or_else(|| "127.0.0.1".into()),
         port,
         runner_port,

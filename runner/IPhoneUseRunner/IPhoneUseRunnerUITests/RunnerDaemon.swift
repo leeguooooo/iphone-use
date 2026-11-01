@@ -24,19 +24,39 @@ enum RunnerDaemon {
     return unsafeBitCast(pointer, to: T.self)
   }
 
-  static var linked: Bool { symbol("ipu_daemon_start", as: Start.self) != nil }
+  static var linked: Bool {
+    symbol("ipu_daemon_start_runner", as: Start.self) != nil || symbol("ipu_daemon_start", as: Start.self) != nil
+  }
   private(set) static var port: UInt16?
+  private(set) static var startRefusal: String?
+
+  /// Missing sharing metadata means off; malformed present values fail closed.
+  static func documentsMayBeShared(bundle: Bundle = .main) -> Bool {
+    guard let value = bundle.object(forInfoDictionaryKey: "UIFileSharingEnabled") else { return false }
+    return (value as? Bool) != false
+  }
 
   /// Starts the daemon unless IPU_DAEMON_PORT=0. Returns at once; the daemon runs on its own
   /// thread (never this one: main serves the runner commands the daemon sends).
-  static func start(environment: [String: String], runnerPort: UInt16, mjpegPort: UInt16) {
-    guard let start = symbol("ipu_daemon_start", as: Start.self) else {
-      NSLog("ipu-runner: embedded daemon not linked")
-      return
-    }
+  static func start(environment: [String: String], runnerPort: UInt16, mjpegPort: UInt16,
+                    fileSharingEnabled: Bool = RunnerDaemon.documentsMayBeShared()) {
+    startRefusal = nil
     let port = environment["IPU_DAEMON_PORT"].flatMap { UInt16($0) } ?? defaultPort
     guard port > 0 else {
       NSLog("ipu-runner: embedded daemon off (IPU_DAEMON_PORT=0)")
+      return
+    }
+    let preferred = symbol("ipu_daemon_start_runner", as: Start.self)
+    // An older library is compatible only while Documents is private. Never
+    // let a shared Documents file become trusted pairing/relay control input.
+    guard let start = preferred ?? (fileSharingEnabled ? nil : symbol("ipu_daemon_start", as: Start.self)) else {
+      if fileSharingEnabled && linked {
+        let reason = "runner_update_required: Files sharing requires private daemon control storage"
+        startRefusal = reason
+        NSLog("ipu-runner: %@", reason)
+      } else {
+        NSLog("ipu-runner: embedded daemon not linked")
+      }
       return
     }
     // The agent token defaults to the runner's own token: whoever may drive the runner may
@@ -59,6 +79,11 @@ enum RunnerDaemon {
 
   static func statusValue() -> [String: Any] {
     var value: [String: Any] = ["linked": linked]
+    if let startRefusal {
+      value["state"] = "blocked"
+      value["error"] = startRefusal
+      return value
+    }
     guard let state = symbol("ipu_daemon_state", as: State.self) else { return value }
     let code = state()
     value["state"] = ["not_started", "serving", "failed"][Int(max(0, min(2, code)))]

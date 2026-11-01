@@ -103,3 +103,22 @@ metadata. These lightweight checks use adapters for unrelated setup services;
 they do not exercise a real signing identity, the complete setup engine or
 device installation. Full PR CI and signed-product/hardware upgrade acceptance
 remain required for this integration candidate. No phone was operated for it.
+
+## Runner private control storage candidate
+
+Source inspection found that the embedded daemon's pairing/relay handoff used
+Documents. The Runner host now chooses a private Library directory through a
+new C entry point; the separate app's original entry point and seven arguments
+remain unchanged. A Files-enabled Runner refuses the legacy-only embedded
+library rather than trusting public Documents as daemon control input.
+Old public files are not migrated or deleted.
+
+The source-level check executes the actual path helper and C export wrappers
+with a synthetic start callback, and the complete production Swift daemon
+loader with controlled symbol lookup. Nine library/Files/off scenarios and four actual Foundation bundle-metadata
+cases pass. Real temporary directories verify 0700 control permissions and
+reject public state or symlinked control. No actual daemon, Simulator or phone
+was started. An added CI lane builds the actual iOS static library, links it
+into an unsigned Runner and checks both C entry symbols; its result is pending. Server unit coverage checks
+the path boundary and legacy app behavior. Full integration CI, signed-library
+symbol retention and actual signed-device upgrade acceptance remain required.

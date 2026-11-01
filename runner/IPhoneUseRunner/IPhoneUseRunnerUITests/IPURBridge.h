@@ -167,6 +167,8 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// "Hold" (the records' scheduled length) and "Calls". Empty when nothing was synthesized. Resets.
 + (NSDictionary<NSString *, NSNumber *> *)takeSynthesisTiming;
 
+/// Probe before selecting an input path; an error after synthesis starts never permits replay.
++ (BOOL)textSynthesisAvailable;
 /// Types into whatever holds keyboard focus. `charactersPerSecond` 0 → 60.
 + (nullable NSString *)synthesizeText:(NSString *)text
                   charactersPerSecond:(NSUInteger)charactersPerSecond

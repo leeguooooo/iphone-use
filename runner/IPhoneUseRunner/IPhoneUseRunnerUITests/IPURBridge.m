@@ -921,13 +921,21 @@ static NSMutableDictionary<NSString *, NSNumber *> *IPURAcceptedDepths(void)
 
 // MARK: - Event synthesis
 
+static NSString *const IPURTextRecordClass = @"XCSynthesizedEventRecord";
+static NSString *const IPURTextPathClass = @"XCPointerEventPath";
+static NSString *const IPURTextRecordInit = @"initWithName:";
+static NSString *const IPURTextPathInit = @"initForTextInput";
+static NSString *const IPURTextPathType = @"typeText:atOffset:typingSpeed:shouldRedact:";
+static NSString *const IPURRecordAddPath = @"addPointerEventPath:";
+static NSString *const IPURRecordSynthesize = @"synthesizeWithError:";
+
 + (BOOL)eventSynthesisAvailable
 {
   Class recordClass = NSClassFromString(@"XCSynthesizedEventRecord");
   Class pathClass = NSClassFromString(@"XCPointerEventPath");
   return recordClass != Nil && pathClass != Nil
-    && [recordClass instancesRespondToSelector:NSSelectorFromString(@"synthesizeWithError:")]
-    && [recordClass instancesRespondToSelector:NSSelectorFromString(@"addPointerEventPath:")]
+    && [recordClass instancesRespondToSelector:NSSelectorFromString(IPURRecordSynthesize)]
+    && [recordClass instancesRespondToSelector:NSSelectorFromString(IPURRecordAddPath)]
     && [pathClass instancesRespondToSelector:NSSelectorFromString(@"initForTouchAtPoint:offset:")]
     && [pathClass instancesRespondToSelector:NSSelectorFromString(@"moveToPoint:atOffset:")]
     && [pathClass instancesRespondToSelector:NSSelectorFromString(@"liftUpAtOffset:")]
@@ -985,7 +993,7 @@ static BOOL IPURSynthesizeRecord(id record, NSError **error)
     IPURSynthHoldMs += ((double (*)(id, SEL))objc_msgSend)(record, maximumOffset) * 1000.0;
   }
   double started = IPURNowMs();
-  BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(record, NSSelectorFromString(@"synthesizeWithError:"), error);
+  BOOL ok = ((IPURMsgSendSynthesize)objc_msgSend)(record, NSSelectorFromString(IPURRecordSynthesize), error);
   IPURSynthWaitMs += IPURNowMs() - started;
   IPURSynthCalls += 1;
   return ok;
@@ -1067,7 +1075,7 @@ static void IPURLift(id path, double offset)
 
 static NSString *IPURSynthesize(id record, id path)
 {
-  ((IPURMsgSendAddPath)objc_msgSend)(record, NSSelectorFromString(@"addPointerEventPath:"), path);
+  ((IPURMsgSendAddPath)objc_msgSend)(record, NSSelectorFromString(IPURRecordAddPath), path);
   NSError *error = nil;
   [IPURBridge invalidateRequestCache];  // a touch can change the foreground app
   BOOL ok = IPURSynthesizeRecord(record, &error);
@@ -1128,18 +1136,33 @@ static NSString *IPURSynthesize(id record, id path)
   }
 }
 
++ (BOOL)textSynthesisAvailable
+{
+  @try {
+    Class recordClass = NSClassFromString(IPURTextRecordClass);
+    Class pathClass = NSClassFromString(IPURTextPathClass);
+    return recordClass != Nil && pathClass != Nil
+        && [recordClass instancesRespondToSelector:NSSelectorFromString(IPURTextRecordInit)]
+        && [recordClass instancesRespondToSelector:NSSelectorFromString(IPURRecordAddPath)]
+        && [recordClass instancesRespondToSelector:NSSelectorFromString(IPURRecordSynthesize)]
+        && [pathClass instancesRespondToSelector:NSSelectorFromString(IPURTextPathInit)]
+        && [pathClass instancesRespondToSelector:NSSelectorFromString(IPURTextPathType)];
+  } @catch (__unused NSException *exception) {
+    return NO;
+  }
+}
+
 + (nullable NSString *)synthesizeText:(NSString *)text
                   charactersPerSecond:(NSUInteger)charactersPerSecond
                                   pid:(int)pid
 {
   @try {
-    Class recordClass = NSClassFromString(@"XCSynthesizedEventRecord");
-    Class pathClass = NSClassFromString(@"XCPointerEventPath");
-    SEL initRecord = NSSelectorFromString(@"initWithName:");
-    SEL initPath = NSSelectorFromString(@"initForTextInput");
-    SEL typeText = NSSelectorFromString(@"typeText:atOffset:typingSpeed:shouldRedact:");
-    if (recordClass == Nil || pathClass == Nil || ![recordClass instancesRespondToSelector:initRecord]
-        || ![pathClass instancesRespondToSelector:initPath] || ![pathClass instancesRespondToSelector:typeText]) {
+    Class recordClass = NSClassFromString(IPURTextRecordClass);
+    Class pathClass = NSClassFromString(IPURTextPathClass);
+    SEL initRecord = NSSelectorFromString(IPURTextRecordInit);
+    SEL initPath = NSSelectorFromString(IPURTextPathInit);
+    SEL typeText = NSSelectorFromString(IPURTextPathType);
+    if (![self textSynthesisAvailable]) {
       return @"private XCTest text synthesis unavailable";
     }
     id record = ((IPURMsgSendInitRecordName)objc_msgSend)([recordClass alloc], initRecord, @"ipu-type");
