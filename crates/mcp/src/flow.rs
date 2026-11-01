@@ -2432,7 +2432,7 @@ mod tests {
                 serde_json::json!({"kind":"action","action":{"type":"tap_locator","locator":locator}})
             };
             let body = serde_json::json!({"coverage":"complete","elements":rows}).to_string();
-            let (url, task, _) = mock_daemon_sequence(&[("200 OK", &body)]);
+            let (url, task, requests) = mock_daemon_sequence(&[("200 OK", &body)]);
             let diagnosis = diagnose_failure(
                 Some(&serde_json::json!([step])),
                 &failing_result(0),
@@ -2441,6 +2441,8 @@ mod tests {
             .await
             .unwrap();
             task.join().unwrap();
+            assert!(requests.recv().unwrap().starts_with("GET /agent/elements?locator_state=1&ocr=off "));
+            assert!(requests.try_recv().is_err(),"diagnosis must remain read-only and bounded");
             assert_eq!(diagnosis["reason"], reason, "{diagnosis}");
             assert_eq!(
                 diagnosis
