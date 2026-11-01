@@ -101,6 +101,7 @@ fn mock_runner_with_budget(
                 Err(error) => panic!("mock runner accept failed: {error}"),
             };
             last_request = std::time::Instant::now();
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(std::time::Duration::from_secs(60))).unwrap();
             let mut request = [0_u8; 8_192];
             let read = stream.read(&mut request).unwrap();
