@@ -49,6 +49,23 @@ def judge(before, after, nonce, pid, identifier, field, expected, value):
     return type(value) is bool and value is expected
 
 
+def focus_confirmed(value, sequence, wanted):
+    if not isinstance(value, dict) or type(sequence) is not int or type(wanted) is not bool:
+        return False
+    controls = value.get('controls')
+    field = controls.get('state.field') if isinstance(controls, dict) else None
+    if not isinstance(field, dict):
+        return False
+    receipt = value.get('focus_command')
+    return (type(value.get('command_sequence')) is int and value['command_sequence'] == sequence
+            and isinstance(receipt, dict)
+            and type(receipt.get('sequence')) is int and receipt['sequence'] == sequence
+            and type(receipt.get('requested')) is bool and receipt['requested'] is wanted
+            and type(receipt.get('acknowledged')) is bool and receipt['acknowledged'] is True
+            and type(receipt.get('before')) is bool and type(receipt.get('after')) is bool
+            and field.get('focused') is wanted)
+
+
 def build(out):
     project = out / 'fixture-src'
     shutil.copytree(ROOT / 'runner/gesture-fixture', project)
@@ -154,16 +171,23 @@ def main():
         nonlocal sequence
         sequence += 1
         command = {'run_id': nonce, 'pid': expected_pid, 'sequence': sequence, 'focused': wanted}
+        save('focus-commands/' + str(sequence) + '/request.json', command)
         temporary = data_dir / 'state-command.tmp'
         temporary.write_text(json.dumps(command))
         temporary.replace(data_dir / 'state-command.json')
         deadline = time.monotonic() + 5
+        samples = []
         while time.monotonic() < deadline:
             value = state(allow_pending=True)
-            if value['command_sequence'] == sequence and value['controls']['state.field']['focused'] is wanted:
+            samples.append(value)
+            save('focus-commands/' + str(sequence) + '/samples.json', samples)
+            if focus_confirmed(value, sequence, wanted):
                 return value
+            receipt = value.get('focus_command')
+            if isinstance(receipt, dict) and receipt.get('sequence') == sequence and receipt.get('acknowledged') is False:
+                raise RuntimeError('fixture focus API refused the one command; no replay')
             time.sleep(0.05)
-        raise RuntimeError('one fixture focus command not confirmed; no replay')
+        raise RuntimeError('one fixture focus command not confirmed; inspect focus-commands; no replay')
 
     try:
         assert BUNDLE not in installed_apps(), 'preexisting fixture must not be overwritten'
@@ -275,6 +299,12 @@ def main():
         result['error'] = type(error).__name__ + ': ' + str(error)
         raise
     finally:
+        # Preserve the actual fixture response before uninstall removes its files.
+        if install_attempted and data_dir is not None:
+            try:
+                save('app-state-before-cleanup.json', json.loads((data_dir / 'state-oracle.json').read_text()))
+            except (OSError, ValueError) as error:
+                result['final_state_capture_error'] = type(error).__name__ + ': ' + str(error)
         if install_attempted:
             try:
                 result['fixture_uninstall_attempts'] = 0

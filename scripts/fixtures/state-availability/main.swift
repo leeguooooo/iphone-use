@@ -18,6 +18,7 @@ final class StateController: UIViewController {
   let unselected = UIButton(type: .system)
   let field = UITextField()
   var sequence = 0
+  var focusReceipt: [String:Any]?
   var touches = 0
   var tick = 0
   var appeared = false
@@ -63,8 +64,10 @@ final class StateController: UIViewController {
           let next = command["sequence"] as? Int, next > sequence,
           let focused = command["focused"] as? Bool else { return }
     sequence = next
-    if focused { _ = field.becomeFirstResponder() }
-    else { _ = field.resignFirstResponder() }
+    let before = field.isFirstResponder
+    let acknowledged = focused ? field.becomeFirstResponder() : field.resignFirstResponder()
+    focusReceipt = ["sequence":next,"requested":focused,"acknowledged":acknowledged,
+      "before":before,"after":field.isFirstResponder]
     save()
   }
   func save() {
@@ -87,7 +90,9 @@ final class StateController: UIViewController {
         "state.field":["focused":field.isFirstResponder],
       ],
     ]
-    if let bytes = try? JSONSerialization.data(withJSONObject:state) {
+    var result = state
+    if let focusReceipt { result["focus_command"] = focusReceipt }
+    if let bytes = try? JSONSerialization.data(withJSONObject:result) {
       try? bytes.write(to:documents.appendingPathComponent("state-oracle.json"),options:.atomic)
     }
   }

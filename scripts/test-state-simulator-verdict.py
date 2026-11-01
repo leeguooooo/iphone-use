@@ -44,5 +44,37 @@ class Verdict(unittest.TestCase):
             self.assertFalse(self.judge(after, before, False, False), key)
 
 
+class FocusReceipt(unittest.TestCase):
+    def sample(self, wanted=True):
+        return {'command_sequence': 1,
+                'focus_command': {'sequence': 1, 'requested': wanted, 'acknowledged': True,
+                                  'before': not wanted, 'after': wanted},
+                'controls': {'state.field': {'focused': wanted}}}
+
+    def test_api_acknowledgement_and_current_state_are_both_required(self):
+        for wanted in (True, False):
+            value = self.sample(wanted)
+            self.assertTrue(oracle.focus_confirmed(value, 1, wanted))
+            value['focus_command']['acknowledged'] = False
+            self.assertFalse(oracle.focus_confirmed(value, 1, wanted))
+            value['focus_command']['acknowledged'] = True
+            value['controls']['state.field']['focused'] = not wanted
+            self.assertFalse(oracle.focus_confirmed(value, 1, wanted))
+
+    def test_stale_missing_and_mistyped_receipts_never_confirm(self):
+        for key, wrong in [('sequence', 0), ('sequence', True), ('requested', False),
+                           ('requested', 1), ('acknowledged', 1), ('acknowledged', None),
+                           ('before', None), ('after', 0)]:
+            value = self.sample()
+            value['focus_command'][key] = wrong
+            self.assertFalse(oracle.focus_confirmed(value, 1, True), (key, wrong))
+        for wrong in (None, {}, [], {'command_sequence': 1},
+                      {'command_sequence': 1, 'controls': []}):
+            self.assertFalse(oracle.focus_confirmed(wrong, 1, True))
+        value = self.sample()
+        value['command_sequence'] = True
+        self.assertFalse(oracle.focus_confirmed(value, 1, True))
+
+
 if __name__ == '__main__':
     unittest.main()
