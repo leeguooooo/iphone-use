@@ -136,9 +136,26 @@ fn decode_header(header: &[u8; HEADER_LEN]) -> Result<(u64, u64, u64, u64)> {
 
 /// Read one packet off `stream`.
 pub async fn read_packet<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Packet> {
+    read_packet_limited(stream, None).await
+}
+
+async fn read_packet_limited<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    read_limit: Option<u64>,
+) -> Result<Packet> {
     let mut header = [0u8; HEADER_LEN];
     stream.read_exact(&mut header).await?;
     let (total, this, number, operation) = decode_header(&header)?;
+    if let Some(limit) = read_limit {
+        let valid = match operation {
+            OP_DATA => this == HEADER_LEN as u64 && total - this <= limit,
+            OP_STATUS => this == HEADER_LEN as u64 + 8 && total == this,
+            _ => false,
+        };
+        if !valid {
+            bail!("AFC read reply exceeds requested bytes or has an invalid layout");
+        }
+    }
     let mut arguments = vec![0u8; (this as usize) - HEADER_LEN];
     stream.read_exact(&mut arguments).await?;
     let mut data = vec![0u8; (total - this) as usize];
@@ -226,6 +243,7 @@ impl FileInfo {
 pub struct AfcClient<S> {
     stream: S,
     next_number: u64,
+    failed: bool,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> AfcClient<S> {
@@ -233,21 +251,44 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AfcClient<S> {
         Self {
             stream,
             next_number: 0,
+            failed: false,
         }
     }
 
     /// Send one request and read its reply; a non-zero status is an error.
     async fn request(&mut self, operation: u64, arguments: &[u8]) -> Result<Packet> {
+        if self.failed {
+            bail!("AFC stream is unusable after a failed exchange");
+        }
         let number = self.next_number;
         self.next_number += 1;
         let packet = encode(number, operation, arguments, &[]);
+        let read_limit = if operation == OP_FILE_READ {
+            Some(u64::from_le_bytes(
+                arguments
+                    .get(8..16)
+                    .context("AFC read request without byte count")?
+                    .try_into()
+                    .unwrap(),
+            ))
+        } else {
+            None
+        };
         let reply = tokio::time::timeout(EXCHANGE_TIMEOUT, async {
             self.stream.write_all(&packet).await?;
             self.stream.flush().await?;
-            read_packet(&mut self.stream).await
+            read_packet_limited(&mut self.stream, read_limit).await
         })
         .await
-        .context("the AFC service did not answer in time")??;
+        .context("the AFC service did not answer in time")
+        .and_then(|reply| reply);
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.failed = true;
+                return Err(error);
+            }
+        };
         status(&reply)?;
         Ok(reply)
     }
@@ -294,8 +335,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AfcClient<S> {
         Ok(())
     }
 
-    /// The first `cap` bytes of `path`, and whether the file holds more. The
-    /// handle is closed even when a read fails.
+    /// The first `cap` bytes of `path`, and whether the file holds more. Close
+    /// is attempted after a read error; a broken exchange retires the stream
+    /// instead of sending another command across an unknown frame boundary.
     pub async fn read_file(&mut self, path: &str, cap: usize) -> Result<(Vec<u8>, bool)> {
         let handle = self.open_read(path).await?;
         let read = self.read_to_cap(handle, cap).await;
@@ -326,6 +368,38 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AfcClient<S> {
 mod tests {
     use super::*;
     use tokio::io::DuplexStream;
+
+    #[test]
+    fn read_rejects_excess_headers_before_body_and_invalidates_stream() {
+        block_on(async {
+            for (operation, arguments, data) in [
+                (OP_DATA, vec![], vec![0; 6]),
+                (OP_DATA, vec![0; 8], vec![]),
+                (OP_STATUS, vec![0; 8], vec![0]),
+                (OP_FILE_OPEN_RESULT, vec![0; 8], vec![]),
+            ] {
+                let (host, mut peer) = tokio::io::duplex(1024);
+                let device = tokio::spawn(async move {
+                    let request = read_packet(&mut peer).await.unwrap();
+                    assert_eq!(request.operation, OP_FILE_READ);
+                    let reply = encode(request.number, operation, &arguments, &data);
+                    // Retain the stream without sending any reply body. Rejection
+                    // must follow the header, not EOF or a completed allocation.
+                    peer.write_all(&reply[..HEADER_LEN]).await.unwrap();
+                    peer
+                });
+                let mut client = AfcClient::new(host);
+                let error = tokio::time::timeout(Duration::from_secs(1), client.read(1, 5))
+                    .await
+                    .expect("read waited for an excessive reply body")
+                    .unwrap_err();
+                assert!(error.to_string().contains("requested bytes"), "{error:#}");
+                let error = client.read(1, 5).await.unwrap_err();
+                assert!(error.to_string().contains("unusable"), "{error:#}");
+                drop(device.await.unwrap());
+            }
+        });
+    }
 
     /// `#[tokio::test]` expands to `::core::…`, which this crate's `core`
     /// dependency shadows; tests build their own runtime.
@@ -507,7 +581,7 @@ mod tests {
         let (host, device) = tokio::io::duplex(1 << 20);
         let script = vec![
             (OP_FILE_OPEN_RESULT, 9u64.to_le_bytes().to_vec(), vec![]),
-            (OP_DATA, vec![], b"0123456".to_vec()),
+            (OP_DATA, vec![], b"01234".to_vec()),
             (OP_STATUS, 0u64.to_le_bytes().to_vec(), vec![]),
         ];
         let device = tokio::spawn(fake_device(device, script));
