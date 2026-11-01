@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Reject stale, unknown and mistyped Native state oracle receipts."""
+import ast
 import copy
+import hashlib
 import importlib.util
 from pathlib import Path
 import sys
@@ -74,6 +76,46 @@ class FocusReceipt(unittest.TestCase):
         value = self.sample()
         value['command_sequence'] = True
         self.assertFalse(oracle.focus_confirmed(value, 1, True))
+
+
+class TextState(unittest.TestCase):
+    def sample(self, text):
+        return {'touches': 0, 'return_events': 0, 'controls': {
+            'state.field': {'focused': True, 'characters': len(text),
+                            'utf16_length': len(text.encode('utf-16-le')) // 2,
+                            'sha256': hashlib.sha256(text.encode()).hexdigest()},
+            'state.other': {'focused': False, 'sha256': hashlib.sha256(b'untouched').hexdigest()}}}
+
+    def test_native_input_payload_contains_private_use_scalars(self):
+        module = ast.parse((HERE / 'test-state-simulator.py').read_text())
+        literals = [ast.literal_eval(node.value) for node in ast.walk(module)
+                    if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+                    and target.id == 'literal' for target in node.targets)]
+        self.assertEqual(len(literals), 1)
+        self.assertIn(chr(0xE007), literals[0])
+        self.assertIn(chr(0xE003), literals[0])
+        self.assertNotIn('\\ue007', literals[0])
+
+    def test_full_unicode_hash_and_both_length_units_agree(self):
+        for text in ('', '字' * 500, 'literal-\ue007-\ue003-👋🏻'):
+            self.assertTrue(oracle.text_state_matches(self.sample(text), text))
+            self.assertFalse(oracle.text_state_matches(self.sample(text), text + 'extra'))
+
+    def test_wrong_field_return_touch_and_unknown_metadata_fail(self):
+        for field, key, wrong in [('state.field', 'focused', False),
+                                 ('state.field', 'characters', True),
+                                 ('state.field', 'utf16_length', 2),
+                                 ('state.field', 'sha256', '0' * 64),
+                                 ('state.other', 'focused', True),
+                                 ('state.other', 'sha256', 'changed')]:
+            value = self.sample('👋🏻')
+            value['controls'][field][key] = wrong
+            self.assertFalse(oracle.text_state_matches(value, '👋🏻'), (field, key))
+        for key, wrong in [('touches', 1), ('return_events', 1), ('touches', False), ('return_events', None)]:
+            value = self.sample('x');value[key] = wrong
+            self.assertFalse(oracle.text_state_matches(value, 'x'))
+        for bad in (None, {}, {'controls': []}, {'controls': {'state.field': None}}):
+            self.assertFalse(oracle.text_state_matches(bad, 'x'))
 
 
 if __name__ == '__main__':

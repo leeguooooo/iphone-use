@@ -1,4 +1,5 @@
 import UIKit
+import CryptoKit
 
 final class StateWindow: UIWindow {
   var recordTouch: (() -> Void)?
@@ -9,7 +10,7 @@ final class StateWindow: UIWindow {
   }
 }
 
-final class StateController: UIViewController {
+final class StateController: UIViewController, UITextFieldDelegate {
   let runID: String
   let controllerID = UUID().uuidString
   let enabled = UIButton(type: .system)
@@ -17,6 +18,8 @@ final class StateController: UIViewController {
   let selected = UIButton(type: .system)
   let unselected = UIButton(type: .system)
   let field = UITextField()
+  let otherField = UITextField()
+  var returnEvents = 0
   var sequence = 0
   var focusReceipt: [String:Any]?
   var touches = 0
@@ -43,7 +46,25 @@ final class StateController: UIViewController {
     field.placeholder = "State focus oracle"
     field.accessibilityIdentifier = "state.field"
     field.autocorrectionType = .no
+    field.autocapitalizationType = .none
+    field.delegate = self
     view.addSubview(field)
+    otherField.frame = CGRect(x:20,y:435,width:330,height:50)
+    otherField.borderStyle = .roundedRect
+    otherField.accessibilityIdentifier = "state.other"
+    otherField.text = "untouched"
+    view.addSubview(otherField)
+  }
+  func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+    returnEvents += 1
+    save()
+    return false
+  }
+  func textState(_ input: UITextField) -> [String:Any] {
+    let text = input.text ?? ""
+    let digest = SHA256.hash(data:Data(text.utf8)).map {String(format:"%02x",$0)}.joined()
+    return ["focused":input.isFirstResponder,"characters":text.unicodeScalars.count,
+      "utf16_length":text.utf16.count,"sha256":digest]
   }
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
@@ -72,13 +93,13 @@ final class StateController: UIViewController {
   }
   func save() {
     guard let window = view.window else { return }
-    let controls: [UIView] = [enabled,disabled,selected,unselected,field]
+    let controls: [UIView] = [enabled,disabled,selected,unselected,field,otherField]
     let visible = controls.enumerated().compactMap { index, control -> Int? in
       !control.isHidden && control.convert(control.bounds,to:window).intersects(window.bounds) ? index : nil
     }
     let state: [String:Any] = [
       "run_id":runID,"controller_id":controllerID,"pid":Int(ProcessInfo.processInfo.processIdentifier),
-      "command_sequence":sequence,"touches":touches,"tick":tick,"appeared":appeared,
+      "command_sequence":sequence,"touches":touches,"tick":tick,"appeared":appeared,"return_events":returnEvents,
       "application_state":UIApplication.shared.applicationState.rawValue,"key_window":window.isKeyWindow,
       "width":window.bounds.width,"height":window.bounds.height,
       "visible_indices":visible,
@@ -87,7 +108,8 @@ final class StateController: UIViewController {
         "state.disabled":["enabled":disabled.isEnabled],
         "state.selected":["selected":selected.isSelected],
         "state.unselected":["selected":unselected.isSelected],
-        "state.field":["focused":field.isFirstResponder],
+        "state.field":textState(field),
+        "state.other":textState(otherField),
       ],
     ]
     var result = state

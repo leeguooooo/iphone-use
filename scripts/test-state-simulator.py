@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare Native state getters to UIKit on one explicit owned Simulator."""
+"""Compare Native state and controlled text input to UIKit on one owned Simulator."""
 import argparse
 import hashlib
 import importlib.util
@@ -66,6 +66,22 @@ def focus_confirmed(value, sequence, wanted):
             and field.get('focused') is wanted)
 
 
+def text_state_matches(value, text):
+    if not isinstance(value, dict) or not isinstance(value.get('controls'), dict):
+        return False
+    field = value['controls'].get('state.field')
+    other = value['controls'].get('state.other')
+    if not isinstance(field, dict) or not isinstance(other, dict):
+        return False
+    return (type(value.get('touches')) is int and value['touches'] == 0
+            and type(value.get('return_events')) is int and value['return_events'] == 0
+            and field.get('focused') is True and other.get('focused') is False
+            and type(field.get('characters')) is int and field['characters'] == len(text)
+            and type(field.get('utf16_length')) is int and field['utf16_length'] == len(text.encode('utf-16-le')) // 2
+            and field.get('sha256') == hashlib.sha256(text.encode()).hexdigest()
+            and other.get('sha256') == hashlib.sha256(b'untouched').hexdigest())
+
+
 def build(out):
     project = out / 'fixture-src'
     shutil.copytree(ROOT / 'runner/gesture-fixture', project)
@@ -95,6 +111,7 @@ def main():
         parser.add_argument('--' + name, required=True)
     for name in ('mcp', 'runner-record', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--type-text', action='store_true')
     args = parser.parse_args()
     uuid.UUID(args.udid)
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -115,6 +132,8 @@ def main():
     result = {'passed': False, 'cases': [], 'cleanup_errors': [], 'product_acceptance': False,
         'scope': 'owned Simulator UIKit/Native getters plus host HTTP waits; programmatic fixture focus, no HID; not MCP or physical proof',
         'mcp_sha256': hashlib.sha256(args.mcp.read_bytes()).hexdigest()}
+    if args.type_text:
+        result['scope'] = 'owned Simulator Native keyboard input and host HTTP; independent UIKit text hashes; not physical/MCP/performance proof'
     nonce = str(uuid.uuid4())
     expected_pid = None
     expected_controller = None
@@ -219,7 +238,7 @@ def main():
         state(after_tick=ready['tick'])
         active = native('/wda/activeAppInfo')
         assert active['body']['value']['bundleId'] == BUNDLE and active['body']['value']['pid'] == expected_pid
-        assert set(ready['controls']) == {'state.enabled','state.disabled','state.selected','state.unselected','state.field'}
+        assert set(ready['controls']) == {'state.enabled','state.disabled','state.selected','state.unselected','state.field','state.other'}
         save('active-before.json', active)
         handles = {}
         for identifier in ready['controls']:
@@ -229,7 +248,77 @@ def main():
             matches = query['body']['value']
             assert len(matches) == 1
             handles[identifier] = matches[0].get('ELEMENT') or matches[0]['element-6066-11e4-a52e-4f735466cecf']
-        for name, identifier, field, expected in CASES:
+        if args.type_text:
+            focus(True)
+            untouched = hashlib.sha256(b'untouched').hexdigest()
+            last_tick = state()['tick']
+
+            def inspect_text(expected):
+                nonlocal last_tick
+                deadline = time.monotonic() + 20
+                while True:
+                    value = state(after_tick=last_tick)
+                    last_tick = value['tick']
+                    save('input-last-state.json', value)
+                    assert type(value.get('return_events')) is int and value['return_events'] == 0, 'text was interpreted as Return'
+                    assert value['controls']['state.other']['sha256'] == untouched, 'input changed another field'
+                    if text_state_matches(value, expected):
+                        return value
+                    assert time.monotonic() < deadline, 'UIKit value did not match the full expected text'
+                    time.sleep(0.05)
+
+            def call_text(action, label):
+                assert action['type'] == 'text'
+                save('input/' + label + '-request.json', action)
+                try:
+                    response = daemon.call('/agent/input', action)
+                except urllib.error.HTTPError as error:
+                    response = json.load(error)
+                save('input/' + label + '-response.json', response)
+                return response
+
+            inspect_text('')
+            payload = '字' * 500
+            response = call_text({'type': 'text', 'text': payload, 'budget_ms': 6000}, 'start')
+            offset = 0
+            remaining = payload
+            seen_tokens = set()
+            last_consumed = None
+            continuations = 0
+            while response.get('ok') is not True:
+                assert response.get('error') == 'text_partially_typed', 'Native input failed; inspect response; no replay'
+                assert type(response.get('characters_confirmed')) is int and 0 <= response['characters_confirmed'] <= len(remaining)
+                assert type(response.get('characters_uncertain')) is int and response['characters_uncertain'] == 0, 'uncertain Native input; no continuation sent'
+                assert response.get('continuation_safe') is True
+                token = response.get('continue_token')
+                assert isinstance(token, str) and re.fullmatch(r'[0-9a-f]{64}', token) and token not in seen_tokens
+                seen_tokens.add(token)
+                offset += response['characters_confirmed']
+                remaining = payload[offset:]
+                assert response.get('remaining_text') == remaining
+                inspect_text(payload[:offset])
+                continuations += 1
+                assert continuations <= 5, 'continuation did not make bounded progress; no replay'
+                last_consumed = token
+                response = call_text({'type': 'text', 'continue_token': token}, 'continue-' + str(continuations))
+            after = inspect_text(payload)
+            save('input-500-state.json', after)
+            replay_checked = False
+            if last_consumed is not None:
+                rejected = call_text({'type': 'text', 'continue_token': last_consumed}, 'consumed-token')
+                assert rejected.get('ok') is False and rejected.get('error') == 'input_continuation_expired'
+                save('input-500-after-replay.json', inspect_text(payload))
+                replay_checked = True
+            result['cases'].append({'name': 'input-500', 'passed': True, 'characters': 500,
+                'sha256': hashlib.sha256(payload.encode()).hexdigest(), 'continuation_calls': continuations,
+                'continuation_exercised': continuations > 0, 'consumed_token_replay_checked': replay_checked})
+            literal = 'literal-\ue007-\ue003-👋🏻'
+            response = call_text({'type': 'text', 'text': literal, 'clear': True}, 'literal')
+            assert response.get('ok') is True, 'literal input/clear failed; no replay'
+            save('input-literal-state.json', inspect_text(literal))
+            result['cases'].append({'name': 'literal-private-unicode', 'passed': True,
+                'characters': len(literal), 'sha256': hashlib.sha256(literal.encode()).hexdigest(), 'return_events': 0})
+        for name, identifier, field, expected in ([] if args.type_text else CASES):
             if name in ('focus-on', 'focus-off'):
                 focus(expected)
             before = state()
