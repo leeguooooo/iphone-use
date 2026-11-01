@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 #[derive(Parser)]
+#[command(name = "iphone-use files __native-read")]
 struct ReadArgs {
     #[arg(long)]
     device: String,
