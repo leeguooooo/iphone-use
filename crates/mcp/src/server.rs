@@ -4969,7 +4969,7 @@ mod tests {
             "completed":0,"applied_actions":0,"failed_step_outcome":"partial","batch_outcome":"partially_applied",
             "retry_safe":false,"steps":[],"characters_confirmed":200,"characters_total":500,
             "characters_uncertain":0,"remaining_text":"suffix","continue_token":token,"continuation_safe":true});
-        let (url,task)=scripted_daemon("502 Bad Gateway",body.to_string());
+        let (url,task)=scripted_daemon("502 Bad Gateway",body.to_string().into_bytes());
         let handler=handler_for(&url);
         let result=block(handler.phone_run_steps(Parameters(RunStepsParams{
             steps:vec![PhoneStep::Type{text:"new".into(),clear:false,budget_ms:None,after_ms:0}],
