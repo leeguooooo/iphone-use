@@ -127,9 +127,11 @@ jobs:
             ${{ runner.temp }}/candidate-element-proof/conformance/*.log
             ${{ runner.temp }}/candidate-element-proof/conformance/*.jsonl
             ${{ runner.temp }}/candidate-element-proof/conformance/*/*.json
+            ${{ runner.temp }}/candidate-element-proof/conformance/focus-commands/*/*.json
             ${{ runner.temp }}/candidate-element-proof/conformance/failure-ui.png
             ${{ runner.temp }}/candidate-element-proof/default-conformance/*.json
             ${{ runner.temp }}/candidate-element-proof/default-conformance/*.log
             ${{ runner.temp }}/candidate-element-proof/default-conformance/*.jsonl
             ${{ runner.temp }}/candidate-element-proof/default-conformance/*/*.json
+            ${{ runner.temp }}/candidate-element-proof/default-conformance/focus-commands/*/*.json
             ${{ runner.temp }}/candidate-element-proof/default-conformance/failure-ui.png

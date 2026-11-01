@@ -151,12 +151,14 @@ extension RunnerTests {
     #else
     let volumeButtons = true
     #endif
+    let guardedInput = IPURBridge.textSynthesisAvailable()
     return [
       "device": UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone",
       "sdkVersion": Self.systemVersion,
       "ipu:timedDragPath": true,
       "ipu:valueRead": true,
-      "ipu:guardedInput": IPURBridge.textSynthesisAvailable(),
+      "ipu:guardedInput": guardedInput,
+      "ipu:inputContinuation": guardedInput,
       "ipu:volumeButtons": volumeButtons,
       "ipu:systemCaptureRequest": IPURBridge.systemScreenshotAvailable(),
       "browserName": NSNull(),
@@ -360,13 +362,15 @@ extension RunnerTests {
     if (text.contains("\n") || text.contains("\r")), node.type != "XCUIElementTypeTextView" {
       throw RunnerError.invalidArgument("newline_requires_multiline_field; nothing was sent")
     }
-    let path = try typeIntoFocus(text, frequency: frequency, targetPID: node.pid)
+    let path = try typeIntoFocus(text, frequency: frequency, mapKeys: false, targetPID: node.pid)
     // This check follows dispatch: failure is uncertain, never a not-sent receipt.
-    do { _ = try checkedInputTarget(token) }
+    let after: UINode
+    do { after = try checkedInputTarget(token) }
     catch {
       inputBinding = nil
       throw RunnerError.failed("input target changed during typing; text outcome unknown; do not retry input")
     }
+    elements.renew(token, node: after)
     return .value(NSNull(), headers: ["X-IPU-Gesture": path])
   }
 
@@ -703,6 +707,7 @@ extension RunnerTests {
       guard state.count == 0 else {
         throw RunnerError.failed("bound clear incomplete")
       }
+      elements.renew(token, node: state.node)
       return .value(NSNull())
     } catch {
       if started {

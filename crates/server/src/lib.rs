@@ -14,6 +14,7 @@ pub mod guard;
 pub mod h264sps;
 pub mod home_layout;
 pub mod http;
+pub mod input_continuation;
 pub mod instance;
 pub mod keep_awake;
 pub mod keep_runner;

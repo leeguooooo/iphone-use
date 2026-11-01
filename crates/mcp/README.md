@@ -332,7 +332,7 @@ carries a `registry.hint` to save it as a flow, and a failed `phone_flow_run` na
 | `phone_tap_element` | `element`, `snapshot`, `observe?` | Snapshot-bound indexed tap; stale trees are rejected without tapping |
 | `phone_tap_label` | `label`, `observe?` | Exact-label tap; requires one unique match and sends nothing on ambiguity |
 | `phone_scroll` | `x`, `y`, `dx`, `dy`, `observe?` | Scroll-wheel gesture; negative `dy` scrolls content up |
-| `phone_type` | `text`, `observe?` | Type text; any Unicode (incl. CJK) lands cleanly |
+| `phone_type` | `text` or `continue_token`, `clear?`, `budget_ms?`, `observe?` | Type Unicode; bounded input may return a single-use original-field continuation |
 | `phone_key` | `name`, `observe?` | Named key: `return`, `escape`, `space`, `tab`, `delete`, `up`, `down`, `left`, `right` |
 | `phone_shortcut` | `name`, `observe?` | System shortcut: `home`, `spotlight`, `save_screenshot`, `volume_up`, `volume_down`. Screenshot requests require a capable Runner and an independent saved-image check. Volume requires a physical device and a capable Runner; ACK confirms the request, not the volume level. Do not replay uncertain presses. App Switcher is unsupported |
 | `phone_run_steps` | `steps`, `observe?` | Run up to 24 guarded action/wait steps in one MCP call; includes long-press/swipe/drag (`points` supports 2–16 stops with `dwell_ms`, travel `duration_ms` per segment, total hold/travel/dwell <= 10s), strict `tap_locator`, bundle-id `launch_app`, `open_url` (links; non-http schemes need `IPHONE_USE_ALLOW_URL_SCHEMES` on the daemon), `alert`, `picker`, `perform` (toggle a switch, adjust a slider), full preflight, one device lock, and first-failure stop |

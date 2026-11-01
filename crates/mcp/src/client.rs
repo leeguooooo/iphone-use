@@ -650,11 +650,21 @@ impl DaemonClient {
     /// `POST /agent/input` with the daemon's structured result kept.
     ///
     /// `observe` asks the daemon for a post-action observation
-    /// (`?return=delta`); without it the request is byte-for-byte what
-    /// [`Self::input`] sends, so existing callers are unaffected.
+    /// (`?return=delta`); both forms preserve the same action fields as
+    /// [`Self::input`].
     pub async fn input_observed(
         &self,
         msg: &InputMsg,
+        observe: bool,
+    ) -> anyhow::Result<DaemonResponse> {
+        self.input_value_observed(&serde_json::to_value(msg)?, observe)
+            .await
+    }
+
+    /// Observed action envelope, including a single-use text continuation.
+    pub async fn input_value_observed(
+        &self,
+        action: &serde_json::Value,
         observe: bool,
     ) -> anyhow::Result<DaemonResponse> {
         let path = if observe {
@@ -666,10 +676,15 @@ impl DaemonClient {
             .auth(self.http().post(self.url(&path)))
             .header("x-phone-control", "1")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(msg.to_json());
-        let typing = match msg {
-            InputMsg::Text { text } => text_allowance(text),
-            _ => Duration::ZERO,
+            .body(action.to_string());
+        let typing = if action.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+            action
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(text_allowance)
+                .unwrap_or_default()
+        } else {
+            Duration::ZERO
         };
         if observe {
             req = req.timeout(OBSERVE_TIMEOUT + typing);
@@ -680,7 +695,6 @@ impl DaemonClient {
         self.remember_snapshot(response.json.as_ref());
         Ok(response)
     }
-
 
     /// `POST /agent/input` with an arbitrary action body (element taps,
     /// set_value, …), keeping the daemon's structured result.

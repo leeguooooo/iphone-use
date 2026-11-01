@@ -384,6 +384,15 @@ final class ElementRegistry {
 
   func node(_ id: String) -> UINode? { entries[id]?.node }
 
+  /// Only acknowledged activity on a still-live handle can extend its lifetime.
+  func renew(_ id: String, node: UINode, now: Date = Date()) {
+    guard let entry = entries[id], now.timeIntervalSince(entry.at) <= Self.maxAgeSeconds else { return }
+    entries[id] = (node, now)
+    order.removeAll { $0 == id }
+    order.append(id)
+  }
+
+
   /// Drops ids registered more than `maxAgeSeconds` before `now` (order is registration order).
   func prune(now: Date = Date()) {
     var cut = 0

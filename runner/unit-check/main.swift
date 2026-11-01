@@ -831,6 +831,18 @@ do {
   check(registry.node(fresh) != nil, "a recent id survives the prune")
   for _ in 0..<20 { _ = registry.register(tree, now: start.addingTimeInterval(66)) }
   check(registry.count <= 8, "the registry never holds more than its capacity")
+  let renewed = ElementRegistry(capacity: 8)
+  let active = renewed.register(tree, now: start)
+  let stale = renewed.register(tree, now: start)
+  renewed.renew(active, node: tree, now: start.addingTimeInterval(55))
+  renewed.prune(now: start.addingTimeInterval(65))
+  check(renewed.node(active) != nil, "acknowledged activity keeps the same handle alive")
+  check(renewed.node(stale) == nil, "renewal does not hide expired handles behind a fresh one")
+  renewed.renew(active, node: tree, now: start.addingTimeInterval(121))
+  renewed.prune(now: start.addingTimeInterval(121))
+  check(renewed.node(active) == nil, "renewal cannot revive an already expired handle")
+  renewed.renew("missing", node: tree, now: start.addingTimeInterval(122))
+  check(renewed.count == 0, "renewal cannot create an unknown handle")
 }
 
 // MARK: - Request signing (RunnerAuth)

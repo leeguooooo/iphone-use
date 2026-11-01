@@ -48,6 +48,7 @@ final class Registry {
   var entries: [String:UINode] = [:]
   func register(_ node: UINode) -> String { let id = UUID().uuidString; entries[id] = node; return id }
   func prune() {}
+  func renew(_ id:String, node:UINode) { if entries[id] != nil { entries[id] = node } }
 }
 enum IPURBridge { static func invalidateRequestCache() {} }
 '''
@@ -61,6 +62,7 @@ final class RunnerTests {
   var foregroundPID: Int32 = 42
   var fullValue: [String:Any] = ["value":"old", "complete":true]
   var sends = 0
+  var lastMapKeys: Bool?
   var afterSend: (() -> Void)?
   init() { root.nodes = [node] }
   func foregroundTree() throws -> UINode { root }
@@ -69,8 +71,8 @@ final class RunnerTests {
     guard let node = elements.entries[id] else { throw RunnerError.failed("stale") }; return node
   }
   func fullElementValue(_ id:String, limit:Int) throws -> [String:Any] { fullValue }
-  func typeIntoFocus(_ text:String, frequency:UInt, targetPID:Int32?) throws -> String {
-    precondition(targetPID == 42); sends += 1
+  func typeIntoFocus(_ text:String, frequency:UInt, mapKeys:Bool = true, targetPID:Int32?) throws -> String {
+    precondition(targetPID == 42); sends += 1; lastMapKeys = mapKeys
     if text.contains("delete") { fullValue = ["value":"", "complete":true] }
     afterSend?(); return "synthetic"
   }
@@ -97,6 +99,11 @@ func refused(_ run:() throws -> Void, status:Int,_ message:String) {
 let r = RunnerTests();let t = try token(r)
 _ = try r.boundKeys("once",token:t,frequency:60)
 check(r.sends == 1,"one bound dispatch")
+do {
+  let r = RunnerTests();let t = try token(r)
+  _ = try r.boundKeys("\u{E007}",token:t,frequency:60)
+  check(r.lastMapKeys == false,"bound text never maps private-use input into Return or editing keys")
+}
 for reason in 0..<8 {
   let r = RunnerTests();let t = try token(r)
   switch reason {
