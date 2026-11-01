@@ -50,7 +50,7 @@ final class RunnerTests {
   func freshNode(_ id: String) throws -> Node {
     reads += 1
     if scenario == 0 || (scenario == 1 && reads > 1) { throw RunnerError.staleElement(id) }
-    let outside = scenario != 5 && (reads == 1 || scenario == 3)
+    let outside = scenario != 5 && scenario != 6 && (reads == 1 || scenario == 3)
     return Node(rect: CGRect(x: 20, y: outside ? 1500 : 200, width: 80, height: 40))
   }
   func windowSizePoints() -> CGSize { CGSize(width: 390, height: 844) }
@@ -58,6 +58,7 @@ final class RunnerTests {
   func tapPoint(_ point: CGPoint) throws {
     touches += 1
     if scenario == 2 { throw RunnerError.staleElement("callback-after-input") }
+    if scenario == 6 { throw RunnerError.failed("synthesis failure after input") }
   }
   func run() -> Int {
     do { return try clickElement("fixture").status }
@@ -67,7 +68,7 @@ final class RunnerTests {
 '''
 harness += route + '\n}\n'
 harness += r'''
-let expected = [(404,0,0),(500,1,0),(500,1,1),(500,1,0),(200,1,1),(200,0,1)]
+let expected = [(404,0,0),(500,1,0),(500,1,1),(500,1,0),(200,1,1),(200,0,1),(500,0,1)]
 for (scenario, wanted) in expected.enumerated() {
   let runner = RunnerTests(scenario)
   let status = runner.run()
@@ -76,7 +77,7 @@ for (scenario, wanted) in expected.enumerated() {
     exit(1)
   }
 }
-print("Native click delivery: 6 scenarios passed; production Swift, synthetic callbacks only")
+print("Native click delivery: 7 scenarios passed; production Swift, synthetic callbacks only")
 '''
 with tempfile.TemporaryDirectory(prefix='ipu-click-delivery-') as folder:
     out = Path(folder)

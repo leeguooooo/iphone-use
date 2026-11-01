@@ -372,3 +372,58 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
         }
     });
 }
+
+#[test]
+fn native_click_unknown_after_internal_reveal_never_retries_or_falls_back() {
+    block(async {
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let record = seen.clone();
+        let runner = mock_runner(move |request, _| {
+            record.lock().unwrap().push(request.to_string());
+            let body = if request.starts_with("POST /session ") {
+                r#"{"value":{"sessionId":"SESSION"}}"#
+            } else if request.contains("/source?") {
+                return Some((Duration::ZERO, response(TREE, "complete")));
+            } else if request.starts_with("POST ") && request.contains("/elements ") {
+                return Some((
+                    Duration::ZERO,
+                    response(r#"{"value":[{"ELEMENT":"E1"}]}"#, "complete"),
+                ));
+            } else if request.contains("/element/E1/rect") {
+                r#"{"value":{"x":10,"y":10,"width":100,"height":40}}"#
+            } else if request.contains("/window/size") {
+                r#"{"value":{"width":390,"height":844}}"#
+            } else if request.contains("/E1/click ") {
+                let body = r#"{"value":{"error":"unknown error","message":"click outcome unknown after reveal; no automatic retry"}}"#;
+                return Some((Duration::ZERO,format!("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())));
+            } else {
+                r#"{"value":null}"#
+            };
+            Some((Duration::ZERO, body.into()))
+        });
+        let request=Request::builder().method("POST").uri("/agent/actions").header("x-phone-control","1").header("content-type","application/json").body(Body::from(serde_json::json!({"observe":false,"steps":[{"kind":"action","action":{"type":"tap_locator","locator":{"label":"Done"}}}]}).to_string())).unwrap();
+        let reply = server::http::router(build_state_with_runner(runner.url()))
+            .oneshot(request)
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&reply.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let sent = seen.lock().unwrap();
+        assert_eq!(
+            sent.iter()
+                .filter(|r| r.starts_with("POST ") && r.contains("/E1/click "))
+                .count(),
+            1,
+            "{sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|r| r.starts_with("POST ") && r.contains("/actions ")),
+            "no coordinate fallback after native500: {sent:?}"
+        );
+        assert_eq!(body["outcome"], "unknown", "{body}");
+        assert_eq!(body["retry_safe"], false, "{body}");
+        assert_eq!(body["applied_actions"], 0, "{body}");
+    });
+}
