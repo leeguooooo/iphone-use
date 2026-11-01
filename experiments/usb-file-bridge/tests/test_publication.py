@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 import uuid
@@ -22,6 +23,44 @@ class PublicationTests(unittest.TestCase):
                      'sha256':hashlib.sha256(b'synthetic bytes').hexdigest()}
         self.session = c.Session(self.root/'state',10)
         self.dest = self.root/'out'
+
+    def test_stop_acknowledged_during_final_guard_prevents_publication(self):
+        def guard():self.assertTrue(c.Session.cancel(self.session.root))
+        with self.session.acquire(),self.assertRaises(c.Cancelled):
+            c.commit_file(self.source,self.meta,self.dest,self.session,guard)
+        self.assertFalse((self.dest/'sample.pdf').exists())
+        self.assertEqual(p.reconcile(self.session.root,self.meta['id'])['outcome'],'not_published')
+
+    def test_stop_waits_for_inflight_publication_before_acknowledging(self):
+        entered=threading.Event();release=threading.Event();stopped=threading.Event();stopping=threading.Event()
+        errors=[];results=[];real=c.os.link
+        def link(a,b):
+            entered.set()
+            if not release.wait(2):raise RuntimeError('test publication release missing')
+            real(a,b)
+        def receive():
+            try:c.commit_file(self.source,self.meta,self.dest,self.session,lambda:None)
+            except Exception as error:errors.append(error)
+        def stop():
+            try:
+                stopping.set()
+                acknowledged=c.Session.cancel(self.session.root)
+                results.append((acknowledged,(self.dest/'sample.pdf').exists()))
+            except Exception as error:errors.append(error)
+            finally:stopped.set()
+        with self.session.acquire(),patch.object(c.os,'link',side_effect=link):
+            receiver=threading.Thread(target=receive);receiver.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                stopper=threading.Thread(target=stop);stopper.start()
+                try:
+                    self.assertTrue(stopping.wait(2))
+                    self.assertFalse(stopped.wait(0.1))
+                finally:release.set();stopper.join(3)
+            finally:release.set();receiver.join(3)
+            self.assertFalse(receiver.is_alive());self.assertFalse(stopper.is_alive())
+            self.assertEqual(errors,[]);self.assertEqual(results,[(True,True)])
+            self.assertTrue(p.reconcile(self.session.root,self.meta['id'])['committed'])
 
     def test_cancel_after_link_reports_committed(self):
         real = c.os.link

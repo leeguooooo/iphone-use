@@ -98,6 +98,22 @@ def copy_bounded(incoming, output, maximum, check):
         output.write(chunk)
         total += len(chunk)
 
+@contextlib.contextmanager
+def publication_gate(root):
+    # Serialize local stop acknowledgement with the final publication syscall.
+    # This does not lock the remote daemon's owner/privacy state.
+    with (root / 'publication.lock').open('a') as lock:
+        deadline = time.monotonic() + 3
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TransferError('Publication busy; query result and retry stop') from None
+                time.sleep(0.01)
+        yield
+
 class Session:
     """OS lock is authoritative; cancellation is token-based, never kill-by-PID."""
     def __init__(self, root, seconds):
@@ -161,8 +177,12 @@ class Session:
         if 'token' not in state:
             raise TransferError('Receiver is starting; retry stop shortly')
         token = str(uuid.UUID(state['token']))
-        (root / ('cancel-' + token)).touch(mode=0o600, exist_ok=True)
-        return True
+        with publication_gate(root):
+            current = Session.status(root)
+            if not current.get('active') or current.get('token') != token:
+                return False
+            (root / ('cancel-' + token)).touch(mode=0o600, exist_ok=True)
+            return True
 
 class Device:
     def __init__(self, args, session, scratch):
@@ -278,7 +298,9 @@ def commit_file(source, meta, destination, session, guard):
             raise TransferError('Destination differs; refusing overwrite')
         guard()
         path, record = publication.prepare(session, meta, target, publication.identity(target, existing=True))
-        publication.mark_committed(path, record)
+        with publication_gate(session.root):
+            session.check()
+            publication.mark_committed(path, record)
         return target, 'already_identical'
     fd, name = tempfile.mkstemp(prefix='.usb-', suffix='.partial', dir=destination)
     stage = Path(name)
@@ -294,10 +316,12 @@ def commit_file(source, meta, destination, session, guard):
         path, record = publication.prepare(session, meta, target, publication.identity(stage))
         publication.mark_committing(path, record)
         guard()  # Recheck after persisting intent as well as after the transport probe.
-        attempted = True
-        os.link(stage, target)
-        sync_directory(destination)
-        publication.mark_committed(path, record)
+        with publication_gate(session.root):
+            session.check()
+            attempted = True
+            os.link(stage, target)
+            sync_directory(destination)
+            publication.mark_committed(path, record)
         return target, 'copied'
     except Exception as error:
         if path is not None:

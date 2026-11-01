@@ -130,7 +130,13 @@ owner name. This remains a checkpoint protocol, with a gap between the final
 check and publication.
 
 Use the same instance/state-dir for each command. `stop` uses a session token,
-not a stale PID. An OS lock scopes exclusivity by UDID/bundle/instance. Agents
+not a stale PID. Stop acknowledgement and the final local publication share a
+lock: an acknowledged cancellation prevents a later publication, while an
+already-running publication must finish before stop can acknowledge. A busy
+publication can make stop fail after three seconds; query result before retrying.
+`cancel_requested=true` does not undo an already committed file. This local lock
+does not close the remote owner/privacy checkpoint gap described above.
+An OS lock scopes exclusivity by UDID/bundle/instance. Agents
 should select one route per task and avoid clipboard-export flows while a USB
 receiver is active. Apple clipboard settings remain unchanged throughout;
 there is no global switch to restore after cancellation or disconnection.
