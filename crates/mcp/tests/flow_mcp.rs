@@ -427,7 +427,7 @@ fn a_failing_batch_keeps_its_evidence_over_stdio() {
     assert_eq!(structured["steps"].as_array().map(Vec::len), Some(25));
     // The model reads a compact verdict instead of the whole body.
     let text = result["content"][0]["text"].as_str().unwrap_or_default();
-    assert!(text.starts_with("FAILED expectation_timeout · step 24 of 25"), "{text}");
+    assert!(text.starts_with("FAILED expectation_timeout · step 25 of 25"), "{text}");
     assert!(text.contains("retry_safe=false"), "{text}");
     assert!(text.contains("end screen: unreadable — no readable element tree"), "{text}");
     assert!(text.len() < 2 * 1024, "{} bytes: {text}", text.len());

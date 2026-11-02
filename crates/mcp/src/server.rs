@@ -1573,7 +1573,10 @@ impl PhoneHandler {
             // Without an observed screen the body stays as it was.
             let text = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
-                .and_then(|json| crate::compact::batch(&json))
+                .and_then(|mut json| {
+                    crate::compact::label_action_steps(&mut json, &request);
+                    crate::compact::batch(&json)
+                })
                 .unwrap_or(body);
             return with_structure(
                 CallToolResult::success(vec![Content::text(text)]),
@@ -1589,8 +1592,11 @@ impl PhoneHandler {
             let body = response.body().to_string();
             let text = response
                 .json
-                .as_ref()
-                .and_then(crate::compact::failed_batch)
+                .clone()
+                .and_then(|mut json| {
+                    crate::compact::label_action_steps(&mut json, &request);
+                    crate::compact::failed_batch(&json)
+                })
                 .unwrap_or(body);
             return with_structure(CallToolResult::error(vec![Content::text(text)]), &response);
         }
