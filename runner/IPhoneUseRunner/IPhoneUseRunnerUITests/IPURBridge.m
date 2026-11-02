@@ -924,12 +924,15 @@ static NSMutableDictionary *IPURSerialize(
   node[@"rect"] = IPURRect(snapshot);
   NSString *enabled = IPURBoolString(snapshot, @"enabled");
   if (enabled != nil) node[@"isEnabled"] = enabled;
-  // hasFocus is the focus engine's (tvOS-style) flag; a text field holding the keyboard reports
-  // only hasKeyboardFocus (hardware: Settings' search field, iOS 27).
+  // hasKeyboardFocus decides where typed text goes: a text field holding the keyboard reports
+  // only it (hardware: Settings' search field, iOS 27). hasFocus is the focus engine's
+  // (tvOS-style) flag, true on most links and texts of a web page (hardware: 210 of 221 rows on
+  // a PayPay screen, iOS 27), so it counts only where hasKeyboardFocus is not reported.
   NSString *focus = IPURBoolString(snapshot, @"hasFocus");
   NSString *keyboardFocus = IPURBoolString(snapshot, @"hasKeyboardFocus");
-  if ([focus isEqual:@"1"] || [keyboardFocus isEqual:@"1"]) node[@"isFocused"] = @"1";
-  else if ([focus isEqual:@"0"] && [keyboardFocus isEqual:@"0"]) node[@"isFocused"] = @"0";
+  if ([keyboardFocus isEqual:@"1"]) node[@"isFocused"] = @"1";
+  else if (keyboardFocus != nil) { if (focus != nil) node[@"isFocused"] = @"0"; }
+  else if ([focus isEqual:@"1"]) node[@"isFocused"] = @"1";
   NSString *selected = IPURBoolString(snapshot, @"selected");
   if (selected != nil) node[@"isSelected"] = selected;
   if (walk->includeElements) {

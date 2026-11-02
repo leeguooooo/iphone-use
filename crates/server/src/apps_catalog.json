@@ -52,7 +52,7 @@
   {"name": "同花顺", "aliases": ["Tonghuashun", "10jqka"], "bundle_id": "cn.com.10jqka.IHexin", "track_id": 303191318, "store_name": "同花顺-炒股、股票", "publisher": "Zhejiang Royalflush Cloud Software Co., Ltd.", "country": "cn"},
   {"name": "东方财富", "aliases": ["Eastmoney"], "bundle_id": "com.eastmoney.iphone", "track_id": 423525686, "store_name": "东方财富-股票、炒股、理财", "publisher": "东方财富信息股份有限公司", "country": "cn"},
   {"name": "富途牛牛", "aliases": ["富途", "Futu", "moomoo HK"], "bundle_id": "cn.futu.FutuTraderPhone", "track_id": 592031984, "store_name": "富途牛牛 - 港股美股 Crypto 期權 ETF 實時報價", "publisher": "Shenzhen Futu Network Technology Company Limited", "country": "hk"},
-  {"name": "PayPay", "aliases": ["ペイペイ"], "bundle_id": "jp.pay2.app.ios", "track_id": 1435783608, "store_name": "PayPay", "publisher": "PayPay Corporation", "country": "jp"},
+  {"name": "PayPay", "aliases": ["ペイペイ", "PayPayカード", "PayPay Card"], "bundle_id": "jp.pay2.app.ios", "track_id": 1435783608, "store_name": "PayPay", "publisher": "PayPay Corporation", "country": "jp"},
   {"name": "LINE", "aliases": ["ライン"], "bundle_id": "jp.naver.line", "track_id": 443904275, "store_name": "LINE", "publisher": "LINE Corporation", "country": "jp"},
   {"name": "WhatsApp", "aliases": ["WhatsApp Messenger"], "bundle_id": "net.whatsapp.WhatsApp", "track_id": 310633997, "store_name": "WhatsApp Messenger", "publisher": "WhatsApp Inc.", "country": "us"},
   {"name": "Instagram", "aliases": ["IG"], "bundle_id": "com.burbn.instagram", "track_id": 389801252, "store_name": "Instagram", "publisher": "Instagram, Inc.", "country": "us"},
