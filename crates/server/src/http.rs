@@ -9525,6 +9525,30 @@ async fn runner_control_with_client(
 /// the runner measures, so the daemon's size disagreed with it). Anything
 /// else fails closed as an unknown outcome. Either way the runner's own
 /// reason rides along in `detail.runner_error`.
+/// The runner's "no single focused text field" refusal, under a name an
+/// agent can act on. Typing used to report `ok · applied` with no field
+/// focused while the text went nowhere (#391).
+fn input_target_refusal(error: &anyhow::Error) -> Option<RunnerControlOutcome> {
+    let runner = crate::runner::runner_http_error(error)?;
+    if !runner.nothing_sent() {
+        return None;
+    }
+    let message = runner.message.as_deref().unwrap_or_default();
+    if message.starts_with("input_target_ambiguous_or_missing") {
+        Some(RunnerControlOutcome::Refused(
+            "no_focused_field",
+            "no single text field has keyboard focus, so nothing was typed; tap the field you mean (or use set_value with its element) and type again",
+        ))
+    } else if message.starts_with("newline_requires_multiline_field") {
+        Some(RunnerControlOutcome::Refused(
+            "newline_requires_multiline_field",
+            "the focused field is single-line, so text with a line break was not typed; send one line, or use key return where Return is intended",
+        ))
+    } else {
+        None
+    }
+}
+
 fn runner_failure_outcome(
     w: &mut crate::runner::RunnerClient,
     actionable: &std::sync::atomic::AtomicBool,
@@ -9946,7 +9970,15 @@ async fn type_text_chunked(
         Some(target) => Some(target),
         None => match w.input_target_for_text(text).await {
             Ok(target) => target,
-            Err(error) => return runner_failure_outcome(w, actionable, &error, "text", detail),
+            Err(error) => {
+                if let Some(refusal) = input_target_refusal(&error) {
+                    if let Some(runner) = crate::runner::runner_http_error(&error) {
+                        *detail = Some(serde_json::json!({ "runner_error": runner.to_json() }));
+                    }
+                    return refusal;
+                }
+                return runner_failure_outcome(w, actionable, &error, "text", detail);
+            }
         },
     };
     if budget_ms.is_some() && (target.is_none() || !w.supports_input_continuation()) {
@@ -28837,6 +28869,29 @@ mod tests {
             .find("let agent_runner_deadline = tokio::time::Instant::now() + AGENT_INPUT_RUNNER_DEADLINE;")
             .unwrap();
         assert!(resolve < deadline, "the deadline is set before resolution");
+    }
+
+    #[test]
+    fn typing_with_no_focused_field_is_a_named_refusal() {
+        let runner = |message: &str| {
+            anyhow::Error::new(crate::runner::RunnerHttpError::from_body(
+                "GET /wda/input-target",
+                reqwest::StatusCode::BAD_REQUEST,
+                &serde_json::json!({"value":{"error":"invalid argument","message":message}}).to_string(),
+            ))
+        };
+        assert!(matches!(
+            input_target_refusal(&runner("input_target_ambiguous_or_missing; nothing was sent")),
+            Some(RunnerControlOutcome::Refused("no_focused_field", _))
+        ));
+        assert!(matches!(
+            input_target_refusal(&runner("newline_requires_multiline_field; nothing was sent")),
+            Some(RunnerControlOutcome::Refused("newline_requires_multiline_field", _))
+        ));
+        // Other refusals keep the generic path; a refusal that may have sent is never renamed.
+        assert!(input_target_refusal(&runner("input_target_tree_incomplete; nothing was sent")).is_none());
+        assert!(input_target_refusal(&runner("input_target_ambiguous_or_missing")).is_none());
+        assert!(input_target_refusal(&anyhow::anyhow!("connection reset")).is_none());
     }
 
     #[test]
