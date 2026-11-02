@@ -168,11 +168,10 @@ impl Candidate {
             }
         }
         if best == 0 {
-            let brand_prefix = std::iter::once(self.name.as_str())
-                .chain(self.aliases.iter().map(String::as_str))
-                .map(normalize)
-                .any(|name| name.chars().count() >= 2 && wanted.starts_with(&name));
-            if brand_prefix {
+            // Only the app's own name: a short alias ("IG") would make any
+            // query that happens to start with it ("ignite") a candidate.
+            let name = normalize(&self.name);
+            if name.chars().count() >= 2 && wanted.starts_with(&name) {
                 best = 1;
             }
         }
@@ -896,6 +895,19 @@ mod tests {
             resolve_for_launch("PayPay銀行", Some(&phone)),
             Err(ResolveError::NotFound { .. })
         ));
+
+        // Only the app's own name is a brand: a short alias is not.
+        let instagram = [Candidate {
+            name: "Instagram".into(),
+            aliases: vec!["IG".into()],
+            bundle_id: "com.burbn.instagram".into(),
+            source: "installed",
+            system: false,
+            publisher: None,
+            country: None,
+            track_id: None,
+        }];
+        assert!(rank("ignite", Some(&instagram), &[], &[]).is_empty());
     }
 
     #[test]

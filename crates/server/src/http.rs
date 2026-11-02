@@ -19543,7 +19543,12 @@ async fn store_country(state: &AppState) -> (String, &'static str) {
         .lock()
         .ok()
         .and_then(|cache| cache.get(&udid).cloned())
-        .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(3600))
+        // A failed read is retried after a minute (the phone may reconnect),
+        // without paying its 8 s worst case on every lookup in between.
+        .filter(|(at, found)| {
+            let ttl = if found.is_some() { 3600 } else { 60 };
+            at.elapsed() < std::time::Duration::from_secs(ttl)
+        })
         .map(|(_, found)| found);
     let found = match cached {
         Some(found) => found,
@@ -19560,8 +19565,10 @@ async fn store_country(state: &AppState) -> (String, &'static str) {
 
 async fn read_store_country(state: &AppState, udid: &str) -> Option<(String, &'static str)> {
     const READ: std::time::Duration = std::time::Duration::from_secs(4);
-    // A few third-party apps from the cached inventory are enough to vote.
-    let bundles: Vec<String> = installed_inventory(state, false, APP_LOOKUP_INVENTORY_MAX_AGE)
+    // Up to 32 third-party apps spread across the whole (alphabetical) list
+    // vote; each one's iTunesMetadata keeps a single Lookup reply small.
+    const VOTERS: usize = 32;
+    let all: Vec<String> = installed_inventory(state, false, APP_LOOKUP_INVENTORY_MAX_AGE)
         .await
         .ok()
         .map(|body| crate::app_lookup::installed_from_inventory(&body))
@@ -19569,8 +19576,9 @@ async fn read_store_country(state: &AppState, udid: &str) -> Option<(String, &'s
         .into_iter()
         .map(|app| app.bundle_id)
         .filter(|bundle| !bundle.starts_with("com.apple."))
-        .take(8)
         .collect();
+    let step = all.len().div_ceil(VOTERS).max(1);
+    let bundles: Vec<String> = all.into_iter().step_by(step).collect();
     match tokio::time::timeout(READ, crate::lockdown::app_store_country(udid, &bundles)).await {
         Ok(Ok(Some(country))) => return Some((country, "app_store")),
         Ok(Ok(None)) => {}
