@@ -19326,7 +19326,9 @@ struct AgentAppsQuery {
     query: Option<String>,
     /// `auto` (default), `installed`, `catalog`, or `apple`.
     source: Option<String>,
-    /// App Store storefront for `apple`, two letters. Default `cn`.
+    /// App Store storefront for `apple`, two letters. Default: the
+    /// `IPHONE_USE_STORE_COUNTRY` setting, else the phone's own App Store, else `cn`
+    /// (see [`store_country`]).
     country: Option<String>,
     /// 1–30 candidates. Default 10.
     limit: Option<usize>,
@@ -19431,7 +19433,8 @@ async fn installed_inventory(
 struct AppLookupParams {
     query: String,
     source: &'static str,
-    country: String,
+    /// `None`: the caller named no storefront ([`store_country`] picks one).
+    country: Option<String>,
     limit: usize,
 }
 
@@ -19448,10 +19451,12 @@ fn app_lookup_params(query: &AgentAppsQuery) -> Result<AppLookupParams, String> 
         "apple" => "apple",
         _ => return Err("source must be auto, installed, catalog or apple".to_string()),
     };
-    let country = query.country.as_deref().unwrap_or("cn").to_ascii_lowercase();
-    if country.len() != 2 || !country.chars().all(|c| c.is_ascii_lowercase()) {
-        return Err("country must be a two-letter App Store storefront such as cn, us, hk, jp".to_string());
-    }
+    let country = match query.country.as_deref() {
+        Some(country) => Some(valid_store_country(country).ok_or_else(|| {
+            "country must be a two-letter App Store storefront such as cn, us, hk, jp".to_string()
+        })?),
+        None => None,
+    };
     let limit = query.limit.unwrap_or(10);
     if !(1..=30).contains(&limit) {
         return Err("limit must be 1 to 30".to_string());
@@ -19462,6 +19467,95 @@ fn app_lookup_params(query: &AgentAppsQuery) -> Result<AppLookupParams, String> 
         country,
         limit,
     })
+}
+
+fn valid_store_country(country: &str) -> Option<String> {
+    let country = country.trim().to_ascii_lowercase();
+    (country.len() == 2 && country.chars().all(|c| c.is_ascii_lowercase())).then_some(country)
+}
+
+/// What [`store_country`] last read from the phone, per udid, for an hour:
+/// the account's store rarely changes, and a search should not open two
+/// lockdown sessions every time.
+fn store_country_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<(String, &'static str)>)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<(String, &'static str)>)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Which App Store storefront a lookup that named none searches, and where
+/// that came from:
+/// - `setting`: `IPHONE_USE_STORE_COUNTRY`;
+/// - `app_store`: the store the phone's own apps were bought from (the
+///   Apple ID's storefront);
+/// - `device_region`: the phone's Region setting, when no app says;
+/// - `fallback`: `cn`, when nothing could be read (the answer warns).
+///
+/// A phone in Japan used to search the Chinese store and miss Japan-only apps.
+async fn store_country(state: &AppState) -> (String, &'static str) {
+    if let Some(country) = std::env::var("IPHONE_USE_STORE_COUNTRY")
+        .ok()
+        .and_then(|value| valid_store_country(&value))
+    {
+        return (country, "setting");
+    }
+    let Some(udid) = state.device_udid.clone() else {
+        return ("cn".to_string(), "fallback");
+    };
+    let cached = store_country_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&udid).cloned())
+        .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(3600))
+        .map(|(_, found)| found);
+    let found = match cached {
+        Some(found) => found,
+        None => {
+            let found = read_store_country(state, &udid).await;
+            if let Ok(mut cache) = store_country_cache().lock() {
+                cache.insert(udid.clone(), (std::time::Instant::now(), found.clone()));
+            }
+            found
+        }
+    };
+    found.unwrap_or_else(|| ("cn".to_string(), "fallback"))
+}
+
+async fn read_store_country(state: &AppState, udid: &str) -> Option<(String, &'static str)> {
+    const READ: std::time::Duration = std::time::Duration::from_secs(4);
+    // A few third-party apps from the cached inventory are enough to vote.
+    let bundles: Vec<String> = installed_inventory(state, false, APP_LOOKUP_INVENTORY_MAX_AGE)
+        .await
+        .ok()
+        .map(|body| crate::app_lookup::installed_from_inventory(&body))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|app| app.bundle_id)
+        .filter(|bundle| !bundle.starts_with("com.apple."))
+        .take(8)
+        .collect();
+    match tokio::time::timeout(READ, crate::lockdown::app_store_country(udid, &bundles)).await {
+        Ok(Ok(Some(country))) => return Some((country, "app_store")),
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => tracing::debug!("app lookup: app store country: {error:#}"),
+        Err(_) => tracing::debug!("app lookup: app store country timed out"),
+    }
+    match tokio::time::timeout(READ, crate::lockdown::device_region(udid)).await {
+        Ok(Ok(region)) => region
+            .as_deref()
+            .and_then(valid_store_country)
+            .map(|region| (region, "device_region")),
+        Ok(Err(error)) => {
+            tracing::debug!("app lookup: lockdown region read: {error:#}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("app lookup: lockdown region read timed out");
+            None
+        }
+    }
 }
 
 /// `GET /agent/apps?query=<name>` — which bundle id is this app?
@@ -19485,6 +19579,10 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
     };
     let refresh = matches!(query.refresh.as_deref(), Some("1" | "true"));
     let mut warnings: Vec<String> = Vec::new();
+    let (country, country_source) = match params.country.clone() {
+        Some(country) => (country, "request"),
+        None => store_country(state).await,
+    };
     let mut searched: Vec<&str> = Vec::new();
     let mut installed: Option<Vec<crate::app_lookup::Candidate>> = None;
     if matches!(params.source, "auto" | "installed") {
@@ -19510,7 +19608,12 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
     let mut apple_error = None;
     if params.source == "apple" || (params.source == "auto" && local.is_empty()) {
         searched.push("apple");
-        match crate::app_lookup::search_apple(&params.query, &params.country, params.limit).await {
+        if country_source == "fallback" {
+            warnings.push(
+                "the phone's region could not be read; searched the cn App Store — pass country (jp, us, …) or set IPHONE_USE_STORE_COUNTRY".to_string(),
+            );
+        }
+        match crate::app_lookup::search_apple(&params.query, &country, params.limit).await {
             Ok(rows) => apple = rows,
             Err(error) => {
                 warnings.push(error.clone());
@@ -19548,7 +19651,8 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
             "ok": true,
             "query": params.query,
             "source": params.source,
-            "country": params.country,
+            "country": country,
+            "country_source": country_source,
             "candidates": candidates,
             "total_matches": total,
             "searched": searched,
@@ -28752,11 +28856,11 @@ mod tests {
             AppLookupParams {
                 query: "微信".to_string(),
                 source: "auto",
-                country: "cn".to_string(),
+                country: None,
                 limit: 10
             }
         );
-        assert_eq!(q("x", Some("apple"), Some("US"), Some(30)).unwrap().country, "us");
+        assert_eq!(q("x", Some("apple"), Some("US"), Some(30)).unwrap().country.as_deref(), Some("us"));
         assert!(q("", None, None, None).is_err());
         assert!(q(&"a".repeat(101), None, None, None).is_err());
         assert!(q("x", Some("web"), None, None).is_err());

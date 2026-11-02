@@ -148,7 +148,10 @@ pub struct AppsParams {
     /// then the App Store), `installed`, `catalog` (offline), or `apple`.
     #[serde(default)]
     pub source: Option<String>,
-    /// App Store storefront for the store search, two letters. Default `cn`.
+    /// App Store storefront for the store search, two letters. Default: the
+    /// store the phone's apps came from (or IPHONE_USE_STORE_COUNTRY, else the
+    /// Region setting); `cn` only when none is known, with a warning. The
+    /// answer's `country_source` says which.
     #[serde(default)]
     pub country: Option<String>,
     /// 1–30 candidates. Default 10.
