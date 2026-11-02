@@ -480,6 +480,11 @@ pub fn label_action_steps(result: &mut Value, request: &Value) {
     let Some(sent) = request.get("steps").and_then(Value::as_array) else {
         return;
     };
+    // A batch refused before its first step answers with no step results;
+    // the request still says how many were asked for.
+    if let Some(object) = result.as_object_mut() {
+        object.insert("requested_steps".to_string(), Value::from(sent.len()));
+    }
     let Some(steps) = result.get_mut("steps").and_then(Value::as_array_mut) else {
         return;
     };
@@ -693,9 +698,13 @@ pub fn failed_batch(json: &Value) -> Option<String> {
         .or_else(|| text(json, "outcome"))
         .unwrap_or_default();
     let retry_safe = json.get("retry_safe").and_then(Value::as_bool);
+    let total = steps.len().max(
+        json.get("requested_steps")
+            .and_then(Value::as_u64)
+            .map_or(0, |n| n as usize),
+    );
     let mut head = format!(
-        "FAILED {error} · step {failed} of {} · {completed} completed · {applied} applied · {outcome}",
-        steps.len()
+        "FAILED {error} · step {failed} of {total} · {completed} completed · {applied} applied · {outcome}"
     );
     match retry_safe {
         Some(true) => head.push_str(" · retry_safe"),
@@ -1331,6 +1340,21 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_refusal_before_the_first_step_counts_the_requested_steps() {
+        // What the daemon answered on hardware for a lone `type` with no
+        // focused field: no step results at all.
+        let request = json!({"steps": [{"kind": "action", "action": {"type": "text", "text": "zq"}}]});
+        let mut body = json!({
+            "ok": false, "error": "no_focused_field", "failed_step": 0, "completed": 0,
+            "applied_actions": 0, "outcome": "not_sent", "batch_outcome": "nothing_applied",
+            "retry_safe": true, "steps": []
+        });
+        label_action_steps(&mut body, &request);
+        let text = failed_batch(&body).unwrap();
+        assert!(text.starts_with("FAILED no_focused_field · step 1 of 1 · 0 completed"), "{text}");
     }
 
     #[test]

@@ -19509,11 +19509,11 @@ fn valid_store_country(country: &str) -> Option<String> {
 /// What [`store_country`] last read from the phone, per udid, for an hour:
 /// the account's store rarely changes, and a search should not open two
 /// lockdown sessions every time.
-fn store_country_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<(String, &'static str)>)>> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<(String, &'static str)>)>>,
-    > = std::sync::OnceLock::new();
+type StoreCountryCache =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<(String, &'static str)>)>>;
+
+fn store_country_cache() -> &'static StoreCountryCache {
+    static CACHE: std::sync::OnceLock<StoreCountryCache> = std::sync::OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
@@ -19611,10 +19611,9 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
     };
     let refresh = matches!(query.refresh.as_deref(), Some("1" | "true"));
     let mut warnings: Vec<String> = Vec::new();
-    let (country, country_source) = match params.country.clone() {
-        Some(country) => (country, "request"),
-        None => store_country(state).await,
-    };
+    // The storefront is resolved only when the App Store is searched.
+    let mut country: Option<(String, &'static str)> =
+        params.country.clone().map(|country| (country, "request"));
     let mut searched: Vec<&str> = Vec::new();
     let mut installed: Option<Vec<crate::app_lookup::Candidate>> = None;
     if matches!(params.source, "auto" | "installed") {
@@ -19640,12 +19639,16 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
     let mut apple_error = None;
     if params.source == "apple" || (params.source == "auto" && local.is_empty()) {
         searched.push("apple");
+        if country.is_none() {
+            country = Some(store_country(state).await);
+        }
+        let (store, country_source) = country.clone().expect("resolved above");
         if country_source == "fallback" {
             warnings.push(
                 "the phone's region could not be read; searched the cn App Store — pass country (jp, us, …) or set IPHONE_USE_STORE_COUNTRY".to_string(),
             );
         }
-        match crate::app_lookup::search_apple(&params.query, &country, params.limit).await {
+        match crate::app_lookup::search_apple(&params.query, &store, params.limit).await {
             Ok(rows) => apple = rows,
             Err(error) => {
                 warnings.push(error.clone());
@@ -19683,8 +19686,8 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
             "ok": true,
             "query": params.query,
             "source": params.source,
-            "country": country,
-            "country_source": country_source,
+            "country": country.as_ref().map(|(country, _)| country.clone()),
+            "country_source": country.as_ref().map(|(_, source)| *source),
             "candidates": candidates,
             "total_matches": total,
             "searched": searched,
