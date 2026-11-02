@@ -37,6 +37,9 @@ int main(void) { @autoreleasepool {
   expect(@{@"hasKeyboardFocus":@YES},nil,@"1",nil);
   expect(@{@"hasFocus":@NO},nil,nil,nil);
   expect(@{@"hasKeyboardFocus":@NO},nil,nil,nil);
+  // A web page's links and texts: focus-engine focus without the keyboard is not focus.
+  expect(@{@"hasFocus":@YES,@"hasKeyboardFocus":@NO},nil,@"0",nil);
+  expect(@{@"hasFocus":@NO,@"hasKeyboardFocus":@YES},nil,@"1",nil);
   expect(@{@"enabled":@2,@"hasFocus":@"unknown",@"hasKeyboardFocus":@NO,@"selected":@[]},nil,nil,nil);
   expect(@{@"enabled":@1.0,@"hasFocus":@0.0,@"hasKeyboardFocus":@NO,@"selected":@1.25},nil,nil,nil);
   expect(@{@"enabled":@"false",@"hasFocus":@"0",@"hasKeyboardFocus":@"false",@"selected":@"1"},@"0",@"0",@"1");

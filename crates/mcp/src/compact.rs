@@ -472,6 +472,66 @@ pub fn observed(json: &Value) -> Option<String> {
     Some(out.join("\n"))
 }
 
+/// Name each `"kind":"action"` step result after the action it ran
+/// (`launch_app`, `text`, `tap_label`…), taken from the request that was
+/// sent: the daemon reports every input step as plain `action`, which read
+/// as "0 action · 1 pause" for a launch followed by a pause.
+pub fn label_action_steps(result: &mut Value, request: &Value) {
+    let Some(sent) = request.get("steps").and_then(Value::as_array) else {
+        return;
+    };
+    // A batch refused before its first step answers with no step results;
+    // the request still says how many were asked for.
+    if let Some(object) = result.as_object_mut() {
+        object.insert("requested_steps".to_string(), Value::from(sent.len()));
+    }
+    let Some(steps) = result.get_mut("steps").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for step in steps {
+        if step.get("kind").and_then(Value::as_str) != Some("action") || step.get("action").is_some() {
+            continue;
+        }
+        let Some(index) = step.get("index").and_then(Value::as_u64) else {
+            continue;
+        };
+        let action = sent
+            .get(index as usize)
+            .and_then(|sent| sent.get("action"))
+            .and_then(|action| action.get("type"))
+            .and_then(Value::as_str);
+        if let (Some(action), Some(object)) = (action, step.as_object_mut()) {
+            object.insert("action".to_string(), Value::String(action.to_string()));
+        }
+    }
+}
+
+/// One line for a batch's steps, numbered from 1 in the order they ran
+/// (the daemon's `index` is 0-based and read like a count), each named by
+/// its action when [`label_action_steps`] supplied one.
+fn step_list(steps: &[Value], with_error: bool) -> String {
+    steps
+        .iter()
+        .enumerate()
+        .map(|(position, step)| {
+            let kind = text(step, "kind").unwrap_or_default();
+            let kind = match text(step, "action") {
+                Some(action) if kind == "action" => action,
+                _ => kind,
+            };
+            let mark = match step.get("ok") {
+                Some(Value::Bool(false)) if with_error => {
+                    format!(" FAILED {}", text(step, "error").unwrap_or_default())
+                }
+                Some(Value::Bool(false)) => " FAILED".to_string(),
+                _ => String::new(),
+            };
+            format!("#{} {kind}{mark}", position + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// A successful observed batch (`POST /agent/actions` with `observe`) as text:
 /// the verdict and step count, one short line for the steps, then the screen
 /// the batch ended on — rendered once, exactly as an observed single action
@@ -495,21 +555,7 @@ pub fn batch(json: &Value) -> Option<String> {
     head.push_str(&format!(" · {completed}/{total} steps · {applied} applied"));
     let mut out = vec![head];
     if let Some(steps) = steps {
-        let list = steps
-            .iter()
-            .enumerate()
-            .map(|(position, step)| {
-                let index = text(step, "index").unwrap_or_else(|| (position + 1).to_string());
-                let kind = text(step, "kind").unwrap_or_default();
-                let mark = if step.get("ok") == Some(&Value::Bool(false)) {
-                    format!(" FAILED {}", text(step, "error").unwrap_or_default())
-                } else {
-                    String::new()
-                };
-                format!("{index} {kind}{mark}")
-            })
-            .collect::<Vec<_>>()
-            .join(" · ");
+        let list = step_list(steps, true);
         if !list.is_empty() {
             out.push(format!("steps: {list}"));
         }
@@ -518,9 +564,9 @@ pub fn batch(json: &Value) -> Option<String> {
             let Some(resolved) = step.get("resolved") else {
                 continue;
             };
-            let index = text(step, "index").unwrap_or_else(|| (position + 1).to_string());
+            let index = position + 1;
             out.push(format!(
-                "resolved: step {index} app {:?} → {} ({}, {} match)",
+                "resolved: step #{index} app {:?} → {} ({}, {} match)",
                 text(resolved, "app").unwrap_or_default(),
                 text(resolved, "name").unwrap_or_default(),
                 text(resolved, "bundle_id").unwrap_or_default(),
@@ -639,16 +685,26 @@ pub fn failed_batch(json: &Value) -> Option<String> {
     }
     let steps = json.get("steps").and_then(Value::as_array)?;
     let error = text(json, "error").unwrap_or_else(|| "failed".to_string());
-    let failed = text(json, "failed_step").unwrap_or_default();
+    // `failed_step` is the daemon's 0-based index; the text numbers steps from 1.
+    let failed = json
+        .get("failed_step")
+        .and_then(Value::as_u64)
+        .map(|index| (index + 1).to_string())
+        .or_else(|| text(json, "failed_step"))
+        .unwrap_or_default();
     let completed = text(json, "completed").unwrap_or_default();
     let applied = text(json, "applied_actions").unwrap_or_else(|| "0".to_string());
     let outcome = text(json, "batch_outcome")
         .or_else(|| text(json, "outcome"))
         .unwrap_or_default();
     let retry_safe = json.get("retry_safe").and_then(Value::as_bool);
+    let total = steps.len().max(
+        json.get("requested_steps")
+            .and_then(Value::as_u64)
+            .map_or(0, |n| n as usize),
+    );
     let mut head = format!(
-        "FAILED {error} · step {failed} of {} · {completed} completed · {applied} applied · {outcome}",
-        steps.len()
+        "FAILED {error} · step {failed} of {total} · {completed} completed · {applied} applied · {outcome}"
     );
     match retry_safe {
         Some(true) => head.push_str(" · retry_safe"),
@@ -686,20 +742,7 @@ pub fn failed_batch(json: &Value) -> Option<String> {
         };
         out.push(format!("text: {confirmed} of {total} characters typed, {uncertain} uncertain; {next}"));
     }
-    let list = steps
-        .iter()
-        .enumerate()
-        .map(|(position, step)| {
-            let index = text(step, "index").unwrap_or_else(|| (position + 1).to_string());
-            let kind = text(step, "kind").unwrap_or_default();
-            if step.get("ok") == Some(&Value::Bool(false)) {
-                format!("{index} {kind} FAILED")
-            } else {
-                format!("{index} {kind}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let list = step_list(steps, false);
     if !list.is_empty() {
         out.push(format!("steps: {list}"));
     }
@@ -989,15 +1032,15 @@ mod tests {
         let body = json!({
             "ok": false,
             "error": "wait_for_timeout",
-            "failed_step": 2,
+            "failed_step": 1,
             "completed": 1,
             "applied_actions": 1,
             "outcome": "not_sent",
             "batch_outcome": "applied_partially",
             "retry_safe": false,
             "steps": [
-                {"index": 1, "kind": "tap_label", "ok": true, "timing": {"total_ms": 900}},
-                {"index": 2, "kind": "wait_for", "ok": false, "error": "wait_for_timeout",
+                {"index": 0, "kind": "action", "action": "tap_label", "ok": true, "timing": {"total_ms": 900}},
+                {"index": 1, "kind": "wait_for", "ok": false, "error": "wait_for_timeout",
                  "hint": "关于本机 never appeared", "timing": {"total_ms": 8000},
                  "observation": {"snapshot": "S9", "elements": [{"kind": "Button", "label": "x"}]}}
             ],
@@ -1007,7 +1050,7 @@ mod tests {
         });
         let text = failed_batch(&body).unwrap();
         assert!(text.starts_with("FAILED wait_for_timeout · step 2 of 2 · 1 completed · 1 applied · applied_partially · retry_safe=false"), "{text}");
-        assert!(text.contains("steps: 1 tap_label · 2 wait_for FAILED"), "{text}");
+        assert!(text.contains("steps: #1 tap_label · #2 wait_for FAILED"), "{text}");
         assert!(text.contains("\"hint\":\"关于本机 never appeared\""), "{text}");
         assert!(!text.contains("total_ms"), "timing stays structured: {text}");
         assert!(text.contains("end screen: snapshot S9"), "{text}");
@@ -1244,8 +1287,8 @@ mod tests {
             "settle": {"reason": "stable", "waited_ms": 812, "captures": 2},
             "timing": {"total_ms": 1900, "runner_ms": 1500, "runner": [{"call": "GET /source", "count": 2, "ms": 400}]},
             "steps": [
-                {"index": 1, "kind": "tap_label", "ok": true},
-                {"index": 2, "kind": "wait_for", "ok": true, "attempts": 1, "probe_misses": 1,
+                {"index": 0, "kind": "action", "action": "tap_label", "ok": true},
+                {"index": 1, "kind": "wait_for", "ok": true, "attempts": 1, "probe_misses": 1,
                  "observation": {"present": [{"label": "蓝牙", "kind": "Switch", "matched": 1}]}}
             ],
             "elements": [
@@ -1269,7 +1312,7 @@ mod tests {
             "{text}"
         );
         assert!(first.ends_with("· 2/2 steps · 1 applied"), "{text}");
-        assert!(text.contains("steps: 1 tap_label · 2 wait_for"), "{text}");
+        assert!(text.contains("steps: #1 tap_label · #2 wait_for"), "{text}");
         assert!(text.contains("[Switch] \"蓝牙\" value=1"), "{text}");
         // What the agent decides from next is kept.
         assert!(text.contains("flow_suggestion:"), "{text}");
@@ -1287,16 +1330,52 @@ mod tests {
     #[test]
     fn a_batch_says_which_app_a_loose_launch_name_opened() {
         let mut body = bluetooth_batch();
-        body["steps"][0] = json!({"index": 1, "kind": "action", "ok": true, "resolved": {
+        body["steps"][0] = json!({"index": 0, "kind": "action", "ok": true, "resolved": {
             "app": "idol ludo", "name": "Idol Ludo Board",
             "bundle_id": "com.kr.idolludobroard", "match": "partial"}});
         let text = batch(&body).unwrap();
         assert!(
             text.contains(
-                "resolved: step 1 app \"idol ludo\" → Idol Ludo Board (com.kr.idolludobroard, partial match)"
+                "resolved: step #1 app \"idol ludo\" → Idol Ludo Board (com.kr.idolludobroard, partial match)"
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_refusal_before_the_first_step_counts_the_requested_steps() {
+        // What the daemon answered on hardware for a lone `type` with no
+        // focused field: no step results at all.
+        let request = json!({"steps": [{"kind": "action", "action": {"type": "text", "text": "zq"}}]});
+        let mut body = json!({
+            "ok": false, "error": "no_focused_field", "failed_step": 0, "completed": 0,
+            "applied_actions": 0, "outcome": "not_sent", "batch_outcome": "nothing_applied",
+            "retry_safe": true, "steps": []
+        });
+        label_action_steps(&mut body, &request);
+        let text = failed_batch(&body).unwrap();
+        assert!(text.starts_with("FAILED no_focused_field · step 1 of 1 · 0 completed"), "{text}");
+    }
+
+    #[test]
+    fn a_launch_then_pause_names_the_launch_and_numbers_from_one() {
+        // The shape the daemon answered on hardware for launch_app + pause,
+        // which used to read "steps: 0 action · 1 pause".
+        let request = json!({"steps": [
+            {"kind": "action", "action": {"type": "launch_app", "bundle": "com.apple.Preferences"}},
+            {"kind": "pause", "ms": 800}
+        ]});
+        let mut body = bluetooth_batch();
+        body["steps"] = json!([
+            {"index": 0, "kind": "action", "ok": true},
+            {"index": 1, "kind": "pause", "ok": true}
+        ]);
+        label_action_steps(&mut body, &request);
+        assert_eq!(body["steps"][0]["action"], "launch_app");
+        assert!(body["steps"][1].get("action").is_none());
+        let text = batch(&body).unwrap();
+        assert!(text.contains("2/2 steps · 1 applied"), "{text}");
+        assert!(text.contains("steps: #1 launch_app · #2 pause"), "{text}");
     }
 
     #[test]
@@ -1320,17 +1399,17 @@ mod tests {
         // A failure's evidence is the whole body (failed_step, applied_actions,
         // retry_safe, the failed step's own detail): never summarised away.
         let failure = json!({
-            "ok": false, "error": "expectation_timeout", "failed_step": 2, "completed": 1,
+            "ok": false, "error": "expectation_timeout", "failed_step": 1, "completed": 1,
             "applied_actions": 1, "outcome": "applied", "retry_safe": false,
-            "steps": [{"index": 1, "kind": "tap_label", "ok": true},
-                      {"index": 2, "kind": "wait_for", "ok": false, "error": "expectation_timeout"}],
+            "steps": [{"index": 0, "kind": "action", "ok": true},
+                      {"index": 1, "kind": "wait_for", "ok": false, "error": "expectation_timeout"}],
             "observation": {"snapshot": "S2", "elements": []}
         });
         assert_eq!(batch(&failure), None);
         // Not observed: no screen to render, the daemon's answer stands.
         assert_eq!(
             batch(&json!({"ok": true, "completed": 2, "applied_actions": 1,
-                          "steps": [{"index": 1, "kind": "tap_label", "ok": true}]})),
+                          "steps": [{"index": 0, "kind": "action", "ok": true}]})),
             None
         );
     }

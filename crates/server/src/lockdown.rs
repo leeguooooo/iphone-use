@@ -241,6 +241,119 @@ async fn open_attached_service(attached: &usbmux::Attached, name: &str) -> Resul
 /// this key without a session (`GetProhibited`), so this pairs the same way
 /// [`ddi_status`] does; over USB or a Wi-Fi attachment alike.
 pub async fn passcode_protected(udid: &str) -> Result<bool> {
+    let reply = session_value(udid, None, "PasswordProtected").await?;
+    reply
+        .get("Value")
+        .and_then(Value::as_bool)
+        .context("PasswordProtected had no boolean value")
+}
+
+/// The phone's region setting (`com.apple.international` `Locale`, such as
+/// `ja_JP` or `zh_CN`) as a lowercase two-letter code: `jp`, `cn`. `None`
+/// when the locale names no region.
+pub async fn device_region(udid: &str) -> Result<Option<String>> {
+    let reply = session_value(udid, Some("com.apple.international"), "Locale").await?;
+    Ok(reply
+        .get("Value")
+        .and_then(Value::as_str)
+        .and_then(region_of_locale))
+}
+
+/// `ja_JP` / `zh-Hans_CN` / `en_US@calendar=gregorian` → `jp` / `cn` / `us`.
+pub fn region_of_locale(locale: &str) -> Option<String> {
+    let locale = locale.split('@').next().unwrap_or(locale);
+    let region = locale.rsplit(['_', '-']).next()?;
+    (region.len() == 2 && region.chars().all(|c| c.is_ascii_alphabetic()) && region != locale)
+        .then(|| region.to_ascii_lowercase())
+}
+
+/// The App Store storefront the phone's apps were bought from
+/// (`storefrontCountryCode` in each app's `iTunesMetadata`, from
+/// `com.apple.mobile.installation_proxy`): the Apple ID's store, which the
+/// Region setting is not — a phone in Japan read `zh-Hans_US` there while its
+/// apps said `jp`. The most common code among `bundles` wins; `None` when
+/// none of them came from the App Store.
+pub async fn app_store_country(udid: &str, bundles: &[String]) -> Result<Option<String>> {
+    if bundles.is_empty() {
+        return Ok(None);
+    }
+    let mut ids = String::new();
+    for bundle in bundles {
+        ids.push_str(&format!("<string>{}</string>", usbmux::escape(bundle)));
+    }
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict><key>Label</key><string>{LABEL}</string>\
+         <key>Command</key><string>Lookup</string><key>ClientOptions</key><dict>\
+         <key>BundleIDs</key><array>{ids}</array>\
+         <key>ReturnAttributes</key><array><string>CFBundleIdentifier</string>\
+         <string>iTunesMetadata</string></array></dict></dict></plist>\n"
+    );
+    let mut stream = open_service(udid, "com.apple.mobile.installation_proxy").await?;
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    tokio::time::timeout(EXCHANGE_TIMEOUT, async {
+        stream.write_all(&frame(&body)).await?;
+        stream.flush().await?;
+        // Lookup answers in one message; a few more are tolerated until `Complete`.
+        for _ in 0..8 {
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).await?;
+            let length = u32::from_be_bytes(header) as usize;
+            if length == 0 || length > MAX_MESSAGE {
+                bail!("installation_proxy reply length {length} is out of range");
+            }
+            let mut payload = vec![0u8; length];
+            stream.read_exact(&mut payload).await?;
+            let reply = plist::Value::from_reader(std::io::Cursor::new(payload))
+                .context("installation_proxy reply is not a property list")?;
+            let reply = reply.as_dictionary().context("installation_proxy reply is not a dictionary")?;
+            if let Some(error) = reply.get("Error").and_then(plist::Value::as_string) {
+                bail!("installation_proxy Lookup failed: {error}");
+            }
+            let found = reply.get("LookupResult").and_then(plist::Value::as_dictionary);
+            for app in found.into_iter().flat_map(|apps| apps.values()) {
+                let code = app
+                    .as_dictionary()
+                    .and_then(|app| app.get("iTunesMetadata"))
+                    .and_then(plist::Value::as_data)
+                    .and_then(|data| plist::Value::from_reader(std::io::Cursor::new(data)).ok())
+                    .and_then(|meta| {
+                        meta.as_dictionary()?
+                            .get("storefrontCountryCode")?
+                            .as_string()
+                            .map(str::to_ascii_lowercase)
+                    })
+                    .filter(|code| code.len() == 2 && code.chars().all(|c| c.is_ascii_lowercase()));
+                if let Some(code) = code {
+                    match counts.iter_mut().find(|(seen, _)| *seen == code) {
+                        Some((_, count)) => *count += 1,
+                        None => counts.push((code, 1)),
+                    }
+                }
+            }
+            if reply.get("Status").and_then(plist::Value::as_string) == Some("Complete") {
+                break;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .context("installation_proxy did not answer in time")??;
+    // Ties keep the first app's store.
+    Ok(counts
+        .iter()
+        .fold(None::<&(String, usize)>, |best, row| match best {
+            Some(best) if best.1 >= row.1 => Some(best),
+            _ => Some(row),
+        })
+        .map(|(code, _)| code.clone()))
+}
+
+/// One `GetValue` inside a paired lockdown session (keys lockdownd refuses
+/// without one, `GetProhibited`), over USB or a Wi-Fi attachment alike.
+async fn session_value(udid: &str, domain: Option<&str>, key: &str) -> Result<Value> {
     let attached = attached(udid).await?;
     let pair = PairRecord::parse(&usbmux::read_pair_record(&attached.serial).await?)?;
     let tls = Arc::new(pair.tls_config()?);
@@ -258,11 +371,11 @@ pub async fn passcode_protected(udid: &str) -> Result<bool> {
     )
     .await?;
     lockdown_error(&reply, "StartSession")?;
-    let get = request(&[
-        ("Label", LABEL),
-        ("Request", "GetValue"),
-        ("Key", "PasswordProtected"),
-    ]);
+    let mut fields = vec![("Label", LABEL), ("Request", "GetValue"), ("Key", key)];
+    if let Some(domain) = domain {
+        fields.push(("Domain", domain));
+    }
+    let get = request(&fields);
     let reply = if reply.get("EnableSessionSSL").and_then(Value::as_bool) == Some(true) {
         let mut session = handshake(&tls, plain)
             .await
@@ -271,11 +384,8 @@ pub async fn passcode_protected(udid: &str) -> Result<bool> {
     } else {
         exchange(&mut plain, &get).await?
     };
-    lockdown_error(&reply, "GetValue PasswordProtected")?;
-    reply
-        .get("Value")
-        .and_then(Value::as_bool)
-        .context("PasswordProtected had no boolean value")
+    lockdown_error(&reply, &format!("GetValue {key}"))?;
+    Ok(reply)
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -754,6 +864,16 @@ impl rustls::client::danger::ServerCertVerifier for PinnedDevice {
 mod tests {
     use super::*;
     use rustls::client::danger::ServerCertVerifier as _;
+
+    #[test]
+    fn a_locale_names_its_region() {
+        assert_eq!(region_of_locale("ja_JP").as_deref(), Some("jp"));
+        assert_eq!(region_of_locale("zh-Hans_CN").as_deref(), Some("cn"));
+        assert_eq!(region_of_locale("en_US@calendar=gregorian").as_deref(), Some("us"));
+        assert_eq!(region_of_locale("en"), None);
+        assert_eq!(region_of_locale("zh-Hans"), None);
+        assert_eq!(region_of_locale("es_419"), None);
+    }
 
     /// `#[tokio::test]` expands to `::core::…`, which this crate's `core`
     /// dependency shadows; tests build their own runtime.

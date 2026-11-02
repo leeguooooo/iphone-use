@@ -335,6 +335,35 @@ struct ClassChain {
 
 /// A retained live AX handle, rather than a label or rectangle, authorizes input.
 enum InputTargetCheck {
+  static func focusPointOccluded(target: UINode, root: UINode, point: CGPoint) -> Bool {
+    var ancestors = Set<ObjectIdentifier>()
+    var parent = target.parent
+    while let node = parent { ancestors.insert(ObjectIdentifier(node)); parent = node.parent }
+    let actionable: Set<String> = ["XCUIElementTypeButton", "XCUIElementTypeLink", "XCUIElementTypeCell",
+      "XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeSearchField",
+      "XCUIElementTypeTextView", "XCUIElementTypeSwitch", "XCUIElementTypeSlider", "XCUIElementTypeStepper",
+      "XCUIElementTypePickerWheel", "XCUIElementTypeDatePicker", "XCUIElementTypeKey", "XCUIElementTypeAlert",
+      "XCUIElementTypeSheet", "XCUIElementTypePopover", "XCUIElementTypeMenu", "XCUIElementTypeMenuItem"]
+    return ([root] + root.descendants()).contains { node in
+      node !== target && !ancestors.contains(ObjectIdentifier(node)) && node.rect.contains(point)
+        && (actionable.contains(node.type) || (node.type == "XCUIElementTypeOther" && node.label != nil && node.children.isEmpty))
+    }
+  }
+
+  static func replacementRefusal(original: UINode, current: UINode,
+      foregroundPID: Int32, visible: Bool, bindingMatches: Bool, requireFocus: Bool) -> String? {
+    guard bindingMatches else { return "replacement_binding_changed" }
+    guard original.pid == current.pid, original.type == current.type,
+          original.identifier == current.identifier,
+          original.identifier != nil || original.label == current.label else {
+      return "replacement_identity_changed"
+    }
+    guard visible else { return "replacement_target_not_visible" }
+    return refusal(type: current.type, focused: !requireFocus || current.isFocused,
+      enabled: current.isEnabled, pid: current.pid, foregroundPID: foregroundPID,
+      live: current.axElement != nil)
+  }
+
   static func preservesBinding(path: String, binding: String?, body: [String: Any]) -> Bool {
     guard let binding, body["inputTarget"] as? String == binding else { return false }
     return path.hasSuffix("/wda/keys") || path.hasSuffix("/element/\(binding)/clear")

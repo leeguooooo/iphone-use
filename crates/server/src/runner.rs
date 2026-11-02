@@ -129,6 +129,7 @@ pub struct RunnerClient {
     device_settle: Option<bool>,
     value_read: bool,
     guarded_input: bool,
+    selected_input_target: bool,
     input_continuation: bool,
     pending_input: crate::input_continuation::Store,
     volume_buttons: bool,
@@ -382,6 +383,7 @@ impl RunnerClient {
             device_settle: None,
             value_read: false,
             guarded_input: false,
+            selected_input_target: false,
             input_continuation: false,
             pending_input: crate::input_continuation::Store::default(),
             volume_buttons: false,
@@ -748,6 +750,8 @@ impl RunnerClient {
                 .and_then(|value| value.pointer("/value/capabilities/ipu:inputContinuation").and_then(serde_json::Value::as_bool)) == Some(true);
             self.guarded_input = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:guardedInput").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.selected_input_target = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:selectedInputTarget").and_then(serde_json::Value::as_bool)) == Some(true);
             self.value_read = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool)) == Some(true);
             self.volume_buttons = serde_json::from_str::<serde_json::Value>(&text).ok()
@@ -2084,6 +2088,22 @@ impl RunnerClient {
         self.input_target_for_text("").await
     }
 
+    /// Bind the explicitly selected original, with at most one guarded initial
+    /// focus tap. Once advertised, failure never permits a legacy replacement.
+    pub async fn input_target_for_element(&mut self, id: &str, text: &str) -> Result<Option<String>> {
+        let sid = self.ensure_session().await?.to_string();
+        if !self.selected_input_target { return Ok(None); }
+        let response = self.post_req(format!("{}/session/{}/ipu/element/{}/input-target", self.base, sid, id))
+            .json(&serde_json::json!({"multiline":text.contains(['\n','\r'])}))
+            .send_signed(&self.auth).await.context("POST selected input target")?;
+        let value = ensure_runner_success(response, "POST selected input target").await?;
+        let token = value.get("token").and_then(serde_json::Value::as_str)
+            .filter(|token| !token.is_empty() && token.len() <= 128
+                && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+            .context("selected input target response missing or invalid token")?;
+        Ok(Some(token.to_string()))
+    }
+
     pub(crate) async fn input_target_for_text(&mut self, text: &str) -> Result<Option<String>> {
         let sid = self.ensure_session().await?.to_string();
         if !self.guarded_input {
@@ -2829,6 +2849,7 @@ impl RunnerClient {
         self.session = None;
         self.value_read = false;
         self.guarded_input = false;
+        self.selected_input_target = false;
         self.input_continuation = false;
         self.pending_input.clear();
         self.volume_buttons = false;
@@ -4041,7 +4062,38 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    // Issue #257: a runner's error status keeps its own reason.
+    // Selected target capability failures never authorize an alternate input path.
+    #[test]
+    fn selected_target_negotiates_capability_and_preserves_literal_request() {
+        for supported in [false, true] {
+            let (base, task) = mock_runner(if supported { 3 } else { 2 }, move |request| {
+                if request.starts_with("POST /session ") {
+                    return serde_json::json!({"value":{"sessionId":"S","capabilities":{"ipu:selectedInputTarget":supported}}}).to_string();
+                }
+                if request.contains("/appium/settings ") { return r#"{"value":null}"#.into(); }
+                assert!(request.starts_with("POST /session/S/ipu/element/selected/input-target "), "{request}");
+                let body:serde_json::Value=serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(body,serde_json::json!({"multiline":true}));
+                r#"{"value":{"token":"bound-original"}}"#.into()
+            });
+            let mut client=RunnerClient::new(base).unwrap();
+            assert_eq!(block(client.input_target_for_element("selected","new\nline")).unwrap(),supported.then(||"bound-original".to_string()));
+            task.join().unwrap();
+            client.invalidate_session();assert!(!client.selected_input_target);
+        }
+    }
+
+    #[test]
+    fn selected_target_failure_never_tries_legacy_focusing_or_typing() {
+        let (base,task)=mock_runner(1,|request| {
+            assert!(request.starts_with("POST /session/S/ipu/element/selected/input-target "),"{request}");
+            r#"{"value":{"error":"unknown error","message":"focus outcome unknown"}}"#.into()
+        });
+        let mut client=RunnerClient::new(base).unwrap();client.session=Some("S".into());client.selected_input_target=true;
+        assert!(block(client.input_target_for_element("selected","literal")).is_err());
+        task.join().unwrap();
+    }
+
     #[test]
     fn continuation_survives_reads_but_not_mutation_or_session_reset() {
         let scope = crate::input_continuation::Scope {

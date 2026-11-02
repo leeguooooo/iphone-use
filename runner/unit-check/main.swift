@@ -1074,5 +1074,57 @@ do {
   check(false, "strict identifier predicate: \(error)")
 }
 
+// Guarded input uses live identity and focus, never labels or geometry.
+do {
+  func replacementNode(_ changes: [String: Any] = [:], pid: Int32 = 42) -> UINode {
+    var raw: [String: Any] = ["type":"XCUIElementTypeTextField", "rawIdentifier":"field-a",
+      "label":"Draft", "isEnabled":"1", "isFocused":"0", IPURNodeAXElementKey:NSObject()]
+    for (key, value) in changes { raw[key] = value }
+    return UINode(raw: raw, parent: nil, pid: pid)
+  }
+  let original = replacementNode(["isFocused":"1"])
+  func replacementAllowed(_ node: UINode, foreground: Int32 = 42, visible: Bool = true,
+      binding: Bool = true, requireFocus: Bool = false) -> Bool {
+    InputTargetCheck.replacementRefusal(original: original, current: node, foregroundPID: foreground,
+      visible: visible, bindingMatches: binding, requireFocus: requireFocus) == nil
+  }
+  check(replacementAllowed(replacementNode()), "retained unfocused original may be inspected for clear proof")
+  check(!replacementAllowed(replacementNode(), requireFocus: true), "unfocused proof cannot authorize typing")
+  check(replacementAllowed(replacementNode(["isFocused":"1"]), requireFocus: true), "same focused original passes replacement identity gate")
+  check(!replacementAllowed(replacementNode(), binding: false), "initial focus cannot revive an invalidated binding")
+  check(!replacementAllowed(replacementNode(), foreground: 43), "initial focus refuses a changed foreground")
+  check(!replacementAllowed(replacementNode(pid: 43), foreground: 43), "initial focus refuses another process even if foreground")
+  check(!replacementAllowed(replacementNode(["rawIdentifier":"field-b"])), "same-label different field cannot be restored")
+  check(!replacementAllowed(replacementNode(["rawIdentifier":NSNull()])), "lost identifier cannot rebind by label")
+  check(!replacementAllowed(replacementNode(["type":"XCUIElementTypeSecureTextField"])), "secure conversion refuses initial focus")
+  check(!replacementAllowed(replacementNode(["isEnabled":"0"])), "disabled original refuses initial focus")
+  check(!replacementAllowed(replacementNode(), visible: false), "hidden original refuses initial focus")
+  let noAX = UINode(raw:["type":"XCUIElementTypeTextField", "rawIdentifier":"field-a"], parent:nil, pid:42)
+  check(!replacementAllowed(noAX), "stored metadata without live AX cannot authorize initial focus")
+  let field: [String:Any] = ["type":"XCUIElementTypeTextField", "rawIdentifier":"a",
+    "rect":["x":0,"y":0,"width":100,"height":40]]
+  let covering: [String:Any] = ["type":"XCUIElementTypeButton", "rawIdentifier":"overlay",
+    "rect":["x":0,"y":0,"width":100,"height":40]]
+  func scene(_ children:[[String:Any]]) -> UINode {
+    UINode(raw:["type":"XCUIElementTypeWindow","children":children],parent:nil,pid:42)
+  }
+  let point=CGPoint(x:50,y:20)
+  let alone=scene([field])
+  check(!InputTargetCheck.focusPointOccluded(target:alone.children[0],root:alone,point:point), "uncovered original focus point is permitted")
+  let covered=scene([field,covering])
+  check(InputTargetCheck.focusPointOccluded(target:covered.children[0],root:covered,point:point), "new sibling action covering the field blocks initial focus")
+  var disabledCover=covering;disabledCover["isEnabled"]="0"
+  let disabledScene=scene([field,disabledCover])
+  check(InputTargetCheck.focusPointOccluded(target:disabledScene.children[0],root:disabledScene,point:point), "disabled control still blocks a physical focus point")
+  var distant=covering;distant["rect"]=["x":200,"y":0,"width":100,"height":40]
+  let separate=scene([field,distant])
+  check(!InputTargetCheck.focusPointOccluded(target:separate.children[0],root:separate,point:point), "unrelated nonoverlapping control does not block initial focus")
+  let cell=scene([["type":"XCUIElementTypeCell","rect":["x":0,"y":0,"width":100,"height":40],"children":[field]]])
+  check(!InputTargetCheck.focusPointOccluded(target:cell.children[0].children[0],root:cell,point:point), "original's ancestor container is not a sibling occluder")
+  var withClear=field;withClear["children"]=[covering]
+  let childAction=scene([withClear])
+  check(InputTargetCheck.focusPointOccluded(target:childAction.children[0],root:childAction,point:point), "an actionable descendant cannot be blindly tapped as the field")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)

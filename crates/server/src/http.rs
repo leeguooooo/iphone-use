@@ -7353,6 +7353,7 @@ const TEXT_INPUT_KINDS: [&str; 4] = ["TextField", "SecureTextField", "SearchFiel
 async fn set_value_snapshot_element(
     w: &mut crate::runner::RunnerClient,
     value: &serde_json::Value,
+    allowed: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), SnapshotElementTapError> {
     let text = value
         .get("value")
@@ -7364,7 +7365,7 @@ async fn set_value_snapshot_element(
     let element_id = if snapshot_row_locator(row).is_some() {
         let element_id = resolve_snapshot_row_element(w, &rows, index).await?;
         if reused && !verify_reused_row(w, &element_id, row).await? {
-            return Box::pin(set_value_snapshot_element(w, value)).await;
+            return Box::pin(set_value_snapshot_element(w, value, allowed)).await;
         }
         element_id
     } else if TEXT_INPUT_KINDS.contains(&row.kind.as_str()) {
@@ -7375,6 +7376,26 @@ async fn set_value_snapshot_element(
     } else {
         return Err(SnapshotElementTapError::InvalidTarget);
     };
+    let secure = row.kind == "SecureTextField";
+    if !allowed() { return Err(SnapshotElementTapError::BeforeDispatch(anyhow::anyhow!("replacement scope ended before binding"))); }
+    if !secure {
+        if let Some(target) = w.input_target_for_element(&element_id, &text).await.map_err(set_value_dispatch_error)? {
+            if !allowed() { return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement scope ended after focus"))); }
+            w.clear_input_target(&target).await.map_err(set_value_dispatch_error)?;
+            for chunk in crate::text_input::split(&text, crate::text_input::CHUNK_CHARS) {
+                if !allowed() { return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement scope ended; do not retry"))); }
+                w.keys_to_target(chunk, &target, crate::text_input::chunk_timeout(crate::text_input::char_count(chunk)))
+                    .await.map_err(set_value_dispatch_error)?;
+            }
+            let receipt = w.read_element_value(&target, (text.encode_utf16().count() + 1) as u32)
+                .await.map_err(set_value_dispatch_error)?;
+            if !allowed() || receipt.get("complete").and_then(serde_json::Value::as_bool) != Some(true)
+                || receipt.get("value").and_then(serde_json::Value::as_str) != Some(text.as_str()) {
+                return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("selected replacement exact value was not confirmed; do not retry")));
+            }
+            return Ok(());
+        }
+    }
     if text.is_empty() {
         // Clearing IS the requested mutation — report its real outcome.
         return w.clear_element(&element_id).await.map_err(|error| {
@@ -7385,7 +7406,6 @@ async fn set_value_snapshot_element(
             }
         });
     }
-    let secure = row.kind == "SecureTextField";
     let before = if secure {
         None
     } else {
@@ -9159,7 +9179,11 @@ async fn runner_control_with_client(
             }
         }
         "set_value" => {
-            let result = set_value_snapshot_element(w, v).await;
+            // A cold daemon starts unactionable until an action succeeds, so only
+            // a drop to unactionable during this replacement ends its scope.
+            let was_actionable = actionable.load(Ordering::Acquire);
+            let allowed = || (!was_actionable || actionable.load(Ordering::Acquire)) && dispatch_allowed.is_none_or(|allowed| allowed());
+            let result = set_value_snapshot_element(w, v, &allowed).await;
             match snapshot_element_outcome(result, w, "control set_value") {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
@@ -9525,6 +9549,30 @@ async fn runner_control_with_client(
 /// the runner measures, so the daemon's size disagreed with it). Anything
 /// else fails closed as an unknown outcome. Either way the runner's own
 /// reason rides along in `detail.runner_error`.
+/// The runner's "no single focused text field" refusal, under a name an
+/// agent can act on. Typing used to report `ok · applied` with no field
+/// focused while the text went nowhere (#391).
+fn input_target_refusal(error: &anyhow::Error) -> Option<RunnerControlOutcome> {
+    let runner = crate::runner::runner_http_error(error)?;
+    if !runner.nothing_sent() {
+        return None;
+    }
+    let message = runner.message.as_deref().unwrap_or_default();
+    if message.starts_with("input_target_ambiguous_or_missing") {
+        Some(RunnerControlOutcome::Refused(
+            "no_focused_field",
+            "no single text field has keyboard focus, so nothing was typed; tap the field you mean (or use set_value with its element) and type again",
+        ))
+    } else if message.starts_with("newline_requires_multiline_field") {
+        Some(RunnerControlOutcome::Refused(
+            "newline_requires_multiline_field",
+            "the focused field is single-line, so text with a line break was not typed; send one line, or use key return where Return is intended",
+        ))
+    } else {
+        None
+    }
+}
+
 fn runner_failure_outcome(
     w: &mut crate::runner::RunnerClient,
     actionable: &std::sync::atomic::AtomicBool,
@@ -9946,7 +9994,15 @@ async fn type_text_chunked(
         Some(target) => Some(target),
         None => match w.input_target_for_text(text).await {
             Ok(target) => target,
-            Err(error) => return runner_failure_outcome(w, actionable, &error, "text", detail),
+            Err(error) => {
+                if let Some(refusal) = input_target_refusal(&error) {
+                    if let Some(runner) = crate::runner::runner_http_error(&error) {
+                        *detail = Some(serde_json::json!({ "runner_error": runner.to_json() }));
+                    }
+                    return refusal;
+                }
+                return runner_failure_outcome(w, actionable, &error, "text", detail);
+            }
         },
     };
     if budget_ms.is_some() && (target.is_none() || !w.supports_input_continuation()) {
@@ -19326,7 +19382,9 @@ struct AgentAppsQuery {
     query: Option<String>,
     /// `auto` (default), `installed`, `catalog`, or `apple`.
     source: Option<String>,
-    /// App Store storefront for `apple`, two letters. Default `cn`.
+    /// App Store storefront for `apple`, two letters. Default: the
+    /// `IPHONE_USE_STORE_COUNTRY` setting, else the phone's own App Store, else `cn`
+    /// (see [`store_country`]).
     country: Option<String>,
     /// 1–30 candidates. Default 10.
     limit: Option<usize>,
@@ -19431,7 +19489,8 @@ async fn installed_inventory(
 struct AppLookupParams {
     query: String,
     source: &'static str,
-    country: String,
+    /// `None`: the caller named no storefront ([`store_country`] picks one).
+    country: Option<String>,
     limit: usize,
 }
 
@@ -19448,10 +19507,12 @@ fn app_lookup_params(query: &AgentAppsQuery) -> Result<AppLookupParams, String> 
         "apple" => "apple",
         _ => return Err("source must be auto, installed, catalog or apple".to_string()),
     };
-    let country = query.country.as_deref().unwrap_or("cn").to_ascii_lowercase();
-    if country.len() != 2 || !country.chars().all(|c| c.is_ascii_lowercase()) {
-        return Err("country must be a two-letter App Store storefront such as cn, us, hk, jp".to_string());
-    }
+    let country = match query.country.as_deref() {
+        Some(country) => Some(valid_store_country(country).ok_or_else(|| {
+            "country must be a two-letter App Store storefront such as cn, us, hk, jp".to_string()
+        })?),
+        None => None,
+    };
     let limit = query.limit.unwrap_or(10);
     if !(1..=30).contains(&limit) {
         return Err("limit must be 1 to 30".to_string());
@@ -19462,6 +19523,103 @@ fn app_lookup_params(query: &AgentAppsQuery) -> Result<AppLookupParams, String> 
         country,
         limit,
     })
+}
+
+fn valid_store_country(country: &str) -> Option<String> {
+    let country = country.trim().to_ascii_lowercase();
+    (country.len() == 2 && country.chars().all(|c| c.is_ascii_lowercase())).then_some(country)
+}
+
+/// What [`store_country`] last read from the phone, per udid, for an hour:
+/// the account's store rarely changes, and a search should not open two
+/// lockdown sessions every time.
+type StoreCountryCache =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<(String, &'static str)>)>>;
+
+fn store_country_cache() -> &'static StoreCountryCache {
+    static CACHE: std::sync::OnceLock<StoreCountryCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Which App Store storefront a lookup that named none searches, and where
+/// that came from:
+/// - `setting`: `IPHONE_USE_STORE_COUNTRY`;
+/// - `app_store`: the store the phone's own apps were bought from (the
+///   Apple ID's storefront);
+/// - `device_region`: the phone's Region setting, when no app says;
+/// - `fallback`: `cn`, when nothing could be read (the answer warns).
+///
+/// A phone in Japan used to search the Chinese store and miss Japan-only apps.
+async fn store_country(state: &AppState) -> (String, &'static str) {
+    if let Some(country) = std::env::var("IPHONE_USE_STORE_COUNTRY")
+        .ok()
+        .and_then(|value| valid_store_country(&value))
+    {
+        return (country, "setting");
+    }
+    let Some(udid) = state.device_udid.clone() else {
+        return ("cn".to_string(), "fallback");
+    };
+    let cached = store_country_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&udid).cloned())
+        // A failed read is retried after a minute (the phone may reconnect),
+        // without paying its 8 s worst case on every lookup in between.
+        .filter(|(at, found)| {
+            let ttl = if found.is_some() { 3600 } else { 60 };
+            at.elapsed() < std::time::Duration::from_secs(ttl)
+        })
+        .map(|(_, found)| found);
+    let found = match cached {
+        Some(found) => found,
+        None => {
+            let found = read_store_country(state, &udid).await;
+            if let Ok(mut cache) = store_country_cache().lock() {
+                cache.insert(udid.clone(), (std::time::Instant::now(), found.clone()));
+            }
+            found
+        }
+    };
+    found.unwrap_or_else(|| ("cn".to_string(), "fallback"))
+}
+
+async fn read_store_country(state: &AppState, udid: &str) -> Option<(String, &'static str)> {
+    const READ: std::time::Duration = std::time::Duration::from_secs(4);
+    // Up to 32 third-party apps spread across the whole (alphabetical) list
+    // vote; each one's iTunesMetadata keeps a single Lookup reply small.
+    const VOTERS: usize = 32;
+    let all: Vec<String> = installed_inventory(state, false, APP_LOOKUP_INVENTORY_MAX_AGE)
+        .await
+        .ok()
+        .map(|body| crate::app_lookup::installed_from_inventory(&body))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|app| app.bundle_id)
+        .filter(|bundle| !bundle.starts_with("com.apple."))
+        .collect();
+    let step = all.len().div_ceil(VOTERS).max(1);
+    let bundles: Vec<String> = all.into_iter().step_by(step).collect();
+    match tokio::time::timeout(READ, crate::lockdown::app_store_country(udid, &bundles)).await {
+        Ok(Ok(Some(country))) => return Some((country, "app_store")),
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => tracing::debug!("app lookup: app store country: {error:#}"),
+        Err(_) => tracing::debug!("app lookup: app store country timed out"),
+    }
+    match tokio::time::timeout(READ, crate::lockdown::device_region(udid)).await {
+        Ok(Ok(region)) => region
+            .as_deref()
+            .and_then(valid_store_country)
+            .map(|region| (region, "device_region")),
+        Ok(Err(error)) => {
+            tracing::debug!("app lookup: lockdown region read: {error:#}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("app lookup: lockdown region read timed out");
+            None
+        }
+    }
 }
 
 /// `GET /agent/apps?query=<name>` — which bundle id is this app?
@@ -19485,6 +19643,9 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
     };
     let refresh = matches!(query.refresh.as_deref(), Some("1" | "true"));
     let mut warnings: Vec<String> = Vec::new();
+    // The storefront is resolved only when the App Store is searched.
+    let mut country: Option<(String, &'static str)> =
+        params.country.clone().map(|country| (country, "request"));
     let mut searched: Vec<&str> = Vec::new();
     let mut installed: Option<Vec<crate::app_lookup::Candidate>> = None;
     if matches!(params.source, "auto" | "installed") {
@@ -19508,9 +19669,20 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
     let local = crate::app_lookup::rank(&params.query, installed.as_deref(), catalog, &[]);
     let mut apple = Vec::new();
     let mut apple_error = None;
-    if params.source == "apple" || (params.source == "auto" && local.is_empty()) {
+    // Only an exact local match settles an auto lookup: a partial one ("PayPay"
+    // for "PayPay銀行") may be a different app the store has.
+    if params.source == "apple" || (params.source == "auto" && !local.iter().any(|row| row.exact)) {
         searched.push("apple");
-        match crate::app_lookup::search_apple(&params.query, &params.country, params.limit).await {
+        if country.is_none() {
+            country = Some(store_country(state).await);
+        }
+        let (store, country_source) = country.clone().expect("resolved above");
+        if country_source == "fallback" {
+            warnings.push(
+                "the phone's region could not be read; searched the cn App Store — pass country (jp, us, …) or set IPHONE_USE_STORE_COUNTRY".to_string(),
+            );
+        }
+        match crate::app_lookup::search_apple(&params.query, &store, params.limit).await {
             Ok(rows) => apple = rows,
             Err(error) => {
                 warnings.push(error.clone());
@@ -19548,7 +19720,8 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
             "ok": true,
             "query": params.query,
             "source": params.source,
-            "country": params.country,
+            "country": country.as_ref().map(|(country, _)| country.clone()),
+            "country_source": country.as_ref().map(|(_, source)| *source),
             "candidates": candidates,
             "total_matches": total,
             "searched": searched,
@@ -28795,6 +28968,29 @@ mod tests {
     }
 
     #[test]
+    fn typing_with_no_focused_field_is_a_named_refusal() {
+        let runner = |message: &str| {
+            anyhow::Error::new(crate::runner::RunnerHttpError::from_body(
+                "GET /wda/input-target",
+                reqwest::StatusCode::BAD_REQUEST,
+                &serde_json::json!({"value":{"error":"invalid argument","message":message}}).to_string(),
+            ))
+        };
+        assert!(matches!(
+            input_target_refusal(&runner("input_target_ambiguous_or_missing; nothing was sent")),
+            Some(RunnerControlOutcome::Refused("no_focused_field", _))
+        ));
+        assert!(matches!(
+            input_target_refusal(&runner("newline_requires_multiline_field; nothing was sent")),
+            Some(RunnerControlOutcome::Refused("newline_requires_multiline_field", _))
+        ));
+        // Other refusals keep the generic path; a refusal that may have sent is never renamed.
+        assert!(input_target_refusal(&runner("input_target_tree_incomplete; nothing was sent")).is_none());
+        assert!(input_target_refusal(&runner("input_target_ambiguous_or_missing")).is_none());
+        assert!(input_target_refusal(&anyhow::anyhow!("connection reset")).is_none());
+    }
+
+    #[test]
     fn lookup_parameters_are_validated() {
         let q = |query: &str, source: Option<&str>, country: Option<&str>, limit: Option<usize>| {
             app_lookup_params(&AgentAppsQuery {
@@ -28811,11 +29007,11 @@ mod tests {
             AppLookupParams {
                 query: "微信".to_string(),
                 source: "auto",
-                country: "cn".to_string(),
+                country: None,
                 limit: 10
             }
         );
-        assert_eq!(q("x", Some("apple"), Some("US"), Some(30)).unwrap().country, "us");
+        assert_eq!(q("x", Some("apple"), Some("US"), Some(30)).unwrap().country.as_deref(), Some("us"));
         assert!(q("", None, None, None).is_err());
         assert!(q(&"a".repeat(101), None, None, None).is_err());
         assert!(q("x", Some("web"), None, None).is_err());

@@ -147,7 +147,12 @@ impl Candidate {
             .chain(std::iter::once(self.bundle_id.as_str()))
     }
 
-    /// 2 = an exact name, alias or bundle id; 1 = a substring of one; 0 = no match.
+    /// 2 = an exact name, alias or bundle id; 1 = a substring of one, or a
+    /// name the query starts with ("PayPayカード" finds PayPay, whose card
+    /// lives in the main app); 0 = no match.
+    ///
+    /// The second partial form only suggests: a loose `launch_app` name still
+    /// needs the installed name to start with it ([`word_prefix_match`]).
     fn score(&self, wanted: &str) -> u8 {
         if wanted.is_empty() {
             return 0;
@@ -159,6 +164,14 @@ impl Candidate {
                 return 2;
             }
             if name.contains(wanted) {
+                best = 1;
+            }
+        }
+        if best == 0 {
+            // Only the app's own name: a short alias ("IG") would make any
+            // query that happens to start with it ("ignite") a candidate.
+            let name = normalize(&self.name);
+            if name.chars().count() >= 2 && wanted.starts_with(&name) {
                 best = 1;
             }
         }
@@ -839,6 +852,62 @@ mod tests {
             ranked[0].to_json()["store_url"],
             "https://apps.apple.com/cn/app/id392899425"
         );
+    }
+
+    #[test]
+    fn a_product_name_finds_the_app_it_lives_in() {
+        // What the jp storefront answered for "PayPayカード" on 2026-11-02:
+        // PayPay first, then unrelated popular apps.
+        let rows = parse_apple(
+            &json!({"results": [
+                {"trackName":"PayPay","bundleId":"jp.pay2.app.ios","trackId":1435783608,"sellerName":"PAYPAY CORPORATION"},
+                {"trackName":"PayPay銀行","bundleId":"jp.co.japannetbank.smtapp.balance","trackId":1,"sellerName":"PayPay Bank Corporation"},
+                {"trackName":"楽天カード：明細確認アプリ","bundleId":"jp.co.rakuten-card.RakutenCard","trackId":2,"sellerName":"RAKUTEN CARD,INC."},
+                {"trackName":"Instagram","bundleId":"com.burbn.instagram","trackId":3,"sellerName":"Instagram, Inc."},
+                {"trackName":"ChatGPT","bundleId":"com.openai.chat","trackId":4,"sellerName":"OpenAI OpCo, LLC"}
+            ]}),
+            "jp",
+        )
+        .unwrap();
+        let ranked = rank("PayPayカード", Some(&[] as &[Candidate]), &[], &rows);
+        let ids: Vec<&str> = ranked.iter().map(|r| r.candidate.bundle_id.as_str()).collect();
+        assert_eq!(ids, ["jp.pay2.app.ios"], "only the brand prefix, not the rest of the store page");
+        assert!(!ranked[0].exact);
+
+        // The catalog alias makes the card's name an exact match for the app.
+        let ranked = rank("PayPayカード", None, catalog(), &[]);
+        assert_eq!(ranked[0].candidate.bundle_id, "jp.pay2.app.ios");
+        assert!(ranked[0].exact);
+
+        // A suggestion is never a loose launch: the installed name does not
+        // start with the query.
+        let phone = [Candidate {
+            name: "PayPay".into(),
+            aliases: vec![],
+            bundle_id: "jp.pay2.app.ios".into(),
+            source: "installed",
+            system: false,
+            publisher: None,
+            country: None,
+            track_id: None,
+        }];
+        assert!(matches!(
+            resolve_for_launch("PayPay銀行", Some(&phone)),
+            Err(ResolveError::NotFound { .. })
+        ));
+
+        // Only the app's own name is a brand: a short alias is not.
+        let instagram = [Candidate {
+            name: "Instagram".into(),
+            aliases: vec!["IG".into()],
+            bundle_id: "com.burbn.instagram".into(),
+            source: "installed",
+            system: false,
+            publisher: None,
+            country: None,
+            track_id: None,
+        }];
+        assert!(rank("ignite", Some(&instagram), &[], &[]).is_empty());
     }
 
     #[test]

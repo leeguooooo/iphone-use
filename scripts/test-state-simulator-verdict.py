@@ -118,6 +118,46 @@ class TextState(unittest.TestCase):
             self.assertFalse(oracle.text_state_matches(bad, 'x'))
 
 
+class SelectedReplacement(unittest.TestCase):
+    def sample(self):
+        text = '选' * 420 + '-\ue007-\ue003-👋🏻'
+        before = {'pid': 123, 'run_id': 'owned', 'controller_id': 'controller', 'tick': 10,
+            'touches': 0, 'return_events': 0, 'controls': {
+                'state.field': {'focused': False, 'characters': 0, 'utf16_length': 0, 'sha256': hashlib.sha256(b'').hexdigest()},
+                'state.other': {'focused': False, 'characters': 9, 'utf16_length': 9, 'sha256': hashlib.sha256(b'untouched').hexdigest()}}}
+        after = copy.deepcopy(before)
+        after.update(tick=11, touches=1)
+        after['controls']['state.other'] = {'focused': True, 'characters': len(text),
+            'utf16_length': len(text.encode('utf-16-le')) // 2, 'sha256': hashlib.sha256(text.encode()).hexdigest()}
+        response = {'ok': True, 'timing': {'runner': [{'call': call, 'count': count} for call, count in [
+            ('POST /ipu/element/:id/input-target', 1), ('POST /element/:id/clear', 1),
+            ('POST /wda/keys', 3), ('GET /element/:id/value', 1)]]}}
+        return before, after, text, response
+
+    def test_exact_app_value_and_real_new_route_are_both_required(self):
+        self.assertTrue(oracle.selected_replacement_matches(*self.sample()))
+        for key, value in [('touches', 0), ('touches', 2), ('return_events', 1), ('pid', 124), ('tick', 10)]:
+            before, after, text, response = self.sample()
+            after[key] = value
+            self.assertFalse(oracle.selected_replacement_matches(before, after, text, response))
+        for key, value in [('sha256', 'wrong'), ('focused', False), ('characters', 1), ('utf16_length', 1)]:
+            before, after, text, response = self.sample()
+            after['controls']['state.other'][key] = value
+            self.assertFalse(oracle.selected_replacement_matches(before, after, text, response))
+
+    def test_wrong_field_legacy_route_and_repeated_binding_cannot_pass(self):
+        for call, count in [('POST /element/:id/value', 1), ('POST /element/:id/click', 1),
+                            ('POST /ipu/element/:id/input-target', 1)]:
+            before, after, text, response = self.sample()
+            response['timing']['runner'].append({'call': call, 'count': count})
+            self.assertFalse(oracle.selected_replacement_matches(before, after, text, response))
+        before, after, text, response = self.sample()
+        after['controls']['state.field']['sha256'] = 'wrong'
+        self.assertFalse(oracle.selected_replacement_matches(before, after, text, response))
+        response['timing']['runner'] = []
+        self.assertFalse(oracle.selected_replacement_matches(before, before, text, response))
+
+
 class ContinuationConsumer(unittest.TestCase):
     def run_case(self, responses):
         module = ast.parse((HERE / 'test-state-simulator.py').read_text())

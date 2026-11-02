@@ -76,6 +76,12 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 + (nullable id)systemApplicationElement;
 
 /// Pid of an XCAccessibilityElement, or 0.
++ (BOOL)sameAXElement:(id)left other:(id)right NS_SWIFT_NAME(sameAXElement(_:_:));
++ (BOOL)focusRecoveryAvailable;
++ (nullable NSString *)synthesizeFocusTapForAXElement:(id)element atPoint:(CGPoint)point pid:(int)pid
+  allowDispatch:(BOOL (NS_NOESCAPE ^)(void))allowDispatch
+  NS_SWIFT_NAME(synthesizeFocusTap(forAXElement:at:pid:allowDispatch:));
+
 + (int)pidForAXElement:(id)element;
 
 /// Bundle id of a running process, via XCUIDevice.applicationMonitor
