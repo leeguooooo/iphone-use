@@ -19648,7 +19648,9 @@ async fn agent_apps_lookup(state: &AppState, query: &AgentAppsQuery) -> Response
     let local = crate::app_lookup::rank(&params.query, installed.as_deref(), catalog, &[]);
     let mut apple = Vec::new();
     let mut apple_error = None;
-    if params.source == "apple" || (params.source == "auto" && local.is_empty()) {
+    // Only an exact local match settles an auto lookup: a partial one ("PayPay"
+    // for "PayPay銀行") may be a different app the store has.
+    if params.source == "apple" || (params.source == "auto" && !local.iter().any(|row| row.exact)) {
         searched.push("apple");
         if country.is_none() {
             country = Some(store_country(state).await);
