@@ -4330,6 +4330,8 @@ fn control_against_clear(
                 ok(r#"{"value":{"error":"no such alert","message":"no alert"}}"#.to_string())
             } else if line.starts_with("POST") && line.contains("/elements") {
                 ok(r#"{"value":[{"ELEMENT":"FIELD"}]}"#.to_string())
+            } else if source == ONE_TEXT_FIELD && line.starts_with("GET") && line.contains("/element/FIELD/rect ") {
+                ok(r#"{"value":{"x":20,"y":700,"width":300,"height":40}}"#.to_string())
             } else if fail_clear && line.starts_with("POST") && line.contains("/clear ") {
                 let body = r#"{"value":{"error":"unknown error","message":"clear interrupted; outcome unknown"}}"#;
                 ok(format!("HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
@@ -4443,7 +4445,7 @@ fn set_value_stops_after_clear_failure_without_writing_replacement() {
         true,
     );
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
-    assert_eq!(json["retry_safe"], false, "{json}");
+    assert_eq!(json["retry_safe"], false, "{json}; requests={lines:?}");
     assert_eq!(
         lines
             .iter()
@@ -4459,26 +4461,26 @@ fn set_value_stops_after_clear_failure_without_writing_replacement() {
 }
 #[test]
 fn set_value_that_does_not_stick_is_reported_not_applied() {
-    let (status, json, _) = control_against(
+    let (status, json, lines) = control_against(
         ONE_TEXT_FIELD,
         "",
         true,
         serde_json::json!({"type":"set_value","element":1,"value":"こんにちは","ttl_ms":2000}),
     );
-    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(status, StatusCode::CONFLICT, "{json}; requests={lines:?}");
     assert_eq!(json["error"], "value_not_applied");
     assert_eq!(json["outcome"], "no_effect");
 }
 
 #[test]
 fn set_value_that_reads_back_formatted_is_applied() {
-    let (status, json, _) = control_against(
+    let (status, json, lines) = control_against(
         ONE_TEXT_FIELD,
         "090-1234-5678",
         true,
         serde_json::json!({"type":"set_value","element":1,"value":"09012345678","ttl_ms":2000}),
     );
-    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(status, StatusCode::OK, "{json}; requests={lines:?}");
 }
 
 #[test]
