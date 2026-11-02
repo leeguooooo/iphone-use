@@ -9158,7 +9158,10 @@ async fn runner_control_with_client(
             }
         }
         "set_value" => {
-            let allowed = || actionable.load(Ordering::Acquire) && dispatch_allowed.is_none_or(|allowed| allowed());
+            // A cold daemon starts unactionable until an action succeeds, so only
+            // a drop to unactionable during this replacement ends its scope.
+            let was_actionable = actionable.load(Ordering::Acquire);
+            let allowed = || (!was_actionable || actionable.load(Ordering::Acquire)) && dispatch_allowed.is_none_or(|allowed| allowed());
             let result = set_value_snapshot_element(w, v, &allowed).await;
             match snapshot_element_outcome(result, w, "control set_value") {
                 Ok(result) => result,
