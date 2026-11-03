@@ -7078,6 +7078,11 @@ async fn fetch_snapshot_row(
         .filter(|snapshot| !snapshot.is_empty())
         .ok_or(SnapshotElementTapError::Invalid)?;
 
+    // Taken before the fresh read: that read joins the bounded history and
+    // could push the caller's snapshot out of it.
+    let served = w.served_tree(|served| {
+        element_snapshot_id(served).is_ok_and(|id| id == expected_snapshot)
+    });
     let rows = w
         .elements()
         .await
@@ -7089,10 +7094,11 @@ async fn fetch_snapshot_row(
         // suggestion). That alone does not make the caller's row unknowable:
         // if the snapshot it read is still remembered and that row is still
         // the one element of its identity here, act on it in the live tree.
-        let Some(served) = w.served_tree(|served| {
-            element_snapshot_id(served).is_ok_and(|id| id == expected_snapshot)
-        }) else {
-            return Err(SnapshotElementTapError::Stale);
+        let Some(served) = served else {
+            return Err(SnapshotElementTapError::Refused(
+                "stale_element_snapshot",
+                SNAPSHOT_FORGOTTEN_HINT,
+            ));
         };
         if index >= served.len() {
             return Err(SnapshotElementTapError::Invalid);
@@ -7113,6 +7119,11 @@ async fn fetch_snapshot_row(
     }
     Ok((rows, index))
 }
+
+/// The screen changed and the snapshot the caller named is no longer kept
+/// (older than the last few reads, or from before a restart or a privacy
+/// change), so its row cannot be recognized again.
+const SNAPSHOT_FORGOTTEN_HINT: &str = "the screen changed and that snapshot is no longer remembered; refresh /agent/elements and choose the element again";
 
 /// Where an old snapshot row lives in a newer tree of the same screen.
 #[derive(Debug, PartialEq, Eq)]
@@ -7179,18 +7190,28 @@ fn same_screen(old: &[crate::runner::ElementRow], new: &[crate::runner::ElementR
     }
     // An alert or sheet that came up covers the screen the index was read
     // from: the caller has to see it, not have its tap land underneath.
-    let overlays = |rows: &[crate::runner::ElementRow]| {
-        rows.iter().filter(|row| matches!(row.kind.as_str(), "Alert" | "Sheet")).count()
-    };
-    if overlays(new) > overlays(old) {
-        return false;
+    let mut old_overlays: Vec<_> = old
+        .iter()
+        .filter(|row| matches!(row.kind.as_str(), "Alert" | "Sheet"))
+        .map(row_identity)
+        .collect();
+    for overlay in new.iter().filter(|row| matches!(row.kind.as_str(), "Alert" | "Sheet")) {
+        let identity = row_identity(overlay);
+        match old_overlays.iter().position(|old| identity.is_some() && *old == identity) {
+            Some(position) => {
+                old_overlays.swap_remove(position);
+            }
+            None => return false,
+        }
     }
+    // Bars survive a tab switch or a push; only the page's own rows say the
+    // page is the same.
     let mut remaining: std::collections::HashMap<_, usize> = std::collections::HashMap::new();
-    for identity in new.iter().filter_map(row_identity) {
+    for identity in page_rows(new).filter_map(row_identity) {
         *remaining.entry(identity).or_default() += 1;
     }
     let (mut known, mut retained) = (0_usize, 0_usize);
-    for identity in old.iter().filter_map(row_identity) {
+    for identity in page_rows(old).filter_map(row_identity) {
         known += 1;
         if let Some(count) = remaining.get_mut(&identity).filter(|count| **count > 0) {
             *count -= 1;
@@ -7198,6 +7219,22 @@ fn same_screen(old: &[crate::runner::ElementRow], new: &[crate::runner::ElementR
         }
     }
     known > 0 && retained as f64 >= known as f64 * SAME_SCREEN_MIN_RETAINED
+}
+
+/// Rows outside the navigation, tab and tool bars.
+fn page_rows(
+    rows: &[crate::runner::ElementRow],
+) -> impl Iterator<Item = &crate::runner::ElementRow> {
+    let mut bar_depth: Option<u32> = None;
+    rows.iter().filter(move |row| {
+        if bar_depth.is_some_and(|depth| row.depth <= depth) {
+            bar_depth = None;
+        }
+        if bar_depth.is_none() && matches!(row.kind.as_str(), "NavigationBar" | "TabBar" | "Toolbar") {
+            bar_depth = Some(row.depth);
+        }
+        bar_depth.is_none()
+    })
 }
 
 /// Find the row an old snapshot's `index` named in a fresh tree, failing
@@ -7224,6 +7261,19 @@ fn rebind_snapshot_row(
             .filter(|&i| row_identity(&rows[i]) == Some(identity))
             .collect()
     };
+    // An unlabeled cell is a list item nothing tells apart from the next one:
+    // after a scroll, the same button in another item has the same ancestry.
+    let mut depth = old[index].depth;
+    let mut anonymous_item = false;
+    for row in old[..index].iter().rev() {
+        if row.depth < depth {
+            depth = row.depth;
+            anonymous_item |= row.kind == "Cell" && row_identity(row).is_none();
+        }
+    }
+    if anonymous_item {
+        return RowRebind::Stale;
+    }
     let (old_same, new_same) = (same(old), same(new));
     let ancestry = row_ancestry(old, index);
     match (old_same.as_slice(), new_same.as_slice()) {
@@ -30130,6 +30180,39 @@ mod snapshot_rebind_tests {
         new.push(row(1, "Alert", "允许“设置”使用你的位置？"));
         new.push(row(2, "Button", "允许"));
         assert_eq!(rebind_snapshot_row(&old, 7, &new), RowRebind::Stale);
+    }
+
+    #[test]
+    fn a_replaced_alert_is_stale() {
+        let mut old = settings();
+        old.push(row(1, "Alert", "要加入“Home”吗？"));
+        let mut new = settings();
+        new.push(row(1, "Alert", "密码错误"));
+        assert_eq!(rebind_snapshot_row(&old, 7, &new), RowRebind::Stale);
+        assert_eq!(rebind_snapshot_row(&old, 7, &old.clone()), RowRebind::Index(7));
+    }
+
+    #[test]
+    fn a_button_in_an_unlabeled_cell_is_stale() {
+        let mut old = settings();
+        old.push(row(2, "Cell", ""));
+        old.push(row(3, "Button", "删除"));
+        let mut new = old.clone();
+        new[1].label = "10:42".into();
+        assert_eq!(rebind_snapshot_row(&old, 10, &new), RowRebind::Stale);
+    }
+
+    #[test]
+    fn a_tab_switch_kept_only_by_its_bars_is_stale() {
+        let tabs = |page: &[(&str, &str)]| {
+            let mut rows = vec![row(0, "Application", "时钟"), row(1, "TabBar", "")];
+            rows.extend(["世界时钟", "闹钟", "秒表", "计时器"].map(|tab| row(2, "Button", tab)));
+            rows.extend(page.iter().map(|(kind, label)| row(1, kind, label)));
+            rows
+        };
+        let old = tabs(&[("Button", "编辑"), ("StaticText", "北京")]);
+        let new = tabs(&[("Button", "编辑"), ("StaticText", "07:00")]);
+        assert_eq!(rebind_snapshot_row(&old, 6, &new), RowRebind::Stale);
     }
 
     #[test]

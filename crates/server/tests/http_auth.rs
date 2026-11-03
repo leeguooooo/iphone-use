@@ -1599,6 +1599,12 @@ fn an_index_from_an_older_snapshot_still_taps_its_row_after_the_clock_ticks() {
         let observed_clicks = clicks.clone();
         let (base, _server) = mock_runner_at_most(40, move |request, _| {
             let ok = |body: &str| Some((std::time::Duration::ZERO, body.to_string()));
+            let mutation = !request.starts_with("GET ")
+                && !request.starts_with("POST /session ")
+                && !(request.starts_with("POST") && request.contains("/elements"));
+            if mutation && !request.contains("/click") {
+                observed_clicks.lock().unwrap().push(request.lines().next().unwrap_or("").to_string());
+            }
             if request.starts_with("POST /session ") {
                 ok(r#"{"value":{"sessionId":"SESSION"}}"#)
             } else if request.contains("/source?format=json") {
