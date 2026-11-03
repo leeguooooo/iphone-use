@@ -271,19 +271,38 @@ fn line(en: impl Into<String>, zh: impl Into<String>) -> Line {
 
 /// What an action touched, in both languages: an element of `rows` (its
 /// label, identifier or kind), a label, a locator, or a point.
+fn keypad_number(label: &str) -> bool {
+    let label = label.trim();
+    let mut chars = label.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if label.chars().all(char::is_numeric) {
+        return true;
+    }
+    // Telephone keys can expose their letter group as well as their digit.
+    if first.is_numeric() && chars.all(|ch| !ch.is_numeric()) {
+        return true;
+    }
+    [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ]
+    .contains(&label.to_ascii_lowercase().as_str())
+}
+
 fn key_label(label: &str) -> bool {
     let label = label.trim();
     let lower = label.to_ascii_lowercase();
     !label.is_empty()
         && (label.chars().count() == 1
-            || label.chars().any(char::is_numeric)
-            || [
-                "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-            ]
-            .contains(&lower.as_str())
-            || ["digit", "key", "number", "numeric"]
-                .iter()
-                .any(|prefix| lower.starts_with(prefix)))
+            || keypad_number(label)
+            || ["digit", "key", "number", "numeric"].iter().any(|prefix| {
+                lower.strip_prefix(prefix).is_some_and(|rest| {
+                    keypad_number(rest.trim_start_matches(|ch: char| {
+                        ch.is_whitespace() || matches!(ch, ':' | '-' | '_')
+                    }))
+                })
+            }))
 }
 
 fn sensitive_input(row: &ElementRow) -> bool {
@@ -601,6 +620,26 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_control_names_are_not_keypad_prefixes() {
+        for label in [
+            "Keynote",
+            "Keyboard settings",
+            "Digital clock",
+            "Number of items",
+            "iPhone 17",
+            "2026 report",
+        ] {
+            let rows = vec![ElementRow {
+                rect: [10.0, 20.0, 40.0, 60.0],
+                ..row("Button", label)
+            }];
+            let described = describe(&json!({"type":"tap","element":0}), Some(&rows));
+            assert!(described.en.contains(label), "{label}");
+            assert!(described.target.is_some(), "{label}");
+        }
+    }
+
+    #[test]
     fn rebound_feedback_uses_the_new_row_rectangle() {
         let rows = vec![ElementRow {
             rect: [10.0, 20.0, 40.0, 60.0],
@@ -848,6 +887,8 @@ mod tests {
             ("Key", "Q"),
             ("Button", "A"),
             ("Button", "2 ABC"),
+            ("Button", "2, ABC"),
+            ("Button", "2 (ABC)"),
             ("Button", "Digit 1"),
             ("Button", "KEY 2"),
             ("Button", "Digit One"),
