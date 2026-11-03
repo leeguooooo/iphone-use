@@ -57,6 +57,7 @@ fn fixture_app_state(password: Option<&str>) -> Arc<AppState> {
         flow_trail: std::sync::Arc::new(std::sync::Mutex::new(
             srv::flows::FlowTrail::default(),
         )),
+        action_traces: std::sync::Arc::new(std::sync::Mutex::new(srv::action_trace::TraceStore::default())),
         element_snapshots: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::VecDeque::new(),
         )),

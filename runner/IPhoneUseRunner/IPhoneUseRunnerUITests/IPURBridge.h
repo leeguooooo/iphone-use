@@ -158,6 +158,10 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
                                           rememberKey:(nullable NSString *)rememberKey
                                       includeElements:(BOOL)includeElements;
 
+/// Optional, element-only AX editable attribute. nil means unavailable, never true.
++ (nullable NSNumber *)editableStateForAXElement:(id)element
+    NS_SWIFT_NAME(editableState(for:));
+
 /// Serializes an already-taken snapshot (public XCUIElementSnapshot or private XCElementSnapshot)
 /// into runner's /source node shape.
 + (NSDictionary<NSString *, id> *)runnerTreeForSnapshot:(id)snapshot maxNodes:(NSInteger)maxNodes;
