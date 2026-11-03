@@ -7190,19 +7190,39 @@ fn same_screen(old: &[crate::runner::ElementRow], new: &[crate::runner::ElementR
     }
     // An alert or sheet that came up covers the screen the index was read
     // from: the caller has to see it, not have its tap land underneath.
-    let mut old_overlays: Vec<_> = old
-        .iter()
-        .filter(|row| matches!(row.kind.as_str(), "Alert" | "Sheet"))
-        .map(row_identity)
-        .collect();
-    for overlay in new.iter().filter(|row| matches!(row.kind.as_str(), "Alert" | "Sheet")) {
-        let identity = row_identity(overlay);
-        match old_overlays.iter().position(|old| identity.is_some() && *old == identity) {
+    // Matched by title AND contents: a same-titled sheet for another item
+    // ("删除这条备忘录？") is a different question.
+    fn overlays(rows: &[crate::runner::ElementRow]) -> Vec<Vec<Option<(&str, &str, &str)>>> {
+        (0..rows.len())
+            .filter(|&i| matches!(rows[i].kind.as_str(), "Alert" | "Sheet"))
+            .map(|i| {
+                std::iter::once(&rows[i])
+                    .chain(rows[i + 1..].iter().take_while(|row| row.depth > rows[i].depth))
+                    .map(row_identity)
+                    .collect()
+            })
+            .collect()
+    }
+    let mut old_overlays = overlays(old);
+    for overlay in overlays(new) {
+        match old_overlays.iter().position(|old| overlay[0].is_some() && *old == overlay) {
             Some(position) => {
                 old_overlays.swap_remove(position);
             }
             None => return false,
         }
+    }
+    // The selected tab says which page is up; the rest of the bar does not.
+    fn selected_tabs(rows: &[crate::runner::ElementRow]) -> Vec<Option<(&str, &str, &str)>> {
+        (0..rows.len())
+            .filter(|&i| rows[i].kind == "TabBar")
+            .flat_map(|i| rows[i + 1..].iter().take_while(move |row| row.depth > rows[i].depth))
+            .filter(|row| row.selected == Some(true))
+            .map(row_identity)
+            .collect()
+    }
+    if selected_tabs(old) != selected_tabs(new) {
+        return false;
     }
     // Bars survive a tab switch or a push; only the page's own rows say the
     // page is the same.
@@ -7276,25 +7296,50 @@ fn rebind_snapshot_row(
     }
     let (old_same, new_same) = (same(old), same(new));
     let ancestry = row_ancestry(old, index);
-    match (old_same.as_slice(), new_same.as_slice()) {
+    let found = match (old_same.as_slice(), new_same.as_slice()) {
         (_, []) => return RowRebind::Stale,
         // Unique, but under another row (a list that scrolled: one 删除 for
         // a different item) is a different element.
         ([_], [live]) if row_ancestry(new, *live) != ancestry => return RowRebind::Stale,
-        ([_], [live]) => return RowRebind::Index(*live),
-        _ => {}
-    }
-    let placed = |rows: &[crate::runner::ElementRow], same: &[usize]| -> Vec<usize> {
-        same.iter()
-            .copied()
-            .filter(|&i| row_ancestry(rows, i) == ancestry)
-            .collect()
+        ([_], [live]) => *live,
+        _ => {
+            let placed = |rows: &[crate::runner::ElementRow], same: &[usize]| -> Vec<usize> {
+                same.iter()
+                    .copied()
+                    .filter(|&i| row_ancestry(rows, i) == ancestry)
+                    .collect()
+            };
+            match (placed(old, &old_same).as_slice(), placed(new, &new_same).as_slice()) {
+                ([_], [live]) => *live,
+                (_, []) => return RowRebind::Stale,
+                _ => return RowRebind::Ambiguous,
+            }
+        }
     };
-    match (placed(old, &old_same).as_slice(), placed(new, &new_same).as_slice()) {
-        ([_], [live]) => RowRebind::Index(*live),
-        (_, []) => RowRebind::Stale,
-        _ => RowRebind::Ambiguous,
+    // Unlabeled containers are not rows, so a list item built from them
+    // leaves no ancestor to tell one item's 删除 from the next. The rows
+    // around it (the item's title, its neighbours) do.
+    if row_neighbours(old, index) != row_neighbours(new, found) {
+        return RowRebind::Stale;
     }
+    RowRebind::Index(found)
+}
+
+/// How many rows on each side of a rebound row must read the same.
+const REBIND_NEIGHBOURS: usize = 2;
+
+/// The identities of the rows just before and after `index`, with the ends
+/// of the tree marked so a row that became first or last does not match.
+fn row_neighbours(
+    rows: &[crate::runner::ElementRow],
+    index: usize,
+) -> Vec<Option<Option<(&str, &str, &str)>>> {
+    (1..=REBIND_NEIGHBOURS)
+        .rev()
+        .map(|step| index.checked_sub(step))
+        .chain((1..=REBIND_NEIGHBOURS).map(|step| Some(index + step)))
+        .map(|at| at.and_then(|at| rows.get(at)).map(row_identity))
+        .collect()
 }
 
 /// How long a tree read stays reusable for a snapshot-bound action.
@@ -30128,9 +30173,9 @@ mod snapshot_rebind_tests {
         let mut new = settings();
         new[1].label = "10:42".into();
         new[5].value = Some("1".into());
-        new.insert(6, row(2, "Cell", "Cafe"));
+        new.insert(4, row(1, "StaticText", "已连接"));
         assert_eq!(rebind_snapshot_row(&old, 7, &new), RowRebind::Index(8));
-        assert_eq!(rebind_snapshot_row(&old, 5, &new), RowRebind::Index(5));
+        assert_eq!(rebind_snapshot_row(&old, 8, &new), RowRebind::Index(9));
     }
 
     #[test]
@@ -30213,6 +30258,52 @@ mod snapshot_rebind_tests {
         let old = tabs(&[("Button", "编辑"), ("StaticText", "北京")]);
         let new = tabs(&[("Button", "编辑"), ("StaticText", "07:00")]);
         assert_eq!(rebind_snapshot_row(&old, 6, &new), RowRebind::Stale);
+    }
+
+    #[test]
+    fn a_same_titled_sheet_for_another_item_is_stale() {
+        let sheet = |item: &str| {
+            let mut rows = settings();
+            rows.push(row(1, "Sheet", "删除备忘录？"));
+            rows.push(row(2, "StaticText", item));
+            rows.push(row(2, "Button", "删除"));
+            rows
+        };
+        let (old, new) = (sheet("购物清单"), sheet("会议记录"));
+        assert_eq!(rebind_snapshot_row(&old, 11, &new), RowRebind::Stale);
+        assert_eq!(rebind_snapshot_row(&old, 11, &sheet("购物清单")), RowRebind::Index(11));
+    }
+
+    #[test]
+    fn another_selected_tab_is_stale() {
+        let tabs = |selected: usize| {
+            let mut rows = settings();
+            rows.push(row(1, "TabBar", ""));
+            for (i, tab) in ["收藏", "最近"].into_iter().enumerate() {
+                let mut tab = row(2, "Button", tab);
+                tab.selected = (i == selected).then_some(true);
+                rows.push(tab);
+            }
+            rows
+        };
+        assert_eq!(rebind_snapshot_row(&tabs(0), 7, &tabs(1)), RowRebind::Stale);
+        assert_eq!(rebind_snapshot_row(&tabs(0), 7, &tabs(0)), RowRebind::Index(7));
+    }
+
+    #[test]
+    fn a_button_in_another_unlabeled_list_item_is_stale() {
+        // Items built from unlabeled containers emit no row of their own:
+        // only the item's text sits next to its 删除.
+        let list = |item: &str| {
+            let mut rows = settings();
+            rows.push(row(3, "StaticText", item));
+            rows.push(row(3, "Button", "删除"));
+            rows
+        };
+        assert_eq!(rebind_snapshot_row(&list("Item 5"), 10, &list("Item 12")), RowRebind::Stale);
+        let mut clock = list("Item 5");
+        clock[1].label = "10:42".into();
+        assert_eq!(rebind_snapshot_row(&list("Item 5"), 10, &clock), RowRebind::Index(10));
     }
 
     #[test]
