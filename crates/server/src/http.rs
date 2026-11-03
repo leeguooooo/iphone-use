@@ -645,7 +645,7 @@ fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<bool, Resp
     if outcome.is_ok() {
         let before = previous.as_ref().filter(|o| now.saturating_duration_since(o.last_seen) < lease).map(|o| &o.name);
         let after = slot.as_ref().map(|o| &o.name);
-        if before != after {
+        if before != after || (previous.is_some() && slot.is_none()) {
             state.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             crate::activity::clear_live();
             if let Some(previous) = previous.as_ref() { traces.end_owner(&previous.name); }
@@ -7166,7 +7166,7 @@ fn snapshot_element_outcome(
 ) -> Result<anyhow::Result<()>, RunnerControlOutcome> {
     let rebound = w.rebound_row.take();
     if let (Some((from, to)), Ok(()) | Err(SnapshotElementTapError::AfterDispatch(_))) = (rebound, &result) {
-        *detail = Some(serde_json::json!({"rebound": {"from": from, "to": to}}));
+        detail.get_or_insert_with(||serde_json::json!({}))["rebound"] = serde_json::json!({"from":from,"to":to});
     }
     match result {
         Ok(()) => Ok(Ok(())),
@@ -7247,6 +7247,7 @@ async fn fetch_snapshot_row(
         .ok_or(SnapshotElementTapError::Invalid)?;
 
     w.rebound_row = None;
+    w.activity_rebound_rect=None;
     // Taken before the fresh read: that read joins the bounded history and
     // could push the caller's snapshot out of it.
     let served = w.served_tree(|served| {
@@ -7297,6 +7298,7 @@ async fn fetch_snapshot_row(
                     "snapshot row {index} rebound to live row {live} after the screen changed"
                 );
                 w.rebound_row = Some((index, live));
+                w.activity_rebound_rect=Some(rows[live].rect);
                 Ok((rows, live))
             }
             RowRebind::Ambiguous => Err(SnapshotElementTapError::Ambiguous),
@@ -9592,6 +9594,7 @@ async fn runner_control_with_client(
     dispatch_allowed: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> RunnerControlOutcome {
     use std::sync::atomic::Ordering;
+    w.activity_rebound_rect=None;
     let typ = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let r: anyhow::Result<()> = match typ {
         "tap" if v.get("label").is_some() => {
@@ -10829,6 +10832,7 @@ async fn direct_agent_action(
     input_scope: Option<&crate::input_continuation::Scope>,
 ) -> RunnerControlOutcome {
     use std::sync::atomic::Ordering;
+    w.activity_rebound_rect=None;
 
     let typ = value
         .get("type")
@@ -13394,7 +13398,8 @@ async fn agent_actions_scoped(
                     .await;
                 }
                 applied_actions += 1;
-                record_activity(&state, &headers, action, w.cached_window_size(), &capture_scope);
+                let rebound_rect=w.activity_rebound_rect.take();
+                record_activity(&state, &headers, action, w.cached_window_size(), &capture_scope, rebound_rect);
                 let mut receipt = serde_json::json!({
                     "index": index,
                     "kind": "action",
@@ -15783,6 +15788,10 @@ async fn agent_input_inner(
             return with_app_lifecycle_receipt(runner_deadline_response(posted_since(runner, mark).await), detail.as_ref()).await;
         }
     };
+    let activity_rebound_rect=client.activity_rebound_rect.take();
+    if outcome==RunnerControlOutcome::Applied {
+        record_activity(&state,&headers,&value,client.cached_window_size(),&capture_scope,activity_rebound_rect);
+    }
     renew_after_long_text(&state, &headers, &value, &capture_scope);
     // Post-action observation (`?return=delta`), still holding the SAME
     // guard so no other control interleaves between the action and its
@@ -15926,7 +15935,7 @@ async fn agent_input_inner(
                 }
             };
             let body = attach_alert(body, alert);
-            let mut blocks = flow_after_input(&state, &headers, &value, &capture_scope);
+            let mut blocks = flow_after_input(&state, &headers, &value);
             if let Some(capture) = detail.as_ref().and_then(|value| value.get("system_capture")) {
                 blocks.push(("system_capture", capture.clone()));
             }
@@ -16428,13 +16437,13 @@ fn record_flow_action(state: &AppState, action: &serde_json::Value, now: Instant
 }
 
 /// One applied action on the activity feed, in plain words (`crate::activity`).
-fn record_activity(state: &AppState, headers: &HeaderMap, action: &serde_json::Value, viewport: Option<(f64,f64)>, scope: &ScreenReadScope) {
+fn record_activity(state: &AppState, headers: &HeaderMap, action: &serde_json::Value, viewport: Option<(f64,f64)>, scope: &ScreenReadScope, rebound_rect:Option<[f64;4]>) {
     if !scope.current(state) { return; }
     let rows = action
         .get("snapshot")
         .and_then(serde_json::Value::as_str)
         .and_then(|snapshot| lookup_element_snapshot(state, snapshot));
-    let mut line = crate::activity::describe(action, rows.as_deref().map(Vec::as_slice));
+    let mut line = crate::activity::describe(action, rows.as_deref().map(Vec::as_slice)).with_target_rect(rebound_rect);
     let viewport = viewport.or_else(|| state.runner.as_ref()?.try_lock().ok()?.cached_window_size());
     if let Some((width,height)) = viewport { line = line.with_runner_viewport(width,height); }
     else if let Some(root) = rows.as_ref().and_then(|rows| rows.iter().find(|row| row.kind == "Application")) {
@@ -16455,9 +16464,7 @@ fn flow_after_input(
     state: &AppState,
     headers: &HeaderMap,
     action: &serde_json::Value,
-    scope: &ScreenReadScope,
 ) -> Vec<(&'static str, serde_json::Value)> {
-    record_activity(state, headers, action, None, scope);
     if headers.contains_key(FLOW_RUN_HEADER) {
         return Vec::new();
     }
@@ -22498,6 +22505,17 @@ fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value
 #[cfg(test)]
 mod tests {
     #[test]
+    fn rebound_notice_preserves_the_value_verification_receipt() {
+        let mut runner=crate::runner::RunnerClient::new("http://127.0.0.1:9").unwrap();
+        runner.rebound_row=Some((1,2));
+        let mut detail=Some(serde_json::json!({"verification":{"status":"verified","scope":"element_value"}}));
+        assert!(snapshot_element_outcome(Ok(()),&mut runner,"fixture",&mut detail).unwrap().is_ok());
+        let detail=detail.unwrap();
+        assert_eq!(detail["verification"]["status"],"verified");
+        assert_eq!(detail["rebound"],serde_json::json!({"from":1,"to":2}));
+    }
+
+    #[test]
     fn live_activity_is_no_store_and_fenced_until_publication() {
         use tower::ServiceExt;
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
@@ -22516,12 +22534,14 @@ mod tests {
     #[test]
     fn lease_release_and_expiry_end_the_previous_owners_trace() {
         let state=fixture_app_state(None);
-        for expired in [false,true] {
-            let owner=if expired {"expired-owner"} else {"released-owner"};
+        for mode in [0,1,2] {
+            let expired=mode>0;
+            let owner=match mode {0=>"released-owner",1=>"expired-owner",_=>"expired-anonymous-owner"};
             *state.owner.lock().unwrap()=Some(PhoneOwner{name:owner.into(),last_seen:if expired {Instant::now()-std::time::Duration::from_secs(state.owner_lease_secs+1)} else {Instant::now()}});
             assert!(state.action_traces.lock().unwrap().start(owner,"run"));
             if expired {
-                let mut headers=HeaderMap::new();headers.insert("x-phone-owner","new-owner".parse().unwrap());
+                let mut headers=HeaderMap::new();
+                if mode==1 {headers.insert("x-phone-owner","new-owner".parse().unwrap());}
                 assert!(claim_phone_owner(&state,&headers).is_ok());
             } else { state.release_owner_lease(); }
             assert_eq!(state.action_traces.lock().unwrap().export(owner,"run").unwrap()["active"],false);

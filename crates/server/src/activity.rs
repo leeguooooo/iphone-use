@@ -227,6 +227,26 @@ pub struct Line {
 }
 
 impl Line {
+    /// Rebinding chose a newer row: show that observation's rectangle rather
+    /// than the old snapshot's location. Never create feedback for redacted rows.
+    #[must_use]
+    pub fn with_target_rect(mut self, rect: Option<[f64; 4]>) -> Self {
+        if let (Some(target), Some([x, y, w, h])) = (&mut self.target, rect) {
+            if [x, y, w, h, x + w, y + h].iter().all(|n| n.is_finite())
+                && x >= 0.0
+                && y >= 0.0
+                && w > 0.0
+                && h > 0.0
+            {
+                target.point = [x + w / 2.0, y + h / 2.0];
+                target.rect = Some([x, y, w, h]);
+            } else {
+                self.target = None;
+            }
+        }
+        self
+    }
+
     /// Supply the authoritative runner window size for this action's screen.
     /// Never use screenshot pixels or infer a viewport from accessibility rows.
     /// Without this hook runner-point targets remain in the feed but are not drawn.
@@ -254,7 +274,8 @@ fn line(en: impl Into<String>, zh: impl Into<String>) -> Line {
 /// label, identifier or kind), a label, a locator, or a point.
 fn key_label(label: &str) -> bool {
     let label = label.trim();
-    !label.is_empty() && (label.chars().count() == 1 || label.chars().all(|c| c.is_ascii_digit()))
+    !label.is_empty()
+        && (label.chars().count() == 1 || label.chars().next().is_some_and(char::is_numeric))
 }
 
 fn sensitive_input(row: &ElementRow) -> bool {
@@ -572,6 +593,19 @@ mod tests {
     }
 
     #[test]
+    fn rebound_feedback_uses_the_new_row_rectangle() {
+        let rows = vec![ElementRow {
+            rect: [10.0, 20.0, 40.0, 60.0],
+            ..row("Button", "Done")
+        }];
+        let line = describe(&json!({"type":"tap","element":0}), Some(&rows))
+            .with_target_rect(Some([100.0, 200.0, 40.0, 60.0]));
+        let target = json!(line.target);
+        assert_eq!(target["point"], json!([120.0, 230.0]));
+        assert_eq!(target["rect"], json!([100.0, 200.0, 40.0, 60.0]));
+    }
+
+    #[test]
     fn geometry_is_live_only_and_bound_to_current_scope() {
         let scope = LiveScope {
             owner_epoch: 1,
@@ -790,7 +824,14 @@ mod tests {
                 .target
                 .is_none());
         }
-        for (kind, label) in [("Button", "7"), ("Key", "Q"), ("Button", "A")] {
+        for (kind, label) in [
+            ("Button", "7"),
+            ("Key", "Q"),
+            ("Button", "A"),
+            ("Button", "2 ABC"),
+            ("Button", "2\nABC"),
+            ("Button", "٢ أبج"),
+        ] {
             let rows = vec![ElementRow {
                 rect: [10.0, 20.0, 40.0, 50.0],
                 ..row(kind, label)

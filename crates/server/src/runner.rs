@@ -155,6 +155,7 @@ pub struct RunnerClient {
     /// `(snapshot index, live index)` when the current snapshot-bound action
     /// found its row in a changed tree; the response reports it.
     pub rebound_row: Option<(usize, usize)>,
+    pub(crate) activity_rebound_rect: Option<[f64;4]>,
     /// Whether the last [`Self::elements`] kept the tree read without
     /// `isVisible` (see [`Self::bounded_source`]): its rows' `visible` is
     /// geometric, and the next read keeps that mode until the tree shrinks
@@ -411,6 +412,7 @@ impl RunnerClient {
             last_tree: None,
             served_trees: std::collections::VecDeque::new(),
             rebound_row: None,
+            activity_rebound_rect: None,
             lite_source: false,
             probe: ProbeMemory::default(),
             full_visibility: full_visibility_requested(),
@@ -2729,6 +2731,7 @@ impl RunnerClient {
 
     /// Discard screen-derived data after the caller's authorization scope changes.
     pub fn forget_observations(&mut self) {
+        self.activity_rebound_rect=None;
         self.last_tree = None;
         self.served_trees.clear();
         self.settled_frame = None;
@@ -2952,6 +2955,7 @@ impl RunnerClient {
     /// Drop the cached session (e.g. after an error that suggests it went
     /// stale); the next call re-creates one via [`Self::ensure_session`].
     pub fn invalidate_session(&mut self) {
+        self.activity_rebound_rect=None;
         self.session = None;
         self.value_read = false;
         self.element_subtree = false;
