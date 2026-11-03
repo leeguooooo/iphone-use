@@ -372,6 +372,7 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 // label + enclosing rows, never by value or frame. Another app, another page (navigation bar differs),
 // a new alert/sheet, most rows replaced, or a row with no label/identifier → 409 stale_element_snapshot;
 // two look-alikes nothing tells apart → ambiguous. Either way nothing is sent: read again.
+// When it does act on a changed screen, the result carries "rebound":{"from":3,"to":4} (old index → live index).
 {"type":"tap","label":"新备忘录"}                         // exact, unique; add "kind":"Button" if a StaticText shares it
 {"type":"tap_locator","locator":{"identifier":"save"}}  // label/identifier/kind/value/focused/enabled/visible
 {"type":"tap","x":0.5,"y":0.3}                          // last resort

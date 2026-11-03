@@ -145,6 +145,9 @@ pub struct RunnerClient {
     /// whose token no longer matches the live tree looks its snapshot up here
     /// to learn which element the index named (see [`Self::served_tree`]).
     served_trees: std::collections::VecDeque<std::sync::Arc<Vec<ElementRow>>>,
+    /// `(snapshot index, live index)` when the current snapshot-bound action
+    /// found its row in a changed tree; the response reports it.
+    pub rebound_row: Option<(usize, usize)>,
     /// Whether the last [`Self::elements`] kept the tree read without
     /// `isVisible` (see [`Self::bounded_source`]): its rows' `visible` is
     /// geometric, and the next read keeps that mode until the tree shrinks
@@ -398,6 +401,7 @@ impl RunnerClient {
             system_capture_request: false,
             last_tree: None,
             served_trees: std::collections::VecDeque::new(),
+            rebound_row: None,
             lite_source: false,
             probe: ProbeMemory::default(),
             full_visibility: full_visibility_requested(),

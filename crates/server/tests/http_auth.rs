@@ -1673,6 +1673,10 @@ fn an_index_from_an_older_snapshot_still_taps_its_row_after_the_clock_ticks() {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert_eq!(*clicks.lock().unwrap(), vec!["MORE".to_string()]);
+        // The caller is told its index was resolved on a changed screen.
+        let live = second["elements"].as_array().unwrap().iter().position(|row| row["label"] == "更多").unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["rebound"], serde_json::json!({"from": more, "to": live}));
 
         // The tap was posted, so the next index from the same old snapshot
         // reads the tree afresh and still finds its row.

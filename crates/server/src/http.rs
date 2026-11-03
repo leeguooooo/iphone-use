@@ -6999,7 +6999,12 @@ fn snapshot_element_outcome(
     result: Result<(), SnapshotElementTapError>,
     w: &mut crate::runner::RunnerClient,
     context: &str,
+    detail: &mut Option<serde_json::Value>,
 ) -> Result<anyhow::Result<()>, RunnerControlOutcome> {
+    let rebound = w.rebound_row.take();
+    if let (Some((from, to)), Ok(()) | Err(SnapshotElementTapError::AfterDispatch(_))) = (rebound, &result) {
+        *detail = Some(serde_json::json!({"rebound": {"from": from, "to": to}}));
+    }
     match result {
         Ok(()) => Ok(Ok(())),
         Err(SnapshotElementTapError::Invalid) => Err(RunnerControlOutcome::InvalidElementSnapshot),
@@ -7108,6 +7113,7 @@ async fn fetch_snapshot_row(
                 tracing::info!(
                     "snapshot row {index} rebound to live row {live} after the screen changed"
                 );
+                w.rebound_row = Some((index, live));
                 Ok((rows, live))
             }
             RowRebind::Ambiguous => Err(SnapshotElementTapError::Ambiguous),
@@ -9404,7 +9410,7 @@ async fn runner_control_with_client(
         }
         "tap" if v.get("element").is_some() => {
             let result = tap_snapshot_element(w, v).await;
-            match snapshot_element_outcome(result, w, "control snapshot tap") {
+            match snapshot_element_outcome(result, w, "control snapshot tap", detail) {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
             }
@@ -9415,7 +9421,7 @@ async fn runner_control_with_client(
             let was_actionable = actionable.load(Ordering::Acquire);
             let allowed = || (!was_actionable || actionable.load(Ordering::Acquire)) && dispatch_allowed.is_none_or(|allowed| allowed());
             let result = set_value_snapshot_element(w, v, &allowed).await;
-            match snapshot_element_outcome(result, w, "control set_value") {
+            match snapshot_element_outcome(result, w, "control set_value", detail) {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
             }
@@ -9431,7 +9437,7 @@ async fn runner_control_with_client(
                 return RunnerControlOutcome::UnsupportedPerformAction;
             }
             let result = perform_snapshot_element(w, v).await;
-            match snapshot_element_outcome(result, w, "control perform") {
+            match snapshot_element_outcome(result, w, "control perform", detail) {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
             }
@@ -9509,7 +9515,7 @@ async fn runner_control_with_client(
         }
         "scroll" if v.get("element").is_some() => {
             let result = scroll_snapshot_element(w, v, guard_alert, detail).await;
-            match snapshot_element_outcome(result, w, "control element scroll") {
+            match snapshot_element_outcome(result, w, "control element scroll", detail) {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
             }
@@ -10720,7 +10726,7 @@ async fn direct_agent_action(
         }
         "tap" if value.get("element").is_some() => {
             let result = tap_snapshot_element(w, value).await;
-            match snapshot_element_outcome(result, w, "agent snapshot tap") {
+            match snapshot_element_outcome(result, w, "agent snapshot tap", detail) {
                 Ok(result) => Some(result),
                 Err(outcome) => return outcome,
             }
@@ -10996,6 +11002,9 @@ async fn direct_control(
         let mut body = serde_json::json!({"ok":true});
         if let Some(capture) = detail.as_ref().and_then(|value| value.get("system_capture")) {
             body["system_capture"] = capture.clone();
+        }
+        if let Some(rebound) = detail.as_ref().and_then(|value| value.get("rebound")) {
+            body["rebound"] = rebound.clone();
         }
         return with_security_headers(
             Response::builder()
@@ -13134,6 +13143,9 @@ async fn agent_actions_scoped(
                 }
                 if let Some(capture) = step_detail.as_ref().and_then(|value| value.get("system_capture")) {
                     receipt["system_capture"] = capture.clone();
+                }
+                if let Some(rebound) = step_detail.as_ref().and_then(|value| value.get("rebound")) {
+                    receipt["rebound"] = rebound.clone();
                 }
                 step_results.push(receipt);
                 if *after_ms > 0
@@ -15641,6 +15653,9 @@ async fn agent_input_inner(
             let mut blocks = flow_after_input(&state, &headers, &value);
             if let Some(capture) = detail.as_ref().and_then(|value| value.get("system_capture")) {
                 blocks.push(("system_capture", capture.clone()));
+            }
+            if let Some(rebound) = detail.as_ref().and_then(|value| value.get("rebound")) {
+                blocks.push(("rebound", rebound.clone()));
             }
             if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
                 blocks.push(("agent_focus", block));
