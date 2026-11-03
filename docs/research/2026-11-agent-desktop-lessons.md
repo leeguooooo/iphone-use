@@ -6,6 +6,25 @@
 
 借鉴原则照旧：借机制，不照搬它的命令名、字段名和文案（Apache-2.0 也一样）。不去它的仓库提 PR 或评论。
 
+## 落地状态（2026-11-04）
+
+第 1 项已通过 PR #400 合并；键盘变化后的旧快照重定位已补真机验收。第 2–8 项在后续分支实现：
+
+| 建议 | 当前实现 |
+|---|---|
+| 2. 送达与验证 | `action_evidence` 分开报告；set_value 精确读回、终态 wait_for 才能标验证；已有 observed alert 接口继续使用 |
+| 3. 结构化恢复 | 错误附 `recovery.action` 固定策略；不确定或部分送达不建议重试 |
+| 4. 点击展示 | activity 结构化目标；面板绿色涟漪/描边，区分坐标空间 |
+| 5. 派发前检查 | runner 对单元素 enabled/editable/frame 作有界检查；保留未知状态 |
+| 6. 子树读取 | `/agent/subtree` / `phone_subtree`，native AX 子树，带覆盖范围；返回只读局部行，不生成动作编号 |
+| 7. 动作轨迹 | run start `trace:true`，按 owner 隔离的脱敏内存轨迹，JSON/JSONL 导出；不含截图，不自动重放 |
+| 8. 方法与知识 | `docs/CONCEPTS.md`、`docs/solutions/negative-waits-and-action-receipts.md`、三态属性与覆盖范围测试 |
+
+另为潜在的消失等待竞态增加了可选 `absent_after_present`，不把普通 absent 等待改成隐式睡眠。
+功能接口见 [agent-reference](../agent-reference.md)。下文保留首次研究的现状与建议作为设计背景，不代表最新实现状态。
+
+验收分层：自动化与真机结果见 [验收记录](../qa/2026-11-agent-desktop-followups.md)，不以合成测试或模拟器构建代替真机结果。
+
 ## 已经对齐的部分
 
 这些我们有等价物，不用动：
@@ -23,7 +42,7 @@
 
 ### 1. 快照令牌是整屏哈希，屏上任何变化都让所有 index 失效
 
-> 已实现（未提交，2026-11-03）：`rebind_snapshot_row`（`crates/server/src/http.rs`），runner 侧保留最近 8 棵完整树（`RunnerClient::served_tree`）。另加了两道闸：同屏判定（导航栏一致、无新 alert/sheet、至少 75% 可识别行保留），以及唯一命中时祖先行也必须一致。响应里还不会标明发生了重绑定，只打日志。待真机验证。
+> 已通过 PR #400 合并；后续已用真机验证键盘弹出后的旧快照重定位，见上方验收记录。
 
 **它怎么做。** 每个 ref 存一份身份证据：role、name、description、native_id（开发者给的 identifier）、在树里的路径、几何、可用动作、所属窗口。动作时按顺序重新定位：先走存下的路径，再做有界搜索；候选先用 identifier 确认，再用“稳定文本”确认；只有没有任何身份的元素才允许靠唯一几何命中。零个匹配是 `STALE_REF`，多个是 `AMBIGUOUS_TARGET`，绝不猜。
 

@@ -473,8 +473,18 @@ impl DaemonClient {
     /// `POST /agent/run` start: open an explicit run for this owner; every
     /// later request carries it until [`Self::run_end`].
     pub async fn run_start(&self, run_id: &str, complete_trace: bool) -> anyhow::Result<String> {
+        self.run_start_with_trace(run_id, complete_trace, false).await
+    }
+
+    pub async fn action_trace(&self, run_id: &str) -> anyhow::Result<String> {
+        let response = self.auth(self.http().get(self.url("/agent/trace")))
+            .query(&[("run_id", run_id)]).send().await?;
+        Ok(check_status(response).await?.text().await?)
+    }
+
+    pub async fn run_start_with_trace(&self, run_id: &str, complete_trace: bool, trace: bool) -> anyhow::Result<String> {
         let body = serde_json::json!({
-            "action": "start", "run_id": run_id, "complete_trace": complete_trace
+            "action": "start", "run_id": run_id, "complete_trace": complete_trace, "trace": trace
         });
         let req = self
             .auth(self.http().post(self.url("/agent/run")))
@@ -887,6 +897,14 @@ impl DaemonClient {
     /// (L2 / WebDriverAgent). Returns the JSON body verbatim:
     /// `{"snapshot":"…","elements":[{kind,label,identifier?,rect,
     /// enabled?,visible?,accessible?,focused?,placeholder?,depth},…]}`.
+    pub async fn subtree(&self, snapshot: &str, element: usize, max_depth: u32, max_nodes: u32) -> anyhow::Result<String> {
+        let response = self.auth(self.http().post(self.url("/agent/subtree")))
+            .header("x-phone-control", "1")
+            .json(&serde_json::json!({"snapshot":snapshot,"element":element,"max_depth":max_depth,"max_nodes":max_nodes}))
+            .send().await?;
+        Ok(check_status(response).await?.text().await?)
+    }
+
     pub async fn elements(&self) -> anyhow::Result<String> {
         self.elements_at("/agent/elements", None).await
     }

@@ -134,6 +134,8 @@ pub struct RunnerClient {
     /// runner). Asked again whenever a new session starts (a new runner).
     device_settle: Option<bool>,
     value_read: bool,
+    element_subtree: bool,
+    element_evidence: bool,
     guarded_input: bool,
     selected_input_target: bool,
     input_continuation: bool,
@@ -397,6 +399,8 @@ impl RunnerClient {
             no_alert_at: None,
             device_settle: None,
             value_read: false,
+            element_subtree: false,
+            element_evidence: false,
             guarded_input: false,
             selected_input_target: false,
             input_continuation: false,
@@ -771,6 +775,10 @@ impl RunnerClient {
                 .and_then(|value| value.pointer("/value/capabilities/ipu:selectedInputTarget").and_then(serde_json::Value::as_bool)) == Some(true);
             self.value_read = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.element_subtree = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:elementSubtree").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.element_evidence = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:elementEvidence").and_then(serde_json::Value::as_bool)) == Some(true);
             self.volume_buttons = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:volumeButtons").and_then(serde_json::Value::as_bool)) == Some(true);
             self.system_capture_request = serde_json::from_str::<serde_json::Value>(&text).ok()
@@ -1056,6 +1064,53 @@ impl RunnerClient {
         let response=self.http.get(format!("{}/session/{}/element/{}/value?complete=1",self.base,sid,id))
             .query(&[("max_utf16",max_utf16)]).send_signed(&self.auth).await?;
         ensure_runner_success(response,"GET element value").await
+    }
+
+    /// Fetch only the retained AX element's bounded subtree on the phone.
+    /// Rows are read-only local indices: they are NOT saved in the screen-token
+    /// cache. Keep the original snapshot/locator to address later actions.
+    /// Legacy runners explicitly refuse; never fetch /source as a substitute.
+    pub async fn element_subtree(
+        &mut self, element_id: &str, max_depth: u32, max_nodes: u32,
+    ) -> Result<ElementSubtree> {
+        if !(1..=64).contains(&max_depth) || !(1..=5000).contains(&max_nodes) {
+            return Err(anyhow!("subtree requires max_depth in 1..=64 and max_nodes in 1..=5000"));
+        }
+        let sid = self.ensure_session().await?.to_owned();
+        if !self.element_subtree {
+            return Err(unsupported_element_read("GET element subtree", "ipu:elementSubtree"));
+        }
+        let mut url = reqwest::Url::parse(&format!("{}/session/", self.base))?;
+        url.path_segments_mut().map_err(|_| anyhow!("runner base cannot hold path segments"))?
+            .pop_if_empty().extend([sid.as_str(), "element", element_id, "ipu", "subtree"]);
+        let response = self.http.get(url)
+            .query(&[("max_depth", max_depth), ("max_nodes", max_nodes)])
+            .send_signed(&self.auth).await.context("GET element subtree")?;
+        let coverage = SnapshotCoverage::from_headers(response.headers());
+        let root = ensure_runner_success(response, "GET element subtree").await?;
+        if !root.is_object() { return Err(anyhow!("element subtree must return a tree object")); }
+        let mut rows = Vec::new();
+        flatten_tree(&root, 0, &mut rows);
+        Ok(ElementSubtree { root, rows, coverage })
+    }
+
+    /// One shallow element read, or at most four frame samples polled inside
+    /// the phone. Missing attributes are None, never evidence of true/false.
+    /// Does not mutate, retry input, fetch a whole tree, or update screen tokens.
+    pub async fn element_evidence(
+        &mut self, element_id: &str, stability: bool,
+    ) -> Result<ElementEvidence> {
+        let sid = self.ensure_session().await?.to_owned();
+        if !self.element_evidence {
+            return Err(unsupported_element_read("GET element evidence", "ipu:elementEvidence"));
+        }
+        let mut url = reqwest::Url::parse(&format!("{}/session/", self.base))?;
+        url.path_segments_mut().map_err(|_| anyhow!("runner base cannot hold path segments"))?
+            .pop_if_empty().extend([sid.as_str(), "element", element_id, "ipu", "evidence"]);
+        let response = self.http.get(url).query(&[("stability", if stability { "1" } else { "0" })])
+            .send_signed(&self.auth).await.context("GET element evidence")?;
+        let value = ensure_runner_success(response, "GET element evidence").await?;
+        serde_json::from_value(value).context("parse element evidence")
     }
 
     /// Request one iOS system capture under a live screen/owner permit;
@@ -2895,6 +2950,8 @@ impl RunnerClient {
     pub fn invalidate_session(&mut self) {
         self.session = None;
         self.value_read = false;
+        self.element_subtree = false;
+        self.element_evidence = false;
         self.guarded_input = false;
         self.selected_input_target = false;
         self.input_continuation = false;
@@ -3260,6 +3317,38 @@ pub struct ElementMatches {
 pub struct ElementSnapshot {
     pub rows: Vec<ElementRow>,
     pub coverage: SnapshotCoverage,
+}
+
+/// Indices in `rows` are local to this read, never actionable screen refs.
+pub struct ElementSubtree {
+    pub root: serde_json::Value,
+    pub rows: Vec<ElementRow>,
+    pub coverage: SnapshotCoverage,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct ElementEvidence {
+    pub enabled: Option<bool>,
+    pub editable: Option<bool>,
+    pub stable: Option<bool>,
+    pub rect: ElementEvidenceRect,
+    pub samples: u32,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct ElementEvidenceRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+fn unsupported_element_read(operation: &str, capability: &str) -> anyhow::Error {
+    RunnerHttpError {
+        operation: operation.into(), status: reqwest::StatusCode::NOT_IMPLEMENTED,
+        code: Some("unsupported operation".into()),
+        message: Some(format!("runner lacks {capability}; no whole-screen fallback")),
+    }.into()
 }
 
 /// One row of the flattened element tree.
@@ -3947,11 +4036,13 @@ impl RunnerHttpError {
     /// The runner said it refused the request before acting on the phone.
     /// Its `/actions` route checks every touch point against the screen
     /// before it synthesizes anything, and that refusal (HTTP 400, "invalid
-    /// argument") ends "nothing was sent". A 400 alone proves nothing: the
+    /// argument") ends "nothing was sent". Element actionability refusals
+    /// use "invalid element state" with the same explicit no-dispatch suffix.
+    /// A 400 alone proves nothing: the
     /// same status can follow touches already played.
     pub fn nothing_sent(&self) -> bool {
         self.status == reqwest::StatusCode::BAD_REQUEST
-            && self.code.as_deref() == Some("invalid argument")
+            && matches!(self.code.as_deref(), Some("invalid argument" | "invalid element state"))
             && self
                 .message
                 .as_deref()
@@ -4109,6 +4200,115 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn element_reads_require_explicit_session_capabilities() {
+        for capability in [serde_json::json!({}), serde_json::json!({"ipu:elementSubtree": false, "ipu:elementEvidence": false})] {
+            let (base, task) = mock_runner(2, move |request| {
+                if request.starts_with("POST /session ") {
+                    return serde_json::json!({"value":{"sessionId":"S","capabilities":capability}}).to_string();
+                }
+                assert!(request.starts_with("POST /session/S/appium/settings "), "{request}");
+                r#"{"value":null}"#.into()
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            let subtree = block(client.element_subtree("E", 2, 10)).err().unwrap();
+            let evidence = block(client.element_evidence("E", true)).err().unwrap();
+            for error in [subtree, evidence] {
+                let error = error.downcast_ref::<RunnerHttpError>().unwrap();
+                assert_eq!(error.status, reqwest::StatusCode::NOT_IMPLEMENTED);
+                assert_eq!(error.code.as_deref(), Some("unsupported operation"));
+            }
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn subtree_preserves_provider_coverage_without_screen_cache() {
+        for (headers, expected) in [
+            ("X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n", SnapshotCoverage::Complete),
+            ("X-IPU-Truncated: 1\r\nX-IPU-Tree-Complete: 1\r\n", SnapshotCoverage::Truncated),
+            ("", SnapshotCoverage::Unknown),
+        ] {
+            let (base, task) = mock_runner(1, move |request| {
+                assert!(request.starts_with("GET /session/S/element/E%2Fchild/ipu/subtree?max_depth=3&max_nodes=10 "), "{request}");
+                let body = r#"{"value":{"type":"XCUIElementTypeCell","rect":{"x":0,"y":0,"width":20,"height":20},"children":[{"type":"XCUIElementTypeButton","label":"Inside","rect":{"x":1,"y":1,"width":10,"height":10}}]}}"#;
+                format!("HTTP/1.1 200 OK\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            client.session = Some("S".into());
+            client.element_subtree = true;
+            let result = block(client.element_subtree("E/child", 3, 10)).unwrap();
+            assert_eq!(result.coverage, expected);
+            assert_eq!(result.root["type"], "XCUIElementTypeCell");
+            assert!(result.rows.iter().any(|row| row.label == "Inside"));
+            assert!(client.last_tree.is_none());
+            assert!(client.served_trees.is_empty());
+            assert!(client.window.is_none());
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn element_evidence_retains_unknown_and_false() {
+        for stability in [false, true] {
+            let (base, task) = mock_runner(1, move |request| {
+                let expected = if stability { "1" } else { "0" };
+                assert!(request.starts_with(&format!("GET /session/S/element/E/ipu/evidence?stability={expected} ")), "{request}");
+                r#"{"value":{"enabled":false,"editable":null,"rect":{"x":1,"y":2,"width":3,"height":4},"samples":1}}"#.into()
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            client.session = Some("S".into()); client.element_evidence = true;
+            let result = block(client.element_evidence("E", stability)).unwrap();
+            assert_eq!(result.enabled, Some(false));
+            assert_eq!(result.editable, None); assert_eq!(result.stable, None);
+            assert_eq!(result.samples, 1);
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn element_read_failures_never_retry_or_fetch_source() {
+        for subtree in [false, true] {
+            let (base, task) = mock_runner(1, move |request| {
+                let endpoint = if subtree { "subtree" } else { "evidence" };
+                assert!(request.contains(&format!("/element/E/ipu/{endpoint}?")), "{request}");
+                http_400(r#"{"value":{"error":"unsupported operation","message":"AX unavailable"}}"#)
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            client.session = Some("S".into()); client.element_subtree = true; client.element_evidence = true;
+            if subtree { assert!(block(client.element_subtree("E", 2, 10)).is_err()); }
+            else { assert!(block(client.element_evidence("E", true)).is_err()); }
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_subtree_limits_do_not_contact_runner() {
+        let mut client = RunnerClient::new("http://127.0.0.1:1").unwrap();
+        for (depth, count) in [(0,10),(65,10),(2,0),(2,5001)] {
+            assert!(block(client.element_subtree("E",depth,count)).is_err());
+            assert!(client.session.is_none());
+        }
+    }
+
+    #[test]
+    fn native_actionability_refusal_requires_explicit_no_dispatch_proof() {
+        for (status, message, expected) in [
+            (400, "element is disabled; nothing was sent", true),
+            (400, "element frame is unstable or unavailable; nothing was sent", true),
+            (400, "element is not editable; nothing was sent", true),
+            (400, "invalid element state after input", false),
+            (500, "element is disabled; nothing was sent", false),
+        ] {
+            let error = RunnerHttpError {
+                operation: "POST element/click".into(),
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                code: Some("invalid element state".into()), message: Some(message.into()),
+            };
+            assert_eq!(error.nothing_sent(), expected, "{error}");
+        }
+    }
 
     // Selected target capability failures never authorize an alternate input path.
     #[test]

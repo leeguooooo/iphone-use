@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
+include!("../fixtures/http_request.rs");
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
@@ -166,11 +167,10 @@ fn mock_runner_inner(
             stream
                 .set_read_timeout(Some(std::time::Duration::from_millis(500)))
                 .unwrap();
-            let mut request = [0_u8; 8_192];
-            let Ok(read) = stream.read(&mut request) else {
-                continue;
+            let request = match read_mock_request(&mut stream) {
+                Ok(Some(request)) => request,
+                _ => continue,
             };
-            let request = String::from_utf8_lossy(&request[..read]).to_string();
             // Session setup writes runner's idle-wait settings. Answer them here,
             // outside the script and its request index, so each test scripts
             // only the traffic it is about.

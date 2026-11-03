@@ -330,3 +330,13 @@ install its skill, since the right way differs per project and per release.
 ## Author
 
 Built by **郭立 (Guo Li / leeguoo)** — [leeguoo.com](https://leeguoo.com/about) · [GitHub](https://github.com/leeguooooo) · [X](https://x.com/leeguooooo) · more tools in the [*-use family](https://github.com/leeguooooo/plugins).
+
+### Focused reads and action receipts
+
+`phone_subtree` reads one native element’s descendants with explicit coverage;
+its local positions are read-only. Action responses separate delivery from UI
+verification and include structured recovery strategies. `phone_run_start` with
+`trace=true` enables a bounded, redacted timeline, available through
+`phone_run_trace`; it contains no typed values or screenshots. These native
+checks and subtree reads require an updated runner. See the
+[agent reference](docs/agent-reference.md#action-evidence-and-recovery).

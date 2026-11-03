@@ -3,7 +3,7 @@
 //! Each applied action becomes one line such as `Tapped “Wi-Fi”`, resolved
 //! from the screen the action named (its `snapshot`), so a person reading the
 //! control page sees what was touched instead of `tap {element: 12}`. Typed
-//! text and set values are never kept, only their length. In memory only; the
+//! text and set values are never kept. In memory only; the
 //! last [`CAPACITY`] lines.
 
 use std::collections::VecDeque;
@@ -62,22 +62,45 @@ pub fn recent(since: u64, limit: usize) -> Value {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let newer: Vec<&Entry> = log.entries.iter().filter(|e| e.seq > since).collect();
     let skip = newer.len().saturating_sub(limit);
-    let items: Vec<Value> = newer[skip..]
-        .iter()
-        .map(|e| {
-            let mut item = json!({
-                "seq": e.seq,
-                "at_ms": e.at_ms,
-                "text": e.text.en,
-                "text_zh": e.text.zh,
-            });
-            if let Some(owner) = &e.owner {
-                item["owner"] = json!(owner);
-            }
-            item
-        })
-        .collect();
+    let items: Vec<Value> = newer[skip..].iter().map(|e| entry_json(e)).collect();
     json!({"ok": true, "items": items, "next": log.next})
+}
+
+fn entry_json(e: &Entry) -> Value {
+    let mut item = json!({
+        "seq": e.seq, "at_ms": e.at_ms,
+        "text": e.text.en, "text_zh": e.text.zh,
+    });
+    if let Some(owner) = &e.owner {
+        item["owner"] = json!(owner);
+    }
+    if let Some(action_type) = e.text.action_type {
+        item["action_type"] = json!(action_type);
+    }
+    if let Some(target) = &e.text.target {
+        item["target"] = json!(target);
+    }
+    item
+}
+
+/// Geometry alone: never retain the action, locator, row label, or row value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+struct Target {
+    coordinate_space: CoordinateSpace,
+    point: [f64; 2],
+    /// Element targets describe a rect center, not the runner's actual hit point.
+    point_basis: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rect: Option<[f64; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    viewport: Option<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CoordinateSpace {
+    Normalized,
+    RunnerPoints,
 }
 
 fn quoted(label: &str) -> String {
@@ -94,12 +117,33 @@ fn quoted(label: &str) -> String {
 pub struct Line {
     pub en: String,
     pub zh: String,
+    action_type: Option<&'static str>,
+    target: Option<Target>,
+}
+
+impl Line {
+    /// Supply the authoritative runner window size for this action's screen.
+    /// Never use screenshot pixels or infer a viewport from accessibility rows.
+    /// Without this hook runner-point targets remain in the feed but are not drawn.
+    #[must_use]
+    pub fn with_runner_viewport(mut self, width: f64, height: f64) -> Self {
+        if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+            if let Some(target) = &mut self.target {
+                if target.coordinate_space == CoordinateSpace::RunnerPoints {
+                    target.viewport = Some([width, height]);
+                }
+            }
+        }
+        self
+    }
 }
 
 fn line(en: impl Into<String>, zh: impl Into<String>) -> Line {
     Line {
         en: en.into(),
         zh: zh.into(),
+        action_type: None,
+        target: None,
     }
 }
 
@@ -111,11 +155,21 @@ fn target(action: &Value, rows: Option<&[ElementRow]>) -> Line {
         .and_then(Value::as_u64)
         .and_then(|i| rows.and_then(|rows| rows.get(i as usize)))
     {
-        if !row.label.trim().is_empty() {
+        // Some input providers repeat entered content as their label.
+        if !row.label.trim().is_empty()
+            && !row.kind.to_ascii_lowercase().contains("textfield")
+            && !row.kind.to_ascii_lowercase().contains("textview")
+            && !row.kind.to_ascii_lowercase().contains("securetext")
+            && row.value.as_deref() != Some(row.label.as_str())
+        {
             let q = quoted(&row.label);
             return line(q.clone(), q);
         }
-        if let Some(id) = row.identifier.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(id) = row
+            .identifier
+            .as_deref()
+            .filter(|s| !s.trim().is_empty() && row.value.as_deref() != Some(*s))
+        {
             let q = quoted(id);
             return line(q.clone(), q);
         }
@@ -127,6 +181,9 @@ fn target(action: &Value, rows: Option<&[ElementRow]>) -> Line {
         }
     }
     if element.is_some() {
+        return line("an element", "一个控件");
+    }
+    if action.get("type").and_then(Value::as_str) == Some("set_value") {
         return line("an element", "一个控件");
     }
     let text = action.get("label").and_then(Value::as_str).or_else(|| {
@@ -177,8 +234,80 @@ fn swipe_line(action: &Value) -> Line {
 }
 
 /// One action in plain words. `rows` is the screen its `snapshot` named.
-/// Typed text and set values are reduced to their length.
+/// Typed text is reduced to its length; set/picker values are omitted.
 pub fn describe(action: &Value, rows: Option<&[ElementRow]>) -> Line {
+    let mut description = describe_words(action, rows);
+    description.action_type = match action.get("type").and_then(Value::as_str) {
+        Some("tap") => Some("tap"),
+        Some("tap_locator") => Some("tap_locator"),
+        Some("longpress") => Some("longpress"),
+        _ => None,
+    };
+    if description.action_type.is_some() {
+        description.target = click_target(action, rows);
+    }
+    description
+}
+
+fn click_target(action: &Value, rows: Option<&[ElementRow]>) -> Option<Target> {
+    // Locator dispatch resolves internally; this API has no applied row proof.
+    if action.get("type").and_then(Value::as_str) == Some("tap_locator") {
+        return None;
+    }
+    // Indexed rows are qualified by the caller's snapshot. Do not resolve a
+    // label/locator ourselves: the applied target may differ or be ambiguous.
+    if let Some(element) = action.get("element") {
+        if action.get("label").is_some()
+            || action.get("locator").is_some()
+            || action.get("x").is_some()
+            || action.get("y").is_some()
+        {
+            return None;
+        }
+        let index = usize::try_from(element.as_u64()?).ok()?;
+        let row = rows?.get(index)?;
+        let [x, y, w, h] = row.rect;
+        if !row.rect.iter().all(|v| v.is_finite())
+            || x < 0.0
+            || y < 0.0
+            || w <= 0.0
+            || h <= 0.0
+            || !(x + w).is_finite()
+            || !(y + h).is_finite()
+        {
+            return None;
+        }
+        return Some(Target {
+            coordinate_space: CoordinateSpace::RunnerPoints,
+            point: [x + w / 2.0, y + h / 2.0],
+            point_basis: "rect_center",
+            rect: Some(row.rect),
+            viewport: None,
+        });
+    }
+    if action.get("label").is_some() || action.get("locator").is_some() {
+        return None;
+    }
+    // The /agent/input tap and longpress contract explicitly uses [0,1].
+    // An out-of-range number is invalid, never evidence of runner points.
+    let x = action.get("x")?.as_f64()?;
+    let y = action.get("y")?.as_f64()?;
+    if ![x, y]
+        .iter()
+        .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+    {
+        return None;
+    }
+    Some(Target {
+        coordinate_space: CoordinateSpace::Normalized,
+        point: [x, y],
+        point_basis: "action_coordinates",
+        rect: None,
+        viewport: None,
+    })
+}
+
+fn describe_words(action: &Value, rows: Option<&[ElementRow]>) -> Line {
     let typ = action.get("type").and_then(Value::as_str).unwrap_or("");
     let name = action.get("name").and_then(Value::as_str);
     let on = |en: &str, zh: &str| {
@@ -274,13 +403,7 @@ pub fn describe(action: &Value, rows: Option<&[ElementRow]>) -> Line {
             (None, Some(_)) => line("Accepted the alert", "确认弹窗"),
             (None, None) => line("Answered the alert", "处理弹窗"),
         },
-        "picker" => match action.get("value").and_then(Value::as_str) {
-            Some(value) => {
-                let q = quoted(value);
-                line(format!("Picked {q}"), format!("选择{q}"))
-            }
-            None => line("Turned a picker", "拨动选择器"),
-        },
+        "picker" => line("Turned a picker", "拨动选择器"),
         "perform" => {
             let verb = action
                 .get("action")
@@ -354,12 +477,12 @@ mod tests {
         let rows = vec![row("Window", ""), row("Cell", "Wi-Fi")];
         let tap = json!({"type":"tap","element":1,"snapshot":"S1"});
         assert_eq!(
-            describe(&tap, Some(&rows)),
+            describe_words(&tap, Some(&rows)),
             line("Tapped “Wi-Fi”", "点按“Wi-Fi”")
         );
         assert_eq!(en(tap, None), "Tapped an element");
         assert_eq!(
-            describe(&json!({"type":"tap","element":0}), Some(&rows)),
+            describe_words(&json!({"type":"tap","element":0}), Some(&rows)),
             line("Tapped a window", "点按一个 Window 控件")
         );
         assert_eq!(
@@ -367,7 +490,7 @@ mod tests {
             "Tapped “Done”"
         );
         assert_eq!(
-            describe(&json!({"type":"tap","x":100.4,"y":220.6}), None),
+            describe_words(&json!({"type":"tap","x":100.4,"y":220.6}), None),
             line("Tapped (100, 221)", "点按坐标 (100, 221)")
         );
         assert_eq!(
@@ -388,8 +511,130 @@ mod tests {
             &json!({"type":"set_value","element":0,"value":"hunter2"}),
             Some(&rows),
         );
-        assert_eq!(set, line("Filled in “Password”", "填写“Password”"));
+        assert_eq!(
+            set,
+            line("Filled in a textfield", "填写一个 TextField 控件")
+        );
         assert!(!format!("{typed:?}{set:?}").contains("hunter2"));
+    }
+
+    fn wire(action: Value, rows: Option<&[ElementRow]>) -> Value {
+        entry_json(&Entry {
+            seq: 1,
+            at_ms: 10,
+            owner: None,
+            text: describe(&action, rows),
+        })
+    }
+
+    #[test]
+    fn coordinate_clicks_keep_explicit_normalized_geometry() {
+        let item = wire(
+            json!({"type":"tap","x":0.25,"y":0.75,"text":"SECRET"}),
+            None,
+        );
+        assert_eq!(item["action_type"], "tap");
+        assert_eq!(
+            item["target"],
+            json!({
+                "coordinate_space":"normalized", "point":[0.25,0.75],
+                "point_basis":"action_coordinates",
+            })
+        );
+        assert!(!item.to_string().contains("SECRET"));
+        for action in [
+            json!({"type":"tap","x":25,"y":75}),
+            json!({"type":"tap","x":-0.1,"y":0.5}),
+            json!({"type":"tap","x":0.5}),
+            json!({"type":"tap","x":0.5,"y":0.5,"element":99}),
+            json!({"type":"tap","x":0.5,"y":0.5,"label":"Done"}),
+            json!({"type":"tap_locator","locator":{"label":"Done"}}),
+        ] {
+            assert!(wire(action, None).get("target").is_none());
+        }
+        assert_eq!(
+            wire(json!({"type":"longpress","x":0,"y":1}), None)["target"]["point"],
+            json!([0.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn indexed_geometry_is_runner_points_and_never_guesses_a_viewport() {
+        let rows = vec![ElementRow {
+            rect: [10.0, 20.0, 40.0, 60.0],
+            ..row("Button", "Done")
+        }];
+        let action = json!({"type":"tap","element":0,"snapshot":"S1"});
+        let target = wire(action.clone(), Some(&rows))["target"].clone();
+        assert_eq!(
+            target,
+            json!({
+                "coordinate_space":"runner_points", "point":[30.0,50.0],
+                "point_basis":"rect_center", "rect":[10.0,20.0,40.0,60.0],
+            })
+        );
+        let sized = describe(&action, Some(&rows)).with_runner_viewport(390.0, 844.0);
+        assert_eq!(json!(sized.target)["viewport"], json!([390.0, 844.0]));
+        for width in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                json!(
+                    describe(&action, Some(&rows))
+                        .with_runner_viewport(width, 844.0)
+                        .target
+                ),
+                target
+            );
+        }
+        assert!(wire(action.clone(), None).get("target").is_none());
+        for rect in [
+            [0.0; 4],
+            [-1.0, 0.0, 4.0, 4.0],
+            [0.0, 0.0, -1.0, 4.0],
+            [f64::NAN, 0.0, 4.0, 4.0],
+            [f64::MAX, 0.0, f64::MAX, 4.0],
+        ] {
+            let rows = vec![ElementRow {
+                rect,
+                ..row("Button", "Done")
+            }];
+            assert!(wire(action.clone(), Some(&rows)).get("target").is_none());
+        }
+    }
+
+    #[test]
+    fn serialized_activity_never_copies_entered_values_or_input_labels() {
+        let rows = vec![ElementRow {
+            value: Some("SECRET".into()),
+            identifier: Some("SECRET".into()),
+            rect: [10.0, 20.0, 40.0, 60.0],
+            ..row("TextField", "SECRET")
+        }];
+        for action in [
+            json!({"type":"text","text":"SECRET","x":0.5,"y":0.5}),
+            json!({"type":"set_value","element":0,"value":"SECRET"}),
+            json!({"type":"picker","element":0,"value":"SECRET"}),
+            json!({"type":"tap","element":0,"snapshot":"S1","value":"SECRET"}),
+        ] {
+            let item = wire(action.clone(), Some(&rows));
+            assert!(!item.to_string().contains("SECRET"), "{item}");
+            if action["type"] != "tap" {
+                assert!(item.get("target").is_none());
+            }
+        }
+        // A provider may expose an input label even when it omits its value.
+        let rows = vec![row("SecureTextField", "SECRET")];
+        assert!(!wire(json!({"type":"tap","element":0}), Some(&rows))
+            .to_string()
+            .contains("SECRET"));
+        // Geometry-free system activity remains compatible with the same log.
+        let entry = Entry {
+            seq: 2,
+            at_ms: 10,
+            owner: Some("agent".into()),
+            text: recording_started(),
+        };
+        assert!(entry_json(&entry).get("target").is_none());
+        assert_eq!(entry_json(&entry)["owner"], "agent");
     }
 
     #[test]
@@ -487,7 +732,10 @@ mod tests {
         );
         assert_eq!(location(false).en, "Set a simulated location");
         assert_eq!(location(true).zh, "取消模拟定位");
-        assert_eq!(installed(Some("com.example.x")).en, "Installed com.example.x");
+        assert_eq!(
+            installed(Some("com.example.x")).en,
+            "Installed com.example.x"
+        );
         assert_eq!(installed(None).en, "Installed an app");
     }
 }

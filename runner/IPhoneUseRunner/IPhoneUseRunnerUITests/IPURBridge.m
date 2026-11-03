@@ -482,6 +482,46 @@ static BOOL IPURUseRequestCache(void)
   return attributes;
 }
 
++ (nullable NSNumber *)editableStateForAXElement:(id)element
+{
+  // Do not add optional state to every tree snapshot. Older AX providers may
+  // not map or expose this attribute; that is unknown, not an editable field.
+  id client = [self axClient];
+  Class snapshotClass = NSClassFromString(@"XCElementSnapshot");
+  SEL mapper = NSSelectorFromString(@"axAttributesForElementSnapshotKeyPaths:isMacOS:");
+  SEL reader = NSSelectorFromString(@"attributesForElement:attributes:error:");
+  if (![snapshotClass respondsToSelector:mapper] || ![client respondsToSelector:reader]) return nil;
+  @try {
+    id mapped = ((IPURMsgSendMapAttributes)objc_msgSend)(snapshotClass, mapper, @[@"isEditable"], NO);
+    if ([mapped isKindOfClass:NSSet.class]) mapped = [mapped allObjects];
+    if (![mapped isKindOfClass:NSArray.class]) return nil;
+    NSMutableArray *attributes = [NSMutableArray array];
+    for (id attribute in mapped) {
+      if ([[attribute description] hasSuffix:@"Editable"]) [attributes addObject:attribute];
+    }
+    if (attributes.count != 1) return nil;
+    NSMethodSignature *signature = [client methodSignatureForSelector:reader];
+    if (signature.numberOfArguments != 5 || signature.methodReturnType[0] != '@'
+        || [signature getArgumentTypeAtIndex:2][0] != '@'
+        || [signature getArgumentTypeAtIndex:3][0] != '@'
+        || strcmp([signature getArgumentTypeAtIndex:4], "^@") != 0) return nil;
+    typedef id (*ReadAttributes)(id, SEL, id, id, NSError **);
+    NSError *error = nil;
+    id values = ((ReadAttributes)objc_msgSend)(client, reader, element, attributes, &error);
+    if (error || ![values isKindOfClass:NSDictionary.class]) return nil;
+    id value = values[attributes.firstObject];
+    if ([value isKindOfClass:NSNumber.class]
+        && strchr("cCsSiIlLqQB", [value objCType][0]) != NULL
+        && ([value doubleValue] == 0 || [value doubleValue] == 1)) return @([value boolValue]);
+    if ([value isKindOfClass:NSString.class]) {
+      NSString *text = [[value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+      if ([text isEqual:@"0"] || [text isEqual:@"false"]) return @NO;
+      if ([text isEqual:@"1"] || [text isEqual:@"true"]) return @YES;
+    }
+  } @catch (__unused NSException *exception) { return nil; }
+  return nil;
+}
+
 + (nullable NSDictionary<NSString *, id> *)readValueForAXElement:(id)element
                                                maxUTF16Length:(NSUInteger)limit
                                                   placeholder:(NSString *)placeholder

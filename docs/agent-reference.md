@@ -978,11 +978,11 @@ worked example below.
 
 ## MCP specifics
 
-40 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_read_value`, `phone_reconnect`, `phone_hold`,
+42 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_read_value`, `phone_reconnect`, `phone_hold`,
 `phone_release_owner`, `phone_login`, `phone_apps`, `phone_screenshot`, `phone_elements`, `phone_home_layout`, `phone_instances`, `phone_tap`,
 `phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_scroll_find`, `phone_collect_list`, `phone_type`,
 `phone_key`, `phone_shortcut`, `phone_run_steps`, `phone_jev_run`,
-`phone_run_start`, `phone_run_end`, `phone_flow_list / info / run / draft /
+`phone_run_start`, `phone_run_end`, `phone_run_trace`, `phone_subtree`, `phone_flow_list / info / run / draft /
 update / publish / report`, and the device tools `phone_logs`, `phone_crashes`,
 `phone_set_location`, `phone_record`, `phone_install_app`, `phone_app_notes`.
 
@@ -1618,3 +1618,80 @@ upgrade. It never carries a value or promotes a snapshot preview.
 
 Only a successful, validated complete-value contract can report a complete null
 or empty value. An unavailable attribute is evidence of neither.
+
+## Action evidence and recovery
+
+Input and batch responses add `action_evidence` without changing `ok`, `outcome`,
+`batch_outcome` or `retry_safe`. `delivery.status` is `not_sent`, `delivered`,
+`partial`, `uncertain` or `unavailable`. `postcondition.status` separately says
+`verified`, `unverified` or `unavailable`. A native acknowledgement is delivery
+only. A readable `set_value` match verifies the element value; it does not prove
+that the application saved or submitted it. Secure fields stay unverified. A
+successful terminal `wait_for` verifies its UI expectation only. The existing
+`alert` block accompanies observed actions; no alert block does not prove that
+no alert exists.
+
+Errors also carry `recovery.action`: `next_step` is a fixed strategy,
+`retry_allowed` is permission to reassess a retry only when the whole request was certainly
+not delivered. Partial batches and uncertain writes require reading the live
+state and deciding where to resume. Never branch on `hint` wording.
+
+### Waiting for a delayed loader
+
+Add `absent_after_present:true` inside a `wait_for` expectation when a negative
+target must first appear before its absence can count:
+
+```json
+{"kind":"wait_for","expect":{"absent":[{"label":"Loading"}],"absent_after_present":true},"timeout_ms":10000}
+```
+
+Every absent selector needs its own positive observation in this wait; this
+also works with `ocr_absent`. Unknown/partial reads never prove disappearance.
+A loader that never appears times out. Omit the option for an ordinary absence
+check. This option requires a nonzero timeout and at least one negative target.
+
+### Reading one element's subtree
+
+`POST /agent/subtree` (`phone_subtree`) accepts `snapshot`, `element`,
+`max_depth` (default 8, range 1–64) and `max_nodes` (default 500, range 1–5000).
+The daemon resolves a unique semantic target, then requests only that native
+AX element's subtree. Locator resolution may still read the application tree.
+The reply includes `rows`, `coverage`, `complete` and `partial`; a capped read
+must not be used as proof of absence. Older runners return
+`subtree_not_supported`; no global source read is silently substituted.
+
+These rows have **local, read-only positions**, not action refs. The reply
+carries no actionable snapshot token. Use a unique locator or get new full
+`phone_elements` refs before input. Other regions' snapshot refs are unchanged.
+
+### Native action checks
+
+The updated runner samples only the target element's frame before element
+clicks, text edits and adjustments. Disabled targets, positively noneditable
+editors, unavailable frames and frames that keep moving refuse before input.
+Missing enabled/editable metadata stays unknown, not false. The bounded frame
+samples run on the phone, not as repeated whole-screen network reads. These
+checks require updating the runner; a daemon-only update cannot add them to an
+older runner. Coordinate-only actions cannot prove a semantic target's enabled
+or editable state.
+
+### Watching and inspecting a run
+
+The control panel shows agent targets in green: a ripple and, when available,
+an outline. Element geometry is a snapshot's rectangle centre, not proof of the
+actual dispatched hit point. Runner-point targets are drawn only with a known
+runner viewport. Unresolved, stale and historical targets are not animated.
+
+`POST /agent/run {"action":"start","run_id":"task-1","trace":true}`
+(or `phone_run_start(trace=true)`) opts into a redacted action timeline. This
+`trace` option is independent of `complete_trace`, which counts model turns.
+End with the usual run end. Read it with
+`GET /agent/trace?run_id=task-1` (`phone_run_trace`), or add `format=jsonl` for
+newline-delimited JSON export. Export requires the same authenticated owner.
+
+The timeline stores action kinds, bounded numerical target metadata, delivery,
+verification and counts. It does not store typed values, labels, URLs,
+screenshots or arbitrary runner messages. Private/revoked requests add no event.
+It is bounded memory (16 runs, 200 events/run), reports dropped events and is
+lost on restart or eviction. It supports reviewing what happened, not automatic
+replay of mutations. Tracing is off by default.

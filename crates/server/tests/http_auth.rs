@@ -76,6 +76,40 @@ fn mock_runner_at_most(
     mock_runner_with_budget(RequestBudget::AtMost(requests), responder)
 }
 
+include!("fixtures/http_request.rs");
+
+#[test]
+fn mock_request_reader_waits_for_fragmented_headers_and_utf8_body() {
+    struct Fragments {
+        bytes: std::io::Cursor<Vec<u8>>,
+        calls: usize,
+    }
+    impl Read for Fragments {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            if self.calls == 3 {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            self.bytes.read(&mut buffer[..1])
+        }
+    }
+    let body = r#"{"value":"こんにちは"}"#;
+    let request = format!(
+        "POST /session/S/element/FIELD/value HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut reader = Fragments {
+        bytes: std::io::Cursor::new(request.as_bytes().to_vec()),
+        calls: 0,
+    };
+    assert_eq!(read_mock_request(&mut reader).unwrap(), Some(request));
+    assert_eq!(
+        read_mock_request(&mut std::io::Cursor::new(Vec::<u8>::new())).unwrap(),
+        None
+    );
+    assert!(read_mock_request(&mut std::io::Cursor::new(b"GET / HTTP/1.1\r\n".to_vec())).is_err());
+}
+
 fn mock_runner_with_budget(
     budget: RequestBudget,
     responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)> + Send + 'static,
@@ -103,9 +137,11 @@ fn mock_runner_with_budget(
             last_request = std::time::Instant::now();
             stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(std::time::Duration::from_secs(60))).unwrap();
-            let mut request = [0_u8; 8_192];
-            let read = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..read]);
+            let request = match read_mock_request(&mut stream) {
+                Ok(Some(request)) => request,
+                Ok(None) => continue,
+                Err(error) => panic!("mock runner request failed: {error}"),
+            };
             // Session setup writes runner's idle-wait settings; answer them here,
             // outside the scripted count and index.
             if request.starts_with("POST ") && request.contains("/appium/settings") {
@@ -1054,15 +1090,16 @@ fn direct_browser_control_timeout_before_dispatch_is_retry_safe_408() {
         assert!(response.headers().get(header::RETRY_AFTER).is_none());
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
+        let legacy: serde_json::Value = serde_json::json!({
                 "ok": false,
                 "error": "not_sent",
                 "outcome": "not_sent",
                 "retry_safe": true
-            })
-        );
+            });
+        for (key, value) in legacy.as_object().unwrap() {
+            assert_eq!(&json[key], value, "legacy field {key}");
+        }
+        assert!(json["action_evidence"]["delivery"].is_object());
     });
 }
 
@@ -1085,7 +1122,7 @@ fn direct_browser_control_timeout_after_dispatch_is_unknown_504() {
             } else {
                 observed.fetch_add(1, Ordering::SeqCst);
                 Some((
-                    std::time::Duration::from_millis(400),
+                    std::time::Duration::from_millis(1_500),
                     r#"{"value":null}"#.to_string(),
                 ))
             }
@@ -1099,7 +1136,7 @@ fn direct_browser_control_timeout_after_dispatch_is_unknown_504() {
                     .uri("/control")
                     .header("x-phone-control", "1")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"type":"tap","x":1.0,"y":1.0,"ttl_ms":150}"#))
+                    .body(Body::from(r#"{"type":"tap","x":1.0,"y":1.0,"ttl_ms":1000}"#))
                     .unwrap(),
             )
             .await
@@ -1110,15 +1147,16 @@ fn direct_browser_control_timeout_after_dispatch_is_unknown_504() {
         assert!(response.headers().get(header::RETRY_AFTER).is_none());
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
+        let legacy: serde_json::Value = serde_json::json!({
                 "ok": false,
                 "error": "outcome_unknown",
                 "outcome": "unknown",
                 "retry_safe": false
-            })
-        );
+            });
+        for (key, value) in legacy.as_object().unwrap() {
+            assert_eq!(&json[key], value, "legacy field {key}");
+        }
+        assert!(json["action_evidence"]["delivery"].is_object());
         assert_eq!(action_count.load(Ordering::SeqCst), 1);
     });
 }
@@ -2205,7 +2243,14 @@ fn delayed_cold_runner_session_eventually_becomes_actionable() {
             .await
             .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
-        tokio::time::sleep(std::time::Duration::from_millis(2_200)).await;
+        // Keep polling the runtime until the cold-session probe actually
+        // completes; a fixed sleep followed by a blocking thread join can
+        // starve the async settings/lock/apps-list reads on a loaded host.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !state.runner_health.lock().unwrap().actionable {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }).await.expect("cold runner should become actionable within its probe budget");
         server.join().unwrap();
 
         let health = *state.runner_health.lock().unwrap();

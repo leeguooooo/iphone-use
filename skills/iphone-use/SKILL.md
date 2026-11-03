@@ -318,3 +318,25 @@ When a task needs the complete value of one non-secure field, use
 completeness and UTF-16 limit. A truncated preview is not a full value; secure or
 unsupported fields require a permitted alternative. Ownership/privacy changes
 withhold results. This read does not focus, unlock, or claim control.
+
+## Focused observation and action receipts
+
+`phone_subtree(element, snapshot)` reads a unique native element's descendants.
+Read `complete`/`coverage`; its local row positions are read-only and cannot be
+used as action refs. Use locators or fresh `phone_elements` refs for input.
+Older runners explicitly refuse this operation.
+
+`action_evidence` separates delivery from postcondition verification. A native
+ACK is not application success; even verified element values do not establish
+saving or submission. Errors carry `recovery.action.next_step` and
+`retry_allowed`. Never replay partial or uncertain requests.
+
+For delayed loaders use `expect.absent_after_present:true` with `absent` or
+`ocr_absent`: every target must appear during this wait before absence counts.
+A loader never observed causes timeout; ordinary absence checks omit the flag.
+
+`phone_run_start(trace=true)` enables a redacted, owner-scoped timeline for this
+run. Read it with `phone_run_trace(run_id)` and close with `phone_run_end`.
+It is bounded memory, lost on restart, and contains no input values, labels,
+URLs or screenshots. It supports inspection, never automatic action replay.
+Native per-element enabled/editable/frame checks require an updated runner.

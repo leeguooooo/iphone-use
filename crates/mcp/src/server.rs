@@ -189,6 +189,18 @@ pub struct ElementsParams {
     pub ocr: Option<String>,
 }
 
+/// One snapshot-selected native subtree, read without a global tree walk.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubtreeParams {
+    pub snapshot: String,
+    pub element: usize,
+    /// Relative depth cap (1..64), default 8.
+    pub max_depth: Option<u32>,
+    /// Node cap (1..5000), default 500.
+    pub max_nodes: Option<u32>,
+}
+
 /// Parameters for [`phone_tap_label`].
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -554,6 +566,10 @@ pub struct PhoneUiExpectation {
     /// Text that must not be visible (a loading caption), read by OCR.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ocr_absent: Vec<String>,
+    /// Wait until each absent target has first appeared and then disappeared;
+    /// use for loaders that may start after the preceding action returns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub absent_after_present: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -841,6 +857,10 @@ pub struct RunStartParams {
     /// model round trips reported.
     #[serde(default)]
     pub complete_trace: Option<bool>,
+    /// Opt into a bounded, redacted action timeline (no values/screenshots).
+    /// Retrieve with phone_run_trace; restart loses it. Default false.
+    #[serde(default)]
+    pub trace: bool,
 }
 
 /// Parameters for [`PhoneHandler::phone_run_end`].
@@ -852,6 +872,13 @@ pub struct RunEndParams {
     /// complete trace; `[]` for a task that used no model turns.
     #[serde(default)]
     pub turn_ids: Option<Vec<String>>,
+}
+
+/// Owner-scoped trace lookup.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunTraceParams {
+    pub run_id: String,
 }
 
 /// Parameters for [`PhoneHandler::phone_collect_list`].
@@ -1770,6 +1797,17 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = true),
+        description = "Read one native element's bounded subtree by element+snapshot, serializing only that element (locator lookup may still read the app tree). Requires a unique live semantic target and a runner with ipu:elementSubtree. Returned row positions are READ ONLY, not action refs; use unique locators or fresh phone_elements refs for input. complete=false means descendants may be missing."
+    )]
+    async fn phone_subtree(&self, Parameters(params): Parameters<SubtreeParams>) -> CallToolResult {
+        match self.daemon.subtree(&params.snapshot, params.element, params.max_depth.unwrap_or(8), params.max_nodes.unwrap_or(500)).await {
+            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
+            Err(error) => CallToolResult::error(vec![Content::text(format!("subtree read failed: {error:#}"))]),
+        }
+    }
+
+    #[tool(
+        annotations(read_only_hint = true, open_world_hint = true),
         description = "The current screen as text — use this instead of screenshots (an order \
         of magnitude cheaper). Rows carry kind, label, identifier, value, rect and state, plus a \
         `snapshot` token for phone_tap_element; indexes and snapshot tokens are valid for this read \
@@ -2157,11 +2195,22 @@ impl PhoneHandler {
         self.progress_reset();
         match self
             .daemon
-            .run_start(&params.run_id, params.complete_trace.unwrap_or(false))
+            .run_start_with_trace(&params.run_id, params.complete_trace.unwrap_or(false), params.trace)
             .await
         {
             Ok(body) => CallToolResult::success(vec![Content::text(body)]),
             Err(e) => CallToolResult::error(vec![Content::text(format!("run start failed: {e:#}"))]),
+        }
+    }
+
+    #[tool(
+        annotations(read_only_hint = true, open_world_hint = true),
+        description = "Read this session's redacted action timeline for a run started with trace=true. Bounded memory only; includes counts and delivery/verification receipts, never typed values or screenshots. It cannot replay actions."
+    )]
+    async fn phone_run_trace(&self, Parameters(params): Parameters<RunTraceParams>) -> CallToolResult {
+        match self.daemon.action_trace(&params.run_id).await {
+            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
+            Err(error) => CallToolResult::error(vec![Content::text(format!("trace read failed: {error:#}"))]),
         }
     }
 
@@ -4076,6 +4125,11 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                         "steps[{index}] ocr_present/ocr_absent entries must be 1 to 200 characters of visible text; no action was sent"
                     ));
                 }
+                if expect.absent_after_present
+                    && (expect.absent.is_empty() && expect.ocr_absent.is_empty() || timeout_ms == 0)
+                {
+                    return Err(format!("steps[{index}]: absent_after_present needs absent/ocr_absent and a nonzero timeout; no action was sent"));
+                }
                 let max_wait = if ocr { MAX_OCR_WAIT_MS } else { MAX_WAIT_MS };
                 if expect
                     .application
@@ -5262,7 +5316,7 @@ mod tests {
 
     /// The tools that only read: no phone input, no outward-facing writes.
     /// `IPHONE_USE_MCP_TOOLS=readonly` exposes exactly these.
-    const READ_ONLY_TOOLS: [&str; 15] = [
+    const READ_ONLY_TOOLS: [&str; 17] = [
         "phone_apps",
         "phone_capabilities",
         "phone_crashes",
@@ -5274,10 +5328,12 @@ mod tests {
         "phone_instances",
         "phone_metrics",
         "phone_read_value",
+        "phone_run_trace",
         "phone_screen",
         "phone_screen_frame",
         "phone_screenshot",
         "phone_status",
+        "phone_subtree",
     ];
 
     /// Every tool states read_only_hint and open_world_hint explicitly (the
@@ -5560,6 +5616,7 @@ mod tests {
                     absent: vec![],
                     ocr_present: vec![],
                     ocr_absent: vec![],
+                absent_after_present: false,
                 },
                 timeout_ms: 2_000,
                 poll_ms: 100,
@@ -5912,6 +5969,7 @@ mod tests {
                 absent: vec![],
                 ocr_present: vec![],
                 ocr_absent: vec![],
+                absent_after_present: false,
             },
             timeout_ms: 30_001,
             poll_ms: 100,
@@ -5928,6 +5986,7 @@ mod tests {
                 absent: vec![],
                 ocr_present: vec![],
                 ocr_absent: vec![],
+                absent_after_present: false,
             },
             timeout_ms: 30_000,
             poll_ms: 100,
@@ -5950,6 +6009,7 @@ mod tests {
                 absent: vec![],
                 ocr_present: vec![],
                 ocr_absent: vec![],
+                absent_after_present: false,
             },
             timeout_ms: 1_000,
             poll_ms: 100,
@@ -6001,6 +6061,7 @@ mod tests {
                     absent: vec![],
                     ocr_present: present.into_iter().map(str::to_string).collect(),
                     ocr_absent: vec![],
+                absent_after_present: false,
                 },
                 timeout_ms,
                 poll_ms: 500,
@@ -6028,6 +6089,7 @@ mod tests {
                     absent: vec![],
                     ocr_present: vec![],
                     ocr_absent: vec![],
+                absent_after_present: false,
                 },
                 timeout_ms: 10_000,
                 poll_ms: 100,
