@@ -7135,13 +7135,16 @@ enum RowRebind {
     Ambiguous,
 }
 
+/// A row's type, accessibility identifier and stable label (see [`row_identity`]).
+type RowIdentity<'a> = Option<(&'a str, &'a str, &'a str)>;
+
 /// What recognizes a row across two reads of a changing screen: its type,
 /// accessibility identifier and label. Never its value — a text field's
 /// contents, a switch position or a slider fraction change under the same
 /// control — nor its frame, which a banner or a keyboard moves. A text input
 /// whose label is just its contents has no stable label. `None` when nothing
 /// durable is left; such a row is only ever addressed by its exact snapshot.
-fn row_identity(row: &crate::runner::ElementRow) -> Option<(&str, &str, &str)> {
+fn row_identity(row: &crate::runner::ElementRow) -> RowIdentity<'_> {
     let identifier = row.identifier.as_deref().unwrap_or("");
     let volatile_label = TEXT_INPUT_KINDS.contains(&row.kind.as_str())
         && row.value.as_deref().is_some_and(|value| value == row.label);
@@ -7157,7 +7160,7 @@ fn row_identity(row: &crate::runner::ElementRow) -> Option<(&str, &str, &str)> {
 fn row_ancestry(
     rows: &[crate::runner::ElementRow],
     index: usize,
-) -> Vec<Option<(&str, &str, &str)>> {
+) -> Vec<RowIdentity<'_>> {
     let mut depth = rows[index].depth;
     let mut chain = Vec::new();
     for row in rows[..index].iter().rev() {
@@ -7179,7 +7182,7 @@ const SAME_SCREEN_MIN_RETAINED: f64 = 0.75;
 /// of the same app with look-alike controls (every page has a `返回`). The
 /// navigation bars must agree and most recognizable rows must remain.
 fn same_screen(old: &[crate::runner::ElementRow], new: &[crate::runner::ElementRow]) -> bool {
-    fn bars(rows: &[crate::runner::ElementRow]) -> Vec<Option<(&str, &str, &str)>> {
+    fn bars(rows: &[crate::runner::ElementRow]) -> Vec<RowIdentity<'_>> {
         rows.iter()
             .filter(|row| row.kind == "NavigationBar")
             .map(row_identity)
@@ -7192,7 +7195,7 @@ fn same_screen(old: &[crate::runner::ElementRow], new: &[crate::runner::ElementR
     // from: the caller has to see it, not have its tap land underneath.
     // Matched by title AND contents: a same-titled sheet for another item
     // ("删除这条备忘录？") is a different question.
-    fn overlays(rows: &[crate::runner::ElementRow]) -> Vec<Vec<Option<(&str, &str, &str)>>> {
+    fn overlays(rows: &[crate::runner::ElementRow]) -> Vec<Vec<RowIdentity<'_>>> {
         (0..rows.len())
             .filter(|&i| matches!(rows[i].kind.as_str(), "Alert" | "Sheet"))
             .map(|i| {
@@ -7213,7 +7216,7 @@ fn same_screen(old: &[crate::runner::ElementRow], new: &[crate::runner::ElementR
         }
     }
     // The selected tab says which page is up; the rest of the bar does not.
-    fn selected_tabs(rows: &[crate::runner::ElementRow]) -> Vec<Option<(&str, &str, &str)>> {
+    fn selected_tabs(rows: &[crate::runner::ElementRow]) -> Vec<RowIdentity<'_>> {
         (0..rows.len())
             .filter(|&i| rows[i].kind == "TabBar")
             .flat_map(|i| rows[i + 1..].iter().take_while(move |row| row.depth > rows[i].depth))
@@ -7333,7 +7336,7 @@ const REBIND_NEIGHBOURS: usize = 2;
 fn row_neighbours(
     rows: &[crate::runner::ElementRow],
     index: usize,
-) -> Vec<Option<Option<(&str, &str, &str)>>> {
+) -> Vec<Option<RowIdentity<'_>>> {
     (1..=REBIND_NEIGHBOURS)
         .rev()
         .map(|step| index.checked_sub(step))
